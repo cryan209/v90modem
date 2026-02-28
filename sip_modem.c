@@ -38,7 +38,7 @@
 #define BITS_PER_SAMPLE  16
 
 /* PJMEDIA port signature tag ('M','O','D','M') */
-#define PORT_SIG PJ_FOURCC('M','O','D','M')
+#define PORT_SIG PJMEDIA_FOURCC('M','O','D','M')
 
 /* ------------------------------------------------------------------ */
 /* Global state                                                        */

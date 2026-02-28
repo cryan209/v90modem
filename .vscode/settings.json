@@ -1,3 +1,10 @@
 {
-    "makefile.makefilePath": "makefile"
+    "makefile.makefilePath": "makefile",
+    "makefile.launchConfigurations": [
+        {
+            "cwd": "/Users/scottcryan/v90modem",
+            "binaryPath": "/Users/scottcryan/v90modem/sip_v90_modem",
+            "binaryArgs": []
+        }
+    ]
 }
