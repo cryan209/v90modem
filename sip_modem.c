@@ -63,10 +63,25 @@ static volatile int     g_running    = 1;
 static pj_status_t modem_put_frame(pjmedia_port *port, pjmedia_frame *frame)
 {
     (void)port;
+
+    /* Diagnostic: log frame type so we can tell silence-frames from no-frames */
+    static int put_frame_count = 0;
+    static int put_none_count  = 0;
     if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO) {
+        put_frame_count++;
         int16_t *samples = (int16_t *)frame->buf;
         int      count   = (int)(frame->size / sizeof(int16_t));
         me_rx_audio(samples, count);
+    } else {
+        /* TYPE_NONE means the conference bridge has no data for us this tick */
+        put_none_count++;
+    }
+    /* Log the AUDIO vs NONE ratio once per second (50 frames @ 20ms) */
+    if ((put_frame_count + put_none_count) >= 50) {
+        PJ_LOG(4, ("sip_modem", "put_frame: AUDIO=%d NONE=%d per sec",
+                   put_frame_count, put_none_count));
+        put_frame_count = 0;
+        put_none_count  = 0;
     }
     return PJ_SUCCESS;
 }

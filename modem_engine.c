@@ -289,6 +289,10 @@ static cr_state_t     g_cr;
 static int g_training_samples;
 #define TRAINING_DURATION_SAMPLES  (8000 * 1)  /* 1 second stub */
 
+/* Audio diagnostics: accumulated energy and sample count for V.8 logging */
+static int64_t g_v8_rx_energy;
+static int     g_v8_rx_count;
+
 /* Pending SIP URI for outgoing calls (set by me_dial) */
 static char g_dial_uri[256];
 
@@ -296,52 +300,87 @@ static char g_dial_uri[256];
 /* V.8 result callback                                                 */
 /* ------------------------------------------------------------------ */
 
-static void v8_result_handler(void *user_data, v8_parms_t *result)
+/* Start V.22bis training — shared helper used by V.8 result handler */
+static void start_v22bis_training(void)
 {
-    (void)user_data;
+    /* Must be called with g_state_mtx held */
+    g_mod   = ME_MOD_V22BIS;
+    g_state = ME_TRAINING;
+    g_training_samples = 0;
 
-    fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X\n",
-            result->status, result->modulations);
-
-    if (result->status != V8_STATUS_V8_CALL) {
-        fprintf(stderr, "[ME] V.8 failed, hanging up\n");
-        me_hangup();
-        return;
-    }
-
-    pthread_mutex_lock(&g_state_mtx);
-
-    if (result->modulations & V8_MOD_V90) {
-        fprintf(stderr, "[ME] V.8 negotiated V.90\n");
-        g_mod   = ME_MOD_V90;
-        g_state = ME_TRAINING;
-        g_training_samples = 0;
-
-        /* Reinitialise V.22bis for upstream (answer side) */
-        if (g_v22bis) {
-            v22bis_restart(g_v22bis, 2400);
-        }
-
-    } else if (result->modulations & V8_MOD_V22) {
-        fprintf(stderr, "[ME] V.8 negotiated V.22bis\n");
-        g_mod   = ME_MOD_V22BIS;
-        g_state = ME_TRAINING;
-        g_training_samples = 0;
-
-    } else {
-        fprintf(stderr, "[ME] V.8 no common modulation, hanging up\n");
-        pthread_mutex_unlock(&g_state_mtx);
-        me_hangup();
-        return;
-    }
-
-    /* Initialise V.22bis (answer side = not calling party) */
     if (!g_v22bis) {
         g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, 0,
                                v22bis_get_bit_cb, NULL,
                                v22bis_put_bit_cb, NULL);
         if (!g_v22bis)
             fprintf(stderr, "[ME] v22bis_init failed\n");
+    } else {
+        v22bis_restart(g_v22bis, 2400);
+    }
+}
+
+static void v8_result_handler(void *user_data, v8_parms_t *result)
+{
+    (void)user_data;
+
+    fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
+            result->status, result->modulations, result->pstn_access);
+
+    /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
+    if (result->status == V8_STATUS_IN_PROGRESS ||
+        result->status == V8_STATUS_V8_OFFERED) {
+        fprintf(stderr, "[ME] V.8 in progress (status=%d)\n", result->status);
+        return;
+    }
+
+    if (result->status == V8_STATUS_NON_V8_CALL) {
+        /*
+         * Remote end doesn't support V.8 (e.g. plain V.22bis modem or
+         * ATA auto-answer with no V.8).  Fall back to V.22bis directly.
+         */
+        fprintf(stderr, "[ME] Non-V.8 call detected, falling back to V.22bis\n");
+        pthread_mutex_lock(&g_state_mtx);
+        start_v22bis_training();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+
+    if (result->status != V8_STATUS_V8_CALL) {
+        fprintf(stderr, "[ME] V.8 failed (status=%d), hanging up\n", result->status);
+        me_hangup();
+        return;
+    }
+
+    /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
+    pthread_mutex_lock(&g_state_mtx);
+
+    if (result->modulations & V8_MOD_V90) {
+        fprintf(stderr, "[ME] V.8 negotiated V.90 (downstream PCM + V.22bis upstream)\n");
+        g_mod   = ME_MOD_V90;
+        g_state = ME_TRAINING;
+        g_training_samples = 0;
+
+        /* Initialise V.22bis for the upstream direction (answer side) */
+        if (!g_v22bis) {
+            g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, 0,
+                                   v22bis_get_bit_cb, NULL,
+                                   v22bis_put_bit_cb, NULL);
+            if (!g_v22bis)
+                fprintf(stderr, "[ME] v22bis_init failed\n");
+        } else {
+            v22bis_restart(g_v22bis, 2400);
+        }
+
+    } else if (result->modulations & (V8_MOD_V34 | V8_MOD_V22)) {
+        fprintf(stderr, "[ME] V.8 negotiated V.22bis/V.34 fallback\n");
+        start_v22bis_training();
+
+    } else {
+        fprintf(stderr, "[ME] V.8 no usable modulation (0x%X), hanging up\n",
+                result->modulations);
+        pthread_mutex_unlock(&g_state_mtx);
+        me_hangup();
+        return;
     }
 
     pthread_mutex_unlock(&g_state_mtx);
@@ -406,6 +445,8 @@ void me_on_sip_connected(void)
 
     cr_reset(&g_cr);
     g_training_samples = 0;
+    g_v8_rx_energy     = 0;
+    g_v8_rx_count      = 0;
 
     /* Initialise V.8 — we are the answering side (not calling party) */
     v8_parms_t v8_parms;
@@ -414,8 +455,12 @@ void me_on_sip_connected(void)
     v8_parms.send_ci            = FALSE; /* answerer doesn't send CI */
     v8_parms.v92                = FALSE;
     v8_parms.call_function      = V8_CALL_V_SERIES;
-    v8_parms.modulations        = V8_MOD_V90 | V8_MOD_V22;
+    /* Include V34 so analog modems see we support V.90 upstream (V.34).
+     * Without V8_MOD_V34 some modems won't select V.90. */
+    v8_parms.modulations        = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22;
     v8_parms.protocol           = V8_PROTOCOL_LAPM_V42;
+    /* Signal we are on the digital (server) side of the PSTN — required for V.90 */
+    v8_parms.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
     v8_parms.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
 
     if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
@@ -463,6 +508,18 @@ void me_rx_audio(const int16_t *amp, int len)
 
     switch (state) {
     case ME_V8:
+        /* Accumulate received energy for a 1-second diagnostic log */
+        for (int i = 0; i < len; i++)
+            g_v8_rx_energy += (int64_t)amp[i] * amp[i];
+        g_v8_rx_count += len;
+        if (g_v8_rx_count >= 8000) {
+            double rms = sqrt((double)g_v8_rx_energy / g_v8_rx_count);
+            fprintf(stderr, "[ME] V.8 rx: RMS=%.1f (%d samples) — %s\n",
+                    rms, g_v8_rx_count,
+                    rms < 10.0 ? "WARNING: near-silence, check conference bridge" : "audio OK");
+            g_v8_rx_energy = 0;
+            g_v8_rx_count  = 0;
+        }
         /* Feed received audio to V.8 receiver */
         if (g_v8)
             v8_rx(g_v8, amp, len);
