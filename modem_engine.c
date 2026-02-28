@@ -56,15 +56,64 @@
 #define V90_RATE_BPS    56000   /* Advertised downstream rate */
 
 /*
- * Ucode-to-µ-law mapping (ITU-T V.90 Table 1/V.90):
- *   Positive codes (Ucode 0-127): µ-law = 0xFF - Ucode
- *   Negative codes (Ucode 128-255): µ-law = 0x7F - (Ucode - 128)
- * The polarity (sign) is applied separately via the MSB of the µ-law byte.
+ * Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90).
+ *
+ * µ-law: simple formula: positive codeword = 0xFF - Ucode.
+ * A-law: independent mapping defined in Table 1 (not derivable via linear).
+ * The polarity (sign) is applied separately via the MSB of the G.711 byte.
  */
-static inline uint8_t ucode_to_ulaw_positive(int ucode)
+
+/* A-law positive codewords indexed by Ucode (from ITU-T V.90 Table 1) */
+static const uint8_t v90_ucode_to_alaw[128] = {
+    /* Ucode   0-  7 */ 0xD5, 0xD4, 0xD7, 0xD6, 0xD1, 0xD0, 0xD3, 0xD2,
+    /* Ucode   8- 15 */ 0xDD, 0xDC, 0xDF, 0xDE, 0xD9, 0xD8, 0xDB, 0xDA,
+    /* Ucode  16- 23 */ 0xC5, 0xC4, 0xC7, 0xC6, 0xC1, 0xC0, 0xC3, 0xC2,
+    /* Ucode  24- 31 */ 0xCD, 0xCC, 0xCF, 0xCE, 0xC9, 0xC8, 0xCB, 0xCA,
+    /* Ucode  32- 39 */ 0xF5, 0xF4, 0xF7, 0xF6, 0xF1, 0xF0, 0xF3, 0xF2,
+    /* Ucode  40- 47 */ 0xFD, 0xFC, 0xFF, 0xFE, 0xF9, 0xF8, 0xFB, 0xFA,
+    /* Ucode  48- 55 */ 0xE5, 0xE4, 0xE7, 0xE6, 0xE1, 0xE0, 0xE3, 0xE2,
+    /* Ucode  56- 63 */ 0xED, 0xEC, 0xEF, 0xEE, 0xE9, 0xE8, 0xEB, 0xEA,
+    /* Ucode  64- 71 */ 0x95, 0x94, 0x97, 0x96, 0x91, 0x90, 0x93, 0x92,
+    /* Ucode  72- 79 */ 0x9D, 0x9C, 0x9F, 0x9E, 0x99, 0x98, 0x9B, 0x9A,
+    /* Ucode  80- 87 */ 0x85, 0x84, 0x87, 0x86, 0x81, 0x80, 0x83, 0x82,
+    /* Ucode  88- 95 */ 0x8D, 0x8C, 0x8F, 0x8E, 0x89, 0x88, 0x8B, 0x8A,
+    /* Ucode  96-103 */ 0xB5, 0xB4, 0xB7, 0xB6, 0xB1, 0xB0, 0xB3, 0xB2,
+    /* Ucode 104-111 */ 0xBD, 0xBC, 0xBF, 0xBE, 0xB9, 0xB8, 0xBB, 0xBA,
+    /* Ucode 112-119 */ 0xA5, 0xA4, 0xA7, 0xA6, 0xA1, 0xA0, 0xA3, 0xA2,
+    /* Ucode 120-127 */ 0xAD, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB, 0xAA,
+};
+
+/* Current G.711 law (set by sip_modem.c after codec negotiation) */
+static me_law_t g_law = ME_LAW_ULAW;
+
+/*
+ * Convert a Ucode (0-127) to the positive G.711 codeword for the
+ * currently negotiated law.
+ */
+static inline uint8_t ucode_to_pcm_positive(int ucode)
 {
-    /* Returns the POSITIVE µ-law codeword for a given Ucode (0..127). */
-    return (uint8_t)(0xFF - ucode);
+    if (g_law == ME_LAW_ALAW)
+        return v90_ucode_to_alaw[ucode & 0x7F];
+    return (uint8_t)(0xFF - ucode);  /* µ-law */
+}
+
+/*
+ * Convert a positive G.711 codeword to linear PCM, using the
+ * currently negotiated law.
+ */
+static inline int16_t pcm_to_linear(uint8_t codeword)
+{
+    if (g_law == ME_LAW_ALAW)
+        return alaw_to_linear(codeword);
+    return ulaw_to_linear(codeword);
+}
+
+/*
+ * Return the idle (silence) codeword for the current law.
+ */
+static inline uint8_t pcm_idle(void)
+{
+    return (g_law == ME_LAW_ALAW) ? (uint8_t)0xD5 : (uint8_t)0xFF;
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,12 +202,12 @@ static void v90_encode_frame(v90_enc_t *e, const uint8_t *data_in,
          *   $i = s_i XOR $_{i-1}  (where $_{-1} = $5 of previous frame) */
         sign = s_bit ^ sign;
 
-        /* Map Ucode → positive µ-law codeword */
-        uint8_t mu = ucode_to_ulaw_positive(mag);
+        /* Map Ucode → positive PCM codeword (µ-law or A-law per negotiated law) */
+        uint8_t mu = ucode_to_pcm_positive(mag);
 
-        /* Apply polarity: µ-law MSB=1 → positive, MSB=0 → negative.
-         * A G.711 sign bit of 1 (positive) is already encoded in mu since
-         * ucode_to_ulaw_positive returns codes in 0x80..0xFF range.
+        /* Apply polarity: G.711 MSB=1 → positive, MSB=0 → negative
+         * (same convention for both µ-law and A-law).
+         * ucode_to_pcm_positive returns positive codewords (MSB=1).
          * For negative: clear the MSB. */
         if (sign == 0)
             mu &= 0x7F; /* make negative */
@@ -608,16 +657,17 @@ void me_tx_audio(int16_t *amp, int len)
                 /* Read from PTY upstream buffer — one byte per symbol */
                 if (dring_read(&downstream_ring, data_in, V90_FRAME_LEN)
                     < V90_FRAME_LEN) {
-                    /* Not enough data: fill with idle (µ-law silence 0xFF) */
+                    /* Not enough data: fill with idle (silence codeword) */
+                    uint8_t idle = pcm_idle();
                     for (int i = 0; i < V90_FRAME_LEN; i++)
-                        amp[pos + i] = ulaw_to_linear(0xFF);
+                        amp[pos + i] = pcm_to_linear(idle);
                     pos += V90_FRAME_LEN;
                     continue;
                 }
 
                 v90_encode_frame(&g_v90_enc, data_in, pcm_out);
                 for (int i = 0; i < V90_FRAME_LEN; i++)
-                    amp[pos + i] = ulaw_to_linear(pcm_out[i]);
+                    amp[pos + i] = pcm_to_linear(pcm_out[i]);
                 pos += V90_FRAME_LEN;
             }
         } else {
@@ -666,6 +716,20 @@ me_modulation_t me_get_modulation(void)
     me_modulation_t m = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
     return m;
+}
+
+void me_set_law(me_law_t law)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    g_law = law;
+    pthread_mutex_unlock(&g_state_mtx);
+    fprintf(stderr, "[ME] PCM law set to %s\n",
+            law == ME_LAW_ALAW ? "A-law (PCMA)" : "u-law (PCMU)");
+}
+
+me_law_t me_get_law(void)
+{
+    return g_law;
 }
 
 /* Expose the dial URI for sip_modem.c to pick up */

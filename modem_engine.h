@@ -36,6 +36,12 @@ typedef enum {
     ME_MOD_V22BIS    /* Full V.22bis duplex (fallback) */
 } me_modulation_t;
 
+/* G.711 encoding law for the RTP stream */
+typedef enum {
+    ME_LAW_ULAW = 0,  /* G.711 µ-law (PCMU, payload type 0) — North America/Japan */
+    ME_LAW_ALAW = 1   /* G.711 A-law (PCMA, payload type 8) — Europe/international */
+} me_law_t;
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
@@ -81,6 +87,14 @@ void me_tx_audio(int16_t *amp, int len);
 
 /* Notify the engine that a SIP call has been connected (audio active). */
 void me_on_sip_connected(void);
+
+/*
+ * Set the G.711 encoding law for V.90 downstream codeword generation.
+ * Must be called before or at the same time as me_on_sip_connected().
+ * V.90 uses different codeword tables for µ-law and A-law networks.
+ */
+void me_set_law(me_law_t law);
+me_law_t me_get_law(void);
 
 /* Notify the engine that a SIP call has been disconnected. */
 void me_on_sip_disconnected(void);

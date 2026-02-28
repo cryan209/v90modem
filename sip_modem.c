@@ -52,6 +52,13 @@ static pjmedia_port     g_modem_port;
 static int16_t          g_frame_buf[SAMPLES_PER_FRAME * 2]; /* TX + scratch */
 static volatile int     g_running    = 1;
 
+/* Ring state for incoming calls — emulates S0 register auto-answer */
+#define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
+#define AUTO_ANSWER_RINGS   2       /* Answer after this many rings */
+static pjsua_call_id   g_ringing_call = PJSUA_INVALID_ID;
+static int             g_ring_count   = 0;
+static pj_time_val     g_last_ring_time;
+
 /* ------------------------------------------------------------------ */
 /* Custom pjmedia_port — bridge between PJSIP and modem_engine        */
 /* ------------------------------------------------------------------ */
@@ -142,6 +149,27 @@ static void attach_modem_to_call(pjsua_call_id call_id)
     pjsua_conf_connect(call_slot,     g_modem_slot);
     pjsua_conf_connect(g_modem_slot,  call_slot);
 
+    /* Also connect call→master (slot 0) so the null sound device's clock
+     * drives RTP packet extraction from the jitter buffer.  Without this,
+     * incoming audio is never read and put_frame receives only silence. */
+    pjsua_conf_connect(call_slot, 0);
+
+    /* Detect negotiated codec (PCMU vs PCMA) and tell the modem engine */
+    {
+        pjsua_stream_info si;
+        if (pjsua_call_get_stream_info(call_id, 0, &si) == PJ_SUCCESS &&
+            si.type == PJMEDIA_TYPE_AUDIO) {
+            pj_str_t pcma_name = pj_str("PCMA");
+            if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
+                me_set_law(ME_LAW_ALAW);
+                PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law)"));
+            } else {
+                me_set_law(ME_LAW_ULAW);
+                PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law)"));
+            }
+        }
+    }
+
     PJ_LOG(3, ("sip_modem", "Modem port connected to call slot %d", call_slot));
     me_on_sip_connected();
 }
@@ -169,6 +197,12 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
                call_id, (int)ci.state_text.slen, ci.state_text.ptr));
 
     if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
+        /* Cancel ringing if the caller hung up before we answered */
+        if (call_id == g_ringing_call) {
+            PJ_LOG(3, ("sip_modem", "Caller hung up during ringing"));
+            g_ringing_call = PJSUA_INVALID_ID;
+            g_ring_count   = 0;
+        }
         if (call_id == g_call_id) {
             detach_modem_from_call();
             g_call_id = PJSUA_INVALID_ID;
@@ -201,13 +235,17 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     PJ_LOG(3, ("sip_modem", "Incoming call from %.*s",
                (int)ci.remote_info.slen, ci.remote_info.ptr));
 
-    /* Signal the data interface to send RING to the PTY */
-    di_on_ring();
+    /* Send 180 Ringing to the caller — don't answer yet */
+    pjsua_call_answer(call_id, 180, NULL, NULL);
 
-    /* Auto-answer after 1 ring (S0=1 equivalent) — in a full implementation
-     * the AT interpreter's S0 register controls this. */
-    pjsua_call_answer(call_id, 200, NULL, NULL);
-    g_call_id = call_id;
+    /* Start the ring sequence */
+    g_ringing_call = call_id;
+    g_ring_count   = 1;
+    pj_gettimeofday(&g_last_ring_time);
+
+    /* First RING to the PTY */
+    di_on_ring();
+    PJ_LOG(3, ("sip_modem", "RING 1/%d", AUTO_ANSWER_RINGS));
 }
 
 /* ------------------------------------------------------------------ */
@@ -418,6 +456,32 @@ int main(int argc, char *argv[])
     while (g_running) {
         /* Poll for PJSIP events (10 ms tick) */
         pjsua_handle_events(10);
+
+        /* ── Ring timer: send RING and auto-answer after N rings ── */
+        if (g_ringing_call != PJSUA_INVALID_ID) {
+            pj_time_val now;
+            pj_gettimeofday(&now);
+            long elapsed_ms = (now.sec - g_last_ring_time.sec) * 1000
+                            + (now.msec - g_last_ring_time.msec);
+
+            if (elapsed_ms >= RING_INTERVAL_MS) {
+                g_ring_count++;
+                g_last_ring_time = now;
+                di_on_ring();
+                PJ_LOG(3, ("sip_modem", "RING %d/%d",
+                           g_ring_count, AUTO_ANSWER_RINGS));
+
+                if (g_ring_count >= AUTO_ANSWER_RINGS) {
+                    /* Answer the call */
+                    PJ_LOG(3, ("sip_modem", "Auto-answering after %d rings",
+                               g_ring_count));
+                    pjsua_call_answer(g_ringing_call, 200, NULL, NULL);
+                    g_call_id      = g_ringing_call;
+                    g_ringing_call = PJSUA_INVALID_ID;
+                    g_ring_count   = 0;
+                }
+            }
+        }
 
         /* Check if ATD has put us into DIALING state */
         if (me_get_state() == ME_DIALING && g_call_id == PJSUA_INVALID_ID) {
