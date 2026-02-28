@@ -1,0 +1,828 @@
+/*
+ * Copyright (C) 2008-2011 Teluu Inc. (http://www.teluu.com)
+ * Copyright (C) 2003-2008 Benny Prijono <benny@prijono.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+#include <pjlib.h>
+#include <pjlib-util.h>
+#include <pjmedia.h>
+#include <pjmedia-codec.h>
+
+/* Ignore gap >30s */
+#define GAP_IGNORE_SECONDS 30
+
+static const char *USAGE =
+"pcaputil [options] INPUT OUTPUT\n"
+"\n"
+"  Convert captured RTP packets in PCAP file to WAV/AVI file or play it\n"
+"  to audio device.\n"
+"\n"
+"  INPUT  is the PCAP file name/path.\n"
+"  OUTPUT is the WAV/AVI file name/path to store the output, or set to \"-\",\n"
+"         to play the output to audio device. The program will decode\n"
+"         the RTP contents using codec that is available in PJMEDIA,\n"
+"         and optionally decrypt the content using the SRTP crypto and\n"
+"         keys below.\n"
+"\n"
+"Options to filter packets from PCAP file:\n"
+"(you can always select the relevant packets from Wireshark of course!)\n"
+"  --src-ip=IP            Only include packets from this source address\n"
+"  --dst-ip=IP            Only include packets destined to this address\n"
+"  --src-port=port        Only include packets from this source port number\n"
+"  --dst-port=port        Only include packets destined to this port number\n"
+"\n"
+"Options for RTP packet processing:\n"
+""
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+"  --video                Video mode\n"
+#endif
+"  --codec=codec_id       The codec ID formatted \"name/clock-rate/channel-count\"\n"
+"                         must be specified for codec with dynamic PT,\n"
+"                         e.g: \"Speex/8000\"\n"
+"  --srtp-crypto=TAG, -c  Set crypto to be used to decrypt SRTP packets. Valid\n"
+"                         tags are: \n"
+"                           AES_CM_128_HMAC_SHA1_80 \n"
+"                           AES_CM_128_HMAC_SHA1_32\n"
+"  --srtp-key=KEY, -k     Set the base64 key to decrypt SRTP packets.\n"
+"  --codec-fmtp=FMTP      Set the fmtp input for parsing codec options.\n"
+"                         For example: \"mode-set=0;octet-align=1\".\n"
+#if PJMEDIA_HAS_OPUS_CODEC
+"  --opus-ch=CH           Opus channel count                            \n"
+"  --opus-clock-rate=CR   Opus clock rate                               \n"
+#endif
+"\n"
+"Options for playing to audio device:\n"
+""
+"  --play-dev-id=dev_id   Audio device ID for playback.\n"
+"\n"
+"  Example:\n"
+"    pcaputil file.pcap output.wav\n"
+"    pcaputil -c AES_CM_128_HMAC_SHA1_80 \\\n"
+"             -k VLDONbsbGl2Puqy+0PV7w/uGfpSPKFevDpxGsxN3 \\\n"
+"             file.pcap output.wav\n"
+"\n"
+;
+
+static struct app
+{
+    pj_caching_pool      cp;
+    pj_pool_t           *pool;
+    pjmedia_endpt       *mept;
+    pj_pcap_file        *pcap;
+    pjmedia_port        *wav;
+    pjmedia_codec       *codec;
+    pjmedia_vid_codec   *vcodec;
+    pjmedia_format       vfmt;
+    pjmedia_aud_stream  *aud_strm;
+    unsigned             pt;
+    pjmedia_transport   *srtp;
+    pjmedia_rtp_session  rtp_sess;
+    pj_bool_t            rtp_sess_init;
+} app;
+
+struct args
+{
+    pj_bool_t video;
+    pj_str_t codec;
+    pj_str_t wav_filename;
+    pjmedia_aud_dev_index dev_id;
+    pj_str_t srtp_crypto;
+    pj_str_t srtp_key;
+    pj_str_t codec_fmtp;
+#if PJMEDIA_HAS_OPUS_CODEC
+    int opus_clock_rate;
+    int opus_ch;
+#endif
+};
+
+
+static void cleanup()
+{
+    if (app.srtp) pjmedia_transport_close(app.srtp);
+    if (app.wav) {
+        pj_ssize_t pos = pjmedia_wav_writer_port_get_pos(app.wav);
+        if (pos >= 0) {
+            unsigned msec;
+            msec = (unsigned)pos / 2 * 1000 / PJMEDIA_PIA_SRATE(&app.wav->info);
+            printf("Written: %dm:%02ds.%03d\n",
+                    msec / 1000 / 60,
+                    (msec / 1000) % 60,
+                    msec % 1000);
+        }
+        pjmedia_port_destroy(app.wav);
+    }
+    if (app.pcap) pj_pcap_close(app.pcap);
+    if (app.codec) {
+        pjmedia_codec_mgr *cmgr;
+        pjmedia_codec_close(app.codec);
+        cmgr = pjmedia_endpt_get_codec_mgr(app.mept);
+        pjmedia_codec_mgr_dealloc_codec(cmgr, app.codec);
+    }
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+    if (app.vcodec) {
+        pjmedia_vid_codec_close(app.vcodec);
+        pjmedia_vid_codec_mgr_dealloc_codec(NULL, app.vcodec);
+    }
+#endif
+    if (app.aud_strm) {
+        pjmedia_aud_stream_stop(app.aud_strm);
+        pjmedia_aud_stream_destroy(app.aud_strm);
+    }
+
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+
+#if defined(PJMEDIA_HAS_FFMPEG_VID_CODEC) && PJMEDIA_HAS_FFMPEG_VID_CODEC != 0
+    pjmedia_codec_ffmpeg_vid_deinit();
+#endif
+#if defined(PJMEDIA_HAS_VPX_CODEC) && PJMEDIA_HAS_VPX_CODEC != 0
+    pjmedia_codec_vpx_vid_deinit();
+#endif
+#if defined(PJMEDIA_HAS_OPENH264_CODEC) && PJMEDIA_HAS_OPENH264_CODEC != 0
+    pjmedia_codec_openh264_vid_deinit();
+#endif
+    pjmedia_vid_dev_subsys_shutdown();
+    pjmedia_event_mgr_destroy(NULL);
+    pjmedia_video_format_mgr_destroy(NULL);
+    pjmedia_converter_mgr_destroy(NULL);
+    pjmedia_vid_codec_mgr_destroy(pjmedia_vid_codec_mgr_instance());
+
+#endif
+
+    if (app.mept) pjmedia_endpt_destroy(app.mept);
+    if (app.pool) pj_pool_release(app.pool);
+    pj_caching_pool_destroy(&app.cp);
+    pj_shutdown();
+}
+
+static void err_exit(const char *title, pj_status_t status)
+{
+    if (status != PJ_SUCCESS) {
+        char errmsg[PJ_ERR_MSG_SIZE];
+        pj_strerror(status, errmsg, sizeof(errmsg));
+        printf("Error: %s: %s\n", title, errmsg);
+    } else {
+        printf("Error: %s\n", title);
+    }
+    cleanup();
+    exit(1);
+}
+
+#define T(op)       do { \
+                        status = op; \
+                        if (status != PJ_SUCCESS) \
+                            err_exit(#op, status); \
+                    } while (0)
+
+
+static int read_rtp(pj_uint8_t *buf, pj_size_t bufsize,
+                    pjmedia_rtp_hdr **rtp,
+                    pj_uint8_t **payload,
+                    unsigned *payload_size,
+                    pj_bool_t check_pt)
+{
+    pj_status_t status;
+
+    /* Init RTP session */
+    if (!app.rtp_sess_init) {
+        T(pjmedia_rtp_session_init(&app.rtp_sess, 0, 0));
+        app.rtp_sess_init = PJ_TRUE;
+    }
+
+    /* Loop reading until we have a good RTP packet */
+    for (;;) {
+        pj_size_t sz = bufsize;
+        const pjmedia_rtp_hdr *r;
+        const void *p;
+        pjmedia_rtp_status seq_st;
+
+        status = pj_pcap_read_udp(app.pcap, NULL, buf, &sz);
+        if (status != PJ_SUCCESS) {
+            if (status == PJ_EEOF)
+                return PJ_FALSE;
+            err_exit("Error reading PCAP file", status);
+        }
+
+        /* Decode RTP packet to make sure that this is an RTP packet.
+         * We will decode it again to get the payload after we do
+         * SRTP decoding
+         */
+        status = pjmedia_rtp_decode_rtp(&app.rtp_sess, buf, (int)sz, &r,
+                                        &p, payload_size);
+        if (status != PJ_SUCCESS) {
+            char errmsg[PJ_ERR_MSG_SIZE];
+            pj_strerror(status, errmsg, sizeof(errmsg));
+            printf("Not RTP packet, skipping packet: %s\n", errmsg);
+            continue;
+        }
+
+        /* Decrypt SRTP */
+#if PJMEDIA_HAS_SRTP
+        if (app.srtp) {
+            int len = (int)sz;
+            status = pjmedia_transport_srtp_decrypt_pkt(app.srtp, PJ_TRUE,
+                                                        buf, &len);
+            if (status != PJ_SUCCESS) {
+                char errmsg[PJ_ERR_MSG_SIZE];
+                pj_strerror(status, errmsg, sizeof(errmsg));
+                printf("SRTP packet decryption failed, skipping packet: %s\n",
+                        errmsg);
+                continue;
+            }
+            sz = len;
+
+            /* Decode RTP packet again */
+            status = pjmedia_rtp_decode_rtp(&app.rtp_sess, buf, (int)sz, &r,
+                                            &p, payload_size);
+            if (status != PJ_SUCCESS) {
+                char errmsg[PJ_ERR_MSG_SIZE];
+                pj_strerror(status, errmsg, sizeof(errmsg));
+                printf("Not RTP packet, skipping packet: %s\n", errmsg);
+                continue;
+            }
+        }
+#endif
+
+        /* Update RTP session */
+        pjmedia_rtp_session_update2(&app.rtp_sess, r, &seq_st, PJ_FALSE);
+
+        /* Skip out-of-order packet */
+        if (seq_st.diff == 0) {
+            printf("Skipping out of order packet\n");
+            continue;
+        }
+
+        /* Skip if payload type is different */
+        if (check_pt && r->pt != app.pt) {
+            printf("Skipping RTP packet with bad payload type\n");
+            continue;
+        }
+
+        /* Skip bad packet */
+        if (seq_st.status.flag.bad) {
+            printf("Skipping bad RTP\n");
+            continue;
+        }
+
+
+        *rtp = (pjmedia_rtp_hdr*)r;
+        *payload = (pj_uint8_t*)p;
+
+        /* We have good packet */
+        break;
+    }
+    return PJ_TRUE;
+}
+
+pjmedia_frame play_frm;
+static pj_bool_t play_frm_copied, play_frm_ready;
+
+static pj_status_t wait_play(pjmedia_frame *f)
+{
+    play_frm_copied = PJ_FALSE;
+    play_frm = *f;
+    play_frm_ready = PJ_TRUE;
+    while (!play_frm_copied) {
+        pj_thread_sleep(1);
+    }
+    play_frm_ready = PJ_FALSE;
+
+    return PJ_SUCCESS;
+}
+
+static pj_status_t play_cb(void *user_data, pjmedia_frame *f)
+{
+    PJ_UNUSED_ARG(user_data);
+
+    if (!play_frm_ready) {
+        PJ_LOG(3, ("play_cb()", "Warning! Play frame not ready"));
+        return PJ_SUCCESS;
+    }
+
+    pj_memcpy(f->buf, play_frm.buf, play_frm.size);
+    f->size = play_frm.size;
+
+    play_frm_copied = PJ_TRUE;
+    return PJ_SUCCESS;
+}
+
+
+static void pcap2wav(const struct args *args)
+{
+    const pj_str_t WAV = {".wav", 4};
+    struct pkt
+    {
+        pj_uint8_t       buffer[PJMEDIA_MAX_MTU];
+        pjmedia_rtp_hdr *rtp;
+        pj_uint8_t      *payload;
+        unsigned         payload_len;
+    } pkt0;
+
+    pjmedia_codec_mgr *cmgr;
+    const pjmedia_codec_info *ci;
+    pjmedia_codec_param param;
+    unsigned samples_per_frame;
+    pj_status_t status;
+
+    /* Initialize all codecs */
+    T( pjmedia_codec_register_audio_codecs(app.mept, NULL) );
+
+    /* Create SRTP transport is needed */
+#if PJMEDIA_HAS_SRTP
+    if (args->srtp_crypto.slen) {
+        pjmedia_srtp_crypto crypto;
+        pjmedia_transport *tp;
+
+        pj_bzero(&crypto, sizeof(crypto));
+        crypto.key = args->srtp_key;
+        crypto.name = args->srtp_crypto;
+        T( pjmedia_transport_loop_create(app.mept, &tp) );
+        T( pjmedia_transport_srtp_create(app.mept, tp, NULL, &app.srtp) );
+        T( pjmedia_transport_srtp_start(app.srtp, &crypto, &crypto) );
+    }
+#endif
+
+    /* Read first packet */
+    read_rtp(pkt0.buffer, sizeof(pkt0.buffer), &pkt0.rtp,
+             &pkt0.payload, &pkt0.payload_len, PJ_FALSE);
+
+    cmgr = pjmedia_endpt_get_codec_mgr(app.mept);
+
+    /* Get codec info and param for the specified payload type */
+    app.pt = pkt0.rtp->pt;
+    if (app.pt < 96) {
+        T( pjmedia_codec_mgr_get_codec_info(cmgr, pkt0.rtp->pt, &ci) );
+    } else {
+        unsigned cnt = 2;
+        const pjmedia_codec_info *info[2];
+        T( pjmedia_codec_mgr_find_codecs_by_id(cmgr, &args->codec, &cnt,
+                                               info, NULL) );
+        if (cnt != 1)
+            err_exit("Codec ID must be specified and unique!", 0);
+
+        ci = info[0];
+    }
+    T( pjmedia_codec_mgr_get_default_param(cmgr, ci, &param) );
+    if (args->codec_fmtp.slen > 0) {
+        T( pjmedia_stream_info_parse_fmtp_data(app.pool, &args->codec_fmtp, &param.setting.dec_fmtp) );
+    }
+
+    /* Alloc and init codec */
+    T( pjmedia_codec_mgr_alloc_codec(cmgr, ci, &app.codec) );
+    T( pjmedia_codec_init(app.codec, app.pool) );
+    T( pjmedia_codec_open(app.codec, &param) );
+
+    /* Init audio device or WAV file */
+    samples_per_frame = param.info.clock_rate * param.info.frm_ptime / 1000;
+    if (pj_strcmp2(&args->wav_filename, "-") == 0) {
+        pjmedia_aud_param aud_param;
+
+        /* Open audio device */
+        T( pjmedia_aud_dev_default_param(args->dev_id, &aud_param) );
+        aud_param.dir = PJMEDIA_DIR_PLAYBACK;
+        aud_param.channel_count = param.info.channel_cnt;
+        aud_param.clock_rate = param.info.clock_rate;
+        aud_param.samples_per_frame = samples_per_frame;
+#if PJMEDIA_HAS_OPUS_CODEC
+        if (!pj_stricmp2(&args->codec, "opus")) {
+            if (args->opus_clock_rate > 0)
+                aud_param.clock_rate = args->opus_clock_rate;
+            if (args->opus_ch > 0)
+                aud_param.channel_count = args->opus_ch;
+        }
+#endif
+        T( pjmedia_aud_stream_create(&aud_param, NULL, &play_cb,
+                                     NULL, &app.aud_strm) );
+        T( pjmedia_aud_stream_start(app.aud_strm) );
+    } else if (pj_stristr(&args->wav_filename, &WAV)) {
+        /* Open WAV file */
+        T( pjmedia_wav_writer_port_create(app.pool, args->wav_filename.ptr,
+                                          param.info.clock_rate, param.info.channel_cnt,
+                                          samples_per_frame,
+                                          param.info.pcm_bits_per_sample, 0, 0,
+                                          &app.wav) );
+    } else {
+        err_exit("invalid output file", PJ_EINVAL);
+    }
+
+    /* Loop reading PCAP and writing WAV file */
+    for (;;) {
+        struct pkt pkt1;
+        pj_timestamp ts;
+        pjmedia_frame frames[16], pcm_frame;
+        short pcm[PJMEDIA_MAX_MTU];
+        unsigned i, frame_cnt;
+        long samples_cnt, ts_gap;
+
+        pj_assert(sizeof(pcm) >= samples_per_frame);
+
+        /* Parse first packet */
+        ts.u64 = 0;
+        frame_cnt = PJ_ARRAY_SIZE(frames);
+        T( pjmedia_codec_parse(app.codec, pkt0.payload, pkt0.payload_len,
+                                &ts, &frame_cnt, frames) );
+
+        /* Decode and write to WAV file */
+        samples_cnt = 0;
+        for (i=0; i<frame_cnt; ++i) {
+            pcm_frame.buf = pcm;
+            pcm_frame.size = samples_per_frame * 2;
+
+            T( pjmedia_codec_decode(app.codec, &frames[i],
+                                    (unsigned)pcm_frame.size, &pcm_frame) );
+            if (app.wav) {
+                T( pjmedia_port_put_frame(app.wav, &pcm_frame) );
+            }
+            if (app.aud_strm) {
+                T( wait_play(&pcm_frame) );
+            }
+            samples_cnt += samples_per_frame;
+        }
+
+        /* Read next packet */
+        if (!read_rtp(pkt1.buffer, sizeof(pkt1.buffer), &pkt1.rtp,
+                      &pkt1.payload, &pkt1.payload_len, PJ_TRUE)) {
+            break;
+        }
+
+        /* Fill in the gap (if any) between pkt0 and pkt1 */
+        ts_gap = pj_ntohl(pkt1.rtp->ts) - pj_ntohl(pkt0.rtp->ts) -
+                 samples_cnt;
+
+        if (ts_gap <= (long)param.info.clock_rate * GAP_IGNORE_SECONDS) { /* Ignore gap >30s */
+            while (ts_gap >= (long)samples_per_frame) {
+                pcm_frame.buf = pcm;
+                pcm_frame.size = samples_per_frame * 2;
+
+                if (app.codec->op->recover) {
+                    T( pjmedia_codec_recover(app.codec, (unsigned)pcm_frame.size,
+                                            &pcm_frame) );
+                } else {
+                    pj_bzero(pcm_frame.buf, pcm_frame.size);
+                }
+
+                if (app.wav) {
+                    T( pjmedia_port_put_frame(app.wav, &pcm_frame) );
+                }
+                if (app.aud_strm) {
+                    T( wait_play(&pcm_frame) );
+                }
+                ts_gap -= samples_per_frame;
+            }
+        }
+
+        /* Next */
+        pkt0 = pkt1;
+        pkt0.rtp = (pjmedia_rtp_hdr*)pkt0.buffer;
+        pkt0.payload = pkt0.buffer + (pkt1.payload - pkt1.buffer);
+    }
+}
+
+
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+static pj_status_t event_cb(pjmedia_event *event, void *user_data)
+{
+    PJ_UNUSED_ARG(user_data);
+
+    if (event->epub == app.vcodec) {
+        /* This is codec event */
+        switch (event->type) {
+        case PJMEDIA_EVENT_FMT_CHANGED:
+            {
+                pjmedia_format *fmt = &event->data.fmt_changed.new_fmt;
+
+                /* The event may only provide width & height, re-initialize
+                 * format with fps, bps, etc.
+                 */
+                pjmedia_format_init_video(&app.vfmt,
+                                          fmt->id,
+                                          fmt->det.vid.size.w,
+                                          fmt->det.vid.size.h,
+                                          25, 1);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    return PJ_SUCCESS;
+}
+#endif
+
+
+static void pcap2avi(const struct args *args)
+{
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+    const pj_str_t AVI = {".avi", 4};
+    enum { MAX_BUF_SIZE = 100 * 1024 * 1024 };
+    struct pkt
+    {
+        pj_uint8_t       buffer[PJMEDIA_MAX_MTU];
+        pjmedia_rtp_hdr *rtp;
+        pj_uint8_t      *payload;
+        unsigned         payload_len;
+    } pkt0;
+
+    const pjmedia_vid_codec_info *ci;
+    pjmedia_vid_codec_param param;
+    pjmedia_avi_streams *avi_streams = NULL;
+    pj_uint8_t *buf;
+    pj_status_t status;
+
+    /* Create SRTP transport is needed */
+#if PJMEDIA_HAS_SRTP
+    if (args->srtp_crypto.slen) {
+        pjmedia_srtp_crypto crypto;
+        pjmedia_transport *tp;
+
+        pj_bzero(&crypto, sizeof(crypto));
+        crypto.key = args->srtp_key;
+        crypto.name = args->srtp_crypto;
+        T( pjmedia_transport_loop_create(app.mept, &tp) );
+        T( pjmedia_transport_srtp_create(app.mept, tp, NULL, &app.srtp) );
+        T( pjmedia_transport_srtp_start(app.srtp, &crypto, &crypto) );
+    }
+#endif
+
+    /* Read first packet */
+    read_rtp(pkt0.buffer, sizeof(pkt0.buffer), &pkt0.rtp,
+             &pkt0.payload, &pkt0.payload_len, PJ_FALSE);
+
+    /* Get codec info and param for the specified payload type */
+    app.pt = pkt0.rtp->pt;
+    if (app.pt < 96) {
+        T( pjmedia_vid_codec_mgr_get_codec_info(NULL, pkt0.rtp->pt, &ci) );
+    } else {
+        unsigned cnt = 2;
+        const pjmedia_vid_codec_info *info[2];
+        T( pjmedia_vid_codec_mgr_find_codecs_by_id(NULL, &args->codec, &cnt,
+                                                   info, NULL) );
+        if (cnt != 1)
+            err_exit("Codec ID must be specified and unique!", 0);
+
+        ci = info[0];
+    }
+    T( pjmedia_vid_codec_mgr_get_default_param(NULL, ci, &param) );
+    if (args->codec_fmtp.slen > 0) {
+        T( pjmedia_stream_info_parse_fmtp_data(app.pool, &args->codec_fmtp, &param.dec_fmtp) );
+    }
+
+    /* Alloc and init codec */
+    T( pjmedia_vid_codec_mgr_alloc_codec(NULL, ci, &app.vcodec) );
+    T( pjmedia_vid_codec_init(app.vcodec, app.pool) );
+    T( pjmedia_vid_codec_open(app.vcodec, &param) );
+
+    /* Subscribe to codec events */
+    pjmedia_event_subscribe(NULL, &event_cb, app.vcodec, app.vcodec);
+
+    /* Alloc buffer for decoded video frame */
+    buf = (pj_uint8_t*)pj_pool_alloc(app.pool, MAX_BUF_SIZE);
+
+    /* Loop reading PCAP and writing AVI file */
+    for (;;) {
+        struct pkt pkt1;
+        pjmedia_frame frame, out_frame;
+
+        pj_bzero(&out_frame, sizeof(out_frame));
+        out_frame.buf = buf;
+        out_frame.size = MAX_BUF_SIZE;
+
+        /* Decode and write to AVI file */
+        pj_bzero(&frame, sizeof(frame));
+        frame.buf = pkt0.payload;
+        frame.size = pkt0.payload_len;
+        T( pjmedia_vid_codec_decode(app.vcodec, 1, &frame,
+                                    MAX_BUF_SIZE, &out_frame) );
+        if (out_frame.type == PJMEDIA_FRAME_TYPE_VIDEO && out_frame.size) {
+            if (!avi_streams && app.vfmt.id == PJMEDIA_FORMAT_I420) {
+                /* Open AVI file */
+                if (pj_stristr(&args->wav_filename, &AVI)) {
+                    T( pjmedia_avi_writer_create_streams(app.pool,
+                                                         args->wav_filename.ptr,
+                                                         1000 * 1024 * 1024, /* max file size */
+                                                         1, &app.vfmt, 0,
+                                                         &avi_streams) );
+                    pj_assert(avi_streams->streams[0]);
+                } else {
+                    err_exit("invalid output file", PJ_EINVAL);
+                }
+            }
+
+            if (avi_streams && avi_streams->streams[0])
+                T( pjmedia_port_put_frame(avi_streams->streams[0], &out_frame) );
+        }
+
+        /* Read next packet */
+        if (!read_rtp(pkt1.buffer, sizeof(pkt1.buffer), &pkt1.rtp,
+                      &pkt1.payload, &pkt1.payload_len, PJ_TRUE)) {
+            break;
+        }
+
+        /* Next */
+        pkt0 = pkt1;
+        pkt0.rtp = (pjmedia_rtp_hdr*)pkt0.buffer;
+        pkt0.payload = pkt0.buffer + (pkt1.payload - pkt1.buffer);
+    }
+
+    if (avi_streams && avi_streams->streams[0])
+        pjmedia_port_destroy(avi_streams->streams[0]);
+
+#else
+    PJ_UNUSED_ARG(args);
+#endif
+}
+
+
+int main(int argc, char *argv[])
+{
+    pj_str_t input;
+    pj_pcap_filter filter;
+    pj_status_t status;
+    struct args args;
+
+    enum {
+        OPT_SRC_IP = 1,
+        OPT_DST_IP,
+        OPT_SRC_PORT,
+        OPT_DST_PORT,
+        OPT_VIDEO,
+        OPT_CODEC,
+        OPT_PLAY_DEV_ID,
+        OPT_CODEC_FMTP,
+#if PJMEDIA_HAS_OPUS_CODEC
+        OPT_OPUS_CH = 'C',
+        OPT_OPUS_CLOCK_RATE = 'K',
+#endif
+        OPT_SRTP_CRYPTO = 'c',
+        OPT_SRTP_KEY = 'k'
+    };
+    struct pj_getopt_option long_options[] = {
+        { "srtp-crypto",    1, 0, OPT_SRTP_CRYPTO },
+        { "srtp-key",       1, 0, OPT_SRTP_KEY },
+        { "src-ip",         1, 0, OPT_SRC_IP },
+        { "dst-ip",         1, 0, OPT_DST_IP },
+        { "src-port",       1, 0, OPT_SRC_PORT },
+        { "dst-port",       1, 0, OPT_DST_PORT },
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+        { "video",          0, 0, OPT_VIDEO },
+#endif
+        { "codec",          1, 0, OPT_CODEC },
+        { "play-dev-id",    1, 0, OPT_PLAY_DEV_ID },
+        { "codec-fmtp",     1, 0, OPT_CODEC_FMTP },
+#if PJMEDIA_HAS_OPUS_CODEC
+        { "opus-ch", 1, 0, OPT_OPUS_CH },
+        { "opus-clock-rate", 1, 0, OPT_OPUS_CLOCK_RATE },
+#endif
+        { NULL, 0, 0, 0}
+    };
+    int c;
+    int option_index;
+    char key_bin[32];
+
+    pj_bzero(&args, sizeof(args));
+    args.dev_id = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
+#if PJMEDIA_HAS_OPUS_CODEC
+    args.opus_clock_rate = -1;
+    args.opus_ch = -1;
+#endif
+
+    pj_pcap_filter_default(&filter);
+    filter.link = PJ_PCAP_LINK_TYPE_ETH;
+    filter.proto = PJ_PCAP_PROTO_TYPE_UDP;
+
+    /* Parse arguments */
+    pj_optind = 0;
+    while((c=pj_getopt_long(argc,argv, "c:k:", long_options, &option_index))!=-1) {
+        switch (c) {
+        case OPT_SRTP_CRYPTO:
+            args.srtp_crypto = pj_str(pj_optarg);
+            break;
+        case OPT_SRTP_KEY:
+            {
+                int key_len = sizeof(key_bin);
+                args.srtp_key = pj_str(pj_optarg);
+                if (pj_base64_decode(&args.srtp_key, (pj_uint8_t*)key_bin, &key_len)) {
+                    puts("Error: invalid key");
+                    return 1;
+                }
+                args.srtp_key.ptr = key_bin;
+                args.srtp_key.slen = key_len;
+            }
+            break;
+        case OPT_SRC_IP:
+            {
+                pj_str_t t = pj_str(pj_optarg);
+                pj_in_addr a = pj_inet_addr(&t);
+                filter.ip_src = a.s_addr;
+            }
+            break;
+        case OPT_DST_IP:
+            {
+                pj_str_t t = pj_str(pj_optarg);
+                pj_in_addr a = pj_inet_addr(&t);
+                filter.ip_dst = a.s_addr;
+            }
+            break;
+        case OPT_SRC_PORT:
+            filter.src_port = pj_htons((pj_uint16_t)atoi(pj_optarg));
+            break;
+        case OPT_DST_PORT:
+            filter.dst_port = pj_htons((pj_uint16_t)atoi(pj_optarg));
+            break;
+        case OPT_CODEC:
+            args.codec = pj_str(pj_optarg);
+            break;
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+        case OPT_VIDEO:
+            args.video = PJ_TRUE;
+            break;
+#endif
+        case OPT_PLAY_DEV_ID:
+            args.dev_id = atoi(pj_optarg);
+            break;
+        case OPT_CODEC_FMTP:
+            args.codec_fmtp = pj_str(pj_optarg);
+            break;
+#if PJMEDIA_HAS_OPUS_CODEC
+        case OPT_OPUS_CLOCK_RATE:
+            args.opus_clock_rate = atoi(pj_optarg);
+            break;
+        case OPT_OPUS_CH:
+            args.opus_ch = atoi(pj_optarg);
+            break;
+#endif
+        default:
+            puts("Error: invalid option");
+            return 1;
+        }
+    }
+
+    if (pj_optind != argc - 2) {
+        puts(USAGE);
+        return 1;
+    }
+
+    if (!(args.srtp_crypto.slen) != !(args.srtp_key.slen)) {
+        puts("Error: both SRTP crypto and key must be specified");
+        puts(USAGE);
+        return 1;
+    }
+
+    input = pj_str(argv[pj_optind]);
+    args.wav_filename = pj_str(argv[pj_optind+1]);
+
+    T( pj_init() );
+
+    pj_caching_pool_init(&app.cp, NULL, 0);
+    app.pool = pj_pool_create(&app.cp.factory, "pcaputil", 1000, 1000, NULL);
+
+    T( pjlib_util_init() );
+    T( pjmedia_endpt_create(&app.cp.factory, NULL, 0, &app.mept) );
+
+#if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+
+    /* Video subsystem init */
+    T( pjmedia_vid_dev_subsys_init(&app.cp.factory) );
+    T( pjmedia_converter_mgr_create(app.pool, NULL) );
+    T( pjmedia_event_mgr_create(app.pool, 0, NULL) );
+    T( pjmedia_vid_codec_mgr_create(app.pool, NULL) );
+    T (pjmedia_video_format_mgr_create(app.pool, 64, 0, NULL) );
+
+#if defined(PJMEDIA_HAS_OPENH264_CODEC) && PJMEDIA_HAS_OPENH264_CODEC != 0
+    T( pjmedia_codec_openh264_vid_init(NULL, &app.cp.factory) );
+#endif
+#if defined(PJMEDIA_HAS_VPX_CODEC) && PJMEDIA_HAS_VPX_CODEC != 0
+    T( pjmedia_codec_vpx_vid_init(NULL, &app.cp.factory) );
+#endif
+#if defined(PJMEDIA_HAS_FFMPEG_VID_CODEC) && PJMEDIA_HAS_FFMPEG_VID_CODEC != 0
+    T( pjmedia_codec_ffmpeg_vid_init(NULL, &app.cp.factory) );
+#endif
+
+#endif
+
+    T( pj_pcap_open(app.pool, input.ptr, &app.pcap) );
+    T( pj_pcap_set_filter(app.pcap, &filter) );
+
+    if (args.video) {
+        pcap2avi(&args);
+    } else {
+        pcap2wav(&args);
+    }
+
+    cleanup();
+    return 0;
+}
+
