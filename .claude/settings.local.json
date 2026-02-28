@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /opt/homebrew/Cellar/pjproject/2.16/lib/*.pc)"
+    ]
+  }
+}

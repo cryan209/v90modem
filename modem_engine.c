@@ -1,0 +1,618 @@
+/*
+ * modem_engine.c — V.90 modem state machine
+ *
+ * Digital (server) side of V.90 over SIP/G.711:
+ *
+ *   Downstream (digital→analog, up to 56 kbps):
+ *     ITU-T V.90 §5 PCM codeword injection into the G.711 RTP stream.
+ *     Table 1/V.90 universal code mapping: Ucode u → µ-law = 0xFF - u (u<128).
+ *     Encoder: scrambler (V.34 polynomial) → modulus encoder → PCM mapper
+ *              → sign assignment (differential coding per §5.4.5.1).
+ *
+ *   Upstream (analog→digital, up to 33.6 kbps):
+ *     SpanDSP V.22bis (2400 bps) as a working placeholder for V.34.
+ *     V.34 upstream can replace this once the ITU-T V.34 encoder is available.
+ *
+ *   Handshake:
+ *     SpanDSP V.8 negotiation; if V.90 selected, we enter V.90 training;
+ *     otherwise fall back to full V.22bis duplex.
+ *
+ * NOTE: V.90 training (Phases 1-4, §8 and §9 of V.90) is stubbed with a
+ * fixed-length silence/tone period. Full training implementation is needed
+ * for interoperability with real V.90 analog modems.
+ */
+
+#include "modem_engine.h"
+#include "data_interface.h"
+#include "clock_recovery.h"
+
+#include <spandsp.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <math.h>
+
+/* ------------------------------------------------------------------ */
+/* V.90 downstream encoder constants (ITU-T V.90 §5)                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Number of positive constellation points per data frame interval.
+ * V.90 uses 6 data frame intervals (i=0..5), each with Mi points.
+ * For simplicity we use Mi=128 (7 magnitude bits per symbol),
+ * giving a theoretical max of 7+1 (sign) = 8 bits/symbol @ 8000 sym/s.
+ *
+ * K=42 magnitude bits + S=6 sign bits per 6-symbol frame.
+ * Scrambled throughput ≈ 48 bits/frame × (8000/6 frames/s) ≈ 64 kbps;
+ * after framing/overhead the effective rate is ≈ 56 kbps.
+ *
+ * NOTE: In a conforming implementation, Mi is negotiated during training.
+ */
+#define V90_MI          128     /* Constellation points per frame interval */
+#define V90_K_BITS      42      /* Magnitude data bits per 6-symbol frame */
+#define V90_FRAME_LEN   6       /* Symbols per data frame */
+#define V90_RATE_BPS    56000   /* Advertised downstream rate */
+
+/*
+ * Ucode-to-µ-law mapping (ITU-T V.90 Table 1/V.90):
+ *   Positive codes (Ucode 0-127): µ-law = 0xFF - Ucode
+ *   Negative codes (Ucode 128-255): µ-law = 0x7F - (Ucode - 128)
+ * The polarity (sign) is applied separately via the MSB of the µ-law byte.
+ */
+static inline uint8_t ucode_to_ulaw_positive(int ucode)
+{
+    /* Returns the POSITIVE µ-law codeword for a given Ucode (0..127). */
+    return (uint8_t)(0xFF - ucode);
+}
+
+/* ------------------------------------------------------------------ */
+/* V.90 scrambler (V.34 polynomial GPC, ITU-T V.34 §7)                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Self-synchronising scrambler using the V.34 generator polynomial:
+ *   GPC(x) = x^23 + x^5 + 1   (23-stage LFSR)
+ */
+typedef struct {
+    uint32_t sr; /* shift register, 23 bits significant */
+} v90_scrambler_t;
+
+static void v90_scrambler_init(v90_scrambler_t *s)
+{
+    s->sr = 0x7FFFFF; /* all-ones start state */
+}
+
+static uint8_t v90_scramble_byte(v90_scrambler_t *s, uint8_t in)
+{
+    uint8_t out = 0;
+    for (int i = 0; i < 8; i++) {
+        int in_bit  = (in >> i) & 1;
+        int fb      = ((s->sr >> 22) ^ (s->sr >> 4)) & 1; /* x^23 XOR x^5 */
+        int out_bit = in_bit ^ fb;
+        s->sr = ((s->sr << 1) | out_bit) & 0x7FFFFF;
+        out  |= (uint8_t)(out_bit << i);
+    }
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* V.90 downstream encoder state                                       */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    v90_scrambler_t scrambler;
+
+    /* Modulus encoder residue across frames */
+    uint64_t R;
+
+    /* Data frame interval index (0..5) */
+    int frame_idx;
+
+    /* Sign bit differential coding state (§5.4.5.1) */
+    int prev_sign; /* $5 of previous data frame */
+
+    /* Bit accumulator for pulling whole bytes from the upstream data buffer */
+    uint8_t  byte_acc;
+    int      bits_in_acc;
+} v90_enc_t;
+
+static void v90_enc_init(v90_enc_t *e)
+{
+    memset(e, 0, sizeof(*e));
+    v90_scrambler_init(&e->scrambler);
+    e->prev_sign = 0;
+}
+
+/*
+ * Encode one 6-symbol data frame from the downstream data buffer.
+ * Fills pcm_out[0..5] with µ-law codewords ready for the RTP stream.
+ *
+ * Uses simplified encoding (Mi=128 for all intervals, Sr=0 spectral shaping):
+ *   1. Scramble 6 raw data bytes (one per symbol, 48 bits total)
+ *   2. Split into 6 × (7 magnitude bits + 1 sign bit)
+ *   3. Map magnitude → Ucode → µ-law positive code
+ *   4. Apply sign via differential coding (§5.4.5.1)
+ *   5. Set µ-law MSB from the differentially-coded sign
+ */
+static void v90_encode_frame(v90_enc_t *e, const uint8_t *data_in,
+                              uint8_t *pcm_out)
+{
+    int sign = e->prev_sign;
+
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        /* Scramble one byte */
+        uint8_t s = v90_scramble_byte(&e->scrambler, data_in[i]);
+
+        /* 7 magnitude bits (b0..b6) select the constellation point */
+        uint8_t mag   = s & 0x7F;          /* Ucode: 0..127             */
+        int     s_bit = (s >> 7) & 1;      /* raw sign bit from data    */
+
+        /* §5.4.5.1 differential coding for sign (Sr=0):
+         *   $i = s_i XOR $_{i-1}  (where $_{-1} = $5 of previous frame) */
+        sign = s_bit ^ sign;
+
+        /* Map Ucode → positive µ-law codeword */
+        uint8_t mu = ucode_to_ulaw_positive(mag);
+
+        /* Apply polarity: µ-law MSB=1 → positive, MSB=0 → negative.
+         * A G.711 sign bit of 1 (positive) is already encoded in mu since
+         * ucode_to_ulaw_positive returns codes in 0x80..0xFF range.
+         * For negative: clear the MSB. */
+        if (sign == 0)
+            mu &= 0x7F; /* make negative */
+
+        pcm_out[i] = mu;
+    }
+
+    e->prev_sign = sign; /* save $5 for next frame */
+}
+
+/* ------------------------------------------------------------------ */
+/* Ring buffers for data exchange between threads                      */
+/* ------------------------------------------------------------------ */
+
+#define DATA_RING_SIZE 16384
+
+typedef struct {
+    uint8_t  buf[DATA_RING_SIZE];
+    volatile int head;
+    volatile int tail;
+    pthread_mutex_t mtx;
+} data_ring_t;
+
+static void dring_init(data_ring_t *r) {
+    r->head = r->tail = 0;
+    pthread_mutex_init(&r->mtx, NULL);
+}
+
+static int dring_write(data_ring_t *r, const uint8_t *d, int len) {
+    pthread_mutex_lock(&r->mtx);
+    int n = 0;
+    for (int i = 0; i < len; i++) {
+        int next = (r->head + 1) % DATA_RING_SIZE;
+        if (next == r->tail) break;
+        r->buf[r->head] = d[i];
+        r->head = next;
+        n++;
+    }
+    pthread_mutex_unlock(&r->mtx);
+    return n;
+}
+
+static int dring_read(data_ring_t *r, uint8_t *buf, int max) {
+    pthread_mutex_lock(&r->mtx);
+    int n = 0;
+    while (n < max && r->tail != r->head) {
+        buf[n++] = r->buf[r->tail];
+        r->tail  = (r->tail + 1) % DATA_RING_SIZE;
+    }
+    pthread_mutex_unlock(&r->mtx);
+    return n;
+}
+
+static int dring_available(data_ring_t *r) {
+    pthread_mutex_lock(&r->mtx);
+    int n = (r->head - r->tail + DATA_RING_SIZE) % DATA_RING_SIZE;
+    pthread_mutex_unlock(&r->mtx);
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* V.22bis get_bit / put_bit callbacks for SpanDSP                    */
+/* ------------------------------------------------------------------ */
+
+static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
+static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
+
+/* Bit accumulator for V.22bis TX (one byte at a time) */
+static uint8_t  v22bis_tx_byte = 0;
+static int      v22bis_tx_bits = 0;
+
+static int v22bis_get_bit_cb(void *user_data)
+{
+    (void)user_data;
+    if (v22bis_tx_bits == 0) {
+        /* Fetch the next byte from the downstream ring */
+        uint8_t b;
+        if (dring_read(&downstream_ring, &b, 1) == 1) {
+            v22bis_tx_byte = b;
+            v22bis_tx_bits = 8;
+        } else {
+            return SIG_STATUS_END_OF_DATA; /* Mark for silence */
+        }
+    }
+    int bit = v22bis_tx_byte & 1;
+    v22bis_tx_byte >>= 1;
+    v22bis_tx_bits--;
+    return bit;
+}
+
+/* Bit accumulator for V.22bis RX */
+static uint8_t  v22bis_rx_byte = 0;
+static int      v22bis_rx_bits = 0;
+
+static void v22bis_put_bit_cb(void *user_data, int bit)
+{
+    (void)user_data;
+    if (bit < 0) return; /* SIG_STATUS_* sentinel, ignore */
+
+    v22bis_rx_byte |= (uint8_t)((bit & 1) << v22bis_rx_bits);
+    v22bis_rx_bits++;
+    if (v22bis_rx_bits == 8) {
+        dring_write(&upstream_ring, &v22bis_rx_byte, 1);
+        v22bis_rx_byte = 0;
+        v22bis_rx_bits = 0;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Module state                                                        */
+/* ------------------------------------------------------------------ */
+
+static me_state_t      g_state     = ME_IDLE;
+static me_modulation_t g_mod       = ME_MOD_NONE;
+static pthread_mutex_t g_state_mtx;
+
+/* SpanDSP modem contexts */
+static v8_state_t    *g_v8      = NULL;
+static v22bis_state_t *g_v22bis = NULL;
+
+/* V.90 downstream encoder */
+static v90_enc_t      g_v90_enc;
+
+/* Clock recovery */
+static cr_state_t     g_cr;
+
+/* Training timer: samples elapsed since entering training state */
+static int g_training_samples;
+#define TRAINING_DURATION_SAMPLES  (8000 * 1)  /* 1 second stub */
+
+/* Pending SIP URI for outgoing calls (set by me_dial) */
+static char g_dial_uri[256];
+
+/* ------------------------------------------------------------------ */
+/* V.8 result callback                                                 */
+/* ------------------------------------------------------------------ */
+
+static void v8_result_handler(void *user_data, v8_parms_t *result)
+{
+    (void)user_data;
+
+    fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X\n",
+            result->status, result->modulations);
+
+    if (result->status != V8_STATUS_V8_CALL) {
+        fprintf(stderr, "[ME] V.8 failed, hanging up\n");
+        me_hangup();
+        return;
+    }
+
+    pthread_mutex_lock(&g_state_mtx);
+
+    if (result->modulations & V8_MOD_V90) {
+        fprintf(stderr, "[ME] V.8 negotiated V.90\n");
+        g_mod   = ME_MOD_V90;
+        g_state = ME_TRAINING;
+        g_training_samples = 0;
+
+        /* Reinitialise V.22bis for upstream (answer side) */
+        if (g_v22bis) {
+            v22bis_restart(g_v22bis, 2400);
+        }
+
+    } else if (result->modulations & V8_MOD_V22) {
+        fprintf(stderr, "[ME] V.8 negotiated V.22bis\n");
+        g_mod   = ME_MOD_V22BIS;
+        g_state = ME_TRAINING;
+        g_training_samples = 0;
+
+    } else {
+        fprintf(stderr, "[ME] V.8 no common modulation, hanging up\n");
+        pthread_mutex_unlock(&g_state_mtx);
+        me_hangup();
+        return;
+    }
+
+    /* Initialise V.22bis (answer side = not calling party) */
+    if (!g_v22bis) {
+        g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, 0,
+                               v22bis_get_bit_cb, NULL,
+                               v22bis_put_bit_cb, NULL);
+        if (!g_v22bis)
+            fprintf(stderr, "[ME] v22bis_init failed\n");
+    }
+
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                           */
+/* ------------------------------------------------------------------ */
+
+void me_init(void)
+{
+    pthread_mutex_init(&g_state_mtx, NULL);
+    dring_init(&downstream_ring);
+    dring_init(&upstream_ring);
+    cr_init(&g_cr, 8000);
+    v90_enc_init(&g_v90_enc);
+    g_state = ME_IDLE;
+    g_mod   = ME_MOD_NONE;
+}
+
+void me_destroy(void)
+{
+    if (g_v8)     { v8_free(g_v8);       g_v8     = NULL; }
+    if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
+    pthread_mutex_destroy(&g_state_mtx);
+}
+
+/* ------------------------------------------------------------------ */
+/* Control                                                             */
+/* ------------------------------------------------------------------ */
+
+void me_dial(const char *sip_uri)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_state == ME_IDLE) {
+        snprintf(g_dial_uri, sizeof(g_dial_uri), "%s", sip_uri);
+        g_state = ME_DIALING;
+        /* Actual SIP call is initiated by sip_modem.c which polls me_get_state() */
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+void me_answer(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    /* SIP answer is triggered by sip_modem.c */
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+void me_hangup(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    g_state = ME_HANGUP;
+    pthread_mutex_unlock(&g_state_mtx);
+    /* sip_modem.c will detect ME_HANGUP and hang up the SIP call */
+}
+
+/* Called by sip_modem.c when the SIP call media becomes active */
+void me_on_sip_connected(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+
+    cr_reset(&g_cr);
+    g_training_samples = 0;
+
+    /* Initialise V.8 — we are the answering side (not calling party) */
+    v8_parms_t v8_parms;
+    memset(&v8_parms, 0, sizeof(v8_parms));
+    v8_parms.modem_connect_tone = MODEM_CONNECT_TONES_ANSAM_PR; /* ANSam */
+    v8_parms.send_ci            = FALSE; /* answerer doesn't send CI */
+    v8_parms.v92                = FALSE;
+    v8_parms.call_function      = V8_CALL_V_SERIES;
+    v8_parms.modulations        = V8_MOD_V90 | V8_MOD_V22;
+    v8_parms.protocol           = V8_PROTOCOL_LAPM_V42;
+    v8_parms.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+
+    if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
+    g_v8 = v8_init(NULL, FALSE /* answerer */, &v8_parms,
+                   v8_result_handler, NULL);
+    if (!g_v8) {
+        fprintf(stderr, "[ME] v8_init failed\n");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+
+    g_state = ME_V8;
+    g_mod   = ME_MOD_NONE;
+    pthread_mutex_unlock(&g_state_mtx);
+
+    fprintf(stderr, "[ME] SIP connected, starting V.8 handshake\n");
+}
+
+/* Called by sip_modem.c when the SIP call is torn down */
+void me_on_sip_disconnected(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+
+    if (g_v8)     { v8_free(g_v8);        g_v8     = NULL; }
+    if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
+
+    me_state_t prev = g_state;
+    g_state = ME_IDLE;
+    g_mod   = ME_MOD_NONE;
+    pthread_mutex_unlock(&g_state_mtx);
+
+    if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8)
+        di_on_disconnected();
+}
+
+/* ------------------------------------------------------------------ */
+/* Audio I/O — called from PJSIP media thread (real-time)             */
+/* ------------------------------------------------------------------ */
+
+void me_rx_audio(const int16_t *amp, int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    me_state_t state = g_state;
+    pthread_mutex_unlock(&g_state_mtx);
+
+    switch (state) {
+    case ME_V8:
+        /* Feed received audio to V.8 receiver */
+        if (g_v8)
+            v8_rx(g_v8, amp, len);
+        break;
+
+    case ME_TRAINING:
+    case ME_DATA:
+        /* Feed audio to V.22bis upstream receiver */
+        if (g_v22bis)
+            v22bis_rx(g_v22bis, amp, len);
+
+        /* In DATA mode, flush received bytes to the PTY */
+        if (state == ME_DATA) {
+            uint8_t buf[256];
+            int n;
+            while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
+                di_write_data(buf, n);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+void me_tx_audio(int16_t *amp, int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    me_state_t state = g_state;
+    pthread_mutex_unlock(&g_state_mtx);
+
+    memset(amp, 0, sizeof(int16_t) * (size_t)len);
+
+    switch (state) {
+    case ME_V8:
+        /* Generate V.8 negotiation audio */
+        if (g_v8)
+            v8_tx(g_v8, amp, len);
+        break;
+
+    case ME_TRAINING: {
+        /*
+         * Stub training: send 1 kHz tone for TRAINING_DURATION_SAMPLES,
+         * then transition to DATA mode.
+         *
+         * A real implementation sends the V.90 startup sequences described
+         * in ITU-T V.90 §8 (Phases 1-4).
+         */
+        double phase = 0.0;
+        for (int i = 0; i < len; i++) {
+            amp[i] = (int16_t)(8000.0 * sin(phase));
+            phase += 2.0 * M_PI * 1004.0 / 8000.0;
+        }
+
+        pthread_mutex_lock(&g_state_mtx);
+        g_training_samples += len;
+        if (g_training_samples >= TRAINING_DURATION_SAMPLES) {
+            g_state = ME_DATA;
+            v90_enc_init(&g_v90_enc);
+            pthread_mutex_unlock(&g_state_mtx);
+
+            int rate = (g_mod == ME_MOD_V90) ? V90_RATE_BPS : 2400;
+            fprintf(stderr, "[ME] Training complete, entering DATA mode (%d bps)\n",
+                    rate);
+            di_on_connected(rate);
+        } else {
+            pthread_mutex_unlock(&g_state_mtx);
+        }
+        break;
+    }
+
+    case ME_DATA:
+        if (g_mod == ME_MOD_V90) {
+            /*
+             * V.90 downstream: encode 6 bytes per frame into 6 µ-law
+             * codewords and convert to linear PCM for the RTP stream.
+             *
+             * We need 6 data bytes per frame; produce len/6 frames.
+             * Remaining samples are silence (no data available).
+             */
+            int pos = 0;
+            while (pos + V90_FRAME_LEN <= len) {
+                uint8_t data_in[V90_FRAME_LEN];
+                uint8_t pcm_out[V90_FRAME_LEN];
+
+                /* Read from PTY upstream buffer — one byte per symbol */
+                if (dring_read(&downstream_ring, data_in, V90_FRAME_LEN)
+                    < V90_FRAME_LEN) {
+                    /* Not enough data: fill with idle (µ-law silence 0xFF) */
+                    for (int i = 0; i < V90_FRAME_LEN; i++)
+                        amp[pos + i] = ulaw_to_linear(0xFF);
+                    pos += V90_FRAME_LEN;
+                    continue;
+                }
+
+                v90_encode_frame(&g_v90_enc, data_in, pcm_out);
+                for (int i = 0; i < V90_FRAME_LEN; i++)
+                    amp[pos + i] = ulaw_to_linear(pcm_out[i]);
+                pos += V90_FRAME_LEN;
+            }
+        } else {
+            /* V.22bis duplex downstream TX */
+            if (g_v22bis)
+                v22bis_tx(g_v22bis, amp, len);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Data I/O                                                            */
+/* ------------------------------------------------------------------ */
+
+int me_put_data(const uint8_t *buf, int len)
+{
+    /* Upstream data: application → modem → SIP (for V.22bis TX or V.90 stub) */
+    return dring_write(&downstream_ring, buf, len);
+}
+
+int me_get_data(uint8_t *buf, int max_len)
+{
+    /* Downstream data: SIP → modem → application */
+    return dring_read(&upstream_ring, buf, max_len);
+}
+
+/* ------------------------------------------------------------------ */
+/* State query                                                         */
+/* ------------------------------------------------------------------ */
+
+me_state_t me_get_state(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    me_state_t s = g_state;
+    pthread_mutex_unlock(&g_state_mtx);
+    return s;
+}
+
+me_modulation_t me_get_modulation(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    me_modulation_t m = g_mod;
+    pthread_mutex_unlock(&g_state_mtx);
+    return m;
+}
+
+/* Expose the dial URI for sip_modem.c to pick up */
+const char *me_get_dial_uri(void)
+{
+    return g_dial_uri;
+}
