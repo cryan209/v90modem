@@ -2346,11 +2346,23 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
 
     /* Switch RX to primary channel demodulator for Phase 3 reception.
-       The answerer must detect the caller's S signal during Phase 3. */
+       The answerer must detect the caller's S signal during Phase 3.
+       Must reinitialize RX demodulator state since it was previously running
+       the CC (control channel) demodulator with different timing parameters. */
     s->rx.current_demodulator = V34_MODULATION_V34;
     s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
     s->rx.duration = 0;
+    s->rx.bit_count = 0;
+    s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
+    /* Reset RX RRC filter to flush stale CC demodulator data */
+    s->rx.rrc_filter_step = 0;
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+    /* Reset eq_put_step for V34 primary channel timing.
+       steps_per_baud for 3429 baud = 192*8000*7/(2400*10) = 448 */
+    s->rx.eq_put_step = 448/2 - 1;
+    /* Reset carrier phase for clean demodulation start */
+    s->rx.carrier_phase = 0;
     span_log(&s->logging, SPAN_LOG_FLOW, "Rx - Phase 3: waiting for far-end S signal\n");
 }
 /*- End of function --------------------------------------------------------*/

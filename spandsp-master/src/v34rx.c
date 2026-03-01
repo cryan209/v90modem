@@ -2292,6 +2292,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         s->duration++;
         energy = sample->re * sample->re + sample->im * sample->im;
 
+        /* Log energy periodically for debugging */
+        if ((s->duration % 500) == 1)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: baud %d, energy=%.3f (re=%.3f im=%.3f), consecutive=%d\n",
+                     s->duration, energy, sample->re, sample->im, s->bit_count);
+        }
+        /*endif*/
+
         /* Guard period: don't look for S during the first ~500ms (1715 bauds at 3429)
            to avoid triggering on our own echo. The caller needs time to receive our
            Phase 3 training signals, train its equalizer, and start its own Phase 3. */
@@ -2319,6 +2328,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         }
         else
         {
+            if (s->bit_count > 0)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: energy dropout at baud %d (energy=%.3f, had %d consecutive)\n",
+                         s->duration, energy, s->bit_count);
+            }
+            /*endif*/
             s->bit_count = 0;
         }
         /*endif*/
@@ -2327,7 +2343,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->duration >= 10287)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S detection timeout, forcing transition\n");
+                     "Rx - Phase 3: S detection timeout, forcing transition (last energy=%.3f)\n",
+                     energy);
             s->received_event = V34_EVENT_S;
             s->stage = V34_RX_STAGE_PHASE3_TRAINING;
         }
