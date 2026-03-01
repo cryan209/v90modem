@@ -616,6 +616,10 @@ void me_tx_audio(int16_t *amp, int len)
          *
          * A real implementation sends the V.90 startup sequences described
          * in ITU-T V.90 §8 (Phases 1-4).
+         * – Phase 1: Network interaction - Implemented in ME_V8
+         * – Phase 2: Channel probing and ranging - Part of V.34
+         * – Phase 3: Equaliser and echo canceller training and digital impairment learning
+         * – Phase 4: Final training
          */
         double phase = 0.0;
         for (int i = 0; i < len; i++) {

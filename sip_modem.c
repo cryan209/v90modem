@@ -3,7 +3,8 @@
  *
  * Initialises pjsua as a minimal SIP UA:
  *   - Null audio device (audio handled entirely by this process)
- *   - G.711 µ-law (PCMU/8000) only; all other codecs disabled
+ *   - G.711 a/µ-law (PCMA/U/8000) only; all other codecs disabled
+ *   - Directly talks PCMA/U as transcoding will break V.90
  *   - Custom pjmedia_port that routes PCM samples to/from modem_engine
  *   - Detects ME_DIALING state and places the outgoing SIP call
  *   - Detects ME_HANGUP state and tears down the call
