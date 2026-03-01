@@ -1,0 +1,26 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 10.00
+# Visual C++ Express 2008
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Encoder", "Encoder\Encoder.vcproj", "{1776DF94-9614-4F8E-8F1A-6D4766116C10}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Decoder", "Decoder\Decoder.vcproj", "{641FD85D-312D-4241-9740-BAC759FB51CB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1776DF94-9614-4F8E-8F1A-6D4766116C10}.Debug|Win32.ActiveCfg = Debug|Win32
+		{1776DF94-9614-4F8E-8F1A-6D4766116C10}.Debug|Win32.Build.0 = Debug|Win32
+		{1776DF94-9614-4F8E-8F1A-6D4766116C10}.Release|Win32.ActiveCfg = Release|Win32
+		{1776DF94-9614-4F8E-8F1A-6D4766116C10}.Release|Win32.Build.0 = Release|Win32
+		{641FD85D-312D-4241-9740-BAC759FB51CB}.Debug|Win32.ActiveCfg = Debug|Win32
+		{641FD85D-312D-4241-9740-BAC759FB51CB}.Debug|Win32.Build.0 = Debug|Win32
+		{641FD85D-312D-4241-9740-BAC759FB51CB}.Release|Win32.ActiveCfg = Release|Win32
+		{641FD85D-312D-4241-9740-BAC759FB51CB}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
