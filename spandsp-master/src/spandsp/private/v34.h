@@ -442,6 +442,11 @@ typedef struct
                round trip delay are properly handled. */
     span_sample_timer_t sample_time;
 
+    /*! \brief Pre-emphasis filter state for Phase 3+ TX */
+    float pre_emphasis_buf[16];
+    int pre_emphasis_idx;
+    const float *pre_emphasis_coeffs;
+
     logging_state_t *logging;
 } v34_tx_state_t;
 

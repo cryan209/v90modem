@@ -2290,6 +2290,9 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 static void s_not_s_baud_init(v34_state_t *s)
 {
     int power_reduction;
+    int preemp_idx;
+    int baud_idx;
+    int carrier_idx;
 
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
 
@@ -2305,11 +2308,43 @@ static void s_not_s_baud_init(v34_state_t *s)
              "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0)\n",
              power_reduction, -14.0f - (float)power_reduction);
 
+    /* Initialize pre-emphasis filter from caller's INFO1c.
+       The caller specifies what pre-emphasis WE should use for our TX.
+       V.34/5.4, Table 15 bits 26:29 (for 2400 baud) or probing results
+       for the selected baud rate. Index 0 = no pre-emphasis, 1-10 = filter. */
+    baud_idx = s->tx.baud_rate;
+    carrier_idx = s->tx.high_carrier ? 1 : 0;
+    preemp_idx = s->rx.info1c.rate_data[baud_idx].pre_emphasis;
+    s->tx.pre_emphasis_coeffs = NULL;
+    memset(s->tx.pre_emphasis_buf, 0, sizeof(s->tx.pre_emphasis_buf));
+    s->tx.pre_emphasis_idx = 0;
+    if (preemp_idx >= 1  &&  preemp_idx <= 10)
+    {
+        s->tx.pre_emphasis_coeffs = v34_tx_pre_emphasis_filters[baud_idx][carrier_idx][preemp_idx - 1];
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3: applying pre-emphasis filter %d (baud %d, %s carrier)\n",
+                 preemp_idx, baud_rate_parameters[baud_idx].baud_rate,
+                 carrier_idx ? "high" : "low");
+    }
+    else
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3: no pre-emphasis (index %d)\n", preemp_idx);
+    }
+    /*endif*/
+
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.stage = V34_TX_STAGE_FIRST_S;
     s->tx.current_getbaud = get_s_not_s_baud;
+    /* Reset baud phase and RRC filter for V.34 modulator. The previous CC modulator
+       used different num/den (40/3 for 600 baud), so baud_phase could be invalid.
+       Also flush the RRC filter buffer to avoid stale CC modulator data. */
+    s->tx.baud_phase = 0;
+    s->tx.rrc_filter_step = 0;
+    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
 
     /* Switch RX to primary channel demodulator for Phase 3 reception.
        The answerer must detect the caller's S signal during Phase 3. */
@@ -2775,7 +2810,40 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
         /* Now create and modulate the carrier */
         z = dds_complexf(&(s->tx.carrier_phase), s->tx.v34_carrier_phase_rate);
         /* Don't bother saturating. We should never clip. */
-        amp[sample] = (int16_t) lfastrintf((x.re*z.re - x.im*z.im)*s->tx.gain);
+        {
+            float sample_f;
+
+            sample_f = (x.re*z.re - x.im*z.im)*s->tx.gain;
+            /* Apply pre-emphasis filter if active (V.34/5.4).
+               This shapes the TX spectrum as requested by the remote modem's INFO1c. */
+            if (s->tx.pre_emphasis_coeffs)
+            {
+                float filtered;
+                int j;
+                int idx;
+
+                s->tx.pre_emphasis_buf[s->tx.pre_emphasis_idx] = sample_f;
+                filtered = 0.0f;
+                for (j = 0;  j < 16;  j++)
+                {
+                    idx = s->tx.pre_emphasis_idx - j;
+                    if (idx < 0)
+                        idx += 16;
+                    /*endif*/
+                    filtered += s->tx.pre_emphasis_coeffs[j]*s->tx.pre_emphasis_buf[idx];
+                }
+                /*endfor*/
+                if (++s->tx.pre_emphasis_idx >= 16)
+                    s->tx.pre_emphasis_idx = 0;
+                /*endif*/
+                amp[sample] = (int16_t) lfastrintf(filtered);
+            }
+            else
+            {
+                amp[sample] = (int16_t) lfastrintf(sample_f);
+            }
+            /*endif*/
+        }
 #endif
     }
     /*endfor*/
