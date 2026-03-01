@@ -131,6 +131,14 @@ enum v34_tx_stages_e
     V34_TX_STAGE_J,
     /*! \brief J' is being transmitted */
     V34_TX_STAGE_J_DASHED,
+    /*! \brief Phase 4: silence while waiting for caller to complete Phase 3 */
+    V34_TX_STAGE_PHASE4_WAIT,
+    /*! \brief Phase 4: S signal (128T) before TRN and MP */
+    V34_TX_STAGE_PHASE4_S,
+    /*! \brief Phase 4: S-bar signal (16T) before TRN and MP */
+    V34_TX_STAGE_PHASE4_NOT_S,
+    /*! \brief Phase 4: TRN signal (>=512T) before MP */
+    V34_TX_STAGE_PHASE4_TRN,
     /*! \brief MP is being transmitted */
     V34_TX_STAGE_MP,
 

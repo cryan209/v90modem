@@ -322,6 +322,7 @@ static void infoh_baud_init(v34_state_t *s);
 static void s_not_s_baud_init(v34_state_t *s);
 static void pp_baud_init(v34_state_t *s);
 static void trn_baud_init(v34_state_t *s);
+static void phase4_wait_init(v34_state_t *s);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
 
@@ -2479,21 +2480,26 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             {
                 if (s->rx.received_event == V34_EVENT_S)
                 {
-                    span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - far-end S detected, switching J -> J'\n");
                     if (s->tx.calling_party)
                     {
-                        /* Change to J' */
+                        /* Caller: send J' then TRN then MP (V.34 §11.4.1.1.1) */
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "Tx - far-end S detected, switching J -> J'\n");
                         s->tx.stage = V34_TX_STAGE_J_DASHED;
                         s->tx.persistence2 = j_dashed_pattern[0];
                         s->tx.tone_duration = 0;
                     }
                     else
                     {
-                        /* Answerer: also send J' then MP (V.34/10.1.3.9) */
-                        s->tx.stage = V34_TX_STAGE_J_DASHED;
-                        s->tx.persistence2 = j_dashed_pattern[0];
-                        s->tx.tone_duration = 0;
+                        /* Answerer: per V.34 §11.3.1.2.6 / §11.4.1.2, after
+                           detecting the caller's S, go silent and wait for the
+                           caller to complete Phase 3 (PP, TRN, J), then send
+                           Phase 4: S(128T), S-bar(16T), TRN(>=512T), MP.
+                           The answerer does NOT send J' — only the caller
+                           sends J' (§11.4.1.1.1). */
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "Tx - far-end S detected, starting Phase 4 wait\n");
+                        phase4_wait_init(s);
                     }
                     /*endif*/
                 }
@@ -2541,6 +2547,116 @@ static void trn_baud_init(v34_state_t *s)
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_TRN;
     s->tx.current_getbaud = get_trn_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Phase 4 wait duration: number of bauds to wait after detecting the caller's S
+   signal before starting Phase 4 S/S-bar/TRN.  This gives the caller time to
+   complete its Phase 3 sequence (S-bar, PP, TRN, J).
+   At 3429 baud: caller needs ~944 bauds for S-bar(16)+PP(288)+TRN(512)+margin.
+   1500 bauds ≈ 437 ms, which is well within the spec's allowance. */
+#define PHASE4_WAIT_BAUDS 1500
+
+static complex_sig_t get_phase4_baud(v34_state_t *s)
+{
+#if defined(SPANDSP_USE_FIXED_POINT)
+    int16_t x;
+#else
+    float x;
+#endif
+
+    switch (s->tx.stage)
+    {
+    case V34_TX_STAGE_PHASE4_WAIT:
+        /* Transmit silence while waiting for the caller to complete Phase 3.
+           V.34 §11.3.1.2.4: "After detecting the S-to-S-bar transition, the
+           modem shall transmit silence." */
+        if (++s->tx.tone_duration >= PHASE4_WAIT_BAUDS)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Phase 4: wait complete, starting S signal (128T)\n");
+            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP),
+                                            TRAINING_SCALE(0.0f));
+            s->tx.stage = V34_TX_STAGE_PHASE4_S;
+            s->tx.tone_duration = 0;
+        }
+        /*endif*/
+        return zero;
+
+    case V34_TX_STAGE_PHASE4_S:
+        /* Phase 4 S signal: 128T of alternating constellation points.
+           V.34 §11.4.1.2.1: "The answer modem shall transmit signal S for 128T" */
+        if (++s->tx.tone_duration == 128)
+        {
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
+            s->tx.tone_duration = 0;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Phase 4: S complete, starting S-bar (16T)\n");
+        }
+        /*endif*/
+        break;
+
+    case V34_TX_STAGE_PHASE4_NOT_S:
+        /* Phase 4 S-bar signal: 16T.
+           V.34 §11.4.1.2.1: "transmit signal S-bar for 16T followed by signal TRN" */
+        if (++s->tx.tone_duration == 16)
+        {
+            /* Initialize scrambler to zero for TRN (V.34 §10.1.3.8:
+               "The scrambler is initialized to zero prior to transmission
+               of the TRN signal.") */
+            s->tx.scramble_reg = 0;
+            s->tx.diff = 0;
+            s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
+            s->tx.tone_duration = 0;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Phase 4: S-bar complete, starting TRN (>=512T)\n");
+            return s->tx.lastbit;
+        }
+        /*endif*/
+        break;
+
+    case V34_TX_STAGE_PHASE4_TRN:
+        /* Phase 4 TRN: at least 512T of scrambled training.
+           V.34 §11.4.1.2.2: "the answer modem shall transmit TRN for at least
+           512T but no longer than 2000 ms plus a round trip delay" */
+        {
+            int bit;
+
+            bit = scramble(&s->tx, 1);
+            bit = (scramble(&s->tx, 1) << 1) | bit;
+            if (++s->tx.tone_duration >= 512)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: TRN complete (%d bauds), starting MP\n",
+                         s->tx.tone_duration);
+                mp_or_mph_baud_init(s);
+            }
+            /*endif*/
+            return training_constellation_4[bit];
+        }
+
+    default:
+        return zero;
+    }
+    /*endswitch*/
+
+    /* S and S-bar use the alternating point pattern (same as get_s_not_s_baud) */
+    x = s->tx.lastbit.re;
+    s->tx.lastbit.re = s->tx.lastbit.im;
+    s->tx.lastbit.im = x;
+    return s->tx.lastbit;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_wait_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
+    s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
+    s->tx.tone_duration = 0;
+    s->tx.current_getbaud = get_phase4_baud;
+    /* Keep RX in primary channel mode — do NOT switch to CC yet.
+       The caller is still sending Phase 3 training signals, not MP. */
 }
 /*- End of function --------------------------------------------------------*/
 
