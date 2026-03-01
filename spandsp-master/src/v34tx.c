@@ -2174,12 +2174,10 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
     {
         if (s->tx.calling_party)
         {
-printf("info 1 Tx silence\n");
             tx_silence_init(s, 30000);
         }
         else
         {
-printf("info 1 Tx S !S\n");
             s_not_s_baud_init(s);
         }
         /*endif*/
@@ -2700,7 +2698,6 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
     int sample;
 
     /* The V.34 modulator. */
-printf("ZZZ baud rate %d\n", s->tx.baud_rate);
     num = s->tx.parms.samples_per_symbol_numerator;
     den = s->tx.parms.samples_per_symbol_denominator;
     shaper = v34_tx_shapers[s->tx.baud_rate];
@@ -2712,7 +2709,6 @@ printf("ZZZ baud rate %d\n", s->tx.baud_rate);
             v = s->tx.current_getbaud(s);
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
             s->tx.rrc_filter_im[s->tx.rrc_filter_step] = v.im;
-printf("V.34 baud %10.5f %10.5f - %10.5f\n", s->tx.rrc_filter_re[s->tx.rrc_filter_step], s->tx.rrc_filter_im[s->tx.rrc_filter_step], s->tx.gain);
             if (++s->tx.rrc_filter_step >= V34_TX_FILTER_STEPS)
                 s->tx.rrc_filter_step = 0;
             /*endif*/
@@ -2747,7 +2743,6 @@ printf("V.34 baud %10.5f %10.5f - %10.5f\n", s->tx.rrc_filter_re[s->tx.rrc_filte
         /* Don't bother saturating. We should never clip. */
         amp[sample] = (int16_t) lfastrintf((x.re*z.re - x.im*z.im)*s->tx.gain);
 #endif
-printf("V.34 sample %d\n", amp[sample]);
     }
     /*endfor*/
     return sample;
@@ -2779,10 +2774,6 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
             v = s->tx.current_getbaud(s);
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
             s->tx.rrc_filter_im[s->tx.rrc_filter_step] = v.im;
-printf("CC baud %10.5f %10.5f - %10.5f\n",
-       s->tx.rrc_filter_re[s->tx.rrc_filter_step],
-       s->tx.rrc_filter_im[s->tx.rrc_filter_step],
-       s->tx.gain);
             if (++s->tx.rrc_filter_step >= V34_INFO_TX_FILTER_STEPS)
                 s->tx.rrc_filter_step = 0;
             /*endif*/
@@ -2818,7 +2809,6 @@ printf("CC baud %10.5f %10.5f - %10.5f\n",
         /* Don't bother saturating. We should never clip. */
         amp[sample] = (int16_t) lfastrintf(famp*s->tx.gain);
 #endif
-printf("CC sample %d\n", amp[sample]);
     }
     return sample;
 }

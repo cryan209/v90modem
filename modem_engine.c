@@ -1,25 +1,22 @@
 /*
- * modem_engine.c — V.90 modem state machine
+ * modem_engine.c — V.34/V.90 modem state machine
  *
- * Digital (server) side of V.90 over SIP/G.711:
+ * Digital (server) side modem over SIP/G.711:
  *
- *   Downstream (digital→analog, up to 56 kbps):
+ *   Primary mode: V.34 full duplex (up to 33.6 kbps)
+ *     SpanDSP 3.0.0 V.34 handles all training phases internally:
+ *     Phase 2 (DPSK INFO exchange), Phase 3 (equalizer training),
+ *     Phase 4 (final training and rate negotiation).
+ *
+ *   Future: V.90 downstream (up to 56 kbps)
  *     ITU-T V.90 §5 PCM codeword injection into the G.711 RTP stream.
- *     Table 1/V.90 universal code mapping: Ucode u → µ-law = 0xFF - u (u<128).
- *     Encoder: scrambler (V.34 polynomial) → modulus encoder → PCM mapper
- *              → sign assignment (differential coding per §5.4.5.1).
+ *     V.90 encoder code is retained but not yet active (requires V.90-specific
+ *     Phase 3/4 training which differs from standard V.34).
  *
- *   Upstream (analog→digital, up to 33.6 kbps):
- *     SpanDSP V.22bis (2400 bps) as a working placeholder for V.34.
- *     V.34 upstream can replace this once the ITU-T V.34 encoder is available.
+ *   Fallback: V.22bis full duplex (2400 bps)
  *
  *   Handshake:
- *     SpanDSP V.8 negotiation; if V.90 selected, we enter V.90 training;
- *     otherwise fall back to full V.22bis duplex.
- *
- * NOTE: V.90 training (Phases 1-4, §8 and §9 of V.90) is stubbed with a
- * fixed-length silence/tone period. Full training implementation is needed
- * for interoperability with real V.90 analog modems.
+ *     SpanDSP V.8 negotiation; V.34 preferred, V.22bis fallback.
  */
 
 #include "modem_engine.h"
@@ -317,12 +314,40 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 }
 
 /* ------------------------------------------------------------------ */
+/* Module state                                                        */
+/* ------------------------------------------------------------------ */
+
+static me_state_t      g_state     = ME_IDLE;
+static me_modulation_t g_mod       = ME_MOD_NONE;
+static pthread_mutex_t g_state_mtx;
+
+/* SpanDSP modem contexts */
+static v8_state_t     *g_v8      = NULL;
+static v22bis_state_t *g_v22bis  = NULL;
+static v34_state_t    *g_v34     = NULL;
+
+/* V.90 downstream encoder */
+static v90_enc_t      g_v90_enc;
+
+/* Clock recovery */
+static cr_state_t     g_cr;
+
+/* Audio diagnostics: accumulated energy and sample count for V.8 logging */
+static int64_t g_v8_rx_energy;
+static int     g_v8_rx_count;
+
+/* Pending SIP URI for outgoing calls (set by me_dial) */
+static char g_dial_uri[256];
+
+/* ------------------------------------------------------------------ */
 /* V.34 get_bit / put_bit callbacks for SpanDSP                       */
 /* ------------------------------------------------------------------ */
 
-/* Bit accumulator for V.34 TX (one byte at a time) */
+/* Bit accumulators for V.34 TX and RX (one byte at a time) */
 static uint8_t  v34_tx_byte = 0;
 static int      v34_tx_bits = 0;
+static uint8_t  v34_rx_byte = 0;
+static int      v34_rx_bits = 0;
 
 static int v34_get_bit_cb(void *user_data)
 {
@@ -373,36 +398,6 @@ static void v34_put_bit_cb(void *user_data, int bit)
 }
 
 /* ------------------------------------------------------------------ */
-/* Module state                                                        */
-/* ------------------------------------------------------------------ */
-
-static me_state_t      g_state     = ME_IDLE;
-static me_modulation_t g_mod       = ME_MOD_NONE;
-static pthread_mutex_t g_state_mtx;
-
-/* SpanDSP modem contexts */
-static v8_state_t     *g_v8      = NULL;
-static v22bis_state_t *g_v22bis  = NULL;
-static v34_state_t    *g_v34     = NULL;
-
-/* V.90 downstream encoder */
-static v90_enc_t      g_v90_enc;
-
-/* Clock recovery */
-static cr_state_t     g_cr;
-
-/* V.34 RX bit accumulator (same pattern as V.22bis) */
-static uint8_t  v34_rx_byte = 0;
-static int      v34_rx_bits = 0;
-
-/* Audio diagnostics: accumulated energy and sample count for V.8 logging */
-static int64_t g_v8_rx_energy;
-static int     g_v8_rx_count;
-
-/* Pending SIP URI for outgoing calls (set by me_dial) */
-static char g_dial_uri[256];
-
-/* ------------------------------------------------------------------ */
 /* V.8 result callback                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -424,12 +419,59 @@ static void start_v22bis_training(void)
     }
 }
 
+/* Start V.34 training — used when V.8 negotiates V.34 */
+static void start_v34_training(void)
+{
+    /* Must be called with g_state_mtx held */
+    g_mod   = ME_MOD_V34;
+    g_state = ME_TRAINING;
+
+    /* Reset bit accumulators */
+    v34_tx_byte = 0;
+    v34_tx_bits = 0;
+    v34_rx_byte = 0;
+    v34_rx_bits = 0;
+
+    if (g_v34) {
+        v34_free(g_v34);
+        g_v34 = NULL;
+    }
+
+    /*
+     * Init V.34 as answerer (calling_party=false), full duplex.
+     * Use 3429 baud, 33600 bps as maximum; V.34 will negotiate down
+     * during training based on line conditions.
+     * Note: 33600 bps requires 3429 baud (3200 baud max is 31200 bps).
+     */
+    g_v34 = v34_init(NULL,
+                     3429,          /* baud rate */
+                     33600,         /* bit rate */
+                     false,         /* answerer */
+                     true,          /* full duplex */
+                     v34_get_bit_cb, NULL,
+                     v34_put_bit_cb, NULL);
+    if (!g_v34) {
+        fprintf(stderr, "[ME] v34_init failed, falling back to V.22bis\n");
+        start_v22bis_training();
+        return;
+    }
+
+    /* Enable SpanDSP logging for V.34 training diagnostics */
+    logging_state_t *log = v34_get_logging_state(g_v34);
+    if (log) {
+        span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
+                                SPAN_LOG_FLOW);
+    }
+
+    fprintf(stderr, "[ME] V.34 training started (answerer, 3429 baud, up to 33600 bps)\n");
+}
+
 static void v8_result_handler(void *user_data, v8_parms_t *result)
 {
     (void)user_data;
 
     fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
-            result->status, result->modulations, result->pstn_access);
+            result->status, result->jm_cm.modulations, result->jm_cm.pstn_access);
 
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
     if (result->status == V8_STATUS_IN_PROGRESS ||
@@ -459,30 +501,17 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if (result->modulations & V8_MOD_V90) {
-        fprintf(stderr, "[ME] V.8 negotiated V.90 (downstream PCM + V.22bis upstream)\n");
-        g_mod   = ME_MOD_V90;
-        g_state = ME_TRAINING;
-        g_training_samples = 0;
+    if (result->jm_cm.modulations & V8_MOD_V34) {
+        fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
+        start_v34_training();
 
-        /* Initialise V.22bis for the upstream direction (answer side) */
-        if (!g_v22bis) {
-            g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, 0,
-                                   v22bis_get_bit_cb, NULL,
-                                   v22bis_put_bit_cb, NULL);
-            if (!g_v22bis)
-                fprintf(stderr, "[ME] v22bis_init failed\n");
-        } else {
-            v22bis_restart(g_v22bis, 2400);
-        }
-
-    } else if (result->modulations & (V8_MOD_V34 | V8_MOD_V22)) {
-        fprintf(stderr, "[ME] V.8 negotiated V.22bis/V.34 fallback\n");
+    } else if (result->jm_cm.modulations & V8_MOD_V22) {
+        fprintf(stderr, "[ME] V.8 negotiated V.22bis fallback\n");
         start_v22bis_training();
 
     } else {
         fprintf(stderr, "[ME] V.8 no usable modulation (0x%X), hanging up\n",
-                result->modulations);
+                result->jm_cm.modulations);
         pthread_mutex_unlock(&g_state_mtx);
         me_hangup();
         return;
@@ -508,8 +537,9 @@ void me_init(void)
 
 void me_destroy(void)
 {
-    if (g_v8)     { v8_free(g_v8);       g_v8     = NULL; }
+    if (g_v8)     { v8_free(g_v8);         g_v8     = NULL; }
     if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
+    if (g_v34)    { v34_free(g_v34);       g_v34    = NULL; }
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -549,7 +579,6 @@ void me_on_sip_connected(void)
     pthread_mutex_lock(&g_state_mtx);
 
     cr_reset(&g_cr);
-    g_training_samples = 0;
     g_v8_rx_energy     = 0;
     g_v8_rx_count      = 0;
 
@@ -557,19 +586,18 @@ void me_on_sip_connected(void)
     v8_parms_t v8_parms;
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = MODEM_CONNECT_TONES_ANSAM_PR; /* ANSam */
-    v8_parms.send_ci            = FALSE; /* answerer doesn't send CI */
-    v8_parms.v92                = FALSE;
-    v8_parms.call_function      = V8_CALL_V_SERIES;
-    /* Include V34 so analog modems see we support V.90 upstream (V.34).
-     * Without V8_MOD_V34 some modems won't select V.90. */
-    v8_parms.modulations        = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22;
-    v8_parms.protocol           = V8_PROTOCOL_LAPM_V42;
-    /* Signal we are on the digital (server) side of the PSTN — required for V.90 */
-    v8_parms.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-    v8_parms.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    v8_parms.send_ci            = false; /* answerer doesn't send CI */
+    v8_parms.v92                = false;
+    v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
+    /* Advertise V.34 + V.22bis. We don't advertise V.90 yet because our
+     * training uses standard V.34 phases (not V.90-modified Phase 3/4). */
+    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
+    v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
+    v8_parms.jm_cm.pstn_access        = 0;
+    v8_parms.jm_cm.pcm_modem_availability = 0;
 
     if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
-    g_v8 = v8_init(NULL, FALSE /* answerer */, &v8_parms,
+    g_v8 = v8_init(NULL, false /* answerer */, &v8_parms,
                    v8_result_handler, NULL);
     if (!g_v8) {
         fprintf(stderr, "[ME] v8_init failed\n");
@@ -589,8 +617,9 @@ void me_on_sip_disconnected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
 
-    if (g_v8)     { v8_free(g_v8);        g_v8     = NULL; }
+    if (g_v8)     { v8_free(g_v8);         g_v8     = NULL; }
     if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
+    if (g_v34)    { v34_free(g_v34);       g_v34    = NULL; }
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -632,8 +661,10 @@ void me_rx_audio(const int16_t *amp, int len)
 
     case ME_TRAINING:
     case ME_DATA:
-        /* Feed audio to V.22bis upstream receiver */
-        if (g_v22bis)
+        /* Feed audio to the appropriate modem receiver */
+        if (g_mod == ME_MOD_V34 && g_v34)
+            v34_rx(g_v34, amp, len);
+        else if (g_v22bis)
             v22bis_rx(g_v22bis, amp, len);
 
         /* In DATA mode, flush received bytes to the PTY */
@@ -665,59 +696,35 @@ void me_tx_audio(int16_t *amp, int len)
             v8_tx(g_v8, amp, len);
         break;
 
-    case ME_TRAINING: {
+    case ME_TRAINING:
         /*
-         * Stub training: send 1 kHz tone for TRAINING_DURATION_SAMPLES,
-         * then transition to DATA mode.
-         *
-         * A real implementation sends the V.90 startup sequences described
-         * in ITU-T V.90 §8 (Phases 1-4).
-         * – Phase 1: Network interaction - Implemented in ME_V8
-         * – Phase 2: Channel probing and ranging - Part of V.34
-         * – Phase 3: Equaliser and echo canceller training and digital impairment learning
-         * – Phase 4: Final training
+         * V.34/V.22bis training: SpanDSP handles the training state machine
+         * internally (Phase 2 DPSK INFO exchange, tone probing, Phase 3/4
+         * equalizer training). The put_bit callback fires SIG_STATUS_CARRIER_UP
+         * when training completes, transitioning us to ME_DATA.
          */
-        double phase = 0.0;
-        for (int i = 0; i < len; i++) {
-            amp[i] = (int16_t)(8000.0 * sin(phase));
-            phase += 2.0 * M_PI * 1004.0 / 8000.0;
-        }
-
-        pthread_mutex_lock(&g_state_mtx);
-        g_training_samples += len;
-        if (g_training_samples >= TRAINING_DURATION_SAMPLES) {
-            g_state = ME_DATA;
-            v90_enc_init(&g_v90_enc);
-            pthread_mutex_unlock(&g_state_mtx);
-
-            int rate = (g_mod == ME_MOD_V90) ? V90_RATE_BPS : 2400;
-            fprintf(stderr, "[ME] Training complete, entering DATA mode (%d bps)\n",
-                    rate);
-            di_on_connected(rate);
-        } else {
-            pthread_mutex_unlock(&g_state_mtx);
-        }
+        if (g_mod == ME_MOD_V34 && g_v34)
+            v34_tx(g_v34, amp, len);
+        else if (g_v22bis)
+            v22bis_tx(g_v22bis, amp, len);
         break;
-    }
 
     case ME_DATA:
-        if (g_mod == ME_MOD_V90) {
+        if (g_mod == ME_MOD_V34 && g_v34) {
+            /* V.34 full duplex data TX */
+            v34_tx(g_v34, amp, len);
+        } else if (g_mod == ME_MOD_V90) {
             /*
              * V.90 downstream: encode 6 bytes per frame into 6 µ-law
              * codewords and convert to linear PCM for the RTP stream.
-             *
-             * We need 6 data bytes per frame; produce len/6 frames.
-             * Remaining samples are silence (no data available).
              */
             int pos = 0;
             while (pos + V90_FRAME_LEN <= len) {
                 uint8_t data_in[V90_FRAME_LEN];
                 uint8_t pcm_out[V90_FRAME_LEN];
 
-                /* Read from PTY upstream buffer — one byte per symbol */
                 if (dring_read(&downstream_ring, data_in, V90_FRAME_LEN)
                     < V90_FRAME_LEN) {
-                    /* Not enough data: fill with idle (silence codeword) */
                     uint8_t idle = pcm_idle();
                     for (int i = 0; i < V90_FRAME_LEN; i++)
                         amp[pos + i] = pcm_to_linear(idle);

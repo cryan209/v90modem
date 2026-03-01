@@ -2181,7 +2181,6 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     float v;
 
     step = 6;
-printf("XYX0 %d\n", len);
     for (i = 0;  i < len;  i++)
     {
         s->rrc_filter[s->rrc_filter_step] = amp[i];
@@ -2387,7 +2386,6 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     s->shaper_im = v34_rx_shapers_im[s->baud_rate][s->high_carrier];
     s->shaper_sets = steps_per_baud[s->baud_rate];
     s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, 0));
-printf("XYX0 %d\n", len);
     for (i = 0;  i < len;  i++)
     {
         s->rrc_filter[s->rrc_filter_step] = amp[i];

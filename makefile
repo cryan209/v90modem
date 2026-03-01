@@ -36,9 +36,9 @@ LDFLAGS = \
   -lilbccodec-$(ARCH_SUFFIX) \
   -lg7221codec-$(ARCH_SUFFIX) \
   -lwebrtc-$(ARCH_SUFFIX) \
-  -L$(SPANDSP_DIR)/.libs \
+  $(SPANDSP_DIR)/.libs/libspandsp.a \
   -L/opt/homebrew/lib \
-  -lspandsp -ltiff \
+  -ltiff \
   -lssl -lcrypto \
   -lm -lpthread \
   -framework CoreAudio \

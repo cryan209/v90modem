@@ -92,10 +92,10 @@ static void          *cb_user_data = NULL;
 /* ------------------------------------------------------------------ */
 
 /* Called by SpanDSP to write response text back to the terminal */
-static int at_tx_handler(at_state_t *s, void *user_data,
+static int at_tx_handler(void *user_data,
                          const uint8_t *buf, size_t len)
 {
-    (void)s; (void)user_data;
+    (void)user_data;
     if (master_fd >= 0)
         write(master_fd, buf, len);
     return 0;
@@ -106,10 +106,10 @@ static int at_tx_handler(at_state_t *s, void *user_data,
  * op  — one of the AT_MODEM_CONTROL_* enum values
  * num — dial string (for CALL), or NULL
  */
-static int at_modem_control_handler(at_state_t *s, void *user_data,
+static int at_modem_control_handler(void *user_data,
                                     int op, const char *num)
 {
-    (void)s; (void)user_data;
+    (void)user_data;
 
     switch (op) {
     case AT_MODEM_CONTROL_CALL:
