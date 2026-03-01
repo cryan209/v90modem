@@ -2832,13 +2832,8 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
         i = (x.re*z.re - x.im*z.im) >> 15;
         amp[sample] = (int16_t) ((i*s->tx.gain) >> 15);
 #else
-        x = zero;
-        for (i = 0;  i < V34_TX_FILTER_STEPS;  i++)
-        {
-            x.re += shaper[num - 1 - s->tx.baud_phase][i]*s->tx.rrc_filter_re[i + s->tx.rrc_filter_step];
-            x.im += shaper[num - 1 - s->tx.baud_phase][i]*s->tx.rrc_filter_im[i + s->tx.rrc_filter_step];
-        }
-        /*endfor*/
+        x.re = vec_circular_dot_prodf(s->tx.rrc_filter_re, shaper[num - 1 - s->tx.baud_phase], V34_TX_FILTER_STEPS, s->tx.rrc_filter_step);
+        x.im = vec_circular_dot_prodf(s->tx.rrc_filter_im, shaper[num - 1 - s->tx.baud_phase], V34_TX_FILTER_STEPS, s->tx.rrc_filter_step);
         /* Now create and modulate the carrier */
         z = dds_complexf(&(s->tx.carrier_phase), s->tx.v34_carrier_phase_rate);
         /* Don't bother saturating. We should never clip. */

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(ls /opt/homebrew/Cellar/pjproject/2.16/lib/*.pc)",
-      "Bash(pdftotext \"/Users/scottcryan/v90modem/T-REC-V.8bis-199608-S!!PDF-E-1.pdf\" /tmp/v8bis.txt)"
+      "Bash(pdftotext \"/Users/scottcryan/v90modem/T-REC-V.8bis-199608-S!!PDF-E-1.pdf\" /tmp/v8bis.txt)",
+      "Bash(make clean)",
+      "Bash(make)"
     ]
   }
 }
