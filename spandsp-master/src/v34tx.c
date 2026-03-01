@@ -2395,21 +2395,24 @@ static void pp_baud_init(v34_state_t *s)
 
 static complex_sig_t get_trn_baud(v34_state_t *s)
 {
-    /* J pattern per V.34 §10.1.3.8: descrambled bit sequence "1000100110010000"
-       with the leftmost '1' transmitted first.  Since persistence2 is shifted out
-       LSB-first, the stored value must be bit-reversed so that bit 0 (first
-       transmitted) = 1.  0x8990 reversed = 0x0991. */
+    /* J pattern per V.34 §10.1.3.3, Table 18.
+       4-point:  "0000100110010001" (left-most bit first in time)
+       16-point: "0000110110010001" (left-most bit first in time)
+       Since persistence2 is shifted out LSB-first, the left-most (first transmitted)
+       bit is stored at the LSB.  Reading "0000100110010001" into a uint16_t with
+       position 0 at bit 0 gives 0x8990. */
     static const uint16_t j_pattern[2] =
     {
-        0x0991, /* 4 point constellation (bit-reversed 0x8990) */
-        0x0D91  /* 16 point constellation (bit-reversed 0x89B0) */
+        0x8990, /* 4 point constellation */
+        0x89B0  /* 16 point constellation */
     };
-    /* J' pattern per V.34 §10.1.3.9: same as J but last 4 bits = 1111.
-       "1000100110011111" bit-reversed = 0xF991. */
+    /* J' pattern per V.34 §10.1.3.4, Table 19.
+       "1111100110010001" (left-most bit first in time) = 0x899F.
+       J' is the same pattern for all constellation sizes. */
     static const uint16_t j_dashed_pattern[2] =
     {
-        0xF991, /* 4 point constellation (bit-reversed 0x899F) */
-        0xFD91  /* 16 point constellation (bit-reversed 0x89BF) */
+        0x899F, /* 4 point constellation */
+        0x899F  /* 16 point constellation (same pattern per Table 19) */
     };
     int bit;
 
@@ -2418,7 +2421,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_TRN:
-        /* Send the TRN signal */
+        /* Send the TRN signal (V.34 §10.1.3.8).
+           TRN uses direct mapping (no differential encoding):
+           I_n = 2*I2_n + I1_n, transmitted point = point 0 rotated by I_n*90°. */
         bit = scramble(&s->tx, 1);
         bit = (scramble(&s->tx, 1) << 1) | bit;
         /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments.
@@ -2435,6 +2440,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->tx.stage = V34_TX_STAGE_J;
             s->tx.persistence2 = j_pattern[0];
             s->tx.tone_duration = 0;
+            /* V.34 §10.1.3.3: "The differential encoder shall be initialized
+               using the final symbol of the transmitted TRN sequence." */
+            s->tx.diff = bit;
             /* Clear any stale S detection event (e.g. from timeout during TRN).
                The caller can't send S until it detects our J, so any event
                from before J is spurious. Reset RX to wait for the real S.
@@ -2449,15 +2457,19 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_J:
-        /* Send the terminal J signal */
+        /* Send the J signal (V.34 §10.1.3.3).
+           J uses DIFFERENTIAL encoding unlike TRN:
+           I_n = 2*I2_n + I1_n, Z_n = (I_n + Z_{n-1}) mod 4,
+           transmitted point = point 0 rotated by Z_n*90°. */
         bit = scramble(&s->tx, (s->tx.persistence2 & 1));
         s->tx.persistence2 >>= 1;
         bit = (scramble(&s->tx, (s->tx.persistence2 & 1)) << 1) | bit;
         s->tx.persistence2 >>= 1;
+        /* Apply differential encoding per V.34 §10.1.3.3 */
+        s->tx.diff = (s->tx.diff + bit) & 3;
+        bit = s->tx.diff;
         /* Reload J pattern when all 16 bits are consumed (every 8 bauds for 4-point,
-           every 4 bauds for 16-point). The J pattern must repeat continuously per
-           V.34 §10.1.3.8 — without this, bauds 9-16 would send scrambled zeros
-           instead of the pattern, making J undetectable by the remote modem. */
+           every 4 bauds for 16-point). */
         if (s->tx.persistence2 == 0)
             s->tx.persistence2 = j_pattern[0];
         /*endif*/
@@ -2502,11 +2514,14 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_J_DASHED:
-        /* Send J' */
+        /* Send J' (V.34 §10.1.3.4) — same differential encoding as J */
         bit = scramble(&s->tx, (s->tx.persistence2 & 1));
         s->tx.persistence2 >>= 1;
         bit = (scramble(&s->tx, (s->tx.persistence2 & 1)) << 1) | bit;
         s->tx.persistence2 >>= 1;
+        /* Apply differential encoding per V.34 §10.1.3.3 */
+        s->tx.diff = (s->tx.diff + bit) & 3;
+        bit = s->tx.diff;
         if (++s->tx.tone_duration >= 16)
         {
             /* After J', begin MP exchange (V.34/10.1.3.10) */
