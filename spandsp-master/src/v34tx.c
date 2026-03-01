@@ -2395,15 +2395,21 @@ static void pp_baud_init(v34_state_t *s)
 
 static complex_sig_t get_trn_baud(v34_state_t *s)
 {
+    /* J pattern per V.34 §10.1.3.8: descrambled bit sequence "1000100110010000"
+       with the leftmost '1' transmitted first.  Since persistence2 is shifted out
+       LSB-first, the stored value must be bit-reversed so that bit 0 (first
+       transmitted) = 1.  0x8990 reversed = 0x0991. */
     static const uint16_t j_pattern[2] =
     {
-        0x8990, /* 4 point constellation */
-        0x89B0  /* 16 point constellation */
+        0x0991, /* 4 point constellation (bit-reversed 0x8990) */
+        0x0D91  /* 16 point constellation (bit-reversed 0x89B0) */
     };
+    /* J' pattern per V.34 §10.1.3.9: same as J but last 4 bits = 1111.
+       "1000100110011111" bit-reversed = 0xF991. */
     static const uint16_t j_dashed_pattern[2] =
     {
-        0x899F, /* 4 point constellation (V.34/10.1.3.9) */
-        0x89BF  /* 16 point constellation */
+        0xF991, /* 4 point constellation (bit-reversed 0x899F) */
+        0xFD91  /* 16 point constellation (bit-reversed 0x89BF) */
     };
     int bit;
 
@@ -2431,8 +2437,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->tx.tone_duration = 0;
             /* Clear any stale S detection event (e.g. from timeout during TRN).
                The caller can't send S until it detects our J, so any event
-               from before J is spurious. Reset RX to wait for the real S. */
+               from before J is spurious. Reset RX to wait for the real S.
+               Must also reset stage to PHASE3_WAIT_S so the S detection code
+               runs during J — otherwise it stays at PHASE3_TRAINING (set by
+               the timeout) and the real caller S can never be detected. */
             s->rx.received_event = V34_EVENT_NONE;
+            s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
             s->rx.duration = 0;
             s->rx.bit_count = 0;
         }
