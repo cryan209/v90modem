@@ -2289,12 +2289,35 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 
 static void s_not_s_baud_init(v34_state_t *s)
 {
+    int power_reduction;
+
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
+
+    /* Apply power reduction requested by the caller in INFO1c before Phase 3 TX.
+       If INFO1c was not received (CRC fail), use a safe default of 3 dB to avoid
+       overdriving the remote modem's receiver. */
+    power_reduction = s->rx.info1c.power_reduction;
+    if (power_reduction <= 0)
+        power_reduction = 3;  /* Safe default when INFO1c was not received */
+    /*endif*/
+    v34_tx_power(s, -14.0f - (float)power_reduction);
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0)\n",
+             power_reduction, -14.0f - (float)power_reduction);
+
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.stage = V34_TX_STAGE_FIRST_S;
     s->tx.current_getbaud = get_s_not_s_baud;
+
+    /* Switch RX to primary channel demodulator for Phase 3 reception.
+       The answerer must detect the caller's S signal during Phase 3. */
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+    s->rx.duration = 0;
+    s->rx.received_event = V34_EVENT_NONE;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - Phase 3: waiting for far-end S signal\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2373,7 +2396,10 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     }
                     else
                     {
-                        /* Send silence */
+                        /* Answerer: also send J' then MP (V.34/10.1.3.9) */
+                        s->tx.stage = V34_TX_STAGE_J_DASHED;
+                        s->tx.persistence2 = j_pattern[0];
+                        s->tx.tone_duration = 0;
                     }
                     /*endif*/
                 }
@@ -2401,6 +2427,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         s->tx.persistence2 >>= 1;
         if (++s->tx.tone_duration >= 16)
         {
+            /* After J', begin MP exchange (V.34/10.1.3.10) */
+            mp_or_mph_baud_init(s);
         }
         /*endif*/
         break;
@@ -2473,6 +2501,12 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     /*endif*/
     s->tx.txptr = 0;
     s->tx.current_getbaud = get_mp_or_mph_baud;
+
+    /* Switch RX to CC demodulator for receiving far-end MP messages */
+    s->rx.current_demodulator = V34_MODULATION_CC;
+    s->rx.stage = V34_RX_STAGE_CC;
+    s->rx.mp_seen = 0;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - switched to CC mode for MP exchange\n");
 }
 /*- End of function --------------------------------------------------------*/
 

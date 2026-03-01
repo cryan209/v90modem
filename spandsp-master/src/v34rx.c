@@ -2272,31 +2272,10 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 {
-#if 0
-    int i;
-    complexf_t z;
-    complexf_t zz;
-#if defined(SPANDSP_USE_FIXED_POINT)
-    const complexi_t *target;
-#else
-    const complexf_t *target;
-#endif
-    float v;
-    float p;
-    int bit;
-    int j;
-    int32_t angle;
-    int32_t ang;
-    int constellation_state;
-#endif
+    float energy;
 
     /* This routine processes every half a baud, as we put things into the equalizer at the T/2 rate.
        This routine adapts the position of the half baud samples, which the caller takes. */
-#if 0
-    /* Add a sample to the equalizer's circular buffer, but don't calculate anything at this time. */
-    s->eq_buf[s->eq_step] = *sample;
-    s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
-#endif
 
     /* On alternate insertions we have a whole baud and must process it. */
     if ((s->baud_half ^= 1))
@@ -2306,27 +2285,70 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     s->last_sample = *sample;
 
-#if 0
-    z = equalizer_get(s);
-
-    switch (s->training_stage)
+    /* Phase 3 S signal detection state machine */
+    switch (s->stage)
     {
-    case TRAINING_TX_STAGE_NORMAL_OPERATION_V34:
-        /* Normal operation. */
-        constellation_state = decode_baud(s, &z);
-        target = &s->constellation[constellation_state];
+    case V34_RX_STAGE_PHASE3_WAIT_S:
+        s->duration++;
+        energy = sample->re * sample->re + sample->im * sample->im;
+
+        /* Guard period: don't look for S during the first ~500ms (1715 bauds at 3429)
+           to avoid triggering on our own echo. The caller needs time to receive our
+           Phase 3 training signals, train its equalizer, and start its own Phase 3. */
+        if (s->duration < 1715)
+            break;
+        /*endif*/
+
+        /* Detect sustained energy above threshold as S signal.
+           S signal has amplitude ~TRAINING_AMP (10.0), so energy ~100.
+           Use a low threshold to account for channel attenuation and AGC. */
+        if (energy > 1.0f)
+        {
+            s->bit_count++;
+            if (s->bit_count >= 32)
+            {
+                /* Sustained energy for 32 bauds - declare S detected */
+                s->received_event = V34_EVENT_S;
+                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                s->bit_count = 0;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: S signal detected (baud %d, energy %.1f)\n",
+                         s->duration, energy);
+            }
+            /*endif*/
+        }
+        else
+        {
+            s->bit_count = 0;
+        }
+        /*endif*/
+
+        /* Timeout after ~3 seconds (10287 bauds at 3429) - force S detected */
+        if (s->duration >= 10287)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: S detection timeout, forcing transition\n");
+            s->received_event = V34_EVENT_S;
+            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+        }
+        /*endif*/
         break;
+
+    case V34_RX_STAGE_PHASE3_TRAINING:
+        /* Phase 3 training in progress. The TX side handles the state transitions
+           (J -> J' -> MP) based on V34_EVENT_S being set. We just keep the demodulator
+           running. The CC RX transition happens when mp_or_mph_baud_init() is called. */
+        s->duration++;
+        break;
+
+    case V34_RX_STAGE_PHASE3_DONE:
+        break;
+
     default:
-        /* We failed to train! */
-        /* Park here until the carrier drops. */
-        target = &z;
+        /* Normal data mode operation - not yet implemented */
         break;
     }
     /*endswitch*/
-    if (s->qam_report)
-        s->qam_report(s->qam_user_data, &z, target, constellation_state);
-    /*endif*/
-#endif
 }
 /*- End of function --------------------------------------------------------*/
 
