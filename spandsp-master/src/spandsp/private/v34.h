@@ -79,7 +79,9 @@ enum v34_rx_stages_e
     V34_RX_STAGE_PRIMARY_CHANNEL,
     V34_RX_STAGE_PHASE3_WAIT_S,
     V34_RX_STAGE_PHASE3_TRAINING,
-    V34_RX_STAGE_PHASE3_DONE
+    V34_RX_STAGE_PHASE3_DONE,
+    /*! \brief Phase 4: detecting MP on primary channel (DQPSK demod) */
+    V34_RX_STAGE_PHASE4_MP
 };
 
 enum v34_tx_stages_e

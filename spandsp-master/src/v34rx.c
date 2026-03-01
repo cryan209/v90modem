@@ -2277,6 +2277,14 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 {
     float energy;
+    uint32_t ang1;
+    uint32_t ang2;
+    uint32_t ang3;
+    int data_bits;
+    int bits[4];
+    int i;
+    mp_t mp;
+    v34_state_t *t;
 
     /* This routine processes every half a baud, as we put things into the equalizer at the T/2 rate.
        This routine adapts the position of the half baud samples, which the caller takes. */
@@ -2286,8 +2294,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         return;
     /*endif*/
     pri_symbol_sync(s);
-
-    s->last_sample = *sample;
 
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
@@ -2300,12 +2306,138 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     case V34_RX_STAGE_PHASE3_TRAINING:
         /* Phase 3 training in progress. The TX side handles the state transitions
-           (J -> J' -> MP) based on V34_EVENT_S being set. We just keep the demodulator
-           running. The CC RX transition happens when mp_or_mph_baud_init() is called. */
+           based on V34_EVENT_S being set. We just keep the demodulator running. */
         s->duration++;
         break;
 
     case V34_RX_STAGE_PHASE3_DONE:
+        break;
+
+    case V34_RX_STAGE_PHASE4_MP:
+        /* Phase 4 MP detection on primary channel using DQPSK demodulation.
+           Same approach as CC channel MP detection: differential phase decoding,
+           descrambling, then scanning for the MP preamble and frame. */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
+
+        /* Descramble the data bits */
+        for (i = 0;  i < 2;  i++)
+        {
+            bits[i] = descramble(s, data_bits & 1);
+            data_bits >>= 1;
+        }
+        /*endfor*/
+
+        /* Scan for MP/MPh messages — same logic as process_cc_half_baud */
+        for (i = 0;  i < 2;  i++)
+        {
+            s->bitstream = (s->bitstream << 1) | bits[i];
+            if (s->mp_seen >= 2)
+            {
+                /* Post-MP data */
+                s->put_bit(s->put_bit_user_data, bits[i]);
+                continue;
+            }
+            /*endif*/
+            if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
+            {
+                /* E is 20 consecutive ones — end of MP exchange */
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: E signal detected, MP exchange complete\n");
+                if (s->duplex)
+                {
+                    /* TODO: start data reception */
+                }
+                /*endif*/
+            }
+            else if ((s->bitstream & 0x7FFFE) == 0x7FFFC)
+            {
+                /* MP preamble detected: 17 ones followed by a zero */
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: MP preamble detected on primary channel\n");
+                s->crc = 0xFFFF;
+                s->bit_count = 0;
+                s->mp_count = 17;
+                /* Check the type bit */
+                if (bits[i])
+                {
+                    s->mp_len = 186 + 1;
+                    s->mp_and_fill_len = 186 + 1 + 1;
+                }
+                else
+                {
+                    s->mp_len = 84 + 1;
+                    s->mp_and_fill_len = 84 + 3 + 1;
+                }
+                /*endif*/
+            }
+            /*endif*/
+            if (s->mp_count >= 0)
+            {
+                s->mp_count++;
+                /* Don't include the start bits in the CRC calculation */
+                if (s->mp_count%17 != 0)
+                    s->crc = crc_itu16_bits(bits[i], 1, s->crc);
+                /*endif*/
+                s->bit_count++;
+                if ((s->bit_count & 0x07) == 0)
+                    s->info_buf[(s->bit_count >> 3) - 1] = bit_reverse8(s->bitstream & 0xFF);
+                /*endif*/
+                if (s->mp_count >= s->mp_len)
+                {
+                    if (s->mp_count == s->mp_len)
+                    {
+                        if (s->crc == 0)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP received successfully (CRC OK)\n");
+                            if (s->duplex)
+                            {
+                                process_rx_mp(s, &mp, s->info_buf);
+                                t = span_container_of(s, v34_state_t, rx);
+                                if (mp.type == 1)
+                                    memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
+                                /*endif*/
+                                switch (mp.trellis_size)
+                                {
+                                case V34_TRELLIS_16:
+                                    t->tx.conv_encode_table = v34_conv16_encode_table;
+                                    break;
+                                case V34_TRELLIS_32:
+                                    t->tx.conv_encode_table = v34_conv32_encode_table;
+                                    break;
+                                case V34_TRELLIS_64:
+                                    t->tx.conv_encode_table = v34_conv64_encode_table;
+                                    break;
+                                default:
+                                    span_log(&t->logging, SPAN_LOG_FLOW,
+                                             "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                    break;
+                                }
+                                /*endswitch*/
+                            }
+                            /*endif*/
+                            s->mp_seen = 1;
+                        }
+                        else
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP CRC error (0x%04X)\n", s->crc);
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
+                    if (s->mp_count == s->mp_and_fill_len)
+                        s->mp_count = -1;
+                    /*endif*/
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+        /*endfor*/
         break;
 
     default:
@@ -2313,6 +2445,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         break;
     }
     /*endswitch*/
+    s->last_sample = *sample;
 }
 /*- End of function --------------------------------------------------------*/
 

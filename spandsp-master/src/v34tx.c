@@ -2617,15 +2617,26 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         break;
 
     case V34_TX_STAGE_PHASE4_TRN:
-        /* Phase 4 TRN: at least 512T of scrambled training.
+        /* Phase 4 TRN: scrambled training before MP.
            V.34 §11.4.1.2.2: "the answer modem shall transmit TRN for at least
-           512T but no longer than 2000 ms plus a round trip delay" */
+           512T but no longer than 2000 ms plus a round trip delay"
+
+           In practice, the caller doesn't detect our Phase 4 S signal until
+           ~640ms after we start sending it (SIP/RTP propagation + detection
+           latency).  The caller then needs at least 512T of our TRN to train
+           its equalizer.  At 3429 baud:
+             640ms latency ≈ 2195 bauds
+             512T training  = 512 bauds
+             safety margin  ≈ 1000 bauds
+             total          ≈ 3707 bauds minimum
+           We use 6000 bauds (~1.75s) to be safe while staying well within
+           the 2000ms + RTD limit. */
         {
             int bit;
 
             bit = scramble(&s->tx, 1);
             bit = (scramble(&s->tx, 1) << 1) | bit;
-            if (++s->tx.tone_duration >= 512)
+            if (++s->tx.tone_duration >= 6000)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds), starting MP\n",
@@ -2668,26 +2679,40 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
     bit = (scramble(&s->tx, get_data_bit(&s->tx)) << 1) | bit;
     if (s->tx.txptr >= s->tx.txbits)
     {
-        if (1)
+        if (s->tx.duplex)
         {
-            if (s->tx.duplex)
+            /* Check if we've received the far-end's MP (mp_seen >= 1).
+               If so, set the acknowledge bit to turn MP into MP'.
+               V.34 §11.4.2: "When the modem has received its first valid MP
+               sequence from the far end, it shall begin transmitting MP' with
+               the acknowledge bit set to 1." */
+            if (s->rx.mp_seen >= 1  &&  !s->tx.mp.mp_acknowledged)
             {
-                /* See if we need to set the acknowledge bit, so MP becomes MP' */
-                if (1)
-                {
-                    s->tx.mp.mp_acknowledged = 1;
-                    /* We need to rebuild the message we send */
-                    s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
-                }
-                /*endif*/
+                s->tx.mp.mp_acknowledged = 1;
+                s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - far-end MP received, switching to MP'\n");
             }
             /*endif*/
-            /* Restart the message */
-            s->tx.txptr = 0;
+            /* Check if we've received MP' (acknowledged) from the far end.
+               When both sides have sent MP', transition to E signal. */
+            if (s->rx.mp_seen >= 1  &&  s->tx.mp.mp_acknowledged)
+            {
+                /* We've sent MP' and received at least one MP.
+                   After completing this MP' transmission, send E. */
+                e_baud_init(s);
+            }
+            else
+            {
+                /* Restart the MP/MP' message */
+                s->tx.txptr = 0;
+            }
+            /*endif*/
         }
         else
         {
-            e_baud_init(s);
+            /* Restart the message */
+            s->tx.txptr = 0;
         }
         /*endif*/
     }
@@ -2748,29 +2773,21 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->tx.txptr = 0;
     s->tx.current_getbaud = get_mp_or_mph_baud;
 
-    /* Switch RX to CC demodulator for receiving far-end MP messages.
-       Must reinitialize CC RX state since it was previously running
-       the V34 primary channel demodulator with different timing. */
-    s->rx.current_demodulator = V34_MODULATION_CC;
-    s->rx.stage = V34_RX_STAGE_CC;
+    /* Phase 4 MP exchange is DUPLEX on the PRIMARY channel, not CC.
+       V.34 §11.4: Both sides transmit MP using the same 4-point constellation
+       and primary channel carrier (1959 Hz for answerer TX, 1959 Hz for caller TX)
+       at the negotiated baud rate. DO NOT switch RX to CC demodulator here.
+       Keep the primary channel demodulator running so we can decode the caller's MP.
+       Reset MP-related RX state for detecting far-end MP. */
+    s->rx.stage = V34_RX_STAGE_PHASE4_MP;
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
     s->rx.baud_half = 0;
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
-    /* cc_carrier_phase_rate stays as initialized in v34_rx_restart:
-       answerer RX at 1200 Hz (caller CC TX), caller RX at 2400 Hz (answerer CC TX). */
-    /* Reset carrier phase for CC demodulation */
-    s->rx.carrier_phase = 0;
-    /* Reset eq_put_step for CC timing (600 baud).
-       RX_PULSESHAPER_2400_COEFF_SETS = 12, eq_put_step = 12*40/(3*2) - 1 = 79 */
-    s->rx.eq_put_step = 79;
-    /* Reset RRC filter to flush stale V34 primary channel data */
-    s->rx.rrc_filter_step = 0;
-    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
-    /* Reset AGC to a reasonable default for CC channel */
-    s->rx.agc_scaling = 0.01f;
-    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - switched to CC mode for MP exchange\n");
+    /* Reset descrambler for Phase 4 MP detection */
+    s->rx.scramble_reg = 0;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - ready for MP exchange on primary channel (stage=PHASE4_MP)\n");
 }
 /*- End of function --------------------------------------------------------*/
 
