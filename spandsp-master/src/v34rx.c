@@ -1146,7 +1146,6 @@ static int process_rx_mph(v34_rx_state_t *s, mph_t *mph, uint8_t buf[])
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     /* Put info0, info1, tone A or tone B bits */
-    printf("Rx bit = %d\n", bit);
     s->bitstream = (s->bitstream << 1) | bit;
     switch (s->stage)
     {
@@ -1172,7 +1171,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
            a little while since the last one */
         if (s->persistence2 > 20)
         {
-            printf("Rx bit reversal in tone A\n");
             switch (s->received_event)
             {
             case V34_EVENT_REVERSAL_1:
@@ -1224,7 +1222,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
            a little while since the last one */
         if (s->persistence2 > 20)
         {
-            printf("Rx bit reversal in tone B\n");
             switch (s->received_event)
             {
             case V34_EVENT_REVERSAL_2:
@@ -1261,7 +1258,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         if ((s->bitstream & 0x3FF) == 0x372)
         {
             span_log(s->logging, SPAN_LOG_FLOW, "Rx - info sync code detected\n");
-            printf("Rx bit info sync code detected\n");
             s->crc = 0xFFFF;
             s->bit_count = 1;
         }
@@ -1277,17 +1273,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         if (s->bit_count++ == s->target_bits)
         {
             span_log(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x\n", s->crc);
-            printf("Rx bit CRC result 0x%X\n", s->crc);
-            printf("Rx 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X\n",
-                   s->info_buf[0],
-                   s->info_buf[1],
-                   s->info_buf[2],
-                   s->info_buf[3],
-                   s->info_buf[4],
-                   s->info_buf[5],
-                   s->info_buf[6],
-                   s->info_buf[7],
-                   s->info_buf[8]);
             if (s->crc == 0)
             {
                 switch (s->stage)
@@ -1410,7 +1395,6 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         zz.re = sample.re*z.re - sample.im*z.im;
         zz.im = -sample.re*z.im - sample.im*z.re;
         angle = arctan2(zz.im, zz.re);
-        printf("XXX%d, %7d, %f, %f, 0x%08X, %d\n", s->calling_party, amp[i], zz.re, zz.im, angle, angle);
         if (abs(angle - s->last_angles[1]) > DDS_PHASE(90.0f)  &&  s->blip_duration > 3)
         {
             put_info_bit(s, 1, i);
@@ -1918,11 +1902,6 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     /*endfor*/
     for (i = 0;  i < 25;  i++)
     {
-        printf("DFT %4d, %12.5f, %12.5f, %12.5f\n",
-               i,
-               (i + 1)*150.0f,
-               s->l1_l2_gains[i],
-               s->l1_l2_phases[i]);
         span_log(s->logging, SPAN_LOG_FLOW, "DFT %4d, %12.5f, %12.5f, %12.5f\n",
                  i,
                  (i + 1)*150.0f,
@@ -2278,9 +2257,6 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             zz.im = -sample.re*z.im - sample.im*z.re;
             process_cc_half_baud(s, &zz);
 
-            //angle = arctan2(zz.im, zz.re);
-            //printf("XYX1 %10.5f %10.5f\n", atan2(zz.re, zz.im), sqrt(zz.re*zz.re + zz.im*zz.im));
-            printf("XYX2 %10.5f %10.5f\n", zz.re, zz.im);
         }
         /*endif*/
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -2460,9 +2436,6 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             zz.im = -sample.re*z.im - sample.im*z.re;
             process_primary_half_baud(s, &zz);
 
-            //angle = arctan2(zz.im, zz.re);
-            printf("XYX1 %10.5f %10.5f\n", atan2(zz.re, zz.im), sqrt(zz.re*zz.re + zz.im*zz.im));
-            printf("XYX2 %10.5f %10.5f\n", zz.re, zz.im);
         }
         /*endif*/
 #if defined(SPANDSP_USE_FIXED_POINT)

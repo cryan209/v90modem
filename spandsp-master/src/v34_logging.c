@@ -161,7 +161,7 @@ void log_info1a(logging_state_t *log, bool tx, const info1a_t *info1a)
     span_log(log, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
     span_log(log, SPAN_LOG_FLOW, "  %s carrier\n", (info1a->use_high_carrier)  ?  "High"  :  "Low");
     span_log(log, SPAN_LOG_FLOW, "  Pre-emphasis filter = %d\n", info1a->preemphasis_filter);
-    span_log(log, SPAN_LOG_FLOW, "  Maximum data rate = %dbps\n", info1a->max_data_rate*2400);
+    span_log(log, SPAN_LOG_FLOW, "  Maximum data rate = %dbps\n", info1a->max_data_rate * 2400);
     span_log(log, SPAN_LOG_FLOW, "  Baud rate A->C = %d\n", baud_rate_parameters[info1a->baud_rate_a_to_c].baud_rate);
     span_log(log, SPAN_LOG_FLOW, "  Baud rate C->A = %d\n", baud_rate_parameters[info1a->baud_rate_c_to_a].baud_rate);
     if (info1a->freq_offset == -512)

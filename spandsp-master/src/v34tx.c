@@ -451,7 +451,7 @@ static void prepare_info1a(v34_state_t *s)
 
     s->tx.info1a.use_high_carrier = false;
     s->tx.info1a.preemphasis_filter = 6;
-    s->tx.info1a.max_data_rate = s->tx.parms.max_bit_rate_code;
+    s->tx.info1a.max_data_rate = (s->tx.parms.max_bit_rate_code >> 1) + 1;
 
     s->tx.info1a.baud_rate_a_to_c = s->tx.baud_rate;
     s->tx.info1a.baud_rate_c_to_a = s->tx.baud_rate;
