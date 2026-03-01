@@ -2410,14 +2410,26 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /* Send the TRN signal */
         bit = scramble(&s->tx, 1);
         bit = (scramble(&s->tx, 1) << 1) | bit;
-        /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments */
+        /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments.
+           In full-duplex, send enough TRN for the remote equalizer to converge before
+           the J pattern starts. At 3429 baud, the remote needs ~5000 bauds to converge.
+           Use 10000 bauds (~2.9s at 3429 baud) to ensure the TRN→J transition is
+           visible to the remote's J detector after convergence. */
         if ((!s->tx.duplex  &&  ++s->tx.tone_duration >= s->rx.infoh.length_of_trn*35*s->rx.infoh.baud_rate/1000)
             ||
-            (s->tx.duplex  &&  ++s->tx.tone_duration >= 512))
+            (s->tx.duplex  &&  ++s->tx.tone_duration >= 10000))
         {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
+                     s->tx.tone_duration);
             s->tx.stage = V34_TX_STAGE_J;
             s->tx.persistence2 = j_pattern[0];
             s->tx.tone_duration = 0;
+            /* Clear any stale S detection event (e.g. from timeout during TRN).
+               The caller can't send S until it detects our J, so any event
+               from before J is spurious. Reset RX to wait for the real S. */
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.duration = 0;
+            s->rx.bit_count = 0;
         }
         /*endif*/
         break;
@@ -2433,6 +2445,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             {
                 if (s->rx.received_event == V34_EVENT_S)
                 {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - far-end S detected, switching J -> J'\n");
                     if (s->tx.calling_party)
                     {
                         /* Change to J' */
@@ -2591,10 +2605,8 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->rx.baud_half = 0;
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
-    /* Update CC carrier phase rate for Phase 4 CC frequencies (opposite of Phase 2).
-       Phase 2: answerer RX 1200 Hz, caller RX 2400 Hz.
-       Phase 4 CC: answerer RX 2400 Hz (caller CC TX), caller RX 1200 Hz (answerer CC TX). */
-    s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  1200.0f  :  2400.0f);
+    /* cc_carrier_phase_rate stays as initialized in v34_rx_restart:
+       answerer RX at 1200 Hz (caller CC TX), caller RX at 2400 Hz (answerer CC TX). */
     /* Reset carrier phase for CC demodulation */
     s->rx.carrier_phase = 0;
     /* Reset eq_put_step for CC timing (600 baud).

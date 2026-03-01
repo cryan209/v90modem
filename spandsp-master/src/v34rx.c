@@ -2175,26 +2175,25 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         while (step < 0)
             step += RX_PULSESHAPER_2400_COEFF_SETS;
         /*endwhile*/
-        /* Phase 4 CC: receive the FAR END's CC signal.
-           Caller TX CC at 2400 Hz → answerer RX needs 2400 Hz shaper.
-           Answerer TX CC at 1200 Hz → caller RX needs 1200 Hz shaper.
-           This is OPPOSITE of Phase 2 (info_rx), where assignments are swapped. */
+        /* CC carrier assignments (same for Phase 2 and Phase 4):
+           Caller TX at 1200 Hz, Answerer TX at 2400 Hz.
+           So: Caller RX = 2400 Hz, Answerer RX = 1200 Hz. */
         if (s->calling_party)
         {
-            /* We are caller: receive answerer's CC at 1200 Hz */
-#if defined(SPANDSP_USE_FIXED_POINT)
-            ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#else
-            ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#endif
-        }
-        else
-        {
-            /* We are answerer: receive caller's CC at 2400 Hz */
+            /* We are caller: receive answerer's CC at 2400 Hz */
 #if defined(SPANDSP_USE_FIXED_POINT)
             ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else
             ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#endif
+        }
+        else
+        {
+            /* We are answerer: receive caller's CC at 1200 Hz */
+#if defined(SPANDSP_USE_FIXED_POINT)
+            ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#else
+            ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #endif
         }
         /*endif*/
@@ -2226,23 +2225,24 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             //s->agc_scaling = (FP_SCALE(2.17f)/RX_PULSESHAPER_GAIN)/fixed_sqrt32(power);
 #endif
             s->eq_put_step += RX_PULSESHAPER_2400_COEFF_SETS*40/(3*2);
-            /* Same shaper swap as the real part above */
+            /* Same shaper as the real part above:
+               Caller RX at 2400 Hz (answerer TX), Answerer RX at 1200 Hz (caller TX). */
             if (s->calling_party)
             {
-                /* We are caller: receive answerer's CC at 1200 Hz */
-#if defined(SPANDSP_USE_FIXED_POINT)
-                qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#else
-                qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#endif
-            }
-            else
-            {
-                /* We are answerer: receive caller's CC at 2400 Hz */
+                /* We are caller: receive answerer's CC at 2400 Hz */
 #if defined(SPANDSP_USE_FIXED_POINT)
                 qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else
                 qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#endif
+            }
+            else
+            {
+                /* We are answerer: receive caller's CC at 1200 Hz */
+#if defined(SPANDSP_USE_FIXED_POINT)
+                qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#else
+                qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #endif
             }
             /*endif*/
@@ -2261,8 +2261,8 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         }
         /*endif*/
         /* Use CC carrier phase rate, not V34 primary channel rate.
-           For answerer RX: caller CC at 2400 Hz.
-           For caller RX: answerer CC at 1200 Hz. */
+           For answerer RX: caller CC at 1200 Hz.
+           For caller RX: answerer CC at 2400 Hz. */
 #if defined(SPANDSP_USE_FIXED_POINT)
         dds_advance(&s->carrier_phase, s->cc_carrier_phase_rate);
 #else
