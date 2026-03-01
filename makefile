@@ -4,8 +4,12 @@ CC = gcc
 PJPROJ_DIR   = /opt/homebrew/Cellar/pjproject/2.16
 ARCH_SUFFIX  = aarch64-apple-darwin24.6.0
 
+# Local SpanDSP 3.0.0 build (with V.34 support)
+SPANDSP_DIR  = spandsp-master/src
+
 CFLAGS = -Wall -Wextra -O2 -g \
          -I$(PJPROJ_DIR)/include \
+         -I$(SPANDSP_DIR) -I$(SPANDSP_DIR)/.. \
          -I/opt/homebrew/include \
          -DPJ_AUTOCONF=1 -DPJ_IS_BIG_ENDIAN=0 -DPJ_IS_LITTLE_ENDIAN=1
 
@@ -32,6 +36,7 @@ LDFLAGS = \
   -lilbccodec-$(ARCH_SUFFIX) \
   -lg7221codec-$(ARCH_SUFFIX) \
   -lwebrtc-$(ARCH_SUFFIX) \
+  -L$(SPANDSP_DIR)/.libs \
   -L/opt/homebrew/lib \
   -lspandsp -ltiff \
   -lssl -lcrypto \

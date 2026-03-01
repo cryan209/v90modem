@@ -317,6 +317,62 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 }
 
 /* ------------------------------------------------------------------ */
+/* V.34 get_bit / put_bit callbacks for SpanDSP                       */
+/* ------------------------------------------------------------------ */
+
+/* Bit accumulator for V.34 TX (one byte at a time) */
+static uint8_t  v34_tx_byte = 0;
+static int      v34_tx_bits = 0;
+
+static int v34_get_bit_cb(void *user_data)
+{
+    (void)user_data;
+    if (v34_tx_bits == 0) {
+        uint8_t b;
+        if (dring_read(&downstream_ring, &b, 1) == 1) {
+            v34_tx_byte = b;
+            v34_tx_bits = 8;
+        } else {
+            return SIG_STATUS_END_OF_DATA;
+        }
+    }
+    int bit = v34_tx_byte & 1;
+    v34_tx_byte >>= 1;
+    v34_tx_bits--;
+    return bit;
+}
+
+static void v34_put_bit_cb(void *user_data, int bit)
+{
+    (void)user_data;
+    if (bit < 0) {
+        /* Status event from V.34 training state machine */
+        if (bit == SIG_STATUS_CARRIER_UP) {
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_state == ME_TRAINING) {
+                g_state = ME_DATA;
+                pthread_mutex_unlock(&g_state_mtx);
+                int rate = v34_get_current_bit_rate(g_v34);
+                fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
+                di_on_connected(rate);
+                return;
+            }
+            pthread_mutex_unlock(&g_state_mtx);
+        }
+        fprintf(stderr, "[ME] V.34 status: %d\n", bit);
+        return;
+    }
+    /* Normal data bit — accumulate into bytes, write to upstream ring */
+    v34_rx_byte |= (uint8_t)((bit & 1) << v34_rx_bits);
+    v34_rx_bits++;
+    if (v34_rx_bits == 8) {
+        dring_write(&upstream_ring, &v34_rx_byte, 1);
+        v34_rx_byte = 0;
+        v34_rx_bits = 0;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Module state                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -325,8 +381,9 @@ static me_modulation_t g_mod       = ME_MOD_NONE;
 static pthread_mutex_t g_state_mtx;
 
 /* SpanDSP modem contexts */
-static v8_state_t    *g_v8      = NULL;
-static v22bis_state_t *g_v22bis = NULL;
+static v8_state_t     *g_v8      = NULL;
+static v22bis_state_t *g_v22bis  = NULL;
+static v34_state_t    *g_v34     = NULL;
 
 /* V.90 downstream encoder */
 static v90_enc_t      g_v90_enc;
@@ -334,9 +391,9 @@ static v90_enc_t      g_v90_enc;
 /* Clock recovery */
 static cr_state_t     g_cr;
 
-/* Training timer: samples elapsed since entering training state */
-static int g_training_samples;
-#define TRAINING_DURATION_SAMPLES  (8000 * 1)  /* 1 second stub */
+/* V.34 RX bit accumulator (same pattern as V.22bis) */
+static uint8_t  v34_rx_byte = 0;
+static int      v34_rx_bits = 0;
 
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
@@ -355,10 +412,9 @@ static void start_v22bis_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
-    g_training_samples = 0;
 
     if (!g_v22bis) {
-        g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, 0,
+        g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, false,
                                v22bis_get_bit_cb, NULL,
                                v22bis_put_bit_cb, NULL);
         if (!g_v22bis)

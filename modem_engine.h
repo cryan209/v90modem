@@ -24,15 +24,16 @@ typedef enum {
     ME_IDLE,         /* Waiting for ATD or incoming call */
     ME_DIALING,      /* Outgoing SIP call in progress (pre-audio) */
     ME_V8,           /* V.8 capability exchange (audio active) */
-    ME_TRAINING,     /* V.90 / V.22bis training sequences */
-    ME_DATA,         /* Data mode: PCM downstream + V.22bis upstream */
+    ME_TRAINING,     /* V.34 / V.22bis training sequences */
+    ME_DATA,         /* Data mode: V.34 duplex or V.22bis fallback */
     ME_HANGUP        /* Call tear-down in progress */
 } me_state_t;
 
 /* Negotiated modulation after V.8 */
 typedef enum {
     ME_MOD_NONE,
-    ME_MOD_V90,      /* V.90 downstream + V.22bis upstream */
+    ME_MOD_V90,      /* V.90 downstream PCM + V.34 upstream (future) */
+    ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS    /* Full V.22bis duplex (fallback) */
 } me_modulation_t;
 
