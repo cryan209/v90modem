@@ -2400,6 +2400,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         0x8990, /* 4 point constellation */
         0x89B0  /* 16 point constellation */
     };
+    static const uint16_t j_dashed_pattern[2] =
+    {
+        0x899F, /* 4 point constellation (V.34/10.1.3.9) */
+        0x89BF  /* 16 point constellation */
+    };
     int bit;
 
     /* See V.34/10.1.3.8 */
@@ -2439,6 +2444,13 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         s->tx.persistence2 >>= 1;
         bit = (scramble(&s->tx, (s->tx.persistence2 & 1)) << 1) | bit;
         s->tx.persistence2 >>= 1;
+        /* Reload J pattern when all 16 bits are consumed (every 8 bauds for 4-point,
+           every 4 bauds for 16-point). The J pattern must repeat continuously per
+           V.34 §10.1.3.8 — without this, bauds 9-16 would send scrambled zeros
+           instead of the pattern, making J undetectable by the remote modem. */
+        if (s->tx.persistence2 == 0)
+            s->tx.persistence2 = j_pattern[0];
+        /*endif*/
         if (++s->tx.tone_duration >= 16)
         {
             if (s->tx.duplex)
@@ -2451,14 +2463,14 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     {
                         /* Change to J' */
                         s->tx.stage = V34_TX_STAGE_J_DASHED;
-                        s->tx.persistence2 = j_pattern[0];
+                        s->tx.persistence2 = j_dashed_pattern[0];
                         s->tx.tone_duration = 0;
                     }
                     else
                     {
                         /* Answerer: also send J' then MP (V.34/10.1.3.9) */
                         s->tx.stage = V34_TX_STAGE_J_DASHED;
-                        s->tx.persistence2 = j_pattern[0];
+                        s->tx.persistence2 = j_dashed_pattern[0];
                         s->tx.tone_duration = 0;
                     }
                     /*endif*/
