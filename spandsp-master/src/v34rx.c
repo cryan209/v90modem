@@ -2322,6 +2322,18 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
 
+        s->duration++;
+        /* Log first 20 bauds and periodically after */
+        if (s->duration <= 20 || (s->duration % 500) == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4 MP baud %d: sample=(%.4f,%.4f) last=(%.4f,%.4f) "
+                     "ang1=0x%08X ang2=0x%08X ang3=0x%08X data_bits=%d\n",
+                     s->duration, sample->re, sample->im,
+                     s->last_sample.re, s->last_sample.im,
+                     ang1, ang2, ang3, data_bits);
+        }
+
         /* Descramble the data bits */
         for (i = 0;  i < 2;  i++)
         {
@@ -2356,7 +2368,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             {
                 /* MP preamble detected: 17 ones followed by a zero */
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: MP preamble detected on primary channel\n");
+                         "Rx - Phase 4: MP preamble detected on primary channel (baud %d)\n",
+                         s->duration);
                 s->crc = 0xFFFF;
                 s->bit_count = 0;
                 s->mp_count = 17;
@@ -2424,7 +2437,30 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         else
                         {
                             span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP CRC error (0x%04X)\n", s->crc);
+                                     "Rx - Phase 4: MP CRC error (0x%04X), mp_count=%d, bit_count=%d\n",
+                                     s->crc, s->mp_count, s->bit_count);
+                            /* Dump first 12 bytes of received MP for debugging */
+                            {
+                                int nb = (s->bit_count >> 3);
+                                if (nb > 12) nb = 12;
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: MP data[0..%d]:"
+                                         " %02X %02X %02X %02X %02X %02X"
+                                         " %02X %02X %02X %02X %02X %02X\n",
+                                         nb - 1,
+                                         nb > 0 ? s->info_buf[0] : 0,
+                                         nb > 1 ? s->info_buf[1] : 0,
+                                         nb > 2 ? s->info_buf[2] : 0,
+                                         nb > 3 ? s->info_buf[3] : 0,
+                                         nb > 4 ? s->info_buf[4] : 0,
+                                         nb > 5 ? s->info_buf[5] : 0,
+                                         nb > 6 ? s->info_buf[6] : 0,
+                                         nb > 7 ? s->info_buf[7] : 0,
+                                         nb > 8 ? s->info_buf[8] : 0,
+                                         nb > 9 ? s->info_buf[9] : 0,
+                                         nb > 10 ? s->info_buf[10] : 0,
+                                         nb > 11 ? s->info_buf[11] : 0);
+                            }
                         }
                         /*endif*/
                     }
