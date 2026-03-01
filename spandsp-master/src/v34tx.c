@@ -660,7 +660,6 @@ static int mp_sequence_tx(v34_tx_state_t *s, mp_t *mp)
     uint16_t crc;
     bitstream_state_t bs;
 
-    log_mp(s->logging, true, mp);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:16     Frame sync: 11111111111111111. */
@@ -2525,6 +2524,39 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_V34;
     if (s->tx.duplex)
     {
+        int max_n;
+        int i;
+        int mask;
+
+        /* Populate MP parameters from negotiated settings.
+           V.34/Table 12 defines the MP sequence fields. */
+        s->tx.mp.type = 0;  /* MP0 — no precoder coefficients initially */
+
+        /* Maximum data rate as N where rate = N * 2400 bps.
+           max_bit_rate_code uses internal encoding: code = (N-1)*2 */
+        max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+        s->tx.mp.bit_rate_a_to_c = max_n;  /* answerer -> caller */
+        s->tx.mp.bit_rate_c_to_a = max_n;  /* caller -> answerer */
+
+        /* Build signalling rate capability mask from valid mappings
+           at the selected baud rate.  Bit i = rate (i+1)*2400 bps. */
+        mask = 0;
+        for (i = 0;  i < 14;  i++)
+        {
+            if (baud_rate_parameters[s->tx.baud_rate].mappings[i * 2].b > 0)
+                mask |= (1 << i);
+        }
+        /*endfor*/
+        s->tx.mp.signalling_rate_mask = mask;
+
+        s->tx.mp.trellis_size = 0;          /* 16-state trellis */
+        s->tx.mp.use_non_linear_encoder = false;
+        s->tx.mp.expanded_shaping = false;
+        s->tx.mp.aux_channel_supported = false;
+        s->tx.mp.asymmetric_rates_allowed = false;
+        s->tx.mp.mp_acknowledged = false;
+
+        log_mp(s->tx.logging, true, &s->tx.mp);
         s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
         s->tx.stage = V34_TX_STAGE_MP;
     }

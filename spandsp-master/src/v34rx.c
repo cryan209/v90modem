@@ -1902,7 +1902,7 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     /*endfor*/
     for (i = 0;  i < 25;  i++)
     {
-        span_log(s->logging, SPAN_LOG_FLOW, "DFT %4d, %12.5f, %12.5f, %12.5f\n",
+        span_log(s->logging, SPAN_LOG_DEBUG, "DFT %4d, %12.5f, %12.5f, %12.5f\n",
                  i,
                  (i + 1)*150.0f,
                  s->l1_l2_gains[i],
@@ -1943,7 +1943,7 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             /* We now have 160 samples, so process the 3 cycles we should have in the buffer. */
             perform_l1_l2_analysis(s);
             s->dft_ptr = 0;
-            span_log(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis x %d\n", s->l1_l2_duration);
+            span_log(s->logging, SPAN_LOG_DEBUG, "L1/L2 analysis x %d\n", s->l1_l2_duration);
             if (++s->l1_l2_duration > 20)
             {
                 span_log(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
