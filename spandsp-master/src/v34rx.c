@@ -2167,14 +2167,6 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             s->rrc_filter_step = 0;
         /*endif*/
 
-        //if ((power = signal_detect(s, amp[i])) == 0)
-        //    continue;
-        ///*endif*/
-        //if (s->training_stage == TRAINING_STAGE_PARKED)
-        //    continue;
-        ///*endif*/
-        /* Only spend effort processing this data if the modem is not
-           parked, after training failure. */
         s->eq_put_step -= RX_PULSESHAPER_2400_COEFF_SETS;
         step = -s->eq_put_step;
         if (step > RX_PULSESHAPER_2400_COEFF_SETS - 1)
@@ -2183,20 +2175,26 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         while (step < 0)
             step += RX_PULSESHAPER_2400_COEFF_SETS;
         /*endwhile*/
+        /* Phase 4 CC: receive the FAR END's CC signal.
+           Caller TX CC at 2400 Hz → answerer RX needs 2400 Hz shaper.
+           Answerer TX CC at 1200 Hz → caller RX needs 1200 Hz shaper.
+           This is OPPOSITE of Phase 2 (info_rx), where assignments are swapped. */
         if (s->calling_party)
         {
-#if defined(SPANDSP_USE_FIXED_POINT)
-            ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#else
-            ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#endif
-        }
-        else
-        {
+            /* We are caller: receive answerer's CC at 1200 Hz */
 #if defined(SPANDSP_USE_FIXED_POINT)
             ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else
             ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#endif
+        }
+        else
+        {
+            /* We are answerer: receive caller's CC at 2400 Hz */
+#if defined(SPANDSP_USE_FIXED_POINT)
+            ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#else
+            ii = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #endif
         }
         /*endif*/
@@ -2228,20 +2226,23 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             //s->agc_scaling = (FP_SCALE(2.17f)/RX_PULSESHAPER_GAIN)/fixed_sqrt32(power);
 #endif
             s->eq_put_step += RX_PULSESHAPER_2400_COEFF_SETS*40/(3*2);
+            /* Same shaper swap as the real part above */
             if (s->calling_party)
             {
-#if defined(SPANDSP_USE_FIXED_POINT)
-                qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#else
-                qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
-#endif
-            }
-            else
-            {
+                /* We are caller: receive answerer's CC at 1200 Hz */
 #if defined(SPANDSP_USE_FIXED_POINT)
                 qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else
                 qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_1200_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#endif
+            }
+            else
+            {
+                /* We are answerer: receive caller's CC at 2400 Hz */
+#if defined(SPANDSP_USE_FIXED_POINT)
+                qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
+#else
+                qq = vec_circular_dot_prodf(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #endif
             }
             /*endif*/
@@ -2259,10 +2260,13 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 
         }
         /*endif*/
+        /* Use CC carrier phase rate, not V34 primary channel rate.
+           For answerer RX: caller CC at 2400 Hz.
+           For caller RX: answerer CC at 1200 Hz. */
 #if defined(SPANDSP_USE_FIXED_POINT)
-        dds_advance(&s->carrier_phase, s->v34_carrier_phase_rate);
+        dds_advance(&s->carrier_phase, s->cc_carrier_phase_rate);
 #else
-        dds_advancef(&s->carrier_phase, s->v34_carrier_phase_rate);
+        dds_advancef(&s->carrier_phase, s->cc_carrier_phase_rate);
 #endif
     }
     /*endfor*/
@@ -2289,66 +2293,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     switch (s->stage)
     {
     case V34_RX_STAGE_PHASE3_WAIT_S:
-        s->duration++;
-        energy = sample->re * sample->re + sample->im * sample->im;
-
-        /* Log energy periodically for debugging */
-        if ((s->duration % 500) == 1)
-        {
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: baud %d, energy=%.3f (re=%.3f im=%.3f), consecutive=%d\n",
-                     s->duration, energy, sample->re, sample->im, s->bit_count);
-        }
-        /*endif*/
-
-        /* Guard period: don't look for S during the first ~500ms (1715 bauds at 3429)
-           to avoid triggering on our own echo. The caller needs time to receive our
-           Phase 3 training signals, train its equalizer, and start its own Phase 3. */
-        if (s->duration < 1715)
-            break;
-        /*endif*/
-
-        /* Detect sustained energy above threshold as S signal.
-           S signal has amplitude ~TRAINING_AMP (10.0), so energy ~100.
-           Use a low threshold to account for channel attenuation and AGC. */
-        if (energy > 1.0f)
-        {
-            s->bit_count++;
-            if (s->bit_count >= 32)
-            {
-                /* Sustained energy for 32 bauds - declare S detected */
-                s->received_event = V34_EVENT_S;
-                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-                s->bit_count = 0;
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: S signal detected (baud %d, energy %.1f)\n",
-                         s->duration, energy);
-            }
-            /*endif*/
-        }
-        else
-        {
-            if (s->bit_count > 0)
-            {
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: energy dropout at baud %d (energy=%.3f, had %d consecutive)\n",
-                         s->duration, energy, s->bit_count);
-            }
-            /*endif*/
-            s->bit_count = 0;
-        }
-        /*endif*/
-
-        /* Timeout after ~3 seconds (10287 bauds at 3429) - force S detected */
-        if (s->duration >= 10287)
-        {
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S detection timeout, forcing transition (last energy=%.3f)\n",
-                     energy);
-            s->received_event = V34_EVENT_S;
-            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-        }
-        /*endif*/
+        /* S detection is now handled in primary_channel_rx using raw audio power.
+           This code path should not be reached since primary_channel_rx skips
+           demodulation during PHASE3_WAIT_S. */
         break;
 
     case V34_RX_STAGE_PHASE3_TRAINING:
@@ -2385,6 +2332,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     float ii;
     float qq;
     float v;
+    int32_t power;
     /* The following lead to integer values for the rx increments per symbol, for each of the 6 baud rates */
     static const int steps_per_baud[6] =
     {
@@ -2407,13 +2355,63 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         if (++s->rrc_filter_step >= V34_RX_FILTER_STEPS)
             s->rrc_filter_step = 0;
         /*endif*/
-        //if ((power = signal_detect(s, amp[i])) == 0)
-        //    continue;
-        ///*endif*/
-        //if (s->training_stage == TRAINING_STAGE_PARKED)
-        //    continue;
-        ///*endif*/
-        /* Only spend effort processing this data if the modem is not parked, after training failure. */
+
+        /* During Phase 3 S detection, use raw audio power instead of demodulated
+           energy. The full demodulator requires carrier lock and correct AGC to
+           produce stable energy readings, which aren't available during initial
+           signal detection. Raw power detection is robust and sufficient. */
+        power = power_meter_update(&s->power, amp[i]);
+        if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+        {
+            s->duration++;
+            /* Guard period: 4000 samples = 0.5s at 8000 Hz.
+               The caller needs time to receive our Phase 3 signals. */
+            if (s->duration < 4000)
+                continue;
+            /*endif*/
+            /* Check raw audio power. Signal present threshold: -43 dBm0.
+               The S signal at -17 dBm0 after line attenuation should be well above this. */
+            if (power > s->carrier_on_power)
+            {
+                s->bit_count++;
+                if (s->bit_count >= 80)
+                {
+                    /* Sustained power for 80 samples (~10ms) — declare S detected */
+                    s->received_event = V34_EVENT_S;
+                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    s->bit_count = 0;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: S signal detected (sample %d, power=%d, threshold=%d)\n",
+                             s->duration, power, s->carrier_on_power);
+                }
+                /*endif*/
+            }
+            else
+            {
+                s->bit_count = 0;
+            }
+            /*endif*/
+            /* Log power periodically */
+            if ((s->duration % 1000) == 1)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: sample %d, raw_power=%d, threshold=%d, consecutive=%d\n",
+                         s->duration, power, s->carrier_on_power, s->bit_count);
+            }
+            /*endif*/
+            /* Timeout after 3 seconds (24000 samples at 8000 Hz) */
+            if (s->duration >= 24000)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: S detection timeout (power=%d, threshold=%d)\n",
+                         power, s->carrier_on_power);
+                s->received_event = V34_EVENT_S;
+                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+            }
+            /*endif*/
+            continue;
+        }
+        /*endif*/
         s->eq_put_step -= V34_RX_PULSESHAPER_COEFF_SETS;
         step = -s->eq_put_step;
         if (step > V34_RX_PULSESHAPER_COEFF_SETS - 1)
@@ -2706,6 +2704,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.high_carrier = high_carrier;
 
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+    /* Phase 2 INFO exchange: answerer RX at 1200 Hz (tone B), caller RX at 2400 Hz (tone A).
+       This gets updated to Phase 4 CC frequencies in mp_or_mph_baud_init(). */
     s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  2400.0f  :  1200.0f);
     v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate, true);
 

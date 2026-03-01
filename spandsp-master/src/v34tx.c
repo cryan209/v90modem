@@ -2581,10 +2581,30 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->tx.txptr = 0;
     s->tx.current_getbaud = get_mp_or_mph_baud;
 
-    /* Switch RX to CC demodulator for receiving far-end MP messages */
+    /* Switch RX to CC demodulator for receiving far-end MP messages.
+       Must reinitialize CC RX state since it was previously running
+       the V34 primary channel demodulator with different timing. */
     s->rx.current_demodulator = V34_MODULATION_CC;
     s->rx.stage = V34_RX_STAGE_CC;
     s->rx.mp_seen = 0;
+    s->rx.mp_count = -1;
+    s->rx.baud_half = 0;
+    s->rx.bitstream = 0;
+    s->rx.bit_count = 0;
+    /* Update CC carrier phase rate for Phase 4 CC frequencies (opposite of Phase 2).
+       Phase 2: answerer RX 1200 Hz, caller RX 2400 Hz.
+       Phase 4 CC: answerer RX 2400 Hz (caller CC TX), caller RX 1200 Hz (answerer CC TX). */
+    s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  1200.0f  :  2400.0f);
+    /* Reset carrier phase for CC demodulation */
+    s->rx.carrier_phase = 0;
+    /* Reset eq_put_step for CC timing (600 baud).
+       RX_PULSESHAPER_2400_COEFF_SETS = 12, eq_put_step = 12*40/(3*2) - 1 = 79 */
+    s->rx.eq_put_step = 79;
+    /* Reset RRC filter to flush stale V34 primary channel data */
+    s->rx.rrc_filter_step = 0;
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+    /* Reset AGC to a reasonable default for CC channel */
+    s->rx.agc_scaling = 0.01f;
     span_log(&s->logging, SPAN_LOG_FLOW, "Rx - switched to CC mode for MP exchange\n");
 }
 /*- End of function --------------------------------------------------------*/
