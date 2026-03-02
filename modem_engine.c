@@ -448,8 +448,8 @@ static void start_v34_training(void)
      * Note: 33600 bps requires 3429 baud (3200 baud max is 31200 bps).
      */
     g_v34 = v34_init(NULL,
-                     3429,          /* baud rate */
-                     33600,         /* bit rate */
+                     2800,          /* baud rate */
+                     9600,         /* bit rate */
                      false,         /* answerer */
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
@@ -591,14 +591,14 @@ void me_on_sip_connected(void)
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = MODEM_CONNECT_TONES_ANSAM_PR; /* ANSam */
     v8_parms.send_ci            = false; /* answerer doesn't send CI */
-    v8_parms.v92                = false;
+    v8_parms.v92                = true;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     /* Advertise V.34 + V.22bis. We don't advertise V.90 yet because our
      * training uses standard V.34 phases (not V.90-modified Phase 3/4). */
     v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
-    v8_parms.jm_cm.pstn_access        = 0;
-    v8_parms.jm_cm.pcm_modem_availability = 0;
+    v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+    v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
 
     if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
     g_v8 = v8_init(NULL, false /* answerer */, &v8_parms,
