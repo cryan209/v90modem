@@ -2333,6 +2333,13 @@ static void s_not_s_baud_init(v34_state_t *s)
     }
     /*endif*/
 
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - Phase 3: TX carrier=%s (%.0f Hz), RX carrier=%s (%.0f Hz)\n",
+             s->tx.high_carrier ? "high" : "low",
+             carrier_frequency(s->tx.baud_rate, s->tx.high_carrier),
+             s->rx.high_carrier ? "high" : "low",
+             carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
@@ -2429,12 +2436,10 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         bit = (scramble(&s->tx, 1) << 1) | bit;
         /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments.
            In full-duplex, send enough TRN for the remote equalizer to converge before
-           the J pattern starts. At 3429 baud, the remote needs ~5000 bauds to converge.
-           Use 10000 bauds (~2.9s at 3429 baud) to ensure the TRN→J transition is
-           visible to the remote's J detector after convergence. */
+           the J pattern starts. 2048 bauds (~597ms at 3429 baud) is standard. */
         if ((!s->tx.duplex  &&  ++s->tx.tone_duration >= s->rx.infoh.length_of_trn*35*s->rx.infoh.baud_rate/1000)
             ||
-            (s->tx.duplex  &&  ++s->tx.tone_duration >= 10000))
+            (s->tx.duplex  &&  ++s->tx.tone_duration >= 2048))
         {
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
                      s->tx.tone_duration);
@@ -2551,10 +2556,26 @@ static void trn_baud_init(v34_state_t *s)
 /*- End of function --------------------------------------------------------*/
 
 /* Phase 4 wait duration: number of bauds to wait after detecting the caller's S
-   signal before starting Phase 4 S/S-bar/TRN.  This gives the caller time to
-   complete its Phase 3 sequence (S-bar, PP, TRN, J).
-   At 3429 baud: caller needs ~944 bauds for S-bar(16)+PP(288)+TRN(512)+margin.
-   1500 bauds ≈ 437 ms, which is well within the spec's allowance. */
+   signal before starting Phase 4 S/S-bar/TRN.
+
+   CRITICAL TIMING: We detect the caller's Phase 3 S signal, but the caller still
+   has to complete Phase 3 (S-bar + PP + TRN + J) before entering Phase 4.
+   The caller only starts looking for our S→S-bar transition AFTER entering
+   Phase 4 S.  If our S→S-bar happens before the caller is in Phase 4, the
+   caller will never see it and will keep sending S until timeout/disconnect.
+
+   From test data at 3429 baud, the caller enters Phase 4 approximately
+   5800-6000 bauds after we detect their Phase 3 S.  We need our Phase 4 S
+   to start BEFORE that and continue past it.
+
+   Caller's remaining Phase 3 after S:
+     S-bar(16T) + PP(~288T) + TRN(≥512T) + J(variable) ≈ 2000-5000 bauds
+   Plus SIP/RTP propagation delay: ~50ms × 3429 = ~171 bauds each way
+
+   We use 1500 bauds (~437ms).  Longer waits (5000+) caused the caller
+   to time out and drop signal.  The Phase 4 S duration is extended
+   instead (5000T) to ensure our S→S-bar is visible when the caller
+   enters Phase 4. */
 #define PHASE4_WAIT_BAUDS 1500
 
 static complex_sig_t get_phase4_baud(v34_state_t *s)
@@ -2584,15 +2605,24 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return zero;
 
     case V34_TX_STAGE_PHASE4_S:
-        /* Phase 4 S signal: 128T of alternating constellation points.
-           V.34 §11.4.1.2.1: "The answer modem shall transmit signal S for 128T" */
-        if (++s->tx.tone_duration == 128)
+        /* Phase 4 S signal: alternating constellation points.
+           V.34 §11.4.1.2.1: "The answer modem shall transmit signal S for
+           at least 128T."
+
+           We send S for 5000T (~1.46s at 3429 baud) to ensure the caller
+           has entered Phase 4 and had time to detect our S signal before
+           we transition to S-bar.  From test data, the caller enters Phase 4
+           at ~baud 5868 (absolute).  Our S starts at baud 1500 (after wait)
+           and continues to baud 6500, giving the caller ~632 bauds of our S
+           before S-bar begins. */
+        if (++s->tx.tone_duration == 5000)
         {
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: S complete, starting S-bar (16T)\n");
+                     "Tx - Phase 4: S complete (%d bauds), starting S-bar (16T)\n",
+                     5000);
         }
         /*endif*/
         break;
@@ -2629,14 +2659,15 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
              512T training  = 512 bauds
              safety margin  ≈ 1000 bauds
              total          ≈ 3707 bauds minimum
-           We use 6000 bauds (~1.75s) to be safe while staying well within
-           the 2000ms + RTD limit. */
+           We use 1024 bauds (~299ms) for TRN. Combined with the extended
+           Phase 4 S (5000T) and wait (1500T), we need to keep TRN shorter
+           to avoid the caller timing out (observed at total >2.6s). */
         {
             int bit;
 
             bit = scramble(&s->tx, 1);
             bit = (scramble(&s->tx, 1) << 1) | bit;
-            if (++s->tx.tone_duration >= 6000)
+            if (++s->tx.tone_duration >= 1024)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds), starting MP\n",
@@ -2671,9 +2702,32 @@ static void phase4_wait_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Number of bauds to transmit silence at the start of MP TX.
+   This allows the caller's MP to arrive without echo interference
+   from our own TX.  Set to 0 to disable (normal V.34 operation). */
+#define MP_TX_SILENCE_BAUDS 0
+
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {
     int bit;
+
+    /* Transmit silence for the first MP_TX_SILENCE_BAUDS to test
+       whether echo of our own TX is corrupting MP reception. */
+    if (MP_TX_SILENCE_BAUDS > 0)
+    {
+        s->tx.tone_duration++;
+        if (s->tx.tone_duration <= MP_TX_SILENCE_BAUDS)
+        {
+            if (s->tx.tone_duration == 1)
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - MP: transmitting silence for %d bauds (echo test)\n",
+                         MP_TX_SILENCE_BAUDS);
+            if (s->tx.tone_duration == MP_TX_SILENCE_BAUDS)
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - MP: silence period complete, starting MP TX\n");
+            return zero;
+        }
+    }
 
     bit = scramble(&s->tx, get_data_bit(&s->tx));
     bit = (scramble(&s->tx, get_data_bit(&s->tx)) << 1) | bit;
@@ -2771,6 +2825,7 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     }
     /*endif*/
     s->tx.txptr = 0;
+    s->tx.tone_duration = 0;  /* Reset for MP_TX_SILENCE_BAUDS counter */
     s->tx.current_getbaud = get_mp_or_mph_baud;
 
     /* Phase 4 MP exchange is DUPLEX on the PRIMARY channel, not CC.
@@ -2782,11 +2837,15 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->rx.stage = V34_RX_STAGE_PHASE4_MP;
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
-    s->rx.baud_half = 0;
+    /* Do NOT reset baud_half — symbol timing recovery (TED) has been tracking
+       the correct sample phase throughout Phase 3.  Resetting would misalign
+       the half-baud processing with the actual symbol boundaries. */
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
-    /* Reset descrambler for Phase 4 MP detection */
-    s->rx.scramble_reg = 0;
+    /* Do NOT reset scramble_reg — the GPC descrambler is self-synchronizing
+       (syncs within 23 received bits).  It doesn't need explicit reset. */
+    /* Reset duration for diagnostic logging (counts bauds in PHASE4_MP) */
+    s->rx.duration = 0;
     span_log(&s->logging, SPAN_LOG_FLOW, "Rx - ready for MP exchange on primary channel (stage=PHASE4_MP)\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -3458,7 +3517,6 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     int high_carrier;
 
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - Restarting V.34, %d baud, %dbps\n", baud_rate, bit_rate);
-    high_carrier = true;
     if ((bit_rate_code = bit_rate_to_code(bit_rate)) < 0)
         return -1;
     /*endif*/
@@ -3478,8 +3536,32 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->tx.half_duplex_source =
     s->half_duplex_source = (s->calling_party)  ?  V34_HALF_DUPLEX_SOURCE  :  V34_HALF_DUPLEX_RECIPIENT;
 
-    v34_tx_restart(s, baud_rate_code, bit_rate_code, high_carrier);
-    v34_rx_restart(s, baud_rate_code, bit_rate_code, high_carrier);
+    /* V.34 §3.2: In duplex mode, the calling modem uses the higher frequency
+       carrier for transmission and the answering modem uses the lower frequency.
+       TX and RX must use DIFFERENT carriers so full-duplex signals don't collide.
+         Caller:   TX=high, RX=low  (receives answerer's low-carrier TX)
+         Answerer: TX=low,  RX=high (receives caller's high-carrier TX)
+       In half-duplex, both TX and RX use the same carrier. */
+    if (duplex)
+    {
+        int tx_high = s->calling_party ? true : false;
+        int rx_high = s->calling_party ? false : true;
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Carrier assignment: %s, TX=%s (%.0f Hz), RX=%s (%.0f Hz)\n",
+                 s->calling_party ? "caller" : "answerer",
+                 tx_high ? "high" : "low",
+                 carrier_frequency(baud_rate_code, tx_high),
+                 rx_high ? "high" : "low",
+                 carrier_frequency(baud_rate_code, rx_high));
+        v34_tx_restart(s, baud_rate_code, bit_rate_code, tx_high);
+        v34_rx_restart(s, baud_rate_code, bit_rate_code, rx_high);
+    }
+    else
+    {
+        high_carrier = true;
+        v34_tx_restart(s, baud_rate_code, bit_rate_code, high_carrier);
+        v34_rx_restart(s, baud_rate_code, bit_rate_code, high_carrier);
+    }
 
     return 0;
 }

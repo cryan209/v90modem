@@ -334,6 +334,8 @@ static cr_state_t     g_cr;
 
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
+static int64_t g_training_rx_energy;
+static int     g_training_rx_count;
 static int     g_v8_rx_count;
 
 /* Pending SIP URI for outgoing calls (set by me_dial) */
@@ -425,6 +427,8 @@ static void start_v34_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
+    g_training_rx_energy = 0;
+    g_training_rx_count  = 0;
 
     /* Reset bit accumulators */
     v34_tx_byte = 0;
@@ -661,6 +665,19 @@ void me_rx_audio(const int16_t *amp, int len)
 
     case ME_TRAINING:
     case ME_DATA:
+        /* RX energy diagnostic — log every second during training */
+        if (state == ME_TRAINING) {
+            for (int i = 0; i < len; i++)
+                g_training_rx_energy += (int64_t)amp[i] * amp[i];
+            g_training_rx_count += len;
+            if (g_training_rx_count >= 8000) {
+                double rms = sqrt((double)g_training_rx_energy / g_training_rx_count);
+                fprintf(stderr, "[ME] Training rx: RMS=%.1f (%d samples)\n",
+                        rms, g_training_rx_count);
+                g_training_rx_energy = 0;
+                g_training_rx_count  = 0;
+            }
+        }
         /* Feed audio to the appropriate modem receiver */
         if (g_mod == ME_MOD_V34 && g_v34)
             v34_rx(g_v34, amp, len);

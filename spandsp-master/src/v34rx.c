@@ -2322,25 +2322,27 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
 
-        s->duration++;
-        /* Log first 20 bauds and periodically after */
-        if (s->duration <= 20 || (s->duration % 500) == 0)
+        /* Descramble the data bits */
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4 MP baud %d: sample=(%.4f,%.4f) last=(%.4f,%.4f) "
-                     "ang1=0x%08X ang2=0x%08X ang3=0x%08X data_bits=%d\n",
-                     s->duration, sample->re, sample->im,
-                     s->last_sample.re, s->last_sample.im,
-                     ang1, ang2, ang3, data_bits);
+            int raw_bits = data_bits;
+            for (i = 0;  i < 2;  i++)
+            {
+                bits[i] = descramble(s, raw_bits & 1);
+                raw_bits >>= 1;
+            }
         }
 
-        /* Descramble the data bits */
-        for (i = 0;  i < 2;  i++)
+        s->duration++;
+        /* Log first 30 bauds (to see initial sync) and every 200 bauds after */
+        if (s->duration <= 30 || (s->duration % 200) == 0)
         {
-            bits[i] = descramble(s, data_bits & 1);
-            data_bits >>= 1;
+            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4 MP baud %d: mag=%.3f data_bits=%d descr=%d,%d "
+                     "bitstream=0x%08X\n",
+                     s->duration, mag, data_bits, bits[0], bits[1],
+                     (unsigned)s->bitstream);
         }
-        /*endfor*/
 
         /* Scan for MP/MPh messages — same logic as process_cc_half_baud */
         for (i = 0;  i < 2;  i++)
@@ -2366,25 +2368,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             else if ((s->bitstream & 0x7FFFE) == 0x7FFFC)
             {
-                /* MP preamble detected: 17 ones followed by a zero */
+                /* MP preamble detected: 16 ones + start bit (0) + type bit.
+                   bits[i] is the type bit. However, the type bit may be decoded
+                   incorrectly due to bit errors. Instead of trusting it, always
+                   try MP0 (type=0) first, then MP1 (type=1) if CRC fails.
+                   This dual-length approach handles single-bit errors in the type. */
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: MP preamble detected on primary channel (baud %d)\n",
-                         s->duration);
+                         "Rx - Phase 4: MP preamble detected (baud %d, type_bit=%d), trying MP0 first\n",
+                         s->duration, bits[i]);
                 s->crc = 0xFFFF;
                 s->bit_count = 0;
                 s->mp_count = 17;
-                /* Check the type bit */
-                if (bits[i])
-                {
-                    s->mp_len = 186 + 1;
-                    s->mp_and_fill_len = 186 + 1 + 1;
-                }
-                else
-                {
-                    s->mp_len = 84 + 1;
-                    s->mp_and_fill_len = 84 + 3 + 1;
-                }
-                /*endif*/
+                /* Always try MP0 first (84+1=85 bits). If CRC fails at MP0
+                   boundary, we'll continue to MP1 length (186+1=187 bits). */
+                s->mp_len = 84 + 1;
+                s->mp_and_fill_len = 186 + 1 + 1;  /* max length to keep collecting */
             }
             /*endif*/
             if (s->mp_count >= 0)
@@ -2398,78 +2396,124 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if ((s->bit_count & 0x07) == 0)
                     s->info_buf[(s->bit_count >> 3) - 1] = bit_reverse8(s->bitstream & 0xFF);
                 /*endif*/
-                if (s->mp_count >= s->mp_len)
+                /* Check CRC at MP0 boundary (mp_count=85) */
+                if (s->mp_count == 84 + 1)
                 {
-                    if (s->mp_count == s->mp_len)
+                    if (s->crc == 0)
                     {
-                        if (s->crc == 0)
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP0 received (CRC OK, %d bits)\n", s->bit_count);
+                        if (s->duplex)
                         {
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP received successfully (CRC OK)\n");
-                            if (s->duplex)
-                            {
-                                process_rx_mp(s, &mp, s->info_buf);
-                                t = span_container_of(s, v34_state_t, rx);
-                                if (mp.type == 1)
-                                    memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                                /*endif*/
-                                switch (mp.trellis_size)
-                                {
-                                case V34_TRELLIS_16:
-                                    t->tx.conv_encode_table = v34_conv16_encode_table;
-                                    break;
-                                case V34_TRELLIS_32:
-                                    t->tx.conv_encode_table = v34_conv32_encode_table;
-                                    break;
-                                case V34_TRELLIS_64:
-                                    t->tx.conv_encode_table = v34_conv64_encode_table;
-                                    break;
-                                default:
-                                    span_log(&t->logging, SPAN_LOG_FLOW,
-                                             "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
-                                    break;
-                                }
-                                /*endswitch*/
-                            }
+                            process_rx_mp(s, &mp, s->info_buf);
+                            t = span_container_of(s, v34_state_t, rx);
+                            if (mp.type == 1)
+                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                             /*endif*/
-                            s->mp_seen = 1;
-                        }
-                        else
-                        {
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP CRC error (0x%04X), mp_count=%d, bit_count=%d\n",
-                                     s->crc, s->mp_count, s->bit_count);
-                            /* Dump first 12 bytes of received MP for debugging */
+                            switch (mp.trellis_size)
                             {
-                                int nb = (s->bit_count >> 3);
-                                if (nb > 12) nb = 12;
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP data[0..%d]:"
-                                         " %02X %02X %02X %02X %02X %02X"
-                                         " %02X %02X %02X %02X %02X %02X\n",
-                                         nb - 1,
-                                         nb > 0 ? s->info_buf[0] : 0,
-                                         nb > 1 ? s->info_buf[1] : 0,
-                                         nb > 2 ? s->info_buf[2] : 0,
-                                         nb > 3 ? s->info_buf[3] : 0,
-                                         nb > 4 ? s->info_buf[4] : 0,
-                                         nb > 5 ? s->info_buf[5] : 0,
-                                         nb > 6 ? s->info_buf[6] : 0,
-                                         nb > 7 ? s->info_buf[7] : 0,
-                                         nb > 8 ? s->info_buf[8] : 0,
-                                         nb > 9 ? s->info_buf[9] : 0,
-                                         nb > 10 ? s->info_buf[10] : 0,
-                                         nb > 11 ? s->info_buf[11] : 0);
+                            case V34_TRELLIS_16:
+                                t->tx.conv_encode_table = v34_conv16_encode_table;
+                                break;
+                            case V34_TRELLIS_32:
+                                t->tx.conv_encode_table = v34_conv32_encode_table;
+                                break;
+                            case V34_TRELLIS_64:
+                                t->tx.conv_encode_table = v34_conv64_encode_table;
+                                break;
+                            default:
+                                span_log(&t->logging, SPAN_LOG_FLOW,
+                                         "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                break;
                             }
+                            /*endswitch*/
                         }
                         /*endif*/
+                        s->mp_seen = 1;
+                        s->mp_count = -1;  /* Stop collecting */
+                    }
+                    else
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP0 CRC fail (0x%04X), continuing to MP1 length\n",
+                                 s->crc);
+                        /* Don't reset — continue collecting bits to check at MP1 length.
+                           CRC continues to accumulate. */
                     }
                     /*endif*/
-                    if (s->mp_count == s->mp_and_fill_len)
+                }
+                /* Check CRC at MP1 boundary (mp_count=187) */
+                else if (s->mp_count == 186 + 1)
+                {
+                    if (s->crc == 0)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP1 received (CRC OK, %d bits)\n", s->bit_count);
+                        if (s->duplex)
+                        {
+                            process_rx_mp(s, &mp, s->info_buf);
+                            t = span_container_of(s, v34_state_t, rx);
+                            if (mp.type == 1)
+                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
+                            /*endif*/
+                            switch (mp.trellis_size)
+                            {
+                            case V34_TRELLIS_16:
+                                t->tx.conv_encode_table = v34_conv16_encode_table;
+                                break;
+                            case V34_TRELLIS_32:
+                                t->tx.conv_encode_table = v34_conv32_encode_table;
+                                break;
+                            case V34_TRELLIS_64:
+                                t->tx.conv_encode_table = v34_conv64_encode_table;
+                                break;
+                            default:
+                                span_log(&t->logging, SPAN_LOG_FLOW,
+                                         "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                break;
+                            }
+                            /*endswitch*/
+                        }
+                        /*endif*/
+                        s->mp_seen = 1;
                         s->mp_count = -1;
+                    }
+                    else
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP1 CRC also failed (0x%04X), mp_count=%d, bit_count=%d\n",
+                                 s->crc, s->mp_count, s->bit_count);
+                        /* Dump first 12 bytes for debugging */
+                        {
+                            int nb = (s->bit_count >> 3);
+                            if (nb > 12) nb = 12;
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP data[0..%d]:"
+                                     " %02X %02X %02X %02X %02X %02X"
+                                     " %02X %02X %02X %02X %02X %02X\n",
+                                     nb - 1,
+                                     nb > 0 ? s->info_buf[0] : 0,
+                                     nb > 1 ? s->info_buf[1] : 0,
+                                     nb > 2 ? s->info_buf[2] : 0,
+                                     nb > 3 ? s->info_buf[3] : 0,
+                                     nb > 4 ? s->info_buf[4] : 0,
+                                     nb > 5 ? s->info_buf[5] : 0,
+                                     nb > 6 ? s->info_buf[6] : 0,
+                                     nb > 7 ? s->info_buf[7] : 0,
+                                     nb > 8 ? s->info_buf[8] : 0,
+                                     nb > 9 ? s->info_buf[9] : 0,
+                                     nb > 10 ? s->info_buf[10] : 0,
+                                     nb > 11 ? s->info_buf[11] : 0);
+                        }
+                        s->mp_count = -1;  /* Give up on this MP, wait for next preamble */
+                    }
                     /*endif*/
                 }
-                /*endif*/
+                /* Stop collecting if we've gone past the max possible length */
+                else if (s->mp_count >= s->mp_and_fill_len)
+                {
+                    s->mp_count = -1;
+                }
             }
             /*endif*/
         }
