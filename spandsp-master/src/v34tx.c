@@ -2572,20 +2572,14 @@ static void trn_baud_init(v34_state_t *s)
      S-bar(16T) + PP(~288T) + TRN(≥512T) + J(variable) ≈ 2000-5000 bauds
    Plus SIP/RTP propagation delay: ~50ms × 3429 = ~171 bauds each way
 
-   We use 1500 bauds (~437ms).  Longer waits (5000+) caused the caller
-   to time out and drop signal.  The Phase 4 S duration is extended
-   instead (5000T) to ensure our S→S-bar is visible when the caller
-   enters Phase 4. */
-#define PHASE4_WAIT_BAUDS 1500
+   Per V.34 §11.4.1.2, Phase 4 S starts immediately after J — no silence
+   gap.  The caller detects our J, enters Phase 4, and expects to hear
+   our Phase 4 S right away.  A silence gap prevents the caller from
+   detecting our S and causes it to stay in S forever. */
+#define PHASE4_WAIT_BAUDS 0
 
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
-#if defined(SPANDSP_USE_FIXED_POINT)
-    int16_t x;
-#else
-    float x;
-#endif
-
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_PHASE4_WAIT:
@@ -2595,9 +2589,11 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         if (++s->tx.tone_duration >= PHASE4_WAIT_BAUDS)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: wait complete, starting S signal (128T)\n");
-            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP),
-                                            TRAINING_SCALE(0.0f));
+                     "Tx - Phase 4: wait complete, starting S signal\n");
+            /* Initialize diff encoder for S signal.
+               S = 180° phase reversal per baud (data_bits=2 = diff += 2).
+               This produces alternating constellation points at 45° and 225°. */
+            s->tx.diff = 0;
             s->tx.stage = V34_TX_STAGE_PHASE4_S;
             s->tx.tone_duration = 0;
         }
@@ -2605,9 +2601,9 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return zero;
 
     case V34_TX_STAGE_PHASE4_S:
-        /* Phase 4 S signal: alternating constellation points.
+        /* Phase 4 S signal: 180° phase reversal per baud using 4-point DQPSK.
            V.34 §11.4.1.2.1: "The answer modem shall transmit signal S for
-           at least 128T."
+           at least 128T."  V.34 §10.1.3.2: S = constant 180° phase changes.
 
            We send S for 5000T (~1.46s at 3429 baud) to ensure the caller
            has entered Phase 4 and had time to detect our S signal before
@@ -2615,53 +2611,51 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
            at ~baud 5868 (absolute).  Our S starts at baud 1500 (after wait)
            and continues to baud 6500, giving the caller ~632 bauds of our S
            before S-bar begins. */
+        s->tx.diff = (s->tx.diff + 2) & 3;
         if (++s->tx.tone_duration == 5000)
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: S complete (%d bauds), starting S-bar (16T)\n",
-                     5000);
+                     "Tx - Phase 4: S complete (5000 bauds), starting S-bar (16T)\n");
         }
         /*endif*/
-        break;
+        return training_constellation_4[s->tx.diff];
 
     case V34_TX_STAGE_PHASE4_NOT_S:
         /* Phase 4 S-bar signal: 16T.
-           V.34 §11.4.1.2.1: "transmit signal S-bar for 16T followed by signal TRN" */
+           V.34 §10.1.3.3: "S-bar is defined such that the data component of
+           the transition from S to S-bar represents the value 01 (corresponding
+           to a 90° phase offset)."
+
+           First baud of S-bar: diff += 1 (90° transition, detectable by caller)
+           Remaining bauds: diff += 2 (same 180° reversals as S, from new phase) */
+        if (s->tx.tone_duration == 0)
+            s->tx.diff = (s->tx.diff + 1) & 3;  /* 90° S→S-bar transition */
+        else
+            s->tx.diff = (s->tx.diff + 2) & 3;  /* 180° reversal continues */
+        /*endif*/
         if (++s->tx.tone_duration == 16)
         {
             /* Initialize scrambler to zero for TRN (V.34 §10.1.3.8:
                "The scrambler is initialized to zero prior to transmission
                of the TRN signal.") */
             s->tx.scramble_reg = 0;
-            s->tx.diff = 0;
             s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: S-bar complete, starting TRN (>=512T)\n");
-            return s->tx.lastbit;
         }
         /*endif*/
-        break;
+        return training_constellation_4[s->tx.diff];
 
     case V34_TX_STAGE_PHASE4_TRN:
         /* Phase 4 TRN: scrambled training before MP.
            V.34 §11.4.1.2.2: "the answer modem shall transmit TRN for at least
            512T but no longer than 2000 ms plus a round trip delay"
 
-           In practice, the caller doesn't detect our Phase 4 S signal until
-           ~640ms after we start sending it (SIP/RTP propagation + detection
-           latency).  The caller then needs at least 512T of our TRN to train
-           its equalizer.  At 3429 baud:
-             640ms latency ≈ 2195 bauds
-             512T training  = 512 bauds
-             safety margin  ≈ 1000 bauds
-             total          ≈ 3707 bauds minimum
-           We use 1024 bauds (~299ms) for TRN. Combined with the extended
-           Phase 4 S (5000T) and wait (1500T), we need to keep TRN shorter
-           to avoid the caller timing out (observed at total >2.6s). */
+           We use 1024 bauds (~299ms).  Combined with Phase 4 S (5000T) and
+           wait (1500T), total Phase 4 before MP = 7540 bauds (~2.2s). */
         {
             int bit;
 
@@ -2682,12 +2676,6 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return zero;
     }
     /*endswitch*/
-
-    /* S and S-bar use the alternating point pattern (same as get_s_not_s_baud) */
-    x = s->tx.lastbit.re;
-    s->tx.lastbit.re = s->tx.lastbit.im;
-    s->tx.lastbit.im = x;
-    return s->tx.lastbit;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2697,8 +2685,19 @@ static void phase4_wait_init(v34_state_t *s)
     s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_phase4_baud;
-    /* Keep RX in primary channel mode — do NOT switch to CC yet.
-       The caller is still sending Phase 3 training signals, not MP. */
+
+    /* Start Phase 4 RX: detect the caller's S signal on the primary channel.
+       The caller enters Phase 4 after detecting our J and starts sending S.
+       We need to detect their S → S-bar → TRN before reading MP. */
+    s->rx.stage = V34_RX_STAGE_PHASE4_S;
+    s->rx.duration = 0;
+    s->rx.s_detect_count = 0;
+    s->rx.s_window = 0;
+    s->rx.bitstream = 0;
+    s->rx.mp_seen = 0;
+    s->rx.mp_count = -1;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4: waiting for far-end S signal\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2830,23 +2829,11 @@ static void mp_or_mph_baud_init(v34_state_t *s)
 
     /* Phase 4 MP exchange is DUPLEX on the PRIMARY channel, not CC.
        V.34 §11.4: Both sides transmit MP using the same 4-point constellation
-       and primary channel carrier (1959 Hz for answerer TX, 1959 Hz for caller TX)
-       at the negotiated baud rate. DO NOT switch RX to CC demodulator here.
-       Keep the primary channel demodulator running so we can decode the caller's MP.
-       Reset MP-related RX state for detecting far-end MP. */
-    s->rx.stage = V34_RX_STAGE_PHASE4_MP;
-    s->rx.mp_seen = 0;
-    s->rx.mp_count = -1;
-    /* Do NOT reset baud_half — symbol timing recovery (TED) has been tracking
-       the correct sample phase throughout Phase 3.  Resetting would misalign
-       the half-baud processing with the actual symbol boundaries. */
-    s->rx.bitstream = 0;
-    s->rx.bit_count = 0;
-    /* Do NOT reset scramble_reg — the GPC descrambler is self-synchronizing
-       (syncs within 23 received bits).  It doesn't need explicit reset. */
-    /* Reset duration for diagnostic logging (counts bauds in PHASE4_MP) */
-    s->rx.duration = 0;
-    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - ready for MP exchange on primary channel (stage=PHASE4_MP)\n");
+       at the negotiated baud rate.
+       DO NOT touch RX state here — the RX progresses independently
+       through S → S-bar → TRN → MP stages as it detects the caller's signals.
+       The RX stage was set to PHASE4_S in phase4_wait_init(). */
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - MP transmission starting (RX still detecting far-end S)\n");
 }
 /*- End of function --------------------------------------------------------*/
 

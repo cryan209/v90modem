@@ -443,13 +443,16 @@ static void start_v34_training(void)
 
     /*
      * Init V.34 as answerer (calling_party=false), full duplex.
-     * Use 3429 baud, 33600 bps as maximum; V.34 will negotiate down
+     * Use 3200 baud, 31200 bps as maximum; V.34 will negotiate down
      * during training based on line conditions.
-     * Note: 33600 bps requires 3429 baud (3200 baud max is 31200 bps).
+     * Note: 3200 baud gives different carrier frequencies per direction
+     * (low=1829 Hz, high=1920 Hz) needed for echo cancellation.
+     * At 3429 baud both carriers are 1959 Hz — caller can't separate
+     * our signal from its own echo during Phase 4 S.
      */
     g_v34 = v34_init(NULL,
-                     2800,          /* baud rate */
-                     9600,         /* bit rate */
+                     3200,          /* max baud rate (NOT 3429 — same carrier both dirs) */
+                     31200,         /* max bit rate at 3200 baud */
                      false,         /* answerer */
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
@@ -467,7 +470,7 @@ static void start_v34_training(void)
                                 SPAN_LOG_FLOW);
     }
 
-    fprintf(stderr, "[ME] V.34 training started (answerer, 3429 baud, up to 33600 bps)\n");
+    fprintf(stderr, "[ME] V.34 training started (answerer, 3200 baud, up to 31200 bps)\n");
 }
 
 static void v8_result_handler(void *user_data, v8_parms_t *result)

@@ -80,6 +80,12 @@ enum v34_rx_stages_e
     V34_RX_STAGE_PHASE3_WAIT_S,
     V34_RX_STAGE_PHASE3_TRAINING,
     V34_RX_STAGE_PHASE3_DONE,
+    /*! \brief Phase 4: detecting far-end S signal (180° phase reversals) */
+    V34_RX_STAGE_PHASE4_S,
+    /*! \brief Phase 4: detected S, waiting for S-bar transition (90° offset) */
+    V34_RX_STAGE_PHASE4_S_BAR,
+    /*! \brief Phase 4: TRN synchronization after S-bar */
+    V34_RX_STAGE_PHASE4_TRN,
     /*! \brief Phase 4: detecting MP on primary channel (DQPSK demod) */
     V34_RX_STAGE_PHASE4_MP
 };
@@ -742,6 +748,11 @@ typedef struct
     int l1_l2_duration;
 
     int current_demodulator;
+
+    /*! \brief Phase 4 S signal detection: count of data_bits=2 in sliding window */
+    int s_detect_count;
+    /*! \brief Phase 4 S signal detection: 32-bit circular window of data_bits==2 flags */
+    uint32_t s_window;
 
     /*! \brief Used to align the transmit and receive positions, to ensure things like
                round trip delay are properly handled. */

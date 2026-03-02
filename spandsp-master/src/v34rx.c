@@ -2313,6 +2313,116 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     case V34_RX_STAGE_PHASE3_DONE:
         break;
 
+    case V34_RX_STAGE_PHASE4_S:
+        /* Phase 4: Detect the caller's S signal (constant 180° phase reversals).
+           S is data_bits=2 for every baud.  Due to imperfect carrier recovery,
+           we may see errors (~1 in 3 bauds).  Use a window-based detector:
+           count data_bits=2 in last 32 bauds.  S detected when count >= 20/32.
+           After S is confirmed, watch for a sustained drop (S→S-bar transition). */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
+        s->duration++;
+
+        /* Sliding window: shift in new bit, shift out old */
+        {
+            int idx = (s->duration - 1) & 31;  /* circular index 0-31 */
+            int old_was_2 = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
+            int new_is_2 = (data_bits == 2) ? 1 : 0;
+
+            if (new_is_2)
+                s->s_window |= (1u << idx);
+            else
+                s->s_window &= ~(1u << idx);
+
+            s->s_detect_count += new_is_2 - old_was_2;
+        }
+
+        if (s->duration <= 10 || (s->duration % 500) == 0)
+        {
+            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
+                     s->duration, mag, data_bits, s->s_detect_count);
+        }
+
+        if (s->duration >= 128 && s->s_detect_count >= 20)
+        {
+            /* S signal confirmed.  Now transition to S-bar detection.
+               We skip explicit S-bar detection since we can't reliably
+               distinguish S-bar from S with this demodulator quality.
+               Instead, wait a fixed time for the caller's S-bar(16T) + TRN(≥512T)
+               to pass, then go straight to MP detection. */
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: S signal confirmed (baud %d, win=%d/32), "
+                     "waiting for S-bar + TRN\n",
+                     s->duration, s->s_detect_count);
+            s->stage = V34_RX_STAGE_PHASE4_TRN;
+            s->duration = 0;
+            s->scramble_reg = 0;
+        }
+        break;
+
+    case V34_RX_STAGE_PHASE4_S_BAR:
+        /* Phase 4: S-bar is 16T. After S-bar, TRN begins. */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
+        s->duration++;
+
+        if (s->duration >= 16)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: S-bar complete (%d bauds), starting TRN detection\n",
+                     s->duration);
+            s->stage = V34_RX_STAGE_PHASE4_TRN;
+            s->duration = 0;
+            s->scramble_reg = 0;
+        }
+        break;
+
+    case V34_RX_STAGE_PHASE4_TRN:
+        /* Phase 4: We've confirmed the caller's S signal.  The caller will
+           continue S for some time, then send S-bar(16T), TRN(≥512T), MP.
+           We can't reliably distinguish these transitions with the demodulator,
+           so skip directly to MP detection — the MP preamble (16 ones) is
+           distinctive and won't false-trigger during S/S-bar/TRN.
+           Run the descrambler so it self-syncs during TRN. */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
+        s->duration++;
+
+        /* Descramble to let the descrambler self-sync (needs ~23 bits) */
+        {
+            int raw_bits = data_bits;
+            for (i = 0;  i < 2;  i++)
+            {
+                descramble(s, raw_bits & 1);
+                raw_bits >>= 1;
+            }
+        }
+
+        /* Transition to MP scanning after minimal sync time.
+           The MP preamble won't appear during S/S-bar/TRN so it's safe
+           to start scanning immediately. */
+        if (s->duration >= 32)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: descrambler sync done (%d bauds), scanning for MP\n",
+                     s->duration);
+            s->stage = V34_RX_STAGE_PHASE4_MP;
+            s->duration = 0;
+            s->bitstream = 0;
+            s->bit_count = 0;
+            s->mp_seen = 0;
+            s->mp_count = -1;
+        }
+        break;
+
     case V34_RX_STAGE_PHASE4_MP:
         /* Phase 4 MP detection on primary channel using DQPSK demodulation.
            Same approach as CC channel MP detection: differential phase decoding,
