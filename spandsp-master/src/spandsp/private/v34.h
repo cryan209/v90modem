@@ -784,6 +784,12 @@ struct v34_state_s
     v34_rx_state_t rx;
     modem_echo_can_state_t *ec;
 
+    /*! \brief True when using the primary channel (Phase 3/4 and data mode).
+        During Phase 2, both sides use 1200 Hz DPSK; during Phase 3+, TX and RX
+        use separated carriers (e.g. 1829/1920 Hz at 3200 baud).  External echo
+        cancellers should only operate when this flag is true. */
+    bool primary_channel_active;
+
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

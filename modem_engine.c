@@ -329,6 +329,25 @@ static v34_state_t    *g_v34     = NULL;
 /* V.90 downstream encoder */
 static v90_enc_t      g_v90_enc;
 
+/* Echo canceller for full-duplex V.34.
+   The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
+   RX.  Without cancellation, the ~20-30 dB return loss causes ~30-50% bit
+   errors in the V.34 demodulator during Phase 4 and data mode.
+   SpanDSP's modem_echo canceller uses LMS — ideal for constant-amplitude
+   modem signals.  256 taps = 32 ms at 8 kHz, covering typical hybrid echo. */
+#define ECHO_CAN_TAPS 256
+static modem_echo_can_segment_state_t *g_echo_can = NULL;
+
+/* TX sample ring buffer for echo canceller.
+   The echo canceller needs the TX sample that corresponds to each RX sample.
+   TX and RX are generated in separate callbacks, so we buffer TX samples.
+   Size must be a power of 2. */
+#define TX_BUF_SIZE 4096
+#define TX_BUF_MASK (TX_BUF_SIZE - 1)
+static int16_t g_tx_buf[TX_BUF_SIZE];
+static int     g_tx_buf_wr = 0;  /* write position (updated by me_tx_audio) */
+static int     g_tx_buf_rd = 0;  /* read position (updated by me_rx_audio) */
+
 /* Clock recovery */
 static cr_state_t     g_cr;
 
@@ -470,6 +489,23 @@ static void start_v34_training(void)
                                 SPAN_LOG_FLOW);
     }
 
+    /* Initialize echo canceller for full-duplex operation.
+       The FXS hybrid leaks TX into RX; without cancellation the V.34
+       demodulator sees ~30-50% bit errors during Phase 4. */
+    if (g_echo_can) {
+        modem_echo_can_segment_free(g_echo_can);
+        g_echo_can = NULL;
+    }
+    g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
+    if (g_echo_can) {
+        modem_echo_can_adaption_mode(g_echo_can, 1);
+        fprintf(stderr, "[ME] Echo canceller initialized (%d taps)\n", ECHO_CAN_TAPS);
+    } else {
+        fprintf(stderr, "[ME] WARNING: echo canceller init failed\n");
+    }
+    g_tx_buf_wr = 0;
+    g_tx_buf_rd = 0;
+
     fprintf(stderr, "[ME] V.34 training started (answerer, 3200 baud, up to 31200 bps)\n");
 }
 
@@ -508,8 +544,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if (result->jm_cm.modulations & V8_MOD_V34) {
-        fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
+    if (result->jm_cm.modulations & (V8_MOD_V90 | V8_MOD_V34)) {
+        /* V.90 and V.34 both start with V.34 Phase 2 training.
+         * V.90 PCM downstream is layered on after training (future). */
+        const char *mod_str = (result->jm_cm.modulations & V8_MOD_V90)
+                              ? "V.90/V.34" : "V.34";
+        fprintf(stderr, "[ME] V.8 negotiated %s (full duplex, up to 33.6 kbps)\n", mod_str);
         start_v34_training();
 
     } else if (result->jm_cm.modulations & V8_MOD_V22) {
@@ -544,9 +584,10 @@ void me_init(void)
 
 void me_destroy(void)
 {
-    if (g_v8)     { v8_free(g_v8);         g_v8     = NULL; }
-    if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
-    if (g_v34)    { v34_free(g_v34);       g_v34    = NULL; }
+    if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
+    if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
+    if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -594,11 +635,12 @@ void me_on_sip_connected(void)
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = MODEM_CONNECT_TONES_ANSAM_PR; /* ANSam */
     v8_parms.send_ci            = false; /* answerer doesn't send CI */
-    v8_parms.v92                = true;
+    v8_parms.v92                = -1;    /* don't send V.92 extension */
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
-    /* Advertise V.34 + V.22bis. We don't advertise V.90 yet because our
-     * training uses standard V.34 phases (not V.90-modified Phase 3/4). */
-    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
+    /* Advertise V.90 + V.34 + V.22bis.  V.90 training starts with V.34
+     * Phase 2, so we can safely advertise it; the actual V.90 PCM switch
+     * happens after training (not yet implemented). */
+    v8_parms.jm_cm.modulations        = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22;
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
     v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
@@ -610,6 +652,14 @@ void me_on_sip_connected(void)
         fprintf(stderr, "[ME] v8_init failed\n");
         pthread_mutex_unlock(&g_state_mtx);
         return;
+    }
+
+    /* Enable SpanDSP logging for V.8 diagnostics */
+    {
+        logging_state_t *log = v8_get_logging_state(g_v8);
+        if (log)
+            span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
+                                    SPAN_LOG_FLOW);
     }
 
     g_state = ME_V8;
@@ -624,9 +674,10 @@ void me_on_sip_disconnected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
 
-    if (g_v8)     { v8_free(g_v8);         g_v8     = NULL; }
-    if (g_v22bis) { v22bis_free(g_v22bis); g_v22bis = NULL; }
-    if (g_v34)    { v34_free(g_v34);       g_v34    = NULL; }
+    if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
+    if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
+    if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -681,10 +732,28 @@ void me_rx_audio(const int16_t *amp, int len)
                 g_training_rx_count  = 0;
             }
         }
-        /* Feed audio to the appropriate modem receiver */
-        if (g_mod == ME_MOD_V34 && g_v34)
-            v34_rx(g_v34, amp, len);
-        else if (g_v22bis)
+        /* Feed audio to the appropriate modem receiver.
+           Echo cancellation is only applied after V.34 enters the primary
+           channel (Phase 3/4+), where TX and RX use separate carriers
+           (e.g. 1829 vs 1920 Hz at 3200 baud).  During Phase 2, both sides
+           share the 1200 Hz carrier — the canceller would subtract the
+           far-end signal along with our echo. */
+        if (g_mod == ME_MOD_V34 && g_v34) {
+            if (g_echo_can && v34_get_primary_channel_active(g_v34)) {
+                int16_t clean[len];
+                for (int i = 0; i < len; i++) {
+                    int16_t tx_sample = 0;
+                    if (g_tx_buf_rd != g_tx_buf_wr) {
+                        tx_sample = g_tx_buf[g_tx_buf_rd];
+                        g_tx_buf_rd = (g_tx_buf_rd + 1) & TX_BUF_MASK;
+                    }
+                    clean[i] = modem_echo_can_update(g_echo_can, tx_sample, amp[i]);
+                }
+                v34_rx(g_v34, clean, len);
+            } else {
+                v34_rx(g_v34, amp, len);
+            }
+        } else if (g_v22bis)
             v22bis_rx(g_v22bis, amp, len);
 
         /* In DATA mode, flush received bytes to the PTY */
@@ -766,6 +835,16 @@ void me_tx_audio(int16_t *amp, int len)
 
     default:
         break;
+    }
+
+    /* Buffer TX samples for the echo canceller.
+       Must happen after TX generation so me_rx_audio can subtract
+       our echo from the received signal. */
+    if (g_echo_can && g_mod == ME_MOD_V34) {
+        for (int i = 0; i < len; i++) {
+            g_tx_buf[g_tx_buf_wr] = amp[i];
+            g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
+        }
     }
 }
 

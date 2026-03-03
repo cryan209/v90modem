@@ -1420,6 +1420,15 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         dds_advancef(&s->carrier_phase, s->cc_carrier_phase_rate);
     }
     /*endfor*/
+    /* Periodic diagnostic: log every 8000 samples (~1 sec) */
+    if (s->duration % 8000 < (unsigned)len)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx info_rx diag: duration=%d bit_count=%d bitstream=0x%08X "
+                 "stage=%d signal=%d blip=%d power=%d\n",
+                 s->duration, s->bit_count, s->bitstream,
+                 s->stage, s->signal_present, s->blip_duration, power);
+    }
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2667,11 +2676,20 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         192*8000*7/(2400*10)
     };
 
-    s->baud_rate = 5;
+    /* Use the negotiated baud rate and carrier assignment.
+       baud_rate is set from INFO1a (process_rx_info1a) or v34_rx_restart.
+       high_carrier is set from v34_rx_restart based on calling_party flag. */
+    if (s->baud_rate < 0 || s->baud_rate > 5)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - ERROR: baud_rate=%d out of range (expected 0-5), forcing to 4\n",
+                 s->baud_rate);
+        s->baud_rate = 4;  /* V34_BAUD_RATE_3200 */
+    }
     s->shaper_re = v34_rx_shapers_re[s->baud_rate][s->high_carrier];
     s->shaper_im = v34_rx_shapers_im[s->baud_rate][s->high_carrier];
     s->shaper_sets = steps_per_baud[s->baud_rate];
-    s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, 0));
+    s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
     for (i = 0;  i < len;  i++)
     {
         s->rrc_filter[s->rrc_filter_step] = amp[i];

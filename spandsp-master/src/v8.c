@@ -416,6 +416,13 @@ static const uint8_t *process_modulation_mode(v8_state_t *s, const uint8_t *p)
         /*endif*/
     }
     /*endif*/
+    /* Intersect the received modulations with what we actually support.
+       The JM should only advertise modulations the answerer can do, not
+       echo back everything the caller offered.  Without this, a V.92
+       modem seeing V.90 in JM + digital-side PCM availability may try
+       V.92 quick-connect instead of standard V.34 CJ. */
+    if (!s->calling_party)
+        modulations &= s->parms.jm_cm.modulations;
     s->result.jm_cm.modulations = modulations;
     v8_log_supported_modulations(s, modulations);
     return p;

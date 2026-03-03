@@ -2682,6 +2682,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 static void phase4_wait_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
+    s->primary_channel_active = true;
     s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_phase4_baud;
@@ -2697,7 +2698,10 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Rx - Phase 4: waiting for far-end S signal\n");
+             "Rx - Phase 4: waiting for far-end S signal (baud_rate=%d, high_carrier=%d, "
+             "carrier=%.1f Hz)\n",
+             s->rx.baud_rate, s->rx.high_carrier,
+             carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3363,6 +3367,12 @@ void v34_set_working_parameters(v34_parameters_t *s, int baud_rate, int bit_rate
 SPAN_DECLARE(int) v34_get_current_bit_rate(v34_state_t *s)
 {
     return s->bit_rate;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s)
+{
+    return s->primary_channel_active;
 }
 /*- End of function --------------------------------------------------------*/
 

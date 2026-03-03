@@ -240,6 +240,14 @@ SPAN_DECLARE(void) v34_set_put_bit(v34_state_t *s, span_put_bit_func_t put_bit, 
     \param user_data An opaque pointer. */
 SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_bit, void *user_data);
 
+/*! Check if the V.34 modem has entered the primary channel phase (Phase 3/4
+    or data mode).  During Phase 2, both sides share the same 1200 Hz carrier,
+    so an external echo canceller would cancel the far-end signal.  After this
+    returns true, TX and RX use separated carriers and echo cancellation is safe.
+    \param s The modem context.
+    \return true when the primary channel is active. */
+SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s);
+
 #if defined(__cplusplus)
 }
 #endif
