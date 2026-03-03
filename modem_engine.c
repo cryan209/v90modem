@@ -644,6 +644,8 @@ void me_on_sip_connected(void)
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
     v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    v8_parms.jm_cm.nsf                = -1;   /* don't send NSF */
+    v8_parms.jm_cm.t66                = -1;   /* don't send T.66 */
 
     if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
     g_v8 = v8_init(NULL, false /* answerer */, &v8_parms,
@@ -733,13 +735,13 @@ void me_rx_audio(const int16_t *amp, int len)
             }
         }
         /* Feed audio to the appropriate modem receiver.
-           Echo cancellation is only applied after V.34 enters the primary
-           channel (Phase 3/4+), where TX and RX use separate carriers
-           (e.g. 1829 vs 1920 Hz at 3200 baud).  During Phase 2, both sides
-           share the 1200 Hz carrier — the canceller would subtract the
-           far-end signal along with our echo. */
+           Echo cancellation is active throughout V.34 — during Phase 2
+           the answerer TX is at 2400 Hz and the caller TX at 1200 Hz,
+           so the canceller correctly removes the 2400 Hz echo while
+           preserving the 1200 Hz far-end signal.  During Phase 3/4+
+           the carriers are 1829/1920 Hz (at 3200 baud). */
         if (g_mod == ME_MOD_V34 && g_v34) {
-            if (g_echo_can && v34_get_primary_channel_active(g_v34)) {
+            if (g_echo_can) {
                 int16_t clean[len];
                 for (int i = 0; i < len; i++) {
                     int16_t tx_sample = 0;
