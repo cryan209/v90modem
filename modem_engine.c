@@ -271,6 +271,7 @@ static int dring_available(data_ring_t *r) {
 
 static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
+static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 
 /* Bit accumulator for V.22bis TX (one byte at a time) */
 static uint8_t  v22bis_tx_byte = 0;
@@ -302,7 +303,11 @@ static int      v22bis_rx_bits = 0;
 static void v22bis_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
-    if (bit < 0) return; /* SIG_STATUS_* sentinel, ignore */
+    if (bit < 0) {
+        if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED)
+            on_training_complete(ME_MOD_V22BIS, 2400, "V.22bis");
+        return;
+    }
 
     v22bis_rx_byte |= (uint8_t)((bit & 1) << v22bis_rx_bits);
     v22bis_rx_bits++;
@@ -320,6 +325,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 static me_state_t      g_state     = ME_IDLE;
 static me_modulation_t g_mod       = ME_MOD_NONE;
 static pthread_mutex_t g_state_mtx;
+static bool            g_calling_party = false; /* false=answerer, true=caller */
 
 /* SpanDSP modem contexts */
 static v8_state_t     *g_v8      = NULL;
@@ -361,6 +367,19 @@ static int     g_v8_rx_count;
 /* Pending SIP URI for outgoing calls (set by me_dial) */
 static char g_dial_uri[256];
 
+static void on_training_complete(me_modulation_t mod, int rate, const char *name)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_state == ME_TRAINING && g_mod == mod) {
+        g_state = ME_DATA;
+        pthread_mutex_unlock(&g_state_mtx);
+        fprintf(stderr, "[ME] %s training complete (%d bps)\n", name, rate);
+        di_on_connected(rate);
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
 /* ------------------------------------------------------------------ */
 /* V.34 get_bit / put_bit callbacks for SpanDSP                       */
 /* ------------------------------------------------------------------ */
@@ -394,7 +413,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
     (void)user_data;
     if (bit < 0) {
         /* Status event from V.34 training state machine */
-        if (bit == SIG_STATUS_CARRIER_UP) {
+        if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_state == ME_TRAINING) {
                 g_state = ME_DATA;
@@ -429,16 +448,16 @@ static void start_v22bis_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
-
-    if (!g_v22bis) {
-        g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, false,
-                               v22bis_get_bit_cb, NULL,
-                               v22bis_put_bit_cb, NULL);
-        if (!g_v22bis)
-            fprintf(stderr, "[ME] v22bis_init failed\n");
-    } else {
-        v22bis_restart(g_v22bis, 2400);
+    if (g_v22bis) {
+        v22bis_free(g_v22bis);
+        g_v22bis = NULL;
     }
+
+    g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, g_calling_party,
+                           v22bis_get_bit_cb, NULL,
+                           v22bis_put_bit_cb, NULL);
+    if (!g_v22bis)
+        fprintf(stderr, "[ME] v22bis_init failed\n");
 }
 
 /* Start V.34 training — used when V.8 negotiates V.34 */
@@ -462,7 +481,7 @@ static void start_v34_training(void)
     }
 
     /*
-     * Init V.34 as answerer (calling_party=false), full duplex.
+     * Init V.34 in caller/answerer role matching SIP call direction.
      * Use 3200 baud, 31200 bps as maximum; V.34 will negotiate down
      * during training based on line conditions.
      * Note: 3200 baud gives different carrier frequencies per direction
@@ -473,7 +492,7 @@ static void start_v34_training(void)
     g_v34 = v34_init(NULL,
                      3200,          /* max baud rate (NOT 3429 — same carrier both dirs) */
                      31200,         /* max bit rate at 3200 baud */
-                     false,         /* answerer */
+                     g_calling_party,
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
                      v34_put_bit_cb, NULL);
@@ -507,7 +526,8 @@ static void start_v34_training(void)
     g_tx_buf_wr = 0;
     g_tx_buf_rd = 0;
 
-    fprintf(stderr, "[ME] V.34 training started (answerer, 3200 baud, up to 31200 bps)\n");
+    fprintf(stderr, "[ME] V.34 training started (%s, 3200 baud, up to 31200 bps)\n",
+            g_calling_party ? "caller" : "answerer");
 }
 
 static void v8_result_handler(void *user_data, v8_parms_t *result)
@@ -631,11 +651,15 @@ void me_on_sip_connected(void)
     g_v8_rx_energy     = 0;
     g_v8_rx_count      = 0;
 
-    /* Initialise V.8 — we are the answering side (not calling party) */
+    /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
+    g_calling_party = (g_state == ME_DIALING);
+
+    /* Initialise V.8 */
     v8_parms_t v8_parms;
     memset(&v8_parms, 0, sizeof(v8_parms));
-    v8_parms.modem_connect_tone = MODEM_CONNECT_TONES_ANSAM_PR; /* ANSam */
-    v8_parms.send_ci            = false; /* answerer doesn't send CI */
+    v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
+                                                  : MODEM_CONNECT_TONES_ANSAM_PR;
+    v8_parms.send_ci            = false;
     v8_parms.v92                = -1;    /* don't send V.92 extension */
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     /* Advertise V.90 + V.34 + V.22bis.  V.90 training starts with V.34
@@ -649,7 +673,7 @@ void me_on_sip_connected(void)
     v8_parms.jm_cm.t66                = -1;   /* don't send T.66 */
 
     if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
-    g_v8 = v8_init(NULL, false /* answerer */, &v8_parms,
+    g_v8 = v8_init(NULL, g_calling_party, &v8_parms,
                    v8_result_handler, NULL);
     if (!g_v8) {
         fprintf(stderr, "[ME] v8_init failed\n");
@@ -669,7 +693,8 @@ void me_on_sip_connected(void)
     g_mod   = ME_MOD_NONE;
     pthread_mutex_unlock(&g_state_mtx);
 
-    fprintf(stderr, "[ME] SIP connected, starting V.8 handshake\n");
+    fprintf(stderr, "[ME] SIP connected as %s, starting V.8 handshake\n",
+            g_calling_party ? "caller" : "answerer");
 }
 
 /* Called by sip_modem.c when the SIP call is torn down */
@@ -685,6 +710,7 @@ void me_on_sip_disconnected(void)
     me_state_t prev = g_state;
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
+    g_calling_party = false;
     pthread_mutex_unlock(&g_state_mtx);
 
     if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8)
