@@ -388,6 +388,7 @@ static me_state_t      g_state     = ME_IDLE;
 static me_modulation_t g_mod       = ME_MOD_NONE;
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
+static bool            g_invert_v34_role = false; /* debug override via env */
 
 /* SpanDSP modem contexts */
 static v8_state_t     *g_v8      = NULL;
@@ -407,6 +408,8 @@ static v90_enc_t      g_v90_enc;
 #define ECHO_CAN_TAPS 512
 static modem_echo_can_segment_state_t *g_echo_can = NULL;
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
+static const int  g_v34_start_baud = 2400;   /* More robust than 3200/3429 on VoIP */
+static const int  g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
 
 /* TX sample ring buffer for echo canceller.
    The echo canceller needs the TX sample that corresponds to each RX sample.
@@ -550,16 +553,12 @@ static void start_v34_training(void)
 
     /*
      * Init V.34 in caller/answerer role matching SIP call direction.
-     * Use 3200 baud, 31200 bps as maximum; V.34 will negotiate down
-     * during training based on line conditions.
-     * Note: 3200 baud gives different carrier frequencies per direction
-     * (low=1829 Hz, high=1920 Hz) needed for echo cancellation.
-     * At 3429 baud both carriers are 1959 Hz — caller can't separate
-     * our signal from its own echo during Phase 4 S.
+     * Start with a conservative profile that is typically more robust over
+     * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
      */
     g_v34 = v34_init(NULL,
-                     3200,          /* max baud rate (NOT 3429 — same carrier both dirs) */
-                     31200,         /* max bit rate at 3200 baud */
+                     g_v34_start_baud,
+                     g_v34_start_bps,
                      g_calling_party,
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
@@ -576,6 +575,7 @@ static void start_v34_training(void)
         span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
                                 SPAN_LOG_FLOW);
     }
+    v34_tx_power(g_v34, -16.0f);
 
     /* Initialize echo canceller for full-duplex operation.
        The FXS hybrid leaks TX into RX; without cancellation the V.34
@@ -594,8 +594,8 @@ static void start_v34_training(void)
     g_tx_buf_wr = 0;
     g_tx_buf_rd = 0;
 
-    fprintf(stderr, "[ME] V.34 training started (%s, 3200 baud, up to 31200 bps)\n",
-            g_calling_party ? "caller" : "answerer");
+    fprintf(stderr, "[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
+            g_calling_party ? "caller" : "answerer", g_v34_start_baud, g_v34_start_bps);
 }
 
 static void v8_result_handler(void *user_data, v8_parms_t *result)
@@ -678,6 +678,13 @@ void me_init(void)
     dring_init(&upstream_ring);
     cr_init(&g_cr, 8000);
     v90_enc_init(&g_v90_enc);
+    {
+        const char *inv = getenv("ME_V34_INVERT_ROLE");
+        g_invert_v34_role = (inv && (inv[0] == '1' || inv[0] == 'y' || inv[0] == 'Y' ||
+                                     inv[0] == 't' || inv[0] == 'T'));
+        if (g_invert_v34_role)
+            fprintf(stderr, "[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
+    }
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
 }
@@ -733,6 +740,8 @@ void me_on_sip_connected(void)
 
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
+    if (g_invert_v34_role)
+        g_calling_party = !g_calling_party;
     trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
     /* Initialise V.8 */
@@ -750,8 +759,13 @@ void me_on_sip_connected(void)
     if (g_advertise_v90)
         v8_parms.jm_cm.modulations   |= V8_MOD_V90;
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
-    v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-    v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    if (g_advertise_v90) {
+        v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    } else {
+        v8_parms.jm_cm.pstn_access            = 0;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
+    }
     v8_parms.jm_cm.nsf                = -1;   /* don't send NSF */
     v8_parms.jm_cm.t66                = -1;   /* don't send T.66 */
 
