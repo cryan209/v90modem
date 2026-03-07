@@ -2426,14 +2426,14 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
 
     /* The 48 symbol PP signal, which is repeated 6 times, to make a 288 symbol sequence */
     /* See V.34/10.1.3.6 */
-    i = s->tx.tone_duration%48;
+    i = s->tx.tone_duration%PP_PERIOD_SYMBOLS;
     if (++s->tx.tone_duration == 1)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: PP transmission started (%d symbols)\n",
-                 PP_SYMBOLS*PP_REPEATS);
+                 PP_TOTAL_SYMBOLS);
     }
-    if (s->tx.tone_duration == PP_SYMBOLS*PP_REPEATS)
+    if (s->tx.tone_duration == PP_TOTAL_SYMBOLS)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: PP transmission complete (%d symbols), starting TRN\n",
@@ -2452,7 +2452,7 @@ static void pp_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - pp_baud_init() [Phase 3 PP: %d-symbol sequence]\n",
-             PP_SYMBOLS*PP_REPEATS);
+             PP_TOTAL_SYMBOLS);
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_pp_baud;
 }

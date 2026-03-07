@@ -2512,7 +2512,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      s->duration, mag, data_bits, s->s_detect_count);
         }
 
-        if (s->duration >= 128 && s->s_detect_count >= 14)
+        /* Require a stronger S pattern before declaring detection.
+           A loose threshold causes false positives and premature Phase 4 entry. */
+        if (s->duration >= 256 && s->s_detect_count >= 20)
         {
             s->received_event = V34_EVENT_S;
             s->stage = V34_RX_STAGE_PHASE3_TRAINING;
@@ -2778,6 +2780,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     s->mp_hyp_bitstream[h] = bstream;
                 }
                 /*endfor*/
+                /* Expose one live hypothesis stream for diagnostics while unlocked. */
+                s->bitstream = s->mp_hyp_bitstream[0];
 
                 if (chosen_hyp >= 0)
                 {

@@ -200,15 +200,16 @@ static const float line_probe_samples[LINE_PROBE_SAMPLES] =
     LINE_PROBE_SCALE( 24514.95f)
 };
 
-/* The 48 symbol PP signal, which is repeated 6 times, to make a 288 symbol sequence */
-/* See V.34/10.1.3.5 */
-#define PP_REPEATS 6
-#define PP_SYMBOLS (8*PP_REPEATS)
+/* PP is one 48-symbol period repeated 6 times (total 288 symbols).
+   See V.34/10.1.3.6. */
+#define PP_PERIOD_SYMBOLS 48
+#define PP_PERIOD_REPEATS 6
+#define PP_TOTAL_SYMBOLS (PP_PERIOD_SYMBOLS*PP_PERIOD_REPEATS)
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
-static const complexi16_t pp_symbols[PP_SYMBOLS] =
+static const complexi16_t pp_symbols[PP_PERIOD_SYMBOLS] =
 #else
-static const complexf_t pp_symbols[PP_SYMBOLS] =
+static const complexf_t pp_symbols[PP_PERIOD_SYMBOLS] =
 #endif
 {
     {PP_SYMBOL_SCALE( 1.0000000f), PP_SYMBOL_SCALE( 0.0000000f)},
@@ -305,4 +306,3 @@ static const complexf_t pph_symbols[PPH_SYMBOLS] =
     {PP_SYMBOL_SCALE(-0.7071068f), PP_SYMBOL_SCALE( 0.7071068f)},   /* 135 degrees */
     {PP_SYMBOL_SCALE(-0.7071068f), PP_SYMBOL_SCALE(-0.7071068f)},   /* 225 degrees */
 };
-
