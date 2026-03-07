@@ -120,7 +120,7 @@
 #define V34_TRAINING_END                0
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               18
-#define MP_PREAMBLE_SCORE_MIN           18
+#define MP_PREAMBLE_SCORE_MIN           17
 #define MP_PREAMBLE_WAIT_BITS           5000
 
 enum
@@ -330,6 +330,35 @@ static bool mp_start_bit_ok(int type, int bit_index, int bit_value)
     }
     /*endif*/
     return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int mp_data_bit_index(int type, int frame_idx)
+{
+    /* Return 1-based data-bit index within MP body (excluding inserted start bits).
+       For inserted start-bit locations return -1. frame_idx is the absolute MP bit
+       index where 0..16 are sync '1's, 17=start, 18=type. */
+    int idx;
+    int data_count;
+
+    if (frame_idx < 19)
+        return -1;
+    /*endif*/
+    if (mp_start_bit_ok(type, frame_idx, 1))
+    {
+        /* Non-start-bit location. Count non-start bits from frame_idx 19..frame_idx. */
+        data_count = 0;
+        for (idx = 19;  idx <= frame_idx;  idx++)
+        {
+            if (mp_start_bit_ok(type, idx, 1))
+                data_count++;
+            /*endif*/
+        }
+        /*endfor*/
+        return data_count;
+    }
+    /*endif*/
+    return -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3263,7 +3292,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     bits32_to_str(s->bitstream, tail);
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: MP preamble detected (baud %d): "
-                             "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, tail=0b%s\n",
+                             "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
+                             "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
                              s->duration, preamble_score, type, s->mp_frame_target, tail);
                     continue;
                 }
@@ -3288,12 +3318,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         type_now = s->mp_frame_bits[18];
                         if (!mp_start_bit_ok(type_now, idx, bits[i]))
                         {
+                            int data_idx;
+
+                            data_idx = mp_data_bit_index(type_now, idx);
                             s->mp_early_rejects++;
                             if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 16) == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP%d rejected early at bit[%d]=%d (expected start bit 0), reject_count=%d\n",
-                                         type_now, idx, bits[i], s->mp_early_rejects);
+                                         "Rx - Phase 4: MP%d rejected early at frame_idx=%d body_idx=%d data_idx=%d value=%d "
+                                         "(expected start bit 0), reject_count=%d\n",
+                                         type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
                             }
                             /*endif*/
                             s->mp_frame_pos = 0;
@@ -3317,9 +3351,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     if (s->bit_count <= 40 || (s->bit_count % 32) == 0)
                     {
+                        int frame_idx;
+                        int type_now;
+                        int data_idx;
+
+                        frame_idx = s->mp_frame_pos - 1;
+                        type_now = s->mp_frame_bits[18];
+                        data_idx = mp_data_bit_index(type_now, frame_idx);
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 MP bit[%d]=%d frame_pos=%d/%d\n",
-                                 s->bit_count, bits[i], s->mp_frame_pos, s->mp_frame_target);
+                                 "Rx - Phase 4 MP body_idx=%d frame_idx=%d data_idx=%d value=%d frame_pos=%d/%d\n",
+                                 s->bit_count, frame_idx, data_idx, bits[i],
+                                 s->mp_frame_pos, s->mp_frame_target);
                     }
                     /*endif*/
 

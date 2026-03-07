@@ -741,6 +741,7 @@ typedef struct
     uint32_t phase3_j_win[8][3][16];
     int phase3_j_bits;
     int phase3_j_lock_hyp;
+    int phase3_j_trn16;
     int phase4_j_seen;
     int phase4_trn_after_j;
 
