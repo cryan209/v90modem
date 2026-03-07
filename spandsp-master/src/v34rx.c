@@ -214,6 +214,23 @@ static void bits32_to_str(uint32_t v, char out[33])
 }
 /*- End of function --------------------------------------------------------*/
 
+static int phase3_j_pattern_bit(int pat_type, int bit_idx)
+{
+    /* LSB-first pattern bits, per V.34 Table 18/19 representation used by TX:
+       J (4-point)  = 0x8990
+       J (16-point) = 0x89B0
+       J'           = 0x899F */
+    static const uint16_t pats[3] =
+    {
+        0x8990,
+        0x89B0,
+        0x899F
+    };
+
+    return (pats[pat_type] >> (bit_idx & 15)) & 1;
+}
+/*- End of function --------------------------------------------------------*/
+
 static uint16_t mp_crc_bits(const uint8_t bits[], int type)
 {
     int i;
@@ -2484,54 +2501,194 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     {
     case V34_RX_STAGE_PHASE3_WAIT_S:
         /* Phase 3 S detection using demodulated differential phase.
-           S corresponds to repeated 180-degree reversals (data_bits==2). */
+           Use a dominant-symbol detector over a 32-baud window.
+           In real channels, phase/mapping ambiguity can move S away from a
+           fixed symbol index, so don't hardcode data_bits==2. */
+        {
+            float mag_now;
+            float mag_prev;
+            float dot;
+            int idx;
+            int old_rev;
+            int new_rev;
+
         ang1 = arctan2(sample->re, sample->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
         s->duration++;
 
-        {
-            int idx = (s->duration - 1) & 31;
-            int old_was_2 = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
-            int new_is_2 = (data_bits == 2) ? 1 : 0;
+            /* Explicit Phase 3 J/J' detector (answerer side):
+               - apply all dibit mapping hypotheses
+               - undo differential encoding (Z_n -> I_n)
+               - descramble
+               - correlate against J/J' 16-bit templates */
+            if (!s->calling_party)
+            {
+                int h;
+                int best_score;
+                int best_h;
+                int best_t;
+                int best_p;
 
-            if (new_is_2)
+                best_score = 0;
+                best_h = -1;
+                best_t = -1;
+                best_p = 0;
+                for (h = 0;  h < 8;  h++)
+                {
+                    int raw_sym;
+
+                    raw_sym = map_phase4_raw_bits(data_bits, h);
+                    if (s->phase3_j_prev_valid[h])
+                    {
+                        int in_sym;
+                        uint32_t reg;
+                        int dbit[2];
+                        int b;
+
+                        in_sym = (raw_sym - s->phase3_j_prev_z[h]) & 0x3;
+                        reg = s->phase3_j_scramble[h];
+                        dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
+                        dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
+                        s->phase3_j_scramble[h] = reg;
+
+                        for (b = 0;  b < 2;  b++)
+                        {
+                            int t;
+                            int bit_pos;
+
+                            bit_pos = s->phase3_j_bits + b;
+                            for (t = 0;  t < 3;  t++)
+                            {
+                                int p;
+
+                                for (p = 0;  p < 16;  p++)
+                                {
+                                    uint32_t w;
+                                    int match;
+                                    int score;
+
+                                    match = (dbit[b] == phase3_j_pattern_bit(t, bit_pos + p)) ? 1 : 0;
+                                    w = s->phase3_j_win[h][t][p];
+                                    w = (w << 1) | (uint32_t) match;
+                                    s->phase3_j_win[h][t][p] = w;
+                                    score = __builtin_popcount(w);
+                                    if (score > best_score)
+                                    {
+                                        best_score = score;
+                                        best_h = h;
+                                        best_t = t;
+                                        best_p = p;
+                                    }
+                                    /*endif*/
+                                }
+                                /*endfor*/
+                            }
+                            /*endfor*/
+                        }
+                        /*endfor*/
+                    }
+                    /*endif*/
+                    s->phase3_j_prev_z[h] = (uint8_t) raw_sym;
+                    s->phase3_j_prev_valid[h] = 1;
+                }
+                /*endfor*/
+                s->phase3_j_bits += 2;
+                if ((s->duration <= 20 || (s->duration % 64) == 0) && s->phase3_j_bits >= 16)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3 J detector: bits=%d best_score=%d/32 hyp=%d\n",
+                             s->phase3_j_bits, best_score, best_h);
+                }
+                /*endif*/
+                if (s->phase3_j_bits >= 48
+                    &&
+                    best_score >= 28
+                    &&
+                    (s->received_event == V34_EVENT_NONE || s->received_event == V34_EVENT_S))
+                {
+                    s->received_event = (best_t == 2)  ?  V34_EVENT_J_DASHED  :  V34_EVENT_J;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: explicit %s detected (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                             (best_t == 2)  ?  "J'"  :  "J",
+                             best_h, best_p, best_score, s->phase3_j_bits);
+                }
+                /*endif*/
+            }
+            /*endif*/
+
+            idx = (s->duration - 1) & 31;
+            int old_sym = s->phase3_s_ring[idx] & 3;
+
+            if (s->duration > 32)
+                s->phase3_s_counts[old_sym]--;
+            /*endif*/
+            s->phase3_s_ring[idx] = (uint8_t) (data_bits & 3);
+            s->phase3_s_counts[data_bits & 3]++;
+            s->s_detect_count = s->phase3_s_counts[0];
+            if (s->phase3_s_counts[1] > s->s_detect_count)
+                s->s_detect_count = s->phase3_s_counts[1];
+            if (s->phase3_s_counts[2] > s->s_detect_count)
+                s->s_detect_count = s->phase3_s_counts[2];
+            if (s->phase3_s_counts[3] > s->s_detect_count)
+                s->s_detect_count = s->phase3_s_counts[3];
+
+            /* Independent reversal detector:
+               count bauds where current symbol is close to 180° from previous. */
+            mag_now = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            mag_prev = sqrtf(s->last_sample.re * s->last_sample.re
+                             + s->last_sample.im * s->last_sample.im);
+            dot = sample->re*s->last_sample.re + sample->im*s->last_sample.im;
+            old_rev = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
+            new_rev = (mag_now > 0.2f  &&  mag_prev > 0.2f  &&  dot < -0.15f*mag_now*mag_prev) ? 1 : 0;
+            if (new_rev)
                 s->s_window |= (1u << idx);
             else
                 s->s_window &= ~(1u << idx);
-
-            s->s_detect_count += new_is_2 - old_was_2;
-        }
+            s->bit_count += new_rev - old_rev;  /* reuse bit_count as reversal window count */
 
         if (s->duration <= 10 || (s->duration % 500) == 0)
         {
-            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
-                     s->duration, mag, data_bits, s->s_detect_count);
+                     "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d dom=%d/32 rev=%d/32 counts=%d,%d,%d,%d\n",
+                     s->duration, mag_now, data_bits, s->s_detect_count, s->bit_count,
+                     s->phase3_s_counts[0], s->phase3_s_counts[1],
+                     s->phase3_s_counts[2], s->phase3_s_counts[3]);
         }
 
-        /* Require a stronger S pattern before declaring detection.
-           A loose threshold causes false positives and premature Phase 4 entry. */
-        if (s->duration >= 256 && s->s_detect_count >= 20)
+        /* In this path detection is armed only after local J starts (Phase 3),
+           so we can use a less strict threshold than earlier TRN-safe values.
+           Reversal count is the most robust indicator across phase ambiguity. */
+        if (s->duration >= 128 && (s->s_detect_count >= 18 || s->bit_count >= 20))
         {
+            int rev_hits = s->bit_count;
             s->received_event = V34_EVENT_S;
             s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-            s->bit_count = 0;
+            s->bit_count = 0;  /* clear reversal counter reuse */
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S pattern detected (baud %d, win=%d/32)\n",
-                     s->duration, s->s_detect_count);
+                     "Rx - Phase 3: S pattern detected (baud %d, dom=%d/32 rev=%d/32)\n",
+                     s->duration, s->s_detect_count, rev_hits);
         }
         else if (s->duration >= 6000)
         {
             /* Don't force a false S event; keep searching for a real pattern. */
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S detect timeout (%d bauds, win=%d/32), continuing search\n",
-                     s->duration, s->s_detect_count);
+                     "Rx - Phase 3: S detect timeout (%d bauds, dom=%d/32 rev=%d/32), continuing search\n",
+                     s->duration, s->s_detect_count, s->bit_count);
             s->duration = 0;
             s->s_detect_count = 0;
+            s->bit_count = 0;
             s->s_window = 0;
+            memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
+            memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
+            s->phase3_s_pos = 0;
+            memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
+            memset(s->phase3_j_prev_z, 0, sizeof(s->phase3_j_prev_z));
+            memset(s->phase3_j_prev_valid, 0, sizeof(s->phase3_j_prev_valid));
+            memset(s->phase3_j_win, 0, sizeof(s->phase3_j_win));
+            s->phase3_j_bits = 0;
+        }
         }
         break;
 
@@ -3424,9 +3581,17 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.total_baud_timing_correction = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
+    memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+    memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+    s->rx.phase3_s_pos = 0;
     memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
+    memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+    memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+    memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+    s->rx.phase3_j_bits = 0;
 
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */

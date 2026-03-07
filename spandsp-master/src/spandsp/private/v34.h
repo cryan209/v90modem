@@ -194,7 +194,9 @@ enum v34_events_e
     V34_EVENT_INFOH_OK,
     V34_EVENT_INFOH_BAD,
     V34_EVENT_L2_SEEN,
-    V34_EVENT_S
+    V34_EVENT_S,
+    V34_EVENT_J,
+    V34_EVENT_J_DASHED
 };
 
 typedef struct
@@ -726,9 +728,17 @@ typedef struct
     int persistence2;
     int phase3_s_guard_samples;
     int phase3_s_hits;
+    uint8_t phase3_s_ring[32];
+    int phase3_s_counts[4];
+    int phase3_s_pos;
     uint8_t phase3_pp_lag8[8];
     int phase3_pp_obs;
     int phase3_pp_match;
+    uint32_t phase3_j_scramble[8];
+    uint8_t phase3_j_prev_z[8];
+    uint8_t phase3_j_prev_valid[8];
+    uint32_t phase3_j_win[8][3][16];
+    int phase3_j_bits;
 
     /* MP or MPh receive tracking data */
     int mp_count;

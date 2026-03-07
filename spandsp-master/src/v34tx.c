@@ -2401,9 +2401,17 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.s_window = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
+    memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+    memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+    s->rx.phase3_s_pos = 0;
     memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
+    memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+    memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+    memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+    s->rx.phase3_j_bits = 0;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
     /* Reset RX RRC filter to flush stale CC demodulator data */
@@ -2479,6 +2487,17 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         0x899F, /* 4 point constellation */
         0x899F  /* 16 point constellation (same pattern per Table 19) */
     };
+    /* Guard against indefinite J-loop when far-end Phase 3 signaling is weak.
+       ~500 ms maximum wait from 11.3.1.2.6 at current baud. */
+    static const int j_wait_max_bauds[6] =
+    {
+        (2400*500 + 999)/1000,
+        (2743*500 + 999)/1000,
+        (2800*500 + 999)/1000,
+        (3000*500 + 999)/1000,
+        (3200*500 + 999)/1000,
+        (3429*500 + 999)/1000
+    };
     int bit;
     int j_pat_idx;
 
@@ -2523,9 +2542,17 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.s_window = 0;
             s->rx.phase3_s_guard_samples = 4000;
             s->rx.phase3_s_hits = 0;
+            memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+            memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+            s->rx.phase3_s_pos = 0;
             memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
             s->rx.phase3_pp_obs = 0;
             s->rx.phase3_pp_match = 0;
+            memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+            memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+            memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+            memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+            s->rx.phase3_j_bits = 0;
         }
         /*endif*/
         break;
@@ -2546,68 +2573,92 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         if (s->tx.persistence2 == 0)
             s->tx.persistence2 = j_pattern[j_pat_idx];
         /*endif*/
-        if (++s->tx.tone_duration >= 16)
+        if (++s->tx.tone_duration >= 16
+            &&
+            (s->tx.tone_duration % 16) == 0)
         {
             if (s->tx.duplex)
             {
-                if (s->rx.received_event == V34_EVENT_S)
+                if (s->tx.calling_party
+                    &&
+                    s->rx.received_event == V34_EVENT_S)
                 {
-                    if (s->tx.calling_party)
+                    /* Caller: send J' then TRN then MP (V.34 §11.4.1.1.1) */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - far-end S detected, switching J -> J'\n");
+                    s->tx.stage = V34_TX_STAGE_J_DASHED;
+                    s->tx.persistence2 = j_dashed_pattern[0];
+                    s->tx.tone_duration = 0;
+                }
+                else if (!s->tx.calling_party
+                         &&
+                         (s->rx.received_event == V34_EVENT_J
+                          ||  s->rx.received_event == V34_EVENT_J_DASHED
+                          ||  (s->rx.received_event == V34_EVENT_S && s->rx.info1c.md > 0)))
+                {
+                    int md_units;
+                    int md_wait_samples;
+
+                    md_units = s->rx.info1c.md;
+                    md_wait_samples = (md_units*35*8000 + 500)/1000;
+
+                    /* Answerer Phase 3 (11.3.1.2.4): after first detected
+                       S-transition, send silence and (if MD is indicated)
+                       wait MD duration while conditioning for the next
+                       S-transition. */
+                    if (s->rx.received_event == V34_EVENT_S
+                        &&
+                        md_units > 0
+                        &&
+                        s->rx.phase3_s_hits == 0)
                     {
-                        /* Caller: send J' then TRN then MP (V.34 §11.4.1.1.1) */
-                        span_log(&s->logging, SPAN_LOG_FLOW,
-                                 "Tx - far-end S detected, switching J -> J'\n");
-                        s->tx.stage = V34_TX_STAGE_J_DASHED;
-                        s->tx.persistence2 = j_dashed_pattern[0];
+                        s->rx.phase3_s_hits = 1;
+                        s->rx.received_event = V34_EVENT_NONE;
+                        s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+                        s->rx.duration = 0;
+                        s->rx.bit_count = 0;
+                        s->rx.phase3_s_guard_samples = md_wait_samples;
+                        s->tx.persistence2 = j_pattern[j_pat_idx];
                         s->tx.tone_duration = 0;
-                    }
-                    else
-                    {
-                        int md_units;
-                        int md_wait_samples;
-
-                        md_units = s->rx.info1c.md;
-                        md_wait_samples = (md_units*35*8000 + 500)/1000;
-
-                        /* Answerer Phase 3 (11.3.1.2.4): after first detected
-                           S-transition, send silence and (if MD is indicated)
-                           wait MD duration while conditioning for the next
-                           S-transition. */
-                        if (md_units > 0  &&  s->rx.phase3_s_hits == 0)
-                        {
-                            s->rx.phase3_s_hits = 1;
-                            s->rx.received_event = V34_EVENT_NONE;
-                            s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
-                            s->rx.duration = 0;
-                            s->rx.bit_count = 0;
-                            s->rx.phase3_s_guard_samples = md_wait_samples;
-                            s->tx.persistence2 = j_pattern[j_pat_idx];
-                            s->tx.tone_duration = 0;
-                            span_log(&s->logging, SPAN_LOG_FLOW,
-                                     "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
-                                     "waiting %d samples for next S transition\n",
-                                     md_units, md_wait_samples);
-                            break;
-                        }
-                        /*endif*/
-
-                        /* Answerer: per V.34 §11.3.1.2.6 / §11.4.1.2, after
-                           detecting the caller's S, go silent and wait for the
-                           caller to complete Phase 3 (PP, TRN, J), then send
-                           Phase 4: S(128T), S-bar(16T), TRN(>=512T), MP.
-                           The answerer does NOT send J' — only the caller
-                           sends J' (§11.4.1.1.1). */
+                        memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+                        memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+                        memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+                        memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+                        s->rx.phase3_j_bits = 0;
                         span_log(&s->logging, SPAN_LOG_FLOW,
-                                 "Tx - far-end S detected, starting Phase 4 wait\n");
-                        phase4_wait_init(s);
+                                 "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
+                                 "waiting %d samples for next S transition\n",
+                                 md_units, md_wait_samples);
+                        break;
                     }
                     /*endif*/
+
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - far-end %s detected, starting Phase 4 wait\n",
+                             (s->rx.received_event == V34_EVENT_J_DASHED)
+                                ? "J'"
+                                : ((s->rx.received_event == V34_EVENT_J) ? "J" : "S(MD)"));
+                    phase4_wait_init(s);
+                }
+                else if (!s->tx.calling_party
+                         &&
+                         s->tx.baud_rate >= 0
+                         &&
+                         s->tx.baud_rate <= 5
+                         &&
+                         s->tx.tone_duration >= j_wait_max_bauds[s->tx.baud_rate])
+                {
+                    /* Interop fallback: if the peer's Phase 3 transition is not
+                       detected reliably, move to Phase 4 after the allowed wait. */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - Phase 3: J wait timeout (%d bauds), starting Phase 4 wait\n",
+                             s->tx.tone_duration);
+                    phase4_wait_init(s);
                 }
                 else
                 {
                     /* Continue with repeats of J */
                     s->tx.persistence2 = j_pattern[j_pat_idx];
-                    s->tx.tone_duration = 0;
                 }
                 /*endif*/
             }
