@@ -335,6 +335,32 @@ static void trace_phase(const char *fmt, ...)
     fputc('\n', stderr);
 }
 
+static int parse_env_int(const char *name, int fallback)
+{
+    const char *s = getenv(name);
+    if (!s || !*s)
+        return fallback;
+    char *endp = NULL;
+    long v = strtol(s, &endp, 10);
+    if (endp == s || *endp != '\0')
+        return fallback;
+    return (int)v;
+}
+
+static bool valid_v34_baud(int baud)
+{
+    return baud == 2400 || baud == 2743 || baud == 2800 ||
+           baud == 3000 || baud == 3200 || baud == 3429;
+}
+
+static bool valid_v34_bps(int bps)
+{
+    return bps == 4800 || bps == 7200 || bps == 9600 || bps == 12000 ||
+           bps == 14400 || bps == 16800 || bps == 19200 || bps == 21600 ||
+           bps == 24000 || bps == 26400 || bps == 28800 || bps == 31200 ||
+           bps == 33600;
+}
+
 /* Bit accumulator for V.22bis TX (one byte at a time) */
 static uint8_t  v22bis_tx_byte = 0;
 static int      v22bis_tx_bits = 0;
@@ -408,8 +434,8 @@ static v90_enc_t      g_v90_enc;
 #define ECHO_CAN_TAPS 512
 static modem_echo_can_segment_state_t *g_echo_can = NULL;
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
-static const int  g_v34_start_baud = 2400;   /* More robust than 3200/3429 on VoIP */
-static const int  g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
+static int        g_v34_start_baud = 2400;   /* Default robust baseline */
+static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
 
 /* TX sample ring buffer for echo canceller.
    The echo canceller needs the TX sample that corresponds to each RX sample.
@@ -684,6 +710,16 @@ void me_init(void)
                                      inv[0] == 't' || inv[0] == 'T'));
         if (g_invert_v34_role)
             fprintf(stderr, "[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
+    }
+    {
+        int env_baud = parse_env_int("ME_V34_BAUD", g_v34_start_baud);
+        int env_bps  = parse_env_int("ME_V34_BPS", g_v34_start_bps);
+        if (valid_v34_baud(env_baud))
+            g_v34_start_baud = env_baud;
+        if (valid_v34_bps(env_bps))
+            g_v34_start_bps = env_bps;
+        fprintf(stderr, "[ME] V.34 start profile: %d baud / %d bps\n",
+                g_v34_start_baud, g_v34_start_bps);
     }
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
