@@ -2534,9 +2534,50 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         break;
 
     case V34_RX_STAGE_PHASE3_TRAINING:
-        /* Phase 3 training in progress. The TX side handles the state transitions
-           based on V34_EVENT_S being set. We just keep the demodulator running. */
+        /* Phase 3 training in progress.
+           Also compute a lightweight PP heuristic: PP is an 8-symbol sequence
+           repeated, so differential symbol decisions tend to show lag-8 periodicity. */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
         s->duration++;
+        {
+            int idx = (s->duration - 1) & 7;
+            int prev = s->phase3_pp_lag8[idx];
+
+            if (s->duration > 8)
+            {
+                s->phase3_pp_obs++;
+                if (data_bits == prev)
+                    s->phase3_pp_match++;
+                /*endif*/
+            }
+            /*endif*/
+            s->phase3_pp_lag8[idx] = (uint8_t) data_bits;
+        }
+
+        if (s->duration <= 10 || (s->duration % 500) == 0)
+        {
+            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            float pct = (s->phase3_pp_obs > 0)
+                        ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
+                        : 0.0f;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3 PP heuristic baud %d: mag=%.3f data_bits=%d lag8=%d/%d (%.1f%%)\n",
+                     s->duration, mag, data_bits,
+                     s->phase3_pp_match, s->phase3_pp_obs, pct);
+        }
+        if (s->phase3_pp_obs >= 128
+            &&
+            ((100*s->phase3_pp_match)/s->phase3_pp_obs) >= 70
+            &&
+            (s->duration % 500) == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: PP-like periodicity observed (lag8 match %d/%d)\n",
+                     s->phase3_pp_match, s->phase3_pp_obs);
+        }
         break;
 
     case V34_RX_STAGE_PHASE3_DONE:
@@ -3379,6 +3420,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.total_baud_timing_correction = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
+    memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
+    s->rx.phase3_pp_obs = 0;
+    s->rx.phase3_pp_match = 0;
 
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */

@@ -2401,6 +2401,9 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.s_window = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
+    memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
+    s->rx.phase3_pp_obs = 0;
+    s->rx.phase3_pp_match = 0;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
     /* Reset RX RRC filter to flush stale CC demodulator data */
@@ -2520,6 +2523,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.s_window = 0;
             s->rx.phase3_s_guard_samples = 4000;
             s->rx.phase3_s_hits = 0;
+            memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
+            s->rx.phase3_pp_obs = 0;
+            s->rx.phase3_pp_match = 0;
         }
         /*endif*/
         break;
