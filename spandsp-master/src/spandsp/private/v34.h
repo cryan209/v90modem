@@ -733,6 +733,9 @@ typedef struct
     int mp_hypothesis;
     uint32_t mp_hyp_scramble[8];
     uint32_t mp_hyp_bitstream[8];
+    uint8_t mp_frame_bits[188];
+    int mp_frame_pos;
+    int mp_frame_target;
 
     int dft_ptr;
 #if defined(SPANDSP_USE_FIXED_POINT)

@@ -214,6 +214,109 @@ static void bits32_to_str(uint32_t v, char out[33])
 }
 /*- End of function --------------------------------------------------------*/
 
+static uint16_t mp_crc_bits(const uint8_t bits[], int type)
+{
+    int i;
+    int len;
+    uint16_t crc;
+
+    crc = 0xFFFF;
+    len = (type == 1)  ?  170  :  68;
+    for (i = 17;  i < len;  i += 17)
+    {
+        int j;
+
+        for (j = 0;  j < 16;  j++)
+            crc = crc_itu16_bits(bits[i + j], 1, crc);
+        /*endfor*/
+    }
+    /*endfor*/
+    return crc;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_crc_ok(const uint8_t bits[], int type, uint16_t *rx_crc_out, uint16_t *residual_out)
+{
+    int i;
+    int crc_start;
+    uint16_t crc;
+    uint16_t rx_crc;
+
+    crc = mp_crc_bits(bits, type);
+    crc_start = (type == 1)  ?  171  :  69;
+    rx_crc = 0;
+    for (i = 0;  i < 16;  i++)
+    {
+        rx_crc |= bits[crc_start + i] << i;
+        crc = crc_itu16_bits(bits[crc_start + i], 1, crc);
+    }
+    /*endfor*/
+    if (rx_crc_out)
+        *rx_crc_out = rx_crc;
+    /*endif*/
+    if (residual_out)
+        *residual_out = crc;
+    /*endif*/
+    return (crc == 0);
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_fill_ok(const uint8_t bits[], int type)
+{
+    if (type == 1)
+        return bits[187] == 0;
+    return (bits[85] | bits[86] | bits[87]) == 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_pack_for_parser(uint8_t out[25], const uint8_t bits[], int type)
+{
+    int i;
+    int limit;
+    uint8_t *t;
+    bitstream_state_t bs;
+
+    memset(out, 0, 25);
+    bitstream_init(&bs, true);
+    t = out;
+    limit = (type == 1)  ?  188  :  88;
+    for (i = 18;  i < limit;  i++)
+        bitstream_put(&bs, &t, bits[i], 1);
+    /*endfor*/
+    bitstream_flush(&bs, &t);
+}
+/*- End of function --------------------------------------------------------*/
+
+static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type, bool crc_ok, uint16_t rx_crc, uint16_t residual_crc, bool fill_ok)
+{
+    if (type == 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - MP0 diag: sync[0..16]=all1 start17=%d type18=%d reserved19=%d "
+                 "start34=%d start51=%d start68=%d crc_rx=0x%04X crc_res=0x%04X "
+                 "fill85..87=%d%d%d crc_ok=%d fill_ok=%d\n",
+                 bits[17], bits[18], bits[19],
+                 bits[34], bits[51], bits[68],
+                 rx_crc, residual_crc,
+                 bits[85], bits[86], bits[87],
+                 crc_ok, fill_ok);
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - MP1 diag: sync[0..16]=all1 start17=%d type18=%d reserved19=%d "
+                 "starts34/51/68/85/102/119/136/153/170=%d%d%d%d%d%d%d%d%d "
+                 "crc_rx=0x%04X crc_res=0x%04X fill187=%d crc_ok=%d fill_ok=%d\n",
+                 bits[17], bits[18], bits[19],
+                 bits[34], bits[51], bits[68], bits[85], bits[102],
+                 bits[119], bits[136], bits[153], bits[170],
+                 rx_crc, residual_crc, bits[187],
+                 crc_ok, fill_ok);
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void pack_output_bitstream(v34_rx_state_t *s)
 {
     uint8_t *t;
@@ -2586,83 +2689,92 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      (unsigned)s->bitstream, s->mp_hypothesis);
         }
 
-        /* Scan for MP/MPh messages — same logic as process_cc_half_baud */
-            if (s->mp_hypothesis >= 0  &&  !locked_this_symbol)
-            {
-                for (i = 0;  i < 2;  i++)
+        /* Scan for MP frames on the primary channel */
+        if (s->mp_hypothesis >= 0  &&  !locked_this_symbol)
         {
-            s->bitstream = (s->bitstream << 1) | bits[i];
-            if (s->mp_seen >= 2)
+            for (i = 0;  i < 2;  i++)
             {
-                /* Post-MP data */
-                s->put_bit(s->put_bit_user_data, bits[i]);
-                continue;
-            }
-            /*endif*/
-            if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
-            {
-                /* E is 20 consecutive ones — end of MP exchange */
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: E signal detected, MP exchange complete\n");
-                s->mp_seen = 2;
-                if (s->duplex)
-                    report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
-                /*endif*/
-            }
-            else if ((s->bitstream & 0x7FFFE) == 0x7FFFC)
-            {
-                char tail[33];
-
-                /* MP preamble detected: 16 ones + start bit (0) + type bit.
-                   bits[i] is the type bit. However, the type bit may be decoded
-                   incorrectly due to bit errors. Instead of trusting it, always
-                   try MP0 (type=0) first, then MP1 (type=1) if CRC fails.
-                   This dual-length approach handles single-bit errors in the type. */
-                bits32_to_str(s->bitstream, tail);
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: MP preamble detected (baud %d, type_bit=%d), trying MP0 first\n"
-                         "Rx - Phase 4: MP framing expects 16x'1' + start '0' + type bit\n"
-                         "Rx - Phase 4: MP preamble tail bits=0b%s\n",
-                         s->duration, bits[i], tail);
-                s->crc = 0xFFFF;
-                s->bit_count = 0;
-                s->mp_count = 17;
-                /* Always try MP0 first (84+1=85 bits). If CRC fails at MP0
-                   boundary, we'll continue to MP1 length (186+1=187 bits). */
-                s->mp_len = 84 + 1;
-                s->mp_and_fill_len = 186 + 1 + 1;  /* max length to keep collecting */
-            }
-            /*endif*/
-            if (s->mp_count >= 0)
-            {
-                int start_boundary;
-
-                s->mp_count++;
-                start_boundary = ((s->mp_count % 17) == 0);
-                /* Don't include the start bits in the CRC calculation */
-                if (!start_boundary)
-                    s->crc = crc_itu16_bits(bits[i], 1, s->crc);
-                /*endif*/
-                s->bit_count++;
-                if ((s->bit_count & 0x07) == 0)
-                    s->info_buf[(s->bit_count >> 3) - 1] = bit_reverse8(s->bitstream & 0xFF);
-                /*endif*/
-                if (s->bit_count <= 40 || (s->bit_count % 32) == 0 || start_boundary)
+                s->bitstream = (s->bitstream << 1) | bits[i];
+                if (s->mp_seen >= 2)
                 {
+                    /* Post-MP data */
+                    s->put_bit(s->put_bit_user_data, bits[i]);
+                    continue;
+                }
+                /*endif*/
+                if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
+                {
+                    /* E is 20 consecutive ones — end of MP exchange */
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4 MP bit[%d]=%d mp_count=%d start_boundary=%d crc=0x%04X\n",
-                             s->bit_count, bits[i], s->mp_count, start_boundary, s->crc);
+                             "Rx - Phase 4: E signal detected, MP exchange complete\n");
+                    s->mp_seen = 2;
+                    if (s->duplex)
+                        report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
+                    /*endif*/
+                    continue;
                 }
                 /*endif*/
-                /* Check CRC at MP0 boundary (mp_count=85) */
-                if (s->mp_count == 84 + 1)
+
+                /* Detect 17x'1' + start '0' + type bit. */
+                if ((s->bitstream & 0x7FFFE) == 0x7FFFC)
                 {
-                    if (s->crc == 0)
+                    int b;
+                    int type;
+                    char tail[33];
+
+                    type = bits[i];
+                    for (b = 0;  b < 17;  b++)
+                        s->mp_frame_bits[b] = 1;
+                    /*endfor*/
+                    s->mp_frame_bits[17] = 0;
+                    s->mp_frame_bits[18] = type;
+                    s->mp_frame_target = (type == 1)  ?  188  :  88;
+                    s->mp_frame_pos = 19;
+                    s->bit_count = 0;
+
+                    bits32_to_str(s->bitstream, tail);
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: MP preamble detected (baud %d): "
+                             "17x'1' + start(0) + type(%d), target=%d bits, tail=0b%s\n",
+                             s->duration, type, s->mp_frame_target, tail);
+                    continue;
+                }
+                /*endif*/
+
+                if (s->mp_frame_pos > 0  &&  s->mp_frame_pos < s->mp_frame_target)
+                {
+                    bool crc_good;
+                    bool fill_good;
+                    int type;
+                    uint16_t rx_crc;
+                    uint16_t residual_crc;
+
+                    s->mp_frame_bits[s->mp_frame_pos++] = bits[i];
+                    s->bit_count = s->mp_frame_pos - 19;
+                    if (s->bit_count <= 40 || (s->bit_count % 32) == 0)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP0 received (CRC OK, %d bits)\n", s->bit_count);
+                                 "Rx - Phase 4 MP bit[%d]=%d frame_pos=%d/%d\n",
+                                 s->bit_count, bits[i], s->mp_frame_pos, s->mp_frame_target);
+                    }
+                    /*endif*/
+
+                    if (s->mp_frame_pos < s->mp_frame_target)
+                        continue;
+                    /*endif*/
+
+                    type = s->mp_frame_bits[18];
+                    crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
+                    fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                    log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
+                    if (crc_good  &&  fill_good)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
+                                 type, s->mp_frame_target);
                         if (s->duplex)
                         {
+                            mp_pack_for_parser(s->info_buf, s->mp_frame_bits, type);
                             process_rx_mp(s, &mp, s->info_buf);
                             t = span_container_of(s, v34_state_t, rx);
                             if (mp.type == 1)
@@ -2688,96 +2800,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         /*endif*/
                         s->mp_seen = 1;
-                        s->mp_count = -1;  /* Stop collecting */
                     }
                     else
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP0 CRC fail (0x%04X), continuing to MP1 length\n",
-                                 s->crc);
-                        /* Don't reset — continue collecting bits to check at MP1 length.
-                           CRC continues to accumulate. */
+                                 "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d)\n",
+                                 type, crc_good, fill_good);
                     }
                     /*endif*/
+                    s->mp_frame_pos = 0;
+                    s->mp_frame_target = 0;
                 }
-                /* Check CRC at MP1 boundary (mp_count=187) */
-                else if (s->mp_count == 186 + 1)
-                {
-                    if (s->crc == 0)
-                    {
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP1 received (CRC OK, %d bits)\n", s->bit_count);
-                        if (s->duplex)
-                        {
-                            process_rx_mp(s, &mp, s->info_buf);
-                            t = span_container_of(s, v34_state_t, rx);
-                            if (mp.type == 1)
-                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                            /*endif*/
-                            switch (mp.trellis_size)
-                            {
-                            case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
-                                break;
-                            case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
-                                break;
-                            case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
-                                break;
-                            default:
-                                span_log(&t->logging, SPAN_LOG_FLOW,
-                                         "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
-                                break;
-                            }
-                            /*endswitch*/
-                        }
-                        /*endif*/
-                        s->mp_seen = 1;
-                        s->mp_count = -1;
-                    }
-                    else
-                    {
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP1 CRC also failed (0x%04X), mp_count=%d, bit_count=%d\n",
-                                 s->crc, s->mp_count, s->bit_count);
-                        /* Dump first 12 bytes for debugging */
-                        {
-                            int nb = (s->bit_count >> 3);
-                            if (nb > 12) nb = 12;
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP data[0..%d]:"
-                                     " %02X %02X %02X %02X %02X %02X"
-                                     " %02X %02X %02X %02X %02X %02X\n",
-                                     nb - 1,
-                                     nb > 0 ? s->info_buf[0] : 0,
-                                     nb > 1 ? s->info_buf[1] : 0,
-                                     nb > 2 ? s->info_buf[2] : 0,
-                                     nb > 3 ? s->info_buf[3] : 0,
-                                     nb > 4 ? s->info_buf[4] : 0,
-                                     nb > 5 ? s->info_buf[5] : 0,
-                                     nb > 6 ? s->info_buf[6] : 0,
-                                     nb > 7 ? s->info_buf[7] : 0,
-                                     nb > 8 ? s->info_buf[8] : 0,
-                                     nb > 9 ? s->info_buf[9] : 0,
-                                     nb > 10 ? s->info_buf[10] : 0,
-                                     nb > 11 ? s->info_buf[11] : 0);
-                        }
-                        s->mp_count = -1;  /* Give up on this MP, wait for next preamble */
-                    }
-                    /*endif*/
-                }
-                /* Stop collecting if we've gone past the max possible length */
-                else if (s->mp_count >= s->mp_and_fill_len)
-                {
-                    s->mp_count = -1;
-                }
+                /*endif*/
             }
-            /*endif*/
-                }
-                /*endfor*/
-            }
-            /*endif*/
+            /*endfor*/
+        }
+        /*endif*/
         }
         break;
 
