@@ -2975,9 +2975,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
         {
             s->duration++;
-            /* Guard period: 4000 samples = 0.5s at 8000 Hz.
-               The caller needs time to receive our Phase 3 signals. */
-            if (s->duration < 4000)
+            /* Guard period before declaring S transition.
+               Default is 4000 samples, but TX may retune this when waiting
+               for a second transition around optional MD. */
+            if (s->duration < s->phase3_s_guard_samples)
                 continue;
             /*endif*/
             /* Check raw audio power. Signal present threshold: -43 dBm0.
@@ -3387,6 +3388,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.last_angles[0] = 0;
     s->rx.last_angles[1] = 0;
     s->rx.total_baud_timing_correction = 0;
+    s->rx.phase3_s_guard_samples = 4000;
+    s->rx.phase3_s_hits = 0;
 
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */

@@ -2237,14 +2237,30 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 #else
     float x;
 #endif
+    int silence_bauds;
+    int md_bauds;
+
+    /* V.34 11.3.1.2.1 (answer modem): 70 +/- 5 ms silence after INFO1a
+       before first S(128T)+S-bar(16T). Caller path keeps legacy timing. */
+    silence_bauds = 0;
+    if (!s->tx.calling_party)
+        silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
+    /*endif*/
+    if (silence_bauds < 0)
+        silence_bauds = 0;
+    /*endif*/
+
+    /* MD is optional and disabled in this implementation.
+       Always skip MD waveform transmission. */
+    md_bauds = 0;
 
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_FIRST_S:
-        if (++s->tx.tone_duration < 180)
+        if (++s->tx.tone_duration <= silence_bauds)
             return zero;
         /*endif*/
-        if (s->tx.tone_duration == (128 + 180))
+        if (s->tx.tone_duration == (128 + silence_bauds))
         {
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_S;
@@ -2256,8 +2272,8 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
         if (++s->tx.tone_duration == 16)
         {
             s->tx.lastbit.re = -s->tx.lastbit.re;
-            if (s->tx.duplex  &&  s->tx.info1c.md)
-                s->tx.stage = V34_TX_STAGE_SECOND_S;
+            if (s->tx.duplex  &&  md_bauds > 0)
+                s->tx.stage = V34_TX_STAGE_MD;
             else
                 pp_baud_init(s);
             /*endif*/
@@ -2266,8 +2282,16 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_MD:
-        /* This is where MD would go */
-        break;
+        /* MD waveform is implementation-specific. Use silence placeholder
+           with correct duration so Phase 3 timing and sequencing remain
+           standards-aligned when MD is non-zero. */
+        if (md_bauds <= 0  ||  ++s->tx.tone_duration >= md_bauds)
+        {
+            s->tx.stage = V34_TX_STAGE_SECOND_S;
+            s->tx.tone_duration = 0;
+        }
+        /*endif*/
+        return zero;
     case V34_TX_STAGE_SECOND_S:
         if (++s->tx.tone_duration == 128)
         {
@@ -2299,6 +2323,14 @@ static void s_not_s_baud_init(v34_state_t *s)
     int carrier_idx;
 
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
+    if (!s->tx.calling_party)
+    {
+        int silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3 (answerer): INFO1a -> silence 70ms (~%d bauds) -> S/!S\n",
+                 silence_bauds);
+    }
+    /*endif*/
 
     /* Apply power reduction requested by the caller in INFO1c before Phase 3 TX.
        If INFO1c was not received (CRC fail), use a safe default of 3 dB to avoid
@@ -2365,6 +2397,8 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
     s->rx.duration = 0;
     s->rx.bit_count = 0;
+    s->rx.phase3_s_guard_samples = 4000;
+    s->rx.phase3_s_hits = 0;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
     /* Reset RX RRC filter to flush stale CC demodulator data */
@@ -2463,6 +2497,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
             s->rx.duration = 0;
             s->rx.bit_count = 0;
+            s->rx.phase3_s_guard_samples = 4000;
+            s->rx.phase3_s_hits = 0;
         }
         /*endif*/
         break;
@@ -2500,6 +2536,34 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     }
                     else
                     {
+                        int md_units;
+                        int md_wait_samples;
+
+                        md_units = s->rx.info1c.md;
+                        md_wait_samples = (md_units*35*8000 + 500)/1000;
+
+                        /* Answerer Phase 3 (11.3.1.2.4): after first detected
+                           S-transition, send silence and (if MD is indicated)
+                           wait MD duration while conditioning for the next
+                           S-transition. */
+                        if (md_units > 0  &&  s->rx.phase3_s_hits == 0)
+                        {
+                            s->rx.phase3_s_hits = 1;
+                            s->rx.received_event = V34_EVENT_NONE;
+                            s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+                            s->rx.duration = 0;
+                            s->rx.bit_count = 0;
+                            s->rx.phase3_s_guard_samples = md_wait_samples;
+                            s->tx.persistence2 = j_pattern[0];
+                            s->tx.tone_duration = 0;
+                            span_log(&s->logging, SPAN_LOG_FLOW,
+                                     "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
+                                     "waiting %d samples for next S transition\n",
+                                     md_units, md_wait_samples);
+                            break;
+                        }
+                        /*endif*/
+
                         /* Answerer: per V.34 §11.3.1.2.6 / §11.4.1.2, after
                            detecting the caller's S, go silent and wait for the
                            caller to complete Phase 3 (PP, TRN, J), then send

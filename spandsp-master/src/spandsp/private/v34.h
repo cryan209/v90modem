@@ -724,6 +724,8 @@ typedef struct
     int step;
     int persistence1;
     int persistence2;
+    int phase3_s_guard_samples;
+    int phase3_s_hits;
 
     /* MP or MPh receive tracking data */
     int mp_count;
