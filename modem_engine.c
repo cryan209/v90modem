@@ -334,8 +334,9 @@ static v90_enc_t      g_v90_enc;
    RX.  Without cancellation, the ~20-30 dB return loss causes ~30-50% bit
    errors in the V.34 demodulator during Phase 4 and data mode.
    SpanDSP's modem_echo canceller uses LMS — ideal for constant-amplitude
-   modem signals.  256 taps = 32 ms at 8 kHz, covering typical hybrid echo. */
-#define ECHO_CAN_TAPS 256
+   modem signals.  512 taps = 64 ms at 8 kHz, covering hybrid echo + RTP
+   packetization delay (~40ms round-trip). */
+#define ECHO_CAN_TAPS 512
 static modem_echo_can_segment_state_t *g_echo_can = NULL;
 
 /* TX sample ring buffer for echo canceller.

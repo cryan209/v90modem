@@ -1397,6 +1397,14 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         angle = arctan2(zz.im, zz.re);
         if (abs(angle - s->last_angles[1]) > DDS_PHASE(90.0f)  &&  s->blip_duration > 3)
         {
+            /* Log reversal events during first 3 seconds */
+            if (s->sample_time < 24000)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx info_rx REV: t=%u blip=%d angle=0x%08X last=0x%08X diff=0x%08X ii=%.1f qq=%.1f\n",
+                         s->sample_time + i, s->blip_duration, angle, s->last_angles[1],
+                         (uint32_t)(angle - s->last_angles[1]), ii, qq);
+            }
             put_info_bit(s, 1, i);
             s->duration = 0;
             s->blip_duration = 0;
@@ -1420,14 +1428,15 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         dds_advancef(&s->carrier_phase, s->cc_carrier_phase_rate);
     }
     /*endfor*/
-    /* Periodic diagnostic: log every 8000 samples (~1 sec) */
-    if (s->duration % 8000 < (unsigned)len)
+    /* Periodic diagnostic: log every 2000 samples (~250ms) */
+    if (s->duration % 2000 < (unsigned)len)
     {
         span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx info_rx diag: duration=%d bit_count=%d bitstream=0x%08X "
-                 "stage=%d signal=%d blip=%d power=%d\n",
-                 s->duration, s->bit_count, s->bitstream,
-                 s->stage, s->signal_present, s->blip_duration, power);
+                 "Rx info_rx diag: t=%u dur=%d bits=%d stream=0x%08X "
+                 "stage=%d sig=%d blip=%d pwr=%d angle=0x%08X ii=%.2f qq=%.2f\n",
+                 s->sample_time, s->duration, s->bit_count, s->bitstream,
+                 s->stage, s->signal_present, s->blip_duration, power,
+                 angle, ii, qq);
     }
     return 0;
 }

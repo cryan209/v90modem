@@ -1581,6 +1581,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* Continue sending pure tone until we see an INFO0c message (V.34/11.2.1.2.3) */
         if (s->rx.received_event == V34_EVENT_INFO0_OK)
         {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A\n");
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
@@ -1590,6 +1591,8 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                  ||
                  s->rx.received_event == V34_EVENT_TONE_SEEN)
         {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: bad event %d, retrying INFO0a\n",
+                     s->rx.received_event);
             /* Go back to sending INFO0a until we get a clean INFO0c */
             info0_baud_init(s);
         }
@@ -1891,7 +1894,8 @@ static complex_sig_t get_initial_hdx_b_not_b_baud(v34_state_t *s)
 
 static void initial_ab_not_ab_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - initial_ab_not_ab_baud_init()\n");
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - initial_ab_not_ab_baud_init() [calling=%d duplex=%d sample_time=%d]\n",
+             s->tx.calling_party, s->tx.duplex, s->tx.sample_time);
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
