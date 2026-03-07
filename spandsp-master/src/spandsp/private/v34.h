@@ -196,7 +196,8 @@ enum v34_events_e
     V34_EVENT_L2_SEEN,
     V34_EVENT_S,
     V34_EVENT_J,
-    V34_EVENT_J_DASHED
+    V34_EVENT_J_DASHED,
+    V34_EVENT_PHASE4_TRN_READY
 };
 
 typedef struct
@@ -739,6 +740,9 @@ typedef struct
     uint8_t phase3_j_prev_valid[8];
     uint32_t phase3_j_win[8][3][16];
     int phase3_j_bits;
+    int phase3_j_lock_hyp;
+    int phase4_j_seen;
+    int phase4_trn_after_j;
 
     /* MP or MPh receive tracking data */
     int mp_count;
@@ -751,6 +755,7 @@ typedef struct
     uint8_t mp_frame_bits[188];
     int mp_frame_pos;
     int mp_frame_target;
+    int mp_early_rejects;
 
     int dft_ptr;
 #if defined(SPANDSP_USE_FIXED_POINT)

@@ -2412,6 +2412,9 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
+    s->rx.phase3_j_lock_hyp = -1;
+    s->rx.phase4_j_seen = 0;
+    s->rx.phase4_trn_after_j = 0;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
     /* Reset RX RRC filter to flush stale CC demodulator data */
@@ -2553,6 +2556,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
             memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
             s->rx.phase3_j_bits = 0;
+            s->rx.phase3_j_lock_hyp = -1;
+            s->rx.phase4_j_seen = 0;
+            s->rx.phase4_trn_after_j = 0;
         }
         /*endif*/
         break;
@@ -2625,6 +2631,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
                         memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
                         s->rx.phase3_j_bits = 0;
+                        s->rx.phase3_j_lock_hyp = -1;
+                        s->rx.phase4_j_seen = 0;
+                        s->rx.phase4_trn_after_j = 0;
                         span_log(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
                                  "waiting %d samples for next S transition\n",
@@ -2709,6 +2718,7 @@ static void trn_baud_init(v34_state_t *s)
 #define PHASE4_WAIT_BAUDS 0
 #define PHASE4_S_BAUDS 128
 #define PHASE4_TRN_BAUDS 512
+#define PHASE4_TRN_MAX_BAUDS 5200
 
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
@@ -2783,10 +2793,25 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 
             bit = scramble(&s->tx, 1);
             bit = (scramble(&s->tx, 1) << 1) | bit;
-            if (++s->tx.tone_duration >= PHASE4_TRN_BAUDS)
+            s->tx.tone_duration++;
+            if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
+                && s->rx.received_event == V34_EVENT_PHASE4_TRN_READY)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - Phase 4: TRN complete (%d bauds), starting MP\n",
+                         "Tx - Phase 4: TRN complete (%d bauds) and far-end J'/TRN confirmed, starting MP\n",
+                         s->tx.tone_duration);
+                mp_or_mph_baud_init(s);
+            }
+            else if (s->tx.tone_duration == PHASE4_TRN_BAUDS)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: local TRN minimum reached (%d bauds), waiting for far-end J'/TRN confirmation\n",
+                         s->tx.tone_duration);
+            }
+            else if (s->tx.tone_duration >= PHASE4_TRN_MAX_BAUDS)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: TRN max guard reached (%d bauds) without far-end confirmation, forcing MP\n",
                          s->tx.tone_duration);
                 mp_or_mph_baud_init(s);
             }
@@ -2820,7 +2845,16 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.bitstream = 0;
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
+    s->rx.mp_early_rejects = 0;
     s->rx.mp_hypothesis = -1;
+    s->rx.received_event = V34_EVENT_NONE;
+    memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+    memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+    memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+    s->rx.phase3_j_bits = 0;
+    s->rx.phase4_j_seen = 0;
+    s->rx.phase4_trn_after_j = 0;
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
     span_log(&s->logging, SPAN_LOG_FLOW,
