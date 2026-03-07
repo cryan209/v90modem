@@ -744,13 +744,32 @@ void me_rx_audio(const int16_t *amp, int len)
         if (g_mod == ME_MOD_V34 && g_v34) {
             if (g_echo_can) {
                 int16_t clean[len];
+                int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
+                int tx_zeros = 0;
+                int64_t rx_sum = 0, clean_sum = 0, tx_sum = 0;
                 for (int i = 0; i < len; i++) {
                     int16_t tx_sample = 0;
                     if (g_tx_buf_rd != g_tx_buf_wr) {
                         tx_sample = g_tx_buf[g_tx_buf_rd];
                         g_tx_buf_rd = (g_tx_buf_rd + 1) & TX_BUF_MASK;
+                    } else {
+                        tx_zeros++;
                     }
                     clean[i] = modem_echo_can_update(g_echo_can, tx_sample, amp[i]);
+                    rx_sum += (int64_t)amp[i] * amp[i];
+                    clean_sum += (int64_t)clean[i] * clean[i];
+                    tx_sum += (int64_t)tx_sample * tx_sample;
+                }
+                /* Log echo canceller performance every ~500ms */
+                static int ec_log_counter = 0;
+                if (++ec_log_counter >= 25) {  /* 25 frames * 20ms = 500ms */
+                    double rx_rms = sqrt((double)rx_sum / len);
+                    double clean_rms = sqrt((double)clean_sum / len);
+                    double tx_rms = sqrt((double)tx_sum / len);
+                    fprintf(stderr, "[EC] avail=%d zeros=%d tx_rms=%.0f rx_rms=%.0f clean_rms=%.0f reduction=%.1fdB\n",
+                            tx_avail, tx_zeros, tx_rms, rx_rms, clean_rms,
+                            (rx_rms > 0.1) ? 20.0*log10(clean_rms / rx_rms) : 0.0);
+                    ec_log_counter = 0;
                 }
                 v34_rx(g_v34, clean, len);
             } else {
