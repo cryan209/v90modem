@@ -269,6 +269,26 @@ static bool mp_fill_ok(const uint8_t bits[], int type)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool mp_start_bit_ok(int type, int bit_index, int bit_value)
+{
+    if (bit_index == 34 || bit_index == 51 || bit_index == 68)
+        return bit_value == 0;
+    if (type == 1
+        &&
+        (bit_index == 85
+         || bit_index == 102
+         || bit_index == 119
+         || bit_index == 136
+         || bit_index == 153
+         || bit_index == 170))
+    {
+        return bit_value == 0;
+    }
+    /*endif*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void mp_pack_for_parser(uint8_t out[25], const uint8_t bits[], int type)
 {
     int i;
@@ -2526,6 +2546,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->duration = 0;
             s->scramble_reg = 0;
         }
+        else if (s->duration >= 2048)
+        {
+            /* If S wasn't confidently detected within a long guard interval,
+               don't stall forever in Phase 4 S detection. Advance to TRN/MP
+               search so the handshake can continue. */
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: S detect timeout (%d bauds, win=%d/32), "
+                     "forcing TRN/MP search\n",
+                     s->duration, s->s_detect_count);
+            s->stage = V34_RX_STAGE_PHASE4_TRN;
+            s->duration = 0;
+            s->scramble_reg = 0;
+        }
         break;
 
     case V34_RX_STAGE_PHASE4_S_BAR:
@@ -2570,13 +2603,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
         }
 
-        /* Transition to MP scanning after minimal sync time.
-           The MP preamble won't appear during S/S-bar/TRN so it's safe
-           to start scanning immediately. */
-        if (s->duration >= 32)
+        /* Transition to MP scanning only after a substantial Phase 4 lead-in.
+           In practice the far end stays in S for a long interval before S-bar/TRN/MP.
+           Scanning too early causes frequent false preamble hits and bogus MP locks.
+           Keep descrambling for sync, but gate MP search until late in the expected window. */
+        if (s->duration >= 900)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: descrambler sync done (%d bauds), scanning for MP (decoder=hyp8-v1)\n",
+                     "Rx - Phase 4: descrambler sync done (%d bauds), scanning for MP (decoder=hyp8-v1, gated=900)\n",
                      s->duration);
             s->stage = V34_RX_STAGE_PHASE4_MP;
             s->duration = 0;
@@ -2666,12 +2700,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     s->bitstream = s->mp_hyp_bitstream[chosen_hyp];
                     s->crc = 0xFFFF;
                     s->bit_count = 0;
-                    s->mp_count = 17;
+                    s->mp_count = 0;
                     s->mp_len = 84 + 1;
                     s->mp_and_fill_len = 186 + 1 + 1;
+                    /* Do not seed frame bits here. A lock can occur in the middle of
+                       a repeated MP stream; wait for an explicit preamble boundary
+                       before starting frame collection. */
+                    s->mp_frame_target = 0;
+                    s->mp_frame_pos = 0;
                     locked_this_symbol = 1;
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: locked MP hypothesis=%d, type_bit=%d (baud %d)\n",
+                             "Rx - Phase 4: locked MP hypothesis=%d, type_bit=%d (baud %d), awaiting preamble boundary\n",
                              chosen_hyp, chosen_type_bit, s->duration + 1);
                 }
                 /*endif*/
@@ -2697,6 +2736,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             for (i = 0;  i < 2;  i++)
             {
                 s->bitstream = (s->bitstream << 1) | bits[i];
+                if (s->mp_hypothesis >= 0  &&  s->mp_frame_pos == 0)
+                {
+                    if (++s->mp_count > 800)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
+                                 s->mp_hypothesis, s->mp_count);
+                        s->mp_hypothesis = -1;
+                        s->mp_count = -1;
+                        memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+                        memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+                        break;
+                    }
+                    /*endif*/
+                }
+                /*endif*/
                 if (s->mp_seen >= 2)
                 {
                     /* Post-MP data */
@@ -2732,6 +2787,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     s->mp_frame_bits[18] = type;
                     s->mp_frame_target = (type == 1)  ?  188  :  88;
                     s->mp_frame_pos = 19;
+                    s->mp_count = 0;
                     s->bit_count = 0;
 
                     bits32_to_str(s->bitstream, tail);
@@ -2753,6 +2809,30 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                     s->mp_frame_bits[s->mp_frame_pos++] = bits[i];
                     s->bit_count = s->mp_frame_pos - 19;
+                    {
+                        int type_now;
+                        int idx;
+
+                        idx = s->mp_frame_pos - 1;
+                        type_now = s->mp_frame_bits[18];
+                        if (!mp_start_bit_ok(type_now, idx, bits[i]))
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d rejected early at bit[%d]=%d (expected start bit 0)\n",
+                                     type_now, idx, bits[i]);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: unlock MP hypothesis=%d after early structure reject\n",
+                                     s->mp_hypothesis);
+                            s->mp_hypothesis = -1;
+                            s->mp_count = -1;
+                            s->mp_frame_pos = 0;
+                            s->mp_frame_target = 0;
+                            memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+                            memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+                            break;
+                        }
+                        /*endif*/
+                    }
                     if (s->bit_count <= 40 || (s->bit_count % 32) == 0)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
@@ -2808,6 +2888,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d)\n",
                                  type, crc_good, fill_good);
+                        /* Bad lock: drop hypothesis and resume global search. */
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
+                                 s->mp_hypothesis);
+                        s->mp_hypothesis = -1;
+                        s->mp_count = -1;
+                        memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+                        memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
                     }
                     /*endif*/
                     s->mp_frame_pos = 0;

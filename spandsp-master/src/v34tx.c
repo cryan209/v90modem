@@ -2559,28 +2559,14 @@ static void trn_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Phase 4 wait duration: number of bauds to wait after detecting the caller's S
-   signal before starting Phase 4 S/S-bar/TRN.
-
-   CRITICAL TIMING: We detect the caller's Phase 3 S signal, but the caller still
-   has to complete Phase 3 (S-bar + PP + TRN + J) before entering Phase 4.
-   The caller only starts looking for our S→S-bar transition AFTER entering
-   Phase 4 S.  If our S→S-bar happens before the caller is in Phase 4, the
-   caller will never see it and will keep sending S until timeout/disconnect.
-
-   From test data at 3429 baud, the caller enters Phase 4 approximately
-   5800-6000 bauds after we detect their Phase 3 S.  We need our Phase 4 S
-   to start BEFORE that and continue past it.
-
-   Caller's remaining Phase 3 after S:
-     S-bar(16T) + PP(~288T) + TRN(≥512T) + J(variable) ≈ 2000-5000 bauds
-   Plus SIP/RTP propagation delay: ~50ms × 3429 = ~171 bauds each way
-
-   Per V.34 §11.4.1.2, Phase 4 S starts immediately after J — no silence
-   gap.  The caller detects our J, enters Phase 4, and expects to hear
-   our Phase 4 S right away.  A silence gap prevents the caller from
-   detecting our S and causes it to stay in S forever. */
+/* Phase 4 answer modem timing (V.34 §11.4.1.2):
+   - S for 128T
+   - S-bar for 16T
+   - TRN for >=512T, then MP
+   Keep wait at 0 so S starts immediately after J handling. */
 #define PHASE4_WAIT_BAUDS 0
+#define PHASE4_S_BAUDS 128
+#define PHASE4_TRN_BAUDS 512
 
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
@@ -2606,22 +2592,15 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 
     case V34_TX_STAGE_PHASE4_S:
         /* Phase 4 S signal: 180° phase reversal per baud using 4-point DQPSK.
-           V.34 §11.4.1.2.1: "The answer modem shall transmit signal S for
-           at least 128T."  V.34 §10.1.3.2: S = constant 180° phase changes.
-
-           We send S for 5000T (~1.46s at 3429 baud) to ensure the caller
-           has entered Phase 4 and had time to detect our S signal before
-           we transition to S-bar.  From test data, the caller enters Phase 4
-           at ~baud 5868 (absolute).  Our S starts at baud 1500 (after wait)
-           and continues to baud 6500, giving the caller ~632 bauds of our S
-           before S-bar begins. */
+           V.34 §11.4.1.2.1: answer modem sends S for 128T. */
         s->tx.diff = (s->tx.diff + 2) & 3;
-        if (++s->tx.tone_duration == 5000)
+        if (++s->tx.tone_duration == PHASE4_S_BAUDS)
         {
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: S complete (5000 bauds), starting S-bar (16T)\n");
+                     "Tx - Phase 4: S complete (%d bauds), starting S-bar (16T)\n",
+                     PHASE4_S_BAUDS);
         }
         /*endif*/
         return training_constellation_4[s->tx.diff];
@@ -2656,16 +2635,13 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
     case V34_TX_STAGE_PHASE4_TRN:
         /* Phase 4 TRN: scrambled training before MP.
            V.34 §11.4.1.2.2: "the answer modem shall transmit TRN for at least
-           512T but no longer than 2000 ms plus a round trip delay"
-
-           We use 1024 bauds (~299ms).  Combined with Phase 4 S (5000T) and
-           wait (1500T), total Phase 4 before MP = 7540 bauds (~2.2s). */
+           512T but no longer than 2000 ms plus a round trip delay". */
         {
             int bit;
 
             bit = scramble(&s->tx, 1);
             bit = (scramble(&s->tx, 1) << 1) | bit;
-            if (++s->tx.tone_duration >= 1024)
+            if (++s->tx.tone_duration >= PHASE4_TRN_BAUDS)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds), starting MP\n",
@@ -2691,10 +2667,11 @@ static void phase4_wait_init(v34_state_t *s)
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_phase4_baud;
 
-    /* Start Phase 4 RX: detect the caller's S signal on the primary channel.
-       The caller enters Phase 4 after detecting our J and starts sending S.
-       We need to detect their S → S-bar → TRN before reading MP. */
-    s->rx.stage = V34_RX_STAGE_PHASE4_S;
+    /* Phase 4 answerer RX conditioning (V.34 11.4.1.2.1/11.4.1.2.2):
+       while sending S, condition receiver to detect caller J' followed by TRN,
+       then receive MP. We therefore enter TRN/descrambler conditioning directly
+       instead of waiting on a far-end S detector. */
+    s->rx.stage = V34_RX_STAGE_PHASE4_TRN;
     s->rx.duration = 0;
     s->rx.s_detect_count = 0;
     s->rx.s_window = 0;
@@ -2705,7 +2682,7 @@ static void phase4_wait_init(v34_state_t *s)
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Rx - Phase 4: waiting for far-end S signal (baud_rate=%d, high_carrier=%d, "
+             "Rx - Phase 4: conditioned for J'/TRN then MP (baud_rate=%d, high_carrier=%d, "
              "carrier=%.1f Hz)\n",
              s->rx.baud_rate, s->rx.high_carrier,
              carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
@@ -3078,7 +3055,18 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
         if ((s->tx.baud_phase += den) >= num)
         {
             s->tx.baud_phase -= num;
-            v = s->tx.current_getbaud(s);
+            if (s->tx.current_getbaud == NULL)
+            {
+                span_log(&s->logging, SPAN_LOG_ERROR,
+                         "Tx - NULL current_getbaud in V34 modulator (stage=%d mod=%d)\n",
+                         s->tx.stage, s->tx.current_modulator);
+                v = zero;
+            }
+            else
+            {
+                v = s->tx.current_getbaud(s);
+            }
+            /*endif*/
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
             s->tx.rrc_filter_im[s->tx.rrc_filter_step] = v.im;
             if (++s->tx.rrc_filter_step >= V34_TX_FILTER_STEPS)
@@ -3171,7 +3159,18 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
         if ((s->tx.baud_phase += 3) >= 40)
         {
             s->tx.baud_phase -= 40;
-            v = s->tx.current_getbaud(s);
+            if (s->tx.current_getbaud == NULL)
+            {
+                span_log(&s->logging, SPAN_LOG_ERROR,
+                         "Tx - NULL current_getbaud in CC modulator (stage=%d mod=%d)\n",
+                         s->tx.stage, s->tx.current_modulator);
+                v = zero;
+            }
+            else
+            {
+                v = s->tx.current_getbaud(s);
+            }
+            /*endif*/
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
             s->tx.rrc_filter_im[s->tx.rrc_filter_step] = v.im;
             if (++s->tx.rrc_filter_step >= V34_INFO_TX_FILTER_STEPS)
