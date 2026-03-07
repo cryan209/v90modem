@@ -121,7 +121,7 @@
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               18
 #define MP_PREAMBLE_SCORE_MIN           17
-#define MP_PREAMBLE_WAIT_BITS           5000
+#define MP_PREAMBLE_WAIT_BITS           800
 
 enum
 {
@@ -249,6 +249,23 @@ static bool mp_preamble_has_start_zero(uint32_t bitstream)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void mp_reset_hypothesis_search(v34_rx_state_t *s)
+{
+    s->mp_hypothesis = -1;
+    s->mp_count = -1;
+    memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+    memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+}
+/*- End of function --------------------------------------------------------*/
+
+static int mp_alternate_scrambler_tap(int tap)
+{
+    /* V.34 uses the two complementary scrambler taps (x^-5 and x^-18),
+       represented here as zero-based indices 4 and 17. */
+    return (tap == 17) ? 4 : 17;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int phase3_j_pattern_bit(int pat_type, int bit_idx)
 {
     /* LSB-first pattern bits, per V.34 Table 18/19 representation used by TX:
@@ -278,8 +295,10 @@ static uint16_t mp_crc_bits(const uint8_t bits[], int type)
     {
         int j;
 
+        /* Each 17-bit block is: start bit + 16 payload bits.
+           CRC is over the 16 payload bits only (exclude start bit). */
         for (j = 0;  j < 16;  j++)
-            crc = crc_itu16_bits(bits[i + j], 1, crc);
+            crc = crc_itu16_bits(bits[i + 1 + j], 1, crc);
         /*endfor*/
     }
     /*endfor*/
@@ -338,6 +357,112 @@ static bool mp_start_bit_ok(int type, int bit_index, int bit_value)
     }
     /*endif*/
     return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_try_slip_recovery(uint8_t bits[188], int type, int target, int *slip_out)
+{
+    static const int slips[] = {-2, -1, 1, 2};
+    uint8_t trial[188];
+    int sidx;
+
+    for (sidx = 0;  sidx < (int) (sizeof(slips)/sizeof(slips[0]));  sidx++)
+    {
+        int slip;
+        int i;
+        uint16_t rx_crc;
+        uint16_t residual_crc;
+        bool crc_ok;
+        bool fill_ok;
+
+        slip = slips[sidx];
+        memcpy(trial, bits, sizeof(trial));
+        for (i = 19;  i < target;  i++)
+        {
+            int src;
+
+            src = i + slip;
+            trial[i] = (src >= 19 && src < target)  ?  bits[src]  :  0;
+        }
+        /*endfor*/
+        crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
+        fill_ok = mp_fill_ok(trial, type);
+        if (crc_ok  &&  fill_ok)
+        {
+            memcpy(bits, trial, sizeof(trial));
+            if (slip_out)
+                *slip_out = slip;
+            /*endif*/
+            return true;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_try_boundary_slip_recovery(uint8_t bits[188], int type, int target, int *boundary_out, int *slip_out)
+{
+    static const int starts_mp0[] = {34, 51, 68};
+    static const int starts_mp1[] = {34, 51, 68, 85, 102, 119, 136, 153, 170};
+    static const int slips[] = {-1, 1};
+    uint8_t trial[188];
+    const int *starts;
+    int nstarts;
+    int si;
+
+    starts = (type == 1) ? starts_mp1 : starts_mp0;
+    nstarts = (type == 1) ? (int) (sizeof(starts_mp1)/sizeof(starts_mp1[0]))
+                          : (int) (sizeof(starts_mp0)/sizeof(starts_mp0[0]));
+
+    for (si = 0;  si < nstarts;  si++)
+    {
+        int boundary;
+        int k;
+
+        boundary = starts[si];
+        if (boundary < 19 || boundary >= target)
+            continue;
+        /*endif*/
+        for (k = 0;  k < (int) (sizeof(slips)/sizeof(slips[0]));  k++)
+        {
+            int slip;
+            int i;
+            uint16_t rx_crc;
+            uint16_t residual_crc;
+            bool crc_ok;
+            bool fill_ok;
+
+            slip = slips[k];
+            memcpy(trial, bits, sizeof(trial));
+            for (i = boundary;  i < target;  i++)
+            {
+                int src;
+
+                src = i + slip;
+                trial[i] = (src >= boundary && src < target) ? bits[src] : 0;
+            }
+            /*endfor*/
+            crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
+            fill_ok = mp_fill_ok(trial, type);
+            if (crc_ok  &&  fill_ok)
+            {
+                memcpy(bits, trial, sizeof(trial));
+                if (boundary_out)
+                    *boundary_out = boundary;
+                /*endif*/
+                if (slip_out)
+                    *slip_out = slip;
+                /*endif*/
+                return true;
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    return false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3036,39 +3161,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_frame_pos = 0;
             s->mp_frame_target = 0;
             s->mp_early_rejects = 0;
+            s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
+            s->mp_phase4_reject_streak = 0;
+            s->mp_phase4_alt_tap_active = 0;
             if (s->phase3_j_lock_hyp >= 0  &&  s->phase3_j_lock_hyp < 8)
             {
-                s->mp_hypothesis = s->phase3_j_lock_hyp;
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: seeding MP hypothesis from Phase 3 J lock (hyp=%d)\n",
-                         s->mp_hypothesis);
-            }
-            else
-            {
-                s->mp_hypothesis = -1;
+                         "Rx - Phase 4: Phase 3 J lock hint available (hyp=%d), starting unbiased MP hypothesis search\n",
+                         s->phase3_j_lock_hyp);
             }
             /*endif*/
-            memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-            memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+            mp_reset_hypothesis_search(s);
         }
-        else if (s->duration >= 5200)
+        else if (s->duration >= 5200  &&  (s->duration % 512) == 0)
         {
-            s->received_event = V34_EVENT_PHASE4_TRN_READY;
+            /* Do not force MP without explicit J' + TRN confirmation. */
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: J'/TRN confirmation timeout (%d bauds), forcing MP scan\n",
+                     "Rx - Phase 4: still waiting for far-end J'/TRN confirmation (%d bauds)\n",
                      s->duration);
-            s->stage = V34_RX_STAGE_PHASE4_MP;
-            s->duration = 0;
-            s->bitstream = 0;
-            s->bit_count = 0;
-            s->mp_seen = 0;
-            s->mp_remote_ack_seen = 0;
-            s->mp_count = -1;
-            s->mp_frame_pos = 0;
-            s->mp_frame_target = 0;
-            s->mp_hypothesis = -1;
-            memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-            memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
         }
         break;
 
@@ -3138,18 +3248,32 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         && mp_preamble_has_start_zero(bstream)
                         && sc > chosen_score)
                     {
+                        /* Lock boundary at bit0: current bit is MP type bit.
+                           The second bit of this dibit belongs to frame_idx=19
+                           and must be carried as a pending first body bit. */
                         chosen_hyp = h;
                         chosen_type_bit = d0;
                         chosen_score = sc;
                         chosen_reg = reg;
                         chosen_bstream = bstream;
                         chosen_bit_pos = 0;
-                        chosen_pending_valid = 0;
-                        chosen_pending_bit = 0;
+                        chosen_pending_valid = 1;
+                        chosen_pending_bit = 0; /* set after d1 decode below */
                     }
                     /*endif*/
                     d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
                     bstream = (bstream << 1) | d1;
+                    /* If we provisionally selected bit0 for this hypothesis,
+                       update pending bit and saved state to include d1. */
+                    if (chosen_hyp == h
+                        && chosen_bit_pos == 0
+                        && chosen_pending_valid)
+                    {
+                        chosen_pending_bit = d1;
+                        chosen_reg = reg;
+                        chosen_bstream = bstream;
+                    }
+                    /*endif*/
                     sc = mp_preamble_score(bstream);
                     if (sc >= MP_LOCK_SCORE_MIN
                         && mp_preamble_has_start_zero(bstream)
@@ -3164,17 +3288,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_pending_valid = 0;
                         chosen_pending_bit = 0;
                     }
-                    else if (chosen_hyp == h
-                             && chosen_bit_pos == 0
-                             && chosen_score >= MP_LOCK_SCORE_MIN
-                             && !chosen_pending_valid)
-                    {
-                        /* If lock point was d0, d1 is the immediate next bit in time.
-                           Preserve it so frame alignment is not lost. */
-                        chosen_pending_valid = 1;
-                        chosen_pending_bit = d1;
-                    }
-                    /*endif*/
                     s->mp_hyp_scramble[h] = reg;
                     s->mp_hyp_bitstream[h] = bstream;
                 }
@@ -3254,10 +3367,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
                                  s->mp_hypothesis, s->mp_count);
-                        s->mp_hypothesis = -1;
-                        s->mp_count = -1;
-                        memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-                        memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+                        mp_reset_hypothesis_search(s);
                         break;
                     }
                     /*endif*/
@@ -3378,6 +3488,32 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     type = s->mp_frame_bits[18];
                     crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                     fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                    if (!(crc_good  &&  fill_good))
+                    {
+                        int recovered_slip;
+                        int recovered_boundary;
+
+                        recovered_slip = 0;
+                        recovered_boundary = 0;
+                        if (mp_try_slip_recovery(s->mp_frame_bits, type, s->mp_frame_target, &recovered_slip))
+                        {
+                            crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
+                            fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d recovered via bit-slip=%d before CRC/fill check\n",
+                                     type, recovered_slip);
+                        }
+                        else if (mp_try_boundary_slip_recovery(s->mp_frame_bits, type, s->mp_frame_target, &recovered_boundary, &recovered_slip))
+                        {
+                            crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
+                            fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d recovered via boundary-slip at frame_idx=%d slip=%d before CRC/fill check\n",
+                                     type, recovered_boundary, recovered_slip);
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                     log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
                     if (crc_good  &&  fill_good)
                     {
@@ -3426,12 +3562,32 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
                                  s->mp_hypothesis);
-                        s->mp_hypothesis = -1;
-                        s->mp_count = -1;
                         s->mp_early_rejects = 0;
-                        memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-                        memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+                        mp_reset_hypothesis_search(s);
+                        if (++s->mp_phase4_reject_streak >= 3)
+                        {
+                            if (!s->mp_phase4_alt_tap_active)
+                            {
+                                s->scrambler_tap = mp_alternate_scrambler_tap(s->mp_phase4_default_scrambler_tap);
+                                s->mp_phase4_alt_tap_active = 1;
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: switching MP descrambler tap to alternate (%d -> %d) after %d rejects\n",
+                                         s->mp_phase4_default_scrambler_tap, s->scrambler_tap, s->mp_phase4_reject_streak);
+                            }
+                            else
+                            {
+                                s->scrambler_tap = s->mp_phase4_default_scrambler_tap;
+                                s->mp_phase4_alt_tap_active = 0;
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: restoring MP descrambler tap to default (%d) after alternate-tap rejects\n",
+                                         s->scrambler_tap);
+                            }
+                            s->mp_phase4_reject_streak = 0;
+                        }
                     }
+                    /*endif*/
+                    if (crc_good  &&  fill_good)
+                        s->mp_phase4_reject_streak = 0;
                     /*endif*/
                     s->mp_frame_pos = 0;
                     s->mp_frame_target = 0;
@@ -3895,9 +4051,10 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_frame_pos = 0;
     s->rx.mp_frame_target = 0;
     s->rx.mp_early_rejects = 0;
-    s->rx.mp_hypothesis = -1;
-    memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
-    memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
+    s->rx.mp_phase4_default_scrambler_tap = s->rx.scrambler_tap;
+    s->rx.mp_phase4_reject_streak = 0;
+    s->rx.mp_phase4_alt_tap_active = 0;
+    mp_reset_hypothesis_search(&s->rx);
 
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;

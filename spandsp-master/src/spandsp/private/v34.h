@@ -758,6 +758,9 @@ typedef struct
     int mp_frame_pos;
     int mp_frame_target;
     int mp_early_rejects;
+    int mp_phase4_default_scrambler_tap;
+    int mp_phase4_reject_streak;
+    int mp_phase4_alt_tap_active;
 
     int dft_ptr;
 #if defined(SPANDSP_USE_FIXED_POINT)

@@ -2490,16 +2490,18 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         0x899F, /* 4 point constellation */
         0x899F  /* 16 point constellation (same pattern per Table 19) */
     };
-    /* Guard against indefinite J-loop when far-end Phase 3 signaling is weak.
-       ~500 ms maximum wait from 11.3.1.2.6 at current baud. */
+    /* Interop guard for weak/noisy Phase 3 signaling.
+       Spec allows "up to 500 ms" after receiving J, but in the field we can
+       miss/late-detect J at this boundary. Use a larger hold-off before
+       fallback to avoid transitioning too early. */
     static const int j_wait_max_bauds[6] =
     {
-        (2400*500 + 999)/1000,
-        (2743*500 + 999)/1000,
-        (2800*500 + 999)/1000,
-        (3000*500 + 999)/1000,
-        (3200*500 + 999)/1000,
-        (3429*500 + 999)/1000
+        (2400*1000 + 999)/1000,
+        (2743*1000 + 999)/1000,
+        (2800*1000 + 999)/1000,
+        (3000*1000 + 999)/1000,
+        (3200*1000 + 999)/1000,
+        (3429*1000 + 999)/1000
     };
     int bit;
     int j_pat_idx;
@@ -2810,10 +2812,15 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             else if (s->tx.tone_duration >= PHASE4_TRN_MAX_BAUDS)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - Phase 4: TRN max guard reached (%d bauds) without far-end confirmation, forcing MP\n",
-                         s->tx.tone_duration);
-                mp_or_mph_baud_init(s);
+                /* V.34 interop safeguard: never start MP until far-end J'/TRN
+                   was explicitly confirmed by RX. Keep sending TRN and wait. */
+                if ((s->tx.tone_duration % 512) == 0)
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - Phase 4: TRN guard exceeded (%d bauds) without far-end J'/TRN confirmation; continuing TRN\n",
+                             s->tx.tone_duration);
+                }
+                /*endif*/
             }
             /*endif*/
             return training_constellation_4[bit];
