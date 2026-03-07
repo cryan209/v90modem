@@ -406,6 +406,7 @@ static v90_enc_t      g_v90_enc;
    packetization delay (~40ms round-trip). */
 #define ECHO_CAN_TAPS 512
 static modem_echo_can_segment_state_t *g_echo_can = NULL;
+static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
 
 /* TX sample ring buffer for echo canceller.
    The echo canceller needs the TX sample that corresponds to each RX sample.
@@ -638,13 +639,15 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if (result->jm_cm.modulations & (V8_MOD_V90 | V8_MOD_V34)) {
-        /* V.90 and V.34 both start with V.34 Phase 2 training.
-         * V.90 PCM downstream is layered on after training (future). */
-        const char *mod_str = (result->jm_cm.modulations & V8_MOD_V90)
-                              ? "V.90/V.34" : "V.34";
-        fprintf(stderr, "[ME] V.8 negotiated %s (full duplex, up to 33.6 kbps)\n", mod_str);
-        trace_phase("V8 selected %s", mod_str);
+    if (result->jm_cm.modulations & V8_MOD_V34) {
+        /*
+         * Prefer pure V.34 for now. V.90 requires downstream PCM mode after
+         * V.34 startup; this endpoint is not yet doing the full V.90 switch.
+         */
+        if ((result->jm_cm.modulations & V8_MOD_V90) && !g_advertise_v90)
+            trace_phase("V8 remote offered V90 but forcing V34-only datapump");
+        fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
+        trace_phase("V8 selected V34");
         start_v34_training();
 
     } else if (result->jm_cm.modulations & V8_MOD_V22) {
@@ -743,7 +746,9 @@ void me_on_sip_connected(void)
     /* Advertise V.90 + V.34 + V.22bis.  V.90 training starts with V.34
      * Phase 2, so we can safely advertise it; the actual V.90 PCM switch
      * happens after training (not yet implemented). */
-    v8_parms.jm_cm.modulations        = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22;
+    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
+    if (g_advertise_v90)
+        v8_parms.jm_cm.modulations   |= V8_MOD_V90;
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
     v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
@@ -770,7 +775,7 @@ void me_on_sip_connected(void)
     g_state = ME_V8;
     g_mod   = ME_MOD_NONE;
     pthread_mutex_unlock(&g_state_mtx);
-    trace_phase("enter V8: advertised mods=V90|V34|V22");
+    trace_phase("enter V8: advertised mods=%s", g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
     fprintf(stderr, "[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");
@@ -848,7 +853,7 @@ void me_rx_audio(const int16_t *amp, int len)
            preserving the 1200 Hz far-end signal.  During Phase 3/4+
            the carriers are 1829/1920 Hz (at 3200 baud). */
         if (g_mod == ME_MOD_V34 && g_v34) {
-            if (g_echo_can) {
+            if (g_echo_can && state == ME_DATA) {
                 int16_t clean[len];
                 int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
                 int tx_zeros = 0;
