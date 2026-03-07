@@ -30,6 +30,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <math.h>
+#include <stdarg.h>
+#include <sys/time.h>
 
 /* ------------------------------------------------------------------ */
 /* V.90 downstream encoder constants (ITU-T V.90 §5)                  */
@@ -273,6 +275,66 @@ static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 
+/* ------------------------------------------------------------------ */
+/* Phase trace helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+static uint64_t g_trace_start_ms = 0;
+
+static uint64_t trace_now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000ULL);
+}
+
+static const char *me_mod_to_str(me_modulation_t mod)
+{
+    switch (mod) {
+    case ME_MOD_NONE:   return "NONE";
+    case ME_MOD_V90:    return "V90";
+    case ME_MOD_V34:    return "V34";
+    case ME_MOD_V22BIS: return "V22BIS";
+    default:            return "UNKNOWN";
+    }
+}
+
+static void v8_mod_mask_to_str(int mask, char *buf, size_t size)
+{
+    int off = 0;
+    if (size == 0)
+        return;
+    buf[0] = '\0';
+
+    if (mask & V8_MOD_V90)
+        off += snprintf(buf + off, size - (size_t)off, "%sV90", off ? "|" : "");
+    if (mask & V8_MOD_V34)
+        off += snprintf(buf + off, size - (size_t)off, "%sV34", off ? "|" : "");
+    if (mask & V8_MOD_V22)
+        off += snprintf(buf + off, size - (size_t)off, "%sV22", off ? "|" : "");
+    if (mask & V8_MOD_V32)
+        off += snprintf(buf + off, size - (size_t)off, "%sV32", off ? "|" : "");
+    if (mask & V8_MOD_V21)
+        off += snprintf(buf + off, size - (size_t)off, "%sV21", off ? "|" : "");
+    if (off == 0)
+        snprintf(buf, size, "none");
+}
+
+static void trace_phase(const char *fmt, ...)
+{
+    uint64_t now = trace_now_ms();
+    if (g_trace_start_ms == 0)
+        g_trace_start_ms = now;
+
+    fprintf(stderr, "[TRACE +%llums] ", (unsigned long long)(now - g_trace_start_ms));
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
 /* Bit accumulator for V.22bis TX (one byte at a time) */
 static uint8_t  v22bis_tx_byte = 0;
 static int      v22bis_tx_bits = 0;
@@ -374,6 +436,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
         g_state = ME_DATA;
         pthread_mutex_unlock(&g_state_mtx);
         fprintf(stderr, "[ME] %s training complete (%d bps)\n", name, rate);
+        trace_phase("%s training complete: rate=%d mod=%s", name, rate, me_mod_to_str(mod));
         di_on_connected(rate);
         return;
     }
@@ -413,6 +476,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
     (void)user_data;
     if (bit < 0) {
         /* Status event from V.34 training state machine */
+        trace_phase("V34 rx status=%s (%d)", signal_status_to_str(bit), bit);
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_state == ME_TRAINING) {
@@ -420,6 +484,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 pthread_mutex_unlock(&g_state_mtx);
                 int rate = v34_get_current_bit_rate(g_v34);
                 fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
+                trace_phase("V34 enter DATA: rate=%d", rate);
                 di_on_connected(rate);
                 return;
             }
@@ -448,6 +513,7 @@ static void start_v22bis_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
+    trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
@@ -466,6 +532,7 @@ static void start_v34_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
+    trace_phase("enter TRAINING: mod=V34 role=%s", g_calling_party ? "caller" : "answerer");
     g_training_rx_energy = 0;
     g_training_rx_count  = 0;
 
@@ -533,9 +600,15 @@ static void start_v34_training(void)
 static void v8_result_handler(void *user_data, v8_parms_t *result)
 {
     (void)user_data;
+    char mod_str[96];
+    v8_mod_mask_to_str(result->jm_cm.modulations, mod_str, sizeof(mod_str));
 
     fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
             result->status, result->jm_cm.modulations, result->jm_cm.pstn_access);
+    trace_phase("V8 result: status=%s (%d) mods=%s (0x%X) protocol=0x%X pstn=0x%X pcm=0x%X",
+                v8_status_to_str(result->status), result->status,
+                mod_str, result->jm_cm.modulations, result->jm_cm.protocols,
+                result->jm_cm.pstn_access, result->jm_cm.pcm_modem_availability);
 
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
     if (result->status == V8_STATUS_IN_PROGRESS ||
@@ -571,15 +644,18 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         const char *mod_str = (result->jm_cm.modulations & V8_MOD_V90)
                               ? "V.90/V.34" : "V.34";
         fprintf(stderr, "[ME] V.8 negotiated %s (full duplex, up to 33.6 kbps)\n", mod_str);
+        trace_phase("V8 selected %s", mod_str);
         start_v34_training();
 
     } else if (result->jm_cm.modulations & V8_MOD_V22) {
         fprintf(stderr, "[ME] V.8 negotiated V.22bis fallback\n");
+        trace_phase("V8 selected V22BIS");
         start_v22bis_training();
 
     } else {
         fprintf(stderr, "[ME] V.8 no usable modulation (0x%X), hanging up\n",
                 result->jm_cm.modulations);
+        trace_phase("V8 selected no usable modulation -> hangup");
         pthread_mutex_unlock(&g_state_mtx);
         me_hangup();
         return;
@@ -648,11 +724,13 @@ void me_on_sip_connected(void)
     pthread_mutex_lock(&g_state_mtx);
 
     cr_reset(&g_cr);
+    g_trace_start_ms = trace_now_ms();
     g_v8_rx_energy     = 0;
     g_v8_rx_count      = 0;
 
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
+    trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
     /* Initialise V.8 */
     v8_parms_t v8_parms;
@@ -692,6 +770,7 @@ void me_on_sip_connected(void)
     g_state = ME_V8;
     g_mod   = ME_MOD_NONE;
     pthread_mutex_unlock(&g_state_mtx);
+    trace_phase("enter V8: advertised mods=V90|V34|V22");
 
     fprintf(stderr, "[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");
@@ -712,6 +791,7 @@ void me_on_sip_disconnected(void)
     g_mod   = ME_MOD_NONE;
     g_calling_party = false;
     pthread_mutex_unlock(&g_state_mtx);
+    trace_phase("SIP disconnected: prev_state=%d -> IDLE", prev);
 
     if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8)
         di_on_disconnected();
