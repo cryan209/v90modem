@@ -2483,9 +2483,54 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     switch (s->stage)
     {
     case V34_RX_STAGE_PHASE3_WAIT_S:
-        /* S detection is now handled in primary_channel_rx using raw audio power.
-           This code path should not be reached since primary_channel_rx skips
-           demodulation during PHASE3_WAIT_S. */
+        /* Phase 3 S detection using demodulated differential phase.
+           S corresponds to repeated 180-degree reversals (data_bits==2). */
+        ang1 = arctan2(sample->re, sample->im);
+        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
+        data_bits = ang3 >> 30;
+        s->duration++;
+
+        {
+            int idx = (s->duration - 1) & 31;
+            int old_was_2 = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
+            int new_is_2 = (data_bits == 2) ? 1 : 0;
+
+            if (new_is_2)
+                s->s_window |= (1u << idx);
+            else
+                s->s_window &= ~(1u << idx);
+
+            s->s_detect_count += new_is_2 - old_was_2;
+        }
+
+        if (s->duration <= 10 || (s->duration % 500) == 0)
+        {
+            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
+                     s->duration, mag, data_bits, s->s_detect_count);
+        }
+
+        if (s->duration >= 128 && s->s_detect_count >= 14)
+        {
+            s->received_event = V34_EVENT_S;
+            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+            s->bit_count = 0;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: S pattern detected (baud %d, win=%d/32)\n",
+                     s->duration, s->s_detect_count);
+        }
+        else if (s->duration >= 6000)
+        {
+            /* Don't force a false S event; keep searching for a real pattern. */
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: S detect timeout (%d bauds, win=%d/32), continuing search\n",
+                     s->duration, s->s_detect_count);
+            s->duration = 0;
+            s->s_detect_count = 0;
+            s->s_window = 0;
+        }
         break;
 
     case V34_RX_STAGE_PHASE3_TRAINING:
@@ -2967,63 +3012,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             s->rrc_filter_step = 0;
         /*endif*/
 
-        /* During Phase 3 S detection, use raw audio power instead of demodulated
-           energy. The full demodulator requires carrier lock and correct AGC to
-           produce stable energy readings, which aren't available during initial
-           signal detection. Raw power detection is robust and sufficient. */
         power = power_meter_update(&s->power, amp[i]);
-        if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
-        {
-            s->duration++;
-            /* Guard period before declaring S transition.
-               Default is 4000 samples, but TX may retune this when waiting
-               for a second transition around optional MD. */
-            if (s->duration < s->phase3_s_guard_samples)
-                continue;
-            /*endif*/
-            /* Check raw audio power. Signal present threshold: -43 dBm0.
-               The S signal at -17 dBm0 after line attenuation should be well above this. */
-            if (power > s->carrier_on_power)
-            {
-                s->bit_count++;
-                if (s->bit_count >= 80)
-                {
-                    /* Sustained power for 80 samples (~10ms) — declare S detected */
-                    s->received_event = V34_EVENT_S;
-                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-                    s->bit_count = 0;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3: S signal detected (sample %d, power=%d, threshold=%d)\n",
-                             s->duration, power, s->carrier_on_power);
-                }
-                /*endif*/
-            }
-            else
-            {
-                s->bit_count = 0;
-            }
-            /*endif*/
-            /* Log power periodically */
-            if ((s->duration % 1000) == 1)
-            {
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: sample %d, raw_power=%d, threshold=%d, consecutive=%d\n",
-                         s->duration, power, s->carrier_on_power, s->bit_count);
-            }
-            /*endif*/
-            /* Timeout after 3 seconds (24000 samples at 8000 Hz) */
-            if (s->duration >= 24000)
-            {
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: S detection timeout (power=%d, threshold=%d)\n",
-                         power, s->carrier_on_power);
-                s->received_event = V34_EVENT_S;
-                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-            }
-            /*endif*/
-            continue;
-        }
-        /*endif*/
         s->eq_put_step -= V34_RX_PULSESHAPER_COEFF_SETS;
         step = -s->eq_put_step;
         if (step > V34_RX_PULSESHAPER_COEFF_SETS - 1)

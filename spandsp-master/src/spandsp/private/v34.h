@@ -726,6 +726,9 @@ typedef struct
     int persistence2;
     int phase3_s_guard_samples;
     int phase3_s_hits;
+    uint8_t phase3_pp_lag8[8];
+    int phase3_pp_obs;
+    int phase3_pp_match;
 
     /* MP or MPh receive tracking data */
     int mp_count;

@@ -2390,13 +2390,15 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
 
     /* Switch RX to primary channel demodulator for Phase 3 reception.
-       The answerer must detect the caller's S signal during Phase 3.
-       Must reinitialize RX demodulator state since it was previously running
-       the CC (control channel) demodulator with different timing parameters. */
+       Keep the demodulator running, but do not arm S detection yet.
+       Per V.34 §11.3.1.2.4 the answerer conditions for S/S->S only after
+       transmitting J. */
     s->rx.current_demodulator = V34_MODULATION_V34;
-    s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+    s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
     s->rx.duration = 0;
     s->rx.bit_count = 0;
+    s->rx.s_detect_count = 0;
+    s->rx.s_window = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
     s->rx.baud_half = 0;
@@ -2409,7 +2411,8 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.eq_put_step = 448/2 - 1;
     /* Reset carrier phase for clean demodulation start */
     s->rx.carrier_phase = 0;
-    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - Phase 3: waiting for far-end S signal\n");
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 3: primary demod active; S detection will arm at J\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2421,8 +2424,19 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
     /* The 48 symbol PP signal, which is repeated 6 times, to make a 288 symbol sequence */
     /* See V.34/10.1.3.6 */
     i = s->tx.tone_duration%48;
-    if (++s->tx.tone_duration == PP_SYMBOLS*PP_REPEATS)
+    if (++s->tx.tone_duration == 1)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3: PP transmission started (%d symbols)\n",
+                 PP_SYMBOLS*PP_REPEATS);
+    }
+    if (s->tx.tone_duration == PP_SYMBOLS*PP_REPEATS)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3: PP transmission complete (%d symbols), starting TRN\n",
+                 s->tx.tone_duration);
         trn_baud_init(s);
+    }
     /*endif*/
     x = pp_symbols[i];
     x.re *= TRAINING_SCALE(TRAINING_AMP);
@@ -2433,7 +2447,9 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
 
 static void pp_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - pp_baud_init()\n");
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - pp_baud_init() [Phase 3 PP: %d-symbol sequence]\n",
+             PP_SYMBOLS*PP_REPEATS);
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_pp_baud;
 }
@@ -2461,9 +2477,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         0x899F  /* 16 point constellation (same pattern per Table 19) */
     };
     int bit;
+    int j_pat_idx;
 
     /* See V.34/10.1.3.8 */
     bit = 0;
+    /* V.34 §10.1.3.3 Table 18: J pattern depends on TRN constellation size. */
+    j_pat_idx = s->tx.infoh.trn16 ? 1 : 0;
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_TRN:
@@ -2482,7 +2501,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
                      s->tx.tone_duration);
             s->tx.stage = V34_TX_STAGE_J;
-            s->tx.persistence2 = j_pattern[0];
+            s->tx.persistence2 = j_pattern[j_pat_idx];
             s->tx.tone_duration = 0;
             /* V.34 §10.1.3.3: "The differential encoder shall be initialized
                using the final symbol of the transmitted TRN sequence." */
@@ -2497,6 +2516,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
             s->rx.duration = 0;
             s->rx.bit_count = 0;
+            s->rx.s_detect_count = 0;
+            s->rx.s_window = 0;
             s->rx.phase3_s_guard_samples = 4000;
             s->rx.phase3_s_hits = 0;
         }
@@ -2517,7 +2538,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /* Reload J pattern when all 16 bits are consumed (every 8 bauds for 4-point,
            every 4 bauds for 16-point). */
         if (s->tx.persistence2 == 0)
-            s->tx.persistence2 = j_pattern[0];
+            s->tx.persistence2 = j_pattern[j_pat_idx];
         /*endif*/
         if (++s->tx.tone_duration >= 16)
         {
@@ -2554,7 +2575,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                             s->rx.duration = 0;
                             s->rx.bit_count = 0;
                             s->rx.phase3_s_guard_samples = md_wait_samples;
-                            s->tx.persistence2 = j_pattern[0];
+                            s->tx.persistence2 = j_pattern[j_pat_idx];
                             s->tx.tone_duration = 0;
                             span_log(&s->logging, SPAN_LOG_FLOW,
                                      "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
@@ -2579,7 +2600,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 else
                 {
                     /* Continue with repeats of J */
-                    s->tx.persistence2 = j_pattern[0];
+                    s->tx.persistence2 = j_pattern[j_pat_idx];
                     s->tx.tone_duration = 0;
                 }
                 /*endif*/
@@ -2883,9 +2904,9 @@ static void mp_or_mph_baud_init(v34_state_t *s)
        V.34 §11.4: Both sides transmit MP using the same 4-point constellation
        at the negotiated baud rate.
        DO NOT touch RX state here — the RX progresses independently
-       through S → S-bar → TRN → MP stages as it detects the caller's signals.
-       The RX stage was set to PHASE4_S in phase4_wait_init(). */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - MP transmission starting (RX still detecting far-end S)\n");
+       through TRN/J' conditioning into MP decode.
+       The RX stage was set in phase4_wait_init(). */
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - MP transmission starting (RX conditioned for J'/TRN/MP)\n");
 }
 /*- End of function --------------------------------------------------------*/
 
