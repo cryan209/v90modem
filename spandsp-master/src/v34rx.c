@@ -241,6 +241,14 @@ static int mp_preamble_score(uint32_t bitstream)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool mp_preamble_has_start_zero(uint32_t bitstream)
+{
+    /* Preamble layout in bitstream[18:1]:
+       17x'1' followed by start '0' at bit 1. */
+    return ((bitstream >> 1) & 1) == 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int phase3_j_pattern_bit(int pat_type, int bit_idx)
 {
     /* LSB-first pattern bits, per V.34 Table 18/19 representation used by TX:
@@ -2327,6 +2335,9 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                         if (s->duplex)
                         {
                             process_rx_mp(s, &mp, s->info_buf);
+                            if (mp.mp_acknowledged)
+                                s->mp_remote_ack_seen = 1;
+                            /*endif*/
                             t = span_container_of(s, v34_state_t, rx);
                             if (mp.type == 1)
                             {
@@ -3020,6 +3031,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->bitstream = 0;
             s->bit_count = 0;
             s->mp_seen = 0;
+            s->mp_remote_ack_seen = 0;
             s->mp_count = -1;
             s->mp_frame_pos = 0;
             s->mp_frame_target = 0;
@@ -3050,6 +3062,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->bitstream = 0;
             s->bit_count = 0;
             s->mp_seen = 0;
+            s->mp_remote_ack_seen = 0;
             s->mp_count = -1;
             s->mp_frame_pos = 0;
             s->mp_frame_target = 0;
@@ -3121,7 +3134,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     d0 = descramble_reg(&reg, s->scrambler_tap, raw_bits & 1);
                     bstream = (bstream << 1) | d0;
                     sc = mp_preamble_score(bstream);
-                    if (sc >= MP_LOCK_SCORE_MIN  &&  sc > chosen_score)
+                    if (sc >= MP_LOCK_SCORE_MIN
+                        && mp_preamble_has_start_zero(bstream)
+                        && sc > chosen_score)
                     {
                         chosen_hyp = h;
                         chosen_type_bit = d0;
@@ -3136,7 +3151,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
                     bstream = (bstream << 1) | d1;
                     sc = mp_preamble_score(bstream);
-                    if (sc >= MP_LOCK_SCORE_MIN  &&  sc > chosen_score)
+                    if (sc >= MP_LOCK_SCORE_MIN
+                        && mp_preamble_has_start_zero(bstream)
+                        && sc > chosen_score)
                     {
                         chosen_hyp = h;
                         chosen_type_bit = d1;
@@ -3266,37 +3283,42 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endif*/
 
-                /* Detect 17x'1' + start '0' + type bit. */
+                /* Detect 17x'1' + start '0' + type bit only when not already
+                   collecting an MP frame. Otherwise we can retrigger on long runs
+                   of ones and keep resetting frame alignment. */
+                if (s->mp_frame_pos == 0)
                 {
                     int preamble_score;
 
                     preamble_score = mp_preamble_score(s->bitstream);
-                    if (preamble_score >= MP_PREAMBLE_SCORE_MIN)
-                {
-                    int b;
-                    int type;
-                    char tail[33];
+                    if (preamble_score >= MP_PREAMBLE_SCORE_MIN
+                        && mp_preamble_has_start_zero(s->bitstream))
+                    {
+                        int b;
+                        int type;
+                        char tail[33];
 
-                    type = bits[i];
-                    for (b = 0;  b < 17;  b++)
-                        s->mp_frame_bits[b] = 1;
-                    /*endfor*/
-                    s->mp_frame_bits[17] = 0;
-                    s->mp_frame_bits[18] = type;
-                    s->mp_frame_target = (type == 1)  ?  188  :  88;
-                    s->mp_frame_pos = 19;
-                    s->mp_count = 0;
-                    s->bit_count = 0;
-                    s->mp_early_rejects = 0;
+                        type = bits[i];
+                        for (b = 0;  b < 17;  b++)
+                            s->mp_frame_bits[b] = 1;
+                        /*endfor*/
+                        s->mp_frame_bits[17] = 0;
+                        s->mp_frame_bits[18] = type;
+                        s->mp_frame_target = (type == 1)  ?  188  :  88;
+                        s->mp_frame_pos = 19;
+                        s->mp_count = 0;
+                        s->bit_count = 0;
+                        s->mp_early_rejects = 0;
 
-                    bits32_to_str(s->bitstream, tail);
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: MP preamble detected (baud %d): "
-                             "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
-                             "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
-                             s->duration, preamble_score, type, s->mp_frame_target, tail);
-                    continue;
-                }
+                        bits32_to_str(s->bitstream, tail);
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP preamble detected (baud %d): "
+                                 "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
+                                 "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
+                                 s->duration, preamble_score, type, s->mp_frame_target, tail);
+                        continue;
+                    }
+                    /*endif*/
                 }
                 /*endif*/
 
@@ -3322,30 +3344,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                             data_idx = mp_data_bit_index(type_now, idx);
                             s->mp_early_rejects++;
-                            if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 16) == 0)
+                            if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP%d rejected early at frame_idx=%d body_idx=%d data_idx=%d value=%d "
-                                         "(expected start bit 0), reject_count=%d\n",
+                                         "Rx - Phase 4: MP%d start-bit mismatch at frame_idx=%d body_idx=%d data_idx=%d value=%d "
+                                         "(expected 0), start_err_count=%d (continuing until CRC)\n",
                                          type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
                             }
                             /*endif*/
-                            s->mp_frame_pos = 0;
-                            s->mp_frame_target = 0;
-                            s->bit_count = 0;
-                            if (s->mp_early_rejects >= 64)
-                            {
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: unlock MP hypothesis=%d after %d early rejects\n",
-                                         s->mp_hypothesis, s->mp_early_rejects);
-                                s->mp_hypothesis = -1;
-                                s->mp_count = -1;
-                                s->mp_early_rejects = 0;
-                                memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-                                memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
-                            }
-                            /*endif*/
-                            break;
                         }
                         /*endif*/
                     }
@@ -3382,6 +3388,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         {
                             mp_pack_for_parser(s->info_buf, s->mp_frame_bits, type);
                             process_rx_mp(s, &mp, s->info_buf);
+                            if (mp.mp_acknowledged)
+                                s->mp_remote_ack_seen = 1;
+                            /*endif*/
                             t = span_container_of(s, v34_state_t, rx);
                             if (mp.type == 1)
                                 memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
@@ -3406,18 +3415,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         /*endif*/
                         s->mp_seen = 1;
+                        s->mp_early_rejects = 0;
                     }
                     else
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d)\n",
-                                 type, crc_good, fill_good);
+                                 "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d start_err_count=%d)\n",
+                                 type, crc_good, fill_good, s->mp_early_rejects);
                         /* Bad lock: drop hypothesis and resume global search. */
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
                                  s->mp_hypothesis);
                         s->mp_hypothesis = -1;
                         s->mp_count = -1;
+                        s->mp_early_rejects = 0;
                         memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
                         memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
                     }
@@ -3880,6 +3891,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_count = -1;
     s->rx.mp_len = 0;
     s->rx.mp_seen = -1;
+    s->rx.mp_remote_ack_seen = 0;
     s->rx.mp_frame_pos = 0;
     s->rx.mp_frame_target = 0;
     s->rx.mp_early_rejects = 0;

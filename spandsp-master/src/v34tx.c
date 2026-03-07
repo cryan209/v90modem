@@ -2844,6 +2844,7 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.s_window = 0;
     s->rx.bitstream = 0;
     s->rx.mp_seen = 0;
+    s->rx.mp_remote_ack_seen = 0;
     s->rx.mp_count = -1;
     s->rx.mp_early_rejects = 0;
     s->rx.mp_hypothesis = -1;
@@ -2911,12 +2912,12 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                          "Tx - far-end MP received, switching to MP'\n");
             }
             /*endif*/
-            /* Check if we've received MP' (acknowledged) from the far end.
-               When both sides have sent MP', transition to E signal. */
-            if (s->rx.mp_seen >= 1  &&  s->tx.mp.mp_acknowledged)
+            /* Transition to E only after:
+               - we've switched to MP' locally, and
+               - we've received a valid far-end MP' (ack bit seen in a valid MP frame). */
+            if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen)
             {
-                /* We've sent MP' and received at least one MP.
-                   After completing this MP' transmission, send E. */
+                /* We've exchanged acknowledged MP. After completing this MP' frame, send E. */
                 e_baud_init(s);
             }
             else
