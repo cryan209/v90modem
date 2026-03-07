@@ -2584,6 +2584,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->bit_count = 0;
             s->mp_seen = 0;
             s->mp_count = -1;
+            s->mp_frame_pos = 0;
+            s->mp_frame_target = 0;
             s->mp_hypothesis = -1;
             memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
             memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
@@ -3305,6 +3307,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_count = -1;
     s->rx.mp_len = 0;
     s->rx.mp_seen = -1;
+    s->rx.mp_frame_pos = 0;
+    s->rx.mp_frame_target = 0;
     s->rx.mp_hypothesis = -1;
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
