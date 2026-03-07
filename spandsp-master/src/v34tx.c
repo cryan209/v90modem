@@ -2701,6 +2701,9 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.bitstream = 0;
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
+    s->rx.mp_hypothesis = -1;
+    memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
+    memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: waiting for far-end S signal (baud_rate=%d, high_carrier=%d, "
              "carrier=%.1f Hz)\n",

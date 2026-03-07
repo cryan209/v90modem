@@ -178,6 +178,42 @@ static int descramble(v34_rx_state_t *s, int in_bit)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
+{
+    int out_bit;
+
+    out_bit = (in_bit ^ (*reg >> scrambler_tap) ^ (*reg >> (23 - 1))) & 1;
+    *reg = (*reg << 1) | in_bit;
+    return out_bit;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int map_phase4_raw_bits(int dibit, int hypothesis)
+{
+    int mapped;
+
+    /* 8 hypotheses:
+       - dibit XOR rotation (0..3)
+       - optional bit swap */
+    mapped = (dibit ^ (hypothesis & 0x3)) & 0x3;
+    if (hypothesis & 0x4)
+        mapped = ((mapped & 1) << 1) | ((mapped >> 1) & 1);
+    /*endif*/
+    return mapped;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void bits32_to_str(uint32_t v, char out[33])
+{
+    int j;
+
+    for (j = 31;  j >= 0;  j--)
+        out[31 - j] = ((v >> j) & 1) ? '1' : '0';
+    /*endfor*/
+    out[32] = '\0';
+}
+/*- End of function --------------------------------------------------------*/
+
 static void pack_output_bitstream(v34_rx_state_t *s)
 {
     uint8_t *t;
@@ -2437,7 +2473,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->duration >= 32)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: descrambler sync done (%d bauds), scanning for MP\n",
+                     "Rx - Phase 4: descrambler sync done (%d bauds), scanning for MP (decoder=hyp8-v1)\n",
                      s->duration);
             s->stage = V34_RX_STAGE_PHASE4_MP;
             s->duration = 0;
@@ -2445,6 +2481,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->bit_count = 0;
             s->mp_seen = 0;
             s->mp_count = -1;
+            s->mp_hypothesis = -1;
+            memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+            memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
         }
         break;
 
@@ -2452,53 +2491,105 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* Phase 4 MP detection on primary channel using DQPSK demodulation.
            Same approach as CC channel MP detection: differential phase decoding,
            descrambling, then scanning for the MP preamble and frame. */
+        {
+            int locked_this_symbol;
+            int h;
+
         ang1 = arctan2(sample->re, sample->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
 
-        /* Descramble the data bits */
-        {
-            int raw_bits = data_bits;
-            for (i = 0;  i < 2;  i++)
+            locked_this_symbol = 0;
+
+            if (s->mp_hypothesis >= 0)
             {
-                bits[i] = descramble(s, raw_bits & 1);
-                raw_bits >>= 1;
+                int raw_bits;
+
+                raw_bits = map_phase4_raw_bits(data_bits, s->mp_hypothesis);
+                for (i = 0;  i < 2;  i++)
+                {
+                    bits[i] = descramble(s, raw_bits & 1);
+                    raw_bits >>= 1;
+                }
+                /*endfor*/
             }
-        }
+            else
+            {
+                int chosen_hyp;
+                int chosen_type_bit;
+
+                chosen_hyp = -1;
+                chosen_type_bit = 0;
+                for (h = 0;  h < 8;  h++)
+                {
+                    uint32_t reg;
+                    uint32_t bstream;
+                    int raw_bits;
+                    int d0;
+                    int d1;
+
+                    reg = s->mp_hyp_scramble[h];
+                    bstream = s->mp_hyp_bitstream[h];
+                    raw_bits = map_phase4_raw_bits(data_bits, h);
+
+                    d0 = descramble_reg(&reg, s->scrambler_tap, raw_bits & 1);
+                    bstream = (bstream << 1) | d0;
+                    if ((bstream & 0x7FFFE) == 0x7FFFC)
+                    {
+                        chosen_hyp = h;
+                        chosen_type_bit = d0;
+                    }
+                    /*endif*/
+                    d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
+                    bstream = (bstream << 1) | d1;
+                    if (chosen_hyp < 0  &&  (bstream & 0x7FFFE) == 0x7FFFC)
+                    {
+                        chosen_hyp = h;
+                        chosen_type_bit = d1;
+                    }
+                    /*endif*/
+                    s->mp_hyp_scramble[h] = reg;
+                    s->mp_hyp_bitstream[h] = bstream;
+                }
+                /*endfor*/
+
+                if (chosen_hyp >= 0)
+                {
+                    s->mp_hypothesis = chosen_hyp;
+                    s->scramble_reg = s->mp_hyp_scramble[chosen_hyp];
+                    s->bitstream = s->mp_hyp_bitstream[chosen_hyp];
+                    s->crc = 0xFFFF;
+                    s->bit_count = 0;
+                    s->mp_count = 17;
+                    s->mp_len = 84 + 1;
+                    s->mp_and_fill_len = 186 + 1 + 1;
+                    locked_this_symbol = 1;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: locked MP hypothesis=%d, type_bit=%d (baud %d)\n",
+                             chosen_hyp, chosen_type_bit, s->duration + 1);
+                }
+                /*endif*/
+                bits[0] = bits[1] = 0;
+            }
+            /*endif*/
 
         s->duration++;
-        if (s->duplex && s->duration == 3000 && s->mp_seen == 0)
-        {
-            /* Fallback: if we still have not decoded a valid far-end MP frame
-               after prolonged Phase 4 MP demodulation, allow TX to advance to MP'
-               instead of looping forever in MP. */
-            s->mp_seen = 1;
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: MP timeout fallback, forcing mp_seen=1\n");
-        }
-        if (s->duplex && s->duration == 9000 && s->mp_seen == 1)
-        {
-            /* Secondary fallback: unblock upper layers if the MP/E handshake
-               still cannot be decoded in this implementation. */
-            s->mp_seen = 2;
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: handshake timeout fallback, forcing training success\n");
-            report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
-        }
         /* Log first 30 bauds (to see initial sync) and every 200 bauds after */
         if (s->duration <= 30 || (s->duration % 200) == 0)
         {
             float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4 MP baud %d: mag=%.3f data_bits=%d descr=%d,%d "
-                     "bitstream=0x%08X\n",
+                     "bitstream=0x%08X hyp=%d\n",
                      s->duration, mag, data_bits, bits[0], bits[1],
-                     (unsigned)s->bitstream);
+                     (unsigned)s->bitstream, s->mp_hypothesis);
         }
 
         /* Scan for MP/MPh messages — same logic as process_cc_half_baud */
-        for (i = 0;  i < 2;  i++)
+            if (s->mp_hypothesis >= 0  &&  !locked_this_symbol)
+            {
+                for (i = 0;  i < 2;  i++)
         {
             s->bitstream = (s->bitstream << 1) | bits[i];
             if (s->mp_seen >= 2)
@@ -2520,14 +2611,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             else if ((s->bitstream & 0x7FFFE) == 0x7FFFC)
             {
+                char tail[33];
+
                 /* MP preamble detected: 16 ones + start bit (0) + type bit.
                    bits[i] is the type bit. However, the type bit may be decoded
                    incorrectly due to bit errors. Instead of trusting it, always
                    try MP0 (type=0) first, then MP1 (type=1) if CRC fails.
                    This dual-length approach handles single-bit errors in the type. */
+                bits32_to_str(s->bitstream, tail);
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: MP preamble detected (baud %d, type_bit=%d), trying MP0 first\n",
-                         s->duration, bits[i]);
+                         "Rx - Phase 4: MP preamble detected (baud %d, type_bit=%d), trying MP0 first\n"
+                         "Rx - Phase 4: MP framing expects 16x'1' + start '0' + type bit\n"
+                         "Rx - Phase 4: MP preamble tail bits=0b%s\n",
+                         s->duration, bits[i], tail);
                 s->crc = 0xFFFF;
                 s->bit_count = 0;
                 s->mp_count = 17;
@@ -2539,14 +2635,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
             if (s->mp_count >= 0)
             {
+                int start_boundary;
+
                 s->mp_count++;
+                start_boundary = ((s->mp_count % 17) == 0);
                 /* Don't include the start bits in the CRC calculation */
-                if (s->mp_count%17 != 0)
+                if (!start_boundary)
                     s->crc = crc_itu16_bits(bits[i], 1, s->crc);
                 /*endif*/
                 s->bit_count++;
                 if ((s->bit_count & 0x07) == 0)
                     s->info_buf[(s->bit_count >> 3) - 1] = bit_reverse8(s->bitstream & 0xFF);
+                /*endif*/
+                if (s->bit_count <= 40 || (s->bit_count % 32) == 0 || start_boundary)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4 MP bit[%d]=%d mp_count=%d start_boundary=%d crc=0x%04X\n",
+                             s->bit_count, bits[i], s->mp_count, start_boundary, s->crc);
+                }
                 /*endif*/
                 /* Check CRC at MP0 boundary (mp_count=85) */
                 if (s->mp_count == 84 + 1)
@@ -2668,8 +2774,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
             }
             /*endif*/
+                }
+                /*endfor*/
+            }
+            /*endif*/
         }
-        /*endfor*/
         break;
 
     default:
@@ -3158,6 +3267,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_count = -1;
     s->rx.mp_len = 0;
     s->rx.mp_seen = -1;
+    s->rx.mp_hypothesis = -1;
+    memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
+    memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
 
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;

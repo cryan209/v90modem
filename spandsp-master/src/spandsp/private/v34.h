@@ -730,6 +730,9 @@ typedef struct
     int mp_len;
     int mp_and_fill_len;
     int mp_seen;
+    int mp_hypothesis;
+    uint32_t mp_hyp_scramble[8];
+    uint32_t mp_hyp_bitstream[8];
 
     int dft_ptr;
 #if defined(SPANDSP_USE_FIXED_POINT)
