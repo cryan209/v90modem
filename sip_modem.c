@@ -382,6 +382,12 @@ int main(int argc, char *argv[])
     media_cfg.audio_frame_ptime = 20;   /* 20 ms frames */
     media_cfg.ec_tail_len     = 0;      /* No echo cancellation */
     media_cfg.no_vad          = PJ_TRUE; /* No voice activity detection */
+    /* For modem pass-through, adaptive jitter buffering can destroy
+       phase continuity needed by V.34 training. Keep playout fixed. */
+    media_cfg.jb_init         = 0;
+    media_cfg.jb_min_pre      = 0;
+    media_cfg.jb_max_pre      = 0;
+    media_cfg.jb_max          = 0;
 
     status = pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
     if (status != PJ_SUCCESS) {
