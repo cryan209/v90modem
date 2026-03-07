@@ -2602,9 +2602,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                              s->phase3_j_bits, best_score, best_h);
                 }
                 /*endif*/
-                if (s->phase3_j_bits >= 48
+                if (s->phase3_j_bits >= 32
                     &&
-                    best_score >= 28
+                    best_score >= 24
                     &&
                     (s->received_event == V34_EVENT_NONE || s->received_event == V34_EVENT_S))
                 {
@@ -2663,12 +2663,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->duration >= 128 && (s->s_detect_count >= 18 || s->bit_count >= 20))
         {
             int rev_hits = s->bit_count;
-            s->received_event = V34_EVENT_S;
-            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-            s->bit_count = 0;  /* clear reversal counter reuse */
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S pattern detected (baud %d, dom=%d/32 rev=%d/32)\n",
-                     s->duration, s->s_detect_count, rev_hits);
+            if (!s->calling_party  &&  s->info1c.md <= 0)
+            {
+                /* Answerer with no MD should not leave J/J' search on S-like patterns. */
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: S-like pattern seen (baud %d, dom=%d/32 rev=%d/32), "
+                         "continuing J/J' search (MD=0)\n",
+                         s->duration, s->s_detect_count, rev_hits);
+            }
+            else
+            {
+                s->received_event = V34_EVENT_S;
+                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                s->bit_count = 0;  /* clear reversal counter reuse */
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: S pattern detected (baud %d, dom=%d/32 rev=%d/32)\n",
+                         s->duration, s->s_detect_count, rev_hits);
+            }
+            /*endif*/
         }
         else if (s->duration >= 6000)
         {
