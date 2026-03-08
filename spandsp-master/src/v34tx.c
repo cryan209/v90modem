@@ -2445,6 +2445,12 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
+    memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
+    memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
+    memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
+    memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
+    s->rx.phase4_trn_lock_hyp = -1;
+    s->rx.phase4_trn_lock_score = -1;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
     /* Reset RX RRC filter to flush stale CC demodulator data */
@@ -2615,6 +2621,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.phase4_j_seen = 0;
             s->rx.phase4_j_lock_hyp = -1;
             s->rx.phase4_trn_after_j = 0;
+            memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
+            memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
+            memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
+            memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
+            s->rx.phase4_trn_lock_hyp = -1;
+            s->rx.phase4_trn_lock_score = -1;
         }
         /*endif*/
         return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
@@ -2706,6 +2718,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase4_j_seen = 0;
                         s->rx.phase4_j_lock_hyp = -1;
                         s->rx.phase4_trn_after_j = 0;
+                        memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
+                        memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
+                        memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
+                        memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
+                        s->rx.phase4_trn_lock_hyp = -1;
+                        s->rx.phase4_trn_lock_score = -1;
                         span_log(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
                                  "waiting %d samples for next S transition\n",
@@ -2953,6 +2971,12 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
+    memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
+    memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
+    memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
+    memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
+    s->rx.phase4_trn_lock_hyp = -1;
+    s->rx.phase4_trn_lock_score = -1;
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
     span_log(&s->logging, SPAN_LOG_FLOW,
