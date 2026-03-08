@@ -3038,24 +3038,21 @@ static void mp_or_mph_baud_init(v34_state_t *s)
 
 static complex_sig_t get_e_baud(v34_state_t *s)
 {
-    static const uint16_t e_pattern[2] =
-    {
-        0x8990, /* 4 point constellation */
-        0x89B0  /* 16 point constellation */
-    };
     int bit;
 
-    bit = (e_pattern[0] >> s->tx.tone_duration) & 1;
-    if (++s->tx.tone_duration == 16)
+    /* V.34 E detection in RX is based on 20 consecutive post-descrambler 1 bits.
+       Therefore transmit continuous scrambled 1s on the primary channel so a
+       synchronized far-end descrambler yields an all-ones run. */
+    bit = scramble(&s->tx, 1);
+    bit = (scramble(&s->tx, 1) << 1) | bit;
+    s->tx.diff = (s->tx.diff + bit) & 3;
+    if (++s->tx.tone_duration == 10)
     {
-        //if (s->tx.duplex)
-            /* CC comes next */
-        //else
-            /* B1 comes next */
-        ///*endif*/
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - E minimum reached (>=20 bits), continuing E until post-MP data path is available\n");
     }
     /*endif*/
-    return training_constellation_4[bit];
+    return training_constellation_4[s->tx.diff];
 }
 /*- End of function --------------------------------------------------------*/
 

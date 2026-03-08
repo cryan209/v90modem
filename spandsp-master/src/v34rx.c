@@ -829,6 +829,81 @@ static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type,
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, const uint8_t bits[])
+{
+    int bit_idx;
+
+    if (mp->type != type)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (type mismatch frame=%d parsed=%d)\n",
+                 type, type, mp->type);
+        return false;
+    }
+    /*endif*/
+    if (bits[19] != 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (reserved19=%d expected 0)\n",
+                 type, bits[19]);
+        return false;
+    }
+    /*endif*/
+    if (mp->bit_rate_a_to_c < 1  ||  mp->bit_rate_a_to_c > 14
+        ||  mp->bit_rate_c_to_a < 1  ||  mp->bit_rate_c_to_a > 14)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (rate fields out of range a_to_c=%d c_to_a=%d)\n",
+                 type, mp->bit_rate_a_to_c, mp->bit_rate_c_to_a);
+        return false;
+    }
+    /*endif*/
+    if (mp->trellis_size < V34_TRELLIS_16  ||  mp->trellis_size > V34_TRELLIS_64)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (invalid trellis code=%d)\n",
+                 type, mp->trellis_size);
+        return false;
+    }
+    /*endif*/
+    if ((mp->signalling_rate_mask & 0x3FFF) == 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (empty signalling_rate_mask=0x%04X)\n",
+                 type, mp->signalling_rate_mask & 0x7FFF);
+        return false;
+    }
+    /*endif*/
+    if (mp->signalling_rate_mask & 0x4000)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (reserved rate-mask bit set: 0x%04X)\n",
+                 type, mp->signalling_rate_mask & 0x7FFF);
+        return false;
+    }
+    /*endif*/
+    bit_idx = mp->bit_rate_a_to_c - 1;
+    if (!(mp->signalling_rate_mask & (1 << bit_idx)))
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (a_to_c rate %d missing from mask 0x%04X)\n",
+                 type, mp->bit_rate_a_to_c, mp->signalling_rate_mask & 0x7FFF);
+        return false;
+    }
+    /*endif*/
+    bit_idx = mp->bit_rate_c_to_a - 1;
+    if (!(mp->signalling_rate_mask & (1 << bit_idx)))
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d semantic reject (c_to_a rate %d missing from mask 0x%04X)\n",
+                 type, mp->bit_rate_c_to_a, mp->signalling_rate_mask & 0x7FFF);
+        return false;
+    }
+    /*endif*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void pack_output_bitstream(v34_rx_state_t *s)
 {
     uint8_t *t;
@@ -3948,43 +4023,68 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
+                    {
+                        bool frame_accepted;
+
+                        frame_accepted = false;
                     if (crc_good  &&  fill_good)
                     {
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
-                                 type, s->mp_frame_target);
+                        bool semantic_good;
+
+                        semantic_good = true;
                         if (s->duplex)
                         {
                             mp_pack_for_parser(s->info_buf, s->mp_frame_bits, type);
                             process_rx_mp(s, &mp, s->info_buf);
-                            if (mp.mp_acknowledged)
-                                s->mp_remote_ack_seen = 1;
-                            /*endif*/
-                            t = span_container_of(s, v34_state_t, rx);
-                            if (mp.type == 1)
-                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                            /*endif*/
-                            switch (mp.trellis_size)
+                            semantic_good = mp_semantic_ok_phase4(s, &mp, type, s->mp_frame_bits);
+                            if (semantic_good)
                             {
-                            case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
-                                break;
-                            case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
-                                break;
-                            case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
-                                break;
-                            default:
-                                span_log(&t->logging, SPAN_LOG_FLOW,
-                                         "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
-                                break;
+                                if (mp.mp_acknowledged)
+                                    s->mp_remote_ack_seen = 1;
+                                /*endif*/
+                                t = span_container_of(s, v34_state_t, rx);
+                                if (mp.type == 1)
+                                    memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
+                                /*endif*/
+                                switch (mp.trellis_size)
+                                {
+                                case V34_TRELLIS_16:
+                                    t->tx.conv_encode_table = v34_conv16_encode_table;
+                                    break;
+                                case V34_TRELLIS_32:
+                                    t->tx.conv_encode_table = v34_conv32_encode_table;
+                                    break;
+                                case V34_TRELLIS_64:
+                                    t->tx.conv_encode_table = v34_conv64_encode_table;
+                                    break;
+                                default:
+                                    span_log(&t->logging, SPAN_LOG_FLOW,
+                                             "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                    semantic_good = false;
+                                    break;
+                                }
+                                /*endswitch*/
                             }
-                            /*endswitch*/
+                            /*endif*/
                         }
                         /*endif*/
-                        s->mp_seen = 1;
-                        s->mp_early_rejects = 0;
+                        if (semantic_good)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
+                                     type, s->mp_frame_target);
+                            s->mp_seen = 1;
+                            s->mp_early_rejects = 0;
+                            frame_accepted = true;
+                        }
+                        else
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d rejected (semantic checks failed)\n",
+                                     type);
+                            mp_unlock_after_reject(s, true);
+                        }
+                        /*endif*/
                     }
                     else
                     {
@@ -4007,9 +4107,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         mp_unlock_after_reject(s, true);
                     }
                     /*endif*/
-                    if (crc_good  &&  fill_good)
+                    if (frame_accepted)
                         s->mp_phase4_reject_streak = 0;
                     /*endif*/
+                    }
                     if (s->mp_hypothesis >= 0)
                     {
                         s->mp_frame_pos = 0;
