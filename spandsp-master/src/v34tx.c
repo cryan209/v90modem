@@ -2876,7 +2876,7 @@ static void phase4_wait_init(v34_state_t *s)
 /* Number of bauds to transmit silence at the start of MP TX.
    This allows the caller's MP to arrive without echo interference
    from our own TX.  Set to 0 to disable (normal V.34 operation). */
-#define MP_TX_SILENCE_BAUDS 0
+#define MP_TX_SILENCE_BAUDS 200
 
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {

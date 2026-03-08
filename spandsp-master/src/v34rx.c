@@ -3558,6 +3558,18 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d start_err_count=%d)\n",
                                  type, crc_good, fill_good, s->mp_early_rejects);
+                        /* Dump first 70 frame bits for diagnosis */
+                        {
+                            char dump[200];
+                            int dlen = (s->mp_frame_target < 90) ? s->mp_frame_target : 90;
+                            int d;
+                            for (d = 0; d < dlen && d < (int)sizeof(dump) - 1; d++)
+                                dump[d] = '0' + (s->mp_frame_bits[d] & 1);
+                            dump[d] = '\0';
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP frame bits[0..%d]: %s\n",
+                                     dlen - 1, dump);
+                        }
                         /* Bad lock: drop hypothesis and resume global search. */
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
