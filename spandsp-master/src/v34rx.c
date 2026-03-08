@@ -125,6 +125,7 @@
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
+#define MP_HINT_ONLY_BAUDS              2000
 
 enum
 {
@@ -556,6 +557,195 @@ static bool mp_try_boundary_slip_recovery(uint8_t bits[188], int type, int targe
             /*endif*/
         }
         /*endfor*/
+    }
+    /*endfor*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_apply_boundary_slip(uint8_t bits[188], int boundary, int target, int slip)
+{
+    uint8_t src[188];
+    int i;
+
+    memcpy(src, bits, sizeof(src));
+    for (i = boundary;  i < target;  i++)
+    {
+        int from;
+
+        from = i + slip;
+        bits[i] = (from >= boundary && from < target) ? src[from] : 0;
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_try_boundary_double_slip_recovery(uint8_t bits[188], int type, int target, int *b1_out, int *s1_out, int *b2_out, int *s2_out)
+{
+    static const int starts_mp0[] = {34, 51, 68};
+    static const int starts_mp1[] = {34, 51, 68, 85, 102, 119, 136, 153, 170};
+    static const int slips[] = {-1, 1};
+    const int *starts;
+    int nstarts;
+    int i;
+    int j;
+    int k1;
+    int k2;
+
+    starts = (type == 1) ? starts_mp1 : starts_mp0;
+    nstarts = (type == 1) ? (int) (sizeof(starts_mp1)/sizeof(starts_mp1[0]))
+                          : (int) (sizeof(starts_mp0)/sizeof(starts_mp0[0]));
+
+    for (i = 0;  i < nstarts;  i++)
+    {
+        int b1;
+
+        b1 = starts[i];
+        if (b1 < 19 || b1 >= target)
+            continue;
+        /*endif*/
+        for (k1 = 0;  k1 < (int) (sizeof(slips)/sizeof(slips[0]));  k1++)
+        {
+            uint8_t trial1[188];
+            uint16_t rx_crc;
+            uint16_t residual_crc;
+            bool crc_ok;
+            bool fill_ok;
+
+            memcpy(trial1, bits, sizeof(trial1));
+            mp_apply_boundary_slip(trial1, b1, target, slips[k1]);
+            crc_ok = mp_crc_ok(trial1, type, &rx_crc, &residual_crc);
+            fill_ok = mp_fill_ok(trial1, type);
+            if (crc_ok  &&  fill_ok)
+            {
+                memcpy(bits, trial1, sizeof(trial1));
+                if (b1_out) *b1_out = b1;
+                if (s1_out) *s1_out = slips[k1];
+                if (b2_out) *b2_out = -1;
+                if (s2_out) *s2_out = 0;
+                return true;
+            }
+            /*endif*/
+
+            for (j = i + 1;  j < nstarts;  j++)
+            {
+                int b2;
+
+                b2 = starts[j];
+                if (b2 < 19 || b2 >= target)
+                    continue;
+                /*endif*/
+                for (k2 = 0;  k2 < (int) (sizeof(slips)/sizeof(slips[0]));  k2++)
+                {
+                    uint8_t trial2[188];
+
+                    memcpy(trial2, trial1, sizeof(trial2));
+                    mp_apply_boundary_slip(trial2, b2, target, slips[k2]);
+                    crc_ok = mp_crc_ok(trial2, type, &rx_crc, &residual_crc);
+                    fill_ok = mp_fill_ok(trial2, type);
+                    if (crc_ok  &&  fill_ok)
+                    {
+                        memcpy(bits, trial2, sizeof(trial2));
+                        if (b1_out) *b1_out = b1;
+                        if (s1_out) *s1_out = slips[k1];
+                        if (b2_out) *b2_out = b2;
+                        if (s2_out) *s2_out = slips[k2];
+                        return true;
+                    }
+                    /*endif*/
+                }
+                /*endfor*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    return false;
+}
+
+static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int target, int *changes_out)
+{
+    int boundaries[16];
+    int boundary_count;
+    int b;
+    int total_states;
+    int state;
+
+    boundary_count = 0;
+    boundaries[boundary_count++] = 34;
+    boundaries[boundary_count++] = 51;
+    boundaries[boundary_count++] = 68;
+    if (type == 1)
+    {
+        boundaries[boundary_count++] = 85;
+        boundaries[boundary_count++] = 102;
+        boundaries[boundary_count++] = 119;
+        boundaries[boundary_count++] = 136;
+        boundaries[boundary_count++] = 153;
+        boundaries[boundary_count++] = 170;
+    }
+    /*endif*/
+    for (b = 0;  b < boundary_count;  b++)
+    {
+        if (boundaries[b] >= target)
+            break;
+        /*endif*/
+    }
+    /*endfor*/
+    boundary_count = b;
+    if (boundary_count <= 0)
+        return false;
+    /*endif*/
+
+    total_states = 1;
+    for (b = 0;  b < boundary_count;  b++)
+        total_states *= 3;
+    /*endfor*/
+
+    for (state = 0;  state < total_states;  state++)
+    {
+        uint8_t trial[188];
+        int code;
+        int i;
+        int change_count;
+        bool crc_ok;
+        bool fill_ok;
+        uint16_t rx_crc;
+        uint16_t residual_crc;
+
+        memcpy(trial, bits, sizeof(trial));
+        code = state;
+        change_count = 0;
+        for (i = 0;  i < boundary_count;  i++)
+        {
+            int trit;
+            int slip;
+
+            trit = code % 3;
+            code /= 3;
+            slip = trit - 1;   /* 0->-1, 1->0, 2->+1 */
+            if (slip == 0)
+                continue;
+            /*endif*/
+            change_count++;
+            mp_apply_boundary_slip(trial, boundaries[i], target, slip);
+        }
+        /*endfor*/
+        if (change_count <= 0)
+            continue;
+        /*endif*/
+        crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
+        fill_ok = mp_fill_ok(trial, type);
+        if (crc_ok  &&  fill_ok)
+        {
+            memcpy(bits, trial, sizeof(trial));
+            if (changes_out)
+                *changes_out = change_count;
+            /*endif*/
+            return true;
+        }
+        /*endif*/
     }
     /*endfor*/
     return false;
@@ -3322,6 +3512,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int chosen_pending_bit;
                 uint32_t chosen_preamble_stream;
                 int hint_h;
+                int hint_only;
                 int hint_found;
                 int hint_score;
                 int hint_type_bit;
@@ -3342,6 +3533,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 chosen_pending_bit = 0;
                 chosen_preamble_stream = 0;
                 hint_h = s->phase3_j_lock_hyp;
+                hint_only = (hint_h >= 0
+                             && hint_h < MP_HYPOTHESIS_COUNT
+                             && s->duration < MP_HINT_ONLY_BAUDS);
                 hint_found = 0;
                 hint_score = -1;
                 hint_type_bit = 0;
@@ -3373,6 +3567,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
                     bstream = (bstream << 1) | d1;
                     if (sc0 >= MP_LOCK_SCORE_MIN
+                        && (!hint_only || h == hint_h)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > chosen_score)
@@ -3409,6 +3604,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /*endif*/
                     sc = mp_preamble_score(bstream);
                     if (sc >= MP_LOCK_SCORE_MIN
+                        && (!hint_only || h == hint_h)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
                         && sc > chosen_score)
@@ -3621,12 +3817,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                          type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
                             }
                             /*endif*/
-                            if (idx <= MP_EARLY_START_ERR_FRAME_LIMIT
-                                && s->mp_early_rejects >= MP_EARLY_START_ERR_MAX)
+                            /* Only use fast-reject on very first MP acquisition.
+                               After at least one valid MP frame, let CRC/slip
+                               recovery run to handle boundary drift. */
+                            if (idx == 34  &&  s->mp_seen == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP%d early-abort after %d inserted-start mismatches by frame_idx=%d\n",
-                                         type_now, s->mp_early_rejects, idx);
+                                         "Rx - Phase 4: MP%d fast-reject at first inserted start (frame_idx=34, value=%d)\n",
+                                         type_now, bits[i]);
                                 mp_unlock_after_reject(s, false);
                                 break;
                             }
@@ -3637,21 +3835,40 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (s->mp_hypothesis < 0)
                         break;
                     /*endif*/
-                    if (s->bit_count <= 40 || (s->bit_count % 32) == 0)
                     {
                         int frame_idx;
                         int type_now;
-                        int data_idx;
+                        bool is_inserted_start;
+                        bool log_body_bit;
 
                         frame_idx = s->mp_frame_pos - 1;
                         type_now = s->mp_frame_bits[18];
-                        data_idx = mp_data_bit_index(type_now, frame_idx);
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 MP body_idx=%d frame_idx=%d data_idx=%d value=%d frame_pos=%d/%d\n",
-                                 s->bit_count, frame_idx, data_idx, bits[i],
-                                 s->mp_frame_pos, s->mp_frame_target);
+                        is_inserted_start = (frame_idx == 34 || frame_idx == 51 || frame_idx == 68)
+                                            || (type_now == 1
+                                                && (frame_idx == 85
+                                                    || frame_idx == 102
+                                                    || frame_idx == 119
+                                                    || frame_idx == 136
+                                                    || frame_idx == 153
+                                                    || frame_idx == 170));
+                        /* For MP0 debug, log every body bit so bit drift is visible.
+                           For MP1, keep denser periodic logs plus all inserted starts. */
+                        log_body_bit = (s->mp_frame_target <= 88)
+                                       || s->bit_count <= 40
+                                       || (s->bit_count % 8) == 0
+                                       || is_inserted_start;
+                        if (log_body_bit)
+                        {
+                            int data_idx;
+
+                            data_idx = mp_data_bit_index(type_now, frame_idx);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4 MP body_idx=%d frame_idx=%d data_idx=%d value=%d frame_pos=%d/%d\n",
+                                     s->bit_count, frame_idx, data_idx, bits[i],
+                                     s->mp_frame_pos, s->mp_frame_target);
+                        }
+                        /*endif*/
                     }
-                    /*endif*/
 
                     if (s->mp_frame_pos < s->mp_frame_target)
                         continue;
@@ -3673,9 +3890,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     {
                         int recovered_slip;
                         int recovered_boundary;
+                        int recovered_boundary_2;
+                        int recovered_slip_2;
+                        int recovered_changes;
 
                         recovered_slip = 0;
                         recovered_boundary = 0;
+                        recovered_boundary_2 = 0;
+                        recovered_slip_2 = 0;
+                        recovered_changes = 0;
                         if (mp_try_slip_recovery(s->mp_frame_bits, type, s->mp_frame_target, &recovered_slip))
                         {
                             crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
@@ -3691,6 +3914,35 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d recovered via boundary-slip at frame_idx=%d slip=%d before CRC/fill check\n",
                                      type, recovered_boundary, recovered_slip);
+                        }
+                        else if (mp_try_boundary_double_slip_recovery(s->mp_frame_bits,
+                                                                       type,
+                                                                       s->mp_frame_target,
+                                                                       &recovered_boundary,
+                                                                       &recovered_slip,
+                                                                       &recovered_boundary_2,
+                                                                       &recovered_slip_2))
+                        {
+                            crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
+                            fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d recovered via double-boundary-slip (%d,%d) and (%d,%d) before CRC/fill check\n",
+                                     type,
+                                     recovered_boundary,
+                                     recovered_slip,
+                                     recovered_boundary_2,
+                                     recovered_slip_2);
+                        }
+                        else if (mp_try_boundary_bruteforce_recovery(s->mp_frame_bits,
+                                                                      type,
+                                                                      s->mp_frame_target,
+                                                                      &recovered_changes))
+                        {
+                            crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
+                            fill_good = mp_fill_ok(s->mp_frame_bits, type);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d recovered via boundary-bruteforce (%d boundary adjustments) before CRC/fill check\n",
+                                     type, recovered_changes);
                         }
                         /*endif*/
                     }
