@@ -328,13 +328,15 @@ static int mp_alternate_scrambler_tap(int tap)
 
 static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 {
+    const int tap_switch_rejects = 1;
+
     span_log(s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
              s->mp_hypothesis);
     s->mp_early_rejects = 0;
     mp_reset_hypothesis_search(s);
     if (count_tap_reject
-        && ++s->mp_phase4_reject_streak >= 3)
+        && ++s->mp_phase4_reject_streak >= tap_switch_rejects)
     {
         if (!s->mp_phase4_alt_tap_active)
         {
@@ -457,6 +459,23 @@ static bool mp_start_bit_ok(int type, int bit_index, int bit_value)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int mp_start_error_count(const uint8_t bits[], int type, int target)
+{
+    int i;
+    int errs;
+
+    errs = 0;
+    for (i = 17;  i < target;  i++)
+    {
+        if (!mp_start_bit_ok(type, i, bits[i]))
+            errs++;
+        /*endif*/
+    }
+    /*endfor*/
+    return errs;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool mp_try_slip_recovery(uint8_t bits[188], int type, int target, int *slip_out)
 {
     static const int slips[] = {-2, -1, 1, 2};
@@ -503,7 +522,7 @@ static bool mp_try_boundary_slip_recovery(uint8_t bits[188], int type, int targe
 {
     static const int starts_mp0[] = {34, 51, 68};
     static const int starts_mp1[] = {34, 51, 68, 85, 102, 119, 136, 153, 170};
-    static const int slips[] = {-1, 1};
+    static const int slips[] = {-2, -1, 1, 2};
     uint8_t trial[188];
     const int *starts;
     int nstarts;
@@ -584,7 +603,7 @@ static bool mp_try_boundary_double_slip_recovery(uint8_t bits[188], int type, in
 {
     static const int starts_mp0[] = {34, 51, 68};
     static const int starts_mp1[] = {34, 51, 68, 85, 102, 119, 136, 153, 170};
-    static const int slips[] = {-1, 1};
+    static const int slips[] = {-2, -1, 1, 2};
     const int *starts;
     int nstarts;
     int i;
@@ -666,11 +685,12 @@ static bool mp_try_boundary_double_slip_recovery(uint8_t bits[188], int type, in
 
 static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int target, int *changes_out)
 {
+    static const int base_slips[] = {-2, -1, 0, 1, 2};
     int boundaries[16];
     int boundary_count;
     int b;
+    int bs;
     int total_states;
-    int state;
 
     boundary_count = 0;
     boundaries[boundary_count++] = 34;
@@ -703,49 +723,73 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
         total_states *= 3;
     /*endfor*/
 
-    for (state = 0;  state < total_states;  state++)
+    for (bs = 0;  bs < (int) (sizeof(base_slips)/sizeof(base_slips[0]));  bs++)
     {
-        uint8_t trial[188];
-        int code;
-        int i;
-        int change_count;
-        bool crc_ok;
-        bool fill_ok;
-        uint16_t rx_crc;
-        uint16_t residual_crc;
+        uint8_t base_trial[188];
+        int base_slip;
+        int state;
 
-        memcpy(trial, bits, sizeof(trial));
-        code = state;
-        change_count = 0;
-        for (i = 0;  i < boundary_count;  i++)
+        base_slip = base_slips[bs];
+        memcpy(base_trial, bits, sizeof(base_trial));
+        if (base_slip != 0)
         {
-            int trit;
-            int slip;
+            int i;
 
-            trit = code % 3;
-            code /= 3;
-            slip = trit - 1;   /* 0->-1, 1->0, 2->+1 */
-            if (slip == 0)
+            for (i = 19;  i < target;  i++)
+            {
+                int src;
+
+                src = i + base_slip;
+                base_trial[i] = (src >= 19  &&  src < target)  ?  bits[src]  :  0;
+            }
+            /*endfor*/
+        }
+
+        for (state = 0;  state < total_states;  state++)
+        {
+            uint8_t trial[188];
+            int code;
+            int i;
+            int change_count;
+            bool crc_ok;
+            bool fill_ok;
+            uint16_t rx_crc;
+            uint16_t residual_crc;
+
+            memcpy(trial, base_trial, sizeof(trial));
+            code = state;
+            change_count = (base_slip != 0) ? 1 : 0;
+            for (i = 0;  i < boundary_count;  i++)
+            {
+                int trit;
+                int slip;
+
+                trit = code % 3;
+                code /= 3;
+                slip = trit - 1;   /* 0->-1, 1->0, 2->+1 */
+                if (slip == 0)
+                    continue;
+                /*endif*/
+                change_count++;
+                mp_apply_boundary_slip(trial, boundaries[i], target, slip);
+            }
+            /*endfor*/
+            if (change_count <= 0)
                 continue;
             /*endif*/
-            change_count++;
-            mp_apply_boundary_slip(trial, boundaries[i], target, slip);
+            crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
+            fill_ok = mp_fill_ok(trial, type);
+            if (crc_ok  &&  fill_ok)
+            {
+                memcpy(bits, trial, sizeof(trial));
+                if (changes_out)
+                    *changes_out = change_count;
+                /*endif*/
+                return true;
+            }
+            /*endif*/
         }
         /*endfor*/
-        if (change_count <= 0)
-            continue;
-        /*endif*/
-        crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
-        fill_ok = mp_fill_ok(trial, type);
-        if (crc_ok  &&  fill_ok)
-        {
-            memcpy(bits, trial, sizeof(trial));
-            if (changes_out)
-                *changes_out = change_count;
-            /*endif*/
-            return true;
-        }
-        /*endif*/
     }
     /*endfor*/
     return false;
@@ -3869,6 +3913,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 {
                     bool crc_good;
                     bool fill_good;
+                    bool starts_good;
+                    int start_err_count;
                     int type;
                     uint16_t rx_crc;
                     uint16_t residual_crc;
@@ -3895,18 +3941,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                          type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
                             }
                             /*endif*/
-                            /* Only use fast-reject on very first MP acquisition.
-                               After at least one valid MP frame, let CRC/slip
-                               recovery run to handle boundary drift. */
-                            if (idx == 34  &&  s->mp_seen == 0)
-                            {
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP%d fast-reject at first inserted start (frame_idx=34, value=%d)\n",
-                                         type_now, bits[i]);
-                                mp_unlock_after_reject(s, false);
-                                break;
-                            }
-                            /*endif*/
+                            /* Do not fast-reject on first inserted start mismatch.
+                               Keep collecting through CRC so slip/boundary recovery
+                               can salvage near-correct locks. */
                         }
                         /*endif*/
                     }
@@ -4025,12 +4062,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         /*endif*/
                     }
                     /*endif*/
+                    start_err_count = mp_start_error_count(s->mp_frame_bits, type, s->mp_frame_target);
+                    starts_good = (start_err_count == 0);
                     log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
                     {
                         bool frame_accepted;
 
                         frame_accepted = false;
-                        if (crc_good  &&  fill_good)
+                        if (crc_good  &&  fill_good  &&  starts_good)
                         {
                             bool semantic_good;
 
@@ -4091,9 +4130,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         else
                         {
+                            bool keep_hypothesis;
+
+                            /* If all inserted start bits were consistent, this is often
+                               a boundary/timing wobble rather than a bad phase hypothesis.
+                               Keep the current hypothesis and re-acquire the next preamble
+                               locally instead of immediately jumping to global search. */
+                            keep_hypothesis = (s->mp_hypothesis >= 0
+                                               && start_err_count == 0);
                             span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d start_err_count=%d)\n",
-                                     type, crc_good, fill_good, s->mp_early_rejects);
+                                     "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d starts_ok=%d start_err_count=%d)\n",
+                                     type, crc_good, fill_good, starts_good, start_err_count);
                             /* Dump first 70 frame bits for diagnosis */
                             {
                                 char dump[200];
@@ -4106,8 +4153,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                          "Rx - Phase 4: MP frame bits[0..%d]: %s\n",
                                          dlen - 1, dump);
                             }
-                            /* Bad lock: drop hypothesis and resume global search. */
-                            mp_unlock_after_reject(s, true);
+                            if (keep_hypothesis)
+                            {
+                                s->mp_early_rejects = 0;
+                                s->mp_count = 0;
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: keeping MP hypothesis=%d after CRC-only reject; retrying local preamble reacquire\n",
+                                         s->mp_hypothesis);
+                            }
+                            else
+                            {
+                                /* Bad lock: drop hypothesis and resume global search. */
+                                mp_unlock_after_reject(s, true);
+                            }
+                            /*endif*/
                         }
                         /*endif*/
                         if (frame_accepted)
