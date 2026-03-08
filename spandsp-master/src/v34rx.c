@@ -249,6 +249,40 @@ static void bits32_to_str(uint32_t v, char out[33])
 }
 /*- End of function --------------------------------------------------------*/
 
+static void bits16_to_str(uint16_t v, char out[17])
+{
+    int j;
+
+    /* Left-most output bit is first-in-time.
+       For our shift-left stream register, that is bit 15 (oldest). */
+    for (j = 15;  j >= 0;  j--)
+        out[15 - j] = ((v >> j) & 1) ? '1' : '0';
+    /*endfor*/
+    out[16] = '\0';
+}
+/*- End of function --------------------------------------------------------*/
+
+static uint16_t j_ordered16(uint16_t rx_recent16, int total_bits, int phase)
+{
+    uint16_t ordered;
+    int t;
+
+    ordered = 0;
+    for (t = 0;  t < 16;  t++)
+    {
+        int seq_idx;
+        int b;
+
+        /* t runs from oldest -> newest bit in time. */
+        seq_idx = (total_bits - 16 + t + phase) & 0xF;
+        b = (rx_recent16 >> (15 - t)) & 1;
+        ordered |= (uint16_t) (b << seq_idx);
+    }
+    /*endfor*/
+    return ordered;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int mp_preamble_score(uint32_t bitstream)
 {
     int k;
@@ -328,7 +362,7 @@ static int mp_alternate_scrambler_tap(int tap)
 
 static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 {
-    const int tap_switch_rejects = 1;
+    const int tap_switch_rejects = 3;
 
     span_log(s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
@@ -3130,12 +3164,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int h;
                 int best_score;
                 int best_h;
-                int best_t;
                 int best_p;
 
                 best_score = 0;
                 best_h = -1;
-                best_t = -1;
                 best_p = 0;
                 for (h = 0;  h < 8;  h++)
                 {
@@ -3154,6 +3186,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                         dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
                         s->phase3_j_scramble[h] = reg;
+                        s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
+                        s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
 
                         for (b = 0;  b < 2;  b++)
                         {
@@ -3180,7 +3214,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                     {
                                         best_score = score;
                                         best_h = h;
-                                        best_t = t;
                                         best_p = p;
                                     }
                                     /*endif*/
@@ -3210,17 +3243,76 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     &&
                     (s->received_event == V34_EVENT_NONE || s->received_event == V34_EVENT_S))
                 {
-                    s->received_event = (best_t == 2)  ?  V34_EVENT_J_DASHED  :  V34_EVENT_J;
-                    s->phase3_j_lock_hyp = best_h;
-                    if (best_t == 0  ||  best_t == 1)
-                        s->phase3_j_trn16 = best_t;
+                    int d4;
+                    int d16;
+                    int djd;
+                    int dmin;
+                    int pat;
+                    uint16_t rx_recent16;
+                    uint16_t rx_ordered16;
+                    char rx_recent_bits[17];
+                    char rx_ordered_bits[17];
+                    const char *j_validity;
+                    int canonical_ok;
+
+                    rx_recent16 = (uint16_t) (s->phase3_j_stream[best_h] & 0xFFFFU);
+                    rx_ordered16 = j_ordered16(rx_recent16, s->phase3_j_bits, best_p);
+                    bits16_to_str(rx_recent16, rx_recent_bits);
+                    bits16_to_str(rx_ordered16, rx_ordered_bits);
+                    d4 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x8990U));
+                    d16 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x89B0U));
+                    djd = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x899FU));
+                    dmin = d4;
+                    pat = 0;
+                    if (d16 < dmin)
+                    {
+                        dmin = d16;
+                        pat = 1;
+                    }
                     /*endif*/
+                    if (djd < dmin)
+                    {
+                        dmin = djd;
+                        pat = 2;
+                    }
+                    /*endif*/
+                    canonical_ok = (dmin <= 3);
+                    if (pat == 1)
+                        j_validity = canonical_ok ? "valid J(16-point)" : "near/non-canonical";
+                    else if (pat == 0)
+                        j_validity = canonical_ok ? "valid J(4-point)" : "near/non-canonical";
+                    else
+                        j_validity = canonical_ok ? "valid J'" : "near/non-canonical";
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3: explicit %s detected (hyp=%d phase=%d score=%d/32 bits=%d%s%s)\n",
-                             (best_t == 2)  ?  "J'"  :  "J",
-                             best_h, best_p, best_score, s->phase3_j_bits,
-                             (best_t == 2) ? "" : ", trn=",
-                             (best_t == 2) ? "" : (best_t ? "16-point" : "4-point"));
+                             "Rx - Phase 3 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
+                             rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                    if (canonical_ok)
+                    {
+                        if (pat == 2)
+                        {
+                            /* Phase 3 transition should be driven by J (Table 18).
+                               Treat J' hits here as diagnostics only to avoid
+                               premature Phase 4 transitions with unknown TRN size. */
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3: canonical J' candidate ignored (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                                     best_h, best_p, best_score, s->phase3_j_bits);
+                        }
+                        else
+                        {
+                            s->received_event = V34_EVENT_J;
+                            s->phase3_j_lock_hyp = best_h;
+                            s->phase3_j_trn16 = pat;
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3: explicit J detected (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
+                                     best_h, best_p, best_score, s->phase3_j_bits,
+                                     pat ? "16-point" : "4-point");
+                        }
+                    }
+                    else
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 3: J candidate rejected (non-canonical 16-bit pattern)\n");
+                    }
                 }
                 /*endif*/
             }
@@ -3304,6 +3396,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
             s->phase3_s_pos = 0;
             memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
+            memset(s->phase3_j_stream, 0, sizeof(s->phase3_j_stream));
             memset(s->phase3_j_prev_z, 0, sizeof(s->phase3_j_prev_z));
             memset(s->phase3_j_prev_valid, 0, sizeof(s->phase3_j_prev_valid));
             memset(s->phase3_j_win, 0, sizeof(s->phase3_j_win));
@@ -3311,6 +3404,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_j_lock_hyp = -1;
             s->phase3_j_trn16 = -1;
             s->phase4_j_seen = 0;
+            s->phase4_j_lock_hyp = -1;
             s->phase4_trn_after_j = 0;
         }
         }
@@ -3493,6 +3587,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                     dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
                     s->phase3_j_scramble[h] = reg;
+                    s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
+                    s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
 
                     for (b = 0;  b < 2;  b++)
                     {
@@ -3542,13 +3638,45 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 && best_h >= 0
                 && best_score >= 24)
             {
-                s->phase4_j_seen = 1;
-                s->phase4_trn_after_j = 0;
-                s->phase3_j_lock_hyp = best_h;
-                s->received_event = V34_EVENT_J_DASHED;
+                int d4;
+                int d16;
+                int djd;
+                int dmin;
+                uint16_t rx_recent16;
+                uint16_t rx_ordered16;
+                char rx_recent_bits[17];
+                char rx_ordered_bits[17];
+                const char *j_validity;
+                int canonical_ok;
+
+                rx_recent16 = (uint16_t) (s->phase3_j_stream[best_h] & 0xFFFFU);
+                rx_ordered16 = j_ordered16(rx_recent16, s->phase3_j_bits, best_p);
+                bits16_to_str(rx_recent16, rx_recent_bits);
+                bits16_to_str(rx_ordered16, rx_ordered_bits);
+                d4 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x8990U));
+                d16 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x89B0U));
+                djd = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x899FU));
+                dmin = djd;
+                if (d4 < dmin)
+                    dmin = d4;
+                if (d16 < dmin)
+                    dmin = d16;
+                canonical_ok = (djd <= 3);
+                j_validity = canonical_ok ? "valid J'" : ((dmin <= 3) ? "valid non-J'" : "near/non-canonical");
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d)\n",
-                         best_h, best_p, best_score, s->phase3_j_bits);
+                         "Rx - Phase 4 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
+                         rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                if (canonical_ok)
+                {
+                    s->phase4_j_seen = 1;
+                    s->phase4_trn_after_j = 0;
+                    s->phase4_j_lock_hyp = best_h;
+                    s->received_event = V34_EVENT_J_DASHED;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                             best_h, best_p, best_score, s->phase3_j_bits);
+                }
+                /*endif*/
             }
             /*endif*/
         }
@@ -3612,7 +3740,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
-        expected_mp_type = (s->phase3_j_trn16 < 0) ? -1 : (s->phase3_j_trn16 ? 1 : 0);
+        /* Do not constrain MP/MP' type from Phase 3 J classification.
+           J determines far-end training constellation usage, but forcing the
+           MP frame type here causes systematic false rejects on some peers. */
+        expected_mp_type = -1;
 
             locked_this_symbol = 0;
 
@@ -4636,6 +4767,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
     memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
     memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
@@ -4643,6 +4775,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
     s->rx.phase4_j_seen = 0;
+    s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
 
     s->rx.stage = V34_RX_STAGE_INFO0;

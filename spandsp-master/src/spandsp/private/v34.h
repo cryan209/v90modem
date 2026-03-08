@@ -744,6 +744,7 @@ typedef struct
     int phase3_j_lock_hyp;
     int phase3_j_trn16;
     int phase4_j_seen;
+    int phase4_j_lock_hyp;
     int phase4_trn_after_j;
 
     /* MP or MPh receive tracking data */

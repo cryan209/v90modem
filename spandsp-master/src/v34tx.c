@@ -2435,6 +2435,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
     memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
     memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
@@ -2442,6 +2443,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
     s->rx.phase4_j_seen = 0;
+    s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
     s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
@@ -2532,20 +2534,41 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         (3429*1000 + 999)/1000
     };
     int bit;
+    int trn_i;
+    int trn_q;
+    int trn_sym;
     int j_pat_idx;
 
     /* See V.34/10.1.3.8 */
     bit = 0;
+    trn_i = 0;
+    trn_q = 0;
+    trn_sym = 0;
     /* V.34 §10.1.3.3 Table 18: J pattern depends on TRN constellation size. */
     j_pat_idx = s->tx.infoh.trn16 ? 1 : 0;
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_TRN:
         /* Send the TRN signal (V.34 §10.1.3.8).
-           TRN uses direct mapping (no differential encoding):
-           I_n = 2*I2_n + I1_n, transmitted point = point 0 rotated by I_n*90°. */
-        bit = scramble(&s->tx, 1);
-        bit = (scramble(&s->tx, 1) << 1) | bit;
+           TRN uses direct mapping (no differential encoding).
+           4-point TRN:
+             I_n = 2*I2_n + I1_n, transmitted point = point 0 rotated by I_n*90°.
+           16-point TRN:
+             Q_n = 2*Q2_n + Q1_n selects quarter-superconstellation point,
+             then rotate by I_n*90°, where I_n = 2*I2_n + I1_n. */
+        trn_i = scramble(&s->tx, 1);
+        trn_i = (scramble(&s->tx, 1) << 1) | trn_i;
+        if (s->tx.infoh.trn16)
+        {
+            trn_q = scramble(&s->tx, 1);
+            trn_q = (scramble(&s->tx, 1) << 1) | trn_q;
+            trn_sym = (trn_q << 2) | trn_i;
+        }
+        else
+        {
+            trn_sym = trn_i;
+        }
+        /*endif*/
         /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments.
            In full-duplex, send enough TRN for the remote equalizer to converge before
            the J pattern starts. 2048 bauds (~597ms at 3429 baud) is standard. */
@@ -2560,7 +2583,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->tx.tone_duration = 0;
             /* V.34 §10.1.3.3: "The differential encoder shall be initialized
                using the final symbol of the transmitted TRN sequence." */
-            s->tx.diff = bit;
+            s->tx.diff = trn_i;
             /* Clear any stale S detection event (e.g. from timeout during TRN).
                The caller can't send S until it detects our J, so any event
                from before J is spurious. Reset RX to wait for the real S.
@@ -2582,6 +2605,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.phase3_pp_obs = 0;
             s->rx.phase3_pp_match = 0;
             memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+            memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
             memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
             memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
             memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
@@ -2589,10 +2613,12 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.phase3_j_lock_hyp = -1;
             s->rx.phase3_j_trn16 = -1;
             s->rx.phase4_j_seen = 0;
+            s->rx.phase4_j_lock_hyp = -1;
             s->rx.phase4_trn_after_j = 0;
         }
         /*endif*/
-        break;
+        return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
+                                 : training_constellation_4[trn_sym];
     case V34_TX_STAGE_J:
         /* Send the J signal (V.34 §10.1.3.3).
            J uses DIFFERENTIAL encoding unlike TRN:
@@ -2670,6 +2696,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->tx.persistence2 = j_pattern[j_pat_idx];
                         s->tx.tone_duration = 0;
                         memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+                        memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
                         memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
                         memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
                         memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
@@ -2677,6 +2704,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase3_j_lock_hyp = -1;
                         s->rx.phase3_j_trn16 = -1;
                         s->rx.phase4_j_seen = 0;
+                        s->rx.phase4_j_lock_hyp = -1;
                         s->rx.phase4_trn_after_j = 0;
                         span_log(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
@@ -2748,6 +2776,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
 static void trn_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - trn_baud_init()\n");
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - Phase 3 TRN mode: %s-point (infoh.trn16=%d)\n",
+             s->tx.infoh.trn16 ? "16" : "4", s->tx.infoh.trn16);
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_TRN;
     s->tx.current_getbaud = get_trn_baud;
@@ -2823,7 +2854,8 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - Phase 4: S-bar complete, starting TRN (>=512T)\n");
+                     "Tx - Phase 4: S-bar complete, starting TRN (>=512T, mode=%s-point)\n",
+                     s->tx.infoh.trn16 ? "16" : "4");
         }
         /*endif*/
         return training_constellation_4[s->tx.diff];
@@ -2833,10 +2865,23 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
            V.34 §11.4.1.2.2: "the answer modem shall transmit TRN for at least
            512T but no longer than 2000 ms plus a round trip delay". */
         {
-            int bit;
+            int i_sym;
+            int q_sym;
+            int trn_sym;
 
-            bit = scramble(&s->tx, 1);
-            bit = (scramble(&s->tx, 1) << 1) | bit;
+            i_sym = scramble(&s->tx, 1);
+            i_sym = (scramble(&s->tx, 1) << 1) | i_sym;
+            if (s->tx.infoh.trn16)
+            {
+                q_sym = scramble(&s->tx, 1);
+                q_sym = (scramble(&s->tx, 1) << 1) | q_sym;
+                trn_sym = (q_sym << 2) | i_sym;
+            }
+            else
+            {
+                trn_sym = i_sym;
+            }
+            /*endif*/
             s->tx.tone_duration++;
             if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
                 && s->rx.received_event == V34_EVENT_PHASE4_TRN_READY)
@@ -2865,7 +2910,8 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 /*endif*/
             }
             /*endif*/
-            return training_constellation_4[bit];
+            return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
+                                     : training_constellation_4[trn_sym];
         }
 
     default:
@@ -2899,11 +2945,13 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.mp_hypothesis = -1;
     s->rx.received_event = V34_EVENT_NONE;
     memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+    memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
     memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
     s->rx.phase4_j_seen = 0;
+    s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
