@@ -123,6 +123,8 @@
 #define MP_PREAMBLE_SCORE_MIN           18
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_HYPOTHESIS_COUNT             24
+#define MP_EARLY_START_ERR_MAX          2
+#define MP_EARLY_START_ERR_FRAME_LIMIT  85
 
 enum
 {
@@ -292,6 +294,43 @@ static int mp_alternate_scrambler_tap(int tap)
     /* V.34 uses the two complementary scrambler taps (x^-5 and x^-18),
        represented here as zero-based indices 4 and 17. */
     return (tap == 17) ? 4 : 17;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
+{
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
+             s->mp_hypothesis);
+    s->mp_early_rejects = 0;
+    mp_reset_hypothesis_search(s);
+    if (count_tap_reject
+        && ++s->mp_phase4_reject_streak >= 3)
+    {
+        if (!s->mp_phase4_alt_tap_active)
+        {
+            s->scrambler_tap = mp_alternate_scrambler_tap(s->mp_phase4_default_scrambler_tap);
+            s->mp_phase4_alt_tap_active = 1;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: switching MP descrambler tap to alternate (%d -> %d) after %d rejects\n",
+                     s->mp_phase4_default_scrambler_tap, s->scrambler_tap, s->mp_phase4_reject_streak);
+        }
+        else
+        {
+            s->scrambler_tap = s->mp_phase4_default_scrambler_tap;
+            s->mp_phase4_alt_tap_active = 0;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: restoring MP descrambler tap to default (%d) after alternate-tap rejects\n",
+                     s->scrambler_tap);
+        }
+        s->mp_phase4_reject_streak = 0;
+    }
+    /*endif*/
+    if (!count_tap_reject)
+        s->mp_phase4_reject_streak = 0;
+    /*endif*/
+    s->mp_frame_pos = 0;
+    s->mp_frame_target = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3569,9 +3608,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                          type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
                             }
                             /*endif*/
+                            if (idx <= MP_EARLY_START_ERR_FRAME_LIMIT
+                                && s->mp_early_rejects >= MP_EARLY_START_ERR_MAX)
+                            {
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: MP%d early-abort after %d inserted-start mismatches by frame_idx=%d\n",
+                                         type_now, s->mp_early_rejects, idx);
+                                mp_unlock_after_reject(s, false);
+                                break;
+                            }
+                            /*endif*/
                         }
                         /*endif*/
                     }
+                    if (s->mp_hypothesis < 0)
+                        break;
+                    /*endif*/
                     if (s->bit_count <= 40 || (s->bit_count % 32) == 0)
                     {
                         int frame_idx;
@@ -3678,38 +3730,18 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                      dlen - 1, dump);
                         }
                         /* Bad lock: drop hypothesis and resume global search. */
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
-                                 s->mp_hypothesis);
-                        s->mp_early_rejects = 0;
-                        mp_reset_hypothesis_search(s);
-                        if (++s->mp_phase4_reject_streak >= 3)
-                        {
-                            if (!s->mp_phase4_alt_tap_active)
-                            {
-                                s->scrambler_tap = mp_alternate_scrambler_tap(s->mp_phase4_default_scrambler_tap);
-                                s->mp_phase4_alt_tap_active = 1;
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: switching MP descrambler tap to alternate (%d -> %d) after %d rejects\n",
-                                         s->mp_phase4_default_scrambler_tap, s->scrambler_tap, s->mp_phase4_reject_streak);
-                            }
-                            else
-                            {
-                                s->scrambler_tap = s->mp_phase4_default_scrambler_tap;
-                                s->mp_phase4_alt_tap_active = 0;
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: restoring MP descrambler tap to default (%d) after alternate-tap rejects\n",
-                                         s->scrambler_tap);
-                            }
-                            s->mp_phase4_reject_streak = 0;
-                        }
+                        mp_unlock_after_reject(s, true);
                     }
                     /*endif*/
                     if (crc_good  &&  fill_good)
                         s->mp_phase4_reject_streak = 0;
                     /*endif*/
-                    s->mp_frame_pos = 0;
-                    s->mp_frame_target = 0;
+                    if (s->mp_hypothesis >= 0)
+                    {
+                        s->mp_frame_pos = 0;
+                        s->mp_frame_target = 0;
+                    }
+                    /*endif*/
                 }
                 /*endif*/
             }
