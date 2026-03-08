@@ -120,8 +120,9 @@
 #define V34_TRAINING_END                0
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               18
-#define MP_PREAMBLE_SCORE_MIN           17
+#define MP_PREAMBLE_SCORE_MIN           18
 #define MP_PREAMBLE_WAIT_BITS           800
+#define MP_HYPOTHESIS_COUNT             24
 
 enum
 {
@@ -193,16 +194,44 @@ static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 
 static int map_phase4_raw_bits(int dibit, int hypothesis)
 {
-    int mapped;
+    static const uint8_t map_table[MP_HYPOTHESIS_COUNT][4] =
+    {
+        /* Legacy hyp8 ordering first for Phase 3 lock-hint compatibility */
+        {0, 1, 2, 3}, /*  0: identity */
+        {1, 0, 3, 2}, /*  1: xor 1 */
+        {2, 3, 0, 1}, /*  2: xor 2 */
+        {3, 2, 1, 0}, /*  3: xor 3 */
+        {0, 2, 1, 3}, /*  4: swap */
+        {2, 0, 3, 1}, /*  5: swap + xor 1 */
+        {1, 3, 0, 2}, /*  6: swap + xor 2 */
+        {3, 1, 2, 0}, /*  7: swap + xor 3 */
 
-    /* 8 hypotheses:
-       - dibit XOR rotation (0..3)
-       - optional bit swap */
-    mapped = (dibit ^ (hypothesis & 0x3)) & 0x3;
-    if (hypothesis & 0x4)
-        mapped = ((mapped & 1) << 1) | ((mapped >> 1) & 1);
+        /* Additional invertible affine transforms on dibits */
+        {0, 3, 2, 1}, /*  8 */
+        {1, 2, 3, 0}, /*  9 */
+        {2, 1, 0, 3}, /* 10 */
+        {3, 0, 1, 2}, /* 11 */
+        {0, 1, 3, 2}, /* 12 */
+        {1, 0, 2, 3}, /* 13 */
+        {2, 3, 1, 0}, /* 14 */
+        {3, 2, 0, 1}, /* 15 */
+        {0, 2, 3, 1}, /* 16 */
+        {1, 3, 2, 0}, /* 17 */
+        {2, 0, 1, 3}, /* 18 */
+        {3, 1, 0, 2}, /* 19 */
+        {0, 3, 1, 2}, /* 20 */
+        {1, 2, 0, 3}, /* 21 */
+        {2, 1, 3, 0}, /* 22 */
+        {3, 0, 2, 1}  /* 23 */
+    };
+
+    int hidx;
+
+    hidx = hypothesis % MP_HYPOTHESIS_COUNT;
+    if (hidx < 0)
+        hidx += MP_HYPOTHESIS_COUNT;
     /*endif*/
-    return mapped;
+    return map_table[hidx][dibit & 0x3];
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1700,6 +1729,7 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     float ii;
     float qq;
     uint32_t angle;
+    int32_t phase_delta;
     int32_t power;
 
     s->agc_scaling = 0.01f;
@@ -1760,14 +1790,18 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         zz.re = sample.re*z.re - sample.im*z.im;
         zz.im = -sample.re*z.im - sample.im*z.re;
         angle = arctan2(zz.im, zz.re);
-        if (abs(angle - s->last_angles[1]) > DDS_PHASE(90.0f)  &&  s->blip_duration > 3)
+        phase_delta = (int32_t) (angle - s->last_angles[1]);
+        if ((phase_delta > (int32_t) DDS_PHASE(90.0f)
+             || phase_delta < -(int32_t) DDS_PHASE(90.0f))
+            &&
+            s->blip_duration > 3)
         {
             /* Log reversal events during first 3 seconds */
             if (s->sample_time < 24000)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx info_rx REV: t=%u blip=%d angle=0x%08X last=0x%08X diff=0x%08X ii=%.1f qq=%.1f\n",
-                         s->sample_time + i, s->blip_duration, angle, s->last_angles[1],
+                         (unsigned) (s->sample_time + i), s->blip_duration, angle, s->last_angles[1],
                          (uint32_t)(angle - s->last_angles[1]), ii, qq);
             }
             put_info_bit(s, 1, i);
@@ -1799,7 +1833,7 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         span_log(s->logging, SPAN_LOG_FLOW,
                  "Rx info_rx diag: t=%u dur=%d bits=%d stream=0x%08X "
                  "stage=%d sig=%d blip=%d pwr=%d angle=0x%08X ii=%.2f qq=%.2f\n",
-                 s->sample_time, s->duration, s->bit_count, s->bitstream,
+                 (unsigned) s->sample_time, s->duration, s->bit_count, s->bitstream,
                  s->stage, s->signal_present, s->blip_duration, power,
                  angle, ii, qq);
     }
@@ -3149,7 +3183,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
             s->received_event = V34_EVENT_PHASE4_TRN_READY;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds), scanning for MP (decoder=hyp8-v1, gated=900)\n",
+                     "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds), scanning for MP (decoder=hyp24-v2, gated=900)\n",
                      s->phase4_trn_after_j);
             s->stage = V34_RX_STAGE_PHASE4_MP;
             s->duration = 0;
@@ -3164,7 +3198,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
             s->mp_phase4_reject_streak = 0;
             s->mp_phase4_alt_tap_active = 0;
-            if (s->phase3_j_lock_hyp >= 0  &&  s->phase3_j_lock_hyp < 8)
+            if (s->phase3_j_lock_hyp >= 0  &&  s->phase3_j_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: Phase 3 J lock hint available (hyp=%d), starting unbiased MP hypothesis search\n",
@@ -3219,6 +3253,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int chosen_bit_pos;
                 int chosen_pending_valid;
                 int chosen_pending_bit;
+                int hint_h;
+                int hint_found;
+                int hint_score;
+                int hint_type_bit;
+                uint32_t hint_reg;
+                uint32_t hint_bstream;
+                int hint_bit_pos;
+                int hint_pending_valid;
+                int hint_pending_bit;
 
                 chosen_hyp = -1;
                 chosen_type_bit = 0;
@@ -3228,7 +3271,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 chosen_bit_pos = -1;
                 chosen_pending_valid = 0;
                 chosen_pending_bit = 0;
-                for (h = 0;  h < 8;  h++)
+                hint_h = s->phase3_j_lock_hyp;
+                hint_found = 0;
+                hint_score = -1;
+                hint_type_bit = 0;
+                hint_reg = 0;
+                hint_bstream = 0;
+                hint_bit_pos = -1;
+                hint_pending_valid = 0;
+                hint_pending_bit = 0;
+                for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
                 {
                     uint32_t reg;
                     uint32_t bstream;
@@ -3261,6 +3313,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_pending_bit = 0; /* set after d1 decode below */
                     }
                     /*endif*/
+                    if (h == hint_h
+                        && sc >= MP_PREAMBLE_SCORE_MIN
+                        && mp_preamble_has_start_zero(bstream)
+                        && sc > hint_score)
+                    {
+                        hint_found = 1;
+                        hint_score = sc;
+                        hint_type_bit = d0;
+                        hint_reg = reg;
+                        hint_bstream = bstream;
+                        hint_bit_pos = 0;
+                        hint_pending_valid = 1;
+                        hint_pending_bit = 0; /* set after d1 decode below */
+                    }
+                    /*endif*/
                     d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
                     bstream = (bstream << 1) | d1;
                     /* If we provisionally selected bit0 for this hypothesis,
@@ -3272,6 +3339,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_pending_bit = d1;
                         chosen_reg = reg;
                         chosen_bstream = bstream;
+                    }
+                    /*endif*/
+                    if (h == hint_h
+                        && hint_found
+                        && hint_bit_pos == 0
+                        && hint_pending_valid)
+                    {
+                        hint_pending_bit = d1;
+                        hint_reg = reg;
+                        hint_bstream = bstream;
                     }
                     /*endif*/
                     sc = mp_preamble_score(bstream);
@@ -3288,10 +3365,40 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_pending_valid = 0;
                         chosen_pending_bit = 0;
                     }
+                    /*endif*/
+                    if (h == hint_h
+                        && sc >= MP_PREAMBLE_SCORE_MIN
+                        && mp_preamble_has_start_zero(bstream)
+                        && sc > hint_score)
+                    {
+                        hint_found = 1;
+                        hint_score = sc;
+                        hint_type_bit = d1;
+                        hint_reg = reg;
+                        hint_bstream = bstream;
+                        hint_bit_pos = 1;
+                        hint_pending_valid = 0;
+                        hint_pending_bit = 0;
+                    }
                     s->mp_hyp_scramble[h] = reg;
                     s->mp_hyp_bitstream[h] = bstream;
                 }
                 /*endfor*/
+                if (hint_found
+                    && hint_h >= 0
+                    && hint_h < MP_HYPOTHESIS_COUNT
+                    && (chosen_hyp < 0 || hint_score >= chosen_score - 1))
+                {
+                    chosen_hyp = hint_h;
+                    chosen_type_bit = hint_type_bit;
+                    chosen_score = hint_score;
+                    chosen_reg = hint_reg;
+                    chosen_bstream = hint_bstream;
+                    chosen_bit_pos = hint_bit_pos;
+                    chosen_pending_valid = hint_pending_valid;
+                    chosen_pending_bit = hint_pending_bit;
+                }
+                /*endif*/
                 /* Expose one live hypothesis stream for diagnostics while unlocked. */
                 s->bitstream = s->mp_hyp_bitstream[0];
 

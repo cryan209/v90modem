@@ -752,6 +752,27 @@ static int mp_sequence_tx(v34_tx_state_t *s, mp_t *mp)
     /* Add some extra postamble, so we have a whole number of bytes to work with. */
     bitstream_put(&bs, &t, 0, 8);
     bitstream_flush(&bs, &t);
+
+    /* TX diagnostic: dump the exact serialized MP frame bits (LSB-first stream)
+       to compare directly against RX Phase 4 MP frame reconstruction. */
+    {
+        bitstream_state_t dbg_bs;
+        const uint8_t *dbg_p;
+        int dbg_len;
+        char dbg_bits[188 + 1];
+
+        dbg_len = (mp->type == 1) ? 188 : 88;
+        bitstream_init(&dbg_bs, true);
+        dbg_p = s->txbuf;
+        for (i = 0;  i < dbg_len;  i++)
+            dbg_bits[i] = (char) ('0' + (int) bitstream_get(&dbg_bs, &dbg_p, 1));
+        /*endfor*/
+        dbg_bits[dbg_len] = '\0';
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Tx - MP%d bits[0..%d]: %s\n",
+                 mp->type, dbg_len - 1, dbg_bits);
+    }
+
     return (mp->type == 1)  ?  188  :  88;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2812,8 +2833,8 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             else if (s->tx.tone_duration >= PHASE4_TRN_MAX_BAUDS)
             {
-                /* V.34 interop safeguard: never start MP until far-end J'/TRN
-                   was explicitly confirmed by RX. Keep sending TRN and wait. */
+                /* Strict behavior: never start MP until far-end J'/TRN was
+                   explicitly confirmed by RX. Keep sending TRN and wait. */
                 if ((s->tx.tone_duration % 512) == 0)
                 {
                     span_log(&s->logging, SPAN_LOG_FLOW,
@@ -2876,7 +2897,7 @@ static void phase4_wait_init(v34_state_t *s)
 /* Number of bauds to transmit silence at the start of MP TX.
    This allows the caller's MP to arrive without echo interference
    from our own TX.  Set to 0 to disable (normal V.34 operation). */
-#define MP_TX_SILENCE_BAUDS 200
+#define MP_TX_SILENCE_BAUDS 0
 
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {

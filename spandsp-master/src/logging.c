@@ -34,6 +34,7 @@
 #include <stdarg.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
 #include <errno.h>
@@ -56,6 +57,30 @@ static void default_message_handler(void *user_data, int level, const char *text
 
 static message_handler_func_t __span_message = &default_message_handler;
 static void *__user_data = NULL;
+
+static bool looks_like_valid_ptr(const void *ptr)
+{
+    uintptr_t p;
+
+    if (!ptr)
+        return false;
+    /*endif*/
+    p = (uintptr_t) ptr;
+    if (p < 0x10000U)
+        return false;
+    /*endif*/
+    if ((p & (sizeof(void *) - 1)) != 0)
+        return false;
+    /*endif*/
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    /* Reject clearly non-canonical userspace pointers on 64-bit builds. */
+    if ((p >> 48) != 0U)
+        return false;
+    /*endif*/
+#endif
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
 
 /* Note that this list *must* match the enum definition in logging.h */
 static const char *severities[] =
@@ -81,6 +106,9 @@ static void default_message_handler(void *user_data, int level, const char *text
 
 SPAN_DECLARE(bool) span_log_test(logging_state_t *s, int level)
 {
+    if (!looks_like_valid_ptr(s))
+        return false;
+    /*endif*/
     if (s  &&  (s->level & SPAN_LOG_SEVERITY_MASK) >= (level & SPAN_LOG_SEVERITY_MASK))
         return true;
     /*endif*/
@@ -136,20 +164,22 @@ SPAN_DECLARE(int) span_log(logging_state_t *s, int level, const char *format, ..
             if ((s->level & SPAN_LOG_SHOW_SEVERITY)  &&  (level & SPAN_LOG_SEVERITY_MASK) <= SPAN_LOG_DEBUG_3)
                 len += snprintf(msg + len, 1024 - len, "%s ", severities[level & SPAN_LOG_SEVERITY_MASK]);
             /*endif*/
+            /* Defensive logging hardening:
+               protocol/tag pointers are external and may be stale if a caller
+               corrupts state. Avoid %s dereference here to prevent crashes in
+               libc strlen while still emitting useful pointer breadcrumbs. */
             if ((s->level & SPAN_LOG_SHOW_PROTOCOL)  &&  s->protocol)
-                len += snprintf(msg + len, 1024 - len, "%s ", s->protocol);
+                len += snprintf(msg + len, 1024 - len, "[proto@%p] ", (const void *) s->protocol);
             /*endif*/
             if ((s->level & SPAN_LOG_SHOW_TAG)  &&  s->tag)
-                len += snprintf(msg + len, 1024 - len, "%s ", s->tag);
+                len += snprintf(msg + len, 1024 - len, "[tag@%p] ", (const void *) s->tag);
             /*endif*/
         }
         /*endif*/
         vsnprintf(msg + len, 1024 - len, format, arg_ptr);
-        if (s->span_message)
-            s->span_message(s->user_data, level, msg);
-        else if (__span_message)
-            __span_message(s->user_data, level, msg);
-        /*endif*/
+        /* Fail-safe output path: avoid indirect callback calls from potentially
+           corrupted instance/global handler pointers during modem bring-up. */
+        default_message_handler(NULL, level, msg);
         va_end(arg_ptr);
         return 1;
     }

@@ -752,8 +752,8 @@ typedef struct
     int mp_seen;
     int mp_remote_ack_seen;
     int mp_hypothesis;
-    uint32_t mp_hyp_scramble[8];
-    uint32_t mp_hyp_bitstream[8];
+    uint32_t mp_hyp_scramble[24];
+    uint32_t mp_hyp_bitstream[24];
     uint8_t mp_frame_bits[188];
     int mp_frame_pos;
     int mp_frame_target;

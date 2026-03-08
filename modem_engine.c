@@ -508,17 +508,14 @@ static void v34_put_bit_cb(void *user_data, int bit)
         /* Status event from V.34 training state machine */
         trace_phase("V34 rx status=%s (%d)", signal_status_to_str(bit), bit);
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED) {
-            pthread_mutex_lock(&g_state_mtx);
             if (g_state == ME_TRAINING) {
                 g_state = ME_DATA;
-                pthread_mutex_unlock(&g_state_mtx);
                 int rate = v34_get_current_bit_rate(g_v34);
                 fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
                 trace_phase("V34 enter DATA: rate=%d", rate);
                 di_on_connected(rate);
                 return;
             }
-            pthread_mutex_unlock(&g_state_mtx);
         }
         fprintf(stderr, "[ME] V.34 status: %d\n", bit);
         return;
@@ -902,8 +899,10 @@ void me_rx_audio(const int16_t *amp, int len)
            so the canceller correctly removes the 2400 Hz echo while
            preserving the 1200 Hz far-end signal.  During Phase 3/4+
            the carriers are 1829/1920 Hz (at 3200 baud). */
-        if (g_mod == ME_MOD_V34 && g_v34) {
-            if (g_echo_can && state == ME_DATA) {
+        if (g_mod == ME_MOD_V34) {
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_mod == ME_MOD_V34 && g_v34) {
+                if (g_echo_can && state == ME_DATA) {
                 int16_t clean[len];
                 int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
                 int tx_zeros = 0;
@@ -933,9 +932,11 @@ void me_rx_audio(const int16_t *amp, int len)
                     ec_log_counter = 0;
                 }
                 v34_rx(g_v34, clean, len);
-            } else {
-                v34_rx(g_v34, amp, len);
+                } else {
+                    v34_rx(g_v34, amp, len);
+                }
             }
+            pthread_mutex_unlock(&g_state_mtx);
         } else if (g_v22bis)
             v22bis_rx(g_v22bis, amp, len);
 
@@ -975,16 +976,22 @@ void me_tx_audio(int16_t *amp, int len)
          * equalizer training). The put_bit callback fires SIG_STATUS_CARRIER_UP
          * when training completes, transitioning us to ME_DATA.
          */
-        if (g_mod == ME_MOD_V34 && g_v34)
-            v34_tx(g_v34, amp, len);
-        else if (g_v22bis)
+        if (g_mod == ME_MOD_V34) {
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_mod == ME_MOD_V34 && g_v34)
+                v34_tx(g_v34, amp, len);
+            pthread_mutex_unlock(&g_state_mtx);
+        } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;
 
     case ME_DATA:
-        if (g_mod == ME_MOD_V34 && g_v34) {
+        if (g_mod == ME_MOD_V34) {
             /* V.34 full duplex data TX */
-            v34_tx(g_v34, amp, len);
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_mod == ME_MOD_V34 && g_v34)
+                v34_tx(g_v34, amp, len);
+            pthread_mutex_unlock(&g_state_mtx);
         } else if (g_mod == ME_MOD_V90) {
             /*
              * V.90 downstream: encode 6 bytes per frame into 6 µ-law
@@ -1023,11 +1030,15 @@ void me_tx_audio(int16_t *amp, int len)
     /* Buffer TX samples for the echo canceller.
        Must happen after TX generation so me_rx_audio can subtract
        our echo from the received signal. */
-    if (g_echo_can && g_mod == ME_MOD_V34) {
+    if (g_mod == ME_MOD_V34) {
+        pthread_mutex_lock(&g_state_mtx);
+        if (g_echo_can && g_mod == ME_MOD_V34) {
         for (int i = 0; i < len; i++) {
             g_tx_buf[g_tx_buf_wr] = amp[i];
             g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
         }
+        }
+        pthread_mutex_unlock(&g_state_mtx);
     }
 }
 
