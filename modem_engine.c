@@ -887,8 +887,11 @@ void me_rx_audio(const int16_t *amp, int len)
             g_training_rx_count += len;
             if (g_training_rx_count >= 8000) {
                 double rms = sqrt((double)g_training_rx_energy / g_training_rx_count);
-                fprintf(stderr, "[ME] Training rx: RMS=%.1f (%d samples)\n",
-                        rms, g_training_rx_count);
+                /* Keep this diagnostic for abnormal levels only. */
+                if (rms < 20.0 || rms > 2000.0) {
+                    fprintf(stderr, "[ME] Training rx: RMS=%.1f (%d samples)\n",
+                            rms, g_training_rx_count);
+                }
                 g_training_rx_energy = 0;
                 g_training_rx_count  = 0;
             }
