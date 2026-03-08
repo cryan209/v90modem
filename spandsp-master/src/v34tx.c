@@ -2442,6 +2442,11 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
+    memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
+    memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
+    s->rx.phase3_trn_bits = 0;
+    s->rx.phase3_trn_lock_hyp = -1;
+    s->rx.phase3_trn_lock_score = -1;
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
@@ -2618,6 +2623,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.phase3_j_bits = 0;
             s->rx.phase3_j_lock_hyp = -1;
             s->rx.phase3_j_trn16 = -1;
+            memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
+            memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
+            s->rx.phase3_trn_bits = 0;
+            s->rx.phase3_trn_lock_hyp = -1;
+            s->rx.phase3_trn_lock_score = -1;
             s->rx.phase4_j_seen = 0;
             s->rx.phase4_j_lock_hyp = -1;
             s->rx.phase4_trn_after_j = 0;
@@ -2715,6 +2725,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase3_j_bits = 0;
                         s->rx.phase3_j_lock_hyp = -1;
                         s->rx.phase3_j_trn16 = -1;
+                        memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
+                        memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
+                        s->rx.phase3_trn_bits = 0;
+                        s->rx.phase3_trn_lock_hyp = -1;
+                        s->rx.phase3_trn_lock_score = -1;
                         s->rx.phase4_j_seen = 0;
                         s->rx.phase4_j_lock_hyp = -1;
                         s->rx.phase4_trn_after_j = 0;
@@ -2968,6 +2983,11 @@ static void phase4_wait_init(v34_state_t *s)
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
+    memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
+    memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
+    s->rx.phase3_trn_bits = 0;
+    s->rx.phase3_trn_lock_hyp = -1;
+    s->rx.phase3_trn_lock_score = -1;
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;

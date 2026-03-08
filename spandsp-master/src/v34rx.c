@@ -121,11 +121,14 @@
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               18
 #define MP_PREAMBLE_SCORE_MIN           18
+#define MP_HINT_LOCK_SCORE_MIN          16
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
-#define MP_HINT_ONLY_BAUDS              2000
+#define MP_HINT_ONLY_BAUDS              8000
+#define MP1_START_ERR_ACCEPT_MAX        3
+#define MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES 4
 
 enum
 {
@@ -360,6 +363,16 @@ static void phase4_trn_hyp_reset(v34_rx_state_t *s)
     memset(s->phase4_trn_one_count, 0, sizeof(s->phase4_trn_one_count));
     s->phase4_trn_lock_hyp = -1;
     s->phase4_trn_lock_score = -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase3_trn_hyp_reset(v34_rx_state_t *s)
+{
+    memset(s->phase3_trn_scramble, 0, sizeof(s->phase3_trn_scramble));
+    memset(s->phase3_trn_one_count, 0, sizeof(s->phase3_trn_one_count));
+    s->phase3_trn_bits = 0;
+    s->phase3_trn_lock_hyp = -1;
+    s->phase3_trn_lock_score = -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -819,7 +832,7 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
                 mp_apply_boundary_slip(trial, boundaries[i], target, slip);
             }
             /*endfor*/
-            if (change_count <= 0)
+            if (change_count <= 0  ||  change_count > MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES)
                 continue;
             /*endif*/
             crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
@@ -3287,6 +3300,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         pat = 2;
                     }
                     /*endif*/
+                    if (pat == 1  &&  (d16 + 1) >= d4)
+                    {
+                        /* Prefer 4-point when J(4)/J(16) are nearly tied.
+                           A weak 1-bit advantage for 16-point is not stable
+                           enough and can mis-classify TRN mode. */
+                        pat = 0;
+                        dmin = d4;
+                    }
+                    /*endif*/
                     canonical_ok = (dmin <= 3);
                     if (pat == 1)
                         j_validity = canonical_ok ? "valid J(16-point)" : "near/non-canonical";
@@ -3324,6 +3346,67 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 3: J candidate rejected (non-canonical 16-bit pattern)\n");
                     }
+                }
+                /*endif*/
+
+                /* Phase 3 TRN ones-based lock hint (4-point path):
+                   score hypotheses by descrambled ones ratio. This runs before
+                   explicit J is decoded and helps stabilize later phase search. */
+                if (s->phase3_j_trn16 < 0  &&  s->duration >= 256)
+                {
+                    int h;
+                    int best_trn_h;
+                    int best_trn_score;
+
+                    best_trn_h = -1;
+                    best_trn_score = -1;
+                    for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
+                    {
+                        int raw_sym;
+                        uint32_t reg;
+                        int d0;
+                        int d1;
+
+                        raw_sym = map_phase4_raw_bits(data_bits, h);
+                        reg = s->phase3_trn_scramble[h];
+                        d0 = descramble_reg(&reg, s->scrambler_tap, raw_sym & 1);
+                        d1 = descramble_reg(&reg, s->scrambler_tap, (raw_sym >> 1) & 1);
+                        s->phase3_trn_scramble[h] = reg;
+                        s->phase3_trn_one_count[h] += (uint16_t) (d0 + d1);
+                        if (s->phase3_trn_one_count[h] > best_trn_score)
+                        {
+                            best_trn_h = h;
+                            best_trn_score = s->phase3_trn_one_count[h];
+                        }
+                        /*endif*/
+                    }
+                    /*endfor*/
+                    s->phase3_trn_bits += 2;
+                    if (s->phase3_trn_bits >= 256  &&  best_trn_h >= 0)
+                    {
+                        int score_pct;
+
+                        score_pct = (100*best_trn_score + (s->phase3_trn_bits/2))/s->phase3_trn_bits;
+                        if (score_pct >= 70
+                            &&
+                            (s->phase3_trn_lock_hyp < 0  ||  score_pct > s->phase3_trn_lock_score))
+                        {
+                            s->phase3_trn_lock_hyp = best_trn_h;
+                            s->phase3_trn_lock_score = score_pct;
+                            s->phase3_j_lock_hyp = best_trn_h;
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3 TRN: lock hint hyp=%d ones=%d/%d (%d%%)\n",
+                                     best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
+                        }
+                        else if ((s->phase3_trn_bits % 512) == 0)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3 TRN: best hyp=%d ones=%d/%d (%d%%)\n",
+                                     best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                 }
                 /*endif*/
             }
@@ -3414,6 +3497,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_j_bits = 0;
             s->phase3_j_lock_hyp = -1;
             s->phase3_j_trn16 = -1;
+            phase3_trn_hyp_reset(s);
             s->phase4_j_seen = 0;
             s->phase4_j_lock_hyp = -1;
             s->phase4_trn_after_j = 0;
@@ -3712,15 +3796,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 raw_sym = map_phase4_raw_bits(data_bits, h);
                 if (s->phase4_trn_prev_valid[h])
                 {
-                    int in_sym;
                     uint32_t reg;
                     int d0;
                     int d1;
 
-                    in_sym = (raw_sym - s->phase4_trn_prev_z[h]) & 0x3;
+                    /* TRN is not differentially encoded; score descrambled dibits directly.
+                       Keep this active for both 4-point and 16-point TRN. */
                     reg = s->phase4_trn_scramble[h];
-                    d0 = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
-                    d1 = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
+                    d0 = descramble_reg(&reg, s->scrambler_tap, raw_sym & 1);
+                    d1 = descramble_reg(&reg, s->scrambler_tap, (raw_sym >> 1) & 1);
                     s->phase4_trn_scramble[h] = reg;
                     s->phase4_trn_one_count[h] += (uint16_t) (d0 + d1);
                     if (s->phase4_trn_one_count[h] > best_score)
@@ -3743,7 +3827,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 bits_observed = 2*(s->phase4_trn_after_j - 1);
                 if (bits_observed > 0  &&  best_h >= 0)
                 {
+                    int old_lock_hyp;
+                    int old_lock_score;
+                    int lock_changed;
+
                     score_pct = (100*best_score + (bits_observed/2))/bits_observed;
+                    old_lock_hyp = s->phase4_trn_lock_hyp;
+                    old_lock_score = s->phase4_trn_lock_score;
+                    lock_changed = 0;
+
+                    /* After enough TRN, track the current best hypothesis rather than
+                       preserving only the earliest high-percent lock. */
+                    if (bits_observed >= 512
+                        && (s->phase4_trn_lock_hyp < 0
+                            || score_pct >= s->phase4_trn_lock_score - 2))
+                    {
+                        s->phase4_trn_lock_hyp = best_h;
+                        s->phase4_trn_lock_score = score_pct;
+                    }
+                    /*endif*/
                     if (score_pct >= 70
                         &&
                         (s->phase4_trn_lock_hyp < 0
@@ -3751,9 +3853,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     {
                         s->phase4_trn_lock_hyp = best_h;
                         s->phase4_trn_lock_score = score_pct;
+                    }
+                    /*endif*/
+                    lock_changed = (s->phase4_trn_lock_hyp != old_lock_hyp
+                                    || s->phase4_trn_lock_score != old_lock_score);
+                    if (lock_changed && s->phase4_trn_lock_score >= 70)
+                    {
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4 TRN: lock hint hyp=%d ones=%d/%d (%d%%)\n",
-                                 best_h, best_score, bits_observed, score_pct);
+                                 s->phase4_trn_lock_hyp, best_score, bits_observed, s->phase4_trn_lock_score);
                     }
                     else if ((s->phase4_trn_after_j % 256) == 0)
                     {
@@ -3922,7 +4030,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     pre0 = bstream;
                     d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
                     bstream = (bstream << 1) | d1;
-                    if (sc0 >= MP_LOCK_SCORE_MIN
+                    if (sc0 >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && mp_preamble_has_start_zero(pre0)
@@ -3943,7 +4051,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     if (h == hint_h
-                        && sc0 >= MP_PREAMBLE_SCORE_MIN
+                        && sc0 >= MP_HINT_LOCK_SCORE_MIN
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
@@ -3961,7 +4069,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     sc = mp_preamble_score(bstream);
-                    if (sc >= MP_LOCK_SCORE_MIN
+                    if (sc >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
@@ -3980,7 +4088,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     if (h == hint_h
-                        && sc >= MP_PREAMBLE_SCORE_MIN
+                        && sc >= MP_HINT_LOCK_SCORE_MIN
                         && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
@@ -4311,9 +4419,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
                     {
                         bool frame_accepted;
+                        int start_err_accept_max;
+                        bool starts_acceptable;
 
                         frame_accepted = false;
-                        if (crc_good  &&  fill_good  &&  starts_good)
+                        start_err_accept_max = (type == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
+                        starts_acceptable = (start_err_count <= start_err_accept_max);
+                        if (crc_good  &&  fill_good  &&  starts_acceptable)
                         {
                             bool semantic_good;
 
@@ -4356,6 +4468,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /*endif*/
                             if (semantic_good)
                             {
+                                if (!starts_good)
+                                {
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 4: MP%d accepting frame with %d/%d start-bit mismatches because CRC/fill are valid\n",
+                                             type, start_err_count, start_err_accept_max);
+                                }
+                                /*endif*/
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
                                          type, s->mp_frame_target);
@@ -4365,10 +4484,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             }
                             else
                             {
+                                /* CRC/fill/starts passed but semantic parse failed.
+                                   Prefer a local re-acquire on the same hypothesis
+                                   before dropping back to global search. */
+                                s->mp_early_rejects = 0;
+                                s->mp_count = 0;
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d rejected (semantic checks failed)\n",
                                          type);
-                                mp_unlock_after_reject(s, true);
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: keeping MP hypothesis=%d after semantic reject; retrying local preamble reacquire\n",
+                                         s->mp_hypothesis);
                             }
                             /*endif*/
                         }
@@ -4383,8 +4509,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             keep_hypothesis = (s->mp_hypothesis >= 0
                                                && start_err_count == 0);
                             span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d starts_ok=%d start_err_count=%d)\n",
-                                     type, crc_good, fill_good, starts_good, start_err_count);
+                                     "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d starts_ok=%d starts_acceptable=%d start_err_count=%d max=%d)\n",
+                                     type, crc_good, fill_good, starts_good, starts_acceptable, start_err_count, start_err_accept_max);
                             /* Dump first 70 frame bits for diagnosis */
                             {
                                 char dump[200];
@@ -4871,6 +4997,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
+    phase3_trn_hyp_reset(&s->rx);
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
