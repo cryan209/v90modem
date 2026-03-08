@@ -2440,6 +2440,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
+    s->rx.phase3_j_trn16 = -1;
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_trn_after_j = 0;
     s->rx.baud_half = 0;
@@ -2586,6 +2587,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
             s->rx.phase3_j_bits = 0;
             s->rx.phase3_j_lock_hyp = -1;
+            s->rx.phase3_j_trn16 = -1;
             s->rx.phase4_j_seen = 0;
             s->rx.phase4_trn_after_j = 0;
         }
@@ -2618,12 +2620,24 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     &&
                     s->rx.received_event == V34_EVENT_S)
                 {
-                    /* Caller: send J' then TRN then MP (V.34 §11.4.1.1.1) */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - far-end S detected, switching J -> J'\n");
-                    s->tx.stage = V34_TX_STAGE_J_DASHED;
-                    s->tx.persistence2 = j_dashed_pattern[0];
-                    s->tx.tone_duration = 0;
+                    if (s->rx.phase3_j_trn16 >= 0)
+                    {
+                        /* Caller: terminate J only after far-end J is decoded so
+                           MP type (4-point/16-point) is known from J per spec. */
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "Tx - far-end S detected and J decoded (trn=%s), switching J -> J'\n",
+                                 s->rx.phase3_j_trn16 ? "16-point" : "4-point");
+                        s->tx.stage = V34_TX_STAGE_J_DASHED;
+                        s->tx.persistence2 = j_dashed_pattern[0];
+                        s->tx.tone_duration = 0;
+                    }
+                    else if ((s->tx.tone_duration % 64) == 0)
+                    {
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "Tx - far-end S detected, waiting for explicit J decode before J' (J bits=%d)\n",
+                                 s->rx.phase3_j_bits);
+                    }
+                    /*endif*/
                 }
                 else if (!s->tx.calling_party
                          &&
@@ -2661,6 +2675,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
                         s->rx.phase3_j_bits = 0;
                         s->rx.phase3_j_lock_hyp = -1;
+                        s->rx.phase3_j_trn16 = -1;
                         s->rx.phase4_j_seen = 0;
                         s->rx.phase4_trn_after_j = 0;
                         span_log(&s->logging, SPAN_LOG_FLOW,

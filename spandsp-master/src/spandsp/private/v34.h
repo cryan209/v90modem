@@ -736,6 +736,7 @@ typedef struct
     int phase3_pp_obs;
     int phase3_pp_match;
     uint32_t phase3_j_scramble[8];
+    uint32_t phase3_j_stream[8];
     uint8_t phase3_j_prev_z[8];
     uint8_t phase3_j_prev_valid[8];
     uint32_t phase3_j_win[8][3][16];

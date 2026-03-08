@@ -3212,10 +3212,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 {
                     s->received_event = (best_t == 2)  ?  V34_EVENT_J_DASHED  :  V34_EVENT_J;
                     s->phase3_j_lock_hyp = best_h;
+                    if (best_t == 0  ||  best_t == 1)
+                        s->phase3_j_trn16 = best_t;
+                    /*endif*/
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3: explicit %s detected (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                             "Rx - Phase 3: explicit %s detected (hyp=%d phase=%d score=%d/32 bits=%d%s%s)\n",
                              (best_t == 2)  ?  "J'"  :  "J",
-                             best_h, best_p, best_score, s->phase3_j_bits);
+                             best_h, best_p, best_score, s->phase3_j_bits,
+                             (best_t == 2) ? "" : ", trn=",
+                             (best_t == 2) ? "" : (best_t ? "16-point" : "4-point"));
                 }
                 /*endif*/
             }
@@ -3304,6 +3309,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             memset(s->phase3_j_win, 0, sizeof(s->phase3_j_win));
             s->phase3_j_bits = 0;
             s->phase3_j_lock_hyp = -1;
+            s->phase3_j_trn16 = -1;
             s->phase4_j_seen = 0;
             s->phase4_trn_after_j = 0;
         }
@@ -3577,8 +3583,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->phase3_j_lock_hyp >= 0  &&  s->phase3_j_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: Phase 3 J lock hint available (hyp=%d), starting unbiased MP hypothesis search\n",
-                         s->phase3_j_lock_hyp);
+                         "Rx - Phase 4: Phase 3 J lock hint available (hyp=%d, trn=%s), starting unbiased MP hypothesis search\n",
+                         s->phase3_j_lock_hyp,
+                         (s->phase3_j_trn16 < 0) ? "unknown" : (s->phase3_j_trn16 ? "16-point" : "4-point"));
             }
             /*endif*/
             mp_reset_hypothesis_search(s);
@@ -3599,11 +3606,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
             int locked_this_symbol;
             int h;
+            int expected_mp_type;
 
         ang1 = arctan2(sample->re, sample->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
+        expected_mp_type = (s->phase3_j_trn16 < 0) ? -1 : (s->phase3_j_trn16 ? 1 : 0);
 
             locked_this_symbol = 0;
 
@@ -3687,6 +3696,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     bstream = (bstream << 1) | d1;
                     if (sc0 >= MP_LOCK_SCORE_MIN
                         && (!hint_only || h == hint_h)
+                        && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > chosen_score)
@@ -3706,6 +3716,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /*endif*/
                     if (h == hint_h
                         && sc0 >= MP_PREAMBLE_SCORE_MIN
+                        && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > hint_score)
@@ -3724,6 +3735,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     sc = mp_preamble_score(bstream);
                     if (sc >= MP_LOCK_SCORE_MIN
                         && (!hint_only || h == hint_h)
+                        && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
                         && sc > chosen_score)
@@ -3741,6 +3753,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /*endif*/
                     if (h == hint_h
                         && sc >= MP_PREAMBLE_SCORE_MIN
+                        && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
                         && sc > hint_score)
@@ -3891,6 +3904,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                         mp_seed_frame_prefix(s->mp_frame_bits, s->bitstream);
                         type = s->mp_frame_bits[18];
+                        if (expected_mp_type >= 0  &&  type != expected_mp_type)
+                            continue;
+                        /*endif*/
                         s->mp_frame_target = (type == 1)  ?  188  :  88;
                         s->mp_frame_pos = 19;
                         s->mp_count = 0;
@@ -4625,6 +4641,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
+    s->rx.phase3_j_trn16 = -1;
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_trn_after_j = 0;
 
