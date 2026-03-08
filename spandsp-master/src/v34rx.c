@@ -280,6 +280,34 @@ static bool mp_preamble_has_start_zero(uint32_t bitstream)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool mp_preamble_has_sync_ones(uint32_t bitstream)
+{
+    int k;
+
+    /* Preamble layout in bitstream[18:1]:
+       17x'1' in bits [18:2], start '0' in bit [1], type in bit [0]. */
+    for (k = 2;  k <= 18;  k++)
+    {
+        if (((bitstream >> k) & 1) == 0)
+            return false;
+        /*endif*/
+    }
+    /*endfor*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_seed_frame_prefix(uint8_t bits[], uint32_t preamble_stream)
+{
+    int idx;
+
+    /* frame_idx 0..16 are sync bits, 17 is start, 18 is type. */
+    for (idx = 0;  idx <= 18;  idx++)
+        bits[idx] = (preamble_stream >> (18 - idx)) & 1;
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void mp_reset_hypothesis_search(v34_rx_state_t *s)
 {
     s->mp_hypothesis = -1;
@@ -410,7 +438,7 @@ static bool mp_fill_ok(const uint8_t bits[], int type)
 
 static bool mp_start_bit_ok(int type, int bit_index, int bit_value)
 {
-    if (bit_index == 34 || bit_index == 51 || bit_index == 68)
+    if (bit_index == 17 || bit_index == 34 || bit_index == 51 || bit_index == 68)
         return bit_value == 0;
     if (type == 1
         &&
@@ -3292,6 +3320,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int chosen_bit_pos;
                 int chosen_pending_valid;
                 int chosen_pending_bit;
+                uint32_t chosen_preamble_stream;
                 int hint_h;
                 int hint_found;
                 int hint_score;
@@ -3301,6 +3330,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int hint_bit_pos;
                 int hint_pending_valid;
                 int hint_pending_bit;
+                uint32_t hint_preamble_stream;
 
                 chosen_hyp = -1;
                 chosen_type_bit = 0;
@@ -3310,6 +3340,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 chosen_bit_pos = -1;
                 chosen_pending_valid = 0;
                 chosen_pending_bit = 0;
+                chosen_preamble_stream = 0;
                 hint_h = s->phase3_j_lock_hyp;
                 hint_found = 0;
                 hint_score = -1;
@@ -3319,14 +3350,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 hint_bit_pos = -1;
                 hint_pending_valid = 0;
                 hint_pending_bit = 0;
+                hint_preamble_stream = 0;
                 for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
                 {
                     uint32_t reg;
                     uint32_t bstream;
+                    uint32_t pre0;
                     int raw_bits;
                     int d0;
                     int d1;
                     int sc;
+                    int sc0;
 
                     reg = s->mp_hyp_scramble[h];
                     bstream = s->mp_hyp_bitstream[h];
@@ -3334,65 +3368,49 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                     d0 = descramble_reg(&reg, s->scrambler_tap, raw_bits & 1);
                     bstream = (bstream << 1) | d0;
-                    sc = mp_preamble_score(bstream);
-                    if (sc >= MP_LOCK_SCORE_MIN
-                        && mp_preamble_has_start_zero(bstream)
-                        && sc > chosen_score)
+                    sc0 = mp_preamble_score(bstream);
+                    pre0 = bstream;
+                    d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
+                    bstream = (bstream << 1) | d1;
+                    if (sc0 >= MP_LOCK_SCORE_MIN
+                        && mp_preamble_has_start_zero(pre0)
+                        && mp_preamble_has_sync_ones(pre0)
+                        && sc0 > chosen_score)
                     {
                         /* Lock boundary at bit0: current bit is MP type bit.
-                           The second bit of this dibit belongs to frame_idx=19
-                           and must be carried as a pending first body bit. */
+                           The second bit of this dibit belongs to frame_idx=19. */
                         chosen_hyp = h;
                         chosen_type_bit = d0;
-                        chosen_score = sc;
+                        chosen_score = sc0;
                         chosen_reg = reg;
                         chosen_bstream = bstream;
                         chosen_bit_pos = 0;
                         chosen_pending_valid = 1;
-                        chosen_pending_bit = 0; /* set after d1 decode below */
+                        chosen_pending_bit = d1;
+                        chosen_preamble_stream = pre0;
                     }
                     /*endif*/
                     if (h == hint_h
-                        && sc >= MP_PREAMBLE_SCORE_MIN
-                        && mp_preamble_has_start_zero(bstream)
-                        && sc > hint_score)
+                        && sc0 >= MP_PREAMBLE_SCORE_MIN
+                        && mp_preamble_has_start_zero(pre0)
+                        && mp_preamble_has_sync_ones(pre0)
+                        && sc0 > hint_score)
                     {
                         hint_found = 1;
-                        hint_score = sc;
+                        hint_score = sc0;
                         hint_type_bit = d0;
                         hint_reg = reg;
                         hint_bstream = bstream;
                         hint_bit_pos = 0;
                         hint_pending_valid = 1;
-                        hint_pending_bit = 0; /* set after d1 decode below */
-                    }
-                    /*endif*/
-                    d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
-                    bstream = (bstream << 1) | d1;
-                    /* If we provisionally selected bit0 for this hypothesis,
-                       update pending bit and saved state to include d1. */
-                    if (chosen_hyp == h
-                        && chosen_bit_pos == 0
-                        && chosen_pending_valid)
-                    {
-                        chosen_pending_bit = d1;
-                        chosen_reg = reg;
-                        chosen_bstream = bstream;
-                    }
-                    /*endif*/
-                    if (h == hint_h
-                        && hint_found
-                        && hint_bit_pos == 0
-                        && hint_pending_valid)
-                    {
                         hint_pending_bit = d1;
-                        hint_reg = reg;
-                        hint_bstream = bstream;
+                        hint_preamble_stream = pre0;
                     }
                     /*endif*/
                     sc = mp_preamble_score(bstream);
                     if (sc >= MP_LOCK_SCORE_MIN
                         && mp_preamble_has_start_zero(bstream)
+                        && mp_preamble_has_sync_ones(bstream)
                         && sc > chosen_score)
                     {
                         chosen_hyp = h;
@@ -3403,11 +3421,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_bit_pos = 1;
                         chosen_pending_valid = 0;
                         chosen_pending_bit = 0;
+                        chosen_preamble_stream = bstream;
                     }
                     /*endif*/
                     if (h == hint_h
                         && sc >= MP_PREAMBLE_SCORE_MIN
                         && mp_preamble_has_start_zero(bstream)
+                        && mp_preamble_has_sync_ones(bstream)
                         && sc > hint_score)
                     {
                         hint_found = 1;
@@ -3418,6 +3438,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         hint_bit_pos = 1;
                         hint_pending_valid = 0;
                         hint_pending_bit = 0;
+                        hint_preamble_stream = bstream;
                     }
                     s->mp_hyp_scramble[h] = reg;
                     s->mp_hyp_bitstream[h] = bstream;
@@ -3436,6 +3457,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     chosen_bit_pos = hint_bit_pos;
                     chosen_pending_valid = hint_pending_valid;
                     chosen_pending_bit = hint_pending_bit;
+                    chosen_preamble_stream = hint_preamble_stream;
                 }
                 /*endif*/
                 /* Expose one live hypothesis stream for diagnostics while unlocked. */
@@ -3455,15 +3477,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /* Lock criterion is the MP preamble itself, so start frame
                        collection immediately at this boundary. */
                     {
-                        int b;
                         int type;
 
-                        type = chosen_type_bit;
-                        for (b = 0;  b < 17;  b++)
-                            s->mp_frame_bits[b] = 1;
-                        /*endfor*/
-                        s->mp_frame_bits[17] = 0;
-                        s->mp_frame_bits[18] = type;
+                        mp_seed_frame_prefix(s->mp_frame_bits, chosen_preamble_stream);
+                        type = s->mp_frame_bits[18];
                         s->mp_frame_target = (type == 1)  ?  188  :  88;
                         s->mp_frame_pos = 19;
                         if (chosen_pending_valid)
@@ -3548,18 +3565,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                     preamble_score = mp_preamble_score(s->bitstream);
                     if (preamble_score >= MP_PREAMBLE_SCORE_MIN
-                        && mp_preamble_has_start_zero(s->bitstream))
+                        && mp_preamble_has_start_zero(s->bitstream)
+                        && mp_preamble_has_sync_ones(s->bitstream))
                     {
-                        int b;
                         int type;
                         char tail[33];
 
-                        type = bits[i];
-                        for (b = 0;  b < 17;  b++)
-                            s->mp_frame_bits[b] = 1;
-                        /*endfor*/
-                        s->mp_frame_bits[17] = 0;
-                        s->mp_frame_bits[18] = type;
+                        mp_seed_frame_prefix(s->mp_frame_bits, s->bitstream);
+                        type = s->mp_frame_bits[18];
                         s->mp_frame_target = (type == 1)  ?  188  :  88;
                         s->mp_frame_pos = 19;
                         s->mp_count = 0;
@@ -3645,6 +3658,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /*endif*/
 
                     type = s->mp_frame_bits[18];
+                    if (!mp_start_bit_ok(type, 17, s->mp_frame_bits[17]))
+                    {
+                        s->mp_early_rejects++;
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: MP%d start-bit mismatch at frame_idx=17 body_idx=0 data_idx=-1 value=%d "
+                                 "(expected 0), start_err_count=%d (continuing until CRC)\n",
+                                 type, s->mp_frame_bits[17], s->mp_early_rejects);
+                    }
+                    /*endif*/
                     crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                     fill_good = mp_fill_ok(s->mp_frame_bits, type);
                     if (!(crc_good  &&  fill_good))

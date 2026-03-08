@@ -739,7 +739,10 @@ static int mp_sequence_tx(v34_tx_state_t *s, mp_t *mp)
     crc = 0xFFFF;
     len = (mp->type == 1)  ?  170  :  68;
     for (i = 17;  i < len;  i += 17)
-        crc = crc_bit_block(s->txbuf, i, i + 15, crc);
+        /* Per V.34 10.1.2.3.2, CRC excludes frame sync/start/fill bits.
+           Each 17-bit block is start + 16 information bits, so CRC the
+           16 information bits only. */
+        crc = crc_bit_block(s->txbuf, i + 1, i + 16, crc);
     /*endfor*/
     /* 69:84/171:186    CRC. */
     bitstream_put(&bs, &t, crc, 16);
@@ -869,7 +872,10 @@ static int mph_sequence_tx(v34_tx_state_t *s, mph_t *mph)
     crc = 0xFFFF;
     len = (mph->type == 1)  ?  170  :  68;
     for (i = 17;  i < len;  i += 17)
-        crc = crc_bit_block(s->txbuf, i, i + 15, crc);
+        /* Per V.34 10.1.2.3.2, CRC excludes frame sync/start/fill bits.
+           Each 17-bit block is start + 16 information bits, so CRC the
+           16 information bits only. */
+        crc = crc_bit_block(s->txbuf, i + 1, i + 16, crc);
     /*endfor*/
     /* 69:84/171:186    CRC. */
     bitstream_put(&bs, &t, crc, 16);
