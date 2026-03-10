@@ -751,8 +751,8 @@ typedef struct
     int phase4_j_seen;
     int phase4_j_lock_hyp;
     int phase4_trn_after_j;
-    uint32_t phase4_trn_scramble_tap[2][24];
-    uint16_t phase4_trn_one_count_tap[2][24];
+    uint32_t phase4_trn_scramble_tap[2][2][24];
+    uint16_t phase4_trn_one_count_tap[2][2][24];
     uint32_t phase4_trn_scramble[24];
     uint8_t phase4_trn_prev_z[24];
     uint8_t phase4_trn_prev_valid[24];
@@ -760,6 +760,7 @@ typedef struct
     int phase4_trn_lock_hyp;
     int phase4_trn_lock_score;
     int phase4_trn_lock_tap;
+    int phase4_trn_lock_order;
 
     /* MP or MPh receive tracking data */
     int mp_count;
