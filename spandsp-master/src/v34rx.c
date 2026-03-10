@@ -124,8 +124,12 @@
 #define MP_HINT_LOCK_SCORE_MIN          16
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
-#define MP_TRN_PRELOCK_SCORE_MIN        60
+#define MP_TRN_PRELOCK_SCORE_MIN        70
 #define PHASE4_TRN_SCORE_START_BAUD     145
+#define PHASE4_TRN_LOCK_MIN_BITS        512
+#define PHASE4_TRN_READY_MIN_SCORE      70
+#define PHASE4_TRN_READY_MIN_BAUD       1024
+#define PHASE4_TRN_READY_MAX_BAUD       2200
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
@@ -370,6 +374,7 @@ static void phase4_trn_hyp_reset(v34_rx_state_t *s)
     s->phase4_trn_lock_score = -1;
     s->phase4_trn_lock_tap = -1;
     s->phase4_trn_lock_order = -1;
+    s->phase4_trn_lock_domain = -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -405,6 +410,28 @@ static int phase4_trn_tap_value(int tap_idx)
 static const char *phase4_trn_order_name(int order_idx)
 {
     return (order_idx == 1) ? "b1,b0" : "b0,b1";
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *phase4_trn_domain_name(int domain_idx)
+{
+    return (domain_idx == 1) ? "abs" : "diff";
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_unpack_ordered_bits(int raw_bits, int order_idx, int *first_bit, int *second_bit)
+{
+    if (order_idx == 1)
+    {
+        *first_bit = (raw_bits >> 1) & 1;
+        *second_bit = raw_bits & 1;
+    }
+    else
+    {
+        *first_bit = raw_bits & 1;
+        *second_bit = (raw_bits >> 1) & 1;
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3668,10 +3695,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     case V34_RX_STAGE_PHASE4_TRN:
         /* Phase 4: gate MP entry on explicit far-end J' followed by >=512T TRN. */
+        {
+        int abs_bits;
+
         ang1 = arctan2(sample->re, sample->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
+        abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
 
         /* Descramble to let the descrambler self-sync (needs ~23 bits) */
@@ -3811,67 +3842,75 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int best_score;
             int best_tap;
             int best_order;
+            int best_domain;
 
             s->phase4_trn_after_j++;
             best_h = -1;
             best_score = -1;
             best_tap = -1;
             best_order = -1;
+            best_domain = -1;
             for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
             {
-                int raw_sym;
-
-                raw_sym = map_phase4_raw_bits(data_bits, h);
                 /* Phase 4 after J' starts with S (128T) + S-bar (16T).
                    Do not pollute TRN ones-scoring with those non-TRN symbols. */
                 if (s->phase4_trn_after_j >= PHASE4_TRN_SCORE_START_BAUD
                     && s->phase4_trn_prev_valid[h])
                 {
+                    int domain_idx;
                     int tap_idx;
 
                     /* TRN is not differentially encoded; score descrambled dibits directly.
-                       Evaluate both complementary scrambler taps in parallel. */
-                    for (tap_idx = 0;  tap_idx < 2;  tap_idx++)
+                       Evaluate both domains (diff/abs), both complementary taps,
+                       and both bit serialization orders in parallel. */
+                    for (domain_idx = 0;  domain_idx < 2;  domain_idx++)
                     {
-                        int order_idx;
+                        int raw_sym;
 
-                        for (order_idx = 0;  order_idx < 2;  order_idx++)
+                        raw_sym = map_phase4_raw_bits(domain_idx ? abs_bits : data_bits, h);
+                        for (tap_idx = 0;  tap_idx < 2;  tap_idx++)
                         {
-                            uint32_t reg;
-                            int d0;
-                            int d1;
-                            int tap;
+                            int order_idx;
 
-                            tap = phase4_trn_tap_value(tap_idx);
-                            reg = s->phase4_trn_scramble_tap[tap_idx][order_idx][h];
-                            if (order_idx == 0)
+                            for (order_idx = 0;  order_idx < 2;  order_idx++)
                             {
-                                d0 = descramble_reg(&reg, tap, raw_sym & 1);
-                                d1 = descramble_reg(&reg, tap, (raw_sym >> 1) & 1);
+                                uint32_t reg;
+                                int d0;
+                                int d1;
+                                int tap;
+
+                                tap = phase4_trn_tap_value(tap_idx);
+                                reg = s->phase4_trn_scramble_tap[domain_idx][tap_idx][order_idx][h];
+                                if (order_idx == 0)
+                                {
+                                    d0 = descramble_reg(&reg, tap, raw_sym & 1);
+                                    d1 = descramble_reg(&reg, tap, (raw_sym >> 1) & 1);
+                                }
+                                else
+                                {
+                                    d1 = descramble_reg(&reg, tap, (raw_sym >> 1) & 1);
+                                    d0 = descramble_reg(&reg, tap, raw_sym & 1);
+                                }
+                                /*endif*/
+                                s->phase4_trn_scramble_tap[domain_idx][tap_idx][order_idx][h] = reg;
+                                s->phase4_trn_one_count_tap[domain_idx][tap_idx][order_idx][h] += (uint16_t) (d0 + d1);
+                                if (s->phase4_trn_one_count_tap[domain_idx][tap_idx][order_idx][h] > best_score)
+                                {
+                                    best_h = h;
+                                    best_score = s->phase4_trn_one_count_tap[domain_idx][tap_idx][order_idx][h];
+                                    best_tap = tap_idx;
+                                    best_order = order_idx;
+                                    best_domain = domain_idx;
+                                }
+                                /*endif*/
                             }
-                            else
-                            {
-                                d1 = descramble_reg(&reg, tap, (raw_sym >> 1) & 1);
-                                d0 = descramble_reg(&reg, tap, raw_sym & 1);
-                            }
-                            /*endif*/
-                            s->phase4_trn_scramble_tap[tap_idx][order_idx][h] = reg;
-                            s->phase4_trn_one_count_tap[tap_idx][order_idx][h] += (uint16_t) (d0 + d1);
-                            if (s->phase4_trn_one_count_tap[tap_idx][order_idx][h] > best_score)
-                            {
-                                best_h = h;
-                                best_score = s->phase4_trn_one_count_tap[tap_idx][order_idx][h];
-                                best_tap = tap_idx;
-                                best_order = order_idx;
-                            }
-                            /*endif*/
+                            /*endfor*/
                         }
                         /*endif*/
                     }
-                    /*endif*/
+                    /*endfor*/
                 }
                 /*endif*/
-                s->phase4_trn_prev_z[h] = (uint8_t) raw_sym;
                 s->phase4_trn_prev_valid[h] = 1;
             }
             /*endfor*/
@@ -3894,27 +3933,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     old_lock_score = s->phase4_trn_lock_score;
                     lock_changed = 0;
 
-                    /* After enough TRN, track the current best hypothesis rather than
-                       preserving only the earliest high-percent lock. */
-                    if (bits_observed >= 512
+                    /* Keep the strongest sustained TRN candidate (with minimum
+                       evidence), so later noisy segments do not overwrite it. */
+                    if (bits_observed >= PHASE4_TRN_LOCK_MIN_BITS
                         && (s->phase4_trn_lock_hyp < 0
-                            || score_pct >= s->phase4_trn_lock_score - 2))
+                            || score_pct > s->phase4_trn_lock_score))
                     {
                         s->phase4_trn_lock_hyp = best_h;
                         s->phase4_trn_lock_score = score_pct;
                         s->phase4_trn_lock_tap = best_tap;
                         s->phase4_trn_lock_order = best_order;
-                    }
-                    /*endif*/
-                    if (score_pct >= 70
-                        &&
-                        (s->phase4_trn_lock_hyp < 0
-                         || score_pct > s->phase4_trn_lock_score))
-                    {
-                        s->phase4_trn_lock_hyp = best_h;
-                        s->phase4_trn_lock_score = score_pct;
-                        s->phase4_trn_lock_tap = best_tap;
-                        s->phase4_trn_lock_order = best_order;
+                        s->phase4_trn_lock_domain = best_domain;
                     }
                     /*endif*/
                     lock_changed = (s->phase4_trn_lock_hyp != old_lock_hyp
@@ -3922,8 +3951,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (lock_changed && s->phase4_trn_lock_score >= 70)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: lock hint hyp=%d tap=%d ord=%s ones=%d/%d (%d%%)\n",
+                                 "Rx - Phase 4 TRN: lock hint hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%)\n",
                                  s->phase4_trn_lock_hyp,
+                                 phase4_trn_domain_name(s->phase4_trn_lock_domain),
                                  phase4_trn_tap_value(s->phase4_trn_lock_tap),
                                  phase4_trn_order_name(s->phase4_trn_lock_order),
                                  best_score, bits_observed, s->phase4_trn_lock_score);
@@ -3931,8 +3961,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     else if ((s->phase4_trn_after_j % 256) == 0)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: best hyp=%d tap=%d ord=%s ones=%d/%d (%d%%)\n",
-                                 best_h, phase4_trn_tap_value(best_tap), phase4_trn_order_name(best_order),
+                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%)\n",
+                                 best_h, phase4_trn_domain_name(best_domain),
+                                 phase4_trn_tap_value(best_tap), phase4_trn_order_name(best_order),
                                  best_score, bits_observed, score_pct);
                     }
                     /*endif*/
@@ -3943,18 +3974,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         }
         /*endif*/
 
-        /* Transition to MP scan only after explicit J' then >=512T TRN. */
+        /* Transition to MP scan only after explicit J' and TRN ones-lock. */
         if (s->phase4_j_seen
-            && s->phase4_trn_after_j >= 512
-            && s->duration >= 900)
+            && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
+            && s->duration >= 900
+            && (s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
+                || s->phase4_trn_after_j >= PHASE4_TRN_READY_MAX_BAUD))
         {
             int h;
+            int domain_idx;
             int tap_idx;
             int order_idx;
             int trn_bits_observed;
             int trn_best_h;
             int trn_best_ones;
             int trn_best_score_pct;
+            int trn_best_domain;
             int trn_best_tap;
             int trn_best_order;
 
@@ -3966,22 +4001,28 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             trn_best_h = -1;
             trn_best_ones = -1;
             trn_best_score_pct = 0;
+            trn_best_domain = -1;
             trn_best_tap = -1;
             trn_best_order = -1;
             if (trn_bits_observed > 0)
             {
-                for (tap_idx = 0;  tap_idx < 2;  tap_idx++)
+                for (domain_idx = 0;  domain_idx < 2;  domain_idx++)
                 {
-                    for (order_idx = 0;  order_idx < 2;  order_idx++)
+                    for (tap_idx = 0;  tap_idx < 2;  tap_idx++)
                     {
-                        for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
+                        for (order_idx = 0;  order_idx < 2;  order_idx++)
                         {
-                            if (s->phase4_trn_one_count_tap[tap_idx][order_idx][h] > trn_best_ones)
+                            for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
                             {
-                                trn_best_ones = s->phase4_trn_one_count_tap[tap_idx][order_idx][h];
-                                trn_best_h = h;
-                                trn_best_tap = tap_idx;
-                                trn_best_order = order_idx;
+                                if (s->phase4_trn_one_count_tap[domain_idx][tap_idx][order_idx][h] > trn_best_ones)
+                                {
+                                    trn_best_ones = s->phase4_trn_one_count_tap[domain_idx][tap_idx][order_idx][h];
+                                    trn_best_h = h;
+                                    trn_best_domain = domain_idx;
+                                    trn_best_tap = tap_idx;
+                                    trn_best_order = order_idx;
+                                }
+                                /*endif*/
                             }
                             /*endif*/
                         }
@@ -3995,22 +4036,48 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 /*endif*/
             }
             /*endif*/
+            if (s->phase4_trn_lock_score < PHASE4_TRN_READY_MIN_SCORE
+                && s->phase4_trn_after_j >= PHASE4_TRN_READY_MAX_BAUD)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: TRN lock threshold not reached by %d bauds (best=%d%%, min=%d), forcing MP scan\n",
+                         s->phase4_trn_after_j, s->phase4_trn_lock_score, PHASE4_TRN_READY_MIN_SCORE);
+            }
+            /*endif*/
             s->received_event = V34_EVENT_PHASE4_TRN_READY;
-            if (trn_best_h >= 0  &&  trn_best_h < MP_HYPOTHESIS_COUNT)
+            if (s->phase4_trn_lock_hyp >= 0
+                && s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT
+                && s->phase4_trn_lock_domain >= 0 && s->phase4_trn_lock_domain < 2
+                && s->phase4_trn_lock_tap >= 0 && s->phase4_trn_lock_tap < 2
+                && s->phase4_trn_lock_order >= 0 && s->phase4_trn_lock_order < 2)
+            {
+                memcpy(s->phase4_trn_scramble,
+                       s->phase4_trn_scramble_tap[s->phase4_trn_lock_domain][s->phase4_trn_lock_tap][s->phase4_trn_lock_order],
+                       sizeof(s->phase4_trn_scramble));
+                memcpy(s->phase4_trn_one_count,
+                       s->phase4_trn_one_count_tap[s->phase4_trn_lock_domain][s->phase4_trn_lock_tap][s->phase4_trn_lock_order],
+                       sizeof(s->phase4_trn_one_count));
+                s->scrambler_tap = phase4_trn_tap_value(s->phase4_trn_lock_tap);
+                s->phase3_j_lock_hyp = s->phase4_trn_lock_hyp;
+            }
+            else if (trn_best_h >= 0  &&  trn_best_h < MP_HYPOTHESIS_COUNT)
             {
                 /* Use final TRN best hypothesis at MP handoff. */
                 s->phase4_trn_lock_hyp = trn_best_h;
                 s->phase4_trn_lock_score = trn_best_score_pct;
+                s->phase4_trn_lock_domain = trn_best_domain;
                 s->phase4_trn_lock_tap = trn_best_tap;
                 s->phase4_trn_lock_order = trn_best_order;
                 s->phase3_j_lock_hyp = trn_best_h;
-                if (trn_best_tap >= 0 && trn_best_tap < 2 && trn_best_order >= 0 && trn_best_order < 2)
+                if (trn_best_domain >= 0 && trn_best_domain < 2
+                    && trn_best_tap >= 0 && trn_best_tap < 2
+                    && trn_best_order >= 0 && trn_best_order < 2)
                 {
                     memcpy(s->phase4_trn_scramble,
-                           s->phase4_trn_scramble_tap[trn_best_tap][trn_best_order],
+                           s->phase4_trn_scramble_tap[trn_best_domain][trn_best_tap][trn_best_order],
                            sizeof(s->phase4_trn_scramble));
                     memcpy(s->phase4_trn_one_count,
-                           s->phase4_trn_one_count_tap[trn_best_tap][trn_best_order],
+                           s->phase4_trn_one_count_tap[trn_best_domain][trn_best_tap][trn_best_order],
                            sizeof(s->phase4_trn_one_count));
                     s->scrambler_tap = phase4_trn_tap_value(trn_best_tap);
                 }
@@ -4018,8 +4085,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             /*endif*/
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds), scanning for MP (decoder=hyp24-v2, gated=900)\n",
-                     s->phase4_trn_after_j);
+                     "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds, best_ones=%d%%), scanning for MP (decoder=hyp24-v2, gated=900)\n",
+                     s->phase4_trn_after_j, s->phase4_trn_lock_score);
             s->stage = V34_RX_STAGE_PHASE4_MP;
             s->duration = 0;
             s->bitstream = 0;
@@ -4033,11 +4100,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
             s->mp_phase4_reject_streak = 0;
             s->mp_phase4_alt_tap_active = 0;
+            s->mp_phase4_bit_order = (s->phase4_trn_lock_order == 1) ? 1 : 0;
             if (s->phase4_trn_lock_hyp >= 0  &&  s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: TRN final best available (hyp=%d, tap=%d, ord=%s, ones=%d%%), starting MP hypothesis search\n",
+                         "Rx - Phase 4: TRN final best available (hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%), starting MP hypothesis search\n",
                          s->phase4_trn_lock_hyp,
+                         phase4_trn_domain_name(s->phase4_trn_lock_domain),
                          phase4_trn_tap_value(s->phase4_trn_lock_tap),
                          phase4_trn_order_name(s->phase4_trn_lock_order),
                          s->phase4_trn_lock_score);
@@ -4064,8 +4133,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     s->bitstream = 0;
                     s->mp_count = 0;
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: direct MP pre-lock from TRN (hyp=%d, tap=%d, ord=%s, ones=%d%%)\n",
+                             "Rx - Phase 4: direct MP pre-lock from TRN (hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%)\n",
                              s->mp_hypothesis,
+                             phase4_trn_domain_name(s->phase4_trn_lock_domain),
                              phase4_trn_tap_value(s->phase4_trn_lock_tap),
                              phase4_trn_order_name(s->phase4_trn_lock_order),
                              s->phase4_trn_lock_score);
@@ -4073,8 +4143,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 else
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: TRN hint too weak for direct pre-lock (hyp=%d, tap=%d, ord=%s, ones=%d%%, min=%d), using global MP search\n",
+                             "Rx - Phase 4: TRN hint too weak for direct pre-lock (hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%, min=%d), using global MP search\n",
                              s->phase4_trn_lock_hyp,
+                             phase4_trn_domain_name(s->phase4_trn_lock_domain),
                              phase4_trn_tap_value(s->phase4_trn_lock_tap),
                              phase4_trn_order_name(s->phase4_trn_lock_order),
                              s->phase4_trn_lock_score,
@@ -4083,12 +4154,23 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             /*endif*/
         }
+        /*endif*/
+        else if (s->phase4_j_seen
+                 && s->phase4_trn_after_j >= 512
+                 && (s->phase4_trn_after_j % 256) == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: waiting for TRN ones-lock before MP (after_j=%d, best=%d%%, min=%d)\n",
+                     s->phase4_trn_after_j, s->phase4_trn_lock_score, PHASE4_TRN_READY_MIN_SCORE);
+        }
+        /*endif*/
         else if (s->duration >= 5200  &&  (s->duration % 512) == 0)
         {
             /* Do not force MP without explicit J' + TRN confirmation. */
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: still waiting for far-end J'/TRN confirmation (%d bauds)\n",
                      s->duration);
+        }
         }
         break;
 
@@ -4105,24 +4187,23 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
-        /* Do not constrain MP/MP' type from Phase 3 J classification.
-           J determines far-end training constellation usage, but forcing the
-           MP frame type here causes systematic false rejects on some peers. */
-        expected_mp_type = -1;
+        /* During initial Phase 4 MP acquisition, prefer MP0 (type 0) to avoid
+           false MP1 preamble locks. After a couple of rejects, relax back to
+           either type for interoperability with non-standard peers. */
+        expected_mp_type = (s->mp_seen == 0 && s->mp_phase4_reject_streak < 2) ? 0 : -1;
 
             locked_this_symbol = 0;
 
             if (s->mp_hypothesis >= 0)
             {
+                int in0;
+                int in1;
                 int raw_bits;
 
                 raw_bits = map_phase4_raw_bits(data_bits, s->mp_hypothesis);
-                for (i = 0;  i < 2;  i++)
-                {
-                    bits[i] = descramble(s, raw_bits & 1);
-                    raw_bits >>= 1;
-                }
-                /*endfor*/
+                phase4_unpack_ordered_bits(raw_bits, s->mp_phase4_bit_order, &in0, &in1);
+                bits[0] = descramble(s, in0);
+                bits[1] = descramble(s, in1);
             }
             else
             {
@@ -4180,18 +4261,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     int raw_bits;
                     int d0;
                     int d1;
+                    int in0;
+                    int in1;
                     int sc;
                     int sc0;
 
                     reg = s->mp_hyp_scramble[h];
                     bstream = s->mp_hyp_bitstream[h];
                     raw_bits = map_phase4_raw_bits(data_bits, h);
-
-                    d0 = descramble_reg(&reg, s->scrambler_tap, raw_bits & 1);
+                    phase4_unpack_ordered_bits(raw_bits, s->mp_phase4_bit_order, &in0, &in1);
+                    d0 = descramble_reg(&reg, s->scrambler_tap, in0);
                     bstream = (bstream << 1) | d0;
                     sc0 = mp_preamble_score(bstream);
                     pre0 = bstream;
-                    d1 = descramble_reg(&reg, s->scrambler_tap, (raw_bits >> 1) & 1);
+                    d1 = descramble_reg(&reg, s->scrambler_tap, in1);
                     bstream = (bstream << 1) | d1;
                     if (sc0 >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
