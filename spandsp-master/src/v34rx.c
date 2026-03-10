@@ -435,6 +435,30 @@ static void phase4_unpack_ordered_bits(int raw_bits, int order_idx, int *first_b
 }
 /*- End of function --------------------------------------------------------*/
 
+static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
+{
+    int use_alt_order;
+    int use_alt_tap;
+    int tap;
+    int order;
+
+    use_alt_order = (retry_mode == 1 || retry_mode == 3);
+    use_alt_tap = (retry_mode == 2 || retry_mode == 3);
+    tap = s->mp_phase4_default_scrambler_tap;
+    order = s->mp_phase4_default_bit_order;
+    if (use_alt_tap)
+        tap = mp_alternate_scrambler_tap(tap);
+    /*endif*/
+    if (use_alt_order)
+        order ^= 1;
+    /*endif*/
+    s->scrambler_tap = tap;
+    s->mp_phase4_bit_order = order;
+    s->mp_phase4_alt_tap_active = use_alt_tap;
+    s->mp_phase4_alt_order_active = use_alt_order;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 {
     const int tap_switch_rejects = 3;
@@ -447,21 +471,20 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
     if (count_tap_reject
         && ++s->mp_phase4_reject_streak >= tap_switch_rejects)
     {
-        if (!s->mp_phase4_alt_tap_active)
+        s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x3;
+        mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
+        if (s->mp_phase4_retry_mode == 0)
         {
-            s->scrambler_tap = mp_alternate_scrambler_tap(s->mp_phase4_default_scrambler_tap);
-            s->mp_phase4_alt_tap_active = 1;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: switching MP descrambler tap to alternate (%d -> %d) after %d rejects\n",
-                     s->mp_phase4_default_scrambler_tap, s->scrambler_tap, s->mp_phase4_reject_streak);
+                     "Rx - Phase 4: restoring MP descrambler defaults (tap=%d, ord=%s) after %d rejects\n",
+                     s->scrambler_tap, phase4_trn_order_name(s->mp_phase4_bit_order), s->mp_phase4_reject_streak);
         }
         else
         {
-            s->scrambler_tap = s->mp_phase4_default_scrambler_tap;
-            s->mp_phase4_alt_tap_active = 0;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: restoring MP descrambler tap to default (%d) after alternate-tap rejects\n",
-                     s->scrambler_tap);
+                     "Rx - Phase 4: switching MP descrambler retry mode=%d (tap=%d, ord=%s) after %d rejects\n",
+                     s->mp_phase4_retry_mode, s->scrambler_tap,
+                     phase4_trn_order_name(s->mp_phase4_bit_order), s->mp_phase4_reject_streak);
         }
         s->mp_phase4_reject_streak = 0;
     }
@@ -4098,9 +4121,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_frame_target = 0;
             s->mp_early_rejects = 0;
             s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
+            s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
             s->mp_phase4_reject_streak = 0;
             s->mp_phase4_alt_tap_active = 0;
+            s->mp_phase4_alt_order_active = 0;
+            s->mp_phase4_retry_mode = 0;
             s->mp_phase4_bit_order = (s->phase4_trn_lock_order == 1) ? 1 : 0;
+            s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
             if (s->phase4_trn_lock_hyp >= 0  &&  s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
@@ -5269,8 +5296,12 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_frame_target = 0;
     s->rx.mp_early_rejects = 0;
     s->rx.mp_phase4_default_scrambler_tap = s->rx.scrambler_tap;
+    s->rx.mp_phase4_default_bit_order = 0;
     s->rx.mp_phase4_reject_streak = 0;
     s->rx.mp_phase4_alt_tap_active = 0;
+    s->rx.mp_phase4_alt_order_active = 0;
+    s->rx.mp_phase4_retry_mode = 0;
+    s->rx.mp_phase4_bit_order = 0;
     mp_reset_hypothesis_search(&s->rx);
 
     s->rx.viterbi.ptr = 0;

@@ -777,8 +777,11 @@ typedef struct
     int mp_frame_target;
     int mp_early_rejects;
     int mp_phase4_default_scrambler_tap;
+    int mp_phase4_default_bit_order;
     int mp_phase4_reject_streak;
     int mp_phase4_alt_tap_active;
+    int mp_phase4_alt_order_active;
+    int mp_phase4_retry_mode;
     int mp_phase4_bit_order;
 
     int dft_ptr;
