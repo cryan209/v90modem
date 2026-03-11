@@ -433,6 +433,12 @@ static v90_enc_t      g_v90_enc;
    packetization delay (~40ms round-trip). */
 #define ECHO_CAN_TAPS 512
 static modem_echo_can_segment_state_t *g_echo_can = NULL;
+/* Echo canceller is only useful during Phase 3/4 when TX (1600 Hz) and RX (1800 Hz)
+   overlap in the RRC passband.  During Phase 2, TX is at 2400 Hz and RX at 1200 Hz —
+   well-separated, and the LMS diverges if active.  We track RX frame count since
+   ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
+static int g_ec_rx_frames = 0;          /* Frames since ME_TRAINING started */
+#define EC_ACTIVATION_FRAMES 200        /* ~4s at 20ms/frame — after Phase 2 completes */
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
 static int        g_v34_start_baud = 2400;   /* Default robust baseline */
 static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
@@ -610,10 +616,12 @@ static void start_v34_training(void)
     g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
     if (g_echo_can) {
         modem_echo_can_adaption_mode(g_echo_can, 1);
-        fprintf(stderr, "[ME] Echo canceller initialized (%d taps)\n", ECHO_CAN_TAPS);
+        fprintf(stderr, "[ME] Echo canceller initialized (%d taps, activation after %d frames)\n",
+                ECHO_CAN_TAPS, EC_ACTIVATION_FRAMES);
     } else {
         fprintf(stderr, "[ME] WARNING: echo canceller init failed\n");
     }
+    g_ec_rx_frames = 0;
     g_tx_buf_wr = 0;
     g_tx_buf_rd = 0;
 
@@ -905,7 +913,10 @@ void me_rx_audio(const int16_t *amp, int len)
         if (g_mod == ME_MOD_V34) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_mod == ME_MOD_V34 && g_v34) {
-                if (g_echo_can && state == ME_DATA) {
+                if (state == ME_TRAINING)
+                    g_ec_rx_frames++;
+                if (g_echo_can && (state == ME_DATA ||
+                    (state == ME_TRAINING && g_ec_rx_frames > EC_ACTIVATION_FRAMES))) {
                 int16_t clean[len];
                 int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
                 int tx_zeros = 0;

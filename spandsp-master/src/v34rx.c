@@ -4984,7 +4984,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             //    s->agc_scaling = (FP_SCALE(2.17f)/RX_PULSESHAPER_GAIN)/fixed_sqrt32(power);
             ///*endif*/
 #endif
-            s->eq_put_step += s->shaper_sets;
+            s->eq_put_step += s->shaper_sets/2;
 #if defined(SPANDSP_USE_FIXED_POINT)
             qq = vec_circular_dot_prodi16(s->rrc_filter, (*s->shaper_im)[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else

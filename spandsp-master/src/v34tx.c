@@ -2470,9 +2470,10 @@ static void s_not_s_baud_init(v34_state_t *s)
     /* Reset RX RRC filter to flush stale CC demodulator data */
     s->rx.rrc_filter_step = 0;
     memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
-    /* Reset eq_put_step for V34 primary channel timing.
-       steps_per_baud for 3429 baud = 192*8000*7/(2400*10) = 448 */
-    s->rx.eq_put_step = 448/2 - 1;
+    /* Reset eq_put_step for V34 primary channel T/2 timing.
+       Phase 3 always uses 2400 baud: steps_per_baud = 192*8000/2400 = 640.
+       T/2 step = 640/2 = 320, initial value = 320 - 1 = 319. */
+    s->rx.eq_put_step = V34_RX_PULSESHAPER_COEFF_SETS*10/(3*2) - 1;
     /* Reset carrier phase for clean demodulation start */
     s->rx.carrier_phase = 0;
     span_log(&s->logging, SPAN_LOG_FLOW,
