@@ -121,7 +121,7 @@
 #define V34_TRAINING_SHUTDOWN_END       0
 #define MP_LOCK_SCORE_MIN               18
 #define MP_PREAMBLE_SCORE_MIN           18
-#define MP_HINT_LOCK_SCORE_MIN          16
+#define MP_HINT_LOCK_SCORE_MIN          18
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
 #define MP_TRN_PRELOCK_SCORE_MIN        70
@@ -4417,7 +4417,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if (hint_found
                     && hint_h >= 0
                     && hint_h < MP_HYPOTHESIS_COUNT
-                    && (chosen_hyp < 0 || hint_score >= chosen_score - 1))
+                    /* Do not let a weaker TRN/J hint override an equally or more
+                       convincing live preamble candidate. The hint is only meant
+                       to break ties when the observed MP preamble is just as good. */
+                    && (chosen_hyp < 0 || hint_score >= chosen_score))
                 {
                     chosen_hyp = hint_h;
                     chosen_type_bit = hint_type_bit;
