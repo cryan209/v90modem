@@ -437,25 +437,58 @@ static void phase4_unpack_ordered_bits(int raw_bits, int order_idx, int *first_b
 
 static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
 {
+    int use_alt_domain;
     int use_alt_order;
     int use_alt_tap;
     int tap;
     int order;
+    int domain;
 
-    use_alt_order = (retry_mode == 1 || retry_mode == 3);
-    use_alt_tap = (retry_mode == 2 || retry_mode == 3);
+    use_alt_domain = ((retry_mode & 0x4) != 0);
+    use_alt_order = ((retry_mode & 0x1) != 0);
+    use_alt_tap = ((retry_mode & 0x2) != 0);
     tap = s->mp_phase4_default_scrambler_tap;
     order = s->mp_phase4_default_bit_order;
+    domain = s->mp_phase4_default_domain;
     if (use_alt_tap)
         tap = mp_alternate_scrambler_tap(tap);
     /*endif*/
     if (use_alt_order)
         order ^= 1;
     /*endif*/
+    if (use_alt_domain)
+        domain ^= 1;
+    /*endif*/
     s->scrambler_tap = tap;
     s->mp_phase4_bit_order = order;
+    s->mp_phase4_domain = domain;
     s->mp_phase4_alt_tap_active = use_alt_tap;
     s->mp_phase4_alt_order_active = use_alt_order;
+    s->mp_phase4_alt_domain_active = use_alt_domain;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
+{
+    s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
+    mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
+    mp_reset_hypothesis_search(s);
+    if (s->mp_phase4_retry_mode == 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: %s; restoring MP descrambler defaults (dom=%s, tap=%d, ord=%s)\n",
+                 reason, phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order));
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: %s; switching MP descrambler retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
+                 reason, s->mp_phase4_retry_mode,
+                 phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order));
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -471,21 +504,13 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
     if (count_tap_reject
         && ++s->mp_phase4_reject_streak >= tap_switch_rejects)
     {
-        s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x3;
+        s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
         mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
-        if (s->mp_phase4_retry_mode == 0)
-        {
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: restoring MP descrambler defaults (tap=%d, ord=%s) after %d rejects\n",
-                     s->scrambler_tap, phase4_trn_order_name(s->mp_phase4_bit_order), s->mp_phase4_reject_streak);
-        }
-        else
-        {
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: switching MP descrambler retry mode=%d (tap=%d, ord=%s) after %d rejects\n",
-                     s->mp_phase4_retry_mode, s->scrambler_tap,
-                     phase4_trn_order_name(s->mp_phase4_bit_order), s->mp_phase4_reject_streak);
-        }
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: after %d rejects, MP retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
+                 s->mp_phase4_reject_streak, s->mp_phase4_retry_mode,
+                 phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order));
         s->mp_phase4_reject_streak = 0;
     }
     /*endif*/
@@ -4122,10 +4147,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_early_rejects = 0;
             s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
             s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
+            s->mp_phase4_default_domain = (s->phase4_trn_lock_domain == 1) ? 1 : 0;
             s->mp_phase4_reject_streak = 0;
             s->mp_phase4_alt_tap_active = 0;
             s->mp_phase4_alt_order_active = 0;
+            s->mp_phase4_alt_domain_active = 0;
             s->mp_phase4_retry_mode = 0;
+            s->mp_phase4_domain = s->mp_phase4_default_domain;
             s->mp_phase4_bit_order = (s->phase4_trn_lock_order == 1) ? 1 : 0;
             s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
             if (s->phase4_trn_lock_hyp >= 0  &&  s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
@@ -4209,11 +4237,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int locked_this_symbol;
             int h;
             int expected_mp_type;
+            int abs_bits;
 
         ang1 = arctan2(sample->re, sample->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
+        abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         /* During initial Phase 4 MP acquisition, prefer MP0 (type 0) to avoid
            false MP1 preamble locks. After a couple of rejects, relax back to
            either type for interoperability with non-standard peers. */
@@ -4227,7 +4257,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int in1;
                 int raw_bits;
 
-                raw_bits = map_phase4_raw_bits(data_bits, s->mp_hypothesis);
+                raw_bits = map_phase4_raw_bits((s->mp_phase4_domain == 1) ? abs_bits : data_bits,
+                                               s->mp_hypothesis);
                 phase4_unpack_ordered_bits(raw_bits, s->mp_phase4_bit_order, &in0, &in1);
                 bits[0] = descramble(s, in0);
                 bits[1] = descramble(s, in1);
@@ -4295,7 +4326,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                     reg = s->mp_hyp_scramble[h];
                     bstream = s->mp_hyp_bitstream[h];
-                    raw_bits = map_phase4_raw_bits(data_bits, h);
+                    raw_bits = map_phase4_raw_bits((s->mp_phase4_domain == 1) ? abs_bits : data_bits, h);
                     phase4_unpack_ordered_bits(raw_bits, s->mp_phase4_bit_order, &in0, &in1);
                     d0 = descramble_reg(&reg, s->scrambler_tap, in0);
                     bstream = (bstream << 1) | d0;
@@ -4443,6 +4474,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
 
         s->duration++;
+        if (s->mp_hypothesis < 0
+            && s->mp_seen == 0
+            && (s->duration % 400) == 0)
+        {
+            mp_phase4_rotate_retry_mode(s, "no MP hypothesis lock");
+        }
+        /*endif*/
         /* Per-baud MP diagnostics are most useful once a hypothesis is locked.
            Suppress unlocked chatter (hyp=-1), which tends to dominate logs without
            adding actionable information. */
@@ -4478,7 +4516,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
                                  s->mp_hypothesis, s->mp_count);
-                        mp_reset_hypothesis_search(s);
+                        mp_phase4_rotate_retry_mode(s, "unlock MP hypothesis (preamble timeout)");
                         break;
                     }
                     /*endif*/
@@ -4706,7 +4744,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         frame_accepted = false;
                         start_err_accept_max = (type == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
                         starts_acceptable = (start_err_count <= start_err_accept_max);
-                        if (crc_good  &&  fill_good  &&  starts_acceptable)
+                        if (crc_good  &&  fill_good)
                         {
                             bool semantic_good;
 
@@ -4752,8 +4790,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                 if (!starts_good)
                                 {
                                     span_log(s->logging, SPAN_LOG_FLOW,
-                                             "Rx - Phase 4: MP%d accepting frame with %d/%d start-bit mismatches because CRC/fill are valid\n",
-                                             type, start_err_count, start_err_accept_max);
+                                             "Rx - Phase 4: MP%d accepting frame with %d start-bit mismatches because CRC/fill are valid\n",
+                                             type, start_err_count);
                                 }
                                 /*endif*/
                                 span_log(s->logging, SPAN_LOG_FLOW,
@@ -5297,11 +5335,14 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_early_rejects = 0;
     s->rx.mp_phase4_default_scrambler_tap = s->rx.scrambler_tap;
     s->rx.mp_phase4_default_bit_order = 0;
+    s->rx.mp_phase4_default_domain = 0;
     s->rx.mp_phase4_reject_streak = 0;
     s->rx.mp_phase4_alt_tap_active = 0;
     s->rx.mp_phase4_alt_order_active = 0;
+    s->rx.mp_phase4_alt_domain_active = 0;
     s->rx.mp_phase4_retry_mode = 0;
     s->rx.mp_phase4_bit_order = 0;
+    s->rx.mp_phase4_domain = 0;
     mp_reset_hypothesis_search(&s->rx);
 
     s->rx.viterbi.ptr = 0;
