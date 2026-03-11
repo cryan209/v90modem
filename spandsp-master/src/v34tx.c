@@ -2959,9 +2959,17 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             else if (s->tx.tone_duration >= PHASE4_TRN_MAX_BAUDS)
             {
-                /* Strict behavior: never start MP until far-end J'/TRN was
-                   explicitly confirmed by RX. Keep sending TRN and wait. */
-                if ((s->tx.tone_duration % 512) == 0)
+                if (s->tx.tone_duration == PHASE4_TRN_MAX_BAUDS)
+                {
+                    /* Failsafe: avoid unbounded TRN if far-end J'/TRN
+                       confirmation is missed locally. Proceed to MP so the
+                       peer can attempt frame lock. */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - Phase 4: TRN guard reached (%d bauds) without far-end J'/TRN confirmation; forcing MP start\n",
+                             s->tx.tone_duration);
+                    mp_or_mph_baud_init(s);
+                }
+                else if ((s->tx.tone_duration % 512) == 0)
                 {
                     span_log(&s->logging, SPAN_LOG_FLOW,
                              "Tx - Phase 4: TRN guard exceeded (%d bauds) without far-end J'/TRN confirmation; continuing TRN\n",

@@ -328,17 +328,19 @@ static bool mp_preamble_has_start_zero(uint32_t bitstream)
 static bool mp_preamble_has_sync_ones(uint32_t bitstream)
 {
     int k;
+    int ones;
 
     /* Preamble layout in bitstream[18:1]:
        17x'1' in bits [18:2], start '0' in bit [1], type in bit [0]. */
+    ones = 0;
     for (k = 2;  k <= 18;  k++)
     {
-        if (((bitstream >> k) & 1) == 0)
-            return false;
-        /*endif*/
+        ones += ((bitstream >> k) & 1);
     }
     /*endfor*/
-    return true;
+    /* Allow up to two sync-bit errors in the preamble gate.
+       CRC/fill checks still provide the final validity filter. */
+    return (ones >= 15);
 }
 /*- End of function --------------------------------------------------------*/
 
