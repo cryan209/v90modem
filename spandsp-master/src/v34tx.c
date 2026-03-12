@@ -4047,7 +4047,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.s_bit_cnt = 0;
     s->tx.aux_bit_cnt = 0;
 
-    s->tx.conv_encode_table = v34_conv16_encode_table;
+    s->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv16_encode_table;
 
     s->tx.current_get_bit = s->tx.get_bit;
     s->tx.last_logged_stage = -1;

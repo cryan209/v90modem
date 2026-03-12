@@ -3573,13 +3573,13 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             switch (mp.trellis_size)
                             {
                             case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv16_encode_table;
                                 break;
                             case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv32_encode_table;
                                 break;
                             case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv64_encode_table;
                                 break;
                             default:
                                 span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
@@ -3600,13 +3600,13 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             switch (mph.trellis_size)
                             {
                             case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv16_encode_table;
                                 break;
                             case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv32_encode_table;
                                 break;
                             case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
+                                t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv64_encode_table;
                                 break;
                             default:
                                 span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
@@ -5633,13 +5633,13 @@ phase3_training_done:
                                     switch (mp.trellis_size)
                                     {
                                     case V34_TRELLIS_16:
-                                        t->tx.conv_encode_table = v34_conv16_encode_table;
+                                        t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv16_encode_table;
                                         break;
                                     case V34_TRELLIS_32:
-                                        t->tx.conv_encode_table = v34_conv32_encode_table;
+                                        t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv32_encode_table;
                                         break;
                                     case V34_TRELLIS_64:
-                                        t->tx.conv_encode_table = v34_conv64_encode_table;
+                                        t->tx.conv_encode_table = (const conv_encode_table_t *) &v34_conv64_encode_table;
                                         break;
                                     default:
                                         span_log(&t->logging, SPAN_LOG_FLOW,
