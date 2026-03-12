@@ -6283,7 +6283,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.scramble_reg = 0;
 
     s->rx.current_demodulator = V34_MODULATION_TONES;
-    s->rx.viterbi.conv_decode_table = v34_conv16_decode_table;
+    s->rx.viterbi.conv_decode_table = &v34_conv16_decode_table;
 
     s->rx.v0_pattern = 0;
     s->rx.super_frame = 0;
