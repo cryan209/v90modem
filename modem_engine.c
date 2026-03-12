@@ -438,20 +438,37 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    well-separated, and the LMS diverges if active.  We track RX frame count since
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 static int g_ec_rx_frames = 0;          /* Frames since ME_TRAINING started */
-#define EC_ACTIVATION_FRAMES 200        /* ~4s at 20ms/frame — after Phase 2 completes */
+#define EC_ACTIVATION_FRAMES 400        /* ~8s at 20ms/frame — after Phase 2 completes */
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
 static int        g_v34_start_baud = 2400;   /* Default robust baseline */
 static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
 
-/* TX sample ring buffer for echo canceller.
-   The echo canceller needs the TX sample that corresponds to each RX sample.
-   TX and RX are generated in separate callbacks, so we buffer TX samples.
+/* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
 #define TX_BUF_SIZE 4096
 #define TX_BUF_MASK (TX_BUF_SIZE - 1)
 static int16_t g_tx_buf[TX_BUF_SIZE];
 static int     g_tx_buf_wr = 0;  /* write position (updated by me_tx_audio) */
 static int     g_tx_buf_rd = 0;  /* read position (updated by me_rx_audio) */
+
+/* Notch filter to remove our own TX carrier echo from the RX signal.
+   During V.34 Phase 3/4, we TX at 1600 Hz (answerer low carrier) and RX at 1800 Hz.
+   The FXS hybrid leaks our TX back into RX. A second-order IIR notch filter at
+   1600 Hz removes this echo without significantly affecting the 1800 Hz signal.
+   Design: f0=1600 Hz, fs=8000 Hz, Q=15.
+     ω0 = 2π×1600/8000 = 0.4π
+     r = 1 - π×(f0/Q)/fs = 1 - π×106.67/8000 = 0.9581
+     cos(ω0) = cos(72°) = 0.30902
+   Transfer function: H(z) = (1 - 2cos(ω0)z⁻¹ + z⁻²) / (1 - 2r·cos(ω0)z⁻¹ + r²z⁻²) */
+typedef struct {
+    float b0, b1, b2;  /* numerator (zeros on unit circle at ω0) */
+    float a1, a2;       /* denominator (poles at radius r) */
+    float x1, x2;       /* input delay line */
+    float y1, y2;       /* output delay line */
+    bool  active;
+} notch_filter_t;
+
+static notch_filter_t g_notch = {0};
 
 /* Clock recovery */
 static cr_state_t     g_cr;
@@ -915,8 +932,29 @@ void me_rx_audio(const int16_t *amp, int len)
             if (g_mod == ME_MOD_V34 && g_v34) {
                 if (state == ME_TRAINING)
                     g_ec_rx_frames++;
+                /* Drain TX buffer even when EC is inactive to keep alignment */
+                if (g_echo_can && state == ME_TRAINING && g_ec_rx_frames <= EC_ACTIVATION_FRAMES) {
+                    /* Consume TX samples to stay aligned, but don't apply EC */
+                    int drain = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
+                    if (drain > len) drain = len;
+                    g_tx_buf_rd = (g_tx_buf_rd + drain) & TX_BUF_MASK;
+                }
                 if (g_echo_can && (state == ME_DATA ||
                     (state == ME_TRAINING && g_ec_rx_frames > EC_ACTIVATION_FRAMES))) {
+                /* On first EC activation, reset canceller and flush any remaining stale TX data */
+                if (g_ec_rx_frames == EC_ACTIVATION_FRAMES + 1) {
+                    int stale = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
+                    if (stale > len) {
+                        /* Keep only one frame of recent TX data */
+                        g_tx_buf_rd = (g_tx_buf_wr - len) & TX_BUF_MASK;
+                        fprintf(stderr, "[EC] Flushed %d stale TX samples on activation\n", stale - len);
+                    }
+                    modem_echo_can_segment_free(g_echo_can);
+                    g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
+                    if (g_echo_can)
+                        modem_echo_can_adaption_mode(g_echo_can, 1);
+                    fprintf(stderr, "[EC] Echo canceller activated and reset at frame %d\n", g_ec_rx_frames);
+                }
                 int16_t clean[len];
                 int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
                 int tx_zeros = 0;

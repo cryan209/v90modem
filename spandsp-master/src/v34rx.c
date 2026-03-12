@@ -2513,6 +2513,13 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     }
     /*endif*/
 #endif
+    /* Periodic TED + carrier tracking diagnostic (every 256 bauds) */
+    if ((s->duration & 0xFF) == 0  &&  s->stage >= V34_RX_STAGE_PHASE3_WAIT_S)
+    {
+        fprintf(stderr, "[V34 RX] baud=%d ted_phase=%.1f ted_corr=%d carrier=%.2fHz eq_step=%d\n",
+                s->duration, (double)s->pri_ted.baud_phase, s->total_baud_timing_correction,
+                dds_frequencyf(s->v34_carrier_phase_rate), s->eq_put_step);
+    }
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4887,6 +4894,39 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         break;
     }
     /*endswitch*/
+
+    /* Decision-directed carrier tracking for DQPSK during Phase 3/4 training.
+       Snap the received sample to the nearest QPSK constellation point and use the
+       phase error to update the carrier tracking loop. The original track_carrier()
+       is inside #if 0, so we implement it inline. Without carrier tracking, any
+       frequency offset between our DDS and the far-end carrier causes the demodulated
+       constellation to drift, degrading symbol decisions over time. */
+    if (s->stage >= V34_RX_STAGE_PHASE3_WAIT_S
+    &&  s->stage <= V34_RX_STAGE_PHASE4_MP)
+    {
+        float mag;
+
+        mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
+        if (mag > 0.001f)
+        {
+            complexf_t target;
+            float error;
+
+            /* Snap to nearest of the 4 QPSK points on the circle of radius mag.
+               QPSK points at (±1,±1)/√2 scaled by mag. */
+            float s2 = mag * 0.7071068f;  /* mag/√2 */
+            target.re = (sample->re >= 0.0f)  ?  s2  :  -s2;
+            target.im = (sample->im >= 0.0f)  ?  s2  :  -s2;
+
+            /* Phase error = Im(z * conj(target)) = z.im*t.re - z.re*t.im */
+            error = sample->im*target.re - sample->re*target.im;
+            s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
+            s->carrier_phase += (int32_t)(s->carrier_track_p*error);
+        }
+        /*endif*/
+    }
+    /*endif*/
+
     s->last_sample = *sample;
 }
 /*- End of function --------------------------------------------------------*/
