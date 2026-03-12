@@ -26,3 +26,7 @@ v27ter_tx_2400_rrc.h
 v27ter_tx_4800_rrc.h
 v29rx_rrc.h
 v29tx_rrc.h
+
+# Libtool build artifacts
+.libs/
+.deps/
