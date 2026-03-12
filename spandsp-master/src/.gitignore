@@ -30,3 +30,7 @@ v29tx_rrc.h
 # Libtool build artifacts
 .libs/
 .deps/
+
+# Libtool object and archive files
+*.lo
+*.la
