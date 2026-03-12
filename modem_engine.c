@@ -437,8 +437,7 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    overlap in the RRC passband.  During Phase 2, TX is at 2400 Hz and RX at 1200 Hz —
    well-separated, and the LMS diverges if active.  We track RX frame count since
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
-static int g_ec_rx_frames = 0;          /* Frames since ME_TRAINING started */
-#define EC_ACTIVATION_FRAMES 400        /* ~8s at 20ms/frame — after Phase 2 completes */
+/* EC disabled — notch filter used instead (see g_notch) */
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
 static int        g_v34_start_baud = 2400;   /* Default robust baseline */
 static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
@@ -481,6 +480,40 @@ static int     g_v8_rx_count;
 
 /* Pending SIP URI for outgoing calls (set by me_dial) */
 static char g_dial_uri[256];
+
+static void notch_filter_init(notch_filter_t *nf, float freq, float q, float fs)
+{
+    float w0 = 2.0f * M_PI * freq / fs;
+    float cosw0 = cosf(w0);
+    float r = 1.0f - (M_PI * freq / q) / fs;
+    nf->b0 = 1.0f;
+    nf->b1 = -2.0f * cosw0;
+    nf->b2 = 1.0f;
+    nf->a1 = -2.0f * r * cosw0;
+    nf->a2 = r * r;
+    nf->x1 = nf->x2 = 0.0f;
+    nf->y1 = nf->y2 = 0.0f;
+    nf->active = true;
+}
+
+static void notch_filter_apply(notch_filter_t *nf, int16_t *samples, int len)
+{
+    if (!nf->active)
+        return;
+    for (int i = 0; i < len; i++) {
+        float x0 = (float)samples[i];
+        float y0 = nf->b0*x0 + nf->b1*nf->x1 + nf->b2*nf->x2
+                  - nf->a1*nf->y1 - nf->a2*nf->y2;
+        nf->x2 = nf->x1;
+        nf->x1 = x0;
+        nf->y2 = nf->y1;
+        nf->y1 = y0;
+        /* Clamp to int16 range */
+        if (y0 > 32767.0f) y0 = 32767.0f;
+        if (y0 < -32768.0f) y0 = -32768.0f;
+        samples[i] = (int16_t)y0;
+    }
+}
 
 static void on_training_complete(me_modulation_t mod, int rate, const char *name)
 {
@@ -623,24 +656,22 @@ static void start_v34_training(void)
     }
     v34_tx_power(g_v34, -16.0f);
 
-    /* Initialize echo canceller for full-duplex operation.
-       The FXS hybrid leaks TX into RX; without cancellation the V.34
-       demodulator sees ~30-50% bit errors during Phase 4. */
+    /* Echo canceller disabled — LMS diverges because far-end signal is too weak
+       by the time it's safe to activate (after Phase 2). Use notch filter instead. */
     if (g_echo_can) {
         modem_echo_can_segment_free(g_echo_can);
         g_echo_can = NULL;
     }
-    g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
-    if (g_echo_can) {
-        modem_echo_can_adaption_mode(g_echo_can, 1);
-        fprintf(stderr, "[ME] Echo canceller initialized (%d taps, activation after %d frames)\n",
-                ECHO_CAN_TAPS, EC_ACTIVATION_FRAMES);
-    } else {
-        fprintf(stderr, "[ME] WARNING: echo canceller init failed\n");
+
+    /* Initialize notch filter at our TX carrier to remove FXS hybrid echo.
+       Answerer TX at 1600 Hz (low carrier at 2400 baud), caller TX at 1800 Hz.
+       We filter out our OWN TX echo from the received signal. */
+    {
+        float our_tx_carrier = g_calling_party ? 1800.0f : 1600.0f;
+        notch_filter_init(&g_notch, our_tx_carrier, 15.0f, 8000.0f);
+        fprintf(stderr, "[ME] Notch filter initialized at %.0f Hz (Q=15) to remove TX echo\n",
+                our_tx_carrier);
     }
-    g_ec_rx_frames = 0;
-    g_tx_buf_wr = 0;
-    g_tx_buf_rd = 0;
 
     fprintf(stderr, "[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
             g_calling_party ? "caller" : "answerer", g_v34_start_baud, g_v34_start_bps);
@@ -922,71 +953,15 @@ void me_rx_audio(const int16_t *amp, int len)
             }
         }
         /* Feed audio to the appropriate modem receiver.
-           Echo cancellation is active throughout V.34 — during Phase 2
-           the answerer TX is at 2400 Hz and the caller TX at 1200 Hz,
-           so the canceller correctly removes the 2400 Hz echo while
-           preserving the 1200 Hz far-end signal.  During Phase 3/4+
-           the carriers are 1829/1920 Hz (at 3200 baud). */
+           Apply notch filter to remove our TX carrier echo from FXS hybrid. */
         if (g_mod == ME_MOD_V34) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_mod == ME_MOD_V34 && g_v34) {
-                if (state == ME_TRAINING)
-                    g_ec_rx_frames++;
-                /* Drain TX buffer even when EC is inactive to keep alignment */
-                if (g_echo_can && state == ME_TRAINING && g_ec_rx_frames <= EC_ACTIVATION_FRAMES) {
-                    /* Consume TX samples to stay aligned, but don't apply EC */
-                    int drain = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
-                    if (drain > len) drain = len;
-                    g_tx_buf_rd = (g_tx_buf_rd + drain) & TX_BUF_MASK;
-                }
-                if (g_echo_can && (state == ME_DATA ||
-                    (state == ME_TRAINING && g_ec_rx_frames > EC_ACTIVATION_FRAMES))) {
-                /* On first EC activation, reset canceller and flush any remaining stale TX data */
-                if (g_ec_rx_frames == EC_ACTIVATION_FRAMES + 1) {
-                    int stale = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
-                    if (stale > len) {
-                        /* Keep only one frame of recent TX data */
-                        g_tx_buf_rd = (g_tx_buf_wr - len) & TX_BUF_MASK;
-                        fprintf(stderr, "[EC] Flushed %d stale TX samples on activation\n", stale - len);
-                    }
-                    modem_echo_can_segment_free(g_echo_can);
-                    g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
-                    if (g_echo_can)
-                        modem_echo_can_adaption_mode(g_echo_can, 1);
-                    fprintf(stderr, "[EC] Echo canceller activated and reset at frame %d\n", g_ec_rx_frames);
-                }
-                int16_t clean[len];
-                int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
-                int tx_zeros = 0;
-                int64_t rx_sum = 0, clean_sum = 0, tx_sum = 0;
-                for (int i = 0; i < len; i++) {
-                    int16_t tx_sample = 0;
-                    if (g_tx_buf_rd != g_tx_buf_wr) {
-                        tx_sample = g_tx_buf[g_tx_buf_rd];
-                        g_tx_buf_rd = (g_tx_buf_rd + 1) & TX_BUF_MASK;
-                    } else {
-                        tx_zeros++;
-                    }
-                    clean[i] = modem_echo_can_update(g_echo_can, tx_sample, amp[i]);
-                    rx_sum += (int64_t)amp[i] * amp[i];
-                    clean_sum += (int64_t)clean[i] * clean[i];
-                    tx_sum += (int64_t)tx_sample * tx_sample;
-                }
-                /* Log echo canceller performance every ~500ms */
-                static int ec_log_counter = 0;
-                if (++ec_log_counter >= 25) {  /* 25 frames * 20ms = 500ms */
-                    double rx_rms = sqrt((double)rx_sum / len);
-                    double clean_rms = sqrt((double)clean_sum / len);
-                    double tx_rms = sqrt((double)tx_sum / len);
-                    fprintf(stderr, "[EC] avail=%d zeros=%d tx_rms=%.0f rx_rms=%.0f clean_rms=%.0f reduction=%.1fdB\n",
-                            tx_avail, tx_zeros, tx_rms, rx_rms, clean_rms,
-                            (rx_rms > 0.1) ? 20.0*log10(clean_rms / rx_rms) : 0.0);
-                    ec_log_counter = 0;
-                }
-                v34_rx(g_v34, clean, len);
-                } else {
-                    v34_rx(g_v34, amp, len);
-                }
+                /* Apply notch filter at our TX carrier frequency */
+                int16_t filtered[len];
+                memcpy(filtered, amp, len * sizeof(int16_t));
+                notch_filter_apply(&g_notch, filtered, len);
+                v34_rx(g_v34, filtered, len);
             }
             pthread_mutex_unlock(&g_state_mtx);
         } else if (g_v22bis)

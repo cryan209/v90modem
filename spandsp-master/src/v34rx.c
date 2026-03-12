@@ -3697,6 +3697,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      "Rx - Phase 4 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
                      s->duration, mag, data_bits, s->s_detect_count);
         }
+        /* Dump raw I/Q constellation for first 32 bauds to diagnose signal quality */
+        if (s->duration <= 32)
+        {
+            uint32_t ang_abs = arctan2(sample->re, sample->im);
+            float deg = (float)ang_abs / (4294967296.0f / 360.0f);
+            float deg_diff = (float)ang3 / (4294967296.0f / 360.0f);
+            fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f ang=%.1f diff=%.1f data=%d\n",
+                    s->duration, sample->re, sample->im, deg, deg_diff, data_bits);
+        }
 
         if (s->duration >= 128 && s->s_detect_count >= 20)
         {
