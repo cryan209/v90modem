@@ -34,3 +34,7 @@ v29tx_rrc.h
 # Libtool object and archive files
 *.lo
 *.la
+
+# Generated godard descriptor headers (rebuilt by make_modem_godard_descriptor)
+v17_v32bis_rx_godard.h
+v29rx_godard.h
