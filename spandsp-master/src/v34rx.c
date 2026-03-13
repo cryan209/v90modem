@@ -183,6 +183,9 @@ static const complex_sig_t zero = {TRAINING_SCALE(0.0f), TRAINING_SCALE(0.0f)};
 static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample);
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample);
 static void l1_l2_analysis_init(v34_rx_state_t *s);
+static void equalizer_reset(v34_rx_state_t *s);
+static complexf_t equalizer_get(v34_rx_state_t *s);
+static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
 
 static int descramble(v34_rx_state_t *s, int in_bit)
 {
@@ -2596,6 +2599,7 @@ static void report_status_change(v34_rx_state_t *s, int status)
     /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
+#endif  /* #if 0 - disabled API functions above */
 
 static void equalizer_save(v34_rx_state_t *s)
 {
@@ -2624,10 +2628,11 @@ static void equalizer_reset(v34_rx_state_t *s)
     s->eq_put_step = V34_RX_PULSESHAPER_COEFF_SETS*10/(3*2) - 1;
     s->eq_step = 0;
     s->eq_delta = EQUALIZER_DELTA/(V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->eq_target_mag = 0.0f;  /* Will be initialized from first equalizer output */
 }
 /*- End of function --------------------------------------------------------*/
 
-static __inline__ complexf_t equalizer_get(v34_rx_state_t *s)
+static complexf_t equalizer_get(v34_rx_state_t *s)
 {
     int i;
     int p;
@@ -2657,7 +2662,14 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
 
     /* Find the x and y mismatch from the exact constellation position. */
     ez = complex_subf(target, z);
-    //span_log(s->logging, SPAN_LOG_FLOW, "Rx - Equalizer error %f\n", sqrt(ez.re*ez.re + ez.im*ez.im));
+    /* Log equalizer error magnitude periodically */
+    if ((s->duration & 0xFF) == 0)
+    {
+        float emag = sqrtf(ez.re*ez.re + ez.im*ez.im);
+        float zmag = sqrtf(z->re*z->re + z->im*z->im);
+        fprintf(stderr, "[EQ] baud=%d err=%.4f mag=%.4f target_mag=%.4f delta=%.6f\n",
+                s->duration, emag, zmag, s->eq_target_mag, s->eq_delta);
+    }
     ez.re *= s->eq_delta;
     ez.im *= s->eq_delta;
 
@@ -2676,6 +2688,7 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
 }
 /*- End of function --------------------------------------------------------*/
 
+#if 0  /* Disabled functions - track_carrier reimplemented inline, others unused */
 static void track_carrier(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target)
 {
     float error;
@@ -3254,15 +3267,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     int i;
     mp_t mp;
     v34_state_t *t;
+    complexf_t eq_sample;
+    complexf_t eq_target;
+    const complexf_t *sym;
 
     /* This routine processes every half a baud, as we put things into the equalizer at the T/2 rate.
        This routine adapts the position of the half baud samples, which the caller takes. */
+
+    /* Feed the T/2-rate primary channel samples into the equalizer buffer. */
+    s->eq_buf[s->eq_step] = *sample;
+    s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
 
     /* On alternate insertions we have a whole baud and must process it. */
     if ((s->baud_half ^= 1))
         return;
     /*endif*/
     pri_symbol_sync(s);
+    eq_sample = equalizer_get(s);
+    sym = &eq_sample;
 
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
@@ -3280,7 +3302,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int old_rev;
             int new_rev;
 
-        ang1 = arctan2(sample->re, sample->im);
+        ang1 = arctan2(sym->re, sym->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
@@ -3640,7 +3662,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
         if (s->duration <= 10 || (s->duration % 500) == 0)
         {
-            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
             float pct = (s->phase3_pp_obs > 0)
                         ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                         : 0.0f;
@@ -3670,7 +3692,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            we may see errors (~1 in 3 bauds).  Use a window-based detector:
            count data_bits=2 in last 32 bauds.  S detected when count >= 20/32.
            After S is confirmed, watch for a sustained drop (S→S-bar transition). */
-        ang1 = arctan2(sample->re, sample->im);
+        ang1 = arctan2(sym->re, sym->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
@@ -3692,7 +3714,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
         if (s->duration <= 10 || (s->duration % 500) == 0)
         {
-            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
                      s->duration, mag, data_bits, s->s_detect_count);
@@ -3700,11 +3722,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* Dump raw I/Q constellation for first 32 bauds to diagnose signal quality */
         if (s->duration <= 32)
         {
-            uint32_t ang_abs = arctan2(sample->re, sample->im);
+            uint32_t ang_abs = arctan2(sym->re, sym->im);
             float deg = (float)ang_abs / (4294967296.0f / 360.0f);
             float deg_diff = (float)ang3 / (4294967296.0f / 360.0f);
             fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f ang=%.1f diff=%.1f data=%d\n",
-                    s->duration, sample->re, sample->im, deg, deg_diff, data_bits);
+                    s->duration, sym->re, sym->im, deg, deg_diff, data_bits);
         }
 
         if (s->duration >= 128 && s->s_detect_count >= 20)
@@ -3741,7 +3763,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     case V34_RX_STAGE_PHASE4_S_BAR:
         /* Phase 4: S-bar is 16T. After S-bar, TRN begins. */
-        ang1 = arctan2(sample->re, sample->im);
+        ang1 = arctan2(sym->re, sym->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
@@ -3764,12 +3786,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
         int abs_bits;
 
-        ang1 = arctan2(sample->re, sample->im);
+        ang1 = arctan2(sym->re, sym->im);
         ang2 = arctan2(s->last_sample.re, s->last_sample.im);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = ang3 >> 30;
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
+
+        /* I/Q constellation diagnostic: log first 64 TRN bauds after J' */
+        if (s->phase4_j_seen  &&  s->phase4_trn_after_j < 64)
+        {
+            float deg_abs = (float)ang1 / (4294967296.0f / 360.0f);
+            float deg_diff = (float)ang3 / (4294967296.0f / 360.0f);
+            float mag_now = sqrtf(sym->re*sym->re + sym->im*sym->im);
+            fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f mag=%.3f abs=%.1f diff=%.1f data=%d\n",
+                    s->phase4_trn_after_j, sym->re, sym->im, mag_now, deg_abs, deg_diff, data_bits);
+        }
 
         /* Descramble to let the descrambler self-sync (needs ~23 bits) */
         {
@@ -4508,7 +4540,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->mp_hypothesis >= 0
             && (s->duration <= 30 || (s->duration % 200) == 0))
         {
-            float mag = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4 MP baud %d: mag=%.3f data_bits=%d descr=%d,%d "
                      "bitstream=0x%08X hyp=%d\n",
@@ -4904,31 +4936,54 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     }
     /*endswitch*/
 
-    /* Decision-directed carrier tracking for DQPSK during Phase 3/4 training.
-       Snap the received sample to the nearest QPSK constellation point and use the
-       phase error to update the carrier tracking loop. The original track_carrier()
-       is inside #if 0, so we implement it inline. Without carrier tracking, any
-       frequency offset between our DDS and the far-end carrier causes the demodulated
-       constellation to drift, degrading symbol decisions over time. */
+    /* Decision-directed carrier tracking and equalizer training for DQPSK during
+       Phase 3/4 training.  Snap to the nearest QPSK constellation point using a
+       FIXED target magnitude (EMA of equalizer output) so the equalizer corrects
+       both phase AND amplitude distortion (ISI).  Using the received magnitude as
+       the target (as before) gives the equalizer zero amplitude-correction incentive
+       and leaves ISI uncorrected. */
     if (s->stage >= V34_RX_STAGE_PHASE3_WAIT_S
     &&  s->stage <= V34_RX_STAGE_PHASE4_MP)
     {
         float mag;
 
-        mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
+        mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
         if (mag > 0.001f)
         {
-            complexf_t target;
             float error;
+            float target_mag;
 
-            /* Snap to nearest of the 4 QPSK points on the circle of radius mag.
-               QPSK points at (±1,±1)/√2 scaled by mag. */
-            float s2 = mag * 0.7071068f;  /* mag/√2 */
-            target.re = (sample->re >= 0.0f)  ?  s2  :  -s2;
-            target.im = (sample->im >= 0.0f)  ?  s2  :  -s2;
+            /* Track the expected constellation magnitude with an EMA.
+               Use a fast adaptation initially (alpha=0.1) to settle quickly,
+               then a slower one (alpha=0.01) for stability. */
+            if (s->eq_target_mag < 0.001f)
+            {
+                /* First valid sample — seed the EMA */
+                s->eq_target_mag = mag;
+            }
+            else
+            {
+                float alpha = (s->duration < 64)  ?  0.1f  :  0.01f;
+                s->eq_target_mag += alpha * (mag - s->eq_target_mag);
+            }
+            /*endif*/
+            target_mag = s->eq_target_mag;
+
+            /* Snap to nearest of the 4 QPSK points at the FIXED target radius.
+               QPSK points at (±1,±1)/√2 scaled by target_mag. */
+            float s2 = target_mag * 0.7071068f;  /* target_mag/√2 */
+            eq_target.re = (sym->re >= 0.0f)  ?  s2  :  -s2;
+            eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
+
+            if (s->stage == V34_RX_STAGE_PHASE3_TRAINING
+                || s->stage == V34_RX_STAGE_PHASE4_TRN)
+            {
+                tune_equalizer(s, sym, &eq_target);
+            }
+            /*endif*/
 
             /* Phase error = Im(z * conj(target)) = z.im*t.re - z.re*t.im */
-            error = sample->im*target.re - sample->re*target.im;
+            error = sym->im*eq_target.re - sym->re*eq_target.im;
             s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
             s->carrier_phase += (int32_t)(s->carrier_track_p*error);
         }
@@ -4936,7 +4991,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     }
     /*endif*/
 
-    s->last_sample = *sample;
+    s->last_sample = *sym;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5296,7 +5351,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.carrier_phase = 0;
     s->rx.agc_scaling_save = 0.0f;
     s->rx.agc_scaling = 0.0017f/V34_RX_PULSESHAPER_GAIN;
-    //equalizer_reset(&s->rx);
+    equalizer_reset(&s->rx);
     s->rx.carrier_track_i = 5000.0f;
     s->rx.carrier_track_p = 40000.0f;
 
