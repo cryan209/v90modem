@@ -2622,7 +2622,7 @@ static void equalizer_reset(v34_rx_state_t *s)
 {
     /* Start with an equalizer based on everything being perfect */
     cvec_zerof(s->eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
-    s->eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(3.0f), TRAINING_SCALE(0.0f));
+    s->eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(1.0f), TRAINING_SCALE(0.0f));
     cvec_zerof(s->eq_buf, V34_EQUALIZER_MASK);
 
     s->eq_put_step = V34_RX_PULSESHAPER_COEFF_SETS*10/(3*2) - 1;
@@ -2680,9 +2680,8 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
         z1 = complex_conjf(&s->eq_buf[p]);
         z1 = complex_mulf(&ez, &z1);
         s->eq_coeff[i] = complex_addf(&s->eq_coeff[i], &z1);
-        /* Leak a little to tame uncontrolled wandering */
-        s->eq_coeff[i].re *= 0.9999f;
-        s->eq_coeff[i].im *= 0.9999f;
+        /* Leak disabled — was causing coefficient decay faster than LMS convergence
+           (0.9999^2400 = 0.787/sec), making equalizer actively harmful */
     }
     /*endfor*/
 }
@@ -4978,7 +4977,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->stage == V34_RX_STAGE_PHASE3_TRAINING
                 || s->stage == V34_RX_STAGE_PHASE4_TRN)
             {
-                tune_equalizer(s, sym, &eq_target);
+                /* Equalizer disabled for diagnostic — measuring raw signal quality.
+                   Decision-directed LMS can't converge at 25% BER. */
+                /* tune_equalizer(s, sym, &eq_target); */
             }
             /*endif*/
 

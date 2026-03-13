@@ -441,6 +441,7 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
 static int        g_v34_start_baud = 2400;   /* Default robust baseline */
 static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
+static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 
 /* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
@@ -618,6 +619,7 @@ static void start_v34_training(void)
     trace_phase("enter TRAINING: mod=V34 role=%s", g_calling_party ? "caller" : "answerer");
     g_training_rx_energy = 0;
     g_training_rx_count  = 0;
+    g_training_tx_samples = 0;
 
     /* Reset bit accumulators */
     v34_tx_byte = 0;
@@ -1008,10 +1010,6 @@ void me_tx_audio(int16_t *amp, int len)
             if (g_mod == ME_MOD_V34 && g_v34)
                 v34_tx(g_v34, amp, len);
             pthread_mutex_unlock(&g_state_mtx);
-            /* ECHO TEST: Zero TX audio so V.34 state machine advances but
-               no signal is sent.  If TRN ones jump from ~75% to ~95%+,
-               echo contamination through the FXS hybrid is confirmed. */
-            memset(amp, 0, sizeof(int16_t) * (size_t)len);
         } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;
