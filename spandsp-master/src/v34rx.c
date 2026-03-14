@@ -4379,8 +4379,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->phase4_j_seen
             && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
             && s->duration >= 900
-            && (s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
-                || s->phase4_trn_after_j >= PHASE4_TRN_READY_MAX_BAUD))
+            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE)
         {
             int h;
             int domain_idx;
@@ -4435,14 +4434,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if (trn_best_h >= 0)
                     trn_best_score_pct = (100*trn_best_ones + (trn_bits_observed/2))/trn_bits_observed;
                 /*endif*/
-            }
-            /*endif*/
-            if (s->phase4_trn_lock_score < PHASE4_TRN_READY_MIN_SCORE
-                && s->phase4_trn_after_j >= PHASE4_TRN_READY_MAX_BAUD)
-            {
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: TRN lock threshold not reached by %d bauds (best=%d%%, min=%d), forcing MP scan\n",
-                         s->phase4_trn_after_j, s->phase4_trn_lock_score, PHASE4_TRN_READY_MIN_SCORE);
             }
             /*endif*/
             s->received_event = V34_EVENT_PHASE4_TRN_READY;
@@ -4568,7 +4559,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                  && (s->phase4_trn_after_j % 256) == 0)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: waiting for TRN ones-lock before MP (after_j=%d, best=%d%%, min=%d)\n",
+                     "Rx - Phase 4: waiting for TRN ones-lock before MP (after_j=%d, best=%d%%, min=%d); staying in TRN\n",
                      s->phase4_trn_after_j, s->phase4_trn_lock_score, PHASE4_TRN_READY_MIN_SCORE);
         }
         /*endif*/
