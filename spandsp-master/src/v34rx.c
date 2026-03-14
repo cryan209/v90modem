@@ -3147,19 +3147,21 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
                 s->duration, error, sqrtf(y_mag2), s->eq_target_mag, s->eq_delta);
     }
 
-    /* Gradient: error * y  (note: CMA gradient is error*y, not target-y like LMS).
-       Scale down by 0.1 vs DD-LMS because CMA gradient magnitude is larger
-       (includes |y| factor and potentially large R²-|y|² error).
-       Clamp error to prevent explosive divergence when the equalizer output
-       magnitude overshoots — without this, one large sample can cause a
-       runaway feedback loop (error*|y| grows each iteration). */
+    /* Normalized CMA gradient: error * y / |y|² — normalizing by |y|²
+       prevents the positive feedback loop where large output → large gradient
+       → even larger output.  This is equivalent to NCMA and makes convergence
+       independent of the output magnitude.  Floor y_mag2 to avoid division
+       by zero when the equalizer output is near zero. */
     if (error < -4.0f * R2)
         error = -4.0f * R2;
     else if (error > 4.0f * R2)
         error = 4.0f * R2;
     /*endif*/
-    gz.re = 0.1f * s->eq_delta * error * z->re;
-    gz.im = 0.1f * s->eq_delta * error * z->im;
+    {
+        float norm = (y_mag2 > 0.001f) ? y_mag2 : 0.001f;
+        gz.re = 0.1f * s->eq_delta * error * z->re / norm;
+        gz.im = 0.1f * s->eq_delta * error * z->im / norm;
+    }
 
     p = s->eq_step - 1;
     for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
@@ -5707,13 +5709,13 @@ phase3_training_done:
             eq_target.re = (sym->re >= 0.0f)  ?  s2  :  -s2;
             eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
 
-            if (phase3_equalizer_refine_active(s)
-                || (s->stage == V34_RX_STAGE_PHASE4_TRN
-                    && !phase4_trn_should_freeze_tracking(s)))
+            if (phase3_equalizer_refine_active(s))
             {
-                /* CMA (blind) equalizer — doesn't need correct symbol decisions,
-                   just drives all symbols to constant modulus.  Fixes the 4:1
-                   magnitude variation (ISI) that DD-LMS couldn't converge on. */
+                /* CMA (blind) equalizer — only during Phase 3 TRN refinement.
+                   Disabled during Phase 4: the equalizer is reset to unity
+                   (passthrough) at Phase 4 entry, which is correct for clean
+                   SIP/RTP channels.  CMA was causing explosive divergence
+                   (mag 4-6x overshoot) and preventing TRN convergence. */
                 tune_equalizer_cma(s, sym);
             }
             /*endif*/

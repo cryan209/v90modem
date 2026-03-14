@@ -3204,6 +3204,30 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.mp_phase4_retry_mode = 0;
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
+
+    /* Reset equalizer for Phase 4: Phase 3 used TRAINING_AMP=10.0 scaling which
+       sets eq_target_mag ~10.0, but Phase 4 signals are ~0.6 magnitude. CMA would
+       try to amplify 16x and never converge. Reset to 0 so CMA seeds from actual
+       signal magnitude. Also reset EQ coefficients since Phase 3 DD-LMS training
+       with the wrong target may have corrupted them. */
+    s->rx.eq_target_mag = 0.0f;
+    cvec_zerof(s->rx.eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->rx.eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(1.0f), TRAINING_SCALE(0.0f));
+    cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
+    s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
+    s->rx.baud_half = 0;
+
+    /* Reset TED state for Phase 4 — Phase 3 TED may have accumulated
+       bias that prevents clean symbol sync acquisition. */
+    s->rx.pri_ted.baud_phase = 0.0f;
+    s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
+    s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
+    s->rx.pri_ted.symbol_sync_high[0] = 0.0f;
+    s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
+    s->rx.pri_ted.symbol_sync_dc_filter[0] = 0.0f;
+    s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
+    s->rx.total_baud_timing_correction = 0;
+
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: conditioned for J'/TRN then MP (baud_rate=%d, high_carrier=%d, "
              "carrier=%.1f Hz)\n",
