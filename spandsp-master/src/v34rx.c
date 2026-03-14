@@ -2687,6 +2687,49 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
 }
 /*- End of function --------------------------------------------------------*/
 
+static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
+{
+    int i;
+    int p;
+    complexf_t gz;
+    complexf_t z1;
+    float y_mag2;
+    float R2;
+    float error;
+
+    /* CMA (Constant Modulus Algorithm) — blind equalizer for constant-envelope
+       signals like DQPSK.  Minimizes E[(R² - |y|²)²] without needing to know
+       which symbol was transmitted.  Immune to the decision-directed convergence
+       failure that occurs at 25% BER. */
+    y_mag2 = z->re*z->re + z->im*z->im;
+    R2 = s->eq_target_mag * s->eq_target_mag;
+    error = R2 - y_mag2;
+
+    /* Log CMA error periodically */
+    if ((s->duration & 0xFF) == 0)
+    {
+        fprintf(stderr, "[CMA] baud=%d err=%.4f mag=%.4f R=%.4f delta=%.6f\n",
+                s->duration, error, sqrtf(y_mag2), s->eq_target_mag, s->eq_delta);
+    }
+
+    /* Gradient: error * y  (note: CMA gradient is error*y, not target-y like LMS).
+       Scale down by 0.1 vs DD-LMS because CMA gradient magnitude is larger
+       (includes |y| factor and potentially large R²-|y|² error). */
+    gz.re = 0.1f * s->eq_delta * error * z->re;
+    gz.im = 0.1f * s->eq_delta * error * z->im;
+
+    p = s->eq_step - 1;
+    for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
+    {
+        p = (p - 1) & V34_EQUALIZER_MASK;
+        z1 = complex_conjf(&s->eq_buf[p]);
+        z1 = complex_mulf(&gz, &z1);
+        s->eq_coeff[i] = complex_addf(&s->eq_coeff[i], &z1);
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 #if 0  /* Disabled functions - track_carrier reimplemented inline, others unused */
 static void track_carrier(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target)
 {
@@ -2970,10 +3013,10 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     cc_symbol_sync(s);
 
     /* Slice the phase difference, to get a pair of data bits */
-    ang1 = arctan2(sample->re, sample->im);
-    ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+    ang1 = arctan2(sample->im, sample->re);
+    ang2 = arctan2(s->last_sample.im, s->last_sample.re);
     ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-    data_bits = ang3 >> 30;
+    data_bits = (ang3 >> 30) & 0x3;
 
     /* Descramble the data bits. */
     for (i = 0;  i < 2;  i++)
@@ -3301,10 +3344,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int old_rev;
             int new_rev;
 
-        ang1 = arctan2(sym->re, sym->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sym->im, sym->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
 
             /* Explicit Phase 3 J/J' detector (answerer side):
@@ -3639,10 +3682,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* Phase 3 training in progress.
            Also compute a lightweight PP heuristic: PP is an 8-symbol sequence
            repeated, so differential symbol decisions tend to show lag-8 periodicity. */
-        ang1 = arctan2(sample->re, sample->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sample->im, sample->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
         {
             int idx = (s->duration - 1) & 7;
@@ -3691,10 +3734,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            we may see errors (~1 in 3 bauds).  Use a window-based detector:
            count data_bits=2 in last 32 bauds.  S detected when count >= 20/32.
            After S is confirmed, watch for a sustained drop (S→S-bar transition). */
-        ang1 = arctan2(sym->re, sym->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sym->im, sym->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
 
         /* Sliding window: shift in new bit, shift out old */
@@ -3721,7 +3764,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* Dump raw I/Q constellation for first 32 bauds to diagnose signal quality */
         if (s->duration <= 32)
         {
-            uint32_t ang_abs = arctan2(sym->re, sym->im);
+            uint32_t ang_abs = arctan2(sym->im, sym->re);
             float deg = (float)ang_abs / (4294967296.0f / 360.0f);
             float deg_diff = (float)ang3 / (4294967296.0f / 360.0f);
             fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f ang=%.1f diff=%.1f data=%d\n",
@@ -3762,10 +3805,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     case V34_RX_STAGE_PHASE4_S_BAR:
         /* Phase 4: S-bar is 16T. After S-bar, TRN begins. */
-        ang1 = arctan2(sym->re, sym->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sym->im, sym->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
 
         if (s->duration >= 16)
@@ -3785,10 +3828,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
         int abs_bits;
 
-        ang1 = arctan2(sym->re, sym->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sym->im, sym->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
 
@@ -4288,10 +4331,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int expected_mp_type;
             int abs_bits;
 
-        ang1 = arctan2(sample->re, sample->im);
-        ang2 = arctan2(s->last_sample.re, s->last_sample.im);
+        ang1 = arctan2(sample->im, sample->re);
+        ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
-        data_bits = ang3 >> 30;
+        data_bits = (ang3 >> 30) & 0x3;
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         /* During initial Phase 4 MP acquisition, prefer MP0 (type 0) to avoid
            false MP1 preamble locks. After a couple of rejects, relax back to
@@ -4953,18 +4996,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             float target_mag;
 
             /* Track the expected constellation magnitude with an EMA.
-               Use a fast adaptation initially (alpha=0.1) to settle quickly,
-               then a slower one (alpha=0.01) for stability. */
+               Settle quickly in first 128 bauds, then freeze to give CMA
+               a stable target radius (avoids R tracking feedback loop). */
             if (s->eq_target_mag < 0.001f)
             {
                 /* First valid sample — seed the EMA */
                 s->eq_target_mag = mag;
             }
-            else
+            else if (s->duration < 128)
             {
-                float alpha = (s->duration < 64)  ?  0.1f  :  0.01f;
+                float alpha = (s->duration < 32)  ?  0.2f  :  0.05f;
                 s->eq_target_mag += alpha * (mag - s->eq_target_mag);
             }
+            /* After 128 bauds: frozen — CMA uses this fixed R */
             /*endif*/
             target_mag = s->eq_target_mag;
 
@@ -4977,13 +5021,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->stage == V34_RX_STAGE_PHASE3_TRAINING
                 || s->stage == V34_RX_STAGE_PHASE4_TRN)
             {
-                /* Equalizer disabled for diagnostic — measuring raw signal quality.
-                   Decision-directed LMS can't converge at 25% BER. */
-                /* tune_equalizer(s, sym, &eq_target); */
+                /* CMA (blind) equalizer — doesn't need correct symbol decisions,
+                   just drives all symbols to constant modulus.  Fixes the 4:1
+                   magnitude variation (ISI) that DD-LMS couldn't converge on. */
+                tune_equalizer_cma(s, sym);
             }
             /*endif*/
 
-            /* Phase error = Im(z * conj(target)) = z.im*t.re - z.re*t.im */
+            /* Re-enabled carrier tracking — test 4 showed MP detection worked
+               better with carrier tracking on.  CMA equalization now provides
+               more stable magnitude for eq_target, improving tracking quality. */
             error = sym->im*eq_target.re - sym->re*eq_target.im;
             s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
             s->carrier_phase += (int32_t)(s->carrier_track_p*error);
