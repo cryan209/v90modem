@@ -773,6 +773,11 @@ typedef struct
     int phase4_trn_lock_tap;
     int phase4_trn_lock_order;
     int phase4_trn_lock_domain;
+    int phase4_trn_current_hyp;
+    int phase4_trn_current_score;
+    int phase4_trn_current_tap;
+    int phase4_trn_current_order;
+    int phase4_trn_current_domain;
 
     /* MP or MPh receive tracking data */
     int mp_count;

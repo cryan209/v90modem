@@ -2583,6 +2583,11 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase4_trn_lock_tap = -1;
     s->rx.phase4_trn_lock_order = -1;
     s->rx.phase4_trn_lock_domain = -1;
+    s->rx.phase4_trn_current_hyp = -1;
+    s->rx.phase4_trn_current_score = -1;
+    s->rx.phase4_trn_current_tap = -1;
+    s->rx.phase4_trn_current_order = -1;
+    s->rx.phase4_trn_current_domain = -1;
     s->rx.mp_phase4_bit_order = 0;
     s->rx.mp_phase4_default_bit_order = 0;
     s->rx.mp_phase4_alt_order_active = 0;
@@ -2765,6 +2770,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             s->rx.phase4_trn_lock_tap = -1;
             s->rx.phase4_trn_lock_order = -1;
             s->rx.phase4_trn_lock_domain = -1;
+            s->rx.phase4_trn_current_hyp = -1;
+            s->rx.phase4_trn_current_score = -1;
+            s->rx.phase4_trn_current_tap = -1;
+            s->rx.phase4_trn_current_order = -1;
+            s->rx.phase4_trn_current_domain = -1;
             s->rx.mp_phase4_bit_order = 0;
             s->rx.mp_phase4_default_bit_order = 0;
             s->rx.mp_phase4_alt_order_active = 0;
@@ -2876,6 +2886,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase4_trn_lock_tap = -1;
                         s->rx.phase4_trn_lock_order = -1;
                         s->rx.phase4_trn_lock_domain = -1;
+                        s->rx.phase4_trn_current_hyp = -1;
+                        s->rx.phase4_trn_current_score = -1;
+                        s->rx.phase4_trn_current_tap = -1;
+                        s->rx.phase4_trn_current_order = -1;
+                        s->rx.phase4_trn_current_domain = -1;
                         s->rx.mp_phase4_bit_order = 0;
                         s->rx.mp_phase4_default_bit_order = 0;
                         s->rx.mp_phase4_alt_order_active = 0;
@@ -3169,6 +3184,11 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.phase4_trn_lock_tap = -1;
     s->rx.phase4_trn_lock_order = -1;
     s->rx.phase4_trn_lock_domain = -1;
+    s->rx.phase4_trn_current_hyp = -1;
+    s->rx.phase4_trn_current_score = -1;
+    s->rx.phase4_trn_current_tap = -1;
+    s->rx.phase4_trn_current_order = -1;
+    s->rx.phase4_trn_current_domain = -1;
     s->rx.mp_phase4_bit_order = 0;
     s->rx.mp_phase4_default_bit_order = 0;
     s->rx.mp_phase4_alt_order_active = 0;
