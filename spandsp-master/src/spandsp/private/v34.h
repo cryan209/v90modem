@@ -466,6 +466,10 @@ typedef struct
     int pre_emphasis_idx;
     const float *pre_emphasis_coeffs;
 
+    /*! \brief Last values emitted by debug stage-change logging. */
+    int last_logged_stage;
+    int last_logged_modulator;
+
     logging_state_t *logging;
 } v34_tx_state_t;
 
@@ -793,6 +797,7 @@ typedef struct
     int mp_phase4_retry_mode;
     int mp_phase4_bit_order;
     int mp_phase4_domain;
+    int last_logged_mp_diag_state;
 
     int dft_ptr;
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -816,6 +821,11 @@ typedef struct
     int s_detect_count;
     /*! \brief Phase 4 S signal detection: 32-bit circular window of data_bits==2 flags */
     uint32_t s_window;
+
+    /*! \brief Last values emitted by debug stage-change logging. */
+    int last_logged_stage;
+    int last_logged_event;
+    int last_logged_demodulator;
 
     /*! \brief Used to align the transmit and receive positions, to ensure things like
                round trip delay are properly handled. */

@@ -128,6 +128,96 @@ enum
     TRAINING_TX_STAGE_PARKED
 };
 
+static const char *v34_tx_stage_to_str(int stage)
+{
+    switch (stage)
+    {
+    case V34_TX_STAGE_INITIAL_PREAMBLE: return "INITIAL_PREAMBLE";
+    case V34_TX_STAGE_INFO0: return "INFO0";
+    case V34_TX_STAGE_INITIAL_A: return "INITIAL_A";
+    case V34_TX_STAGE_FIRST_A: return "FIRST_A";
+    case V34_TX_STAGE_FIRST_NOT_A: return "FIRST_NOT_A";
+    case V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN: return "FIRST_NOT_A_REVERSAL_SEEN";
+    case V34_TX_STAGE_SECOND_A: return "SECOND_A";
+    case V34_TX_STAGE_L1: return "L1";
+    case V34_TX_STAGE_L2: return "L2";
+    case V34_TX_STAGE_POST_L2_A: return "POST_L2_A";
+    case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
+    case V34_TX_STAGE_A_SILENCE: return "A_SILENCE";
+    case V34_TX_STAGE_PRE_INFO1_A: return "PRE_INFO1_A";
+    case V34_TX_STAGE_INFO1: return "INFO1";
+    case V34_TX_STAGE_FIRST_B: return "FIRST_B";
+    case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
+    case V34_TX_STAGE_FIRST_NOT_B_WAIT: return "FIRST_NOT_B_WAIT";
+    case V34_TX_STAGE_FIRST_NOT_B: return "FIRST_NOT_B";
+    case V34_TX_STAGE_FIRST_B_SILENCE: return "FIRST_B_SILENCE";
+    case V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE: return "FIRST_B_POST_REVERSAL_SILENCE";
+    case V34_TX_STAGE_SECOND_B: return "SECOND_B";
+    case V34_TX_STAGE_SECOND_B_WAIT: return "SECOND_B_WAIT";
+    case V34_TX_STAGE_SECOND_NOT_B: return "SECOND_NOT_B";
+    case V34_TX_STAGE_INFO0_RETRY: return "INFO0_RETRY";
+    case V34_TX_STAGE_FIRST_S: return "FIRST_S";
+    case V34_TX_STAGE_FIRST_NOT_S: return "FIRST_NOT_S";
+    case V34_TX_STAGE_MD: return "MD";
+    case V34_TX_STAGE_SECOND_S: return "SECOND_S";
+    case V34_TX_STAGE_SECOND_NOT_S: return "SECOND_NOT_S";
+    case V34_TX_STAGE_TRN: return "TRN";
+    case V34_TX_STAGE_J: return "J";
+    case V34_TX_STAGE_J_DASHED: return "J_DASHED";
+    case V34_TX_STAGE_PHASE4_WAIT: return "PHASE4_WAIT";
+    case V34_TX_STAGE_PHASE4_S: return "PHASE4_S";
+    case V34_TX_STAGE_PHASE4_NOT_S: return "PHASE4_NOT_S";
+    case V34_TX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
+    case V34_TX_STAGE_MP: return "MP";
+    case V34_TX_STAGE_HDX_INITIAL_A: return "HDX_INITIAL_A";
+    case V34_TX_STAGE_HDX_FIRST_A: return "HDX_FIRST_A";
+    case V34_TX_STAGE_HDX_FIRST_NOT_A: return "HDX_FIRST_NOT_A";
+    case V34_TX_STAGE_HDX_FIRST_A_SILENCE: return "HDX_FIRST_A_SILENCE";
+    case V34_TX_STAGE_HDX_SECOND_A: return "HDX_SECOND_A";
+    case V34_TX_STAGE_HDX_SECOND_A_WAIT: return "HDX_SECOND_A_WAIT";
+    case V34_TX_STAGE_HDX_FIRST_B: return "HDX_FIRST_B";
+    case V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN: return "HDX_FIRST_B_INFO_SEEN";
+    case V34_TX_STAGE_HDX_FIRST_NOT_B_WAIT: return "HDX_FIRST_NOT_B_WAIT";
+    case V34_TX_STAGE_HDX_FIRST_NOT_B: return "HDX_FIRST_NOT_B";
+    case V34_TX_STAGE_HDX_POST_L2_B: return "HDX_POST_L2_B";
+    case V34_TX_STAGE_HDX_POST_L2_SILENCE: return "HDX_POST_L2_SILENCE";
+    case V34_TX_STAGE_HDX_SH: return "HDX_SH";
+    case V34_TX_STAGE_HDX_FIRST_ALT: return "HDX_FIRST_ALT";
+    case V34_TX_STAGE_HDX_PPH: return "HDX_PPH";
+    case V34_TX_STAGE_HDX_SECOND_ALT: return "HDX_SECOND_ALT";
+    case V34_TX_STAGE_HDX_MPH: return "HDX_MPH";
+    case V34_TX_STAGE_HDX_E: return "HDX_E";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *v34_modulation_to_str(int mod)
+{
+    switch (mod)
+    {
+    case V34_MODULATION_V34: return "V34";
+    case V34_MODULATION_CC: return "CC";
+    case V34_MODULATION_TONES: return "TONES";
+    case V34_MODULATION_L1_L2: return "L1_L2";
+    case V34_MODULATION_SILENCE: return "SILENCE";
+    default: return "UNKNOWN";
+    }
+}
+
+static void v34_tx_log_state_change(v34_state_t *s)
+{
+    if (s->tx.last_logged_stage != s->tx.stage
+        || s->tx.last_logged_modulator != s->tx.current_modulator)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - stage=%s (%d) mod=%s (%d)\n",
+                 v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
+                 v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator);
+        s->tx.last_logged_stage = s->tx.stage;
+        s->tx.last_logged_modulator = s->tx.current_modulator;
+    }
+}
+
 #if defined(SPANDSP_USE_FIXED_POINT)
 typedef int16_t tx_shaper_t[V34_TX_FILTER_STEPS];
 #else
@@ -331,6 +421,38 @@ static void pph_baud_init(v34_state_t *s);
 static void first_alt_baud_init(v34_state_t *s);
 static void second_alt_baud_init(v34_state_t *s);
 static void sh_baud_init(v34_state_t *s);
+
+static void reset_primary_rx_frontend_for_phase3(v34_state_t *s)
+{
+    s->rx.agc_scaling = 0.0017f/V34_RX_PULSESHAPER_GAIN;
+    s->rx.carrier_track_i = 5000.0f;
+    s->rx.carrier_track_p = 40000.0f;
+    s->rx.total_baud_timing_correction = 0;
+    s->rx.carrier_phase = 0;
+    s->rx.baud_half = 0;
+    s->rx.rrc_filter_step = 0;
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+
+    cvec_zerof(s->rx.eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->rx.eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(1.0f), TRAINING_SCALE(0.0f));
+    cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
+    s->rx.eq_step = 0;
+    s->rx.eq_put_step = V34_RX_PULSESHAPER_COEFF_SETS*10/(3*2) - 1;
+    s->rx.eq_delta = EQUALIZER_DELTA/(V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->rx.eq_target_mag = 0.0f;
+
+#if defined(SPANDSP_USE_FIXED_POINT)
+    s->rx.pri_ted.symbol_sync_low[0] = s->rx.pri_ted.symbol_sync_low[1] = 0;
+    s->rx.pri_ted.symbol_sync_high[0] = s->rx.pri_ted.symbol_sync_high[1] = 0;
+    s->rx.pri_ted.symbol_sync_dc_filter[0] = s->rx.pri_ted.symbol_sync_dc_filter[1] = 0;
+    s->rx.pri_ted.baud_phase = 0;
+#else
+    s->rx.pri_ted.symbol_sync_low[0] = s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
+    s->rx.pri_ted.symbol_sync_high[0] = s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
+    s->rx.pri_ted.symbol_sync_dc_filter[0] = s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
+    s->rx.pri_ted.baud_phase = 0.0f;
+#endif
+}
 
 static __inline__ int scramble(v34_tx_state_t *s, int in_bit)
 {
@@ -2465,17 +2587,8 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.mp_phase4_default_bit_order = 0;
     s->rx.mp_phase4_alt_order_active = 0;
     s->rx.mp_phase4_retry_mode = 0;
-    s->rx.baud_half = 0;
     s->rx.received_event = V34_EVENT_NONE;
-    /* Reset RX RRC filter to flush stale CC demodulator data */
-    s->rx.rrc_filter_step = 0;
-    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
-    /* Reset eq_put_step for V34 primary channel T/2 timing.
-       Phase 3 always uses 2400 baud: steps_per_baud = 192*8000/2400 = 640.
-       T/2 step = 640/2 = 320, initial value = 320 - 1 = 319. */
-    s->rx.eq_put_step = V34_RX_PULSESHAPER_COEFF_SETS*10/(3*2) - 1;
-    /* Reset carrier phase for clean demodulation start */
-    s->rx.carrier_phase = 0;
+    reset_primary_rx_frontend_for_phase3(s);
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 3: primary demod active; S detection will arm at J\n");
 }
@@ -3608,6 +3721,7 @@ SPAN_DECLARE(int) v34_tx(v34_state_t *s, int16_t amp[], int max_len)
     int len;
     int lenx;
 
+    v34_tx_log_state_change(s);
     len = 0;
     lenx = -1;
     do
@@ -3829,6 +3943,8 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.conv_encode_table = v34_conv16_encode_table;
 
     s->tx.current_get_bit = s->tx.get_bit;
+    s->tx.last_logged_stage = -1;
+    s->tx.last_logged_modulator = -1;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

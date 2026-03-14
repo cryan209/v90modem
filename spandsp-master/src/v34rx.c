@@ -144,6 +144,128 @@ enum
     TRAINING_TX_STAGE_PARKED
 };
 
+static const char *v34_rx_stage_to_str(int stage)
+{
+    switch (stage)
+    {
+    case V34_RX_STAGE_INFO0: return "INFO0";
+    case V34_RX_STAGE_INFOH: return "INFOH";
+    case V34_RX_STAGE_INFO1C: return "INFO1C";
+    case V34_RX_STAGE_INFO1A: return "INFO1A";
+    case V34_RX_STAGE_TONE_A: return "TONE_A";
+    case V34_RX_STAGE_TONE_B: return "TONE_B";
+    case V34_RX_STAGE_L1_L2: return "L1_L2";
+    case V34_RX_STAGE_CC: return "CC";
+    case V34_RX_STAGE_PRIMARY_CHANNEL: return "PRIMARY_CHANNEL";
+    case V34_RX_STAGE_PHASE3_WAIT_S: return "PHASE3_WAIT_S";
+    case V34_RX_STAGE_PHASE3_TRAINING: return "PHASE3_TRAINING";
+    case V34_RX_STAGE_PHASE3_DONE: return "PHASE3_DONE";
+    case V34_RX_STAGE_PHASE4_S: return "PHASE4_S";
+    case V34_RX_STAGE_PHASE4_S_BAR: return "PHASE4_S_BAR";
+    case V34_RX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
+    case V34_RX_STAGE_PHASE4_MP: return "PHASE4_MP";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *v34_event_to_str(int event)
+{
+    switch (event)
+    {
+    case V34_EVENT_NONE: return "NONE";
+    case V34_EVENT_TONE_SEEN: return "TONE_SEEN";
+    case V34_EVENT_REVERSAL_1: return "REVERSAL_1";
+    case V34_EVENT_REVERSAL_2: return "REVERSAL_2";
+    case V34_EVENT_REVERSAL_3: return "REVERSAL_3";
+    case V34_EVENT_INFO0_OK: return "INFO0_OK";
+    case V34_EVENT_INFO0_BAD: return "INFO0_BAD";
+    case V34_EVENT_INFO1_OK: return "INFO1_OK";
+    case V34_EVENT_INFO1_BAD: return "INFO1_BAD";
+    case V34_EVENT_INFOH_OK: return "INFOH_OK";
+    case V34_EVENT_INFOH_BAD: return "INFOH_BAD";
+    case V34_EVENT_L2_SEEN: return "L2_SEEN";
+    case V34_EVENT_S: return "S";
+    case V34_EVENT_J: return "J";
+    case V34_EVENT_J_DASHED: return "J_DASHED";
+    case V34_EVENT_PHASE4_TRN_READY: return "PHASE4_TRN_READY";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *v34_demodulator_to_str(int mod)
+{
+    switch (mod)
+    {
+    case V34_MODULATION_V34: return "V34";
+    case V34_MODULATION_CC: return "CC";
+    case V34_MODULATION_TONES: return "TONES";
+    case V34_MODULATION_L1_L2: return "L1_L2";
+    case V34_MODULATION_SILENCE: return "SILENCE";
+    default: return "UNKNOWN";
+    }
+}
+
+static void v34_rx_log_state_change(v34_rx_state_t *s)
+{
+    if (s->last_logged_stage != s->stage
+        || s->last_logged_demodulator != s->current_demodulator)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - stage=%s (%d) demod=%s (%d)\n",
+                 v34_rx_stage_to_str(s->stage), s->stage,
+                 v34_demodulator_to_str(s->current_demodulator), s->current_demodulator);
+        s->last_logged_stage = s->stage;
+        s->last_logged_demodulator = s->current_demodulator;
+    }
+    if (s->last_logged_event != s->received_event)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - event=%s (%d)\n",
+                 v34_event_to_str(s->received_event), s->received_event);
+        s->last_logged_event = s->received_event;
+    }
+}
+
+enum
+{
+    V34_MP_DIAG_STATE_NONE = -1,
+    V34_MP_DIAG_STATE_DET_SYNC = 0,
+    V34_MP_DIAG_STATE_DET_INFO = 1,
+    V34_MP_DIAG_STATE_COMPLETE = 2
+};
+
+static const char *v34_mp_diag_state_to_str(int state)
+{
+    switch (state)
+    {
+    case V34_MP_DIAG_STATE_DET_SYNC: return "DET_SYNC";
+    case V34_MP_DIAG_STATE_DET_INFO: return "DET_INFO";
+    case V34_MP_DIAG_STATE_COMPLETE: return "COMPLETE";
+    default: return "NONE";
+    }
+}
+
+static void v34_rx_log_mp_diag_state(v34_rx_state_t *s, int state, const char *reason)
+{
+    if (s->last_logged_mp_diag_state == state)
+        return;
+    /*endif*/
+    if (reason && reason[0])
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4 MP microstate=%s (%s)\n",
+                 v34_mp_diag_state_to_str(state), reason);
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4 MP microstate=%s\n",
+                 v34_mp_diag_state_to_str(state));
+    }
+    /*endif*/
+    s->last_logged_mp_diag_state = state;
+}
+
 static const v34_rx_shaper_t *v34_rx_shapers_re[6][2] =
 {
     {&rx_pulseshaper_2400_low_carrier_re, &rx_pulseshaper_2400_high_carrier_re},
@@ -186,6 +308,7 @@ static void l1_l2_analysis_init(v34_rx_state_t *s);
 static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
 static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
+static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
 
 static int descramble(v34_rx_state_t *s, int in_bit)
 {
@@ -259,6 +382,17 @@ static void bits32_to_str(uint32_t v, char out[33])
         out[31 - j] = ((v >> j) & 1) ? '1' : '0';
     /*endfor*/
     out[32] = '\0';
+}
+/*- End of function --------------------------------------------------------*/
+
+static void frame_bits_to_str(const uint8_t bits[], int start, int count, char *out)
+{
+    int i;
+
+    for (i = 0;  i < count;  i++)
+        out[i] = bits[start + i] ? '1' : '0';
+    /*endfor*/
+    out[count] = '\0';
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1032,6 +1166,100 @@ static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type,
                  crc_ok, fill_ok);
     }
     /*endif*/
+}
+
+static void log_mp_tx_rx_compare(v34_rx_state_t *s, const uint8_t rx_bits[], int type)
+{
+    v34_state_t *t;
+    bitstream_state_t bs;
+    const uint8_t *p;
+    int target;
+    int first_diff;
+    int i;
+    int max_diffs;
+    int diff_count;
+
+    t = span_container_of(s, v34_state_t, rx);
+    if (t->tx.mp.type != type)
+        return;
+    /*endif*/
+    target = (type == 1) ? 188 : 88;
+    bitstream_init(&bs, true);
+    p = t->tx.txbuf;
+    first_diff = -1;
+    max_diffs = 8;
+    diff_count = 0;
+
+    for (i = 0;  i < target;  i++)
+    {
+        int tx_bit;
+
+        tx_bit = bitstream_get(&bs, &p, 1);
+        if (tx_bit != (rx_bits[i] & 1))
+        {
+            if (first_diff < 0)
+                first_diff = i;
+            /*endif*/
+            if (diff_count < max_diffs)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: MP%d TX/RX diff[%d] frame_idx=%d tx=%d rx=%d (dom=%s tap=%d ord=%s hyp=%d)\n",
+                         type, diff_count, i, tx_bit, rx_bits[i] & 1,
+                         phase4_trn_domain_name(s->mp_phase4_domain),
+                         s->scrambler_tap,
+                         phase4_trn_order_name(s->mp_phase4_bit_order),
+                         s->mp_hypothesis);
+            }
+            /*endif*/
+            diff_count++;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+
+    if (first_diff >= 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d first TX/RX divergence at frame_idx=%d (dom=%s tap=%d ord=%s hyp=%d total_diffs=%d)\n",
+                 type, first_diff,
+                 phase4_trn_domain_name(s->mp_phase4_domain),
+                 s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order),
+                 s->mp_hypothesis,
+                 diff_count);
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: MP%d TX/RX frame bits match exactly (%d bits)\n",
+                 type, target);
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static void log_mp_lock_seed(v34_rx_state_t *s,
+                             int hyp,
+                             int type_bit,
+                             int score,
+                             int bit_pos,
+                             uint32_t preamble_stream,
+                             int pending_valid,
+                             int pending_bit)
+{
+    char tail[33];
+    char seed_bits[25];
+
+    bits32_to_str(preamble_stream, tail);
+    frame_bits_to_str(s->mp_frame_bits, 0, 24, seed_bits);
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4: MP lock seed hyp=%d type=%d score=%d/18 bit%d pending=%s%d "
+             "frame_pos=%d target=%d preamble=0b%s seeded[0..23]=%s\n",
+             hyp, type_bit, score, bit_pos,
+             pending_valid ? "" : "none/",
+             pending_valid ? pending_bit : 0,
+             s->mp_frame_pos, s->mp_frame_target,
+             tail, seed_bits);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1862,6 +2090,21 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
     /*endif*/
     s->baud_rate = info1a->baud_rate_c_to_a;
     s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+    create_godard_coeffs(&s->pri_ted,
+                         carrier_frequency(s->baud_rate, s->high_carrier),
+                         baud_rate_parameters[s->baud_rate].baud_rate,
+                         0.99f);
+#if defined(SPANDSP_USE_FIXED_POINT)
+    s->pri_ted.symbol_sync_low[0] = s->pri_ted.symbol_sync_low[1] = 0;
+    s->pri_ted.symbol_sync_high[0] = s->pri_ted.symbol_sync_high[1] = 0;
+    s->pri_ted.symbol_sync_dc_filter[0] = s->pri_ted.symbol_sync_dc_filter[1] = 0;
+    s->pri_ted.baud_phase = 0;
+#else
+    s->pri_ted.symbol_sync_low[0] = s->pri_ted.symbol_sync_low[1] = 0.0f;
+    s->pri_ted.symbol_sync_high[0] = s->pri_ted.symbol_sync_high[1] = 0.0f;
+    s->pri_ted.symbol_sync_dc_filter[0] = s->pri_ted.symbol_sync_dc_filter[1] = 0.0f;
+    s->pri_ted.baud_phase = 0.0f;
+#endif
 
     log_info1a(s->logging, false, info1a);
     return 0;
@@ -4447,6 +4690,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (sc0 >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
+                        && d1 == 0
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > chosen_score)
@@ -4467,6 +4711,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (h == hint_h
                         && sc0 >= MP_HINT_LOCK_SCORE_MIN
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
+                        && d1 == 0
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > hint_score)
@@ -4574,6 +4819,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             s->bit_count = 0;
                         }
                         /*endif*/
+                        log_mp_lock_seed(s,
+                                         chosen_hyp,
+                                         chosen_type_bit,
+                                         chosen_score,
+                                         chosen_bit_pos,
+                                         chosen_preamble_stream,
+                                         chosen_pending_valid,
+                                         chosen_pending_bit);
                     }
                     locked_this_symbol = 1;
                     span_log(s->logging, SPAN_LOG_FLOW,
@@ -4618,6 +4871,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 {
                     int preamble_wait_limit;
 
+                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "awaiting MP preamble");
+
                     /* If we started from a TRN direct pre-lock, fail fast and
                        fall back to global hypothesis search rather than waiting
                        the full window on a possibly phase-offset hypothesis. */
@@ -4645,6 +4900,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
                 {
                     /* E is 20 consecutive ones — end of MP exchange */
+                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete\n");
                     s->mp_seen = 2;
@@ -4680,6 +4936,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         s->mp_count = 0;
                         s->bit_count = 0;
                         s->mp_early_rejects = 0;
+                        v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP preamble found; collecting frame");
 
                         bits32_to_str(s->bitstream, tail);
                         span_log(s->logging, SPAN_LOG_FLOW,
@@ -4742,6 +4999,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                         frame_idx = s->mp_frame_pos - 1;
                         type_now = s->mp_frame_bits[18];
+                        if (frame_idx == 19  &&  bits[i] != 0)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
+                                     "(expected 0), dropping lock immediately\n",
+                                     type_now, bits[i]);
+                            mp_unlock_after_reject(s, true);
+                            v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "reserved19 mismatch; resuming global search");
+                            break;
+                        }
+                        /*endif*/
                         is_inserted_start = (frame_idx == 34 || frame_idx == 51 || frame_idx == 68)
                                             || (type_now == 1
                                                 && (frame_idx == 85
@@ -4849,6 +5117,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     start_err_count = mp_start_error_count(s->mp_frame_bits, type, s->mp_frame_target);
                     starts_good = (start_err_count == 0);
                     log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
+                    log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
                     {
                         bool frame_accepted;
                         int start_err_accept_max;
@@ -4912,6 +5181,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                          type, s->mp_frame_target);
                                 s->mp_seen = 1;
                                 s->mp_early_rejects = 0;
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted; awaiting E");
                                 frame_accepted = true;
                             }
                             else
@@ -4927,6 +5197,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: keeping MP hypothesis=%d after semantic reject; retrying local preamble reacquire\n",
                                          s->mp_hypothesis);
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "semantic reject; reacquiring preamble");
                             }
                             /*endif*/
                         }
@@ -4962,11 +5233,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: keeping MP hypothesis=%d after CRC-only reject; retrying local preamble reacquire\n",
                                          s->mp_hypothesis);
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "CRC-only reject; reacquiring preamble");
                             }
                             else
                             {
                                 /* Bad lock: drop hypothesis and resume global search. */
                                 mp_unlock_after_reject(s, true);
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "bad lock; resuming global search");
                             }
                             /*endif*/
                         }
@@ -5340,6 +5613,7 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
     int leny;
     int lenx;
 
+    v34_rx_log_state_change(&s->rx);
     leny = 0;
     lenx = -1;
     do
@@ -5518,6 +5792,10 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_phase4_bit_order = 0;
     s->rx.mp_phase4_domain = 0;
     mp_reset_hypothesis_search(&s->rx);
+    s->rx.last_logged_mp_diag_state = V34_MP_DIAG_STATE_NONE;
+    s->rx.last_logged_stage = -1;
+    s->rx.last_logged_event = -1;
+    s->rx.last_logged_demodulator = -1;
 
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;
