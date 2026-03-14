@@ -131,6 +131,9 @@
 #define PHASE4_TRN_READY_MIN_SCORE      70
 #define PHASE4_TRN_READY_MIN_BAUD       1024
 #define PHASE4_TRN_READY_MAX_BAUD       2200
+#define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
+#define PHASE4_TRN_FREEZE_SCORE         80
+#define PHASE3_NOT_S_BAUDS              16
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
@@ -522,6 +525,111 @@ static void phase4_trn_hyp_reset(v34_rx_state_t *s)
     s->phase4_trn_current_tap = -1;
     s->phase4_trn_current_order = -1;
     s->phase4_trn_current_domain = -1;
+    s->phase4_trn_recent_scramble = 0;
+    s->phase4_trn_recent_window_bits = 0;
+    s->phase4_trn_recent_window_ones = 0;
+    s->phase4_trn_recent_window_fill = 0;
+    s->phase4_trn_recent_score = -1;
+    memset(s->phase4_trn_recent_symbol_ones, 0, sizeof(s->phase4_trn_recent_symbol_ones));
+    s->phase4_trn_recent_active = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_trn_recent_reset(v34_rx_state_t *s)
+{
+    s->phase4_trn_recent_scramble = 0;
+    s->phase4_trn_recent_window_bits = 0;
+    s->phase4_trn_recent_window_ones = 0;
+    s->phase4_trn_recent_window_fill = 0;
+    s->phase4_trn_recent_score = -1;
+    memset(s->phase4_trn_recent_symbol_ones, 0, sizeof(s->phase4_trn_recent_symbol_ones));
+    s->phase4_trn_recent_active = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_trn_recent_seed(v34_rx_state_t *s)
+{
+    if (s->phase4_trn_lock_hyp < 0
+        || s->phase4_trn_lock_domain < 0
+        || s->phase4_trn_lock_tap < 0
+        || s->phase4_trn_lock_order < 0)
+    {
+        phase4_trn_recent_reset(s);
+        return;
+    }
+    /*endif*/
+    s->phase4_trn_recent_scramble =
+        s->phase4_trn_scramble_tap[s->phase4_trn_lock_domain][s->phase4_trn_lock_tap][s->phase4_trn_lock_order][s->phase4_trn_lock_hyp];
+    s->phase4_trn_recent_window_bits = 0;
+    s->phase4_trn_recent_window_ones = 0;
+    s->phase4_trn_recent_window_fill = 0;
+    s->phase4_trn_recent_score = -1;
+    memset(s->phase4_trn_recent_symbol_ones, 0, sizeof(s->phase4_trn_recent_symbol_ones));
+    s->phase4_trn_recent_active = 1;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_trn_recent_update(v34_rx_state_t *s, int raw_sym)
+{
+    int d0;
+    int d1;
+    int ones;
+    int pos;
+    int tap;
+
+    if (!s->phase4_trn_recent_active)
+        return;
+    /*endif*/
+    if (s->phase4_trn_lock_hyp < 0)
+        return;
+    /*endif*/
+    if (s->phase4_trn_after_j < PHASE4_TRN_SCORE_START_BAUD)
+        return;
+    /*endif*/
+
+    tap = (s->phase4_trn_lock_tap == 0) ? 17 : 4;
+    if (s->phase4_trn_lock_order == 0)
+    {
+        d0 = descramble_reg(&s->phase4_trn_recent_scramble, tap, raw_sym & 1);
+        d1 = descramble_reg(&s->phase4_trn_recent_scramble, tap, (raw_sym >> 1) & 1);
+    }
+    else
+    {
+        d1 = descramble_reg(&s->phase4_trn_recent_scramble, tap, (raw_sym >> 1) & 1);
+        d0 = descramble_reg(&s->phase4_trn_recent_scramble, tap, raw_sym & 1);
+    }
+    /*endif*/
+    ones = d0 + d1;
+    pos = (s->phase4_trn_after_j - PHASE4_TRN_SCORE_START_BAUD) & (PHASE4_TRN_RECENT_WINDOW_BAUDS - 1);
+
+    if (s->phase4_trn_recent_window_fill >= PHASE4_TRN_RECENT_WINDOW_BAUDS)
+        s->phase4_trn_recent_window_ones -= s->phase4_trn_recent_symbol_ones[pos];
+    else
+        s->phase4_trn_recent_window_fill++;
+    /*endif*/
+    s->phase4_trn_recent_symbol_ones[pos] = (uint8_t) ones;
+    s->phase4_trn_recent_window_ones += (uint16_t) ones;
+    s->phase4_trn_recent_window_bits = 2*s->phase4_trn_recent_window_fill;
+    if (s->phase4_trn_recent_window_bits > 0)
+    {
+        s->phase4_trn_recent_score =
+            (100*s->phase4_trn_recent_window_ones + (s->phase4_trn_recent_window_bits/2))/s->phase4_trn_recent_window_bits;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static int phase4_trn_should_freeze_tracking(const v34_rx_state_t *s)
+{
+    return (s->stage == V34_RX_STAGE_PHASE4_TRN
+            && s->phase4_j_seen
+            && s->phase4_trn_lock_hyp >= 0
+            && s->phase4_trn_lock_score >= PHASE4_TRN_FREEZE_SCORE
+            && s->phase4_trn_current_hyp == s->phase4_trn_lock_hyp
+            && s->phase4_trn_current_tap == s->phase4_trn_lock_tap
+            && s->phase4_trn_current_order == s->phase4_trn_lock_order
+            && s->phase4_trn_current_domain == s->phase4_trn_lock_domain
+            && s->phase4_trn_current_score >= PHASE4_TRN_FREEZE_SCORE);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3034,8 +3142,8 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 static int phase3_equalizer_refine_active(const v34_rx_state_t *s)
 {
     return (s->stage == V34_RX_STAGE_PHASE3_TRAINING
-            && s->duration > PHASE3_PP_TRAIN_BAUDS
-            && s->duration <= (PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS));
+            && s->duration > (PHASE3_NOT_S_BAUDS + PHASE3_PP_TRAIN_BAUDS)
+            && s->duration <= (PHASE3_NOT_S_BAUDS + PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS));
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3938,24 +4046,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->duration >= 128 && (s->s_detect_count >= 18 || s->bit_count >= 20))
         {
             int rev_hits = s->bit_count;
-            if (!s->calling_party  &&  s->info1c.md <= 0)
-            {
-                /* Answerer with no MD should not leave J/J' search on S-like patterns. */
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: S-like pattern seen (baud %d, dom=%d/32 rev=%d/32), "
-                         "continuing J/J' search (MD=0)\n",
-                         s->duration, s->s_detect_count, rev_hits);
-            }
-            else
-            {
-                s->received_event = V34_EVENT_S;
-                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-                s->bit_count = 0;  /* clear reversal counter reuse */
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: S pattern detected (baud %d, dom=%d/32 rev=%d/32)\n",
-                         s->duration, s->s_detect_count, rev_hits);
-            }
-            /*endif*/
+
+            s->received_event = V34_EVENT_S;
+            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+            s->duration = 0;
+            s->bit_count = 0;  /* clear reversal counter reuse */
+            memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
+            s->phase3_pp_obs = 0;
+            s->phase3_pp_match = 0;
+            memset(s->phase3_trn_scramble, 0, sizeof(s->phase3_trn_scramble));
+            memset(s->phase3_trn_one_count, 0, sizeof(s->phase3_trn_one_count));
+            s->phase3_trn_bits = 0;
+            s->phase3_trn_lock_hyp = -1;
+            s->phase3_trn_lock_score = -1;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: S pattern detected (dom=%d/32 rev=%d/32), waiting %dT for !S before PP training\n",
+                     s->s_detect_count, rev_hits, PHASE3_NOT_S_BAUDS);
         }
         else if (s->duration >= 6000)
         {
@@ -4383,6 +4489,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int best_tap;
             int best_order;
             int best_domain;
+            int lock_raw_sym;
 
             s->phase4_trn_after_j++;
             best_h = -1;
@@ -4454,6 +4561,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase4_trn_prev_valid[h] = 1;
             }
             /*endfor*/
+            if (s->phase4_trn_lock_hyp >= 0
+                && s->phase4_trn_lock_domain >= 0
+                && s->phase4_trn_lock_tap >= 0
+                && s->phase4_trn_lock_order >= 0)
+            {
+                lock_raw_sym = map_phase4_raw_bits(s->phase4_trn_lock_domain ? abs_bits : data_bits,
+                                                   s->phase4_trn_lock_hyp);
+                phase4_trn_recent_update(s, lock_raw_sym);
+            }
+            /*endif*/
             if (s->phase4_trn_after_j >= PHASE4_TRN_SCORE_START_BAUD)
             {
                 int bits_observed;
@@ -4489,27 +4606,40 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         s->phase4_trn_lock_tap = best_tap;
                         s->phase4_trn_lock_order = best_order;
                         s->phase4_trn_lock_domain = best_domain;
+                        phase4_trn_recent_seed(s);
                     }
                     /*endif*/
                     lock_changed = (s->phase4_trn_lock_hyp != old_lock_hyp
                                     || s->phase4_trn_lock_score != old_lock_score);
+                    if (s->phase4_trn_recent_active
+                        && s->phase4_trn_recent_window_bits > 0
+                        && s->phase4_trn_lock_hyp >= 0)
+                    {
+                        s->phase4_trn_current_hyp = s->phase4_trn_lock_hyp;
+                        s->phase4_trn_current_score = s->phase4_trn_recent_score;
+                        s->phase4_trn_current_tap = s->phase4_trn_lock_tap;
+                        s->phase4_trn_current_order = s->phase4_trn_lock_order;
+                        s->phase4_trn_current_domain = s->phase4_trn_lock_domain;
+                    }
+                    /*endif*/
                     if (lock_changed && s->phase4_trn_lock_score >= 70)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: lock hint hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%)\n",
+                                 "Rx - Phase 4 TRN: lock hint hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%)\n",
                                  s->phase4_trn_lock_hyp,
                                  phase4_trn_domain_name(s->phase4_trn_lock_domain),
                                  phase4_trn_tap_value(s->phase4_trn_lock_tap),
                                  phase4_trn_order_name(s->phase4_trn_lock_order),
-                                 best_score, bits_observed, s->phase4_trn_lock_score);
+                                 best_score, bits_observed, s->phase4_trn_lock_score,
+                                 s->phase4_trn_recent_score);
                     }
                     else if ((s->phase4_trn_after_j % 256) == 0)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%)\n",
+                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%)\n",
                                  best_h, phase4_trn_domain_name(best_domain),
                                  phase4_trn_tap_value(best_tap), phase4_trn_order_name(best_order),
-                                 best_score, bits_observed, score_pct);
+                                 best_score, bits_observed, score_pct, s->phase4_trn_recent_score);
                     }
                     /*endif*/
                 }
@@ -5440,7 +5570,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
 
             if (phase3_equalizer_refine_active(s)
-                || s->stage == V34_RX_STAGE_PHASE4_TRN)
+                || (s->stage == V34_RX_STAGE_PHASE4_TRN
+                    && !phase4_trn_should_freeze_tracking(s)))
             {
                 /* CMA (blind) equalizer — doesn't need correct symbol decisions,
                    just drives all symbols to constant modulus.  Fixes the 4:1
@@ -5452,10 +5583,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /* Re-enabled carrier tracking — test 4 showed MP detection worked
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
-            error = sym->im*eq_target.re - sym->re*eq_target.im;
-            s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
-            s->carrier_phase += (int32_t)(s->carrier_track_p*error);
-        }
+            if (!phase4_trn_should_freeze_tracking(s))
+            {
+                error = sym->im*eq_target.re - sym->re*eq_target.im;
+                s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
+                s->carrier_phase += (int32_t)(s->carrier_track_p*error);
+            }
+            }
         /*endif*/
     }
     /*endif*/

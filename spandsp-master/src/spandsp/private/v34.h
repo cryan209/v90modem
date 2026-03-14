@@ -778,6 +778,13 @@ typedef struct
     int phase4_trn_current_tap;
     int phase4_trn_current_order;
     int phase4_trn_current_domain;
+    uint32_t phase4_trn_recent_scramble;
+    uint16_t phase4_trn_recent_window_bits;
+    uint16_t phase4_trn_recent_window_ones;
+    uint16_t phase4_trn_recent_window_fill;
+    uint16_t phase4_trn_recent_score;
+    uint8_t phase4_trn_recent_symbol_ones[256];
+    uint8_t phase4_trn_recent_active;
 
     /* MP or MPh receive tracking data */
     int mp_count;
