@@ -2967,10 +2967,28 @@ static void trn_baud_init(v34_state_t *s)
 #define PHASE4_WAIT_BAUDS 0
 #define PHASE4_S_BAUDS 128
 #define PHASE4_TRN_BAUDS 512
-#define PHASE4_TRN_MAX_BAUDS 5200
+static int phase4_trn_max_bauds(const v34_state_t *s)
+{
+    int baud_rate;
+    int max_bauds;
+
+    if (s->tx.baud_rate < 0 || s->tx.baud_rate > 5)
+        return 6858;
+    /*endif*/
+    baud_rate = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+    max_bauds = (baud_rate*2000 + 500)/1000;
+    if (max_bauds < PHASE4_TRN_BAUDS)
+        max_bauds = PHASE4_TRN_BAUDS;
+    /*endif*/
+    return max_bauds;
+}
+/*- End of function --------------------------------------------------------*/
 
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
+    int phase4_trn_guard_bauds;
+
+    phase4_trn_guard_bauds = phase4_trn_max_bauds(s);
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_PHASE4_WAIT:
@@ -3071,17 +3089,17 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                          "Tx - Phase 4: local TRN minimum reached (%d bauds), waiting for far-end J'/TRN confirmation\n",
                          s->tx.tone_duration);
             }
-            else if (s->tx.tone_duration >= PHASE4_TRN_MAX_BAUDS)
+            else if (s->tx.tone_duration >= phase4_trn_guard_bauds)
             {
-                if (s->tx.tone_duration == PHASE4_TRN_MAX_BAUDS)
+                if (s->tx.tone_duration == phase4_trn_guard_bauds)
                 {
-                    /* Failsafe: avoid unbounded TRN if far-end J'/TRN
-                       confirmation is missed locally. Proceed to MP so the
-                       peer can attempt frame lock. */
+                    /* Do not force MP locally. If RX has not confirmed far-end
+                       J'/TRN yet, switching to MP only pollutes the peer's TRN
+                       detector and creates a false late handoff. Hold TRN
+                       until explicit PHASE4_TRN_READY arrives. */
                     span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - Phase 4: TRN guard reached (%d bauds) without far-end J'/TRN confirmation; forcing MP start\n",
+                             "Tx - Phase 4: TRN guard reached (%d bauds ~= 2000 ms) without far-end J'/TRN confirmation; continuing TRN\n",
                              s->tx.tone_duration);
-                    mp_or_mph_baud_init(s);
                 }
                 else if ((s->tx.tone_duration % 512) == 0)
                 {

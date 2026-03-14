@@ -607,8 +607,27 @@ static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int mp_phase4_has_pinned_trn_lock(const v34_rx_state_t *s)
+{
+    return (s->phase4_trn_lock_hyp >= 0
+            && s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT
+            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE);
+}
+/*- End of function --------------------------------------------------------*/
+
 static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
 {
+    if (mp_phase4_has_pinned_trn_lock(s))
+    {
+        mp_reset_hypothesis_search(s);
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
+                 reason, s->phase4_trn_lock_hyp,
+                 phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order));
+        return;
+    }
+    /*endif*/
     s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
     mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
     mp_reset_hypothesis_search(s);
@@ -640,6 +659,19 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
              s->mp_hypothesis);
     s->mp_early_rejects = 0;
     mp_reset_hypothesis_search(s);
+    if (mp_phase4_has_pinned_trn_lock(s))
+    {
+        s->mp_phase4_reject_streak = 0;
+        s->mp_frame_pos = 0;
+        s->mp_frame_target = 0;
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: keeping TRN-locked MP hypothesis/settings after reject (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
+                 s->phase4_trn_lock_hyp,
+                 phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                 phase4_trn_order_name(s->mp_phase4_bit_order));
+        return;
+    }
+    /*endif*/
     if (count_tap_reject
         && ++s->mp_phase4_reject_streak >= tap_switch_rejects)
     {
@@ -4523,33 +4555,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->phase4_trn_lock_hyp >= 0
                 && s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
-                if (s->phase4_trn_lock_score >= MP_TRN_PRELOCK_SCORE_MIN)
-                {
-                    /* Treat TRN as an actual training lock source only when
-                       the ones-score is strong enough to be reliable. */
-                    s->mp_hypothesis = s->phase4_trn_lock_hyp;
-                    s->scramble_reg = s->phase4_trn_scramble[s->mp_hypothesis];
-                    s->bitstream = 0;
-                    s->mp_count = 0;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: direct MP pre-lock from TRN (hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%)\n",
-                             s->mp_hypothesis,
-                             phase4_trn_domain_name(s->phase4_trn_lock_domain),
-                             phase4_trn_tap_value(s->phase4_trn_lock_tap),
-                             phase4_trn_order_name(s->phase4_trn_lock_order),
-                             s->phase4_trn_lock_score);
-                }
-                else
-                {
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: TRN hint too weak for direct pre-lock (hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%, min=%d), using global MP search\n",
-                             s->phase4_trn_lock_hyp,
-                             phase4_trn_domain_name(s->phase4_trn_lock_domain),
-                             phase4_trn_tap_value(s->phase4_trn_lock_tap),
-                             phase4_trn_order_name(s->phase4_trn_lock_order),
-                             s->phase4_trn_lock_score,
-                             MP_TRN_PRELOCK_SCORE_MIN);
-                }
+                /* A strong TRN ones-lock is useful as a hypothesis/search hint,
+                   but it is not sufficient to assert that the current symbols
+                   already belong to MP. In practice this pre-lock path tends to
+                   consume late-TRN symbols as if they were MP, producing fake
+                   all-ones preambles and poisoning frame alignment immediately.
+                   Keep the TRN-selected domain/tap/order as the initial search
+                   mode, but require an actually observed MP preamble before
+                   locking a hypothesis. */
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: TRN hint available but direct MP pre-lock disabled "
+                         "(hyp=%d, dom=%s, tap=%d, ord=%s, ones=%d%%); waiting for observed MP preamble\n",
+                         s->phase4_trn_lock_hyp,
+                         phase4_trn_domain_name(s->phase4_trn_lock_domain),
+                         phase4_trn_tap_value(s->phase4_trn_lock_tap),
+                         phase4_trn_order_name(s->phase4_trn_lock_order),
+                         s->phase4_trn_lock_score);
             }
             /*endif*/
         }
@@ -4639,13 +4660,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 chosen_pending_valid = 0;
                 chosen_pending_bit = 0;
                 chosen_preamble_stream = 0;
-                hint_h = s->phase3_j_lock_hyp;
+                hint_h = mp_phase4_has_pinned_trn_lock(s) ? s->phase4_trn_lock_hyp : s->phase3_j_lock_hyp;
                 /* Constrain early MP lock to the TRN/J hint until we have
                    accumulated a couple of failed frame attempts. Using absolute
                    phase4 duration is ineffective because MP starts late in phase4. */
                 hint_only = (hint_h >= 0
                              && hint_h < MP_HYPOTHESIS_COUNT
-                             && s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS);
+                             && (mp_phase4_has_pinned_trn_lock(s)
+                                 || s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS));
                 hint_found = 0;
                 hint_score = -1;
                 hint_type_bit = 0;
