@@ -2649,6 +2649,16 @@ static complexf_t equalizer_get(v34_rx_state_t *s)
         z = complex_addf(&z, &z1);
     }
     /*endfor*/
+    /* Guard against NaN/Inf from coefficient divergence — reset to
+       center tap if the equalizer has blown up. */
+    if (!isfinite(z.re) || !isfinite(z.im))
+    {
+        cvec_zerof(s->eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+        s->eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(1.0f), TRAINING_SCALE(0.0f));
+        z.re = 0.0f;
+        z.im = 0.0f;
+    }
+    /*endif*/
     return z;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2714,7 +2724,15 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 
     /* Gradient: error * y  (note: CMA gradient is error*y, not target-y like LMS).
        Scale down by 0.1 vs DD-LMS because CMA gradient magnitude is larger
-       (includes |y| factor and potentially large R²-|y|² error). */
+       (includes |y| factor and potentially large R²-|y|² error).
+       Clamp error to prevent explosive divergence when the equalizer output
+       magnitude overshoots — without this, one large sample can cause a
+       runaway feedback loop (error*|y| grows each iteration). */
+    if (error < -4.0f * R2)
+        error = -4.0f * R2;
+    else if (error > 4.0f * R2)
+        error = 4.0f * R2;
+    /*endif*/
     gz.re = 0.1f * s->eq_delta * error * z->re;
     gz.im = 0.1f * s->eq_delta * error * z->im;
 
@@ -4990,7 +5008,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         float mag;
 
         mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
-        if (mag > 0.001f)
+        if (mag > 0.001f  &&  isfinite(mag)  &&  mag < 100.0f)
         {
             float error;
             float target_mag;
@@ -5084,7 +5102,6 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     s->shaper_re = v34_rx_shapers_re[s->baud_rate][s->high_carrier];
     s->shaper_im = v34_rx_shapers_im[s->baud_rate][s->high_carrier];
     s->shaper_sets = steps_per_baud[s->baud_rate];
-    s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
     for (i = 0;  i < len;  i++)
     {
         s->rrc_filter[s->rrc_filter_step] = amp[i];
