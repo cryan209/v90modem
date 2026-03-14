@@ -2539,9 +2539,8 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
 
     /* Switch RX to primary channel demodulator for Phase 3 reception.
-       Keep the demodulator running, but do not arm S detection yet.
-       Per V.34 §11.3.1.2.4 the answerer conditions for S/S->S only after
-       transmitting J. */
+       Acquire the far-end PP immediately, then refine on the first 512T of TRN.
+       J detection is re-armed later when local TRN completes. */
     s->rx.current_demodulator = V34_MODULATION_V34;
     s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
     s->rx.duration = 0;
@@ -2556,6 +2555,11 @@ static void s_not_s_baud_init(v34_state_t *s)
     memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
+    memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+    s->rx.phase3_pp_phase = -1;
+    s->rx.phase3_pp_phase_score = -1;
+    s->rx.phase3_pp_acquire_hits = 0;
+    s->rx.phase3_pp_started = 0;
     memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
     memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
     memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
@@ -2595,7 +2599,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.received_event = V34_EVENT_NONE;
     reset_primary_rx_frontend_for_phase3(s);
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Rx - Phase 3: primary demod active; S detection will arm at J\n");
+             "Rx - Phase 3: primary demod active; acquiring far-end PP for equalizer conditioning\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2743,6 +2747,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
             s->rx.phase3_pp_obs = 0;
             s->rx.phase3_pp_match = 0;
+            memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+            s->rx.phase3_pp_phase = -1;
+            s->rx.phase3_pp_phase_score = -1;
+            s->rx.phase3_pp_acquire_hits = 0;
+            s->rx.phase3_pp_started = 0;
             memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
             memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
             memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));

@@ -746,6 +746,11 @@ typedef struct
     uint8_t phase3_pp_lag8[8];
     int phase3_pp_obs;
     int phase3_pp_match;
+    float phase3_pp_error[48];
+    int phase3_pp_phase;
+    int phase3_pp_phase_score;
+    int phase3_pp_acquire_hits;
+    int phase3_pp_started;
     uint32_t phase3_j_scramble[8];
     uint32_t phase3_j_stream[8];
     uint8_t phase3_j_prev_z[8];
@@ -782,7 +787,7 @@ typedef struct
     uint16_t phase4_trn_recent_window_bits;
     uint16_t phase4_trn_recent_window_ones;
     uint16_t phase4_trn_recent_window_fill;
-    uint16_t phase4_trn_recent_score;
+    int phase4_trn_recent_score;
     uint8_t phase4_trn_recent_symbol_ones[256];
     uint8_t phase4_trn_recent_active;
 

@@ -133,7 +133,6 @@
 #define PHASE4_TRN_READY_MAX_BAUD       2200
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_TRN_FREEZE_SCORE         80
-#define PHASE3_NOT_S_BAUDS              16
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
@@ -142,6 +141,10 @@
 #define MP_HINT_STRICT_REJECTS          2
 #define PHASE3_PP_TRAIN_BAUDS           PP_TOTAL_SYMBOLS
 #define PHASE3_TRN_REFINE_BAUDS         512
+#define PHASE3_PP_ACQUIRE_MIN_BAUDS     160
+#define PHASE3_PP_ACQUIRE_HOLD_BAUDS    24
+#define PHASE3_PP_ACQUIRE_SCORE_MIN     28
+#define PHASE3_PP_ACQUIRE_DECAY         0.98f
 
 enum
 {
@@ -507,6 +510,19 @@ static void mp_reset_hypothesis_search(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void phase3_pp_reset(v34_rx_state_t *s)
+{
+    memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
+    s->phase3_pp_obs = 0;
+    s->phase3_pp_match = 0;
+    memset(s->phase3_pp_error, 0, sizeof(s->phase3_pp_error));
+    s->phase3_pp_phase = -1;
+    s->phase3_pp_phase_score = -1;
+    s->phase3_pp_acquire_hits = 0;
+    s->phase3_pp_started = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void phase4_trn_hyp_reset(v34_rx_state_t *s)
 {
     memset(s->phase4_trn_scramble_tap, 0, sizeof(s->phase4_trn_scramble_tap));
@@ -735,13 +751,17 @@ static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
 {
     if (mp_phase4_has_pinned_trn_lock(s))
     {
-        mp_reset_hypothesis_search(s);
-        span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
-                 reason, s->phase4_trn_lock_hyp,
-                 phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
-                 phase4_trn_order_name(s->mp_phase4_bit_order));
-        return;
+        if (s->mp_phase4_reject_streak < 3)
+        {
+            mp_reset_hypothesis_search(s);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
+                     reason, s->phase4_trn_lock_hyp,
+                     phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                     phase4_trn_order_name(s->mp_phase4_bit_order));
+            return;
+        }
+        /*endif*/
     }
     /*endif*/
     s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
@@ -777,12 +797,26 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
     mp_reset_hypothesis_search(s);
     if (mp_phase4_has_pinned_trn_lock(s))
     {
-        s->mp_phase4_reject_streak = 0;
+        if (count_tap_reject)
+            s->mp_phase4_reject_streak++;
+        /*endif*/
+        if (s->mp_phase4_reject_streak >= tap_switch_rejects)
+        {
+            s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
+            mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: pinned TRN lock with %d rejects, switching MP retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
+                     s->mp_phase4_reject_streak, s->mp_phase4_retry_mode,
+                     phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                     phase4_trn_order_name(s->mp_phase4_bit_order));
+            s->mp_phase4_reject_streak = 0;
+        }
+        /*endif*/
         s->mp_frame_pos = 0;
         s->mp_frame_target = 0;
         span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx - Phase 4: keeping TRN-locked MP hypothesis/settings after reject (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
-                 s->phase4_trn_lock_hyp,
+                 "Rx - Phase 4: keeping TRN-locked MP hypothesis/settings after reject (hyp=%d, streak=%d, dom=%s, tap=%d, ord=%s)\n",
+                 s->phase4_trn_lock_hyp, s->mp_phase4_reject_streak,
                  phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
                  phase4_trn_order_name(s->mp_phase4_bit_order));
         return;
@@ -3142,8 +3176,8 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 static int phase3_equalizer_refine_active(const v34_rx_state_t *s)
 {
     return (s->stage == V34_RX_STAGE_PHASE3_TRAINING
-            && s->duration > (PHASE3_NOT_S_BAUDS + PHASE3_PP_TRAIN_BAUDS)
-            && s->duration <= (PHASE3_NOT_S_BAUDS + PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS));
+            && s->duration > PHASE3_PP_TRAIN_BAUDS
+            && s->duration <= (PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS));
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4043,27 +4077,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* In this path detection is armed only after local J starts (Phase 3),
            so we can use a less strict threshold than earlier TRN-safe values.
            Reversal count is the most robust indicator across phase ambiguity. */
-        if (s->duration >= 128 && (s->s_detect_count >= 18 || s->bit_count >= 20))
-        {
-            int rev_hits = s->bit_count;
-
-            s->received_event = V34_EVENT_S;
-            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-            s->duration = 0;
-            s->bit_count = 0;  /* clear reversal counter reuse */
-            memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
-            s->phase3_pp_obs = 0;
-            s->phase3_pp_match = 0;
-            memset(s->phase3_trn_scramble, 0, sizeof(s->phase3_trn_scramble));
-            memset(s->phase3_trn_one_count, 0, sizeof(s->phase3_trn_one_count));
-            s->phase3_trn_bits = 0;
-            s->phase3_trn_lock_hyp = -1;
-            s->phase3_trn_lock_score = -1;
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S pattern detected (dom=%d/32 rev=%d/32), waiting %dT for !S before PP training\n",
-                     s->s_detect_count, rev_hits, PHASE3_NOT_S_BAUDS);
-        }
-        else if (s->duration >= 6000)
+        if (s->duration >= 6000)
         {
             /* Don't force a false S event; keep searching for a real pattern. */
             span_log(s->logging, SPAN_LOG_FLOW,
@@ -4095,24 +4109,115 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
     case V34_RX_STAGE_PHASE3_TRAINING:
         /* Phase 3 receiver conditioning:
-           - adapt equalizer directly against the known PP sequence
+           - acquire the PP start/phase against the known 48-symbol PP sequence
+           - adapt equalizer directly against the aligned PP sequence
            - optionally refine for only the first 512T of TRN
            - then hold the equalizer steady until J/S handling takes over */
+        {
+        v34_state_t *t;
+
+        t = span_container_of(s, v34_state_t, rx);
         ang1 = arctan2(sample->im, sample->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
-        if (s->duration <= PHASE3_PP_TRAIN_BAUDS)
+        if (!s->phase3_pp_started)
+        {
+            int phase;
+            int best_phase;
+            float best_err;
+            float next_err;
+            float mag;
+
+            mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
+            best_phase = 0;
+            best_err = 0.0f;
+            next_err = 0.0f;
+            for (phase = 0;  phase < PP_PERIOD_SYMBOLS;  phase++)
+            {
+                complexf_t cand;
+                float err;
+
+                cand = pp_symbols[(s->duration - 1 + phase)%PP_PERIOD_SYMBOLS];
+                cand.re *= TRAINING_AMP;
+                cand.im *= TRAINING_AMP;
+                err = (sym->re - cand.re)*(sym->re - cand.re)
+                    + (sym->im - cand.im)*(sym->im - cand.im);
+                s->phase3_pp_error[phase] = PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_error[phase] + err;
+                if (phase == 0 || s->phase3_pp_error[phase] < best_err)
+                {
+                    next_err = best_err;
+                    best_err = s->phase3_pp_error[phase];
+                    best_phase = phase;
+                }
+                else if (next_err == 0.0f || s->phase3_pp_error[phase] < next_err)
+                {
+                    next_err = s->phase3_pp_error[phase];
+                }
+                /*endif*/
+            }
+            /*endfor*/
+
+            if (s->phase3_pp_phase == best_phase)
+                s->phase3_pp_acquire_hits++;
+            else
+                s->phase3_pp_acquire_hits = 1;
+            /*endif*/
+            s->phase3_pp_phase = best_phase;
+            if (next_err > best_err)
+                s->phase3_pp_phase_score = (int) lrintf(next_err - best_err);
+            else
+                s->phase3_pp_phase_score = 0;
+            /*endif*/
+
+            if (s->duration <= 10 || (s->duration % 64) == 0)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3 PP acquire baud %d: mag=%.3f data_bits=%d phase=%d score=%d hold=%d/%d\n",
+                         s->duration, mag, data_bits,
+                         s->phase3_pp_phase, s->phase3_pp_phase_score,
+                         s->phase3_pp_acquire_hits, PHASE3_PP_ACQUIRE_HOLD_BAUDS);
+            }
+            /*endif*/
+
+            if (s->duration >= PHASE3_PP_ACQUIRE_MIN_BAUDS
+                && s->phase3_pp_phase_score >= PHASE3_PP_ACQUIRE_SCORE_MIN
+                && s->phase3_pp_acquire_hits >= PHASE3_PP_ACQUIRE_HOLD_BAUDS)
+            {
+                int acquire_bauds;
+                /* Do not arm PP conditioning while local Phase 3 TX is still in S.
+                   In practice this avoids false PP locks on the S/!S interval. */
+                if (t->tx.stage < V34_TX_STAGE_FIRST_NOT_S)
+                {
+                    goto phase3_training_done;
+                }
+                /*endif*/
+
+                acquire_bauds = s->duration;
+                s->phase3_pp_started = 1;
+                s->duration = 0;
+                memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
+                s->phase3_pp_obs = 0;
+                s->phase3_pp_match = 0;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds), starting supervised PP conditioning\n",
+                         s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds);
+            }
+            /*endif*/
+        }
+        else if (s->duration <= PHASE3_PP_TRAIN_BAUDS)
         {
             complexf_t pp_target;
             float target_mag;
             int idx;
             int prev;
+            int pp_baud;
 
-            idx = (s->duration - 1) & 7;
+            pp_baud = s->duration;
+            idx = (pp_baud - 1) & 7;
             prev = s->phase3_pp_lag8[idx];
-            if (s->duration > 8)
+            if (pp_baud > 8)
             {
                 s->phase3_pp_obs++;
                 if (data_bits == prev)
@@ -4122,40 +4227,42 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
             s->phase3_pp_lag8[idx] = (uint8_t) data_bits;
 
-            pp_target = pp_symbols[(s->duration - 1)%PP_PERIOD_SYMBOLS];
+            pp_target = pp_symbols[(pp_baud - 1 + s->phase3_pp_phase)%PP_PERIOD_SYMBOLS];
             pp_target.re *= TRAINING_AMP;
             pp_target.im *= TRAINING_AMP;
             target_mag = sqrtf(pp_target.re*pp_target.re + pp_target.im*pp_target.im);
             s->eq_target_mag = target_mag;
             tune_equalizer(s, sym, &pp_target);
 
-            if (s->duration == 1)
+            if (pp_baud == 1)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: conditioning equalizer with PP sequence (%d bauds)\n",
+                         "Rx - Phase 3: conditioning on aligned PP sequence (%d bauds)\n",
                          PHASE3_PP_TRAIN_BAUDS);
             }
             /*endif*/
-            if (s->duration <= 10 || (s->duration % 96) == 0)
+            if (pp_baud <= 10 || (pp_baud % 96) == 0)
             {
                 float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
                 float pct = (s->phase3_pp_obs > 0)
                             ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                             : 0.0f;
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3 PP baud %d: mag=%.3f data_bits=%d lag8=%d/%d (%.1f%%)\n",
-                         s->duration, mag, data_bits,
-                         s->phase3_pp_match, s->phase3_pp_obs, pct);
+                         "Rx - Phase 3 PP baud %d: mag=%.3f data_bits=%d lag8=%d/%d (%.1f%%) phase=%d score=%d\n",
+                         pp_baud, mag, data_bits,
+                         s->phase3_pp_match, s->phase3_pp_obs, pct,
+                         s->phase3_pp_phase, s->phase3_pp_phase_score);
             }
             /*endif*/
-            if (s->duration == PHASE3_PP_TRAIN_BAUDS)
+            if (pp_baud == PHASE3_PP_TRAIN_BAUDS)
             {
                 float pct = (s->phase3_pp_obs > 0)
                             ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                             : 0.0f;
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: PP conditioning complete (lag8=%d/%d, %.1f%%), refining with first %dT of TRN\n",
-                         s->phase3_pp_match, s->phase3_pp_obs, pct, PHASE3_TRN_REFINE_BAUDS);
+                         "Rx - Phase 3: PP conditioning complete (lag8=%d/%d, %.1f%%, phase=%d, score=%d), refining with first %dT of TRN\n",
+                         s->phase3_pp_match, s->phase3_pp_obs, pct,
+                         s->phase3_pp_phase, s->phase3_pp_phase_score, PHASE3_TRN_REFINE_BAUDS);
             }
             /*endif*/
         }
@@ -4164,9 +4271,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int h;
             int best_trn_h;
             int best_trn_score;
+            int trn_refine_baud;
 
             best_trn_h = -1;
             best_trn_score = -1;
+            trn_refine_baud = s->duration - PHASE3_PP_TRAIN_BAUDS;
             for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
             {
                 int raw_sym;
@@ -4189,7 +4298,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             /*endfor*/
             s->phase3_trn_bits += 2;
-            if (s->duration == (PHASE3_PP_TRAIN_BAUDS + 1))
+            if (trn_refine_baud == 1)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP complete, using first %dT of TRN for equalizer refinement\n",
@@ -4221,13 +4330,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 /*endif*/
             }
             /*endif*/
-            if (s->duration == (PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS))
+            if (trn_refine_baud == PHASE3_TRN_REFINE_BAUDS)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: first %dT of TRN processed; equalizer frozen, waiting for J-handling stage\n",
                          PHASE3_TRN_REFINE_BAUDS);
             }
             /*endif*/
+        }
+phase3_training_done:
+        ;
         }
         break;
 
@@ -4583,7 +4695,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 {
                     int old_lock_hyp;
                     int old_lock_score;
+                    int old_lock_tap;
+                    int old_lock_order;
+                    int old_lock_domain;
                     int lock_changed;
+                    int lock_identity_changed;
 
                     score_pct = (100*best_score + (bits_observed/2))/bits_observed;
                     s->phase4_trn_current_hyp = best_h;
@@ -4593,7 +4709,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     s->phase4_trn_current_domain = best_domain;
                     old_lock_hyp = s->phase4_trn_lock_hyp;
                     old_lock_score = s->phase4_trn_lock_score;
+                    old_lock_tap = s->phase4_trn_lock_tap;
+                    old_lock_order = s->phase4_trn_lock_order;
+                    old_lock_domain = s->phase4_trn_lock_domain;
                     lock_changed = 0;
+                    lock_identity_changed = 0;
 
                     /* Keep the strongest sustained TRN candidate (with minimum
                        evidence), so later noisy segments do not overwrite it. */
@@ -4606,11 +4726,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         s->phase4_trn_lock_tap = best_tap;
                         s->phase4_trn_lock_order = best_order;
                         s->phase4_trn_lock_domain = best_domain;
-                        phase4_trn_recent_seed(s);
                     }
                     /*endif*/
                     lock_changed = (s->phase4_trn_lock_hyp != old_lock_hyp
                                     || s->phase4_trn_lock_score != old_lock_score);
+                    lock_identity_changed = (s->phase4_trn_lock_hyp != old_lock_hyp
+                                             || s->phase4_trn_lock_tap != old_lock_tap
+                                             || s->phase4_trn_lock_order != old_lock_order
+                                             || s->phase4_trn_lock_domain != old_lock_domain);
+                    if (lock_identity_changed)
+                        phase4_trn_recent_seed(s);
+                    /*endif*/
                     if (s->phase4_trn_recent_active
                         && s->phase4_trn_recent_window_bits > 0
                         && s->phase4_trn_lock_hyp >= 0)
@@ -4620,6 +4746,18 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         s->phase4_trn_current_tap = s->phase4_trn_lock_tap;
                         s->phase4_trn_current_order = s->phase4_trn_lock_order;
                         s->phase4_trn_current_domain = s->phase4_trn_lock_domain;
+
+                        /* Cumulative TRN score can be "poisoned" by early noisy
+                           symbols and never recover above readiness threshold.
+                           Promote a stable full-window recent score for the same
+                           locked candidate to avoid stalling in TRN forever. */
+                        if (s->phase4_trn_recent_window_fill >= PHASE4_TRN_RECENT_WINDOW_BAUDS
+                            && s->phase4_trn_recent_score > s->phase4_trn_lock_score)
+                        {
+                            s->phase4_trn_lock_score = s->phase4_trn_recent_score;
+                            lock_changed = 1;
+                        }
+                        /*endif*/
                     }
                     /*endif*/
                     if (lock_changed && s->phase4_trn_lock_score >= 70)
@@ -6017,9 +6155,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
     s->rx.phase3_s_pos = 0;
-    memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
-    s->rx.phase3_pp_obs = 0;
-    s->rx.phase3_pp_match = 0;
+    phase3_pp_reset(&s->rx);
     memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
     memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
     memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
