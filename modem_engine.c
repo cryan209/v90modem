@@ -355,10 +355,12 @@ static bool valid_v34_baud(int baud)
 
 static bool valid_v34_bps(int bps)
 {
-    return bps == 4800 || bps == 7200 || bps == 9600 || bps == 12000 ||
-           bps == 14400 || bps == 16800 || bps == 19200 || bps == 21600 ||
-           bps == 24000 || bps == 26400 || bps == 28800 || bps == 31200 ||
-           bps == 33600;
+    /* Must be a multiple of 2400 in range [2400, 33600].
+       Note: not all baud/bps combos are valid — SpanDSP's v34_init will
+       return NULL if the combination is unsupported. Max bps per baud rate:
+         2400 baud → 21600, 2743/2800 → 26400, 3000 → 28800,
+         3200 → 31200, 3429 → 33600 */
+    return bps >= 2400 && bps <= 33600 && (bps % 2400) == 0;
 }
 
 /* Bit accumulator for V.22bis TX (one byte at a time) */
@@ -439,9 +441,14 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
-static int        g_v34_start_baud = 2400;   /* Default robust baseline */
-static int        g_v34_start_bps  = 21600;  /* Conservative baseline for initial bring-up */
+static int        g_v34_start_baud = 3200;   /* 3429 has 0 Hz TX/RX carrier separation — unusable without EC */
+static int        g_v34_start_bps  = 31200;  /* Max for 3200 baud per V.34 Table 10 */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
+
+/* Handshake timeouts (in milliseconds) */
+#define V8_TIMEOUT_MS       10000   /* V.8 negotiation: 10 seconds */
+#define TRAINING_TIMEOUT_MS 30000   /* V.34 training (Phase 2-4): 30 seconds */
+static uint64_t g_phase_start_ms = 0;      /* When current phase started */
 
 /* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
@@ -521,6 +528,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
     pthread_mutex_lock(&g_state_mtx);
     if (g_state == ME_TRAINING && g_mod == mod) {
         g_state = ME_DATA;
+        g_phase_start_ms = 0;
         pthread_mutex_unlock(&g_state_mtx);
         fprintf(stderr, "[ME] %s training complete (%d bps)\n", name, rate);
         trace_phase("%s training complete: rate=%d mod=%s", name, rate, me_mod_to_str(mod));
@@ -567,6 +575,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             if (g_state == ME_TRAINING) {
                 g_state = ME_DATA;
+                g_phase_start_ms = 0;
                 int rate = v34_get_current_bit_rate(g_v34);
                 fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
                 trace_phase("V34 enter DATA: rate=%d", rate);
@@ -616,6 +625,7 @@ static void start_v34_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V34 role=%s", g_calling_party ? "caller" : "answerer");
     g_training_rx_energy = 0;
     g_training_rx_count  = 0;
@@ -656,7 +666,7 @@ static void start_v34_training(void)
         span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
                                 SPAN_LOG_FLOW);
     }
-    v34_tx_power(g_v34, -16.0f);
+    v34_tx_power(g_v34, -14.0f);  /* SpanDSP default; -16 was too quiet for some gateways */
 
     /* Echo canceller disabled — LMS diverges because far-end signal is too weak
        by the time it's safe to activate (after Phase 2). Use notch filter instead. */
@@ -666,13 +676,87 @@ static void start_v34_training(void)
     }
 
     /* Initialize notch filter at our TX carrier to remove FXS hybrid echo.
-       Answerer TX at 1600 Hz (low carrier at 2400 baud), caller TX at 1800 Hz.
-       We filter out our OWN TX echo from the received signal. */
+       Carrier frequency depends on baud rate (V.34 Table 10):
+         baud  low_carrier(d/e)   high_carrier(d/e)
+         2400  1600 (2/3)         1800 (3/4)
+         2743  1646 (3/5)         1829 (2/3)
+         2800  1633 (3/5)         1867 (2/3)
+         3000  1800 (3/5)         1200* (2/3)  -- actually 2000
+         3200  1829 (4/7)         1920 (3/5)
+         3429  1959 (4/7)         1959 (4/7)  -- same! unusable
+       In duplex: answerer TX=low, caller TX=high. */
     {
-        float our_tx_carrier = g_calling_party ? 1800.0f : 1600.0f;
-        notch_filter_init(&g_notch, our_tx_carrier, 15.0f, 8000.0f);
-        fprintf(stderr, "[ME] Notch filter initialized at %.0f Hz (Q=15) to remove TX echo\n",
-                our_tx_carrier);
+        /* Compute exact baud rate and carrier from V.34 tables.
+           exact_baud = 2400 * a/c (from baud_rate_parameters) */
+        float exact_baud;
+        float our_tx_carrier;
+        switch (g_v34_start_baud) {
+        case 2400: exact_baud = 2400.0f; break;
+        case 2743: exact_baud = 2400.0f * 8.0f / 7.0f; break;
+        case 2800: exact_baud = 2400.0f * 7.0f / 6.0f; break;
+        case 3000: exact_baud = 2400.0f * 5.0f / 4.0f; break;
+        case 3200: exact_baud = 2400.0f * 4.0f / 3.0f; break;
+        case 3429: exact_baud = 2400.0f * 10.0f / 7.0f; break;
+        default:   exact_baud = 2400.0f; break;
+        }
+        if (g_calling_party) {
+            /* Caller TX = high carrier */
+            switch (g_v34_start_baud) {
+            case 2400: our_tx_carrier = exact_baud * 3.0f / 4.0f; break;
+            case 2743: case 2800: case 3000:
+                       our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
+            case 3200: our_tx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 3429: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
+            default:   our_tx_carrier = exact_baud * 3.0f / 4.0f; break;
+            }
+        } else {
+            /* Answerer TX = low carrier */
+            switch (g_v34_start_baud) {
+            case 2400: our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
+            case 2743: case 2800: case 3000:
+                       our_tx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 3200: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
+            case 3429: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
+            default:   our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
+            }
+        }
+        /* Compute RX carrier to check separation */
+        float rx_carrier;
+        if (g_calling_party) {
+            /* Caller RX = low carrier */
+            switch (g_v34_start_baud) {
+            case 2400: rx_carrier = exact_baud * 2.0f / 3.0f; break;
+            case 2743: case 2800: case 3000:
+                       rx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 3200: rx_carrier = exact_baud * 4.0f / 7.0f; break;
+            case 3429: rx_carrier = exact_baud * 4.0f / 7.0f; break;
+            default:   rx_carrier = exact_baud * 2.0f / 3.0f; break;
+            }
+        } else {
+            /* Answerer RX = high carrier */
+            switch (g_v34_start_baud) {
+            case 2400: rx_carrier = exact_baud * 3.0f / 4.0f; break;
+            case 2743: case 2800: case 3000:
+                       rx_carrier = exact_baud * 2.0f / 3.0f; break;
+            case 3200: rx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 3429: rx_carrier = exact_baud * 4.0f / 7.0f; break;
+            default:   rx_carrier = exact_baud * 3.0f / 4.0f; break;
+            }
+        }
+        float separation = fabsf(rx_carrier - our_tx_carrier);
+        if (separation < 150.0f) {
+            /* Carriers too close — notch would attenuate RX signal.
+               SpanDSP V.34 has its own internal echo management. */
+            g_notch.active = false;
+            fprintf(stderr, "[ME] Notch filter DISABLED: TX=%.1f Hz, RX=%.1f Hz, "
+                    "separation=%.1f Hz too narrow for %d baud\n",
+                    our_tx_carrier, rx_carrier, separation, g_v34_start_baud);
+        } else {
+            notch_filter_init(&g_notch, our_tx_carrier, 30.0f, 8000.0f);
+            fprintf(stderr, "[ME] Notch filter at %.1f Hz (Q=30) for %d baud, "
+                    "RX carrier=%.1f Hz (sep=%.1f Hz)\n",
+                    our_tx_carrier, g_v34_start_baud, rx_carrier, separation);
+        }
     }
 
     fprintf(stderr, "[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
@@ -840,7 +924,7 @@ void me_on_sip_connected(void)
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
                                                   : MODEM_CONNECT_TONES_ANSAM_PR;
-    v8_parms.send_ci            = false;
+    v8_parms.send_ci            = g_calling_party;  /* Caller must send CI so answerer knows we want V.8 */
     v8_parms.v92                = -1;    /* don't send V.92 extension */
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     /* Advertise V.90 + V.34 + V.22bis.  V.90 training starts with V.34
@@ -879,6 +963,7 @@ void me_on_sip_connected(void)
 
     g_state = ME_V8;
     g_mod   = ME_MOD_NONE;
+    g_phase_start_ms = trace_now_ms();
     pthread_mutex_unlock(&g_state_mtx);
     trace_phase("enter V8: advertised mods=%s", g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
@@ -916,6 +1001,27 @@ void me_rx_audio(const int16_t *amp, int len)
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
     pthread_mutex_unlock(&g_state_mtx);
+
+    /* Check for phase timeouts */
+    if (g_phase_start_ms > 0) {
+        uint64_t elapsed = trace_now_ms() - g_phase_start_ms;
+        if (state == ME_V8 && elapsed > V8_TIMEOUT_MS) {
+            fprintf(stderr, "[ME] V.8 negotiation timed out after %llu ms\n",
+                    (unsigned long long)elapsed);
+            trace_phase("V8 timeout after %llums", (unsigned long long)elapsed);
+            g_phase_start_ms = 0;
+            me_hangup();
+            return;
+        }
+        if (state == ME_TRAINING && elapsed > TRAINING_TIMEOUT_MS) {
+            fprintf(stderr, "[ME] V.34 training timed out after %llu ms\n",
+                    (unsigned long long)elapsed);
+            trace_phase("TRAINING timeout after %llums", (unsigned long long)elapsed);
+            g_phase_start_ms = 0;
+            me_hangup();
+            return;
+        }
+    }
 
     switch (state) {
     case ME_V8:
@@ -959,10 +1065,15 @@ void me_rx_audio(const int16_t *amp, int len)
         if (g_mod == ME_MOD_V34) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_mod == ME_MOD_V34 && g_v34) {
-                /* Apply notch filter at our TX carrier frequency */
+                /* Only apply notch filter after Phase 2 completes (Phase 3+).
+                   During Phase 2, both sides use 1200 Hz DPSK — the notch at
+                   1600/1800 Hz could affect the Phase 2 signal through its
+                   skirts, and there's no echo to cancel anyway since TX/RX
+                   share the same frequency band. */
                 int16_t filtered[len];
                 memcpy(filtered, amp, len * sizeof(int16_t));
-                notch_filter_apply(&g_notch, filtered, len);
+                if (v34_get_primary_channel_active(g_v34))
+                    notch_filter_apply(&g_notch, filtered, len);
                 v34_rx(g_v34, filtered, len);
             }
             pthread_mutex_unlock(&g_state_mtx);

@@ -4331,7 +4331,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             int expected_mp_type;
             int abs_bits;
 
-        ang1 = arctan2(sample->im, sample->re);
+        ang1 = arctan2(sym->im, sym->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
