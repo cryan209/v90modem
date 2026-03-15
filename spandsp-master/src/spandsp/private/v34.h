@@ -197,7 +197,8 @@ enum v34_events_e
     V34_EVENT_S,
     V34_EVENT_J,
     V34_EVENT_J_DASHED,
-    V34_EVENT_PHASE4_TRN_READY
+    V34_EVENT_PHASE4_TRN_READY,
+    V34_EVENT_TRAINING_FAILED
 };
 
 typedef struct
@@ -347,6 +348,8 @@ typedef struct
 #else
     complexf_t (*current_getbaud)(v34_state_t *s);
 #endif
+
+    bool getbaud_null_logged;
 
     /*! \brief Mapping frame parsed input */
     uint32_t r0;
@@ -808,6 +811,7 @@ typedef struct
     int mp_phase4_default_bit_order;
     int mp_phase4_default_domain;
     int mp_phase4_reject_streak;
+    int mp_phase4_nolock_count;
     int mp_phase4_alt_tap_active;
     int mp_phase4_alt_order_active;
     int mp_phase4_alt_domain_active;

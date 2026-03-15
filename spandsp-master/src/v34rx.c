@@ -127,10 +127,10 @@
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
 #define MP_TRN_PRELOCK_SCORE_MIN        70
 #define PHASE4_TRN_SCORE_START_BAUD     145
-#define PHASE4_TRN_LOCK_MIN_BITS        512
-#define PHASE4_TRN_READY_MIN_SCORE      70
-#define PHASE4_TRN_READY_MIN_BAUD       1024
-#define PHASE4_TRN_READY_MAX_BAUD       2200
+#define PHASE4_TRN_LOCK_MIN_BITS        64
+#define PHASE4_TRN_READY_MIN_SCORE      65
+#define PHASE4_TRN_READY_MIN_BAUD       160
+#define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_TRN_FREEZE_SCORE         80
 #define MP_HYPOTHESIS_COUNT             24
@@ -753,13 +753,26 @@ static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
     {
         if (s->mp_phase4_reject_streak < 3)
         {
-            mp_reset_hypothesis_search(s);
-            span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
-                     reason, s->phase4_trn_lock_hyp,
-                     phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
-                     phase4_trn_order_name(s->mp_phase4_bit_order));
-            return;
+            s->mp_phase4_nolock_count++;
+            /* After 3 no-lock rotations (~1200 bauds), broaden search beyond
+               TRN hint hypothesis — the TRN-locked hyp may not match MP. */
+            if (s->mp_phase4_nolock_count >= 3)
+            {
+                s->mp_phase4_reject_streak = 3;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: %s; TRN hint hyp=%d failed %d times, broadening MP search\n",
+                         reason, s->phase4_trn_lock_hyp, s->mp_phase4_nolock_count);
+            }
+            else
+            {
+                mp_reset_hypothesis_search(s);
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
+                         reason, s->phase4_trn_lock_hyp,
+                         phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                         phase4_trn_order_name(s->mp_phase4_bit_order));
+                return;
+            }
         }
         /*endif*/
     }
@@ -1460,9 +1473,8 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     if (bits[19] != 0)
     {
         span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx - Phase 4: MP%d semantic reject (reserved19=%d expected 0)\n",
+                 "Rx - Phase 4: MP%d reserved19=%d (expected 0), tolerating\n",
                  type, bits[19]);
-        return false;
     }
     /*endif*/
     if (mp->bit_rate_a_to_c < 1  ||  mp->bit_rate_a_to_c > 14
@@ -4455,14 +4467,18 @@ phase3_training_done:
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
 
-        /* I/Q constellation diagnostic: log first 64 TRN bauds after J' */
-        if (s->phase4_j_seen  &&  s->phase4_trn_after_j < 64)
+        /* I/Q constellation diagnostic: log first 64 bauds of S+Sbar and first 64 bauds of TRN scoring */
+        if (s->phase4_j_seen
+            && (s->phase4_trn_after_j < 64
+                || (s->phase4_trn_after_j >= PHASE4_TRN_SCORE_START_BAUD
+                    && s->phase4_trn_after_j < PHASE4_TRN_SCORE_START_BAUD + 64)))
         {
             float deg_abs = (float)ang1 / (4294967296.0f / 360.0f);
             float deg_diff = (float)ang3 / (4294967296.0f / 360.0f);
             float mag_now = sqrtf(sym->re*sym->re + sym->im*sym->im);
-            fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f mag=%.3f abs=%.1f diff=%.1f data=%d\n",
-                    s->phase4_trn_after_j, sym->re, sym->im, mag_now, deg_abs, deg_diff, data_bits);
+            float deg_prev = (float)ang2 / (4294967296.0f / 360.0f);
+            fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f mag=%.3f abs=%.1f prev=%.1f diff=%.1f data=%d abs_bits=%d\n",
+                    s->phase4_trn_after_j, sym->re, sym->im, mag_now, deg_abs, deg_prev, deg_diff, data_bits, abs_bits);
         }
 
         /* Descramble to let the descrambler self-sync (needs ~23 bits) */
@@ -4775,11 +4791,26 @@ phase3_training_done:
                     }
                     else if ((s->phase4_trn_after_j % 256) == 0)
                     {
+                        /* Find best score for each domain separately */
+                        int best_diff_score = 0;
+                        int best_abs_score = 0;
+                        int dh, dt, do2;
+                        for (dt = 0; dt < 2; dt++)
+                            for (do2 = 0; do2 < 2; do2++)
+                                for (dh = 0; dh < MP_HYPOTHESIS_COUNT; dh++)
+                                {
+                                    if (s->phase4_trn_one_count_tap[0][dt][do2][dh] > best_diff_score)
+                                        best_diff_score = s->phase4_trn_one_count_tap[0][dt][do2][dh];
+                                    if (s->phase4_trn_one_count_tap[1][dt][do2][dh] > best_abs_score)
+                                        best_abs_score = s->phase4_trn_one_count_tap[1][dt][do2][dh];
+                                }
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%)\n",
+                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%) [diff_best=%d%% abs_best=%d%%]\n",
                                  best_h, phase4_trn_domain_name(best_domain),
                                  phase4_trn_tap_value(best_tap), phase4_trn_order_name(best_order),
-                                 best_score, bits_observed, score_pct, s->phase4_trn_recent_score);
+                                 best_score, bits_observed, score_pct, s->phase4_trn_recent_score,
+                                 (100*best_diff_score + (bits_observed/2))/bits_observed,
+                                 (100*best_abs_score + (bits_observed/2))/bits_observed);
                     }
                     /*endif*/
                 }
@@ -4789,16 +4820,14 @@ phase3_training_done:
         }
         /*endif*/
 
-        /* Transition to MP scan only after explicit J' and TRN ones-lock. */
+        /* Transition to MP scan after explicit J' and TRN ones-lock.
+           The far-end TRN may be very short (as few as ~100 bauds), so we
+           transition as soon as we have a confident lock — we do NOT require
+           the current sliding-window score to still be high, because the
+           far-end may have already moved past TRN to MP by the time we check. */
         if (s->phase4_j_seen
             && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
-            && s->duration >= 900
-            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
-            && s->phase4_trn_current_score >= PHASE4_TRN_READY_MIN_SCORE
-            && s->phase4_trn_current_hyp == s->phase4_trn_lock_hyp
-            && s->phase4_trn_current_tap == s->phase4_trn_lock_tap
-            && s->phase4_trn_current_order == s->phase4_trn_lock_order
-            && s->phase4_trn_current_domain == s->phase4_trn_lock_domain)
+            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE)
         {
             int h;
             int domain_idx;
@@ -4912,6 +4941,7 @@ phase3_training_done:
             s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
             s->mp_phase4_default_domain = (s->phase4_trn_lock_domain == 1) ? 1 : 0;
             s->mp_phase4_reject_streak = 0;
+            s->mp_phase4_nolock_count = 0;
             s->mp_phase4_alt_tap_active = 0;
             s->mp_phase4_alt_order_active = 0;
             s->mp_phase4_alt_domain_active = 0;
@@ -4969,6 +4999,18 @@ phase3_training_done:
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: waiting for TRN ones-lock before MP (after_j=%d, lock=%d%% current=%d%%, min=%d); staying in TRN\n",
                      s->phase4_trn_after_j, s->phase4_trn_lock_score, s->phase4_trn_current_score, PHASE4_TRN_READY_MIN_SCORE);
+        }
+        /*endif*/
+        /* Timeout: if TRN lock never achieved within max allowed time, signal failure (once) */
+        if (s->phase4_j_seen
+            && s->phase4_trn_after_j >= PHASE4_TRN_READY_MAX_BAUD
+            && s->phase4_trn_lock_score < PHASE4_TRN_READY_MIN_SCORE
+            && s->received_event != V34_EVENT_TRAINING_FAILED)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: TRN timeout (%d bauds after J', lock=%d%% < %d%%); signalling failure\n",
+                     s->phase4_trn_after_j, s->phase4_trn_lock_score, PHASE4_TRN_READY_MIN_SCORE);
+            s->received_event = V34_EVENT_TRAINING_FAILED;
         }
         /*endif*/
         else if (s->duration >= 5200  &&  (s->duration % 512) == 0)
@@ -5401,13 +5443,11 @@ phase3_training_done:
                         type_now = s->mp_frame_bits[18];
                         if (frame_idx == 19  &&  bits[i] != 0)
                         {
+                            s->mp_early_rejects++;
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
-                                     "(expected 0), dropping lock immediately\n",
-                                     type_now, bits[i]);
-                            mp_unlock_after_reject(s, true);
-                            v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "reserved19 mismatch; resuming global search");
-                            break;
+                                     "(expected 0), early_reject_count=%d (continuing until CRC)\n",
+                                     type_now, bits[i], s->mp_early_rejects);
                         }
                         /*endif*/
                         is_inserted_start = (frame_idx == 34 || frame_idx == 51 || frame_idx == 68)
@@ -5709,13 +5749,13 @@ phase3_training_done:
             eq_target.re = (sym->re >= 0.0f)  ?  s2  :  -s2;
             eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
 
-            if (phase3_equalizer_refine_active(s))
+            if (phase3_equalizer_refine_active(s)
+                || s->stage == V34_RX_STAGE_PHASE4_TRN
+                || s->stage == V34_RX_STAGE_PHASE4_MP)
             {
-                /* CMA (blind) equalizer — only during Phase 3 TRN refinement.
-                   Disabled during Phase 4: the equalizer is reset to unity
-                   (passthrough) at Phase 4 entry, which is correct for clean
-                   SIP/RTP channels.  CMA was causing explosive divergence
-                   (mag 4-6x overshoot) and preventing TRN convergence. */
+                /* CMA (blind) equalizer — during Phase 3 TRN refinement and
+                   Phase 4.  Phase 4 needs CMA to adapt equalizer gain for
+                   variable signal levels on analog/SIP channels. */
                 tune_equalizer_cma(s, sym);
             }
             /*endif*/
@@ -6187,6 +6227,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_phase4_default_bit_order = 0;
     s->rx.mp_phase4_default_domain = 0;
     s->rx.mp_phase4_reject_streak = 0;
+    s->rx.mp_phase4_nolock_count = 0;
     s->rx.mp_phase4_alt_tap_active = 0;
     s->rx.mp_phase4_alt_order_active = 0;
     s->rx.mp_phase4_alt_domain_active = 0;

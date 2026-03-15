@@ -3099,6 +3099,15 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             /*endif*/
             s->tx.tone_duration++;
+            if (s->rx.received_event == V34_EVENT_TRAINING_FAILED)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4: TRN training failed after %d bauds, dropping call\n",
+                         s->tx.tone_duration);
+                s->tx.current_getbaud = NULL;
+                return zero;
+            }
+            /*endif*/
             if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
                 && s->rx.received_event == V34_EVENT_PHASE4_TRN_READY)
             {
@@ -3216,6 +3225,16 @@ static void phase4_wait_init(v34_state_t *s)
     cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
     s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
     s->rx.baud_half = 0;
+
+    /* Reset carrier phase rate to nominal for Phase 4 — Phase 3 carrier
+       tracking may have adjusted it away from the correct frequency. */
+    s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+    s->rx.carrier_phase = 0;
+
+    /* Flush RRC filter buffer — stale Phase 3 samples would corrupt
+       the first few Phase 4 matched filter outputs. */
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+    s->rx.rrc_filter_step = 0;
 
     /* Reset TED state for Phase 4 — Phase 3 TED may have accumulated
        bias that prevents clean symbol sync acquisition. */
@@ -3601,9 +3620,14 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
             s->tx.baud_phase -= num;
             if (s->tx.current_getbaud == NULL)
             {
-                span_log(&s->logging, SPAN_LOG_ERROR,
-                         "Tx - NULL current_getbaud in V34 modulator (stage=%d mod=%d)\n",
-                         s->tx.stage, s->tx.current_modulator);
+                if (!s->tx.getbaud_null_logged)
+                {
+                    span_log(&s->logging, SPAN_LOG_ERROR,
+                             "Tx - NULL current_getbaud in V34 modulator (stage=%d mod=%d); silencing further\n",
+                             s->tx.stage, s->tx.current_modulator);
+                    s->tx.getbaud_null_logged = true;
+                }
+                /*endif*/
                 v = zero;
             }
             else
