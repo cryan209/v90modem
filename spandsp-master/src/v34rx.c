@@ -505,8 +505,12 @@ static void mp_reset_hypothesis_search(v34_rx_state_t *s)
 {
     s->mp_hypothesis = -1;
     s->mp_count = -1;
-    memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
-    memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+    /* Do NOT zero mp_hyp_scramble or mp_hyp_bitstream here — the GPC
+       descrambler shift registers must track every input baud continuously.
+       Zeroing them destroys synchronization and makes all subsequent
+       descrambled data garbage even if preamble re-locks.  The registers
+       are properly initialized at MP entry from the TRN scramble state
+       and updated every baud in the hypothesis scan loop. */
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3149,14 +3153,14 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
        which symbol was transmitted.  Immune to the decision-directed convergence
        failure that occurs at 25% BER. */
     y_mag2 = z->re*z->re + z->im*z->im;
-    R2 = s->eq_target_mag * s->eq_target_mag;
+    R2 = 1.0f;  /* Fixed unit radius for QPSK — R²=1.0 */
     error = R2 - y_mag2;
 
     /* Log CMA error periodically */
     if ((s->duration & 0xFF) == 0)
     {
-        fprintf(stderr, "[CMA] baud=%d err=%.4f mag=%.4f R=%.4f delta=%.6f\n",
-                s->duration, error, sqrtf(y_mag2), s->eq_target_mag, s->eq_delta);
+        fprintf(stderr, "[CMA] baud=%d err=%.4f mag=%.4f R=1.0000 delta=%.6f\n",
+                s->duration, error, sqrtf(y_mag2), s->eq_delta);
     }
 
     /* Normalized CMA gradient: error * y / |y|² — normalizing by |y|²
@@ -4932,6 +4936,8 @@ phase3_training_done:
             s->bitstream = 0;
             s->bit_count = 0;
             s->mp_seen = 0;
+            s->received_event = 0;  /* Clear any TRN-phase timeout so MP timeout can fire */
+            s->eq_target_mag = 0.0f;  /* Reset so CMA re-seeds with minimum clamp (1.0) */
             s->mp_remote_ack_seen = 0;
             s->mp_count = -1;
             s->mp_frame_pos = 0;
@@ -5282,11 +5288,39 @@ phase3_training_done:
             /*endif*/
 
         s->duration++;
+        /* MP stage timeout: if we haven't successfully decoded an MP frame
+           within ~2s (4800 bauds at 2400 baud rate), signal training failure
+           so the call can retrain or drop.  The far-end won't wait forever. */
+        if (s->mp_seen == 0
+            && s->duration >= 4800
+            && s->received_event != V34_EVENT_TRAINING_FAILED)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: MP timeout (%d bauds without successful MP frame); signalling failure\n",
+                     s->duration);
+            s->received_event = V34_EVENT_TRAINING_FAILED;
+        }
+        /*endif*/
         if (s->mp_hypothesis < 0
             && s->mp_seen == 0
             && (s->duration % 400) == 0)
         {
-            mp_phase4_rotate_retry_mode(s, "no MP hypothesis lock");
+            /* If TRN locked a hypothesis, keep those descrambler settings —
+               do NOT rotate through modes.  The TRN lock determined the correct
+               domain/tap/order; changing them will prevent MP detection. */
+            if (mp_phase4_has_pinned_trn_lock(s))
+            {
+                mp_reset_hypothesis_search(s);
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: no MP lock at baud %d; keeping TRN-locked settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
+                         s->duration, s->phase4_trn_lock_hyp,
+                         phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
+                         phase4_trn_order_name(s->mp_phase4_bit_order));
+            }
+            else
+            {
+                mp_phase4_rotate_retry_mode(s, "no MP hypothesis lock");
+            }
         }
         /*endif*/
         /* Per-baud MP diagnostics are most useful once a hypothesis is locked.
@@ -5326,7 +5360,18 @@ phase3_training_done:
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
                                  s->mp_hypothesis, s->mp_count);
-                        mp_phase4_rotate_retry_mode(s, "unlock MP hypothesis (preamble timeout)");
+                        if (mp_phase4_has_pinned_trn_lock(s))
+                        {
+                            /* Keep TRN-locked descrambler settings, just reset
+                               hypothesis search to re-scan for preamble */
+                            mp_reset_hypothesis_search(s);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: preamble timeout; keeping TRN-locked settings, resetting preamble search\n");
+                        }
+                        else
+                        {
+                            mp_phase4_rotate_retry_mode(s, "unlock MP hypothesis (preamble timeout)");
+                        }
                         break;
                     }
                     /*endif*/
@@ -5726,22 +5771,12 @@ phase3_training_done:
             float error;
             float target_mag;
 
-            /* Track the expected constellation magnitude with an EMA.
-               Settle quickly in first 128 bauds, then freeze to give CMA
-               a stable target radius (avoids R tracking feedback loop). */
-            if (s->eq_target_mag < 0.001f)
-            {
-                /* First valid sample — seed the EMA */
-                s->eq_target_mag = mag;
-            }
-            else if (s->duration < 128)
-            {
-                float alpha = (s->duration < 32)  ?  0.2f  :  0.05f;
-                s->eq_target_mag += alpha * (mag - s->eq_target_mag);
-            }
-            /* After 128 bauds: frozen — CMA uses this fixed R */
-            /*endif*/
-            target_mag = s->eq_target_mag;
+            /* Fixed CMA target radius: QPSK constellation at unit radius.
+               Adaptive EMA tracking was causing CMA divergence when it seeded
+               from weak first samples (R=0.15), making the equalizer oscillate.
+               A fixed target of 1.0 normalizes the equalizer output to a known
+               level regardless of input power. */
+            target_mag = 1.0f;
 
             /* Snap to nearest of the 4 QPSK points at the FIXED target radius.
                QPSK points at (±1,±1)/√2 scaled by target_mag. */
