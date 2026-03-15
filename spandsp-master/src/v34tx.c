@@ -3951,6 +3951,18 @@ SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
+{
+    return s->rx.stage;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
+{
+    return s->tx.stage;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
 {
     switch (mode)

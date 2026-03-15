@@ -248,6 +248,16 @@ SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_b
     \return true when the primary channel is active. */
 SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s);
 
+/*! Get the current RX stage of the V.34 state machine.
+    \param s The modem context.
+    \return The current RX stage (v34_rx_stages_e value). */
+SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
+
+/*! Get the current TX stage of the V.34 state machine.
+    \param s The modem context.
+    \return The current TX stage (v34_tx_stages_e value). */
+SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
+
 #if defined(__cplusplus)
 }
 #endif

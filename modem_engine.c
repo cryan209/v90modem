@@ -33,6 +33,68 @@
 #include <stdarg.h>
 #include <sys/time.h>
 
+/* V.34 RX/TX stage enums — copied from spandsp/private/v34.h to avoid
+   pulling in SpanDSP's full internal header chain.  We access g_v34->rx.stage
+   and g_v34->tx.stage by casting through a minimal struct overlay. */
+enum v34_rx_stages_e {
+    V34_RX_STAGE_INFO0 = 1,
+    V34_RX_STAGE_INFOH,
+    V34_RX_STAGE_INFO1C,
+    V34_RX_STAGE_INFO1A,
+    V34_RX_STAGE_TONE_A,
+    V34_RX_STAGE_TONE_B,
+    V34_RX_STAGE_L1_L2,
+    V34_RX_STAGE_CC,
+    V34_RX_STAGE_PRIMARY_CHANNEL,
+    V34_RX_STAGE_PHASE3_WAIT_S,
+    V34_RX_STAGE_PHASE3_TRAINING,
+    V34_RX_STAGE_PHASE3_DONE,
+    V34_RX_STAGE_PHASE4_S = 14,
+    V34_RX_STAGE_PHASE4_S_BAR = 16,
+    V34_RX_STAGE_PHASE4_TRN = 18,
+    V34_RX_STAGE_PHASE4_MP = 20,
+};
+
+enum v34_tx_stages_e {
+    V34_TX_STAGE_INITIAL_PREAMBLE = 1,
+    V34_TX_STAGE_INFO0,
+    V34_TX_STAGE_INITIAL_A,
+    V34_TX_STAGE_FIRST_A,
+    V34_TX_STAGE_FIRST_NOT_A,
+    V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN,
+    V34_TX_STAGE_SECOND_A,
+    V34_TX_STAGE_L1,
+    V34_TX_STAGE_L2,
+    V34_TX_STAGE_POST_L2_A,
+    V34_TX_STAGE_POST_L2_NOT_A,
+    V34_TX_STAGE_A_SILENCE,
+    V34_TX_STAGE_PRE_INFO1_A,
+    V34_TX_STAGE_INFO1,
+    V34_TX_STAGE_FIRST_B,
+    V34_TX_STAGE_FIRST_B_INFO_SEEN,
+    V34_TX_STAGE_FIRST_NOT_B_WAIT,
+    V34_TX_STAGE_FIRST_NOT_B,
+    V34_TX_STAGE_FIRST_B_SILENCE,
+    V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE,
+    V34_TX_STAGE_SECOND_B,
+    V34_TX_STAGE_SECOND_B_WAIT,
+    V34_TX_STAGE_SECOND_NOT_B,
+    V34_TX_STAGE_INFO0_RETRY,
+    V34_TX_STAGE_FIRST_S,
+    V34_TX_STAGE_FIRST_NOT_S,
+    V34_TX_STAGE_MD,
+    V34_TX_STAGE_SECOND_S,
+    V34_TX_STAGE_SECOND_NOT_S,
+    V34_TX_STAGE_TRN,
+    V34_TX_STAGE_J,
+    V34_TX_STAGE_J_DASHED,
+    V34_TX_STAGE_PHASE4_WAIT,
+    V34_TX_STAGE_PHASE4_S,
+    V34_TX_STAGE_PHASE4_NOT_S,
+    V34_TX_STAGE_PHASE4_TRN,
+    V34_TX_STAGE_MP,
+};
+
 /* ------------------------------------------------------------------ */
 /* V.90 downstream encoder constants (ITU-T V.90 §5)                  */
 /* ------------------------------------------------------------------ */
@@ -347,6 +409,75 @@ static int parse_env_int(const char *name, int fallback)
     return (int)v;
 }
 
+static const char *v34_rx_stage_name(int stage)
+{
+    switch (stage) {
+    case 0:                              return "IDLE";
+    case V34_RX_STAGE_INFO0:             return "INFO0";
+    case V34_RX_STAGE_INFOH:             return "INFOH";
+    case V34_RX_STAGE_INFO1C:            return "INFO1C";
+    case V34_RX_STAGE_INFO1A:            return "INFO1A";
+    case V34_RX_STAGE_TONE_A:            return "TONE_A";
+    case V34_RX_STAGE_TONE_B:            return "TONE_B";
+    case V34_RX_STAGE_L1_L2:             return "L1_L2";
+    case V34_RX_STAGE_CC:                return "CC";
+    case V34_RX_STAGE_PRIMARY_CHANNEL:   return "PRIMARY_CHANNEL";
+    case V34_RX_STAGE_PHASE3_WAIT_S:     return "PHASE3_WAIT_S";
+    case V34_RX_STAGE_PHASE3_TRAINING:   return "PHASE3_TRAINING";
+    case V34_RX_STAGE_PHASE3_DONE:       return "PHASE3_DONE";
+    case V34_RX_STAGE_PHASE4_S:          return "PHASE4_S";
+    case V34_RX_STAGE_PHASE4_S_BAR:      return "PHASE4_S_BAR";
+    case V34_RX_STAGE_PHASE4_TRN:        return "PHASE4_TRN";
+    case V34_RX_STAGE_PHASE4_MP:         return "PHASE4_MP";
+    default:                             return "UNKNOWN";
+    }
+}
+
+static const char *v34_tx_stage_name(int stage)
+{
+    switch (stage) {
+    case 0:                                        return "IDLE";
+    case V34_TX_STAGE_INITIAL_PREAMBLE:            return "INITIAL_PREAMBLE";
+    case V34_TX_STAGE_INFO0:                       return "INFO0";
+    case V34_TX_STAGE_INITIAL_A:                   return "INITIAL_A";
+    case V34_TX_STAGE_FIRST_A:                     return "FIRST_A";
+    case V34_TX_STAGE_FIRST_NOT_A:                 return "FIRST_NOT_A";
+    case V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN:   return "FIRST_NOT_A_REVERSAL";
+    case V34_TX_STAGE_SECOND_A:                    return "SECOND_A";
+    case V34_TX_STAGE_L1:                          return "L1";
+    case V34_TX_STAGE_L2:                          return "L2";
+    case V34_TX_STAGE_POST_L2_A:                   return "POST_L2_A";
+    case V34_TX_STAGE_POST_L2_NOT_A:               return "POST_L2_NOT_A";
+    case V34_TX_STAGE_A_SILENCE:                   return "A_SILENCE";
+    case V34_TX_STAGE_PRE_INFO1_A:                 return "PRE_INFO1_A";
+    case V34_TX_STAGE_INFO1:                       return "INFO1";
+    case V34_TX_STAGE_FIRST_B:                     return "FIRST_B";
+    case V34_TX_STAGE_FIRST_B_INFO_SEEN:           return "FIRST_B_INFO_SEEN";
+    case V34_TX_STAGE_FIRST_NOT_B_WAIT:            return "FIRST_NOT_B_WAIT";
+    case V34_TX_STAGE_FIRST_NOT_B:                 return "FIRST_NOT_B";
+    case V34_TX_STAGE_FIRST_B_SILENCE:             return "FIRST_B_SILENCE";
+    case V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE: return "FIRST_B_POST_REVERSAL_SILENCE";
+    case V34_TX_STAGE_SECOND_B:                    return "SECOND_B";
+    case V34_TX_STAGE_SECOND_B_WAIT:               return "SECOND_B_WAIT";
+    case V34_TX_STAGE_SECOND_NOT_B:                return "SECOND_NOT_B";
+    case V34_TX_STAGE_INFO0_RETRY:                 return "INFO0_RETRY";
+    case V34_TX_STAGE_FIRST_S:                     return "FIRST_S";
+    case V34_TX_STAGE_FIRST_NOT_S:                 return "FIRST_NOT_S";
+    case V34_TX_STAGE_MD:                          return "MD";
+    case V34_TX_STAGE_SECOND_S:                    return "SECOND_S";
+    case V34_TX_STAGE_SECOND_NOT_S:                return "SECOND_NOT_S";
+    case V34_TX_STAGE_TRN:                         return "TRN";
+    case V34_TX_STAGE_J:                           return "J";
+    case V34_TX_STAGE_J_DASHED:                    return "J_DASHED";
+    case V34_TX_STAGE_PHASE4_WAIT:                 return "PHASE4_WAIT";
+    case V34_TX_STAGE_PHASE4_S:                    return "PHASE4_S";
+    case V34_TX_STAGE_PHASE4_NOT_S:                return "PHASE4_NOT_S";
+    case V34_TX_STAGE_PHASE4_TRN:                  return "PHASE4_TRN";
+    case V34_TX_STAGE_MP:                          return "MP";
+    default:                                       return "UNKNOWN";
+    }
+}
+
 static bool valid_v34_baud(int baud)
 {
     return baud == 2400 || baud == 2743 || baud == 2800 ||
@@ -450,6 +581,10 @@ static int        g_training_tx_samples = 0; /* Sample counter for TX silencing 
 #define TRAINING_TIMEOUT_MS 30000   /* V.34 training (Phase 2-4): 30 seconds */
 static uint64_t g_phase_start_ms = 0;      /* When current phase started */
 
+/* V.34 RX stage tracking — used for notch filter activation and diagnostics */
+static int g_last_rx_stage = 0;            /* Last logged RX stage */
+static int g_last_tx_stage = 0;            /* Last logged TX stage */
+
 /* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
 #define TX_BUF_SIZE 4096
@@ -542,6 +677,9 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 /* V.34 get_bit / put_bit callbacks for SpanDSP                       */
 /* ------------------------------------------------------------------ */
 
+/* Forward declarations */
+static void start_v22bis_training(void);
+
 /* Bit accumulators for V.34 TX and RX (one byte at a time) */
 static uint8_t  v34_tx_byte = 0;
 static int      v34_tx_bits = 0;
@@ -583,7 +721,28 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 return;
             }
         }
-        fprintf(stderr, "[ME] V.34 status: %d\n", bit);
+        if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
+            if (g_state == ME_TRAINING && g_mod == ME_MOD_V34) {
+                fprintf(stderr, "[ME] V.34 training failed (%s), falling back to V.22bis\n",
+                        signal_status_to_str(bit));
+                trace_phase("V34 training failed (%s) -> fallback V22BIS",
+                            signal_status_to_str(bit));
+                /* Clean up V.34 state */
+                if (g_v34) {
+                    v34_free(g_v34);
+                    g_v34 = NULL;
+                }
+                g_notch.active = false;
+                g_last_rx_stage = 0;
+                g_last_tx_stage = 0;
+                /* Fall back to V.22bis */
+                pthread_mutex_lock(&g_state_mtx);
+                start_v22bis_training();
+                pthread_mutex_unlock(&g_state_mtx);
+                return;
+            }
+        }
+        fprintf(stderr, "[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
         return;
     }
     /* Normal data bit — accumulate into bytes, write to upstream ring */
@@ -630,6 +789,8 @@ static void start_v34_training(void)
     g_training_rx_energy = 0;
     g_training_rx_count  = 0;
     g_training_tx_samples = 0;
+    g_last_rx_stage = 0;
+    g_last_tx_stage = 0;
 
     /* Reset bit accumulators */
     v34_tx_byte = 0;
@@ -680,8 +841,8 @@ static void start_v34_training(void)
          baud  low_carrier(d/e)   high_carrier(d/e)
          2400  1600 (2/3)         1800 (3/4)
          2743  1646 (3/5)         1829 (2/3)
-         2800  1633 (3/5)         1867 (2/3)
-         3000  1800 (3/5)         1200* (2/3)  -- actually 2000
+         2800  1633 (7/12)        1867 (2/3)
+         3000  1800 (3/5)         2000 (2/3)
          3200  1829 (4/7)         1920 (3/5)
          3429  1959 (4/7)         1959 (4/7)  -- same! unusable
        In duplex: answerer TX=low, caller TX=high. */
@@ -713,8 +874,9 @@ static void start_v34_training(void)
             /* Answerer TX = low carrier */
             switch (g_v34_start_baud) {
             case 2400: our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
-            case 2743: case 2800: case 3000:
+            case 2743: case 3000:
                        our_tx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 2800: our_tx_carrier = exact_baud * 7.0f / 12.0f; break;
             case 3200: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
             case 3429: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
             default:   our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
@@ -726,8 +888,9 @@ static void start_v34_training(void)
             /* Caller RX = low carrier */
             switch (g_v34_start_baud) {
             case 2400: rx_carrier = exact_baud * 2.0f / 3.0f; break;
-            case 2743: case 2800: case 3000:
+            case 2743: case 3000:
                        rx_carrier = exact_baud * 3.0f / 5.0f; break;
+            case 2800: rx_carrier = exact_baud * 7.0f / 12.0f; break;
             case 3200: rx_carrier = exact_baud * 4.0f / 7.0f; break;
             case 3429: rx_carrier = exact_baud * 4.0f / 7.0f; break;
             default:   rx_carrier = exact_baud * 2.0f / 3.0f; break;
@@ -1014,10 +1177,28 @@ void me_rx_audio(const int16_t *amp, int len)
             return;
         }
         if (state == ME_TRAINING && elapsed > TRAINING_TIMEOUT_MS) {
-            fprintf(stderr, "[ME] V.34 training timed out after %llu ms\n",
-                    (unsigned long long)elapsed);
-            trace_phase("TRAINING timeout after %llums", (unsigned long long)elapsed);
+            fprintf(stderr, "[ME] Training timed out after %llu ms (mod=%s)\n",
+                    (unsigned long long)elapsed, me_mod_to_str(g_mod));
+            trace_phase("TRAINING timeout after %llums mod=%s",
+                        (unsigned long long)elapsed, me_mod_to_str(g_mod));
             g_phase_start_ms = 0;
+            if (g_mod == ME_MOD_V34) {
+                /* V.34 training failed — fall back to V.22bis */
+                fprintf(stderr, "[ME] V.34 training timeout, falling back to V.22bis\n");
+                trace_phase("V34 timeout -> fallback V22BIS");
+                if (g_v34) {
+                    v34_free(g_v34);
+                    g_v34 = NULL;
+                }
+                g_notch.active = false;
+                g_last_rx_stage = 0;
+                g_last_tx_stage = 0;
+                pthread_mutex_lock(&g_state_mtx);
+                start_v22bis_training();
+                pthread_mutex_unlock(&g_state_mtx);
+                return;
+            }
+            /* V.22bis timeout — give up */
             me_hangup();
             return;
         }
@@ -1065,14 +1246,29 @@ void me_rx_audio(const int16_t *amp, int len)
         if (g_mod == ME_MOD_V34) {
             pthread_mutex_lock(&g_state_mtx);
             if (g_mod == ME_MOD_V34 && g_v34) {
-                /* Only apply notch filter after Phase 2 completes (Phase 3+).
-                   During Phase 2, both sides use 1200 Hz DPSK — the notch at
-                   1600/1800 Hz could affect the Phase 2 signal through its
-                   skirts, and there's no echo to cancel anyway since TX/RX
-                   share the same frequency band. */
+                /* Log RX/TX stage transitions for training diagnostics */
+                int rx_stage = v34_get_rx_stage(g_v34);
+                int tx_stage = v34_get_tx_stage(g_v34);
+                if (rx_stage != g_last_rx_stage || tx_stage != g_last_tx_stage) {
+                    trace_phase("V34 stage: rx=%s(%d) tx=%s(%d)",
+                                v34_rx_stage_name(rx_stage), rx_stage,
+                                v34_tx_stage_name(tx_stage), tx_stage);
+                    g_last_rx_stage = rx_stage;
+                    g_last_tx_stage = tx_stage;
+                }
+
+                /* Apply notch filter once Phase 3 begins (TX/RX use separated
+                   carriers).  During Phase 2, both sides share 1200 Hz DPSK —
+                   the notch at 1600+ Hz could affect Phase 2 through its skirts,
+                   and there's no echo to cancel since TX/RX overlap.
+                   Previously this used v34_get_primary_channel_active() which
+                   only returns true after Phase 4 completes — far too late.
+                   The equalizer needs clean RX from Phase 3 onset. */
+                bool notch_active = (rx_stage >= V34_RX_STAGE_PHASE3_WAIT_S) ||
+                                    (tx_stage >= V34_TX_STAGE_FIRST_S);
                 int16_t filtered[len];
                 memcpy(filtered, amp, len * sizeof(int16_t));
-                if (v34_get_primary_channel_active(g_v34))
+                if (notch_active)
                     notch_filter_apply(&g_notch, filtered, len);
                 v34_rx(g_v34, filtered, len);
             }
