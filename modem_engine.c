@@ -484,13 +484,21 @@ static bool valid_v34_baud(int baud)
            baud == 3000 || baud == 3200 || baud == 3429;
 }
 
+static int max_v34_bps_for_baud(int baud)
+{
+    /* V.34 Table 2: max bit rate per symbol rate */
+    switch (baud) {
+    case 2400: return 21600;
+    case 2743: case 2800: return 26400;
+    case 3000: return 28800;
+    case 3200: return 31200;
+    case 3429: return 33600;
+    default:   return 21600;
+    }
+}
+
 static bool valid_v34_bps(int bps)
 {
-    /* Must be a multiple of 2400 in range [2400, 33600].
-       Note: not all baud/bps combos are valid — SpanDSP's v34_init will
-       return NULL if the combination is unsupported. Max bps per baud rate:
-         2400 baud → 21600, 2743/2800 → 26400, 3000 → 28800,
-         3200 → 31200, 3429 → 33600 */
     return bps >= 2400 && bps <= 33600 && (bps % 2400) == 0;
 }
 
@@ -572,8 +580,8 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
 static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
-static int        g_v34_start_baud = 3200;   /* 3429 has 0 Hz TX/RX carrier separation — unusable without EC */
-static int        g_v34_start_bps  = 31200;  /* Max for 3200 baud per V.34 Table 10 */
+static int        g_v34_start_baud = 2400;   /* 3200 has 91 Hz separation (notch unusable); 2400 has 200 Hz */
+static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 
 /* Handshake timeouts (in milliseconds) */
@@ -808,9 +816,10 @@ static void start_v34_training(void)
      * Start with a conservative profile that is typically more robust over
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
      */
+    int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
-                     g_v34_start_bps,
+                     bps,
                      g_calling_party,
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
@@ -837,11 +846,11 @@ static void start_v34_training(void)
     }
 
     /* Initialize notch filter at our TX carrier to remove FXS hybrid echo.
-       Carrier frequency depends on baud rate (V.34 Table 10):
+       Carrier frequency depends on baud rate (V.34 Table 2):
          baud  low_carrier(d/e)   high_carrier(d/e)
          2400  1600 (2/3)         1800 (3/4)
          2743  1646 (3/5)         1829 (2/3)
-         2800  1633 (7/12)        1867 (2/3)
+         2800  1680 (3/5)         1867 (2/3)
          3000  1800 (3/5)         2000 (2/3)
          3200  1829 (4/7)         1920 (3/5)
          3429  1959 (4/7)         1959 (4/7)  -- same! unusable
@@ -876,7 +885,7 @@ static void start_v34_training(void)
             case 2400: our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
             case 2743: case 3000:
                        our_tx_carrier = exact_baud * 3.0f / 5.0f; break;
-            case 2800: our_tx_carrier = exact_baud * 7.0f / 12.0f; break;
+            case 2800: our_tx_carrier = exact_baud * 3.0f / 5.0f; break;
             case 3200: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
             case 3429: our_tx_carrier = exact_baud * 4.0f / 7.0f; break;
             default:   our_tx_carrier = exact_baud * 2.0f / 3.0f; break;
@@ -890,7 +899,7 @@ static void start_v34_training(void)
             case 2400: rx_carrier = exact_baud * 2.0f / 3.0f; break;
             case 2743: case 3000:
                        rx_carrier = exact_baud * 3.0f / 5.0f; break;
-            case 2800: rx_carrier = exact_baud * 7.0f / 12.0f; break;
+            case 2800: rx_carrier = exact_baud * 3.0f / 5.0f; break;
             case 3200: rx_carrier = exact_baud * 4.0f / 7.0f; break;
             case 3429: rx_carrier = exact_baud * 4.0f / 7.0f; break;
             default:   rx_carrier = exact_baud * 2.0f / 3.0f; break;
@@ -923,7 +932,7 @@ static void start_v34_training(void)
     }
 
     fprintf(stderr, "[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
-            g_calling_party ? "caller" : "answerer", g_v34_start_baud, g_v34_start_bps);
+            g_calling_party ? "caller" : "answerer", g_v34_start_baud, bps);
 }
 
 static void v8_result_handler(void *user_data, v8_parms_t *result)
@@ -1015,13 +1024,14 @@ void me_init(void)
     }
     {
         int env_baud = parse_env_int("ME_V34_BAUD", g_v34_start_baud);
-        int env_bps  = parse_env_int("ME_V34_BPS", g_v34_start_bps);
+        int env_bps  = parse_env_int("ME_V34_BPS", 0);
         if (valid_v34_baud(env_baud))
             g_v34_start_baud = env_baud;
-        if (valid_v34_bps(env_bps))
+        if (env_bps > 0 && valid_v34_bps(env_bps))
             g_v34_start_bps = env_bps;
+        int effective_bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
         fprintf(stderr, "[ME] V.34 start profile: %d baud / %d bps\n",
-                g_v34_start_baud, g_v34_start_bps);
+                g_v34_start_baud, effective_bps);
     }
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;

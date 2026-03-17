@@ -3710,13 +3710,8 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
            will fiddle the step to align this with the symbols. */
         if (s->eq_put_step <= 0)
         {
-            /* Only AGC until we have locked down the setting. */
-            //if (s->agc_scaling_save == 0.0f)
-#if defined(SPANDSP_USE_FIXED_POINT)
-            //s->agc_scaling = saturate16(((int32_t) (1024.0f*FP_SCALE(2.17f)))/fixed_sqrt32(power));
-#else
-            //s->agc_scaling = (FP_SCALE(2.17f)/RX_PULSESHAPER_GAIN)/fixed_sqrt32(power);
-#endif
+            /* CC channel AGC not needed — Phase 2 works with fixed scaling.
+               Primary channel AGC is re-enabled in primary_channel_rx(). */
             s->eq_put_step += RX_PULSESHAPER_2400_COEFF_SETS*40/(3*2);
             /* Same shaper as the real part above:
                Caller RX at 2400 Hz (answerer TX), Answerer RX at 1200 Hz (caller TX). */
@@ -4218,9 +4213,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
                 s->phase3_pp_obs = 0;
                 s->phase3_pp_match = 0;
+                /* Freeze AGC — the equalizer will now be conditioned with known
+                   PP symbols at the current magnitude.  Freezing prevents AGC from
+                   fighting the LMS equalizer adaptation. */
+                s->agc_scaling_save = s->agc_scaling;
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds), starting supervised PP conditioning\n",
-                         s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds);
+                         "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds), starting supervised PP conditioning (agc frozen at %.6f)\n",
+                         s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds, s->agc_scaling);
             }
             /*endif*/
         }
@@ -4245,12 +4244,27 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
             s->phase3_pp_lag8[idx] = (uint8_t) data_bits;
 
-            pp_target = pp_symbols[(pp_baud - 1 + s->phase3_pp_phase)%PP_PERIOD_SYMBOLS];
-            pp_target.re *= TRAINING_AMP;
-            pp_target.im *= TRAINING_AMP;
-            target_mag = sqrtf(pp_target.re*pp_target.re + pp_target.im*pp_target.im);
-            s->eq_target_mag = target_mag;
-            tune_equalizer(s, sym, &pp_target);
+            /* Scale PP target to match the actual equalizer output magnitude.
+               The AGC + center-tap equalizer produces output at some magnitude
+               that depends on signal power at AGC freeze time.  Track it with
+               an EMA and scale the unit-magnitude PP reference to match. */
+            {
+                float sym_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
+                float scale;
+
+                if (pp_baud <= 1)
+                    s->phase3_pp_mag_ema = sym_mag;
+                else
+                    s->phase3_pp_mag_ema = 0.95f*s->phase3_pp_mag_ema + 0.05f*sym_mag;
+                /*endif*/
+                scale = (s->phase3_pp_mag_ema > 0.01f) ? s->phase3_pp_mag_ema : 1.0f;
+                pp_target = pp_symbols[(pp_baud - 1 + s->phase3_pp_phase)%PP_PERIOD_SYMBOLS];
+                pp_target.re *= scale;
+                pp_target.im *= scale;
+                target_mag = sqrtf(pp_target.re*pp_target.re + pp_target.im*pp_target.im);
+                s->eq_target_mag = target_mag;
+                tune_equalizer(s, sym, &pp_target);
+            }
 
             if (pp_baud == 1)
             {
@@ -4936,7 +4950,9 @@ phase3_training_done:
             s->bitstream = 0;
             s->bit_count = 0;
             s->mp_seen = 0;
-            s->received_event = 0;  /* Clear any TRN-phase timeout so MP timeout can fire */
+            /* Do NOT clear received_event here — TX needs to see PHASE4_TRN_READY
+               to transition from TRN to MP transmission.  The MP timeout at line 5014
+               will overwrite with TRAINING_FAILED if MP decoding fails. */
             s->eq_target_mag = 0.0f;  /* Reset so CMA re-seeds with minimum clamp (1.0) */
             s->mp_remote_ack_seen = 0;
             s->mp_count = -1;
@@ -5895,16 +5911,12 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
            will fiddle the step to align this with the symbols. */
         if (s->eq_put_step <= 0)
         {
-            /* Only AGC until we have locked down the setting. */
-#if defined(SPANDSP_USE_FIXED_POINT)
-            //if (s->agc_scaling_save == 0)
-            //    s->agc_scaling = saturate16(((int32_t) (1024.0f*FP_SCALE(2.17f)))/fixed_sqrt32(power));
-            ///*endif*/
-#else
-            //if (s->agc_scaling_save == 0.0f)
-            //    s->agc_scaling = (FP_SCALE(2.17f)/RX_PULSESHAPER_GAIN)/fixed_sqrt32(power);
-            ///*endif*/
-#endif
+            /* AGC: adapt scaling until locked down.
+               This normalizes equalizer input so that TRAINING_AMP-scaled PP
+               symbols and CMA can operate at the expected magnitude. */
+            if (s->agc_scaling_save == 0.0f  &&  power > 10)
+                s->agc_scaling = 2.17f / sqrtf((float)power);
+            /*endif*/
             s->eq_put_step += s->shaper_sets/2;
 #if defined(SPANDSP_USE_FIXED_POINT)
             qq = vec_circular_dot_prodi16(s->rrc_filter, (*s->shaper_im)[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
