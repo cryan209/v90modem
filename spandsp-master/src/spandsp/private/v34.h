@@ -55,7 +55,7 @@ typedef float cc_rx_shaper_t[V34_RX_CC_PULSESHAPER_COEFF_SETS][V34_RX_FILTER_STE
 #endif
 
 typedef const uint8_t conv_encode_table_t[64][16];
-typedef const uint8_t conv_decode_table_t[16][16];
+typedef const uint8_t conv_decode_table_t[16][4];
 
 enum
 {

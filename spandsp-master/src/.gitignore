@@ -1,0 +1,40 @@
+# Generated code generator binaries (built from make_*.c sources during make)
+make_at_dictionary
+make_cielab_luts
+make_math_fixed_tables
+make_modem_filter
+make_modem_godard_descriptor
+make_t43_gray_code_tables
+make_v34_convolutional_coders
+make_v34_probe_signals
+make_v34_shell_map
+make_v34_tx_pre_emphasis_filters
+
+# Generated headers (rebuilt by make_* tools during make)
+at_interpreter_dictionary.h
+cielab_luts.h
+math_fixed_tables.h
+t43_gray_code_tables.h
+v17_v32bis_rx_rrc.h
+v17_v32bis_tx_rrc.h
+v22bis_rx_1200_rrc.h
+v22bis_rx_2400_rrc.h
+v22bis_tx_rrc.h
+v27ter_rx_2400_rrc.h
+v27ter_rx_4800_rrc.h
+v27ter_tx_2400_rrc.h
+v27ter_tx_4800_rrc.h
+v29rx_rrc.h
+v29tx_rrc.h
+
+# Libtool build artifacts
+.libs/
+.deps/
+
+# Libtool object and archive files
+*.lo
+*.la
+
+# Generated godard descriptor headers (rebuilt by make_modem_godard_descriptor)
+v17_v32bis_rx_godard.h
+v29rx_godard.h
