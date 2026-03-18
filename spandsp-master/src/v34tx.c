@@ -1685,9 +1685,20 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
         /* Are we at the initial stage, where A or B comes next, or at the retry
            stage, where we keep repeating INFO0 */
         if (s->tx.stage == V34_TX_STAGE_INFO0)
+        {
             initial_ab_not_ab_baud_init(s);
+        }
+        else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
+                 && s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            /* A valid INFO0c arrived while we were retrying — go straight to Tone A */
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - INFO0_RETRY: INFO0c received OK, switching to Tone A\n");
+            initial_ab_not_ab_baud_init(s);
+        }
         else
+        {
             info0_baud_init(s);
+        }
         /*endif*/
     }
     /*endif*/

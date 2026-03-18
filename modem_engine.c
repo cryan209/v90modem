@@ -836,7 +836,7 @@ static void start_v34_training(void)
         span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
                                 SPAN_LOG_FLOW);
     }
-    v34_tx_power(g_v34, -14.0f);  /* SpanDSP default; -16 was too quiet for some gateways */
+    v34_tx_power(g_v34, -10.0f);  /* Boosted from -14; caller modem not detecting our Phase 2 */
 
     /* Echo canceller disabled — LMS diverges because far-end signal is too weak
        by the time it's safe to activate (after Phase 2). Use notch filter instead. */
@@ -1281,6 +1281,24 @@ void me_rx_audio(const int16_t *amp, int len)
                 if (notch_active)
                     notch_filter_apply(&g_notch, filtered, len);
                 v34_rx(g_v34, filtered, len);
+                /* RX PCM dump during training */
+                {
+                    static FILE *rx_dump = NULL;
+                    if (!rx_dump) {
+                        rx_dump = fopen("/tmp/v34_rx.raw", "wb");
+                        if (rx_dump)
+                            fprintf(stderr, "[ME] RX PCM dump: /tmp/v34_rx.raw (s16le 8000Hz mono)\n");
+                    }
+                    if (rx_dump) {
+                        fwrite(filtered, sizeof(int16_t), len, rx_dump);
+                        static int rx_dump_count = 0;
+                        rx_dump_count += len;
+                        if (rx_dump_count >= 8000) {
+                            fflush(rx_dump);
+                            rx_dump_count = 0;
+                        }
+                    }
+                }
             }
             pthread_mutex_unlock(&g_state_mtx);
         } else if (g_v22bis)
@@ -1327,6 +1345,30 @@ void me_tx_audio(int16_t *amp, int len)
             if (g_mod == ME_MOD_V34 && g_v34)
                 v34_tx(g_v34, amp, len);
             pthread_mutex_unlock(&g_state_mtx);
+            /* TX PCM dump + RMS diagnostic during training */
+            {
+                static FILE *tx_dump = NULL;
+                static int64_t tx_energy = 0;
+                static int tx_count = 0;
+                if (!tx_dump) {
+                    tx_dump = fopen("/tmp/v34_tx.raw", "wb");
+                    if (tx_dump)
+                        fprintf(stderr, "[ME] TX PCM dump: /tmp/v34_tx.raw (s16le 8000Hz mono)\n");
+                }
+                if (tx_dump)
+                    fwrite(amp, sizeof(int16_t), len, tx_dump);
+                for (int i = 0; i < len; i++)
+                    tx_energy += (int64_t)amp[i] * amp[i];
+                tx_count += len;
+                if (tx_count >= 8000) {
+                    double rms = sqrt((double)tx_energy / tx_count);
+                    fprintf(stderr, "[ME] Training TX: RMS=%.1f (%d samples)\n",
+                            rms, tx_count);
+                    if (tx_dump) fflush(tx_dump);
+                    tx_energy = 0;
+                    tx_count = 0;
+                }
+            }
         } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;

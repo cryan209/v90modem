@@ -818,6 +818,9 @@ typedef struct
     int mp_phase4_retry_mode;
     int mp_phase4_bit_order;
     int mp_phase4_domain;
+    int mp_phase4_force_abs_active;
+    int mp_phase4_diff_collapse_streak;
+    int mp_phase4_diff_recover_streak;
     int last_logged_mp_diag_state;
 
     int dft_ptr;
