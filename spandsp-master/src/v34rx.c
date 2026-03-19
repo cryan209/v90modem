@@ -154,6 +154,8 @@
 #define PHASE3_J_PROGRESS_LOG_INTERVAL  32
 #define PHASE4_J_PROGRESS_LOG_INTERVAL  32
 #define V34_DEBUG_IQ_LOG                0
+#define PHASE4_MP_NOLOCK_LOG_INTERVAL   800
+#define PHASE4_MP_BAUD_LOG_INTERVAL     400
 
 enum
 {
@@ -1629,6 +1631,10 @@ static void log_mp_lock_seed(v34_rx_state_t *s,
 {
     char tail[33];
     char seed_bits[25];
+
+    if (score < (MP_PREAMBLE_SCORE_MIN - 1))
+        return;
+    /*endif*/
 
     bits32_to_str(preamble_stream, tail);
     frame_bits_to_str(s->mp_frame_bits, 0, 24, seed_bits);
@@ -4184,9 +4190,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /* Phase 3 transition should be driven by J (Table 18).
                                Treat J' hits here as diagnostics only to avoid
                                premature Phase 4 transitions with unknown TRN size. */
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 3: canonical J' candidate ignored (hyp=%d phase=%d score=%d/32 bits=%d)\n",
-                                     best_h, best_p, best_score, s->phase3_j_bits);
+                            if ((s->phase3_j_bits % 32) == 0)
+                            {
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 3: canonical J' candidate ignored (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                                         best_h, best_p, best_score, s->phase3_j_bits);
+                            }
+                            /*endif*/
                         }
                         else
                         {
@@ -4597,7 +4607,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                              "Rx - Phase 3 TRN refine: lock hint hyp=%d ones=%d/%d (%d%%)\n",
                              best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
                 }
-                else if ((s->phase3_trn_bits % 256) == 0)
+                else if ((s->phase3_trn_bits % 512) == 0)
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 TRN refine: best hyp=%d ones=%d/%d (%d%%)\n",
@@ -5695,15 +5705,20 @@ phase3_training_done:
                         if (sc_diag > best_sc)
                             best_sc = sc_diag;
                     }
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: no MP lock at baud %d; best_score=%d/%d hint_hyp=%d hint_bs=0x%08X (dom=%s%s, tap=%d, ord=%s)\n",
-                             s->duration, best_sc, MP_PREAMBLE_SCORE_MIN,
-                             s->phase4_trn_lock_hyp,
-                             (unsigned)s->mp_hyp_bitstream[s->phase4_trn_lock_hyp],
-                             phase4_trn_domain_name(s->mp_phase4_domain),
-                             s->mp_phase4_force_abs_active ? "/auto-abs" : "",
-                             s->scrambler_tap,
-                             phase4_trn_order_name(s->mp_phase4_bit_order));
+                    if ((s->duration % PHASE4_MP_NOLOCK_LOG_INTERVAL) == 0
+                        || best_sc >= (MP_PREAMBLE_SCORE_MIN - 1))
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: no MP lock at baud %d; best_score=%d/%d hint_hyp=%d hint_bs=0x%08X (dom=%s%s, tap=%d, ord=%s)\n",
+                                 s->duration, best_sc, MP_PREAMBLE_SCORE_MIN,
+                                 s->phase4_trn_lock_hyp,
+                                 (unsigned)s->mp_hyp_bitstream[s->phase4_trn_lock_hyp],
+                                 phase4_trn_domain_name(s->mp_phase4_domain),
+                                 s->mp_phase4_force_abs_active ? "/auto-abs" : "",
+                                 s->scrambler_tap,
+                                 phase4_trn_order_name(s->mp_phase4_bit_order));
+                    }
+                    /*endif*/
                 }
                 mp_reset_hypothesis_search(s);
             }
@@ -5718,7 +5733,7 @@ phase3_training_done:
            adding actionable information. */
         if (s->mp_hypothesis >= 0
             && s->mp_seen == 0
-            && (s->duration <= 30 || (s->duration % 200) == 0))
+            && (s->duration <= 6 || (s->duration % PHASE4_MP_BAUD_LOG_INTERVAL) == 0))
         {
             float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
             span_log(s->logging, SPAN_LOG_FLOW,
@@ -5922,11 +5937,11 @@ phase3_training_done:
                            - MP0: early window + periodic checkpoints + inserted starts
                            - MP1: slightly denser early window + periodic checkpoints + inserted starts */
                         log_body_bit = (s->mp_frame_target <= 88)
-                                       ? (s->bit_count <= 16
-                                          || (s->bit_count % 8) == 0
+                                       ? (s->bit_count <= 4
+                                          || (s->bit_count % 16) == 0
                                           || is_inserted_start)
-                                       : (s->bit_count <= 40
-                                       || (s->bit_count % 8) == 0
+                                       : (s->bit_count <= 16
+                                       || (s->bit_count % 16) == 0
                                        || is_inserted_start);
                         if (log_body_bit  &&  s->mp_seen == 0)
                         {
