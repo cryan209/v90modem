@@ -154,8 +154,15 @@
 #define PHASE3_J_PROGRESS_LOG_INTERVAL  32
 #define PHASE4_J_PROGRESS_LOG_INTERVAL  32
 #define V34_DEBUG_IQ_LOG                0
+#define V34_DEBUG_INFO_RX_DIAG          0
+#define V34_DEBUG_MP_DIBIT_DIST         0
 #define PHASE4_MP_NOLOCK_LOG_INTERVAL   800
 #define PHASE4_MP_BAUD_LOG_INTERVAL     400
+#define PHASE4_MP_DIBIT_LOG_INTERVAL    1600
+#define PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL 3200
+#define PHASE3_S_BAUD_LOG_INTERVAL      1000
+#define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
+#define PHASE3_PP_BAUD_LOG_INTERVAL     192
 
 enum
 {
@@ -2985,7 +2992,8 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
     }
     /*endfor*/
     /* Periodic diagnostic: log every 8000 samples (~1s) */
-    if (s->duration % 8000 < (unsigned)len)
+    if (V34_DEBUG_INFO_RX_DIAG
+        && s->duration % 8000 < (unsigned)len)
     {
         span_log(s->logging, SPAN_LOG_FLOW,
                  "Rx info_rx diag: stage=%d sig=%d pwr=%d bits=%d\n",
@@ -4314,7 +4322,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->s_window &= ~(1u << idx);
             s->bit_count += new_rev - old_rev;  /* reuse bit_count as reversal window count */
 
-        if (s->duration <= 10 || (s->duration % 500) == 0)
+        if (s->duration <= 4 || (s->duration % PHASE3_S_BAUD_LOG_INTERVAL) == 0)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d dom=%d/32 rev=%d/32 counts=%d,%d,%d,%d\n",
@@ -4421,7 +4429,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_pp_phase_score = 0;
             /*endif*/
 
-            if (s->duration <= 10 || (s->duration % 64) == 0)
+            if (s->duration <= 4 || (s->duration % PHASE3_PP_ACQUIRE_LOG_INTERVAL) == 0)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3 PP acquire baud %d: mag=%.3f data_bits=%d phase=%d score=%d hold=%d/%d\n",
@@ -4527,7 +4535,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                          PHASE3_PP_TRAIN_BAUDS);
             }
             /*endif*/
-            if (pp_baud <= 10 || (pp_baud % 96) == 0)
+            if (pp_baud <= 4 || (pp_baud % PHASE3_PP_BAUD_LOG_INTERVAL) == 0)
             {
                 float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
                 float pct = (s->phase3_pp_obs > 0)
@@ -5387,20 +5395,26 @@ phase3_training_done:
             static int dibit_hist[4] = {0,0,0,0};
             static int abs_hist[4] = {0,0,0,0};
             static int diag_count = 0;
+            static int diag_baud = 0;
             dibit_hist[data_bits]++;
             abs_hist[abs_bits]++;
             if (s->mp_seen == 0)
             {
                 diag_count++;
+                diag_baud++;
                 if (diag_count == 400)
                 {
-                    float mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
-                    float ang_deg = atan2f(sym->im, sym->re) * 180.0f / 3.14159265f;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4 MP dibit dist (400 bauds): diff=[%d,%d,%d,%d] abs=[%d,%d,%d,%d] mag=%.3f ang=%.1f\n",
-                             dibit_hist[0], dibit_hist[1], dibit_hist[2], dibit_hist[3],
-                             abs_hist[0], abs_hist[1], abs_hist[2], abs_hist[3],
-                             mag, ang_deg);
+                    if (V34_DEBUG_MP_DIBIT_DIST
+                        && (diag_baud % PHASE4_MP_DIBIT_LOG_INTERVAL) == 0)
+                    {
+                        float mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
+                        float ang_deg = atan2f(sym->im, sym->re) * 180.0f / 3.14159265f;
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4 MP dibit dist (400 bauds): diff=[%d,%d,%d,%d] abs=[%d,%d,%d,%d] mag=%.3f ang=%.1f\n",
+                                 dibit_hist[0], dibit_hist[1], dibit_hist[2], dibit_hist[3],
+                                 abs_hist[0], abs_hist[1], abs_hist[2], abs_hist[3],
+                                 mag, ang_deg);
+                    }
                     mp_phase4_update_auto_domain(s, dibit_hist, abs_hist);
                     dibit_hist[0] = dibit_hist[1] = dibit_hist[2] = dibit_hist[3] = 0;
                     abs_hist[0] = abs_hist[1] = abs_hist[2] = abs_hist[3] = 0;
@@ -5803,10 +5817,10 @@ phase3_training_done:
                     continue;
                 }
                 /*endif*/
-                if (s->mp_seen == 1)
+                if (s->mp_seen == 1  &&  s->mp_remote_ack_seen)
                 {
-                    /* Once MP is accepted, stay on the current hypothesis and
-                       wait for E; avoid relocking churn that can mask E. */
+                    /* We've received MP' (with ack bit); now just wait for E.
+                       Avoid relocking churn that can mask E. */
                     continue;
                 }
                 /*endif*/
@@ -5881,7 +5895,12 @@ phase3_training_done:
 
                             data_idx = mp_data_bit_index(type_now, idx);
                             s->mp_early_rejects++;
-                            start_err_accept_max = (type_now == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
+                            /* MP0 often suffers a transient inserted-start mismatch
+                               from one-bit alignment wobble. Allow a small number
+                               before dropping lock so CRC/slip recovery can run. */
+                            start_err_accept_max = (type_now == 1)
+                                                   ? MP1_START_ERR_ACCEPT_MAX
+                                                   : MP_EARLY_START_ERR_MAX;
                             if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
@@ -5915,14 +5934,28 @@ phase3_training_done:
                         type_now = s->mp_frame_bits[18];
                         if (frame_idx == 19  &&  bits[i] != 0)
                         {
+                            int early_reject_max;
+
+                            early_reject_max = (type_now == 1)
+                                               ? MP1_START_ERR_ACCEPT_MAX
+                                               : MP_EARLY_START_ERR_MAX;
                             s->mp_early_rejects++;
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
-                                     "(expected 0), early_reject_count=%d (rejecting lock immediately)\n",
-                                     type_now, bits[i], s->mp_early_rejects);
-                            mp_unlock_after_reject(s, true);
-                            v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "reserved bit mismatch; dropping lock");
-                            break;
+                            if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
+                            {
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
+                                         "(expected 0), early_reject_count=%d max=%d%s\n",
+                                         type_now, bits[i], s->mp_early_rejects, early_reject_max,
+                                         (s->mp_early_rejects > early_reject_max) ? " (rejecting lock immediately)" : " (continuing until CRC)");
+                            }
+                            /*endif*/
+                            if (s->mp_early_rejects > early_reject_max)
+                            {
+                                mp_unlock_after_reject(s, true);
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "reserved bit mismatch; dropping lock");
+                                break;
+                            }
+                            /*endif*/
                         }
                         /*endif*/
                         is_inserted_start = (frame_idx == 34 || frame_idx == 51 || frame_idx == 68)
@@ -6037,8 +6070,18 @@ phase3_training_done:
                     starts_good = (start_err_count == 0);
                     if (s->mp_seen == 0  ||  !crc_good  ||  !fill_good  ||  !starts_good)
                     {
-                        log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
-                        log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
+                        bool log_reject_detail;
+
+                        log_reject_detail = (s->duration <= PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL
+                                             || (s->duration % PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL) == 0
+                                             || !fill_good
+                                             || !starts_good
+                                             || (crc_good && fill_good));
+                        if (log_reject_detail)
+                        {
+                            log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
+                            log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
+                        }
                     }
                     {
                         bool frame_accepted;
@@ -6048,7 +6091,9 @@ phase3_training_done:
 
                         frame_accepted = false;
                         first_mp_accept = (s->mp_seen == 0);
-                        start_err_accept_max = (type == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
+                        start_err_accept_max = (type == 1)
+                                               ? MP1_START_ERR_ACCEPT_MAX
+                                               : MP_EARLY_START_ERR_MAX;
                         starts_acceptable = (start_err_count <= start_err_accept_max);
                         if (crc_good  &&  fill_good)
                         {
@@ -6058,7 +6103,7 @@ phase3_training_done:
                             if (s->duplex)
                             {
                                 mp_pack_for_parser(s->info_buf, s->mp_frame_bits, type);
-                                if (first_mp_accept  ||  type == 1)
+                                if (first_mp_accept  ||  type == 1  ||  !s->mp_remote_ack_seen)
                                 {
                                     process_rx_mp(s, &mp, s->info_buf);
                                     semantic_good = mp_semantic_ok_phase4(s, &mp, type, s->mp_frame_bits);
@@ -6114,6 +6159,8 @@ phase3_training_done:
                                 s->mp_early_rejects = 0;
                                 if (first_mp_accept)
                                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted; awaiting E");
+                                else if (s->mp_remote_ack_seen)
+                                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP' (ack) accepted; awaiting E");
                                 frame_accepted = true;
                             }
                             else
@@ -6178,9 +6225,12 @@ phase3_training_done:
                                     vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
                                 vote_frames++;
 
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP0 vote accumulator: %d frames (hyp=%d)\n",
-                                         vote_frames, vote_hyp);
+                                if (vote_frames <= 2 || (vote_frames % 4) == 0)
+                                {
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 4: MP0 vote accumulator: %d frames (hyp=%d)\n",
+                                             vote_frames, vote_hyp);
+                                }
 
                                 /* Try majority-vote after every 3+ frames */
                                 if (vote_frames >= 3)
