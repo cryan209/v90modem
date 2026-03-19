@@ -769,6 +769,12 @@ typedef struct
     int phase3_trn_lock_score;
     int phase4_j_seen;
     int phase4_j_lock_hyp;
+    int phase4_j_bits;
+    uint32_t phase4_j_scramble_tap[2][2][2][8];
+    uint32_t phase4_j_stream_tap[2][2][2][8];
+    uint8_t phase4_j_prev_z_tap[2][2][2][8];
+    uint8_t phase4_j_prev_valid_tap[2][2][2][8];
+    uint32_t phase4_j_win_tap[2][2][2][8][16];
     int phase4_trn_after_j;
     uint32_t phase4_trn_scramble_tap[2][2][2][24];
     uint16_t phase4_trn_one_count_tap[2][2][2][24];

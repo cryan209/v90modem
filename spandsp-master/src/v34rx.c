@@ -125,6 +125,7 @@
 #define MP_HINT_LOCK_SCORE_MIN          14
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
+#define PHASE4_MP_TIMEOUT_BAUDS         20000
 #define MP_TRN_PRELOCK_SCORE_MIN        70
 #define PHASE4_TRN_SCORE_START_BAUD     145
 #define PHASE4_TRN_LOCK_MIN_BITS        64
@@ -139,12 +140,20 @@
 #define MP1_START_ERR_ACCEPT_MAX        3
 #define MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES 4
 #define MP_HINT_STRICT_REJECTS          2
+#define MP_HINT_MAX_NOLOCKS             3
 #define PHASE3_PP_TRAIN_BAUDS           PP_TOTAL_SYMBOLS
 #define PHASE3_TRN_REFINE_BAUDS         512
 #define PHASE3_PP_ACQUIRE_MIN_BAUDS     160
 #define PHASE3_PP_ACQUIRE_HOLD_BAUDS    24
 #define PHASE3_PP_ACQUIRE_SCORE_MIN     28
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
+#define V34_AGC_POWER_MIN               100000
+#define V34_AGC_SCALING_MIN             0.00001f
+#define V34_AGC_SCALING_MAX             0.01f
+#define PHASE3_PP_MAG_SANITY_MAX        20.0f
+#define PHASE3_J_PROGRESS_LOG_INTERVAL  32
+#define PHASE4_J_PROGRESS_LOG_INTERVAL  32
+#define V34_DEBUG_IQ_LOG                0
 
 enum
 {
@@ -868,6 +877,17 @@ static void mp_phase4_update_auto_domain(v34_rx_state_t *s, const int diff_hist[
                  phase4_trn_domain_name(s->mp_phase4_domain));
     }
     /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_j_detector_reset(v34_rx_state_t *s)
+{
+    s->phase4_j_bits = 0;
+    memset(s->phase4_j_scramble_tap, 0, sizeof(s->phase4_j_scramble_tap));
+    memset(s->phase4_j_stream_tap, 0, sizeof(s->phase4_j_stream_tap));
+    memset(s->phase4_j_prev_z_tap, 0, sizeof(s->phase4_j_prev_z_tap));
+    memset(s->phase4_j_prev_valid_tap, 0, sizeof(s->phase4_j_prev_valid_tap));
+    memset(s->phase4_j_win_tap, 0, sizeof(s->phase4_j_win_tap));
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3298,6 +3318,13 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
 
     /* Find the x and y mismatch from the exact constellation position. */
     ez = complex_subf(target, z);
+    if (!isfinite(z->re) || !isfinite(z->im)
+        || !isfinite(target->re) || !isfinite(target->im)
+        || !isfinite(ez.re) || !isfinite(ez.im))
+    {
+        return;
+    }
+    /*endif*/
     /* Log equalizer error magnitude periodically */
     if ((s->duration & 0xFF) == 0)
     {
@@ -4075,7 +4102,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endfor*/
                 s->phase3_j_bits += 2;
-                if ((s->duration <= 20 || (s->duration % 64) == 0) && s->phase3_j_bits >= 16)
+                if (s->phase3_j_bits >= 16
+                    &&
+                    (s->phase3_j_bits == 16
+                        ||
+                        (s->phase3_j_bits % PHASE3_J_PROGRESS_LOG_INTERVAL) == 0))
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 J detector: bits=%d best_score=%d/32 hyp=%d\n",
@@ -4099,6 +4130,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     char rx_ordered_bits[17];
                     const char *j_validity;
                     int canonical_ok;
+                    int emit_diag;
 
                     rx_recent16 = (uint16_t) (s->phase3_j_stream[best_h] & 0xFFFFU);
                     rx_ordered16 = j_ordered16(rx_recent16, s->phase3_j_bits, best_p);
@@ -4137,9 +4169,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         j_validity = canonical_ok ? "valid J(4-point)" : "near/non-canonical";
                     else
                         j_validity = canonical_ok ? "valid J'" : "near/non-canonical";
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
-                             rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                    emit_diag = canonical_ok || ((s->phase3_j_bits % 16) == 0);
+                    if (emit_diag)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 3 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
+                                 rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                    }
+                    /*endif*/
                     if (canonical_ok)
                     {
                         if (pat == 2)
@@ -4164,8 +4201,12 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     else
                     {
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 3: J candidate rejected (non-canonical 16-bit pattern)\n");
+                        if (emit_diag)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3: J candidate rejected (non-canonical 16-bit pattern)\n");
+                        }
+                        /*endif*/
                     }
                 }
                 /*endif*/
@@ -4300,6 +4341,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase4_j_seen = 0;
             s->phase4_j_lock_hyp = -1;
             s->phase4_trn_after_j = 0;
+            phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
         }
         }
@@ -4446,6 +4488,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 float sym_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
                 float scale;
 
+                if (!isfinite(sym_mag) || sym_mag <= 0.0f || sym_mag > PHASE3_PP_MAG_SANITY_MAX)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: PP conditioning symbol magnitude out of range (mag=%.3f), clamping target scale and resetting equalizer\n",
+                             sym_mag);
+                    sym_mag = 1.0f;
+                    equalizer_reset(s);
+                }
+                /*endif*/
                 if (pp_baud <= 1)
                     s->eq_target_mag = sym_mag;
                 else
@@ -4605,6 +4656,7 @@ phase3_training_done:
                      s->duration, mag, data_bits, s->s_detect_count);
         }
         /* Dump raw I/Q constellation for first 32 bauds to diagnose signal quality */
+        #if V34_DEBUG_IQ_LOG
         if (s->duration <= 32)
         {
             uint32_t ang_abs = arctan2(sym->im, sym->re);
@@ -4613,6 +4665,7 @@ phase3_training_done:
             fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f ang=%.1f diff=%.1f data=%d\n",
                     s->duration, sym->re, sym->im, deg, deg_diff, data_bits);
         }
+        #endif
 
         if (s->duration >= 128 && s->s_detect_count >= 20)
         {
@@ -4628,6 +4681,7 @@ phase3_training_done:
             s->stage = V34_RX_STAGE_PHASE4_TRN;
             s->duration = 0;
             s->scramble_reg = 0;
+            phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
         }
         else if (s->duration >= 2048)
@@ -4642,6 +4696,7 @@ phase3_training_done:
             s->stage = V34_RX_STAGE_PHASE4_TRN;
             s->duration = 0;
             s->scramble_reg = 0;
+            phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
         }
         break;
@@ -4662,6 +4717,7 @@ phase3_training_done:
             s->stage = V34_RX_STAGE_PHASE4_TRN;
             s->duration = 0;
             s->scramble_reg = 0;
+            phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
         }
         break;
@@ -4679,6 +4735,7 @@ phase3_training_done:
         s->duration++;
 
         /* I/Q constellation diagnostic: log first 64 bauds of S+Sbar and first 64 bauds of TRN scoring */
+        #if V34_DEBUG_IQ_LOG
         if (s->phase4_j_seen
             && (s->phase4_trn_after_j < 64
                 || (s->phase4_trn_after_j >= PHASE4_TRN_SCORE_START_BAUD
@@ -4691,6 +4748,7 @@ phase3_training_done:
             fprintf(stderr, "[IQ] baud=%d re=%.4f im=%.4f mag=%.3f abs=%.1f prev=%.1f diff=%.1f data=%d abs_bits=%d\n",
                     s->phase4_trn_after_j, sym->re, sym->im, mag_now, deg_abs, deg_prev, deg_diff, data_bits, abs_bits);
         }
+        #endif
 
         /* Descramble to let the descrambler self-sync (needs ~23 bits) */
         {
@@ -4704,78 +4762,123 @@ phase3_training_done:
 
         if (!s->phase4_j_seen)
         {
+            int domain_idx;
+            int tap_idx;
+            int order_idx;
             int h;
             int best_h;
             int best_p;
             int best_score;
+            int best_domain;
+            int best_tap;
+            int best_order;
 
             best_h = -1;
             best_p = 0;
             best_score = -1;
-            for (h = 0;  h < 8;  h++)
+            best_domain = 0;
+            best_tap = 0;
+            best_order = 0;
+            for (domain_idx = 0;  domain_idx < 2;  domain_idx++)
             {
-                int raw_sym;
-                int in_sym;
-                uint32_t reg;
-                int dbit[2];
-                int b;
-
-                raw_sym = map_phase4_raw_bits(data_bits, h);
-                if (s->phase3_j_prev_valid[h])
+                for (tap_idx = 0;  tap_idx < 2;  tap_idx++)
                 {
-                    in_sym = (raw_sym - s->phase3_j_prev_z[h]) & 0x3;
-                    reg = s->phase3_j_scramble[h];
-                    dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
-                    dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
-                    s->phase3_j_scramble[h] = reg;
-                    s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
-                    s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
+                    int tap;
 
-                    for (b = 0;  b < 2;  b++)
+                    tap = phase4_trn_tap_value(tap_idx);
+                    for (order_idx = 0;  order_idx < 2;  order_idx++)
                     {
-                        int bit_pos;
-                        int p;
-
-                        bit_pos = s->phase3_j_bits + b;
-                        for (p = 0;  p < 16;  p++)
+                        for (h = 0;  h < 8;  h++)
                         {
-                            int match;
-                            uint32_t w;
-                            int score;
+                            int raw_sym;
+                            int in_sym;
+                            uint32_t reg;
+                            int dbit[2];
+                            int b;
 
-                            match = (dbit[b] == phase3_j_pattern_bit(2, bit_pos + p)) ? 1 : 0;
-                            w = s->phase3_j_win[h][2][p];
-                            w = ((w << 1) | match) & 0xFFFFFFFFU;
-                            s->phase3_j_win[h][2][p] = w;
-                            score = __builtin_popcount(w);
-                            if (score > best_score)
+                            raw_sym = map_phase4_raw_bits(domain_idx ? abs_bits : data_bits, h);
+                            if (s->phase4_j_prev_valid_tap[domain_idx][tap_idx][order_idx][h])
                             {
-                                best_score = score;
-                                best_h = h;
-                                best_p = p;
+                                in_sym = (raw_sym - s->phase4_j_prev_z_tap[domain_idx][tap_idx][order_idx][h]) & 0x3;
+                                reg = s->phase4_j_scramble_tap[domain_idx][tap_idx][order_idx][h];
+                                if (order_idx == 0)
+                                {
+                                    dbit[0] = descramble_reg(&reg, tap, in_sym & 1);
+                                    dbit[1] = descramble_reg(&reg, tap, (in_sym >> 1) & 1);
+                                }
+                                else
+                                {
+                                    dbit[0] = descramble_reg(&reg, tap, (in_sym >> 1) & 1);
+                                    dbit[1] = descramble_reg(&reg, tap, in_sym & 1);
+                                }
+                                /*endif*/
+                                s->phase4_j_scramble_tap[domain_idx][tap_idx][order_idx][h] = reg;
+                                s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] =
+                                    ((s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
+                                s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] =
+                                    ((s->phase4_j_stream_tap[domain_idx][tap_idx][order_idx][h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
+
+                                for (b = 0;  b < 2;  b++)
+                                {
+                                    int bit_pos;
+                                    int p;
+
+                                    bit_pos = s->phase4_j_bits + b;
+                                    for (p = 0;  p < 16;  p++)
+                                    {
+                                        int match;
+                                        uint32_t w;
+                                        int score;
+
+                                        match = (dbit[b] == phase3_j_pattern_bit(2, bit_pos + p)) ? 1 : 0;
+                                        w = s->phase4_j_win_tap[domain_idx][tap_idx][order_idx][h][p];
+                                        w = ((w << 1) | match) & 0xFFFFFFFFU;
+                                        s->phase4_j_win_tap[domain_idx][tap_idx][order_idx][h][p] = w;
+                                        score = __builtin_popcount(w);
+                                        if (score > best_score)
+                                        {
+                                            best_score = score;
+                                            best_h = h;
+                                            best_p = p;
+                                            best_domain = domain_idx;
+                                            best_tap = tap_idx;
+                                            best_order = order_idx;
+                                        }
+                                        /*endif*/
+                                    }
+                                    /*endfor*/
+                                }
+                                /*endfor*/
                             }
                             /*endif*/
+                            s->phase4_j_prev_z_tap[domain_idx][tap_idx][order_idx][h] = (uint8_t) raw_sym;
+                            s->phase4_j_prev_valid_tap[domain_idx][tap_idx][order_idx][h] = 1;
                         }
                         /*endfor*/
                     }
                     /*endfor*/
                 }
-                /*endif*/
-                s->phase3_j_prev_z[h] = (uint8_t) raw_sym;
-                s->phase3_j_prev_valid[h] = 1;
+                /*endfor*/
             }
             /*endfor*/
 
-            s->phase3_j_bits += 2;
-            if ((s->duration <= 20 || (s->duration % 64) == 0) && s->phase3_j_bits >= 16)
+            s->phase4_j_bits += 2;
+            if (s->phase4_j_bits >= 16
+                &&
+                (s->phase4_j_bits == 16
+                    ||
+                    (s->phase4_j_bits % PHASE4_J_PROGRESS_LOG_INTERVAL) == 0))
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4 J' detector: bits=%d best_score=%d/32 hyp=%d\n",
-                         s->phase3_j_bits, best_score, best_h);
+                         "Rx - Phase 4 J' detector: bits=%d best_score=%d/32 hyp=%d dom=%s tap=%d ord=%s\n",
+                         s->phase4_j_bits, best_score, best_h,
+                         phase4_trn_domain_name(best_domain),
+                         phase4_trn_tap_value(best_tap),
+                         phase4_trn_order_name(best_order));
             }
             /*endif*/
 
-            if (s->phase3_j_bits >= 32
+            if (s->phase4_j_bits >= 32
                 && best_h >= 0
                 && best_score >= 24)
             {
@@ -4789,9 +4892,10 @@ phase3_training_done:
                 char rx_ordered_bits[17];
                 const char *j_validity;
                 int canonical_ok;
+                int emit_diag;
 
-                rx_recent16 = (uint16_t) (s->phase3_j_stream[best_h] & 0xFFFFU);
-                rx_ordered16 = j_ordered16(rx_recent16, s->phase3_j_bits, best_p);
+                rx_recent16 = (uint16_t) (s->phase4_j_stream_tap[best_domain][best_tap][best_order][best_h] & 0xFFFFU);
+                rx_ordered16 = j_ordered16(rx_recent16, s->phase4_j_bits, best_p);
                 bits16_to_str(rx_recent16, rx_recent_bits);
                 bits16_to_str(rx_ordered16, rx_ordered_bits);
                 d4 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x8990U));
@@ -4804,19 +4908,28 @@ phase3_training_done:
                     dmin = d16;
                 canonical_ok = (djd <= 3);
                 j_validity = canonical_ok ? "valid J'" : ((dmin <= 3) ? "valid non-J'" : "near/non-canonical");
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
-                         rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                emit_diag = canonical_ok || ((s->phase4_j_bits % 16) == 0);
+                if (emit_diag)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4 J bits: recent16=%s ordered16=%s phase=%d (%s, d4=%d d16=%d dj'=%d)\n",
+                             rx_recent_bits, rx_ordered_bits, best_p, j_validity, d4, d16, djd);
+                }
+                /*endif*/
                 if (canonical_ok)
                 {
                     s->phase4_j_seen = 1;
                     s->phase4_trn_after_j = 0;
                     phase4_trn_hyp_reset(s);
                     s->phase4_j_lock_hyp = best_h;
+                    s->scrambler_tap = phase4_trn_tap_value(best_tap);
                     s->received_event = V34_EVENT_J_DASHED;
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d)\n",
-                             best_h, best_p, best_score, s->phase3_j_bits);
+                             "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d dom=%s tap=%d ord=%s)\n",
+                             best_h, best_p, best_score, s->phase4_j_bits,
+                             phase4_trn_domain_name(best_domain),
+                             phase4_trn_tap_value(best_tap),
+                             phase4_trn_order_name(best_order));
                 }
                 /*endif*/
             }
@@ -5266,27 +5379,30 @@ phase3_training_done:
             static int diag_count = 0;
             dibit_hist[data_bits]++;
             abs_hist[abs_bits]++;
-            diag_count++;
-            if (diag_count == 400)
+            if (s->mp_seen == 0)
             {
-                float mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
-                float ang_deg = atan2f(sym->im, sym->re) * 180.0f / 3.14159265f;
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4 MP dibit dist (400 bauds): diff=[%d,%d,%d,%d] abs=[%d,%d,%d,%d] mag=%.3f ang=%.1f\n",
-                         dibit_hist[0], dibit_hist[1], dibit_hist[2], dibit_hist[3],
-                         abs_hist[0], abs_hist[1], abs_hist[2], abs_hist[3],
-                         mag, ang_deg);
-                mp_phase4_update_auto_domain(s, dibit_hist, abs_hist);
-                dibit_hist[0] = dibit_hist[1] = dibit_hist[2] = dibit_hist[3] = 0;
-                abs_hist[0] = abs_hist[1] = abs_hist[2] = abs_hist[3] = 0;
-                diag_count = 0;
+                diag_count++;
+                if (diag_count == 400)
+                {
+                    float mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
+                    float ang_deg = atan2f(sym->im, sym->re) * 180.0f / 3.14159265f;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4 MP dibit dist (400 bauds): diff=[%d,%d,%d,%d] abs=[%d,%d,%d,%d] mag=%.3f ang=%.1f\n",
+                             dibit_hist[0], dibit_hist[1], dibit_hist[2], dibit_hist[3],
+                             abs_hist[0], abs_hist[1], abs_hist[2], abs_hist[3],
+                             mag, ang_deg);
+                    mp_phase4_update_auto_domain(s, dibit_hist, abs_hist);
+                    dibit_hist[0] = dibit_hist[1] = dibit_hist[2] = dibit_hist[3] = 0;
+                    abs_hist[0] = abs_hist[1] = abs_hist[2] = abs_hist[3] = 0;
+                    diag_count = 0;
+                }
             }
         }
 
-        /* During initial Phase 4 MP acquisition, prefer MP0 (type 0) to avoid
-           false MP1 preamble locks. After a couple of rejects, relax back to
-           either type for interoperability with non-standard peers. */
-        expected_mp_type = (s->mp_seen == 0 && s->mp_phase4_reject_streak < 2) ? 0 : -1;
+        /* During initial Phase 4 MP acquisition, lock only MP0 (type 0).
+           In observed failures, early MP1 locks are almost always false and
+           consume the Phase 4 budget. */
+        expected_mp_type = (s->mp_seen == 0) ? 0 : -1;
 
             locked_this_symbol = 0;
 
@@ -5315,6 +5431,7 @@ phase3_training_done:
                 uint32_t chosen_preamble_stream;
                 int hint_h;
                 int hint_only;
+                int strict_mp0_lock;
                 int hint_found;
                 int hint_score;
                 int hint_type_bit;
@@ -5335,13 +5452,16 @@ phase3_training_done:
                 chosen_pending_bit = 0;
                 chosen_preamble_stream = 0;
                 hint_h = mp_phase4_has_pinned_trn_lock(s) ? s->phase4_trn_lock_hyp : s->phase3_j_lock_hyp;
+                strict_mp0_lock = (s->mp_seen == 0 && expected_mp_type == 0);
                 /* Constrain early MP lock to the TRN/J hint until we have
                    accumulated a couple of failed frame attempts. Using absolute
                    phase4 duration is ineffective because MP starts late in phase4. */
                 hint_only = (hint_h >= 0
+                             && s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS
+                             && s->mp_phase4_nolock_count < MP_HINT_MAX_NOLOCKS
                              && hint_h < MP_HYPOTHESIS_COUNT
                              && (mp_phase4_has_pinned_trn_lock(s)
-                                 || s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS));
+                                 || s->phase3_j_lock_hyp >= 0));
                 hint_found = 0;
                 hint_score = -1;
                 hint_type_bit = 0;
@@ -5415,8 +5535,11 @@ phase3_training_done:
                     }
                     /*endif*/
                     sc = mp_preamble_score(bstream);
-                    if (sc >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
+                    if ((!strict_mp0_lock || expected_mp_type != 0)
+                        && sc >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
+                        && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
+                        && d0 == 0
                         && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
@@ -5433,8 +5556,11 @@ phase3_training_done:
                         chosen_preamble_stream = bstream;
                     }
                     /*endif*/
-                    if (h == hint_h
+                    if ((!strict_mp0_lock || expected_mp_type != 0)
+                        && h == hint_h
                         && sc >= MP_HINT_LOCK_SCORE_MIN
+                        && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
+                        && d0 == 0
                         && (expected_mp_type < 0 || d1 == expected_mp_type)
                         && mp_preamble_has_start_zero(bstream)
                         && mp_preamble_has_sync_ones(bstream)
@@ -5478,6 +5604,7 @@ phase3_training_done:
 
                 if (chosen_hyp >= 0)
                 {
+                    s->mp_phase4_nolock_count = 0;
                     s->mp_hypothesis = chosen_hyp;
                     s->scramble_reg = chosen_reg;
                     s->bitstream = chosen_bstream;
@@ -5531,7 +5658,7 @@ phase3_training_done:
            within ~2s (4800 bauds at 2400 baud rate), signal training failure
            so the call can retrain or drop.  The far-end won't wait forever. */
         if (s->mp_seen == 0
-            && s->duration >= 4800
+            && s->duration >= PHASE4_MP_TIMEOUT_BAUDS
             && s->received_event != V34_EVENT_TRAINING_FAILED)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
@@ -5549,6 +5676,16 @@ phase3_training_done:
                domain/tap/order; changing them will prevent MP detection. */
             if (mp_phase4_has_pinned_trn_lock(s))
             {
+                s->mp_phase4_nolock_count++;
+                if (s->mp_phase4_nolock_count >= MP_HINT_MAX_NOLOCKS
+                    && s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS)
+                {
+                    s->mp_phase4_reject_streak = MP_HINT_STRICT_REJECTS;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: no MP lock at baud %d with pinned hint hyp=%d for %d windows; broadening MP search beyond hint-only\n",
+                             s->duration, s->phase4_trn_lock_hyp, s->mp_phase4_nolock_count);
+                }
+                /*endif*/
                 /* Log best preamble score for the hint hypothesis to diagnose MP lock failures */
                 {
                     int best_sc = 0;
@@ -5560,7 +5697,7 @@ phase3_training_done:
                     }
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: no MP lock at baud %d; best_score=%d/%d hint_hyp=%d hint_bs=0x%08X (dom=%s%s, tap=%d, ord=%s)\n",
-                             s->duration, best_sc, MP_LOCK_SCORE_MIN,
+                             s->duration, best_sc, MP_PREAMBLE_SCORE_MIN,
                              s->phase4_trn_lock_hyp,
                              (unsigned)s->mp_hyp_bitstream[s->phase4_trn_lock_hyp],
                              phase4_trn_domain_name(s->mp_phase4_domain),
@@ -5580,6 +5717,7 @@ phase3_training_done:
            Suppress unlocked chatter (hyp=-1), which tends to dominate logs without
            adding actionable information. */
         if (s->mp_hypothesis >= 0
+            && s->mp_seen == 0
             && (s->duration <= 30 || (s->duration % 200) == 0))
         {
             float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
@@ -5596,7 +5734,7 @@ phase3_training_done:
             for (i = 0;  i < 2;  i++)
             {
                 s->bitstream = (s->bitstream << 1) | bits[i];
-                if (s->mp_hypothesis >= 0  &&  s->mp_frame_pos == 0)
+                if (s->mp_hypothesis >= 0  &&  s->mp_frame_pos == 0  &&  s->mp_seen == 0)
                 {
                     int preamble_wait_limit;
 
@@ -5650,6 +5788,13 @@ phase3_training_done:
                     continue;
                 }
                 /*endif*/
+                if (s->mp_seen == 1)
+                {
+                    /* Once MP is accepted, stay on the current hypothesis and
+                       wait for E; avoid relocking churn that can mask E. */
+                    continue;
+                }
+                /*endif*/
 
                 /* Detect 17x'1' + start '0' + type bit only when not already
                    collecting an MP frame. Otherwise we can retrigger on long runs
@@ -5671,6 +5816,9 @@ phase3_training_done:
                         if (expected_mp_type >= 0  &&  type != expected_mp_type)
                             continue;
                         /*endif*/
+                        if (type == 0 && s->mp_frame_bits[19] != 0)
+                            continue;
+                        /*endif*/
                         s->mp_frame_target = (type == 1)  ?  188  :  88;
                         s->mp_frame_pos = 19;
                         s->mp_count = 0;
@@ -5678,12 +5826,15 @@ phase3_training_done:
                         s->mp_early_rejects = 0;
                         v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP preamble found; collecting frame");
 
-                        bits32_to_str(s->bitstream, tail);
-                        span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4: MP preamble detected (baud %d): "
-                                 "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
-                                 "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
-                                 s->duration, preamble_score, type, s->mp_frame_target, tail);
+                        if (s->mp_seen == 0)
+                        {
+                            bits32_to_str(s->bitstream, tail);
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: MP preamble detected (baud %d): "
+                                     "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
+                                     "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
+                                     s->duration, preamble_score, type, s->mp_frame_target, tail);
+                        }
                         continue;
                     }
                     /*endif*/
@@ -5711,20 +5862,28 @@ phase3_training_done:
                         if (!mp_start_bit_ok(type_now, idx, bits[i]))
                         {
                             int data_idx;
+                            int start_err_accept_max;
 
                             data_idx = mp_data_bit_index(type_now, idx);
                             s->mp_early_rejects++;
+                            start_err_accept_max = (type_now == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
                             if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d start-bit mismatch at frame_idx=%d body_idx=%d data_idx=%d value=%d "
-                                         "(expected 0), start_err_count=%d (continuing until CRC)\n",
-                                         type_now, idx, idx - 19 + 1, data_idx, bits[i], s->mp_early_rejects);
+                                         "(expected 0), start_err_count=%d max=%d%s\n",
+                                         type_now, idx, idx - 19 + 1, data_idx, bits[i],
+                                         s->mp_early_rejects, start_err_accept_max,
+                                         (s->mp_early_rejects > start_err_accept_max) ? " (rejecting lock immediately)" : " (continuing until CRC)");
                             }
                             /*endif*/
-                            /* Do not fast-reject on first inserted start mismatch.
-                               Keep collecting through CRC so slip/boundary recovery
-                               can salvage near-correct locks. */
+                            if (s->mp_early_rejects > start_err_accept_max)
+                            {
+                                mp_unlock_after_reject(s, true);
+                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "start-bit mismatch limit exceeded; dropping lock");
+                                break;
+                            }
+                            /*endif*/
                         }
                         /*endif*/
                     }
@@ -5744,8 +5903,11 @@ phase3_training_done:
                             s->mp_early_rejects++;
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
-                                     "(expected 0), early_reject_count=%d (continuing until CRC)\n",
+                                     "(expected 0), early_reject_count=%d (rejecting lock immediately)\n",
                                      type_now, bits[i], s->mp_early_rejects);
+                            mp_unlock_after_reject(s, true);
+                            v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "reserved bit mismatch; dropping lock");
+                            break;
                         }
                         /*endif*/
                         is_inserted_start = (frame_idx == 34 || frame_idx == 51 || frame_idx == 68)
@@ -5756,13 +5918,17 @@ phase3_training_done:
                                                     || frame_idx == 136
                                                     || frame_idx == 153
                                                     || frame_idx == 170));
-                        /* For MP0 debug, log every body bit so bit drift is visible.
-                           For MP1, keep denser periodic logs plus all inserted starts. */
+                        /* Keep MP body logs lightweight:
+                           - MP0: early window + periodic checkpoints + inserted starts
+                           - MP1: slightly denser early window + periodic checkpoints + inserted starts */
                         log_body_bit = (s->mp_frame_target <= 88)
-                                       || s->bit_count <= 40
+                                       ? (s->bit_count <= 16
+                                          || (s->bit_count % 8) == 0
+                                          || is_inserted_start)
+                                       : (s->bit_count <= 40
                                        || (s->bit_count % 8) == 0
-                                       || is_inserted_start;
-                        if (log_body_bit)
+                                       || is_inserted_start);
+                        if (log_body_bit  &&  s->mp_seen == 0)
                         {
                             int data_idx;
 
@@ -5854,14 +6020,19 @@ phase3_training_done:
                     /*endif*/
                     start_err_count = mp_start_error_count(s->mp_frame_bits, type, s->mp_frame_target);
                     starts_good = (start_err_count == 0);
-                    log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
-                    log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
+                    if (s->mp_seen == 0  ||  !crc_good  ||  !fill_good  ||  !starts_good)
+                    {
+                        log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
+                        log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
+                    }
                     {
                         bool frame_accepted;
+                        bool first_mp_accept;
                         int start_err_accept_max;
                         bool starts_acceptable;
 
                         frame_accepted = false;
+                        first_mp_accept = (s->mp_seen == 0);
                         start_err_accept_max = (type == 1) ? MP1_START_ERR_ACCEPT_MAX : 0;
                         starts_acceptable = (start_err_count <= start_err_accept_max);
                         if (crc_good  &&  fill_good)
@@ -5872,35 +6043,39 @@ phase3_training_done:
                             if (s->duplex)
                             {
                                 mp_pack_for_parser(s->info_buf, s->mp_frame_bits, type);
-                                process_rx_mp(s, &mp, s->info_buf);
-                                semantic_good = mp_semantic_ok_phase4(s, &mp, type, s->mp_frame_bits);
-                                if (semantic_good)
+                                if (first_mp_accept  ||  type == 1)
                                 {
-                                    if (mp.mp_acknowledged)
-                                        s->mp_remote_ack_seen = 1;
-                                    /*endif*/
-                                    t = span_container_of(s, v34_state_t, rx);
-                                    if (mp.type == 1)
-                                        memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                                    /*endif*/
-                                    switch (mp.trellis_size)
+                                    process_rx_mp(s, &mp, s->info_buf);
+                                    semantic_good = mp_semantic_ok_phase4(s, &mp, type, s->mp_frame_bits);
+                                    if (semantic_good)
                                     {
-                                    case V34_TRELLIS_16:
-                                        t->tx.conv_encode_table = v34_conv16_encode_table;
-                                        break;
-                                    case V34_TRELLIS_32:
-                                        t->tx.conv_encode_table = v34_conv32_encode_table;
-                                        break;
-                                    case V34_TRELLIS_64:
-                                        t->tx.conv_encode_table = v34_conv64_encode_table;
-                                        break;
-                                    default:
-                                        span_log(&t->logging, SPAN_LOG_FLOW,
-                                                 "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
-                                        semantic_good = false;
-                                        break;
+                                        if (mp.mp_acknowledged)
+                                            s->mp_remote_ack_seen = 1;
+                                        /*endif*/
+                                        t = span_container_of(s, v34_state_t, rx);
+                                        if (mp.type == 1)
+                                            memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
+                                        /*endif*/
+                                        switch (mp.trellis_size)
+                                        {
+                                        case V34_TRELLIS_16:
+                                            t->tx.conv_encode_table = v34_conv16_encode_table;
+                                            break;
+                                        case V34_TRELLIS_32:
+                                            t->tx.conv_encode_table = v34_conv32_encode_table;
+                                            break;
+                                        case V34_TRELLIS_64:
+                                            t->tx.conv_encode_table = v34_conv64_encode_table;
+                                            break;
+                                        default:
+                                            span_log(&t->logging, SPAN_LOG_FLOW,
+                                                     "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                            semantic_good = false;
+                                            break;
+                                        }
+                                        /*endswitch*/
                                     }
-                                    /*endswitch*/
+                                    /*endif*/
                                 }
                                 /*endif*/
                             }
@@ -5914,12 +6089,16 @@ phase3_training_done:
                                              type, start_err_count);
                                 }
                                 /*endif*/
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
-                                         type, s->mp_frame_target);
+                                if (first_mp_accept)
+                                {
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
+                                             type, s->mp_frame_target);
+                                }
                                 s->mp_seen = 1;
                                 s->mp_early_rejects = 0;
-                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted; awaiting E");
+                                if (first_mp_accept)
+                                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted; awaiting E");
                                 frame_accepted = true;
                             }
                             else
@@ -6016,6 +6195,9 @@ phase3_training_done:
 
                                     if (vote_crc_ok  &&  vote_fill_ok)
                                     {
+                                        int accepted_vote_frames;
+
+                                        accepted_vote_frames = vote_frames;
                                         /* Replace frame bits with voted version and accept */
                                         memcpy(s->mp_frame_bits, voted_bits, 88);
                                         crc_good = true;
@@ -6050,7 +6232,7 @@ phase3_training_done:
                                                 }
                                                 span_log(s->logging, SPAN_LOG_FLOW,
                                                          "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
-                                                         vote_frames);
+                                                         accepted_vote_frames);
                                                 s->mp_seen = 1;
                                                 s->mp_early_rejects = 0;
                                                 v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted via vote; awaiting E");
@@ -6348,7 +6530,21 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                This normalizes equalizer input so that TRAINING_AMP-scaled PP
                symbols and CMA can operate at the expected magnitude. */
             if (s->agc_scaling_save == 0.0f  &&  power > 10)
-                s->agc_scaling = 2.17f / sqrtf((float)power);
+            {
+                if (power > V34_AGC_POWER_MIN)
+                {
+                    float new_scaling;
+
+                    new_scaling = 2.17f / sqrtf((float) power);
+                    if (!isfinite(new_scaling) || new_scaling < V34_AGC_SCALING_MIN)
+                        new_scaling = V34_AGC_SCALING_MIN;
+                    else if (new_scaling > V34_AGC_SCALING_MAX)
+                        new_scaling = V34_AGC_SCALING_MAX;
+                    /*endif*/
+                    s->agc_scaling = new_scaling;
+                }
+                /*endif*/
+            }
             /*endif*/
             s->eq_put_step += s->shaper_sets/2;
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -6690,6 +6886,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;
+    phase4_j_detector_reset(&s->rx);
     phase4_trn_hyp_reset(&s->rx);
 
     s->rx.stage = V34_RX_STAGE_INFO0;
