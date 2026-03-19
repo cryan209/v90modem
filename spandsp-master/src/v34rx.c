@@ -130,7 +130,7 @@
 #define PHASE4_TRN_SCORE_START_BAUD     145
 #define PHASE4_TRN_LOCK_MIN_BITS        64
 #define PHASE4_TRN_READY_MIN_SCORE      65
-#define PHASE4_TRN_READY_MIN_BAUD       160
+#define PHASE4_TRN_READY_MIN_BAUD       4800    /* ~1.5s at 3200 baud; per V.34 §11.4 train on TRN ~2000ms before scanning MP */
 #define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_TRN_FREEZE_SCORE         80
@@ -1557,74 +1557,6 @@ static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type,
     /*endif*/
 }
 
-static void log_mp_tx_rx_compare(v34_rx_state_t *s, const uint8_t rx_bits[], int type)
-{
-    v34_state_t *t;
-    bitstream_state_t bs;
-    const uint8_t *p;
-    int target;
-    int first_diff;
-    int i;
-    int max_diffs;
-    int diff_count;
-
-    t = span_container_of(s, v34_state_t, rx);
-    if (t->tx.mp.type != type)
-        return;
-    /*endif*/
-    target = (type == 1) ? 188 : 88;
-    bitstream_init(&bs, true);
-    p = t->tx.txbuf;
-    first_diff = -1;
-    max_diffs = 8;
-    diff_count = 0;
-
-    for (i = 0;  i < target;  i++)
-    {
-        int tx_bit;
-
-        tx_bit = bitstream_get(&bs, &p, 1);
-        if (tx_bit != (rx_bits[i] & 1))
-        {
-            if (first_diff < 0)
-                first_diff = i;
-            /*endif*/
-            if (diff_count < max_diffs)
-            {
-                span_log(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 4: MP%d TX/RX diff[%d] frame_idx=%d tx=%d rx=%d (dom=%s tap=%d ord=%s hyp=%d)\n",
-                         type, diff_count, i, tx_bit, rx_bits[i] & 1,
-                         phase4_trn_domain_name(s->mp_phase4_domain),
-                         s->scrambler_tap,
-                         phase4_trn_order_name(s->mp_phase4_bit_order),
-                         s->mp_hypothesis);
-            }
-            /*endif*/
-            diff_count++;
-        }
-        /*endif*/
-    }
-    /*endfor*/
-
-    if (first_diff >= 0)
-    {
-        span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx - Phase 4: MP%d first TX/RX divergence at frame_idx=%d (dom=%s tap=%d ord=%s hyp=%d total_diffs=%d)\n",
-                 type, first_diff,
-                 phase4_trn_domain_name(s->mp_phase4_domain),
-                 s->scrambler_tap,
-                 phase4_trn_order_name(s->mp_phase4_bit_order),
-                 s->mp_hypothesis,
-                 diff_count);
-    }
-    else
-    {
-        span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx - Phase 4: MP%d TX/RX frame bits match exactly (%d bits)\n",
-                 type, target);
-    }
-    /*endif*/
-}
 /*- End of function --------------------------------------------------------*/
 
 static void log_mp_lock_seed(v34_rx_state_t *s,
@@ -5162,11 +5094,10 @@ phase3_training_done:
         }
         /*endif*/
 
-        /* Transition to MP scan after explicit J' and TRN ones-lock.
-           The far-end TRN may be very short (as few as ~100 bauds), so we
-           transition as soon as we have a confident lock — we do NOT require
-           the current sliding-window score to still be high, because the
-           far-end may have already moved past TRN to MP by the time we check. */
+        /* Transition to MP scan after explicit J' and sufficient TRN training.
+           Per V.34 §11.4, TRN is at least 512T and up to 2000ms+RTD.
+           We train on TRN for ~1.5-2s to lock the equalizer and scrambler
+           before scanning for MP. */
         if (s->phase4_j_seen
             && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
             && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE)
@@ -6080,7 +6011,6 @@ phase3_training_done:
                         if (log_reject_detail)
                         {
                             log_mp_frame_diag(s, s->mp_frame_bits, type, crc_good, rx_crc, residual_crc, fill_good);
-                            log_mp_tx_rx_compare(s, s->mp_frame_bits, type);
                         }
                     }
                     {
