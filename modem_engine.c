@@ -49,10 +49,11 @@ enum v34_rx_stages_e {
     V34_RX_STAGE_PHASE3_WAIT_S,
     V34_RX_STAGE_PHASE3_TRAINING,
     V34_RX_STAGE_PHASE3_DONE,
-    V34_RX_STAGE_PHASE4_S = 14,
-    V34_RX_STAGE_PHASE4_S_BAR = 16,
-    V34_RX_STAGE_PHASE4_TRN = 18,
-    V34_RX_STAGE_PHASE4_MP = 20,
+    V34_RX_STAGE_PHASE4_S,
+    V34_RX_STAGE_PHASE4_S_BAR,
+    V34_RX_STAGE_PHASE4_TRN,
+    V34_RX_STAGE_PHASE4_MP,
+    V34_RX_STAGE_DATA,
 };
 
 enum v34_tx_stages_e {
@@ -429,6 +430,7 @@ static const char *v34_rx_stage_name(int stage)
     case V34_RX_STAGE_PHASE4_S_BAR:      return "PHASE4_S_BAR";
     case V34_RX_STAGE_PHASE4_TRN:        return "PHASE4_TRN";
     case V34_RX_STAGE_PHASE4_MP:         return "PHASE4_MP";
+    case V34_RX_STAGE_DATA:              return "DATA";
     default:                             return "UNKNOWN";
     }
 }

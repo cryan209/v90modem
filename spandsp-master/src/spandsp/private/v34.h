@@ -87,7 +87,9 @@ enum v34_rx_stages_e
     /*! \brief Phase 4: TRN synchronization after S-bar */
     V34_RX_STAGE_PHASE4_TRN,
     /*! \brief Phase 4: detecting MP on primary channel (DQPSK demod) */
-    V34_RX_STAGE_PHASE4_MP
+    V34_RX_STAGE_PHASE4_MP,
+    /*! \brief Data mode: full constellation decode (Viterbi, shell unmap, etc.) */
+    V34_RX_STAGE_DATA
 };
 
 enum v34_tx_stages_e
@@ -436,6 +438,15 @@ typedef struct
 
     uint16_t v0_pattern;
 
+    /*! \brief Data mode: buffer holding the current mapping frame's 8 x 2D symbols (Q9.7 re,im pairs) */
+    int16_t tx_mapping_frame_buf[16];
+    /*! \brief Data mode: which 2D symbol (0-7) we're on within the current mapping frame */
+    int tx_mapping_frame_step;
+    /*! \brief Data mode: true after B1 frame has been sent */
+    bool b1_sent;
+    /*! \brief True once TX has entered data mode (used by RX to freeze equalizer) */
+    bool tx_data_mode;
+
     uint8_t txbuf[50];
     int txbits;
     int txptr;
@@ -611,6 +622,11 @@ typedef struct
     int mjk[8];
 
     int step_2d;
+
+    /*! \brief Buffer to accumulate 8 equalized 2D symbols (as Q9.7 re,im pairs)
+               before calling v34_put_mapping_frame() */
+    int16_t mapping_frame_buf[16];
+    int mapping_frame_count;
 
     /*! \brief Parameters for the current bit rate and baud rate */
     v34_parameters_t parms;

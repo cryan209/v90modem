@@ -191,6 +191,7 @@ static const char *v34_rx_stage_to_str(int stage)
     case V34_RX_STAGE_PHASE4_S_BAR: return "PHASE4_S_BAR";
     case V34_RX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
     case V34_RX_STAGE_PHASE4_MP: return "PHASE4_MP";
+    case V34_RX_STAGE_DATA: return "DATA";
     default: return "UNKNOWN";
     }
 }
@@ -336,6 +337,7 @@ static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
 static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
 static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
+SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16]);
 
 static int descramble(v34_rx_state_t *s, int in_bit)
 {
@@ -4872,7 +4874,8 @@ phase3_training_done:
                     s->phase4_trn_after_j = 0;
                     phase4_trn_hyp_reset(s);
                     s->phase4_j_lock_hyp = best_h;
-                    s->scrambler_tap = phase4_trn_tap_value(best_tap);
+                    /* Use role-based tap, not TRN auto-detected tap (see §7) */
+                    s->scrambler_tap = s->calling_party ? 4 : 17;
                     s->received_event = V34_EVENT_J_DASHED;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d dom=%s tap=%d ord=%s)\n",
@@ -5197,6 +5200,28 @@ phase3_training_done:
                 /*endif*/
             }
             /*endif*/
+            /* V.34 §7: call modem uses GPC (tap=17), answer modem uses GPA (tap=4).
+               We are receiving from the far end, so use the far end's scrambler:
+               - If we are the answerer, far end is caller → tap=17 (GPC)
+               - If we are the caller, far end is answerer → tap=4 (GPA)
+               TRN (all-ones) cannot distinguish between the two polynomials because
+               a self-synchronizing descrambler produces all-ones output for either tap
+               once it converges.  Force the correct tap here. */
+            {
+                int correct_tap;
+
+                correct_tap = s->calling_party ? 4 : 17;
+                if (s->scrambler_tap != correct_tap)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: TRN selected tap=%d but role requires tap=%d (%s receives from %s); correcting\n",
+                             s->scrambler_tap, correct_tap,
+                             s->calling_party ? "caller" : "answerer",
+                             s->calling_party ? "answerer/GPA" : "caller/GPC");
+                    s->scrambler_tap = correct_tap;
+                }
+                /*endif*/
+            }
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: far-end J' + TRN confirmed (J'->TRN=%d bauds, best_ones=%d%%), scanning for MP (decoder=hyp24-v2, gated=900)\n",
                      s->phase4_trn_after_j, s->phase4_trn_lock_score);
@@ -5730,22 +5755,41 @@ phase3_training_done:
                 /*endif*/
                 if (s->mp_seen >= 2)
                 {
-                    /* Post-MP data */
-                    s->put_bit(s->put_bit_user_data, bits[i]);
+                    /* Should not reach here — we transition to V34_RX_STAGE_DATA on E */
                     continue;
                 }
                 /*endif*/
                 if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
                 {
-                    /* E is 20 consecutive ones — end of MP exchange */
+                    /* E is 20 consecutive ones — end of MP exchange.
+                       Transition to data mode: the far end will send B1 (one mapping
+                       frame of ones) then switch to the negotiated data constellation. */
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: E signal detected, MP exchange complete\n");
+                             "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
                     s->mp_seen = 2;
+                    /* Initialize data mode state */
+                    s->step_2d = 0;
+                    s->data_frame = 0;
+                    s->super_frame = 0;
+                    s->v0_pattern = 0;
+                    s->mapping_frame_count = 0;
+                    s->s_bit_cnt = 0;
+                    s->aux_bit_cnt = 0;
+                    memset(s->xt, 0, sizeof(s->xt));
+                    memset(s->x, 0, sizeof(s->x));
+                    memset(s->ww, 0, sizeof(s->ww));
+                    s->viterbi.ptr = 0;
+                    s->viterbi.windup = 15;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - DATA mode: parms b=%d k=%d q=%d m=%d p=%d j=%d l=%d r=%d w=%d\n",
+                             s->parms.b, s->parms.k, s->parms.q, s->parms.m,
+                             s->parms.p, s->parms.j, s->parms.l, s->parms.r, s->parms.w);
+                    s->stage = V34_RX_STAGE_DATA;
                     if (s->duplex)
                         report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
                     /*endif*/
-                    continue;
+                    break;  /* Exit the bit loop; next baud will enter DATA stage */
                 }
                 /*endif*/
                 if (s->mp_seen == 1  &&  s->mp_remote_ack_seen)
@@ -6064,6 +6108,45 @@ phase3_training_done:
                                             break;
                                         }
                                         /*endswitch*/
+                                        /* Update RX data mode parameters from MP-negotiated bit rate.
+                                           We receive from the far end:
+                                           - If we are answerer: receive at bit_rate_c_to_a
+                                           - If we are caller: receive at bit_rate_a_to_c
+                                           MP bit_rate field N means N*2400 bps; convert to
+                                           internal bit_rate_code = (N-1)*2 */
+                                        {
+                                            int rx_rate_n;
+
+                                            rx_rate_n = s->calling_party
+                                                      ? mp.bit_rate_a_to_c
+                                                      : mp.bit_rate_c_to_a;
+                                            s->bit_rate = (rx_rate_n - 1) * 2;
+                                            v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate,
+                                                                       mp.expanded_shaping);
+                                            span_log(s->logging, SPAN_LOG_FLOW,
+                                                     "Rx - Phase 4: updated parms from MP: rate=%d bps (N=%d code=%d) "
+                                                     "b=%d k=%d q=%d m=%d p=%d j=%d l=%d\n",
+                                                     rx_rate_n * 2400, rx_rate_n, s->bit_rate,
+                                                     s->parms.b, s->parms.k, s->parms.q, s->parms.m,
+                                                     s->parms.p, s->parms.j, s->parms.l);
+                                        }
+                                        /* Rate negotiation: adopt far-end's proposed rates
+                                           (take min of our rate and their rate for each direction) */
+                                        {
+                                            int neg_a2c;
+                                            int neg_c2a;
+
+                                            neg_a2c = mp.bit_rate_a_to_c;
+                                            neg_c2a = mp.bit_rate_c_to_a;
+                                            if (t->tx.mp.bit_rate_a_to_c > neg_a2c)
+                                                t->tx.mp.bit_rate_a_to_c = neg_a2c;
+                                            if (t->tx.mp.bit_rate_c_to_a > neg_c2a)
+                                                t->tx.mp.bit_rate_c_to_a = neg_c2a;
+                                            span_log(s->logging, SPAN_LOG_FLOW,
+                                                     "Rx - Phase 4: rate negotiation: a2c=%d bps c2a=%d bps\n",
+                                                     t->tx.mp.bit_rate_a_to_c * 2400,
+                                                     t->tx.mp.bit_rate_c_to_a * 2400);
+                                        }
                                     }
                                     /*endif*/
                                 }
@@ -6374,8 +6457,32 @@ phase3_training_done:
         }
         break;
 
+    case V34_RX_STAGE_DATA:
+        /* V.34 data mode: collect equalized symbols into mapping frames (8 x 2D symbols)
+           and run the full decode pipeline. */
+        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->re * 128.0f);
+        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->im * 128.0f);
+        s->duration++;
+        if (s->mapping_frame_count >= 16)
+        {
+            /* Log RMS of mapping frame for diagnostic */
+            {
+                float rms_sum = 0;
+                int ii;
+                for (ii = 0; ii < 16; ii++)
+                    rms_sum += (float)s->mapping_frame_buf[ii] * s->mapping_frame_buf[ii];
+                fprintf(stderr, "[DATA] baud=%d frame_rms=%.1f (%.3f)\n",
+                        s->duration, sqrtf(rms_sum / 16.0f),
+                        sqrtf(rms_sum / 16.0f) / 128.0f);
+            }
+            v34_put_mapping_frame(s, s->mapping_frame_buf);
+            s->mapping_frame_count = 0;
+        }
+        /*endif*/
+        s->last_sample = *sym;
+        break;
+
     default:
-        /* Normal data mode operation - not yet implemented */
         break;
     }
     /*endswitch*/
@@ -6416,8 +6523,12 @@ phase3_training_done:
             {
                 /* CMA (blind) equalizer — during Phase 3 TRN refinement and
                    Phase 4.  Phase 4 needs CMA to adapt equalizer gain for
-                   variable signal levels on analog/SIP channels. */
-                tune_equalizer_cma(s, sym);
+                   variable signal levels on analog/SIP channels.
+                   Stop CMA once TX enters data mode — echo from the high-power
+                   data constellation would cause CMA to diverge. */
+                v34_state_t *t_cma = span_container_of(s, v34_state_t, rx);
+                if (!t_cma->tx.tx_data_mode)
+                    tune_equalizer_cma(s, sym);
             }
             /*endif*/
 
@@ -6586,7 +6697,7 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
     complexi16_t y[2];
 
     /* Put the four 4D symbols (eight 2D symbols) of a mapping frame */
-#define BYPASS_VITERBI
+//#define BYPASS_VITERBI
     for (i = 0;  i < 8;  i++)
     {
         s->xt[0].re = bits[2*i];
@@ -6930,6 +7041,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.data_frame = 0;
     s->rx.s_bit_cnt = 0;
     s->rx.aux_bit_cnt = 0;
+    s->rx.mapping_frame_count = 0;
 
     return 0;
 }

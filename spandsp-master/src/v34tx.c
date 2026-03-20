@@ -415,6 +415,7 @@ static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
+static void data_baud_init(v34_state_t *s);
 
 /* Control channel startup routines */
 static void pph_baud_init(v34_state_t *s);
@@ -3436,7 +3437,14 @@ static complex_sig_t get_e_baud(v34_state_t *s)
     if (++s->tx.tone_duration == 10)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - E minimum reached (>=20 bits), continuing E until post-MP data path is available\n");
+                 "Tx - E minimum reached (>=20 bits)\n");
+    }
+    /*endif*/
+    /* After minimum E duration (10 bauds = 20 bits), transition to B1+data.
+       Use 20 bauds (40 bits) to give the far end time to detect E. */
+    if (s->tx.tone_duration >= 20)
+    {
+        data_baud_init(s);
     }
     /*endif*/
     return training_constellation_4[s->tx.diff];
@@ -3449,6 +3457,81 @@ static void e_baud_init(v34_state_t *s)
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_HDX_E;
     s->tx.current_getbaud = get_e_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_data_baud(v34_state_t *s)
+{
+    complex_sig_t v;
+
+    if (s->tx.tx_mapping_frame_step == 0)
+    {
+        /* Need a new mapping frame */
+        if (!s->tx.b1_sent)
+        {
+            /* B1: first data frame is all-ones (V.34 §9.2).
+               fake_get_bit returns 1, which parse_primary_channel_bitstream will use. */
+            span_get_bit_func_t saved_get_bit = s->tx.current_get_bit;
+            s->tx.current_get_bit = fake_get_bit;
+            v34_get_mapping_frame(&s->tx, s->tx.tx_mapping_frame_buf);
+            s->tx.current_get_bit = saved_get_bit;
+            s->tx.b1_sent = true;
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - B1 frame sent (all-ones data frame)\n");
+        }
+        else
+        {
+            v34_get_mapping_frame(&s->tx, s->tx.tx_mapping_frame_buf);
+        }
+        /*endif*/
+    }
+    /*endif*/
+
+    /* Return one 2D symbol from the current mapping frame.
+       tx_mapping_frame_buf is Q9.7: convert to float for the modulator. */
+    v.re = (float)s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step];
+    v.im = (float)s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1];
+    if (++s->tx.tx_mapping_frame_step >= 8)
+        s->tx.tx_mapping_frame_step = 0;
+    /*endif*/
+    return v;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void data_baud_init(v34_state_t *s)
+{
+    /* Update TX parms from the MP-negotiated rate for our transmit direction */
+    {
+        int tx_rate_n;
+        tx_rate_n = s->calling_party
+                  ? s->tx.mp.bit_rate_c_to_a
+                  : s->tx.mp.bit_rate_a_to_c;
+        s->tx.bit_rate = (tx_rate_n - 1) * 2;
+        v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, s->tx.bit_rate,
+                                   s->tx.mp.expanded_shaping);
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - data_baud_init(): rate=%d bps (N=%d code=%d) "
+                 "b=%d k=%d q=%d m=%d p=%d j=%d l=%d\n",
+                 tx_rate_n * 2400, tx_rate_n, s->tx.bit_rate,
+                 s->tx.parms.b, s->tx.parms.k, s->tx.parms.q, s->tx.parms.m,
+                 s->tx.parms.p, s->tx.parms.j, s->tx.parms.l);
+    }
+    s->tx.tx_mapping_frame_step = 0;
+    s->tx.b1_sent = false;
+    s->tx.data_frame = 0;
+    s->tx.super_frame = 0;
+    s->tx.s_bit_cnt = 0;
+    s->tx.aux_bit_cnt = 0;
+    s->tx.v0_pattern = 0;
+    /* Initialize precoder and trellis state for data mode */
+    s->tx.c.re = 0;
+    s->tx.c.im = 0;
+    s->tx.p.re = 0;
+    s->tx.p.im = 0;
+    s->tx.z = 0;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.tx_data_mode = true;
+    s->tx.current_getbaud = get_data_baud;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - switching to DATA mode\n");
 }
 /*- End of function --------------------------------------------------------*/
 
