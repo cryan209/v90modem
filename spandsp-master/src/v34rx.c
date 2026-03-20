@@ -2643,6 +2643,8 @@ static int process_rx_mph(v34_rx_state_t *s, mph_t *mph, uint8_t buf[])
 
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
+    int info_search_enabled;
+
     /* Put info0, info1, tone A or tone B bits */
     s->bitstream = (s->bitstream << 1) | bit;
     /* Log only sync code matches and CRC results (verbose bit logging removed) */
@@ -2750,8 +2752,29 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         s->persistence2 = 0;
         break;
     }
+    info_search_enabled = (s->stage == V34_RX_STAGE_INFO0
+                           ||
+                           s->stage == V34_RX_STAGE_INFOH
+                           ||
+                           s->stage == V34_RX_STAGE_INFO1A
+                           ||
+                           s->stage == V34_RX_STAGE_INFO1C
+                           ||
+                           ((s->stage == V34_RX_STAGE_TONE_A
+                             ||
+                             s->stage == V34_RX_STAGE_TONE_B)
+                            &&
+                            (s->received_event == V34_EVENT_NONE
+                             ||
+                             s->received_event == V34_EVENT_INFO0_BAD
+                             ||
+                             s->received_event == V34_EVENT_TONE_SEEN)));
     /* Search for INFO0, INFOh, INFO1a or INFO1c messages. */
-    if (s->bit_count == 0)
+    if (!info_search_enabled)
+    {
+        s->bit_count = 0;
+    }
+    else if (s->bit_count == 0)
     {
         /* Look for info message sync code */
         if ((s->bitstream & 0x3FF) == 0x372)
