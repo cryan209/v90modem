@@ -557,6 +557,63 @@ static void cm_jm_decode(v8_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool cm_jm_decode_saved(v8_state_t *s)
+{
+    const uint8_t *p;
+
+    if (s->got_cm_jm || s->cm_jm_len <= 0)
+        return false;
+    /*endif*/
+
+    s->got_cm_jm = true;
+
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Decoding single CM/JM candidate after timeout\n");
+
+    s->cm_jm_data[s->cm_jm_len] = 0;
+
+    s->result.jm_cm.modulations = 0;
+    p = s->cm_jm_data;
+
+    while (*p)
+    {
+        switch (*p & 0x1F)
+        {
+        case V8_CALL_FUNCTION_TAG:
+            p = process_call_function(s, p);
+            break;
+        case V8_MODULATION_TAG:
+            p = process_modulation_mode(s, p);
+            break;
+        case V8_PROTOCOLS_TAG:
+            p = process_protocols(s, p);
+            break;
+        case V8_PSTN_ACCESS_TAG:
+            p = process_pstn_access(s, p);
+            break;
+        case V8_NSF_TAG:
+            p = process_non_standard_facilities(s, p);
+            break;
+        case V8_PCM_MODEM_AVAILABILITY_TAG:
+            p = process_pcm_modem_availability(s, p);
+            break;
+        case V8_T66_TAG:
+            p = process_t66(s, p);
+            break;
+        default:
+            p++;
+            break;
+        }
+        /*endswitch*/
+        while ((*p & 0x38) == 0x10)
+            p++;
+        /*endwhile*/
+    }
+    /*endwhile*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void put_bit(void *user_data, int bit)
 {
     v8_state_t *s;
@@ -1227,11 +1284,39 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             {
                 if ((s->negotiation_timer -= len) <= 0)
                 {
-                    /* Timeout */
-                    span_log(&s->logging, SPAN_LOG_FLOW, "Timeout waiting for CM\n");
-                    s->state = V8_PARKED;
-                    s->result.status = V8_STATUS_FAILED;
-                    report_event(s);
+                    /* On packetized links it is common to clip the first CM burst.
+                       If we have one complete CM candidate, accept it rather than
+                       requiring a second identical repeat. */
+                    if (cm_jm_decode_saved(s))
+                    {
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "CM recognised from single saved candidate\n");
+
+                        s->result.status = V8_STATUS_V8_OFFERED;
+                        report_event(s);
+
+                        if (s->parms.gateway_mode)
+                        {
+                            s->state = V8_POST_CM_WAIT;
+                        }
+                        else
+                        {
+                            fsk_tx_init(&s->v21tx, &preset_fsk_specs[FSK_V21CH2], get_bit, s);
+                            s->negotiation_timer = milliseconds_to_samples(5000);
+                            s->state = V8_JM_ON;
+                            send_cm_jm(s);
+                            s->modem_connect_tone_tx_timer = milliseconds_to_samples(75);
+                            s->fsk_tx_on = true;
+                        }
+                    }
+                    else
+                    {
+                        /* Timeout */
+                        span_log(&s->logging, SPAN_LOG_FLOW, "Timeout waiting for CM\n");
+                        s->state = V8_PARKED;
+                        s->result.status = V8_STATUS_FAILED;
+                        report_event(s);
+                    }
                 }
                 /*endif*/
             }

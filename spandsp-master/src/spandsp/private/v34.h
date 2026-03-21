@@ -821,6 +821,8 @@ typedef struct
     int mp_len;
     int mp_and_fill_len;
     int mp_seen;
+    /*! \brief Baud count when mp_seen was first set to 1 (for E-detect timeout) */
+    int mp_accepted_baud;
     int mp_remote_ack_seen;
     int mp_hypothesis;
     uint32_t mp_hyp_scramble[24];

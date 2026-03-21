@@ -1714,8 +1714,6 @@ static void info0_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - info0_baud_init()\n");
     s->tx.txbits = info0_sequence_tx(&s->tx);
-    /* Round up to a whole number of bytes */
-    s->tx.txbits = (s->tx.txbits + 7) & ~7;
     s->tx.txptr = 0;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.current_modulator = V34_MODULATION_CC;

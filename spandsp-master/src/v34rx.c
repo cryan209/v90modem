@@ -3799,6 +3799,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                         }
                         /*endif*/
                         s->mp_seen = 1;
+                        s->mp_accepted_baud = s->duration;
                     }
                     /*endif*/
                 }
@@ -5815,6 +5816,41 @@ phase3_training_done:
                     break;  /* Exit the bit loop; next baud will enter DATA stage */
                 }
                 /*endif*/
+                if (s->mp_seen == 1  &&  s->mp_accepted_baud > 0
+                    &&  (s->duration - s->mp_accepted_baud) > 500)
+                {
+                    /* Timeout: E not detected within 500 bauds of MP acceptance.
+                       The far end likely already sent E and moved to data mode
+                       while we were still majority-voting MP frames.  Force
+                       transition to DATA mode. */
+                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E timeout — forcing DATA transition");
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: E detection timeout (%d bauds since MP accept) — forcing DATA mode\n",
+                             s->duration - s->mp_accepted_baud);
+                    s->mp_seen = 2;
+                    s->step_2d = 0;
+                    s->data_frame = 0;
+                    s->super_frame = 0;
+                    s->v0_pattern = 0;
+                    s->mapping_frame_count = 0;
+                    s->s_bit_cnt = 0;
+                    s->aux_bit_cnt = 0;
+                    memset(s->xt, 0, sizeof(s->xt));
+                    memset(s->x, 0, sizeof(s->x));
+                    memset(s->ww, 0, sizeof(s->ww));
+                    s->viterbi.ptr = 0;
+                    s->viterbi.windup = 15;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - DATA mode: parms b=%d k=%d q=%d m=%d p=%d j=%d l=%d r=%d w=%d\n",
+                             s->parms.b, s->parms.k, s->parms.q, s->parms.m,
+                             s->parms.p, s->parms.j, s->parms.l, s->parms.r, s->parms.w);
+                    s->stage = V34_RX_STAGE_DATA;
+                    if (s->duplex)
+                        report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
+                    /*endif*/
+                    break;
+                }
+                /*endif*/
                 if (s->mp_seen == 1  &&  s->mp_remote_ack_seen)
                 {
                     /* We've received MP' (with ack bit); now just wait for E.
@@ -6192,6 +6228,8 @@ phase3_training_done:
                                              type, s->mp_frame_target);
                                 }
                                 s->mp_seen = 1;
+                                if (s->mp_accepted_baud == 0)
+                                    s->mp_accepted_baud = s->duration;
                                 s->mp_early_rejects = 0;
                                 if (first_mp_accept)
                                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted; awaiting E");
@@ -6335,6 +6373,8 @@ phase3_training_done:
                                                          "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
                                                          accepted_vote_frames);
                                                 s->mp_seen = 1;
+                                                if (s->mp_accepted_baud == 0)
+                                                    s->mp_accepted_baud = s->duration;
                                                 s->mp_early_rejects = 0;
                                                 v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted via vote; awaiting E");
                                                 frame_accepted = true;
@@ -6434,6 +6474,8 @@ phase3_training_done:
                                                 span_log(s->logging, SPAN_LOG_FLOW,
                                                          "Rx - Phase 4: MP1 ACCEPTED via majority vote\n");
                                                 s->mp_seen = 1;
+                                                if (s->mp_accepted_baud == 0)
+                                                    s->mp_accepted_baud = s->duration;
                                                 s->mp_early_rejects = 0;
                                                 v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP1 accepted via vote; awaiting E");
                                                 frame_accepted = true;
