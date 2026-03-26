@@ -6524,9 +6524,13 @@ phase3_training_done:
 
     case V34_RX_STAGE_DATA:
         /* V.34 data mode: collect equalized symbols into mapping frames (8 x 2D symbols)
-           and run the full decode pipeline. */
-        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->re * 128.0f);
-        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->im * 128.0f);
+           and run the full decode pipeline.
+           The CMA equalizer (frozen from training) normalizes to unit magnitude.
+           Training DQPSK had magnitude TRAINING_AMP=10, so the frozen equalizer
+           divides by 10.  Multiply by 10 to recover the integer constellation grid
+           (odd integers 1..43) expected by quantize_n_ways() in Q9.7 format. */
+        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->re * 128.0f * 10.0f);
+        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->im * 128.0f * 10.0f);
         s->duration++;
         if (s->mapping_frame_count >= 16)
         {
