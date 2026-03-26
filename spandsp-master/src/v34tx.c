@@ -4202,6 +4202,14 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
         s->tx.guard_phase_rate = 0;
         s->tx.guard_level = 0.0f;
     }
+    else if (s->tx.v90_mode)
+    {
+        /* V.90 §8.2.3.1: digital modem (answerer) transmits INFO at 1200 Hz,
+           not the standard V.34 answerer frequency of 2400 Hz. */
+        s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
+        s->tx.guard_phase_rate = 0;
+        s->tx.guard_level = 0.0f;
+    }
     else
     {
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);

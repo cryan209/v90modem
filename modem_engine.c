@@ -997,7 +997,11 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         fprintf(stderr, "[ME] V.8 negotiated V.90 (PCM downstream + V.34 upstream)\n");
         trace_phase("V8 selected V90");
         g_mod = ME_MOD_V90;
+        /* V.90 §6.2: analog modem only supports 3200 baud (mandatory) */
+        int saved_baud = g_v34_start_baud;
+        g_v34_start_baud = 3200;
         start_v34_training();
+        g_v34_start_baud = saved_baud;
         /* start_v34_training sets g_mod = ME_MOD_V34; override back to V90 */
         g_mod = ME_MOD_V90;
         /* Enable V.90 INFO0d frame generation in SpanDSP V.34 */

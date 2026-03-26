@@ -2794,7 +2794,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         s->crc = crc_itu16_bits(bit, 1, s->crc);
         if (s->bit_count++ == s->target_bits)
         {
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x\n", s->crc);
+            span_log(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x (target_bits=%d)\n", s->crc, s->target_bits);
+            {
+                int nbytes = (s->target_bits + 7) / 8;
+                if (nbytes > 25) nbytes = 25;
+                char hexbuf[80];
+                int hoff = 0;
+                for (int hh = 0; hh < nbytes; hh++)
+                    hoff += snprintf(hexbuf + hoff, sizeof(hexbuf) - hoff, " %02x", s->info_buf[hh]);
+                span_log(s->logging, SPAN_LOG_FLOW, "Rx - info raw bytes:%s\n", hexbuf);
+            }
             if (s->crc == 0)
             {
                 switch (s->stage)
@@ -6972,8 +6981,13 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
 
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     /* Phase 2 INFO exchange: answerer RX at 1200 Hz (tone B), caller RX at 2400 Hz (tone A).
+       V.90 §8.2.3.1: in V.90 mode carriers are swapped — digital modem (answerer)
+       RX listens at 2400 Hz (analog modem's CC carrier).
        This gets updated to Phase 4 CC frequencies in mp_or_mph_baud_init(). */
-    s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  2400.0f  :  1200.0f);
+    if (s->rx.v90_mode && !s->calling_party)
+        s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+    else
+        s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  2400.0f  :  1200.0f);
     v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate, true);
 
     s->rx.high_sample = 0;
