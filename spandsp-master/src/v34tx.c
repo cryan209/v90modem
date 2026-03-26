@@ -1808,7 +1808,21 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         if (++s->tx.tone_duration == 30)
         {
             /* 50ms minimum A period has passed - accept an incoming INFO0c */
-            s->tx.stage = V34_TX_STAGE_FIRST_A;
+            if (s->rx.received_event == V34_EVENT_REVERSAL_1
+                &&  s->rx.info0_received)
+            {
+                /* INFO0 was already received and a reversal arrived during
+                   INITIAL_A — skip FIRST_A and go straight to the 40ms
+                   delay before sending our reversal back. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - INITIAL_A: INFO0 + reversal already seen, skipping FIRST_A\n");
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+            }
+            else
+            {
+                s->tx.stage = V34_TX_STAGE_FIRST_A;
+            }
         }
         /*endif*/
         break;
@@ -1821,6 +1835,17 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+        }
+        else if (s->rx.received_event == V34_EVENT_REVERSAL_1
+                 &&  s->rx.info0_received)
+        {
+            /* Reversal arrived after INFO0 was received but before we could
+               check for INFO0_OK — the event was overwritten. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: reversal seen (INFO0 already received), sending !A\n");
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD
                  ||
@@ -4153,6 +4178,12 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
 {
     return s->tx.stage;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s)
+{
+    return s->rx.info1a.max_data_rate;
 }
 /*- End of function --------------------------------------------------------*/
 

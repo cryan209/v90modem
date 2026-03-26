@@ -41,6 +41,12 @@ typedef enum {
  * Initialise a V.90 digital modem context.
  * Creates an underlying V.34 modem with V.90 INFO0d enabled.
  */
+/*
+ * Create a V.90 context wrapping an existing V.34 state.
+ * Use this when V.34 was already initialized externally (e.g., by modem_engine).
+ */
+v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law);
+
 v90_state_t *v90_init(int baud_rate,
                       int bit_rate,
                       bool calling_party,

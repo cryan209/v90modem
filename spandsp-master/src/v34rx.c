@@ -2870,6 +2870,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     process_rx_info0(s, s->info_buf);
                     s->stage = (s->calling_party)  ?   V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B;
                     s->received_event = V34_EVENT_INFO0_OK;
+                    s->info0_received = true;
                     break;
                 case V34_RX_STAGE_INFOH:
                     process_rx_infoh(s, &s->infoh, s->info_buf);
@@ -7135,6 +7136,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     phase4_j_detector_reset(&s->rx);
     phase4_trn_hyp_reset(&s->rx);
 
+    s->rx.info0_received = false;
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */
     s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));

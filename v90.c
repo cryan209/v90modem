@@ -100,6 +100,8 @@ struct v90_state_s {
 
     /* Downstream PCM encoder state (data mode) */
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
+
+    bool             owns_v34;      /* true if we allocated v34 (v90_init), false if external */
 };
 
 /* ---- PCM codeword helpers ---- */
@@ -350,6 +352,24 @@ static int16_t v90_phase3_sample(v90_state_t *s)
 
 /* ---- Public API ---- */
 
+v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
+{
+    v90_state_t *s = (v90_state_t *)calloc(1, sizeof(*s));
+    if (!s)
+        return NULL;
+
+    s->v34 = v34;
+    s->law = law;
+    s->tx_phase = V90_TX_PHASE2;
+    s->u_info = 80;
+    s->owns_v34 = false;
+    v90_scrambler_init(&s->scrambler);
+    s->diff_enc = 0;
+    s->prev_sign = 0;
+
+    return s;
+}
+
 v90_state_t *v90_init(int baud_rate,
                       int bit_rate,
                       bool calling_party,
@@ -370,6 +390,7 @@ v90_state_t *v90_init(int baud_rate,
     s->diff_enc = 0;
     s->prev_sign = 0;
 
+    s->owns_v34 = true;
     s->v34 = v34_init(NULL, baud_rate, bit_rate, calling_party, true,
                        get_bit, get_bit_user_data,
                        put_bit, put_bit_user_data);
@@ -388,7 +409,7 @@ void v90_free(v90_state_t *s)
 {
     if (!s)
         return;
-    if (s->v34)
+    if (s->v34 && s->owns_v34)
         v34_free(s->v34);
     free(s);
 }

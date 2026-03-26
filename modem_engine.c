@@ -22,6 +22,7 @@
 #include "modem_engine.h"
 #include "data_interface.h"
 #include "clock_recovery.h"
+#include "v90.h"
 
 #include <spandsp.h>
 
@@ -564,8 +565,12 @@ static v8_state_t     *g_v8      = NULL;
 static v22bis_state_t *g_v22bis  = NULL;
 static v34_state_t    *g_v34     = NULL;
 
-/* V.90 downstream encoder */
+/* V.90 downstream encoder (legacy, used in data mode) */
 static v90_enc_t      g_v90_enc;
+
+/* V.90 state (Phase 3/4 TX) */
+static v90_state_t   *g_v90     = NULL;
+static bool           g_v90_phase3_started = false;
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -746,7 +751,9 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         signal_status_to_str(bit));
                 trace_phase("V34 training failed (%s) -> fallback V22BIS",
                             signal_status_to_str(bit));
-                /* Clean up V.34 state */
+                /* Clean up V.90/V.34 state */
+                if (g_v90) { v90_free(g_v90); g_v90 = NULL; }
+                g_v90_phase3_started = false;
                 if (g_v34) {
                     v34_free(g_v34);
                     g_v34 = NULL;
@@ -1008,6 +1015,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+        g_v90_phase3_started = false;
         /* Phase 2 CC carriers: answerer TX=2400 Hz, RX=1200 Hz (1200 Hz apart).
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
            disabled the notch — but we need it for Phase 2 CC echo removal. */
@@ -1073,8 +1081,10 @@ void me_destroy(void)
 {
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    if (g_v90)      { v90_free(g_v90);                            g_v90      = NULL; }
     if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
+    g_v90_phase3_started = false;
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -1183,8 +1193,10 @@ void me_on_sip_disconnected(void)
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    if (g_v90)      { v90_free(g_v90);                           g_v90      = NULL; }
     if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
+    g_v90_phase3_started = false;
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -1376,8 +1388,40 @@ void me_tx_audio(int16_t *amp, int len)
          */
         if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
-            if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34)
-                v34_tx(g_v34, amp, len);
+            if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
+                /* V.90: detect Phase 2→3 transition and switch TX to PCM codewords */
+                if (g_mod == ME_MOD_V90 && !g_v90_phase3_started) {
+                    int tx_stage = v34_get_tx_stage(g_v34);
+                    if (tx_stage >= V34_TX_STAGE_FIRST_S) {
+                        /* Phase 2 INFO exchange complete — V.34 is about to send
+                           Phase 3 S tones.  For V.90, we take over TX with our own
+                           PCM codeword generation (Jd, J'd, Sd, S̄d, TRN1d). */
+                        int u_info = v34_get_v90_u_info(g_v34);
+                        fprintf(stderr, "[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
+                                tx_stage, u_info);
+                        /* Create V.90 state wrapping existing V.34 */
+                        if (!g_v90) {
+                            v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+                            g_v90 = v90_init_with_v34(g_v34, law);
+                        }
+                        if (g_v90) {
+                            v90_start_phase3(g_v90, u_info);
+                            g_v90_phase3_started = true;
+                        }
+                    }
+                }
+
+                if (g_v90_phase3_started && g_v90) {
+                    /* V.90 Phase 3: generate PCM codewords for actual RTP output */
+                    v90_phase3_tx(g_v90, amp, len);
+                    /* Still call v34_tx into a discard buffer to keep V.34 RX
+                       state machine advancing (it's coupled to TX) */
+                    int16_t discard[len];
+                    v34_tx(g_v34, discard, len);
+                } else {
+                    v34_tx(g_v34, amp, len);
+                }
+            }
             pthread_mutex_unlock(&g_state_mtx);
             /* TX PCM dump + RMS diagnostic during training */
             {

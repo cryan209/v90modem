@@ -757,6 +757,9 @@ typedef struct
 
     bool info0_acknowledgement;
 
+    /*! \brief Set true once a valid INFO0 has been received (survives event overwrites). */
+    bool info0_received;
+
     union
     {
         info1a_t info1a;
