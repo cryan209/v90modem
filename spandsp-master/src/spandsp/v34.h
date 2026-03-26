@@ -258,6 +258,14 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
     \return The current TX stage (v34_tx_stages_e value). */
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
 
+/*! Enable V.90 mode on a V.34 modem context.  When enabled, the digital
+    modem sends INFO0d (V.90 Table 7) instead of standard V.34 INFO0 during
+    Phase 2, and expects INFO0a (V.90 Table 8) from the analog modem.
+    Must be called after v34_init() and before training begins.
+    \param s The modem context.
+    \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
+SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
+
 #if defined(__cplusplus)
 }
 #endif

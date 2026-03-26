@@ -499,6 +499,76 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     uint16_t crc;
     bitstream_state_t bs;
 
+    if (s->v90_mode)
+    {
+        /* V.90 INFO0d frame (ITU-T V.90 Table 7) — 62 bits total.
+           Transmitted by the digital modem at 1200 Hz carrier. */
+        span_log(s->logging, SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
+        bitstream_init(&bs, true);
+        t = s->txbuf;
+        /* 0:3      Fill bits: 1111. */
+        /* 4:11     Frame sync: 01110010 */
+        bitstream_put(&bs, &t, INFO_FILL_AND_SYNC_BITS, 12);
+        /* 12       Symbol rate 2743 supported in V.34 mode */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_2743])  ?  1  :  0, 1);
+        /* 13       Symbol rate 2800 supported in V.34 mode */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_2800])  ?  1  :  0, 1);
+        /* 14       Symbol rate 3429 supported in V.34 mode */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3429])  ?  1  :  0, 1);
+        /* 15       Ability to transmit at low carrier frequency with symbol rate 3000 */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3000])  ?  1  :  0, 1);
+        /* 16       Ability to transmit at high carrier frequency with symbol rate 3000 */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3000])  ?  1  :  0, 1);
+        /* 17       Ability to transmit at low carrier frequency with symbol rate 3200 */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3200])  ?  1  :  0, 1);
+        /* 18       Ability to transmit at high carrier frequency with symbol rate 3200 */
+        bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200])  ?  1  :  0, 1);
+        /* 19       Set to 0 indicates transmission with symbol rate 3429 is disallowed */
+        bitstream_put(&bs, &t, (v34_capabilities.rate_3429_allowed)  ?  1  :  0, 1);
+        /* 20       Ability to reduce transmit power */
+        bitstream_put(&bs, &t, (v34_capabilities.support_power_reduction)  ?  1  :  0, 1);
+        /* 21:23    Max allowed difference in symbol rates */
+        bitstream_put(&bs, &t, v34_capabilities.max_baud_rate_difference, 3);
+        /* 24       CME modem */
+        bitstream_put(&bs, &t, v34_capabilities.from_cme_modem, 1);
+        /* 25       1664-point signal constellations supported */
+        bitstream_put(&bs, &t, (v34_capabilities.support_1664_point_constellation)  ?  1  :  0, 1);
+        /* 26:27    Reserved for ITU — set to 0 by digital modem */
+        bitstream_put(&bs, &t, 0, 2);
+        /* 28       Acknowledge correct reception of INFO0a during error recovery */
+        bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
+        /* 29:32    Digital modem nominal transmit power for Phase 2.
+                    Represented in -1 dBm0 steps: 0 = -6 dBm0, 15 = -21 dBm0.
+                    We use -10 dBm0 → code = 10 - 6 = 4 */
+        bitstream_put(&bs, &t, 4, 4);
+        /* 33:37    Maximum digital modem transmit power.
+                    Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
+                    We use -10 dBm0 → code = (10 - 0.5) / 0.5 = 19 */
+        bitstream_put(&bs, &t, 19, 5);
+        /* 38       Power measurement at codec output (1) or modem terminals (0).
+                    SIP/RTP = codec output */
+        bitstream_put(&bs, &t, 1, 1);
+        /* 39       PCM coding in use: 0 = µ-law, 1 = A-law */
+        bitstream_put(&bs, &t, s->v90_pcm_law, 1);
+        /* 40       Set to 1 = ability to operate V.90 with upstream symbol rate 3429 */
+        bitstream_put(&bs, &t, 0, 1);
+        /* 41       Reserved — set to 0 */
+        bitstream_put(&bs, &t, 0, 1);
+        bitstream_emit(&bs, &t);
+        crc = crc_bit_block(s->txbuf, 12, 41, 0xFFFF);
+        /* 42:57    CRC */
+        bitstream_put(&bs, &t, crc, 16);
+        /* 58:61    Fill bits: 1111 */
+        bitstream_put(&bs, &t, 0xF, 4);
+        /* Extra postamble for byte alignment */
+        bitstream_put(&bs, &t, 0, 8);
+        bitstream_flush(&bs, &t);
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "  PCM law: %s, nominal power: -10 dBm0, max power: -10 dBm0\n",
+                 s->v90_pcm_law ? "A-law" : "u-law");
+        return 62;
+    }
+
     log_info0(s->logging, true, &v34_capabilities, s->info0_acknowledgement);
     bitstream_init(&bs, true);
     t = s->txbuf;
@@ -4073,6 +4143,17 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
 {
     return s->tx.stage;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
+{
+    s->tx.v90_mode = true;
+    s->tx.v90_pcm_law = pcm_law;
+    s->rx.v90_mode = true;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "V.90 mode enabled (PCM law: %s)\n",
+             pcm_law ? "A-law" : "u-law");
 }
 /*- End of function --------------------------------------------------------*/
 

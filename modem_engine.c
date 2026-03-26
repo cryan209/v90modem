@@ -8,10 +8,10 @@
  *     Phase 2 (DPSK INFO exchange), Phase 3 (equalizer training),
  *     Phase 4 (final training and rate negotiation).
  *
- *   Future: V.90 downstream (up to 56 kbps)
+ *   V.90 mode: downstream PCM (up to 56 kbps) + upstream V.34
  *     ITU-T V.90 §5 PCM codeword injection into the G.711 RTP stream.
- *     V.90 encoder code is retained but not yet active (requires V.90-specific
- *     Phase 3/4 training which differs from standard V.34).
+ *     Training uses V.34 Phases 2-4, then TX switches to direct PCM injection.
+ *     Upstream (analog→digital) uses V.34 demodulation.
  *
  *   Fallback: V.22bis full duplex (2400 bps)
  *
@@ -581,7 +581,7 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    well-separated, and the LMS diverges if active.  We track RX frame count since
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
-static const bool g_advertise_v90 = false; /* Keep false until PCM downstream is implemented end-to-end */
+static const bool g_advertise_v90 = true; /* Advertise V.90 — PCM downstream active */
 static int        g_v34_start_baud = 2400;   /* 3200 has 91 Hz separation (notch unusable); 2400 has 200 Hz */
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
@@ -725,14 +725,23 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 g_state = ME_DATA;
                 g_phase_start_ms = 0;
                 int rate = v34_get_current_bit_rate(g_v34);
-                fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
-                trace_phase("V34 enter DATA: rate=%d", rate);
-                di_on_connected(rate);
+                if (g_mod == ME_MOD_V90) {
+                    fprintf(stderr, "[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
+                            rate, V90_RATE_BPS);
+                    trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
+                    /* Re-init V.90 encoder for clean data mode start */
+                    v90_enc_init(&g_v90_enc);
+                    di_on_connected(V90_RATE_BPS);
+                } else {
+                    fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
+                    trace_phase("V34 enter DATA: rate=%d", rate);
+                    di_on_connected(rate);
+                }
                 return;
             }
         }
         if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
-            if (g_state == ME_TRAINING && g_mod == ME_MOD_V34) {
+            if (g_state == ME_TRAINING && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {
                 fprintf(stderr, "[ME] V.34 training failed (%s), falling back to V.22bis\n",
                         signal_status_to_str(bit));
                 trace_phase("V34 training failed (%s) -> fallback V22BIS",
@@ -978,13 +987,24 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if (result->jm_cm.modulations & V8_MOD_V34) {
+    if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
+        && (result->jm_cm.modulations & V8_MOD_V34)) {
         /*
-         * Prefer pure V.34 for now. V.90 requires downstream PCM mode after
-         * V.34 startup; this endpoint is not yet doing the full V.90 switch.
+         * V.90 selected: downstream = PCM codeword injection (up to 56 kbps),
+         * upstream = V.34 modulation.  Training uses V.34 Phases 2-4; after
+         * training completes, TX switches from V.34 to direct PCM injection.
          */
-        if ((result->jm_cm.modulations & V8_MOD_V90) && !g_advertise_v90)
-            trace_phase("V8 remote offered V90 but forcing V34-only datapump");
+        fprintf(stderr, "[ME] V.8 negotiated V.90 (PCM downstream + V.34 upstream)\n");
+        trace_phase("V8 selected V90");
+        g_mod = ME_MOD_V90;
+        start_v34_training();
+        /* start_v34_training sets g_mod = ME_MOD_V34; override back to V90 */
+        g_mod = ME_MOD_V90;
+        /* Enable V.90 INFO0d frame generation in SpanDSP V.34 */
+        if (g_v34)
+            v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+
+    } else if (result->jm_cm.modulations & V8_MOD_V34) {
         fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
         trace_phase("V8 selected V34");
         start_v34_training();
@@ -1194,10 +1214,12 @@ void me_rx_audio(const int16_t *amp, int len)
             trace_phase("TRAINING timeout after %llums mod=%s",
                         (unsigned long long)elapsed, me_mod_to_str(g_mod));
             g_phase_start_ms = 0;
-            if (g_mod == ME_MOD_V34) {
-                /* V.34 training failed — fall back to V.22bis */
-                fprintf(stderr, "[ME] V.34 training timeout, falling back to V.22bis\n");
-                trace_phase("V34 timeout -> fallback V22BIS");
+            if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
+                /* V.34/V.90 training failed — fall back to V.22bis */
+                fprintf(stderr, "[ME] %s training timeout, falling back to V.22bis\n",
+                        g_mod == ME_MOD_V90 ? "V.90" : "V.34");
+                trace_phase("%s timeout -> fallback V22BIS",
+                            g_mod == ME_MOD_V90 ? "V90" : "V34");
                 if (g_v34) {
                     v34_free(g_v34);
                     g_v34 = NULL;
@@ -1255,9 +1277,9 @@ void me_rx_audio(const int16_t *amp, int len)
         }
         /* Feed audio to the appropriate modem receiver.
            Apply notch filter to remove our TX carrier echo from FXS hybrid. */
-        if (g_mod == ME_MOD_V34) {
+        if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
-            if (g_mod == ME_MOD_V34 && g_v34) {
+            if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
                 /* Log RX/TX stage transitions for training diagnostics */
                 int rx_stage = v34_get_rx_stage(g_v34);
                 int tx_stage = v34_get_tx_stage(g_v34);
@@ -1342,9 +1364,9 @@ void me_tx_audio(int16_t *amp, int len)
          * equalizer training). The put_bit callback fires SIG_STATUS_CARRIER_UP
          * when training completes, transitioning us to ME_DATA.
          */
-        if (g_mod == ME_MOD_V34) {
+        if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
-            if (g_mod == ME_MOD_V34 && g_v34)
+            if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34)
                 v34_tx(g_v34, amp, len);
             pthread_mutex_unlock(&g_state_mtx);
             /* TX PCM dump + RMS diagnostic during training */

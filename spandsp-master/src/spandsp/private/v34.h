@@ -454,6 +454,12 @@ typedef struct
 
     bool info0_acknowledgement;
 
+    /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
+        instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */
+    bool v90_mode;
+    /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
+    int v90_pcm_law;
+
     union
     {
         info1a_t info1a;
@@ -721,6 +727,10 @@ typedef struct
     int target_bits;
     uint16_t crc;
     uint32_t last_angles[2];
+
+    /*! \brief V.90 mode: when true, INFO0 RX expects V.90 INFO0a format (49 bits)
+        instead of standard V.34 INFO0.  Set by external v90 module. */
+    bool v90_mode;
 
     /*! \brief Buffer for receiving info frames. */
     uint8_t info_buf[25];
