@@ -2641,12 +2641,17 @@ static int process_rx_mph(v34_rx_state_t *s, mph_t *mph, uint8_t buf[])
 }
 /*- End of function --------------------------------------------------------*/
 
+static int put_info_bit_count = 0;
+
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     int info_search_enabled;
 
     /* Put info0, info1, tone A or tone B bits */
     s->bitstream = (s->bitstream << 1) | bit;
+    if (++put_info_bit_count % 600 == 0)
+        span_log(s->logging, SPAN_LOG_FLOW, "Rx - info_rx bits=%d bitstream=0x%03x stage=%d\n",
+                 put_info_bit_count, (int)(s->bitstream & 0xFFF), s->stage);
     /* Log only sync code matches and CRC results (verbose bit logging removed) */
     switch (s->stage)
     {
@@ -2899,7 +2904,9 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         if (++s->rrc_filter_step >= V34_RX_FILTER_STEPS)
             s->rrc_filter_step = 0;
         /*endif*/
-        if (s->calling_party)
+        /* V.34: caller listens at 2400 Hz, answerer at 1200 Hz.
+           V.90 §8.2.3.1: digital modem (answerer) listens at 2400 Hz instead. */
+        if (s->calling_party || s->v90_mode)
         {
 #if defined(SPANDSP_USE_FIXED_POINT)
             ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
