@@ -2426,8 +2426,12 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
 static void info1_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - info1_baud_init()\n");
-    if (s->tx.calling_party)
+    if (s->tx.calling_party || s->tx.v90_mode)
     {
+        /* V.90 §8.2.3.2 Table 9: digital modem sends INFO1d which is
+           identical to V.34 INFO1c (109 bits with probing results) */
+        if (s->tx.v90_mode)
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d (V.90 Table 9, same format as V.34 INFO1c):\n");
         prepare_info1c(s);
         s->tx.txbits = info1c_sequence_tx(&s->tx, &s->tx.info1c);
         s->tx.txbits += 8;
