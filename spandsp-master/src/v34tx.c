@@ -4151,6 +4151,18 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     s->tx.v90_mode = true;
     s->tx.v90_pcm_law = pcm_law;
     s->rx.v90_mode = true;
+
+    /* V.90 §8.2.3.1: digital modem TX CC at 1200 Hz, RX CC at 2400 Hz.
+       Must update carrier phase rates here since v34_init/restart already ran
+       with v90_mode=false and set standard V.34 carriers. */
+    if (!s->calling_party)
+    {
+        s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
+        s->tx.guard_phase_rate = 0;
+        s->tx.guard_level = 0.0f;
+        s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+    }
+
     span_log(&s->logging, SPAN_LOG_FLOW,
              "V.90 mode enabled (PCM law: %s)\n",
              pcm_law ? "A-law" : "u-law");
@@ -4204,8 +4216,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     }
     else if (s->tx.v90_mode)
     {
-        /* V.90 §8.2.3.1: digital modem (answerer) transmits INFO at 1200 Hz,
-           not the standard V.34 answerer frequency of 2400 Hz. */
+        /* V.90 §8.2.3.1: digital modem (answerer) transmits INFO at 1200 Hz */
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
         s->tx.guard_phase_rate = 0;
         s->tx.guard_level = 0.0f;

@@ -1004,9 +1004,15 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         g_v34_start_baud = saved_baud;
         /* start_v34_training sets g_mod = ME_MOD_V34; override back to V90 */
         g_mod = ME_MOD_V90;
-        /* Enable V.90 INFO0d frame generation in SpanDSP V.34 */
+        /* Enable V.90 INFO0d frame generation and carrier swap in SpanDSP V.34.
+           v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+        /* Phase 2 CC carriers: answerer TX=2400 Hz, RX=1200 Hz (1200 Hz apart).
+           The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
+           disabled the notch — but we need it for Phase 2 CC echo removal. */
+        notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
+        fprintf(stderr, "[ME] V.90 notch filter at 1200 Hz (our CC TX), RX CC at 2400 Hz\n");
 
     } else if (result->jm_cm.modulations & V8_MOD_V34) {
         fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
