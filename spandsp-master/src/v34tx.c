@@ -629,7 +629,13 @@ static void prepare_info1c(v34_state_t *s)
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {
-        s->tx.info1c.rate_data[i].use_high_carrier = false;
+        /* In V.90, INFO1d bit 25 tells the analog modem which carrier to use for its
+           upstream TX. Since we (digital modem/answerer) RX on high carrier, set
+           use_high_carrier=true so the analog modem transmits on high carrier.
+           In standard V.34, INFO1c bit 25 tells the answerer which carrier to use;
+           the answerer TX=low in duplex, so use_high_carrier=false was for that case.
+           V.90 §8.2.3.2 Table 9 redefined this bit for the analog→digital direction. */
+        s->tx.info1c.rate_data[i].use_high_carrier = s->tx.v90_mode ? true : false;
         s->tx.info1c.rate_data[i].pre_emphasis = 6;
         s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  ((s->tx.parms.max_bit_rate_code >> 1) + 1)  :  0;
     }

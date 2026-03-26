@@ -2,8 +2,11 @@
  * v90.c — V.90 digital modem module
  *
  * ITU-T V.90 digital (server) side implementation.
- * Wraps SpanDSP V.34 for training with V.90-specific INFO0d frames,
- * and implements the PCM downstream encoder (§5).
+ *
+ * Phase 2: Wraps SpanDSP V.34 for INFO0d/INFO1d exchange.
+ * Phase 3: Generates PCM codewords (Jd, J'd, Sd, S̄d, TRN1d) directly.
+ * Phase 4: V.90-specific MP/CP exchange (TODO).
+ * Data:    Modulus encoder → PCM codewords at 8 kHz.
  */
 
 #include "v90.h"
@@ -16,8 +19,18 @@
 #include <math.h>
 
 /* V.90 downstream encoder constants (ITU-T V.90 §5) */
-#define V90_MI          128     /* Constellation points per frame interval */
+#define V90_MI          128     /* Default constellation points per frame interval */
 #define V90_FRAME_LEN   6       /* Symbols per data frame */
+
+/* Jd frame is 72 bits (Table 13): 17 sync + 51 data + 4 fill */
+#define V90_JD_BITS     72
+
+/* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
+#define V90_SD_REPS     64
+#define V90_SD_BAR_REPS 8
+
+/* TRN1d: multiple of 6 symbols; use 768 symbols (128ms @ 8kHz) */
+#define V90_TRN1D_LEN   768
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
@@ -47,30 +60,49 @@ typedef struct {
 
 static void v90_scrambler_init(v90_scrambler_t *sc)
 {
-    sc->sr = 0x7FFFFF;
+    sc->sr = 0;  /* V.90 §8.4: scrambler initialized to zero */
+}
+
+static int v90_scramble_bit(v90_scrambler_t *sc, int in_bit)
+{
+    int fb = ((sc->sr >> 22) ^ (sc->sr >> 4)) & 1;
+    int out_bit = in_bit ^ fb;
+    sc->sr = ((sc->sr << 1) | out_bit) & 0x7FFFFF;
+    return out_bit;
 }
 
 static uint8_t v90_scramble_byte(v90_scrambler_t *sc, uint8_t in)
 {
     uint8_t out = 0;
     for (int i = 0; i < 8; i++) {
-        int in_bit  = (in >> i) & 1;
-        int fb      = ((sc->sr >> 22) ^ (sc->sr >> 4)) & 1;
-        int out_bit = in_bit ^ fb;
-        sc->sr = ((sc->sr << 1) | out_bit) & 0x7FFFFF;
-        out   |= (uint8_t)(out_bit << i);
+        int in_bit = (in >> i) & 1;
+        int out_bit = v90_scramble_bit(sc, in_bit);
+        out |= (uint8_t)(out_bit << i);
     }
     return out;
 }
 
 struct v90_state_s {
-    v34_state_t *v34;
-    v90_law_t    law;
+    v34_state_t     *v34;
+    v90_law_t        law;
 
-    /* Downstream PCM encoder state */
-    v90_scrambler_t scrambler;
-    int prev_sign;   /* §5.4.5.1 differential sign coding */
+    /* Phase 3/4 TX state */
+    v90_tx_phase_t   tx_phase;
+    int              u_info;        /* U_INFO Ucode from analog modem's INFO1a */
+    v90_scrambler_t  scrambler;
+    int              diff_enc;      /* Differential encoder state (last sign bit) */
+    int              sample_count;  /* Sample counter within current sub-state */
+    int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
+
+    /* Jd frame data */
+    uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
+    int              jd_bit_pos;    /* Current bit position in Jd frame */
+
+    /* Downstream PCM encoder state (data mode) */
+    int              prev_sign;     /* §5.4.5.1 differential sign coding */
 };
+
+/* ---- PCM codeword helpers ---- */
 
 static inline uint8_t ucode_to_pcm_positive(v90_law_t law, int ucode)
 {
@@ -91,32 +123,232 @@ static inline uint8_t v90_pcm_idle(v90_law_t law)
     return (law == V90_LAW_ALAW) ? (uint8_t)0xD5 : (uint8_t)0xFF;
 }
 
-/*
- * Encode one 6-symbol data frame.
- * Fills pcm_out[0..5] with G.711 codewords.
- */
-static void v90_encode_frame(v90_state_t *s, const uint8_t *data_in,
-                             uint8_t *pcm_out)
+/* Generate a signed PCM sample from a Ucode and sign bit.
+ * sign=1 → positive, sign=0 → negative. */
+static inline int16_t v90_pcm_signed(v90_law_t law, int ucode, int sign)
 {
-    int sign = s->prev_sign;
+    uint8_t pcm = ucode_to_pcm_positive(law, ucode);
+    if (!sign)
+        pcm &= 0x7F;  /* Clear sign bit → negative polarity */
+    return v90_pcm_to_linear(law, pcm);
+}
 
-    for (int i = 0; i < V90_FRAME_LEN; i++) {
-        uint8_t sc = v90_scramble_byte(&s->scrambler, data_in[i]);
-        uint8_t mag   = sc & 0x7F;
-        int     s_bit = (sc >> 7) & 1;
+/* ---- Jd frame construction (Table 13) ---- */
 
-        /* §5.4.5.1 differential sign coding (Sr=0) */
-        sign = s_bit ^ sign;
+static void v90_build_jd(v90_state_t *s)
+{
+    /* Build the 72-bit Jd frame per V.90 Table 13.
+     * Bits 0:16   = Frame sync (17 ones)
+     * Bit  17     = Start bit (0)
+     * Bits 18:33  = Data signalling rate capability mask
+     * Bit  34     = Start bit (0)
+     * Bits 35:46  = Rate capability mask continued + reserved
+     * Bit  47     = Constellation size for training (0=4pt, 1=16pt)
+     * Bit  48     = Constellation size for renegotiation
+     * Bits 49:50  = Spectral shaping lookahead (1-3)
+     * Bit  51     = Start bit (0)
+     * Bits 52:67  = CRC
+     * Bits 68:71  = Fill (0000)
+     */
+    memset(s->jd_bits, 0, sizeof(s->jd_bits));
 
-        uint8_t mu = ucode_to_pcm_positive(s->law, mag);
-        if (sign == 0)
-            mu &= 0x7F;  /* negative polarity */
+    /* We pack bit-by-bit, LSB first within each byte */
+    int pos = 0;
 
-        pcm_out[i] = mu;
+    /* Bits 0:16 — 17 sync bits (all 1) */
+    for (int i = 0; i < 17; i++)
+        s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+
+    /* Bit 17 — start bit (0) */
+    pos++;
+
+    /* Bits 18:33 — data signalling rate capability mask.
+     * Support 28-56 kbps (bits 18:28 = rates 28k through 56k).
+     * Bit 18:28 = 000 (28k disabled) through 56k.
+     * For now, enable all rates 28k-56k (bits 18:40).
+     * Actually the mask is: bit N = rate (N-18+20)*8000/6 / 1000
+     * Let's enable rates corresponding to common V.90 speeds.
+     * Bit 18 = 28000, bit 19 = 29333, ..., bit 33 = 48000 (first group)
+     * Simple approach: enable all. */
+    for (int i = 18; i <= 33; i++)
+        s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+
+    /* Bit 34 — start bit (0) */
+    pos++;
+
+    /* Bits 35:46 — continued rate mask + reserved.
+     * Bits 35:40 = rates 49333-56000. Enable all.
+     * Bits 41:46 = reserved (0) */
+    for (int i = 35; i <= 40; i++)
+        s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+    pos += 6; /* bits 41:46 reserved = 0 */
+
+    /* Bit 47 — constellation size for training: 0=4-point */
+    pos++;
+
+    /* Bit 48 — constellation size for renegotiation: 0=4-point */
+    pos++;
+
+    /* Bits 49:50 — spectral shaping lookahead: 1 (minimum mandatory) */
+    s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+    pos++; /* bit 50 = 0 → value is 1 */
+
+    /* Bit 51 — start bit (0) */
+    pos++;
+
+    /* Bits 52:67 — CRC (16 bits). Computed over bits 0:51.
+     * Using the CRC generator from V.34 §10.1.2.3.2. */
+    {
+        uint16_t crc = 0xFFFF;
+        for (int i = 0; i < 52; i++) {
+            int bit = (s->jd_bits[i/8] >> (i%8)) & 1;
+            int fb = ((crc >> 15) ^ bit) & 1;
+            crc <<= 1;
+            if (fb)
+                crc ^= 0x8005;  /* CRC-16 polynomial */
+            crc &= 0xFFFF;
+        }
+        for (int i = 0; i < 16; i++) {
+            if ((crc >> (15 - i)) & 1)
+                s->jd_bits[(52+i)/8] |= (1 << ((52+i)%8));
+        }
     }
 
-    s->prev_sign = sign;
+    /* Bits 68:71 — fill (0000), already zero */
 }
+
+/* ---- Phase 3 TX sample generation ---- */
+
+/* Get next Jd bit, wrap around for continuous repetition */
+static int v90_get_jd_bit(v90_state_t *s)
+{
+    int bit = (s->jd_bits[s->jd_bit_pos / 8] >> (s->jd_bit_pos % 8)) & 1;
+    s->jd_bit_pos++;
+    if (s->jd_bit_pos >= V90_JD_BITS)
+        s->jd_bit_pos = 0;
+    return bit;
+}
+
+/* Generate one Phase 3 TX sample */
+static int16_t v90_phase3_sample(v90_state_t *s)
+{
+    int sign;
+    int ucode;
+
+    switch (s->tx_phase) {
+    case V90_TX_JD:
+        /* §8.4.2: Jd bits are scrambled and differentially encoded,
+         * transmitted as sign of U_INFO PCM codeword. */
+        {
+            int bit = v90_get_jd_bit(s);
+            int scrambled = v90_scramble_bit(&s->scrambler, bit);
+            /* Differential encoding: sign = scrambled XOR previous sign */
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            return v90_pcm_signed(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_JD_PRIME:
+        /* §8.4.3: J'd = 12 scrambled zeros as sign of U_INFO */
+        {
+            int scrambled = v90_scramble_bit(&s->scrambler, 0);
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            if (s->sample_count >= 12) {
+                /* Transition to Sd */
+                fprintf(stderr, "[V90] Phase 3: J'd complete, starting Sd\n");
+                s->tx_phase = V90_TX_SD;
+                s->sample_count = 0;
+                s->rep_count = 0;
+            }
+            return v90_pcm_signed(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_SD:
+        /* §8.4.4: Sd = 64 reps of {+W, +0, +W, -W, -0, -W}
+         * W = Ucode(16 + U_INFO), 0 = Ucode 0 */
+        {
+            int w_ucode = 16 + s->u_info;
+            int pos_in_pattern = s->sample_count % 6;
+            s->sample_count++;
+
+            switch (pos_in_pattern) {
+            case 0: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
+            case 1: return v90_pcm_signed(s->law, 0, 1);       /* +0 */
+            case 2: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
+            case 3: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
+            case 4: return v90_pcm_signed(s->law, 0, 0);       /* -0 */
+            case 5:
+                s->rep_count++;
+                if (s->rep_count >= V90_SD_REPS) {
+                    fprintf(stderr, "[V90] Phase 3: Sd complete (%d reps), starting S̄d\n",
+                            s->rep_count);
+                    s->tx_phase = V90_TX_SD_BAR;
+                    s->sample_count = 0;
+                    s->rep_count = 0;
+                }
+                return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
+            }
+            break;  /* unreachable */
+        }
+
+    case V90_TX_SD_BAR:
+        /* §8.4.4: S̄d = 8 reps of {-W, -0, -W, +W, +0, +W} */
+        {
+            int w_ucode = 16 + s->u_info;
+            int pos_in_pattern = s->sample_count % 6;
+            s->sample_count++;
+
+            switch (pos_in_pattern) {
+            case 0: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
+            case 1: return v90_pcm_signed(s->law, 0, 0);       /* -0 */
+            case 2: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
+            case 3: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
+            case 4: return v90_pcm_signed(s->law, 0, 1);       /* +0 */
+            case 5:
+                s->rep_count++;
+                if (s->rep_count >= V90_SD_BAR_REPS) {
+                    fprintf(stderr, "[V90] Phase 3: S̄d complete, starting TRN1d\n");
+                    s->tx_phase = V90_TX_TRN1D;
+                    s->sample_count = 0;
+                    /* §8.4.5: scrambler initialized to zero for TRN1d */
+                    v90_scrambler_init(&s->scrambler);
+                }
+                return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
+            }
+            break;  /* unreachable */
+        }
+
+    case V90_TX_TRN1D:
+        /* §8.4.5: TRN1d = U_INFO codeword with signs from scrambled ones.
+         * Scrambler initialized to zero. */
+        {
+            int scrambled = v90_scramble_bit(&s->scrambler, 1);
+            sign = scrambled;  /* sign=0 → negative, sign=1 → positive */
+            s->sample_count++;
+            if (s->sample_count >= V90_TRN1D_LEN) {
+                fprintf(stderr, "[V90] Phase 3: TRN1d complete (%d symbols), entering Phase 4\n",
+                        s->sample_count);
+                s->tx_phase = V90_TX_PHASE4;
+                s->sample_count = 0;
+            }
+            return v90_pcm_signed(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_PHASE4:
+        /* TODO: Phase 4 (B1d, TRN2d, MP, R, E exchanges) */
+        return v90_pcm_signed(s->law, 0, 1);  /* idle for now */
+
+    default:
+        break;
+    }
+
+    return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+}
+
+/* ---- Public API ---- */
 
 v90_state_t *v90_init(int baud_rate,
                       int bit_rate,
@@ -132,7 +364,10 @@ v90_state_t *v90_init(int baud_rate,
         return NULL;
 
     s->law = law;
+    s->tx_phase = V90_TX_PHASE2;
+    s->u_info = 80;  /* Default U_INFO (safe mid-range value) */
     v90_scrambler_init(&s->scrambler);
+    s->diff_enc = 0;
     s->prev_sign = 0;
 
     s->v34 = v34_init(NULL, baud_rate, bit_rate, calling_party, true,
@@ -161,6 +396,74 @@ void v90_free(v90_state_t *s)
 v34_state_t *v90_get_v34(v90_state_t *s)
 {
     return s->v34;
+}
+
+v90_tx_phase_t v90_get_tx_phase(v90_state_t *s)
+{
+    return s->tx_phase;
+}
+
+bool v90_phase3_active(v90_state_t *s)
+{
+    return s->tx_phase >= V90_TX_JD && s->tx_phase <= V90_TX_TRN1D;
+}
+
+void v90_start_phase3(v90_state_t *s, int u_info)
+{
+    if (u_info > 0 && u_info < 128)
+        s->u_info = u_info;
+
+    fprintf(stderr, "[V90] Starting Phase 3 TX (U_INFO=%d, law=%s)\n",
+            s->u_info, s->law == V90_LAW_ALAW ? "A-law" : "u-law");
+
+    /* Build Jd frame */
+    v90_build_jd(s);
+
+    /* Initialize scrambler and differential encoder for Jd.
+     * §8.4.2: differential encoder initialized with final symbol of TRN1d.
+     * Since we haven't sent TRN1d yet, initialize to 0.
+     * Actually, Jd comes BEFORE TRN1d. The scrambler is initialized to zero. */
+    v90_scrambler_init(&s->scrambler);
+    s->diff_enc = 0;
+    s->jd_bit_pos = 0;
+    s->sample_count = 0;
+    s->rep_count = 0;
+
+    s->tx_phase = V90_TX_JD;
+}
+
+int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
+{
+    for (int i = 0; i < len; i++)
+        amp[i] = v90_phase3_sample(s);
+    return len;
+}
+
+/*
+ * Encode one 6-symbol data frame.
+ * Fills pcm_out[0..5] with G.711 codewords.
+ */
+static void v90_encode_frame(v90_state_t *s, const uint8_t *data_in,
+                             uint8_t *pcm_out)
+{
+    int sign = s->prev_sign;
+
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        uint8_t sc = v90_scramble_byte(&s->scrambler, data_in[i]);
+        uint8_t mag   = sc & 0x7F;
+        int     s_bit = (sc >> 7) & 1;
+
+        /* §5.4.5.1 differential sign coding (Sr=0) */
+        sign = s_bit ^ sign;
+
+        uint8_t mu = ucode_to_pcm_positive(s->law, mag);
+        if (sign == 0)
+            mu &= 0x7F;  /* negative polarity */
+
+        pcm_out[i] = mu;
+    }
+
+    s->prev_sign = sign;
 }
 
 int v90_tx_data(v90_state_t *s, int16_t amp[], int len,

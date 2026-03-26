@@ -2370,53 +2370,93 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
 
     bitstream_init(&bs, true);
     t = buf;
-    /* 12:14    Minimum power reduction to be implemented by the call modem transmitter. An integer between 0 and 7 gives
-                the recommended power reduction in dB. These bits shall indicate 0 if INFO0c indicated that the call modem
-                transmitter cannot reduce its power. */
-    info1a->power_reduction = bitstream_get(&bs, &t, 3);
-    /* 15:17    Additional power reduction, below that indicated by bits 12:14, which can be tolerated by the answer modem
-                receiver. An integer between 0 and 7 gives the additional power reduction in dB. These bits shall indicate 0 if
-                INFO0c indicated that the call modem transmitter cannot reduce its power. */
-    info1a->additional_power_reduction = bitstream_get(&bs, &t, 3);
-    /* 18:24    Length of MD to be transmitted by the answer modem during Phase 3. An integer between 0 and 127 gives the
-                length of this sequence in 35 ms increments. */
-    info1a->md = bitstream_get(&bs, &t, 7);
-    /* 25       Set to 1 indicates that the high carrier frequency is to be used in transmitting from the call modem to the answer
-                modem. This shall be consistent with the capabilities of the call modem indicated in INFO0c. */
-    info1a->use_high_carrier = bitstream_get(&bs, &t, 1);
-    /* 26:29    Pre-emphasis filter to be used in transmitting from the call modem to the answer modem. These bits form an
-                integer between 0 and 10 which represents the pre-emphasis filter index (see Tables 3 and 4). */
-    info1a->preemphasis_filter = bitstream_get(&bs, &t, 4);
-    /* 30:33    Projected maximum data rate for the selected symbol rate from the call modem to the answer modem. These bits
-                form an integer between 0 and 14 which gives the projected data rate as a multiple of 2400 bits/s. */
-    info1a->max_data_rate = bitstream_get(&bs, &t, 4);
-    /* 34:36    Symbol rate to be used in transmitting from the answer modem to the call modem. An integer between 0 and 5
-                gives the symbol rate, where 0 represents 2400 and a 5 represents 3429. The symbol rate selected shall be
-                consistent with information in INFO1c and consistent with the symbol rate asymmetry allowed as indicated in
-                INFO0a and INFO0c. The carrier frequency and pre-emphasis filter to be used are those already indicated for
-                this symbol rate in info1c. */
-    info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
-    /* 37:39    Symbol rate to be used in transmitting from the call modem to the answer modem. An integer between 0 and 5
-                gives the symbol rate, where 0 represents 2400 and a 5 represents 3429. The symbol rate selected shall be
-                consistent with the capabilities indicated in INFO0a and consistent with the symbol rate asymmetry allowed as
-                indicated in INFO0a and INFO0c. */
-    info1a->baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
-    /* 40:49    Frequency offset of the probing tones as measured by the answer modem receiver. The frequency offset number
-                shall be the difference between the nominal 1050 Hz line probing signal tone received and the 1050 Hz tone
-                transmitted, f(received) and f(transmitted). A two's complement signed integer between -511 and 511 gives the
-                measured offset in 0.02 Hz increments. Bit 49 is the sign bit of this integer. The frequency offset measurement
-                shall be accurate to 0.25 Hz. Under conditions where this accuracy cannot be achieved, the integer shall be set
-                to -512 indicating that this field is to be ignored. */
-    info1a->freq_offset = bitstream_get(&bs, &t, 10);
-    if ((info1a->freq_offset & 0x200))
-        info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+
+    if (s->v90_mode)
+    {
+        /* V.90 §8.2.3.2 Table 10: INFO1a from analog modem when V.90 is selected.
+           Different field layout from V.34 INFO1a. */
+        /* 12:17    Reserved for ITU (set to 0 by analog modem) */
+        bitstream_get(&bs, &t, 6);
+        info1a->power_reduction = 0;
+        info1a->additional_power_reduction = 0;
+        /* 18:24    Length of MD to be transmitted by the analog modem during Phase 3 */
+        info1a->md = bitstream_get(&bs, &t, 7);
+        /* 25:31    U_INFO: Ucode of the PCM codeword for the 2-point train.
+                    Stored in use_high_carrier (1 bit) + preemphasis_filter (4 bits) + 2 extra bits.
+                    We pack the 7-bit value into max_data_rate for the caller to retrieve. */
+        info1a->max_data_rate = bitstream_get(&bs, &t, 7);  /* U_INFO */
+        info1a->use_high_carrier = false;
+        info1a->preemphasis_filter = 0;
+        /* 32:33    Reserved for ITU */
+        bitstream_get(&bs, &t, 2);
+        /* 34:36    Symbol rate for analog→digital (upstream). 3=3000, 4=3200, 5=3429 */
+        info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
+        /* 37:39    Symbol rate of 8000 (the integer 6) — V.90 PCM downstream rate */
+        info1a->baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
+        /* 40:49    Frequency offset (same as V.34) */
+        info1a->freq_offset = bitstream_get(&bs, &t, 10);
+        if ((info1a->freq_offset & 0x200))
+            info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+        /*endif*/
+
+        span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 10):\n");
+        span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
+        span_log(s->logging, SPAN_LOG_FLOW, "  U_INFO = %d\n", info1a->max_data_rate);
+        span_log(s->logging, SPAN_LOG_FLOW, "  Upstream symbol rate code = %d\n", info1a->baud_rate_a_to_c);
+        span_log(s->logging, SPAN_LOG_FLOW, "  Downstream rate code = %d (8000 PCM)\n", info1a->baud_rate_c_to_a);
+        if (info1a->freq_offset == -512)
+            span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
+        else
+            span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
+
+        /* In V.90, the upstream (analog→digital) uses V.34 modulation at the selected baud rate.
+           Use the upstream baud rate for the primary channel RX configuration. */
+        if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
+        {
+            s->baud_rate = info1a->baud_rate_a_to_c;
+            s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+            create_godard_coeffs(&s->pri_ted,
+                                 carrier_frequency(s->baud_rate, s->high_carrier),
+                                 baud_rate_parameters[s->baud_rate].baud_rate,
+                                 0.99f);
+        }
+        /*endif*/
+    }
+    else
+    {
+        /* Standard V.34 INFO1a parsing */
+        /* 12:14    Minimum power reduction */
+        info1a->power_reduction = bitstream_get(&bs, &t, 3);
+        /* 15:17    Additional power reduction */
+        info1a->additional_power_reduction = bitstream_get(&bs, &t, 3);
+        /* 18:24    Length of MD */
+        info1a->md = bitstream_get(&bs, &t, 7);
+        /* 25       High carrier frequency */
+        info1a->use_high_carrier = bitstream_get(&bs, &t, 1);
+        /* 26:29    Pre-emphasis filter index */
+        info1a->preemphasis_filter = bitstream_get(&bs, &t, 4);
+        /* 30:33    Projected maximum data rate */
+        info1a->max_data_rate = bitstream_get(&bs, &t, 4);
+        /* 34:36    Symbol rate answer→call */
+        info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
+        /* 37:39    Symbol rate call→answer */
+        info1a->baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
+        /* 40:49    Frequency offset */
+        info1a->freq_offset = bitstream_get(&bs, &t, 10);
+        if ((info1a->freq_offset & 0x200))
+            info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+        /*endif*/
+        s->baud_rate = info1a->baud_rate_c_to_a;
+        s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+        create_godard_coeffs(&s->pri_ted,
+                             carrier_frequency(s->baud_rate, s->high_carrier),
+                             baud_rate_parameters[s->baud_rate].baud_rate,
+                             0.99f);
+
+        log_info1a(s->logging, false, info1a);
+    }
     /*endif*/
-    s->baud_rate = info1a->baud_rate_c_to_a;
-    s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
-    create_godard_coeffs(&s->pri_ted,
-                         carrier_frequency(s->baud_rate, s->high_carrier),
-                         baud_rate_parameters[s->baud_rate].baud_rate,
-                         0.99f);
+
 #if defined(SPANDSP_USE_FIXED_POINT)
     s->pri_ted.symbol_sync_low[0] = s->pri_ted.symbol_sync_low[1] = 0;
     s->pri_ted.symbol_sync_high[0] = s->pri_ted.symbol_sync_high[1] = 0;
@@ -2429,7 +2469,6 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
     s->pri_ted.baud_phase = 0.0f;
 #endif
 
-    log_info1a(s->logging, false, info1a);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2740,8 +2779,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_2;
-                /* The next info message will be INFO1c */
-                s->target_bits = 109 - (4 + 8 + 4);
+                if (s->v90_mode)
+                {
+                    /* V.90 §8.2.3.2 Table 10: analog modem sends INFO1a (70 bits),
+                       not INFO1c (109 bits) as in standard V.34 */
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 mode: expecting INFO1a (70 bits) from analog modem\n");
+                    s->target_bits = 70 - (4 + 8 + 4);
+                    s->stage = V34_RX_STAGE_INFO1A;
+                }
+                else
+                {
+                    /* The next info message will be INFO1c */
+                    s->target_bits = 109 - (4 + 8 + 4);
+                }
                 l1_l2_analysis_init(s);
                 break;
             default:
@@ -3638,7 +3689,12 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
                 span_log(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->received_event = V34_EVENT_L2_SEEN;
                 s->current_demodulator = V34_MODULATION_TONES;
-                s->stage = (s->calling_party)  ?  V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_INFO1C;
+                if (s->calling_party)
+                    s->stage = V34_RX_STAGE_TONE_A;
+                else if (s->v90_mode)
+                    s->stage = V34_RX_STAGE_INFO1A;  /* V.90: analog modem sends INFO1a (70 bits) */
+                else
+                    s->stage = V34_RX_STAGE_INFO1C;
             }
             /*endif*/
         }

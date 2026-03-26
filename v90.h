@@ -4,10 +4,9 @@
  * Implements the digital (server) side of ITU-T V.90:
  *   - Downstream: PCM codeword injection into G.711 stream (up to 56 kbps)
  *   - Upstream:   V.34 demodulation (handled by SpanDSP V.34 RX)
- *   - Training:   V.34 Phases 2-4 with V.90-specific INFO0d/INFO0a frames
- *
- * This module wraps SpanDSP's V.34 state machine, enabling V.90 mode
- * for Phase 2 INFO exchange and managing the PCM downstream encoder.
+ *   - Phase 2:    V.34-based INFO exchange with V.90-specific INFO0d/INFO1d
+ *   - Phase 3:    Digital modem TX as raw PCM codewords (DIL, Jd, Sd, TRN1d)
+ *   - Phase 4:    V.90-specific MP/CP exchange
  */
 
 #ifndef V90_H
@@ -26,21 +25,21 @@ typedef enum {
     V90_LAW_ALAW = 1
 } v90_law_t;
 
+/* V.90 Phase 3/4 TX sub-states for the digital modem */
+typedef enum {
+    V90_TX_PHASE2,        /* SpanDSP V.34 handles INFO exchange */
+    V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
+    V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
+    V90_TX_SD,            /* Sending Sd — 64 reps of {+W,+0,+W,-W,-0,-W} */
+    V90_TX_SD_BAR,        /* Sending S̄d — 8 reps of {-W,-0,-W,+W,+0,+W} */
+    V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
+    V90_TX_PHASE4,        /* Phase 4 (B1d, TRN2d, MP, CP exchange) */
+    V90_TX_DATA,          /* Data mode — modulus encoder */
+} v90_tx_phase_t;
+
 /*
  * Initialise a V.90 digital modem context.
  * Creates an underlying V.34 modem with V.90 INFO0d enabled.
- *
- * Parameters:
- *   baud_rate      - V.34 upstream baud rate (3200 recommended for V.90)
- *   bit_rate       - V.34 upstream bit rate (max for baud rate)
- *   calling_party  - true if we initiated the call
- *   law            - G.711 PCM law in use on the SIP path
- *   get_bit        - callback for V.34 upstream TX data bits
- *   get_bit_user_data - opaque pointer for get_bit
- *   put_bit        - callback for V.34 upstream RX data bits
- *   put_bit_user_data - opaque pointer for put_bit
- *
- * Returns: pointer to V.90 context, or NULL on failure.
  */
 v90_state_t *v90_init(int baud_rate,
                       int bit_rate,
@@ -60,22 +59,35 @@ void v90_free(v90_state_t *s);
  */
 v34_state_t *v90_get_v34(v90_state_t *s);
 
+/* Get current Phase 3/4 TX sub-state. */
+v90_tx_phase_t v90_get_tx_phase(v90_state_t *s);
+
+/*
+ * Check if V.90 Phase 3 TX should take over from V.34 TX.
+ * Returns true once Phase 2 INFO exchange is complete and the
+ * digital modem should begin sending PCM codewords.
+ */
+bool v90_phase3_active(v90_state_t *s);
+
+/*
+ * Start V.90 Phase 3 TX. Call this when the V.34 Phase 2 INFO
+ * exchange completes (V34_TX_STAGE_FIRST_S detected).
+ * u_info is the U_INFO Ucode from the analog modem's INFO1a.
+ */
+void v90_start_phase3(v90_state_t *s, int u_info);
+
+/*
+ * Generate V.90 Phase 3 TX samples (PCM codewords as linear samples).
+ * Call this instead of v34_tx() for the downstream direction once
+ * v90_phase3_active() returns true.
+ *
+ * Returns the number of samples written (always == len).
+ */
+int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len);
+
 /*
  * Encode downstream data into PCM codewords for the G.711 RTP stream.
  * Call this instead of v34_tx() once training completes.
- *
- * Reads from data_in (user data bytes) and writes linear PCM samples
- * to amp[].  Each 6-symbol frame consumes 6 data bytes and produces
- * 6 PCM samples.
- *
- * Parameters:
- *   s        - V.90 context
- *   amp      - output buffer for linear PCM samples
- *   len      - number of samples to generate
- *   data_in  - input data bytes (at least len bytes available)
- *   data_len - number of bytes available in data_in
- *
- * Returns: number of data bytes consumed.
  */
 int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
                 const uint8_t *data_in, int data_len);
