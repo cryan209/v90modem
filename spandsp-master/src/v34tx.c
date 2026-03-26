@@ -2655,9 +2655,27 @@ static void s_not_s_baud_init(v34_state_t *s)
 
     /* Switch RX to primary channel demodulator for Phase 3 reception.
        Acquire the far-end PP immediately, then refine on the first 512T of TRN.
-       J detection is re-armed later when local TRN completes. */
-    s->rx.current_demodulator = V34_MODULATION_V34;
-    s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+       J detection is re-armed later when local TRN completes.
+
+       V.90 exception (§9.2.1.1.8): the digital modem must receive INFO1a
+       from the analog modem before proceeding to Phase 3.  Keep the CC
+       demodulator active and the RX stage at INFO1A so that info_rx()
+       can decode INFO1a.  The transition to PHASE3_TRAINING happens later
+       in process_rx_info1a() once INFO1a is received. */
+    if (s->tx.v90_mode)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: keeping RX on CC demod for INFO1a reception\n");
+        s->rx.current_demodulator = V34_MODULATION_TONES;
+        s->rx.stage = V34_RX_STAGE_INFO1A;
+        s->rx.target_bits = 70 - (4 + 8 + 4);
+        s->rx.bit_count = 0;
+    }
+    else
+    {
+        s->rx.current_demodulator = V34_MODULATION_V34;
+        s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+    }
     s->rx.duration = 0;
     s->rx.bit_count = 0;
     s->rx.s_detect_count = 0;
@@ -2853,68 +2871,74 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                from before J is spurious. Reset RX to wait for the real S.
                Must also reset stage to PHASE3_WAIT_S so the S detection code
                runs during J — otherwise it stays at PHASE3_TRAINING (set by
-               the timeout) and the real caller S can never be detected. */
-            s->rx.received_event = V34_EVENT_NONE;
-            s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
-            s->rx.duration = 0;
-            s->rx.bit_count = 0;
-            s->rx.s_detect_count = 0;
-            s->rx.s_window = 0;
-            s->rx.phase3_s_guard_samples = 4000;
-            s->rx.phase3_s_hits = 0;
-            memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
-            memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
-            s->rx.phase3_s_pos = 0;
-            memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
-            s->rx.phase3_pp_obs = 0;
-            s->rx.phase3_pp_match = 0;
-            memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
-            s->rx.phase3_pp_phase = -1;
-            s->rx.phase3_pp_phase_score = -1;
-            s->rx.phase3_pp_acquire_hits = 0;
-            s->rx.phase3_pp_started = 0;
-            memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
-            memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
-            memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
-            memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
-            memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
-            s->rx.phase3_j_bits = 0;
-            s->rx.phase3_j_lock_hyp = -1;
-            s->rx.phase3_j_trn16 = -1;
-            memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
-            memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
-            s->rx.phase3_trn_bits = 0;
-            s->rx.phase3_trn_lock_hyp = -1;
-            s->rx.phase3_trn_lock_score = -1;
-            s->rx.phase4_j_seen = 0;
-            s->rx.phase4_j_lock_hyp = -1;
-            s->rx.phase4_trn_after_j = 0;
-            s->rx.phase4_j_bits = 0;
-            memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
-            memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
-            memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
-            memset(s->rx.phase4_j_prev_valid_tap, 0, sizeof(s->rx.phase4_j_prev_valid_tap));
-            memset(s->rx.phase4_j_win_tap, 0, sizeof(s->rx.phase4_j_win_tap));
-            memset(s->rx.phase4_trn_scramble_tap, 0, sizeof(s->rx.phase4_trn_scramble_tap));
-            memset(s->rx.phase4_trn_one_count_tap, 0, sizeof(s->rx.phase4_trn_one_count_tap));
-            memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
-            memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
-            memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
-            memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
-            s->rx.phase4_trn_lock_hyp = -1;
-            s->rx.phase4_trn_lock_score = -1;
-            s->rx.phase4_trn_lock_tap = -1;
-            s->rx.phase4_trn_lock_order = -1;
-            s->rx.phase4_trn_lock_domain = -1;
-            s->rx.phase4_trn_current_hyp = -1;
-            s->rx.phase4_trn_current_score = -1;
-            s->rx.phase4_trn_current_tap = -1;
-            s->rx.phase4_trn_current_order = -1;
-            s->rx.phase4_trn_current_domain = -1;
-            s->rx.mp_phase4_bit_order = 0;
-            s->rx.mp_phase4_default_bit_order = 0;
-            s->rx.mp_phase4_alt_order_active = 0;
-            s->rx.mp_phase4_retry_mode = 0;
+               the timeout) and the real caller S can never be detected.
+               V.90: don't touch RX state — the V.90 RX controls its own
+               stage transitions (INFO1a → PHASE3_TRAINING). */
+            if (!s->tx.v90_mode)
+            {
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+                s->rx.duration = 0;
+                s->rx.bit_count = 0;
+                s->rx.s_detect_count = 0;
+                s->rx.s_window = 0;
+                s->rx.phase3_s_guard_samples = 4000;
+                s->rx.phase3_s_hits = 0;
+                memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+                memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+                s->rx.phase3_s_pos = 0;
+                memset(s->rx.phase3_pp_lag8, 0, sizeof(s->rx.phase3_pp_lag8));
+                s->rx.phase3_pp_obs = 0;
+                s->rx.phase3_pp_match = 0;
+                memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+                s->rx.phase3_pp_phase = -1;
+                s->rx.phase3_pp_phase_score = -1;
+                s->rx.phase3_pp_acquire_hits = 0;
+                s->rx.phase3_pp_started = 0;
+                memset(s->rx.phase3_j_scramble, 0, sizeof(s->rx.phase3_j_scramble));
+                memset(s->rx.phase3_j_stream, 0, sizeof(s->rx.phase3_j_stream));
+                memset(s->rx.phase3_j_prev_z, 0, sizeof(s->rx.phase3_j_prev_z));
+                memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
+                memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
+                s->rx.phase3_j_bits = 0;
+                s->rx.phase3_j_lock_hyp = -1;
+                s->rx.phase3_j_trn16 = -1;
+                memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
+                memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
+                s->rx.phase3_trn_bits = 0;
+                s->rx.phase3_trn_lock_hyp = -1;
+                s->rx.phase3_trn_lock_score = -1;
+                s->rx.phase4_j_seen = 0;
+                s->rx.phase4_j_lock_hyp = -1;
+                s->rx.phase4_trn_after_j = 0;
+                s->rx.phase4_j_bits = 0;
+                memset(s->rx.phase4_j_scramble_tap, 0, sizeof(s->rx.phase4_j_scramble_tap));
+                memset(s->rx.phase4_j_stream_tap, 0, sizeof(s->rx.phase4_j_stream_tap));
+                memset(s->rx.phase4_j_prev_z_tap, 0, sizeof(s->rx.phase4_j_prev_z_tap));
+                memset(s->rx.phase4_j_prev_valid_tap, 0, sizeof(s->rx.phase4_j_prev_valid_tap));
+                memset(s->rx.phase4_j_win_tap, 0, sizeof(s->rx.phase4_j_win_tap));
+                memset(s->rx.phase4_trn_scramble_tap, 0, sizeof(s->rx.phase4_trn_scramble_tap));
+                memset(s->rx.phase4_trn_one_count_tap, 0, sizeof(s->rx.phase4_trn_one_count_tap));
+                memset(s->rx.phase4_trn_scramble, 0, sizeof(s->rx.phase4_trn_scramble));
+                memset(s->rx.phase4_trn_prev_z, 0, sizeof(s->rx.phase4_trn_prev_z));
+                memset(s->rx.phase4_trn_prev_valid, 0, sizeof(s->rx.phase4_trn_prev_valid));
+                memset(s->rx.phase4_trn_one_count, 0, sizeof(s->rx.phase4_trn_one_count));
+                s->rx.phase4_trn_lock_hyp = -1;
+                s->rx.phase4_trn_lock_score = -1;
+                s->rx.phase4_trn_lock_tap = -1;
+                s->rx.phase4_trn_lock_order = -1;
+                s->rx.phase4_trn_lock_domain = -1;
+                s->rx.phase4_trn_current_hyp = -1;
+                s->rx.phase4_trn_current_score = -1;
+                s->rx.phase4_trn_current_tap = -1;
+                s->rx.phase4_trn_current_order = -1;
+                s->rx.phase4_trn_current_domain = -1;
+                s->rx.mp_phase4_bit_order = 0;
+                s->rx.mp_phase4_default_bit_order = 0;
+                s->rx.mp_phase4_alt_order_active = 0;
+                s->rx.mp_phase4_retry_mode = 0;
+            }
+            /*endif*/
         }
         /*endif*/
         return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
@@ -2981,7 +3005,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                        S-transition, send silence and (if MD is indicated)
                        wait MD duration while conditioning for the next
                        S-transition. */
-                    if (s->rx.received_event == V34_EVENT_S
+                    if (!s->tx.v90_mode
+                        &&
+                        s->rx.received_event == V34_EVENT_S
                         &&
                         md_units > 0
                         &&

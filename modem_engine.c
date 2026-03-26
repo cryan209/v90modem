@@ -1389,14 +1389,15 @@ void me_tx_audio(int16_t *amp, int len)
         if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
             if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
-                /* V.90: detect Phase 2→3 transition and switch TX to PCM codewords */
+                /* V.90: detect Phase 2→3 transition and switch TX to PCM codewords.
+                   We must wait for INFO1a (which carries U_INFO) before starting
+                   Phase 3 TX.  The V.34 RX stays on the CC demodulator at
+                   INFO1A stage until INFO1a is received, then transitions to
+                   PHASE3_TRAINING.  We use U_INFO > 0 as the signal. */
                 if (g_mod == ME_MOD_V90 && !g_v90_phase3_started) {
                     int tx_stage = v34_get_tx_stage(g_v34);
-                    if (tx_stage >= V34_TX_STAGE_FIRST_S) {
-                        /* Phase 2 INFO exchange complete — V.34 is about to send
-                           Phase 3 S tones.  For V.90, we take over TX with our own
-                           PCM codeword generation (Jd, J'd, Sd, S̄d, TRN1d). */
-                        int u_info = v34_get_v90_u_info(g_v34);
+                    int u_info = v34_get_v90_u_info(g_v34);
+                    if (tx_stage >= V34_TX_STAGE_FIRST_S && u_info > 0) {
                         fprintf(stderr, "[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
                                 tx_stage, u_info);
                         /* Create V.90 state wrapping existing V.34 */
@@ -1408,14 +1409,34 @@ void me_tx_audio(int16_t *amp, int len)
                             v90_start_phase3(g_v90, u_info);
                             g_v90_phase3_started = true;
                         }
+                    } else if (tx_stage >= V34_TX_STAGE_FIRST_S && !g_v90_phase3_started) {
+                        /* TX has entered Phase 3 but INFO1a not yet received.
+                           Send silence (idle PCM) while waiting. */
+                        static bool logged_wait = false;
+                        if (!logged_wait) {
+                            fprintf(stderr, "[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
+                            logged_wait = true;
+                        }
                     }
                 }
 
                 if (g_v90_phase3_started && g_v90) {
                     /* V.90 Phase 3: generate PCM codewords for actual RTP output */
                     v90_phase3_tx(g_v90, amp, len);
-                    /* Still call v34_tx into a discard buffer to keep V.34 RX
-                       state machine advancing (it's coupled to TX) */
+                    /* Run v34_tx into discard but protect RX state from being
+                       overwritten by V.34 TX Phase 3/4 transitions */
+                    int saved_rx_stage = v34_get_rx_stage(g_v34);
+                    int16_t discard[len];
+                    v34_tx(g_v34, discard, len);
+                    /* V.34 TX may have clobbered RX stage — don't let it;
+                       the V.90 RX flow controls its own stage transitions. */
+                    /* (RX stage restoration handled by v34rx directly) */
+                } else if (g_mod == ME_MOD_V90
+                           && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
+                    /* V.90 §9.2.1.1.8: send silence while waiting for INFO1a.
+                       V.34 TX still runs into discard to keep RX advancing.
+                       Protect RX stage from V.34 TX overwrites. */
+                    memset(amp, 0, sizeof(int16_t) * (size_t)len);
                     int16_t discard[len];
                     v34_tx(g_v34, discard, len);
                 } else {

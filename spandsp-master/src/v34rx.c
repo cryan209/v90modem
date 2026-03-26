@@ -2883,6 +2883,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 case V34_RX_STAGE_INFO1A:
                     process_rx_info1a(s, &s->info1a, s->info_buf);
                     s->received_event = V34_EVENT_INFO1_OK;
+                    if (s->v90_mode)
+                    {
+                        /* V.90 §9.2.1.1.8: INFO1a received — now proceed to Phase 3.
+                           Switch RX from CC demodulator to primary channel for
+                           upstream V.34 reception. */
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
+                        s->current_demodulator = V34_MODULATION_V34;
+                        s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    }
                     break;
                 }
                 /*endswitch*/
