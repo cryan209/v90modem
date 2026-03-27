@@ -2514,6 +2514,11 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 
 static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 {
+    enum
+    {
+        V90_INFO1A_FAST_RETRY_BAUDS = 120,
+        V90_INFO1A_MAX_FAST_RETRIES = 3
+    };
     int baud_rate;
     int rtd_bauds;
     int timeout_bauds;
@@ -2540,6 +2545,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a received after %d bauds of wait, proceeding to Phase 3 handoff\n",
                  s->tx.tone_duration);
+        s->tx.v90_info1a_fast_retries = 0;
         tx_silence_init(s, 30000);
         s->tx.stage = V34_TX_STAGE_FIRST_S;
         s->rx.received_event = V34_EVENT_NONE;
@@ -2550,9 +2556,31 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
+        if (s->tx.tone_duration <= V90_INFO1A_FAST_RETRY_BAUDS)
+            s->tx.v90_info1a_fast_retries++;
+        else
+            s->tx.v90_info1a_fast_retries = 0;
+        /*endif*/
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path\n",
-                 s->rx.received_event, s->tx.tone_duration);
+                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path (fast retries=%d)\n",
+                 s->rx.received_event, s->tx.tone_duration, s->tx.v90_info1a_fast_retries);
+        if (s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: aborting after %d rapid INFO1a recovery loops without valid INFO1a; signalling training failure\n",
+                     s->tx.v90_info1a_fast_retries);
+            s->rx.received_event = V34_EVENT_TRAINING_FAILED;
+            s->tx.current_getbaud = NULL;
+            return zero;
+        }
+        /*endif*/
+        /* This branch is a recovery fallback. Clear the event before
+           re-entering the Tone A wait state so we wait for a fresh
+           indication instead of immediately re-sending INFO1d on the
+           same stale event. */
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
         v90_wait_tone_a_init(s);
         return zero;
     }
@@ -2563,6 +2591,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a wait timeout after %d bauds (~700ms + RTD), re-sending INFO1d\n",
                  s->tx.tone_duration);
+        s->tx.v90_info1a_fast_retries = 0;
         info1_baud_init(s);
     }
     /*endif*/
@@ -4588,6 +4617,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.baud_rate = baud_rate;
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
+    s->tx.v90_info1a_fast_retries = 0;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
     if (s->calling_party)

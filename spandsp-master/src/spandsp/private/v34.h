@@ -473,6 +473,9 @@ typedef struct
     int v90_pcm_law;
     /*! \brief V.90: count of L1/L2 rounds sent (need 2 before INFO1d) */
     int v90_l2_count;
+    /*! \brief V.90 answerer: consecutive fast Tone-A recoveries while waiting
+               for INFO1a. Used to abort repeated INFO1d loops earlier. */
+    int v90_info1a_fast_retries;
 
     union
     {
