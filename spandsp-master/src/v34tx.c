@@ -2446,6 +2446,10 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     int rtd_bauds;
     int timeout_bauds;
 
+    if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
+        return zero;
+    /*endif*/
+
     if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
         baud_rate = baud_rate_parameters[s->tx.baud_rate].baud_rate;
     else
@@ -2466,6 +2470,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                  s->tx.tone_duration);
         tx_silence_init(s, 30000);
         s->tx.stage = V34_TX_STAGE_FIRST_S;
+        s->rx.received_event = V34_EVENT_NONE;
         return zero;
     }
     /*endif*/
@@ -2533,6 +2538,8 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
     /* Keep RX on CC demod to receive INFO1a at 2400 Hz */
     s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.target_bits = 70 - (4 + 8 + 4);
+    s->rx.bit_count = 0;
     s->rx.stage = V34_RX_STAGE_INFO1A;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
