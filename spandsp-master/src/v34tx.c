@@ -2328,9 +2328,18 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
             if (s->tx.v90_mode)
             {
                 /* V.90 9.2.1.1.1: the digital modem follows INFO0d with Tone B,
-                   not the V.34 answerer A/!A sequence. */
+                   not the V.34 answerer A/!A sequence. It must also condition
+                   its receiver to receive INFO0a and detect Tone A in this
+                   window, so use the Tone A RX stage while keeping INFO0
+                   target_bits active. */
                 s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
                 s->tx.stage = V34_TX_STAGE_FIRST_B;
+                s->rx.stage = V34_RX_STAGE_TONE_A;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                s->rx.last_logged_stage = -1;
+                s->rx.last_logged_event = -1;
             }
             else
             {
