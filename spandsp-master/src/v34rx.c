@@ -2816,6 +2816,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                            ||
                            s->stage == V34_RX_STAGE_INFO1C
                            ||
+                           /* V.90: analog modem may start sending INFO1a during L1/L2
+                              analysis — keep searching for sync codes so we don't miss it */
+                           (s->v90_mode
+                            &&
+                            s->stage == V34_RX_STAGE_L1_L2)
+                           ||
                            ((s->stage == V34_RX_STAGE_TONE_A
                              ||
                              s->stage == V34_RX_STAGE_TONE_B)
@@ -2958,6 +2964,11 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal down\n");
 span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
                 s->signal_present = true;
                 s->persistence2 = 0;
+                /* Reset phase tracking so stale last_angles don't
+                   cause spurious reversals when CC resumes */
+                s->last_angles[0] = 0;
+                s->last_angles[1] = 0;
+                s->blip_duration = 0;
             }
             /*endif*/
         }

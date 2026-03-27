@@ -539,16 +539,16 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
         /* 29:32    Digital modem nominal transmit power for Phase 2.
                     Represented in -1 dBm0 steps: 0 = -6 dBm0, 15 = -21 dBm0.
-                    We use -10 dBm0 → code = 10 - 6 = 4 */
+                    We use -10 dBm0 -> code = 10 - 6 = 4 */
         bitstream_put(&bs, &t, 4, 4);
         /* 33:37    Maximum digital modem transmit power.
                     Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
-                    We use -10 dBm0 → code = (10 - 0.5) / 0.5 = 19 */
+                    We use -10 dBm0 -> code = (10 - 0.5) / 0.5 = 19 */
         bitstream_put(&bs, &t, 19, 5);
         /* 38       Power measurement at codec output (1) or modem terminals (0).
                     SIP/RTP = codec output */
         bitstream_put(&bs, &t, 1, 1);
-        /* 39       PCM coding in use: 0 = µ-law, 1 = A-law */
+        /* 39       PCM coding in use: 0 = u-law, 1 = A-law */
         bitstream_put(&bs, &t, s->v90_pcm_law, 1);
         /* 40       Set to 1 = ability to operate V.90 with upstream symbol rate 3429 */
         bitstream_put(&bs, &t, 0, 1);
@@ -2440,6 +2440,28 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
         {
             tx_silence_init(s, 30000);
         }
+        else if (s->tx.v90_mode)
+        {
+            /* V.90 §9.2.1.1.8: after sending INFO1d, the digital modem
+               shall transmit silence and condition its receiver to receive
+               INFO1a.  Do NOT call s_not_s_baud_init() which would start
+               Phase 3 S/S̄ and overwrite RX state.
+               Guard against re-entry: tx_silence_init changes the modulator
+               but remaining bauds in this frame still call get_info1_baud. */
+            if (s->tx.current_modulator != V34_MODULATION_SILENCE)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a\n");
+                tx_silence_init(s, 30000);
+                s->tx.stage = V34_TX_STAGE_FIRST_S;  /* Signal modem_engine to send silence */
+                /* Keep RX on CC demod to receive INFO1a at 2400 Hz */
+                s->rx.current_demodulator = V34_MODULATION_TONES;
+                s->rx.stage = V34_RX_STAGE_INFO1A;
+                s->rx.received_event = V34_EVENT_REVERSAL_1;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+            }
+        }
         else
         {
             s_not_s_baud_init(s);
@@ -2664,12 +2686,25 @@ static void s_not_s_baud_init(v34_state_t *s)
        in process_rx_info1a() once INFO1a is received. */
     if (s->tx.v90_mode)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: keeping RX on CC demod for INFO1a reception\n");
         s->rx.current_demodulator = V34_MODULATION_TONES;
-        s->rx.stage = V34_RX_STAGE_INFO1A;
-        s->rx.target_bits = 70 - (4 + 8 + 4);
-        s->rx.bit_count = 0;
+        if (s->rx.stage == V34_RX_STAGE_INFO1A)
+        {
+            /* RX already transitioned to INFO1A via reversal detection
+               during L1/L2 — don't regress it back to TONE_B. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: RX already at INFO1A, keeping CC demod active\n");
+        }
+        else
+        {
+            /* RX hasn't reached INFO1A yet — stay on TONE_B and wait
+               for reversals to trigger the natural transition. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: keeping RX on CC demod (TONE_B) for INFO1a reception\n");
+            s->rx.stage = V34_RX_STAGE_TONE_B;
+            s->rx.received_event = V34_EVENT_REVERSAL_1;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+        }
     }
     else
     {
@@ -4225,8 +4260,12 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     if (!s->calling_party)
     {
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
-        s->tx.guard_phase_rate = 0;
-        s->tx.guard_level = 0.0f;
+        /* V.90 §8.2.3.1: digital modem INFO sequences require an 1800 Hz
+           guard tone 7 dB below the nominal transmit power.
+           -7 dB ≈ amplitude factor of 0.4467; the gain value is scaled
+           by the modulator like the CC carrier. */
+        s->tx.guard_phase_rate = dds_phase_ratef(1800.0f);
+        s->tx.guard_level = TRAINING_AMP * 0.4467f;  /* -7 dB below CC carrier */
         s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
     }
 
