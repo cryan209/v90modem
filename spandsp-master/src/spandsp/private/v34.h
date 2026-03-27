@@ -126,6 +126,10 @@ enum v34_tx_stages_e
     V34_TX_STAGE_V90_B_REV_DELAY,
     /*! \brief V.90 §9.2.1.1.6: send Tone B reversal for 10ms then L1/L2 */
     V34_TX_STAGE_V90_B_REV_10MS,
+    /*! \brief V.90 §9.2.1.1.1: digital answerer sending initial Tone B after INFO0d */
+    V34_TX_STAGE_V90_PHASE2_B,
+    /*! \brief V.90 §9.2.1.1.2: digital answerer has received INFO0a and is waiting for Tone A reversal */
+    V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
     /*! \brief INFO1 is being trasnmitted */
     V34_TX_STAGE_INFO1,
 

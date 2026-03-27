@@ -2997,6 +2997,16 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     for (i = 0;  i < len;  i++)
     {
         power = power_meter_update(&s->power, amp[i]);
+        if (s->v90_mode
+            && !s->calling_party
+            && !s->signal_present
+            && (s->stage == V34_RX_STAGE_INFO0 || s->stage == V34_RX_STAGE_TONE_A || s->stage == V34_RX_STAGE_TONE_B)
+            && (s->duration == 400 || s->duration == 800 || s->duration == 1600 || s->duration == 3200))
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - V.90 Phase 2 waiting for carrier: stage=%d power=%" PRId32 " on=%" PRId32 " off=%" PRId32 "\n",
+                     s->stage, power, s->carrier_on_power, s->carrier_off_power);
+        }
         if (s->signal_present)
         {
             if (power < s->carrier_off_power)
@@ -7153,7 +7163,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
                          baud_rate_parameters[s->rx.baud_rate].baud_rate,
                          0.99f);
     create_godard_coeffs(&s->rx.cc_ted,
-                         (s->calling_party)  ?  2400.0f  :  1200.0f,
+                         (s->rx.v90_mode && !s->calling_party)  ?  2400.0f  :  ((s->calling_party)  ?  2400.0f  :  1200.0f),
                          600,
                          0.99f);
     /* Initialise the working data for symbol timing synchronisation */

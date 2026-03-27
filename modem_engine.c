@@ -77,6 +77,8 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_V90_WAIT_TONE_A_REV,
     V34_TX_STAGE_V90_B_REV_DELAY,
     V34_TX_STAGE_V90_B_REV_10MS,
+    V34_TX_STAGE_V90_PHASE2_B,
+    V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
     V34_TX_STAGE_INFO1,
     V34_TX_STAGE_FIRST_B,
     V34_TX_STAGE_FIRST_B_INFO_SEEN,
@@ -465,6 +467,8 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_V90_WAIT_TONE_A_REV:         return "V90_WAIT_TONE_A_REV";
     case V34_TX_STAGE_V90_B_REV_DELAY:             return "V90_B_REV_DELAY";
     case V34_TX_STAGE_V90_B_REV_10MS:              return "V90_B_REV_10MS";
+    case V34_TX_STAGE_V90_PHASE2_B:                return "V90_PHASE2_B";
+    case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:     return "V90_PHASE2_B_INFO0_SEEN";
     case V34_TX_STAGE_INFO1:                       return "INFO1";
     case V34_TX_STAGE_FIRST_B:                     return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN:           return "FIRST_B_INFO_SEEN";
@@ -1028,7 +1032,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
         g_v90_phase3_started = false;
-        /* Phase 2 CC carriers: answerer TX=2400 Hz, RX=1200 Hz (1200 Hz apart).
+        /* Phase 2 CC carriers: V.90 digital answerer TX=1200 Hz, RX=2400 Hz.
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
            disabled the notch — but we need it for Phase 2 CC echo removal. */
         notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);

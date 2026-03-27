@@ -152,6 +152,8 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_V90_WAIT_TONE_A_REV: return "V90_WAIT_TONE_A_REV";
     case V34_TX_STAGE_V90_B_REV_DELAY: return "V90_B_REV_DELAY";
     case V34_TX_STAGE_V90_B_REV_10MS: return "V90_B_REV_10MS";
+    case V34_TX_STAGE_V90_PHASE2_B: return "V90_PHASE2_B";
+    case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN: return "V90_PHASE2_B_INFO0_SEEN";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -297,10 +299,10 @@ S       90 degree alternations
 TRN     Training sequence 4 or 16 symbols scrambled by the scrambler
 MP      Modulation parameter sequence
 MP'     Modulation parameter sequence with the acknowledgement bit set
-A       1200Hz
-!A      Phase reversed 1200Hz
-B       2400Hz
-!B      Phase reversed 2400Hz
+A       2400Hz
+!A      Phase reversed 2400Hz
+B       1200Hz
+!B      Phase reversed 1200Hz
 ALT
 E
 */
@@ -357,10 +359,10 @@ TRN     Training sequence 4 or 16 symbols scrambled by the scrambler
 MP      Modulation parameter sequence
 MP'     Modulation parameter sequence with the acknowledgement bit set
 MPh     Modulation parameter sequence
-A       1200Hz
-!A      Phase reversed 1200Hz
-B       2400Hz
-!B      Phase reversed 2400Hz
+A       2400Hz
+!A      Phase reversed 2400Hz
+B       1200Hz
+!B      Phase reversed 1200Hz
 ALT
 E
 */
@@ -417,7 +419,7 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason);
 static void l1_l2_signal_init(v34_state_t *s);
 static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
-static void v90_wait_tone_a_init(v34_state_t *s);
+static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
@@ -1737,6 +1739,13 @@ static __inline__ float carrier_frequency(int symbol_rate_code, int low_high)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_silence_baud(v34_state_t *s)
+{
+    (void) s;
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int get_data_bit(v34_tx_state_t *s)
 {
     int bit;
@@ -1885,6 +1894,53 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason)
     s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_RX_L2;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_reset_phase2_rx_frontend(v34_state_t *s)
+{
+    power_meter_init(&s->rx.power, 4);
+    s->rx.signal_present = false;
+    s->rx.carrier_phase = 0;
+    s->rx.agc_scaling = 0.01f;
+    s->rx.bit_count = 0;
+    s->rx.bitstream = 0;
+    s->rx.duration = 0;
+    s->rx.blip_duration = 0;
+    s->rx.last_angles[0] = 0;
+    s->rx.last_angles[1] = 0;
+    s->rx.rrc_filter_step = 0;
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
+{
+    int preserve_active_search;
+
+    preserve_active_search = (s->rx.current_demodulator == V34_MODULATION_TONES
+                              && (s->rx.signal_present
+                                  || s->rx.bit_count > 0
+                                  || s->rx.persistence1 > 0
+                                  || s->rx.persistence2 > 0));
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: %s, conditioning RX for INFO0a and Tone A detection%s\n",
+             reason,
+             preserve_active_search ? " (preserving active Phase 2 acquisition)" : "");
+    if (!preserve_active_search)
+        v90_reset_phase2_rx_frontend(s);
+    s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.stage = V34_RX_STAGE_TONE_A;
+    s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+    if (!preserve_active_search)
+    {
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+    }
+    s->rx.last_logged_stage = -1;
+    s->rx.last_logged_event = -1;
+    s->rx.last_logged_demodulator = -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2057,8 +2113,36 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_FIRST_B:
-        /* Send pure tone (V.34/11.2.1.1.1) */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+    case V34_TX_STAGE_V90_PHASE2_B:
+        /* Send pure tone. For the V.90 digital answerer this is the initial
+           Tone B window after INFO0d (§9.2.1.1.1). */
+        if (s->tx.v90_mode
+            && !s->tx.calling_party
+            && s->tx.duplex)
+        {
+            if (s->rx.received_event == V34_EVENT_INFO0_OK)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
+                s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                s->rx.received_event = V34_EVENT_NONE;
+            }
+            else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
+            {
+                /* V.90 §9.2.1.2.1: if Tone A is detected before INFO0a,
+                   repeatedly send INFO0d sequences. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: Tone A detected before INFO0a, repeating INFO0d per 9.2.1.2.1\n");
+                info0_baud_init(s);
+            }
+            else if (s->rx.received_event == V34_EVENT_INFO0_BAD)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: bad INFO0a during initial Tone B, repeating INFO0d\n");
+                info0_baud_init(s);
+            }
+        }
+        else if (s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             s->tx.stage = V34_TX_STAGE_FIRST_B_INFO_SEEN;
         }
@@ -2072,8 +2156,21 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_B_INFO_SEEN:
-        /* Continue sending pure tone (V.34/11.2.1.1.1) */
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+    case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:
+        /* Continue sending pure tone. For the V.90 digital answerer, repeated
+           INFO0a during this Tone B window triggers INFO0d recovery with
+           acknowledgement set (§9.2.1.2.1). */
+        if (s->tx.v90_mode
+            && !s->tx.calling_party
+            && s->tx.duplex
+            && s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: repeated INFO0a during Tone B, repeating INFO0d with acknowledgement\n");
+            s->tx.info0_acknowledgement = true;
+            info0_baud_init(s);
+        }
+        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
             /* First reversal seen - continue sending pure tone for 40+-1ms */
             s->tx.tone_duration = 1;
@@ -2333,13 +2430,8 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
                    window, so use the Tone A RX stage while keeping INFO0
                    target_bits active. */
                 s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
-                s->tx.stage = V34_TX_STAGE_FIRST_B;
-                s->rx.stage = V34_RX_STAGE_TONE_A;
-                s->rx.received_event = V34_EVENT_NONE;
-                s->rx.persistence1 = 0;
-                s->rx.persistence2 = 0;
-                s->rx.last_logged_stage = -1;
-                s->rx.last_logged_event = -1;
+                s->tx.stage = V34_TX_STAGE_V90_PHASE2_B;
+                v90_prime_info0a_tone_a_rx(s, "after INFO0d");
             }
             else
             {
@@ -2404,7 +2496,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                     else if (s->tx.v90_mode)
                     {
                         /* V.90 §9.2.1.1.7: L1/L2 done, wait for Tone A then send INFO1d */
-                        v90_wait_tone_a_init(s);
+                        v90_wait_tone_a_init(s, false);
                     }
                     else
                     {
@@ -2523,6 +2615,19 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
        (up to 550ms + RTD), then sends INFO1d. We send silence while waiting.
        Only trigger on actual Tone A detection — L2_SEEN fires too early
        (before the analog modem has received our L1/L2 and started Tone A). */
+    if (s->rx.received_event == V34_EVENT_INFO0_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: repeated INFO0a received while waiting for Tone A before INFO1d, returning to INFO0d recovery with acknowledgement\n");
+        s->tx.info0_acknowledgement = true;
+        s->tx.v90_info1a_fast_retries = 0;
+        s->tx.v90_info1a_total_retries = 0;
+        v90_arm_tone_a_detection(s, "repeated INFO0a received before INFO1d");
+        info0_baud_init(s);
+        return zero;
+    }
+    /*endif*/
+
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
         ||
@@ -2608,6 +2713,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             s->rx.training_failed_reported = false;
             s->rx.received_event = V34_EVENT_TRAINING_FAILED;
             tx_silence_init(s, 30000);
+            s->tx.stage = 0;
             return zero;
         }
         /*endif*/
@@ -2618,7 +2724,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->rx.received_event = V34_EVENT_NONE;
         s->rx.persistence1 = 0;
         s->rx.persistence2 = 0;
-        v90_wait_tone_a_init(s);
+        v90_wait_tone_a_init(s, true);
         return zero;
     }
     /*endif*/
@@ -2636,12 +2742,8 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void v90_wait_tone_a_init(v34_state_t *s)
+static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
 {
-    int preserve_tone_a_event;
-
-    preserve_tone_a_event = (s->rx.received_event == V34_EVENT_TONE_SEEN
-                             || s->rx.received_event == V34_EVENT_REVERSAL_1);
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d%s\n",
              preserve_tone_a_event ? " (preserving prior Tone A indication)" : "");
@@ -4428,6 +4530,7 @@ static void tx_silence_init(v34_state_t *s, int duration)
 {
     s->tx.tone_duration = milliseconds_to_samples(duration);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
+    s->tx.current_getbaud = get_silence_baud;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4632,6 +4735,21 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
             s->rx.last_logged_demodulator = -1;
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "V.90 mode: re-primed answerer RX for INFO0 detection\n");
+        }
+        /*endif*/
+
+        /* V.8 already enforces the mandatory 75 ms post-CJ silence before
+           handing control to Phase 2. Skip the generic V.34 startup silence
+           here so INFO0d is not delayed by an extra 75 ms on V.90 answerer
+           handoff. */
+        if (s->tx.training_stage == 0x100
+            && s->tx.current_modulator == V34_MODULATION_SILENCE)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "V.90 mode: skipping duplicate Phase 2 startup silence; V.8 already supplied 75 ms\n");
+            s->tx.tone_duration = 0;
+            s->tx.training_stage = 0x101;
+            transmission_preamble_init(s);
         }
         /*endif*/
     }
