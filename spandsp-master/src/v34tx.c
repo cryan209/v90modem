@@ -1775,6 +1775,10 @@ static void transmission_preamble_init(v34_state_t *s)
 
 static complex_sig_t get_info0_baud(v34_state_t *s)
 {
+    enum
+    {
+        V90_INITIAL_INFO0_EXTRA_REPEATS = 2
+    };
     int bit;
 
     bit = get_data_bit(&s->tx);
@@ -1784,6 +1788,28 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             && !s->tx.calling_party
             && s->tx.duplex)
         {
+            if (!s->tx.info0_acknowledgement
+                && !s->rx.info0_received)
+            {
+                if (s->tx.v90_initial_info0_repeats < V90_INITIAL_INFO0_EXTRA_REPEATS)
+                {
+                    s->tx.v90_initial_info0_repeats++;
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: no INFO0a seen after initial INFO0d, repeating INFO0d (%d/%d) before Tone A\n",
+                             s->tx.v90_initial_info0_repeats,
+                             V90_INITIAL_INFO0_EXTRA_REPEATS);
+                    info0_baud_init(s);
+                }
+                else
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: no INFO0a after %d initial INFO0d attempts, proceeding to Tone A\n",
+                             1 + s->tx.v90_initial_info0_repeats);
+                    initial_ab_not_ab_baud_init(s);
+                }
+            }
+            else
+            {
             if (s->rx.received_event == V34_EVENT_INFO0_OK
                 && !s->tx.info0_acknowledgement)
             {
@@ -1819,6 +1845,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             else
             {
                 initial_ab_not_ab_baud_init(s);
+            }
             }
         }
         /* Are we at the initial stage, where A or B comes next, or at the retry
@@ -4589,6 +4616,33 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
         s->tx.guard_phase_rate = 0;
         s->tx.guard_level = 0;
         s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+
+        /* We enable V.90 after a plain V.34 init/restart. Re-prime the early
+           answerer RX path here so INFO0a detection starts from a known state
+           even if the startup state was left stale during the V.34->V.90 handoff. */
+        if (s->tx.stage == 0
+            || s->tx.stage == V34_TX_STAGE_INITIAL_PREAMBLE
+            || s->tx.stage == V34_TX_STAGE_INFO0
+            || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
+        {
+            s->rx.stage = V34_RX_STAGE_INFO0;
+            s->rx.current_demodulator = V34_MODULATION_TONES;
+            s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+            s->rx.bit_count = 0;
+            s->rx.bitstream = 0;
+            s->rx.info0_received = false;
+            s->rx.info0_acknowledgement = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            s->tx.v90_initial_info0_repeats = 0;
+            s->rx.last_logged_stage = -1;
+            s->rx.last_logged_event = -1;
+            s->rx.last_logged_demodulator = -1;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "V.90 mode: re-primed answerer RX for INFO0 detection\n");
+        }
+        /*endif*/
     }
 
     span_log(&s->logging, SPAN_LOG_FLOW,
@@ -4635,6 +4689,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.baud_rate = baud_rate;
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
+    s->tx.v90_initial_info0_repeats = 0;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
 
