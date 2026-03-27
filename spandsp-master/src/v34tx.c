@@ -407,6 +407,7 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s);
 static void l1_l2_signal_init(v34_state_t *s);
 static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
+static void v90_wait_tone_a_init(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
 static void s_not_s_baud_init(v34_state_t *s);
@@ -2225,6 +2226,8 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                 {
                     if (s->tx.calling_party)
                         info1_baud_init(s);
+                    else if (s->tx.v90_mode)
+                        v90_wait_tone_a_init(s);
                     else
                         second_a_baud_init(s);
                     /*endif*/
@@ -2331,6 +2334,42 @@ static void second_a_baud_init(v34_state_t *s)
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.stage = V34_TX_STAGE_POST_L2_A;
     s->tx.current_getbaud = get_second_a_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
+{
+    /* V.90 §9.2.1.1.7: After L2, digital modem waits for Tone A from analog modem
+       (up to 550ms + RTD), then sends INFO1d. We send silence while waiting. */
+    if (s->rx.received_event == V34_EVENT_TONE_SEEN
+        ||
+        ++s->tx.tone_duration >= 600)
+    {
+        /* Tone A detected (or timeout ~1s) — proceed to INFO1d */
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: %s after %d bauds, sending INFO1d\n",
+                 (s->rx.received_event == V34_EVENT_TONE_SEEN) ? "Tone A detected" : "Timeout",
+                 s->tx.tone_duration);
+        info1_baud_init(s);
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_wait_tone_a_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d\n");
+    s->tx.tone_duration = 0;
+    s->tx.current_modulator = V34_MODULATION_SILENCE;
+    s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A;
+    s->tx.current_getbaud = get_v90_wait_tone_a_baud;
+    /* Condition RX to detect Tone A at 2400 Hz */
+    s->rx.stage = V34_RX_STAGE_TONE_A;
+    s->rx.received_event = V34_EVENT_REVERSAL_1;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

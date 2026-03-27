@@ -114,6 +114,8 @@ enum v34_tx_stages_e
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
     V34_TX_STAGE_PRE_INFO1_A,
+    /*! \brief V.90: waiting for Tone A after L2 before sending INFO1d */
+    V34_TX_STAGE_V90_WAIT_TONE_A,
     /*! \brief INFO1 is being trasnmitted */
     V34_TX_STAGE_INFO1,
 

@@ -2703,7 +2703,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         {
             if (++s->persistence2 == 20)
             {
-                //s->received_event = V34_EVENT_TONE_SEEN;
+                span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
+                s->received_event = V34_EVENT_TONE_SEEN;
             }
             /*endif*/
             break;
