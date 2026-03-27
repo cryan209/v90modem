@@ -410,6 +410,9 @@ static void tx_silence_init(v34_state_t *s, int duration);
 static void transmission_preamble_init(v34_state_t *s);
 static void info0_baud_init(v34_state_t *s);
 static void initial_ab_not_ab_baud_init(v34_state_t *s);
+static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s);
+static void v90_arm_tone_a_detection(v34_state_t *s, const char *reason);
+static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason);
 static void l1_l2_signal_init(v34_state_t *s);
 static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
@@ -1767,9 +1770,50 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
     bit = get_data_bit(&s->tx);
     if (s->tx.txptr >= s->tx.txbits)
     {
+        if (s->tx.v90_mode
+            && !s->tx.calling_party
+            && s->tx.duplex)
+        {
+            if (s->rx.received_event == V34_EVENT_INFO0_OK
+                && !s->tx.info0_acknowledgement)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: INFO0a received OK, setting INFO0d acknowledgement bit and repeating INFO0d\n");
+                s->tx.info0_acknowledgement = true;
+                v90_arm_tone_a_detection(s, "INFO0a received during recovery");
+            }
+
+            if (s->tx.info0_acknowledgement
+                && (s->rx.info0_acknowledgement
+                    || (s->rx.info0_received
+                        && ((s->rx.stage == V34_RX_STAGE_TONE_A
+                             && s->rx.received_event == V34_EVENT_TONE_SEEN)
+                            || (s->rx.stage == V34_RX_STAGE_TONE_A
+                                && s->rx.received_event == V34_EVENT_REVERSAL_1)))))
+            {
+                const char *reason;
+
+                if (s->rx.info0_acknowledgement)
+                    reason = "peer acknowledged INFO0a";
+                else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+                    reason = "Tone A reversal detected after INFO0a";
+                else
+                    reason = "Tone A detected after INFO0a";
+                v90_wait_rx_l2_init(s, reason);
+            }
+            else if (s->tx.info0_acknowledgement
+                     || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
+            {
+                info0_baud_init(s);
+            }
+            else
+            {
+                initial_ab_not_ab_baud_init(s);
+            }
+        }
         /* Are we at the initial stage, where A or B comes next, or at the retry
            stage, where we keep repeating INFO0 */
-        if (s->tx.stage == V34_TX_STAGE_INFO0)
+        else if (s->tx.stage == V34_TX_STAGE_INFO0)
         {
             initial_ab_not_ab_baud_init(s);
         }
@@ -1803,6 +1847,34 @@ static void info0_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = (s->tx.stage >= V34_TX_STAGE_INFO0)  ?  V34_TX_STAGE_INFO0_RETRY  :  V34_TX_STAGE_INFO0;
     s->tx.current_getbaud = get_info0_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_arm_tone_a_detection(v34_state_t *s, const char *reason)
+{
+    if (s->rx.stage != V34_RX_STAGE_TONE_A)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: %s, conditioning RX for Tone A detection\n",
+                 reason);
+        s->rx.stage = V34_RX_STAGE_TONE_A;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        s->rx.received_event = V34_EVENT_NONE;
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: %s, completing INFO0d recovery and sending Tone B\n",
+             reason);
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_V90_WAIT_RX_L2;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2530,17 +2602,18 @@ static void v90_wait_tone_a_init(v34_state_t *s)
 static void v90_wait_info1a_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with recovery\n");
+             "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with Tone A recovery armed\n");
     s->tx.tone_duration = 0;
     /* Use CC modulation so we get a per-baud callback while transmitting silence. */
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_INFO1A;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
-    /* Keep RX on CC demod to receive INFO1a at 2400 Hz */
+    /* Keep RX on CC demod, but stay in Tone A stage so we can detect either
+       INFO1a sync or Tone A/reversal as required by V.90 recovery. */
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.target_bits = 70 - (4 + 8 + 4);
     s->rx.bit_count = 0;
-    s->rx.stage = V34_RX_STAGE_INFO1A;
+    s->rx.stage = V34_RX_STAGE_TONE_A;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
@@ -4514,6 +4587,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.bit_rate = bit_rate;
     s->tx.baud_rate = baud_rate;
     s->tx.high_carrier = high_carrier;
+    s->tx.info0_acknowledgement = false;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
     if (s->calling_party)

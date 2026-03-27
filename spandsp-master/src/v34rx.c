@@ -2869,15 +2869,56 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             }
             if (s->crc == 0)
             {
+                int v90_info1a_search;
+
+                v90_info1a_search = (s->v90_mode
+                                     && !s->calling_party
+                                     && s->target_bits == (70 - (4 + 8 + 4))
+                                     && (s->stage == V34_RX_STAGE_TONE_A
+                                         || s->stage == V34_RX_STAGE_TONE_B
+                                         || s->stage == V34_RX_STAGE_INFO1A));
                 switch (s->stage)
                 {
                 case V34_RX_STAGE_TONE_A:
                 case V34_RX_STAGE_TONE_B:
                 case V34_RX_STAGE_INFO0:
-                    process_rx_info0(s, s->info_buf);
-                    s->stage = (s->calling_party)  ?   V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B;
-                    s->received_event = V34_EVENT_INFO0_OK;
-                    s->info0_received = true;
+                    if (v90_info1a_search)
+                    {
+                        process_rx_info1a(s, &s->info1a, s->info_buf);
+                        s->received_event = V34_EVENT_INFO1_OK;
+                        if (s->v90_mode)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
+                            s->current_demodulator = V34_MODULATION_V34;
+                            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                        }
+                    }
+                    else
+                    {
+                        int preserve_tone_a_recovery;
+
+                        preserve_tone_a_recovery = (s->v90_mode
+                                                    && !s->calling_party
+                                                    && s->stage == V34_RX_STAGE_TONE_A);
+                        process_rx_info0(s, s->info_buf);
+                        if (preserve_tone_a_recovery)
+                        {
+                            /* V.90 answerer recovery: after receiving INFO0a and
+                               conditioning RX for Tone A, keep looking for Tone A
+                               instead of falling back to Tone B on every repeated
+                               INFO0a. */
+                            s->stage = V34_RX_STAGE_TONE_A;
+                            s->persistence1 = 0;
+                            s->persistence2 = 0;
+                        }
+                        else
+                        {
+                            s->stage = (s->calling_party)  ?   V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B;
+                        }
+                        s->received_event = V34_EVENT_INFO0_OK;
+                        s->info0_received = true;
+                    }
                     break;
                 case V34_RX_STAGE_INFOH:
                     process_rx_infoh(s, &s->infoh, s->info_buf);
@@ -2906,12 +2947,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             }
             else
             {
+                int v90_info1a_search;
+
+                v90_info1a_search = (s->v90_mode
+                                     && !s->calling_party
+                                     && s->target_bits == (70 - (4 + 8 + 4))
+                                     && (s->stage == V34_RX_STAGE_TONE_A
+                                         || s->stage == V34_RX_STAGE_TONE_B
+                                         || s->stage == V34_RX_STAGE_INFO1A));
                 switch (s->stage)
                 {
                 case V34_RX_STAGE_TONE_A:
                 case V34_RX_STAGE_TONE_B:
                 case V34_RX_STAGE_INFO0:
-                    s->received_event = V34_EVENT_INFO0_BAD;
+                    s->received_event = v90_info1a_search ? V34_EVENT_INFO1_BAD : V34_EVENT_INFO0_BAD;
                 case V34_RX_STAGE_INFOH:
                     break;
                 case V34_RX_STAGE_INFO1C:
