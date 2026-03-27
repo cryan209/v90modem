@@ -145,6 +145,12 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE: return "A_SILENCE";
     case V34_TX_STAGE_PRE_INFO1_A: return "PRE_INFO1_A";
+    case V34_TX_STAGE_V90_WAIT_TONE_A: return "V90_WAIT_TONE_A";
+    case V34_TX_STAGE_V90_WAIT_INFO1A: return "V90_WAIT_INFO1A";
+    case V34_TX_STAGE_V90_WAIT_RX_L2: return "V90_WAIT_RX_L2";
+    case V34_TX_STAGE_V90_WAIT_TONE_A_REV: return "V90_WAIT_TONE_A_REV";
+    case V34_TX_STAGE_V90_B_REV_DELAY: return "V90_B_REV_DELAY";
+    case V34_TX_STAGE_V90_B_REV_10MS: return "V90_B_REV_10MS";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -408,6 +414,7 @@ static void l1_l2_signal_init(v34_state_t *s);
 static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s);
+static void v90_wait_info1a_init(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
 static void s_not_s_baud_init(v34_state_t *s);
@@ -2433,6 +2440,59 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
+{
+    int baud_rate;
+    int rtd_bauds;
+    int timeout_bauds;
+
+    if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
+        baud_rate = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+    else
+        baud_rate = 3200;
+    /*endif*/
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*baud_rate + 4000)/8000
+                : 0;
+    timeout_bauds = (baud_rate*700 + 500)/1000 + rtd_bauds;
+    if (timeout_bauds < 1)
+        timeout_bauds = 1;
+    /*endif*/
+
+    if (s->rx.received_event == V34_EVENT_INFO1_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFO1a received after %d bauds of wait, proceeding to Phase 3 handoff\n",
+                 s->tx.tone_duration);
+        tx_silence_init(s, 30000);
+        s->tx.stage = V34_TX_STAGE_FIRST_S;
+        return zero;
+    }
+    /*endif*/
+
+    if (s->rx.received_event == V34_EVENT_TONE_SEEN
+        ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path\n",
+                 s->rx.received_event, s->tx.tone_duration);
+        v90_wait_tone_a_init(s);
+        return zero;
+    }
+    /*endif*/
+
+    if (++s->tx.tone_duration >= timeout_bauds)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFO1a wait timeout after %d bauds (~700ms + RTD), re-sending INFO1d\n",
+                 s->tx.tone_duration);
+        info1_baud_init(s);
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_wait_tone_a_init(v34_state_t *s)
 {
     int preserve_tone_a_event;
@@ -2459,6 +2519,24 @@ static void v90_wait_tone_a_init(v34_state_t *s)
     /*endif*/
     /* Set RX to detect Tone A from analog modem */
     s->rx.stage = V34_RX_STAGE_TONE_A;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_wait_info1a_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with recovery\n");
+    s->tx.tone_duration = 0;
+    /* Use CC modulation so we get a per-baud callback while transmitting silence. */
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.stage = V34_TX_STAGE_V90_WAIT_INFO1A;
+    s->tx.current_getbaud = get_v90_wait_info1a_baud;
+    /* Keep RX on CC demod to receive INFO1a at 2400 Hz */
+    s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.stage = V34_RX_STAGE_INFO1A;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2573,21 +2651,10 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
             /* V.90 §9.2.1.1.8: after sending INFO1d, the digital modem
                shall transmit silence and condition its receiver to receive
                INFO1a.  Do NOT call s_not_s_baud_init() which would start
-               Phase 3 S/S̄ and overwrite RX state.
-               Guard against re-entry: tx_silence_init changes the modulator
-               but remaining bauds in this frame still call get_info1_baud. */
-            if (s->tx.current_modulator != V34_MODULATION_SILENCE)
+               Phase 3 S/S̄ and overwrite RX state. */
+            if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a\n");
-                tx_silence_init(s, 30000);
-                s->tx.stage = V34_TX_STAGE_FIRST_S;  /* Signal modem_engine to send silence */
-                /* Keep RX on CC demod to receive INFO1a at 2400 Hz */
-                s->rx.current_demodulator = V34_MODULATION_TONES;
-                s->rx.stage = V34_RX_STAGE_INFO1A;
-                s->rx.received_event = V34_EVENT_REVERSAL_1;
-                s->rx.persistence1 = 0;
-                s->rx.persistence2 = 0;
+                v90_wait_info1a_init(s);
             }
         }
         else

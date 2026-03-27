@@ -71,6 +71,12 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
     V34_TX_STAGE_PRE_INFO1_A,
+    V34_TX_STAGE_V90_WAIT_TONE_A,
+    V34_TX_STAGE_V90_WAIT_INFO1A,
+    V34_TX_STAGE_V90_WAIT_RX_L2,
+    V34_TX_STAGE_V90_WAIT_TONE_A_REV,
+    V34_TX_STAGE_V90_B_REV_DELAY,
+    V34_TX_STAGE_V90_B_REV_10MS,
     V34_TX_STAGE_INFO1,
     V34_TX_STAGE_FIRST_B,
     V34_TX_STAGE_FIRST_B_INFO_SEEN,
@@ -453,6 +459,12 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_POST_L2_NOT_A:               return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE:                   return "A_SILENCE";
     case V34_TX_STAGE_PRE_INFO1_A:                 return "PRE_INFO1_A";
+    case V34_TX_STAGE_V90_WAIT_TONE_A:             return "V90_WAIT_TONE_A";
+    case V34_TX_STAGE_V90_WAIT_INFO1A:             return "V90_WAIT_INFO1A";
+    case V34_TX_STAGE_V90_WAIT_RX_L2:              return "V90_WAIT_RX_L2";
+    case V34_TX_STAGE_V90_WAIT_TONE_A_REV:         return "V90_WAIT_TONE_A_REV";
+    case V34_TX_STAGE_V90_B_REV_DELAY:             return "V90_B_REV_DELAY";
+    case V34_TX_STAGE_V90_B_REV_10MS:              return "V90_B_REV_10MS";
     case V34_TX_STAGE_INFO1:                       return "INFO1";
     case V34_TX_STAGE_FIRST_B:                     return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN:           return "FIRST_B_INFO_SEEN";

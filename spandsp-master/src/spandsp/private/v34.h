@@ -116,6 +116,8 @@ enum v34_tx_stages_e
     V34_TX_STAGE_PRE_INFO1_A,
     /*! \brief V.90: waiting for Tone A after L2 before sending INFO1d */
     V34_TX_STAGE_V90_WAIT_TONE_A,
+    /*! \brief V.90: waiting for INFO1a after sending INFO1d */
+    V34_TX_STAGE_V90_WAIT_INFO1A,
     /*! \brief V.90 §9.2.1.1.5: send Tone B while receiving analog's L1/L2 */
     V34_TX_STAGE_V90_WAIT_RX_L2,
     /*! \brief V.90 §9.2.1.1.6: detected Tone A, waiting for Tone A reversal */
