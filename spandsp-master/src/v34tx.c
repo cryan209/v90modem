@@ -2416,6 +2416,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
        Only trigger on actual Tone A detection — L2_SEEN fires too early
        (before the analog modem has received our L1/L2 and started Tone A). */
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
+        || s->rx.received_event == V34_EVENT_REVERSAL_1
         ||
         ++s->tx.tone_duration >= 600)
     {
@@ -2434,17 +2435,28 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 
 static void v90_wait_tone_a_init(v34_state_t *s)
 {
+    int preserve_tone_a_event;
+
+    preserve_tone_a_event = (s->rx.received_event == V34_EVENT_TONE_SEEN
+                             || s->rx.received_event == V34_EVENT_REVERSAL_1);
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d\n");
+             "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d%s\n",
+             preserve_tone_a_event ? " (preserving prior Tone A indication)" : "");
     s->tx.tone_duration = 0;
     /* Use CC modulation so getbaud is called each baud — outputs silence via zero return */
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A;
     s->tx.current_getbaud = get_v90_wait_tone_a_baud;
-    /* Clear stale RX events so we wait for a fresh Tone A detection */
-    s->rx.received_event = V34_EVENT_NONE;
-    s->rx.persistence1 = 0;
-    s->rx.persistence2 = 0;
+    /* Clear stale RX events so we wait for a fresh Tone A detection, but preserve
+       a legitimate Tone A indication some analog modems emit before we enter this
+       state (e.g. reversal 1 during the L1/L2 to INFO1d crossover). */
+    if (!preserve_tone_a_event)
+    {
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+    }
+    /*endif*/
     /* Set RX to detect Tone A from analog modem */
     s->rx.stage = V34_RX_STAGE_TONE_A;
 }

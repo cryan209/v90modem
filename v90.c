@@ -96,6 +96,7 @@ struct v90_state_s {
     int              diff_enc;      /* Differential encoder state (last sign bit) */
     int              sample_count;  /* Sample counter within current sub-state */
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
+    bool             phase4_hold_logged;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
@@ -343,13 +344,22 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                         s->sample_count);
                 s->tx_phase = V90_TX_PHASE4;
                 s->sample_count = 0;
+                s->phase4_hold_logged = false;
             }
             return v90_pcm_signed(s->law, s->u_info, sign);
         }
 
     case V90_TX_PHASE4:
-        /* TODO: Phase 4 (B1d, TRN2d, MP, R, E exchanges) */
-        return v90_pcm_signed(s->law, 0, 1);  /* idle for now */
+        /* Placeholder until real Phase 4 exists:
+           keep transmitting a TRN-like scrambled-ones waveform on U_INFO so the
+           far-end receiver does not lose carrier/equalizer lock immediately. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4 placeholder: holding TRN-like waveform on U_INFO until MP/CP is implemented\n");
+            s->phase4_hold_logged = true;
+        }
+        sign = v90_scramble_bit(&s->scrambler, 1);
+        s->sample_count++;
+        return v90_pcm_signed(s->law, s->u_info, sign);
 
     default:
         break;
@@ -374,6 +384,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
     s->prev_sign = 0;
+    s->phase4_hold_logged = false;
 
     return s;
 }
@@ -457,6 +468,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->jd_bit_pos = 0;
     s->sample_count = 0;
     s->rep_count = 0;
+    s->phase4_hold_logged = false;
 
     s->tx_phase = V90_TX_JD;
 }
