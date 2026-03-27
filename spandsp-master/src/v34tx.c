@@ -47,6 +47,7 @@
 #include "spandsp/stdbool.h"
 #endif
 #include "floating_fudge.h"
+#include <stddef.h>
 
 #include "spandsp/telephony.h"
 #include "spandsp/alloc.h"
@@ -504,6 +505,15 @@ static uint16_t crc_bit_block(const uint8_t buf[], int first_bit, int last_bit, 
 }
 /*- End of function --------------------------------------------------------*/
 
+static logging_state_t *tx_log_state(v34_tx_state_t *s)
+{
+    v34_state_t *owner;
+
+    owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, tx));
+    return &owner->logging;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int info0_sequence_tx(v34_tx_state_t *s)
 {
     uint8_t *t;
@@ -514,7 +524,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     {
         /* V.90 INFO0d frame (ITU-T V.90 Table 7) — 62 bits total.
            Transmitted by the digital modem at 1200 Hz carrier. */
-        span_log(s->logging, SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
+        span_log(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
         bitstream_init(&bs, true);
         t = s->txbuf;
         /* 0:3      Fill bits: 1111. */
@@ -574,13 +584,13 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         /* Extra postamble for byte alignment */
         bitstream_put(&bs, &t, 0, 8);
         bitstream_flush(&bs, &t);
-        span_log(s->logging, SPAN_LOG_FLOW,
+        span_log(tx_log_state(s), SPAN_LOG_FLOW,
                  "  PCM law: %s, nominal power: -10 dBm0, max power: -10 dBm0\n",
                  s->v90_pcm_law ? "A-law" : "u-law");
         return 62;
     }
 
-    log_info0(s->logging, true, &v34_capabilities, s->info0_acknowledgement);
+    log_info0(tx_log_state(s), true, &v34_capabilities, s->info0_acknowledgement);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:3      Fill bits: 1111. */
@@ -687,7 +697,7 @@ static int info1c_sequence_tx(v34_tx_state_t *s, info1c_t *info1c)
     bitstream_state_t bs;
     int i;
 
-    log_info1c(s->logging, true, info1c);
+    log_info1c(tx_log_state(s), true, info1c);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:3      Fill bits: 1111. */
@@ -762,7 +772,7 @@ static int info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
     uint16_t crc;
     bitstream_state_t bs;
 
-    log_info1a(s->logging, true, info1a);
+    log_info1a(tx_log_state(s), true, info1a);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:3      Fill bits: 1111. */
@@ -825,7 +835,7 @@ static int infoh_sequence_tx(v34_tx_state_t *s, infoh_t *infoh)
     uint16_t crc;
     bitstream_state_t bs;
 
-    log_infoh(s->logging, true, infoh);
+    log_infoh(tx_log_state(s), true, infoh);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:3      Fill bits: 1111. */
@@ -981,7 +991,7 @@ static int mp_sequence_tx(v34_tx_state_t *s, mp_t *mp)
             dbg_bits[i] = (char) ('0' + (int) bitstream_get(&dbg_bs, &dbg_p, 1));
         /*endfor*/
         dbg_bits[dbg_len] = '\0';
-        span_log(s->logging, SPAN_LOG_FLOW,
+        span_log(tx_log_state(s), SPAN_LOG_FLOW,
                  "Tx - MP%d bits[0..%d]: %s\n",
                  mp->type, dbg_len - 1, dbg_bits);
     }
@@ -998,7 +1008,7 @@ static int mph_sequence_tx(v34_tx_state_t *s, mph_t *mph)
     uint16_t crc;
     bitstream_state_t bs;
 
-    log_mph(s->logging, true, mph);
+    log_mph(tx_log_state(s), true, mph);
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:16     Frame sync: 11111111111111111. */
@@ -1231,7 +1241,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
         /*endfor*/
     }
     /*endif*/
-    span_log(s->logging,
+    span_log(tx_log_state(s),
              SPAN_LOG_FLOW,
              "Tx - Parsed %p %8X - %X %X %X %X - %2X %2X %2X %2X %2X %2X %2X %2X\n",
              s,
@@ -2517,7 +2527,8 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     enum
     {
         V90_INFO1A_FAST_RETRY_BAUDS = 120,
-        V90_INFO1A_MAX_FAST_RETRIES = 3
+        V90_INFO1A_MAX_FAST_RETRIES = 3,
+        V90_INFO1A_MAX_TOTAL_RETRIES = 6
     };
     int baud_rate;
     int rtd_bauds;
@@ -2546,6 +2557,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                  "Tx - V.90: INFO1a received after %d bauds of wait, proceeding to Phase 3 handoff\n",
                  s->tx.tone_duration);
         s->tx.v90_info1a_fast_retries = 0;
+        s->tx.v90_info1a_total_retries = 0;
         tx_silence_init(s, 30000);
         s->tx.stage = V34_TX_STAGE_FIRST_S;
         s->rx.received_event = V34_EVENT_NONE;
@@ -2556,21 +2568,27 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
+        s->tx.v90_info1a_total_retries++;
         if (s->tx.tone_duration <= V90_INFO1A_FAST_RETRY_BAUDS)
             s->tx.v90_info1a_fast_retries++;
         else
             s->tx.v90_info1a_fast_retries = 0;
         /*endif*/
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path (fast retries=%d)\n",
-                 s->rx.received_event, s->tx.tone_duration, s->tx.v90_info1a_fast_retries);
-        if (s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES)
+                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path (fast retries=%d total retries=%d)\n",
+                 s->rx.received_event, s->tx.tone_duration,
+                 s->tx.v90_info1a_fast_retries,
+                 s->tx.v90_info1a_total_retries);
+        if (s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES
+            || s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: aborting after %d rapid INFO1a recovery loops without valid INFO1a; signalling training failure\n",
+                     "Tx - V.90: aborting after %d total INFO1a recovery loops (%d rapid) without valid INFO1a; signalling training failure\n",
+                     s->tx.v90_info1a_total_retries,
                      s->tx.v90_info1a_fast_retries);
+            s->rx.training_failed_reported = false;
             s->rx.received_event = V34_EVENT_TRAINING_FAILED;
-            s->tx.current_getbaud = NULL;
+            tx_silence_init(s, 30000);
             return zero;
         }
         /*endif*/
@@ -4618,6 +4636,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
     s->tx.v90_info1a_fast_retries = 0;
+    s->tx.v90_info1a_total_retries = 0;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
     if (s->calling_party)

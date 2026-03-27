@@ -476,6 +476,10 @@ typedef struct
     /*! \brief V.90 answerer: consecutive fast Tone-A recoveries while waiting
                for INFO1a. Used to abort repeated INFO1d loops earlier. */
     int v90_info1a_fast_retries;
+    /*! \brief V.90 answerer: total Tone-A recovery loops while waiting for
+               INFO1a. Used to abort peers that never produce a valid INFO1a
+               but keep bouncing between Tone A and INFO1d. */
+    int v90_info1a_total_retries;
 
     union
     {
@@ -904,6 +908,7 @@ typedef struct
     int last_logged_stage;
     int last_logged_event;
     int last_logged_demodulator;
+    bool training_failed_reported;
 
     /*! \brief Used to align the transmit and receive positions, to ensure things like
                round trip delay are properly handled. */

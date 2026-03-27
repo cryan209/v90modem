@@ -7075,6 +7075,16 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
         s->rx.sample_time += lenx;
     }
     while (lenx > 0  &&  leny < len);
+
+    if (s->rx.received_event == V34_EVENT_TRAINING_FAILED
+        && !s->rx.training_failed_reported)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Rx - signalling training failure to host\n");
+        report_status_change(&s->rx, SIG_STATUS_TRAINING_FAILED);
+        s->rx.training_failed_reported = true;
+    }
+    /*endif*/
     /* If there is any residue, this should be the end of operation of the modem,
        so we don't really need to add that residue to the sample time. */
     return leny;
@@ -7110,6 +7120,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.baud_rate = baud_rate;
     s->rx.bit_rate = bit_rate;
     s->rx.high_carrier = high_carrier;
+    s->rx.training_failed_reported = false;
 
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     /* Phase 2 INFO exchange: answerer RX at 1200 Hz (tone B), caller RX at 2400 Hz (tone A).
