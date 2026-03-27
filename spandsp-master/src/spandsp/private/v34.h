@@ -480,11 +480,6 @@ typedef struct
                INFO1a. Used to abort peers that never produce a valid INFO1a
                but keep bouncing between Tone A and INFO1d. */
     int v90_info1a_total_retries;
-    /*! \brief V.90 answerer: extra initial INFO0d repetitions before falling
-               through to Tone A. Helps slow peers that miss the first INFO0d
-               window over RTP/gateway paths. */
-    int v90_initial_info0_repeats;
-
     union
     {
         info1a_t info1a;

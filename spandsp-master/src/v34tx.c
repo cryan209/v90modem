@@ -1775,10 +1775,6 @@ static void transmission_preamble_init(v34_state_t *s)
 
 static complex_sig_t get_info0_baud(v34_state_t *s)
 {
-    enum
-    {
-        V90_INITIAL_INFO0_EXTRA_REPEATS = 2
-    };
     int bit;
 
     bit = get_data_bit(&s->tx);
@@ -1788,28 +1784,6 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             && !s->tx.calling_party
             && s->tx.duplex)
         {
-            if (!s->tx.info0_acknowledgement
-                && !s->rx.info0_received)
-            {
-                if (s->tx.v90_initial_info0_repeats < V90_INITIAL_INFO0_EXTRA_REPEATS)
-                {
-                    s->tx.v90_initial_info0_repeats++;
-                    span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - V.90: no INFO0a seen after initial INFO0d, repeating INFO0d (%d/%d) before Tone A\n",
-                             s->tx.v90_initial_info0_repeats,
-                             V90_INITIAL_INFO0_EXTRA_REPEATS);
-                    info0_baud_init(s);
-                }
-                else
-                {
-                    span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - V.90: no INFO0a after %d initial INFO0d attempts, proceeding to Tone A\n",
-                             1 + s->tx.v90_initial_info0_repeats);
-                    initial_ab_not_ab_baud_init(s);
-                }
-            }
-            else
-            {
             if (s->rx.received_event == V34_EVENT_INFO0_OK
                 && !s->tx.info0_acknowledgement)
             {
@@ -1845,7 +1819,6 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             else
             {
                 initial_ab_not_ab_baud_init(s);
-            }
             }
         }
         /* Are we at the initial stage, where A or B comes next, or at the retry
@@ -2352,8 +2325,18 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
         }
         else
         {
-            s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
-            s->tx.stage = V34_TX_STAGE_INITIAL_A;
+            if (s->tx.v90_mode)
+            {
+                /* V.90 9.2.1.1.1: the digital modem follows INFO0d with Tone B,
+                   not the V.34 answerer A/!A sequence. */
+                s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+                s->tx.stage = V34_TX_STAGE_FIRST_B;
+            }
+            else
+            {
+                s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
+                s->tx.stage = V34_TX_STAGE_INITIAL_A;
+            }
         }
         /*endif*/
     }
@@ -4635,7 +4618,6 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
             s->rx.received_event = V34_EVENT_NONE;
             s->rx.persistence1 = 0;
             s->rx.persistence2 = 0;
-            s->tx.v90_initial_info0_repeats = 0;
             s->rx.last_logged_stage = -1;
             s->rx.last_logged_event = -1;
             s->rx.last_logged_demodulator = -1;
@@ -4689,7 +4671,6 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.baud_rate = baud_rate;
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
-    s->tx.v90_initial_info0_repeats = 0;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
 
