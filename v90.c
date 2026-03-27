@@ -23,7 +23,10 @@
 #define V90_FRAME_LEN   6       /* Symbols per data frame */
 
 /* Jd frame is 72 bits (Table 13): 17 sync + 51 data + 4 fill */
-#define V90_JD_BITS     72
+#define V90_JD_BITS         72
+/* Hold Jd long enough for the analog demodulator to acquire before J'd/Sd.
+   This keeps Phase 3 moving instead of repeating the 72-bit frame forever. */
+#define V90_JD_LEN          4800
 
 /* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
 #define V90_SD_REPS     64
@@ -235,7 +238,6 @@ static int v90_get_jd_bit(v90_state_t *s)
 static int16_t v90_phase3_sample(v90_state_t *s)
 {
     int sign;
-    int ucode;
 
     switch (s->tx_phase) {
     case V90_TX_JD:
@@ -248,6 +250,12 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
+            if (s->sample_count >= V90_JD_LEN) {
+                fprintf(stderr, "[V90] Phase 3: Jd complete (%d symbols), starting J'd\n",
+                        s->sample_count);
+                s->tx_phase = V90_TX_JD_PRIME;
+                s->sample_count = 0;
+            }
             return v90_pcm_signed(s->law, s->u_info, sign);
         }
 

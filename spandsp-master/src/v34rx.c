@@ -3715,7 +3715,11 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
                 if (s->calling_party)
                     s->stage = V34_RX_STAGE_TONE_A;
                 else if (s->v90_mode)
-                    s->stage = V34_RX_STAGE_INFO1A;  /* V.90: analog modem sends INFO1a (70 bits) */
+                {
+                    s->stage = V34_RX_STAGE_TONE_A;  /* V.90 §9.2.1.1.7: detect Tone A before INFO1d */
+                    s->persistence1 = 0;
+                    s->persistence2 = 0;
+                }
                 else
                     s->stage = V34_RX_STAGE_INFO1C;
             }

@@ -1884,7 +1884,74 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* Send phase reversed pure tone for 10ms */
         if (++s->tx.tone_duration == 6)
         {
-            /* 10ms has passed - move on to sending L1/L2 */
+            if (s->tx.v90_mode)
+            {
+                /* V.90 §9.2.1.1.5: digital modem does NOT send L1/L2 here.
+                   Instead, send Tone B and wait to RECEIVE analog's L1/L2 */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: sending Tone B, waiting for analog L1/L2\n");
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_V90_WAIT_RX_L2;
+            }
+            else
+            {
+                /* V.34: 10ms has passed - move on to sending L1/L2 */
+                l1_l2_signal_init(s);
+            }
+        }
+        /*endif*/
+        break;
+    case V34_TX_STAGE_V90_WAIT_RX_L2:
+        /* V.90 §9.2.1.1.5: send Tone B while receiving analog's L1/L2.
+           Wait for L2_SEEN event or timeout (~1200ms = 720 bauds) */
+        if (s->rx.received_event == V34_EVENT_L2_SEEN
+            ||
+            ++s->tx.tone_duration >= 720)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: analog L1/L2 %s after %d bauds, waiting for Tone A reversal\n",
+                     (s->rx.received_event == V34_EVENT_L2_SEEN) ? "received" : "timeout",
+                     s->tx.tone_duration);
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A_REV;
+        }
+        /*endif*/
+        break;
+    case V34_TX_STAGE_V90_WAIT_TONE_A_REV:
+        /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase reversal from analog.
+           Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6) */
+        if (s->rx.received_event == V34_EVENT_TONE_SEEN
+            ||
+            s->rx.received_event == V34_EVENT_REVERSAL_1
+            ||
+            ++s->tx.tone_duration >= 600)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
+                     (s->tx.tone_duration >= 600) ? "timeout" : "detected",
+                     s->rx.received_event, s->tx.tone_duration);
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_V90_B_REV_DELAY;
+        }
+        /*endif*/
+        break;
+    case V34_TX_STAGE_V90_B_REV_DELAY:
+        /* V.90 §9.2.1.1.6: delay 40ms before Tone B reversal */
+        if (++s->tx.tone_duration == 24)
+        {
+            /* Send Tone B phase reversal */
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_V90_B_REV_10MS;
+        }
+        /*endif*/
+        break;
+    case V34_TX_STAGE_V90_B_REV_10MS:
+        /* V.90 §9.2.1.1.6: send Tone B for 10ms after reversal, then L1/L2 */
+        if (++s->tx.tone_duration == 6)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: sending digital L1/L2\n");
             l1_l2_signal_init(s);
         }
         /*endif*/
@@ -2227,9 +2294,14 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                     if (s->tx.calling_party)
                         info1_baud_init(s);
                     else if (s->tx.v90_mode)
+                    {
+                        /* V.90 §9.2.1.1.7: L1/L2 done, wait for Tone A then send INFO1d */
                         v90_wait_tone_a_init(s);
+                    }
                     else
+                    {
                         second_a_baud_init(s);
+                    }
                     /*endif*/
                 }
                 else
@@ -2340,15 +2412,18 @@ static void second_a_baud_init(v34_state_t *s)
 static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 {
     /* V.90 §9.2.1.1.7: After L2, digital modem waits for Tone A from analog modem
-       (up to 550ms + RTD), then sends INFO1d. We send silence while waiting. */
+       (up to 550ms + RTD), then sends INFO1d. We send silence while waiting.
+       Only trigger on actual Tone A detection — L2_SEEN fires too early
+       (before the analog modem has received our L1/L2 and started Tone A). */
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||
         ++s->tx.tone_duration >= 600)
     {
         /* Tone A detected (or timeout ~1s) — proceed to INFO1d */
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: %s after %d bauds, sending INFO1d\n",
-                 (s->rx.received_event == V34_EVENT_TONE_SEEN) ? "Tone A detected" : "Timeout",
+                 "Tx - V.90: %s (event=%d) after %d bauds, sending INFO1d\n",
+                 (s->tx.tone_duration >= 600) ? "Timeout" : "RX event",
+                 s->rx.received_event,
                  s->tx.tone_duration);
         info1_baud_init(s);
     }
@@ -2362,14 +2437,16 @@ static void v90_wait_tone_a_init(v34_state_t *s)
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d\n");
     s->tx.tone_duration = 0;
-    s->tx.current_modulator = V34_MODULATION_SILENCE;
+    /* Use CC modulation so getbaud is called each baud — outputs silence via zero return */
+    s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A;
     s->tx.current_getbaud = get_v90_wait_tone_a_baud;
-    /* Condition RX to detect Tone A at 2400 Hz */
-    s->rx.stage = V34_RX_STAGE_TONE_A;
-    s->rx.received_event = V34_EVENT_REVERSAL_1;
+    /* Clear stale RX events so we wait for a fresh Tone A detection */
+    s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
+    /* Set RX to detect Tone A from analog modem */
+    s->rx.stage = V34_RX_STAGE_TONE_A;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4291,6 +4368,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
 {
     s->tx.v90_mode = true;
     s->tx.v90_pcm_law = pcm_law;
+    s->tx.v90_l2_count = 0;
     s->rx.v90_mode = true;
 
     /* V.90 §8.2.3.1: digital modem TX CC at 1200 Hz, RX CC at 2400 Hz.
@@ -4299,12 +4377,11 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     if (!s->calling_party)
     {
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
-        /* V.90 §8.2.3.1: digital modem INFO sequences require an 1800 Hz
-           guard tone 7 dB below the nominal transmit power.
-           -7 dB ≈ amplitude factor of 0.4467; the gain value is scaled
-           by the modulator like the CC carrier. */
-        s->tx.guard_phase_rate = dds_phase_ratef(1800.0f);
-        s->tx.guard_level = TRAINING_AMP * 0.4467f;  /* -7 dB below CC carrier */
+        /* V.90 §8.2.3.1: digital modem transmits at 1200 Hz at nominal power.
+           NO guard tone — the 1800 Hz guard tone is only for the analog modem
+           (which transmits at 2400 Hz). Disable any guard tone set by V.34 init. */
+        s->tx.guard_phase_rate = 0;
+        s->tx.guard_level = 0;
         s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
     }
 

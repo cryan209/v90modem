@@ -116,6 +116,14 @@ enum v34_tx_stages_e
     V34_TX_STAGE_PRE_INFO1_A,
     /*! \brief V.90: waiting for Tone A after L2 before sending INFO1d */
     V34_TX_STAGE_V90_WAIT_TONE_A,
+    /*! \brief V.90 §9.2.1.1.5: send Tone B while receiving analog's L1/L2 */
+    V34_TX_STAGE_V90_WAIT_RX_L2,
+    /*! \brief V.90 §9.2.1.1.6: detected Tone A, waiting for Tone A reversal */
+    V34_TX_STAGE_V90_WAIT_TONE_A_REV,
+    /*! \brief V.90 §9.2.1.1.6: 40ms delay before Tone B reversal */
+    V34_TX_STAGE_V90_B_REV_DELAY,
+    /*! \brief V.90 §9.2.1.1.6: send Tone B reversal for 10ms then L1/L2 */
+    V34_TX_STAGE_V90_B_REV_10MS,
     /*! \brief INFO1 is being trasnmitted */
     V34_TX_STAGE_INFO1,
 
@@ -461,6 +469,8 @@ typedef struct
     bool v90_mode;
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
+    /*! \brief V.90: count of L1/L2 rounds sent (need 2 before INFO1d) */
+    int v90_l2_count;
 
     union
     {
