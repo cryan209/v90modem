@@ -24,9 +24,6 @@
 
 /* Jd frame is 72 bits (Table 13): 17 sync + 51 data + 4 fill */
 #define V90_JD_BITS         72
-/* Hold Jd long enough for the analog demodulator to acquire before J'd/Sd.
-   This keeps Phase 3 moving instead of repeating the 72-bit frame forever. */
-#define V90_JD_LEN          4800
 
 /* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
 #define V90_SD_REPS     64
@@ -98,6 +95,9 @@ struct v90_state_s {
     int              sample_count;  /* Sample counter within current sub-state */
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
     bool             phase4_hold_logged;
+    bool             jd_terminate_requested;
+    bool             training_complete;
+    bool             dil_requested;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
@@ -322,7 +322,8 @@ static int16_t v90_phase3_sample(v90_state_t *s)
     case V90_TX_JD:
         /* §8.4.2: Jd bits are scrambled and differentially encoded,
          * transmitted as sign of U_INFO PCM codeword.
-         * §9.3.1.4: Sent after TRN1d */
+         * §9.3.1.4/§9.3.1.5: Sent after TRN1d and repeated until S is seen.
+         * Once S is detected, complete the current Jd repetition and send J'd. */
         {
             int bit = v90_get_jd_bit(s);
             int scrambled = v90_scramble_bit(&s->scrambler, bit);
@@ -330,8 +331,8 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
-            if (s->sample_count >= V90_JD_LEN) {
-                fprintf(stderr, "[V90] Phase 3: Jd complete (%d symbols), starting J'd\n",
+            if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
+                fprintf(stderr, "[V90] Phase 3: S detected, completed current Jd repetition after %d symbols, starting J'd\n",
                         s->sample_count);
                 s->tx_phase = V90_TX_JD_PRIME;
                 s->sample_count = 0;
@@ -347,13 +348,28 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             sign = s->diff_enc;
             s->sample_count++;
             if (s->sample_count >= 12) {
-                fprintf(stderr, "[V90] Phase 3: J'd complete, entering Phase 4\n");
-                s->tx_phase = V90_TX_PHASE4;
+                if (s->dil_requested) {
+                    fprintf(stderr, "[V90] Phase 3: J'd complete, entering DIL placeholder state\n");
+                    s->tx_phase = V90_TX_DIL;
+                } else {
+                    fprintf(stderr, "[V90] Phase 3: J'd complete, entering Phase 4\n");
+                    s->tx_phase = V90_TX_PHASE4;
+                }
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
             }
             return v90_pcm_signed(s->law, s->u_info, sign);
         }
+
+    case V90_TX_DIL:
+        /* DIL is not implemented yet. Keep the branch point explicit so
+           Phase 3 control flow can distinguish J'd termination from Phase 4. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] DIL placeholder: requested DIL is not implemented, holding idle PCM until Phase 4 work lands\n");
+            s->phase4_hold_logged = true;
+        }
+        s->sample_count++;
+        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
 
     case V90_TX_PHASE4:
         /* Placeholder until real Phase 4 exists:
@@ -391,6 +407,9 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->diff_enc = 0;
     s->prev_sign = 0;
     s->phase4_hold_logged = false;
+    s->jd_terminate_requested = false;
+    s->training_complete = false;
+    s->dil_requested = false;
 
     return s;
 }
@@ -414,6 +433,9 @@ v90_state_t *v90_init(int baud_rate,
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
     s->prev_sign = 0;
+    s->jd_terminate_requested = false;
+    s->training_complete = false;
+    s->dil_requested = false;
 
     s->owns_v34 = true;
     s->v34 = v34_init(NULL, baud_rate, bit_rate, calling_party, true,
@@ -473,8 +495,25 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->diff_enc = 0;
     s->jd_bit_pos = 0;
     s->phase4_hold_logged = false;
+    s->jd_terminate_requested = false;
+    s->training_complete = false;
 
     s->tx_phase = V90_TX_SD;
+}
+
+void v90_notify_s_detected(v90_state_t *s)
+{
+    if (!s)
+        return;
+    if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
+        fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
+        s->jd_terminate_requested = true;
+    }
+}
+
+bool v90_training_complete(v90_state_t *s)
+{
+    return s ? s->training_complete : false;
 }
 
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)

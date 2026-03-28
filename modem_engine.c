@@ -595,6 +595,7 @@ static v90_enc_t      g_v90_enc;
 /* V.90 state (Phase 3/4 TX) */
 static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
+static bool           g_v90_completion_deferred_logged = false;
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -752,17 +753,25 @@ static void v34_put_bit_cb(void *user_data, int bit)
         trace_phase("V34 rx status=%s (%d)", signal_status_to_str(bit), bit);
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             if (g_state == ME_TRAINING) {
-                g_state = ME_DATA;
-                g_phase_start_ms = 0;
                 int rate = v34_get_current_bit_rate(g_v34);
                 if (g_mod == ME_MOD_V90) {
-                    fprintf(stderr, "[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
-                            rate, V90_RATE_BPS);
-                    trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
-                    /* Re-init V.90 encoder for clean data mode start */
-                    v90_enc_init(&g_v90_enc);
-                    di_on_connected(V90_RATE_BPS);
+                    if (g_v90 && v90_training_complete(g_v90)) {
+                        g_state = ME_DATA;
+                        g_phase_start_ms = 0;
+                        fprintf(stderr, "[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
+                                rate, V90_RATE_BPS);
+                        trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
+                        /* Re-init V.90 encoder for clean data mode start */
+                        v90_enc_init(&g_v90_enc);
+                        di_on_connected(V90_RATE_BPS);
+                    } else if (!g_v90_completion_deferred_logged) {
+                        fprintf(stderr, "[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
+                        trace_phase("V90 deferred DATA entry: V34 success before V90 startup complete");
+                        g_v90_completion_deferred_logged = true;
+                    }
                 } else {
+                    g_state = ME_DATA;
+                    g_phase_start_ms = 0;
                     fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
                     di_on_connected(rate);
@@ -779,6 +788,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 /* Clean up V.90/V.34 state */
                 if (g_v90) { v90_free(g_v90); g_v90 = NULL; }
                 g_v90_phase3_started = false;
+                g_v90_completion_deferred_logged = false;
                 if (g_v34) {
                     v34_free(g_v34);
                     g_v34 = NULL;
@@ -1046,6 +1056,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
         g_v90_phase3_started = false;
+        g_v90_completion_deferred_logged = false;
         /* Phase 2 CC carriers: V.90 digital answerer TX=1200 Hz, RX=2400 Hz.
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
            disabled the notch — but we need it for Phase 2 CC echo removal. */
@@ -1115,6 +1126,7 @@ void me_destroy(void)
     if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     g_v90_phase3_started = false;
+    g_v90_completion_deferred_logged = false;
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -1227,6 +1239,7 @@ void me_on_sip_disconnected(void)
     if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     g_v90_phase3_started = false;
+    g_v90_completion_deferred_logged = false;
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -1438,6 +1451,7 @@ void me_tx_audio(int16_t *amp, int len)
                         if (g_v90) {
                             v90_start_phase3(g_v90, u_info);
                             g_v90_phase3_started = true;
+                            g_v90_completion_deferred_logged = false;
                         }
                     } else if (tx_stage >= V34_TX_STAGE_FIRST_S && !g_v90_phase3_started) {
                         /* TX has entered Phase 3 but INFO1a not yet received.
@@ -1451,6 +1465,8 @@ void me_tx_audio(int16_t *amp, int len)
                 }
 
                 if (g_v90_phase3_started && g_v90) {
+                    if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
+                        v90_notify_s_detected(g_v90);
                     /* V.90 Phase 3: generate PCM codewords for actual RTP output */
                     v90_phase3_tx(g_v90, amp, len);
                     /* Run v34_tx into discard but protect RX state from being

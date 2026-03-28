@@ -34,6 +34,7 @@ typedef enum {
     V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
     V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
     V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
+    V90_TX_DIL,           /* Sending DIL (placeholder branch point) */
     V90_TX_PHASE4,        /* Phase 4 (B1d, TRN2d, MP, CP exchange) */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
@@ -82,6 +83,19 @@ bool v90_phase3_active(v90_state_t *s);
  * u_info is the U_INFO Ucode from the analog modem's INFO1a.
  */
 void v90_start_phase3(v90_state_t *s, int u_info);
+
+/*
+ * Notify the V.90 Phase 3 state machine that the far-end analogue modem's
+ * S signal has been detected and the current Jd repetition should be the last.
+ */
+void v90_notify_s_detected(v90_state_t *s);
+
+/*
+ * Check whether the V.90 state machine has completed startup and may enter
+ * data mode. Phase 4 is still incomplete, so this is currently only true
+ * once a future implementation marks it complete.
+ */
+bool v90_training_complete(v90_state_t *s);
 
 /*
  * Generate V.90 Phase 3 TX samples (PCM codewords as linear samples).
