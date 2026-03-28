@@ -2936,11 +2936,15 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         V90_INFO1A_TONE_GUARD_BAUDS = 120,
         V90_INFO1A_FAST_RETRY_BAUDS = 120,
         V90_INFO1A_MAX_FAST_RETRIES = 3,
-        V90_INFO1A_MAX_TOTAL_RETRIES = 6
+        V90_INFO1A_MAX_TOTAL_RETRIES = 6,
+        V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES = 1,
+        V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES = 2
     };
     int baud_rate;
     int rtd_bauds;
     int timeout_bauds;
+    int max_fast_retries;
+    int max_total_retries;
 
     if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
         return zero;
@@ -2957,6 +2961,17 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     timeout_bauds = (baud_rate*700 + 500)/1000 + rtd_bauds;
     if (timeout_bauds < 1)
         timeout_bauds = 1;
+    /*endif*/
+    if (s->rx.far_capabilities.tx_clock_source == 0)
+    {
+        max_fast_retries = V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES;
+        max_total_retries = V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES;
+    }
+    else
+    {
+        max_fast_retries = V90_INFO1A_MAX_FAST_RETRIES;
+        max_total_retries = V90_INFO1A_MAX_TOTAL_RETRIES;
+    }
     /*endif*/
 
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
@@ -3015,11 +3030,11 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (!s->rx.signal_present
         && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
-        && s->tx.v90_info1a_fast_retries < V90_INFO1A_MAX_FAST_RETRIES)
+        && s->tx.v90_info1a_fast_retries < max_fast_retries)
     {
         s->tx.v90_info1a_fast_retries++;
         s->tx.v90_info1a_total_retries++;
-        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+        if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a retries with repeated carrier loss and no valid INFO1a\n",
@@ -3046,10 +3061,10 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (!s->rx.signal_present
         && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
-        && s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES)
+        && s->tx.v90_info1a_fast_retries >= max_fast_retries)
     {
         s->tx.v90_info1a_total_retries++;
-        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+        if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a recovery attempts with repeated carrier loss and no valid INFO1a\n",
@@ -3082,7 +3097,7 @@ wait_timeout_check:
     {
         s->tx.v90_info1a_total_retries++;
         s->tx.v90_info1a_fast_retries = 0;
-        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+        if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a timeouts without valid INFO1a; signalling training failure\n",
@@ -3138,6 +3153,12 @@ static void v90_wait_info1a_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with Tone A recovery armed\n");
+    if (s->rx.far_capabilities.tx_clock_source == 0)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: peer INFO0a advertises internal TX clock; using reduced INFO1a retry budget\n");
+    }
+    /*endif*/
     s->tx.tone_duration = 0;
     /* Use CC modulation so we get a per-baud callback while transmitting silence. */
     s->tx.current_modulator = V34_MODULATION_CC;

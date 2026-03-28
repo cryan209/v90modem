@@ -447,9 +447,20 @@ static const uint8_t *process_pstn_access(v8_state_t *s, const uint8_t *p)
 
 static const uint8_t *process_non_standard_facilities(v8_state_t *s, const uint8_t *p)
 {
-    /* TODO: This is wrong */
-    s->result.jm_cm.nsf = (*p >> 5) & 0x07;
-    span_log(&s->logging, SPAN_LOG_FLOW, "%s\n", v8_nsf_to_str(s->result.jm_cm.nsf));
+    const uint8_t *q;
+
+    /* V.8 non-standard facilities are bit-packed across extension octets and do
+       not fit the 3-bit jm_cm.nsf placeholder cleanly. Record presence and log
+       the raw encoded field instead of reporting a bogus decoded value. */
+    s->result.jm_cm.nsf = 1;
+    q = p + 1;
+    while ((*q & 0x38) == 0x10)
+        q++;
+    span_log(&s->logging,
+             SPAN_LOG_FLOW,
+             "Non-standard facilities present (%d encoded octets)\n",
+             (int) (q - p));
+    span_log_buf(&s->logging, SPAN_LOG_FLOW, ">NSF(raw): ", p, (int) (q - p));
     return p;
 }
 /*- End of function --------------------------------------------------------*/
@@ -614,6 +625,44 @@ static bool cm_jm_decode_saved(v8_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void v92_decode(v8_state_t *s)
+{
+    static const char *const anspcm_levels[4] =
+    {
+        "-9.5 dBm0",
+        "-12 dBm0",
+        "-15 dBm0",
+        "-18 dBm0"
+    };
+    uint8_t v92;
+    bool from_digital;
+    bool qca;
+    bool lapm;
+    int level;
+
+    if (s->rx_data_ptr <= 0)
+        return;
+    /*endif*/
+
+    v92 = s->rx_data[0];
+    s->result.v92 = v92;
+
+    from_digital = (v92 & 0x01) != 0;
+    qca = (v92 & 0x02) != 0;
+    lapm = (v92 & 0x04) != 0;
+    level = (v92 >> 6) & 0x03;
+
+    span_log(&s->logging,
+             SPAN_LOG_FLOW,
+             "V.92 %s from %s modem (byte=0x%02X, LAPM=%s, ANSpcm=%s)\n",
+             qca ? "QCA" : "QC",
+             from_digital ? "digital" : "analogue",
+             v92,
+             lapm ? "yes" : "no",
+             anspcm_levels[level]);
+}
+/*- End of function --------------------------------------------------------*/
+
 static void put_bit(void *user_data, int bit)
 {
     v8_state_t *s;
@@ -706,6 +755,9 @@ static void put_bit(void *user_data, int bit)
             break;
         case V8_SYNC_CM_JM:
             cm_jm_decode(s);
+            break;
+        case V8_SYNC_V92:
+            v92_decode(s);
             break;
         }
         /*endswitch*/
@@ -1419,6 +1471,7 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
     s->proceed = false;
     s->result.send_ci = s->parms.send_ci;
     s->result.modem_connect_tone = MODEM_CONNECT_TONES_NONE;
+    s->result.v92 = -1;
     s->result.jm_cm.modulations = s->parms.jm_cm.modulations;
     s->result.jm_cm.call_function = s->parms.jm_cm.call_function;
     s->result.jm_cm.nsf = -1;

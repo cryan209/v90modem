@@ -682,30 +682,6 @@ static uint64_t g_phase_start_ms = 0;      /* When current phase started */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
 static int g_last_tx_stage = 0;            /* Last logged TX stage */
 
-static void cleanup_v34_v90_training_locked(void)
-{
-    if (g_v90) {
-        v90_free(g_v90);
-        g_v90 = NULL;
-    }
-    if (g_v34) {
-        v34_free(g_v34);
-        g_v34 = NULL;
-    }
-    g_v90_phase3_started = false;
-    g_v90_completion_deferred_logged = false;
-    g_v90_phase3_j_seen = false;
-    g_v34_fallback_to_v22bis_pending = false;
-    g_v34_fallback_status = 0;
-    g_last_v90_bridge_rx_stage = -1;
-    g_last_v90_bridge_tx_stage = -1;
-    g_last_v90_bridge_rx_event = -1;
-    v90_dil_capture_reset();
-    g_notch.active = false;
-    g_last_rx_stage = 0;
-    g_last_tx_stage = 0;
-}
-
 /* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
 #define TX_BUF_SIZE 4096
@@ -752,6 +728,48 @@ static int v8_alternate_answer_tone(int tone)
     return (tone == MODEM_CONNECT_TONES_ANSAM_PR)
         ? MODEM_CONNECT_TONES_ANSAM
         : MODEM_CONNECT_TONES_ANSAM_PR;
+}
+
+static const char *me_v92_anspcm_level_to_str(int level)
+{
+    switch (level & 0x03)
+    {
+    case 0:
+        return "-9.5 dBm0";
+    case 1:
+        return "-12 dBm0";
+    case 2:
+        return "-15 dBm0";
+    default:
+        return "-18 dBm0";
+    }
+}
+
+static void me_log_v8_peer_summary(const v8_parms_t *result)
+{
+    fprintf(stderr,
+            "[ME] V.8 peer summary: protocol=%s, PSTN=%s, PCM=%s, NSF=%s, T.66=%d\n",
+            v8_protocol_to_str(result->jm_cm.protocols),
+            v8_pstn_access_to_str(result->jm_cm.pstn_access),
+            v8_pcm_modem_availability_to_str(result->jm_cm.pcm_modem_availability),
+            (result->jm_cm.nsf >= 0) ? "present" : "absent",
+            result->jm_cm.t66);
+
+    if (result->v92 >= 0)
+    {
+        const bool from_digital = (result->v92 & 0x01) != 0;
+        const bool qca = (result->v92 & 0x02) != 0;
+        const bool lapm = (result->v92 & 0x04) != 0;
+        const int level = (result->v92 >> 6) & 0x03;
+
+        fprintf(stderr,
+                "[ME] V.8 peer V.92 packet: %s from %s modem, LAPM=%s, ANSpcm=%s (0x%02X)\n",
+                qca ? "QCA" : "QC",
+                from_digital ? "digital" : "analogue",
+                lapm ? "yes" : "no",
+                me_v92_anspcm_level_to_str(level),
+                result->v92);
+    }
 }
 
 static int me_start_or_restart_v8_locked(int answer_tone)
@@ -904,6 +922,26 @@ static void v90_dil_capture_reset(void)
     memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
 }
 
+static void cleanup_v34_v90_training_locked(void)
+{
+    if (g_v90) {
+        v90_free(g_v90);
+        g_v90 = NULL;
+    }
+    if (g_v34) {
+        v34_free(g_v34);
+        g_v34 = NULL;
+    }
+    g_v90_phase3_started = false;
+    g_v90_completion_deferred_logged = false;
+    g_v34_fallback_to_v22bis_pending = false;
+    g_v34_fallback_status = 0;
+    v90_dil_capture_reset();
+    g_notch.active = false;
+    g_last_rx_stage = 0;
+    g_last_tx_stage = 0;
+}
+
 static int v90_dil_capture_get_bit(int pos)
 {
     return (g_v90_dil_capture[pos / 8] >> (pos % 8)) & 1;
@@ -1050,22 +1088,12 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         signal_status_to_str(bit));
                 trace_phase("V34 training failed (%s) -> fallback V22BIS",
                             signal_status_to_str(bit));
-                /* Clean up V.90/V.34 state */
-                if (g_v90) { v90_free(g_v90); g_v90 = NULL; }
-                g_v90_phase3_started = false;
-                g_v90_completion_deferred_logged = false;
-                v90_dil_capture_reset();
-                if (g_v34) {
-                    v34_free(g_v34);
-                    g_v34 = NULL;
-                }
-                g_notch.active = false;
-                g_last_rx_stage = 0;
-                g_last_tx_stage = 0;
-                /* Fall back to V.22bis. This callback runs from inside v34_rx(),
-                   which me_rx_audio() already calls while holding g_state_mtx, so
-                   taking the mutex again here self-deadlocks the media thread. */
-                start_v22bis_training();
+                /* This callback runs from inside v34_rx().  Defer cleanup and
+                   the V.22bis handoff until me_rx_audio() regains control so
+                   we don't free the active V.34 context out from under SpanDSP. */
+                g_v34_fallback_to_v22bis_pending = true;
+                g_v34_fallback_status = bit;
+                g_phase_start_ms = 0;
                 return;
             }
         }
@@ -1272,6 +1300,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                 v8_status_to_str(result->status), result->status,
                 mod_str, result->jm_cm.modulations, result->jm_cm.protocols,
                 result->jm_cm.pstn_access, result->jm_cm.pcm_modem_availability);
+    me_log_v8_peer_summary(result);
 
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
     if (result->status == V8_STATUS_IN_PROGRESS ||
@@ -1404,12 +1433,8 @@ void me_destroy(void)
 {
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
-    if (g_v90)      { v90_free(g_v90);                            g_v90      = NULL; }
-    if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
+    cleanup_v34_v90_training_locked();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
-    g_v90_phase3_started = false;
-    g_v90_completion_deferred_logged = false;
-    v90_dil_capture_reset();
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -1490,12 +1515,8 @@ void me_on_sip_disconnected(void)
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
-    if (g_v90)      { v90_free(g_v90);                           g_v90      = NULL; }
-    if (g_v34)      { v34_free(g_v34);                           g_v34      = NULL; }
+    cleanup_v34_v90_training_locked();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
-    g_v90_phase3_started = false;
-    g_v90_completion_deferred_logged = false;
-    v90_dil_capture_reset();
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
 
@@ -1551,14 +1572,8 @@ void me_rx_audio(const int16_t *amp, int len)
                         g_mod == ME_MOD_V90 ? "V.90" : "V.34");
                 trace_phase("%s timeout -> fallback V22BIS",
                             g_mod == ME_MOD_V90 ? "V90" : "V34");
-                if (g_v34) {
-                    v34_free(g_v34);
-                    g_v34 = NULL;
-                }
-                g_notch.active = false;
-                g_last_rx_stage = 0;
-                g_last_tx_stage = 0;
                 pthread_mutex_lock(&g_state_mtx);
+                cleanup_v34_v90_training_locked();
                 start_v22bis_training();
                 pthread_mutex_unlock(&g_state_mtx);
                 return;
@@ -1637,6 +1652,16 @@ void me_rx_audio(const int16_t *amp, int len)
                 if (notch_active)
                     notch_filter_apply(&g_notch, filtered, len);
                 v34_rx(g_v34, filtered, len);
+                if (g_v34_fallback_to_v22bis_pending) {
+                    int status = g_v34_fallback_status;
+                    fprintf(stderr,
+                            "[ME] Completing deferred V.34/V.90 fallback after %s; starting V.22bis outside v34_rx()\n",
+                            signal_status_to_str(status));
+                    cleanup_v34_v90_training_locked();
+                    start_v22bis_training();
+                    pthread_mutex_unlock(&g_state_mtx);
+                    return;
+                }
                 rx_stage = v34_get_rx_stage(g_v34);
                 tx_stage = v34_get_tx_stage(g_v34);
                 rx_event = v34_get_rx_event(g_v34);
