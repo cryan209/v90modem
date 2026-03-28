@@ -2704,7 +2704,15 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             if (++s->persistence2 == 20)
             {
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
-                s->received_event = V34_EVENT_TONE_SEEN;
+                /* Only set TONE_SEEN if we haven't already seen a reversal —
+                   otherwise we'd overwrite REVERSAL_1 and the next reversal
+                   would be misidentified as the first instead of the second. */
+                if (s->received_event != V34_EVENT_REVERSAL_1
+                    && s->received_event != V34_EVENT_REVERSAL_2
+                    && s->received_event != V34_EVENT_L2_SEEN)
+                {
+                    s->received_event = V34_EVENT_TONE_SEEN;
+                }
             }
             /*endif*/
             break;
@@ -2720,10 +2728,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             switch (s->received_event)
             {
             case V34_EVENT_REVERSAL_1:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
-                s->tone_ab_hop_time = s->sample_time + time_offset;
-                s->received_event = V34_EVENT_REVERSAL_2;
-                l1_l2_analysis_init(s);
+            case V34_EVENT_TONE_SEEN:
+                if (s->received_event == V34_EVENT_REVERSAL_1)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
+                    s->tone_ab_hop_time = s->sample_time + time_offset;
+                    s->received_event = V34_EVENT_REVERSAL_2;
+                    l1_l2_analysis_init(s);
+                }
+                else
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
+                    s->tone_ab_hop_time = s->sample_time + time_offset;
+                    s->received_event = V34_EVENT_REVERSAL_1;
+                }
                 break;
             case V34_EVENT_REVERSAL_2:
             case V34_EVENT_L2_SEEN:

@@ -644,11 +644,13 @@ static int info0_sequence_tx(v34_tx_state_t *s)
 static void prepare_info1c(v34_state_t *s)
 {
     int i;
+    int max_n;
 
     s->tx.info1c.power_reduction = 0;
     s->tx.info1c.additional_power_reduction = 0;
     s->tx.info1c.md = 0;
     s->tx.info1c.freq_offset = 0;
+    max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {
@@ -659,8 +661,22 @@ static void prepare_info1c(v34_state_t *s)
            the answerer TX=low in duplex, so use_high_carrier=false was for that case.
            V.90 §8.2.3.2 Table 9 redefined this bit for the analog→digital direction. */
         s->tx.info1c.rate_data[i].use_high_carrier = s->tx.v90_mode ? true : false;
-        s->tx.info1c.rate_data[i].pre_emphasis = 6;
-        s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  ((s->tx.parms.max_bit_rate_code >> 1) + 1)  :  0;
+        if (s->tx.v90_mode)
+        {
+            int rate_cap;
+
+            /* Keep V.90 INFO1d conservative until the peer proves it accepts a
+               richer probing profile: advertise no TX pre-emphasis and cap each
+               row to the actual maximum rate supported by that symbol rate. */
+            rate_cap = (baud_rate_parameters[i].max_bit_rate_code >> 1) + 1;
+            s->tx.info1c.rate_data[i].pre_emphasis = 0;
+            s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  ((max_n < rate_cap)  ?  max_n  :  rate_cap)  :  0;
+        }
+        else
+        {
+            s->tx.info1c.rate_data[i].pre_emphasis = 6;
+            s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  max_n  :  0;
+        }
     }
 }
 /*- End of function --------------------------------------------------------*/
@@ -2075,6 +2091,10 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                      s->tx.tone_duration);
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A_REV;
+            /* Clear stale L2_SEEN so Tone A detection can set TONE_SEEN/REVERSAL_1 */
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
         }
         /*endif*/
         break;
@@ -2801,7 +2821,10 @@ static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
         s->rx.persistence2 = 0;
     }
     /*endif*/
-    /* Set RX to detect Tone A from analog modem */
+    /* Set RX to detect Tone A from analog modem.
+       Must also switch demodulator to TONES — if L1/L2 analysis is still running,
+       the tone detector won't fire. */
+    s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.stage = V34_RX_STAGE_TONE_A;
 }
 /*- End of function --------------------------------------------------------*/
