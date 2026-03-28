@@ -1800,6 +1800,10 @@ static void transmission_preamble_init(v34_state_t *s)
 
 static complex_sig_t get_info0_baud(v34_state_t *s)
 {
+    enum
+    {
+        V90_INFO0_ACK_GUARD_RETRIES = 4
+    };
     int bit;
 
     bit = get_data_bit(&s->tx);
@@ -1857,9 +1861,15 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                          s->rx.info0_acknowledgement,
                          s->rx.info0_received,
                          s->rx.persistence2);
-                if (s->tx.info0_retry_count >= 10 && s->tx.info0_acknowledgement && s->rx.info0_received)
+                if (s->tx.info0_retry_count >= V90_INFO0_ACK_GUARD_RETRIES
+                    && s->tx.info0_acknowledgement
+                    && s->rx.info0_received)
                 {
-                    /* Guard timer: we've sent INFO0d with ack 10+ times, force transition */
+                    /* Some peers keep repeating valid INFO0a but never reflect the
+                       acknowledgement bit back to us. Once we've resent an
+                       acknowledged INFO0d a few times and still have live INFO0a
+                       from the far end, stop burning more retries and move back to
+                       the Tone A/L1/L2 path. */
                     v90_wait_rx_l2_init(s, "INFO0d retry guard timer");
                 }
                 else
@@ -1954,6 +1964,13 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int v90_note_phase2_info0_recovery(v34_state_t *s)
+{
+    s->tx.v90_phase2_info0_recovery_loops++;
+    return s->tx.v90_phase2_info0_recovery_loops;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_reset_phase2_rx_frontend(v34_state_t *s)
 {
     power_meter_init(&s->rx.power, 4);
@@ -1976,7 +1993,10 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
     int preserve_active_search;
 
     preserve_active_search = (s->rx.current_demodulator == V34_MODULATION_TONES
-                              && (s->rx.signal_present
+                              && (s->rx.stage == V34_RX_STAGE_INFO0
+                                  || s->rx.stage == V34_RX_STAGE_TONE_A
+                                  || s->rx.stage == V34_RX_STAGE_TONE_B
+                                  || s->rx.signal_present
                                   || s->rx.bit_count > 0
                                   || s->rx.persistence1 > 0
                                   || s->rx.persistence2 > 0));
@@ -1986,6 +2006,15 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
              preserve_active_search ? " (preserving active Phase 2 acquisition)" : "");
     if (!preserve_active_search)
         v90_reset_phase2_rx_frontend(s);
+    else
+    {
+        /* Keep the live Phase 2 tone frontend warm across the INFO0d -> Tone A
+           crossover. Resetting the power meter / RRC history here can miss a
+           peer that starts INFO0a or Tone A immediately after our INFO0d. */
+        s->rx.bit_count = 0;
+        s->rx.bitstream = 0;
+    }
+    /*endif*/
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.stage = V34_RX_STAGE_TONE_A;
     s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
@@ -2127,15 +2156,49 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase REVERSAL from analog.
            Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6).
            TONE_SEEN means Tone A is present (not a reversal) — must wait for REVERSAL_1. */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK
-            ||  s->rx.received_event == V34_EVENT_INFO0_BAD)
+        if (s->rx.v90_repeated_info0a_pending
+            ||  s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            int recoveries;
+
+            recoveries = v90_note_phase2_info0_recovery(s);
+            if (recoveries <= 2)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeated INFO0a while waiting for Tone A reversal; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
+                         recoveries);
+                s->tx.info0_acknowledgement = true;
+                s->tx.info0_retry_count = 0;
+                s->tx.tone_duration = 0;
+                s->rx.v90_repeated_info0a_pending = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                info0_baud_init(s);
+            }
+            else
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeated INFO0a persists while waiting for Tone A reversal after %d recoveries; forcing B reversal path instead of another INFO0d loop\n",
+                         recoveries);
+                s->rx.v90_repeated_info0a_pending = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_V90_B_REV_DELAY;
+            }
+            break;
+        }
+        /*endif*/
+        if (s->rx.received_event == V34_EVENT_INFO0_BAD)
         {
             /* Some peers keep leaking INFO0a decodes into the later Tone A
                window. At this point the L1/L2 exchange is already complete, so
                treat them as stale and continue waiting for the Tone A reversal. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: ignoring stale %s while waiting for Tone A reversal\n",
-                     (s->rx.received_event == V34_EVENT_INFO0_OK) ? "INFO0a" : "bad INFO0a");
+                     "bad INFO0a");
             s->rx.received_event = V34_EVENT_NONE;
         }
         /*endif*/
@@ -2297,6 +2360,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: entering FIRST_B_SILENCE, clearing event (was %d) for second A reversal\n",
                          s->rx.received_event);
+                s->rx.v90_repeated_info0a_pending = false;
                 s->rx.received_event = V34_EVENT_NONE;
             }
         }
@@ -2309,6 +2373,36 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             /* Second reversal seen. We now have the round trip timed */
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
+        }
+        else if (s->tx.v90_mode
+                 && s->rx.v90_repeated_info0a_pending)
+        {
+            int recoveries;
+
+            recoveries = v90_note_phase2_info0_recovery(s);
+            if (recoveries <= 2)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeated INFO0a while waiting for second Tone A reversal; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
+                         recoveries);
+                s->tx.info0_acknowledgement = true;
+                s->tx.info0_retry_count = 0;
+                s->tx.tone_duration = 0;
+                s->rx.v90_repeated_info0a_pending = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                info0_baud_init(s);
+            }
+            else
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeated INFO0a persists while waiting for second Tone A reversal after %d recoveries; forcing Tone B/L1/L2 path instead of another INFO0d loop\n",
+                         recoveries);
+                s->rx.v90_repeated_info0a_pending = false;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                v90_wait_rx_l2_init(s, "repeated INFO0a recovery cap reached");
+            }
         }
         else if (s->tx.v90_mode
                  &&
@@ -2870,6 +2964,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a received after %d bauds of wait, proceeding to Phase 3 handoff\n",
                  s->tx.tone_duration);
+        s->tx.v90_phase2_info0_recovery_loops = 0;
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
         tx_silence_init(s, 30000);
@@ -2889,6 +2984,20 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     }
     /*endif*/
 
+    if (s->rx.v90_repeated_info0a_pending || s->rx.received_event == V34_EVENT_INFO0_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: repeated INFO0a arrived while waiting for INFO1a; re-sending acknowledged INFO0d to recover Phase 2\n");
+        s->tx.info0_acknowledgement = true;
+        s->tx.info0_retry_count = 0;
+        s->tx.tone_duration = 0;
+        s->rx.v90_repeated_info0a_pending = false;
+        s->rx.received_event = V34_EVENT_NONE;
+        info0_baud_init(s);
+        return zero;
+    }
+    /*endif*/
+
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
@@ -2901,6 +3010,70 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->rx.persistence1 = 0;
         s->rx.persistence2 = 0;
         goto wait_timeout_check;
+    }
+    /*endif*/
+
+    if (!s->rx.signal_present
+        && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
+        && s->tx.v90_info1a_fast_retries < V90_INFO1A_MAX_FAST_RETRIES)
+    {
+        s->tx.v90_info1a_fast_retries++;
+        s->tx.v90_info1a_total_retries++;
+        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: aborting after %d INFO1a retries with repeated carrier loss and no valid INFO1a\n",
+                     s->tx.v90_info1a_total_retries);
+            s->rx.training_failed_reported = false;
+            s->rx.received_event = V34_EVENT_TRAINING_FAILED;
+            tx_silence_init(s, 30000);
+            s->tx.stage = 0;
+            return zero;
+        }
+        /*endif*/
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: carrier absent while waiting for INFO1a after %d bauds; fast retrying INFO1d (fast retries=%d total=%d)\n",
+                 s->tx.tone_duration,
+                 s->tx.v90_info1a_fast_retries,
+                 s->tx.v90_info1a_total_retries);
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        info1_baud_init(s);
+        return zero;
+    }
+    /*endif*/
+
+    if (!s->rx.signal_present
+        && s->tx.tone_duration >= V90_INFO1A_FAST_RETRY_BAUDS
+        && s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES)
+    {
+        s->tx.v90_info1a_total_retries++;
+        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: aborting after %d INFO1a recovery attempts with repeated carrier loss and no valid INFO1a\n",
+                     s->tx.v90_info1a_total_retries);
+            s->rx.training_failed_reported = false;
+            s->rx.received_event = V34_EVENT_TRAINING_FAILED;
+            tx_silence_init(s, 30000);
+            s->tx.stage = 0;
+            return zero;
+        }
+        /*endif*/
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: exhausted fast INFO1d retries with carrier still absent; restarting Phase 2 from acknowledged INFO0d (total=%d)\n",
+                 s->tx.v90_info1a_total_retries);
+        s->tx.v90_info1a_fast_retries = 0;
+        s->tx.info0_acknowledgement = true;
+        s->tx.info0_retry_count = 0;
+        s->tx.tone_duration = 0;
+        s->rx.v90_repeated_info0a_pending = false;
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        info0_baud_init(s);
+        return zero;
     }
     /*endif*/
 
@@ -2937,6 +3110,7 @@ static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d%s\n",
              preserve_tone_a_event ? " (preserving prior Tone A indication)" : "");
+    s->tx.v90_phase2_info0_recovery_loops = 0;
     s->tx.tone_duration = 0;
     /* Use CC modulation so getbaud is called each baud — outputs silence via zero return */
     s->tx.current_modulator = V34_MODULATION_CC;
@@ -2980,6 +3154,7 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->rx.bit_count = 0;
     s->rx.bitstream = 0;
     s->rx.stage = V34_RX_STAGE_TONE_A;
+    s->rx.v90_repeated_info0a_pending = false;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
@@ -5017,6 +5192,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.info0_retry_count = 0;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
+    s->tx.v90_phase2_info0_recovery_loops = 0;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
     if (s->calling_party)

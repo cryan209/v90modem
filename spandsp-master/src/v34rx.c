@@ -2915,6 +2915,23 @@ static bool try_info_local_slip_recovery(uint8_t out[25], const uint8_t in[25], 
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool info_has_valid_prefix_crc(const uint8_t in[25], int total_bits, int prefix_bits, uint16_t *prefix_crc_out)
+{
+    uint8_t bits[80];
+    uint16_t prefix_crc;
+
+    if (total_bits > (int) (sizeof(bits)/sizeof(bits[0])) || prefix_bits > total_bits)
+        return false;
+    /*endif*/
+    info_unpack_bits(bits, total_bits, in);
+    prefix_crc = info_crc_from_bits(bits, prefix_bits);
+    if (prefix_crc_out)
+        *prefix_crc_out = prefix_crc;
+    /*endif*/
+    return prefix_crc == 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int put_info_bit_count = 0;
 
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
@@ -3172,9 +3189,17 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                         /* Only set INFO0_OK on the first reception. Repeated
                            INFO0a decodes during V.90 FIRST_B_SILENCE would overwrite
                            REVERSAL_1 events from the tone handler, preventing the
-                           TX from detecting the second Tone A reversal. */
+                           TX from detecting the second Tone A reversal. Track them
+                           via a sticky flag instead so the TX state machine can
+                           choose whether to recover Phase 2. */
                         if (!s->info0_received)
                             s->received_event = V34_EVENT_INFO0_OK;
+                        else if (s->v90_mode
+                                 && !s->calling_party
+                                 && (s->stage == V34_RX_STAGE_TONE_A
+                                     || s->stage == V34_RX_STAGE_TONE_B
+                                     || s->stage == V34_RX_STAGE_INFO0))
+                            s->v90_repeated_info0a_pending = true;
                         s->info0_received = true;
                     }
                     break;
@@ -3209,6 +3234,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 uint8_t recovered_info[25];
                 int recovery_shift;
                 int recovery_pivot;
+                uint16_t prefix_crc;
 
                 v90_info1a_search = (s->v90_mode
                                      && !s->calling_party
@@ -3218,6 +3244,19 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                          || s->stage == V34_RX_STAGE_INFO1A));
                 if (v90_info1a_search)
                     info_log_candidate_diag(s, s->info_buf, s->target_bits, s->crc);
+                /*endif*/
+                if (v90_info1a_search
+                    && info_has_valid_prefix_crc(s->info_buf, s->target_bits, 33, &prefix_crc))
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - INFO1a candidate contains a valid 33-bit INFO0a prefix (crc=0x%04x); treating it as repeated INFO0a, not INFO1a\n",
+                             prefix_crc);
+                    process_rx_info0(s, s->info_buf);
+                    s->v90_repeated_info0a_pending = true;
+                    s->received_event = V34_EVENT_INFO0_OK;
+                    s->bit_count = 0;
+                    return;
+                }
                 /*endif*/
                 if (v90_info1a_search
                     && try_info_boundary_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_shift, NULL))
@@ -7662,6 +7701,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     phase4_trn_hyp_reset(&s->rx);
 
     s->rx.info0_received = false;
+    s->rx.v90_repeated_info0a_pending = false;
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */
     s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));

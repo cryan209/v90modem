@@ -366,6 +366,7 @@ static int dring_available(data_ring_t *r) {
 static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
+static void v8_result_handler(void *user_data, v8_parms_t *result);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -437,6 +438,25 @@ static int parse_env_int(const char *name, int fallback)
     if (endp == s || *endp != '\0')
         return fallback;
     return (int)v;
+}
+
+static int parse_v8_answer_tone_env(const char *name, int fallback)
+{
+    const char *s = getenv(name);
+
+    if (!s || !*s)
+        return fallback;
+    if (strcmp(s, "ansam") == 0 || strcmp(s, "ANSAM") == 0)
+        return MODEM_CONNECT_TONES_ANSAM;
+    if (strcmp(s, "ansam_pr") == 0 || strcmp(s, "ANSAM_PR") == 0 ||
+        strcmp(s, "ansam-pr") == 0 || strcmp(s, "ANSAM-PR") == 0 ||
+        strcmp(s, "ansam/") == 0 || strcmp(s, "ANSAM/") == 0)
+        return MODEM_CONNECT_TONES_ANSAM_PR;
+
+    fprintf(stderr,
+            "[ME] Ignoring invalid %s=%s (expected ansam or ansam_pr)\n",
+            name, s);
+    return fallback;
 }
 
 static const char *v34_rx_stage_name(int stage)
@@ -603,6 +623,9 @@ static me_modulation_t g_mod       = ME_MOD_NONE;
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
 static bool            g_invert_v34_role = false; /* debug override via env */
+static int             g_v8_answer_tone = MODEM_CONNECT_TONES_ANSAM;
+static int             g_v8_active_answer_tone = MODEM_CONNECT_TONES_ANSAM;
+static bool            g_v8_answer_tone_retry_done = false;
 
 /* SpanDSP modem contexts */
 static v8_state_t     *g_v8      = NULL;
@@ -617,6 +640,8 @@ static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_phase3_j_seen = false;
+static bool           g_v34_fallback_to_v22bis_pending = false;
+static int            g_v34_fallback_status = 0;
 static int            g_last_v90_bridge_rx_stage = -1;
 static int            g_last_v90_bridge_tx_stage = -1;
 static int            g_last_v90_bridge_rx_event = -1;
@@ -657,6 +682,30 @@ static uint64_t g_phase_start_ms = 0;      /* When current phase started */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
 static int g_last_tx_stage = 0;            /* Last logged TX stage */
 
+static void cleanup_v34_v90_training_locked(void)
+{
+    if (g_v90) {
+        v90_free(g_v90);
+        g_v90 = NULL;
+    }
+    if (g_v34) {
+        v34_free(g_v34);
+        g_v34 = NULL;
+    }
+    g_v90_phase3_started = false;
+    g_v90_completion_deferred_logged = false;
+    g_v90_phase3_j_seen = false;
+    g_v34_fallback_to_v22bis_pending = false;
+    g_v34_fallback_status = 0;
+    g_last_v90_bridge_rx_stage = -1;
+    g_last_v90_bridge_tx_stage = -1;
+    g_last_v90_bridge_rx_event = -1;
+    v90_dil_capture_reset();
+    g_notch.active = false;
+    g_last_rx_stage = 0;
+    g_last_tx_stage = 0;
+}
+
 /* TX sample ring buffer (kept for future use but EC is disabled).
    Size must be a power of 2. */
 #define TX_BUF_SIZE 4096
@@ -689,12 +738,94 @@ static cr_state_t     g_cr;
 
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
+static int64_t g_v8_tx_energy;
 static int64_t g_training_rx_energy;
 static int     g_training_rx_count;
 static int     g_v8_rx_count;
+static int     g_v8_tx_count;
 
 /* Pending SIP URI for outgoing calls (set by me_dial) */
 static char g_dial_uri[256];
+
+static int v8_alternate_answer_tone(int tone)
+{
+    return (tone == MODEM_CONNECT_TONES_ANSAM_PR)
+        ? MODEM_CONNECT_TONES_ANSAM
+        : MODEM_CONNECT_TONES_ANSAM_PR;
+}
+
+static int me_start_or_restart_v8_locked(int answer_tone)
+{
+    v8_parms_t v8_parms;
+    memset(&v8_parms, 0, sizeof(v8_parms));
+    v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
+                                                  : answer_tone;
+    v8_parms.send_ci            = g_calling_party;
+    v8_parms.v92                = -1;
+    v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
+    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
+    if (g_advertise_v90)
+        v8_parms.jm_cm.modulations   |= V8_MOD_V90;
+    v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
+    if (g_advertise_v90) {
+        v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    } else {
+        v8_parms.jm_cm.pstn_access            = 0;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
+    }
+    v8_parms.jm_cm.nsf                = -1;
+    v8_parms.jm_cm.t66                = -1;
+
+    if (g_v8) {
+        if (v8_restart(g_v8, g_calling_party, &v8_parms) != 0)
+            return -1;
+    } else {
+        g_v8 = v8_init(NULL, g_calling_party, &v8_parms, v8_result_handler, NULL);
+        if (!g_v8)
+            return -1;
+        {
+            logging_state_t *log = v8_get_logging_state(g_v8);
+            if (log)
+                span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
+                                        SPAN_LOG_FLOW);
+        }
+    }
+
+    g_v8_active_answer_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE : answer_tone;
+    g_v8_rx_energy = 0;
+    g_v8_rx_count  = 0;
+    g_v8_tx_energy = 0;
+    g_v8_tx_count  = 0;
+    g_state = ME_V8;
+    g_mod   = ME_MOD_NONE;
+    g_phase_start_ms = trace_now_ms();
+    return 0;
+}
+
+static bool me_retry_v8_with_alternate_tone_locked(const char *reason, int status)
+{
+    int retry_tone;
+
+    if (g_calling_party || g_state != ME_V8 || g_v8_answer_tone_retry_done)
+        return false;
+
+    retry_tone = v8_alternate_answer_tone(g_v8_active_answer_tone);
+    fprintf(stderr,
+            "[ME] V.8 failed before CM (%s, status=%d); retrying answer tone with %s\n",
+            reason, status, modem_connect_tone_to_str(retry_tone));
+    trace_phase("V8 retry: %s status=%d tone=%s",
+                reason, status, modem_connect_tone_to_str(retry_tone));
+
+    if (me_start_or_restart_v8_locked(retry_tone) != 0) {
+        fprintf(stderr, "[ME] V.8 retry restart failed\n");
+        trace_phase("V8 retry restart failed");
+        return false;
+    }
+
+    g_v8_answer_tone_retry_done = true;
+    return true;
+}
 
 static void notch_filter_init(notch_filter_t *nf, float freq, float q, float fs)
 {
@@ -1162,6 +1293,14 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     }
 
     if (result->status != V8_STATUS_V8_CALL) {
+        pthread_mutex_lock(&g_state_mtx);
+        if (me_retry_v8_with_alternate_tone_locked("result failure", result->status)) {
+            pthread_mutex_unlock(&g_state_mtx);
+            fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+                    modem_connect_tone_to_str(g_v8_active_answer_tone));
+            return;
+        }
+        pthread_mutex_unlock(&g_state_mtx);
         fprintf(stderr, "[ME] V.8 failed (status=%d), hanging up\n", result->status);
         me_hangup();
         return;
@@ -1242,6 +1381,10 @@ void me_init(void)
         if (g_invert_v34_role)
             fprintf(stderr, "[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
     }
+    g_v8_answer_tone = parse_v8_answer_tone_env("ME_V8_ANSWER_TONE",
+                                                MODEM_CONNECT_TONES_ANSAM);
+    fprintf(stderr, "[ME] V.8 answer tone: %s\n",
+            modem_connect_tone_to_str(g_v8_answer_tone));
     {
         int env_baud = parse_env_int("ME_V34_BAUD", g_v34_start_baud);
         int env_bps  = parse_env_int("ME_V34_BPS", 0);
@@ -1309,6 +1452,10 @@ void me_on_sip_connected(void)
     g_trace_start_ms = trace_now_ms();
     g_v8_rx_energy     = 0;
     g_v8_rx_count      = 0;
+    g_v8_tx_energy     = 0;
+    g_v8_tx_count      = 0;
+    g_v8_active_answer_tone = g_v8_answer_tone;
+    g_v8_answer_tone_retry_done = false;
 
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
@@ -1316,56 +1463,24 @@ void me_on_sip_connected(void)
         g_calling_party = !g_calling_party;
     trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
-    /* Initialise V.8 */
-    v8_parms_t v8_parms;
-    memset(&v8_parms, 0, sizeof(v8_parms));
-    v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
-                                                  : MODEM_CONNECT_TONES_ANSAM_PR;
-    v8_parms.send_ci            = g_calling_party;  /* Caller must send CI so answerer knows we want V.8 */
-    v8_parms.v92                = -1;    /* don't send V.92 extension */
-    v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
-    /* Advertise V.90 + V.34 + V.22bis.  V.90 training starts with V.34
-     * Phase 2, so we can safely advertise it; the actual V.90 PCM switch
-     * happens after training (not yet implemented). */
-    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
-    if (g_advertise_v90)
-        v8_parms.jm_cm.modulations   |= V8_MOD_V90;
-    v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
-    if (g_advertise_v90) {
-        v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
-    } else {
-        v8_parms.jm_cm.pstn_access            = 0;
-        v8_parms.jm_cm.pcm_modem_availability = 0;
+    if (g_v8) {
+        v8_free(g_v8);
+        g_v8 = NULL;
     }
-    v8_parms.jm_cm.nsf                = -1;   /* don't send NSF */
-    v8_parms.jm_cm.t66                = -1;   /* don't send T.66 */
-
-    if (g_v8) { v8_free(g_v8); g_v8 = NULL; }
-    g_v8 = v8_init(NULL, g_calling_party, &v8_parms,
-                   v8_result_handler, NULL);
-    if (!g_v8) {
+    if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
         fprintf(stderr, "[ME] v8_init failed\n");
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
-
-    /* Enable SpanDSP logging for V.8 diagnostics */
-    {
-        logging_state_t *log = v8_get_logging_state(g_v8);
-        if (log)
-            span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
-                                    SPAN_LOG_FLOW);
-    }
-
-    g_state = ME_V8;
-    g_mod   = ME_MOD_NONE;
-    g_phase_start_ms = trace_now_ms();
     pthread_mutex_unlock(&g_state_mtx);
     trace_phase("enter V8: advertised mods=%s", g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
     fprintf(stderr, "[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");
+    if (!g_calling_party) {
+        fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+                modem_connect_tone_to_str(g_v8_answer_tone));
+    }
 }
 
 /* Called by sip_modem.c when the SIP call is torn down */
@@ -1381,6 +1496,8 @@ void me_on_sip_disconnected(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     v90_dil_capture_reset();
+    g_v8_active_answer_tone = g_v8_answer_tone;
+    g_v8_answer_tone_retry_done = false;
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -1410,6 +1527,14 @@ void me_rx_audio(const int16_t *amp, int len)
             fprintf(stderr, "[ME] V.8 negotiation timed out after %llu ms\n",
                     (unsigned long long)elapsed);
             trace_phase("V8 timeout after %llums", (unsigned long long)elapsed);
+            pthread_mutex_lock(&g_state_mtx);
+            if (me_retry_v8_with_alternate_tone_locked("timeout", V8_STATUS_FAILED)) {
+                pthread_mutex_unlock(&g_state_mtx);
+                fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+                        modem_connect_tone_to_str(g_v8_active_answer_tone));
+                return;
+            }
+            pthread_mutex_unlock(&g_state_mtx);
             g_phase_start_ms = 0;
             me_hangup();
             return;
@@ -1597,6 +1722,16 @@ void me_tx_audio(int16_t *amp, int len)
         /* Generate V.8 negotiation audio */
         if (g_v8)
             v8_tx(g_v8, amp, len);
+        for (int i = 0; i < len; i++)
+            g_v8_tx_energy += (int64_t)amp[i] * amp[i];
+        g_v8_tx_count += len;
+        if (g_v8_tx_count >= 8000) {
+            double rms = sqrt((double)g_v8_tx_energy / g_v8_tx_count);
+            fprintf(stderr, "[ME] V.8 tx: RMS=%.1f (%d samples)\n",
+                    rms, g_v8_tx_count);
+            g_v8_tx_energy = 0;
+            g_v8_tx_count  = 0;
+        }
         break;
 
     case ME_TRAINING:

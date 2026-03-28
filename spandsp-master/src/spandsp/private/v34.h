@@ -485,6 +485,10 @@ typedef struct
                INFO1a. Used to abort peers that never produce a valid INFO1a
                but keep bouncing between Tone A and INFO1d. */
     int v90_info1a_total_retries;
+    /*! \brief V.90 answerer: total Phase 2 INFO0d recovery loops caused by
+               repeated stale INFO0a before INFO1a. Used to stop peers from
+               trapping us in endless INFO0d/Tone A recovery cycles. */
+    int v90_phase2_info0_recovery_loops;
     union
     {
         info1a_t info1a;
@@ -790,6 +794,9 @@ typedef struct
 
     /*! \brief Set true once a valid INFO0 has been received (survives event overwrites). */
     bool info0_received;
+    /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
+               during the INFO1a wait window. */
+    bool v90_repeated_info0a_pending;
 
     union
     {
