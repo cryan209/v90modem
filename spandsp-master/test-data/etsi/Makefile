@@ -207,8 +207,8 @@ CPPFLAGS = -I/opt/homebrew/include
 CPPFLAGS_FOR_BUILD = $(CPPFLAGS)
 CSCOPE = cscope
 CTAGS = ctags
-CXX = g++ -std=gnu++11
-CXXCPP = g++ -std=gnu++11 -E
+CXX = g++
+CXXCPP = g++ -E
 CXXDEPMODE = depmode=none
 CXXFLAGS =  
 CYGPATH_W = echo

@@ -203,8 +203,8 @@ am__DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/spandsp.pc.in \
 	$(top_srcdir)/config/install-sh $(top_srcdir)/config/ltmain.sh \
 	$(top_srcdir)/config/missing AUTHORS COPYING ChangeLog INSTALL \
 	NEWS README config/compile config/config.guess \
-	config/config.sub config/install-sh config/ltmain.sh \
-	config/missing
+	config/config.sub config/depcomp config/install-sh \
+	config/ltmain.sh config/missing
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 distdir = $(PACKAGE)-$(VERSION)
 top_distdir = $(distdir)
@@ -269,8 +269,8 @@ CPPFLAGS = -I/opt/homebrew/include
 CPPFLAGS_FOR_BUILD = $(CPPFLAGS)
 CSCOPE = cscope
 CTAGS = ctags
-CXX = g++ -std=gnu++11
-CXXCPP = g++ -std=gnu++11 -E
+CXX = g++
+CXXCPP = g++ -E
 CXXDEPMODE = depmode=none
 CXXFLAGS =  
 CYGPATH_W = echo

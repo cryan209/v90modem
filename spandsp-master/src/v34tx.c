@@ -3295,6 +3295,18 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
 {
     int bit;
 
+    /* V.34 §10.1.2.3.1: "Each INFO sequence is preceded by a point at an
+       arbitrary carrier phase." Send a preamble of unmodulated carrier to
+       let the remote demodulator lock before the DPSK data begins. For V.90
+       INFO1d this is essential — there is no Tone B→INFO transition like
+       INFO0d has, so the demodulator has no carrier reference otherwise. */
+    if (s->tx.v90_mode && s->tx.tone_duration < 16)
+    {
+        s->tx.tone_duration++;
+        return s->tx.lastbit;
+    }
+    /*endif*/
+
     bit = get_data_bit(&s->tx);
     if (s->tx.txptr >= s->tx.txbits)
     {
@@ -3320,7 +3332,7 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
         /*endif*/
     }
     /*endif*/
-    if (bit)
+    if (bit > 0)
         s->tx.lastbit.re = -s->tx.lastbit.re;
     /*endif*/
     return s->tx.lastbit;
@@ -3349,6 +3361,15 @@ static void info1_baud_init(v34_state_t *s)
     /* Round up to a whole number of bytes */
     s->tx.txbits = (s->tx.txbits + 7) & ~7;
     s->tx.txptr = 0;
+    if (s->tx.v90_mode)
+    {
+        int nbytes = (s->tx.txbits + 7) >> 3;
+        char hexbuf[256];
+        int pos = 0;
+        for (int di = 0;  di < nbytes && pos < (int)sizeof(hexbuf) - 4;  di++)
+            pos += snprintf(hexbuf + pos, sizeof(hexbuf) - pos, " %02X", s->tx.txbuf[di]);
+        span_log(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d raw frame (%d bits, %d bytes):%s\n", s->tx.txbits, nbytes, hexbuf);
+    }
 #if 0
 #if defined(SPANDSP_USE_FIXED_POINT)
     cvec_zeroi16(s->tx.rrc_filter, sizeof(s->tx.rrc_filter)/sizeof(s->tx.rrc_filter[0]));
@@ -3364,6 +3385,11 @@ static void info1_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_INFO1;
     s->tx.current_getbaud = get_info1_baud;
+    if (s->tx.v90_mode)
+    {
+        s->tx.tone_duration = 0;
+        span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with 16-baud carrier preamble\n");
+    }
 }
 /*- End of function --------------------------------------------------------*/
 

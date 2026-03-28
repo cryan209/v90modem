@@ -77,6 +77,11 @@
 #include "spandsp/private/power_meter.h"
 #include "spandsp/private/v34.h"
 
+/* Phase 3 RX audio capture for offline analysis */
+static FILE *phase3_rx_dump_fp = NULL;
+static int phase3_rx_dump_count = 0;
+#define PHASE3_RX_DUMP_SAMPLES 24000  /* 3 seconds */
+
 #include "v22bis_rx_1200_rrc.h"
 #include "v22bis_rx_2400_rrc.h"
 
@@ -3162,6 +3167,14 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                      "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
                             s->current_demodulator = V34_MODULATION_V34;
                             s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                            /* Start Phase 3 RX audio dump */
+                            if (!phase3_rx_dump_fp)
+                            {
+                                phase3_rx_dump_fp = fopen("/tmp/v90_phase3_rx.raw", "wb");
+                                phase3_rx_dump_count = 0;
+                                if (phase3_rx_dump_fp)
+                                    fprintf(stderr, "[V34 RX] Phase 3 RX audio dump started -> /tmp/v90_phase3_rx.raw\n");
+                            }
                         }
                     }
                     else
@@ -4256,7 +4269,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             if (mp.mp_acknowledged)
                                 s->mp_remote_ack_seen = 1;
                             /*endif*/
-                            t = span_container_of(s, v34_state_t, rx);
+                            t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                             if (mp.type == 1)
                             {
                                 /* Set the precoder coefficients we are to use */
@@ -4283,7 +4296,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                         else
                         {
                             process_rx_mph(s, &mph, s->info_buf);
-                            t = span_container_of(s, v34_state_t, rx);
+                            t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                             if (mph.type == 1)
                             {
                                 /* Set the precoder coefficients we are to use */
@@ -4483,10 +4496,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     if ((s->stage == V34_RX_STAGE_PHASE3_TRAINING || s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
         && (s->duration == 0 || (s->duration % 256) == 0))
     {
+        float sym_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
         fprintf(stderr,
-                "[V34 RAW] primary_half_baud: s=%p stage=%d demod=%d duration=%d event=%d j_bits=%d trn_bits=%d\n",
-                (void *) s, s->stage, s->current_demodulator, s->duration,
-                s->received_event, s->phase3_j_bits, s->phase3_trn_bits);
+                "[V34 RAW] primary_half_baud: stage=%d dur=%d sym=(%.4f,%.4f) mag=%.4f agc=%.5f\n",
+                s->stage, s->duration, (double)sym->re, (double)sym->im,
+                (double)sym_mag, (double)s->agc_scaling);
     }
     /*endif*/
 
@@ -4882,7 +4896,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
         v34_state_t *t;
 
-        t = span_container_of(s, v34_state_t, rx);
+        t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
         ang1 = arctan2(sample->im, sample->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
@@ -6759,7 +6773,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                         if (mp.mp_acknowledged)
                                             s->mp_remote_ack_seen = 1;
                                         /*endif*/
-                                        t = span_container_of(s, v34_state_t, rx);
+                                        t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                         if (mp.type == 1)
                                             memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                                         /*endif*/
@@ -6968,7 +6982,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                             {
                                                 if (mp.mp_acknowledged)
                                                     s->mp_remote_ack_seen = 1;
-                                                t = span_container_of(s, v34_state_t, rx);
+                                                t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                                 switch (mp.trellis_size)
                                                 {
                                                 case V34_TRELLIS_16:
@@ -7069,7 +7083,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                             {
                                                 if (mp.mp_acknowledged)
                                                     s->mp_remote_ack_seen = 1;
-                                                t = span_container_of(s, v34_state_t, rx);
+                                                t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                                 memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                                                 switch (mp.trellis_size)
                                                 {
@@ -7209,7 +7223,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    variable signal levels on analog/SIP channels.
                    Stop CMA once TX enters data mode — echo from the high-power
                    data constellation would cause CMA to diverge. */
-                v34_state_t *t_cma = span_container_of(s, v34_state_t, rx);
+                v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                 if (!t_cma->tx.tx_data_mode)
                     tune_equalizer_cma(s, sym);
             }
@@ -7274,6 +7288,29 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     s->shaper_re = v34_rx_shapers_re[s->baud_rate][s->high_carrier];
     s->shaper_im = v34_rx_shapers_im[s->baud_rate][s->high_carrier];
     s->shaper_sets = steps_per_baud[s->baud_rate];
+    /* Periodic diagnostic: log primary channel RX config on first entry and every 8000 samples */
+    if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING && (s->sample_time % 8000) < (unsigned)len)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - primary_channel_rx: baud_rate=%d high_carrier=%d carrier=%.1fHz agc=%.5f power=%ld shaper_sets=%d\n",
+                 s->baud_rate, s->high_carrier, dds_frequencyf(s->v34_carrier_phase_rate),
+                 (double)s->agc_scaling, (long)power_meter_current(&s->power), s->shaper_sets);
+    }
+    /* Dump raw Phase 3 RX audio for offline analysis */
+    if (phase3_rx_dump_fp && phase3_rx_dump_count < PHASE3_RX_DUMP_SAMPLES)
+    {
+        int to_write = len;
+        if (phase3_rx_dump_count + to_write > PHASE3_RX_DUMP_SAMPLES)
+            to_write = PHASE3_RX_DUMP_SAMPLES - phase3_rx_dump_count;
+        fwrite(amp, sizeof(int16_t), to_write, phase3_rx_dump_fp);
+        phase3_rx_dump_count += to_write;
+        if (phase3_rx_dump_count >= PHASE3_RX_DUMP_SAMPLES)
+        {
+            fclose(phase3_rx_dump_fp);
+            phase3_rx_dump_fp = NULL;
+            fprintf(stderr, "[V34 RX] Phase 3 RX audio dump complete (%d samples)\n", phase3_rx_dump_count);
+        }
+    }
     for (i = 0;  i < len;  i++)
     {
         s->rrc_filter[s->rrc_filter_step] = amp[i];

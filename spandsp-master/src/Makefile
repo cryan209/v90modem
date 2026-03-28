@@ -328,16 +328,16 @@ AUTOMAKE = ${SHELL} '/Users/scottcryan/v90modem/spandsp-master/config/missing' a
 AWK = awk
 CC = gcc
 CCDEPMODE = depmode=none
-CC_FOR_BUILD = $(CC) -I. -I.. -I/opt/homebrew/include -L/opt/homebrew/lib
+CC_FOR_BUILD = $(CC)
 CFLAGS =  
-COMP_VENDOR_CFLAGS = -DNDEBUG -Wunused-but-set-variable -D_XOPEN_SOURCE=700 -std=gnu99 -Wall -Wunused-variable -Wwrite-strings -Wstrict-prototypes -Wmissing-prototypes 
+COMP_VENDOR_CFLAGS = -DNDEBUG -Wunused-but-set-variable -D_XOPEN_SOURCE=700 -std=c99 -Wall -Wunused-variable -Wwrite-strings -Wstrict-prototypes -Wmissing-prototypes 
 COMP_VENDOR_LDFLAGS = 
 CPPFLAGS = -I/opt/homebrew/include
 CPPFLAGS_FOR_BUILD = $(CPPFLAGS)
 CSCOPE = cscope
 CTAGS = ctags
-CXX = g++ -std=gnu++11
-CXXCPP = g++ -std=gnu++11 -E
+CXX = g++
+CXXCPP = g++ -E
 CXXDEPMODE = depmode=none
 CXXFLAGS =  
 CYGPATH_W = echo

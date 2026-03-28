@@ -599,7 +599,7 @@ old_archive_cmds='$AR $AR_FLAGS $oldlib$oldobjs~$RANLIB $tool_oldlib'
 lock_old_archive_extraction='yes'
 CC='gcc'
 CFLAGS=' '
-compiler='g++ -std=gnu++11'
+compiler='g++'
 GCC='yes'
 lt_cv_sys_global_symbol_pipe='/usr/bin/sed -n -e '\''s/^.*[	 ]\([ABCDGIRSTW][ABCDGIRSTW]*\)[	 ][	 ]*_\([_A-Za-z][_A-Za-z0-9]*\)$/\1 _\2 \2/p'\'' | /usr/bin/sed '\''/ __gnu_lto/d'\'''
 lt_cv_sys_global_symbol_to_cdecl='/usr/bin/sed -n -e '\''s/^T .* \(.*\)$/extern int \1();/p'\'' -e '\''s/^[ABCDGIRSTW][ABCDGIRSTW]* .* \(.*\)$/extern char \1;/p'\'''
@@ -673,7 +673,7 @@ postuninstall_cmds=''
 finish_cmds=''
 finish_eval=''
 hardcode_into_libs='no'
-sys_lib_search_path_spec='/Library/Developer/CommandLineTools/usr/lib/clang/15.0.0  /usr/local/lib'
+sys_lib_search_path_spec='/Library/Developer/CommandLineTools/usr/lib/clang/17  /usr/local/lib'
 configure_time_dlsearch_path='/usr/local/lib /lib /usr/lib'
 configure_time_lt_sys_library_path=''
 hardcode_action='immediate'
@@ -692,7 +692,7 @@ LD_CXX='/Library/Developer/CommandLineTools/usr/bin/ld'
 reload_flag_CXX=' -r'
 reload_cmds_CXX='$LTCC $LTCFLAGS -nostdlib $wl-r -o $output$reload_objs'
 old_archive_cmds_CXX='$AR $AR_FLAGS $oldlib$oldobjs~$RANLIB $tool_oldlib'
-compiler_CXX='g++ -std=gnu++11'
+compiler_CXX='g++'
 GCC_CXX='yes'
 lt_prog_compiler_no_builtin_flag_CXX=' -fno-builtin'
 lt_prog_compiler_pic_CXX=' -fno-common -DPIC'
@@ -942,7 +942,7 @@ S["HAVE_FAX2TIFF"]=""
 S["HAVE_PBMTOG3"]=""
 S["HAVE_SOX"]=""
 S["LIBOBJS"]=" ${LIBOBJDIR}error$U.o"
-S["CXXCPP"]="g++ -std=gnu++11 -E"
+S["CXXCPP"]="g++ -E"
 S["LT_SYS_LIBRARY_PATH"]=""
 S["OTOOL64"]=":"
 S["OTOOL"]="otool"
@@ -971,7 +971,7 @@ S["am__fastdepCXX_TRUE"]="#"
 S["CXXDEPMODE"]="depmode=none"
 S["ac_ct_CXX"]="g++"
 S["CXXFLAGS"]=" "
-S["CXX"]="g++ -std=gnu++11"
+S["CXX"]="g++"
 S["am__fastdepCC_FALSE"]=""
 S["am__fastdepCC_TRUE"]="#"
 S["CCDEPMODE"]="depmode=none"
