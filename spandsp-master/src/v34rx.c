@@ -4150,6 +4150,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     eq_sample = equalizer_get(s);
     sym = &eq_sample;
 
+    if ((s->stage == V34_RX_STAGE_PHASE3_TRAINING || s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+        && (s->duration == 0 || (s->duration % 256) == 0))
+    {
+        fprintf(stderr,
+                "[V34 RAW] primary_half_baud: s=%p stage=%d demod=%d duration=%d event=%d j_bits=%d trn_bits=%d\n",
+                (void *) s, s->stage, s->current_demodulator, s->duration,
+                s->received_event, s->phase3_j_bits, s->phase3_trn_bits);
+    }
+    /*endif*/
+
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
     {
@@ -4171,6 +4181,26 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
+
+            if (s->duration == 1 || (s->duration % 256) == 0)
+            {
+                fprintf(stderr,
+                        "[V34 RAW] WAIT_S case: s=%p stage=%d demod=%d duration=%d event=%d j_bits=%d trn_bits=%d hint=%d/%d%%\n",
+                        (void *) s, s->stage, s->current_demodulator, s->duration,
+                        s->received_event, s->phase3_j_bits, s->phase3_trn_bits,
+                        s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
+            }
+            /*endif*/
+
+            if (s->duration == 1 || (s->duration % 256) == 0)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3 WAIT_S heartbeat: dur=%d demod=%d event=%d j_bits=%d trn_bits=%d trn_hint=%d/%d%%\n",
+                         s->duration, s->current_demodulator, s->received_event,
+                         s->phase3_j_bits, s->phase3_trn_bits,
+                         s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
+            }
+            /*endif*/
 
             /* Explicit Phase 3 J/J' detector (answerer side):
                - apply all dibit mapping hypotheses
@@ -4248,6 +4278,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endfor*/
                 s->phase3_j_bits += 2;
+                if (s->phase3_j_bits <= 8
+                    || (s->phase3_j_bits % 64) == 0)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3 J progress: bits=%d best_score=%d/32 hyp=%d trn_hint=%d/%d%%\n",
+                             s->phase3_j_bits, best_score, best_h,
+                             s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
+                }
+                /*endif*/
                 if (s->phase3_j_bits >= 16
                     &&
                     (s->phase3_j_bits == 16
@@ -4470,8 +4509,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
             /* Don't force a false S event; keep searching for a real pattern. */
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S detect timeout (%d bauds, dom=%d/32 rev=%d/32), continuing search\n",
-                     s->duration, s->s_detect_count, s->bit_count);
+                     "Rx - Phase 3: S detect timeout (%d bauds, dom=%d/32 rev=%d/32, j_bits=%d trn_bits=%d trn_hint=%d/%d%%), continuing search\n",
+                     s->duration, s->s_detect_count, s->bit_count,
+                     s->phase3_j_bits, s->phase3_trn_bits,
+                     s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
             s->duration = 0;
             s->s_detect_count = 0;
             s->bit_count = 0;
@@ -4487,6 +4528,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_j_bits = 0;
             s->phase3_j_lock_hyp = -1;
             s->phase3_j_trn16 = -1;
+            memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
+            memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
+            memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
+            s->phase3_ja_bits = 0;
+            s->phase3_ja_hyp = -1;
             phase3_trn_hyp_reset(s);
             s->phase4_j_seen = 0;
             s->phase4_j_lock_hyp = -1;
@@ -4577,8 +4623,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             {
                 int acquire_bauds;
                 /* Do not arm PP conditioning while local Phase 3 TX is still in S.
-                   In practice this avoids false PP locks on the S/!S interval. */
-                if (t->tx.stage < V34_TX_STAGE_FIRST_NOT_S)
+                   In practice this avoids false PP locks on the S/!S interval.
+                   However, in the external V.90 downstream path the local Phase 3
+                   symbols are no longer driven by SpanDSP TX stage progression,
+                   so this internal TX-stage guard can deadlock RX in
+                   PHASE3_TRAINING forever. In V.90 mode, trust the Phase 3 RX
+                   evidence and allow PP acquisition to proceed. */
+                if (!s->v90_mode && t->tx.stage < V34_TX_STAGE_FIRST_NOT_S)
                 {
                     goto phase3_training_done;
                 }
@@ -4761,10 +4812,69 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: first %dT of TRN processed; equalizer frozen, waiting for J-handling stage\n",
                          PHASE3_TRN_REFINE_BAUDS);
+                s->stage = V34_RX_STAGE_PHASE3_WAIT_S;
+                s->duration = 0;
+                s->s_detect_count = 0;
+                s->bit_count = 0;
+                s->s_window = 0;
+                memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
+                memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
+                s->phase3_s_pos = 0;
+                memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
+                memset(s->phase3_j_stream, 0, sizeof(s->phase3_j_stream));
+                memset(s->phase3_j_prev_z, 0, sizeof(s->phase3_j_prev_z));
+                memset(s->phase3_j_prev_valid, 0, sizeof(s->phase3_j_prev_valid));
+                memset(s->phase3_j_win, 0, sizeof(s->phase3_j_win));
+                s->phase3_j_bits = 0;
+                s->phase3_j_lock_hyp = -1;
+                s->phase3_j_trn16 = -1;
+                memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
+                memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
+                memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
+                s->phase3_ja_bits = 0;
+                s->phase3_ja_hyp = -1;
+                phase3_trn_hyp_reset(s);
             }
             /*endif*/
         }
-phase3_training_done:
+        else if (s->put_aux_bit
+                 && s->phase3_trn_lock_hyp >= 0
+                 && s->phase3_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
+        {
+            int h;
+            int raw_sym;
+
+            h = s->phase3_trn_lock_hyp;
+            raw_sym = map_phase4_raw_bits(data_bits, h);
+            if (s->phase3_ja_prev_valid[h])
+            {
+                int in_sym;
+                uint32_t reg;
+                int b0;
+                int b1;
+
+                in_sym = (raw_sym - s->phase3_ja_prev_z[h]) & 0x3;
+                reg = s->phase3_ja_scramble[h];
+                b0 = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
+                b1 = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
+                s->phase3_ja_scramble[h] = reg;
+                s->put_aux_bit(s->put_aux_bit_user_data, b0);
+                s->put_aux_bit(s->put_aux_bit_user_data, b1);
+                s->phase3_ja_bits += 2;
+                s->phase3_ja_hyp = h;
+                if (s->phase3_ja_bits == 2 || (s->phase3_ja_bits % 256) == 0)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3 Ja capture: emitted %d bits using hyp=%d\n",
+                             s->phase3_ja_bits, h);
+                }
+                /*endif*/
+            }
+            /*endif*/
+            s->phase3_ja_prev_z[h] = (uint8_t) raw_sym;
+            s->phase3_ja_prev_valid[h] = 1;
+        }
+        phase3_training_done:
         ;
         }
         break;
@@ -7146,6 +7256,12 @@ SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_b
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
+{
+    return s->rx.received_event;
+}
+/*- End of function --------------------------------------------------------*/
+
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier)
 {
     int i;
@@ -7248,6 +7364,11 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
+    memset(s->rx.phase3_ja_scramble, 0, sizeof(s->rx.phase3_ja_scramble));
+    memset(s->rx.phase3_ja_prev_z, 0, sizeof(s->rx.phase3_ja_prev_z));
+    memset(s->rx.phase3_ja_prev_valid, 0, sizeof(s->rx.phase3_ja_prev_valid));
+    s->rx.phase3_ja_bits = 0;
+    s->rx.phase3_ja_hyp = -1;
     phase3_trn_hyp_reset(&s->rx);
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;

@@ -245,6 +245,151 @@ static int v90_get_jd_bit(v90_state_t *s)
     return bit;
 }
 
+static int v90_get_packed_bit(const uint8_t *bits, int bit_pos)
+{
+    return (bits[bit_pos / 8] >> (bit_pos % 8)) & 1;
+}
+
+static uint32_t v90_get_packed_bits(const uint8_t *bits, int bit_pos, int bit_count)
+{
+    uint32_t value = 0;
+
+    for (int i = 0; i < bit_count; i++)
+        value |= (uint32_t)(v90_get_packed_bit(bits, bit_pos + i) << i);
+    return value;
+}
+
+static bool v90_expect_zero_bit(const uint8_t *bits, int bit_len, int bit_pos)
+{
+    return bit_pos < bit_len && v90_get_packed_bit(bits, bit_pos) == 0;
+}
+
+static bool v90_expect_zero_range(const uint8_t *bits, int bit_len, int bit_pos, int bit_count)
+{
+    if (bit_pos + bit_count > bit_len)
+        return false;
+    for (int i = 0; i < bit_count; i++) {
+        if (v90_get_packed_bit(bits, bit_pos + i) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool v90_copy_framed_pattern(uint8_t *out,
+                                    int out_len,
+                                    const uint8_t *bits,
+                                    int bit_len,
+                                    int start_bit_pos)
+{
+    int pos = start_bit_pos;
+    int copied = 0;
+
+    while (copied < out_len) {
+        int chunk = out_len - copied;
+        if (chunk > 16)
+            chunk = 16;
+        if (!v90_expect_zero_bit(bits, bit_len, pos))
+            return false;
+        pos++;
+        if (pos + chunk > bit_len)
+            return false;
+        for (int i = 0; i < chunk; i++)
+            out[copied + i] = (uint8_t)v90_get_packed_bit(bits, pos + i);
+        pos += chunk;
+        copied += chunk;
+    }
+    return true;
+}
+
+static bool v90_parse_table12_byte_pairs(uint8_t *out,
+                                         int out_count,
+                                         const uint8_t *bits,
+                                         int bit_len,
+                                         int start_bit_pos)
+{
+    int pos = start_bit_pos;
+    int index = 0;
+
+    while (index < out_count) {
+        if (!v90_expect_zero_bit(bits, bit_len, pos))
+            return false;
+        pos++;
+        if (pos + 8 > bit_len)
+            return false;
+        out[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
+        pos += 7;
+        if (!v90_expect_zero_bit(bits, bit_len, pos))
+            return false;
+        pos++;
+        if (index < out_count) {
+            if (pos + 8 > bit_len)
+                return false;
+            out[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
+            pos += 7;
+        }
+    }
+
+    return true;
+}
+
+static bool v90_parse_table12_training_ucodes(v90_dil_desc_t *out,
+                                              const uint8_t *bits,
+                                              int bit_len,
+                                              int start_bit_pos)
+{
+    int pos = start_bit_pos;
+    int index = 0;
+
+    while (index < out->n) {
+        if (!v90_expect_zero_bit(bits, bit_len, pos))
+            return false;
+        pos++;
+        if (pos + 8 > bit_len)
+            return false;
+        out->train_u[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
+        pos += 7;
+        if (!v90_expect_zero_bit(bits, bit_len, pos))
+            return false;
+        pos++;
+        if (index < out->n) {
+            if (pos + 8 > bit_len)
+                return false;
+            out->train_u[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
+            pos += 7;
+        } else {
+            int pad_bits = 7;
+            if ((out->n & 1) == 0)
+                pad_bits = 8;
+            if (!v90_expect_zero_range(bits, bit_len, pos, pad_bits))
+                return false;
+            pos += pad_bits;
+        }
+    }
+
+    if (!v90_expect_zero_bit(bits, bit_len, pos))
+        return false;
+    pos++;
+    if (pos + 16 > bit_len)
+        return false;
+
+    return true;
+}
+
+static uint16_t v90_crc16_bits(const uint8_t *bits, int bit_count)
+{
+    uint16_t crc = 0xFFFF;
+
+    for (int i = 0; i < bit_count; i++) {
+        int bit = v90_get_packed_bit(bits, i);
+        int fb = ((crc >> 15) ^ bit) & 1;
+        crc <<= 1;
+        if (fb)
+            crc ^= 0x8005;
+        crc &= 0xFFFF;
+    }
+    return crc;
+}
+
 static inline int v90_clamp_positive(int v, int max_v)
 {
     if (v < 1)
@@ -322,6 +467,79 @@ static int16_t v90_dil_sample(v90_state_t *s)
     }
 
     return v90_pcm_signed(s->law, ucode, sp_bit);
+}
+
+bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len)
+{
+    int alpha;
+    int beta;
+    int training_start;
+    int crc_start;
+    int descriptor_bits;
+    uint16_t expected_crc;
+    uint16_t actual_crc;
+
+    if (!out || !bits || bit_len < 206)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+
+    for (int i = 0; i < 17; i++) {
+        if (v90_get_packed_bit(bits, i) == 0)
+            return false;
+    }
+    if (!v90_expect_zero_bit(bits, bit_len, 17))
+        return false;
+
+    out->n = (uint8_t)v90_get_packed_bits(bits, 18, 8);
+    if (!v90_expect_zero_range(bits, bit_len, 26, 8))
+        return false;
+    if (!v90_expect_zero_bit(bits, bit_len, 34))
+        return false;
+
+    out->lsp = (uint8_t)(v90_get_packed_bits(bits, 35, 7) + 1);
+    if (!v90_expect_zero_bit(bits, bit_len, 42))
+        return false;
+    out->ltp = (uint8_t)(v90_get_packed_bits(bits, 43, 7) + 1);
+    if (!v90_expect_zero_bit(bits, bit_len, 50))
+        return false;
+
+    if (out->n == 0) {
+        if (out->lsp != 1 || out->ltp != 1)
+            return false;
+    }
+
+    alpha = ((int)out->lsp + 15) / 16 * 17;
+    beta = alpha + (((int)out->ltp + 15) / 16) * 17;
+    training_start = 187 + beta;
+    crc_start = training_start + (((int)out->n + 1) / 2) * 17;
+    descriptor_bits = crc_start + 18;
+
+    if (bit_len < descriptor_bits)
+        return false;
+
+    if (!v90_copy_framed_pattern(out->sp, out->lsp, bits, bit_len, 51))
+        return false;
+    if (!v90_copy_framed_pattern(out->tp, out->ltp, bits, bit_len, 51 + alpha))
+        return false;
+    if (!v90_parse_table12_byte_pairs(out->h, 8, bits, bit_len, 51 + beta))
+        return false;
+    if (!v90_parse_table12_byte_pairs(out->ref, 8, bits, bit_len, 119 + beta))
+        return false;
+    if (!v90_parse_table12_training_ucodes(out, bits, bit_len, training_start))
+        return false;
+
+    expected_crc = (uint16_t)v90_get_packed_bits(bits, crc_start + 1, 16);
+    actual_crc = v90_crc16_bits(bits, crc_start);
+    if (expected_crc != actual_crc)
+        return false;
+
+    if (!v90_expect_zero_bit(bits, bit_len, crc_start + 17))
+        return false;
+    if ((crc_start + 18) < bit_len && v90_get_packed_bit(bits, crc_start + 18) != 0)
+        return false;
+
+    return true;
 }
 
 /* Generate one Phase 3 TX sample */

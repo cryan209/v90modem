@@ -102,6 +102,12 @@ void v90_start_phase3(v90_state_t *s, int u_info);
 void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc);
 
 /*
+ * Parse a packed Ja/DIL descriptor bitstream (Table 12/V.90, bit 0 first)
+ * into a DIL descriptor. Returns true on success.
+ */
+bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len);
+
+/*
  * Notify the V.90 Phase 3 state machine that the far-end analogue modem's
  * S signal has been detected and the current Jd repetition should be the last.
  */

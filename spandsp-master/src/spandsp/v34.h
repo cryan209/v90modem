@@ -263,6 +263,11 @@ SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
     \return The U_INFO Ucode (0-127), or 0 if not yet received. */
 SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s);
 
+/*! Get the most recent V.34/V.90 RX event code.
+    \param s The modem context.
+    \return The current rx.received_event value (v34_events_e). */
+SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
+
 /*! Enable V.90 mode on a V.34 modem context.  When enabled, the digital
     modem sends INFO0d (V.90 Table 7) instead of standard V.34 INFO0 during
     Phase 2, and expects INFO0a (V.90 Table 8) from the analog modem.

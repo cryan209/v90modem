@@ -596,6 +596,14 @@ static v90_enc_t      g_v90_enc;
 static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
+static v90_dil_desc_t g_v90_pending_dil;
+static bool           g_v90_pending_dil_valid = false;
+static bool           g_v90_dil_parse_logged = false;
+
+#define V90_DIL_CAPTURE_MAX_BITS 8192
+static uint8_t        g_v90_dil_capture[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
+static int            g_v90_dil_capture_bits = 0;
+static int            g_v90_dil_capture_search = 0;
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -727,6 +735,71 @@ static int      v34_tx_bits = 0;
 static uint8_t  v34_rx_byte = 0;
 static int      v34_rx_bits = 0;
 
+static void v90_dil_capture_reset(void)
+{
+    memset(g_v90_dil_capture, 0, sizeof(g_v90_dil_capture));
+    g_v90_dil_capture_bits = 0;
+    g_v90_dil_capture_search = 0;
+    g_v90_pending_dil_valid = false;
+    g_v90_dil_parse_logged = false;
+    memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
+}
+
+static int v90_dil_capture_get_bit(int pos)
+{
+    return (g_v90_dil_capture[pos / 8] >> (pos % 8)) & 1;
+}
+
+static void v90_dil_capture_set_bit(int pos, int bit)
+{
+    if (bit)
+        g_v90_dil_capture[pos / 8] |= (uint8_t)(1U << (pos % 8));
+}
+
+static void v90_dil_capture_set_bit_in_buf(uint8_t *buf, int pos, int bit)
+{
+    if (bit)
+        buf[pos / 8] |= (uint8_t)(1U << (pos % 8));
+}
+
+static bool v90_dil_capture_has_preamble(int start)
+{
+    for (int i = 0; i < 17; i++) {
+        if (v90_dil_capture_get_bit(start + i) == 0)
+            return false;
+    }
+    return v90_dil_capture_get_bit(start + 17) == 0;
+}
+
+static bool v90_dil_capture_try_parse_at(int start)
+{
+    uint8_t shifted[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
+    v90_dil_desc_t desc;
+    int shifted_bits;
+
+    shifted_bits = g_v90_dil_capture_bits - start;
+    if (shifted_bits < 206)
+        return false;
+
+    memset(shifted, 0, sizeof(shifted));
+    for (int i = 0; i < shifted_bits; i++)
+        v90_dil_capture_set_bit_in_buf(shifted, i, v90_dil_capture_get_bit(start + i));
+
+    if (!v90_parse_dil_descriptor(&desc, shifted, shifted_bits))
+        return false;
+
+    g_v90_pending_dil = desc;
+    g_v90_pending_dil_valid = true;
+    if (g_v90)
+        v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+    fprintf(stderr, "[ME] V.90: parsed Ja DIL descriptor (N=%u LSP=%u LTP=%u)\n",
+            desc.n, desc.lsp, desc.ltp);
+    trace_phase("V90 parsed Ja DIL descriptor: N=%u LSP=%u LTP=%u",
+                desc.n, desc.lsp, desc.ltp);
+    g_v90_dil_parse_logged = true;
+    return true;
+}
+
 static int v34_get_bit_cb(void *user_data)
 {
     (void)user_data;
@@ -743,6 +816,39 @@ static int v34_get_bit_cb(void *user_data)
     v34_tx_byte >>= 1;
     v34_tx_bits--;
     return bit;
+}
+
+static void v34_put_aux_bit_cb(void *user_data, int bit)
+{
+    (void)user_data;
+
+    if (bit < 0 || bit > 1)
+        return;
+    if (g_mod != ME_MOD_V90 || g_v90_pending_dil_valid)
+        return;
+    if (g_v90_dil_capture_bits >= V90_DIL_CAPTURE_MAX_BITS)
+        return;
+
+    v90_dil_capture_set_bit(g_v90_dil_capture_bits, bit & 1);
+    g_v90_dil_capture_bits++;
+
+    if (g_v90_dil_capture_bits <= 16 || (g_v90_dil_capture_bits % 256) == 0) {
+        fprintf(stderr, "[ME] V.90 Ja capture: buffered %d bits%s\n",
+                g_v90_dil_capture_bits,
+                g_v90_pending_dil_valid ? " (descriptor already parsed)" : "");
+    }
+
+    if (g_v90_dil_capture_bits < 206)
+        return;
+
+    while (g_v90_dil_capture_search + 206 <= g_v90_dil_capture_bits) {
+        int start = g_v90_dil_capture_search++;
+
+        if (!v90_dil_capture_has_preamble(start))
+            continue;
+        if (v90_dil_capture_try_parse_at(start))
+            break;
+    }
 }
 
 static void v34_put_bit_cb(void *user_data, int bit)
@@ -789,6 +895,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 if (g_v90) { v90_free(g_v90); g_v90 = NULL; }
                 g_v90_phase3_started = false;
                 g_v90_completion_deferred_logged = false;
+                v90_dil_capture_reset();
                 if (g_v34) {
                     v34_free(g_v34);
                     g_v34 = NULL;
@@ -857,6 +964,7 @@ static void start_v34_training(void)
     g_training_tx_samples = 0;
     g_last_rx_stage = 0;
     g_last_tx_stage = 0;
+    v90_dil_capture_reset();
 
     /* Reset bit accumulators */
     v34_tx_byte = 0;
@@ -1055,8 +1163,11 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+        if (g_v34)
+            v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
         g_v90_phase3_started = false;
         g_v90_completion_deferred_logged = false;
+        v90_dil_capture_reset();
         /* Phase 2 CC carriers: V.90 digital answerer TX=1200 Hz, RX=2400 Hz.
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
            disabled the notch — but we need it for Phase 2 CC echo removal. */
@@ -1127,6 +1238,7 @@ void me_destroy(void)
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
+    v90_dil_capture_reset();
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -1240,6 +1352,7 @@ void me_on_sip_disconnected(void)
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
+    v90_dil_capture_reset();
 
     me_state_t prev = g_state;
     g_state = ME_IDLE;
@@ -1447,6 +1560,8 @@ void me_tx_audio(int16_t *amp, int len)
                         if (!g_v90) {
                             v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
                             g_v90 = v90_init_with_v34(g_v34, law);
+                            if (g_v90 && g_v90_pending_dil_valid)
+                                v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
                         }
                         if (g_v90) {
                             v90_start_phase3(g_v90, u_info);
