@@ -1664,110 +1664,73 @@ void me_rx_audio(const int16_t *amp, int len)
                 /* NLMS echo canceller: subtract our TX echo from the RX signal.
                    Critical for V.90 where broadband PCM TX overwhelms the
                    upstream V.34 signal through the FXS hybrid.
-                   Custom NLMS with controlled step-size (mu=0.05) for stability
-                   on high-amplitude PCM codewords. */
+
+                   Uses a single 512-tap FIR (64ms) with no separate delay search.
+                   The FIR naturally learns the echo impulse response including
+                   the bulk delay (~120 samples / 15ms through the SIP/FXS path).
+
+                   TX reference comes from the ring buffer with a fixed lookback
+                   so that tap[0] corresponds to the most recent TX sample and
+                   tap[N] corresponds to N samples ago. */
                 if (g_echo_can && notch_active) {
-                    static float ec_h[ECHO_CAN_TAPS];   /* FIR taps */
-                    static float ec_x[ECHO_CAN_TAPS];   /* TX history */
-                    static int ec_pos = 0;               /* circular buffer position */
+                    #define EC_TAPS     1024    /* 128ms — covers delay + full tail */
+                    static float ec_h[EC_TAPS];   /* adaptive FIR coefficients */
                     static int ec_init_done = 0;
-                    static int ec_delay = -1;
-                    static int ec_delay_search_frames = 0;
-                    #define EC_MU       0.05f    /* NLMS step size */
-                    #define EC_DELTA    100.0f   /* regularization to prevent div-by-zero */
+                    static int ec_samples = 0;    /* total samples processed */
+                    #define EC_MU_FAST  0.15f    /* NLMS step size — fast convergence */
+                    #define EC_MU_SLOW  0.03f    /* NLMS step size — steady state */
+                    #define EC_FAST_SAMPLES 16000 /* fast phase: 2 seconds */
+                    #define EC_DELTA    1000.0f  /* regularization */
 
                     if (!ec_init_done) {
                         memset(ec_h, 0, sizeof(ec_h));
-                        memset(ec_x, 0, sizeof(ec_x));
-                        ec_pos = 0;
                         ec_init_done = 1;
+                        ec_samples = 0;
                     }
 
-                    /* Phase 1: Cross-correlate TX buffer with RX to find echo delay.
-                       Accumulate over multiple frames for reliability. */
-                    if (ec_delay < 0) {
-                        static int64_t ec_corr_acc[ECHO_CAN_TAPS];
-                        if (ec_delay_search_frames == 0)
-                            memset(ec_corr_acc, 0, sizeof(ec_corr_acc));
-
-                        int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
-                        if (tx_avail >= ECHO_CAN_TAPS + len) {
-                            for (int d = 0; d < ECHO_CAN_TAPS; d++) {
-                                int64_t corr = 0;
-                                for (int i = 0; i < len; i++) {
-                                    int tx_idx = (g_tx_buf_wr - len - d + i) & TX_BUF_MASK;
-                                    corr += (int64_t)g_tx_buf[tx_idx] * filtered[i];
-                                }
-                                ec_corr_acc[d] += (corr > 0) ? corr : -corr;
-                            }
-                            ec_delay_search_frames++;
-                        } else if (ec_delay_search_frames == 0) {
-                            static int ec_skip_log = 0;
-                            if (++ec_skip_log % 50 == 1)
-                                fprintf(stderr, "[ME] Echo cancel: delay search waiting for TX data (avail=%d need=%d)\n",
-                                        tx_avail, ECHO_CAN_TAPS + len);
-                        }
-                        /* After 10 frames (~200ms), pick the best delay */
-                        if (ec_delay_search_frames >= 10) {
-                            int best_d = 0;
-                            int64_t best_c = 0;
-                            for (int d = 0; d < ECHO_CAN_TAPS; d++) {
-                                if (ec_corr_acc[d] > best_c) {
-                                    best_c = ec_corr_acc[d];
-                                    best_d = d;
-                                }
-                            }
-                            ec_delay = best_d;
-                            fprintf(stderr, "[ME] Echo cancel: delay=%d samples (%.1fms) corr=%lld\n",
-                                    ec_delay, ec_delay / 8.0, (long long)best_c);
-                        }
-                    }
-
-                    /* Phase 2: NLMS echo cancellation with detected delay */
-                    if (ec_delay >= 0) {
+                    /* Need at least EC_TAPS samples in TX buffer */
+                    int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
+                    if (tx_avail >= EC_TAPS) {
                         for (int i = 0; i < len; i++) {
-                            /* Get the delayed TX sample */
-                            int tx_idx = (g_tx_buf_wr - len + i - ec_delay) & TX_BUF_MASK;
-                            float tx_f = (float)g_tx_buf[tx_idx];
+                            /* Current RX sample index in the TX timeline:
+                               RX[i] was received at the same time as TX was being
+                               sent. The echo of TX[t-d] appears in RX[t].
+                               We reference TX from the read pointer forward. */
+                            int tx_base = (g_tx_buf_rd + i) & TX_BUF_MASK;
 
-                            /* Insert into circular buffer */
-                            ec_x[ec_pos] = tx_f;
-
-                            /* Compute echo estimate: h dot x */
+                            /* Compute echo estimate and input power */
                             float echo_est = 0.0f;
                             float x_pow = EC_DELTA;
-                            int k = ec_pos;
-                            for (int j = 0; j < ECHO_CAN_TAPS; j++) {
-                                echo_est += ec_h[j] * ec_x[k];
-                                x_pow += ec_x[k] * ec_x[k];
-                                k = (k - 1 + ECHO_CAN_TAPS) % ECHO_CAN_TAPS;
+                            for (int j = 0; j < EC_TAPS; j++) {
+                                int tx_idx = (tx_base - j + TX_BUF_SIZE) & TX_BUF_MASK;
+                                float xj = (float)g_tx_buf[tx_idx];
+                                echo_est += ec_h[j] * xj;
+                                x_pow += xj * xj;
                             }
 
                             /* Subtract echo estimate */
                             float rx_f = (float)filtered[i];
                             float error = rx_f - echo_est;
 
-                            /* NLMS update */
-                            float mu_norm = EC_MU / x_pow;
-                            k = ec_pos;
-                            for (int j = 0; j < ECHO_CAN_TAPS; j++) {
-                                ec_h[j] += mu_norm * error * ec_x[k];
-                                k = (k - 1 + ECHO_CAN_TAPS) % ECHO_CAN_TAPS;
+                            /* NLMS tap update — fast mu during initial convergence */
+                            float mu = (ec_samples < EC_FAST_SAMPLES) ? EC_MU_FAST : EC_MU_SLOW;
+                            float mu_norm = mu / x_pow;
+                            for (int j = 0; j < EC_TAPS; j++) {
+                                int tx_idx = (tx_base - j + TX_BUF_SIZE) & TX_BUF_MASK;
+                                ec_h[j] += mu_norm * error * (float)g_tx_buf[tx_idx];
                             }
 
                             /* Clamp output */
                             if (error > 32767.0f) error = 32767.0f;
                             if (error < -32768.0f) error = -32768.0f;
                             filtered[i] = (int16_t)error;
-
-                            ec_pos = (ec_pos + 1) % ECHO_CAN_TAPS;
                         }
+                        ec_samples += len;
                     }
 
-                    /* Advance TX buffer read pointer to keep it in sync.
-                       Only advance once delay is found and NLMS is running;
-                       during delay search we read from arbitrary offsets. */
-                    if (ec_delay >= 0)
+                    /* Advance TX buffer read pointer only when NLMS ran.
+                       Otherwise let the buffer accumulate until we have EC_TAPS. */
+                    if (tx_avail >= EC_TAPS)
                         g_tx_buf_rd = (g_tx_buf_rd + len) & TX_BUF_MASK;
 
                     /* Log performance periodically */
@@ -1783,8 +1746,8 @@ void me_rx_audio(const int16_t *amp, int len)
                             }
                             pre_rms = sqrt(pre_rms / len);
                             post_rms = sqrt(post_rms / len);
-                            fprintf(stderr, "[ME] Echo cancel: delay=%d pre_rms=%.0f post_rms=%.0f (%.1f dB)\n",
-                                    ec_delay, pre_rms, post_rms,
+                            fprintf(stderr, "[ME] Echo cancel: samples=%d pre_rms=%.0f post_rms=%.0f (%.1f dB)\n",
+                                    ec_samples, pre_rms, post_rms,
                                     (pre_rms > 1.0 && post_rms > 1.0) ? 20.0*log10(pre_rms/post_rms) : 0.0);
                         }
                     }
