@@ -554,6 +554,14 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
     if (bit < 0) {
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED)
             on_training_complete(ME_MOD_V22BIS, 2400, "V.22bis");
+        else if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
+            fprintf(stderr, "[ME] V.22bis fallback failed (%s), hanging up\n",
+                    signal_status_to_str(bit));
+            trace_phase("V22BIS training failed (%s) -> hangup",
+                        signal_status_to_str(bit));
+            me_hangup();
+            return;
+        }
         return;
     }
 
@@ -710,6 +718,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 
 /* Forward declarations */
 static void start_v22bis_training(void);
+void me_hangup(void);
 
 /* Bit accumulators for V.34 TX and RX (one byte at a time) */
 static uint8_t  v34_tx_byte = 0;
@@ -777,10 +786,10 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 g_notch.active = false;
                 g_last_rx_stage = 0;
                 g_last_tx_stage = 0;
-                /* Fall back to V.22bis */
-                pthread_mutex_lock(&g_state_mtx);
+                /* Fall back to V.22bis. This callback runs from inside v34_rx(),
+                   which me_rx_audio() already calls while holding g_state_mtx, so
+                   taking the mutex again here self-deadlocks the media thread. */
                 start_v22bis_training();
-                pthread_mutex_unlock(&g_state_mtx);
                 return;
             }
         }
@@ -807,7 +816,12 @@ static void start_v22bis_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
+    v22bis_tx_byte = 0;
+    v22bis_tx_bits = 0;
+    v22bis_rx_byte = 0;
+    v22bis_rx_bits = 0;
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;

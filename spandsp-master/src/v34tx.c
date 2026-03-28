@@ -1800,6 +1800,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                          "Tx - V.90: INFO0a received OK, setting INFO0d acknowledgement bit and repeating INFO0d\n");
                 s->tx.info0_acknowledgement = true;
                 v90_arm_tone_a_detection(s, "INFO0a received during recovery");
+                s->rx.received_event = V34_EVENT_NONE;
             }
 
             if (s->tx.info0_acknowledgement
@@ -1889,6 +1890,21 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason)
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: %s, completing INFO0d recovery and sending Tone B\n",
              reason);
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: arming RX for analog L1/L2 analysis during Tone B\n");
+    s->rx.dft_ptr = 0;
+    s->rx.base_phase = 42.0f;
+    s->rx.l1_l2_duration = 0;
+    s->rx.current_demodulator = V34_MODULATION_L1_L2;
+    s->rx.stage = V34_RX_STAGE_L1_L2;
+    s->rx.bit_count = 0;
+    s->rx.bitstream = 0;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.last_logged_stage = -1;
+    s->rx.last_logged_event = -1;
+    s->rx.last_logged_demodulator = -1;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
@@ -2169,6 +2185,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                      "Tx - V.90: repeated INFO0a during Tone B, repeating INFO0d with acknowledgement\n");
             s->tx.info0_acknowledgement = true;
             info0_baud_init(s);
+            s->rx.received_event = V34_EVENT_NONE;
         }
         else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
@@ -2611,10 +2628,27 @@ static void second_a_baud_init(v34_state_t *s)
 
 static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 {
+    enum
+    {
+        V90_WAIT_TONE_A_GUARD_BAUDS = 120
+    };
     /* V.90 §9.2.1.1.7: After L2, digital modem waits for Tone A from analog modem
        (up to 550ms + RTD), then sends INFO1d. We send silence while waiting.
        Only trigger on actual Tone A detection — L2_SEEN fires too early
        (before the analog modem has received our L1/L2 and started Tone A). */
+    if (s->rx.received_event == V34_EVENT_INFO1_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFO1a received while waiting for Tone A, proceeding directly to Phase 3 handoff\n");
+        s->tx.v90_info1a_fast_retries = 0;
+        s->tx.v90_info1a_total_retries = 0;
+        tx_silence_init(s, 30000);
+        s->tx.stage = V34_TX_STAGE_FIRST_S;
+        s->rx.received_event = V34_EVENT_NONE;
+        return zero;
+    }
+    /*endif*/
+
     if (s->rx.received_event == V34_EVENT_INFO0_OK)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
@@ -2633,6 +2667,20 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
         ||
         ++s->tx.tone_duration >= 600)
     {
+        if (s->tx.tone_duration < V90_WAIT_TONE_A_GUARD_BAUDS
+            && (s->rx.received_event == V34_EVENT_TONE_SEEN
+                || s->rx.received_event == V34_EVENT_REVERSAL_1))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: ignoring early Tone A indication before INFO1d (event=%d) at %d bauds; staying in Tone A wait guard window\n",
+                     s->rx.received_event,
+                     s->tx.tone_duration);
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            return zero;
+        }
+        /*endif*/
         /* Tone A detected (or timeout ~1s) — proceed to INFO1d */
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %s (event=%d) after %d bauds, sending INFO1d\n",
@@ -2650,6 +2698,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 {
     enum
     {
+        V90_INFO1A_TONE_GUARD_BAUDS = 120,
         V90_INFO1A_FAST_RETRY_BAUDS = 120,
         V90_INFO1A_MAX_FAST_RETRIES = 3,
         V90_INFO1A_MAX_TOTAL_RETRIES = 6
@@ -2692,6 +2741,18 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
+        if (s->tx.tone_duration < V90_INFO1A_TONE_GUARD_BAUDS)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: ignoring early Tone A/reversal while waiting for INFO1a (event=%d) at %d bauds; staying in INFO1a wait guard window\n",
+                     s->rx.received_event,
+                     s->tx.tone_duration);
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            goto wait_timeout_check;
+        }
+        /*endif*/
         s->tx.v90_info1a_total_retries++;
         if (s->tx.tone_duration <= V90_INFO1A_FAST_RETRY_BAUDS)
             s->tx.v90_info1a_fast_retries++;
@@ -2729,6 +2790,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     }
     /*endif*/
 
+wait_timeout_check:
     if (++s->tx.tone_duration >= timeout_bauds)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
