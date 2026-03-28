@@ -2741,36 +2741,28 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
-        if (s->tx.tone_duration < V90_INFO1A_TONE_GUARD_BAUDS)
-        {
-            span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: ignoring early Tone A/reversal while waiting for INFO1a (event=%d) at %d bauds; staying in INFO1a wait guard window\n",
-                     s->rx.received_event,
-                     s->tx.tone_duration);
-            s->rx.received_event = V34_EVENT_NONE;
-            s->rx.persistence1 = 0;
-            s->rx.persistence2 = 0;
-            goto wait_timeout_check;
-        }
-        /*endif*/
-        s->tx.v90_info1a_total_retries++;
-        if (s->tx.tone_duration <= V90_INFO1A_FAST_RETRY_BAUDS)
-            s->tx.v90_info1a_fast_retries++;
-        else
-            s->tx.v90_info1a_fast_retries = 0;
-        /*endif*/
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: Tone A/reversal seen while waiting for INFO1a (event=%d) after %d bauds; returning to Tone A wait path (fast retries=%d total retries=%d)\n",
-                 s->rx.received_event, s->tx.tone_duration,
-                 s->tx.v90_info1a_fast_retries,
-                 s->tx.v90_info1a_total_retries);
-        if (s->tx.v90_info1a_fast_retries >= V90_INFO1A_MAX_FAST_RETRIES
-            || s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
+                 "Tx - V.90: %signoring Tone A/reversal while waiting for INFO1a (event=%d) at %d bauds; continuing to wait for INFO1a until timeout\n",
+                 (s->tx.tone_duration < V90_INFO1A_TONE_GUARD_BAUDS) ? "early " : "",
+                 s->rx.received_event,
+                 s->tx.tone_duration);
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        goto wait_timeout_check;
+    }
+    /*endif*/
+
+wait_timeout_check:
+    if (++s->tx.tone_duration >= timeout_bauds)
+    {
+        s->tx.v90_info1a_total_retries++;
+        s->tx.v90_info1a_fast_retries = 0;
+        if (s->tx.v90_info1a_total_retries >= V90_INFO1A_MAX_TOTAL_RETRIES)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: aborting after %d total INFO1a recovery loops (%d rapid) without valid INFO1a; signalling training failure\n",
-                     s->tx.v90_info1a_total_retries,
-                     s->tx.v90_info1a_fast_retries);
+                     "Tx - V.90: aborting after %d INFO1a timeouts without valid INFO1a; signalling training failure\n",
+                     s->tx.v90_info1a_total_retries);
             s->rx.training_failed_reported = false;
             s->rx.received_event = V34_EVENT_TRAINING_FAILED;
             tx_silence_init(s, 30000);
@@ -2778,25 +2770,10 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             return zero;
         }
         /*endif*/
-        /* This branch is a recovery fallback. Clear the event before
-           re-entering the Tone A wait state so we wait for a fresh
-           indication instead of immediately re-sending INFO1d on the
-           same stale event. */
-        s->rx.received_event = V34_EVENT_NONE;
-        s->rx.persistence1 = 0;
-        s->rx.persistence2 = 0;
-        v90_wait_tone_a_init(s, true);
-        return zero;
-    }
-    /*endif*/
-
-wait_timeout_check:
-    if (++s->tx.tone_duration >= timeout_bauds)
-    {
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: INFO1a wait timeout after %d bauds (~700ms + RTD), re-sending INFO1d\n",
-                 s->tx.tone_duration);
-        s->tx.v90_info1a_fast_retries = 0;
+                 "Tx - V.90: INFO1a wait timeout after %d bauds (~700ms + RTD), re-sending INFO1d (timeout retries=%d)\n",
+                 s->tx.tone_duration,
+                 s->tx.v90_info1a_total_retries);
         info1_baud_init(s);
     }
     /*endif*/
