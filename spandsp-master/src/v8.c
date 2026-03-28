@@ -872,6 +872,7 @@ static void send_cm_jm(v8_state_t *s)
 {
     int val;
     uint32_t offered_modulations;
+    int protocols;
     int bytes;
     uint8_t buf[10];
     int ptr;
@@ -939,8 +940,21 @@ static void send_cm_jm(v8_state_t *s)
         buf[ptr++] = val;
     }
     /*endif*/
-    if (s->parms.jm_cm.protocols)
-        buf[ptr++] = (s->parms.jm_cm.protocols << 5) | V8_PROTOCOLS_TAG;
+    if (s->calling_party)
+    {
+        protocols = s->parms.jm_cm.protocols;
+    }
+    else
+    {
+        /* JM may include the protocol octet only when the same protocol was
+           indicated in CM and is supported locally. */
+        protocols = 0;
+        if (s->result.jm_cm.protocols == s->parms.jm_cm.protocols)
+            protocols = s->result.jm_cm.protocols;
+    }
+    /*endif*/
+    if (protocols)
+        buf[ptr++] = (protocols << 5) | V8_PROTOCOLS_TAG;
     /*endif*/
     if (s->parms.jm_cm.pstn_access)
         buf[ptr++] = (s->parms.jm_cm.pstn_access << 5) | V8_PSTN_ACCESS_TAG;
