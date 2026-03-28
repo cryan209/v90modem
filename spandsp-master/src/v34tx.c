@@ -4842,6 +4842,24 @@ SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
+{
+    if (!s)
+        return;
+    if (s->tx.current_getbaud == get_phase4_baud
+        || s->tx.stage >= V34_TX_STAGE_PHASE4_WAIT)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - v34_force_phase4(): already in Phase 4 path (stage=%d)\n",
+                 s->tx.stage);
+        return;
+    }
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - v34_force_phase4(): external V.90 Phase 3 complete, handing TX/RX to native Phase 4\n");
+    phase4_wait_init(s);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
 {
     s->tx.v90_mode = true;

@@ -89,6 +89,12 @@ v90_tx_phase_t v90_get_tx_phase(v90_state_t *s);
 bool v90_phase3_active(v90_state_t *s);
 
 /*
+ * Returns true once external Phase 3 has finished and TX should be driven by
+ * the wrapped SpanDSP V.34 engine for native Phase 4/MP/E/data processing.
+ */
+bool v90_using_internal_v34_tx(v90_state_t *s);
+
+/*
  * Start V.90 Phase 3 TX. Call this when the V.34 Phase 2 INFO
  * exchange completes (V34_TX_STAGE_FIRST_S detected).
  * u_info is the U_INFO Ucode from the analog modem's INFO1a.

@@ -105,6 +105,26 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_MP,
 };
 
+enum v34_events_e {
+    V34_EVENT_NONE = 0,
+    V34_EVENT_TONE_SEEN,
+    V34_EVENT_REVERSAL_1,
+    V34_EVENT_REVERSAL_2,
+    V34_EVENT_REVERSAL_3,
+    V34_EVENT_INFO0_OK,
+    V34_EVENT_INFO0_BAD,
+    V34_EVENT_INFO1_OK,
+    V34_EVENT_INFO1_BAD,
+    V34_EVENT_INFOH_OK,
+    V34_EVENT_INFOH_BAD,
+    V34_EVENT_L2_SEEN,
+    V34_EVENT_S,
+    V34_EVENT_J,
+    V34_EVENT_J_DASHED,
+    V34_EVENT_PHASE4_TRN_READY,
+    V34_EVENT_TRAINING_FAILED,
+};
+
 /* ------------------------------------------------------------------ */
 /* V.90 downstream encoder constants (ITU-T V.90 §5)                  */
 /* ------------------------------------------------------------------ */
@@ -596,6 +616,10 @@ static v90_enc_t      g_v90_enc;
 static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
+static bool           g_v90_phase3_j_seen = false;
+static int            g_last_v90_bridge_rx_stage = -1;
+static int            g_last_v90_bridge_tx_stage = -1;
+static int            g_last_v90_bridge_rx_event = -1;
 static v90_dil_desc_t g_v90_pending_dil;
 static bool           g_v90_pending_dil_valid = false;
 static bool           g_v90_dil_parse_logged = false;
@@ -742,6 +766,10 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_capture_search = 0;
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
+    g_v90_phase3_j_seen = false;
+    g_last_v90_bridge_rx_stage = -1;
+    g_last_v90_bridge_tx_stage = -1;
+    g_last_v90_bridge_rx_event = -1;
     memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
 }
 
@@ -861,7 +889,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
             if (g_state == ME_TRAINING) {
                 int rate = v34_get_current_bit_rate(g_v34);
                 if (g_mod == ME_MOD_V90) {
-                    if (g_v90 && v90_training_complete(g_v90)) {
+                    if (g_v90 && (v90_training_complete(g_v90) || v90_using_internal_v34_tx(g_v90))) {
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
                         fprintf(stderr, "[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
@@ -1461,6 +1489,7 @@ void me_rx_audio(const int16_t *amp, int len)
                 /* Log RX/TX stage transitions for training diagnostics */
                 int rx_stage = v34_get_rx_stage(g_v34);
                 int tx_stage = v34_get_tx_stage(g_v34);
+                int rx_event = v34_get_rx_event(g_v34);
                 if (rx_stage != g_last_rx_stage || tx_stage != g_last_tx_stage) {
                     trace_phase("V34 stage: rx=%s(%d) tx=%s(%d)",
                                 v34_rx_stage_name(rx_stage), rx_stage,
@@ -1483,6 +1512,41 @@ void me_rx_audio(const int16_t *amp, int len)
                 if (notch_active)
                     notch_filter_apply(&g_notch, filtered, len);
                 v34_rx(g_v34, filtered, len);
+                rx_stage = v34_get_rx_stage(g_v34);
+                tx_stage = v34_get_tx_stage(g_v34);
+                rx_event = v34_get_rx_event(g_v34);
+
+                if (g_mod == ME_MOD_V90
+                    && (rx_stage != g_last_v90_bridge_rx_stage
+                        || tx_stage != g_last_v90_bridge_tx_stage
+                        || rx_event != g_last_v90_bridge_rx_event))
+                {
+                    fprintf(stderr,
+                            "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d j_seen=%d\n",
+                            g_v90_phase3_started ? 1 : 0,
+                            g_v90 ? 1 : 0,
+                            v34_rx_stage_name(rx_stage), rx_stage,
+                            v34_tx_stage_name(tx_stage), tx_stage,
+                            rx_event,
+                            g_v90_phase3_j_seen ? 1 : 0);
+                    g_last_v90_bridge_rx_stage = rx_stage;
+                    g_last_v90_bridge_tx_stage = tx_stage;
+                    g_last_v90_bridge_rx_event = rx_event;
+                }
+
+                if (g_mod == ME_MOD_V90
+                    && g_v90
+                    && !g_v90_phase3_j_seen
+                    && (rx_event == V34_EVENT_J || rx_event == V34_EVENT_J_DASHED))
+                {
+                    fprintf(stderr,
+                            "[ME] V.90 Phase 3: far-end %s seen in RX, terminating external Jd at the next boundary\n",
+                            (rx_event == V34_EVENT_J_DASHED) ? "J'" : "J");
+                    trace_phase("V90 Phase3 RX event=%s -> terminate external Jd",
+                                (rx_event == V34_EVENT_J_DASHED) ? "J_DASHED" : "J");
+                    v90_notify_s_detected(g_v90);
+                    g_v90_phase3_j_seen = true;
+                }
                 /* RX PCM dump during training */
                 {
                     static FILE *rx_dump = NULL;
@@ -1582,16 +1646,19 @@ void me_tx_audio(int16_t *amp, int len)
                 if (g_v90_phase3_started && g_v90) {
                     if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
                         v90_notify_s_detected(g_v90);
-                    /* V.90 Phase 3: generate PCM codewords for actual RTP output */
-                    v90_phase3_tx(g_v90, amp, len);
-                    /* Run v34_tx into discard but protect RX state from being
-                       overwritten by V.34 TX Phase 3/4 transitions */
-                    int saved_rx_stage = v34_get_rx_stage(g_v34);
-                    int16_t discard[len];
-                    v34_tx(g_v34, discard, len);
-                    /* V.34 TX may have clobbered RX stage — don't let it;
-                       the V.90 RX flow controls its own stage transitions. */
-                    /* (RX stage restoration handled by v34rx directly) */
+                    if (v90_using_internal_v34_tx(g_v90)) {
+                        v34_tx(g_v34, amp, len);
+                    } else {
+                        /* V.90 Phase 3: generate PCM codewords for actual RTP output */
+                        v90_phase3_tx(g_v90, amp, len);
+                        /* Run v34_tx into discard but protect RX state from being
+                           overwritten by V.34 TX Phase 3/4 transitions */
+                        int16_t discard[len];
+                        v34_tx(g_v34, discard, len);
+                        /* V.34 TX may have clobbered RX stage — don't let it;
+                           the V.90 RX flow controls its own stage transitions. */
+                        /* (RX stage restoration handled by v34rx directly) */
+                    }
                 } else if (g_mod == ME_MOD_V90
                            && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
                     /* V.90 §9.2.1.1.8: send silence while waiting for INFO1a.

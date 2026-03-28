@@ -102,6 +102,7 @@ struct v90_state_s {
     bool             training_complete;
     bool             dil_requested;
     bool             dil_terminate_requested;
+    bool             use_internal_v34_tx;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
@@ -658,8 +659,10 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                     fprintf(stderr, "[V90] Phase 3: J'd complete, entering DIL placeholder state\n");
                     s->tx_phase = V90_TX_DIL;
                 } else {
-                    fprintf(stderr, "[V90] Phase 3: J'd complete, entering Phase 4\n");
+                    fprintf(stderr, "[V90] Phase 3: J'd complete, handing off to native V.34 Phase 4\n");
+                    v34_force_phase4(s->v34);
                     s->tx_phase = V90_TX_PHASE4;
+                    s->use_internal_v34_tx = true;
                 }
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
@@ -786,6 +789,11 @@ bool v90_phase3_active(v90_state_t *s)
     return s->tx_phase >= V90_TX_SD && s->tx_phase <= V90_TX_JD_PRIME;
 }
 
+bool v90_using_internal_v34_tx(v90_state_t *s)
+{
+    return s ? s->use_internal_v34_tx : false;
+}
+
 void v90_start_phase3(v90_state_t *s, int u_info)
 {
     if (u_info > 0 && u_info < 128)
@@ -808,6 +816,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
+    s->use_internal_v34_tx = false;
     v90_dil_reset_tx(s);
 
     s->tx_phase = V90_TX_SD;

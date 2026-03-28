@@ -268,6 +268,11 @@ SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s);
     \return The current rx.received_event value (v34_events_e). */
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
 
+/*! Force the transmitter/receiver pair into Phase 4 startup. Intended for
+    external V.90 downstream implementations which handle Phase 3 themselves
+    and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */
+SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
+
 /*! Enable V.90 mode on a V.34 modem context.  When enabled, the digital
     modem sends INFO0d (V.90 Table 7) instead of standard V.34 INFO0 during
     Phase 2, and expects INFO0a (V.90 Table 8) from the analog modem.
