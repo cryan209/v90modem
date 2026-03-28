@@ -32,8 +32,9 @@
 #define V90_SD_REPS     64
 #define V90_SD_BAR_REPS 8
 
-/* TRN1d: multiple of 6 symbols; use 768 symbols (128ms @ 8kHz) */
-#define V90_TRN1D_LEN   768
+/* TRN1d: multiple of 6 symbols; spec requires ≥2040T (§9.3.1.4).
+ * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
+#define V90_TRN1D_LEN   2046
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
@@ -241,45 +242,10 @@ static int16_t v90_phase3_sample(v90_state_t *s)
     int sign;
 
     switch (s->tx_phase) {
-    case V90_TX_JD:
-        /* §8.4.2: Jd bits are scrambled and differentially encoded,
-         * transmitted as sign of U_INFO PCM codeword. */
-        {
-            int bit = v90_get_jd_bit(s);
-            int scrambled = v90_scramble_bit(&s->scrambler, bit);
-            /* Differential encoding: sign = scrambled XOR previous sign */
-            s->diff_enc ^= scrambled;
-            sign = s->diff_enc;
-            s->sample_count++;
-            if (s->sample_count >= V90_JD_LEN) {
-                fprintf(stderr, "[V90] Phase 3: Jd complete (%d symbols), starting J'd\n",
-                        s->sample_count);
-                s->tx_phase = V90_TX_JD_PRIME;
-                s->sample_count = 0;
-            }
-            return v90_pcm_signed(s->law, s->u_info, sign);
-        }
-
-    case V90_TX_JD_PRIME:
-        /* §8.4.3: J'd = 12 scrambled zeros as sign of U_INFO */
-        {
-            int scrambled = v90_scramble_bit(&s->scrambler, 0);
-            s->diff_enc ^= scrambled;
-            sign = s->diff_enc;
-            s->sample_count++;
-            if (s->sample_count >= 12) {
-                /* Transition to Sd */
-                fprintf(stderr, "[V90] Phase 3: J'd complete, starting Sd\n");
-                s->tx_phase = V90_TX_SD;
-                s->sample_count = 0;
-                s->rep_count = 0;
-            }
-            return v90_pcm_signed(s->law, s->u_info, sign);
-        }
-
     case V90_TX_SD:
         /* §8.4.4: Sd = 64 reps of {+W, +0, +W, -W, -0, -W}
-         * W = Ucode(16 + U_INFO), 0 = Ucode 0 */
+         * W = Ucode(16 + U_INFO), 0 = Ucode 0
+         * §9.3.1.3: Sent first after receiving analog modem's Ja */
         {
             int w_ucode = 16 + s->u_info;
             int pos_in_pattern = s->sample_count % 6;
@@ -334,14 +300,54 @@ static int16_t v90_phase3_sample(v90_state_t *s)
 
     case V90_TX_TRN1D:
         /* §8.4.5: TRN1d = U_INFO codeword with signs from scrambled ones.
-         * Scrambler initialized to zero. */
+         * Scrambler initialized to zero.
+         * §9.3.1.4: ≥2040T, then Jd within 4000ms of starting TRN1d */
         {
             int scrambled = v90_scramble_bit(&s->scrambler, 1);
             sign = scrambled;  /* sign=0 → negative, sign=1 → positive */
             s->sample_count++;
             if (s->sample_count >= V90_TRN1D_LEN) {
-                fprintf(stderr, "[V90] Phase 3: TRN1d complete (%d symbols), entering Phase 4\n",
+                fprintf(stderr, "[V90] Phase 3: TRN1d complete (%d symbols), starting Jd\n",
                         s->sample_count);
+                s->tx_phase = V90_TX_JD;
+                s->sample_count = 0;
+                /* §8.4.2: differential encoder initialized with final symbol of TRN1d */
+                s->diff_enc = sign;
+                s->jd_bit_pos = 0;
+                /* Scrambler continues from TRN1d into Jd (not reinitialized) */
+            }
+            return v90_pcm_signed(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_JD:
+        /* §8.4.2: Jd bits are scrambled and differentially encoded,
+         * transmitted as sign of U_INFO PCM codeword.
+         * §9.3.1.4: Sent after TRN1d */
+        {
+            int bit = v90_get_jd_bit(s);
+            int scrambled = v90_scramble_bit(&s->scrambler, bit);
+            /* Differential encoding: sign = scrambled XOR previous sign */
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            if (s->sample_count >= V90_JD_LEN) {
+                fprintf(stderr, "[V90] Phase 3: Jd complete (%d symbols), starting J'd\n",
+                        s->sample_count);
+                s->tx_phase = V90_TX_JD_PRIME;
+                s->sample_count = 0;
+            }
+            return v90_pcm_signed(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_JD_PRIME:
+        /* §8.4.3: J'd = 12 scrambled zeros as sign of U_INFO */
+        {
+            int scrambled = v90_scramble_bit(&s->scrambler, 0);
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            if (s->sample_count >= 12) {
+                fprintf(stderr, "[V90] Phase 3: J'd complete, entering Phase 4\n");
                 s->tx_phase = V90_TX_PHASE4;
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
@@ -445,7 +451,7 @@ v90_tx_phase_t v90_get_tx_phase(v90_state_t *s)
 
 bool v90_phase3_active(v90_state_t *s)
 {
-    return s->tx_phase >= V90_TX_JD && s->tx_phase <= V90_TX_TRN1D;
+    return s->tx_phase >= V90_TX_SD && s->tx_phase <= V90_TX_JD_PRIME;
 }
 
 void v90_start_phase3(v90_state_t *s, int u_info)
@@ -456,21 +462,19 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     fprintf(stderr, "[V90] Starting Phase 3 TX (U_INFO=%d, law=%s)\n",
             s->u_info, s->law == V90_LAW_ALAW ? "A-law" : "u-law");
 
-    /* Build Jd frame */
+    /* Build Jd frame (used later after TRN1d) */
     v90_build_jd(s);
 
-    /* Initialize scrambler and differential encoder for Jd.
-     * §8.4.2: differential encoder initialized with final symbol of TRN1d.
-     * Since we haven't sent TRN1d yet, initialize to 0.
-     * Actually, Jd comes BEFORE TRN1d. The scrambler is initialized to zero. */
-    v90_scrambler_init(&s->scrambler);
-    s->diff_enc = 0;
-    s->jd_bit_pos = 0;
+    /* V.90 §9.3.1.3: After receiving analog Ja, send Sd first.
+     * Sd does not use scrambler or differential encoder.
+     * Scrambler is initialized to zero for TRN1d (done at Sd→S̄d→TRN1d transition). */
     s->sample_count = 0;
     s->rep_count = 0;
+    s->diff_enc = 0;
+    s->jd_bit_pos = 0;
     s->phase4_hold_logged = false;
 
-    s->tx_phase = V90_TX_JD;
+    s->tx_phase = V90_TX_SD;
 }
 
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)

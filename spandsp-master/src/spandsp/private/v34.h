@@ -469,6 +469,7 @@ typedef struct
     const conv_encode_table_t *conv_encode_table;
 
     bool info0_acknowledgement;
+    int info0_retry_count;
 
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */

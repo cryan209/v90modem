@@ -25,14 +25,15 @@ typedef enum {
     V90_LAW_ALAW = 1
 } v90_law_t;
 
-/* V.90 Phase 3/4 TX sub-states for the digital modem */
+/* V.90 Phase 3/4 TX sub-states for the digital modem.
+ * Order matches V.90 §9.3.1: Sd → S̄d → TRN1d → Jd → J'd → Phase 4 */
 typedef enum {
     V90_TX_PHASE2,        /* SpanDSP V.34 handles INFO exchange */
-    V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
-    V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
     V90_TX_SD,            /* Sending Sd — 64 reps of {+W,+0,+W,-W,-0,-W} */
     V90_TX_SD_BAR,        /* Sending S̄d — 8 reps of {-W,-0,-W,+W,+0,+W} */
     V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
+    V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
+    V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
     V90_TX_PHASE4,        /* Phase 4 (B1d, TRN2d, MP, CP exchange) */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;

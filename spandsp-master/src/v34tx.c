@@ -1809,12 +1809,20 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             && !s->tx.calling_party
             && s->tx.duplex)
         {
-            if (s->rx.received_event == V34_EVENT_INFO0_OK
-                && !s->tx.info0_acknowledgement)
+            if (s->rx.received_event == V34_EVENT_INFO0_OK)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: INFO0a received OK, setting INFO0d acknowledgement bit and repeating INFO0d\n");
-                s->tx.info0_acknowledgement = true;
+                if (!s->tx.info0_acknowledgement)
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: INFO0a received OK, setting INFO0d acknowledgement bit and repeating INFO0d\n");
+                    s->tx.info0_acknowledgement = true;
+                }
+                else
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: INFO0a received again (ack=%d), checking exit condition\n",
+                             s->rx.info0_acknowledgement);
+                }
                 v90_arm_tone_a_detection(s, "INFO0a received during recovery");
                 s->rx.received_event = V34_EVENT_NONE;
             }
@@ -1830,7 +1838,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                 const char *reason;
 
                 if (s->rx.info0_acknowledgement)
-                    reason = "peer acknowledged INFO0a";
+                    reason = "peer acknowledged INFO0d";
                 else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
                     reason = "Tone A reversal detected after INFO0a";
                 else
@@ -1840,7 +1848,24 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             else if (s->tx.info0_acknowledgement
                      || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
             {
-                info0_baud_init(s);
+                s->tx.info0_retry_count++;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: INFO0d retry %d (rx_event=%d, rx_stage=%d, rx_ack=%d, rx_info0=%d, pers2=%d)\n",
+                         s->tx.info0_retry_count,
+                         s->rx.received_event,
+                         s->rx.stage,
+                         s->rx.info0_acknowledgement,
+                         s->rx.info0_received,
+                         s->rx.persistence2);
+                if (s->tx.info0_retry_count >= 10 && s->tx.info0_acknowledgement && s->rx.info0_received)
+                {
+                    /* Guard timer: we've sent INFO0d with ack 10+ times, force transition */
+                    v90_wait_rx_l2_init(s, "INFO0d retry guard timer");
+                }
+                else
+                {
+                    info0_baud_init(s);
+                }
             }
             else
             {
@@ -2099,11 +2124,10 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_V90_WAIT_TONE_A_REV:
-        /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase reversal from analog.
-           Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6) */
-        if (s->rx.received_event == V34_EVENT_TONE_SEEN
-            ||
-            s->rx.received_event == V34_EVENT_REVERSAL_1
+        /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase REVERSAL from analog.
+           Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6).
+           TONE_SEEN means Tone A is present (not a reversal) — must wait for REVERSAL_1. */
+        if (s->rx.received_event == V34_EVENT_REVERSAL_1
             ||
             ++s->tx.tone_duration >= 600)
         {
@@ -2148,37 +2172,42 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
     /* Calling side */
     switch (s->tx.stage)
     {
-    case V34_TX_STAGE_FIRST_B:
     case V34_TX_STAGE_V90_PHASE2_B:
-        /* Send pure tone. For the V.90 digital answerer this is the initial
-           Tone B window after INFO0d (§9.2.1.1.1). */
-        if (s->tx.v90_mode
-            && !s->tx.calling_party
-            && s->tx.duplex)
+        /* V.90 digital answerer: Tone B window after INFO0d (§9.2.1.1.1). */
+        if (++s->tx.tone_duration % 600 == 0)
         {
-            if (s->rx.received_event == V34_EVENT_INFO0_OK)
-            {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
-                s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
-                s->rx.received_event = V34_EVENT_NONE;
-            }
-            else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
-            {
-                /* V.90 §9.2.1.2.1: if Tone A is detected before INFO0a,
-                   repeatedly send INFO0d sequences. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: Tone A detected before INFO0a, repeating INFO0d per 9.2.1.2.1\n");
-                info0_baud_init(s);
-            }
-            else if (s->rx.received_event == V34_EVENT_INFO0_BAD)
-            {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: bad INFO0a during initial Tone B, repeating INFO0d\n");
-                info0_baud_init(s);
-            }
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90 PHASE2_B: baud=%d rx_event=%d rx_stage=%d sig=%d pers1=%d pers2=%d demod=%d\n",
+                     s->tx.tone_duration,
+                     s->rx.received_event, s->rx.stage,
+                     s->rx.signal_present, s->rx.persistence1,
+                     s->rx.persistence2, s->rx.current_demodulator);
         }
-        else if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
+            s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+            s->rx.received_event = V34_EVENT_NONE;
+        }
+        else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
+        {
+            /* V.90 §9.2.1.2.1: if Tone A is detected before INFO0a,
+               repeatedly send INFO0d sequences. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: Tone A detected before INFO0a, repeating INFO0d per 9.2.1.2.1\n");
+            info0_baud_init(s);
+        }
+        else if (s->rx.received_event == V34_EVENT_INFO0_BAD)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: bad INFO0a during initial Tone B, repeating INFO0d\n");
+            info0_baud_init(s);
+        }
+        break;
+    case V34_TX_STAGE_FIRST_B:
+        /* Send pure tone (V.34 answerer side). */
+        if (s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             s->tx.stage = V34_TX_STAGE_FIRST_B_INFO_SEEN;
         }
@@ -2234,6 +2263,16 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             /* Move on to sending silence */
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_FIRST_B_SILENCE;
+            if (s->tx.v90_mode)
+            {
+                /* V.90: clear stale REVERSAL_1 from first exchange so we wait
+                   for the actual second Tone A reversal. Keep persistence intact
+                   so we don't miss a reversal that arrives before re-detecting Tone A. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: entering FIRST_B_SILENCE, clearing event (was %d) for second A reversal\n",
+                         s->rx.received_event);
+                s->rx.received_event = V34_EVENT_NONE;
+            }
         }
         /*endif*/
         break;
@@ -2244,6 +2283,18 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             /* Second reversal seen. We now have the round trip timed */
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
+        }
+        else if (s->tx.v90_mode
+                 &&
+                 (s->rx.received_event == V34_EVENT_INFO0_OK
+                  ||
+                  s->rx.received_event == V34_EVENT_INFO0_BAD))
+        {
+            /* V.90: the analog modem's Tone A carries INFO0a data.  The info_rx
+               demodulator may decode another INFO0a frame and overwrite the event
+               before the reversal detector can set REVERSAL_1.  Consume the stale
+               INFO0 event so the next reversal can be recorded. */
+            s->rx.received_event = V34_EVENT_NONE;
         }
         else if (s->tx.tone_duration == (1200 - 30))
         {
@@ -2261,15 +2312,49 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_SECOND_B;
+            if (s->tx.v90_mode)
+            {
+                /* V.90: clear stale L2_SEEN so Tone A reversal detection starts fresh */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: entering SECOND_B, clearing L2_SEEN for fresh Tone A reversal detection\n");
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                s->rx.current_demodulator = V34_MODULATION_TONES;
+                s->rx.stage = V34_RX_STAGE_TONE_A;
+            }
         }
         /*endif*/
         return zero;
     case V34_TX_STAGE_SECOND_B:
-        /* Send pure tone (V.34/11.2.1.1.5) */
-        if (++s->tx.tone_duration >= 100)
-        //if (s->rx.received_event == V34_EVENT_REVERSAL_3)
+        /* Send pure tone (V.34/11.2.1.1.5, V.90/9.2.1.1.6) */
+        ++s->tx.tone_duration;
+        if (s->tx.v90_mode)
         {
-            /* Second reversal seen - continue sending pure tone for 40+-1ms */
+            /* V.90 §9.2.1.1.6: wait for Tone A phase reversal, then delay 40ms.
+               After clearing events at SECOND_B entry, TONE_SEEN fires first,
+               then REVERSAL_1 on the actual reversal. */
+            if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: Tone A reversal detected at SECOND_B after %d bauds (event=%d), delaying 40ms\n",
+                         s->tx.tone_duration, s->rx.received_event);
+                s->tx.tone_duration = 1;
+                s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
+            }
+            else if (s->tx.tone_duration >= 4200)
+            {
+                /* Timeout: 550ms + generous RTD margin (~7s at 600 baud) */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: Tone A reversal timeout at SECOND_B after %d bauds\n",
+                         s->tx.tone_duration);
+                s->tx.tone_duration = 1;
+                s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
+            }
+        }
+        else if (s->tx.tone_duration >= 100)
+        {
+            /* V.34: fixed timing */
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
         }
@@ -2468,6 +2553,7 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
                    target_bits active. */
                 s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
                 s->tx.stage = V34_TX_STAGE_V90_PHASE2_B;
+                s->tx.tone_duration = 0;
                 v90_prime_info0a_tone_a_rx(s, "after INFO0d");
             }
             else
@@ -2838,12 +2924,14 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_INFO1A;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
-    /* Keep RX on CC demod, but stay in Tone A stage so we can detect either
-       INFO1a sync or Tone A/reversal as required by V.90 recovery. */
+    /* In V.90, after the second reversal exchange the analog modem sends
+       Tone A carrying INFO1a directly — there is no three-reversal sequence.
+       Set RX straight to INFO1A stage so info_rx() decodes the 70-bit format. */
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.target_bits = 70 - (4 + 8 + 4);
     s->rx.bit_count = 0;
-    s->rx.stage = V34_RX_STAGE_TONE_A;
+    s->rx.info_rx_bits = 0;
+    s->rx.stage = V34_RX_STAGE_INFO1A;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
@@ -4860,6 +4948,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.baud_rate = baud_rate;
     s->tx.high_carrier = high_carrier;
     s->tx.info0_acknowledgement = false;
+    s->tx.info0_retry_count = 0;
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
 

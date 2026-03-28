@@ -154,7 +154,7 @@
 #define PHASE3_J_PROGRESS_LOG_INTERVAL  32
 #define PHASE4_J_PROGRESS_LOG_INTERVAL  32
 #define V34_DEBUG_IQ_LOG                0
-#define V34_DEBUG_INFO_RX_DIAG          0
+#define V34_DEBUG_INFO_RX_DIAG          1
 #define V34_DEBUG_MP_DIBIT_DIST         0
 #define PHASE4_MP_NOLOCK_LOG_INTERVAL   800
 #define PHASE4_MP_BAUD_LOG_INTERVAL     400
@@ -2934,7 +2934,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                         {
                             s->stage = (s->calling_party)  ?   V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B;
                         }
-                        s->received_event = V34_EVENT_INFO0_OK;
+                        /* Only set INFO0_OK on the first reception. Repeated
+                           INFO0a decodes during V.90 FIRST_B_SILENCE would overwrite
+                           REVERSAL_1 events from the tone handler, preventing the
+                           TX from detecting the second Tone A reversal. */
+                        if (!s->info0_received)
+                            s->received_event = V34_EVENT_INFO0_OK;
                         s->info0_received = true;
                     }
                     break;
