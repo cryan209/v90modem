@@ -5,7 +5,10 @@ PJPROJ_DIR   = /opt/homebrew/Cellar/pjproject/2.16
 ARCH_SUFFIX  = aarch64-apple-darwin24.6.0
 
 # Local SpanDSP 3.0.0 build (with V.34 support)
-SPANDSP_DIR  = spandsp-master/src
+SPANDSP_ROOT = spandsp-master
+SPANDSP_DIR  = $(SPANDSP_ROOT)/src
+SPANDSP_LIB  = $(SPANDSP_DIR)/.libs/libspandsp.a
+SPANDSP_MAKE = $(SPANDSP_ROOT)/Makefile
 
 CFLAGS = -Wall -Wextra -O2 -g \
          -I$(PJPROJ_DIR)/include \
@@ -36,7 +39,7 @@ LDFLAGS = \
   -lilbccodec-$(ARCH_SUFFIX) \
   -lg7221codec-$(ARCH_SUFFIX) \
   -lwebrtc-$(ARCH_SUFFIX) \
-  $(SPANDSP_DIR)/.libs/libspandsp.a \
+  $(SPANDSP_LIB) \
   -L/opt/homebrew/lib \
   -ltiff \
   -lssl -lcrypto \
@@ -56,12 +59,15 @@ SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 
-.PHONY: all clean
+.PHONY: all clean spandsp
 
-all: $(TARGET)
+all: spandsp $(TARGET)
 
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) $(SPANDSP_LIB)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+
+$(SPANDSP_LIB): $(SPANDSP_MAKE)
+	$(MAKE) -C $(SPANDSP_ROOT)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -71,6 +77,9 @@ modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
+
+spandsp:
+	$(MAKE) -C $(SPANDSP_ROOT)
 
 clean:
 	rm -f $(OBJS) $(TARGET)

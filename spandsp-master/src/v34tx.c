@@ -2930,7 +2930,7 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.target_bits = 70 - (4 + 8 + 4);
     s->rx.bit_count = 0;
-    s->rx.info_rx_bits = 0;
+    s->rx.bitstream = 0;
     s->rx.stage = V34_RX_STAGE_INFO1A;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;

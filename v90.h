@@ -19,6 +19,17 @@
 /* V.90 downstream encoder state */
 typedef struct v90_state_s v90_state_t;
 
+typedef struct {
+    uint8_t n;
+    uint8_t lsp;
+    uint8_t ltp;
+    uint8_t sp[128];
+    uint8_t tp[128];
+    uint8_t h[8];
+    uint8_t ref[8];
+    uint8_t train_u[255];
+} v90_dil_desc_t;
+
 /* PCM law selection */
 typedef enum {
     V90_LAW_ULAW = 0,
@@ -83,6 +94,12 @@ bool v90_phase3_active(v90_state_t *s);
  * u_info is the U_INFO Ucode from the analog modem's INFO1a.
  */
 void v90_start_phase3(v90_state_t *s, int u_info);
+
+/*
+ * Configure the DIL descriptor requested by the far-end analogue modem.
+ * A descriptor with n == 0 disables DIL transmission.
+ */
+void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc);
 
 /*
  * Notify the V.90 Phase 3 state machine that the far-end analogue modem's

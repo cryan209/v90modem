@@ -33,6 +33,9 @@
  * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
 #define V90_TRN1D_LEN   2046
 
+#define V90_DIL_MAX_PAT_BITS 128
+#define V90_DIL_MAX_SEGMENTS 255
+
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
 static const uint8_t v90_ucode_to_alaw[128] = {
@@ -98,10 +101,16 @@ struct v90_state_s {
     bool             jd_terminate_requested;
     bool             training_complete;
     bool             dil_requested;
+    bool             dil_terminate_requested;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
     int              jd_bit_pos;    /* Current bit position in Jd frame */
+
+    /* DIL descriptor/state */
+    v90_dil_desc_t   dil;
+    int              dil_segment_index;
+    int              dil_pos_in_segment;
 
     /* Downstream PCM encoder state (data mode) */
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
@@ -236,6 +245,85 @@ static int v90_get_jd_bit(v90_state_t *s)
     return bit;
 }
 
+static inline int v90_clamp_positive(int v, int max_v)
+{
+    if (v < 1)
+        return 1;
+    if (v > max_v)
+        return max_v;
+    return v;
+}
+
+static inline int v90_dil_uchord_index(int training_ucode)
+{
+    int idx = (training_ucode >> 4);
+    if (idx < 0)
+        idx = 0;
+    if (idx > 7)
+        idx = 7;
+    return idx;
+}
+
+static void v90_dil_reset_tx(v90_state_t *s)
+{
+    s->dil_segment_index = 0;
+    s->dil_pos_in_segment = 0;
+    s->dil_terminate_requested = false;
+}
+
+static int16_t v90_dil_sample(v90_state_t *s)
+{
+    int seg_idx;
+    int n;
+    int training_ucode;
+    int uchord_idx;
+    int lsp;
+    int ltp;
+    int seg_len;
+    int pos;
+    int sp_bit;
+    int tp_bit;
+    int ucode;
+
+    n = s->dil.n;
+    if (n <= 0) {
+        s->tx_phase = V90_TX_PHASE4;
+        s->sample_count = 0;
+        s->phase4_hold_logged = false;
+        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+    }
+
+    seg_idx = s->dil_segment_index % n;
+    training_ucode = s->dil.train_u[seg_idx] & 0x7F;
+    uchord_idx = v90_dil_uchord_index(training_ucode);
+    lsp = v90_clamp_positive(s->dil.lsp, V90_DIL_MAX_PAT_BITS);
+    ltp = v90_clamp_positive(s->dil.ltp, V90_DIL_MAX_PAT_BITS);
+    seg_len = (int)(s->dil.h[uchord_idx] + 1) * 6;
+    pos = s->dil_pos_in_segment;
+
+    sp_bit = s->dil.sp[pos % lsp] ? 1 : 0;
+    tp_bit = s->dil.tp[pos % ltp] ? 1 : 0;
+    ucode = tp_bit ? training_ucode : (s->dil.ref[uchord_idx] & 0x7F);
+
+    s->sample_count++;
+    s->dil_pos_in_segment++;
+    if (s->dil_pos_in_segment >= seg_len) {
+        s->dil_pos_in_segment = 0;
+        s->dil_segment_index++;
+        if (s->dil_terminate_requested) {
+            fprintf(stderr, "[V90] Phase 3: DIL termination requested, completed segment %d/%d and entering Phase 4\n",
+                    seg_idx + 1, n);
+            s->tx_phase = V90_TX_PHASE4;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+        } else if ((s->dil_segment_index % n) == 0) {
+            fprintf(stderr, "[V90] Phase 3: completed one full DIL cycle (%d segments), repeating\n", n);
+        }
+    }
+
+    return v90_pcm_signed(s->law, ucode, sp_bit);
+}
+
 /* Generate one Phase 3 TX sample */
 static int16_t v90_phase3_sample(v90_state_t *s)
 {
@@ -362,14 +450,12 @@ static int16_t v90_phase3_sample(v90_state_t *s)
         }
 
     case V90_TX_DIL:
-        /* DIL is not implemented yet. Keep the branch point explicit so
-           Phase 3 control flow can distinguish J'd termination from Phase 4. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] DIL placeholder: requested DIL is not implemented, holding idle PCM until Phase 4 work lands\n");
+            fprintf(stderr, "[V90] Phase 3: sending DIL (%d segments, LSP=%u, LTP=%u)\n",
+                    s->dil.n, s->dil.lsp, s->dil.ltp);
             s->phase4_hold_logged = true;
         }
-        s->sample_count++;
-        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        return v90_dil_sample(s);
 
     case V90_TX_PHASE4:
         /* Placeholder until real Phase 4 exists:
@@ -410,6 +496,9 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_requested = false;
+    s->dil_terminate_requested = false;
+    memset(&s->dil, 0, sizeof(s->dil));
+    v90_dil_reset_tx(s);
 
     return s;
 }
@@ -436,6 +525,9 @@ v90_state_t *v90_init(int baud_rate,
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_requested = false;
+    s->dil_terminate_requested = false;
+    memset(&s->dil, 0, sizeof(s->dil));
+    v90_dil_reset_tx(s);
 
     s->owns_v34 = true;
     s->v34 = v34_init(NULL, baud_rate, bit_rate, calling_party, true,
@@ -497,8 +589,34 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->phase4_hold_logged = false;
     s->jd_terminate_requested = false;
     s->training_complete = false;
+    s->dil_terminate_requested = false;
+    v90_dil_reset_tx(s);
 
     s->tx_phase = V90_TX_SD;
+}
+
+void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
+{
+    if (!s)
+        return;
+
+    memset(&s->dil, 0, sizeof(s->dil));
+    s->dil_requested = false;
+    s->dil_terminate_requested = false;
+    v90_dil_reset_tx(s);
+
+    if (!desc)
+        return;
+
+    s->dil.n = desc->n;
+    s->dil.lsp = (uint8_t)v90_clamp_positive(desc->lsp, V90_DIL_MAX_PAT_BITS);
+    s->dil.ltp = (uint8_t)v90_clamp_positive(desc->ltp, V90_DIL_MAX_PAT_BITS);
+    memcpy(s->dil.sp, desc->sp, sizeof(s->dil.sp));
+    memcpy(s->dil.tp, desc->tp, sizeof(s->dil.tp));
+    memcpy(s->dil.h, desc->h, sizeof(s->dil.h));
+    memcpy(s->dil.ref, desc->ref, sizeof(s->dil.ref));
+    memcpy(s->dil.train_u, desc->train_u, sizeof(s->dil.train_u));
+    s->dil_requested = (s->dil.n > 0);
 }
 
 void v90_notify_s_detected(v90_state_t *s)
@@ -508,6 +626,9 @@ void v90_notify_s_detected(v90_state_t *s)
     if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
         fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
         s->jd_terminate_requested = true;
+    } else if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
+        fprintf(stderr, "[V90] Phase 3: far-end S detected during DIL, terminating at the next segment boundary\n");
+        s->dil_terminate_requested = true;
     }
 }
 
