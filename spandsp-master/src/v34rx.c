@@ -3245,19 +3245,11 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (v90_info1a_search)
                     info_log_candidate_diag(s, s->info_buf, s->target_bits, s->crc);
                 /*endif*/
-                if (v90_info1a_search
-                    && info_has_valid_prefix_crc(s->info_buf, s->target_bits, 33, &prefix_crc))
-                {
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - INFO1a candidate contains a valid 33-bit INFO0a prefix (crc=0x%04x); treating it as repeated INFO0a, not INFO1a\n",
-                             prefix_crc);
-                    process_rx_info0(s, s->info_buf);
-                    s->v90_repeated_info0a_pending = true;
-                    s->received_event = V34_EVENT_INFO0_OK;
-                    s->bit_count = 0;
-                    return;
-                }
-                /*endif*/
+                /* Try INFO1a boundary/slip recovery before the INFO0a prefix check.
+                   Once INFO1d has been sent, the analog modem should be sending INFO1a,
+                   so prioritise INFO1a decoding.  The INFO0a prefix check is only a
+                   fallback when we haven't yet sent INFO1d (analog modem still in the
+                   INFO0a phase). */
                 if (v90_info1a_search
                     && try_info_boundary_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_shift, NULL))
                 {
@@ -3287,6 +3279,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              "Rx - V.90: recovered INFO1a via local-slip recovery, switching to Phase 3 primary channel RX\n");
                     s->current_demodulator = V34_MODULATION_V34;
                     s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    s->bit_count = 0;
+                    return;
+                }
+                /*endif*/
+                if (v90_info1a_search
+                    && !s->v90_info1d_sent
+                    && info_has_valid_prefix_crc(s->info_buf, s->target_bits, 33, &prefix_crc))
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - INFO1a candidate contains a valid 33-bit INFO0a prefix (crc=0x%04x); treating it as repeated INFO0a, not INFO1a\n",
+                             prefix_crc);
+                    process_rx_info0(s, s->info_buf);
+                    s->v90_repeated_info0a_pending = true;
+                    s->received_event = V34_EVENT_INFO0_OK;
                     s->bit_count = 0;
                     return;
                 }
@@ -7702,6 +7708,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
 
     s->rx.info0_received = false;
     s->rx.v90_repeated_info0a_pending = false;
+    s->rx.v90_info1d_sent = false;
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */
     s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));

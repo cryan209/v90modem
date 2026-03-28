@@ -797,6 +797,9 @@ typedef struct
     /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
                during the INFO1a wait window. */
     bool v90_repeated_info0a_pending;
+    /*! \brief Set by TX after INFO1d has been sent; tells RX to prioritise
+               INFO1a decoding over the INFO0a prefix check. */
+    bool v90_info1d_sent;
 
     union
     {

@@ -2202,16 +2202,26 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->rx.received_event = V34_EVENT_NONE;
         }
         /*endif*/
+        ++s->tx.tone_duration;
         if (s->rx.received_event == V34_EVENT_REVERSAL_1
             ||
-            ++s->tx.tone_duration >= 600)
+            (s->rx.received_event == V34_EVENT_TONE_SEEN && s->tx.tone_duration >= 30)
+            ||
+            s->tx.tone_duration >= 600)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
-                     (s->tx.tone_duration >= 600) ? "timeout" : "detected",
+                     (s->tx.tone_duration >= 600) ? "timeout"
+                     : (s->rx.received_event == V34_EVENT_REVERSAL_1) ? "reversal detected"
+                     : "detected (reversal likely missed during L1/L2)",
                      s->rx.received_event, s->tx.tone_duration);
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_V90_B_REV_DELAY;
+        }
+        else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
+        {
+            /* Tone A present but guard period not yet met — clear and keep waiting */
+            s->rx.received_event = V34_EVENT_NONE;
         }
         /*endif*/
         break;
@@ -2897,17 +2907,18 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     }
     /*endif*/
 
+    ++s->tx.tone_duration;
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
         ||
-        ++s->tx.tone_duration >= 600)
+        s->tx.tone_duration >= 200)
     {
-        if (s->tx.tone_duration < V90_WAIT_TONE_A_GUARD_BAUDS
+        if (s->tx.tone_duration < 30
             && (s->rx.received_event == V34_EVENT_TONE_SEEN
                 || s->rx.received_event == V34_EVENT_REVERSAL_1))
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: ignoring early Tone A indication before INFO1d (event=%d) at %d bauds; staying in Tone A wait guard window\n",
+                     "Tx - V.90: ignoring early Tone A indication before INFO1d (event=%d) at %d bauds\n",
                      s->rx.received_event,
                      s->tx.tone_duration);
             s->rx.received_event = V34_EVENT_NONE;
@@ -2916,10 +2927,10 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
             return zero;
         }
         /*endif*/
-        /* Tone A detected (or timeout ~1s) — proceed to INFO1d */
+        /* Tone A detected (or timeout) — proceed to INFO1d */
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %s (event=%d) after %d bauds, sending INFO1d\n",
-                 (s->tx.tone_duration >= 600) ? "Timeout" : "RX event",
+                 (s->tx.tone_duration >= 200) ? "Timeout" : "RX event",
                  s->rx.received_event,
                  s->tx.tone_duration);
         info1_baud_init(s);
@@ -3007,6 +3018,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.info0_retry_count = 0;
         s->tx.tone_duration = 0;
         s->rx.v90_repeated_info0a_pending = false;
+        s->rx.v90_info1d_sent = false;
         s->rx.received_event = V34_EVENT_NONE;
         info0_baud_init(s);
         return zero;
@@ -3127,6 +3139,7 @@ static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
              preserve_tone_a_event ? " (preserving prior Tone A indication)" : "");
     s->tx.v90_phase2_info0_recovery_loops = 0;
     s->tx.tone_duration = 0;
+    s->rx.v90_info1d_sent = false;
     /* Use CC modulation so getbaud is called each baud — outputs silence via zero return */
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A;
@@ -3176,6 +3189,7 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->rx.bitstream = 0;
     s->rx.stage = V34_RX_STAGE_TONE_A;
     s->rx.v90_repeated_info0a_pending = false;
+    s->rx.v90_info1d_sent = true;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
@@ -4189,9 +4203,20 @@ static void phase4_wait_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
     s->primary_channel_active = true;
+    s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
     s->tx.tone_duration = 0;
+    s->tx.diff = 0;
     s->tx.current_getbaud = get_phase4_baud;
+    /* External V.90 Phase 3 may hand us back TX while the native V.34 side is
+       still parked on silence/control-channel state. Re-prime the V.34 TX
+       pulse-shaping path so Phase 4 S/S-bar/TRN starts on the actual primary
+       channel instead of remaining in the old SILENCE modulator. */
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.baud_phase = 0;
+    s->tx.rrc_filter_step = 0;
+    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
 
     /* Phase 4 answerer RX conditioning (V.34 11.4.1.2.1/11.4.1.2.2):
        while sending S, condition receiver to detect caller J' followed by TRN,
