@@ -2127,6 +2127,18 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase REVERSAL from analog.
            Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6).
            TONE_SEEN means Tone A is present (not a reversal) — must wait for REVERSAL_1. */
+        if (s->rx.received_event == V34_EVENT_INFO0_OK
+            ||  s->rx.received_event == V34_EVENT_INFO0_BAD)
+        {
+            /* Some peers keep leaking INFO0a decodes into the later Tone A
+               window. At this point the L1/L2 exchange is already complete, so
+               treat them as stale and continue waiting for the Tone A reversal. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: ignoring stale %s while waiting for Tone A reversal\n",
+                     (s->rx.received_event == V34_EVENT_INFO0_OK) ? "INFO0a" : "bad INFO0a");
+            s->rx.received_event = V34_EVENT_NONE;
+        }
+        /*endif*/
         if (s->rx.received_event == V34_EVENT_REVERSAL_1
             ||
             ++s->tx.tone_duration >= 600)
@@ -2190,13 +2202,27 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
             s->rx.received_event = V34_EVENT_NONE;
         }
+        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        {
+            /* Some peers assert Tone A and its first reversal before we manage
+               to decode a clean INFO0a frame. Treat the observed reversal as
+               sufficient Phase 2 progress and continue instead of looping on
+               INFO0d retries forever. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: Tone A reversal arrived before clean INFO0a, continuing Phase 2 using reversal fallback\n");
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
+        }
         else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
         {
-            /* V.90 §9.2.1.2.1: if Tone A is detected before INFO0a,
-               repeatedly send INFO0d sequences. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: Tone A detected before INFO0a, repeating INFO0d per 9.2.1.2.1\n");
-            info0_baud_init(s);
+            /* A number of peers assert Tone A early; keep Tone B running long
+               enough for INFO0a or the first reversal to settle instead of
+               immediately dropping back into INFO0d retries. */
+            if (s->tx.tone_duration == 1 || s->tx.tone_duration % 120 == 0)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: Tone A detected before clean INFO0a, holding Tone B and waiting for INFO0a or reversal\n");
+            }
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD)
         {
@@ -2758,12 +2784,21 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_INFO0_OK)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: repeated INFO0a received while waiting for Tone A before INFO1d, returning to INFO0d recovery with acknowledgement\n");
-        s->tx.info0_acknowledgement = true;
-        s->tx.v90_info1a_fast_retries = 0;
-        s->tx.v90_info1a_total_retries = 0;
-        v90_arm_tone_a_detection(s, "repeated INFO0a received before INFO1d");
-        info0_baud_init(s);
+                 "Tx - V.90: ignoring stale repeated INFO0a while waiting for Tone A before INFO1d\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        return zero;
+    }
+    /*endif*/
+
+    if (s->rx.received_event == V34_EVENT_INFO0_BAD)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: ignoring stale bad INFO0a while waiting for Tone A before INFO1d\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
         return zero;
     }
     /*endif*/
@@ -2841,6 +2876,16 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.stage = V34_TX_STAGE_FIRST_S;
         s->rx.received_event = V34_EVENT_NONE;
         return zero;
+    }
+    /*endif*/
+
+    if (s->rx.received_event == V34_EVENT_INFO1_BAD)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFO1a candidate failed CRC at %d bauds, continuing to wait\n",
+                 s->tx.tone_duration);
+        s->rx.received_event = V34_EVENT_NONE;
+        goto wait_timeout_check;
     }
     /*endif*/
 
@@ -2925,13 +2970,16 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->tx.stage = V34_TX_STAGE_V90_WAIT_INFO1A;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
     /* In V.90, after the second reversal exchange the analog modem sends
-       Tone A carrying INFO1a directly — there is no three-reversal sequence.
-       Set RX straight to INFO1A stage so info_rx() decodes the 70-bit format. */
+       Tone A carrying INFO1a directly. Keep the RX in TONE_A while changing
+       the target length to INFO1a so we can still observe fresh Tone A /
+       reversal events from peers that reassert the tone before the INFO1a
+       sync word settles, while info_rx() continues searching for the 70-bit
+       INFO1a payload. */
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.target_bits = 70 - (4 + 8 + 4);
     s->rx.bit_count = 0;
     s->rx.bitstream = 0;
-    s->rx.stage = V34_RX_STAGE_INFO1A;
+    s->rx.stage = V34_RX_STAGE_TONE_A;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;

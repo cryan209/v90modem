@@ -779,6 +779,12 @@ typedef struct
     int low_samples;
     /*! \brief A highest magnitude sample seen. */
     int16_t high_sample;
+    /*! \brief Most recent power sample seen by info_rx(), for candidate diagnostics. */
+    int32_t last_info_rx_power;
+    /*! \brief Peak recent power sample seen by info_rx(), for candidate diagnostics. */
+    int32_t last_info_rx_power_peak;
+    /*! \brief Sample time of the last info_rx() power-peak reset. */
+    span_sample_timer_t last_info_rx_power_peak_reset;
 
     bool info0_acknowledgement;
 

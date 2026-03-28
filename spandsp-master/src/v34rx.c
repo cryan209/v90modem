@@ -2680,6 +2680,241 @@ static int process_rx_mph(v34_rx_state_t *s, mph_t *mph, uint8_t buf[])
 }
 /*- End of function --------------------------------------------------------*/
 
+static void info_unpack_bits(uint8_t bits[], int nbits, const uint8_t buf[])
+{
+    int i;
+
+    for (i = 0;  i < nbits;  i++)
+    {
+        uint8_t octet;
+
+        octet = bit_reverse8(buf[i >> 3]);
+        bits[i] = (octet >> (7 - (i & 7))) & 1;
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static void info_pack_bits(uint8_t buf[25], const uint8_t bits[], int nbits)
+{
+    int i;
+
+    memset(buf, 0, 25);
+    for (i = 0;  i < nbits;  i++)
+    {
+        if (bits[i])
+            buf[i >> 3] |= (1 << (i & 7));
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static uint16_t info_crc_from_bits(const uint8_t bits[], int nbits)
+{
+    uint16_t crc;
+    int i;
+
+    crc = 0xFFFF;
+    for (i = 0;  i < nbits;  i++)
+        crc = crc_itu16_bits(bits[i], 1, crc);
+    /*endfor*/
+    return crc;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void info_bits_to_str(char out[], size_t out_len, const uint8_t bits[], int nbits)
+{
+    int i;
+    size_t pos;
+
+    if (out_len == 0)
+        return;
+    /*endif*/
+    pos = 0;
+    for (i = 0;  i < nbits  &&  pos + 1 < out_len;  i++)
+        out[pos++] = bits[i] ? '1' : '0';
+    /*endfor*/
+    out[pos] = '\0';
+}
+/*- End of function --------------------------------------------------------*/
+
+static void info_log_candidate_diag(v34_rx_state_t *s, const uint8_t in[25], int nbits, uint16_t crc)
+{
+    uint8_t bits[80];
+    char prefix[33];
+    char suffix[33];
+    char full_bits[81];
+    uint16_t shift_crc[5];
+    int shift;
+    int i;
+
+    if (nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return;
+    /*endif*/
+
+    info_unpack_bits(bits, nbits, in);
+    memset(shift_crc, 0, sizeof(shift_crc));
+    for (shift = -2;  shift <= 2;  shift++)
+    {
+        uint8_t trial[80];
+
+        if (shift == 0)
+        {
+            shift_crc[shift + 2] = crc;
+            continue;
+        }
+        /*endif*/
+        for (i = 0;  i < nbits;  i++)
+        {
+            int src;
+
+            src = i + shift;
+            trial[i] = (src >= 0  &&  src < nbits)  ?  bits[src]  :  0;
+        }
+        /*endfor*/
+        shift_crc[shift + 2] = info_crc_from_bits(trial, nbits);
+    }
+    /*endfor*/
+
+    frame_bits_to_str(bits, 0, (nbits < 32) ? nbits : 32, prefix);
+    if (nbits > 32)
+        frame_bits_to_str(bits, nbits - 32, 32, suffix);
+    else
+        suffix[0] = '\0';
+    /*endif*/
+    info_bits_to_str(full_bits, sizeof(full_bits), bits, nbits);
+
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - info candidate diag: stage=%s bits=%d crc=0x%04x sig=%d pwr=%" PRId32 " peak=%" PRId32 " bit_count=%d duration=%d\n",
+             v34_rx_stage_to_str(s->stage),
+             nbits,
+             crc,
+             s->signal_present,
+             s->last_info_rx_power,
+             s->last_info_rx_power_peak,
+             s->bit_count,
+             s->duration);
+    if (nbits <= 64)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - info candidate bits=%s\n",
+                 full_bits);
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - info candidate prefix=%s suffix=%s\n",
+                 prefix,
+                 suffix);
+    }
+    /*endif*/
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - info candidate shift CRCs: -2=0x%04x -1=0x%04x 0=0x%04x +1=0x%04x +2=0x%04x\n",
+             shift_crc[0], shift_crc[1], shift_crc[2], shift_crc[3], shift_crc[4]);
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool try_info_boundary_recovery(uint8_t out[25], const uint8_t in[25], int nbits, int *shift_out, uint16_t *crc_out)
+{
+    uint8_t bits[80];
+    uint8_t trial[80];
+    int shift;
+    int i;
+
+    if (nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return false;
+    /*endif*/
+    info_unpack_bits(bits, nbits, in);
+    for (shift = -2;  shift <= 2;  shift++)
+    {
+        uint16_t crc;
+
+        if (shift == 0)
+            continue;
+        /*endif*/
+        for (i = 0;  i < nbits;  i++)
+        {
+            int src;
+
+            src = i + shift;
+            trial[i] = (src >= 0  &&  src < nbits)  ?  bits[src]  :  0;
+        }
+        /*endfor*/
+        crc = info_crc_from_bits(trial, nbits);
+        if (crc == 0)
+        {
+            info_pack_bits(out, trial, nbits);
+            if (shift_out)
+                *shift_out = shift;
+            /*endif*/
+            if (crc_out)
+                *crc_out = crc;
+            /*endif*/
+            return true;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool try_info_local_slip_recovery(uint8_t out[25], const uint8_t in[25], int nbits, int *pivot_out, int *shift_out)
+{
+    uint8_t bits[80];
+    uint8_t trial[80];
+    int pivot;
+    int shift;
+    int i;
+
+    if (nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return false;
+    /*endif*/
+    info_unpack_bits(bits, nbits, in);
+    for (pivot = 4;  pivot < nbits - 4;  pivot++)
+    {
+        for (shift = -1;  shift <= 1;  shift += 2)
+        {
+            uint16_t crc;
+
+            for (i = 0;  i < nbits;  i++)
+            {
+                int src;
+
+                if (i < pivot)
+                {
+                    src = i;
+                }
+                else
+                {
+                    src = i + shift;
+                }
+                /*endif*/
+                trial[i] = (src >= 0  &&  src < nbits)  ?  bits[src]  :  0;
+            }
+            /*endfor*/
+            crc = info_crc_from_bits(trial, nbits);
+            if (crc == 0)
+            {
+                info_pack_bits(out, trial, nbits);
+                if (pivot_out)
+                    *pivot_out = pivot;
+                /*endif*/
+                if (shift_out)
+                    *shift_out = shift;
+                /*endif*/
+                return true;
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int put_info_bit_count = 0;
 
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
@@ -2971,6 +3206,9 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             else
             {
                 int v90_info1a_search;
+                uint8_t recovered_info[25];
+                int recovery_shift;
+                int recovery_pivot;
 
                 v90_info1a_search = (s->v90_mode
                                      && !s->calling_party
@@ -2978,6 +3216,42 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                      && (s->stage == V34_RX_STAGE_TONE_A
                                          || s->stage == V34_RX_STAGE_TONE_B
                                          || s->stage == V34_RX_STAGE_INFO1A));
+                if (v90_info1a_search)
+                    info_log_candidate_diag(s, s->info_buf, s->target_bits, s->crc);
+                /*endif*/
+                if (v90_info1a_search
+                    && try_info_boundary_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_shift, NULL))
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - INFO1a boundary recovery succeeded with %d-bit shift\n",
+                             recovery_shift);
+                    process_rx_info1a(s, &s->info1a, recovered_info);
+                    s->received_event = V34_EVENT_INFO1_OK;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90: recovered INFO1a, switching to Phase 3 primary channel RX\n");
+                    s->current_demodulator = V34_MODULATION_V34;
+                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    s->bit_count = 0;
+                    return;
+                }
+                /*endif*/
+                if (v90_info1a_search
+                    && try_info_local_slip_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_pivot, &recovery_shift))
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - INFO1a local-slip recovery succeeded at bit %d with suffix shift %d\n",
+                             recovery_pivot,
+                             recovery_shift);
+                    process_rx_info1a(s, &s->info1a, recovered_info);
+                    s->received_event = V34_EVENT_INFO1_OK;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90: recovered INFO1a via local-slip recovery, switching to Phase 3 primary channel RX\n");
+                    s->current_demodulator = V34_MODULATION_V34;
+                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    s->bit_count = 0;
+                    return;
+                }
+                /*endif*/
                 switch (s->stage)
                 {
                 case V34_RX_STAGE_TONE_A:
@@ -3020,6 +3294,17 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     for (i = 0;  i < len;  i++)
     {
         power = power_meter_update(&s->power, amp[i]);
+        s->last_info_rx_power = power;
+        if (s->sample_time - s->last_info_rx_power_peak_reset >= 800)
+        {
+            s->last_info_rx_power_peak = power;
+            s->last_info_rx_power_peak_reset = s->sample_time;
+        }
+        else if (power > s->last_info_rx_power_peak)
+        {
+            s->last_info_rx_power_peak = power;
+        }
+        /*endif*/
         if (s->v90_mode
             && !s->calling_party
             && !s->signal_present
