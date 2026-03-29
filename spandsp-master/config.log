@@ -3516,6 +3516,7 @@ config.status:1297: creating test-data/mitel/Makefile
 config.status:1297: creating tests/Makefile
 config.status:1297: creating spandsp.pc
 config.status:1297: creating src/config.h
+config.status:1478: src/config.h is unchanged
 config.status:1526: executing depfiles commands
 config.status:1603: cd src       && sed -e '/# am--include-marker/d' Makefile         | make -f - am--depfiles
 make: Nothing to be done for 'am--depfiles'.

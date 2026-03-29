@@ -125,11 +125,17 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c v34_stubs.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test
-TEST_OBJS = vpcm_loopback_test.o v91.o vpcm_cp.o v34_stubs.o
+TEST_OBJS = vpcm_loopback_test.o v91.o vpcm_cp.o
+
+USE_V34_STUBS ?= 0
+ifeq ($(USE_V34_STUBS),1)
+SRCS += v34_stubs.c
+TEST_OBJS += v34_stubs.o
+endif
 
 .PHONY: all clean spandsp pjproject
 
@@ -156,7 +162,9 @@ data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
 v91.o:            v91.c            v91.h vpcm_cp.h
 vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
+ifeq ($(USE_V34_STUBS),1)
 v34_stubs.o:      v34_stubs.c
+endif
 vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h
 
 spandsp:

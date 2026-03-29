@@ -204,6 +204,9 @@ static const float line_probe_samples[LINE_PROBE_SAMPLES] =
 /* See V.34/10.1.3.5 */
 #define PP_REPEATS 6
 #define PP_SYMBOLS (8*PP_REPEATS)
+/* One PP pattern period is 48 symbols; the full training burst is 6 periods. */
+#define PP_PERIOD_SYMBOLS PP_SYMBOLS
+#define PP_TOTAL_SYMBOLS  (PP_PERIOD_SYMBOLS*PP_REPEATS)
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
 static const complexi16_t pp_symbols[PP_SYMBOLS] =
@@ -305,4 +308,3 @@ static const complexf_t pph_symbols[PPH_SYMBOLS] =
     {PP_SYMBOL_SCALE(-0.7071068f), PP_SYMBOL_SCALE( 0.7071068f)},   /* 135 degrees */
     {PP_SYMBOL_SCALE(-0.7071068f), PP_SYMBOL_SCALE(-0.7071068f)},   /* 225 degrees */
 };
-

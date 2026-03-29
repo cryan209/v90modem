@@ -54,8 +54,11 @@ typedef float v34_rx_shaper_t[V34_RX_PULSESHAPER_COEFF_SETS][V34_RX_FILTER_STEPS
 typedef float cc_rx_shaper_t[V34_RX_CC_PULSESHAPER_COEFF_SETS][V34_RX_FILTER_STEPS];
 #endif
 
-typedef const uint8_t conv_encode_table_t[64][16];
-typedef const uint8_t conv_decode_table_t[16][16];
+/* Generated V.34 tables currently vary in first/second dimension sizes
+ * (e.g. 16/32/64 encode states and 4 decode entries), so keep these
+ * typedefs dimension-flexible for assignment compatibility. */
+typedef const uint8_t conv_encode_table_t[][16];
+typedef const uint8_t conv_decode_table_t[][4];
 
 enum
 {
@@ -467,7 +470,7 @@ typedef struct
     uint8_t txbuf[50];
     int txbits;
     int txptr;
-    const conv_encode_table_t *conv_encode_table;
+    const uint8_t (*conv_encode_table)[16];
 
     bool info0_acknowledgement;
     int info0_retry_count;
@@ -591,7 +594,7 @@ typedef struct
                Indexed array for indexing from viterbi lookup table */
     uint16_t branch_error[8];
 
-    const conv_decode_table_t *conv_decode_table;
+    const uint8_t (*conv_decode_table)[4];
 } viterbi_t;
 
 typedef struct

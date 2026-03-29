@@ -23,6 +23,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <signal.h>
+#include <time.h>
+#include <unistd.h>
 
 #define TEST_PAYLOAD_LEN 4096
 #define TEST_CHUNK_MAX    257
@@ -143,8 +147,19 @@ static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
 static bool g_vpcm_experimental_v90_info = false;
+static bool g_vpcm_realtime = false;
+static bool g_vpcm_compact_e2e = false;
+static volatile sig_atomic_t g_vpcm_stop_requested = 0;
+
+typedef enum {
+    VPCM_TRANSPORT_LOOPBACK = 0,
+    VPCM_TRANSPORT_PJ_SIP = 1
+} vpcm_transport_backend_t;
+
+static vpcm_transport_backend_t g_vpcm_transport_backend = VPCM_TRANSPORT_LOOPBACK;
 
 static void vpcm_log(const char *fmt, ...);
+static void vpcm_log_e2e_phase(const char *phase, const char *fmt, ...);
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed);
 static bool expect_equal(const char *label,
                          const uint8_t *expected,
@@ -158,11 +173,80 @@ static void vpcm_log_data_sample(const uint8_t *data_tx,
                                  int remote_pcm_rx_len,
                                  const uint8_t *remote_data_rx,
                                  int remote_data_rx_len);
+static void vpcm_log_data_sample_named(const char *h1,
+                                       const char *h2,
+                                       const char *h3,
+                                       const char *h4,
+                                       const uint8_t *data_tx,
+                                       int data_tx_len,
+                                       const uint8_t *pcm_tx,
+                                       int pcm_tx_len,
+                                       const uint8_t *remote_pcm_rx,
+                                       int remote_pcm_rx_len,
+                                       const uint8_t *remote_data_rx,
+                                       int remote_data_rx_len);
+static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int len);
 static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
+static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
+
+static void vpcm_handle_sigint(int sig)
+{
+    (void) sig;
+    g_vpcm_stop_requested = 1;
+}
+
+static double vpcm_monotonic_seconds(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0.0;
+    return (double) ts.tv_sec + ((double) ts.tv_nsec / 1000000000.0);
+}
+
+static void vpcm_maybe_realtime_pace_samples(int samples)
+{
+    struct timespec req;
+    struct timespec rem;
+    long long total_ns;
+
+    if (!g_vpcm_realtime || samples <= 0)
+        return;
+    total_ns = ((long long) samples * 1000000000LL) / 8000LL;
+    if (total_ns <= 0)
+        return;
+    req.tv_sec = (time_t) (total_ns / 1000000000LL);
+    req.tv_nsec = (long) (total_ns % 1000000000LL);
+    while (nanosleep(&req, &rem) != 0) {
+        if (errno != EINTR)
+            break;
+        if (g_vpcm_stop_requested)
+            break;
+        req = rem;
+    }
+}
+
+static int vpcm_data_frames_from_seconds(int seconds)
+{
+    long long frames;
+
+    if (seconds <= 0)
+        return 0;
+    frames = ((long long) seconds * 8000LL) / (long long) VPCM_CP_FRAME_INTERVALS;
+    if (frames < 1)
+        frames = 1;
+    /* Keep frame count byte-aligned for the current V.91 payload mapping. */
+    frames -= (frames % 4LL);
+    if (frames < 4)
+        frames = 4;
+    if (frames > 2000000000LL)
+        frames = 2000000000LL;
+    return (int) frames;
+}
 
 static const char *vpcm_law_to_str(v91_law_t law)
 {
@@ -412,6 +496,20 @@ static void vpcm_log(const char *fmt, ...)
     va_list ap;
 
     fprintf(stderr, "[VPCM] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
+static void vpcm_log_e2e_phase(const char *phase, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!g_vpcm_compact_e2e && !g_vpcm_session_diag && !g_vpcm_verbose)
+        return;
+
+    fprintf(stderr, "[VPCM] [E2E:%s] ", phase);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -1980,8 +2078,10 @@ static void vpcm_transport_pcm_family_codewords(bool robbed_bit,
 {
     if (robbed_bit)
         vpcm_transport_robbed_bit_codewords(dst, src, len);
-    else
+    else {
         memcpy(dst, src, (size_t) len);
+        vpcm_maybe_realtime_pace_samples(len);
+    }
 }
 
 static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
@@ -1989,12 +2089,17 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 const char *path_label,
                                                                 const vpcm_cp_frame_t *cp_offer_template,
                                                                 bool robbed_bit,
-                                                                uint32_t data_seed)
+                                                                uint32_t data_seed,
+                                                                int data_seconds)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
     v91_dil_desc_t default_dil;
     v91_state_t caller;
     v91_state_t answerer;
+    v91_state_t caller_tx;
+    v91_state_t caller_rx;
+    v91_state_t answerer_tx;
+    v91_state_t answerer_rx;
     v91_info_frame_t caller_info;
     v91_info_frame_t answerer_info;
     v91_info_frame_t rx_info;
@@ -2007,25 +2112,39 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     uint8_t cp_buf[VPCM_CP_MAX_BITS];
     uint8_t es_buf[V91_ES_SYMBOLS];
     uint8_t b1_buf[V91_B1_SYMBOLS];
-    uint8_t *data_in;
-    uint8_t *data_out;
-    uint8_t *pcm_tx;
-    uint8_t *pcm_rx;
+    uint8_t *caller_data_in = NULL;
+    uint8_t *caller_data_out = NULL;
+    uint8_t *answerer_data_in = NULL;
+    uint8_t *answerer_data_out = NULL;
+    uint8_t *caller_pcm_tx = NULL;
+    uint8_t *caller_pcm_rx = NULL;
+    uint8_t *answerer_pcm_tx = NULL;
+    uint8_t *answerer_pcm_rx = NULL;
     char rate_buf[64];
     int startup_len;
+    int caller_startup_len;
+    int answerer_startup_len;
     int cp_len;
     int total_bits;
     int total_bytes;
     int total_codewords;
-    int produced;
-    int consumed;
+    int caller_produced;
+    int answerer_produced;
+    int caller_consumed;
+    int answerer_consumed;
     int sample_data_len;
     int sample_pcm_len;
+    int codewords_per_report;
+    int codeword_offset;
+    int data_frames;
 
     v91_default_dil_init(&default_dil);
     v91_init(&caller, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
     cp_offer = *cp_offer_template;
+
+    vpcm_log_e2e_phase("MODEL",
+                       "V.91 startup/data path begins after successful V.8 capability signalling");
 
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis, Phase 2 ~= INFO0 -> A/B -> L1/L2 -> INFO1");
@@ -2051,13 +2170,13 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s phase1 silence failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: phase1 silence ok", family_label);
+    vpcm_log_e2e_phase("PHASE1", "Silence complete (%d symbols)", V91_PHASE1_SILENCE_SYMBOLS);
     if (v91_tx_ez_codewords(&caller, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
         || v91_tx_ez_codewords(&answerer, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
         fprintf(stderr, "%s Ez failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: Ez ok", family_label);
+    vpcm_log_e2e_phase("PHASE1", "Ez exchanged (%d symbols)", V91_EZ_SYMBOLS);
 
     if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
         fprintf(stderr, "%s caller INFO tx failed\n", family_label);
@@ -2078,7 +2197,12 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s answerer->caller INFO rx failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: INFO/INFO' ok", family_label);
+    vpcm_log_e2e_phase("INFO",
+                       "INFO/INFO' exchanged (caller alaw=%d transparent=%d, answerer alaw=%d transparent=%d)",
+                       caller_info.tx_uses_alaw ? 1 : 0,
+                       caller_info.request_transparent_mode ? 1 : 0,
+                       answerer_info.tx_uses_alaw ? 1 : 0,
+                       answerer_info.request_transparent_mode ? 1 : 0);
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
                                                         startup_buf,
@@ -2089,6 +2213,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s caller startup DIL sequence failed\n", family_label);
         return false;
     }
+    caller_startup_len = startup_len;
     vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
@@ -2100,8 +2225,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s answerer startup DIL sequence failed\n", family_label);
         return false;
     }
+    answerer_startup_len = startup_len;
     vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
-    vpcm_trace("%s: startup DIL ok", family_label);
+    vpcm_log_e2e_phase("DIL", "Startup DIL sequence exchanged (caller=%d symbols, answerer=%d symbols)",
+                       caller_startup_len, answerer_startup_len);
 
     if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
         fprintf(stderr, "%s caller SCR tx failed\n", family_label);
@@ -2122,7 +2249,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s answerer SCR rx failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: SCR ok", family_label);
+    vpcm_log_e2e_phase("SCR", "SCR/SCR' exchanged");
 
     cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
     if (cp_len <= 0) {
@@ -2149,7 +2276,11 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s answerer CP rx failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: CP/CP' ok", family_label);
+    vpcm_log_e2e_phase("CP",
+                       "CP/CP' complete (transparent=%d drn=%u rate=%.0f bps)",
+                       cp_ack.transparent_mode_granted ? 1 : 0,
+                       cp_ack.drn,
+                       vpcm_cp_drn_to_bps(cp_ack.drn));
 
     if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
         fprintf(stderr, "%s caller Es tx failed\n", family_label);
@@ -2190,60 +2321,193 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s answerer B1 rx failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: Es/B1 ok", family_label);
+    vpcm_log_e2e_phase("B1", "Es/B1 exchanged");
 
     if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
         fprintf(stderr, "%s data-mode activation failed\n", family_label);
         return false;
     }
-    vpcm_trace("%s: data mode active", family_label);
+    caller_tx = caller;
+    caller_rx = caller;
+    answerer_tx = answerer;
+    answerer_rx = answerer;
+    vpcm_log_e2e_phase("DATA", "Data mode active");
 
-    total_bits = NOMINAL_10S_FRAMES * ((int) cp_ack.drn + 20);
+    data_frames = vpcm_data_frames_from_seconds(data_seconds);
+    if (data_frames <= 0)
+        data_frames = NOMINAL_10S_FRAMES;
+
+    total_bits = data_frames * ((int) cp_ack.drn + 20);
     total_bytes = total_bits / 8;
-    total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
-    data_in = (uint8_t *) malloc((size_t) total_bytes);
-    data_out = (uint8_t *) malloc((size_t) total_bytes);
-    pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
-    pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
-    if (!data_in || !data_out || !pcm_tx || !pcm_rx) {
-        free(data_in);
-        free(data_out);
-        free(pcm_tx);
-        free(pcm_rx);
+    total_codewords = data_frames * VPCM_CP_FRAME_INTERVALS;
+    caller_data_in = (uint8_t *) malloc((size_t) total_bytes);
+    caller_data_out = (uint8_t *) malloc((size_t) total_bytes);
+    answerer_data_in = (uint8_t *) malloc((size_t) total_bytes);
+    answerer_data_out = (uint8_t *) malloc((size_t) total_bytes);
+    caller_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    caller_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    answerer_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    answerer_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    if (!caller_data_in || !caller_data_out || !answerer_data_in || !answerer_data_out
+        || !caller_pcm_tx || !caller_pcm_rx || !answerer_pcm_tx || !answerer_pcm_rx) {
+        free(caller_data_in);
+        free(caller_data_out);
+        free(answerer_data_in);
+        free(answerer_data_out);
+        free(caller_pcm_tx);
+        free(caller_pcm_rx);
+        free(answerer_pcm_tx);
+        free(answerer_pcm_rx);
         fprintf(stderr, "allocation failure in %s session\n", family_label);
         return false;
     }
+    vpcm_log_e2e_phase("DATA",
+                       "Transmit plan: seconds=%d frames=%d bytes=%d codewords=%d",
+                       data_seconds > 0 ? data_seconds : 10,
+                       data_frames,
+                       total_bytes,
+                       total_codewords);
 
-    fill_pattern(data_in, total_bytes, data_seed);
-    memset(data_out, 0, (size_t) total_bytes);
-    produced = v91_tx_codewords(&caller, pcm_tx, total_codewords, data_in, total_bytes);
-    if (produced != total_codewords) {
-        free(data_in);
-        free(data_out);
-        free(pcm_tx);
-        free(pcm_rx);
-        fprintf(stderr, "%s tx length mismatch\n", family_label);
-        return false;
+    fill_pattern(caller_data_in, total_bytes, data_seed);
+    fill_pattern(answerer_data_in, total_bytes, data_seed ^ 0xA55AA55AU);
+    memset(caller_data_out, 0, (size_t) total_bytes);
+    memset(answerer_data_out, 0, (size_t) total_bytes);
+
+    codewords_per_report = vpcm_data_frames_from_seconds(1) * VPCM_CP_FRAME_INTERVALS;
+    if (codewords_per_report < VPCM_CP_FRAME_INTERVALS)
+        codewords_per_report = VPCM_CP_FRAME_INTERVALS;
+
+    for (codeword_offset = 0; codeword_offset < total_codewords; codeword_offset += codewords_per_report) {
+        int chunk_codewords;
+        int chunk_frames;
+        int chunk_bytes;
+        int byte_offset;
+        int frame_index;
+
+        chunk_codewords = total_codewords - codeword_offset;
+        if (chunk_codewords > codewords_per_report)
+            chunk_codewords = codewords_per_report;
+        chunk_frames = chunk_codewords / VPCM_CP_FRAME_INTERVALS;
+        chunk_bytes = (chunk_frames * ((int) cp_ack.drn + 20)) / 8;
+        byte_offset = (codeword_offset / VPCM_CP_FRAME_INTERVALS) * ((int) cp_ack.drn + 20) / 8;
+        frame_index = codeword_offset / VPCM_CP_FRAME_INTERVALS;
+
+        caller_produced = v91_tx_codewords(&caller_tx,
+                                           caller_pcm_tx + codeword_offset,
+                                           chunk_codewords,
+                                           caller_data_in + byte_offset,
+                                           chunk_bytes);
+        answerer_produced = v91_tx_codewords(&answerer_tx,
+                                             answerer_pcm_tx + codeword_offset,
+                                             chunk_codewords,
+                                             answerer_data_in + byte_offset,
+                                             chunk_bytes);
+        if (caller_produced != chunk_codewords || answerer_produced != chunk_codewords) {
+            free(caller_data_in);
+            free(caller_data_out);
+            free(answerer_data_in);
+            free(answerer_data_out);
+            free(caller_pcm_tx);
+            free(caller_pcm_rx);
+            free(answerer_pcm_tx);
+            free(answerer_pcm_rx);
+            fprintf(stderr, "%s tx length mismatch\n", family_label);
+            return false;
+        }
+
+        vpcm_transport_pcm_family_codewords(robbed_bit,
+                                            answerer_pcm_rx + codeword_offset,
+                                            caller_pcm_tx + codeword_offset,
+                                            chunk_codewords);
+        vpcm_transport_pcm_family_codewords(robbed_bit,
+                                            caller_pcm_rx + codeword_offset,
+                                            answerer_pcm_tx + codeword_offset,
+                                            chunk_codewords);
+
+        answerer_consumed = v91_rx_codewords(&answerer_rx,
+                                             answerer_data_out + byte_offset,
+                                             chunk_bytes,
+                                             answerer_pcm_rx + codeword_offset,
+                                             chunk_codewords);
+        caller_consumed = v91_rx_codewords(&caller_rx,
+                                           caller_data_out + byte_offset,
+                                           chunk_bytes,
+                                           caller_pcm_rx + codeword_offset,
+                                           chunk_codewords);
+        if (answerer_consumed != chunk_bytes || caller_consumed != chunk_bytes) {
+            free(caller_data_in);
+            free(caller_data_out);
+            free(answerer_data_in);
+            free(answerer_data_out);
+            free(caller_pcm_tx);
+            free(caller_pcm_rx);
+            free(answerer_pcm_tx);
+            free(answerer_pcm_rx);
+            fprintf(stderr, "%s rx length mismatch: caller=%d/%d answerer=%d/%d\n",
+                    family_label,
+                    caller_consumed,
+                    chunk_bytes,
+                    answerer_consumed,
+                    chunk_bytes);
+            return false;
+        }
+
+        if (g_vpcm_realtime) {
+            int frame_cw = (chunk_codewords < VPCM_CP_FRAME_INTERVALS) ? chunk_codewords : VPCM_CP_FRAME_INTERVALS;
+            int frame_data = (chunk_bytes < 5) ? chunk_bytes : 5;
+            char caller_tx_frame[64];
+            char answerer_tx_frame[64];
+            char caller_tx_data_hex[64];
+            char answerer_rx_data_hex[64];
+            char answerer_tx_data_hex[64];
+            char caller_rx_data_hex[64];
+            bool caller_to_answerer_ok;
+            bool answerer_to_caller_ok;
+
+            vpcm_bytes_to_hex(caller_tx_frame, sizeof(caller_tx_frame), caller_pcm_tx + codeword_offset, frame_cw);
+            vpcm_bytes_to_hex(answerer_tx_frame, sizeof(answerer_tx_frame), answerer_pcm_tx + codeword_offset, frame_cw);
+            vpcm_bytes_to_hex(caller_tx_data_hex, sizeof(caller_tx_data_hex), caller_data_in + byte_offset, frame_data);
+            vpcm_bytes_to_hex(answerer_rx_data_hex, sizeof(answerer_rx_data_hex), answerer_data_out + byte_offset, frame_data);
+            vpcm_bytes_to_hex(answerer_tx_data_hex, sizeof(answerer_tx_data_hex), answerer_data_in + byte_offset, frame_data);
+            vpcm_bytes_to_hex(caller_rx_data_hex, sizeof(caller_rx_data_hex), caller_data_out + byte_offset, frame_data);
+            caller_to_answerer_ok = (memcmp(caller_data_in + byte_offset,
+                                            answerer_data_out + byte_offset,
+                                            (size_t) chunk_bytes) == 0);
+            answerer_to_caller_ok = (memcmp(answerer_data_in + byte_offset,
+                                            caller_data_out + byte_offset,
+                                            (size_t) chunk_bytes) == 0);
+            vpcm_log_e2e_phase("DATA",
+                               "frame=%d codeword=%d caller_tx=[%s] answerer_tx=[%s]",
+                               frame_index,
+                               codeword_offset,
+                               caller_tx_frame,
+                               answerer_tx_frame);
+            vpcm_log_e2e_phase("DATA",
+                               "decode frame=%d caller->answerer tx=[%s] rx=[%s] %s, answerer->caller tx=[%s] rx=[%s] %s",
+                               frame_index,
+                               caller_tx_data_hex,
+                               answerer_rx_data_hex,
+                               caller_to_answerer_ok ? "OK" : "MISMATCH",
+                               answerer_tx_data_hex,
+                               caller_rx_data_hex,
+                               answerer_to_caller_ok ? "OK" : "MISMATCH");
+        }
     }
-    vpcm_transport_pcm_family_codewords(robbed_bit, pcm_rx, pcm_tx, produced);
-    consumed = v91_rx_codewords(&answerer, data_out, total_bytes, pcm_rx, produced);
-    if (consumed != total_bytes) {
-        free(data_in);
-        free(data_out);
-        free(pcm_tx);
-        free(pcm_rx);
-        fprintf(stderr, "%s rx length mismatch: %d/%d\n", family_label, consumed, total_bytes);
-        return false;
-    }
-    if (!expect_equal(family_label, data_in, data_out, total_bytes)) {
-        free(data_in);
-        free(data_out);
-        free(pcm_tx);
-        free(pcm_rx);
+
+    if (!expect_equal(family_label, caller_data_in, answerer_data_out, total_bytes)
+        || !expect_equal(family_label, answerer_data_in, caller_data_out, total_bytes)) {
+        free(caller_data_in);
+        free(caller_data_out);
+        free(answerer_data_in);
+        free(answerer_data_out);
+        free(caller_pcm_tx);
+        free(caller_pcm_rx);
+        free(answerer_pcm_tx);
+        free(answerer_pcm_rx);
         return false;
     }
 
-    sample_pcm_len = (produced < 6) ? produced : 6;
+    sample_pcm_len = (total_codewords < 6) ? total_codewords : 6;
     if (cp_ack.transparent_mode_granted) {
         sample_data_len = sample_pcm_len;
     } else {
@@ -2253,28 +2517,51 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         sample_data_len = 1;
     if (sample_data_len > total_bytes)
         sample_data_len = total_bytes;
-    vpcm_log_data_sample(data_in,
-                         sample_data_len,
-                         pcm_tx,
-                         sample_pcm_len,
-                         pcm_rx,
-                         sample_pcm_len,
-                         data_out,
-                         sample_data_len);
+    if (!g_vpcm_compact_e2e || g_vpcm_session_diag) {
+        vpcm_log_data_sample_named("Caller Data TX",
+                                   "Caller PCM TX",
+                                   "Answerer PCM RX",
+                                   "Answerer Data RX",
+                                   caller_data_in,
+                                   sample_data_len,
+                                   caller_pcm_tx,
+                                   sample_pcm_len,
+                                   answerer_pcm_rx,
+                                   sample_pcm_len,
+                                   answerer_data_out,
+                                   sample_data_len);
+        vpcm_log_data_sample_named("Answerer Data TX",
+                                   "Answerer PCM TX",
+                                   "Caller PCM RX",
+                                   "Caller Data RX",
+                                   answerer_data_in,
+                                   sample_data_len,
+                                   answerer_pcm_tx,
+                                   sample_pcm_len,
+                                   caller_pcm_rx,
+                                   sample_pcm_len,
+                                   caller_data_out,
+                                   sample_data_len);
+    }
     vpcm_format_rate(rate_buf, sizeof(rate_buf), cp_ack.drn);
-    vpcm_log("PASS: %s (%s, %s, drn=%u, rate=%s, bytes=%d, codewords=%d)",
+    vpcm_log("PASS: %s (%s, %s, drn=%u, rate=%s, data_seconds=%d, bytes=%d, codewords=%d)",
              family_label,
              vpcm_law_to_str(law),
              path_label,
              cp_ack.drn,
              rate_buf,
+             data_seconds > 0 ? data_seconds : 10,
              total_bytes,
              total_codewords);
 
-    free(data_in);
-    free(data_out);
-    free(pcm_tx);
-    free(pcm_rx);
+    free(caller_data_in);
+    free(caller_data_out);
+    free(answerer_data_in);
+    free(answerer_data_out);
+    free(caller_pcm_tx);
+    free(caller_pcm_rx);
+    free(answerer_pcm_tx);
+    free(answerer_pcm_rx);
     return true;
 }
 
@@ -3257,14 +3544,18 @@ static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int
     out[pos] = '\0';
 }
 
-static void vpcm_log_data_sample(const uint8_t *data_tx,
-                                 int data_tx_len,
-                                 const uint8_t *pcm_tx,
-                                 int pcm_tx_len,
-                                 const uint8_t *remote_pcm_rx,
-                                 int remote_pcm_rx_len,
-                                 const uint8_t *remote_data_rx,
-                                 int remote_data_rx_len)
+static void vpcm_log_data_sample_named(const char *h1,
+                                       const char *h2,
+                                       const char *h3,
+                                       const char *h4,
+                                       const uint8_t *data_tx,
+                                       int data_tx_len,
+                                       const uint8_t *pcm_tx,
+                                       int pcm_tx_len,
+                                       const uint8_t *remote_pcm_rx,
+                                       int remote_pcm_rx_len,
+                                       const uint8_t *remote_data_rx,
+                                       int remote_data_rx_len)
 {
     char data_tx_hex[128];
     char pcm_tx_hex[128];
@@ -3277,11 +3568,34 @@ static void vpcm_log_data_sample(const uint8_t *data_tx,
     vpcm_bytes_to_hex(remote_data_hex, sizeof(remote_data_hex), remote_data_rx, remote_data_rx_len);
 
     vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
-    vpcm_log("| Data TX                   | PCM TX                    | Remote PCM RX             | Remote Data RX            |");
+    vpcm_log("| %-25s | %-25s | %-25s | %-25s |", h1, h2, h3, h4);
     vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
     vpcm_log("| %-25s | %-25s | %-25s | %-25s |",
              data_tx_hex, pcm_tx_hex, remote_pcm_hex, remote_data_hex);
     vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
+}
+
+static void vpcm_log_data_sample(const uint8_t *data_tx,
+                                 int data_tx_len,
+                                 const uint8_t *pcm_tx,
+                                 int pcm_tx_len,
+                                 const uint8_t *remote_pcm_rx,
+                                 int remote_pcm_rx_len,
+                                 const uint8_t *remote_data_rx,
+                                 int remote_data_rx_len)
+{
+    vpcm_log_data_sample_named("Data TX",
+                               "PCM TX",
+                               "Remote PCM RX",
+                               "Remote Data RX",
+                               data_tx,
+                               data_tx_len,
+                               pcm_tx,
+                               pcm_tx_len,
+                               remote_pcm_rx,
+                               remote_pcm_rx_len,
+                               remote_data_rx,
+                               remote_data_rx_len);
 }
 
 static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])
@@ -3328,6 +3642,7 @@ static void vpcm_transport_linear(vpcm_channel_t channel,
         uint8_t codeword = v91_linear_to_codeword(channel.law, src[i]);
         dst[i] = v91_codeword_to_linear(channel.law, codeword);
     }
+    vpcm_maybe_realtime_pace_samples(len);
 }
 
 static void vpcm_transport_codewords(vpcm_channel_t channel,
@@ -3341,6 +3656,7 @@ static void vpcm_transport_codewords(vpcm_channel_t channel,
     }
 
     memcpy(dst, src, (size_t) len);
+    vpcm_maybe_realtime_pace_samples(len);
 }
 
 static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
@@ -3352,6 +3668,7 @@ static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
     memcpy(dst, src, (size_t) len);
     for (i = 5; i < len; i += 6)
         dst[i] &= 0xFE;
+    vpcm_maybe_realtime_pace_samples(len);
 }
 
 static void vpcm_v8_result_handler(void *user_data, v8_parms_t *result)
@@ -4224,17 +4541,95 @@ static bool run_vpcm_primitive_suite(void)
         && test_v91_full_duplex(V91_LAW_ALAW);
 }
 
+static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_seconds)
+{
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
+    vpcm_cp_frame_t cp_offer;
+
+    init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
+    init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+        return false;
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, vpcm_cp_recommended_robbed_bit_drn(), false);
+    return run_vpcm_full_phase_session(law,
+                                       "V.91 single-call E2E",
+                                       "robbed-bit-safe profile",
+                                       &cp_offer,
+                                       true,
+                                       seed,
+                                       data_seconds);
+}
+
+static int run_v91_e2e_mode(v91_law_t law, int data_seconds)
+{
+    double start_wall;
+    bool ok;
+    uint32_t seed;
+
+    seed = 0x09100000U ^ (uint32_t) law;
+    if (data_seconds <= 0)
+        data_seconds = 10;
+
+    signal(SIGINT, vpcm_handle_sigint);
+    signal(SIGTERM, vpcm_handle_sigint);
+    g_vpcm_compact_e2e = true;
+    start_wall = vpcm_monotonic_seconds();
+
+    vpcm_log("V.91 E2E mode starting (law=%s, transport=%s, realtime=%s, data_seconds=%d)",
+             vpcm_law_to_str(law),
+             (g_vpcm_transport_backend == VPCM_TRANSPORT_LOOPBACK) ? "loopback" : "pj-sip",
+             g_vpcm_realtime ? "on" : "off",
+             data_seconds);
+
+    if (g_vpcm_stop_requested) {
+        vpcm_log("V.91 E2E finished: reason=cancelled before call start elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+        g_vpcm_compact_e2e = false;
+        return 0;
+    }
+
+    vpcm_log("V.91 E2E call starting");
+    ok = run_v91_single_e2e_call(law, seed, data_seconds);
+    if (!ok) {
+        vpcm_log("V.91 E2E finished: reason=call collapsed elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+        g_vpcm_compact_e2e = false;
+        return 1;
+    }
+
+    if (g_vpcm_stop_requested) {
+        vpcm_log("V.91 E2E finished: reason=cancelled elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+    } else {
+        vpcm_log("V.91 E2E finished: reason=data duration reached elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+    }
+    g_vpcm_compact_e2e = false;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *verbose_env;
     bool run_sessions;
     bool run_primitives;
+    bool run_v91_e2e_call;
+    int v91_e2e_seconds;
+    v91_law_t v91_e2e_law;
     int i;
 
     verbose_env = getenv("VPCM_VERBOSE");
     g_vpcm_verbose = (verbose_env != NULL && verbose_env[0] != '\0' && strcmp(verbose_env, "0") != 0);
     run_sessions = true;
     run_primitives = false;
+    run_v91_e2e_call = false;
+    v91_e2e_seconds = 0;
+    v91_e2e_law = V91_LAW_ULAW;
+    g_vpcm_stop_requested = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--all-tests") == 0) {
@@ -4250,6 +4645,54 @@ int main(int argc, char **argv)
             g_vpcm_session_diag = true;
         } else if (strcmp(argv[i], "--experimental-v90-info") == 0) {
             g_vpcm_experimental_v90_info = true;
+        } else if (strcmp(argv[i], "--realtime") == 0) {
+            g_vpcm_realtime = true;
+        } else if (strcmp(argv[i], "--transport") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--transport requires one of: loopback, pj-sip\n");
+                return 2;
+            }
+            i++;
+            if (strcmp(argv[i], "loopback") == 0) {
+                g_vpcm_transport_backend = VPCM_TRANSPORT_LOOPBACK;
+            } else if (strcmp(argv[i], "pj-sip") == 0) {
+                g_vpcm_transport_backend = VPCM_TRANSPORT_PJ_SIP;
+            } else {
+                fprintf(stderr, "Unknown transport backend: %s\n", argv[i]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--v91-e2e-call") == 0) {
+            run_v91_e2e_call = true;
+            run_sessions = false;
+            run_primitives = false;
+        } else if (strcmp(argv[i], "--v91-e2e-seconds") == 0) {
+            char *end = NULL;
+            long v;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--v91-e2e-seconds requires an integer argument\n");
+                return 2;
+            }
+            i++;
+            v = strtol(argv[i], &end, 10);
+            if (end == NULL || *end != '\0' || v < 0 || v > 86400) {
+                fprintf(stderr, "Invalid --v91-e2e-seconds value: %s (expected 0..86400)\n", argv[i]);
+                return 2;
+            }
+            v91_e2e_seconds = (int) v;
+        } else if (strcmp(argv[i], "--v91-e2e-law") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--v91-e2e-law requires one of: ulaw, alaw\n");
+                return 2;
+            }
+            i++;
+            if (strcmp(argv[i], "ulaw") == 0) {
+                v91_e2e_law = V91_LAW_ULAW;
+            } else if (strcmp(argv[i], "alaw") == 0) {
+                v91_e2e_law = V91_LAW_ALAW;
+            } else {
+                fprintf(stderr, "Unknown --v91-e2e-law value: %s\n", argv[i]);
+                return 2;
+            }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [--session-only] [--primitive-tests] [--all-tests] [--session-diag] [--experimental-v90-info]\n", argv[0]);
             printf("  default           Run call-oriented end-to-end session tests only.\n");
@@ -4257,6 +4700,11 @@ int main(int argc, char **argv)
             printf("  --all-tests       Run both session and primitive suites.\n");
             printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
             printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
+            printf("  --realtime        Pace G.711 transport at 8kHz wall clock instead of CPU speed.\n");
+            printf("  --transport <loopback|pj-sip> Select test transport backend (default: loopback).\n");
+            printf("  --v91-e2e-call    Run V.91 single-call end-to-end mode (focus mode).\n");
+            printf("  --v91-e2e-seconds <n> V.91 data transmit duration in seconds (default: 10).\n");
+            printf("  --v91-e2e-law <ulaw|alaw> Set V.91 E2E law (default: ulaw).\n");
             return 0;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -4264,12 +4712,23 @@ int main(int argc, char **argv)
         }
     }
 
-    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s, experimental_v90_info=%s)",
+    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s, experimental_v90_info=%s, realtime=%s, transport=%s, v91_e2e=%s)",
              g_vpcm_verbose ? "on" : "off",
              g_vpcm_session_diag ? "on" : "off",
              run_sessions ? "on" : "off",
              run_primitives ? "on" : "off",
-             g_vpcm_experimental_v90_info ? "on" : "off");
+             g_vpcm_experimental_v90_info ? "on" : "off",
+             g_vpcm_realtime ? "on" : "off",
+             (g_vpcm_transport_backend == VPCM_TRANSPORT_LOOPBACK) ? "loopback" : "pj-sip",
+             run_v91_e2e_call ? "on" : "off");
+
+    if (run_v91_e2e_call) {
+        if (g_vpcm_transport_backend == VPCM_TRANSPORT_PJ_SIP) {
+            fprintf(stderr, "V.91 E2E with --transport pj-sip is not wired yet in this harness. Use --transport loopback for now.\n");
+            return 2;
+        }
+        return run_v91_e2e_mode(v91_e2e_law, v91_e2e_seconds);
+    }
 
     if (run_sessions && !run_vpcm_session_suite())
         return 1;

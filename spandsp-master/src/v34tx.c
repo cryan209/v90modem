@@ -1771,7 +1771,7 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
             y4321 = conv_encode_input[subsets[0]][subsets[1]];
             /* Table 11/V.34 step 9, 9.6.3.1/V.34 and 9.6.3.2/V.34 */
             s->y0 = s->state & 1;
-            s->state = (*s->conv_encode_table)[s->state][y4321];
+            s->state = s->conv_encode_table[s->state][y4321];
 //printf("Y4321 %d %d - %d %d %d\n", subsets[0], subsets[1], y4321, s->y0, s->state);
 //printf("WWW 0x%x 0x%x -> 0x%x\n", v0, y4321, s->state);
         }

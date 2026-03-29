@@ -2171,8 +2171,8 @@ static void viterbi_update_path_metrics(viterbi_t *s)
         /* Loop through each possible branch from the previous state */
         for (j = 0;  j < 4;  j++)
         {
-            prev_state = (*s->conv_decode_table)[i][j] >> 3;
-            branch = (*s->conv_decode_table)[i][j] & 0x7;
+            prev_state = s->conv_decode_table[i][j] >> 3;
+            branch = s->conv_decode_table[i][j] & 0x7;
             metric = s->vit[prev_ptr].cumulative_path_metric[prev_state] + s->branch_error[branch];
 
 //if (metric == 0)
