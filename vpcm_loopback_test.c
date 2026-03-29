@@ -44,6 +44,7 @@ static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
                                                 int len);
 
 static bool g_vpcm_verbose = false;
+static bool g_vpcm_session_diag = false;
 
 static void vpcm_log(const char *fmt, ...);
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed);
@@ -61,6 +62,8 @@ static void vpcm_log_data_sample(const uint8_t *data_tx,
                                  int remote_data_rx_len);
 static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
+static bool run_vpcm_session_suite(void);
+static bool run_vpcm_primitive_suite(void);
 
 static const char *vpcm_law_to_str(v91_law_t law)
 {
@@ -955,6 +958,79 @@ static void vpcm_log_cp_diag_compare(const vpcm_cp_diag_t *tx, const vpcm_cp_dia
     vpcm_log("+------------+--------------------+--------------------+");
 }
 
+static void vpcm_maybe_log_info_session_diag(v91_state_t *tx_state,
+                                             const v91_info_frame_t *tx_info,
+                                             const uint8_t *rx_codewords,
+                                             int rx_len,
+                                             const char *label)
+{
+    v91_info_diag_t tx_diag;
+    v91_info_diag_t rx_diag;
+
+    if (!g_vpcm_session_diag)
+        return;
+    if (!v91_info_build_diag(tx_state, tx_info, &tx_diag))
+        return;
+    if (!v91_info_decode_diag(tx_state, rx_codewords, rx_len, &rx_diag))
+        return;
+    vpcm_log("%s INFO", label);
+    vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+}
+
+static void vpcm_maybe_log_cp_session_diag(const vpcm_cp_frame_t *tx_cp,
+                                           const uint8_t *bits,
+                                           int nbits,
+                                           const char *label)
+{
+    vpcm_cp_diag_t tx_diag;
+    vpcm_cp_diag_t rx_diag;
+
+    if (!g_vpcm_session_diag)
+        return;
+    if (!vpcm_cp_build_diag(tx_cp, &tx_diag))
+        return;
+    if (!vpcm_cp_decode_diag(bits, nbits, &rx_diag))
+        return;
+    vpcm_log("%s CP", label);
+    vpcm_log_cp_diag_compare(&tx_diag, &rx_diag);
+}
+
+static void vpcm_log_session_sequence_header(const char *side1_label,
+                                             const char *side2_label)
+{
+    if (!g_vpcm_session_diag)
+        return;
+    vpcm_log("Sequence: %s <-> %s", side1_label, side2_label);
+    vpcm_log("+----------------------+----------------------+----------------------+----------------------+");
+    vpcm_log("| %-20s | %-20s | %-20s | %-20s |",
+             "Side 1 TX",
+             "Side 1 RX",
+             "Side 2 RX",
+             "Side 2 TX");
+    vpcm_log("+----------------------+----------------------+----------------------+----------------------+");
+}
+
+static void vpcm_log_session_sequence_row(const char *side1_tx,
+                                          const char *side1_rx,
+                                          const char *side2_rx,
+                                          const char *side2_tx)
+{
+    if (!g_vpcm_session_diag)
+        return;
+    vpcm_log("| %-20.20s | %-20.20s | %-20.20s | %-20.20s |",
+             side1_tx,
+             side1_rx,
+             side2_rx,
+             side2_tx);
+}
+
+static void vpcm_log_session_sequence_footer(void)
+{
+    if (!g_vpcm_session_diag)
+        return;
+    vpcm_log("+----------------------+----------------------+----------------------+----------------------+");
+}
+
 static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
 {
     double bps;
@@ -994,6 +1070,16 @@ static void vpcm_v92_init_digital_dil_from_ja(v91_dil_desc_t *desc, bool echo_li
         desc->train_u[i] = echo_train_u[i % 8];
 }
 
+static void vpcm_init_robbed_bit_dil_profile(v91_dil_desc_t *desc)
+{
+    int i;
+
+    v91_default_dil_init(desc);
+    desc->ltp = 6;
+    for (i = 0; i < desc->ltp; i++)
+        desc->tp[i] = 1;
+}
+
 static void vpcm_v92_select_profile_from_dil(const v91_dil_analysis_t *analysis,
                                              uint8_t *downstream_drn,
                                              uint8_t *upstream_drn)
@@ -1027,7 +1113,8 @@ static void vpcm_log_dil_analysis(const char *label, const v91_dil_analysis_t *a
              analysis->impairment_score,
              down_rate_buf,
              up_rate_buf,
-             analysis->echo_limited ? ", echo-limited" : "");
+             analysis->robbed_bit_limited ? ", robbed-bit-limited"
+             : (analysis->echo_limited ? ", echo-limited" : ""));
 }
 
 static bool test_v91_cp_exchange(v91_law_t law)
@@ -1927,11 +2014,13 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         fprintf(stderr, "V.92 asymmetric caller INFO failed\n");
         return false;
     }
+    vpcm_maybe_log_info_session_diag(&caller_startup, &caller_info, transport_buf, V91_INFO_SYMBOLS, "Digital -> Analogue");
     if (v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS
         || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
         fprintf(stderr, "V.92 asymmetric answerer INFO failed\n");
         return false;
     }
+    vpcm_maybe_log_info_session_diag(&answerer_startup, &answerer_info, transport_buf, V91_INFO_SYMBOLS, "Analogue -> Digital");
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
@@ -1990,6 +2079,7 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         fprintf(stderr, "V.92 downstream CP offer failed\n");
         return false;
     }
+    vpcm_maybe_log_cp_session_diag(&cp_down_offer, cp_buf, cp_len, "Digital -> Analogue");
     cp_down_ack = cp_down_offer;
     cp_down_ack.acknowledge = true;
     cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_ack, true);
@@ -2019,6 +2109,7 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         fprintf(stderr, "V.92 upstream CP offer failed\n");
         return false;
     }
+    vpcm_maybe_log_cp_session_diag(&cp_up_offer, cp_buf, cp_len, "Analogue -> Digital");
     cp_up_ack = cp_up_offer;
     cp_up_ack.acknowledge = true;
     cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_ack, true);
@@ -2444,8 +2535,8 @@ static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
 static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
-    const uint8_t drn = vpcm_cp_recommended_robbed_bit_drn();
-    v91_dil_desc_t default_dil;
+    v91_dil_desc_t robbed_bit_dil;
+    v91_dil_analysis_t dil_analysis;
     v91_state_t caller;
     v91_state_t answerer;
     v91_info_frame_t caller_info;
@@ -2465,6 +2556,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
     uint8_t *pcm_tx;
     uint8_t *pcm_rx;
     char rate_buf[64];
+    uint8_t drn;
     int startup_len;
     int cp_len;
     int total_bits;
@@ -2475,7 +2567,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
     int sample_len;
 
     vpcm_log("Test: V.91 startup -> data over robbed-bit signalling (%s, safe rate)", vpcm_law_to_str(law));
-    v91_default_dil_init(&default_dil);
+    vpcm_init_robbed_bit_dil_profile(&robbed_bit_dil);
     v91_init(&caller, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
 
@@ -2498,6 +2590,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller->answerer INFO rx failed\n");
         return false;
     }
+    vpcm_maybe_log_info_session_diag(&caller, &caller_info, transport_buf, V91_INFO_SYMBOLS, "Caller -> Answerer");
 
     if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
         fprintf(stderr, "robbed-bit safe-rate answerer INFO tx failed\n");
@@ -2508,28 +2601,44 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer->caller INFO rx failed\n");
         return false;
     }
+    vpcm_maybe_log_info_session_diag(&answerer, &answerer_info, transport_buf, V91_INFO_SYMBOLS, "Answerer -> Caller");
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
-                                                        &default_dil,
+                                                        &robbed_bit_dil,
                                                         NULL);
     if (startup_len <= 0) {
         fprintf(stderr, "robbed-bit safe-rate caller DIL sequence failed\n");
         return false;
     }
     vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+    if (!v91_note_received_dil(&answerer, &robbed_bit_dil, &dil_analysis)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer DIL analysis failed\n");
+        return false;
+    }
+    vpcm_log_dil_analysis("Analogue side", &dil_analysis);
+    drn = dil_analysis.recommended_downstream_drn;
+    if (!dil_analysis.robbed_bit_limited || drn != vpcm_cp_recommended_robbed_bit_drn()) {
+        fprintf(stderr, "robbed-bit safe-rate DIL analysis selected drn=%u expected=%u\n",
+                drn, vpcm_cp_recommended_robbed_bit_drn());
+        return false;
+    }
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
-                                                        &default_dil,
+                                                        &robbed_bit_dil,
                                                         NULL);
     if (startup_len <= 0) {
         fprintf(stderr, "robbed-bit safe-rate answerer DIL sequence failed\n");
         return false;
     }
     vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+    if (!v91_note_received_dil(&caller, &robbed_bit_dil, NULL)) {
+        fprintf(stderr, "robbed-bit safe-rate caller DIL tracking failed\n");
+        return false;
+    }
 
     if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
         fprintf(stderr, "robbed-bit safe-rate caller SCR tx failed\n");
@@ -2564,6 +2673,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller CP rx failed\n");
         return false;
     }
+    vpcm_maybe_log_cp_session_diag(&cp_offer, transport_buf, cp_len, "Caller -> Answerer");
 
     cp_ack = cp_offer;
     cp_ack.acknowledge = true;
@@ -3062,19 +3172,24 @@ static bool test_v92_dil_rate_adaptation(void)
 {
     v91_dil_desc_t clean_dil;
     v91_dil_desc_t echo_dil;
+    v91_dil_desc_t robbed_bit_dil;
     v91_dil_analysis_t clean_analysis;
     v91_dil_analysis_t echo_analysis;
+    v91_dil_analysis_t robbed_bit_analysis;
     char clean_down_rate[64];
     char clean_up_rate[64];
     char echo_down_rate[64];
     char echo_up_rate[64];
+    char robbed_rate[64];
 
     vpcm_log("Test: V.92 DIL-driven rate adaptation");
 
     vpcm_v92_init_digital_dil_from_ja(&clean_dil, false);
     vpcm_v92_init_digital_dil_from_ja(&echo_dil, true);
+    vpcm_init_robbed_bit_dil_profile(&robbed_bit_dil);
     if (!v91_analyse_dil_descriptor(&clean_dil, &clean_analysis)
-        || !v91_analyse_dil_descriptor(&echo_dil, &echo_analysis)) {
+        || !v91_analyse_dil_descriptor(&echo_dil, &echo_analysis)
+        || !v91_analyse_dil_descriptor(&robbed_bit_dil, &robbed_bit_analysis)) {
         fprintf(stderr, "V.92 DIL analysis failed\n");
         return false;
     }
@@ -3087,16 +3202,23 @@ static bool test_v92_dil_rate_adaptation(void)
         fprintf(stderr, "V.92 impaired DIL did not mark echo-limited\n");
         return false;
     }
+    if (!robbed_bit_analysis.robbed_bit_limited
+        || robbed_bit_analysis.recommended_downstream_drn != vpcm_cp_recommended_robbed_bit_drn()) {
+        fprintf(stderr, "V.92 robbed-bit DIL profile did not select the safe ceiling\n");
+        return false;
+    }
 
     vpcm_format_rate(clean_down_rate, sizeof(clean_down_rate), clean_analysis.recommended_downstream_drn);
     vpcm_format_rate(clean_up_rate, sizeof(clean_up_rate), clean_analysis.recommended_upstream_drn);
     vpcm_format_rate(echo_down_rate, sizeof(echo_down_rate), echo_analysis.recommended_downstream_drn);
     vpcm_format_rate(echo_up_rate, sizeof(echo_up_rate), echo_analysis.recommended_upstream_drn);
-    vpcm_log("PASS: V.92 DIL-driven rate adaptation (clean=%s/%s, impaired=%s/%s)",
+    vpcm_format_rate(robbed_rate, sizeof(robbed_rate), robbed_bit_analysis.recommended_downstream_drn);
+    vpcm_log("PASS: V.92 DIL-driven rate adaptation (clean=%s/%s, impaired=%s/%s, robbed-bit=%s)",
              clean_down_rate,
              clean_up_rate,
              echo_down_rate,
-             echo_up_rate);
+             echo_up_rate,
+             robbed_rate);
     return true;
 }
 
@@ -3406,96 +3528,101 @@ static bool test_v91_full_duplex(v91_law_t law)
         && expect_equal("V.91 full duplex B<-A", a_input, b_output, TEST_PAYLOAD_LEN);
 }
 
-int main(void)
+static bool run_vpcm_session_suite(void)
+{
+    return test_v92_dil_rate_adaptation()
+        && test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW)
+        && test_v8_v90_startup_over_analog_g711(V91_LAW_ALAW)
+        && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ULAW)
+        && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW)
+        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW)
+        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW)
+        && test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW)
+        && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
+        && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
+        && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW)
+        && test_v92_full_phase_operation(V91_LAW_ULAW)
+        && test_v92_full_phase_operation(V91_LAW_ALAW);
+}
+
+static bool run_vpcm_primitive_suite(void)
+{
+    return test_vpcm_cp_robbed_bit_safe_profile()
+        && test_v91_codeword_loopback(V91_LAW_ULAW)
+        && test_v91_codeword_loopback(V91_LAW_ALAW)
+        && test_v91_startup_primitives(V91_LAW_ULAW)
+        && test_v91_startup_primitives(V91_LAW_ALAW)
+        && test_v91_default_dil(V91_LAW_ULAW)
+        && test_v91_default_dil(V91_LAW_ALAW)
+        && test_v91_eu_and_frame_alignment(V91_LAW_ULAW)
+        && test_v91_eu_and_frame_alignment(V91_LAW_ALAW)
+        && test_v91_phil_and_scr_sequences(V91_LAW_ULAW)
+        && test_v91_phil_and_scr_sequences(V91_LAW_ALAW)
+        && test_v91_cp_exchange(V91_LAW_ULAW)
+        && test_v91_cp_exchange(V91_LAW_ALAW)
+        && test_v91_startup_to_b1_multirate(V91_LAW_ULAW)
+        && test_v91_startup_to_b1_multirate(V91_LAW_ALAW)
+        && test_v91_mapped_data_multirate(V91_LAW_ULAW)
+        && test_v91_mapped_data_multirate(V91_LAW_ALAW)
+        && test_v91_robbed_bit_signalling(V91_LAW_ULAW)
+        && test_v91_robbed_bit_signalling(V91_LAW_ALAW)
+        && test_v91_eu_startup_sequence(V91_LAW_ULAW)
+        && test_v91_eu_startup_sequence(V91_LAW_ALAW)
+        && test_v91_em_and_startup_sequence(V91_LAW_ULAW)
+        && test_v91_em_and_startup_sequence(V91_LAW_ALAW)
+        && test_v91_bilateral_info_tracking(V91_LAW_ALAW, V91_LAW_ULAW)
+        && test_v91_linear_loopback(V91_LAW_ULAW)
+        && test_v91_linear_loopback(V91_LAW_ALAW)
+        && test_v91_full_duplex(V91_LAW_ULAW)
+        && test_v91_full_duplex(V91_LAW_ALAW);
+}
+
+int main(int argc, char **argv)
 {
     const char *verbose_env;
+    bool run_sessions;
+    bool run_primitives;
+    int i;
 
     verbose_env = getenv("VPCM_VERBOSE");
     g_vpcm_verbose = (verbose_env != NULL && verbose_env[0] != '\0' && strcmp(verbose_env, "0") != 0);
-    vpcm_log("PCM modem loopback harness starting (verbose=%s)",
-             g_vpcm_verbose ? "on" : "off");
+    run_sessions = true;
+    run_primitives = false;
 
-    if (!test_vpcm_cp_robbed_bit_safe_profile())
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--all-tests") == 0) {
+            run_sessions = true;
+            run_primitives = true;
+        } else if (strcmp(argv[i], "--primitive-tests") == 0) {
+            run_sessions = false;
+            run_primitives = true;
+        } else if (strcmp(argv[i], "--session-only") == 0) {
+            run_sessions = true;
+            run_primitives = false;
+        } else if (strcmp(argv[i], "--session-diag") == 0) {
+            g_vpcm_session_diag = true;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [--session-only] [--primitive-tests] [--all-tests] [--session-diag]\n", argv[0]);
+            printf("  default           Run call-oriented end-to-end session tests only.\n");
+            printf("  --primitive-tests Add focused primitive/component tests.\n");
+            printf("  --all-tests       Run both session and primitive suites.\n");
+            printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s)",
+             g_vpcm_verbose ? "on" : "off",
+             g_vpcm_session_diag ? "on" : "off",
+             run_sessions ? "on" : "off",
+             run_primitives ? "on" : "off");
+
+    if (run_sessions && !run_vpcm_session_suite())
         return 1;
-    if (!test_v91_codeword_loopback(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_codeword_loopback(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_startup_primitives(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_startup_primitives(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_default_dil(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_default_dil(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_eu_and_frame_alignment(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_eu_and_frame_alignment(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_phil_and_scr_sequences(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_phil_and_scr_sequences(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_cp_exchange(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_cp_exchange(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_startup_to_b1_multirate(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_startup_to_b1_multirate(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_mapped_data_multirate(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_mapped_data_multirate(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_robbed_bit_signalling(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_robbed_bit_signalling(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_eu_startup_sequence(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_em_and_startup_sequence(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_em_and_startup_sequence(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_bilateral_info_tracking(V91_LAW_ALAW, V91_LAW_ULAW))
-        return 1;
-    if (!test_v92_dil_rate_adaptation())
-        return 1;
-    if (!test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW))
-        return 1;
-    if (!test_v8_v90_startup_over_analog_g711(V91_LAW_ALAW))
-        return 1;
-    if (!test_v8_v91_advertisement_over_analog_g711(V91_LAW_ULAW))
-        return 1;
-    if (!test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW))
-        return 1;
-    if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW))
-        return 1;
-    if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW))
-        return 1;
-    if (!test_v92_full_phase_operation(V91_LAW_ULAW))
-        return 1;
-    if (!test_v92_full_phase_operation(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_linear_loopback(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_linear_loopback(V91_LAW_ALAW))
-        return 1;
-    if (!test_v91_full_duplex(V91_LAW_ULAW))
-        return 1;
-    if (!test_v91_full_duplex(V91_LAW_ALAW))
+    if (run_primitives && !run_vpcm_primitive_suite())
         return 1;
 
     vpcm_log("All PCM modem loopback tests passed");

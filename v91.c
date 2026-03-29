@@ -116,6 +116,12 @@ bool v91_analyse_dil_descriptor(const v91_dil_desc_t *desc, v91_dil_analysis_t *
                              && analysis.unique_train_u >= 120
                              && analysis.non_default_refs == 0
                              && analysis.non_default_h == 0);
+    analysis.robbed_bit_limited = (desc->n == V91_DEFAULT_DIL_SEGMENTS
+                                   && desc->lsp == 12
+                                   && desc->ltp == 6
+                                   && analysis.unique_train_u >= 120
+                                   && analysis.non_default_refs == 0
+                                   && analysis.non_default_h == 0);
 
     if (desc->n < V91_DEFAULT_DIL_SEGMENTS)
         analysis.impairment_score++;
@@ -134,8 +140,11 @@ bool v91_analyse_dil_descriptor(const v91_dil_desc_t *desc, v91_dil_analysis_t *
     if (analysis.non_default_h != 0)
         analysis.impairment_score++;
 
-    analysis.echo_limited = (analysis.impairment_score >= 3);
-    if (analysis.impairment_score >= 5) {
+    analysis.echo_limited = (!analysis.robbed_bit_limited && analysis.impairment_score >= 3);
+    if (analysis.robbed_bit_limited) {
+        analysis.recommended_downstream_drn = 22;
+        analysis.recommended_upstream_drn = 22;
+    } else if (analysis.impairment_score >= 5) {
         analysis.recommended_downstream_drn = 13;
         analysis.recommended_upstream_drn = 7;
     } else if (analysis.echo_limited) {
