@@ -1475,6 +1475,646 @@ static bool test_v91_robbed_bit_signalling(v91_law_t law)
     return true;
 }
 
+static void vpcm_transport_pcm_family_codewords(bool robbed_bit,
+                                                uint8_t *dst,
+                                                const uint8_t *src,
+                                                int len)
+{
+    if (robbed_bit)
+        vpcm_transport_robbed_bit_codewords(dst, src, len);
+    else
+        memcpy(dst, src, (size_t) len);
+}
+
+static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
+                                                                const char *family_label,
+                                                                const char *path_label,
+                                                                const vpcm_cp_frame_t *cp_offer_template,
+                                                                bool robbed_bit,
+                                                                uint32_t data_seed)
+{
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    v91_dil_desc_t default_dil;
+    v91_state_t caller;
+    v91_state_t answerer;
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    v91_info_frame_t rx_info;
+    vpcm_cp_frame_t cp_offer;
+    vpcm_cp_frame_t cp_ack;
+    vpcm_cp_frame_t cp_rx;
+    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t scr_buf[18];
+    uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    uint8_t es_buf[V91_ES_SYMBOLS];
+    uint8_t b1_buf[V91_B1_SYMBOLS];
+    uint8_t *data_in;
+    uint8_t *data_out;
+    uint8_t *pcm_tx;
+    uint8_t *pcm_rx;
+    char rate_buf[64];
+    int startup_len;
+    int cp_len;
+    int total_bits;
+    int total_bytes;
+    int total_codewords;
+    int produced;
+    int consumed;
+    int sample_data_len;
+    int sample_pcm_len;
+
+    v91_default_dil_init(&default_dil);
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    cp_offer = *cp_offer_template;
+
+    memset(&caller_info, 0, sizeof(caller_info));
+    caller_info.request_default_dil = true;
+    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    caller_info.power_measured_after_digital_impairments = true;
+    caller_info.request_transparent_mode = cp_offer.transparent_mode_granted;
+    caller_info.cleardown_if_transparent_denied = cp_offer.transparent_mode_granted;
+
+    memset(&answerer_info, 0, sizeof(answerer_info));
+    answerer_info.request_default_dil = true;
+    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    answerer_info.power_measured_after_digital_impairments = true;
+    answerer_info.request_transparent_mode = cp_offer.transparent_mode_granted;
+    answerer_info.cleardown_if_transparent_denied = cp_offer.transparent_mode_granted;
+
+    if (v91_tx_phase1_silence_codewords(&caller, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
+        || v91_tx_phase1_silence_codewords(&answerer, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
+        fprintf(stderr, "%s phase1 silence failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: phase1 silence ok", family_label);
+    if (v91_tx_ez_codewords(&caller, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
+        || v91_tx_ez_codewords(&answerer, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
+        fprintf(stderr, "%s Ez failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: Ez ok", family_label);
+
+    if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "%s caller INFO tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, transport_buf, V91_INFO_SYMBOLS);
+    if (!v91_rx_info_codewords(&answerer, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "%s caller->answerer INFO rx failed\n", family_label);
+        return false;
+    }
+
+    if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "%s answerer INFO tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, transport_buf, V91_INFO_SYMBOLS);
+    if (!v91_rx_info_codewords(&caller, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "%s answerer->caller INFO rx failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: INFO/INFO' ok", family_label);
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "%s caller startup DIL sequence failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "%s answerer startup DIL sequence failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
+    vpcm_trace("%s: startup DIL ok", family_label);
+
+    if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+        fprintf(stderr, "%s caller SCR tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(&answerer, transport_buf, 18, false)) {
+        fprintf(stderr, "%s caller SCR rx failed\n", family_label);
+        return false;
+    }
+
+    if (v91_tx_scr_codewords(&answerer, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+        fprintf(stderr, "%s answerer SCR tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(&caller, transport_buf, 18, false)) {
+        fprintf(stderr, "%s answerer SCR rx failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: SCR ok", family_label);
+
+    cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
+    if (cp_len <= 0) {
+        fprintf(stderr, "%s caller CP tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(&answerer, transport_buf, cp_len, &cp_rx, true)
+        || !vpcm_cp_frames_equal(&cp_offer, &cp_rx)) {
+        fprintf(stderr, "%s caller CP rx failed\n", family_label);
+        return false;
+    }
+
+    cp_ack = cp_offer;
+    cp_ack.acknowledge = true;
+    cp_len = v91_tx_cp_codewords(&answerer, cp_buf, (int) sizeof(cp_buf), &cp_ack, true);
+    if (cp_len <= 0) {
+        fprintf(stderr, "%s answerer CP tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(&caller, transport_buf, cp_len, &cp_rx, true)
+        || !vpcm_cp_frames_equal(&cp_ack, &cp_rx)) {
+        fprintf(stderr, "%s answerer CP rx failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: CP/CP' ok", family_label);
+
+    if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+        fprintf(stderr, "%s caller Es tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(&answerer, transport_buf, V91_ES_SYMBOLS, true)) {
+        fprintf(stderr, "%s caller Es rx failed\n", family_label);
+        return false;
+    }
+
+    if (v91_tx_b1_codewords(&caller, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+        fprintf(stderr, "%s caller B1 tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(&answerer, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+        fprintf(stderr, "%s caller B1 rx failed\n", family_label);
+        return false;
+    }
+
+    if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+        fprintf(stderr, "%s answerer Es tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(&caller, transport_buf, V91_ES_SYMBOLS, true)) {
+        fprintf(stderr, "%s answerer Es rx failed\n", family_label);
+        return false;
+    }
+
+    if (v91_tx_b1_codewords(&answerer, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+        fprintf(stderr, "%s answerer B1 tx failed\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(&caller, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+        fprintf(stderr, "%s answerer B1 rx failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: Es/B1 ok", family_label);
+
+    if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
+        fprintf(stderr, "%s data-mode activation failed\n", family_label);
+        return false;
+    }
+    vpcm_trace("%s: data mode active", family_label);
+
+    total_bits = NOMINAL_10S_FRAMES * ((int) cp_ack.drn + 20);
+    total_bytes = total_bits / 8;
+    total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+    data_in = (uint8_t *) malloc((size_t) total_bytes);
+    data_out = (uint8_t *) malloc((size_t) total_bytes);
+    pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    if (!data_in || !data_out || !pcm_tx || !pcm_rx) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "allocation failure in %s session\n", family_label);
+        return false;
+    }
+
+    fill_pattern(data_in, total_bytes, data_seed);
+    memset(data_out, 0, (size_t) total_bytes);
+    produced = v91_tx_codewords(&caller, pcm_tx, total_codewords, data_in, total_bytes);
+    if (produced != total_codewords) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "%s tx length mismatch\n", family_label);
+        return false;
+    }
+    vpcm_transport_pcm_family_codewords(robbed_bit, pcm_rx, pcm_tx, produced);
+    consumed = v91_rx_codewords(&answerer, data_out, total_bytes, pcm_rx, produced);
+    if (consumed != total_bytes) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "%s rx length mismatch: %d/%d\n", family_label, consumed, total_bytes);
+        return false;
+    }
+    if (!expect_equal(family_label, data_in, data_out, total_bytes)) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        return false;
+    }
+
+    sample_pcm_len = (produced < 6) ? produced : 6;
+    if (cp_ack.transparent_mode_granted) {
+        sample_data_len = sample_pcm_len;
+    } else {
+        sample_data_len = (sample_pcm_len * ((int) cp_ack.drn + 20)) / 48;
+    }
+    if (sample_data_len < 1)
+        sample_data_len = 1;
+    if (sample_data_len > total_bytes)
+        sample_data_len = total_bytes;
+    vpcm_log_data_sample(data_in,
+                         sample_data_len,
+                         pcm_tx,
+                         sample_pcm_len,
+                         pcm_rx,
+                         sample_pcm_len,
+                         data_out,
+                         sample_data_len);
+    vpcm_format_rate(rate_buf, sizeof(rate_buf), cp_ack.drn);
+    vpcm_log("PASS: %s (%s, %s, drn=%u, rate=%s, bytes=%d, codewords=%d)",
+             family_label,
+             vpcm_law_to_str(law),
+             path_label,
+             cp_ack.drn,
+             rate_buf,
+             total_bytes,
+             total_codewords);
+
+    free(data_in);
+    free(data_out);
+    free(pcm_tx);
+    free(pcm_rx);
+    return true;
+}
+
+static void vpcm_v92_select_profile(bool echo_limited,
+                                    uint8_t *downstream_drn,
+                                    uint8_t *upstream_drn)
+{
+    /*
+     * V.92 is asymmetric in practice. The digital side typically delivers
+     * a higher downstream rate to the analogue side, while the analogue
+     * upstream rate is lower and more vulnerable to echo. The shared V.PCM
+     * engine works in DRN steps, so we pick nearby family-safe points:
+     *   clean line:      downstream ~= 52 kbps, upstream = 48 kbps
+     *   echo-limited:    downstream = 48 kbps, upstream = 40 kbps
+     */
+    if (echo_limited) {
+        *downstream_drn = 16;
+        *upstream_drn = 10;
+    } else {
+        *downstream_drn = 19;
+        *upstream_drn = 16;
+    }
+}
+
+static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
+                                                  const char *path_label,
+                                                  bool echo_limited,
+                                                  uint32_t seed_base)
+{
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    v91_dil_desc_t default_dil;
+    v91_state_t caller_startup;
+    v91_state_t answerer_startup;
+    v91_state_t caller_tx;
+    v91_state_t caller_rx;
+    v91_state_t answerer_tx;
+    v91_state_t answerer_rx;
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    v91_info_frame_t rx_info;
+    vpcm_cp_frame_t cp_down_offer;
+    vpcm_cp_frame_t cp_down_ack;
+    vpcm_cp_frame_t cp_up_offer;
+    vpcm_cp_frame_t cp_up_ack;
+    vpcm_cp_frame_t cp_rx;
+    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t scr_buf[18];
+    uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    uint8_t es_buf[V91_ES_SYMBOLS];
+    uint8_t b1_buf[V91_B1_SYMBOLS];
+    uint8_t *down_data_in;
+    uint8_t *down_data_out;
+    uint8_t *up_data_in;
+    uint8_t *up_data_out;
+    uint8_t *down_pcm_tx;
+    uint8_t *down_pcm_rx;
+    uint8_t *up_pcm_tx;
+    uint8_t *up_pcm_rx;
+    char down_rate_buf[64];
+    char up_rate_buf[64];
+    uint8_t downstream_drn;
+    uint8_t upstream_drn;
+    int startup_len;
+    int cp_len;
+    int total_codewords;
+    int down_total_bits;
+    int down_total_bytes;
+    int up_total_bits;
+    int up_total_bytes;
+    int down_produced;
+    int down_consumed;
+    int up_produced;
+    int up_consumed;
+    int sample_down_data_len;
+    int sample_up_data_len;
+
+    v91_default_dil_init(&default_dil);
+    v91_init(&caller_startup, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer_startup, law, V91_MODE_TRANSPARENT);
+    v91_init(&caller_tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&caller_rx, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer_tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
+    vpcm_v92_select_profile(echo_limited, &downstream_drn, &upstream_drn);
+
+    memset(&caller_info, 0, sizeof(caller_info));
+    caller_info.request_default_dil = true;
+    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    caller_info.power_measured_after_digital_impairments = true;
+    memset(&answerer_info, 0, sizeof(answerer_info));
+    answerer_info.request_default_dil = true;
+    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    answerer_info.power_measured_after_digital_impairments = true;
+
+    if (v91_tx_phase1_silence_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
+        || v91_tx_phase1_silence_codewords(&answerer_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
+        fprintf(stderr, "V.92 asymmetric phase1 silence failed\n");
+        return false;
+    }
+    if (v91_tx_ez_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
+        || v91_tx_ez_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
+        fprintf(stderr, "V.92 asymmetric Ez failed\n");
+        return false;
+    }
+
+    if (v91_tx_info_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS
+        || !v91_rx_info_codewords(&answerer_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "V.92 asymmetric caller INFO failed\n");
+        return false;
+    }
+    if (v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS
+        || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "V.92 asymmetric answerer INFO failed\n");
+        return false;
+    }
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "V.92 asymmetric caller startup DIL failed\n");
+        return false;
+    }
+    memcpy(transport_buf, startup_buf, (size_t) startup_len);
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&answerer_startup,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "V.92 asymmetric answerer startup DIL failed\n");
+        return false;
+    }
+    memcpy(transport_buf, startup_buf, (size_t) startup_len);
+
+    if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
+        || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)) {
+        fprintf(stderr, "V.92 asymmetric caller SCR failed\n");
+        return false;
+    }
+    if (v91_tx_scr_codewords(&answerer_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
+        || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)) {
+        fprintf(stderr, "V.92 asymmetric answerer SCR failed\n");
+        return false;
+    }
+
+    vpcm_cp_init(&cp_down_offer);
+    cp_down_offer.transparent_mode_granted = false;
+    cp_down_offer.v90_compatibility = true;
+    cp_down_offer.drn = downstream_drn;
+    cp_down_offer.acknowledge = false;
+    cp_down_offer.constellation_count = 1;
+    memset(cp_down_offer.dfi, 0, sizeof(cp_down_offer.dfi));
+    vpcm_cp_enable_all_ucodes(cp_down_offer.masks[0]);
+
+    cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_offer, true);
+    if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_offer, &cp_rx)) {
+        fprintf(stderr, "V.92 downstream CP offer failed\n");
+        return false;
+    }
+    cp_down_ack = cp_down_offer;
+    cp_down_ack.acknowledge = true;
+    cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_ack, true);
+    if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_ack, &cp_rx)) {
+        fprintf(stderr, "V.92 downstream CP acknowledge failed\n");
+        return false;
+    }
+    if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
+        || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
+        || v91_tx_b1_codewords(&caller_startup, b1_buf, (int) sizeof(b1_buf), &cp_down_ack) != V91_B1_SYMBOLS
+        || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &cp_down_ack)) {
+        fprintf(stderr, "V.92 downstream Es/B1 failed\n");
+        return false;
+    }
+
+    vpcm_cp_init(&cp_up_offer);
+    cp_up_offer.transparent_mode_granted = false;
+    cp_up_offer.v90_compatibility = true;
+    cp_up_offer.drn = upstream_drn;
+    cp_up_offer.acknowledge = false;
+    cp_up_offer.constellation_count = 1;
+    memset(cp_up_offer.dfi, 0, sizeof(cp_up_offer.dfi));
+    vpcm_cp_enable_all_ucodes(cp_up_offer.masks[0]);
+
+    cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_offer, true);
+    if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_offer, &cp_rx)) {
+        fprintf(stderr, "V.92 upstream CP offer failed\n");
+        return false;
+    }
+    cp_up_ack = cp_up_offer;
+    cp_up_ack.acknowledge = true;
+    cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_ack, true);
+    if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_ack, &cp_rx)) {
+        fprintf(stderr, "V.92 upstream CP acknowledge failed\n");
+        return false;
+    }
+    if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
+        || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
+        || v91_tx_b1_codewords(&answerer_startup, b1_buf, (int) sizeof(b1_buf), &cp_up_ack) != V91_B1_SYMBOLS
+        || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &cp_up_ack)) {
+        fprintf(stderr, "V.92 upstream Es/B1 failed\n");
+        return false;
+    }
+
+    if (!v91_activate_data_mode(&caller_tx, &cp_down_ack)
+        || !v91_activate_data_mode(&answerer_rx, &cp_down_ack)
+        || !v91_activate_data_mode(&answerer_tx, &cp_up_ack)
+        || !v91_activate_data_mode(&caller_rx, &cp_up_ack)) {
+        fprintf(stderr, "V.92 asymmetric data-mode activation failed\n");
+        return false;
+    }
+
+    total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+    down_total_bits = NOMINAL_10S_FRAMES * ((int) cp_down_ack.drn + 20);
+    down_total_bytes = down_total_bits / 8;
+    up_total_bits = NOMINAL_10S_FRAMES * ((int) cp_up_ack.drn + 20);
+    up_total_bytes = up_total_bits / 8;
+    down_data_in = (uint8_t *) malloc((size_t) down_total_bytes);
+    down_data_out = (uint8_t *) malloc((size_t) down_total_bytes);
+    up_data_in = (uint8_t *) malloc((size_t) up_total_bytes);
+    up_data_out = (uint8_t *) malloc((size_t) up_total_bytes);
+    down_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    down_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    up_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    up_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    if (!down_data_in || !down_data_out || !up_data_in || !up_data_out
+        || !down_pcm_tx || !down_pcm_rx || !up_pcm_tx || !up_pcm_rx) {
+        free(down_data_in);
+        free(down_data_out);
+        free(up_data_in);
+        free(up_data_out);
+        free(down_pcm_tx);
+        free(down_pcm_rx);
+        free(up_pcm_tx);
+        free(up_pcm_rx);
+        fprintf(stderr, "allocation failure in V.92 asymmetric session\n");
+        return false;
+    }
+
+    fill_pattern(down_data_in, down_total_bytes, seed_base ^ 0x00D04E00U);
+    fill_pattern(up_data_in, up_total_bytes, seed_base ^ 0x00A0B000U);
+    memset(down_data_out, 0, (size_t) down_total_bytes);
+    memset(up_data_out, 0, (size_t) up_total_bytes);
+
+    down_produced = v91_tx_codewords(&caller_tx, down_pcm_tx, total_codewords, down_data_in, down_total_bytes);
+    up_produced = v91_tx_codewords(&answerer_tx, up_pcm_tx, total_codewords, up_data_in, up_total_bytes);
+    if (down_produced != total_codewords || up_produced != total_codewords) {
+        free(down_data_in);
+        free(down_data_out);
+        free(up_data_in);
+        free(up_data_out);
+        free(down_pcm_tx);
+        free(down_pcm_rx);
+        free(up_pcm_tx);
+        free(up_pcm_rx);
+        fprintf(stderr, "V.92 asymmetric tx length mismatch\n");
+        return false;
+    }
+
+    memcpy(down_pcm_rx, down_pcm_tx, (size_t) total_codewords);
+    memcpy(up_pcm_rx, up_pcm_tx, (size_t) total_codewords);
+    down_consumed = v91_rx_codewords(&answerer_rx, down_data_out, down_total_bytes, down_pcm_rx, total_codewords);
+    up_consumed = v91_rx_codewords(&caller_rx, up_data_out, up_total_bytes, up_pcm_rx, total_codewords);
+    if (down_consumed != down_total_bytes || up_consumed != up_total_bytes) {
+        free(down_data_in);
+        free(down_data_out);
+        free(up_data_in);
+        free(up_data_out);
+        free(down_pcm_tx);
+        free(down_pcm_rx);
+        free(up_pcm_tx);
+        free(up_pcm_rx);
+        fprintf(stderr, "V.92 asymmetric rx length mismatch down=%d/%d up=%d/%d\n",
+                down_consumed, down_total_bytes, up_consumed, up_total_bytes);
+        return false;
+    }
+    if (!expect_equal("V.92 downstream payload", down_data_in, down_data_out, down_total_bytes)
+        || !expect_equal("V.92 upstream payload", up_data_in, up_data_out, up_total_bytes)) {
+        free(down_data_in);
+        free(down_data_out);
+        free(up_data_in);
+        free(up_data_out);
+        free(down_pcm_tx);
+        free(down_pcm_rx);
+        free(up_pcm_tx);
+        free(up_pcm_rx);
+        return false;
+    }
+
+    sample_down_data_len = (6 * ((int) cp_down_ack.drn + 20)) / 48;
+    sample_up_data_len = (6 * ((int) cp_up_ack.drn + 20)) / 48;
+    if (sample_down_data_len < 1)
+        sample_down_data_len = 1;
+    if (sample_up_data_len < 1)
+        sample_up_data_len = 1;
+    if (sample_down_data_len > down_total_bytes)
+        sample_down_data_len = down_total_bytes;
+    if (sample_up_data_len > up_total_bytes)
+        sample_up_data_len = up_total_bytes;
+
+    vpcm_log("Digital -> Analogue sample");
+    vpcm_log_data_sample(down_data_in,
+                         sample_down_data_len,
+                         down_pcm_tx,
+                         6,
+                         down_pcm_rx,
+                         6,
+                         down_data_out,
+                         sample_down_data_len);
+    vpcm_log("Analogue -> Digital sample");
+    vpcm_log_data_sample(up_data_in,
+                         sample_up_data_len,
+                         up_pcm_tx,
+                         6,
+                         up_pcm_rx,
+                         6,
+                         up_data_out,
+                         sample_up_data_len);
+
+    vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), cp_down_ack.drn);
+    vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), cp_up_ack.drn);
+    vpcm_log("PASS: V.92 full phase operation (%s, %s, digital->analogue=%s, analogue->digital=%s%s)",
+             vpcm_law_to_str(law),
+             path_label,
+             down_rate_buf,
+             up_rate_buf,
+             echo_limited ? ", echo-adapted" : "");
+
+    free(down_data_in);
+    free(down_data_out);
+    free(up_data_in);
+    free(up_data_out);
+    free(down_pcm_tx);
+    free(down_pcm_rx);
+    free(up_pcm_tx);
+    free(up_pcm_rx);
+    return true;
+}
+
 static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
 {
     static const struct {
@@ -2364,6 +3004,41 @@ static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
     return true;
 }
 
+static bool test_v92_full_phase_operation(v91_law_t law)
+{
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
+    const int caller_v92 = 0x45;
+    const int answer_v92 = 0x46;
+
+    vpcm_log("Test: V.92 full phase operation (%s)", vpcm_law_to_str(law));
+
+    init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
+    init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
+    caller_parms.v92 = caller_v92;
+    answer_parms.v92 = answer_v92;
+
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+        return false;
+    if (caller_result.result.v92 != answer_v92 || answer_result.result.v92 != caller_v92) {
+        fprintf(stderr, "V.92 full phase V.8 control byte mismatch caller_rx=0x%X answer_rx=0x%X\n",
+                caller_result.result.v92,
+                answer_result.result.v92);
+        return false;
+    }
+
+    return run_v92_full_phase_asymmetric_session(law,
+                                                 "clean line",
+                                                 false,
+                                                 0x92000000U ^ ((uint32_t) law << 8))
+        && run_v92_full_phase_asymmetric_session(law,
+                                                 "startup echo estimate",
+                                                 true,
+                                                 0x92100000U ^ ((uint32_t) law << 8));
+}
+
 static bool test_v91_codeword_loopback(v91_law_t law)
 {
     v91_state_t tx;
@@ -2711,6 +3386,10 @@ int main(void)
     if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW))
         return 1;
     if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW))
+        return 1;
+    if (!test_v92_full_phase_operation(V91_LAW_ULAW))
+        return 1;
+    if (!test_v92_full_phase_operation(V91_LAW_ALAW))
         return 1;
     if (!test_v91_linear_loopback(V91_LAW_ULAW))
         return 1;

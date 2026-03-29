@@ -30,12 +30,13 @@ Kernel configured for up to 10 processors.
 Processor type: arm64e (ARM64E)
 Processors active: 0 1 2 3 4 5 6 7 8 9
 Primary memory available: 16.00 gigabytes
-Default processor set: 494 tasks, 3215 threads, 10 processors
-Load average: 7.67, Mach factor: 4.15
+Default processor set: 574 tasks, 3358 threads, 10 processors
+Load average: 7.50, Mach factor: 3.67
 /bin/machine           = unknown
 /usr/bin/oslevel       = unknown
 /bin/universe          = unknown
 
+PATH: /Users/scottcryan/.codex/tmp/arg0/codex-arg0OWIcbr/
 PATH: /Users/scottcryan/.local/bin/
 PATH: /opt/homebrew/bin/
 PATH: /opt/homebrew/sbin/
@@ -53,7 +54,7 @@ PATH: /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin/
 PATH: /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin/
 PATH: /Library/Apple/usr/bin/
 PATH: /Applications/VMware Fusion.app/Contents/Public/
-PATH: /Users/scottcryan/.local/bin/
+PATH: /Users/scottcryan/.vscode/extensions/openai.chatgpt-26.323.20928-darwin-arm64/bin/macos-aarch64/
 
 
 ## ----------- ##
@@ -258,7 +259,7 @@ configure:6918: result: BSD nm
 configure:6921: checking whether ln -s works
 configure:6925: result: yes
 configure:6933: checking the maximum length of command line arguments
-configure:7066: result: 786432
+configure:7069: result: none
 configure:7114: checking how to convert aarch64-apple-darwin24.6.0 file names to aarch64-apple-darwin24.6.0 format
 configure:7156: result: func_convert_file_noop
 configure:7163: checking how to convert aarch64-apple-darwin24.6.0 file names to toolchain format
@@ -1026,7 +1027,7 @@ conftest.c:52:6: note: 'memalign' is a builtin with type 'void *(unsigned long, 
 1 warning generated.
 Undefined symbols for architecture arm64:
   "_memalign", referenced from:
-      _main in conftest-c13641.o
+      _main in conftest-6adf15.o
 ld: symbol(s) not found for architecture arm64
 clang: error: linker command failed with exit code 1 (use -v to see invocation)
 configure:20943: $? = 1
@@ -2774,7 +2775,7 @@ lt_cv_sys_global_symbol_to_c_name_address='/usr/bin/sed -n -e '\''s/^: \(.*\) .*
 lt_cv_sys_global_symbol_to_c_name_address_lib_prefix='/usr/bin/sed -n -e '\''s/^: \(.*\) .*$/  {"\1", (void *) 0},/p'\'' -e '\''s/^[ABCDGIRSTW][ABCDGIRSTW]* .* \(lib.*\)$/  {"\1", (void *) \&\1},/p'\'' -e '\''s/^[ABCDGIRSTW][ABCDGIRSTW]* .* \(.*\)$/  {"lib\1", (void *) \&\1},/p'\'''
 lt_cv_sys_global_symbol_to_cdecl='/usr/bin/sed -n -e '\''s/^T .* \(.*\)$/extern int \1();/p'\'' -e '\''s/^[ABCDGIRSTW][ABCDGIRSTW]* .* \(.*\)$/extern char \1;/p'\'''
 lt_cv_sys_global_symbol_to_import=
-lt_cv_sys_max_cmd_len=786432
+lt_cv_sys_max_cmd_len=
 lt_cv_to_host_file_cmd=func_convert_file_noop
 lt_cv_to_tool_file_cmd=func_convert_file_noop
 lt_cv_truncate_bin='/bin/dd bs=4096 count=1'
