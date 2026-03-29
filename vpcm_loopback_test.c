@@ -1285,6 +1285,143 @@ static bool test_v91_mapped_data_multirate(v91_law_t law)
     return true;
 }
 
+static int first_mismatch_index(const uint8_t *expected, const uint8_t *actual, int len)
+{
+    int i;
+
+    for (i = 0; i < len; i++) {
+        if (expected[i] != actual[i])
+            return i;
+    }
+    return -1;
+}
+
+static bool test_v91_robbed_bit_signalling(v91_law_t law)
+{
+    static const struct {
+        bool transparent;
+        const char *mode_label;
+    } cases[] = {
+        {false, "non-transparent"},
+        {true,  "transparent"},
+    };
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    vpcm_cp_frame_t cp;
+    int i;
+
+    vpcm_log("Test: V.91 robbed-bit signalling degradation (%s)", vpcm_law_to_str(law));
+    for (i = 0; i < (int) (sizeof(cases)/sizeof(cases[0])); i++) {
+        v91_state_t caller_tx;
+        v91_state_t answerer_rx;
+        uint8_t *data_in;
+        uint8_t *data_out;
+        uint8_t *pcm_tx;
+        uint8_t *pcm_rx;
+        int total_bits;
+        int total_bytes;
+        int total_codewords;
+        int produced;
+        int consumed;
+        int mismatch_at;
+        int sample_data_len;
+        double effective_bps;
+        int j;
+
+        total_bits = NOMINAL_10S_FRAMES * (28 + 20);
+        total_bytes = total_bits / 8;
+        total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+        effective_bps = 8000.0 * (8.0 - (1.0 / 6.0));
+
+        data_in = (uint8_t *) malloc((size_t) total_bytes);
+        data_out = (uint8_t *) malloc((size_t) total_bytes);
+        pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+        pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+        if (!data_in || !data_out || !pcm_tx || !pcm_rx) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr, "allocation failure in robbed-bit signalling test\n");
+            return false;
+        }
+
+        v91_init(&caller_tx, law, V91_MODE_TRANSPARENT);
+        v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
+        vpcm_cp_init(&cp);
+        cp.transparent_mode_granted = cases[i].transparent;
+        cp.v90_compatibility = true;
+        cp.drn = 28;
+        cp.acknowledge = true;
+        cp.constellation_count = 1;
+        memset(cp.dfi, 0, sizeof(cp.dfi));
+        vpcm_cp_enable_all_ucodes(cp.masks[0]);
+
+        if (!v91_activate_data_mode(&caller_tx, &cp) || !v91_activate_data_mode(&answerer_rx, &cp)) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr, "failed to activate robbed-bit signalling test mode\n");
+            return false;
+        }
+
+        fill_pattern(data_in, total_bytes, 0x91B00000U ^ ((uint32_t) law << 8) ^ (uint32_t) i);
+        memset(data_out, 0, (size_t) total_bytes);
+
+        produced = v91_tx_codewords(&caller_tx, pcm_tx, total_codewords, data_in, total_bytes);
+        if (produced != total_codewords) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr, "robbed-bit test failed to produce full PCM stream\n");
+            return false;
+        }
+
+        memcpy(pcm_rx, pcm_tx, (size_t) produced);
+        for (j = 5; j < produced; j += 6)
+            pcm_rx[j] &= 0xFE;
+
+        consumed = v91_rx_codewords(&answerer_rx, data_out, total_bytes, pcm_rx, produced);
+        mismatch_at = (consumed < total_bytes) ? consumed : first_mismatch_index(data_in, data_out, total_bytes);
+        if (mismatch_at < 0) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr,
+                    "robbed-bit signalling unexpectedly preserved drn=28 %s payload\n",
+                    cases[i].mode_label);
+            return false;
+        }
+
+        sample_data_len = 6;
+        if (sample_data_len > total_bytes)
+            sample_data_len = total_bytes;
+        vpcm_log_data_sample(data_in,
+                             sample_data_len,
+                             pcm_tx,
+                             6,
+                             pcm_rx,
+                             6,
+                             data_out,
+                             (consumed < sample_data_len) ? consumed : sample_data_len);
+        vpcm_log("PASS: robbed-bit signalling degrades %s drn=28 as expected (%s, first mismatch at byte %d, effective ceiling %.2f bps)",
+                 cases[i].mode_label,
+                 vpcm_law_to_str(law),
+                 mismatch_at,
+                 effective_bps);
+
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+    }
+
+    vpcm_log("PASS: V.91 robbed-bit signalling degradation (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed)
 {
     int i;
@@ -1879,6 +2016,10 @@ int main(void)
     if (!test_v91_mapped_data_multirate(V91_LAW_ULAW))
         return 1;
     if (!test_v91_mapped_data_multirate(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_robbed_bit_signalling(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_robbed_bit_signalling(V91_LAW_ALAW))
         return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
         return 1;
