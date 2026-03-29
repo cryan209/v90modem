@@ -47,6 +47,12 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag);
 bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag);
 double vpcm_cp_drn_to_bps(uint8_t drn);
 int vpcm_cp_drn_to_k(uint8_t drn);
+double vpcm_cp_robbed_bit_ceiling_bps(void);
+uint8_t vpcm_cp_recommended_robbed_bit_drn(void);
+void vpcm_cp_enable_odd_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
+void vpcm_cp_init_robbed_bit_safe_profile(vpcm_cp_frame_t *cp,
+                                          uint8_t drn,
+                                          bool transparent_mode_granted);
 int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high);
 
 void vpcm_cp_mask_set(uint8_t mask[VPCM_CP_MASK_BYTES], int ucode, bool enabled);

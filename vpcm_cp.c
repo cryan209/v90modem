@@ -317,6 +317,60 @@ int vpcm_cp_drn_to_k(uint8_t drn)
     return (int) drn + 14;
 }
 
+double vpcm_cp_robbed_bit_ceiling_bps(void)
+{
+    return (47.0 * 8000.0) / 6.0;
+}
+
+uint8_t vpcm_cp_recommended_robbed_bit_drn(void)
+{
+    /*
+     * One stolen bit every sixth PCM codeword leaves a theoretical
+     * ceiling of 47 bits per 6-codeword interval, but real robbed-bit
+     * trunks are conventionally treated as 56 kbps-safe paths.
+     */
+    return 22;
+}
+
+void vpcm_cp_enable_odd_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])
+{
+    int ucode;
+
+    if (!mask)
+        return;
+    memset(mask, 0, VPCM_CP_MASK_BYTES);
+    for (ucode = 1; ucode < VPCM_CP_MASK_BITS; ucode += 2)
+        vpcm_cp_mask_set(mask, ucode, true);
+}
+
+void vpcm_cp_init_robbed_bit_safe_profile(vpcm_cp_frame_t *cp,
+                                          uint8_t drn,
+                                          bool transparent_mode_granted)
+{
+    int ucode;
+
+    if (!cp)
+        return;
+
+    vpcm_cp_init(cp);
+    cp->transparent_mode_granted = transparent_mode_granted;
+    cp->drn = drn;
+    cp->constellation_count = 2;
+    memset(cp->dfi, 0, sizeof(cp->dfi));
+    cp->dfi[VPCM_CP_FRAME_INTERVALS - 1] = 1;
+    memset(cp->masks[0], 0, VPCM_CP_MASK_BYTES);
+    for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++)
+        vpcm_cp_mask_set(cp->masks[0], ucode, true);
+    /*
+     * Robbed-bit trunks steal the LSB on every sixth PCM codeword, so
+     * the robbed slot uses only odd Ucodes. Those survive LSB clearing
+     * in both A-law and u-law while still leaving 64 choices (6 bits).
+     * This profile is suitable family-wide for V.90/V.91/V.92-style
+     * 56 kbps-safe CP negotiation on clean robbed-bit paths.
+     */
+    vpcm_cp_enable_odd_ucodes(cp->masks[1]);
+}
+
 int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high)
 {
     int constellation_idx;

@@ -1340,6 +1340,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                     /* Set the timeout for JM */
                     s->negotiation_timer = milliseconds_to_samples(5000);
                     s->state = V8_JM_ON;
+                    conditionally_send_v92(s);
                     send_cm_jm(s);
                     s->modem_connect_tone_tx_timer = milliseconds_to_samples(75);
                     s->fsk_tx_on = true;
@@ -1370,6 +1371,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                             fsk_tx_init(&s->v21tx, &preset_fsk_specs[FSK_V21CH2], get_bit, s);
                             s->negotiation_timer = milliseconds_to_samples(5000);
                             s->state = V8_JM_ON;
+                            conditionally_send_v92(s);
                             send_cm_jm(s);
                             s->modem_connect_tone_tx_timer = milliseconds_to_samples(75);
                             s->fsk_tx_on = true;
@@ -1396,6 +1398,7 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 /* Set the timeout for JM */
                 s->negotiation_timer = milliseconds_to_samples(5000);
                 s->state = V8_JM_ON;
+                conditionally_send_v92(s);
                 send_cm_jm(s);
                 s->modem_connect_tone_tx_timer = milliseconds_to_samples(75);
                 s->fsk_tx_on = true;

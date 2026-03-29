@@ -39,6 +39,10 @@ typedef struct {
     v8_parms_t result;
 } vpcm_v8_result_t;
 
+static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
+                                                const uint8_t *src,
+                                                int len);
+
 static bool g_vpcm_verbose = false;
 
 static void vpcm_log(const char *fmt, ...);
@@ -56,6 +60,7 @@ static void vpcm_log_data_sample(const uint8_t *data_tx,
                                  const uint8_t *remote_data_rx,
                                  int remote_data_rx_len);
 static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
+static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 
 static const char *vpcm_law_to_str(v91_law_t law)
 {
@@ -101,6 +106,54 @@ static bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t
         && a->constellation_count == b->constellation_count
         && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
         && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
+}
+
+static bool test_vpcm_cp_robbed_bit_safe_profile(void)
+{
+    vpcm_cp_frame_t tx;
+    vpcm_cp_frame_t rx;
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int nbits;
+    int idx;
+
+    vpcm_log("Test: VPCM robbed-bit-safe CP profile");
+
+    vpcm_cp_init_robbed_bit_safe_profile(&tx, vpcm_cp_recommended_robbed_bit_drn(), false);
+    if (!vpcm_cp_validate(&tx, NULL, 0)) {
+        fprintf(stderr, "robbed-bit-safe CP profile validation failed\n");
+        return false;
+    }
+    if (tx.constellation_count != 2 || tx.dfi[VPCM_CP_FRAME_INTERVALS - 1] != 1) {
+        fprintf(stderr, "robbed-bit-safe CP profile shape mismatch\n");
+        return false;
+    }
+    if (vpcm_cp_mask_population(tx.masks[0]) != 128 || vpcm_cp_mask_population(tx.masks[1]) != 64) {
+        fprintf(stderr, "robbed-bit-safe CP profile population mismatch\n");
+        return false;
+    }
+    for (idx = 0; idx < VPCM_CP_MASK_BITS; idx++) {
+        bool expected;
+
+        expected = ((idx & 1) != 0);
+        if (vpcm_cp_mask_get(tx.masks[1], idx) != expected) {
+            fprintf(stderr, "robbed-bit-safe CP profile odd-Ucode mask mismatch at %d\n", idx);
+            return false;
+        }
+    }
+    if (!vpcm_cp_encode_bits(&tx, bits, &nbits) || !vpcm_cp_decode_bits(bits, nbits, &rx)) {
+        fprintf(stderr, "robbed-bit-safe CP profile encode/decode failed\n");
+        return false;
+    }
+    if (!vpcm_cp_frames_equal(&tx, &rx)) {
+        fprintf(stderr, "robbed-bit-safe CP profile did not round-trip\n");
+        return false;
+    }
+
+    vpcm_log("PASS: VPCM robbed-bit-safe CP profile (drn=%u, rate=%.0f bps, robbed slot population=%d)",
+             tx.drn,
+             vpcm_cp_drn_to_bps(tx.drn),
+             vpcm_cp_mask_population(tx.masks[1]));
+    return true;
 }
 
 static void vpcm_bits_to_str(char *out, size_t out_len, const uint8_t *bits, int nbits)
@@ -1422,6 +1475,543 @@ static bool test_v91_robbed_bit_signalling(v91_law_t law)
     return true;
 }
 
+static bool test_v91_startup_to_data_robbed_bit(v91_law_t law)
+{
+    static const struct {
+        bool transparent;
+        const char *mode_label;
+    } cases[] = {
+        {false, "non-transparent"},
+        {true,  "transparent"},
+    };
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    v91_dil_desc_t default_dil;
+    int i;
+
+    vpcm_log("Test: V.91 startup -> data over robbed-bit signalling (%s)", vpcm_law_to_str(law));
+    v91_default_dil_init(&default_dil);
+
+    for (i = 0; i < (int) (sizeof(cases)/sizeof(cases[0])); i++) {
+        v91_state_t caller;
+        v91_state_t answerer;
+        v91_info_frame_t caller_info;
+        v91_info_frame_t answerer_info;
+        v91_info_frame_t rx_info;
+        vpcm_cp_frame_t cp_offer;
+        vpcm_cp_frame_t cp_ack;
+        vpcm_cp_frame_t cp_rx;
+        uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+        uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+        uint8_t scr_buf[18];
+        uint8_t cp_buf[VPCM_CP_MAX_BITS];
+        uint8_t es_buf[V91_ES_SYMBOLS];
+        uint8_t b1_buf[V91_B1_SYMBOLS];
+        uint8_t *data_in;
+        uint8_t *data_out;
+        uint8_t *pcm_tx;
+        uint8_t *pcm_rx;
+        int startup_len;
+        int cp_len;
+        int total_bits;
+        int total_bytes;
+        int total_codewords;
+        int produced;
+        int consumed;
+        int mismatch_at;
+        int sample_len;
+
+        v91_init(&caller, law, V91_MODE_TRANSPARENT);
+        v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+
+        memset(&caller_info, 0, sizeof(caller_info));
+        caller_info.request_default_dil = true;
+        caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+        caller_info.power_measured_after_digital_impairments = true;
+        caller_info.request_transparent_mode = cases[i].transparent;
+        caller_info.cleardown_if_transparent_denied = cases[i].transparent;
+
+        memset(&answerer_info, 0, sizeof(answerer_info));
+        answerer_info.request_default_dil = true;
+        answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+        answerer_info.power_measured_after_digital_impairments = true;
+        answerer_info.request_transparent_mode = cases[i].transparent;
+        answerer_info.cleardown_if_transparent_denied = cases[i].transparent;
+
+        if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup caller INFO tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, transport_buf, V91_INFO_SYMBOLS);
+        if (!v91_rx_info_codewords(&answerer, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+            fprintf(stderr, "robbed-bit startup caller->answerer INFO rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup answerer INFO tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, transport_buf, V91_INFO_SYMBOLS);
+        if (!v91_rx_info_codewords(&caller, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+            fprintf(stderr, "robbed-bit startup answerer->caller INFO rx failed\n");
+            return false;
+        }
+
+        startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
+                                                            startup_buf,
+                                                            (int) sizeof(startup_buf),
+                                                            &default_dil,
+                                                            NULL);
+        if (startup_len <= 0) {
+            fprintf(stderr, "robbed-bit startup caller DIL sequence failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+
+        startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
+                                                            startup_buf,
+                                                            (int) sizeof(startup_buf),
+                                                            &default_dil,
+                                                            NULL);
+        if (startup_len <= 0) {
+            fprintf(stderr, "robbed-bit startup answerer DIL sequence failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+
+        if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+            fprintf(stderr, "robbed-bit startup caller SCR tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, scr_buf, 18);
+        if (!v91_rx_scr_codewords(&answerer, transport_buf, 18, false)) {
+            fprintf(stderr, "robbed-bit startup caller SCR rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_scr_codewords(&answerer, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+            fprintf(stderr, "robbed-bit startup answerer SCR tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, scr_buf, 18);
+        if (!v91_rx_scr_codewords(&caller, transport_buf, 18, false)) {
+            fprintf(stderr, "robbed-bit startup answerer SCR rx failed\n");
+            return false;
+        }
+
+        vpcm_cp_init(&cp_offer);
+        cp_offer.transparent_mode_granted = cases[i].transparent;
+        cp_offer.v90_compatibility = true;
+        cp_offer.drn = 28;
+        cp_offer.acknowledge = false;
+        cp_offer.constellation_count = 1;
+        memset(cp_offer.dfi, 0, sizeof(cp_offer.dfi));
+        vpcm_cp_enable_all_ucodes(cp_offer.masks[0]);
+
+        cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
+        if (cp_len <= 0) {
+            fprintf(stderr, "robbed-bit startup caller CP tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, cp_buf, cp_len);
+        if (!v91_rx_cp_codewords(&answerer, transport_buf, cp_len, &cp_rx, true)
+            || !vpcm_cp_frames_equal(&cp_offer, &cp_rx)) {
+            fprintf(stderr, "robbed-bit startup caller CP rx failed\n");
+            return false;
+        }
+
+        cp_ack = cp_offer;
+        cp_ack.acknowledge = true;
+        cp_len = v91_tx_cp_codewords(&answerer, cp_buf, (int) sizeof(cp_buf), &cp_ack, true);
+        if (cp_len <= 0) {
+            fprintf(stderr, "robbed-bit startup answerer CP tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, cp_buf, cp_len);
+        if (!v91_rx_cp_codewords(&caller, transport_buf, cp_len, &cp_rx, true)
+            || !vpcm_cp_frames_equal(&cp_ack, &cp_rx)) {
+            fprintf(stderr, "robbed-bit startup answerer CP rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup caller Es tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, es_buf, V91_ES_SYMBOLS);
+        if (!v91_rx_es_codewords(&answerer, transport_buf, V91_ES_SYMBOLS, true)) {
+            fprintf(stderr, "robbed-bit startup caller Es rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_b1_codewords(&caller, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup caller B1 tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
+        if (!v91_rx_b1_codewords(&answerer, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+            fprintf(stderr, "robbed-bit startup caller B1 rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup answerer Es tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, es_buf, V91_ES_SYMBOLS);
+        if (!v91_rx_es_codewords(&caller, transport_buf, V91_ES_SYMBOLS, true)) {
+            fprintf(stderr, "robbed-bit startup answerer Es rx failed\n");
+            return false;
+        }
+
+        if (v91_tx_b1_codewords(&answerer, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+            fprintf(stderr, "robbed-bit startup answerer B1 tx failed\n");
+            return false;
+        }
+        vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
+        if (!v91_rx_b1_codewords(&caller, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+            fprintf(stderr, "robbed-bit startup answerer B1 rx failed\n");
+            return false;
+        }
+
+        if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
+            fprintf(stderr, "robbed-bit startup data-mode activation failed\n");
+            return false;
+        }
+
+        total_bits = NOMINAL_10S_FRAMES * (28 + 20);
+        total_bytes = total_bits / 8;
+        total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+        data_in = (uint8_t *) malloc((size_t) total_bytes);
+        data_out = (uint8_t *) malloc((size_t) total_bytes);
+        pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+        pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+        if (!data_in || !data_out || !pcm_tx || !pcm_rx) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr, "allocation failure in robbed-bit startup->data test\n");
+            return false;
+        }
+
+        fill_pattern(data_in, total_bytes, 0x91570000U ^ ((uint32_t) law << 8) ^ (uint32_t) i);
+        memset(data_out, 0, (size_t) total_bytes);
+        produced = v91_tx_codewords(&caller, pcm_tx, total_codewords, data_in, total_bytes);
+        if (produced != total_codewords) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr, "robbed-bit startup->data tx length mismatch\n");
+            return false;
+        }
+
+        vpcm_transport_robbed_bit_codewords(pcm_rx, pcm_tx, produced);
+        consumed = v91_rx_codewords(&answerer, data_out, total_bytes, pcm_rx, produced);
+        mismatch_at = (consumed < total_bytes) ? consumed : first_mismatch_index(data_in, data_out, total_bytes);
+        if (mismatch_at < 0) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            free(pcm_rx);
+            fprintf(stderr,
+                    "robbed-bit startup->data unexpectedly preserved drn=28 %s payload\n",
+                    cases[i].mode_label);
+            return false;
+        }
+
+        sample_len = 6;
+        if (sample_len > total_bytes)
+            sample_len = total_bytes;
+        vpcm_log_data_sample(data_in,
+                             sample_len,
+                             pcm_tx,
+                             6,
+                             pcm_rx,
+                             6,
+                             data_out,
+                             (consumed < sample_len) ? consumed : sample_len);
+        vpcm_log("PASS: startup -> data over robbed-bit signalling degrades %s drn=28 as expected (%s, first mismatch at byte %d)",
+                 cases[i].mode_label,
+                 vpcm_law_to_str(law),
+                 mismatch_at);
+
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+    }
+
+    vpcm_log("PASS: V.91 startup -> data over robbed-bit signalling (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
+{
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    const uint8_t drn = vpcm_cp_recommended_robbed_bit_drn();
+    v91_dil_desc_t default_dil;
+    v91_state_t caller;
+    v91_state_t answerer;
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    v91_info_frame_t rx_info;
+    vpcm_cp_frame_t cp_offer;
+    vpcm_cp_frame_t cp_ack;
+    vpcm_cp_frame_t cp_rx;
+    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t scr_buf[18];
+    uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    uint8_t es_buf[V91_ES_SYMBOLS];
+    uint8_t b1_buf[V91_B1_SYMBOLS];
+    uint8_t *data_in;
+    uint8_t *data_out;
+    uint8_t *pcm_tx;
+    uint8_t *pcm_rx;
+    char rate_buf[64];
+    int startup_len;
+    int cp_len;
+    int total_bits;
+    int total_bytes;
+    int total_codewords;
+    int produced;
+    int consumed;
+    int sample_len;
+
+    vpcm_log("Test: V.91 startup -> data over robbed-bit signalling (%s, safe rate)", vpcm_law_to_str(law));
+    v91_default_dil_init(&default_dil);
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+
+    memset(&caller_info, 0, sizeof(caller_info));
+    caller_info.request_default_dil = true;
+    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    caller_info.power_measured_after_digital_impairments = true;
+
+    memset(&answerer_info, 0, sizeof(answerer_info));
+    answerer_info.request_default_dil = true;
+    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    answerer_info.power_measured_after_digital_impairments = true;
+
+    if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate caller INFO tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, transport_buf, V91_INFO_SYMBOLS);
+    if (!v91_rx_info_codewords(&answerer, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "robbed-bit safe-rate caller->answerer INFO rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate answerer INFO tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, transport_buf, V91_INFO_SYMBOLS);
+    if (!v91_rx_info_codewords(&caller, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer->caller INFO rx failed\n");
+        return false;
+    }
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "robbed-bit safe-rate caller DIL sequence failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+
+    startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
+                                                        startup_buf,
+                                                        (int) sizeof(startup_buf),
+                                                        &default_dil,
+                                                        NULL);
+    if (startup_len <= 0) {
+        fprintf(stderr, "robbed-bit safe-rate answerer DIL sequence failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, startup_buf, startup_len);
+
+    if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+        fprintf(stderr, "robbed-bit safe-rate caller SCR tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(&answerer, transport_buf, 18, false)) {
+        fprintf(stderr, "robbed-bit safe-rate caller SCR rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_scr_codewords(&answerer, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
+        fprintf(stderr, "robbed-bit safe-rate answerer SCR tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(&caller, transport_buf, 18, false)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer SCR rx failed\n");
+        return false;
+    }
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, drn, false);
+
+    cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
+    if (cp_len <= 0) {
+        fprintf(stderr, "robbed-bit safe-rate caller CP tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(&answerer, transport_buf, cp_len, &cp_rx, true)
+        || !vpcm_cp_frames_equal(&cp_offer, &cp_rx)) {
+        fprintf(stderr, "robbed-bit safe-rate caller CP rx failed\n");
+        return false;
+    }
+
+    cp_ack = cp_offer;
+    cp_ack.acknowledge = true;
+    cp_len = v91_tx_cp_codewords(&answerer, cp_buf, (int) sizeof(cp_buf), &cp_ack, true);
+    if (cp_len <= 0) {
+        fprintf(stderr, "robbed-bit safe-rate answerer CP tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(&caller, transport_buf, cp_len, &cp_rx, true)
+        || !vpcm_cp_frames_equal(&cp_ack, &cp_rx)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer CP rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate caller Es tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(&answerer, transport_buf, V91_ES_SYMBOLS, true)) {
+        fprintf(stderr, "robbed-bit safe-rate caller Es rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_b1_codewords(&caller, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate caller B1 tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(&answerer, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+        fprintf(stderr, "robbed-bit safe-rate caller B1 rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate answerer Es tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(&caller, transport_buf, V91_ES_SYMBOLS, true)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer Es rx failed\n");
+        return false;
+    }
+
+    if (v91_tx_b1_codewords(&answerer, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS) {
+        fprintf(stderr, "robbed-bit safe-rate answerer B1 tx failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(&caller, transport_buf, V91_B1_SYMBOLS, &cp_ack)) {
+        fprintf(stderr, "robbed-bit safe-rate answerer B1 rx failed\n");
+        return false;
+    }
+
+    if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
+        fprintf(stderr, "robbed-bit safe-rate data-mode activation failed\n");
+        return false;
+    }
+
+    total_bits = NOMINAL_10S_FRAMES * ((int) drn + 20);
+    total_bytes = total_bits / 8;
+    total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+    data_in = (uint8_t *) malloc((size_t) total_bytes);
+    data_out = (uint8_t *) malloc((size_t) total_bytes);
+    pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+    pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
+    if (!data_in || !data_out || !pcm_tx || !pcm_rx) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "allocation failure in robbed-bit safe-rate test\n");
+        return false;
+    }
+
+    fill_pattern(data_in, total_bytes, 0x91560000U ^ ((uint32_t) law << 8));
+    memset(data_out, 0, (size_t) total_bytes);
+    produced = v91_tx_codewords(&caller, pcm_tx, total_codewords, data_in, total_bytes);
+    if (produced != total_codewords) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "robbed-bit safe-rate tx length mismatch\n");
+        return false;
+    }
+
+    vpcm_transport_robbed_bit_codewords(pcm_rx, pcm_tx, produced);
+    consumed = v91_rx_codewords(&answerer, data_out, total_bytes, pcm_rx, produced);
+    if (consumed != total_bytes) {
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        fprintf(stderr, "robbed-bit safe-rate rx length mismatch: %d/%d\n", consumed, total_bytes);
+        return false;
+    }
+    if (!expect_equal("V.91 robbed-bit safe-rate data", data_in, data_out, total_bytes)) {
+        sample_len = 12;
+        if (sample_len > total_bytes)
+            sample_len = total_bytes;
+        vpcm_log_data_sample(data_in,
+                             sample_len,
+                             pcm_tx,
+                             12,
+                             pcm_rx,
+                             12,
+                             data_out,
+                             sample_len);
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+        free(pcm_rx);
+        return false;
+    }
+
+    sample_len = 6;
+    if (sample_len > total_bytes)
+        sample_len = total_bytes;
+    vpcm_log_data_sample(data_in,
+                         sample_len,
+                         pcm_tx,
+                         6,
+                         pcm_rx,
+                         6,
+                         data_out,
+                         sample_len);
+    vpcm_format_rate(rate_buf, sizeof(rate_buf), drn);
+    vpcm_log("PASS: startup -> data over robbed-bit signalling holds at safe rate (%s, drn=%u, rate=%s, ceiling=%.2f bps)",
+             vpcm_law_to_str(law),
+             drn,
+             rate_buf,
+             vpcm_cp_robbed_bit_ceiling_bps());
+
+    free(data_in);
+    free(data_out);
+    free(pcm_tx);
+    free(pcm_rx);
+    return true;
+}
+
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed)
 {
     int i;
@@ -1530,6 +2120,17 @@ static void vpcm_transport_codewords(vpcm_channel_t channel,
     }
 
     memcpy(dst, src, (size_t) len);
+}
+
+static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
+                                                const uint8_t *src,
+                                                int len)
+{
+    int i;
+
+    memcpy(dst, src, (size_t) len);
+    for (i = 5; i < len; i += 6)
+        dst[i] &= 0xFE;
 }
 
 static void vpcm_v8_result_handler(void *user_data, v8_parms_t *result)
@@ -1702,6 +2303,64 @@ static bool test_v8_v91_advertisement_over_analog_g711(v91_law_t law)
     }
 
     vpcm_log("PASS: V.8 V.91 advertisement over analog-over-G.711 (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
+{
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
+    uint32_t expected_mods;
+    int expected_pcm;
+    const int caller_v92 = 0x45;
+    const int answer_v92 = 0x46;
+
+    /*
+     * Current SpanDSP V.8 behavior in this path keeps the CM/JM modulation
+     * set on the V.90 family advertisement while exchanging the separate
+     * V.92 QC/QCA control byte.  So this test verifies the actual V.92-
+     * specific path we have today: byte exchange over analog-over-G.711.
+     */
+    expected_mods = V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90;
+    expected_pcm = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+    vpcm_log("Test: V.8 V.92 QC/QCA exchange over analog-over-G.711 (%s)", vpcm_law_to_str(law));
+    init_v8_parms(&caller_parms, true, expected_mods, expected_pcm);
+    init_v8_parms(&answer_parms, false, expected_mods, expected_pcm);
+    caller_parms.v92 = caller_v92;
+    answer_parms.v92 = answer_v92;
+
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+        return false;
+
+    if ((caller_result.result.jm_cm.modulations & expected_mods) != expected_mods
+        || (answer_result.result.jm_cm.modulations & expected_mods) != expected_mods) {
+        fprintf(stderr, "V.8 V.92 QC exchange base modulation mismatch caller=0x%X answer=0x%X\n",
+                caller_result.result.jm_cm.modulations,
+                answer_result.result.jm_cm.modulations);
+        return false;
+    }
+    if ((caller_result.result.jm_cm.pcm_modem_availability & expected_pcm) != expected_pcm
+        || (answer_result.result.jm_cm.pcm_modem_availability & expected_pcm) != expected_pcm) {
+        fprintf(stderr, "V.8 V.92 QC exchange PCM availability mismatch caller=0x%X answer=0x%X\n",
+                caller_result.result.jm_cm.pcm_modem_availability,
+                answer_result.result.jm_cm.pcm_modem_availability);
+        return false;
+    }
+    if (caller_result.result.v92 != answer_v92 || answer_result.result.v92 != caller_v92) {
+        fprintf(stderr, "V.8 V.92 QC exchange control byte mismatch caller_rx=0x%X answer_rx=0x%X expected caller=0x%X answer=0x%X\n",
+                caller_result.result.v92,
+                answer_result.result.v92,
+                answer_v92,
+                caller_v92);
+        return false;
+    }
+
+    vpcm_log("PASS: V.8 V.92 QC/QCA exchange over analog-over-G.711 (%s), caller_rx=0x%02X answer_rx=0x%02X",
+             vpcm_law_to_str(law),
+             caller_result.result.v92,
+             answer_result.result.v92);
     return true;
 }
 
@@ -1985,6 +2644,8 @@ int main(void)
     vpcm_log("PCM modem loopback harness starting (verbose=%s)",
              g_vpcm_verbose ? "on" : "off");
 
+    if (!test_vpcm_cp_robbed_bit_safe_profile())
+        return 1;
     if (!test_v91_codeword_loopback(V91_LAW_ULAW))
         return 1;
     if (!test_v91_codeword_loopback(V91_LAW_ALAW))
@@ -2021,6 +2682,14 @@ int main(void)
         return 1;
     if (!test_v91_robbed_bit_signalling(V91_LAW_ALAW))
         return 1;
+    if (!test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW))
+        return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
         return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ALAW))
@@ -2038,6 +2707,10 @@ int main(void)
     if (!test_v8_v91_advertisement_over_analog_g711(V91_LAW_ULAW))
         return 1;
     if (!test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW))
+        return 1;
+    if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW))
+        return 1;
+    if (!test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW))
         return 1;
     if (!test_v91_linear_loopback(V91_LAW_ULAW))
         return 1;
