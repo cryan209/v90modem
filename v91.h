@@ -99,6 +99,16 @@ typedef struct {
     bool retrain_requested;
     bool circuit_107_on;
     int next_frame_interval;
+    bool data_mode_active;
+    vpcm_cp_frame_t active_cp;
+    int active_k;
+    int active_s;
+    int active_primary_bits_per_frame;
+    bool active_transparent_mode;
+    uint64_t tx_bit_accum;
+    int tx_bit_count;
+    uint64_t rx_bit_accum;
+    int rx_bit_count;
 } v91_state_t;
 
 typedef enum {
@@ -181,6 +191,8 @@ int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
                                           const v91_dil_desc_t *peer_dil,
                                           v91_align_signal_t *align_out);
 void v91_note_frame_sync_loss(v91_state_t *s);
+bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
+void v91_deactivate_data_mode(v91_state_t *s);
 
 /*
  * Encode application octets to G.711 codewords.

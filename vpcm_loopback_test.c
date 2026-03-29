@@ -42,6 +42,20 @@ typedef struct {
 static bool g_vpcm_verbose = false;
 
 static void vpcm_log(const char *fmt, ...);
+static void fill_pattern(uint8_t *buf, int len, uint32_t seed);
+static bool expect_equal(const char *label,
+                         const uint8_t *expected,
+                         const uint8_t *actual,
+                         int len);
+static void vpcm_log_data_sample(const uint8_t *data_tx,
+                                 int data_tx_len,
+                                 const uint8_t *pcm_tx,
+                                 int pcm_tx_len,
+                                 const uint8_t *remote_pcm_rx,
+                                 int remote_pcm_rx_len,
+                                 const uint8_t *remote_data_rx,
+                                 int remote_data_rx_len);
+static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 
 static const char *vpcm_law_to_str(v91_law_t law)
 {
@@ -1146,12 +1160,185 @@ static bool test_v91_startup_to_b1_multirate(v91_law_t law)
     return true;
 }
 
+static bool test_v91_mapped_data_multirate(v91_law_t law)
+{
+    static const struct {
+        uint8_t drn;
+        bool transparent;
+        const char *mode_label;
+    } cases[] = {
+        {1,  false, "non-transparent"},
+        {4,  false, "non-transparent"},
+        {9,  false, "non-transparent"},
+        {16, false, "non-transparent"},
+        {24, false, "non-transparent"},
+        {28, false, "non-transparent"},
+        {28, true,  "transparent"},
+    };
+    enum { NOMINAL_10S_FRAMES = 13328 };
+    v91_state_t caller_tx;
+    v91_state_t answerer_rx;
+    vpcm_cp_frame_t cp;
+    char rate_buf[64];
+    int i;
+
+    vpcm_log("Test: V.91 mapped data multirate (%s)", vpcm_law_to_str(law));
+    for (i = 0; i < (int) (sizeof(cases)/sizeof(cases[0])); i++) {
+        uint8_t *data_in;
+        uint8_t *data_out;
+        uint8_t *pcm_tx;
+        uint8_t drn;
+        bool transparent;
+        const char *mode_label;
+        int total_bits;
+        int total_bytes;
+        int total_codewords;
+        int produced;
+        int consumed;
+        int sample_data_len;
+        int sample_pcm_len;
+
+        drn = cases[i].drn;
+        transparent = cases[i].transparent;
+        mode_label = cases[i].mode_label;
+        total_bits = NOMINAL_10S_FRAMES * ((int) drn + 20);
+        total_bytes = total_bits / 8;
+        total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
+
+        data_in = (uint8_t *) malloc((size_t) total_bytes);
+        data_out = (uint8_t *) malloc((size_t) total_bytes);
+        pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
+        if (!data_in || !data_out || !pcm_tx) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            fprintf(stderr, "allocation failure in mapped data test\n");
+            return false;
+        }
+
+        v91_init(&caller_tx, law, V91_MODE_TRANSPARENT);
+        v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
+        vpcm_cp_init(&cp);
+        cp.transparent_mode_granted = transparent;
+        cp.v90_compatibility = true;
+        cp.drn = drn;
+        cp.acknowledge = true;
+        cp.constellation_count = 1;
+        memset(cp.dfi, 0, sizeof(cp.dfi));
+        vpcm_cp_enable_all_ucodes(cp.masks[0]);
+
+        if (!v91_activate_data_mode(&caller_tx, &cp) || !v91_activate_data_mode(&answerer_rx, &cp)) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            fprintf(stderr, "failed to activate mapped data mode for drn=%u\n", drn);
+            return false;
+        }
+
+        fill_pattern(data_in, total_bytes, 0x91000000U ^ ((uint32_t) law << 8) ^ (uint32_t) drn);
+        produced = v91_tx_codewords(&caller_tx, pcm_tx, total_codewords, data_in, total_bytes);
+        consumed = v91_rx_codewords(&answerer_rx, data_out, total_bytes, pcm_tx, produced);
+        if (produced != total_codewords || consumed != total_bytes) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            fprintf(stderr,
+                    "mapped data length mismatch for drn=%u: pcm=%d/%d data=%d/%d\n",
+                    drn, produced, total_codewords, consumed, total_bytes);
+            return false;
+        }
+        if (!expect_equal("V.91 mapped data", data_in, data_out, total_bytes)) {
+            free(data_in);
+            free(data_out);
+            free(pcm_tx);
+            return false;
+        }
+
+        sample_pcm_len = (produced < 6) ? produced : 6;
+        if (cp.transparent_mode_granted) {
+            sample_data_len = sample_pcm_len;
+        } else {
+            sample_data_len = (sample_pcm_len * ((int) drn + 20)) / 48;
+        }
+        if (sample_data_len < 1)
+            sample_data_len = 1;
+        if (sample_data_len > total_bytes)
+            sample_data_len = total_bytes;
+        vpcm_log_data_sample(data_in,
+                             sample_data_len,
+                             pcm_tx,
+                             sample_pcm_len,
+                             pcm_tx,
+                             sample_pcm_len,
+                             data_out,
+                             (consumed < sample_data_len) ? consumed : sample_data_len);
+        vpcm_format_rate(rate_buf, sizeof(rate_buf), drn);
+        vpcm_log("PASS: mapped data (%s, drn=%u, mode=%s, rate=%s, bytes=%d, codewords=%d)",
+                 vpcm_law_to_str(law), drn, mode_label, rate_buf, total_bytes, produced);
+
+        free(data_in);
+        free(data_out);
+        free(pcm_tx);
+    }
+
+    vpcm_log("PASS: V.91 mapped data multirate (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed)
 {
     int i;
 
     for (i = 0; i < len; i++)
         buf[i] = (uint8_t) prng_next(&seed);
+}
+
+static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int len)
+{
+    int i;
+    size_t pos;
+
+    if (out_len == 0)
+        return;
+    pos = 0;
+    for (i = 0; i < len && pos + 3 < out_len; i++) {
+        pos += (size_t) snprintf(out + pos, out_len - pos, "%02X", buf[i]);
+        if (i + 1 < len && pos + 1 < out_len)
+            out[pos++] = ' ';
+    }
+    out[pos] = '\0';
+}
+
+static void vpcm_log_data_sample(const uint8_t *data_tx,
+                                 int data_tx_len,
+                                 const uint8_t *pcm_tx,
+                                 int pcm_tx_len,
+                                 const uint8_t *remote_pcm_rx,
+                                 int remote_pcm_rx_len,
+                                 const uint8_t *remote_data_rx,
+                                 int remote_data_rx_len)
+{
+    char data_tx_hex[128];
+    char pcm_tx_hex[128];
+    char remote_pcm_hex[128];
+    char remote_data_hex[128];
+
+    vpcm_bytes_to_hex(data_tx_hex, sizeof(data_tx_hex), data_tx, data_tx_len);
+    vpcm_bytes_to_hex(pcm_tx_hex, sizeof(pcm_tx_hex), pcm_tx, pcm_tx_len);
+    vpcm_bytes_to_hex(remote_pcm_hex, sizeof(remote_pcm_hex), remote_pcm_rx, remote_pcm_rx_len);
+    vpcm_bytes_to_hex(remote_data_hex, sizeof(remote_data_hex), remote_data_rx, remote_data_rx_len);
+
+    vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
+    vpcm_log("| Data TX                   | PCM TX                    | Remote PCM RX             | Remote Data RX            |");
+    vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
+    vpcm_log("| %-25s | %-25s | %-25s | %-25s |",
+             data_tx_hex, pcm_tx_hex, remote_pcm_hex, remote_data_hex);
+    vpcm_log("+---------------------------+---------------------------+---------------------------+---------------------------+");
+}
+
+static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])
+{
+    memset(mask, 0xFF, VPCM_CP_MASK_BYTES);
 }
 
 static bool expect_equal(const char *label,
@@ -1688,6 +1875,10 @@ int main(void)
     if (!test_v91_startup_to_b1_multirate(V91_LAW_ULAW))
         return 1;
     if (!test_v91_startup_to_b1_multirate(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_mapped_data_multirate(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_mapped_data_multirate(V91_LAW_ALAW))
         return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
         return 1;

@@ -203,6 +203,83 @@ static int v91_select_b1_ucode(const vpcm_cp_frame_t *cp, int frame_interval, in
     return -1;
 }
 
+static void v91_bits_per_interval(int k, int bits_per_interval[VPCM_CP_FRAME_INTERVALS])
+{
+    int base;
+    int rem;
+    int i;
+
+    base = k / VPCM_CP_FRAME_INTERVALS;
+    rem = k % VPCM_CP_FRAME_INTERVALS;
+    for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        bits_per_interval[i] = base + ((i < rem) ? 1 : 0);
+}
+
+static int v91_select_active_ucode_by_ordinal(const uint8_t mask[VPCM_CP_MASK_BYTES], int ordinal)
+{
+    int ucode;
+
+    for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+        if (vpcm_cp_mask_get(mask, ucode)) {
+            if (ordinal-- == 0)
+                return ucode;
+        }
+    }
+    return -1;
+}
+
+static int v91_ucode_ordinal_in_mask(const uint8_t mask[VPCM_CP_MASK_BYTES], int ucode)
+{
+    int ordinal;
+    int i;
+
+    ordinal = 0;
+    for (i = 0; i < VPCM_CP_MASK_BITS; i++) {
+        if (vpcm_cp_mask_get(mask, i)) {
+            if (i == ucode)
+                return ordinal;
+            ordinal++;
+        }
+    }
+    return -1;
+}
+
+static bool v91_data_mode_supported(const vpcm_cp_frame_t *cp, int k)
+{
+    int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
+    int i;
+
+    if (!cp)
+        return false;
+    if (!vpcm_cp_validate(cp, NULL, 0))
+        return false;
+    if (k <= 0)
+        return false;
+
+    v91_bits_per_interval(k, bits_per_interval);
+    for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        int constellation_idx;
+        int population;
+        int needed;
+
+        constellation_idx = cp->dfi[i];
+        if (constellation_idx >= cp->constellation_count)
+            return false;
+        population = vpcm_cp_mask_population(cp->masks[constellation_idx]);
+        needed = 1 << bits_per_interval[i];
+        if (population < needed)
+            return false;
+    }
+    return true;
+}
+
+static int v91_primary_bits_per_frame(const vpcm_cp_frame_t *cp, int k)
+{
+    if (cp && cp->transparent_mode_granted)
+        return 48;
+    return k + 6;
+}
+
 static int v91_rx_diff_bits_stateful(v91_state_t *s,
                                      const uint8_t *g711_in,
                                      int g711_len,
@@ -366,6 +443,15 @@ void v91_init(v91_state_t *s, v91_law_t law, v91_mode_t mode)
     s->retrain_requested = false;
     s->circuit_107_on = false;
     s->next_frame_interval = -1;
+    s->data_mode_active = false;
+    s->active_k = 0;
+    s->active_s = 0;
+    s->active_primary_bits_per_frame = 0;
+    s->active_transparent_mode = false;
+    s->tx_bit_accum = 0;
+    s->tx_bit_count = 0;
+    s->rx_bit_accum = 0;
+    s->rx_bit_count = 0;
 }
 
 uint8_t v91_idle_codeword(v91_law_t law)
@@ -385,6 +471,20 @@ uint8_t v91_ucode_to_codeword(v91_law_t law, int ucode, bool positive)
     if (!positive)
         codeword &= 0x7F;
     return codeword;
+}
+
+static int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword)
+{
+    int ucode;
+
+    if (law == V91_LAW_ULAW)
+        return (0xFF - codeword) & 0x7F;
+
+    for (ucode = 0; ucode < 128; ucode++) {
+        if (v91_ucode_to_alaw[ucode] == codeword || (v91_ucode_to_alaw[ucode] & 0x7F) == (codeword & 0x7F))
+            return ucode;
+    }
+    return -1;
 }
 
 int16_t v91_codeword_to_linear(v91_law_t law, uint8_t codeword)
@@ -929,6 +1029,53 @@ void v91_note_frame_sync_loss(v91_state_t *s)
     s->frame_aligned = false;
     s->retrain_requested = true;
     s->next_frame_interval = -1;
+    s->data_mode_active = false;
+    s->active_k = 0;
+    s->active_s = 0;
+    s->active_primary_bits_per_frame = 0;
+    s->active_transparent_mode = false;
+    s->tx_bit_accum = 0;
+    s->tx_bit_count = 0;
+    s->rx_bit_accum = 0;
+    s->rx_bit_count = 0;
+}
+
+bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp)
+{
+    int k;
+
+    if (!s || !cp)
+        return false;
+    k = vpcm_cp_drn_to_k(cp->drn);
+    if (!v91_data_mode_supported(cp, k))
+        return false;
+
+    s->active_cp = *cp;
+    s->active_k = k;
+    s->active_s = 6;
+    s->active_primary_bits_per_frame = v91_primary_bits_per_frame(cp, k);
+    s->active_transparent_mode = (cp->transparent_mode_granted && cp->drn == 28);
+    s->data_mode_active = true;
+    s->tx_bit_accum = 0;
+    s->tx_bit_count = 0;
+    s->rx_bit_accum = 0;
+    s->rx_bit_count = 0;
+    return true;
+}
+
+void v91_deactivate_data_mode(v91_state_t *s)
+{
+    if (!s)
+        return;
+    s->data_mode_active = false;
+    s->active_k = 0;
+    s->active_s = 0;
+    s->active_primary_bits_per_frame = 0;
+    s->active_transparent_mode = false;
+    s->tx_bit_accum = 0;
+    s->tx_bit_count = 0;
+    s->rx_bit_accum = 0;
+    s->rx_bit_count = 0;
 }
 
 int v91_tx_codewords(v91_state_t *s,
@@ -937,16 +1084,71 @@ int v91_tx_codewords(v91_state_t *s,
                      const uint8_t *data_in,
                      int data_len)
 {
-    (void) s;
+    int data_pos;
+    int out_pos;
 
     if (g711_max <= 0 || data_len <= 0)
         return 0;
 
-    if (data_len > g711_max)
-        data_len = g711_max;
+    if (!s || !s->data_mode_active) {
+        if (data_len > g711_max)
+            data_len = g711_max;
 
-    memcpy(g711_out, data_in, (size_t) data_len);
-    return data_len;
+        memcpy(g711_out, data_in, (size_t) data_len);
+        return data_len;
+    }
+
+    if (s->active_transparent_mode) {
+        if (data_len > g711_max)
+            data_len = g711_max;
+        memcpy(g711_out, data_in, (size_t) data_len);
+        return data_len;
+    }
+
+    data_pos = 0;
+    out_pos = 0;
+    while (out_pos + VPCM_CP_FRAME_INTERVALS <= g711_max) {
+        int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
+        int frame_interval;
+
+        while (s->tx_bit_count < s->active_k && data_pos < data_len) {
+            s->tx_bit_accum |= ((uint64_t) data_in[data_pos++]) << s->tx_bit_count;
+            s->tx_bit_count += 8;
+        }
+        if (s->tx_bit_count < s->active_k)
+            break;
+
+        v91_bits_per_interval(s->active_k, bits_per_interval);
+        for (frame_interval = 0; frame_interval < VPCM_CP_FRAME_INTERVALS; frame_interval++) {
+            int constellation_idx;
+            int nbits;
+            int ordinal;
+            int sign_bit;
+            int ucode;
+            uint64_t mask;
+
+            constellation_idx = s->active_cp.dfi[frame_interval];
+            nbits = bits_per_interval[frame_interval];
+            while (s->tx_bit_count < (nbits + 1) && data_pos < data_len) {
+                s->tx_bit_accum |= ((uint64_t) data_in[data_pos++]) << s->tx_bit_count;
+                s->tx_bit_count += 8;
+            }
+            if (s->tx_bit_count < (nbits + 1))
+                return out_pos;
+            mask = (((uint64_t) 1) << nbits) - 1U;
+            ordinal = (int) (s->tx_bit_accum & mask);
+            s->tx_bit_accum >>= nbits;
+            s->tx_bit_count -= nbits;
+            sign_bit = (int) (s->tx_bit_accum & 1U);
+            s->tx_bit_accum >>= 1;
+            s->tx_bit_count -= 1;
+            ucode = v91_select_active_ucode_by_ordinal(s->active_cp.masks[constellation_idx], ordinal);
+            if (ucode < 0)
+                return out_pos;
+            g711_out[out_pos++] = v91_ucode_to_codeword(s->law, ucode, sign_bit != 0);
+        }
+    }
+    return out_pos;
 }
 
 int v91_rx_codewords(v91_state_t *s,
@@ -955,16 +1157,62 @@ int v91_rx_codewords(v91_state_t *s,
                      const uint8_t *g711_in,
                      int g711_len)
 {
-    (void) s;
+    int in_pos;
+    int out_pos;
 
     if (data_max <= 0 || g711_len <= 0)
         return 0;
 
-    if (g711_len > data_max)
-        g711_len = data_max;
+    if (!s || !s->data_mode_active) {
+        if (g711_len > data_max)
+            g711_len = data_max;
 
-    memcpy(data_out, g711_in, (size_t) g711_len);
-    return g711_len;
+        memcpy(data_out, g711_in, (size_t) g711_len);
+        return g711_len;
+    }
+
+    if (s->active_transparent_mode) {
+        if (g711_len > data_max)
+            g711_len = data_max;
+        memcpy(data_out, g711_in, (size_t) g711_len);
+        return g711_len;
+    }
+
+    in_pos = 0;
+    out_pos = 0;
+    while (in_pos + VPCM_CP_FRAME_INTERVALS <= g711_len) {
+        int bits_per_interval[VPCM_CP_FRAME_INTERVALS];
+        int frame_interval;
+
+        v91_bits_per_interval(s->active_k, bits_per_interval);
+        for (frame_interval = 0; frame_interval < VPCM_CP_FRAME_INTERVALS; frame_interval++) {
+            int constellation_idx;
+            int nbits;
+            int ucode;
+            int ordinal;
+            int sign_bit;
+
+            constellation_idx = s->active_cp.dfi[frame_interval];
+            nbits = bits_per_interval[frame_interval];
+            sign_bit = (g711_in[in_pos] & 0x80) ? 1 : 0;
+            ucode = v91_codeword_to_ucode(s->law, g711_in[in_pos++]);
+            if (ucode < 0)
+                return out_pos;
+            ordinal = v91_ucode_ordinal_in_mask(s->active_cp.masks[constellation_idx], ucode);
+            if (ordinal < 0 || ordinal >= (1 << nbits))
+                return out_pos;
+            s->rx_bit_accum |= ((uint64_t) ordinal) << s->rx_bit_count;
+            s->rx_bit_count += nbits;
+            s->rx_bit_accum |= ((uint64_t) sign_bit) << s->rx_bit_count;
+            s->rx_bit_count += 1;
+            while (s->rx_bit_count >= 8 && out_pos < data_max) {
+                data_out[out_pos++] = (uint8_t) (s->rx_bit_accum & 0xFFU);
+                s->rx_bit_accum >>= 8;
+                s->rx_bit_count -= 8;
+            }
+        }
+    }
+    return out_pos;
 }
 
 int v91_tx_linear(v91_state_t *s,
