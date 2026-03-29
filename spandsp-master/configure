@@ -3375,7 +3375,7 @@ SPANDSP_LT_AGE=0
 
 ac_config_headers="$ac_config_headers src/config.h:config-h.in"
 
-am__api_version='1.18'
+am__api_version='1.17'
 
 
 
@@ -3645,14 +3645,10 @@ am_lf='
 '
 case `pwd` in
   *[\\\"\#\$\&\'\`$am_lf]*)
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
-printf "%s\n" "no" >&6; }
     as_fn_error $? "unsafe absolute working directory name" "$LINENO" 5;;
 esac
 case $srcdir in
   *[\\\"\#\$\&\'\`$am_lf\ \	]*)
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
-printf "%s\n" "no" >&6; }
     as_fn_error $? "unsafe srcdir value: '$srcdir'" "$LINENO" 5;;
 esac
 
@@ -4117,133 +4113,9 @@ AMTAR='$${TAR-tar}'
 
 
 # We'll loop over all known methods to create a tar archive until one works.
-_am_tools='gnutar plaintar pax cpio none'
+_am_tools='gnutar  pax cpio none'
 
-# The POSIX 1988 'ustar' format is defined with fixed-size fields.
-      # There is notably a 21 bits limit for the UID and the GID.  In fact,
-      # the 'pax' utility can hang on bigger UID/GID (see automake bug#8343
-      # and bug#13588).
-      am_max_uid=2097151 # 2^21 - 1
-      am_max_gid=$am_max_uid
-      # The $UID and $GID variables are not portable, so we need to resort
-      # to the POSIX-mandated id(1) utility.  Errors in the 'id' calls
-      # below are definitely unexpected, so allow the users to see them
-      # (that is, avoid stderr redirection).
-      am_uid=`id -u || echo unknown`
-      am_gid=`id -g || echo unknown`
-      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether UID '$am_uid' is supported by ustar format" >&5
-printf %s "checking whether UID '$am_uid' is supported by ustar format... " >&6; }
-      if test x$am_uid = xunknown; then
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: ancient id detected; assuming current UID is ok, but dist-ustar might not work" >&5
-printf "%s\n" "$as_me: WARNING: ancient id detected; assuming current UID is ok, but dist-ustar might not work" >&2;}
-      elif test $am_uid -le $am_max_uid; then
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
-printf "%s\n" "yes" >&6; }
-      else
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
-printf "%s\n" "no" >&6; }
-        _am_tools=none
-      fi
-      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether GID '$am_gid' is supported by ustar format" >&5
-printf %s "checking whether GID '$am_gid' is supported by ustar format... " >&6; }
-      if test x$gm_gid = xunknown; then
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: ancient id detected; assuming current GID is ok, but dist-ustar might not work" >&5
-printf "%s\n" "$as_me: WARNING: ancient id detected; assuming current GID is ok, but dist-ustar might not work" >&2;}
-      elif test $am_gid -le $am_max_gid; then
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
-printf "%s\n" "yes" >&6; }
-      else
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
-printf "%s\n" "no" >&6; }
-        _am_tools=none
-      fi
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking how to create a ustar tar archive" >&5
-printf %s "checking how to create a ustar tar archive... " >&6; }
-
-  # Go ahead even if we have the value already cached.  We do so because we
-  # need to set the values for the 'am__tar' and 'am__untar' variables.
-  _am_tools=${am_cv_prog_tar_ustar-$_am_tools}
-
-  for _am_tool in $_am_tools; do
-    case $_am_tool in
-    gnutar)
-      for _am_tar in tar gnutar gtar; do
-        { echo "$as_me:$LINENO: $_am_tar --version" >&5
-   ($_am_tar --version) >&5 2>&5
-   ac_status=$?
-   echo "$as_me:$LINENO: \$? = $ac_status" >&5
-   (exit $ac_status); } && break
-      done
-      am__tar="$_am_tar --format=ustar -chf - "'"$$tardir"'
-      am__tar_="$_am_tar --format=ustar -chf - "'"$tardir"'
-      am__untar="$_am_tar -xf -"
-      ;;
-    plaintar)
-      # Must skip GNU tar: if it does not support --format= it doesn't create
-      # ustar tarball either.
-      (tar --version) >/dev/null 2>&1 && continue
-      am__tar='tar chf - "$$tardir"'
-      am__tar_='tar chf - "$tardir"'
-      am__untar='tar xf -'
-      ;;
-    pax)
-      am__tar='pax -L -x ustar -w "$$tardir"'
-      am__tar_='pax -L -x ustar -w "$tardir"'
-      am__untar='pax -r'
-      ;;
-    cpio)
-      am__tar='find "$$tardir" -print | cpio -o -H ustar -L'
-      am__tar_='find "$tardir" -print | cpio -o -H ustar -L'
-      am__untar='cpio -i -H ustar -d'
-      ;;
-    none)
-      am__tar=false
-      am__tar_=false
-      am__untar=false
-      ;;
-    esac
-
-    # If the value was cached, stop now.  We just wanted to have am__tar
-    # and am__untar set.
-    test -n "${am_cv_prog_tar_ustar}" && break
-
-    # tar/untar a dummy directory, and stop if the command works.
-    rm -rf conftest.dir
-    mkdir conftest.dir
-    echo GrepMe > conftest.dir/file
-    { echo "$as_me:$LINENO: tardir=conftest.dir && eval $am__tar_ >conftest.tar" >&5
-   (tardir=conftest.dir && eval $am__tar_ >conftest.tar) >&5 2>&5
-   ac_status=$?
-   echo "$as_me:$LINENO: \$? = $ac_status" >&5
-   (exit $ac_status); }
-    rm -rf conftest.dir
-    if test -s conftest.tar; then
-      { echo "$as_me:$LINENO: $am__untar <conftest.tar" >&5
-   ($am__untar <conftest.tar) >&5 2>&5
-   ac_status=$?
-   echo "$as_me:$LINENO: \$? = $ac_status" >&5
-   (exit $ac_status); }
-      { echo "$as_me:$LINENO: cat conftest.dir/file" >&5
-   (cat conftest.dir/file) >&5 2>&5
-   ac_status=$?
-   echo "$as_me:$LINENO: \$? = $ac_status" >&5
-   (exit $ac_status); }
-      grep GrepMe conftest.dir/file >/dev/null 2>&1 && break
-    fi
-  done
-  rm -rf conftest.dir
-
-  if test ${am_cv_prog_tar_ustar+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e) am_cv_prog_tar_ustar=$_am_tool ;;
-esac
-fi
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $am_cv_prog_tar_ustar" >&5
-printf "%s\n" "$am_cv_prog_tar_ustar" >&6; }
+am__tar='$${TAR-tar} chof - "$$tardir"' am__untar='$${TAR-tar} xf -'
 
 
 
@@ -5413,10 +5285,7 @@ _ACEOF
       break
     fi
   done
-  # aligned with autoconf, so not including core; see bug#72225.
-  rm -f -r a.out a.exe b.out conftest.$ac_ext conftest.$ac_objext \
-    conftest.dSYM conftest1.$ac_ext conftest1.$ac_objext conftest1.dSYM \
-    conftest2.$ac_ext conftest2.$ac_objext conftest2.dSYM
+  rm -f core conftest*
   unset am_i ;;
 esac
 fi
@@ -10786,6 +10655,12 @@ lt_prog_compiler_static=
 	lt_prog_compiler_pic='-fPIC'
 	lt_prog_compiler_static='-static'
         ;;
+      # flang / f18. f95 an alias for gfortran or flang on Debian
+      flang* | f18* | f95*)
+	lt_prog_compiler_wl='-Wl,'
+	lt_prog_compiler_pic='-fPIC'
+	lt_prog_compiler_static='-static'
+        ;;
       # icc used to be incompatible with GCC.
       # ICC 10 doesn't accept -KPIC any more.
       icc* | ifort*)
@@ -11277,6 +11152,9 @@ printf %s "checking whether the $compiler linker ($LD) supports shared libraries
   interix*)
     # we just hope/assume this is gcc and not c89 (= MSVC++ or ICC)
     with_gnu_ld=yes
+    ;;
+  linux* | k*bsd*-gnu | gnu*)
+    link_all_deplibs=no
     ;;
   esac
 
@@ -12222,6 +12100,7 @@ printf "%s\n" "$lt_cv_irix_exported_symbol" >&6; }
 	if test yes = "$lt_cv_irix_exported_symbol"; then
           archive_expsym_cmds='$CC -shared $pic_flag $libobjs $deplibs $compiler_flags $wl-soname $wl$soname `test -n "$verstring" && func_echo_all "$wl-set_version $wl$verstring"` $wl-update_registry $wl$output_objdir/so_locations $wl-exports_file $wl$export_symbols -o $lib'
 	fi
+	link_all_deplibs=no
       else
 	archive_cmds='$CC -shared $libobjs $deplibs $compiler_flags -soname $soname `test -n "$verstring" && func_echo_all "-set_version $verstring"` -update_registry $output_objdir/so_locations -o $lib'
 	archive_expsym_cmds='$CC -shared $libobjs $deplibs $compiler_flags -soname $soname `test -n "$verstring" && func_echo_all "-set_version $verstring"` -update_registry $output_objdir/so_locations -exports_file $export_symbols -o $lib'
@@ -13421,6 +13300,18 @@ netbsdelf*-gnu)
   dynamic_linker='NetBSD ld.elf_so'
   ;;
 
+netbsdelf*-gnu)
+  version_type=linux
+  need_lib_prefix=no
+  need_version=no
+  library_names_spec='${libname}${release}${shared_ext}$versuffix ${libname}${release}${shared_ext}$major ${libname}${shared_ext}'
+  soname_spec='${libname}${release}${shared_ext}$major'
+  shlibpath_var=LD_LIBRARY_PATH
+  shlibpath_overrides_runpath=no
+  hardcode_into_libs=yes
+  dynamic_linker='NetBSD ld.elf_so'
+  ;;
+
 netbsd*)
   version_type=sunos
   need_lib_prefix=no
@@ -13830,6 +13721,12 @@ lt_prog_compiler_static=
         ;;
       *flang* | ftn | f18* | f95*)
         # Flang compiler.
+	lt_prog_compiler_wl='-Wl,'
+	lt_prog_compiler_pic='-fPIC'
+	lt_prog_compiler_static='-static'
+        ;;
+      # flang / f18. f95 an alias for gfortran or flang on Debian
+      flang* | f18* | f95*)
 	lt_prog_compiler_wl='-Wl,'
 	lt_prog_compiler_pic='-fPIC'
 	lt_prog_compiler_static='-static'
@@ -17302,6 +17199,9 @@ printf %s "checking whether the $compiler linker ($LD) supports shared libraries
       ;;
     esac
     ;;
+  linux* | k*bsd*-gnu | gnu*)
+    link_all_deplibs_CXX=no
+    ;;
   *)
     export_symbols_cmds_CXX='$NM $libobjs $convenience | $global_symbol_pipe | $SED '\''s/.* //'\'' | sort | uniq > $export_symbols'
     ;;
@@ -18044,6 +17944,18 @@ netbsdelf*-gnu)
   need_version=no
   library_names_spec='$libname$release$shared_ext$versuffix $libname$release$shared_ext$major $libname$shared_ext'
   soname_spec='$libname$release$shared_ext$major'
+  shlibpath_var=LD_LIBRARY_PATH
+  shlibpath_overrides_runpath=no
+  hardcode_into_libs=yes
+  dynamic_linker='NetBSD ld.elf_so'
+  ;;
+
+netbsdelf*-gnu)
+  version_type=linux
+  need_lib_prefix=no
+  need_version=no
+  library_names_spec='${libname}${release}${shared_ext}$versuffix ${libname}${release}${shared_ext}$major ${libname}${shared_ext}'
+  soname_spec='${libname}${release}${shared_ext}$major'
   shlibpath_var=LD_LIBRARY_PATH
   shlibpath_overrides_runpath=no
   hardcode_into_libs=yes
@@ -19755,10 +19667,7 @@ _ACEOF
       break
     fi
   done
-  # aligned with autoconf, so not including core; see bug#72225.
-  rm -f -r a.out a.exe b.out conftest.$ac_ext conftest.$ac_objext \
-    conftest.dSYM conftest1.$ac_ext conftest1.$ac_objext conftest1.dSYM \
-    conftest2.$ac_ext conftest2.$ac_objext conftest2.dSYM
+  rm -f core conftest*
   unset am_i ;;
 esac
 fi

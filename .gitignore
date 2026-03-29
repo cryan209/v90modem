@@ -1,0 +1,56 @@
+# Local tooling
+.codex
+.claude/
+.vscode/
+
+# OS/editor noise
+.DS_Store
+*~
+
+# Generic C/C++ build artifacts
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.obj
+*.lib
+
+# Dependency/deps caches
+*.d
+.deps/
+.libs/
+
+# Project binaries
+sip_v90_modem
+vpcm_loopback_test
+
+# Common maps/logs
+*.map
+*.log
+
+# Autotools-generated files
+autom4te.cache/
+config.log
+config.status
+libtool
+
+# SpanDSP local build byproducts
+spandsp-master/src/.deps/
+spandsp-master/src/.libs/
+spandsp-master/spandsp-sim/.deps/
+spandsp-master/tests/.deps/
+spandsp-master/test-data/**/.deps/
+spandsp-master/autom4te.cache/
+spandsp-master/config-h.in~
+spandsp-master/configure~
+
+# pjproject build intermediates
+pjproject/**/.depend
+pjproject/**/.objs/
+pjproject/**/.libs/

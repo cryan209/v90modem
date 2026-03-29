@@ -23,7 +23,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#if defined(__APPLE__)
 #include <util.h>   /* openpty() on macOS */
+#elif defined(__linux__)
+#include <pty.h>    /* openpty() on Linux */
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Ring buffer for upstream data (PTY → modem engine)                 */

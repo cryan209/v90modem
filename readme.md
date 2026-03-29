@@ -76,7 +76,7 @@ can resolve after a single D/A conversion at the far-end ATA/FXS port.
 ## Building
 
 ```bash
-# Dependencies
+# Linux dependencies
 sudo apt install libpjproject-dev libspandsp-dev
 
 # Build
@@ -87,6 +87,20 @@ make
                 --sip-password yourpassword \
                 --pty /tmp/v90modem
 ```
+
+### macOS notes
+
+- Install dependencies (Homebrew), then build with `make`.
+- The Makefile auto-detects macOS and uses Homebrew-style pjproject naming.
+- If your pjproject install uses a different architecture/version suffix, override:
+  - `make ARCH_SUFFIX=<your-suffix>`
+  - e.g. `make ARCH_SUFFIX=arm64-apple-darwin23.0.0`
+
+### Using bundled pjproject
+
+- The top-level `make` now prefers the in-repo `pjproject/` tree by default.
+- If needed, disable this and use system/Homebrew pjproject with:
+  - `make USE_LOCAL_PJPROJECT=0`
 
 ## Usage
 
