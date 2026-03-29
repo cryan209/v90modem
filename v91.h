@@ -7,14 +7,17 @@
  *   - Phase 1/V.91 transition silence
  *   - Ez
  *   - INFO/INFO'
+ *   - Eu/Em, PHIL, SCR, CP and frame-aligned default DIL generation
  *
  * That gives us a concrete startup/data boundary for the loopback harness
- * while later V.91 signals (J, PHIL, Eu, Em, DIL, SCR, CP, Es, B1) are
+ * while later V.91 signals (J, Es, B1) are
  * still to be implemented.
  */
 
 #ifndef V91_H
 #define V91_H
+
+#include "vpcm_cp.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -30,8 +33,13 @@ typedef enum {
 } v91_mode_t;
 
 #define V91_PHASE1_SILENCE_SYMBOLS 600
+#define V91_EU_SYMBOLS 12
+#define V91_EM_SYMBOLS 12
 #define V91_EZ_SYMBOLS 24
 #define V91_INFO_SYMBOLS 62
+#define V91_DEFAULT_DIL_SEGMENTS 125
+#define V91_DEFAULT_DIL_SEGMENT_SYMBOLS 12
+#define V91_DEFAULT_DIL_SYMBOLS (V91_DEFAULT_DIL_SEGMENTS * V91_DEFAULT_DIL_SEGMENT_SYMBOLS)
 
 typedef struct {
     uint16_t reserved_12_25; /* Raw 14-bit reserved field */
@@ -58,13 +66,44 @@ typedef struct {
 } v91_info_diag_t;
 
 typedef struct {
+    uint8_t n;
+    uint8_t lsp;
+    uint8_t ltp;
+    uint8_t sp[128];
+    uint8_t tp[128];
+    uint8_t h[8];
+    uint8_t ref[8];
+    uint8_t train_u[255];
+} v91_dil_desc_t;
+
+typedef struct {
     v91_law_t  law;
     v91_mode_t mode;
     bool last_tx_info_valid;
     bool last_rx_info_valid;
     v91_info_frame_t last_tx_info;
     v91_info_frame_t last_rx_info;
+    bool last_tx_dil_valid;
+    v91_dil_desc_t last_tx_dil;
+    bool last_tx_cp_valid;
+    bool last_rx_cp_valid;
+    vpcm_cp_frame_t last_tx_cp;
+    vpcm_cp_frame_t last_rx_cp;
+    uint32_t scramble_reg;
+    uint32_t rx_scramble_reg;
+    int diff_sign;
+    int rx_prev_sign;
+    bool frame_aligned;
+    bool retrain_requested;
+    bool circuit_107_on;
+    int next_frame_interval;
 } v91_state_t;
+
+typedef enum {
+    V91_ALIGN_NONE = 0,
+    V91_ALIGN_EU = 1,
+    V91_ALIGN_EM = 2
+} v91_align_signal_t;
 
 void v91_init(v91_state_t *s, v91_law_t law, v91_mode_t mode);
 
@@ -74,7 +113,32 @@ uint8_t v91_linear_to_codeword(v91_law_t law, int16_t sample);
 uint8_t v91_ucode_to_codeword(v91_law_t law, int ucode, bool positive);
 
 int v91_tx_phase1_silence_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+int v91_tx_eu_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+int v91_tx_em_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
 int v91_tx_ez_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+int v91_tx_phil_codewords(v91_state_t *s,
+                          uint8_t *g711_out,
+                          int g711_max,
+                          int nsymbols,
+                          bool continue_from_current);
+int v91_tx_scr_codewords(v91_state_t *s,
+                         uint8_t *g711_out,
+                         int g711_max,
+                         int nsymbols);
+bool v91_rx_scr_codewords(v91_state_t *s,
+                          const uint8_t *g711_in,
+                          int g711_len,
+                          bool continue_from_current);
+int v91_tx_cp_codewords(v91_state_t *s,
+                        uint8_t *g711_out,
+                        int g711_max,
+                        const vpcm_cp_frame_t *cp,
+                        bool continue_from_scr);
+bool v91_rx_cp_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         vpcm_cp_frame_t *cp_out,
+                         bool continue_from_scr);
 int v91_tx_info_codewords(v91_state_t *s,
                           uint8_t *g711_out,
                           int g711_max,
@@ -89,6 +153,19 @@ bool v91_info_decode_diag(v91_state_t *s,
                           const uint8_t *g711_in,
                           int g711_len,
                           v91_info_diag_t *diag);
+void v91_default_dil_init(v91_dil_desc_t *desc);
+int v91_dil_symbol_count(const v91_dil_desc_t *desc);
+int v91_tx_dil_codewords(v91_state_t *s,
+                         uint8_t *g711_out,
+                         int g711_max,
+                         const v91_dil_desc_t *desc);
+int v91_tx_default_dil_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
+                                          uint8_t *g711_out,
+                                          int g711_max,
+                                          const v91_dil_desc_t *peer_dil,
+                                          v91_align_signal_t *align_out);
+void v91_note_frame_sync_loss(v91_state_t *s);
 
 /*
  * Encode application octets to G.711 codewords.

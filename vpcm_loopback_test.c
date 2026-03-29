@@ -78,6 +78,17 @@ static bool vpcm_info_frames_equal(const v91_info_frame_t *a, const v91_info_fra
         && a->cleardown_if_transparent_denied == b->cleardown_if_transparent_denied;
 }
 
+static bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
+{
+    return a->transparent_mode_granted == b->transparent_mode_granted
+        && a->v90_compatibility == b->v90_compatibility
+        && a->drn == b->drn
+        && a->acknowledge == b->acknowledge
+        && a->constellation_count == b->constellation_count
+        && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
+        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
+}
+
 static void vpcm_bits_to_str(char *out, size_t out_len, const uint8_t *bits, int nbits)
 {
     int i;
@@ -308,6 +319,435 @@ static bool run_v91_info_roundtrip_case(v91_state_t *tx,
     return true;
 }
 
+static bool vpcm_dil_desc_equal(const v91_dil_desc_t *a, const v91_dil_desc_t *b)
+{
+    return a->n == b->n
+        && a->lsp == b->lsp
+        && a->ltp == b->ltp
+        && memcmp(a->sp, b->sp, sizeof(a->sp)) == 0
+        && memcmp(a->tp, b->tp, sizeof(a->tp)) == 0
+        && memcmp(a->h, b->h, sizeof(a->h)) == 0
+        && memcmp(a->ref, b->ref, sizeof(a->ref)) == 0
+        && memcmp(a->train_u, b->train_u, sizeof(a->train_u)) == 0;
+}
+
+static int vpcm_v91_gpc_scramble_bit(uint32_t *reg, int in_bit)
+{
+    int out_bit;
+
+    out_bit = (in_bit ^ (int) (*reg >> 17) ^ (int) (*reg >> (23 - 1))) & 1;
+    *reg = (*reg << 1) | (uint32_t) out_bit;
+    return out_bit;
+}
+
+static int vpcm_v91_gpc_descramble_bit(uint32_t *reg, int in_bit)
+{
+    int out_bit;
+
+    out_bit = (in_bit ^ (int) (*reg >> 17) ^ (int) (*reg >> (23 - 1))) & 1;
+    *reg = (*reg << 1) | (uint32_t) in_bit;
+    return out_bit;
+}
+
+static bool vpcm_v91_decode_scrambled_codewords_to_bits(const uint8_t *codewords,
+                                                        int ncodewords,
+                                                        uint8_t *bits_out)
+{
+    uint8_t scrambled_bits[VPCM_CP_MAX_BITS];
+    uint32_t scramble_reg;
+    int sign;
+    int prev_sign;
+    int i;
+
+    if (ncodewords <= 0 || ncodewords > VPCM_CP_MAX_BITS)
+        return false;
+    prev_sign = 0;
+    for (i = 0; i < ncodewords; i++) {
+        sign = (codewords[i] & 0x80) ? 1 : 0;
+        scrambled_bits[i] = (uint8_t) (sign ^ prev_sign);
+        prev_sign = sign;
+    }
+    scramble_reg = 0;
+    for (i = 0; i < ncodewords; i++)
+        bits_out[i] = (uint8_t) vpcm_v91_gpc_descramble_bit(&scramble_reg, scrambled_bits[i] & 1U);
+    return true;
+}
+
+static bool vpcm_expect_scrambled_ones_sequence(v91_law_t law,
+                                                const uint8_t *actual,
+                                                int nsymbols,
+                                                uint32_t initial_scramble_reg,
+                                                int initial_diff_sign,
+                                                uint32_t *scramble_reg_out,
+                                                int *diff_sign_out)
+{
+    uint32_t scramble_reg;
+    int diff_sign;
+    int i;
+
+    scramble_reg = initial_scramble_reg;
+    diff_sign = initial_diff_sign;
+    for (i = 0; i < nsymbols; i++) {
+        diff_sign ^= vpcm_v91_gpc_scramble_bit(&scramble_reg, 1);
+        if (actual[i] != v91_ucode_to_codeword(law, 66, diff_sign != 0))
+            return false;
+    }
+    if (scramble_reg_out)
+        *scramble_reg_out = scramble_reg;
+    if (diff_sign_out)
+        *diff_sign_out = diff_sign;
+    return true;
+}
+
+static bool test_v91_default_dil(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_dil_desc_t dil;
+    uint8_t codewords[V91_DEFAULT_DIL_SYMBOLS];
+    int count;
+    int i;
+    int first_seg_start;
+    int second_seg_start;
+    int last_seg_start;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    v91_default_dil_init(&dil);
+    vpcm_log("Test: V.91 default DIL over raw-G.711 (%s)", vpcm_law_to_str(law));
+
+    if (dil.n != V91_DEFAULT_DIL_SEGMENTS
+        || dil.lsp != 12
+        || dil.ltp != 12) {
+        fprintf(stderr, "V.91 default DIL descriptor header mismatch\n");
+        return false;
+    }
+    for (i = 0; i < 8; i++) {
+        if (dil.h[i] != 1 || dil.ref[i] != 0) {
+            fprintf(stderr, "V.91 default DIL H/REF mismatch at uchord %d\n", i);
+            return false;
+        }
+    }
+    if (dil.train_u[0] != 124 || dil.train_u[1] != 0 || dil.train_u[2] != 123 || dil.train_u[124] != 62) {
+        fprintf(stderr, "V.91 default DIL training-Ucode sequence mismatch\n");
+        return false;
+    }
+    if (v91_dil_symbol_count(&dil) != V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 default DIL symbol count mismatch\n");
+        return false;
+    }
+
+    count = v91_tx_dil_codewords(&tx, codewords, (int) sizeof(codewords), &dil);
+    if (count != V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 default DIL encode length mismatch: %d\n", count);
+        return false;
+    }
+    if (!tx.last_tx_dil_valid || !vpcm_dil_desc_equal(&dil, &tx.last_tx_dil)) {
+        fprintf(stderr, "V.91 default DIL TX tracking mismatch\n");
+        return false;
+    }
+
+    first_seg_start = 0;
+    second_seg_start = V91_DEFAULT_DIL_SEGMENT_SYMBOLS;
+    last_seg_start = V91_DEFAULT_DIL_SYMBOLS - V91_DEFAULT_DIL_SEGMENT_SYMBOLS;
+    for (i = 0; i < 6; i++) {
+        if (codewords[first_seg_start + i] != v91_ucode_to_codeword(law, 124, false)) {
+            fprintf(stderr, "V.91 default DIL first segment negative half mismatch at %d\n", i);
+            return false;
+        }
+        if (codewords[first_seg_start + 6 + i] != v91_ucode_to_codeword(law, 124, true)) {
+            fprintf(stderr, "V.91 default DIL first segment positive half mismatch at %d\n", i);
+            return false;
+        }
+        if (codewords[second_seg_start + i] != v91_ucode_to_codeword(law, 0, false)) {
+            fprintf(stderr, "V.91 default DIL second segment negative half mismatch at %d\n", i);
+            return false;
+        }
+        if (codewords[second_seg_start + 6 + i] != v91_ucode_to_codeword(law, 0, true)) {
+            fprintf(stderr, "V.91 default DIL second segment positive half mismatch at %d\n", i);
+            return false;
+        }
+        if (codewords[last_seg_start + i] != v91_ucode_to_codeword(law, 62, false)) {
+            fprintf(stderr, "V.91 default DIL last segment negative half mismatch at %d\n", i);
+            return false;
+        }
+        if (codewords[last_seg_start + 6 + i] != v91_ucode_to_codeword(law, 62, true)) {
+            fprintf(stderr, "V.91 default DIL last segment positive half mismatch at %d\n", i);
+            return false;
+        }
+    }
+
+    vpcm_log("PASS: V.91 default DIL over raw-G.711 (%s), segments=%u symbols=%d",
+             vpcm_law_to_str(law), dil.n, count);
+    return true;
+}
+
+static bool test_v91_eu_and_frame_alignment(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_info_frame_t info;
+    uint8_t info_buf[V91_INFO_SYMBOLS];
+    uint8_t eu[V91_EU_SYMBOLS];
+    uint8_t dil[V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t expected_eu_symbol;
+    int i;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    vpcm_log("Test: V.91 Eu and frame alignment (%s)", vpcm_law_to_str(law));
+
+    memset(&info, 0, sizeof(info));
+    info.request_default_dil = true;
+    info.power_measured_after_digital_impairments = true;
+    info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    info.request_transparent_mode = true;
+    info.cleardown_if_transparent_denied = true;
+
+    if (v91_tx_info_codewords(&tx, info_buf, (int) sizeof(info_buf), &info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "V.91 INFO encode failed before Eu\n");
+        return false;
+    }
+    expected_eu_symbol = v91_ucode_to_codeword(law, 66, tx.diff_sign != 0);
+    if (v91_tx_eu_codewords(&tx, eu, (int) sizeof(eu)) != V91_EU_SYMBOLS) {
+        fprintf(stderr, "V.91 Eu encode length mismatch\n");
+        return false;
+    }
+    for (i = 0; i < V91_EU_SYMBOLS; i++) {
+        if (eu[i] != expected_eu_symbol) {
+            fprintf(stderr, "V.91 Eu symbol mismatch at %d: %02X != %02X\n",
+                    i, eu[i], expected_eu_symbol);
+            return false;
+        }
+    }
+    if (!tx.frame_aligned || tx.retrain_requested || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 Eu did not establish frame alignment correctly\n");
+        return false;
+    }
+    if (!tx.circuit_107_on) {
+        fprintf(stderr, "V.91 Eu did not raise circuit 107\n");
+        return false;
+    }
+
+    if (v91_tx_default_dil_codewords(&tx, dil, (int) sizeof(dil)) != V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 default DIL encode failed after Eu\n");
+        return false;
+    }
+    if (!tx.frame_aligned || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 frame alignment did not persist across DIL\n");
+        return false;
+    }
+
+    v91_note_frame_sync_loss(&tx);
+    if (tx.frame_aligned || !tx.retrain_requested || tx.next_frame_interval != -1) {
+        fprintf(stderr, "V.91 frame sync loss did not request retrain\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 Eu and frame alignment (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v91_em_and_startup_sequence(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_info_frame_t local_info;
+    v91_info_frame_t peer_info;
+    v91_dil_desc_t dil;
+    uint8_t em[V91_EM_SYMBOLS];
+    uint8_t seq[V91_EM_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    v91_align_signal_t align_signal;
+    uint32_t expected_scramble_reg;
+    int expected_sign;
+    int i;
+    int seq_len;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    vpcm_log("Test: V.91 Em and startup DIL sequence (%s)", vpcm_law_to_str(law));
+
+    memset(&local_info, 0, sizeof(local_info));
+    local_info.request_default_dil = false;
+    local_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    local_info.power_measured_after_digital_impairments = true;
+    memset(&peer_info, 0, sizeof(peer_info));
+    peer_info.request_default_dil = false;
+    peer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    peer_info.power_measured_after_digital_impairments = true;
+
+    tx.last_tx_info = local_info;
+    tx.last_tx_info_valid = true;
+    tx.last_rx_info = peer_info;
+    tx.last_rx_info_valid = true;
+    tx.scramble_reg = 0x0055AA55U;
+    tx.diff_sign = 1;
+
+    expected_scramble_reg = tx.scramble_reg;
+    expected_sign = tx.diff_sign;
+    if (v91_tx_em_codewords(&tx, em, (int) sizeof(em)) != V91_EM_SYMBOLS) {
+        fprintf(stderr, "V.91 Em encode length mismatch\n");
+        return false;
+    }
+    for (i = 0; i < V91_EM_SYMBOLS; i++) {
+        expected_sign ^= vpcm_v91_gpc_scramble_bit(&expected_scramble_reg, 0);
+        if (em[i] != v91_ucode_to_codeword(law, 66, expected_sign != 0)) {
+            fprintf(stderr, "V.91 Em symbol mismatch at %d\n", i);
+            return false;
+        }
+    }
+    if (tx.scramble_reg != expected_scramble_reg || tx.diff_sign != expected_sign) {
+        fprintf(stderr, "V.91 Em did not preserve scrambler/differential state\n");
+        return false;
+    }
+    if (!tx.frame_aligned || !tx.circuit_107_on || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 Em did not establish frame alignment correctly\n");
+        return false;
+    }
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    tx.last_tx_info = local_info;
+    tx.last_tx_info_valid = true;
+    tx.last_rx_info = peer_info;
+    tx.last_rx_info_valid = true;
+    tx.scramble_reg = 0x00123456U;
+    tx.diff_sign = 1;
+    v91_default_dil_init(&dil);
+    seq_len = v91_tx_startup_dil_sequence_codewords(&tx,
+                                                    seq,
+                                                    (int) sizeof(seq),
+                                                    &dil,
+                                                    &align_signal);
+    if (seq_len != V91_EM_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 startup Em+DIL sequence length mismatch: %d\n", seq_len);
+        return false;
+    }
+    if (align_signal != V91_ALIGN_EM) {
+        fprintf(stderr, "V.91 startup helper chose Eu instead of Em\n");
+        return false;
+    }
+    if (!tx.frame_aligned || !tx.circuit_107_on || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 startup Em+DIL sequence did not keep alignment\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 Em and startup DIL sequence (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v91_phil_and_scr_sequences(v91_law_t law)
+{
+    v91_state_t tx;
+    uint8_t phil[V91_INFO_SYMBOLS];
+    uint8_t scr[18];
+    uint8_t em[V91_EM_SYMBOLS];
+    uint32_t expected_scramble_reg;
+    int expected_sign;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    vpcm_log("Test: V.91 PHIL/SCR primitives (%s)", vpcm_law_to_str(law));
+
+    if (v91_tx_phil_codewords(&tx, phil, (int) sizeof(phil), V91_INFO_SYMBOLS, false) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "V.91 PHIL encode length mismatch\n");
+        return false;
+    }
+    if (!vpcm_expect_scrambled_ones_sequence(law,
+                                             phil,
+                                             V91_INFO_SYMBOLS,
+                                             0,
+                                             0,
+                                             &expected_scramble_reg,
+                                             &expected_sign)) {
+        fprintf(stderr, "V.91 PHIL sequence mismatch\n");
+        return false;
+    }
+    if (tx.scramble_reg != expected_scramble_reg || tx.diff_sign != expected_sign) {
+        fprintf(stderr, "V.91 PHIL coder state mismatch\n");
+        return false;
+    }
+    if (tx.frame_aligned || tx.circuit_107_on) {
+        fprintf(stderr, "V.91 PHIL should not establish frame alignment\n");
+        return false;
+    }
+
+    if (v91_tx_em_codewords(&tx, em, (int) sizeof(em)) != V91_EM_SYMBOLS) {
+        fprintf(stderr, "V.91 Em-after-PHIL encode length mismatch\n");
+        return false;
+    }
+    if (!tx.frame_aligned || !tx.circuit_107_on || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 Em after PHIL did not establish frame alignment\n");
+        return false;
+    }
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    if (v91_tx_scr_codewords(&tx, scr, (int) sizeof(scr), 18) != 18) {
+        fprintf(stderr, "V.91 SCR encode length mismatch\n");
+        return false;
+    }
+    if (!vpcm_expect_scrambled_ones_sequence(law,
+                                             scr,
+                                             18,
+                                             0,
+                                             0,
+                                             &expected_scramble_reg,
+                                             &expected_sign)) {
+        fprintf(stderr, "V.91 SCR sequence mismatch\n");
+        return false;
+    }
+    if (tx.scramble_reg != expected_scramble_reg || tx.diff_sign != expected_sign) {
+        fprintf(stderr, "V.91 SCR coder state mismatch\n");
+        return false;
+    }
+    if (v91_tx_scr_codewords(&tx, scr, (int) sizeof(scr), 10) != 0) {
+        fprintf(stderr, "V.91 SCR accepted a non-multiple-of-6 length\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 PHIL/SCR primitives (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v91_eu_startup_sequence(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_info_frame_t local_info;
+    v91_info_frame_t peer_info;
+    uint8_t seq[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    v91_align_signal_t align_signal;
+    int seq_len;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    vpcm_log("Test: V.91 Eu startup DIL sequence (%s)", vpcm_law_to_str(law));
+
+    memset(&local_info, 0, sizeof(local_info));
+    local_info.request_default_dil = true;
+    local_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    local_info.power_measured_after_digital_impairments = true;
+    local_info.request_transparent_mode = true;
+    local_info.cleardown_if_transparent_denied = true;
+    peer_info = local_info;
+
+    tx.last_tx_info = local_info;
+    tx.last_tx_info_valid = true;
+    tx.last_rx_info = peer_info;
+    tx.last_rx_info_valid = true;
+
+    seq_len = v91_tx_startup_dil_sequence_codewords(&tx,
+                                                    seq,
+                                                    (int) sizeof(seq),
+                                                    NULL,
+                                                    &align_signal);
+    if (seq_len != V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 startup Eu+DIL sequence length mismatch: %d\n", seq_len);
+        return false;
+    }
+    if (align_signal != V91_ALIGN_EU) {
+        fprintf(stderr, "V.91 startup helper chose Em instead of Eu\n");
+        return false;
+    }
+    if (!tx.frame_aligned || !tx.circuit_107_on || tx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 startup Eu+DIL sequence did not keep alignment\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 Eu startup DIL sequence (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v91_bilateral_info_tracking(v91_law_t law_a, v91_law_t law_b)
 {
     v91_state_t side_a;
@@ -366,6 +806,154 @@ static bool test_v91_bilateral_info_tracking(v91_law_t law_a, v91_law_t law_b)
 
     vpcm_log("PASS: V.91 bilateral INFO tracking (%s -> %s)",
              vpcm_law_to_str(law_a), vpcm_law_to_str(law_b));
+    return true;
+}
+
+static void vpcm_log_cp_compare_row(const char *field, const char *tx, const char *rx)
+{
+    vpcm_log("| %-10s | %-18s | %-18s |", field, tx, rx);
+}
+
+static void vpcm_log_cp_diag_compare(const vpcm_cp_diag_t *tx, const vpcm_cp_diag_t *rx)
+{
+    char tx_buf[64];
+    char rx_buf[64];
+    int i;
+
+    vpcm_log("+------------+--------------------+--------------------+");
+    vpcm_log("| Field      | TX                 | RX                 |");
+    vpcm_log("+------------+--------------------+--------------------+");
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->frame_sync_ok ? "correct" : "incorrect");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->frame_sync_ok ? "correct" : "incorrect");
+    vpcm_log_cp_compare_row("FS", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->start_bits_ok ? "correct" : "incorrect");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->start_bits_ok ? "correct" : "incorrect");
+    vpcm_log_cp_compare_row("Starts", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->frame.transparent_mode_granted ? "granted" : "not granted");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->frame.transparent_mode_granted ? "granted" : "not granted");
+    vpcm_log_cp_compare_row("Mode", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->frame.v90_compatibility ? "compatible" : "non-v90");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->frame.v90_compatibility ? "compatible" : "non-v90");
+    vpcm_log_cp_compare_row("Compat", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%u", tx->frame.drn);
+    snprintf(rx_buf, sizeof(rx_buf), "%u", rx->frame.drn);
+    vpcm_log_cp_compare_row("DRN", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->frame.acknowledge ? "yes" : "no");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->frame.acknowledge ? "yes" : "no");
+    vpcm_log_cp_compare_row("ACK", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%u", tx->frame.constellation_count);
+    snprintf(rx_buf, sizeof(rx_buf), "%u", rx->frame.constellation_count);
+    vpcm_log_cp_compare_row("Consts", tx_buf, rx_buf);
+    for (i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        snprintf(tx_buf, sizeof(tx_buf), "%u", tx->frame.dfi[i]);
+        snprintf(rx_buf, sizeof(rx_buf), "%u", rx->frame.dfi[i]);
+        if (i == 0)
+            vpcm_log_cp_compare_row("DFI0", tx_buf, rx_buf);
+        else if (i == 1)
+            vpcm_log_cp_compare_row("DFI1", tx_buf, rx_buf);
+        else if (i == 2)
+            vpcm_log_cp_compare_row("DFI2", tx_buf, rx_buf);
+        else if (i == 3)
+            vpcm_log_cp_compare_row("DFI3", tx_buf, rx_buf);
+        else if (i == 4)
+            vpcm_log_cp_compare_row("DFI4", tx_buf, rx_buf);
+        else
+            vpcm_log_cp_compare_row("DFI5", tx_buf, rx_buf);
+    }
+    for (i = 0; i < tx->frame.constellation_count && i < VPCM_CP_MAX_CONSTELLATIONS; i++) {
+        snprintf(tx_buf, sizeof(tx_buf), "%d set", vpcm_cp_mask_population(tx->frame.masks[i]));
+        snprintf(rx_buf, sizeof(rx_buf), "%d set", vpcm_cp_mask_population(rx->frame.masks[i]));
+        if (i == 0)
+            vpcm_log_cp_compare_row("Mask0", tx_buf, rx_buf);
+        else if (i == 1)
+            vpcm_log_cp_compare_row("Mask1", tx_buf, rx_buf);
+        else if (i == 2)
+            vpcm_log_cp_compare_row("Mask2", tx_buf, rx_buf);
+        else if (i == 3)
+            vpcm_log_cp_compare_row("Mask3", tx_buf, rx_buf);
+        else if (i == 4)
+            vpcm_log_cp_compare_row("Mask4", tx_buf, rx_buf);
+        else
+            vpcm_log_cp_compare_row("Mask5", tx_buf, rx_buf);
+    }
+    snprintf(tx_buf, sizeof(tx_buf), "0x%04x", tx->crc_field);
+    snprintf(rx_buf, sizeof(rx_buf), "0x%04x", rx->crc_field);
+    vpcm_log_cp_compare_row("CRC", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "0x%04x", tx->crc_remainder);
+    snprintf(rx_buf, sizeof(rx_buf), "0x%04x", rx->crc_remainder);
+    vpcm_log_cp_compare_row("CRC rem", tx_buf, rx_buf);
+    snprintf(tx_buf, sizeof(tx_buf), "%s", tx->valid ? "correct" : "incorrect");
+    snprintf(rx_buf, sizeof(rx_buf), "%s", rx->valid ? "correct" : "incorrect");
+    vpcm_log_cp_compare_row("CP", tx_buf, rx_buf);
+    vpcm_log("+------------+--------------------+--------------------+");
+}
+
+static bool test_v91_cp_exchange(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_state_t rx;
+    vpcm_cp_frame_t cp_tx;
+    vpcm_cp_frame_t cp_rx;
+    vpcm_cp_diag_t tx_diag;
+    vpcm_cp_diag_t rx_diag;
+    uint8_t codewords[VPCM_CP_MAX_BITS];
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int nbits;
+
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&rx, law, V91_MODE_TRANSPARENT);
+    vpcm_cp_init(&cp_tx);
+    cp_tx.transparent_mode_granted = true;
+    cp_tx.v90_compatibility = true;
+    cp_tx.drn = 9;
+    cp_tx.acknowledge = true;
+    cp_tx.constellation_count = 3;
+    cp_tx.dfi[0] = 0;
+    cp_tx.dfi[1] = 1;
+    cp_tx.dfi[2] = 2;
+    cp_tx.dfi[3] = 0;
+    cp_tx.dfi[4] = 1;
+    cp_tx.dfi[5] = 2;
+    vpcm_cp_mask_set(cp_tx.masks[0], 0, true);
+    vpcm_cp_mask_set(cp_tx.masks[0], 1, true);
+    vpcm_cp_mask_set(cp_tx.masks[0], 15, true);
+    vpcm_cp_mask_set(cp_tx.masks[1], 16, true);
+    vpcm_cp_mask_set(cp_tx.masks[1], 31, true);
+    vpcm_cp_mask_set(cp_tx.masks[1], 64, true);
+    vpcm_cp_mask_set(cp_tx.masks[2], 32, true);
+    vpcm_cp_mask_set(cp_tx.masks[2], 48, true);
+    vpcm_cp_mask_set(cp_tx.masks[2], 127, true);
+
+    vpcm_log("Test: V.91 CP exchange over raw-G.711 (%s)", vpcm_law_to_str(law));
+    if (!vpcm_cp_build_diag(&cp_tx, &tx_diag)) {
+        fprintf(stderr, "V.91 CP TX diag build failed\n");
+        return false;
+    }
+    nbits = vpcm_cp_bit_length(&cp_tx);
+    if (v91_tx_cp_codewords(&tx, codewords, (int) sizeof(codewords), &cp_tx, false) != nbits) {
+        fprintf(stderr, "V.91 CP encode length mismatch\n");
+        return false;
+    }
+    if (!tx.last_tx_cp_valid || !vpcm_cp_frames_equal(&cp_tx, &tx.last_tx_cp)) {
+        fprintf(stderr, "V.91 CP TX tracking mismatch\n");
+        return false;
+    }
+    if (!v91_rx_cp_codewords(&rx, codewords, nbits, &cp_rx)) {
+        fprintf(stderr, "V.91 CP RX decode failed\n");
+        return false;
+    }
+    if (!vpcm_v91_decode_scrambled_codewords_to_bits(codewords, nbits, bits)
+        || !vpcm_cp_decode_diag(bits, nbits, &rx_diag)) {
+        fprintf(stderr, "V.91 CP RX diag decode failed\n");
+        return false;
+    }
+    vpcm_log_cp_diag_compare(&tx_diag, &rx_diag);
+    if (!rx.last_rx_cp_valid || !vpcm_cp_frames_equal(&cp_tx, &rx.last_rx_cp) || !vpcm_cp_frames_equal(&cp_tx, &cp_rx)) {
+        fprintf(stderr, "V.91 CP RX tracking mismatch\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 CP exchange over raw-G.711 (%s)", vpcm_law_to_str(law));
     return true;
 }
 
@@ -891,6 +1479,30 @@ int main(void)
     if (!test_v91_startup_primitives(V91_LAW_ULAW))
         return 1;
     if (!test_v91_startup_primitives(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_default_dil(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_default_dil(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_eu_and_frame_alignment(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_eu_and_frame_alignment(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_phil_and_scr_sequences(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_phil_and_scr_sequences(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_cp_exchange(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_cp_exchange(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_eu_startup_sequence(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_em_and_startup_sequence(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_em_and_startup_sequence(V91_LAW_ALAW))
         return 1;
     if (!test_v91_bilateral_info_tracking(V91_LAW_ALAW, V91_LAW_ULAW))
         return 1;

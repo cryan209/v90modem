@@ -55,11 +55,11 @@ LDFLAGS = \
   -framework CoreVideo \
   -framework CoreMedia
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test
-TEST_OBJS = vpcm_loopback_test.o v91.o
+TEST_OBJS = vpcm_loopback_test.o v91.o vpcm_cp.o
 
 .PHONY: all clean spandsp
 
@@ -82,8 +82,9 @@ modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
-v91.o:            v91.c            v91.h
-vpcm_loopback_test.o: vpcm_loopback_test.c v91.h
+v91.o:            v91.c            v91.h vpcm_cp.h
+vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
+vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h
 
 spandsp:
 	$(MAKE) -C $(SPANDSP_ROOT)
