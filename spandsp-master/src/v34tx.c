@@ -2165,21 +2165,17 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             if (recoveries <= 2)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: repeated INFO0a while waiting for Tone A reversal; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
+                         "Tx - V.90: repeated INFO0a while waiting for Tone A reversal after analog L1/L2; treating it as stale and staying on Tone B (recovery %d)\n",
                          recoveries);
-                s->tx.info0_acknowledgement = true;
-                s->tx.info0_retry_count = 0;
-                s->tx.tone_duration = 0;
                 s->rx.v90_repeated_info0a_pending = false;
                 s->rx.received_event = V34_EVENT_NONE;
                 s->rx.persistence1 = 0;
                 s->rx.persistence2 = 0;
-                info0_baud_init(s);
             }
             else
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: repeated INFO0a persists while waiting for Tone A reversal after %d recoveries; forcing B reversal path instead of another INFO0d loop\n",
+                         "Tx - V.90: repeated INFO0a persists while waiting for Tone A reversal after %d stale repeats; forcing B reversal path instead of restarting INFO0d\n",
                          recoveries);
                 s->rx.v90_repeated_info0a_pending = false;
                 s->rx.received_event = V34_EVENT_NONE;
@@ -2910,8 +2906,8 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     ++s->tx.tone_duration;
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
-        ||
-        s->tx.tone_duration >= 200)
+        || (s->rx.signal_present && s->tx.tone_duration >= 30)
+        || s->tx.tone_duration >= 200)
     {
         if (s->tx.tone_duration < 30
             && (s->rx.received_event == V34_EVENT_TONE_SEEN
@@ -2929,9 +2925,14 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
         /*endif*/
         /* Tone A detected (or timeout) — proceed to INFO1d */
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: %s (event=%d) after %d bauds, sending INFO1d\n",
-                 (s->tx.tone_duration >= 200) ? "Timeout" : "RX event",
+                 "Tx - V.90: %s (event=%d signal=%d) after %d bauds, sending INFO1d\n",
+                 (s->tx.tone_duration >= 200) ? "Timeout"
+                 : (((s->rx.received_event == V34_EVENT_TONE_SEEN)
+                     || (s->rx.received_event == V34_EVENT_REVERSAL_1))
+                    ? "RX event"
+                    : "Tone A present (edge missed)"),
                  s->rx.received_event,
+                 s->rx.signal_present,
                  s->tx.tone_duration);
         info1_baud_init(s);
     }
