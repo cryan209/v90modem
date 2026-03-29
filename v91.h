@@ -7,10 +7,10 @@
  *   - Phase 1/V.91 transition silence
  *   - Ez
  *   - INFO/INFO'
- *   - Eu/Em, PHIL, SCR, CP and frame-aligned default DIL generation
+ *   - Eu/Em, PHIL, SCR, CP, Es and B1 generation
  *
  * That gives us a concrete startup/data boundary for the loopback harness
- * while later V.91 signals (J, Es, B1) are
+ * while later V.91 signals (J) are
  * still to be implemented.
  */
 
@@ -35,6 +35,8 @@ typedef enum {
 #define V91_PHASE1_SILENCE_SYMBOLS 600
 #define V91_EU_SYMBOLS 12
 #define V91_EM_SYMBOLS 12
+#define V91_ES_SYMBOLS 12
+#define V91_B1_SYMBOLS 12
 #define V91_EZ_SYMBOLS 24
 #define V91_INFO_SYMBOLS 62
 #define V91_DEFAULT_DIL_SEGMENTS 125
@@ -129,6 +131,11 @@ bool v91_rx_scr_codewords(v91_state_t *s,
                           const uint8_t *g711_in,
                           int g711_len,
                           bool continue_from_current);
+int v91_tx_es_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+bool v91_rx_es_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         bool continue_from_cp);
 int v91_tx_cp_codewords(v91_state_t *s,
                         uint8_t *g711_out,
                         int g711_max,
@@ -139,6 +146,14 @@ bool v91_rx_cp_codewords(v91_state_t *s,
                          int g711_len,
                          vpcm_cp_frame_t *cp_out,
                          bool continue_from_scr);
+int v91_tx_b1_codewords(v91_state_t *s,
+                        uint8_t *g711_out,
+                        int g711_max,
+                        const vpcm_cp_frame_t *cp);
+bool v91_rx_b1_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         const vpcm_cp_frame_t *cp);
 int v91_tx_info_codewords(v91_state_t *s,
                           uint8_t *g711_out,
                           int g711_max,

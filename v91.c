@@ -141,6 +141,68 @@ static int v91_tx_diff_bits_codewords(v91_state_t *s,
     return nbits;
 }
 
+static int v91_tx_zeros_mapped_as_scr(v91_state_t *s,
+                                      uint8_t *g711_out,
+                                      int g711_max,
+                                      int nsymbols)
+{
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int i;
+
+    if (nsymbols <= 0 || nsymbols > VPCM_CP_MAX_BITS)
+        return 0;
+    for (i = 0; i < nsymbols; i++)
+        bits[i] = 0;
+    return v91_tx_diff_bits_codewords(s, g711_out, g711_max, bits, nsymbols, false, true);
+}
+
+static int v91_select_b1_ucode(const vpcm_cp_frame_t *cp, int frame_interval, int k, int symbol_index)
+{
+    int constellation_idx;
+    int population;
+    int ordinal;
+    int direction;
+    int ucode;
+
+    if (!cp || frame_interval < 0 || frame_interval >= VPCM_CP_FRAME_INTERVALS)
+        return -1;
+    if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
+        return -1;
+    constellation_idx = cp->dfi[frame_interval];
+    if (constellation_idx >= cp->constellation_count)
+        return -1;
+
+    population = vpcm_cp_mask_population(cp->masks[constellation_idx]);
+    if (population <= 0)
+        return -1;
+
+    /* Bring-up mapper: choose a deterministic active codeword within the
+       negotiated constellation. The ordinal depends on K, frame interval,
+       and symbol position so different negotiated rates produce distinct B1
+       patterns while staying within the selected CP mask set. */
+    ordinal = (k - 15 + frame_interval * 5 + symbol_index * 7) % population;
+    if (ordinal < 0)
+        ordinal += population;
+    direction = ((k + frame_interval + symbol_index) & 1) ? -1 : 1;
+
+    if (direction > 0) {
+        for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode)) {
+                if (ordinal-- == 0)
+                    return ucode;
+            }
+        }
+    } else {
+        for (ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode)) {
+                if (ordinal-- == 0)
+                    return ucode;
+            }
+        }
+    }
+    return -1;
+}
+
 static int v91_rx_diff_bits_stateful(v91_state_t *s,
                                      const uint8_t *g711_in,
                                      int g711_len,
@@ -465,6 +527,30 @@ bool v91_rx_scr_codewords(v91_state_t *s,
     return true;
 }
 
+int v91_tx_es_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
+{
+    return v91_tx_zeros_mapped_as_scr(s, g711_out, g711_max, V91_ES_SYMBOLS);
+}
+
+bool v91_rx_es_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         bool continue_from_cp)
+{
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int i;
+
+    if (!s || !g711_in || g711_len != V91_ES_SYMBOLS)
+        return false;
+    if (v91_rx_diff_bits_stateful(s, g711_in, g711_len, bits, !continue_from_cp, true) != g711_len)
+        return false;
+    for (i = 0; i < g711_len; i++) {
+        if (bits[i] != 0)
+            return false;
+    }
+    return true;
+}
+
 int v91_tx_cp_codewords(v91_state_t *s,
                         uint8_t *g711_out,
                         int g711_max,
@@ -514,6 +600,49 @@ bool v91_rx_cp_codewords(v91_state_t *s,
     s->last_rx_cp_valid = true;
     *cp_out = cp;
     return true;
+}
+
+int v91_tx_b1_codewords(v91_state_t *s,
+                        uint8_t *g711_out,
+                        int g711_max,
+                        const vpcm_cp_frame_t *cp)
+{
+    int i;
+    int ucode;
+    int k;
+
+    if (!s || !g711_out || !cp || g711_max < V91_B1_SYMBOLS)
+        return 0;
+
+    /* Bring-up implementation: choose active PCM codewords from the
+       negotiated CP masks with a deterministic K-sensitive selector. */
+    k = vpcm_cp_drn_to_k(cp->drn);
+    if (k <= 0)
+        return 0;
+    for (i = 0; i < V91_B1_SYMBOLS; i++) {
+        int fi;
+
+        fi = i % VPCM_CP_FRAME_INTERVALS;
+        ucode = v91_select_b1_ucode(cp, fi, k, i);
+        if (ucode < 0)
+            return 0;
+        g711_out[i] = v91_ucode_to_codeword(s->law, ucode, true);
+    }
+    return V91_B1_SYMBOLS;
+}
+
+bool v91_rx_b1_codewords(v91_state_t *s,
+                         const uint8_t *g711_in,
+                         int g711_len,
+                         const vpcm_cp_frame_t *cp)
+{
+    uint8_t expected[V91_B1_SYMBOLS];
+
+    if (!s || !g711_in || !cp || g711_len != V91_B1_SYMBOLS)
+        return false;
+    if (v91_tx_b1_codewords(s, expected, V91_B1_SYMBOLS, cp) != V91_B1_SYMBOLS)
+        return false;
+    return memcmp(expected, g711_in, V91_B1_SYMBOLS) == 0;
 }
 
 int v91_tx_info_codewords(v91_state_t *s,

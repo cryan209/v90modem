@@ -310,6 +310,40 @@ double vpcm_cp_drn_to_bps(uint8_t drn)
     return ((double) (drn + 20U) * 8000.0) / 6.0;
 }
 
+int vpcm_cp_drn_to_k(uint8_t drn)
+{
+    if (drn == 0 || drn > 28)
+        return 0;
+    return (int) drn + 14;
+}
+
+int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high)
+{
+    int constellation_idx;
+    int ucode;
+
+    if (!cp || frame_interval < 0 || frame_interval >= VPCM_CP_FRAME_INTERVALS)
+        return -1;
+    if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
+        return -1;
+    constellation_idx = cp->dfi[frame_interval];
+    if (constellation_idx >= cp->constellation_count)
+        return -1;
+
+    if (prefer_high) {
+        for (ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode))
+                return ucode;
+        }
+    } else {
+        for (ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+            if (vpcm_cp_mask_get(cp->masks[constellation_idx], ucode))
+                return ucode;
+        }
+    }
+    return -1;
+}
+
 void vpcm_cp_mask_set(uint8_t mask[VPCM_CP_MASK_BYTES], int ucode, bool enabled)
 {
     int byte_idx;

@@ -970,7 +970,7 @@ static bool test_v91_cp_exchange(v91_law_t law)
     return true;
 }
 
-static bool test_v91_startup_to_cp_multirate(v91_law_t law)
+static bool test_v91_startup_to_b1_multirate(v91_law_t law)
 {
     static const uint8_t drn_cases[] = {1, 4, 9, 16, 24, 28};
     v91_state_t caller;
@@ -984,16 +984,23 @@ static bool test_v91_startup_to_cp_multirate(v91_law_t law)
     uint8_t ez_buf[V91_EZ_SYMBOLS];
     uint8_t scr_buf[18];
     uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    uint8_t es_buf[V91_ES_SYMBOLS];
+    uint8_t b1_buf[V91_B1_SYMBOLS];
+    uint8_t first_b1[V91_B1_SYMBOLS];
     vpcm_cp_frame_t cp_offer;
     vpcm_cp_frame_t cp_ack;
     vpcm_cp_frame_t cp_rx;
     char rate_buf[64];
+    bool first_b1_valid;
+    bool saw_rate_sensitive_b1;
     int i;
     int startup_len;
     int cp_len;
 
-    vpcm_log("Test: V.91 startup to CP/CP' multirate (%s)", vpcm_law_to_str(law));
+    vpcm_log("Test: V.91 startup to Es/B1 multirate (%s)", vpcm_law_to_str(law));
     v91_default_dil_init(&default_dil);
+    first_b1_valid = false;
+    saw_rate_sensitive_b1 = false;
 
     for (i = 0; i < (int) (sizeof(drn_cases)/sizeof(drn_cases[0])); i++) {
         uint8_t drn;
@@ -1096,12 +1103,46 @@ static bool test_v91_startup_to_cp_multirate(v91_law_t law)
             return false;
         }
 
+        if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
+            || !v91_rx_es_codewords(&answerer, es_buf, V91_ES_SYMBOLS, true)) {
+            fprintf(stderr, "V.91 Es caller->answerer failed for drn=%u\n", drn);
+            return false;
+        }
+        if (v91_tx_b1_codewords(&caller, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS
+            || !v91_rx_b1_codewords(&answerer, b1_buf, V91_B1_SYMBOLS, &cp_ack)) {
+            fprintf(stderr, "V.91 B1 caller->answerer failed for drn=%u\n", drn);
+            return false;
+        }
+
+        if (!first_b1_valid) {
+            memcpy(first_b1, b1_buf, sizeof(first_b1));
+            first_b1_valid = true;
+        } else if (memcmp(first_b1, b1_buf, sizeof(first_b1)) != 0) {
+            saw_rate_sensitive_b1 = true;
+        }
+
+        if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
+            || !v91_rx_es_codewords(&caller, es_buf, V91_ES_SYMBOLS, true)) {
+            fprintf(stderr, "V.91 Es answerer->caller failed for drn=%u\n", drn);
+            return false;
+        }
+        if (v91_tx_b1_codewords(&answerer, b1_buf, (int) sizeof(b1_buf), &cp_ack) != V91_B1_SYMBOLS
+            || !v91_rx_b1_codewords(&caller, b1_buf, V91_B1_SYMBOLS, &cp_ack)) {
+            fprintf(stderr, "V.91 B1 answerer->caller failed for drn=%u\n", drn);
+            return false;
+        }
+
         vpcm_format_rate(rate_buf, sizeof(rate_buf), drn);
-        vpcm_log("PASS: startup -> CP/CP' (%s, drn=%u, rate=%s)",
+        vpcm_log("PASS: startup -> CP/CP' -> Es -> B1 (%s, drn=%u, rate=%s)",
                  vpcm_law_to_str(law), drn, rate_buf);
     }
 
-    vpcm_log("PASS: V.91 startup to CP/CP' multirate (%s)", vpcm_law_to_str(law));
+    if (!saw_rate_sensitive_b1) {
+        fprintf(stderr, "V.91 multirate B1 patterns did not vary across DRN cases\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 startup to Es/B1 multirate (%s)", vpcm_law_to_str(law));
     return true;
 }
 
@@ -1644,9 +1685,9 @@ int main(void)
         return 1;
     if (!test_v91_cp_exchange(V91_LAW_ALAW))
         return 1;
-    if (!test_v91_startup_to_cp_multirate(V91_LAW_ULAW))
+    if (!test_v91_startup_to_b1_multirate(V91_LAW_ULAW))
         return 1;
-    if (!test_v91_startup_to_cp_multirate(V91_LAW_ALAW))
+    if (!test_v91_startup_to_b1_multirate(V91_LAW_ALAW))
         return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
         return 1;
