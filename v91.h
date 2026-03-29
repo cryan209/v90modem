@@ -79,6 +79,22 @@ typedef struct {
 } v91_dil_desc_t;
 
 typedef struct {
+    uint8_t n;
+    uint8_t lsp;
+    uint8_t ltp;
+    uint8_t unique_train_u;
+    uint8_t repeated_uchords;
+    uint8_t non_default_refs;
+    uint8_t non_default_h;
+    uint8_t impairment_score;
+    bool default_like;
+    bool robbed_bit_limited;
+    bool echo_limited;
+    uint8_t recommended_downstream_drn;
+    uint8_t recommended_upstream_drn;
+} v91_dil_analysis_t;
+
+typedef struct {
     v91_law_t  law;
     v91_mode_t mode;
     bool last_tx_info_valid;
@@ -86,7 +102,11 @@ typedef struct {
     v91_info_frame_t last_tx_info;
     v91_info_frame_t last_rx_info;
     bool last_tx_dil_valid;
+    bool last_rx_dil_valid;
+    bool last_rx_dil_analysis_valid;
     v91_dil_desc_t last_tx_dil;
+    v91_dil_desc_t last_rx_dil;
+    v91_dil_analysis_t last_rx_dil_analysis;
     bool last_tx_cp_valid;
     bool last_rx_cp_valid;
     vpcm_cp_frame_t last_tx_cp;
@@ -190,6 +210,10 @@ int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
                                           int g711_max,
                                           const v91_dil_desc_t *peer_dil,
                                           v91_align_signal_t *align_out);
+bool v91_analyse_dil_descriptor(const v91_dil_desc_t *desc, v91_dil_analysis_t *analysis_out);
+bool v91_note_received_dil(v91_state_t *s,
+                           const v91_dil_desc_t *desc,
+                           v91_dil_analysis_t *analysis_out);
 void v91_note_frame_sync_loss(v91_state_t *s);
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
 void v91_deactivate_data_mode(v91_state_t *s);

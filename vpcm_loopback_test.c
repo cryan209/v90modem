@@ -968,6 +968,68 @@ static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
         snprintf(buf, len, "%.2f bps", bps);
 }
 
+static void vpcm_v92_init_digital_dil_from_ja(v91_dil_desc_t *desc, bool echo_limited)
+{
+    int i;
+    static const uint8_t echo_train_u[8] = {60, 61, 62, 63, 64, 65, 66, 67};
+
+    v91_default_dil_init(desc);
+    if (!echo_limited)
+        return;
+
+    /*
+     * Harness approximation of a Ja-derived echo-limited profile:
+     * keep the default family framing, but constrain the DIL so the
+     * analogue side sees shorter/narrower training and requests a safer
+     * downstream/upstream pair.
+     */
+    desc->n = 96;
+    desc->lsp = 6;
+    desc->ltp = 6;
+    for (i = 0; i < 8; i++) {
+        desc->ref[i] = 1;
+        desc->h[i] = 1;
+    }
+    for (i = 0; i < desc->n; i++)
+        desc->train_u[i] = echo_train_u[i % 8];
+}
+
+static void vpcm_v92_select_profile_from_dil(const v91_dil_analysis_t *analysis,
+                                             uint8_t *downstream_drn,
+                                             uint8_t *upstream_drn)
+{
+    if (analysis && analysis->recommended_downstream_drn != 0 && analysis->recommended_upstream_drn != 0) {
+        *downstream_drn = analysis->recommended_downstream_drn;
+        *upstream_drn = analysis->recommended_upstream_drn;
+    } else {
+        *downstream_drn = 19;
+        *upstream_drn = 16;
+    }
+}
+
+static void vpcm_log_dil_analysis(const char *label, const v91_dil_analysis_t *analysis)
+{
+    char down_rate_buf[64];
+    char up_rate_buf[64];
+
+    if (!analysis)
+        return;
+
+    vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), analysis->recommended_downstream_drn);
+    vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), analysis->recommended_upstream_drn);
+    vpcm_log("%s DIL analysis: N=%u LSP=%u LTP=%u unique=%u refs=%u score=%u requested downstream=%s upstream=%s%s",
+             label,
+             analysis->n,
+             analysis->lsp,
+             analysis->ltp,
+             analysis->unique_train_u,
+             analysis->non_default_refs,
+             analysis->impairment_score,
+             down_rate_buf,
+             up_rate_buf,
+             analysis->echo_limited ? ", echo-limited" : "");
+}
+
 static bool test_v91_cp_exchange(v91_law_t law)
 {
     v91_state_t tx;
@@ -1775,27 +1837,6 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     return true;
 }
 
-static void vpcm_v92_select_profile(bool echo_limited,
-                                    uint8_t *downstream_drn,
-                                    uint8_t *upstream_drn)
-{
-    /*
-     * V.92 is asymmetric in practice. The digital side typically delivers
-     * a higher downstream rate to the analogue side, while the analogue
-     * upstream rate is lower and more vulnerable to echo. The shared V.PCM
-     * engine works in DRN steps, so we pick nearby family-safe points:
-     *   clean line:      downstream ~= 52 kbps, upstream = 48 kbps
-     *   echo-limited:    downstream = 48 kbps, upstream = 40 kbps
-     */
-    if (echo_limited) {
-        *downstream_drn = 16;
-        *upstream_drn = 10;
-    } else {
-        *downstream_drn = 19;
-        *upstream_drn = 16;
-    }
-}
-
 static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
                                                   const char *path_label,
                                                   bool echo_limited,
@@ -1803,6 +1844,8 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
     v91_dil_desc_t default_dil;
+    v91_dil_desc_t digital_dil;
+    v91_dil_analysis_t digital_dil_analysis;
     v91_state_t caller_startup;
     v91_state_t answerer_startup;
     v91_state_t caller_tx;
@@ -1856,7 +1899,8 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
     v91_init(&caller_rx, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer_tx, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
-    vpcm_v92_select_profile(echo_limited, &downstream_drn, &upstream_drn);
+    v91_default_dil_init(&default_dil);
+    vpcm_v92_init_digital_dil_from_ja(&digital_dil, echo_limited);
 
     memset(&caller_info, 0, sizeof(caller_info));
     caller_info.request_default_dil = true;
@@ -1892,13 +1936,19 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
-                                                        &default_dil,
+                                                        &digital_dil,
                                                         NULL);
     if (startup_len <= 0) {
         fprintf(stderr, "V.92 asymmetric caller startup DIL failed\n");
         return false;
     }
     memcpy(transport_buf, startup_buf, (size_t) startup_len);
+    if (!v91_note_received_dil(&answerer_startup, &digital_dil, &digital_dil_analysis)) {
+        fprintf(stderr, "V.92 asymmetric answerer DIL analysis failed\n");
+        return false;
+    }
+    vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
+    vpcm_log_dil_analysis("Analogue side", &digital_dil_analysis);
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&answerer_startup,
                                                         startup_buf,
@@ -1910,6 +1960,10 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         return false;
     }
     memcpy(transport_buf, startup_buf, (size_t) startup_len);
+    if (!v91_note_received_dil(&caller_startup, &default_dil, NULL)) {
+        fprintf(stderr, "V.92 asymmetric caller DIL tracking failed\n");
+        return false;
+    }
 
     if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)) {
@@ -3004,6 +3058,48 @@ static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
     return true;
 }
 
+static bool test_v92_dil_rate_adaptation(void)
+{
+    v91_dil_desc_t clean_dil;
+    v91_dil_desc_t echo_dil;
+    v91_dil_analysis_t clean_analysis;
+    v91_dil_analysis_t echo_analysis;
+    char clean_down_rate[64];
+    char clean_up_rate[64];
+    char echo_down_rate[64];
+    char echo_up_rate[64];
+
+    vpcm_log("Test: V.92 DIL-driven rate adaptation");
+
+    vpcm_v92_init_digital_dil_from_ja(&clean_dil, false);
+    vpcm_v92_init_digital_dil_from_ja(&echo_dil, true);
+    if (!v91_analyse_dil_descriptor(&clean_dil, &clean_analysis)
+        || !v91_analyse_dil_descriptor(&echo_dil, &echo_analysis)) {
+        fprintf(stderr, "V.92 DIL analysis failed\n");
+        return false;
+    }
+    if (clean_analysis.recommended_downstream_drn <= echo_analysis.recommended_downstream_drn
+        || clean_analysis.recommended_upstream_drn <= echo_analysis.recommended_upstream_drn) {
+        fprintf(stderr, "V.92 DIL analysis did not reduce rate request for impaired line\n");
+        return false;
+    }
+    if (!echo_analysis.echo_limited) {
+        fprintf(stderr, "V.92 impaired DIL did not mark echo-limited\n");
+        return false;
+    }
+
+    vpcm_format_rate(clean_down_rate, sizeof(clean_down_rate), clean_analysis.recommended_downstream_drn);
+    vpcm_format_rate(clean_up_rate, sizeof(clean_up_rate), clean_analysis.recommended_upstream_drn);
+    vpcm_format_rate(echo_down_rate, sizeof(echo_down_rate), echo_analysis.recommended_downstream_drn);
+    vpcm_format_rate(echo_up_rate, sizeof(echo_up_rate), echo_analysis.recommended_upstream_drn);
+    vpcm_log("PASS: V.92 DIL-driven rate adaptation (clean=%s/%s, impaired=%s/%s)",
+             clean_down_rate,
+             clean_up_rate,
+             echo_down_rate,
+             echo_up_rate);
+    return true;
+}
+
 static bool test_v92_full_phase_operation(v91_law_t law)
 {
     v8_parms_t caller_parms;
@@ -3374,6 +3470,8 @@ int main(void)
     if (!test_v91_em_and_startup_sequence(V91_LAW_ALAW))
         return 1;
     if (!test_v91_bilateral_info_tracking(V91_LAW_ALAW, V91_LAW_ULAW))
+        return 1;
+    if (!test_v92_dil_rate_adaptation())
         return 1;
     if (!test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW))
         return 1;

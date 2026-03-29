@@ -57,6 +57,119 @@ static int v91_dil_uchord_index(int training_ucode)
     return idx;
 }
 
+static uint8_t v91_count_distinct_train_u(const v91_dil_desc_t *desc)
+{
+    bool seen[128];
+    uint8_t count;
+    int i;
+
+    memset(seen, 0, sizeof(seen));
+    count = 0;
+    for (i = 0; i < desc->n; i++) {
+        int ucode;
+
+        ucode = desc->train_u[i] & 0x7F;
+        if (!seen[ucode]) {
+            seen[ucode] = true;
+            count++;
+        }
+    }
+    return count;
+}
+
+bool v91_analyse_dil_descriptor(const v91_dil_desc_t *desc, v91_dil_analysis_t *analysis_out)
+{
+    v91_dil_analysis_t analysis;
+    bool seen_uchord[8];
+    int i;
+
+    if (!desc || !analysis_out)
+        return false;
+
+    memset(&analysis, 0, sizeof(analysis));
+    memset(seen_uchord, 0, sizeof(seen_uchord));
+    analysis.n = desc->n;
+    analysis.lsp = desc->lsp;
+    analysis.ltp = desc->ltp;
+    analysis.unique_train_u = v91_count_distinct_train_u(desc);
+
+    for (i = 0; i < 8; i++) {
+        if (desc->ref[i] != 0)
+            analysis.non_default_refs++;
+        if (desc->h[i] != 1)
+            analysis.non_default_h++;
+    }
+    for (i = 0; i < desc->n; i++) {
+        int uchord_idx;
+
+        uchord_idx = v91_dil_uchord_index(desc->train_u[i] & 0x7F);
+        seen_uchord[uchord_idx] = true;
+    }
+    for (i = 0; i < 8; i++) {
+        if (seen_uchord[i])
+            analysis.repeated_uchords++;
+    }
+
+    analysis.default_like = (desc->n == V91_DEFAULT_DIL_SEGMENTS
+                             && desc->lsp == 12
+                             && desc->ltp == 12
+                             && analysis.unique_train_u >= 120
+                             && analysis.non_default_refs == 0
+                             && analysis.non_default_h == 0);
+
+    if (desc->n < V91_DEFAULT_DIL_SEGMENTS)
+        analysis.impairment_score++;
+    if (desc->n < 100)
+        analysis.impairment_score++;
+    if (desc->lsp != 12 || desc->ltp != 12)
+        analysis.impairment_score++;
+    if (desc->lsp < 12 || desc->ltp < 12)
+        analysis.impairment_score++;
+    if (analysis.unique_train_u < 64)
+        analysis.impairment_score++;
+    if (analysis.unique_train_u < 16)
+        analysis.impairment_score++;
+    if (analysis.non_default_refs != 0)
+        analysis.impairment_score++;
+    if (analysis.non_default_h != 0)
+        analysis.impairment_score++;
+
+    analysis.echo_limited = (analysis.impairment_score >= 3);
+    if (analysis.impairment_score >= 5) {
+        analysis.recommended_downstream_drn = 13;
+        analysis.recommended_upstream_drn = 7;
+    } else if (analysis.echo_limited) {
+        analysis.recommended_downstream_drn = 16;
+        analysis.recommended_upstream_drn = 10;
+    } else {
+        analysis.recommended_downstream_drn = 19;
+        analysis.recommended_upstream_drn = 16;
+    }
+
+    *analysis_out = analysis;
+    return true;
+}
+
+bool v91_note_received_dil(v91_state_t *s,
+                           const v91_dil_desc_t *desc,
+                           v91_dil_analysis_t *analysis_out)
+{
+    v91_dil_analysis_t analysis;
+
+    if (!s || !desc)
+        return false;
+    if (!v91_analyse_dil_descriptor(desc, &analysis))
+        return false;
+
+    s->last_rx_dil = *desc;
+    s->last_rx_dil_valid = true;
+    s->last_rx_dil_analysis = analysis;
+    s->last_rx_dil_analysis_valid = true;
+    if (analysis_out)
+        *analysis_out = analysis;
+    return true;
+}
+
 static int v91_scramble_bit(v91_state_t *s, int in_bit)
 {
     int out_bit;
