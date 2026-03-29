@@ -141,41 +141,6 @@ static int v91_tx_diff_bits_codewords(v91_state_t *s,
     return nbits;
 }
 
-static int v91_rx_diff_bits(const uint8_t *g711_in, int g711_len, uint8_t *bits_out)
-{
-    int sign;
-    int prev_sign;
-    int i;
-
-    if (!g711_in || !bits_out || g711_len <= 0)
-        return 0;
-
-    prev_sign = 0;
-    for (i = 0; i < g711_len; i++) {
-        sign = (g711_in[i] & 0x80) ? 1 : 0;
-        bits_out[i] = (uint8_t) (sign ^ prev_sign);
-        prev_sign = sign;
-    }
-    return g711_len;
-}
-
-static int v91_rx_scrambled_diff_bits(const uint8_t *g711_in, int g711_len, uint8_t *bits_out)
-{
-    uint8_t scrambled_bits[VPCM_CP_MAX_BITS];
-    uint32_t scramble_reg;
-    int i;
-
-    if (g711_len > VPCM_CP_MAX_BITS)
-        return 0;
-    if (v91_rx_diff_bits(g711_in, g711_len, scrambled_bits) != g711_len)
-        return 0;
-
-    scramble_reg = 0;
-    for (i = 0; i < g711_len; i++)
-        bits_out[i] = (uint8_t) v91_descramble_reg_bit(&scramble_reg, scrambled_bits[i] & 1U);
-    return g711_len;
-}
-
 static int v91_rx_diff_bits_stateful(v91_state_t *s,
                                      const uint8_t *g711_in,
                                      int g711_len,

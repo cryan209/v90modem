@@ -888,6 +888,19 @@ static void vpcm_log_cp_diag_compare(const vpcm_cp_diag_t *tx, const vpcm_cp_dia
     vpcm_log("+------------+--------------------+--------------------+");
 }
 
+static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
+{
+    double bps;
+
+    bps = vpcm_cp_drn_to_bps(drn);
+    if (drn == 0)
+        snprintf(buf, len, "cleardown");
+    else if (((int) (bps + 0.5)) == (int) bps)
+        snprintf(buf, len, "%.0f bps", bps);
+    else
+        snprintf(buf, len, "%.2f bps", bps);
+}
+
 static bool test_v91_cp_exchange(v91_law_t law)
 {
     v91_state_t tx;
@@ -938,7 +951,7 @@ static bool test_v91_cp_exchange(v91_law_t law)
         fprintf(stderr, "V.91 CP TX tracking mismatch\n");
         return false;
     }
-    if (!v91_rx_cp_codewords(&rx, codewords, nbits, &cp_rx)) {
+    if (!v91_rx_cp_codewords(&rx, codewords, nbits, &cp_rx, false)) {
         fprintf(stderr, "V.91 CP RX decode failed\n");
         return false;
     }
@@ -954,6 +967,141 @@ static bool test_v91_cp_exchange(v91_law_t law)
     }
 
     vpcm_log("PASS: V.91 CP exchange over raw-G.711 (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
+static bool test_v91_startup_to_cp_multirate(v91_law_t law)
+{
+    static const uint8_t drn_cases[] = {1, 4, 9, 16, 24, 28};
+    v91_state_t caller;
+    v91_state_t answerer;
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    v91_info_frame_t rx_info;
+    v91_dil_desc_t default_dil;
+    uint8_t info_buf[V91_INFO_SYMBOLS];
+    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t ez_buf[V91_EZ_SYMBOLS];
+    uint8_t scr_buf[18];
+    uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    vpcm_cp_frame_t cp_offer;
+    vpcm_cp_frame_t cp_ack;
+    vpcm_cp_frame_t cp_rx;
+    char rate_buf[64];
+    int i;
+    int startup_len;
+    int cp_len;
+
+    vpcm_log("Test: V.91 startup to CP/CP' multirate (%s)", vpcm_law_to_str(law));
+    v91_default_dil_init(&default_dil);
+
+    for (i = 0; i < (int) (sizeof(drn_cases)/sizeof(drn_cases[0])); i++) {
+        uint8_t drn;
+
+        drn = drn_cases[i];
+        v91_init(&caller, law, V91_MODE_TRANSPARENT);
+        v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+
+        memset(&caller_info, 0, sizeof(caller_info));
+        caller_info.request_default_dil = true;
+        caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+        caller_info.power_measured_after_digital_impairments = true;
+        memset(&answerer_info, 0, sizeof(answerer_info));
+        answerer_info.request_default_dil = true;
+        answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+        answerer_info.power_measured_after_digital_impairments = true;
+
+        if (v91_tx_phase1_silence_codewords(&caller, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
+            || v91_tx_phase1_silence_codewords(&answerer, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
+            fprintf(stderr, "V.91 phase1 silence failed\n");
+            return false;
+        }
+        if (v91_tx_ez_codewords(&caller, ez_buf, (int) sizeof(ez_buf)) != V91_EZ_SYMBOLS
+            || v91_tx_ez_codewords(&answerer, ez_buf, (int) sizeof(ez_buf)) != V91_EZ_SYMBOLS) {
+            fprintf(stderr, "V.91 Ez failed\n");
+            return false;
+        }
+
+        if (v91_tx_info_codewords(&caller, info_buf, (int) sizeof(info_buf), &caller_info) != V91_INFO_SYMBOLS
+            || !v91_rx_info_codewords(&answerer, info_buf, V91_INFO_SYMBOLS, &rx_info)) {
+            fprintf(stderr, "V.91 INFO caller->answerer failed\n");
+            return false;
+        }
+        if (v91_tx_info_codewords(&answerer, info_buf, (int) sizeof(info_buf), &answerer_info) != V91_INFO_SYMBOLS
+            || !v91_rx_info_codewords(&caller, info_buf, V91_INFO_SYMBOLS, &rx_info)) {
+            fprintf(stderr, "V.91 INFO answerer->caller failed\n");
+            return false;
+        }
+
+        startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
+                                                            startup_buf,
+                                                            (int) sizeof(startup_buf),
+                                                            &default_dil,
+                                                            NULL);
+        if (startup_len <= 0) {
+            fprintf(stderr, "V.91 caller startup DIL sequence failed\n");
+            return false;
+        }
+        startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
+                                                            startup_buf,
+                                                            (int) sizeof(startup_buf),
+                                                            &default_dil,
+                                                            NULL);
+        if (startup_len <= 0) {
+            fprintf(stderr, "V.91 answerer startup DIL sequence failed\n");
+            return false;
+        }
+
+        if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18
+            || !v91_rx_scr_codewords(&answerer, scr_buf, 18, false)) {
+            fprintf(stderr, "V.91 caller SCR failed\n");
+            return false;
+        }
+        if (v91_tx_scr_codewords(&answerer, scr_buf, (int) sizeof(scr_buf), 18) != 18
+            || !v91_rx_scr_codewords(&caller, scr_buf, 18, false)) {
+            fprintf(stderr, "V.91 answerer SCR failed\n");
+            return false;
+        }
+
+        vpcm_cp_init(&cp_offer);
+        cp_offer.transparent_mode_granted = false;
+        cp_offer.v90_compatibility = true;
+        cp_offer.drn = drn;
+        cp_offer.acknowledge = false;
+        cp_offer.constellation_count = 2;
+        cp_offer.dfi[0] = 0;
+        cp_offer.dfi[1] = 1;
+        cp_offer.dfi[2] = 0;
+        cp_offer.dfi[3] = 1;
+        cp_offer.dfi[4] = 0;
+        cp_offer.dfi[5] = 1;
+        vpcm_cp_mask_set(cp_offer.masks[0], 0, true);
+        vpcm_cp_mask_set(cp_offer.masks[0], 1, true);
+        vpcm_cp_mask_set(cp_offer.masks[0], 15, true);
+        vpcm_cp_mask_set(cp_offer.masks[1], 16, true);
+        vpcm_cp_mask_set(cp_offer.masks[1], 31, true);
+        vpcm_cp_mask_set(cp_offer.masks[1], 63, true);
+
+        cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
+        if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_offer, &cp_rx)) {
+            fprintf(stderr, "V.91 CP offer failed for drn=%u\n", drn);
+            return false;
+        }
+
+        cp_ack = cp_offer;
+        cp_ack.acknowledge = true;
+        cp_len = v91_tx_cp_codewords(&answerer, cp_buf, (int) sizeof(cp_buf), &cp_ack, true);
+        if (cp_len <= 0 || !v91_rx_cp_codewords(&caller, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_ack, &cp_rx)) {
+            fprintf(stderr, "V.91 CP acknowledge failed for drn=%u\n", drn);
+            return false;
+        }
+
+        vpcm_format_rate(rate_buf, sizeof(rate_buf), drn);
+        vpcm_log("PASS: startup -> CP/CP' (%s, drn=%u, rate=%s)",
+                 vpcm_law_to_str(law), drn, rate_buf);
+    }
+
+    vpcm_log("PASS: V.91 startup to CP/CP' multirate (%s)", vpcm_law_to_str(law));
     return true;
 }
 
@@ -1495,6 +1643,10 @@ int main(void)
     if (!test_v91_cp_exchange(V91_LAW_ULAW))
         return 1;
     if (!test_v91_cp_exchange(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_startup_to_cp_multirate(V91_LAW_ULAW))
+        return 1;
+    if (!test_v91_startup_to_cp_multirate(V91_LAW_ALAW))
         return 1;
     if (!test_v91_eu_startup_sequence(V91_LAW_ULAW))
         return 1;
