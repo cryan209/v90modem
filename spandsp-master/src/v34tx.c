@@ -67,6 +67,7 @@
 #include "spandsp/dds.h"
 #include "spandsp/crc.h"
 #include "spandsp/complex_filters.h"
+#include "spandsp/g711.h"
 
 #include "spandsp/v29rx.h"
 #include "spandsp/v34.h"
@@ -208,6 +209,7 @@ static const char *v34_modulation_to_str(int mod)
     case V34_MODULATION_CC: return "CC";
     case V34_MODULATION_TONES: return "TONES";
     case V34_MODULATION_L1_L2: return "L1_L2";
+    case V34_MODULATION_PCM_L1_L2: return "PCM_L1_L2";
     case V34_MODULATION_SILENCE: return "SILENCE";
     default: return "UNKNOWN";
     }
@@ -417,6 +419,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s);
 static void v90_arm_tone_a_detection(v34_state_t *s, const char *reason);
 static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason);
 static void l1_l2_signal_init(v34_state_t *s);
+static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
@@ -2773,13 +2776,74 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
 }
 /*- End of function --------------------------------------------------------*/
 
+static __inline__ int16_t pcm_phase2_quantise(v34_state_t *s, int16_t linear)
+{
+    /* V.90/V.91/V.92 downstream signalling must ultimately be conveyed as exact
+       G.711 codewords.  Quantise the generated Phase 2 waveform through the
+       selected PCM law now so this modulator has a dedicated PCM-oriented
+       transmit identity instead of borrowing the generic V.34 analogue path. */
+    if (s->tx.v90_pcm_law)
+        return alaw_to_linear(linear_to_alaw(linear));
+    return ulaw_to_linear(linear_to_ulaw(linear));
+}
+/*- End of function --------------------------------------------------------*/
+
+static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
+{
+    int sample;
+
+    /* Dedicated PCM-modem Phase 2 downstream path.
+       For now this reuses the existing L1/L2 probe envelope, but forces it
+       through exact PCM codewords so the transmit chain is law-aware and
+       separated from the generic V.34 analogue modulator. This is the shared
+       foundation for V.90/V.91/V.92 downstream TX work. */
+    for (sample = 0;  sample < max_len;  sample++)
+    {
+        int16_t raw;
+
+        raw = (int16_t) lfastrintf(line_probe_samples[s->tx.line_probe_step]*s->tx.line_probe_scaling);
+        amp[sample] = pcm_phase2_quantise(s, raw);
+        if (++s->tx.line_probe_step >= LINE_PROBE_SAMPLES)
+        {
+            s->tx.line_probe_step = 0;
+            if (++s->tx.line_probe_cycles == 8)
+            {
+                s->tx.line_probe_scaling *= 0.5f;
+                s->tx.state = V34_TX_STAGE_L2;
+            }
+            else if (s->tx.line_probe_cycles == (8 + 20))
+            {
+                if (s->tx.duplex)
+                {
+                    if (s->tx.calling_party)
+                        info1_baud_init(s);
+                    else if (s->tx.v90_mode)
+                        v90_wait_tone_a_init(s, false);
+                    else
+                        second_a_baud_init(s);
+                }
+                else
+                {
+                    if (s->tx.calling_party)
+                        second_b_baud_init(s);
+                    else
+                        second_a_baud_init(s);
+                }
+                break;
+            }
+        }
+    }
+    return sample;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void l1_l2_signal_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - l2_l2_signal_init()\n");
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*s->tx.gain;
-    s->tx.current_modulator = V34_MODULATION_L1_L2;
+    s->tx.current_modulator = s->tx.v90_mode ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
     s->tx.state = V34_TX_STAGE_L1;
 }
 /*- End of function --------------------------------------------------------*/
@@ -5000,6 +5064,9 @@ SPAN_DECLARE(int) v34_tx(v34_state_t *s, int16_t amp[], int max_len)
             break;
         case V34_MODULATION_L1_L2:
             lenx = tx_l1_l2(s, &amp[len], max_len - len);
+            break;
+        case V34_MODULATION_PCM_L1_L2:
+            lenx = tx_pcm_l1_l2(s, &amp[len], max_len - len);
             break;
         case V34_MODULATION_SILENCE:
             lenx = tx_silence(s, &amp[len], max_len - len);
