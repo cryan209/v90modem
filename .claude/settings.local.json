@@ -5,7 +5,8 @@
       "Bash(pdftotext \"/Users/scottcryan/v90modem/T-REC-V.8bis-199608-S!!PDF-E-1.pdf\" /tmp/v8bis.txt)",
       "Bash(make clean)",
       "Bash(make)",
-      "Bash(grep -iE '\\(pseudoc|target_walkthrough|state_graph\\\\.md$\\)')"
+      "Bash(grep -iE '\\(pseudoc|target_walkthrough|state_graph\\\\.md$\\)')",
+      "Bash(make -j4)"
     ]
   }
 }

@@ -5307,14 +5307,12 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
 
     if (s->calling_party)
     {
-        /* V.90 analog (calling) modem: TX CC at 2400 Hz, RX CC at 1200 Hz.
-           The caller transmits INFO0a at the standard V.34 caller frequency
-           (already 1200 Hz from v34_init), but after Phase 2 tone exchange
-           the upstream V.34 data channel uses high carrier.
-           RX expects INFO0d (62 bits) from the digital answerer at 1200 Hz. */
-        /* Carrier rates: V.34 caller init already sets TX=1200 Hz, but we
-           need RX to expect INFO0d. The CC carrier for the calling modem
-           stays at 1200 Hz (same as standard V.34 caller). */
+        /* V.90 §8.2.3.1: analog (calling) modem TX CC at 2400 Hz, RX CC at 1200 Hz.
+           This is different from standard V.34 where both sides use 1200 Hz.
+           The analog modem transmits INFO0a and Phase 2 tones at 2400 Hz.
+           It receives INFO0d from the digital answerer at 1200 Hz. */
+        s->tx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+        s->rx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
 
         /* Re-prime caller RX for INFO0d detection (62 bits instead of 49). */
         if (s->tx.stage == 0
@@ -5461,7 +5459,14 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.v90_phase2_info0_recovery_loops = 0;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
-    if (s->calling_party)
+    if (s->calling_party && s->tx.v90_mode)
+    {
+        /* V.90 §8.2.3.1: analog (calling) modem transmits INFO at 2400 Hz */
+        s->tx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+        s->tx.guard_phase_rate = 0;
+        s->tx.guard_level = 0.0f;
+    }
+    else if (s->calling_party)
     {
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
         s->tx.guard_phase_rate = 0;

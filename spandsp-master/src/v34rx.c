@@ -3442,8 +3442,9 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         if (++s->rrc_filter_step >= V34_RX_FILTER_STEPS)
             s->rrc_filter_step = 0;
         /*endif*/
-        /* V.90 §8.2.3.1: digital modem (answerer) RX at 2400 Hz */
-        if (s->calling_party || s->v90_mode)
+        /* Standard V.34: caller RX at 2400 Hz, answerer RX at 1200 Hz.
+           V.90 §8.2.3.1: carriers swapped — answerer RX at 2400 Hz, caller RX at 1200 Hz. */
+        if (s->calling_party != s->v90_mode)
         {
 #if defined(SPANDSP_USE_FIXED_POINT)
             ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
@@ -4414,9 +4415,9 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         while (step < 0)
             step += RX_PULSESHAPER_2400_COEFF_SETS;
         /*endwhile*/
-        /* CC carrier assignments: Caller TX at 1200 Hz, Answerer TX at 2400 Hz.
-           V.90 §8.2.3.1: digital modem (answerer) RX at 2400 Hz. */
-        if (s->calling_party || s->v90_mode)
+        /* Standard V.34: caller RX 2400, answerer RX 1200.
+           V.90: swapped — caller RX 1200, answerer RX 2400. */
+        if (s->calling_party != s->v90_mode)
         {
 #if defined(SPANDSP_USE_FIXED_POINT)
             ii = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_re[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
@@ -4456,8 +4457,8 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             /* CC channel AGC not needed — Phase 2 works with fixed scaling.
                Primary channel AGC is re-enabled in primary_channel_rx(). */
             s->eq_put_step += RX_PULSESHAPER_2400_COEFF_SETS*40/(3*2);
-            /* V.90 §8.2.3.1: digital modem (answerer) RX at 2400 Hz */
-            if (s->calling_party || s->v90_mode)
+            /* Same carrier logic as above */
+            if (s->calling_party != s->v90_mode)
             {
 #if defined(SPANDSP_USE_FIXED_POINT)
                 qq = vec_circular_dot_prodi16(s->rrc_filter, rx_pulseshaper_2400_im[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
@@ -7682,9 +7683,13 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
        V.90 §8.2.3.1: in V.90 mode carriers are swapped — digital modem (answerer)
        RX listens at 2400 Hz (analog modem's CC carrier).
        This gets updated to Phase 4 CC frequencies in mp_or_mph_baud_init(). */
-    /* V.90 §8.2.3.1: digital modem (answerer) listens at 2400 Hz (analog modem's CC) */
+    /* V.90 §8.2.3.1: digital modem (answerer) listens at 2400 Hz (analog modem's CC),
+       analog modem (caller) listens at 1200 Hz (digital modem's CC).
+       Standard V.34: caller RX at 2400 Hz, answerer RX at 1200 Hz. */
     if (s->rx.v90_mode && !s->calling_party)
         s->rx.cc_carrier_phase_rate = dds_phase_ratef(2400.0f);
+    else if (s->rx.v90_mode && s->calling_party)
+        s->rx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
     else
         s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  2400.0f  :  1200.0f);
     v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate, true);

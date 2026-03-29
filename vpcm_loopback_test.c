@@ -195,17 +195,42 @@ static const char *vpcm_v34_tx_stage_to_str(int stage)
     {
     case V34_TX_STAGE_INITIAL_PREAMBLE: return "INITIAL_PREAMBLE";
     case V34_TX_STAGE_INFO0: return "INFO0";
+    case V34_TX_STAGE_INITIAL_A: return "INITIAL_A";
     case V34_TX_STAGE_FIRST_A: return "FIRST_A";
+    case V34_TX_STAGE_FIRST_NOT_A: return "FIRST_NOT_A";
+    case V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN: return "FIRST_NOT_A_REV_SEEN";
+    case V34_TX_STAGE_SECOND_A: return "SECOND_A";
     case V34_TX_STAGE_L1: return "L1";
     case V34_TX_STAGE_L2: return "L2";
+    case V34_TX_STAGE_POST_L2_A: return "POST_L2_A";
+    case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
+    case V34_TX_STAGE_A_SILENCE: return "A_SILENCE";
+    case V34_TX_STAGE_PRE_INFO1_A: return "PRE_INFO1_A";
     case V34_TX_STAGE_V90_WAIT_RX_L2: return "V90_WAIT_RX_L2";
     case V34_TX_STAGE_V90_WAIT_TONE_A: return "V90_WAIT_TONE_A";
     case V34_TX_STAGE_V90_WAIT_TONE_A_REV: return "V90_WAIT_TONE_A_REV";
+    case V34_TX_STAGE_V90_B_REV_DELAY: return "V90_B_REV_DELAY";
+    case V34_TX_STAGE_V90_B_REV_10MS: return "V90_B_REV_10MS";
     case V34_TX_STAGE_V90_WAIT_INFO1A: return "V90_WAIT_INFO1A";
     case V34_TX_STAGE_V90_PHASE2_B: return "V90_PHASE2_B";
+    case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN: return "V90_PHASE2_B_INFO0_SEEN";
     case V34_TX_STAGE_INFO1: return "INFO1";
+    case V34_TX_STAGE_FIRST_B: return "FIRST_B";
+    case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
+    case V34_TX_STAGE_FIRST_NOT_B_WAIT: return "FIRST_NOT_B_WAIT";
+    case V34_TX_STAGE_FIRST_NOT_B: return "FIRST_NOT_B";
+    case V34_TX_STAGE_FIRST_B_SILENCE: return "FIRST_B_SILENCE";
+    case V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE: return "FIRST_B_POST_REV_SILENCE";
+    case V34_TX_STAGE_SECOND_B: return "SECOND_B";
+    case V34_TX_STAGE_SECOND_B_WAIT: return "SECOND_B_WAIT";
+    case V34_TX_STAGE_SECOND_NOT_B: return "SECOND_NOT_B";
+    case V34_TX_STAGE_INFO0_RETRY: return "INFO0_RETRY";
     case V34_TX_STAGE_FIRST_S: return "FIRST_S";
-    default: return "other";
+    default: {
+        static char buf[32];
+        snprintf(buf, sizeof(buf), "stage_%d", stage);
+        return buf;
+    }
     }
 }
 
@@ -3575,6 +3600,11 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
 
     v34_set_v90_mode(caller, law == V91_LAW_ALAW ? 1 : 0);
     v34_set_v90_mode(answerer, law == V91_LAW_ALAW ? 1 : 0);
+    if (g_vpcm_session_diag)
+    {
+        span_log_set_level(v34_get_logging_state(caller), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+        span_log_set_level(v34_get_logging_state(answerer), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+    }
 
     caller_saw_info0 = false;
     answerer_saw_info0 = false;
