@@ -2500,7 +2500,20 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         return zero;
     case V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE:
         /* Send silence, as we wait for L2 (V.34/11.2.1.1.4) */
-        if (s->rx.received_event == V34_EVENT_L2_SEEN
+        if (s->tx.v90_mode && s->tx.calling_party)
+        {
+            /* V.90 caller (analog modem): after first reversal exchange silence,
+               immediately send L1/L2 probing signals (V.90 §9.2.1.1.4).
+               Don't wait for answerer's L2 — both sides send L1/L2 concurrently. */
+            if (++s->tx.tone_duration >= 50)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90 caller: silence done, sending L1/L2\n");
+                s->tx.tone_duration = 0;
+                l1_l2_signal_init(s);
+            }
+        }
+        else if (s->rx.received_event == V34_EVENT_L2_SEEN
             ||
             ++s->tx.tone_duration >= 400)
         {
@@ -2510,7 +2523,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->tx.stage = V34_TX_STAGE_SECOND_B;
             if (s->tx.v90_mode)
             {
-                /* V.90: clear stale L2_SEEN so Tone A reversal detection starts fresh */
+                /* V.90 answerer: clear stale L2_SEEN so Tone A reversal detection starts fresh */
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: entering SECOND_B, clearing L2_SEEN for fresh Tone A reversal detection\n");
                 s->rx.received_event = V34_EVENT_NONE;
