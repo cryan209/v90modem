@@ -525,10 +525,10 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     uint16_t crc;
     bitstream_state_t bs;
 
-    if (s->v90_mode)
+    if (s->v90_mode && !s->calling_party)
     {
         /* V.90 INFO0d frame (ITU-T V.90 Table 7) — 62 bits total.
-           Transmitted by the digital modem at 1200 Hz carrier. */
+           Transmitted by the digital modem (answerer) at 1200 Hz carrier. */
         span_log(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
         bitstream_init(&bs, true);
         t = s->txbuf;
@@ -700,6 +700,31 @@ static void prepare_info1a(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void prepare_v90_info1a(v34_state_t *s)
+{
+    /* V.90 §8.2.3.2 Table 10: INFO1a from the analog (calling) modem.
+       Different field layout from standard V.34 INFO1a — carries U_INFO
+       (Ucode for 2-point train) and upstream/downstream rate codes. */
+    s->tx.info1a.power_reduction = 0;
+    s->tx.info1a.additional_power_reduction = 0;
+    s->tx.info1a.md = 0;
+    s->tx.info1a.freq_offset = 0;
+
+    /* In V.90 INFO1a, max_data_rate carries the 7-bit U_INFO Ucode.
+       Default to midpoint Ucode 78 unless externally configured. */
+    if (s->tx.info1a.max_data_rate == 0)
+        s->tx.info1a.max_data_rate = 78;
+    /*endif*/
+    s->tx.info1a.use_high_carrier = false;
+    s->tx.info1a.preemphasis_filter = 0;
+
+    /* Upstream baud rate: use configured baud rate (default 3200 = code 4) */
+    s->tx.info1a.baud_rate_a_to_c = s->tx.baud_rate;
+    /* Downstream: 8000 PCM sampling = code 6 */
+    s->tx.info1a.baud_rate_c_to_a = 6;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void prepare_infoh(v34_state_t *s)
 {
     s->tx.infoh.power_reduction = 0;
@@ -836,6 +861,48 @@ static int info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
                 measured offset in 0.02 Hz increments. Bit 49 is the sign bit of this integer. The frequency offset measurement
                 shall be accurate to 0.25 Hz. Under conditions where this accuracy cannot be achieved, the integer shall be set
                 to -512 indicating that this field is to be ignored. */
+    bitstream_put(&bs, &t, info1a->freq_offset, 10);
+    bitstream_emit(&bs, &t);
+    crc = crc_bit_block(s->txbuf, 12, 49, 0xFFFF);
+    /* 50:65    CRC. */
+    bitstream_put(&bs, &t, crc, 16);
+    /* 66:69    Fill bits: 1111. */
+    bitstream_put(&bs, &t, 0xF, 4);
+    /* Add some extra postamble, so we have a whole number of bytes to work with. */
+    bitstream_put(&bs, &t, 0, 8);
+    bitstream_flush(&bs, &t);
+    return 70;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v90_info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
+{
+    uint8_t *t;
+    uint16_t crc;
+    bitstream_state_t bs;
+
+    span_log(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO1a (V.90 Table 10):\n");
+    span_log(tx_log_state(s), SPAN_LOG_FLOW, "  MD = %dms, U_INFO = %d, upstream rate code = %d, downstream rate code = %d\n",
+             info1a->md*35, info1a->max_data_rate, info1a->baud_rate_a_to_c, info1a->baud_rate_c_to_a);
+    bitstream_init(&bs, true);
+    t = s->txbuf;
+    /* 0:3      Fill bits: 1111. */
+    /* 4:11     Frame sync: 01110010 */
+    bitstream_put(&bs, &t, INFO_FILL_AND_SYNC_BITS, 12);
+    /* 12:17    Reserved for ITU (set to 0 by analog modem) */
+    bitstream_put(&bs, &t, 0, 6);
+    /* 18:24    Length of MD to be transmitted by the analog modem during Phase 3. */
+    bitstream_put(&bs, &t, info1a->md, 7);
+    /* 25:31    U_INFO: Ucode of the PCM codeword to be used for the 2-point training
+                signal by the digital modem (7 bits). */
+    bitstream_put(&bs, &t, info1a->max_data_rate, 7);
+    /* 32:33    Reserved for ITU (set to 0) */
+    bitstream_put(&bs, &t, 0, 2);
+    /* 34:36    Symbol rate for upstream (analog→digital). 3=3000, 4=3200, 5=3429 */
+    bitstream_put(&bs, &t, info1a->baud_rate_a_to_c, 3);
+    /* 37:39    Symbol rate code 6 = 8000 PCM downstream rate */
+    bitstream_put(&bs, &t, info1a->baud_rate_c_to_a, 3);
+    /* 40:49    Frequency offset (same as V.34) */
     bitstream_put(&bs, &t, info1a->freq_offset, 10);
     bitstream_emit(&bs, &t);
     crc = crc_bit_block(s->txbuf, 12, 49, 0xFFFF);
@@ -2843,7 +2910,7 @@ static void l1_l2_signal_init(v34_state_t *s)
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*s->tx.gain;
-    s->tx.current_modulator = s->tx.v90_mode ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
+    s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
     s->tx.state = V34_TX_STAGE_L1;
 }
 /*- End of function --------------------------------------------------------*/
@@ -3407,10 +3474,18 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
 static void info1_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - info1_baud_init()\n");
-    if (s->tx.calling_party || s->tx.v90_mode)
+    if (s->tx.v90_mode && s->tx.calling_party)
     {
-        /* V.90 §8.2.3.2 Table 9: digital modem sends INFO1d which is
-           identical to V.34 INFO1c (109 bits with probing results) */
+        /* V.90 §8.2.3.2 Table 10: analog (calling) modem sends INFO1a
+           with V.90-specific field layout (70 bits with U_INFO). */
+        prepare_v90_info1a(s);
+        s->tx.txbits = v90_info1a_sequence_tx(&s->tx, &s->tx.info1a);
+    }
+    else if (s->tx.calling_party || s->tx.v90_mode)
+    {
+        /* V.34 caller sends INFO1c (109 bits with probing results).
+           V.90 §8.2.3.2 Table 9: digital modem (answerer) sends INFO1d
+           which is identical to V.34 INFO1c. */
         if (s->tx.v90_mode)
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d (V.90 Table 9, same format as V.34 INFO1c):\n");
         prepare_info1c(s);
@@ -5230,11 +5305,61 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     s->tx.v90_l2_count = 0;
     s->rx.v90_mode = true;
 
-    /* V.90 §8.2.3.1: digital modem TX CC at 1200 Hz, RX CC at 2400 Hz.
-       Must update carrier phase rates here since v34_init/restart already ran
-       with v90_mode=false and set standard V.34 carriers. */
-    if (!s->calling_party)
+    if (s->calling_party)
     {
+        /* V.90 analog (calling) modem: TX CC at 2400 Hz, RX CC at 1200 Hz.
+           The caller transmits INFO0a at the standard V.34 caller frequency
+           (already 1200 Hz from v34_init), but after Phase 2 tone exchange
+           the upstream V.34 data channel uses high carrier.
+           RX expects INFO0d (62 bits) from the digital answerer at 1200 Hz. */
+        /* Carrier rates: V.34 caller init already sets TX=1200 Hz, but we
+           need RX to expect INFO0d. The CC carrier for the calling modem
+           stays at 1200 Hz (same as standard V.34 caller). */
+
+        /* Re-prime caller RX for INFO0d detection (62 bits instead of 49). */
+        if (s->tx.stage == 0
+            || s->tx.stage == V34_TX_STAGE_INITIAL_PREAMBLE
+            || s->tx.stage == V34_TX_STAGE_INFO0
+            || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
+        {
+            s->rx.stage = V34_RX_STAGE_INFO0;
+            s->rx.current_demodulator = V34_MODULATION_TONES;
+            /* INFO0d is 62 bits: 12 fill/sync + 30 data + 16 CRC + 4 fill.
+               target_bits counts data+CRC = 62 - 12 - 4 = 46. */
+            s->rx.target_bits = 62 - (4 + 8 + 4);
+            s->rx.bit_count = 0;
+            s->rx.bitstream = 0;
+            s->rx.info0_received = false;
+            s->rx.info0_acknowledgement = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            s->rx.last_logged_stage = -1;
+            s->rx.last_logged_event = -1;
+            s->rx.last_logged_demodulator = -1;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "V.90 caller mode: re-primed RX for INFO0d detection (62 bits)\n");
+        }
+        /*endif*/
+
+        /* V.8 already enforces the mandatory 75 ms post-CJ silence before
+           handing control to Phase 2. Skip the generic V.34 startup silence. */
+        if (s->tx.training_stage == 0x100
+            && s->tx.current_modulator == V34_MODULATION_SILENCE)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "V.90 caller mode: skipping duplicate Phase 2 startup silence\n");
+            s->tx.tone_duration = 0;
+            s->tx.training_stage = 0x101;
+            transmission_preamble_init(s);
+        }
+        /*endif*/
+    }
+    else
+    {
+        /* V.90 §8.2.3.1: digital modem TX CC at 1200 Hz, RX CC at 2400 Hz.
+           Must update carrier phase rates here since v34_init/restart already ran
+           with v90_mode=false and set standard V.34 carriers. */
         s->tx.cc_carrier_phase_rate = dds_phase_ratef(1200.0f);
         /* V.90 §8.2.3.1: digital modem transmits at 1200 Hz at nominal power.
            NO guard tone — the 1800 Hz guard tone is only for the analog modem
@@ -5286,7 +5411,8 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     }
 
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "V.90 mode enabled (PCM law: %s)\n",
+             "V.90 mode enabled (%s, PCM law: %s)\n",
+             s->calling_party ? "caller/analog" : "answerer/digital",
              pcm_law ? "A-law" : "u-law");
 }
 /*- End of function --------------------------------------------------------*/

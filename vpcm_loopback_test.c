@@ -1,11 +1,16 @@
 /*
  * vpcm_loopback_test.c - Local PCM-modem self-test
  *
- * This harness is intended for the V.9x PCM modem family. The first
- * implementation exercises the current V.91 transparent-mode codec by
- * wiring two local instances back-to-back over simulated G.711. Future
- * V.90/V.92 cases can be added here without needing a separate test
- * executable for each PCM-mode modem flavor.
+ * This harness is intended for the V.PCM modem family under a single
+ * "vpcm" umbrella:
+ *   - V.91 has a dedicated G.711 bearer/data-plane helper in v91.[ch]
+ *   - V.90/V.92 startup should ultimately be driven by the SpanDSP-backed
+ *     V.8/V.34/V.90 family code already present in the tree
+ *
+ * The current V.90/V.92 session coverage below is therefore a startup
+ * contract/transport placeholder layered on top of shared PCM helpers.
+ * It is useful for end-to-end harness work, but it is not a spec-faithful
+ * replacement for the real V.90/V.92 Phase 2/3 engine.
  */
 
 #include "v91.h"
@@ -39,12 +44,105 @@ typedef struct {
     v8_parms_t result;
 } vpcm_v8_result_t;
 
+/*
+ * Minimal V.34/V.90 stage and event enums copied from SpanDSP internals.
+ * We intentionally avoid including the full private header tree here.
+ */
+enum vpcm_v34_rx_stages_e {
+    V34_RX_STAGE_INFO0 = 1,
+    V34_RX_STAGE_INFOH,
+    V34_RX_STAGE_INFO1C,
+    V34_RX_STAGE_INFO1A,
+    V34_RX_STAGE_TONE_A,
+    V34_RX_STAGE_TONE_B,
+    V34_RX_STAGE_L1_L2,
+    V34_RX_STAGE_CC,
+    V34_RX_STAGE_PRIMARY_CHANNEL,
+    V34_RX_STAGE_PHASE3_WAIT_S,
+    V34_RX_STAGE_PHASE3_TRAINING,
+    V34_RX_STAGE_PHASE3_DONE,
+    V34_RX_STAGE_PHASE4_S,
+    V34_RX_STAGE_PHASE4_S_BAR,
+    V34_RX_STAGE_PHASE4_TRN,
+    V34_RX_STAGE_PHASE4_MP,
+    V34_RX_STAGE_DATA
+};
+
+enum vpcm_v34_tx_stages_e {
+    V34_TX_STAGE_INITIAL_PREAMBLE = 1,
+    V34_TX_STAGE_INFO0,
+    V34_TX_STAGE_INITIAL_A,
+    V34_TX_STAGE_FIRST_A,
+    V34_TX_STAGE_FIRST_NOT_A,
+    V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN,
+    V34_TX_STAGE_SECOND_A,
+    V34_TX_STAGE_L1,
+    V34_TX_STAGE_L2,
+    V34_TX_STAGE_POST_L2_A,
+    V34_TX_STAGE_POST_L2_NOT_A,
+    V34_TX_STAGE_A_SILENCE,
+    V34_TX_STAGE_PRE_INFO1_A,
+    V34_TX_STAGE_V90_WAIT_TONE_A,
+    V34_TX_STAGE_V90_WAIT_INFO1A,
+    V34_TX_STAGE_V90_WAIT_RX_L2,
+    V34_TX_STAGE_V90_WAIT_TONE_A_REV,
+    V34_TX_STAGE_V90_B_REV_DELAY,
+    V34_TX_STAGE_V90_B_REV_10MS,
+    V34_TX_STAGE_V90_PHASE2_B,
+    V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
+    V34_TX_STAGE_INFO1,
+    V34_TX_STAGE_FIRST_B,
+    V34_TX_STAGE_FIRST_B_INFO_SEEN,
+    V34_TX_STAGE_FIRST_NOT_B_WAIT,
+    V34_TX_STAGE_FIRST_NOT_B,
+    V34_TX_STAGE_FIRST_B_SILENCE,
+    V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE,
+    V34_TX_STAGE_SECOND_B,
+    V34_TX_STAGE_SECOND_B_WAIT,
+    V34_TX_STAGE_SECOND_NOT_B,
+    V34_TX_STAGE_INFO0_RETRY,
+    V34_TX_STAGE_FIRST_S,
+    V34_TX_STAGE_FIRST_NOT_S,
+    V34_TX_STAGE_MD,
+    V34_TX_STAGE_SECOND_S,
+    V34_TX_STAGE_SECOND_NOT_S,
+    V34_TX_STAGE_TRN,
+    V34_TX_STAGE_J,
+    V34_TX_STAGE_J_DASHED,
+    V34_TX_STAGE_PHASE4_WAIT,
+    V34_TX_STAGE_PHASE4_S,
+    V34_TX_STAGE_PHASE4_NOT_S,
+    V34_TX_STAGE_PHASE4_TRN,
+    V34_TX_STAGE_MP
+};
+
+enum vpcm_v34_events_e {
+    V34_EVENT_NONE = 0,
+    V34_EVENT_TONE_SEEN,
+    V34_EVENT_REVERSAL_1,
+    V34_EVENT_REVERSAL_2,
+    V34_EVENT_REVERSAL_3,
+    V34_EVENT_INFO0_OK,
+    V34_EVENT_INFO0_BAD,
+    V34_EVENT_INFO1_OK,
+    V34_EVENT_INFO1_BAD,
+    V34_EVENT_INFOH_OK,
+    V34_EVENT_INFOH_BAD,
+    V34_EVENT_L2_SEEN,
+    V34_EVENT_S,
+    V34_EVENT_J,
+    V34_EVENT_J_DASHED,
+    V34_EVENT_PHASE4_TRN_READY,
+    V34_EVENT_TRAINING_FAILED
+};
+
 static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
                                                 const uint8_t *src,
                                                 int len);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
+static bool g_vpcm_experimental_v90_info = false;
 
 static void vpcm_log(const char *fmt, ...);
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed);
@@ -64,6 +162,7 @@ static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
+static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 
 static const char *vpcm_law_to_str(v91_law_t law)
 {
@@ -73,6 +172,214 @@ static const char *vpcm_law_to_str(v91_law_t law)
 static const char *vpcm_path_mode_to_str(vpcm_path_mode_t mode)
 {
     return (mode == VPCM_PATH_ANALOG_G711) ? "analog-over-G.711" : "raw-G.711";
+}
+
+static const char *vpcm_v34_rx_stage_to_str(int stage)
+{
+    switch (stage)
+    {
+    case V34_RX_STAGE_INFO0: return "INFO0";
+    case V34_RX_STAGE_TONE_A: return "TONE_A";
+    case V34_RX_STAGE_TONE_B: return "TONE_B";
+    case V34_RX_STAGE_L1_L2: return "L1_L2";
+    case V34_RX_STAGE_INFO1C: return "INFO1C";
+    case V34_RX_STAGE_INFO1A: return "INFO1A";
+    case V34_RX_STAGE_PHASE3_TRAINING: return "PHASE3_TRAINING";
+    default: return "other";
+    }
+}
+
+static const char *vpcm_v34_tx_stage_to_str(int stage)
+{
+    switch (stage)
+    {
+    case V34_TX_STAGE_INITIAL_PREAMBLE: return "INITIAL_PREAMBLE";
+    case V34_TX_STAGE_INFO0: return "INFO0";
+    case V34_TX_STAGE_FIRST_A: return "FIRST_A";
+    case V34_TX_STAGE_L1: return "L1";
+    case V34_TX_STAGE_L2: return "L2";
+    case V34_TX_STAGE_V90_WAIT_RX_L2: return "V90_WAIT_RX_L2";
+    case V34_TX_STAGE_V90_WAIT_TONE_A: return "V90_WAIT_TONE_A";
+    case V34_TX_STAGE_V90_WAIT_TONE_A_REV: return "V90_WAIT_TONE_A_REV";
+    case V34_TX_STAGE_V90_WAIT_INFO1A: return "V90_WAIT_INFO1A";
+    case V34_TX_STAGE_V90_PHASE2_B: return "V90_PHASE2_B";
+    case V34_TX_STAGE_INFO1: return "INFO1";
+    case V34_TX_STAGE_FIRST_S: return "FIRST_S";
+    default: return "other";
+    }
+}
+
+static int vpcm_v34_dummy_get_bit(void *user_data)
+{
+    (void) user_data;
+    return 1;
+}
+
+static void vpcm_v34_dummy_put_bit(void *user_data, int bit)
+{
+    (void) user_data;
+    (void) bit;
+}
+
+#define VPCM_V90_INFO_FILL_AND_SYNC_BITS  0x4EF
+#define VPCM_V90_INFO0A_BITS              49
+#define VPCM_V90_INFO1A_BITS              70
+
+typedef struct {
+    bool support_2743;
+    bool support_2800;
+    bool support_3429;
+    bool support_3000_low;
+    bool support_3000_high;
+    bool support_3200_low;
+    bool support_3200_high;
+    bool rate_3429_allowed;
+    bool support_power_reduction;
+    uint8_t max_baud_rate_difference;
+    bool from_cme_modem;
+    bool support_1664_point_constellation;
+    uint8_t tx_clock_source;
+    bool acknowledge_info0d;
+} vpcm_v90_info0a_t;
+
+typedef struct {
+    uint8_t md;
+    uint8_t u_info;
+    uint8_t upstream_symbol_rate_code;
+    uint8_t downstream_rate_code;
+    int16_t freq_offset;
+} vpcm_v90_info1a_t;
+
+static void vpcm_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
+{
+    int i;
+
+    for (i = 0; i < bits; i++) {
+        int pos = *bit_pos + i;
+        if (value & (1U << i))
+            buf[pos >> 3] |= (uint8_t) (1U << (pos & 7));
+    }
+    *bit_pos += bits;
+}
+
+static uint16_t vpcm_crc_bit_block(const uint8_t buf[], int first_bit, int last_bit, uint16_t crc)
+{
+    int pre;
+    int post;
+
+    last_bit++;
+    pre = first_bit & 0x7;
+    first_bit >>= 3;
+    if (pre) {
+        crc = crc_itu16_bits(buf[first_bit] >> pre, (8 - pre), crc);
+        first_bit++;
+    }
+    post = last_bit & 0x7;
+    last_bit >>= 3;
+    if ((last_bit - first_bit) != 0)
+        crc = crc_itu16_calc(buf + first_bit, last_bit - first_bit, crc);
+    if (post)
+        crc = crc_itu16_bits(buf[last_bit], post, crc);
+    return crc;
+}
+
+static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)
+{
+    int i;
+    size_t pos;
+
+    pos = 0;
+    if (out_size == 0)
+        return;
+    for (i = 0; i < bit_count && pos + 1 < out_size; i++)
+        out[pos++] = (buf[i >> 3] & (1U << (i & 7))) ? '1' : '0';
+    out[pos] = '\0';
+}
+
+static void vpcm_v90_info0a_init(vpcm_v90_info0a_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->support_2743 = true;
+    info->support_2800 = true;
+    info->support_3429 = true;
+    info->support_3000_low = true;
+    info->support_3000_high = true;
+    info->support_3200_low = true;
+    info->support_3200_high = true;
+    info->rate_3429_allowed = true;
+    info->support_power_reduction = true;
+    info->max_baud_rate_difference = 0;
+    info->from_cme_modem = false;
+    info->support_1664_point_constellation = true;
+    info->tx_clock_source = 0; /* internal */
+    info->acknowledge_info0d = false;
+}
+
+static void vpcm_v90_info1a_init(vpcm_v90_info1a_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->md = 0;
+    info->u_info = 78;
+    info->upstream_symbol_rate_code = 4; /* 3200 baud */
+    info->downstream_rate_code = 6;      /* 8000 PCM */
+    info->freq_offset = 0;
+}
+
+static bool vpcm_v90_build_info0a_bits(uint8_t *buf, int buf_len, const vpcm_v90_info0a_t *info)
+{
+    int bit_pos;
+    uint16_t crc;
+
+    if (buf_len < ((VPCM_V90_INFO0A_BITS + 7) / 8))
+        return false;
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = 0;
+    vpcm_bits_put(buf, &bit_pos, VPCM_V90_INFO_FILL_AND_SYNC_BITS, 12);
+    vpcm_bits_put(buf, &bit_pos, info->support_2743 ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_2800 ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_3429 ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_3000_low ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_3000_high ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_3200_low ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_3200_high ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->rate_3429_allowed ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_power_reduction ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->max_baud_rate_difference & 0x7U, 3);
+    vpcm_bits_put(buf, &bit_pos, info->from_cme_modem ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->support_1664_point_constellation ? 1U : 0U, 1);
+    vpcm_bits_put(buf, &bit_pos, info->tx_clock_source & 0x3U, 2);
+    vpcm_bits_put(buf, &bit_pos, info->acknowledge_info0d ? 1U : 0U, 1);
+    crc = vpcm_crc_bit_block(buf, 12, 28, 0xFFFF);
+    vpcm_bits_put(buf, &bit_pos, crc, 16);
+    vpcm_bits_put(buf, &bit_pos, 0xFU, 4);
+    return bit_pos == VPCM_V90_INFO0A_BITS;
+}
+
+static bool vpcm_v90_build_info1a_bits(uint8_t *buf, int buf_len, const vpcm_v90_info1a_t *info)
+{
+    int bit_pos;
+    uint16_t crc;
+    uint16_t freq_bits;
+
+    if (buf_len < ((VPCM_V90_INFO1A_BITS + 7) / 8))
+        return false;
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = 0;
+    vpcm_bits_put(buf, &bit_pos, VPCM_V90_INFO_FILL_AND_SYNC_BITS, 12);
+    vpcm_bits_put(buf, &bit_pos, 0, 6); /* reserved */
+    vpcm_bits_put(buf, &bit_pos, info->md & 0x7FU, 7);
+    vpcm_bits_put(buf, &bit_pos, info->u_info & 0x7FU, 7);
+    vpcm_bits_put(buf, &bit_pos, 0, 2); /* reserved */
+    vpcm_bits_put(buf, &bit_pos, info->upstream_symbol_rate_code & 0x7U, 3);
+    vpcm_bits_put(buf, &bit_pos, info->downstream_rate_code & 0x7U, 3);
+    freq_bits = (uint16_t) info->freq_offset;
+    if (info->freq_offset < 0)
+        freq_bits = (uint16_t) (0x400 + info->freq_offset);
+    vpcm_bits_put(buf, &bit_pos, freq_bits & 0x3FFU, 10);
+    crc = vpcm_crc_bit_block(buf, 12, 49, 0xFFFF);
+    vpcm_bits_put(buf, &bit_pos, crc, 16);
+    vpcm_bits_put(buf, &bit_pos, 0xFU, 4);
+    return bit_pos == VPCM_V90_INFO1A_BITS;
 }
 
 static void vpcm_log(const char *fmt, ...)
@@ -1031,6 +1338,23 @@ static void vpcm_log_session_sequence_footer(void)
     vpcm_log("+----------------------+----------------------+----------------------+----------------------+");
 }
 
+static void vpcm_maybe_log_startup_frame_diag(const char *label,
+                                              v91_state_t *tx_state,
+                                              const v91_info_frame_t *tx_info,
+                                              const uint8_t *rx_codewords,
+                                              int rx_len)
+{
+    vpcm_maybe_log_info_session_diag(tx_state, tx_info, rx_codewords, rx_len, label);
+}
+
+static void vpcm_maybe_log_rate_request_diag(const char *label,
+                                             const vpcm_cp_frame_t *tx_cp,
+                                             const uint8_t *bits,
+                                             int nbits)
+{
+    vpcm_maybe_log_cp_session_diag(tx_cp, bits, nbits, label);
+}
+
 static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
 {
     double bps;
@@ -1678,6 +2002,11 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
     cp_offer = *cp_offer_template;
 
+    if (g_vpcm_session_diag) {
+        vpcm_log("Phase model: Phase 1 = V.8/V.8bis, Phase 2 ~= INFO0 -> A/B -> L1/L2 -> INFO1");
+        vpcm_log("Phase model note: current harness still approximates Phase 2 transport with shared PCM startup primitives.");
+    }
+
     memset(&caller_info, 0, sizeof(caller_info));
     caller_info.request_default_dil = true;
     caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
@@ -1924,10 +2253,21 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     return true;
 }
 
-static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
-                                                  const char *path_label,
-                                                  bool echo_limited,
-                                                  uint32_t seed_base)
+/*
+ * Temporary V.90/V.92 startup contract path.
+ *
+ * Phase 1 capability exchange is exercised via the real SpanDSP V.8 path.
+ * After that, this helper only approximates the startup contract using the
+ * existing shared PCM/V.91-style transport primitives so the vpcm harness
+ * can keep exercising end-to-end negotiation/adaptation and payload flow.
+ *
+ * A real V.90/V.92 implementation should replace this with explicit
+ * INFO0 -> A/B -> L1/L2 -> INFO1 timing and later native Phase 3/4 flow.
+ */
+static bool run_v90_v92_startup_contract_session(v91_law_t law,
+                                                 const char *path_label,
+                                                 bool echo_limited,
+                                                 uint32_t seed_base)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
     v91_dil_desc_t default_dil;
@@ -1988,6 +2328,13 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
     v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
     v91_default_dil_init(&default_dil);
     vpcm_v92_init_digital_dil_from_ja(&digital_dil, echo_limited);
+    vpcm_log_session_sequence_header("Digital", "Analogue");
+    if (g_vpcm_session_diag) {
+        vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
+        vpcm_log("Phase model: Phase 2 = INFO0 -> A/B -> L1/L2 -> INFO1 (not yet natively modelled here)");
+        vpcm_log("Harness note: rows below after V.8 are a startup contract placeholder built from shared PCM helpers.");
+        vpcm_log("Harness note: DIL/adaptation shown below is later-phase approximation, not part of Phase 2.");
+    }
 
     memset(&caller_info, 0, sizeof(caller_info));
     caller_info.request_default_dil = true;
@@ -2000,27 +2347,39 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
 
     if (v91_tx_phase1_silence_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
         || v91_tx_phase1_silence_codewords(&answerer_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
-        fprintf(stderr, "V.92 asymmetric phase1 silence failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path phase1 silence failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("Phase2 preamble TX", "waiting for INFO0", "waiting for INFO0", "Phase2 preamble TX");
     if (v91_tx_ez_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
         || v91_tx_ez_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
-        fprintf(stderr, "V.92 asymmetric Ez failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path Ez failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("INFO0-like TX", "waiting for INFO0", "INFO0-like RX", "INFO0-like TX");
 
     if (v91_tx_info_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS
         || !v91_rx_info_codewords(&answerer_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "V.92 asymmetric caller INFO failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path caller INFO failed\n");
         return false;
     }
-    vpcm_maybe_log_info_session_diag(&caller_startup, &caller_info, transport_buf, V91_INFO_SYMBOLS, "Digital -> Analogue");
+    vpcm_log_session_sequence_row("INFO0 ack TX", "waiting for A/B", "INFO0 ack RX", "waiting for A/B");
+    vpcm_maybe_log_startup_frame_diag("Digital -> Analogue startup frame",
+                                      &caller_startup,
+                                      &caller_info,
+                                      transport_buf,
+                                      V91_INFO_SYMBOLS);
     if (v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS
         || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "V.92 asymmetric answerer INFO failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path answerer INFO failed\n");
         return false;
     }
-    vpcm_maybe_log_info_session_diag(&answerer_startup, &answerer_info, transport_buf, V91_INFO_SYMBOLS, "Analogue -> Digital");
+    vpcm_log_session_sequence_row("A/B seen", "A/B seen", "waiting for L1/L2", "A/B TX");
+    vpcm_maybe_log_startup_frame_diag("Analogue -> Digital startup frame",
+                                      &answerer_startup,
+                                      &answerer_info,
+                                      transport_buf,
+                                      V91_INFO_SYMBOLS);
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
@@ -2028,14 +2387,17 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
                                                         &digital_dil,
                                                         NULL);
     if (startup_len <= 0) {
-        fprintf(stderr, "V.92 asymmetric caller startup DIL failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path caller DIL failed\n");
         return false;
     }
     memcpy(transport_buf, startup_buf, (size_t) startup_len);
     if (!v91_note_received_dil(&answerer_startup, &digital_dil, &digital_dil_analysis)) {
-        fprintf(stderr, "V.92 asymmetric answerer DIL analysis failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL analysis failed\n");
         return false;
     }
+    if (g_vpcm_session_diag)
+        vpcm_log("Later-phase adaptation block:");
+    vpcm_log_session_sequence_row("DIL TX", "waiting for DIL", "DIL RX/analyse", "waiting for DIL");
     vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
     vpcm_log_dil_analysis("Analogue side", &digital_dil_analysis);
 
@@ -2045,25 +2407,28 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
                                                         &default_dil,
                                                         NULL);
     if (startup_len <= 0) {
-        fprintf(stderr, "V.92 asymmetric answerer startup DIL failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL failed\n");
         return false;
     }
     memcpy(transport_buf, startup_buf, (size_t) startup_len);
     if (!v91_note_received_dil(&caller_startup, &default_dil, NULL)) {
-        fprintf(stderr, "V.92 asymmetric caller DIL tracking failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path caller DIL tracking failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("DIL RX", "DIL RX/track", "waiting for adapt", "DIL TX");
 
     if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)) {
-        fprintf(stderr, "V.92 asymmetric caller SCR failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path caller conditioning failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("adapt TX", "waiting for adapt", "adapt RX", "waiting for adapt");
     if (v91_tx_scr_codewords(&answerer_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)) {
-        fprintf(stderr, "V.92 asymmetric answerer SCR failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path answerer conditioning failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("adapt RX", "adapt RX", "waiting for req", "adapt TX");
 
     vpcm_cp_init(&cp_down_offer);
     cp_down_offer.transparent_mode_granted = false;
@@ -2076,24 +2441,30 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
 
     cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_offer, true);
     if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_offer, &cp_rx)) {
-        fprintf(stderr, "V.92 downstream CP offer failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path downstream rate request failed\n");
         return false;
     }
-    vpcm_maybe_log_cp_session_diag(&cp_down_offer, cp_buf, cp_len, "Digital -> Analogue");
+    vpcm_log_session_sequence_row("INFO1 down TX", "waiting for INFO1 ack", "INFO1 down RX", "waiting for INFO1 ack");
+    vpcm_maybe_log_rate_request_diag("Digital -> Analogue downstream request",
+                                     &cp_down_offer,
+                                     cp_buf,
+                                     cp_len);
     cp_down_ack = cp_down_offer;
     cp_down_ack.acknowledge = true;
     cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_ack, true);
     if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_ack, &cp_rx)) {
-        fprintf(stderr, "V.92 downstream CP acknowledge failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path downstream acknowledge failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("INFO1 down RX", "INFO1 down RX", "waiting for train", "INFO1 down TX");
     if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
         || v91_tx_b1_codewords(&caller_startup, b1_buf, (int) sizeof(b1_buf), &cp_down_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &cp_down_ack)) {
-        fprintf(stderr, "V.92 downstream Es/B1 failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path downstream startup sequence failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("down train TX", "waiting for up INFO1", "down train RX", "waiting for up INFO1");
 
     vpcm_cp_init(&cp_up_offer);
     cp_up_offer.transparent_mode_granted = false;
@@ -2106,32 +2477,39 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
 
     cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_offer, true);
     if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_offer, &cp_rx)) {
-        fprintf(stderr, "V.92 upstream CP offer failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path upstream rate request failed\n");
         return false;
     }
-    vpcm_maybe_log_cp_session_diag(&cp_up_offer, cp_buf, cp_len, "Analogue -> Digital");
+    vpcm_log_session_sequence_row("waiting for up ack", "INFO1 up RX", "waiting for up ack", "INFO1 up TX");
+    vpcm_maybe_log_rate_request_diag("Analogue -> Digital upstream request",
+                                     &cp_up_offer,
+                                     cp_buf,
+                                     cp_len);
     cp_up_ack = cp_up_offer;
     cp_up_ack.acknowledge = true;
     cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_ack, true);
     if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_ack, &cp_rx)) {
-        fprintf(stderr, "V.92 upstream CP acknowledge failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path upstream acknowledge failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("INFO1 up TX", "waiting for up train", "INFO1 up RX", "INFO1 up TX");
     if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
         || v91_tx_b1_codewords(&answerer_startup, b1_buf, (int) sizeof(b1_buf), &cp_up_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &cp_up_ack)) {
-        fprintf(stderr, "V.92 upstream Es/B1 failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path upstream startup sequence failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("waiting for DATA", "up train RX", "waiting for DATA", "up train TX");
 
     if (!v91_activate_data_mode(&caller_tx, &cp_down_ack)
         || !v91_activate_data_mode(&answerer_rx, &cp_down_ack)
         || !v91_activate_data_mode(&answerer_tx, &cp_up_ack)
         || !v91_activate_data_mode(&caller_rx, &cp_up_ack)) {
-        fprintf(stderr, "V.92 asymmetric data-mode activation failed\n");
+        fprintf(stderr, "V.90/V.92 startup contract path data-mode activation failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("DATA down TX", "DATA up RX", "DATA down RX", "DATA up TX");
 
     total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
     down_total_bits = NOMINAL_10S_FRAMES * ((int) cp_down_ack.drn + 20);
@@ -2156,7 +2534,7 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         free(down_pcm_rx);
         free(up_pcm_tx);
         free(up_pcm_rx);
-        fprintf(stderr, "allocation failure in V.92 asymmetric session\n");
+        fprintf(stderr, "allocation failure in V.90/V.92 startup contract session\n");
         return false;
     }
 
@@ -2176,7 +2554,7 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         free(down_pcm_rx);
         free(up_pcm_tx);
         free(up_pcm_rx);
-        fprintf(stderr, "V.92 asymmetric tx length mismatch\n");
+        fprintf(stderr, "V.90/V.92 startup contract path tx length mismatch\n");
         return false;
     }
 
@@ -2193,7 +2571,7 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
         free(down_pcm_rx);
         free(up_pcm_tx);
         free(up_pcm_rx);
-        fprintf(stderr, "V.92 asymmetric rx length mismatch down=%d/%d up=%d/%d\n",
+        fprintf(stderr, "V.90/V.92 startup contract path rx length mismatch down=%d/%d up=%d/%d\n",
                 down_consumed, down_total_bytes, up_consumed, up_total_bytes);
         return false;
     }
@@ -2242,12 +2620,13 @@ static bool run_v92_full_phase_asymmetric_session(v91_law_t law,
 
     vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), cp_down_ack.drn);
     vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), cp_up_ack.drn);
-    vpcm_log("PASS: V.92 full phase operation (%s, %s, digital->analogue=%s, analogue->digital=%s%s)",
+    vpcm_log("PASS: V.90/V.92 startup contract path (%s, %s, digital->analogue=%s, analogue->digital=%s%s)",
              vpcm_law_to_str(law),
              path_label,
              down_rate_buf,
              up_rate_buf,
              echo_limited ? ", echo-adapted" : "");
+    vpcm_log_session_sequence_footer();
 
     free(down_data_in);
     free(down_data_out);
@@ -2570,6 +2949,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
     vpcm_init_robbed_bit_dil_profile(&robbed_bit_dil);
     v91_init(&caller, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    vpcm_log_session_sequence_header("Caller", "Answerer");
 
     memset(&caller_info, 0, sizeof(caller_info));
     caller_info.request_default_dil = true;
@@ -2590,6 +2970,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller->answerer INFO rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("INFO TX", "waiting for INFO'", "INFO RX", "waiting for INFO'");
     vpcm_maybe_log_info_session_diag(&caller, &caller_info, transport_buf, V91_INFO_SYMBOLS, "Caller -> Answerer");
 
     if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
@@ -2601,6 +2982,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer->caller INFO rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("INFO' RX", "INFO' RX", "waiting for DIL", "INFO' TX");
     vpcm_maybe_log_info_session_diag(&answerer, &answerer_info, transport_buf, V91_INFO_SYMBOLS, "Answerer -> Caller");
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
@@ -2617,6 +2999,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer DIL analysis failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("DIL TX", "waiting for DIL", "DIL RX/analyse", "waiting for DIL");
     vpcm_log_dil_analysis("Analogue side", &dil_analysis);
     drn = dil_analysis.recommended_downstream_drn;
     if (!dil_analysis.robbed_bit_limited || drn != vpcm_cp_recommended_robbed_bit_drn()) {
@@ -2639,6 +3022,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller DIL tracking failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("DIL RX", "DIL RX/track", "waiting for SCR", "DIL TX");
 
     if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
         fprintf(stderr, "robbed-bit safe-rate caller SCR tx failed\n");
@@ -2649,6 +3033,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller SCR rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("SCR TX", "waiting for SCR", "SCR RX", "waiting for SCR");
 
     if (v91_tx_scr_codewords(&answerer, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
         fprintf(stderr, "robbed-bit safe-rate answerer SCR tx failed\n");
@@ -2659,6 +3044,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer SCR rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("SCR RX", "SCR RX", "waiting for CP", "SCR TX");
 
     vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, drn, false);
 
@@ -2673,6 +3059,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller CP rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("CP TX", "waiting for CP'", "CP RX", "waiting for CP'");
     vpcm_maybe_log_cp_session_diag(&cp_offer, transport_buf, cp_len, "Caller -> Answerer");
 
     cp_ack = cp_offer;
@@ -2688,6 +3075,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer CP rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("CP' RX", "CP' RX", "waiting for Es/B1", "CP' TX");
 
     if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
         fprintf(stderr, "robbed-bit safe-rate caller Es tx failed\n");
@@ -2708,6 +3096,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate caller B1 rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("Es/B1 TX", "waiting for Es/B1", "Es/B1 RX", "waiting for Es/B1");
 
     if (v91_tx_es_codewords(&answerer, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
         fprintf(stderr, "robbed-bit safe-rate answerer Es tx failed\n");
@@ -2728,11 +3117,13 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
         fprintf(stderr, "robbed-bit safe-rate answerer B1 rx failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("waiting for DATA", "Es/B1 RX", "waiting for DATA", "Es/B1 TX");
 
     if (!v91_activate_data_mode(&caller, &cp_ack) || !v91_activate_data_mode(&answerer, &cp_ack)) {
         fprintf(stderr, "robbed-bit safe-rate data-mode activation failed\n");
         return false;
     }
+    vpcm_log_session_sequence_row("DATA TX", "waiting for DATA", "DATA RX", "waiting for DATA");
 
     total_bits = NOMINAL_10S_FRAMES * ((int) drn + 20);
     total_bytes = total_bits / 8;
@@ -2808,6 +3199,7 @@ static bool test_v91_startup_to_data_robbed_bit_safe_rate(v91_law_t law)
              drn,
              rate_buf,
              vpcm_cp_robbed_bit_ceiling_bps());
+    vpcm_log_session_sequence_footer();
 
     free(data_in);
     free(data_out);
@@ -3080,6 +3472,228 @@ static bool test_v8_v90_startup_over_analog_g711(v91_law_t law)
     return true;
 }
 
+static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
+{
+    enum { VPCM_V34_MAX_CHUNKS = 2500, VPCM_V34_V8_HANDOFF_CHUNKS = 4 };
+    vpcm_channel_t analog_channel;
+    v34_state_t *caller;
+    v34_state_t *answerer;
+    vpcm_v90_info0a_t analog_info0a;
+    vpcm_v90_info1a_t analog_info1a;
+    uint8_t info0a_bits[(VPCM_V90_INFO0A_BITS + 7) / 8];
+    uint8_t info1a_bits[(VPCM_V90_INFO1A_BITS + 7) / 8];
+    char info0a_str[VPCM_V90_INFO0A_BITS + 1];
+    char info1a_str[VPCM_V90_INFO1A_BITS + 1];
+    bool caller_saw_info0;
+    bool answerer_saw_info0;
+    bool caller_saw_info1;
+    bool answerer_saw_info1;
+    bool answerer_saw_uinfo;
+    bool phase3_seen;
+    int last_caller_rx_stage;
+    int last_answerer_rx_stage;
+    int last_caller_tx_stage;
+    int last_answerer_tx_stage;
+    int chunk;
+    bool ok;
+
+    analog_channel.law = law;
+    analog_channel.mode = VPCM_PATH_ANALOG_G711;
+    vpcm_log("Test: SpanDSP V.90 INFO startup over analog-over-G.711 (%s)", vpcm_law_to_str(law));
+
+    vpcm_v90_info0a_init(&analog_info0a);
+    vpcm_v90_info1a_init(&analog_info1a);
+    if (!vpcm_v90_build_info0a_bits(info0a_bits, (int) sizeof(info0a_bits), &analog_info0a)
+        || !vpcm_v90_build_info1a_bits(info1a_bits, (int) sizeof(info1a_bits), &analog_info1a)) {
+        fprintf(stderr, "failed to build analogue-side V.90 INFO contract frames\n");
+        return false;
+    }
+    if (g_vpcm_session_diag) {
+        vpcm_packed_bits_to_str(info0a_bits, VPCM_V90_INFO0A_BITS, info0a_str, sizeof(info0a_str));
+        vpcm_packed_bits_to_str(info1a_bits, VPCM_V90_INFO1A_BITS, info1a_str, sizeof(info1a_str));
+        vpcm_log("Analogue-side INFO0a contract bits: %s", info0a_str);
+        vpcm_log("Analogue-side INFO1a contract bits: %s", info1a_str);
+        vpcm_log("Analogue-side INFO1a contract fields: md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
+                 analog_info1a.md,
+                 analog_info1a.u_info,
+                 analog_info1a.upstream_symbol_rate_code,
+                 analog_info1a.downstream_rate_code,
+                 analog_info1a.freq_offset);
+    }
+
+    caller = v34_init(NULL, 3200, 21600, true, true,
+                      vpcm_v34_dummy_get_bit, NULL,
+                      vpcm_v34_dummy_put_bit, NULL);
+    answerer = v34_init(NULL, 3200, 21600, false, true,
+                        vpcm_v34_dummy_get_bit, NULL,
+                        vpcm_v34_dummy_put_bit, NULL);
+    if (caller == NULL || answerer == NULL)
+    {
+        if (caller)
+            v34_free(caller);
+        if (answerer)
+            v34_free(answerer);
+        fprintf(stderr, "failed to initialize SpanDSP V.34/V.90 states\n");
+        return false;
+    }
+
+    /*
+     * Enable V.90 mode on both sides:
+     *   - Caller  = analog modem: sends INFO0a (49 bits), receives INFO0d (62 bits),
+     *     sends INFO1a (70 bits with U_INFO), receives INFO1d (109 bits).
+     *   - Answerer = digital modem: sends INFO0d (62 bits), receives INFO0a,
+     *     sends INFO1d (109 bits), receives INFO1a.
+     *
+     * V.8 CJ silence must be supplied before Phase 2. Recreate that here.
+     */
+    for (chunk = 0; chunk < VPCM_V34_V8_HANDOFF_CHUNKS; chunk++)
+    {
+        int16_t caller_tx[VPCM_CHUNK_SAMPLES];
+        int16_t answer_tx[VPCM_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_CHUNK_SAMPLES];
+        int16_t answer_rx[VPCM_CHUNK_SAMPLES];
+
+        if (v34_tx(caller, caller_tx, VPCM_CHUNK_SAMPLES) != VPCM_CHUNK_SAMPLES
+            || v34_tx(answerer, answer_tx, VPCM_CHUNK_SAMPLES) != VPCM_CHUNK_SAMPLES)
+        {
+            fprintf(stderr, "SpanDSP V.90 handoff silence generation failed\n");
+            v34_free(caller);
+            v34_free(answerer);
+            return false;
+        }
+        vpcm_transport_linear(analog_channel, answer_rx, caller_tx, VPCM_CHUNK_SAMPLES);
+        vpcm_transport_linear(analog_channel, caller_rx, answer_tx, VPCM_CHUNK_SAMPLES);
+        if (v34_rx(caller, caller_rx, VPCM_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answer_rx, VPCM_CHUNK_SAMPLES) != 0)
+        {
+            fprintf(stderr, "SpanDSP V.90 handoff silence RX left unprocessed samples\n");
+            v34_free(caller);
+            v34_free(answerer);
+            return false;
+        }
+    }
+
+    v34_set_v90_mode(caller, law == V91_LAW_ALAW ? 1 : 0);
+    v34_set_v90_mode(answerer, law == V91_LAW_ALAW ? 1 : 0);
+
+    caller_saw_info0 = false;
+    answerer_saw_info0 = false;
+    caller_saw_info1 = false;
+    answerer_saw_info1 = false;
+    answerer_saw_uinfo = false;
+    phase3_seen = false;
+    last_caller_rx_stage = -1;
+    last_answerer_rx_stage = -1;
+    last_caller_tx_stage = -1;
+    last_answerer_tx_stage = -1;
+    ok = false;
+
+    for (chunk = 0; chunk < VPCM_V34_MAX_CHUNKS; chunk++)
+    {
+        int16_t caller_tx[VPCM_CHUNK_SAMPLES];
+        int16_t answer_tx[VPCM_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_CHUNK_SAMPLES];
+        int16_t answer_rx[VPCM_CHUNK_SAMPLES];
+        int caller_event;
+        int answerer_event;
+        int caller_rx_stage;
+        int answerer_rx_stage;
+        int caller_tx_stage;
+        int answerer_tx_stage;
+
+        if (v34_tx(caller, caller_tx, VPCM_CHUNK_SAMPLES) != VPCM_CHUNK_SAMPLES
+            || v34_tx(answerer, answer_tx, VPCM_CHUNK_SAMPLES) != VPCM_CHUNK_SAMPLES)
+        {
+            fprintf(stderr, "SpanDSP V.90 INFO startup TX chunk generation failed\n");
+            break;
+        }
+
+        vpcm_transport_linear(analog_channel, answer_rx, caller_tx, VPCM_CHUNK_SAMPLES);
+        vpcm_transport_linear(analog_channel, caller_rx, answer_tx, VPCM_CHUNK_SAMPLES);
+
+        if (v34_rx(caller, caller_rx, VPCM_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answer_rx, VPCM_CHUNK_SAMPLES) != 0)
+        {
+            fprintf(stderr, "SpanDSP V.90 INFO startup RX left unprocessed samples\n");
+            break;
+        }
+
+        caller_event = v34_get_rx_event(caller);
+        answerer_event = v34_get_rx_event(answerer);
+        caller_rx_stage = v34_get_rx_stage(caller);
+        answerer_rx_stage = v34_get_rx_stage(answerer);
+        caller_tx_stage = v34_get_tx_stage(caller);
+        answerer_tx_stage = v34_get_tx_stage(answerer);
+
+        caller_saw_info0 |= (caller_event == V34_EVENT_INFO0_OK);
+        answerer_saw_info0 |= (answerer_event == V34_EVENT_INFO0_OK);
+        caller_saw_info1 |= (caller_event == V34_EVENT_INFO1_OK);
+        answerer_saw_info1 |= (answerer_event == V34_EVENT_INFO1_OK);
+        answerer_saw_uinfo |= (v34_get_v90_u_info(answerer) > 0);
+        phase3_seen |= (caller_rx_stage >= V34_RX_STAGE_PHASE3_TRAINING)
+                    || (answerer_rx_stage >= V34_RX_STAGE_PHASE3_TRAINING)
+                    || v34_get_primary_channel_active(caller)
+                    || v34_get_primary_channel_active(answerer);
+
+        if (g_vpcm_session_diag
+            && (caller_rx_stage != last_caller_rx_stage
+                || answerer_rx_stage != last_answerer_rx_stage
+                || caller_tx_stage != last_caller_tx_stage
+                || answerer_tx_stage != last_answerer_tx_stage))
+        {
+            vpcm_log("SpanDSP V.90 INFO trace: caller tx=%s rx=%s ev=%d | answerer tx=%s rx=%s ev=%d",
+                     vpcm_v34_tx_stage_to_str(caller_tx_stage),
+                     vpcm_v34_rx_stage_to_str(caller_rx_stage),
+                     caller_event,
+                     vpcm_v34_tx_stage_to_str(answerer_tx_stage),
+                     vpcm_v34_rx_stage_to_str(answerer_rx_stage),
+                     answerer_event);
+        }
+        last_caller_rx_stage = caller_rx_stage;
+        last_answerer_rx_stage = answerer_rx_stage;
+        last_caller_tx_stage = caller_tx_stage;
+        last_answerer_tx_stage = answerer_tx_stage;
+
+        if (answerer_saw_info0
+            && answerer_saw_info1
+            && answerer_saw_uinfo
+            && phase3_seen)
+        {
+            ok = true;
+            break;
+        }
+
+        if (caller_event == V34_EVENT_TRAINING_FAILED
+            || answerer_event == V34_EVENT_TRAINING_FAILED)
+            break;
+    }
+
+    if (!ok)
+    {
+        fprintf(stderr,
+                "SpanDSP V.90 INFO startup failed: caller_info0=%d answerer_info0=%d caller_info1=%d answerer_info1=%d u_info=%d phase3=%d caller_stage=%s/%s answerer_stage=%s/%s (note: caller is analogue-side contract, answerer is SpanDSP V.90 digital side)\n",
+                caller_saw_info0 ? 1 : 0,
+                answerer_saw_info0 ? 1 : 0,
+                caller_saw_info1 ? 1 : 0,
+                answerer_saw_info1 ? 1 : 0,
+                answerer_saw_uinfo ? 1 : 0,
+                phase3_seen ? 1 : 0,
+                vpcm_v34_tx_stage_to_str(v34_get_tx_stage(caller)),
+                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(caller)),
+                vpcm_v34_tx_stage_to_str(v34_get_tx_stage(answerer)),
+                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+    }
+
+    v34_free(caller);
+    v34_free(answerer);
+
+    if (!ok)
+        return false;
+
+    vpcm_log("PASS: SpanDSP V.90 INFO startup over analog-over-G.711 (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v8_v91_advertisement_over_analog_g711(v91_law_t law)
 {
     v8_parms_t caller_parms;
@@ -3110,7 +3724,7 @@ static bool test_v8_v91_advertisement_over_analog_g711(v91_law_t law)
     return true;
 }
 
-static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
+static bool __attribute__((unused)) test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
 {
     v8_parms_t caller_parms;
     v8_parms_t answer_parms;
@@ -3222,39 +3836,41 @@ static bool test_v92_dil_rate_adaptation(void)
     return true;
 }
 
-static bool test_v92_full_phase_operation(v91_law_t law)
+static bool test_v90_v92_startup_contract_path(v91_law_t law)
 {
     v8_parms_t caller_parms;
     v8_parms_t answer_parms;
     vpcm_v8_result_t caller_result;
     vpcm_v8_result_t answer_result;
-    const int caller_v92 = 0x45;
-    const int answer_v92 = 0x46;
 
-    vpcm_log("Test: V.92 full phase operation (%s)", vpcm_law_to_str(law));
+    vpcm_log("Test: V.90/V.92 startup contract path (%s)", vpcm_law_to_str(law));
 
     init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
     init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
-    caller_parms.v92 = caller_v92;
-    answer_parms.v92 = answer_v92;
+
+    vpcm_log_session_sequence_header("Digital", "Analogue");
+    vpcm_log_session_sequence_row("V.8 TX", "waiting for V.8", "waiting for V.8", "V.8 RX/TX");
 
     if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
         return false;
-    if (caller_result.result.v92 != answer_v92 || answer_result.result.v92 != caller_v92) {
-        fprintf(stderr, "V.92 full phase V.8 control byte mismatch caller_rx=0x%X answer_rx=0x%X\n",
-                caller_result.result.v92,
-                answer_result.result.v92);
+    if ((caller_result.result.jm_cm.modulations & V8_MOD_V90) == 0
+        || (answer_result.result.jm_cm.modulations & V8_MOD_V90) == 0) {
+        fprintf(stderr, "V.90/V.92 startup contract path V.8 modulation mismatch caller=0x%X answer=0x%X\n",
+                caller_result.result.jm_cm.modulations,
+                answer_result.result.jm_cm.modulations);
         return false;
     }
+    vpcm_log_session_sequence_row("V.8 RX/ok", "waiting for Ez", "waiting for Ez", "V.8 RX/ok");
+    vpcm_log_session_sequence_footer();
 
-    return run_v92_full_phase_asymmetric_session(law,
-                                                 "clean line",
-                                                 false,
-                                                 0x92000000U ^ ((uint32_t) law << 8))
-        && run_v92_full_phase_asymmetric_session(law,
-                                                 "startup echo estimate",
-                                                 true,
-                                                 0x92100000U ^ ((uint32_t) law << 8));
+    return run_v90_v92_startup_contract_session(law,
+                                                "clean line",
+                                                false,
+                                                0x92000000U ^ ((uint32_t) law << 8))
+        && run_v90_v92_startup_contract_session(law,
+                                                "startup echo estimate",
+                                                true,
+                                                0x92100000U ^ ((uint32_t) law << 8));
 }
 
 static bool test_v91_codeword_loopback(v91_law_t law)
@@ -3533,16 +4149,17 @@ static bool run_vpcm_session_suite(void)
     return test_v92_dil_rate_adaptation()
         && test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW)
         && test_v8_v90_startup_over_analog_g711(V91_LAW_ALAW)
+        && (!g_vpcm_experimental_v90_info
+            || (test_spandsp_v90_info_startup_over_analog_g711(V91_LAW_ULAW)
+                && test_spandsp_v90_info_startup_over_analog_g711(V91_LAW_ALAW)))
         && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ULAW)
         && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW)
-        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW)
-        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW)
-        && test_v92_full_phase_operation(V91_LAW_ULAW)
-        && test_v92_full_phase_operation(V91_LAW_ALAW);
+        && test_v90_v92_startup_contract_path(V91_LAW_ULAW)
+        && test_v90_v92_startup_contract_path(V91_LAW_ALAW);
 }
 
 static bool run_vpcm_primitive_suite(void)
@@ -3601,12 +4218,15 @@ int main(int argc, char **argv)
             run_primitives = false;
         } else if (strcmp(argv[i], "--session-diag") == 0) {
             g_vpcm_session_diag = true;
+        } else if (strcmp(argv[i], "--experimental-v90-info") == 0) {
+            g_vpcm_experimental_v90_info = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [--session-only] [--primitive-tests] [--all-tests] [--session-diag]\n", argv[0]);
+            printf("Usage: %s [--session-only] [--primitive-tests] [--all-tests] [--session-diag] [--experimental-v90-info]\n", argv[0]);
             printf("  default           Run call-oriented end-to-end session tests only.\n");
             printf("  --primitive-tests Add focused primitive/component tests.\n");
             printf("  --all-tests       Run both session and primitive suites.\n");
             printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
+            printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
             return 0;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -3614,11 +4234,12 @@ int main(int argc, char **argv)
         }
     }
 
-    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s)",
+    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s, experimental_v90_info=%s)",
              g_vpcm_verbose ? "on" : "off",
              g_vpcm_session_diag ? "on" : "off",
              run_sessions ? "on" : "off",
-             run_primitives ? "on" : "off");
+             run_primitives ? "on" : "off",
+             g_vpcm_experimental_v90_info ? "on" : "off");
 
     if (run_sessions && !run_vpcm_session_suite())
         return 1;

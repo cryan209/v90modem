@@ -2293,8 +2293,34 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
     s->far_capabilities.max_baud_rate_difference = bitstream_get(&bs, &t, 3);
     s->far_capabilities.from_cme_modem = bitstream_get(&bs, &t, 1);
     s->far_capabilities.support_1664_point_constellation = bitstream_get(&bs, &t, 1);
-    s->far_capabilities.tx_clock_source = bitstream_get(&bs, &t, 2);
-    s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
+    if (s->v90_mode && s->calling_party)
+    {
+        /* V.90 INFO0d (62 bits): bits 26-27 are reserved (not tx_clock_source),
+           bit 28 is acknowledgement, then additional digital modem fields follow. */
+        bitstream_get(&bs, &t, 2);     /* 26:27 reserved */
+        s->info0_acknowledgement = bitstream_get(&bs, &t, 1);  /* 28 */
+        /* 29:32    Digital modem nominal TX power (-1 dBm0 steps, 0=-6 dBm0) */
+        bitstream_get(&bs, &t, 4);
+        /* 33:37    Maximum digital modem TX power (-0.5 dBm0 steps) */
+        bitstream_get(&bs, &t, 5);
+        /* 38       Power measurement location (1=codec output) */
+        bitstream_get(&bs, &t, 1);
+        /* 39       PCM coding: 0=µ-law, 1=A-law */
+        s->far_capabilities.tx_clock_source = bitstream_get(&bs, &t, 1);  /* reuse field for pcm_law */
+        /* 40       V.90 upstream symbol rate 3429 support */
+        bitstream_get(&bs, &t, 1);
+        /* 41       Reserved */
+        bitstream_get(&bs, &t, 1);
+        span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO0d (V.90): PCM law=%s, ack=%d\n",
+                 s->far_capabilities.tx_clock_source ? "A-law" : "u-law",
+                 s->info0_acknowledgement);
+    }
+    else
+    {
+        s->far_capabilities.tx_clock_source = bitstream_get(&bs, &t, 2);
+        s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
+    }
+    /*endif*/
 
     log_info0(s->logging, false, &s->far_capabilities, s->info0_acknowledgement);
     return 0;
@@ -3005,9 +3031,22 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone A\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_3;
-                /* The next info message will be INFO1a */
-                s->target_bits = 70 - (4 + 8 + 4);
-                s->stage = V34_RX_STAGE_INFO1A;
+                if (s->v90_mode && s->calling_party)
+                {
+                    /* V.90 caller expects INFO1d (109 bits, same format as INFO1c)
+                       from the digital answerer. */
+                    s->target_bits = 109 - (4 + 8 + 4);
+                    s->stage = V34_RX_STAGE_INFO1C;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 caller: expecting INFO1d (109 bits) from digital answerer\n");
+                }
+                else
+                {
+                    /* Standard V.34: next info message will be INFO1a */
+                    s->target_bits = 70 - (4 + 8 + 4);
+                    s->stage = V34_RX_STAGE_INFO1A;
+                }
+                /*endif*/
                 break;
             default:
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
