@@ -186,6 +186,7 @@ static void vpcm_log_data_sample_named(const char *h1,
                                        const uint8_t *remote_data_rx,
                                        int remote_data_rx_len);
 static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int len);
+static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len);
 static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool run_vpcm_session_suite(void);
@@ -2137,11 +2138,27 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     int codewords_per_report;
     int codeword_offset;
     int data_frames;
+    uint64_t c2a_bits_checked;
+    uint64_t a2c_bits_checked;
+    uint64_t c2a_bit_errors;
+    uint64_t a2c_bit_errors;
+    int c2a_mismatch_chunks;
+    int a2c_mismatch_chunks;
+    int c2a_chunks_checked;
+    int a2c_chunks_checked;
 
     v91_default_dil_init(&default_dil);
     v91_init(&caller, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
     cp_offer = *cp_offer_template;
+    c2a_bits_checked = 0;
+    a2c_bits_checked = 0;
+    c2a_bit_errors = 0;
+    a2c_bit_errors = 0;
+    c2a_mismatch_chunks = 0;
+    a2c_mismatch_chunks = 0;
+    c2a_chunks_checked = 0;
+    a2c_chunks_checked = 0;
 
     vpcm_log_e2e_phase("MODEL",
                        "V.91 startup/data path begins after successful V.8 capability signalling");
@@ -2383,6 +2400,8 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         int chunk_bytes;
         int byte_offset;
         int frame_index;
+        bool caller_to_answerer_ok;
+        bool answerer_to_caller_ok;
 
         chunk_codewords = total_codewords - codeword_offset;
         if (chunk_codewords > codewords_per_report)
@@ -2452,6 +2471,27 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
             return false;
         }
 
+        caller_to_answerer_ok = (memcmp(caller_data_in + byte_offset,
+                                        answerer_data_out + byte_offset,
+                                        (size_t) chunk_bytes) == 0);
+        answerer_to_caller_ok = (memcmp(answerer_data_in + byte_offset,
+                                        caller_data_out + byte_offset,
+                                        (size_t) chunk_bytes) == 0);
+        c2a_chunks_checked++;
+        a2c_chunks_checked++;
+        c2a_bits_checked += ((uint64_t) chunk_bytes * 8ULL);
+        a2c_bits_checked += ((uint64_t) chunk_bytes * 8ULL);
+        c2a_bit_errors += vpcm_count_bit_errors(caller_data_in + byte_offset,
+                                                answerer_data_out + byte_offset,
+                                                chunk_bytes);
+        a2c_bit_errors += vpcm_count_bit_errors(answerer_data_in + byte_offset,
+                                                caller_data_out + byte_offset,
+                                                chunk_bytes);
+        if (!caller_to_answerer_ok)
+            c2a_mismatch_chunks++;
+        if (!answerer_to_caller_ok)
+            a2c_mismatch_chunks++;
+
         if (g_vpcm_realtime) {
             int frame_cw = (chunk_codewords < VPCM_CP_FRAME_INTERVALS) ? chunk_codewords : VPCM_CP_FRAME_INTERVALS;
             int frame_data = (chunk_bytes < 5) ? chunk_bytes : 5;
@@ -2461,8 +2501,8 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
             char answerer_rx_data_hex[64];
             char answerer_tx_data_hex[64];
             char caller_rx_data_hex[64];
-            bool caller_to_answerer_ok;
-            bool answerer_to_caller_ok;
+            double c2a_ber;
+            double a2c_ber;
 
             vpcm_bytes_to_hex(caller_tx_frame, sizeof(caller_tx_frame), caller_pcm_tx + codeword_offset, frame_cw);
             vpcm_bytes_to_hex(answerer_tx_frame, sizeof(answerer_tx_frame), answerer_pcm_tx + codeword_offset, frame_cw);
@@ -2470,12 +2510,8 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
             vpcm_bytes_to_hex(answerer_rx_data_hex, sizeof(answerer_rx_data_hex), answerer_data_out + byte_offset, frame_data);
             vpcm_bytes_to_hex(answerer_tx_data_hex, sizeof(answerer_tx_data_hex), answerer_data_in + byte_offset, frame_data);
             vpcm_bytes_to_hex(caller_rx_data_hex, sizeof(caller_rx_data_hex), caller_data_out + byte_offset, frame_data);
-            caller_to_answerer_ok = (memcmp(caller_data_in + byte_offset,
-                                            answerer_data_out + byte_offset,
-                                            (size_t) chunk_bytes) == 0);
-            answerer_to_caller_ok = (memcmp(answerer_data_in + byte_offset,
-                                            caller_data_out + byte_offset,
-                                            (size_t) chunk_bytes) == 0);
+            c2a_ber = (c2a_bits_checked == 0) ? 0.0 : ((double) c2a_bit_errors / (double) c2a_bits_checked);
+            a2c_ber = (a2c_bits_checked == 0) ? 0.0 : ((double) a2c_bit_errors / (double) a2c_bits_checked);
             vpcm_log_e2e_phase("DATA",
                                "frame=%d codeword=%d caller_tx=[%s] answerer_tx=[%s]",
                                frame_index,
@@ -2491,6 +2527,19 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                answerer_tx_data_hex,
                                caller_rx_data_hex,
                                answerer_to_caller_ok ? "OK" : "MISMATCH");
+            vpcm_log_e2e_phase("DATA",
+                               "stats frame=%d c2a chunks=%d mismatches=%d bits=%llu bit_errors=%llu ber=%.3e, a2c chunks=%d mismatches=%d bits=%llu bit_errors=%llu ber=%.3e",
+                               frame_index,
+                               c2a_chunks_checked,
+                               c2a_mismatch_chunks,
+                               (unsigned long long) c2a_bits_checked,
+                               (unsigned long long) c2a_bit_errors,
+                               c2a_ber,
+                               a2c_chunks_checked,
+                               a2c_mismatch_chunks,
+                               (unsigned long long) a2c_bits_checked,
+                               (unsigned long long) a2c_bit_errors,
+                               a2c_ber);
         }
     }
 
@@ -2543,6 +2592,17 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                    caller_data_out,
                                    sample_data_len);
     }
+    vpcm_log("E2E data stats: c2a chunks=%d mismatches=%d bits=%llu bit_errors=%llu ber=%.3e, a2c chunks=%d mismatches=%d bits=%llu bit_errors=%llu ber=%.3e",
+             c2a_chunks_checked,
+             c2a_mismatch_chunks,
+             (unsigned long long) c2a_bits_checked,
+             (unsigned long long) c2a_bit_errors,
+             (c2a_bits_checked == 0) ? 0.0 : ((double) c2a_bit_errors / (double) c2a_bits_checked),
+             a2c_chunks_checked,
+             a2c_mismatch_chunks,
+             (unsigned long long) a2c_bits_checked,
+             (unsigned long long) a2c_bit_errors,
+             (a2c_bits_checked == 0) ? 0.0 : ((double) a2c_bit_errors / (double) a2c_bits_checked));
     vpcm_format_rate(rate_buf, sizeof(rate_buf), cp_ack.drn);
     vpcm_log("PASS: %s (%s, %s, drn=%u, rate=%s, data_seconds=%d, bytes=%d, codewords=%d)",
              family_label,
@@ -3542,6 +3602,28 @@ static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int
             out[pos++] = ' ';
     }
     out[pos] = '\0';
+}
+
+static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len)
+{
+    uint64_t total;
+    int i;
+
+    total = 0;
+    for (i = 0; i < len; i++) {
+        uint8_t x;
+
+        x = (uint8_t) (a[i] ^ b[i]);
+#if defined(__GNUC__) || defined(__clang__)
+        total += (uint64_t) __builtin_popcount((unsigned int) x);
+#else
+        while (x != 0) {
+            x &= (uint8_t) (x - 1U);
+            total++;
+        }
+#endif
+    }
+    return total;
 }
 
 static void vpcm_log_data_sample_named(const char *h1,
