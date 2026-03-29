@@ -16,12 +16,16 @@
 #include "v91.h"
 
 #include <spandsp.h>
+#include <pjsua-lib/pjsua.h>
+#include <pjmedia-codec/passthrough.h>
+#include <pjmedia/frame.h>
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <signal.h>
@@ -156,7 +160,29 @@ typedef enum {
     VPCM_TRANSPORT_PJ_SIP = 1
 } vpcm_transport_backend_t;
 
+typedef enum {
+    VPCM_PJSIP_ROLE_CALLER = 0,
+    VPCM_PJSIP_ROLE_ANSWERER = 1
+} vpcm_pjsip_role_t;
+
 static vpcm_transport_backend_t g_vpcm_transport_backend = VPCM_TRANSPORT_LOOPBACK;
+
+typedef struct {
+    pjsua_call_id call_id;
+    pjsua_conf_port_id call_conf_port;
+    vpcm_pjsip_role_t role;
+    pjmedia_port *stream_port;
+    bool stream_ready;
+    bool call_confirmed;
+    bool call_disconnected;
+    bool media_ready;
+    bool media_codec_checked;
+    bool media_codec_ok;
+    int disconnect_code;
+    v91_law_t expected_law;
+} vpcm_pjsip_runtime_t;
+
+static vpcm_pjsip_runtime_t g_vpcm_pjsip_runtime;
 
 static void vpcm_log(const char *fmt, ...);
 static void vpcm_log_e2e_phase(const char *phase, const char *fmt, ...);
@@ -193,6 +219,10 @@ static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
+static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint32_t seed);
+static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role);
+static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env);
+static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_t seed);
 
 static void vpcm_handle_sigint(int sig)
 {
@@ -257,6 +287,284 @@ static const char *vpcm_law_to_str(v91_law_t law)
 static const char *vpcm_path_mode_to_str(vpcm_path_mode_t mode)
 {
     return (mode == VPCM_PATH_ANALOG_G711) ? "analog-over-G.711" : "raw-G.711";
+}
+
+static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role)
+{
+    return (role == VPCM_PJSIP_ROLE_ANSWERER) ? "answerer" : "caller";
+}
+
+static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env)
+{
+    if (role_env && role_env[0] != '\0') {
+        if (strcasecmp(role_env, "answerer") == 0)
+            return VPCM_PJSIP_ROLE_ANSWERER;
+        if (strcasecmp(role_env, "callee") == 0)
+            return VPCM_PJSIP_ROLE_ANSWERER;
+    }
+    return VPCM_PJSIP_ROLE_CALLER;
+}
+
+static bool vpcm_str_ieq_prefix_n(const char *s, int slen, const char *prefix)
+{
+    int i;
+    int plen;
+
+    if (!s || !prefix)
+        return false;
+    plen = (int) strlen(prefix);
+    if (slen < plen)
+        return false;
+    for (i = 0; i < plen; i++) {
+        unsigned char a;
+        unsigned char b;
+
+        a = (unsigned char) s[i];
+        b = (unsigned char) prefix[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (unsigned char) (a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z')
+            b = (unsigned char) (b + ('a' - 'A'));
+        if (a != b)
+            return false;
+    }
+    return true;
+}
+
+static const char *vpcm_expected_codec_name(v91_law_t law)
+{
+    return (law == V91_LAW_ALAW) ? "PCMA" : "PCMU";
+}
+
+static bool vpcm_is_expected_law_codec(const pjmedia_codec_info *fmt, v91_law_t law)
+{
+    if (!fmt || !fmt->encoding_name.ptr || fmt->encoding_name.slen <= 0)
+        return false;
+    return vpcm_str_ieq_prefix_n(fmt->encoding_name.ptr,
+                                 fmt->encoding_name.slen,
+                                 (law == V91_LAW_ALAW) ? "PCMA" : "PCMU");
+}
+
+static bool vpcm_is_g711_codec(const pjmedia_codec_info *fmt)
+{
+    if (!fmt || !fmt->encoding_name.ptr || fmt->encoding_name.slen <= 0)
+        return false;
+    return vpcm_str_ieq_prefix_n(fmt->encoding_name.ptr, fmt->encoding_name.slen, "PCMU")
+        || vpcm_str_ieq_prefix_n(fmt->encoding_name.ptr, fmt->encoding_name.slen, "PCMA");
+}
+
+static pj_status_t vpcm_pjsip_register_g711_passthrough(v91_law_t law)
+{
+    pjmedia_codec_passthrough_setting setting;
+    pjmedia_format fmts[2];
+    unsigned cnt;
+
+#if !PJMEDIA_HAS_PASSTHROUGH_CODECS
+    (void) law;
+    return PJ_ENOTSUP;
+#else
+    cnt = 0;
+    memset(&setting, 0, sizeof(setting));
+    memset(fmts, 0, sizeof(fmts));
+
+    if (law == V91_LAW_ALAW || law == V91_LAW_ULAW) {
+        if (law == V91_LAW_ULAW) {
+            pjmedia_format_init_audio(&fmts[cnt++],
+                                      PJMEDIA_FORMAT_PCMU,
+                                      8000,
+                                      1,
+                                      8,
+                                      20000,
+                                      64000,
+                                      64000);
+        } else {
+            pjmedia_format_init_audio(&fmts[cnt++],
+                                      PJMEDIA_FORMAT_PCMA,
+                                      8000,
+                                      1,
+                                      8,
+                                      20000,
+                                      64000,
+                                      64000);
+        }
+    }
+
+    setting.fmt_cnt = cnt;
+    setting.fmts = fmts;
+    setting.ilbc_mode = 20;
+
+    /* Re-register explicitly for null-sound operation where ext fmt list is empty. */
+    pjmedia_codec_passthrough_deinit();
+    return pjmedia_codec_passthrough_init2(pjsua_get_pjmedia_endpt(), &setting);
+#endif
+}
+
+static void vpcm_pjsip_on_call_state(pjsua_call_id call_id, pjsip_event *e)
+{
+    pjsua_call_info ci;
+    pj_status_t st;
+
+    (void) e;
+    st = pjsua_call_get_info(call_id, &ci);
+    if (st != PJ_SUCCESS)
+        return;
+    if (ci.state == PJSIP_INV_STATE_CONFIRMED)
+        g_vpcm_pjsip_runtime.call_confirmed = true;
+    if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
+        g_vpcm_pjsip_runtime.call_disconnected = true;
+        g_vpcm_pjsip_runtime.disconnect_code = ci.last_status;
+    }
+}
+
+static void vpcm_pjsip_on_incoming_call(pjsua_acc_id acc_id,
+                                        pjsua_call_id call_id,
+                                        pjsip_rx_data *rdata)
+{
+    pj_status_t st;
+    pjsua_call_info ci;
+
+    (void) acc_id;
+    (void) rdata;
+
+    st = pjsua_call_get_info(call_id, &ci);
+    if (st == PJ_SUCCESS) {
+        vpcm_log("PJSIP incoming INVITE: from=%.*s to=%.*s role=%s",
+                 (int) ci.remote_info.slen,
+                 ci.remote_info.ptr ? ci.remote_info.ptr : "",
+                 (int) ci.local_info.slen,
+                 ci.local_info.ptr ? ci.local_info.ptr : "",
+                 vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role));
+    } else {
+        vpcm_log("PJSIP incoming INVITE: call_id=%d role=%s",
+                 call_id,
+                 vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role));
+    }
+
+    if (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_ANSWERER
+        && g_vpcm_pjsip_runtime.call_id == PJSUA_INVALID_ID) {
+        g_vpcm_pjsip_runtime.call_id = call_id;
+        st = pjsua_call_answer(call_id, 200, NULL, NULL);
+        if (st != PJ_SUCCESS) {
+            vpcm_log("PJSIP answer failed: status=%d", st);
+            pjsua_call_hangup(call_id, 500, NULL, NULL);
+        } else {
+            vpcm_log("PJSIP answerer accepted call_id=%d", call_id);
+        }
+    } else {
+        pjsua_call_answer(call_id, 486, NULL, NULL);
+        vpcm_log("PJSIP incoming call rejected (busy): active_call=%d role=%s",
+                 g_vpcm_pjsip_runtime.call_id,
+                 vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role));
+    }
+}
+
+static void vpcm_pjsip_on_stream_created2(pjsua_call_id call_id,
+                                          pjsua_on_stream_created_param *param)
+{
+    if (!param)
+        return;
+    if (call_id != g_vpcm_pjsip_runtime.call_id)
+        return;
+    if (param->stream_idx != 0)
+        return;
+    g_vpcm_pjsip_runtime.stream_port = param->port;
+    g_vpcm_pjsip_runtime.stream_ready = (param->port != NULL);
+    vpcm_log("PJSIP stream created: call_id=%d stream_idx=%u stream_port=%s",
+             call_id,
+             param->stream_idx,
+             param->port ? "ready" : "none");
+}
+
+static void vpcm_pjsip_on_call_media_state(pjsua_call_id call_id)
+{
+    pjsua_call_info ci;
+    unsigned i;
+
+    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS)
+        return;
+
+    for (i = 0; i < ci.media_cnt; i++) {
+        pjsua_stream_info si;
+        char codec_name[32];
+        int n;
+
+        if (ci.media[i].type != PJMEDIA_TYPE_AUDIO)
+            continue;
+        if (ci.media[i].status != PJSUA_CALL_MEDIA_ACTIVE
+            && ci.media[i].status != PJSUA_CALL_MEDIA_REMOTE_HOLD) {
+            continue;
+        }
+        if (pjsua_call_get_stream_info(call_id, i, &si) != PJ_SUCCESS)
+            continue;
+        if (si.type != PJMEDIA_TYPE_AUDIO)
+            continue;
+
+        n = si.info.aud.fmt.encoding_name.slen;
+        if (n < 0)
+            n = 0;
+        if (n >= (int) sizeof(codec_name))
+            n = (int) sizeof(codec_name) - 1;
+        memcpy(codec_name, si.info.aud.fmt.encoding_name.ptr, (size_t) n);
+        codec_name[n] = '\0';
+
+        g_vpcm_pjsip_runtime.media_codec_checked = true;
+        if (!vpcm_is_g711_codec(&si.info.aud.fmt)
+            || !vpcm_is_expected_law_codec(&si.info.aud.fmt, g_vpcm_pjsip_runtime.expected_law)) {
+            g_vpcm_pjsip_runtime.media_codec_ok = false;
+            vpcm_log("PJSIP media reject: negotiated codec=%s pt=%u (expected %s passthrough)",
+                     codec_name,
+                     si.info.aud.fmt.pt,
+                     vpcm_expected_codec_name(g_vpcm_pjsip_runtime.expected_law));
+            pjsua_call_hangup(call_id, 488, NULL, NULL);
+            return;
+        }
+
+        g_vpcm_pjsip_runtime.media_codec_ok = true;
+        g_vpcm_pjsip_runtime.media_ready = true;
+        g_vpcm_pjsip_runtime.call_conf_port = pjsua_call_get_conf_port(call_id);
+        if (g_vpcm_pjsip_runtime.call_conf_port >= 0) {
+            pjsua_conf_disconnect(0, g_vpcm_pjsip_runtime.call_conf_port);
+            pjsua_conf_disconnect(g_vpcm_pjsip_runtime.call_conf_port, 0);
+        }
+        vpcm_log("PJSIP media active: codec=%s pt=%u (G.711 passthrough)",
+                 codec_name,
+                 si.info.aud.fmt.pt);
+        return;
+    }
+}
+
+static pj_status_t vpcm_pjsip_set_g711_only_priorities(v91_law_t law)
+{
+    pjsua_codec_info codecs[64];
+    unsigned count;
+    unsigned i;
+    bool matched = false;
+
+    count = (unsigned) PJ_ARRAY_SIZE(codecs);
+    if (pjsua_enum_codecs(codecs, &count) != PJ_SUCCESS)
+        return PJ_EUNKNOWN;
+    if (g_vpcm_verbose || g_vpcm_session_diag)
+        vpcm_log("PJSIP codec enum count=%u", count);
+    for (i = 0; i < count; i++) {
+        pj_str_t cid;
+        bool wanted;
+
+        cid = codecs[i].codec_id;
+        if (g_vpcm_verbose || g_vpcm_session_diag)
+            vpcm_log("PJSIP codec[%u]=%.*s", i, cid.slen, cid.ptr ? cid.ptr : "");
+        wanted = (cid.ptr != NULL
+                  && cid.slen > 0
+                  && vpcm_str_ieq_prefix_n(cid.ptr, cid.slen, vpcm_expected_codec_name(law)));
+        if (wanted)
+            matched = true;
+        if (pjsua_codec_set_priority(&cid, wanted ? 255 : 0) != PJ_SUCCESS)
+            return PJ_EUNKNOWN;
+    }
+    if (!matched) {
+        vpcm_log("PJSIP codec policy could not find expected codec prefix %s",
+                 vpcm_expected_codec_name(law));
+    }
+    return matched ? PJ_SUCCESS : PJ_ENOTFOUND;
 }
 
 static const char *vpcm_v34_rx_stage_to_str(int stage)
@@ -4623,6 +4931,551 @@ static bool run_vpcm_primitive_suite(void)
         && test_v91_full_duplex(V91_LAW_ALAW);
 }
 
+static int vpcm_pjsip_decode_rx_frame(v91_state_t *rx_state,
+                                      const pjmedia_frame *frame,
+                                      uint8_t *rx_bytes,
+                                      int rx_cap,
+                                      int *rx_len,
+                                      int *rx_codewords)
+{
+    uint8_t decoded[512];
+    int consumed;
+
+    if (!frame || !rx_state || !rx_bytes || !rx_len || !rx_codewords)
+        return 0;
+    if (*rx_len >= rx_cap)
+        return 0;
+
+    if (frame->type == PJMEDIA_FRAME_TYPE_EXTENDED) {
+        const pjmedia_frame_ext *ext = (const pjmedia_frame_ext *) frame;
+        unsigned i;
+
+        for (i = 0; i < ext->subframe_cnt; i++) {
+            const pjmedia_frame_ext_subframe *sf;
+            int sf_len;
+            int decoded_cap;
+
+            sf = pjmedia_frame_ext_get_subframe(ext, i);
+            if (!sf)
+                continue;
+            sf_len = (int) ((sf->bitlen + 7U) >> 3);
+            if (sf_len <= 0)
+                continue;
+            decoded_cap = (int) sizeof(decoded);
+            if (decoded_cap > (rx_cap - *rx_len))
+                decoded_cap = rx_cap - *rx_len;
+            if (decoded_cap <= 0)
+                break;
+            consumed = v91_rx_codewords(rx_state, decoded, decoded_cap, sf->data, sf_len);
+            if (consumed > 0) {
+                memcpy(rx_bytes + *rx_len, decoded, (size_t) consumed);
+                *rx_len += consumed;
+            }
+            *rx_codewords += sf_len;
+        }
+        return 1;
+    }
+
+    if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO && frame->buf && frame->size > 0) {
+        int cw_len;
+        int decoded_cap;
+
+        cw_len = (int) frame->size;
+        decoded_cap = (int) sizeof(decoded);
+        if (decoded_cap > (rx_cap - *rx_len))
+            decoded_cap = rx_cap - *rx_len;
+        if (decoded_cap <= 0)
+            return 0;
+        consumed = v91_rx_codewords(rx_state, decoded, decoded_cap, (const uint8_t *) frame->buf, cw_len);
+        if (consumed > 0) {
+            memcpy(rx_bytes + *rx_len, decoded, (size_t) consumed);
+            *rx_len += consumed;
+        }
+        *rx_codewords += cw_len;
+        return 1;
+    }
+
+    return 0;
+}
+
+static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_t seed)
+{
+    enum { CODEWORDS_PER_PACKET = 160, PACKETS_PER_SECOND = 50 };
+    vpcm_cp_frame_t cp;
+    v91_state_t tx_state;
+    v91_state_t rx_state;
+    uint8_t tx_codewords[CODEWORDS_PER_PACKET];
+    uint8_t tx_frame_mem[sizeof(pjmedia_frame_ext) + sizeof(pjmedia_frame_ext_subframe) + CODEWORDS_PER_PACKET];
+    uint8_t rx_frame_mem[4096];
+    uint8_t *tx_data = NULL;
+    uint8_t *expected_rx = NULL;
+    uint8_t *rx_data = NULL;
+    int bytes_per_packet;
+    int total_packets;
+    int total_bytes;
+    int pkt;
+    int tx_len = 0;
+    int rx_len = 0;
+    int rx_codewords = 0;
+    uint64_t bit_errors = 0;
+    uint64_t bits_checked = 0;
+    bool ok = false;
+    uint32_t tx_seed;
+    uint32_t rx_seed;
+    int cmp_len;
+
+    if (!g_vpcm_pjsip_runtime.stream_port) {
+        fprintf(stderr, "PJSIP stream port not available for payload loop\n");
+        return false;
+    }
+    if (data_seconds <= 0)
+        data_seconds = 10;
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp, vpcm_cp_recommended_robbed_bit_drn(), false);
+    bytes_per_packet = (CODEWORDS_PER_PACKET * ((int) cp.drn + 20)) / 48;
+    if (bytes_per_packet <= 0) {
+        fprintf(stderr, "invalid bytes-per-packet for drn=%u\n", cp.drn);
+        return false;
+    }
+
+    total_packets = data_seconds * PACKETS_PER_SECOND;
+    if (total_packets < 1)
+        total_packets = PACKETS_PER_SECOND;
+    total_bytes = total_packets * bytes_per_packet;
+
+    tx_data = (uint8_t *) malloc((size_t) total_bytes);
+    expected_rx = (uint8_t *) malloc((size_t) total_bytes);
+    rx_data = (uint8_t *) malloc((size_t) total_bytes);
+    if (!tx_data || !expected_rx || !rx_data) {
+        fprintf(stderr, "allocation failure in pjsip payload loop\n");
+        free(tx_data);
+        free(expected_rx);
+        free(rx_data);
+        return false;
+    }
+    memset(rx_data, 0, (size_t) total_bytes);
+
+    tx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? seed : (seed ^ 0xA55AA55AU);
+    rx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? (seed ^ 0xA55AA55AU) : seed;
+    fill_pattern(tx_data, total_bytes, tx_seed);
+    fill_pattern(expected_rx, total_bytes, rx_seed);
+
+    v91_init(&tx_state, law, V91_MODE_TRANSPARENT);
+    v91_init(&rx_state, law, V91_MODE_TRANSPARENT);
+    if (!v91_activate_data_mode(&tx_state, &cp) || !v91_activate_data_mode(&rx_state, &cp)) {
+        fprintf(stderr, "pjsip payload loop could not activate V.91 data mode\n");
+        free(tx_data);
+        free(expected_rx);
+        free(rx_data);
+        return false;
+    }
+
+    vpcm_log_e2e_phase("DATA",
+                       "PJSIP transmit plan: role=%s seconds=%d packets=%d bytes=%d codewords=%d codec=%s",
+                       vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
+                       data_seconds,
+                       total_packets,
+                       total_bytes,
+                       total_packets * CODEWORDS_PER_PACKET,
+                       vpcm_expected_codec_name(law));
+
+    for (pkt = 0; pkt < total_packets; pkt++) {
+        pjmedia_frame_ext *tx_ext;
+        pjmedia_frame_ext *rx_ext;
+        pj_status_t st;
+        int produced;
+        int tx_off;
+        int i;
+        int frame_index;
+        int codeword_index;
+        char tx_hex[64];
+
+        if (g_vpcm_stop_requested || g_vpcm_pjsip_runtime.call_disconnected)
+            break;
+
+        tx_off = pkt * bytes_per_packet;
+        produced = v91_tx_codewords(&tx_state,
+                                    tx_codewords,
+                                    CODEWORDS_PER_PACKET,
+                                    tx_data + tx_off,
+                                    bytes_per_packet);
+        if (produced != CODEWORDS_PER_PACKET) {
+            fprintf(stderr, "pjsip payload tx produced mismatch: %d/%d\n",
+                    produced,
+                    CODEWORDS_PER_PACKET);
+            goto done;
+        }
+
+        tx_ext = (pjmedia_frame_ext *) tx_frame_mem;
+        memset(tx_ext, 0, sizeof(tx_frame_mem));
+        tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
+        tx_ext->base.timestamp.u64 = (pj_uint64_t) pkt * CODEWORDS_PER_PACKET;
+        pjmedia_frame_ext_append_subframe(tx_ext,
+                                          tx_codewords,
+                                          CODEWORDS_PER_PACKET * 8U,
+                                          CODEWORDS_PER_PACKET);
+        st = pjmedia_port_put_frame(g_vpcm_pjsip_runtime.stream_port, &tx_ext->base);
+        if (st != PJ_SUCCESS) {
+            fprintf(stderr, "pjsip media put_frame failed: %d\n", st);
+            goto done;
+        }
+        tx_len += bytes_per_packet;
+
+        /* Poll pjsip events and pull a few media frames each packet period. */
+        for (i = 0; i < 4; i++) {
+            pjsua_handle_events(5);
+            if (g_vpcm_pjsip_runtime.call_disconnected)
+                break;
+            rx_ext = (pjmedia_frame_ext *) rx_frame_mem;
+            memset(rx_ext, 0, sizeof(rx_frame_mem));
+            st = pjmedia_port_get_frame(g_vpcm_pjsip_runtime.stream_port, &rx_ext->base);
+            if (st != PJ_SUCCESS)
+                continue;
+            vpcm_pjsip_decode_rx_frame(&rx_state,
+                                       &rx_ext->base,
+                                       rx_data,
+                                       total_bytes,
+                                       &rx_len,
+                                       &rx_codewords);
+        }
+        vpcm_maybe_realtime_pace_samples(CODEWORDS_PER_PACKET);
+
+        if (g_vpcm_realtime && (pkt % PACKETS_PER_SECOND) == 0) {
+            frame_index = (pkt * CODEWORDS_PER_PACKET) / VPCM_CP_FRAME_INTERVALS;
+            codeword_index = pkt * CODEWORDS_PER_PACKET;
+            vpcm_bytes_to_hex(tx_hex, sizeof(tx_hex), tx_codewords, 6);
+            vpcm_log_e2e_phase("DATA",
+                               "frame=%d codeword=%d tx=[%s] decoded_bytes=%d decoded_codewords=%d",
+                               frame_index,
+                               codeword_index,
+                               tx_hex,
+                               rx_len,
+                               rx_codewords);
+        }
+    }
+
+    /* Drain in-flight media briefly. */
+    for (pkt = 0; pkt < 50; pkt++) {
+        pjmedia_frame_ext *rx_ext;
+        pj_status_t st;
+
+        if (g_vpcm_pjsip_runtime.call_disconnected)
+            break;
+        pjsua_handle_events(10);
+        rx_ext = (pjmedia_frame_ext *) rx_frame_mem;
+        memset(rx_ext, 0, sizeof(rx_frame_mem));
+        st = pjmedia_port_get_frame(g_vpcm_pjsip_runtime.stream_port, &rx_ext->base);
+        if (st != PJ_SUCCESS)
+            continue;
+        vpcm_pjsip_decode_rx_frame(&rx_state,
+                                   &rx_ext->base,
+                                   rx_data,
+                                   total_bytes,
+                                   &rx_len,
+                                   &rx_codewords);
+    }
+
+    cmp_len = (rx_len < total_bytes) ? rx_len : total_bytes;
+    if (cmp_len > 0) {
+        bit_errors = vpcm_count_bit_errors(expected_rx, rx_data, cmp_len);
+        bits_checked = (uint64_t) cmp_len * 8ULL;
+    }
+    ok = (cmp_len == total_bytes && bit_errors == 0);
+    vpcm_log("PJSIP payload stats: role=%s tx_bytes=%d expected_rx_bytes=%d actual_rx_bytes=%d rx_codewords=%d bits=%llu bit_errors=%llu ber=%.3e",
+             vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
+             tx_len,
+             total_bytes,
+             rx_len,
+             rx_codewords,
+             (unsigned long long) bits_checked,
+             (unsigned long long) bit_errors,
+             (bits_checked == 0) ? 0.0 : ((double) bit_errors / (double) bits_checked));
+
+done:
+    free(tx_data);
+    free(expected_rx);
+    free(rx_data);
+    return ok;
+}
+
+static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint32_t seed)
+{
+    const char *role_env;
+    const char *dest_uri_env;
+    const char *account_id_env;
+    const char *reg_uri_env;
+    const char *auth_user_env;
+    const char *auth_pass_env;
+    const char *auth_realm_env;
+    const char *local_port_env;
+    const char *caller_number_env;
+    const char *answerer_number_env;
+    const char *domain_env;
+    const char *dummy_uri_env;
+    const char *wait_seconds_env;
+    pjsua_config ua_cfg;
+    pjsua_logging_config log_cfg;
+    pjsua_media_config media_cfg;
+    pjsua_transport_config tp_cfg;
+    pjsua_acc_config acc_cfg;
+    pjsua_call_setting call_opt;
+    pjsua_transport_id tid;
+    pjsua_acc_id acc_id;
+    pj_str_t dst_uri;
+    pj_status_t st;
+    double start_wait;
+    double wait_limit;
+    int local_port;
+    int wait_seconds;
+    bool ok;
+    bool using_dummy_uri;
+    vpcm_pjsip_role_t role;
+    char caller_id_buf[256];
+    char answerer_id_buf[256];
+    char dest_uri_buf[256];
+
+#if !PJMEDIA_HAS_PASSTHROUGH_CODECS
+    fprintf(stderr, "PJMEDIA passthrough codecs are not enabled in pjproject build\n");
+    return false;
+#endif
+#if !PJMEDIA_HAS_PASSTHROUGH_CODEC_PCMU || !PJMEDIA_HAS_PASSTHROUGH_CODEC_PCMA
+    fprintf(stderr, "PJMEDIA passthrough G.711 codecs (PCMU/PCMA) are not fully enabled\n");
+    return false;
+#endif
+
+    role_env = getenv("VPCM_PJSIP_ROLE");
+    role = vpcm_pjsip_parse_role(role_env);
+    account_id_env = getenv("VPCM_PJSIP_ACCOUNT_ID");
+    reg_uri_env = getenv("VPCM_PJSIP_REG_URI");
+    auth_user_env = getenv("VPCM_PJSIP_AUTH_USER");
+    auth_pass_env = getenv("VPCM_PJSIP_AUTH_PASS");
+    auth_realm_env = getenv("VPCM_PJSIP_AUTH_REALM");
+    local_port_env = getenv("VPCM_PJSIP_LOCAL_PORT");
+    caller_number_env = getenv("VPCM_PJSIP_CALLER_NUMBER");
+    answerer_number_env = getenv("VPCM_PJSIP_ANSWERER_NUMBER");
+    domain_env = getenv("VPCM_PJSIP_DOMAIN");
+    dummy_uri_env = getenv("VPCM_PJSIP_DUMMY_URI");
+    dest_uri_env = getenv("VPCM_PJSIP_DEST_URI");
+    wait_seconds_env = getenv("VPCM_PJSIP_WAIT_SECONDS");
+
+    local_port = 0;
+    if (local_port_env && local_port_env[0] != '\0')
+        local_port = atoi(local_port_env);
+    wait_seconds = 60;
+    if (wait_seconds_env && wait_seconds_env[0] != '\0') {
+        wait_seconds = atoi(wait_seconds_env);
+        if (wait_seconds < 5)
+            wait_seconds = 5;
+    }
+
+    memset(caller_id_buf, 0, sizeof(caller_id_buf));
+    memset(answerer_id_buf, 0, sizeof(answerer_id_buf));
+    memset(dest_uri_buf, 0, sizeof(dest_uri_buf));
+    using_dummy_uri = false;
+
+    if ((!account_id_env || account_id_env[0] == '\0')
+        && domain_env && domain_env[0] != '\0') {
+        if (role == VPCM_PJSIP_ROLE_CALLER
+            && caller_number_env && caller_number_env[0] != '\0') {
+            snprintf(caller_id_buf, sizeof(caller_id_buf), "sip:%s@%s", caller_number_env, domain_env);
+            account_id_env = caller_id_buf;
+        } else if (role == VPCM_PJSIP_ROLE_ANSWERER
+                   && answerer_number_env && answerer_number_env[0] != '\0') {
+            snprintf(answerer_id_buf, sizeof(answerer_id_buf), "sip:%s@%s", answerer_number_env, domain_env);
+            account_id_env = answerer_id_buf;
+        }
+    }
+
+    if (role == VPCM_PJSIP_ROLE_CALLER) {
+        if (!dest_uri_env || dest_uri_env[0] == '\0') {
+            if (answerer_number_env && answerer_number_env[0] != '\0'
+                && domain_env && domain_env[0] != '\0') {
+                snprintf(dest_uri_buf, sizeof(dest_uri_buf), "sip:%s@%s", answerer_number_env, domain_env);
+                dest_uri_env = dest_uri_buf;
+            }
+        }
+        if (!dest_uri_env || dest_uri_env[0] == '\0') {
+            if (dummy_uri_env && dummy_uri_env[0] != '\0') {
+                dest_uri_env = dummy_uri_env;
+            } else {
+                dest_uri_env = "sip:dummy@127.0.0.1";
+            }
+            using_dummy_uri = true;
+            vpcm_log("PJSIP destination not configured; using dummy URI %s", dest_uri_env);
+        }
+    }
+
+    memset(&g_vpcm_pjsip_runtime, 0, sizeof(g_vpcm_pjsip_runtime));
+    g_vpcm_pjsip_runtime.call_id = PJSUA_INVALID_ID;
+    g_vpcm_pjsip_runtime.call_conf_port = -1;
+    g_vpcm_pjsip_runtime.role = role;
+    g_vpcm_pjsip_runtime.expected_law = law;
+
+    st = pjsua_create();
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "pjsua_create failed: %d\n", st);
+        return false;
+    }
+
+    pjsua_config_default(&ua_cfg);
+    pjsua_logging_config_default(&log_cfg);
+    pjsua_media_config_default(&media_cfg);
+    ua_cfg.max_calls = 4;
+    ua_cfg.cb.on_incoming_call = &vpcm_pjsip_on_incoming_call;
+    ua_cfg.cb.on_call_state = &vpcm_pjsip_on_call_state;
+    ua_cfg.cb.on_call_media_state = &vpcm_pjsip_on_call_media_state;
+    ua_cfg.cb.on_stream_created2 = &vpcm_pjsip_on_stream_created2;
+    log_cfg.console_level = (g_vpcm_session_diag || g_vpcm_verbose) ? 4 : 3;
+    media_cfg.no_vad = PJ_TRUE;
+    media_cfg.enable_ice = PJ_FALSE;
+    media_cfg.clock_rate = 8000;
+    media_cfg.audio_frame_ptime = 20;
+    media_cfg.channel_count = 1;
+
+    st = pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "pjsua_init failed: %d\n", st);
+        pjsua_destroy();
+        return false;
+    }
+
+    pjsua_transport_config_default(&tp_cfg);
+    if (local_port > 0)
+        tp_cfg.port = (pj_uint16_t) local_port;
+    st = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &tp_cfg, &tid);
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "pjsua_transport_create(UDP) failed: %d\n", st);
+        pjsua_destroy();
+        return false;
+    }
+
+    st = pjsua_start();
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "pjsua_start failed: %d\n", st);
+        pjsua_destroy();
+        return false;
+    }
+
+    pjsua_set_null_snd_dev();
+
+    st = vpcm_pjsip_register_g711_passthrough(law);
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "unable to register G.711 passthrough codec set: %d\n", st);
+        pjsua_destroy();
+        return false;
+    }
+
+    st = vpcm_pjsip_set_g711_only_priorities(law);
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "unable to enforce %s-only codec policy\n", vpcm_expected_codec_name(law));
+        pjsua_destroy();
+        return false;
+    }
+
+    if (account_id_env && account_id_env[0] != '\0') {
+        pjsua_acc_config_default(&acc_cfg);
+        acc_cfg.id = pj_str((char *) account_id_env);
+        if (reg_uri_env && reg_uri_env[0] != '\0')
+            acc_cfg.reg_uri = pj_str((char *) reg_uri_env);
+        if (auth_user_env && auth_user_env[0] != '\0'
+            && auth_pass_env && auth_pass_env[0] != '\0') {
+            acc_cfg.cred_count = 1;
+            acc_cfg.cred_info[0].scheme = pj_str((char *) "digest");
+            acc_cfg.cred_info[0].realm = pj_str((char *) ((auth_realm_env && auth_realm_env[0] != '\0') ? auth_realm_env : "*"));
+            acc_cfg.cred_info[0].username = pj_str((char *) auth_user_env);
+            acc_cfg.cred_info[0].data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
+            acc_cfg.cred_info[0].data = pj_str((char *) auth_pass_env);
+        }
+        st = pjsua_acc_add(&acc_cfg, PJ_TRUE, &acc_id);
+    } else {
+        st = pjsua_acc_add_local(tid, PJ_TRUE, &acc_id);
+    }
+    if (st != PJ_SUCCESS) {
+        fprintf(stderr, "pjsua account add failed: %d\n", st);
+        pjsua_destroy();
+        return false;
+    }
+
+    if (role == VPCM_PJSIP_ROLE_CALLER) {
+        pjsua_call_setting_default(&call_opt);
+        call_opt.aud_cnt = 1;
+        call_opt.vid_cnt = 0;
+        dst_uri = pj_str((char *) dest_uri_env);
+        st = pjsua_call_make_call(acc_id, &dst_uri, &call_opt, NULL, NULL, &g_vpcm_pjsip_runtime.call_id);
+        if (st != PJ_SUCCESS) {
+            fprintf(stderr, "pjsua_call_make_call failed: %d\n", st);
+            pjsua_destroy();
+            return false;
+        }
+        vpcm_log("PJSIP caller started: caller=%s dest=%s law=%s codec_policy=%s-only passthrough",
+                 (account_id_env && account_id_env[0] != '\0') ? account_id_env : "<local>",
+                 dest_uri_env,
+                 vpcm_law_to_str(law),
+                 vpcm_expected_codec_name(law));
+    } else {
+        vpcm_log("PJSIP answerer ready: account=%s wait=%ds law=%s codec_policy=%s-only passthrough",
+                 (account_id_env && account_id_env[0] != '\0') ? account_id_env : "<local>",
+                 wait_seconds,
+                 vpcm_law_to_str(law),
+                 vpcm_expected_codec_name(law));
+    }
+
+    start_wait = vpcm_monotonic_seconds();
+    wait_limit = (role == VPCM_PJSIP_ROLE_CALLER)
+        ? (using_dummy_uri ? 5.0 : 30.0)
+        : (double) wait_seconds;
+    ok = false;
+    while (!g_vpcm_stop_requested) {
+        pjsua_handle_events(100);
+        if (g_vpcm_pjsip_runtime.call_disconnected)
+            break;
+        if (g_vpcm_pjsip_runtime.media_ready
+            && g_vpcm_pjsip_runtime.media_codec_ok
+            && g_vpcm_pjsip_runtime.stream_ready
+            && g_vpcm_pjsip_runtime.stream_port) {
+            ok = true;
+            break;
+        }
+        if ((vpcm_monotonic_seconds() - start_wait) > wait_limit)
+            break;
+    }
+
+    if (ok)
+        ok = vpcm_run_pjsip_payload_loop(law, data_seconds, seed);
+
+    if (g_vpcm_pjsip_runtime.call_id != PJSUA_INVALID_ID
+        && !g_vpcm_pjsip_runtime.call_disconnected) {
+        pjsua_call_hangup(g_vpcm_pjsip_runtime.call_id, 0, NULL, NULL);
+        start_wait = vpcm_monotonic_seconds();
+        while (!g_vpcm_pjsip_runtime.call_disconnected
+               && (vpcm_monotonic_seconds() - start_wait) < 5.0) {
+            pjsua_handle_events(100);
+        }
+    }
+
+    pjsua_destroy();
+
+    if (!ok) {
+        if (g_vpcm_pjsip_runtime.call_disconnected) {
+            fprintf(stderr, "PJSIP call ended before payload completion (status=%d)\n",
+                    g_vpcm_pjsip_runtime.disconnect_code);
+        } else if (!g_vpcm_pjsip_runtime.stream_ready || !g_vpcm_pjsip_runtime.stream_port) {
+            fprintf(stderr, "PJSIP media stream was not ready for payload transport\n");
+        } else if (!g_vpcm_pjsip_runtime.media_codec_checked) {
+            fprintf(stderr, "PJSIP media was never established/checked\n");
+        } else {
+            fprintf(stderr, "PJSIP media codec policy check failed\n");
+        }
+    } else {
+        vpcm_log("PASS: V.91 pj-sip payload E2E role=%s (%s only, duration=%d s)",
+                 vpcm_pjsip_role_to_str(role),
+                 vpcm_expected_codec_name(law),
+                 data_seconds > 0 ? data_seconds : 0);
+    }
+
+    return ok;
+}
+
 static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_seconds)
 {
     v8_parms_t caller_parms;
@@ -4630,6 +5483,10 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
     vpcm_v8_result_t caller_result;
     vpcm_v8_result_t answer_result;
     vpcm_cp_frame_t cp_offer;
+
+    if (g_vpcm_transport_backend == VPCM_TRANSPORT_PJ_SIP) {
+        return run_v91_single_e2e_call_pjsip(law, data_seconds, seed);
+    }
 
     init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
     init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
@@ -4784,6 +5641,15 @@ int main(int argc, char **argv)
             printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
             printf("  --realtime        Pace G.711 transport at 8kHz wall clock instead of CPU speed.\n");
             printf("  --transport <loopback|pj-sip> Select test transport backend (default: loopback).\n");
+            printf("                   pj-sip mode requires PJMEDIA passthrough and G.711 only.\n");
+            printf("                   Env: VPCM_PJSIP_ROLE=<caller|answerer> (default caller),\n");
+            printf("                        VPCM_PJSIP_DEST_URI (caller), VPCM_PJSIP_LOCAL_PORT,\n");
+            printf("                        VPCM_PJSIP_ACCOUNT_ID, VPCM_PJSIP_REG_URI,\n");
+            printf("                        VPCM_PJSIP_AUTH_USER, VPCM_PJSIP_AUTH_PASS, VPCM_PJSIP_AUTH_REALM.\n");
+            printf("                        Optional dialplan inputs: VPCM_PJSIP_CALLER_NUMBER,\n");
+            printf("                        VPCM_PJSIP_ANSWERER_NUMBER, VPCM_PJSIP_DOMAIN,\n");
+            printf("                        VPCM_PJSIP_DUMMY_URI (caller default sip:dummy@127.0.0.1),\n");
+            printf("                        VPCM_PJSIP_WAIT_SECONDS (answerer wait timeout, default 60).\n");
             printf("  --v91-e2e-call    Run V.91 single-call end-to-end mode (focus mode).\n");
             printf("  --v91-e2e-seconds <n> V.91 data transmit duration in seconds (default: 10).\n");
             printf("  --v91-e2e-law <ulaw|alaw> Set V.91 E2E law (default: ulaw).\n");
@@ -4805,10 +5671,6 @@ int main(int argc, char **argv)
              run_v91_e2e_call ? "on" : "off");
 
     if (run_v91_e2e_call) {
-        if (g_vpcm_transport_backend == VPCM_TRANSPORT_PJ_SIP) {
-            fprintf(stderr, "V.91 E2E with --transport pj-sip is not wired yet in this harness. Use --transport loopback for now.\n");
-            return 2;
-        }
         return run_v91_e2e_mode(v91_e2e_law, v91_e2e_seconds);
     }
 
