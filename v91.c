@@ -158,6 +158,7 @@ static bool v91_info_from_bits(const uint8_t bits[V91_INFO_TOTAL_BITS], v91_info
 
 void v91_init(v91_state_t *s, v91_law_t law, v91_mode_t mode)
 {
+    memset(s, 0, sizeof(*s));
     s->law = law;
     s->mode = mode;
 }
@@ -241,6 +242,8 @@ int v91_tx_info_codewords(v91_state_t *s,
     if (!v91_info_frame_validate(info, NULL, 0))
         return 0;
 
+    s->last_tx_info = *info;
+    s->last_tx_info_valid = true;
     v91_info_to_bits(bits, info);
     sign = 0;
     for (i = 0; i < V91_INFO_TOTAL_BITS; i++) {
@@ -271,7 +274,13 @@ bool v91_rx_info_codewords(v91_state_t *s,
         bits[i] = (uint8_t) (sign ^ prev_sign);
         prev_sign = sign;
     }
-    return v91_info_from_bits(bits, info_out);
+    if (!v91_info_from_bits(bits, info_out)) {
+        s->last_rx_info_valid = false;
+        return false;
+    }
+    s->last_rx_info = *info_out;
+    s->last_rx_info_valid = true;
+    return true;
 }
 
 bool v91_info_build_diag(v91_state_t *s, const v91_info_frame_t *info, v91_info_diag_t *diag)
@@ -341,9 +350,17 @@ bool v91_info_decode_diag(v91_state_t *s,
         }
     }
     diag->valid = (diag->fill_ok && diag->sync_ok && diag->crc_remainder == 0);
-    if (!diag->valid)
+    if (!diag->valid) {
+        s->last_rx_info_valid = false;
         return false;
-    return v91_info_from_bits(diag->bits, &diag->frame);
+    }
+    if (!v91_info_from_bits(diag->bits, &diag->frame)) {
+        s->last_rx_info_valid = false;
+        return false;
+    }
+    s->last_rx_info = diag->frame;
+    s->last_rx_info_valid = true;
+    return true;
 }
 
 int v91_tx_codewords(v91_state_t *s,

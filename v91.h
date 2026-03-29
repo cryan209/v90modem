@@ -29,11 +29,6 @@ typedef enum {
     V91_MODE_TRANSPARENT = 0
 } v91_mode_t;
 
-typedef struct {
-    v91_law_t  law;
-    v91_mode_t mode;
-} v91_state_t;
-
 #define V91_PHASE1_SILENCE_SYMBOLS 600
 #define V91_EZ_SYMBOLS 24
 #define V91_INFO_SYMBOLS 62
@@ -61,6 +56,15 @@ typedef struct {
     bool sync_ok;
     bool valid;
 } v91_info_diag_t;
+
+typedef struct {
+    v91_law_t  law;
+    v91_mode_t mode;
+    bool last_tx_info_valid;
+    bool last_rx_info_valid;
+    v91_info_frame_t last_tx_info;
+    v91_info_frame_t last_rx_info;
+} v91_state_t;
 
 void v91_init(v91_state_t *s, v91_law_t law, v91_mode_t mode);
 

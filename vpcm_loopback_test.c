@@ -254,6 +254,121 @@ static uint32_t prng_next(uint32_t *state)
     return x;
 }
 
+static bool run_v91_info_roundtrip_case(v91_state_t *tx,
+                                        v91_state_t *rx,
+                                        const char *label,
+                                        const v91_info_frame_t *expected_info,
+                                        bool require_ack)
+{
+    uint8_t info_buf[V91_INFO_SYMBOLS];
+    v91_info_frame_t info_rx;
+    v91_info_diag_t tx_diag;
+    v91_info_diag_t rx_diag;
+    char validate_reason[128];
+
+    vpcm_log("Case: %s", label);
+    if (!v91_info_frame_validate(expected_info, validate_reason, sizeof(validate_reason))) {
+        fprintf(stderr, "V.91 INFO validation failed for %s: %s\n", label, validate_reason);
+        return false;
+    }
+    if (!v91_info_build_diag(tx, expected_info, &tx_diag)) {
+        fprintf(stderr, "V.91 INFO TX diag build failed for %s\n", label);
+        return false;
+    }
+    if (v91_tx_info_codewords(tx, info_buf, (int) sizeof(info_buf), expected_info) != V91_INFO_SYMBOLS) {
+        fprintf(stderr, "V.91 INFO encode length mismatch for %s\n", label);
+        return false;
+    }
+    if (!tx->last_tx_info_valid || !vpcm_info_frames_equal(expected_info, &tx->last_tx_info)) {
+        fprintf(stderr, "V.91 TX tracking mismatch for %s\n", label);
+        return false;
+    }
+    if (!v91_info_decode_diag(rx, info_buf, (int) sizeof(info_buf), &rx_diag)) {
+        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+        fprintf(stderr, "V.91 INFO decode failed for %s\n", label);
+        return false;
+    }
+    info_rx = rx_diag.frame;
+    if (!rx->last_rx_info_valid || !vpcm_info_frames_equal(expected_info, &rx->last_rx_info)) {
+        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+        fprintf(stderr, "V.91 RX tracking mismatch for %s\n", label);
+        return false;
+    }
+    if (!vpcm_info_frames_equal(expected_info, &info_rx)) {
+        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+        fprintf(stderr, "V.91 INFO round-trip mismatch for %s\n", label);
+        return false;
+    }
+    if (require_ack && !info_rx.acknowledge_info_frame) {
+        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+        fprintf(stderr, "V.91 INFO acknowledgement bit missing for %s\n", label);
+        return false;
+    }
+    vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+    return true;
+}
+
+static bool test_v91_bilateral_info_tracking(v91_law_t law_a, v91_law_t law_b)
+{
+    v91_state_t side_a;
+    v91_state_t side_b;
+    v91_info_frame_t info_a;
+    v91_info_frame_t info_b;
+
+    v91_init(&side_a, law_a, V91_MODE_TRANSPARENT);
+    v91_init(&side_b, law_b, V91_MODE_TRANSPARENT);
+    vpcm_log("Test: V.91 bilateral INFO tracking (%s -> %s)",
+             vpcm_law_to_str(law_a), vpcm_law_to_str(law_b));
+
+    memset(&info_a, 0, sizeof(info_a));
+    info_a.reserved_12_25 = 0x0155;
+    info_a.request_default_dil = true;
+    info_a.request_control_channel = false;
+    info_a.acknowledge_info_frame = false;
+    info_a.reserved_29_32 = 0x3;
+    info_a.max_tx_power = 7;
+    info_a.power_measured_after_digital_impairments = true;
+    info_a.tx_uses_alaw = (law_a == V91_LAW_ALAW);
+    info_a.request_transparent_mode = true;
+    info_a.cleardown_if_transparent_denied = true;
+
+    memset(&info_b, 0, sizeof(info_b));
+    info_b.reserved_12_25 = 0x02aa;
+    info_b.request_default_dil = false;
+    info_b.request_control_channel = true;
+    info_b.acknowledge_info_frame = true;
+    info_b.reserved_29_32 = 0xc;
+    info_b.max_tx_power = 21;
+    info_b.power_measured_after_digital_impairments = false;
+    info_b.tx_uses_alaw = (law_b == V91_LAW_ALAW);
+    info_b.request_transparent_mode = false;
+    info_b.cleardown_if_transparent_denied = false;
+
+    if (!run_v91_info_roundtrip_case(&side_a, &side_b, "A -> B INFO", &info_a, false))
+        return false;
+    if (!run_v91_info_roundtrip_case(&side_b, &side_a, "B -> A INFO", &info_b, true))
+        return false;
+
+    if (!side_a.last_tx_info_valid
+        || !side_a.last_rx_info_valid
+        || !vpcm_info_frames_equal(&info_a, &side_a.last_tx_info)
+        || !vpcm_info_frames_equal(&info_b, &side_a.last_rx_info)) {
+        fprintf(stderr, "V.91 bilateral tracking mismatch on side A\n");
+        return false;
+    }
+    if (!side_b.last_tx_info_valid
+        || !side_b.last_rx_info_valid
+        || !vpcm_info_frames_equal(&info_b, &side_b.last_tx_info)
+        || !vpcm_info_frames_equal(&info_a, &side_b.last_rx_info)) {
+        fprintf(stderr, "V.91 bilateral tracking mismatch on side B\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 bilateral INFO tracking (%s -> %s)",
+             vpcm_law_to_str(law_a), vpcm_law_to_str(law_b));
+    return true;
+}
+
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed)
 {
     int i;
@@ -550,14 +665,10 @@ static bool test_v91_startup_primitives(v91_law_t law)
     v91_state_t rx;
     uint8_t silence[V91_PHASE1_SILENCE_SYMBOLS];
     uint8_t ez[V91_EZ_SYMBOLS];
-    uint8_t info_buf[V91_INFO_SYMBOLS];
     uint8_t expected_silence;
     uint8_t expected_ez;
     v91_info_frame_t info_tx;
-    v91_info_frame_t info_rx;
-    v91_info_diag_t tx_diag;
-    v91_info_diag_t rx_diag;
-    char validate_reason[128];
+    uint32_t random_state;
     int i;
 
     v91_init(&tx, law, V91_MODE_TRANSPARENT);
@@ -603,53 +714,28 @@ static bool test_v91_startup_primitives(v91_law_t law)
     info_tx.request_transparent_mode = true;
     info_tx.cleardown_if_transparent_denied = true;
 
-    if (!v91_info_frame_validate(&info_tx, validate_reason, sizeof(validate_reason))) {
-        fprintf(stderr, "V.91 INFO validation failed: %s\n", validate_reason);
+    if (!run_v91_info_roundtrip_case(&tx, &rx, "INFO", &info_tx, false))
         return false;
-    }
-    if (!v91_info_build_diag(&tx, &info_tx, &tx_diag)) {
-        fprintf(stderr, "V.91 INFO TX diag build failed\n");
-        return false;
-    }
-    if (v91_tx_info_codewords(&tx, info_buf, (int) sizeof(info_buf), &info_tx) != V91_INFO_SYMBOLS) {
-        fprintf(stderr, "V.91 INFO length mismatch\n");
-        return false;
-    }
-    if (!v91_info_decode_diag(&rx, info_buf, (int) sizeof(info_buf), &rx_diag)) {
-        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
-        fprintf(stderr, "V.91 INFO decode failed\n");
-        return false;
-    }
-    info_rx = rx_diag.frame;
-    if (!vpcm_info_frames_equal(&info_tx, &info_rx)) {
-        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
-        fprintf(stderr, "V.91 INFO round-trip mismatch\n");
-        return false;
-    }
-    vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
 
     info_tx.acknowledge_info_frame = true;
-    if (!v91_info_build_diag(&tx, &info_tx, &tx_diag)) {
-        fprintf(stderr, "V.91 INFO' TX diag build failed\n");
+    if (!run_v91_info_roundtrip_case(&tx, &rx, "INFO'", &info_tx, true))
         return false;
-    }
-    if (v91_tx_info_codewords(&tx, info_buf, (int) sizeof(info_buf), &info_tx) != V91_INFO_SYMBOLS) {
-        fprintf(stderr, "V.91 INFO' length mismatch\n");
-        return false;
-    }
-    if (!v91_info_decode_diag(&rx, info_buf, (int) sizeof(info_buf), &rx_diag)) {
-        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
-        fprintf(stderr, "V.91 INFO' decode failed\n");
-        return false;
-    }
-    info_rx = rx_diag.frame;
-    if (!info_rx.acknowledge_info_frame) {
-        vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
-        fprintf(stderr, "V.91 INFO' acknowledgement bit missing\n");
-        return false;
-    }
 
-    vpcm_log_info_diag_compare(&tx_diag, &rx_diag);
+    random_state = 0x91C0DE00U ^ (uint32_t) law;
+    memset(&info_tx, 0, sizeof(info_tx));
+    info_tx.reserved_12_25 = (uint16_t) (prng_next(&random_state) & 0x3FFFU);
+    info_tx.request_default_dil = false;
+    info_tx.request_control_channel = true;
+    info_tx.acknowledge_info_frame = false;
+    info_tx.reserved_29_32 = (uint8_t) (prng_next(&random_state) & 0x0FU);
+    info_tx.max_tx_power = (uint8_t) (1 + (prng_next(&random_state) % 31U));
+    info_tx.power_measured_after_digital_impairments = false;
+    info_tx.tx_uses_alaw = (law == V91_LAW_ALAW);
+    info_tx.request_transparent_mode = false;
+    info_tx.cleardown_if_transparent_denied = false;
+    if (!run_v91_info_roundtrip_case(&tx, &rx, "INFO variant (non-default/random power)", &info_tx, false))
+        return false;
+
     vpcm_log("PASS: V.91 startup primitives over raw-G.711 (%s)", vpcm_law_to_str(law));
     return true;
 }
@@ -805,6 +891,8 @@ int main(void)
     if (!test_v91_startup_primitives(V91_LAW_ULAW))
         return 1;
     if (!test_v91_startup_primitives(V91_LAW_ALAW))
+        return 1;
+    if (!test_v91_bilateral_info_tracking(V91_LAW_ALAW, V91_LAW_ULAW))
         return 1;
     if (!test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW))
         return 1;
