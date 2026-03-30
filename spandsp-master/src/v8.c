@@ -1082,8 +1082,15 @@ static void handle_calling_modem_connect_tone(v8_state_t *s, int tone)
     span_log(&s->logging, SPAN_LOG_FLOW, "'%s' recognised\n", modem_connect_tone_to_str(tone));
     if (tone == MODEM_CONNECT_TONES_ANSAM
         ||
-        tone == MODEM_CONNECT_TONES_ANSAM_PR)
+        tone == MODEM_CONNECT_TONES_ANSAM_PR
+        ||
+        tone == MODEM_CONNECT_TONES_ANS
+        ||
+        tone == MODEM_CONNECT_TONES_ANS_PR)
     {
+        /* On some packet networks the 15Hz AM on ANSam can be stripped or
+           mangled while the 2100Hz/phase-reversal structure survives as ANS/ANS_PR.
+           Accept those tones as a compatibility fallback for V.8 startup. */
         /* Set the Te interval. The spec. says 500ms is the minimum,
            but gives reasons why 1 second is a better value (V.8/8.1.1). */
         s->state = V8_HEARD_ANSAM;

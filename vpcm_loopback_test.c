@@ -19,6 +19,9 @@
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/passthrough.h>
 #include <pjmedia/frame.h>
+#include <pjmedia/transport.h>
+#include <pjmedia/rtp.h>
+#include <pjmedia/stream.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -172,7 +175,9 @@ typedef struct {
     pjsua_conf_port_id call_conf_port;
     vpcm_pjsip_role_t role;
     pjmedia_port *stream_port;
+    pjmedia_transport *media_tp;
     bool stream_ready;
+    bool media_tp_ready;
     bool call_confirmed;
     bool call_disconnected;
     bool media_ready;
@@ -183,6 +188,108 @@ typedef struct {
 } vpcm_pjsip_runtime_t;
 
 static vpcm_pjsip_runtime_t g_vpcm_pjsip_runtime;
+
+typedef struct {
+    bool initialized;
+    bool failed;
+    bool completed;
+    bool v8_complete;
+    bool data_started;
+    bool data_mode_active;
+    bool drain_logged;
+    bool remote_data_logged;
+    v91_law_t law;
+    int packet_codewords_per_pull;
+    int packets_per_second;
+    int v91_codewords_per_packet;
+    int v8_negotiation_timeout_packets;
+    int post_v8_zero_preroll_packets;
+    int drain_packets;
+    int bytes_per_packet;
+    int total_packets;
+    int total_bytes;
+    int total_codewords;
+    int startup_tx_pkt;
+    int data_tx_pkt;
+    int v8_pkt_count;
+    int v8_restart_count;
+    int v8_rx_packets;
+    int v8_rx_bytes;
+    int tx_len;
+    int rx_len;
+    int rx_codewords;
+    int drain_seen_packets;
+    int last_v8_status;
+    int startup_timeout_packets;
+    int startup_pkt_count;
+    int startup_rx_stage;
+    int startup_remote_rx_len;
+    int startup_local_tx_len;
+    int startup_local_tx_pos;
+    int startup_remote_total_len;
+    int startup_stage_offsets[8];
+    int startup_stage_lengths[8];
+    uint8_t idle_codeword;
+    uint64_t bit_errors;
+    uint64_t bits_checked;
+    uint8_t last_rx_pcm_sample[6];
+    uint8_t last_rx_decoded_sample[6];
+    uint8_t last_expected_sample[6];
+    bool have_last_rx_pcm;
+    bool have_last_rx_decoded;
+    uint8_t *tx_data;
+    uint8_t *expected_rx;
+    uint8_t *rx_data;
+    uint8_t *tx_codeword_stream;
+    uint8_t *startup_local_stream;
+    uint8_t *startup_remote_stream;
+    uint8_t *startup_remote_rx_stream;
+    vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t cp_ack;
+    vpcm_cp_frame_t expected_remote_cp;
+    v91_dil_desc_t default_dil;
+    v91_state_t tx_state;
+    v91_state_t rx_state;
+    v8_parms_t v8_parms;
+    v8_state_t *v8_state;
+    vpcm_v8_result_t v8_result;
+} vpcm_pjsip_modem_state_t;
+
+static vpcm_pjsip_modem_state_t g_vpcm_pjsip_modem;
+static pj_mutex_t *g_vpcm_pjsip_modem_lock;
+static pj_pool_t *g_vpcm_pjsip_modem_pool;
+
+typedef struct {
+    pjmedia_port base;
+    pj_pool_t *pool;
+    unsigned payload_samples_per_frame;
+    uint8_t tx_payload[320];
+    uint8_t tx_ext_buf[1024];
+} vpcm_pjsip_passthrough_port_t;
+
+typedef enum {
+    VPCM_STARTUP_STAGE_PHASE1 = 0,
+    VPCM_STARTUP_STAGE_EZ = 1,
+    VPCM_STARTUP_STAGE_INFO = 2,
+    VPCM_STARTUP_STAGE_STARTUP_DIL = 3,
+    VPCM_STARTUP_STAGE_SCR = 4,
+    VPCM_STARTUP_STAGE_CP = 5,
+    VPCM_STARTUP_STAGE_ES = 6,
+    VPCM_STARTUP_STAGE_B1 = 7,
+    VPCM_STARTUP_STAGE_COUNT = 8
+} vpcm_startup_stage_t;
+
+typedef struct {
+    pjmedia_transport base;
+    pj_pool_t *pool;
+    pjmedia_transport *slave_tp;
+    pj_bool_t del_base;
+    void *stream_user_data;
+    void *stream_ref;
+    void (*stream_rtp_cb)(void *user_data, void *pkt, pj_ssize_t size);
+    void (*stream_rtp_cb2)(pjmedia_tp_cb_param *param);
+    void (*stream_rtcp_cb)(void *user_data, void *pkt, pj_ssize_t size);
+} vpcm_tp_adapter_t;
 
 static void vpcm_log(const char *fmt, ...);
 static void vpcm_log_e2e_phase(const char *phase, const char *fmt, ...);
@@ -223,6 +330,19 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
 static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role);
 static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env);
 static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_t seed);
+static pjmedia_transport *vpcm_pjsip_on_create_media_transport(pjsua_call_id call_id,
+                                                               unsigned media_idx,
+                                                               pjmedia_transport *base_tp,
+                                                               unsigned flags);
+static void vpcm_pjsip_modem_reset(void);
+static void vpcm_pjsip_modem_cleanup(void);
+static bool vpcm_pjsip_modem_prepare(v91_law_t law, int data_seconds, uint32_t seed,
+                                     int packet_codewords_per_pull);
+static void vpcm_pjsip_modem_handle_rtp_rx_payload(const uint8_t *payload, int payload_len);
+static void vpcm_pjsip_modem_fill_rtp_tx_payload(uint8_t *payload, int payload_len);
+static pj_status_t vpcm_pjsip_passthrough_port_create(const pjmedia_port *source_port,
+                                                      unsigned payload_samples_per_frame,
+                                                      pjmedia_port **p_port);
 
 static void vpcm_handle_sigint(int sig)
 {
@@ -292,6 +412,20 @@ static const char *vpcm_path_mode_to_str(vpcm_path_mode_t mode)
 static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role)
 {
     return (role == VPCM_PJSIP_ROLE_ANSWERER) ? "answerer" : "caller";
+}
+
+static const char *vpcm_pjsip_inv_state_to_str(pjsip_inv_state state)
+{
+    switch (state) {
+    case PJSIP_INV_STATE_NULL: return "NULL";
+    case PJSIP_INV_STATE_CALLING: return "CALLING";
+    case PJSIP_INV_STATE_INCOMING: return "INCOMING";
+    case PJSIP_INV_STATE_EARLY: return "EARLY";
+    case PJSIP_INV_STATE_CONNECTING: return "CONNECTING";
+    case PJSIP_INV_STATE_CONFIRMED: return "CONFIRMED";
+    case PJSIP_INV_STATE_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+    }
 }
 
 static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env)
@@ -399,6 +533,273 @@ static pj_status_t vpcm_pjsip_register_g711_passthrough(v91_law_t law)
 #endif
 }
 
+static pj_status_t vpcm_tp_get_info(pjmedia_transport *tp, pjmedia_transport_info *info)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_get_info(adapter->slave_tp, info);
+}
+
+static void vpcm_tp_rtcp_cb(void *user_data, void *pkt, pj_ssize_t size)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) user_data;
+    if (adapter->stream_rtcp_cb)
+        adapter->stream_rtcp_cb(adapter->stream_user_data, pkt, size);
+}
+
+static void vpcm_tp_rtp_cb2(pjmedia_tp_cb_param *param)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) param->user_data;
+    const pjmedia_rtp_hdr *hdr = NULL;
+    pjmedia_rtp_dec_hdr dec_hdr;
+    const void *payload = NULL;
+    unsigned payload_len = 0;
+
+    if (param->pkt && param->size > 0
+        && pjmedia_rtp_decode_rtp2(NULL,
+                                   param->pkt,
+                                   (int) param->size,
+                                   &hdr,
+                                   &dec_hdr,
+                                   &payload,
+                                   &payload_len) == PJ_SUCCESS) {
+        pj_uint8_t pt = (pj_uint8_t) (hdr->pt & 0x7F);
+        if ((pt == 0 || pt == 8) && payload && payload_len > 0)
+            vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) payload, (int) payload_len);
+    }
+
+    if (adapter->stream_rtp_cb2) {
+        pjmedia_tp_cb_param cbparam;
+        pj_memcpy(&cbparam, param, sizeof(cbparam));
+        cbparam.user_data = adapter->stream_user_data;
+        adapter->stream_rtp_cb2(&cbparam);
+    } else if (adapter->stream_rtp_cb) {
+        adapter->stream_rtp_cb(adapter->stream_user_data, param->pkt, param->size);
+    }
+}
+
+static pj_status_t vpcm_tp_attach2(pjmedia_transport *tp,
+                                   pjmedia_transport_attach_param *att_param)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    pj_status_t st;
+
+    adapter->stream_user_data = att_param->user_data;
+    adapter->stream_ref = att_param->stream;
+    adapter->stream_rtp_cb = att_param->rtp_cb;
+    adapter->stream_rtp_cb2 = att_param->rtp_cb2;
+    adapter->stream_rtcp_cb = att_param->rtcp_cb;
+
+    att_param->rtp_cb2 = &vpcm_tp_rtp_cb2;
+    att_param->rtp_cb = NULL;
+    att_param->rtcp_cb = &vpcm_tp_rtcp_cb;
+    att_param->user_data = adapter;
+
+    st = pjmedia_transport_attach2(adapter->slave_tp, att_param);
+    if (st != PJ_SUCCESS) {
+        adapter->stream_user_data = NULL;
+        adapter->stream_ref = NULL;
+        adapter->stream_rtp_cb = NULL;
+        adapter->stream_rtp_cb2 = NULL;
+        adapter->stream_rtcp_cb = NULL;
+    }
+    return st;
+}
+
+static void vpcm_tp_detach(pjmedia_transport *tp, void *strm)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    PJ_UNUSED_ARG(strm);
+    if (adapter->stream_user_data != NULL)
+        pjmedia_transport_detach(adapter->slave_tp, adapter);
+    adapter->stream_user_data = NULL;
+    adapter->stream_ref = NULL;
+    adapter->stream_rtp_cb = NULL;
+    adapter->stream_rtp_cb2 = NULL;
+    adapter->stream_rtcp_cb = NULL;
+}
+
+static pj_status_t vpcm_tp_send_rtp(pjmedia_transport *tp, const void *pkt, pj_size_t size)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    const pjmedia_rtp_hdr *hdr = NULL;
+    pjmedia_rtp_dec_hdr dec_hdr;
+    const void *payload = NULL;
+    unsigned payload_len = 0;
+
+    if (pkt && size > 0
+        && pjmedia_rtp_decode_rtp2(NULL,
+                                   pkt,
+                                   (int) size,
+                                   &hdr,
+                                   &dec_hdr,
+                                   &payload,
+                                   &payload_len) == PJ_SUCCESS) {
+        pj_uint8_t pt = (pj_uint8_t) (hdr->pt & 0x7F);
+        if ((pt == 0 || pt == 8) && payload && payload_len > 0) {
+            pj_uint8_t *mutable_payload = (pj_uint8_t *) payload;
+            vpcm_pjsip_modem_fill_rtp_tx_payload(mutable_payload, (int) payload_len);
+        }
+    }
+
+    return pjmedia_transport_send_rtp(adapter->slave_tp, pkt, size);
+}
+
+static pj_status_t vpcm_tp_send_rtcp(pjmedia_transport *tp, const void *pkt, pj_size_t size)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_send_rtcp(adapter->slave_tp, pkt, size);
+}
+
+static pj_status_t vpcm_tp_send_rtcp2(pjmedia_transport *tp,
+                                      const pj_sockaddr_t *addr,
+                                      unsigned addr_len,
+                                      const void *pkt,
+                                      pj_size_t size)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_send_rtcp2(adapter->slave_tp, addr, addr_len, pkt, size);
+}
+
+static pj_status_t vpcm_tp_media_create(pjmedia_transport *tp,
+                                        pj_pool_t *sdp_pool,
+                                        unsigned options,
+                                        const pjmedia_sdp_session *rem_sdp,
+                                        unsigned media_index)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_media_create(adapter->slave_tp,
+                                          sdp_pool,
+                                          options,
+                                          rem_sdp,
+                                          media_index);
+}
+
+static pj_status_t vpcm_tp_encode_sdp(pjmedia_transport *tp,
+                                      pj_pool_t *sdp_pool,
+                                      pjmedia_sdp_session *local_sdp,
+                                      const pjmedia_sdp_session *rem_sdp,
+                                      unsigned media_index)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_encode_sdp(adapter->slave_tp,
+                                        sdp_pool,
+                                        local_sdp,
+                                        rem_sdp,
+                                        media_index);
+}
+
+static pj_status_t vpcm_tp_media_start(pjmedia_transport *tp,
+                                       pj_pool_t *pool,
+                                       const pjmedia_sdp_session *local_sdp,
+                                       const pjmedia_sdp_session *rem_sdp,
+                                       unsigned media_index)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_media_start(adapter->slave_tp,
+                                         pool,
+                                         local_sdp,
+                                         rem_sdp,
+                                         media_index);
+}
+
+static pj_status_t vpcm_tp_media_stop(pjmedia_transport *tp)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_media_stop(adapter->slave_tp);
+}
+
+static pj_status_t vpcm_tp_simulate_lost(pjmedia_transport *tp,
+                                         pjmedia_dir dir,
+                                         unsigned pct_lost)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    return pjmedia_transport_simulate_lost(adapter->slave_tp, dir, pct_lost);
+}
+
+static pj_status_t vpcm_tp_destroy(pjmedia_transport *tp)
+{
+    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
+    if (adapter->del_base && adapter->slave_tp)
+        pjmedia_transport_close(adapter->slave_tp);
+    if (adapter->pool)
+        pj_pool_release(adapter->pool);
+    return PJ_SUCCESS;
+}
+
+static struct pjmedia_transport_op vpcm_tp_adapter_op = {
+    &vpcm_tp_get_info,
+    NULL,
+    &vpcm_tp_detach,
+    &vpcm_tp_send_rtp,
+    &vpcm_tp_send_rtcp,
+    &vpcm_tp_send_rtcp2,
+    &vpcm_tp_media_create,
+    &vpcm_tp_encode_sdp,
+    &vpcm_tp_media_start,
+    &vpcm_tp_media_stop,
+    &vpcm_tp_simulate_lost,
+    &vpcm_tp_destroy,
+    &vpcm_tp_attach2
+};
+
+static pj_status_t vpcm_tp_adapter_create(pjmedia_transport *base_tp,
+                                          pj_bool_t del_base,
+                                          pjmedia_transport **p_tp)
+{
+    pjmedia_endpt *endpt = pjsua_get_pjmedia_endpt();
+    pj_pool_t *pool;
+    vpcm_tp_adapter_t *adapter;
+
+    if (!endpt || !base_tp || !p_tp)
+        return PJ_EINVAL;
+
+    pool = pjmedia_endpt_create_pool(endpt, "vpcm-tp", 1024, 1024);
+    if (!pool)
+        return PJ_ENOMEM;
+
+    adapter = PJ_POOL_ZALLOC_T(pool, vpcm_tp_adapter_t);
+    adapter->pool = pool;
+    adapter->slave_tp = base_tp;
+    adapter->del_base = del_base;
+    pj_ansi_strxcpy(adapter->base.name, pool->obj_name, sizeof(adapter->base.name));
+    adapter->base.type = (pjmedia_transport_type) (PJMEDIA_TRANSPORT_TYPE_USER + 7);
+    adapter->base.op = &vpcm_tp_adapter_op;
+    if (base_tp->grp_lock) {
+        adapter->base.grp_lock = base_tp->grp_lock;
+        pj_grp_lock_add_ref(adapter->base.grp_lock);
+    }
+    *p_tp = &adapter->base;
+    return PJ_SUCCESS;
+}
+
+static pjmedia_transport *__attribute__((unused))
+vpcm_pjsip_on_create_media_transport(pjsua_call_id call_id,
+                                     unsigned media_idx,
+                                     pjmedia_transport *base_tp,
+                                     unsigned flags)
+{
+    pjmedia_transport *tp = base_tp;
+    pj_status_t st;
+
+    PJ_UNUSED_ARG(flags);
+
+    if (media_idx != 0 || !base_tp)
+        return base_tp;
+    if (g_vpcm_pjsip_runtime.call_id != PJSUA_INVALID_ID
+        && call_id != g_vpcm_pjsip_runtime.call_id)
+        return base_tp;
+
+    st = vpcm_tp_adapter_create(base_tp, PJ_FALSE, &tp);
+    if (st != PJ_SUCCESS) {
+        vpcm_log("PJSIP media transport adapter create failed: status=%d", st);
+        return base_tp;
+    }
+
+    g_vpcm_pjsip_runtime.media_tp = tp;
+    g_vpcm_pjsip_runtime.media_tp_ready = true;
+    return tp;
+}
+
 static void vpcm_pjsip_on_call_state(pjsua_call_id call_id, pjsip_event *e)
 {
     pjsua_call_info ci;
@@ -408,6 +809,10 @@ static void vpcm_pjsip_on_call_state(pjsua_call_id call_id, pjsip_event *e)
     st = pjsua_call_get_info(call_id, &ci);
     if (st != PJ_SUCCESS)
         return;
+    vpcm_log("PJSIP call state: call_id=%d state=%s status=%d",
+             call_id,
+             vpcm_pjsip_inv_state_to_str(ci.state),
+             ci.last_status);
     if (ci.state == PJSIP_INV_STATE_CONFIRMED)
         g_vpcm_pjsip_runtime.call_confirmed = true;
     if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
@@ -458,17 +863,131 @@ static void vpcm_pjsip_on_incoming_call(pjsua_acc_id acc_id,
     }
 }
 
+static pj_status_t vpcm_pjsip_passthrough_put_frame(pjmedia_port *this_port,
+                                                    pjmedia_frame *frame)
+{
+    pjmedia_frame_ext *ext;
+    unsigned i;
+
+    PJ_UNUSED_ARG(this_port);
+    if (!frame || !frame->buf || frame->size == 0)
+        return PJ_SUCCESS;
+
+    if (frame->type == PJMEDIA_FRAME_TYPE_EXTENDED) {
+        ext = (pjmedia_frame_ext *) frame->buf;
+        for (i = 0; i < ext->subframe_cnt; i++) {
+            pjmedia_frame_ext_subframe *sf = pjmedia_frame_ext_get_subframe(ext, i);
+            unsigned sf_bytes;
+            if (!sf)
+                continue;
+            sf_bytes = ((unsigned) sf->bitlen + 7U) >> 3;
+            if (sf_bytes > 0)
+                vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) sf->data, (int) sf_bytes);
+        }
+    } else if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO) {
+        vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) frame->buf, (int) frame->size);
+    }
+    return PJ_SUCCESS;
+}
+
+static pj_status_t vpcm_pjsip_passthrough_get_frame(pjmedia_port *this_port,
+                                                    pjmedia_frame *frame)
+{
+    vpcm_pjsip_passthrough_port_t *port = (vpcm_pjsip_passthrough_port_t *) this_port;
+    pjmedia_frame_ext *tx_ext;
+
+    if (!port || !frame)
+        return PJ_EINVAL;
+
+    vpcm_pjsip_modem_fill_rtp_tx_payload(port->tx_payload, (int) port->payload_samples_per_frame);
+
+    memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
+    tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
+    tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
+    tx_ext->base.buf = port->tx_ext_buf;
+    tx_ext->base.size = sizeof(port->tx_ext_buf);
+    pjmedia_frame_ext_append_subframe(tx_ext,
+                                      port->tx_payload,
+                                      port->payload_samples_per_frame * 8U,
+                                      port->payload_samples_per_frame);
+
+    frame->type = PJMEDIA_FRAME_TYPE_EXTENDED;
+    frame->buf = tx_ext;
+    frame->size = sizeof(port->tx_ext_buf);
+    return PJ_SUCCESS;
+}
+
+static pj_status_t vpcm_pjsip_passthrough_on_destroy(pjmedia_port *this_port)
+{
+    vpcm_pjsip_passthrough_port_t *port = (vpcm_pjsip_passthrough_port_t *) this_port;
+    if (port && port->pool)
+        pj_pool_release(port->pool);
+    return PJ_SUCCESS;
+}
+
+static pj_status_t vpcm_pjsip_passthrough_port_create(const pjmedia_port *source_port,
+                                                      unsigned payload_samples_per_frame,
+                                                      pjmedia_port **p_port)
+{
+    pjmedia_endpt *endpt = pjsua_get_pjmedia_endpt();
+    pj_pool_t *pool;
+    vpcm_pjsip_passthrough_port_t *port;
+
+    if (!source_port || !p_port || !endpt)
+        return PJ_EINVAL;
+    if (payload_samples_per_frame == 0 || payload_samples_per_frame > 320)
+        return PJ_EINVAL;
+
+    pool = pjmedia_endpt_create_pool(endpt, "vpcm-pass-port", 1024, 1024);
+    if (!pool)
+        return PJ_ENOMEM;
+
+    port = PJ_POOL_ZALLOC_T(pool, vpcm_pjsip_passthrough_port_t);
+    port->pool = pool;
+    port->payload_samples_per_frame = payload_samples_per_frame;
+    port->base.info = source_port->info;
+    port->base.put_frame = &vpcm_pjsip_passthrough_put_frame;
+    port->base.get_frame = &vpcm_pjsip_passthrough_get_frame;
+    port->base.on_destroy = &vpcm_pjsip_passthrough_on_destroy;
+    *p_port = &port->base;
+    return PJ_SUCCESS;
+}
+
 static void vpcm_pjsip_on_stream_created2(pjsua_call_id call_id,
                                           pjsua_on_stream_created_param *param)
 {
+    pjmedia_port *pass_port = NULL;
+    unsigned payload_samples_per_frame = 160;
+
     if (!param)
         return;
     if (call_id != g_vpcm_pjsip_runtime.call_id)
         return;
     if (param->stream_idx != 0)
         return;
+
+    if (param->port
+        && param->port->info.fmt.type == PJMEDIA_TYPE_AUDIO
+        && param->port->info.fmt.detail_type == PJMEDIA_FORMAT_DETAIL_AUDIO
+        && PJMEDIA_PIA_SPF(&param->port->info) > 0
+        && PJMEDIA_PIA_SPF(&param->port->info) <= 320) {
+        payload_samples_per_frame = PJMEDIA_PIA_SPF(&param->port->info);
+    }
+
+    if (param->port
+        && vpcm_pjsip_passthrough_port_create(param->port,
+                                              payload_samples_per_frame,
+                                              &pass_port) == PJ_SUCCESS) {
+        param->port = pass_port;
+        param->destroy_port = PJ_TRUE;
+    }
+
     g_vpcm_pjsip_runtime.stream_port = param->port;
     g_vpcm_pjsip_runtime.stream_ready = (param->port != NULL);
+    if (param->stream) {
+        g_vpcm_pjsip_runtime.media_tp = pjmedia_stream_get_transport(param->stream);
+        g_vpcm_pjsip_runtime.media_tp_ready = (g_vpcm_pjsip_runtime.media_tp != NULL);
+    }
     vpcm_log("PJSIP stream created: call_id=%d stream_idx=%u stream_port=%s",
              call_id,
              param->stream_idx,
@@ -4075,9 +4594,17 @@ static void init_v8_parms(v8_parms_t *parms,
                           int modulations,
                           int pcm_availability)
 {
+    int answer_tone;
+
     memset(parms, 0, sizeof(*parms));
+    answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
+    if (g_vpcm_transport_backend == VPCM_TRANSPORT_PJ_SIP) {
+        /* On packetized SIP paths ANSam AM is frequently mangled/stripped.
+           Prefer ANS/PR for robust in-call V.8 startup detection. */
+        answer_tone = MODEM_CONNECT_TONES_ANS_PR;
+    }
     parms->modem_connect_tone = calling_party ? MODEM_CONNECT_TONES_NONE
-                                              : MODEM_CONNECT_TONES_ANSAM;
+                                              : answer_tone;
     parms->send_ci = calling_party;
     parms->v92 = -1;
     parms->jm_cm.call_function = V8_CALL_V_SERIES;
@@ -4931,270 +5458,879 @@ static bool run_vpcm_primitive_suite(void)
         && test_v91_full_duplex(V91_LAW_ALAW);
 }
 
-static int vpcm_pjsip_decode_rx_frame(v91_state_t *rx_state,
-                                      const pjmedia_frame *frame,
-                                      uint8_t *rx_bytes,
-                                      int rx_cap,
-                                      int *rx_len,
-                                      int *rx_codewords)
+static int vpcm_decode_rx_codewords(v91_state_t *rx_state,
+                                    const uint8_t *codewords,
+                                    int codeword_len,
+                                    uint8_t *rx_bytes,
+                                    int rx_cap,
+                                    int *rx_len,
+                                    int *rx_codewords,
+                                    int max_codewords_per_pull)
 {
     uint8_t decoded[512];
+    int cw_len;
+    int decoded_cap;
     int consumed;
 
-    if (!frame || !rx_state || !rx_bytes || !rx_len || !rx_codewords)
+    if (!rx_state || !codewords || !rx_bytes || !rx_len || !rx_codewords)
         return 0;
-    if (*rx_len >= rx_cap)
+    if (codeword_len <= 0 || *rx_len >= rx_cap)
         return 0;
+    cw_len = codeword_len;
+    if (max_codewords_per_pull > 0 && cw_len > max_codewords_per_pull)
+        cw_len = max_codewords_per_pull;
+    cw_len -= (cw_len % VPCM_CP_FRAME_INTERVALS);
+    if (cw_len <= 0)
+        return 0;
+    decoded_cap = (int) sizeof(decoded);
+    if (decoded_cap > (rx_cap - *rx_len))
+        decoded_cap = rx_cap - *rx_len;
+    if (decoded_cap <= 0)
+        return 0;
+    consumed = v91_rx_codewords(rx_state, decoded, decoded_cap, codewords, cw_len);
+    if (consumed > 0) {
+        memcpy(rx_bytes + *rx_len, decoded, (size_t) consumed);
+        *rx_len += consumed;
+    }
+    *rx_codewords += cw_len;
+    return consumed;
+}
 
-    if (frame->type == PJMEDIA_FRAME_TYPE_EXTENDED) {
-        const pjmedia_frame_ext *ext = (const pjmedia_frame_ext *) frame;
-        unsigned i;
+static void vpcm_g711_payload_to_linear(const uint8_t *payload,
+                                        int payload_len,
+                                        v91_law_t law,
+                                        int16_t *linear)
+{
+    int i;
 
-        for (i = 0; i < ext->subframe_cnt; i++) {
-            const pjmedia_frame_ext_subframe *sf;
-            int sf_len;
-            int decoded_cap;
+    if (!payload || !linear || payload_len <= 0)
+        return;
+    for (i = 0; i < payload_len; i++) {
+        if (law == V91_LAW_ALAW)
+            linear[i] = alaw_to_linear(payload[i]);
+        else
+            linear[i] = ulaw_to_linear(payload[i]);
+    }
+}
 
-            sf = pjmedia_frame_ext_get_subframe(ext, i);
-            if (!sf)
-                continue;
-            sf_len = (int) ((sf->bitlen + 7U) >> 3);
-            if (sf_len <= 0)
-                continue;
-            decoded_cap = (int) sizeof(decoded);
-            if (decoded_cap > (rx_cap - *rx_len))
-                decoded_cap = rx_cap - *rx_len;
-            if (decoded_cap <= 0)
-                break;
-            consumed = v91_rx_codewords(rx_state, decoded, decoded_cap, sf->data, sf_len);
-            if (consumed > 0) {
-                memcpy(rx_bytes + *rx_len, decoded, (size_t) consumed);
-                *rx_len += consumed;
+static void vpcm_linear_to_g711_payload(const int16_t *linear,
+                                        int linear_len,
+                                        v91_law_t law,
+                                        uint8_t *payload)
+{
+    int i;
+
+    if (!linear || !payload || linear_len <= 0)
+        return;
+    for (i = 0; i < linear_len; i++) {
+        if (law == V91_LAW_ALAW)
+            payload[i] = linear_to_alaw(linear[i]);
+        else
+            payload[i] = linear_to_ulaw(linear[i]);
+    }
+}
+
+static void vpcm_pjsip_modem_reset(void)
+{
+    memset(&g_vpcm_pjsip_modem, 0, sizeof(g_vpcm_pjsip_modem));
+}
+
+static void vpcm_pjsip_modem_cleanup(void)
+{
+    if (g_vpcm_pjsip_modem.v8_state)
+        v8_free(g_vpcm_pjsip_modem.v8_state);
+    g_vpcm_pjsip_modem.v8_state = NULL;
+    free(g_vpcm_pjsip_modem.tx_data);
+    free(g_vpcm_pjsip_modem.expected_rx);
+    free(g_vpcm_pjsip_modem.rx_data);
+    free(g_vpcm_pjsip_modem.tx_codeword_stream);
+    free(g_vpcm_pjsip_modem.startup_local_stream);
+    free(g_vpcm_pjsip_modem.startup_remote_stream);
+    free(g_vpcm_pjsip_modem.startup_remote_rx_stream);
+    g_vpcm_pjsip_modem.tx_data = NULL;
+    g_vpcm_pjsip_modem.expected_rx = NULL;
+    g_vpcm_pjsip_modem.rx_data = NULL;
+    g_vpcm_pjsip_modem.tx_codeword_stream = NULL;
+    g_vpcm_pjsip_modem.startup_local_stream = NULL;
+    g_vpcm_pjsip_modem.startup_remote_stream = NULL;
+    g_vpcm_pjsip_modem.startup_remote_rx_stream = NULL;
+    g_vpcm_pjsip_modem.initialized = false;
+}
+
+static bool vpcm_pjsip_build_startup_sequences(v91_law_t law)
+{
+    enum { VPCM_STARTUP_MAX_CODEWORDS = 8192 };
+    v91_state_t caller;
+    v91_state_t answerer;
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    v91_info_frame_t info_rx;
+    uint8_t caller_stream[VPCM_STARTUP_MAX_CODEWORDS];
+    uint8_t answerer_stream[VPCM_STARTUP_MAX_CODEWORDS];
+    uint8_t buf[2048];
+    int caller_len;
+    int answerer_len;
+    int len;
+    int cp_offer_len;
+    int cp_ack_len;
+    int caller_startup_len;
+    int answerer_startup_len;
+    int i;
+    int caller_stage_len[VPCM_STARTUP_STAGE_COUNT];
+    int answerer_stage_len[VPCM_STARTUP_STAGE_COUNT];
+    int *remote_stage_len;
+    vpcm_cp_frame_t cp_offer;
+    vpcm_cp_frame_t cp_rx;
+    bool is_caller;
+
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    v91_default_dil_init(&g_vpcm_pjsip_modem.default_dil);
+
+    memset(&caller_info, 0, sizeof(caller_info));
+    caller_info.request_default_dil = true;
+    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    caller_info.power_measured_after_digital_impairments = true;
+    memset(&answerer_info, 0, sizeof(answerer_info));
+    answerer_info.request_default_dil = true;
+    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    answerer_info.power_measured_after_digital_impairments = true;
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, vpcm_cp_recommended_robbed_bit_drn(), false);
+    cp_offer.acknowledge = false;
+    g_vpcm_pjsip_modem.cp_ack = cp_offer;
+    g_vpcm_pjsip_modem.cp_ack.acknowledge = true;
+    g_vpcm_pjsip_modem.expected_remote_cp = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER)
+        ? g_vpcm_pjsip_modem.cp_ack
+        : cp_offer;
+
+    caller_len = 0;
+    answerer_len = 0;
+    for (i = 0; i < VPCM_STARTUP_STAGE_COUNT; i++)
+        caller_stage_len[i] = answerer_stage_len[i] = 0;
+
+    len = v91_tx_phase1_silence_codewords(&caller, buf, (int) sizeof(buf));
+    if (len != V91_PHASE1_SILENCE_SYMBOLS)
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_phase1_silence_codewords(&answerer, buf, (int) sizeof(buf));
+    if (len != V91_PHASE1_SILENCE_SYMBOLS)
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_PHASE1] = V91_PHASE1_SILENCE_SYMBOLS;
+    answerer_stage_len[VPCM_STARTUP_STAGE_PHASE1] = V91_PHASE1_SILENCE_SYMBOLS;
+
+    len = v91_tx_ez_codewords(&caller, buf, (int) sizeof(buf));
+    if (len != V91_EZ_SYMBOLS)
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_ez_codewords(&answerer, buf, (int) sizeof(buf));
+    if (len != V91_EZ_SYMBOLS)
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_EZ] = V91_EZ_SYMBOLS;
+    answerer_stage_len[VPCM_STARTUP_STAGE_EZ] = V91_EZ_SYMBOLS;
+
+    len = v91_tx_info_codewords(&caller, buf, (int) sizeof(buf), &caller_info);
+    if (len != V91_INFO_SYMBOLS || !v91_rx_info_codewords(&answerer, buf, len, &info_rx))
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_info_codewords(&answerer, buf, (int) sizeof(buf), &answerer_info);
+    if (len != V91_INFO_SYMBOLS || !v91_rx_info_codewords(&caller, buf, len, &info_rx))
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_INFO] = V91_INFO_SYMBOLS;
+    answerer_stage_len[VPCM_STARTUP_STAGE_INFO] = V91_INFO_SYMBOLS;
+
+    len = v91_tx_startup_dil_sequence_codewords(&caller,
+                                                buf,
+                                                (int) sizeof(buf),
+                                                &g_vpcm_pjsip_modem.default_dil,
+                                                NULL);
+    if (len <= 0)
+        return false;
+    caller_startup_len = len;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_startup_dil_sequence_codewords(&answerer,
+                                                buf,
+                                                (int) sizeof(buf),
+                                                &g_vpcm_pjsip_modem.default_dil,
+                                                NULL);
+    if (len <= 0)
+        return false;
+    answerer_startup_len = len;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_STARTUP_DIL] = caller_startup_len;
+    answerer_stage_len[VPCM_STARTUP_STAGE_STARTUP_DIL] = answerer_startup_len;
+
+    len = v91_tx_scr_codewords(&caller, buf, (int) sizeof(buf), 18);
+    if (len != 18 || !v91_rx_scr_codewords(&answerer, buf, len, false))
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_scr_codewords(&answerer, buf, (int) sizeof(buf), 18);
+    if (len != 18 || !v91_rx_scr_codewords(&caller, buf, len, false))
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_SCR] = 18;
+    answerer_stage_len[VPCM_STARTUP_STAGE_SCR] = 18;
+
+    cp_offer_len = v91_tx_cp_codewords(&caller, buf, (int) sizeof(buf), &cp_offer, true);
+    if (cp_offer_len <= 0 || !v91_rx_cp_codewords(&answerer, buf, cp_offer_len, &cp_rx, true))
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) cp_offer_len);
+    caller_len += cp_offer_len;
+    cp_ack_len = v91_tx_cp_codewords(&answerer, buf, (int) sizeof(buf), &g_vpcm_pjsip_modem.cp_ack, true);
+    if (cp_ack_len <= 0 || !v91_rx_cp_codewords(&caller, buf, cp_ack_len, &cp_rx, true))
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) cp_ack_len);
+    answerer_len += cp_ack_len;
+
+    caller_stage_len[VPCM_STARTUP_STAGE_CP] = cp_offer_len;
+    answerer_stage_len[VPCM_STARTUP_STAGE_CP] = cp_ack_len;
+
+    len = v91_tx_es_codewords(&caller, buf, (int) sizeof(buf));
+    if (len != V91_ES_SYMBOLS || !v91_rx_es_codewords(&answerer, buf, len, true))
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_es_codewords(&answerer, buf, (int) sizeof(buf));
+    if (len != V91_ES_SYMBOLS || !v91_rx_es_codewords(&caller, buf, len, true))
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_ES] = V91_ES_SYMBOLS;
+    answerer_stage_len[VPCM_STARTUP_STAGE_ES] = V91_ES_SYMBOLS;
+
+    len = v91_tx_b1_codewords(&caller, buf, (int) sizeof(buf), &g_vpcm_pjsip_modem.cp_ack);
+    if (len != V91_B1_SYMBOLS || !v91_rx_b1_codewords(&answerer, buf, len, &g_vpcm_pjsip_modem.cp_ack))
+        return false;
+    memcpy(caller_stream + caller_len, buf, (size_t) len);
+    caller_len += len;
+    len = v91_tx_b1_codewords(&answerer, buf, (int) sizeof(buf), &g_vpcm_pjsip_modem.cp_ack);
+    if (len != V91_B1_SYMBOLS || !v91_rx_b1_codewords(&caller, buf, len, &g_vpcm_pjsip_modem.cp_ack))
+        return false;
+    memcpy(answerer_stream + answerer_len, buf, (size_t) len);
+    answerer_len += len;
+    caller_stage_len[VPCM_STARTUP_STAGE_B1] = V91_B1_SYMBOLS;
+    answerer_stage_len[VPCM_STARTUP_STAGE_B1] = V91_B1_SYMBOLS;
+
+    is_caller = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER);
+    remote_stage_len = is_caller ? answerer_stage_len : caller_stage_len;
+    for (i = 0; i < VPCM_STARTUP_STAGE_COUNT; i++)
+        g_vpcm_pjsip_modem.startup_stage_lengths[i] = remote_stage_len[i];
+    g_vpcm_pjsip_modem.startup_stage_offsets[0] = 0;
+    for (i = 1; i < VPCM_STARTUP_STAGE_COUNT; i++) {
+        g_vpcm_pjsip_modem.startup_stage_offsets[i] =
+            g_vpcm_pjsip_modem.startup_stage_offsets[i - 1]
+            + g_vpcm_pjsip_modem.startup_stage_lengths[i - 1];
+    }
+
+    g_vpcm_pjsip_modem.startup_local_tx_len = is_caller ? caller_len : answerer_len;
+    g_vpcm_pjsip_modem.startup_remote_total_len = is_caller ? answerer_len : caller_len;
+    g_vpcm_pjsip_modem.startup_local_stream = (uint8_t *) malloc((size_t) g_vpcm_pjsip_modem.startup_local_tx_len);
+    g_vpcm_pjsip_modem.startup_remote_stream = (uint8_t *) malloc((size_t) g_vpcm_pjsip_modem.startup_remote_total_len);
+    g_vpcm_pjsip_modem.startup_remote_rx_stream = (uint8_t *) malloc((size_t) g_vpcm_pjsip_modem.startup_remote_total_len);
+    if (!g_vpcm_pjsip_modem.startup_local_stream
+        || !g_vpcm_pjsip_modem.startup_remote_stream
+        || !g_vpcm_pjsip_modem.startup_remote_rx_stream)
+        return false;
+    if (is_caller) {
+        memcpy(g_vpcm_pjsip_modem.startup_local_stream, caller_stream, (size_t) caller_len);
+        memcpy(g_vpcm_pjsip_modem.startup_remote_stream, answerer_stream, (size_t) answerer_len);
+    } else {
+        memcpy(g_vpcm_pjsip_modem.startup_local_stream, answerer_stream, (size_t) answerer_len);
+        memcpy(g_vpcm_pjsip_modem.startup_remote_stream, caller_stream, (size_t) caller_len);
+    }
+    g_vpcm_pjsip_modem.startup_local_tx_pos = 0;
+    g_vpcm_pjsip_modem.startup_remote_rx_len = 0;
+    g_vpcm_pjsip_modem.startup_rx_stage = 0;
+    memset(g_vpcm_pjsip_modem.startup_remote_rx_stream, 0, (size_t) g_vpcm_pjsip_modem.startup_remote_total_len);
+    g_vpcm_pjsip_modem.startup_timeout_packets = 20 * g_vpcm_pjsip_modem.packets_per_second;
+    g_vpcm_pjsip_modem.startup_pkt_count = 0;
+    return true;
+}
+
+static bool vpcm_pjsip_modem_prepare(v91_law_t law, int data_seconds, uint32_t seed,
+                                     int packet_codewords_per_pull)
+{
+    int bytes_per_packet;
+    int total_packets;
+    int total_frames;
+    int total_bits;
+    int total_bytes;
+    int total_codewords;
+    uint32_t tx_seed;
+    uint32_t rx_seed;
+    logging_state_t *v8_log;
+
+    if (data_seconds <= 0)
+        data_seconds = 10;
+
+    vpcm_pjsip_modem_reset();
+    g_vpcm_pjsip_modem.law = law;
+    g_vpcm_pjsip_modem.packet_codewords_per_pull = packet_codewords_per_pull;
+    g_vpcm_pjsip_modem.packets_per_second = 8000 / packet_codewords_per_pull;
+    if (g_vpcm_pjsip_modem.packets_per_second < 1)
+        g_vpcm_pjsip_modem.packets_per_second = 1;
+    g_vpcm_pjsip_modem.v8_negotiation_timeout_packets =
+        15 * g_vpcm_pjsip_modem.packets_per_second;
+    g_vpcm_pjsip_modem.post_v8_zero_preroll_packets = 0;
+    g_vpcm_pjsip_modem.drain_packets = g_vpcm_pjsip_modem.packets_per_second;
+    if (g_vpcm_pjsip_modem.drain_packets < 1)
+        g_vpcm_pjsip_modem.drain_packets = 1;
+    g_vpcm_pjsip_modem.last_v8_status = -1;
+
+    vpcm_cp_init_robbed_bit_safe_profile(&g_vpcm_pjsip_modem.cp,
+                                         vpcm_cp_recommended_robbed_bit_drn(),
+                                         false);
+    g_vpcm_pjsip_modem.v91_codewords_per_packet =
+        (packet_codewords_per_pull / VPCM_CP_FRAME_INTERVALS) * VPCM_CP_FRAME_INTERVALS;
+    if (g_vpcm_pjsip_modem.v91_codewords_per_packet <= 0)
+        return false;
+
+    bytes_per_packet = (g_vpcm_pjsip_modem.v91_codewords_per_packet
+                        * ((int) g_vpcm_pjsip_modem.cp.drn + 20)) / 48;
+    if (bytes_per_packet <= 0)
+        return false;
+
+    total_packets = data_seconds * g_vpcm_pjsip_modem.packets_per_second;
+    if (total_packets < 1)
+        total_packets = g_vpcm_pjsip_modem.packets_per_second;
+    total_frames = total_packets * (g_vpcm_pjsip_modem.v91_codewords_per_packet / VPCM_CP_FRAME_INTERVALS);
+    total_bits = total_frames * ((int) g_vpcm_pjsip_modem.cp.drn + 20);
+    total_bytes = total_bits / 8;
+    total_codewords = total_packets * g_vpcm_pjsip_modem.v91_codewords_per_packet;
+
+    g_vpcm_pjsip_modem.bytes_per_packet = bytes_per_packet;
+    g_vpcm_pjsip_modem.total_packets = total_packets;
+    g_vpcm_pjsip_modem.total_bytes = total_bytes;
+    g_vpcm_pjsip_modem.total_codewords = total_codewords;
+
+    g_vpcm_pjsip_modem.tx_data = (uint8_t *) malloc((size_t) total_bytes);
+    g_vpcm_pjsip_modem.expected_rx = (uint8_t *) malloc((size_t) total_bytes);
+    g_vpcm_pjsip_modem.rx_data = (uint8_t *) malloc((size_t) total_bytes);
+    g_vpcm_pjsip_modem.tx_codeword_stream = (uint8_t *) malloc((size_t) total_codewords);
+    if (!g_vpcm_pjsip_modem.tx_data || !g_vpcm_pjsip_modem.expected_rx
+        || !g_vpcm_pjsip_modem.rx_data || !g_vpcm_pjsip_modem.tx_codeword_stream) {
+        vpcm_pjsip_modem_cleanup();
+        return false;
+    }
+    memset(g_vpcm_pjsip_modem.rx_data, 0, (size_t) total_bytes);
+
+    tx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? seed : (seed ^ 0xA55AA55AU);
+    rx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? (seed ^ 0xA55AA55AU) : seed;
+    g_vpcm_pjsip_modem.idle_codeword = v91_ucode_to_codeword(law, 0, true);
+
+    fill_pattern(g_vpcm_pjsip_modem.tx_data, total_bytes, tx_seed);
+    fill_pattern(g_vpcm_pjsip_modem.expected_rx, total_bytes, rx_seed);
+
+    v91_init(&g_vpcm_pjsip_modem.tx_state, law, V91_MODE_TRANSPARENT);
+    v91_init(&g_vpcm_pjsip_modem.rx_state, law, V91_MODE_TRANSPARENT);
+    if (!vpcm_pjsip_build_startup_sequences(law)) {
+        vpcm_pjsip_modem_cleanup();
+        return false;
+    }
+
+    memset(&g_vpcm_pjsip_modem.v8_result, 0, sizeof(g_vpcm_pjsip_modem.v8_result));
+    init_v8_parms(&g_vpcm_pjsip_modem.v8_parms,
+                  g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER,
+                  V8_MOD_V22 | V8_MOD_V34,
+                  V8_PSTN_PCM_MODEM_V91);
+    g_vpcm_pjsip_modem.v8_state = v8_init(NULL,
+                                          g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER,
+                                          &g_vpcm_pjsip_modem.v8_parms,
+                                          vpcm_v8_result_handler,
+                                          &g_vpcm_pjsip_modem.v8_result);
+    if (!g_vpcm_pjsip_modem.v8_state) {
+        vpcm_pjsip_modem_cleanup();
+        return false;
+    }
+    if (g_vpcm_session_diag || g_vpcm_verbose) {
+        v8_log = v8_get_logging_state(g_vpcm_pjsip_modem.v8_state);
+        if (v8_log) {
+            span_log_set_level(v8_log, SPAN_LOG_FLOW | SPAN_LOG_SHOW_TAG);
+            span_log_set_tag(v8_log,
+                             (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER)
+                                 ? "V8-CALLER"
+                                 : "V8-ANSWERER");
+        }
+    }
+
+    g_vpcm_pjsip_modem.initialized = true;
+    return true;
+}
+
+static void vpcm_pjsip_modem_fill_rtp_tx_payload(uint8_t *payload, int payload_len)
+{
+    int produced = 0;
+    int frame_index;
+    int codeword_index;
+    int cw_off;
+    int data_pkt = 0;
+    bool sending_data;
+    bool sending_v8;
+    int16_t tx_linear[320];
+    uint8_t tx_codewords[320];
+
+    if (!payload || payload_len <= 0)
+        return;
+    if (!g_vpcm_pjsip_modem_lock)
+        return;
+    pj_mutex_lock(g_vpcm_pjsip_modem_lock);
+
+    if (!g_vpcm_pjsip_modem.initialized || g_vpcm_pjsip_modem.failed || g_vpcm_pjsip_modem.completed) {
+        memset(payload, 0xFF, (size_t) payload_len);
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        return;
+    }
+
+    if (payload_len > 320)
+        payload_len = 320;
+    if (g_vpcm_pjsip_modem.packet_codewords_per_pull != payload_len) {
+        g_vpcm_pjsip_modem.failed = true;
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        return;
+    }
+
+    sending_v8 = !g_vpcm_pjsip_modem.v8_complete;
+    sending_data = (g_vpcm_pjsip_modem.data_mode_active
+                    && g_vpcm_pjsip_modem.data_tx_pkt < g_vpcm_pjsip_modem.total_packets);
+    if (sending_data)
+        data_pkt = g_vpcm_pjsip_modem.data_tx_pkt;
+
+    if (sending_v8) {
+        produced = v8_tx(g_vpcm_pjsip_modem.v8_state, tx_linear, payload_len);
+        if (produced < 0)
+            produced = 0;
+        if (produced > payload_len)
+            produced = payload_len;
+        if (produced > 0)
+            vpcm_linear_to_g711_payload(tx_linear, produced, g_vpcm_pjsip_modem.law, payload);
+        if (produced < payload_len)
+            memset(payload + produced, g_vpcm_pjsip_modem.idle_codeword, (size_t) (payload_len - produced));
+        g_vpcm_pjsip_modem.startup_tx_pkt++;
+        g_vpcm_pjsip_modem.v8_pkt_count++;
+    } else if (!g_vpcm_pjsip_modem.data_mode_active) {
+        int remain;
+        int copy_len;
+
+        memset(payload, g_vpcm_pjsip_modem.idle_codeword, (size_t) payload_len);
+        remain = g_vpcm_pjsip_modem.startup_local_tx_len - g_vpcm_pjsip_modem.startup_local_tx_pos;
+        if (remain > 0) {
+            copy_len = remain;
+            if (copy_len > payload_len)
+                copy_len = payload_len;
+            memcpy(payload,
+                   g_vpcm_pjsip_modem.startup_local_stream + g_vpcm_pjsip_modem.startup_local_tx_pos,
+                   (size_t) copy_len);
+            g_vpcm_pjsip_modem.startup_local_tx_pos += copy_len;
+        }
+        g_vpcm_pjsip_modem.startup_pkt_count++;
+    } else if (sending_data) {
+        memset(payload, g_vpcm_pjsip_modem.idle_codeword, (size_t) payload_len);
+        cw_off = data_pkt * g_vpcm_pjsip_modem.v91_codewords_per_packet;
+        memcpy(tx_codewords,
+               g_vpcm_pjsip_modem.tx_codeword_stream + cw_off,
+               (size_t) g_vpcm_pjsip_modem.v91_codewords_per_packet);
+        memcpy(payload, tx_codewords, (size_t) g_vpcm_pjsip_modem.v91_codewords_per_packet);
+        g_vpcm_pjsip_modem.data_tx_pkt++;
+        g_vpcm_pjsip_modem.tx_len += g_vpcm_pjsip_modem.bytes_per_packet;
+        frame_index = (data_pkt * g_vpcm_pjsip_modem.v91_codewords_per_packet) / VPCM_CP_FRAME_INTERVALS;
+        codeword_index = data_pkt * g_vpcm_pjsip_modem.v91_codewords_per_packet;
+        if (g_vpcm_realtime
+            && (data_pkt % g_vpcm_pjsip_modem.packets_per_second) == 0) {
+            char tx_hex[64];
+            vpcm_bytes_to_hex(tx_hex, sizeof(tx_hex), tx_codewords, 6);
+            if (g_vpcm_pjsip_modem.have_last_rx_pcm) {
+                char rx_pcm_hex[64];
+                vpcm_bytes_to_hex(rx_pcm_hex, sizeof(rx_pcm_hex), g_vpcm_pjsip_modem.last_rx_pcm_sample, 6);
+                if (g_vpcm_pjsip_modem.have_last_rx_decoded) {
+                    char rx_data_hex[64];
+                    char exp_data_hex[64];
+                    bool chunk_ok = (memcmp(g_vpcm_pjsip_modem.last_rx_decoded_sample,
+                                            g_vpcm_pjsip_modem.last_expected_sample, 6) == 0);
+                    vpcm_bytes_to_hex(rx_data_hex, sizeof(rx_data_hex),
+                                      g_vpcm_pjsip_modem.last_rx_decoded_sample, 6);
+                    vpcm_bytes_to_hex(exp_data_hex, sizeof(exp_data_hex),
+                                      g_vpcm_pjsip_modem.last_expected_sample, 6);
+                    vpcm_log_e2e_phase("DATA",
+                                       "frame=%d codeword=%d tx=[%s] rx_pcm=[%s] rx_data=[%s] expected=[%s] %s decoded_bytes=%d decoded_codewords=%d",
+                                       frame_index, codeword_index, tx_hex, rx_pcm_hex, rx_data_hex, exp_data_hex,
+                                       chunk_ok ? "OK" : "MISMATCH",
+                                       g_vpcm_pjsip_modem.rx_len,
+                                       g_vpcm_pjsip_modem.rx_codewords);
+                } else {
+                    vpcm_log_e2e_phase("DATA",
+                                       "frame=%d codeword=%d tx=[%s] rx_pcm=[%s] rx_data=[pending] decoded_bytes=%d decoded_codewords=%d",
+                                       frame_index, codeword_index, tx_hex, rx_pcm_hex,
+                                       g_vpcm_pjsip_modem.rx_len, g_vpcm_pjsip_modem.rx_codewords);
+                }
             }
-            *rx_codewords += sf_len;
         }
-        return 1;
+    } else {
+        memset(payload, g_vpcm_pjsip_modem.idle_codeword, (size_t) payload_len);
+        if (g_vpcm_pjsip_modem.data_started)
+            g_vpcm_pjsip_modem.drain_seen_packets++;
     }
 
-    if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO && frame->buf && frame->size > 0) {
-        int cw_len;
-        int decoded_cap;
-
-        cw_len = (int) frame->size;
-        decoded_cap = (int) sizeof(decoded);
-        if (decoded_cap > (rx_cap - *rx_len))
-            decoded_cap = rx_cap - *rx_len;
-        if (decoded_cap <= 0)
-            return 0;
-        consumed = v91_rx_codewords(rx_state, decoded, decoded_cap, (const uint8_t *) frame->buf, cw_len);
-        if (consumed > 0) {
-            memcpy(rx_bytes + *rx_len, decoded, (size_t) consumed);
-            *rx_len += consumed;
-        }
-        *rx_codewords += cw_len;
-        return 1;
+    if (g_vpcm_pjsip_modem.data_mode_active
+        && g_vpcm_pjsip_modem.data_tx_pkt >= g_vpcm_pjsip_modem.total_packets
+        && g_vpcm_pjsip_modem.drain_seen_packets >= g_vpcm_pjsip_modem.drain_packets) {
+        g_vpcm_pjsip_modem.completed = true;
     }
 
-    return 0;
+    pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+}
+
+static void vpcm_pjsip_modem_handle_rtp_rx_payload(const uint8_t *payload, int payload_len)
+{
+    int n;
+    int before;
+    int added;
+    int16_t rx_linear[320];
+
+    if (!payload || payload_len <= 0)
+        return;
+    if (!g_vpcm_pjsip_modem_lock)
+        return;
+    pj_mutex_lock(g_vpcm_pjsip_modem_lock);
+
+    if (!g_vpcm_pjsip_modem.initialized || g_vpcm_pjsip_modem.failed || g_vpcm_pjsip_modem.completed) {
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        return;
+    }
+
+    n = (payload_len < 6) ? payload_len : 6;
+    memcpy(g_vpcm_pjsip_modem.last_rx_pcm_sample, payload, (size_t) n);
+    if (n < 6)
+        memset(g_vpcm_pjsip_modem.last_rx_pcm_sample + n, 0, (size_t) (6 - n));
+    g_vpcm_pjsip_modem.have_last_rx_pcm = true;
+
+    if (!g_vpcm_pjsip_modem.v8_complete) {
+        g_vpcm_pjsip_modem.v8_rx_packets++;
+        g_vpcm_pjsip_modem.v8_rx_bytes += payload_len;
+        if (payload_len > 320)
+            payload_len = 320;
+        vpcm_g711_payload_to_linear(payload, payload_len, g_vpcm_pjsip_modem.law, rx_linear);
+        v8_rx(g_vpcm_pjsip_modem.v8_state, rx_linear, payload_len);
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        return;
+    }
+
+    if (!g_vpcm_pjsip_modem.data_mode_active) {
+        int room;
+        int copy_len;
+
+        room = g_vpcm_pjsip_modem.startup_remote_total_len - g_vpcm_pjsip_modem.startup_remote_rx_len;
+        if (room > 0) {
+            copy_len = payload_len;
+            if (copy_len > room)
+                copy_len = room;
+            memcpy(g_vpcm_pjsip_modem.startup_remote_rx_stream + g_vpcm_pjsip_modem.startup_remote_rx_len,
+                   payload,
+                   (size_t) copy_len);
+            g_vpcm_pjsip_modem.startup_remote_rx_len += copy_len;
+        }
+        while (!g_vpcm_pjsip_modem.failed
+               && g_vpcm_pjsip_modem.startup_rx_stage < VPCM_STARTUP_STAGE_COUNT) {
+            int stage = g_vpcm_pjsip_modem.startup_rx_stage;
+            int off = g_vpcm_pjsip_modem.startup_stage_offsets[stage];
+            int len = g_vpcm_pjsip_modem.startup_stage_lengths[stage];
+            const uint8_t *stage_buf;
+
+            if (g_vpcm_pjsip_modem.startup_remote_rx_len < (off + len))
+                break;
+            stage_buf = g_vpcm_pjsip_modem.startup_remote_rx_stream + off;
+            if (stage == VPCM_STARTUP_STAGE_PHASE1 || stage == VPCM_STARTUP_STAGE_EZ
+                || stage == VPCM_STARTUP_STAGE_STARTUP_DIL) {
+                if (memcmp(stage_buf, g_vpcm_pjsip_modem.startup_remote_stream + off, (size_t) len) != 0) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+                if (stage == VPCM_STARTUP_STAGE_STARTUP_DIL
+                    && !v91_note_received_dil(&g_vpcm_pjsip_modem.rx_state,
+                                              &g_vpcm_pjsip_modem.default_dil,
+                                              NULL)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            } else if (stage == VPCM_STARTUP_STAGE_INFO) {
+                v91_info_frame_t info;
+                if (!v91_rx_info_codewords(&g_vpcm_pjsip_modem.rx_state, stage_buf, len, &info)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            } else if (stage == VPCM_STARTUP_STAGE_SCR) {
+                if (!v91_rx_scr_codewords(&g_vpcm_pjsip_modem.rx_state, stage_buf, len, false)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            } else if (stage == VPCM_STARTUP_STAGE_CP) {
+                vpcm_cp_frame_t cp_rx;
+                if (!v91_rx_cp_codewords(&g_vpcm_pjsip_modem.rx_state, stage_buf, len, &cp_rx, true)
+                    || !vpcm_cp_frames_equal(&cp_rx, &g_vpcm_pjsip_modem.expected_remote_cp)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            } else if (stage == VPCM_STARTUP_STAGE_ES) {
+                if (!v91_rx_es_codewords(&g_vpcm_pjsip_modem.rx_state, stage_buf, len, true)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            } else if (stage == VPCM_STARTUP_STAGE_B1) {
+                if (!v91_rx_b1_codewords(&g_vpcm_pjsip_modem.rx_state, stage_buf, len, &g_vpcm_pjsip_modem.cp_ack)) {
+                    g_vpcm_pjsip_modem.failed = true;
+                    break;
+                }
+            }
+            g_vpcm_pjsip_modem.startup_rx_stage++;
+        }
+        if (!g_vpcm_pjsip_modem.failed
+            && g_vpcm_pjsip_modem.startup_rx_stage >= VPCM_STARTUP_STAGE_COUNT
+            && g_vpcm_pjsip_modem.startup_local_tx_pos >= g_vpcm_pjsip_modem.startup_local_tx_len) {
+            if (!v91_activate_data_mode(&g_vpcm_pjsip_modem.tx_state, &g_vpcm_pjsip_modem.cp_ack)
+                || !v91_activate_data_mode(&g_vpcm_pjsip_modem.rx_state, &g_vpcm_pjsip_modem.cp_ack)
+                || v91_tx_codewords(&g_vpcm_pjsip_modem.tx_state,
+                                    g_vpcm_pjsip_modem.tx_codeword_stream,
+                                    g_vpcm_pjsip_modem.total_codewords,
+                                    g_vpcm_pjsip_modem.tx_data,
+                                    g_vpcm_pjsip_modem.total_bytes) != g_vpcm_pjsip_modem.total_codewords) {
+                g_vpcm_pjsip_modem.failed = true;
+            } else {
+                g_vpcm_pjsip_modem.data_mode_active = true;
+                g_vpcm_pjsip_modem.data_started = true;
+                vpcm_log_e2e_phase("V8", "V.91 startup complete from received symbols; entering mapped data mode");
+                vpcm_log_e2e_phase("DATA",
+                                   "mapped payload streaming active (codec=%s)",
+                                   vpcm_expected_codec_name(g_vpcm_pjsip_modem.law));
+            }
+        }
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        return;
+    }
+
+    before = g_vpcm_pjsip_modem.rx_len;
+    added = vpcm_decode_rx_codewords(&g_vpcm_pjsip_modem.rx_state,
+                                     payload,
+                                     payload_len,
+                                     g_vpcm_pjsip_modem.rx_data,
+                                     g_vpcm_pjsip_modem.total_bytes,
+                                     &g_vpcm_pjsip_modem.rx_len,
+                                     &g_vpcm_pjsip_modem.rx_codewords,
+                                     g_vpcm_pjsip_modem.v91_codewords_per_packet);
+    if (added > 0 && g_vpcm_pjsip_modem.rx_len > before) {
+        n = (added < 6) ? added : 6;
+        memcpy(g_vpcm_pjsip_modem.last_rx_decoded_sample, g_vpcm_pjsip_modem.rx_data + before, (size_t) n);
+        if (n < 6)
+            memset(g_vpcm_pjsip_modem.last_rx_decoded_sample + n, 0, (size_t) (6 - n));
+        memcpy(g_vpcm_pjsip_modem.last_expected_sample, g_vpcm_pjsip_modem.expected_rx + before, (size_t) n);
+        if (n < 6)
+            memset(g_vpcm_pjsip_modem.last_expected_sample + n, 0, (size_t) (6 - n));
+        g_vpcm_pjsip_modem.have_last_rx_decoded = true;
+        if (!g_vpcm_pjsip_modem.remote_data_logged) {
+            g_vpcm_pjsip_modem.remote_data_logged = true;
+            vpcm_log_e2e_phase("DATA", "Remote payload detected during drain; decode stream starting");
+        }
+    }
+
+    pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
 }
 
 static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_t seed)
 {
-    enum { CODEWORDS_PER_PACKET = 160, PACKETS_PER_SECOND = 50 };
-    vpcm_cp_frame_t cp;
-    v91_state_t tx_state;
-    v91_state_t rx_state;
-    uint8_t tx_codewords[CODEWORDS_PER_PACKET];
-    uint8_t tx_frame_mem[sizeof(pjmedia_frame_ext) + sizeof(pjmedia_frame_ext_subframe) + CODEWORDS_PER_PACKET];
-    uint8_t rx_frame_mem[4096];
-    uint8_t *tx_data = NULL;
-    uint8_t *expected_rx = NULL;
-    uint8_t *rx_data = NULL;
-    int bytes_per_packet;
-    int total_packets;
-    int total_bytes;
-    int pkt;
-    int tx_len = 0;
-    int rx_len = 0;
-    int rx_codewords = 0;
-    uint64_t bit_errors = 0;
-    uint64_t bits_checked = 0;
-    bool ok = false;
-    uint32_t tx_seed;
-    uint32_t rx_seed;
+    enum { DEFAULT_RTP_CODEWORDS_PER_PACKET = 160, V8_MAX_RESTARTS = 3 };
+    const pjmedia_port_info *stream_info;
+    int packet_codewords_per_pull;
+    int status;
     int cmp_len;
-
+    bool ok = false;
     if (!g_vpcm_pjsip_runtime.stream_port) {
-        fprintf(stderr, "PJSIP stream port not available for payload loop\n");
+        fprintf(stderr, "PJSIP stream port not available for passthrough media loop\n");
         return false;
     }
-    if (data_seconds <= 0)
-        data_seconds = 10;
-
-    vpcm_cp_init_robbed_bit_safe_profile(&cp, vpcm_cp_recommended_robbed_bit_drn(), false);
-    bytes_per_packet = (CODEWORDS_PER_PACKET * ((int) cp.drn + 20)) / 48;
-    if (bytes_per_packet <= 0) {
-        fprintf(stderr, "invalid bytes-per-packet for drn=%u\n", cp.drn);
-        return false;
+    packet_codewords_per_pull = DEFAULT_RTP_CODEWORDS_PER_PACKET;
+    stream_info = &g_vpcm_pjsip_runtime.stream_port->info;
+    if (stream_info
+        && stream_info->fmt.type == PJMEDIA_TYPE_AUDIO
+        && stream_info->fmt.detail_type == PJMEDIA_FORMAT_DETAIL_AUDIO) {
+        unsigned spf = PJMEDIA_PIA_SPF(stream_info);
+        if (spf > 0 && spf <= 320)
+            packet_codewords_per_pull = (int) spf;
+        vpcm_log("PJSIP stream format: srate=%u ptime=%ums bits=%u avg_bps=%u spf=%u",
+                 PJMEDIA_PIA_SRATE(stream_info),
+                 PJMEDIA_PIA_PTIME(stream_info),
+                 PJMEDIA_PIA_BITS(stream_info),
+                 PJMEDIA_PIA_AVG_BPS(stream_info),
+                 spf);
     }
-
-    total_packets = data_seconds * PACKETS_PER_SECOND;
-    if (total_packets < 1)
-        total_packets = PACKETS_PER_SECOND;
-    total_bytes = total_packets * bytes_per_packet;
-
-    tx_data = (uint8_t *) malloc((size_t) total_bytes);
-    expected_rx = (uint8_t *) malloc((size_t) total_bytes);
-    rx_data = (uint8_t *) malloc((size_t) total_bytes);
-    if (!tx_data || !expected_rx || !rx_data) {
-        fprintf(stderr, "allocation failure in pjsip payload loop\n");
-        free(tx_data);
-        free(expected_rx);
-        free(rx_data);
-        return false;
-    }
-    memset(rx_data, 0, (size_t) total_bytes);
-
-    tx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? seed : (seed ^ 0xA55AA55AU);
-    rx_seed = (g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER) ? (seed ^ 0xA55AA55AU) : seed;
-    fill_pattern(tx_data, total_bytes, tx_seed);
-    fill_pattern(expected_rx, total_bytes, rx_seed);
-
-    v91_init(&tx_state, law, V91_MODE_TRANSPARENT);
-    v91_init(&rx_state, law, V91_MODE_TRANSPARENT);
-    if (!v91_activate_data_mode(&tx_state, &cp) || !v91_activate_data_mode(&rx_state, &cp)) {
-        fprintf(stderr, "pjsip payload loop could not activate V.91 data mode\n");
-        free(tx_data);
-        free(expected_rx);
-        free(rx_data);
+    if (packet_codewords_per_pull <= 0 || packet_codewords_per_pull > 320) {
+        fprintf(stderr, "invalid PJSIP packet codewords=%d\n", packet_codewords_per_pull);
         return false;
     }
 
-    vpcm_log_e2e_phase("DATA",
-                       "PJSIP transmit plan: role=%s seconds=%d packets=%d bytes=%d codewords=%d codec=%s",
+    if (!g_vpcm_pjsip_modem_lock) {
+        if (!g_vpcm_pjsip_modem_pool)
+            g_vpcm_pjsip_modem_pool = pjsua_pool_create("vpcm-modem", 1024, 1024);
+        if (!g_vpcm_pjsip_modem_pool
+            || pj_mutex_create_simple(g_vpcm_pjsip_modem_pool,
+                                      "vpcm-modem-lock",
+                                      &g_vpcm_pjsip_modem_lock) != PJ_SUCCESS) {
+            fprintf(stderr, "failed to create PJSIP modem lock\n");
+            return false;
+        }
+    }
+
+    if (!vpcm_pjsip_modem_prepare(law, data_seconds, seed, packet_codewords_per_pull)) {
+        fprintf(stderr, "failed to initialize raw RTP modem state\n");
+        return false;
+    }
+
+    vpcm_log_e2e_phase("V8",
+                       "In-call V.8 negotiation starting (law=%s, transcode=SpanDSP G.711<->linear, packet=%d samples)",
+                       vpcm_law_to_str(law),
+                       packet_codewords_per_pull);
+    vpcm_log_e2e_phase("V8",
+                       "local role=%s send_ci=%d answer_tone=%s",
                        vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
-                       data_seconds,
-                       total_packets,
-                       total_bytes,
-                       total_packets * CODEWORDS_PER_PACKET,
+                       g_vpcm_pjsip_modem.v8_parms.send_ci ? 1 : 0,
+                       modem_connect_tone_to_str(g_vpcm_pjsip_modem.v8_parms.modem_connect_tone));
+    vpcm_log_e2e_phase("V8",
+                       "Plan: after V.8, run receive-gated V.91 startup stages (Phase1/Ez/INFO/DIL/SCR/CP/Es/B1) and only enter data mode after remote stages validate");
+    vpcm_log_e2e_phase("DATA",
+                       "PJSIP transmit plan: role=%s seconds=%d packets=%d bytes=%d codewords=%d codec=%s (PJMEDIA passthrough stream)",
+                       vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
+                       data_seconds > 0 ? data_seconds : 10,
+                       g_vpcm_pjsip_modem.total_packets,
+                       g_vpcm_pjsip_modem.total_bytes,
+                       g_vpcm_pjsip_modem.total_packets * g_vpcm_pjsip_modem.v91_codewords_per_packet,
                        vpcm_expected_codec_name(law));
 
-    for (pkt = 0; pkt < total_packets; pkt++) {
-        pjmedia_frame_ext *tx_ext;
-        pjmedia_frame_ext *rx_ext;
-        pj_status_t st;
-        int produced;
-        int tx_off;
-        int i;
-        int frame_index;
-        int codeword_index;
-        char tx_hex[64];
+    (void) seed;
 
-        if (g_vpcm_stop_requested || g_vpcm_pjsip_runtime.call_disconnected)
-            break;
-
-        tx_off = pkt * bytes_per_packet;
-        produced = v91_tx_codewords(&tx_state,
-                                    tx_codewords,
-                                    CODEWORDS_PER_PACKET,
-                                    tx_data + tx_off,
-                                    bytes_per_packet);
-        if (produced != CODEWORDS_PER_PACKET) {
-            fprintf(stderr, "pjsip payload tx produced mismatch: %d/%d\n",
-                    produced,
-                    CODEWORDS_PER_PACKET);
-            goto done;
-        }
-
-        tx_ext = (pjmedia_frame_ext *) tx_frame_mem;
-        memset(tx_ext, 0, sizeof(tx_frame_mem));
-        tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
-        tx_ext->base.timestamp.u64 = (pj_uint64_t) pkt * CODEWORDS_PER_PACKET;
-        pjmedia_frame_ext_append_subframe(tx_ext,
-                                          tx_codewords,
-                                          CODEWORDS_PER_PACKET * 8U,
-                                          CODEWORDS_PER_PACKET);
-        st = pjmedia_port_put_frame(g_vpcm_pjsip_runtime.stream_port, &tx_ext->base);
-        if (st != PJ_SUCCESS) {
-            fprintf(stderr, "pjsip media put_frame failed: %d\n", st);
-            goto done;
-        }
-        tx_len += bytes_per_packet;
-
-        /* Poll pjsip events and pull a few media frames each packet period. */
-        for (i = 0; i < 4; i++) {
-            pjsua_handle_events(5);
-            if (g_vpcm_pjsip_runtime.call_disconnected)
-                break;
-            rx_ext = (pjmedia_frame_ext *) rx_frame_mem;
-            memset(rx_ext, 0, sizeof(rx_frame_mem));
-            st = pjmedia_port_get_frame(g_vpcm_pjsip_runtime.stream_port, &rx_ext->base);
-            if (st != PJ_SUCCESS)
-                continue;
-            vpcm_pjsip_decode_rx_frame(&rx_state,
-                                       &rx_ext->base,
-                                       rx_data,
-                                       total_bytes,
-                                       &rx_len,
-                                       &rx_codewords);
-        }
-        vpcm_maybe_realtime_pace_samples(CODEWORDS_PER_PACKET);
-
-        if (g_vpcm_realtime && (pkt % PACKETS_PER_SECOND) == 0) {
-            frame_index = (pkt * CODEWORDS_PER_PACKET) / VPCM_CP_FRAME_INTERVALS;
-            codeword_index = pkt * CODEWORDS_PER_PACKET;
-            vpcm_bytes_to_hex(tx_hex, sizeof(tx_hex), tx_codewords, 6);
-            vpcm_log_e2e_phase("DATA",
-                               "frame=%d codeword=%d tx=[%s] decoded_bytes=%d decoded_codewords=%d",
-                               frame_index,
-                               codeword_index,
-                               tx_hex,
-                               rx_len,
-                               rx_codewords);
-        }
-    }
-
-    /* Drain in-flight media briefly. */
-    for (pkt = 0; pkt < 50; pkt++) {
-        pjmedia_frame_ext *rx_ext;
-        pj_status_t st;
-
-        if (g_vpcm_pjsip_runtime.call_disconnected)
-            break;
+    while (!g_vpcm_stop_requested && !g_vpcm_pjsip_runtime.call_disconnected) {
         pjsua_handle_events(10);
-        rx_ext = (pjmedia_frame_ext *) rx_frame_mem;
-        memset(rx_ext, 0, sizeof(rx_frame_mem));
-        st = pjmedia_port_get_frame(g_vpcm_pjsip_runtime.stream_port, &rx_ext->base);
-        if (st != PJ_SUCCESS)
-            continue;
-        vpcm_pjsip_decode_rx_frame(&rx_state,
-                                   &rx_ext->base,
-                                   rx_data,
-                                   total_bytes,
-                                   &rx_len,
-                                   &rx_codewords);
+        pj_mutex_lock(g_vpcm_pjsip_modem_lock);
+        if (!g_vpcm_pjsip_modem.v8_complete
+            && g_vpcm_pjsip_modem.v8_result.seen
+            && g_vpcm_pjsip_modem.v8_result.result.status != g_vpcm_pjsip_modem.last_v8_status) {
+            status = g_vpcm_pjsip_modem.v8_result.result.status;
+            g_vpcm_pjsip_modem.last_v8_status = status;
+            vpcm_log_e2e_phase("V8",
+                               "status=%s (%d) after %.2fs tx_packets=%d rx_packets=%d rx_bytes=%d",
+                               v8_status_to_str(status),
+                               status,
+                               (double) g_vpcm_pjsip_modem.v8_pkt_count
+                                   / (double) g_vpcm_pjsip_modem.packets_per_second,
+                               g_vpcm_pjsip_modem.startup_tx_pkt,
+                               g_vpcm_pjsip_modem.v8_rx_packets,
+                               g_vpcm_pjsip_modem.v8_rx_bytes);
+            if (status == V8_STATUS_V8_CALL) {
+                g_vpcm_pjsip_modem.v8_complete = true;
+                vpcm_log_v8_result(vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
+                                   &g_vpcm_pjsip_modem.v8_result.result);
+                vpcm_log_e2e_phase("V8",
+                                   "V.8 call acknowledged in-band; beginning receive-gated V.91 startup exchange");
+            } else if (status == V8_STATUS_FAILED
+                       || status == V8_STATUS_NON_V8_CALL
+                       || status == V8_STATUS_CALLING_TONE_RECEIVED
+                       || status == V8_STATUS_FAX_CNG_TONE_RECEIVED) {
+                if (g_vpcm_pjsip_modem.v8_restart_count < V8_MAX_RESTARTS) {
+                    if (v8_restart(g_vpcm_pjsip_modem.v8_state,
+                                   g_vpcm_pjsip_runtime.role == VPCM_PJSIP_ROLE_CALLER,
+                                   &g_vpcm_pjsip_modem.v8_parms) != 0) {
+                        g_vpcm_pjsip_modem.failed = true;
+                    } else {
+                        g_vpcm_pjsip_modem.v8_restart_count++;
+                        memset(&g_vpcm_pjsip_modem.v8_result, 0, sizeof(g_vpcm_pjsip_modem.v8_result));
+                        g_vpcm_pjsip_modem.last_v8_status = -1;
+                        vpcm_log_e2e_phase("V8",
+                                           "terminal status %s (%d) observed, restarting V.8 attempt %d/%d",
+                                           v8_status_to_str(status),
+                                           status,
+                                           g_vpcm_pjsip_modem.v8_restart_count,
+                                           V8_MAX_RESTARTS);
+                    }
+                } else {
+                    fprintf(stderr,
+                            "V.8 negotiation failed in-call after %d restarts: status=%s (%d)\n",
+                            g_vpcm_pjsip_modem.v8_restart_count,
+                            v8_status_to_str(status),
+                            status);
+                    g_vpcm_pjsip_modem.failed = true;
+                }
+            }
+        }
+        if (!g_vpcm_pjsip_modem.v8_complete
+            && g_vpcm_pjsip_modem.v8_pkt_count >= g_vpcm_pjsip_modem.v8_negotiation_timeout_packets) {
+            fprintf(stderr, "V.8 negotiation timed out in-call after %.1fs\n",
+                    (double) g_vpcm_pjsip_modem.v8_pkt_count
+                        / (double) g_vpcm_pjsip_modem.packets_per_second);
+            g_vpcm_pjsip_modem.failed = true;
+        }
+        if (g_vpcm_pjsip_modem.v8_complete
+            && !g_vpcm_pjsip_modem.data_mode_active
+            && g_vpcm_pjsip_modem.startup_pkt_count >= g_vpcm_pjsip_modem.startup_timeout_packets) {
+            fprintf(stderr, "V.91 startup timed out after %.1fs waiting for receive-gated stage completion\n",
+                    (double) g_vpcm_pjsip_modem.startup_pkt_count
+                        / (double) g_vpcm_pjsip_modem.packets_per_second);
+            g_vpcm_pjsip_modem.failed = true;
+        }
+        if (g_vpcm_pjsip_modem.completed || g_vpcm_pjsip_modem.failed) {
+            pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+            break;
+        }
+        pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
+        vpcm_maybe_realtime_pace_samples(packet_codewords_per_pull);
     }
 
-    cmp_len = (rx_len < total_bytes) ? rx_len : total_bytes;
-    if (cmp_len > 0) {
-        bit_errors = vpcm_count_bit_errors(expected_rx, rx_data, cmp_len);
-        bits_checked = (uint64_t) cmp_len * 8ULL;
+    pj_mutex_lock(g_vpcm_pjsip_modem_lock);
+    if (!g_vpcm_pjsip_modem.failed) {
+        cmp_len = (g_vpcm_pjsip_modem.rx_len < g_vpcm_pjsip_modem.total_bytes)
+            ? g_vpcm_pjsip_modem.rx_len
+            : g_vpcm_pjsip_modem.total_bytes;
+        if (cmp_len > 0) {
+            g_vpcm_pjsip_modem.bit_errors = vpcm_count_bit_errors(g_vpcm_pjsip_modem.expected_rx,
+                                                                  g_vpcm_pjsip_modem.rx_data,
+                                                                  cmp_len);
+            g_vpcm_pjsip_modem.bits_checked = (uint64_t) cmp_len * 8ULL;
+        }
+        ok = (g_vpcm_pjsip_modem.v8_complete
+              && cmp_len == g_vpcm_pjsip_modem.total_bytes
+              && g_vpcm_pjsip_modem.bit_errors == 0);
     }
-    ok = (cmp_len == total_bytes && bit_errors == 0);
-    vpcm_log("PJSIP payload stats: role=%s tx_bytes=%d expected_rx_bytes=%d actual_rx_bytes=%d rx_codewords=%d bits=%llu bit_errors=%llu ber=%.3e",
+
+    if (!g_vpcm_pjsip_modem.v8_complete) {
+        vpcm_log_e2e_phase("V8",
+                           "V.8 completion was not observed before call stop (tx_packets=%d rx_packets=%d rx_bytes=%d restarts=%d)",
+                           g_vpcm_pjsip_modem.startup_tx_pkt,
+                           g_vpcm_pjsip_modem.v8_rx_packets,
+                           g_vpcm_pjsip_modem.v8_rx_bytes,
+                           g_vpcm_pjsip_modem.v8_restart_count);
+    }
+    vpcm_log("PJSIP payload stats: role=%s tx_bytes=%d expected_rx_bytes=%d actual_rx_bytes=%d rx_codewords=%d bits=%llu bit_errors=%llu ber=%.3e v8_complete=%s",
              vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
-             tx_len,
-             total_bytes,
-             rx_len,
-             rx_codewords,
-             (unsigned long long) bits_checked,
-             (unsigned long long) bit_errors,
-             (bits_checked == 0) ? 0.0 : ((double) bit_errors / (double) bits_checked));
+             g_vpcm_pjsip_modem.tx_len,
+             g_vpcm_pjsip_modem.total_bytes,
+             g_vpcm_pjsip_modem.rx_len,
+             g_vpcm_pjsip_modem.rx_codewords,
+             (unsigned long long) g_vpcm_pjsip_modem.bits_checked,
+             (unsigned long long) g_vpcm_pjsip_modem.bit_errors,
+             (g_vpcm_pjsip_modem.bits_checked == 0) ? 0.0
+                 : ((double) g_vpcm_pjsip_modem.bit_errors / (double) g_vpcm_pjsip_modem.bits_checked),
+             g_vpcm_pjsip_modem.v8_complete ? "yes" : "no");
+    pj_mutex_unlock(g_vpcm_pjsip_modem_lock);
 
-done:
-    free(tx_data);
-    free(expected_rx);
-    free(rx_data);
+    vpcm_pjsip_modem_cleanup();
     return ok;
 }
 
@@ -5208,6 +6344,8 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     const char *auth_pass_env;
     const char *auth_realm_env;
     const char *local_port_env;
+    const char *rtp_port_env;
+    const char *rtp_range_env;
     const char *caller_number_env;
     const char *answerer_number_env;
     const char *domain_env;
@@ -5226,8 +6364,11 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     double start_wait;
     double wait_limit;
     int local_port;
+    int rtp_port;
+    int rtp_range;
     int wait_seconds;
     bool ok;
+    bool wait_confirm_logged;
     bool using_dummy_uri;
     vpcm_pjsip_role_t role;
     char caller_id_buf[256];
@@ -5251,6 +6392,8 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     auth_pass_env = getenv("VPCM_PJSIP_AUTH_PASS");
     auth_realm_env = getenv("VPCM_PJSIP_AUTH_REALM");
     local_port_env = getenv("VPCM_PJSIP_LOCAL_PORT");
+    rtp_port_env = getenv("VPCM_PJSIP_RTP_PORT");
+    rtp_range_env = getenv("VPCM_PJSIP_RTP_RANGE");
     caller_number_env = getenv("VPCM_PJSIP_CALLER_NUMBER");
     answerer_number_env = getenv("VPCM_PJSIP_ANSWERER_NUMBER");
     domain_env = getenv("VPCM_PJSIP_DOMAIN");
@@ -5261,6 +6404,12 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     local_port = 0;
     if (local_port_env && local_port_env[0] != '\0')
         local_port = atoi(local_port_env);
+    rtp_port = 0;
+    if (rtp_port_env && rtp_port_env[0] != '\0')
+        rtp_port = atoi(rtp_port_env);
+    rtp_range = 0;
+    if (rtp_range_env && rtp_range_env[0] != '\0')
+        rtp_range = atoi(rtp_range_env);
     wait_seconds = 60;
     if (wait_seconds_env && wait_seconds_env[0] != '\0') {
         wait_seconds = atoi(wait_seconds_env);
@@ -5374,6 +6523,10 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
 
     if (account_id_env && account_id_env[0] != '\0') {
         pjsua_acc_config_default(&acc_cfg);
+        if (rtp_port > 0)
+            acc_cfg.rtp_cfg.port = (unsigned) rtp_port;
+        if (rtp_range > 0)
+            acc_cfg.rtp_cfg.port_range = (unsigned) rtp_range;
         acc_cfg.id = pj_str((char *) account_id_env);
         if (reg_uri_env && reg_uri_env[0] != '\0')
             acc_cfg.reg_uri = pj_str((char *) reg_uri_env);
@@ -5388,6 +6541,17 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
         }
         st = pjsua_acc_add(&acc_cfg, PJ_TRUE, &acc_id);
     } else {
+        pjsua_acc_config_default(&acc_cfg);
+        if (rtp_port > 0)
+            acc_cfg.rtp_cfg.port = (unsigned) rtp_port;
+        if (rtp_range > 0)
+            acc_cfg.rtp_cfg.port_range = (unsigned) rtp_range;
+        acc_cfg.transport_id = tid;
+        acc_cfg.allow_contact_rewrite = PJ_FALSE;
+        acc_cfg.allow_via_rewrite = PJ_FALSE;
+        acc_cfg.publish_enabled = PJ_FALSE;
+        acc_cfg.register_on_acc_add = PJ_FALSE;
+        acc_cfg.id = pj_str((char *) "sip:local@localhost");
         st = pjsua_acc_add_local(tid, PJ_TRUE, &acc_id);
     }
     if (st != PJ_SUCCESS) {
@@ -5412,12 +6576,18 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
                  dest_uri_env,
                  vpcm_law_to_str(law),
                  vpcm_expected_codec_name(law));
+        if (rtp_port > 0) {
+            vpcm_log("PJSIP RTP bind preference: port=%d range=%d", rtp_port, (rtp_range > 0) ? rtp_range : 0);
+        }
     } else {
         vpcm_log("PJSIP answerer ready: account=%s wait=%ds law=%s codec_policy=%s-only passthrough",
                  (account_id_env && account_id_env[0] != '\0') ? account_id_env : "<local>",
                  wait_seconds,
                  vpcm_law_to_str(law),
                  vpcm_expected_codec_name(law));
+        if (rtp_port > 0) {
+            vpcm_log("PJSIP RTP bind preference: port=%d range=%d", rtp_port, (rtp_range > 0) ? rtp_range : 0);
+        }
     }
 
     start_wait = vpcm_monotonic_seconds();
@@ -5425,16 +6595,24 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
         ? (using_dummy_uri ? 5.0 : 30.0)
         : (double) wait_seconds;
     ok = false;
+    wait_confirm_logged = false;
     while (!g_vpcm_stop_requested) {
         pjsua_handle_events(100);
         if (g_vpcm_pjsip_runtime.call_disconnected)
             break;
-        if (g_vpcm_pjsip_runtime.media_ready
+        if (g_vpcm_pjsip_runtime.call_confirmed
+            && g_vpcm_pjsip_runtime.media_ready
             && g_vpcm_pjsip_runtime.media_codec_ok
             && g_vpcm_pjsip_runtime.stream_ready
             && g_vpcm_pjsip_runtime.stream_port) {
             ok = true;
             break;
+        }
+        if (!wait_confirm_logged
+            && g_vpcm_pjsip_runtime.media_ready
+            && !g_vpcm_pjsip_runtime.call_confirmed) {
+            vpcm_log("PJSIP media is up but call is not CONFIRMED yet; delaying modem/V.8 start");
+            wait_confirm_logged = true;
         }
         if ((vpcm_monotonic_seconds() - start_wait) > wait_limit)
             break;
@@ -5453,12 +6631,23 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
         }
     }
 
+    if (g_vpcm_pjsip_modem_lock) {
+        pj_mutex_destroy(g_vpcm_pjsip_modem_lock);
+        g_vpcm_pjsip_modem_lock = NULL;
+    }
+    if (g_vpcm_pjsip_modem_pool) {
+        pj_pool_release(g_vpcm_pjsip_modem_pool);
+        g_vpcm_pjsip_modem_pool = NULL;
+    }
+
     pjsua_destroy();
 
     if (!ok) {
         if (g_vpcm_pjsip_runtime.call_disconnected) {
             fprintf(stderr, "PJSIP call ended before payload completion (status=%d)\n",
                     g_vpcm_pjsip_runtime.disconnect_code);
+        } else if (!g_vpcm_pjsip_runtime.call_confirmed) {
+            fprintf(stderr, "PJSIP call never reached CONFIRMED state before timeout\n");
         } else if (!g_vpcm_pjsip_runtime.stream_ready || !g_vpcm_pjsip_runtime.stream_port) {
             fprintf(stderr, "PJSIP media stream was not ready for payload transport\n");
         } else if (!g_vpcm_pjsip_runtime.media_codec_checked) {

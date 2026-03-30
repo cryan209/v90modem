@@ -145,8 +145,7 @@ static inline uint8_t v90_pcm_idle(v90_law_t law)
 static inline int16_t v90_pcm_signed(v90_law_t law, int ucode, int sign)
 {
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
-    if (!sign)
-        pcm &= 0x7F;  /* Clear sign bit → negative polarity */
+    pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
     return v90_pcm_to_linear(law, pcm);
 }
 

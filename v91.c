@@ -11,7 +11,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Positive A-law codewords indexed by Ucode. Shared with the V.90 mapping. */
+/* V.90/V.91 Table-1 style A-law entries indexed by Ucode.
+ * Lower 7 bits carry the quantised Ucode value and bit 7 carries polarity. */
 static const uint8_t v91_ucode_to_alaw[128] = {
     0xD5, 0xD4, 0xD7, 0xD6, 0xD1, 0xD0, 0xD3, 0xD2,
     0xDD, 0xDC, 0xDF, 0xDE, 0xD9, 0xD8, 0xDB, 0xDA,
@@ -583,16 +584,13 @@ uint8_t v91_idle_codeword(v91_law_t law)
 
 uint8_t v91_ucode_to_codeword(v91_law_t law, int ucode, bool positive)
 {
-    uint8_t codeword;
+    uint8_t mag7;
 
     if (law == V91_LAW_ALAW)
-        codeword = v91_ucode_to_alaw[ucode & 0x7F];
+        mag7 = (uint8_t) (v91_ucode_to_alaw[ucode & 0x7F] & 0x7F);
     else
-        codeword = (uint8_t) (0xFF - (ucode & 0x7F));
-
-    if (!positive)
-        codeword &= 0x7F;
-    return codeword;
+        mag7 = (uint8_t) ((0xFF - (ucode & 0x7F)) & 0x7F);
+    return (uint8_t) (mag7 | (positive ? 0x80 : 0x00));
 }
 
 static int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword)
