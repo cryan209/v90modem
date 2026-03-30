@@ -2842,10 +2842,10 @@ static void vpcm_set_loopback_v91_state(vpcm_call_t *caller,
                        "Call modem state: caller=%s/%s/%s answerer=%s/%s/%s",
                        vpcm_call_state_to_str(caller->state),
                        vpcm_call_run_mode_to_str(caller->run_mode),
-                       vpcm_v91_modem_state_to_str(caller->v91_state),
+                       vpcm_v91_modem_state_to_str(caller->v91_session.state),
                        vpcm_call_state_to_str(answerer->state),
                        vpcm_call_run_mode_to_str(answerer->run_mode),
-                       vpcm_v91_modem_state_to_str(answerer->v91_state));
+                       vpcm_v91_modem_state_to_str(answerer->v91_session.state));
 }
 
 static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
@@ -2868,6 +2868,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     vpcm_call_t caller_call;
     vpcm_call_t answerer_call;
     vpcm_call_params_t call_params;
+    vpcm_v91_startup_cfg_t startup_cfg;
     v91_info_frame_t caller_info;
     v91_info_frame_t answerer_info;
     v91_info_frame_t rx_info;
@@ -2893,7 +2894,6 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     uint8_t *answerer_tx_storage = NULL;
     uint8_t *answerer_rx_storage = NULL;
     char rate_buf[64];
-    int startup_len;
     int caller_startup_len;
     int answerer_startup_len;
     int cp_len;
@@ -2979,51 +2979,33 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         vpcm_log("Phase model note: current harness still approximates Phase 2 transport with shared PCM startup primitives.");
     }
 
-    memset(&caller_info, 0, sizeof(caller_info));
-    caller_info.request_default_dil = true;
-    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
-    caller_info.power_measured_after_digital_impairments = true;
-    caller_info.request_transparent_mode = cp_offer.transparent_mode_granted;
-    caller_info.cleardown_if_transparent_denied = cp_offer.transparent_mode_granted;
+    vpcm_v91_startup_cfg_init(&startup_cfg, law, &cp_offer);
+    caller_info = startup_cfg.caller_info;
+    answerer_info = startup_cfg.answerer_info;
 
-    memset(&answerer_info, 0, sizeof(answerer_info));
-    answerer_info.request_default_dil = true;
-    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
-    answerer_info.power_measured_after_digital_impairments = true;
-    answerer_info.request_transparent_mode = cp_offer.transparent_mode_granted;
-    answerer_info.cleardown_if_transparent_denied = cp_offer.transparent_mode_granted;
-
-    if (v91_tx_phase1_silence_codewords(&caller, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
-        || v91_tx_phase1_silence_codewords(&answerer, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
+    if (!vpcm_v91_session_run_phase1(&caller_call.v91_session,
+                                     &caller,
+                                     &answerer,
+                                     startup_buf,
+                                     (int) sizeof(startup_buf),
+                                     transport_buf,
+                                     (int) sizeof(transport_buf))) {
         fprintf(stderr, "%s phase1 silence failed\n", family_label);
         return false;
     }
     vpcm_log_e2e_phase("PHASE1", "Silence complete (%d symbols)", V91_PHASE1_SILENCE_SYMBOLS);
-    if (v91_tx_ez_codewords(&caller, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
-        || v91_tx_ez_codewords(&answerer, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
-        fprintf(stderr, "%s Ez failed\n", family_label);
-        return false;
-    }
     vpcm_log_e2e_phase("PHASE1", "Ez exchanged (%d symbols)", V91_EZ_SYMBOLS);
 
     vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_INFO);
-    if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
+    if (!vpcm_v91_session_run_info(&caller_call.v91_session,
+                                   &caller,
+                                   &answerer,
+                                   &startup_cfg,
+                                   &rx_info,
+                                   transport_buf,
+                                   (int) sizeof(transport_buf),
+                                   robbed_bit)) {
         fprintf(stderr, "%s caller INFO tx failed\n", family_label);
-        return false;
-    }
-    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, transport_buf, V91_INFO_SYMBOLS);
-    if (!v91_rx_info_codewords(&answerer, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "%s caller->answerer INFO rx failed\n", family_label);
-        return false;
-    }
-
-    if (v91_tx_info_codewords(&answerer, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS) {
-        fprintf(stderr, "%s answerer INFO tx failed\n", family_label);
-        return false;
-    }
-    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, transport_buf, V91_INFO_SYMBOLS);
-    if (!v91_rx_info_codewords(&caller, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "%s answerer->caller INFO rx failed\n", family_label);
         return false;
     }
     vpcm_log_e2e_phase("INFO",
@@ -3034,29 +3016,20 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                        answerer_info.request_transparent_mode ? 1 : 0);
 
     vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_DIL);
-    startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
-                                                        startup_buf,
-                                                        (int) sizeof(startup_buf),
-                                                        &default_dil,
-                                                        NULL);
-    if (startup_len <= 0) {
+    if (!vpcm_v91_session_run_dil(&caller_call.v91_session,
+                                  &caller,
+                                  &answerer,
+                                  &default_dil,
+                                  startup_buf,
+                                  (int) sizeof(startup_buf),
+                                  transport_buf,
+                                  (int) sizeof(transport_buf),
+                                  &caller_startup_len,
+                                  &answerer_startup_len,
+                                  robbed_bit)) {
         fprintf(stderr, "%s caller startup DIL sequence failed\n", family_label);
         return false;
     }
-    caller_startup_len = startup_len;
-    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
-
-    startup_len = v91_tx_startup_dil_sequence_codewords(&answerer,
-                                                        startup_buf,
-                                                        (int) sizeof(startup_buf),
-                                                        &default_dil,
-                                                        NULL);
-    if (startup_len <= 0) {
-        fprintf(stderr, "%s answerer startup DIL sequence failed\n", family_label);
-        return false;
-    }
-    answerer_startup_len = startup_len;
-    vpcm_transport_pcm_family_codewords(robbed_bit, transport_buf, startup_buf, startup_len);
     vpcm_log_e2e_phase("DIL", "Startup DIL sequence exchanged (caller=%d symbols, answerer=%d symbols)",
                        caller_startup_len, answerer_startup_len);
 

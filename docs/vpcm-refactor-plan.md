@@ -96,6 +96,7 @@ The first extraction step is in place:
 - `vpcm_g711_stream.[ch]`
 - `vpcm_call.[ch]`
 - `vpcm_link.[ch]`
+- `vpcm_v91_session.[ch]`
 
 These modules are intentionally small and transport-agnostic so the next steps
 can move harness logic onto them without changing modem behavior all at once.

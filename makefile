@@ -125,11 +125,11 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_link.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_link.c vpcm_v91_session.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test
-TEST_OBJS = vpcm_loopback_test.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_link.o
+TEST_OBJS = vpcm_loopback_test.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_link.o vpcm_v91_session.o
 
 USE_V34_STUBS ?= 0
 ifeq ($(USE_V34_STUBS),1)
@@ -163,8 +163,9 @@ v90.o:            v90.c            v90.h
 v91.o:            v91.c            v91.h vpcm_cp.h
 vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
 vpcm_g711_stream.o: vpcm_g711_stream.c vpcm_g711_stream.h v91.h
-vpcm_call.o:      vpcm_call.c      vpcm_call.h vpcm_g711_stream.h v91.h
+vpcm_call.o:      vpcm_call.c      vpcm_call.h vpcm_g711_stream.h vpcm_v91_session.h v91.h
 vpcm_link.o:      vpcm_link.c      vpcm_link.h vpcm_call.h vpcm_g711_stream.h v91.h
+vpcm_v91_session.o: vpcm_v91_session.c vpcm_v91_session.h v91.h
 ifeq ($(USE_V34_STUBS),1)
 v34_stubs.o:      v34_stubs.c
 endif
