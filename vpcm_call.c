@@ -2,6 +2,36 @@
 
 #include <string.h>
 
+static bool vpcm_call_state_allows_run_mode(vpcm_call_state_t state)
+{
+    return state == VPCM_CALL_RUN;
+}
+
+const char *vpcm_call_state_to_str(vpcm_call_state_t state)
+{
+    switch (state) {
+    case VPCM_CALL_IDLE: return "IDLE";
+    case VPCM_CALL_WAIT_DIALTONE: return "WAIT_DIALTONE";
+    case VPCM_CALL_DIAL: return "DIAL";
+    case VPCM_CALL_WAIT_RINGING: return "WAIT_RINGING";
+    case VPCM_CALL_ANSWER: return "ANSWER";
+    case VPCM_CALL_RUN: return "RUN";
+    case VPCM_CALL_HANGUP: return "HANGUP";
+    case VPCM_CALL_DONE: return "DONE";
+    default: return "UNKNOWN";
+    }
+}
+
+const char *vpcm_call_run_mode_to_str(vpcm_call_run_mode_t run_mode)
+{
+    switch (run_mode) {
+    case VPCM_CALL_RUN_NONE: return "NONE";
+    case VPCM_CALL_RUN_V90_MODEM: return "V90_MODEM";
+    case VPCM_CALL_RUN_V91_MODEM: return "V91_MODEM";
+    default: return "UNKNOWN";
+    }
+}
+
 bool vpcm_call_params_normalize(vpcm_call_params_t *params)
 {
     if (!params)
@@ -32,6 +62,8 @@ bool vpcm_call_init(vpcm_call_t *call,
 
     memset(call, 0, sizeof(*call));
     call->params = normalized;
+    call->state = VPCM_CALL_IDLE;
+    call->run_mode = VPCM_CALL_RUN_NONE;
 
     memset(&tx_params, 0, sizeof(tx_params));
     tx_params.law = normalized.law;
@@ -58,6 +90,8 @@ void vpcm_call_reset(vpcm_call_t *call)
         return;
     vpcm_g711_stream_reset(&call->tx_stream);
     vpcm_g711_stream_reset(&call->rx_stream);
+    call->state = VPCM_CALL_IDLE;
+    call->run_mode = VPCM_CALL_RUN_NONE;
     call->ticks = 0;
     call->elapsed_seconds = 0.0;
 }
@@ -69,6 +103,45 @@ bool vpcm_call_advance_tick(vpcm_call_t *call)
     call->ticks++;
     call->elapsed_seconds += vpcm_call_tick_seconds(call);
     return true;
+}
+
+void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state)
+{
+    if (!call)
+        return;
+    call->state = state;
+    if (!vpcm_call_state_allows_run_mode(state))
+        call->run_mode = VPCM_CALL_RUN_NONE;
+}
+
+void vpcm_call_set_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode)
+{
+    if (!call)
+        return;
+    if (call->state != VPCM_CALL_RUN && run_mode != VPCM_CALL_RUN_NONE)
+        call->state = VPCM_CALL_RUN;
+    call->run_mode = run_mode;
+}
+
+bool vpcm_call_step(vpcm_call_t *call)
+{
+    if (!call)
+        return false;
+
+    switch (call->state) {
+    case VPCM_CALL_IDLE:
+    case VPCM_CALL_WAIT_DIALTONE:
+    case VPCM_CALL_DIAL:
+    case VPCM_CALL_WAIT_RINGING:
+    case VPCM_CALL_ANSWER:
+    case VPCM_CALL_RUN:
+    case VPCM_CALL_HANGUP:
+        return vpcm_call_advance_tick(call);
+    case VPCM_CALL_DONE:
+        return true;
+    default:
+        return false;
+    }
 }
 
 size_t vpcm_call_frame_bytes(const vpcm_call_t *call)

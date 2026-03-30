@@ -14,6 +14,8 @@
  */
 
 #include "v91.h"
+#include "vpcm_call.h"
+#include "vpcm_link.h"
 
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
@@ -150,6 +152,23 @@ enum vpcm_v34_events_e {
 static void vpcm_transport_robbed_bit_codewords(uint8_t *dst,
                                                 const uint8_t *src,
                                                 int len);
+static size_t vpcm_link_copy_transform(uint8_t *dst,
+                                       size_t dst_cap,
+                                       const uint8_t *src,
+                                       size_t src_len,
+                                       void *user_data);
+static size_t vpcm_link_robbed_bit_transform(uint8_t *dst,
+                                             size_t dst_cap,
+                                             const uint8_t *src,
+                                             size_t src_len,
+                                             void *user_data);
+static bool vpcm_call_transfer_codewords(vpcm_call_t *src_call,
+                                         vpcm_call_t *dst_call,
+                                         const uint8_t *tx_codewords,
+                                         int codeword_len,
+                                         bool robbed_bit,
+                                         uint8_t *rx_codewords,
+                                         size_t scratch_cap);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
@@ -2669,6 +2688,71 @@ static void vpcm_transport_pcm_family_codewords(bool robbed_bit,
     }
 }
 
+static size_t vpcm_link_copy_transform(uint8_t *dst,
+                                       size_t dst_cap,
+                                       const uint8_t *src,
+                                       size_t src_len,
+                                       void *user_data)
+{
+    (void) user_data;
+
+    if (!dst || !src || dst_cap < src_len)
+        return 0;
+    if (dst != src)
+        memcpy(dst, src, src_len);
+    vpcm_maybe_realtime_pace_samples((int) src_len);
+    return src_len;
+}
+
+static size_t vpcm_link_robbed_bit_transform(uint8_t *dst,
+                                             size_t dst_cap,
+                                             const uint8_t *src,
+                                             size_t src_len,
+                                             void *user_data)
+{
+    (void) user_data;
+
+    if (!dst || !src || dst_cap < src_len)
+        return 0;
+    vpcm_transport_robbed_bit_codewords(dst, src, (int) src_len);
+    return src_len;
+}
+
+static bool vpcm_call_transfer_codewords(vpcm_call_t *src_call,
+                                         vpcm_call_t *dst_call,
+                                         const uint8_t *tx_codewords,
+                                         int codeword_len,
+                                         bool robbed_bit,
+                                         uint8_t *rx_codewords,
+                                         size_t scratch_cap)
+{
+    size_t written;
+    size_t moved;
+    size_t read_len;
+    vpcm_link_transform_fn transform;
+
+    if (!src_call || !dst_call || !tx_codewords || !rx_codewords || codeword_len <= 0)
+        return false;
+
+    written = vpcm_g711_stream_write(&src_call->tx_stream, tx_codewords, (size_t) codeword_len);
+    if (written != (size_t) codeword_len)
+        return false;
+
+    transform = robbed_bit ? vpcm_link_robbed_bit_transform : vpcm_link_copy_transform;
+    moved = vpcm_link_transfer(src_call,
+                               dst_call,
+                               rx_codewords,
+                               scratch_cap,
+                               (size_t) codeword_len,
+                               transform,
+                               NULL);
+    if (moved != (size_t) codeword_len)
+        return false;
+
+    read_len = vpcm_g711_stream_read(&dst_call->rx_stream, rx_codewords, (size_t) codeword_len);
+    return read_len == (size_t) codeword_len;
+}
+
 static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 const char *family_label,
                                                                 const char *path_label,
@@ -2678,6 +2762,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 int data_seconds)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
+    enum { VPCM_SESSION_STREAM_CAPACITY = 8192 };
     v91_dil_desc_t default_dil;
     v91_state_t caller;
     v91_state_t answerer;
@@ -2685,6 +2770,9 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     v91_state_t caller_rx;
     v91_state_t answerer_tx;
     v91_state_t answerer_rx;
+    vpcm_call_t caller_call;
+    vpcm_call_t answerer_call;
+    vpcm_call_params_t call_params;
     v91_info_frame_t caller_info;
     v91_info_frame_t answerer_info;
     v91_info_frame_t rx_info;
@@ -2705,6 +2793,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     uint8_t *caller_pcm_rx = NULL;
     uint8_t *answerer_pcm_tx = NULL;
     uint8_t *answerer_pcm_rx = NULL;
+    uint8_t *caller_tx_storage = NULL;
+    uint8_t *caller_rx_storage = NULL;
+    uint8_t *answerer_tx_storage = NULL;
+    uint8_t *answerer_rx_storage = NULL;
     char rate_buf[64];
     int startup_len;
     int caller_startup_len;
@@ -2932,6 +3024,37 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     caller_rx = caller;
     answerer_tx = answerer;
     answerer_rx = answerer;
+    memset(&call_params, 0, sizeof(call_params));
+    call_params.law = law;
+    call_params.sample_rate = 8000;
+    call_params.frame_samples = 64;
+    call_params.caller_id = "caller";
+    call_params.callee_id = "answerer";
+    call_params.label = family_label;
+    caller_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    caller_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    if (!caller_tx_storage || !caller_rx_storage || !answerer_tx_storage || !answerer_rx_storage
+        || !vpcm_call_init(&caller_call,
+                           &call_params,
+                           caller_tx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY,
+                           caller_rx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY)
+        || !vpcm_call_init(&answerer_call,
+                           &call_params,
+                           answerer_tx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY,
+                           answerer_rx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY)) {
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
+        fprintf(stderr, "%s call object init failed\n", family_label);
+        return false;
+    }
     vpcm_log_e2e_phase("DATA", "Data mode active");
 
     data_frames = vpcm_data_frames_from_seconds(data_seconds);
@@ -2959,6 +3082,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         free(caller_pcm_rx);
         free(answerer_pcm_tx);
         free(answerer_pcm_rx);
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
         fprintf(stderr, "allocation failure in %s session\n", family_label);
         return false;
     }
@@ -3014,18 +3141,43 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
             free(caller_pcm_rx);
             free(answerer_pcm_tx);
             free(answerer_pcm_rx);
+            free(caller_tx_storage);
+            free(caller_rx_storage);
+            free(answerer_tx_storage);
+            free(answerer_rx_storage);
             fprintf(stderr, "%s tx length mismatch\n", family_label);
             return false;
         }
 
-        vpcm_transport_pcm_family_codewords(robbed_bit,
-                                            answerer_pcm_rx + codeword_offset,
-                                            caller_pcm_tx + codeword_offset,
-                                            chunk_codewords);
-        vpcm_transport_pcm_family_codewords(robbed_bit,
-                                            caller_pcm_rx + codeword_offset,
-                                            answerer_pcm_tx + codeword_offset,
-                                            chunk_codewords);
+        if (!vpcm_call_transfer_codewords(&caller_call,
+                                          &answerer_call,
+                                          caller_pcm_tx + codeword_offset,
+                                          chunk_codewords,
+                                          robbed_bit,
+                                          answerer_pcm_rx + codeword_offset,
+                                          VPCM_SESSION_STREAM_CAPACITY)
+            || !vpcm_call_transfer_codewords(&answerer_call,
+                                             &caller_call,
+                                             answerer_pcm_tx + codeword_offset,
+                                             chunk_codewords,
+                                             robbed_bit,
+                                             caller_pcm_rx + codeword_offset,
+                                             VPCM_SESSION_STREAM_CAPACITY)) {
+            free(caller_data_in);
+            free(caller_data_out);
+            free(answerer_data_in);
+            free(answerer_data_out);
+            free(caller_pcm_tx);
+            free(caller_pcm_rx);
+            free(answerer_pcm_tx);
+            free(answerer_pcm_rx);
+            free(caller_tx_storage);
+            free(caller_rx_storage);
+            free(answerer_tx_storage);
+            free(answerer_rx_storage);
+            fprintf(stderr, "%s stream transfer failed\n", family_label);
+            return false;
+        }
 
         answerer_consumed = v91_rx_codewords(&answerer_rx,
                                              answerer_data_out + byte_offset,
@@ -3046,6 +3198,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
             free(caller_pcm_rx);
             free(answerer_pcm_tx);
             free(answerer_pcm_rx);
+            free(caller_tx_storage);
+            free(caller_rx_storage);
+            free(answerer_tx_storage);
+            free(answerer_rx_storage);
             fprintf(stderr, "%s rx length mismatch: caller=%d/%d answerer=%d/%d\n",
                     family_label,
                     caller_consumed,
@@ -3137,6 +3293,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         free(caller_pcm_rx);
         free(answerer_pcm_tx);
         free(answerer_pcm_rx);
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
         return false;
     }
 
@@ -3206,6 +3366,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     free(caller_pcm_rx);
     free(answerer_pcm_tx);
     free(answerer_pcm_rx);
+    free(caller_tx_storage);
+    free(caller_rx_storage);
+    free(answerer_tx_storage);
+    free(answerer_rx_storage);
     return true;
 }
 
@@ -5093,10 +5257,18 @@ static bool test_v91_linear_loopback(v91_law_t law)
 
 static bool test_v91_full_duplex(v91_law_t law)
 {
+    enum { VPCM_DUPLEX_STREAM_CAPACITY = 160 };
     v91_state_t a_tx;
     v91_state_t a_rx;
     v91_state_t b_tx;
     v91_state_t b_rx;
+    vpcm_call_t caller;
+    vpcm_call_t answerer;
+    vpcm_call_params_t call_params;
+    uint8_t caller_tx_storage[VPCM_DUPLEX_STREAM_CAPACITY];
+    uint8_t caller_rx_storage[VPCM_DUPLEX_STREAM_CAPACITY];
+    uint8_t answerer_tx_storage[VPCM_DUPLEX_STREAM_CAPACITY];
+    uint8_t answerer_rx_storage[VPCM_DUPLEX_STREAM_CAPACITY];
     uint8_t a_input[TEST_PAYLOAD_LEN];
     uint8_t b_input[TEST_PAYLOAD_LEN];
     uint8_t a_output[TEST_PAYLOAD_LEN];
@@ -5113,6 +5285,28 @@ static bool test_v91_full_duplex(v91_law_t law)
     v91_init(&a_rx, law, V91_MODE_TRANSPARENT);
     v91_init(&b_tx, law, V91_MODE_TRANSPARENT);
     v91_init(&b_rx, law, V91_MODE_TRANSPARENT);
+    memset(&call_params, 0, sizeof(call_params));
+    call_params.law = law;
+    call_params.sample_rate = 8000;
+    call_params.frame_samples = 64;
+    call_params.caller_id = "caller";
+    call_params.callee_id = "answerer";
+    call_params.label = "loopback";
+    if (!vpcm_call_init(&caller,
+                        &call_params,
+                        caller_tx_storage,
+                        sizeof(caller_tx_storage),
+                        caller_rx_storage,
+                        sizeof(caller_rx_storage))
+        || !vpcm_call_init(&answerer,
+                           &call_params,
+                           answerer_tx_storage,
+                           sizeof(answerer_tx_storage),
+                           answerer_rx_storage,
+                           sizeof(answerer_rx_storage))) {
+        fprintf(stderr, "V.91 full duplex call object init failed\n");
+        return false;
+    }
     vpcm_log("Test: V.91 full duplex loopback over raw-G.711 (%s)", vpcm_law_to_str(law));
 
     fill_pattern(a_input, TEST_PAYLOAD_LEN, 0xCAFEBABEU ^ (uint32_t) law);
@@ -5145,6 +5339,23 @@ static bool test_v91_full_duplex(v91_law_t law)
 
         a_prod = v91_tx_codewords(&a_tx, a_to_b, 160, a_input + a_in_pos, a_want);
         b_prod = v91_tx_codewords(&b_tx, b_to_a, 160, b_input + b_in_pos, b_want);
+        if (!vpcm_call_transfer_codewords(&caller,
+                                          &answerer,
+                                          a_to_b,
+                                          a_prod,
+                                          false,
+                                          a_to_b,
+                                          sizeof(a_to_b))
+            || !vpcm_call_transfer_codewords(&answerer,
+                                             &caller,
+                                             b_to_a,
+                                             b_prod,
+                                             false,
+                                             b_to_a,
+                                             sizeof(b_to_a))) {
+            fprintf(stderr, "V.91 full duplex stream transfer failed\n");
+            return false;
+        }
         a_cons = v91_rx_codewords(&a_rx, a_output + a_out_pos, TEST_PAYLOAD_LEN - a_out_pos, b_to_a, b_prod);
         b_cons = v91_rx_codewords(&b_rx, b_output + b_out_pos, TEST_PAYLOAD_LEN - b_out_pos, a_to_b, a_prod);
         if (stride == 97 || ((a_in_pos / 512) != ((a_in_pos + a_want) / 512))) {

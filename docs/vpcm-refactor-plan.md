@@ -15,6 +15,26 @@ call/stream timing, and transport glue.
 - one RX G.711 stream
 - call metadata such as law and caller/callee identifiers
 - tick-based timing derived from sample count
+- top-level phone-line lifecycle state
+
+Top-level call state should model the line, not the modem:
+
+- `CALL_IDLE`
+- `CALL_WAIT_DIALTONE`
+- `CALL_DIAL`
+- `CALL_WAIT_RINGING`
+- `CALL_ANSWER`
+- `CALL_RUN`
+- `CALL_HANGUP`
+- `CALL_DONE`
+
+Within `CALL_RUN`, the active modem family is selected separately, e.g.:
+
+- `CALL_RUN_V90_MODEM`
+- `CALL_RUN_V91_MODEM`
+
+Modem sub-phases such as V.8 audio negotiation, V.91 startup, and V.91 data
+belong under the modem/session layer, not in the top-level call lifecycle.
 
 ### 2. G.711 stream layer
 
@@ -75,6 +95,7 @@ The first extraction step is in place:
 
 - `vpcm_g711_stream.[ch]`
 - `vpcm_call.[ch]`
+- `vpcm_link.[ch]`
 
 These modules are intentionally small and transport-agnostic so the next steps
 can move harness logic onto them without changing modem behavior all at once.
