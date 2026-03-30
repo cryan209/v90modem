@@ -22,7 +22,10 @@
 #include "data_interface.h"
 #include "clock_recovery.h"
 
+#include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
+#include <pjmedia-codec/passthrough.h>
+#include <pjmedia/frame.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,10 +51,21 @@
 static pj_pool_t       *g_pool       = NULL;
 static pjsua_acc_id     g_acc_id     = PJSUA_INVALID_ID;
 static pjsua_call_id    g_call_id    = PJSUA_INVALID_ID;
-static pjsua_conf_port_id g_modem_slot = PJSUA_INVALID_ID;
-static pjmedia_port     g_modem_port;
-static int16_t          g_frame_buf[SAMPLES_PER_FRAME * 2]; /* TX + scratch */
 static volatile int     g_running    = 1;
+static me_law_t         g_media_law  = ME_LAW_ULAW;
+static pj_bool_t        g_media_connected = PJ_FALSE;
+
+typedef struct modem_passthrough_port_s {
+    pjmedia_port base;
+    pj_pool_t *pool;
+    pjmedia_port *downstream_port;
+    unsigned payload_samples_per_frame;
+    uint8_t tx_payload[320];
+    uint8_t tx_ext_buf[2048];
+    uint8_t rx_ext_buf[2048];
+} modem_passthrough_port_t;
+
+static int16_t g_tx_linear[SAMPLES_PER_FRAME * 2];
 
 /* Ring state for incoming calls — emulates S0 register auto-answer */
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
@@ -61,127 +75,171 @@ static int             g_ring_count   = 0;
 static pj_time_val     g_last_ring_time;
 
 /* ------------------------------------------------------------------ */
-/* Custom pjmedia_port — bridge between PJSIP and modem_engine        */
+/* Raw G.711 passthrough bridge between PJSIP and modem_engine        */
 /* ------------------------------------------------------------------ */
 
-/*
- * put_frame: called by the conference bridge with audio received from the
- * network (upstream modem signal). Forward to me_rx_audio.
- */
-static pj_status_t modem_put_frame(pjmedia_port *port, pjmedia_frame *frame)
+static void g711_payload_to_linear(const uint8_t *payload,
+                                   int payload_len,
+                                   int16_t *linear)
 {
-    (void)port;
+    int i;
 
-    /* Diagnostic: log frame type so we can tell silence-frames from no-frames */
-    static int put_frame_count = 0;
-    static int put_none_count  = 0;
-    if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO) {
-        put_frame_count++;
-        int16_t *samples = (int16_t *)frame->buf;
-        int      count   = (int)(frame->size / sizeof(int16_t));
-        me_rx_audio(samples, count);
-    } else {
-        /* TYPE_NONE means the conference bridge has no data for us this tick */
-        put_none_count++;
+    for (i = 0; i < payload_len; i++) {
+        if (g_media_law == ME_LAW_ALAW)
+            linear[i] = alaw_to_linear(payload[i]);
+        else
+            linear[i] = ulaw_to_linear(payload[i]);
     }
-    /* Log the AUDIO vs NONE ratio once per second (50 frames @ 20ms) */
-    if ((put_frame_count + put_none_count) >= 50) {
-        PJ_LOG(4, ("sip_modem", "put_frame: AUDIO=%d NONE=%d per sec",
-                   put_frame_count, put_none_count));
-        put_frame_count = 0;
-        put_none_count  = 0;
+}
+
+static void linear_to_g711_payload(const int16_t *linear,
+                                   int linear_len,
+                                   uint8_t *payload)
+{
+    int i;
+
+    for (i = 0; i < linear_len; i++) {
+        if (g_media_law == ME_LAW_ALAW)
+            payload[i] = linear_to_alaw(linear[i]);
+        else
+            payload[i] = linear_to_ulaw(linear[i]);
     }
-    return PJ_SUCCESS;
 }
 
-/*
- * get_frame: called by the conference bridge when it needs audio to send
- * to the network (downstream modem signal). Pull from me_tx_audio.
- */
-static pj_status_t modem_get_frame(pjmedia_port *port, pjmedia_frame *frame)
+static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
+                                               pjmedia_frame *frame)
 {
-    (void)port;
-    int count = (int)(frame->size / sizeof(int16_t));
-    me_tx_audio((int16_t *)frame->buf, count);
-    frame->type      = PJMEDIA_FRAME_TYPE_AUDIO;
-    frame->timestamp.u64 += count;
-    return PJ_SUCCESS;
+    modem_passthrough_port_t *port = (modem_passthrough_port_t *) this_port;
+    pjmedia_frame_ext *tx_ext;
+    int count;
+
+    PJ_UNUSED_ARG(frame);
+
+    if (!port || !port->downstream_port)
+        return PJ_EINVAL;
+
+    count = (int) port->payload_samples_per_frame;
+    if (count > (int) PJ_ARRAY_SIZE(g_tx_linear))
+        count = (int) PJ_ARRAY_SIZE(g_tx_linear);
+
+    me_tx_audio(g_tx_linear, count);
+    linear_to_g711_payload(g_tx_linear, count, port->tx_payload);
+
+    memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
+    tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
+    tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
+    pjmedia_frame_ext_append_subframe(tx_ext,
+                                      port->tx_payload,
+                                      port->payload_samples_per_frame * 8U,
+                                      (pj_uint16_t) port->payload_samples_per_frame);
+
+    return pjmedia_port_put_frame(port->downstream_port, (pjmedia_frame *) tx_ext);
 }
 
-static pj_status_t modem_port_on_destroy(pjmedia_port *port)
+static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
+                                               pjmedia_frame *frame)
 {
-    (void)port;
-    return PJ_SUCCESS;
-}
+    modem_passthrough_port_t *port = (modem_passthrough_port_t *) this_port;
+    pj_status_t st;
+    pjmedia_frame_ext *rx_ext;
+    unsigned i;
 
-static void create_modem_port(pj_pool_t *pool)
-{
-    pj_str_t name = pj_str("modem");
-    pjmedia_port_info_init(&g_modem_port.info, &name, PORT_SIG,
-                           SAMPLE_RATE, 1, BITS_PER_SAMPLE, SAMPLES_PER_FRAME);
-    g_modem_port.put_frame  = modem_put_frame;
-    g_modem_port.get_frame  = modem_get_frame;
-    g_modem_port.on_destroy = modem_port_on_destroy;
-    (void)pool;
-}
+    if (!port || !frame || !port->downstream_port)
+        return PJ_EINVAL;
 
-/* ------------------------------------------------------------------ */
-/* Attach/detach the modem port to an active call's conference slot    */
-/* ------------------------------------------------------------------ */
+    rx_ext = (pjmedia_frame_ext *) port->rx_ext_buf;
+    pj_bzero(rx_ext, sizeof(pjmedia_frame_ext));
 
-static void attach_modem_to_call(pjsua_call_id call_id)
-{
-    pjsua_call_info ci;
-    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS) return;
-
-    pjsua_conf_port_id call_slot = ci.conf_slot;
-    if (call_slot == PJSUA_INVALID_ID) return;
-
-    /* Add the modem port to the conference bridge */
-    if (g_modem_slot == PJSUA_INVALID_ID) {
-        if (pjsua_conf_add_port(g_pool, &g_modem_port, &g_modem_slot)
-            != PJ_SUCCESS) {
-            PJ_LOG(1, ("sip_modem", "conf_add_port failed"));
-            return;
+    st = pjmedia_port_get_frame(port->downstream_port, (pjmedia_frame *) rx_ext);
+    if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_EXTENDED) {
+        for (i = 0; i < rx_ext->subframe_cnt; i++) {
+            pjmedia_frame_ext_subframe *sf = pjmedia_frame_ext_get_subframe(rx_ext, i);
+            unsigned sf_bytes;
+            if (!sf)
+                continue;
+            sf_bytes = ((unsigned) sf->bitlen + 7U) >> 3;
+            if (sf_bytes == 0 || sf_bytes > PJ_ARRAY_SIZE(g_tx_linear))
+                continue;
+            g711_payload_to_linear((const uint8_t *) sf->data, (int) sf_bytes, g_tx_linear);
+            me_rx_audio(g_tx_linear, (int) sf_bytes);
         }
+    } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
+               && rx_ext->base.buf && rx_ext->base.size > 0) {
+        unsigned sz = (unsigned) rx_ext->base.size;
+        if (sz > PJ_ARRAY_SIZE(g_tx_linear))
+            sz = PJ_ARRAY_SIZE(g_tx_linear);
+        g711_payload_to_linear((const uint8_t *) rx_ext->base.buf, (int) sz, g_tx_linear);
+        me_rx_audio(g_tx_linear, (int) sz);
     }
 
-    /* Connect bidirectionally: network→modem, modem→network */
-    pjsua_conf_connect(call_slot,     g_modem_slot);
-    pjsua_conf_connect(g_modem_slot,  call_slot);
-
-    /* Also connect call→master (slot 0) so the null sound device's clock
-     * drives RTP packet extraction from the jitter buffer.  Without this,
-     * incoming audio is never read and put_frame receives only silence. */
-    pjsua_conf_connect(call_slot, 0);
-
-    /* Detect negotiated codec (PCMU vs PCMA) and tell the modem engine */
-    {
-        pjsua_stream_info si;
-        if (pjsua_call_get_stream_info(call_id, 0, &si) == PJ_SUCCESS &&
-            si.type == PJMEDIA_TYPE_AUDIO) {
-            pj_str_t pcma_name = pj_str("PCMA");
-            if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
-                me_set_law(ME_LAW_ALAW);
-                PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law)"));
-            } else {
-                me_set_law(ME_LAW_ULAW);
-                PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law)"));
-            }
-        }
-    }
-
-    PJ_LOG(3, ("sip_modem", "Modem port connected to call slot %d", call_slot));
-    me_on_sip_connected();
+    frame->type = PJMEDIA_FRAME_TYPE_NONE;
+    frame->size = 0;
+    return PJ_SUCCESS;
 }
 
-static void detach_modem_from_call(void)
+static pj_status_t modem_passthrough_on_destroy(pjmedia_port *this_port)
 {
-    if (g_modem_slot != PJSUA_INVALID_ID) {
-        pjsua_conf_remove_port(g_modem_slot);
-        g_modem_slot = PJSUA_INVALID_ID;
+    modem_passthrough_port_t *port = (modem_passthrough_port_t *) this_port;
+    if (port && port->pool)
+        pj_pool_release(port->pool);
+    return PJ_SUCCESS;
+}
+
+static pj_status_t modem_passthrough_port_create(const pjmedia_port *source_port,
+                                                 unsigned payload_samples_per_frame,
+                                                 pjmedia_port **p_port)
+{
+    pjmedia_endpt *endpt = pjsua_get_pjmedia_endpt();
+    pj_pool_t *pool;
+    modem_passthrough_port_t *port;
+
+    if (!source_port || !p_port || !endpt)
+        return PJ_EINVAL;
+    if (payload_samples_per_frame == 0 || payload_samples_per_frame > 320)
+        return PJ_EINVAL;
+
+    pool = pjmedia_endpt_create_pool(endpt, "modem-pass-port", 1024, 1024);
+    if (!pool)
+        return PJ_ENOMEM;
+
+    port = PJ_POOL_ZALLOC_T(pool, modem_passthrough_port_t);
+    port->pool = pool;
+    port->downstream_port = (pjmedia_port *) source_port;
+    port->payload_samples_per_frame = payload_samples_per_frame;
+    port->base.info = source_port->info;
+    port->base.put_frame = &modem_passthrough_put_frame;
+    port->base.get_frame = &modem_passthrough_get_frame;
+    port->base.on_destroy = &modem_passthrough_on_destroy;
+    *p_port = &port->base;
+    return PJ_SUCCESS;
+}
+
+static void on_stream_created2(pjsua_call_id call_id,
+                               pjsua_on_stream_created_param *param)
+{
+    pjmedia_port *pass_port = NULL;
+    unsigned payload_samples_per_frame = SAMPLES_PER_FRAME;
+
+    if (!param || call_id != g_call_id || param->stream_idx != 0)
+        return;
+
+    if (param->port
+        && param->port->info.fmt.type == PJMEDIA_TYPE_AUDIO
+        && param->port->info.fmt.detail_type == PJMEDIA_FORMAT_DETAIL_AUDIO
+        && PJMEDIA_PIA_SPF(&param->port->info) > 0
+        && PJMEDIA_PIA_SPF(&param->port->info) <= 320) {
+        payload_samples_per_frame = PJMEDIA_PIA_SPF(&param->port->info);
     }
-    me_on_sip_disconnected();
+
+    if (param->port
+        && modem_passthrough_port_create(param->port,
+                                         payload_samples_per_frame,
+                                         &pass_port) == PJ_SUCCESS) {
+        param->port = pass_port;
+        param->destroy_port = PJ_TRUE;
+        PJ_LOG(3, ("sip_modem", "Installed G.711 passthrough stream wrapper (%u samples/frame)",
+                   payload_samples_per_frame));
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -205,7 +263,10 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
             g_ring_count   = 0;
         }
         if (call_id == g_call_id) {
-            detach_modem_from_call();
+            if (g_media_connected) {
+                me_on_sip_disconnected();
+                g_media_connected = PJ_FALSE;
+            }
             g_call_id = PJSUA_INVALID_ID;
         }
     }
@@ -217,10 +278,28 @@ static void on_call_media_state(pjsua_call_id call_id)
     pjsua_call_get_info(call_id, &ci);
 
     for (unsigned i = 0; i < ci.media_cnt; i++) {
+        pjsua_stream_info si;
+
         if (ci.media[i].type == PJMEDIA_TYPE_AUDIO &&
             ci.media[i].status == PJSUA_CALL_MEDIA_ACTIVE) {
             g_call_id = call_id;
-            attach_modem_to_call(call_id);
+            if (pjsua_call_get_stream_info(call_id, i, &si) == PJ_SUCCESS &&
+                si.type == PJMEDIA_TYPE_AUDIO) {
+                pj_str_t pcma_name = pj_str("PCMA");
+                if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
+                    g_media_law = ME_LAW_ALAW;
+                    me_set_law(ME_LAW_ALAW);
+                    PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law passthrough)"));
+                } else {
+                    g_media_law = ME_LAW_ULAW;
+                    me_set_law(ME_LAW_ULAW);
+                    PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
+                }
+            }
+            if (!g_media_connected) {
+                me_on_sip_connected();
+                g_media_connected = PJ_TRUE;
+            }
             break;
         }
     }
@@ -274,6 +353,29 @@ static void restrict_to_g711(void)
         pj_str_t id = pj_str((char *)disable[i]);
         pjsua_codec_set_priority(&id, PJMEDIA_CODEC_PRIO_DISABLED);
     }
+}
+
+static pj_status_t register_g711_passthrough(void)
+{
+    pjmedia_codec_passthrough_setting setting;
+    pjmedia_format fmts[2];
+
+#if !PJMEDIA_HAS_PASSTHROUGH_CODECS
+    return PJ_ENOTSUP;
+#else
+    memset(&setting, 0, sizeof(setting));
+    memset(fmts, 0, sizeof(fmts));
+
+    pjmedia_format_init_audio(&fmts[0], PJMEDIA_FORMAT_PCMU, 8000, 1, 8, 20000, 64000, 64000);
+    pjmedia_format_init_audio(&fmts[1], PJMEDIA_FORMAT_PCMA, 8000, 1, 8, 20000, 64000, 64000);
+
+    setting.fmt_cnt = 2;
+    setting.fmts = fmts;
+    setting.ilbc_mode = 20;
+
+    pjmedia_codec_passthrough_deinit();
+    return pjmedia_codec_passthrough_init2(pjsua_get_pjmedia_endpt(), &setting);
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -367,6 +469,7 @@ int main(int argc, char *argv[])
     ua_cfg.cb.on_call_state       = on_call_state;
     ua_cfg.cb.on_call_media_state = on_call_media_state;
     ua_cfg.cb.on_incoming_call    = on_incoming_call;
+    ua_cfg.cb.on_stream_created2  = on_stream_created2;
     ua_cfg.max_calls              = 1;
 
     /* Logging */
@@ -420,11 +523,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    status = register_g711_passthrough();
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(1, ("sip_modem", "G.711 passthrough init failed"));
+        pjsua_destroy();
+        return 1;
+    }
+
     /* Restrict to G.711 */
     restrict_to_g711();
-
-    /* Create the modem media port (must be after pjsua_start) */
-    create_modem_port(g_pool);
 
     /* ── Optional SIP account registration ──────────────────────── */
     if (sip_server && username) {

@@ -262,10 +262,14 @@ static pj_pool_t *g_vpcm_pjsip_modem_pool;
 typedef struct {
     pjmedia_port base;
     pj_pool_t *pool;
+    pjmedia_port *downstream_port;
     unsigned payload_samples_per_frame;
     uint8_t tx_payload[320];
     uint8_t tx_ext_buf[1024];
+    uint8_t rx_ext_buf[2048];
 } vpcm_pjsip_passthrough_port_t;
+
+static char g_vpcm_passthrough_port_marker;
 
 typedef enum {
     VPCM_STARTUP_STAGE_PHASE1 = 0,
@@ -772,7 +776,7 @@ static pj_status_t vpcm_tp_adapter_create(pjmedia_transport *base_tp,
     return PJ_SUCCESS;
 }
 
-static pjmedia_transport *__attribute__((unused))
+static pjmedia_transport *
 vpcm_pjsip_on_create_media_transport(pjsua_call_id call_id,
                                      unsigned media_idx,
                                      pjmedia_transport *base_tp,
@@ -866,17 +870,55 @@ static void vpcm_pjsip_on_incoming_call(pjsua_acc_id acc_id,
 static pj_status_t vpcm_pjsip_passthrough_put_frame(pjmedia_port *this_port,
                                                     pjmedia_frame *frame)
 {
-    pjmedia_frame_ext *ext;
-    unsigned i;
+    vpcm_pjsip_passthrough_port_t *port = (vpcm_pjsip_passthrough_port_t *) this_port;
+    pjmedia_frame_ext *tx_ext;
 
-    PJ_UNUSED_ARG(this_port);
-    if (!frame || !frame->buf || frame->size == 0)
-        return PJ_SUCCESS;
+    PJ_UNUSED_ARG(frame);
+    if (!port || !port->downstream_port)
+        return PJ_EINVAL;
 
-    if (frame->type == PJMEDIA_FRAME_TYPE_EXTENDED) {
-        ext = (pjmedia_frame_ext *) frame->buf;
-        for (i = 0; i < ext->subframe_cnt; i++) {
-            pjmedia_frame_ext_subframe *sf = pjmedia_frame_ext_get_subframe(ext, i);
+    vpcm_pjsip_modem_fill_rtp_tx_payload(port->tx_payload, (int) port->payload_samples_per_frame);
+
+    /* Build the frame_ext directly in tx_ext_buf.  codec_encode() casts
+     * the pjmedia_frame* argument straight to pjmedia_frame_ext* and
+     * reads subframe_cnt / appends subframes from that address, so we must
+     * pass the frame_ext buffer itself as the frame pointer. */
+    memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
+    tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
+    tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
+    pjmedia_frame_ext_append_subframe(tx_ext,
+                                      port->tx_payload,
+                                      port->payload_samples_per_frame * 8U,
+                                      port->payload_samples_per_frame);
+
+    return pjmedia_port_put_frame(port->downstream_port, (pjmedia_frame *) tx_ext);
+}
+
+static pj_status_t vpcm_pjsip_passthrough_get_frame(pjmedia_port *this_port,
+                                                    pjmedia_frame *frame)
+{
+    vpcm_pjsip_passthrough_port_t *port = (vpcm_pjsip_passthrough_port_t *) this_port;
+    pj_status_t st;
+    pjmedia_frame_ext *rx_ext;
+
+    if (!port || !frame)
+        return PJ_EINVAL;
+    if (!port->downstream_port)
+        return PJ_EINVAL;
+
+    /* get_frame_ext() casts the pjmedia_frame* argument to pjmedia_frame_ext*
+     * and appends subframes starting at that address + sizeof(pjmedia_frame_ext).
+     * We must pass the rx_ext_buf buffer itself as the frame pointer so that
+     * subframe data lands inside rx_ext_buf rather than past the end of a
+     * stack-local pjmedia_frame. */
+    rx_ext = (pjmedia_frame_ext *) port->rx_ext_buf;
+    pj_bzero(rx_ext, sizeof(pjmedia_frame_ext));
+
+    st = pjmedia_port_get_frame(port->downstream_port, (pjmedia_frame *) rx_ext);
+    if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_EXTENDED) {
+        unsigned i;
+        for (i = 0; i < rx_ext->subframe_cnt; i++) {
+            pjmedia_frame_ext_subframe *sf = pjmedia_frame_ext_get_subframe(rx_ext, i);
             unsigned sf_bytes;
             if (!sf)
                 continue;
@@ -884,36 +926,14 @@ static pj_status_t vpcm_pjsip_passthrough_put_frame(pjmedia_port *this_port,
             if (sf_bytes > 0)
                 vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) sf->data, (int) sf_bytes);
         }
-    } else if (frame->type == PJMEDIA_FRAME_TYPE_AUDIO) {
-        vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) frame->buf, (int) frame->size);
+    } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
+               && rx_ext->base.buf && rx_ext->base.size > 0) {
+        vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) rx_ext->base.buf,
+                                               (int) rx_ext->base.size);
     }
-    return PJ_SUCCESS;
-}
 
-static pj_status_t vpcm_pjsip_passthrough_get_frame(pjmedia_port *this_port,
-                                                    pjmedia_frame *frame)
-{
-    vpcm_pjsip_passthrough_port_t *port = (vpcm_pjsip_passthrough_port_t *) this_port;
-    pjmedia_frame_ext *tx_ext;
-
-    if (!port || !frame)
-        return PJ_EINVAL;
-
-    vpcm_pjsip_modem_fill_rtp_tx_payload(port->tx_payload, (int) port->payload_samples_per_frame);
-
-    memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
-    tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
-    tx_ext->base.type = PJMEDIA_FRAME_TYPE_EXTENDED;
-    tx_ext->base.buf = port->tx_ext_buf;
-    tx_ext->base.size = sizeof(port->tx_ext_buf);
-    pjmedia_frame_ext_append_subframe(tx_ext,
-                                      port->tx_payload,
-                                      port->payload_samples_per_frame * 8U,
-                                      port->payload_samples_per_frame);
-
-    frame->type = PJMEDIA_FRAME_TYPE_EXTENDED;
-    frame->buf = tx_ext;
-    frame->size = sizeof(port->tx_ext_buf);
+    frame->type = PJMEDIA_FRAME_TYPE_NONE;
+    frame->size = 0;
     return PJ_SUCCESS;
 }
 
@@ -935,6 +955,10 @@ static pj_status_t vpcm_pjsip_passthrough_port_create(const pjmedia_port *source
 
     if (!source_port || !p_port || !endpt)
         return PJ_EINVAL;
+    if (source_port->port_data.pdata == &g_vpcm_passthrough_port_marker) {
+        *p_port = (pjmedia_port *) source_port;
+        return PJ_SUCCESS;
+    }
     if (payload_samples_per_frame == 0 || payload_samples_per_frame > 320)
         return PJ_EINVAL;
 
@@ -944,8 +968,10 @@ static pj_status_t vpcm_pjsip_passthrough_port_create(const pjmedia_port *source
 
     port = PJ_POOL_ZALLOC_T(pool, vpcm_pjsip_passthrough_port_t);
     port->pool = pool;
+    port->downstream_port = (pjmedia_port *) source_port;
     port->payload_samples_per_frame = payload_samples_per_frame;
     port->base.info = source_port->info;
+    port->base.port_data.pdata = &g_vpcm_passthrough_port_marker;
     port->base.put_frame = &vpcm_pjsip_passthrough_put_frame;
     port->base.get_frame = &vpcm_pjsip_passthrough_get_frame;
     port->base.on_destroy = &vpcm_pjsip_passthrough_on_destroy;
@@ -975,6 +1001,7 @@ static void vpcm_pjsip_on_stream_created2(pjsua_call_id call_id,
     }
 
     if (param->port
+        && param->port->port_data.pdata != &g_vpcm_passthrough_port_marker
         && vpcm_pjsip_passthrough_port_create(param->port,
                                               payload_samples_per_frame,
                                               &pass_port) == PJ_SUCCESS) {
@@ -1041,10 +1068,6 @@ static void vpcm_pjsip_on_call_media_state(pjsua_call_id call_id)
         g_vpcm_pjsip_runtime.media_codec_ok = true;
         g_vpcm_pjsip_runtime.media_ready = true;
         g_vpcm_pjsip_runtime.call_conf_port = pjsua_call_get_conf_port(call_id);
-        if (g_vpcm_pjsip_runtime.call_conf_port >= 0) {
-            pjsua_conf_disconnect(0, g_vpcm_pjsip_runtime.call_conf_port);
-            pjsua_conf_disconnect(g_vpcm_pjsip_runtime.call_conf_port, 0);
-        }
         vpcm_log("PJSIP media active: codec=%s pt=%u (G.711 passthrough)",
                  codec_name,
                  si.info.aud.fmt.pt);
@@ -6474,6 +6497,7 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     ua_cfg.cb.on_call_state = &vpcm_pjsip_on_call_state;
     ua_cfg.cb.on_call_media_state = &vpcm_pjsip_on_call_media_state;
     ua_cfg.cb.on_stream_created2 = &vpcm_pjsip_on_stream_created2;
+    ua_cfg.cb.on_create_media_transport = &vpcm_pjsip_on_create_media_transport;
     log_cfg.console_level = (g_vpcm_session_diag || g_vpcm_verbose) ? 4 : 3;
     media_cfg.no_vad = PJ_TRUE;
     media_cfg.enable_ice = PJ_FALSE;
