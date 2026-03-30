@@ -32,6 +32,23 @@ const char *vpcm_call_run_mode_to_str(vpcm_call_run_mode_t run_mode)
     }
 }
 
+const char *vpcm_v91_modem_state_to_str(vpcm_v91_modem_state_t state)
+{
+    switch (state) {
+    case VPCM_V91_MODEM_IDLE: return "IDLE";
+    case VPCM_V91_MODEM_V8: return "V8";
+    case VPCM_V91_MODEM_PHASE1: return "PHASE1";
+    case VPCM_V91_MODEM_INFO: return "INFO";
+    case VPCM_V91_MODEM_DIL: return "DIL";
+    case VPCM_V91_MODEM_SCR: return "SCR";
+    case VPCM_V91_MODEM_CP: return "CP";
+    case VPCM_V91_MODEM_B1: return "B1";
+    case VPCM_V91_MODEM_DATA: return "DATA";
+    case VPCM_V91_MODEM_CLEARDOWN: return "CLEARDOWN";
+    default: return "UNKNOWN";
+    }
+}
+
 bool vpcm_call_params_normalize(vpcm_call_params_t *params)
 {
     if (!params)
@@ -64,6 +81,7 @@ bool vpcm_call_init(vpcm_call_t *call,
     call->params = normalized;
     call->state = VPCM_CALL_IDLE;
     call->run_mode = VPCM_CALL_RUN_NONE;
+    call->v91_state = VPCM_V91_MODEM_IDLE;
 
     memset(&tx_params, 0, sizeof(tx_params));
     tx_params.law = normalized.law;
@@ -92,6 +110,7 @@ void vpcm_call_reset(vpcm_call_t *call)
     vpcm_g711_stream_reset(&call->rx_stream);
     call->state = VPCM_CALL_IDLE;
     call->run_mode = VPCM_CALL_RUN_NONE;
+    call->v91_state = VPCM_V91_MODEM_IDLE;
     call->ticks = 0;
     call->elapsed_seconds = 0.0;
 }
@@ -110,8 +129,10 @@ void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state)
     if (!call)
         return;
     call->state = state;
-    if (!vpcm_call_state_allows_run_mode(state))
+    if (!vpcm_call_state_allows_run_mode(state)) {
         call->run_mode = VPCM_CALL_RUN_NONE;
+        call->v91_state = VPCM_V91_MODEM_IDLE;
+    }
 }
 
 void vpcm_call_set_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode)
@@ -121,6 +142,19 @@ void vpcm_call_set_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode)
     if (call->state != VPCM_CALL_RUN && run_mode != VPCM_CALL_RUN_NONE)
         call->state = VPCM_CALL_RUN;
     call->run_mode = run_mode;
+    if (run_mode != VPCM_CALL_RUN_V91_MODEM)
+        call->v91_state = VPCM_V91_MODEM_IDLE;
+}
+
+void vpcm_call_set_v91_state(vpcm_call_t *call, vpcm_v91_modem_state_t state)
+{
+    if (!call)
+        return;
+    if (call->run_mode != VPCM_CALL_RUN_V91_MODEM)
+        call->run_mode = VPCM_CALL_RUN_V91_MODEM;
+    if (call->state != VPCM_CALL_RUN)
+        call->state = VPCM_CALL_RUN;
+    call->v91_state = state;
 }
 
 bool vpcm_call_step(vpcm_call_t *call)
@@ -142,6 +176,48 @@ bool vpcm_call_step(vpcm_call_t *call)
     default:
         return false;
     }
+}
+
+bool vpcm_call_step_to_next_state(vpcm_call_t *call)
+{
+    if (!call)
+        return false;
+
+    switch (call->state) {
+    case VPCM_CALL_IDLE:
+        call->state = VPCM_CALL_WAIT_DIALTONE;
+        call->run_mode = VPCM_CALL_RUN_NONE;
+        call->v91_state = VPCM_V91_MODEM_IDLE;
+        break;
+    case VPCM_CALL_WAIT_DIALTONE:
+        call->state = VPCM_CALL_DIAL;
+        break;
+    case VPCM_CALL_DIAL:
+        call->state = VPCM_CALL_WAIT_RINGING;
+        break;
+    case VPCM_CALL_WAIT_RINGING:
+        call->state = VPCM_CALL_ANSWER;
+        break;
+    case VPCM_CALL_ANSWER:
+        call->state = VPCM_CALL_RUN;
+        break;
+    case VPCM_CALL_RUN:
+        call->state = VPCM_CALL_HANGUP;
+        call->run_mode = VPCM_CALL_RUN_NONE;
+        call->v91_state = VPCM_V91_MODEM_CLEARDOWN;
+        break;
+    case VPCM_CALL_HANGUP:
+        call->state = VPCM_CALL_DONE;
+        call->run_mode = VPCM_CALL_RUN_NONE;
+        call->v91_state = VPCM_V91_MODEM_IDLE;
+        break;
+    case VPCM_CALL_DONE:
+        break;
+    default:
+        return false;
+    }
+
+    return vpcm_call_step(call);
 }
 
 size_t vpcm_call_frame_bytes(const vpcm_call_t *call)

@@ -169,6 +169,11 @@ static bool vpcm_call_transfer_codewords(vpcm_call_t *src_call,
                                          bool robbed_bit,
                                          uint8_t *rx_codewords,
                                          size_t scratch_cap);
+static bool vpcm_drive_loopback_call_to_run(vpcm_call_t *caller,
+                                            vpcm_call_t *answerer,
+                                            vpcm_call_run_mode_t run_mode);
+static bool vpcm_drive_loopback_call_to_done(vpcm_call_t *caller,
+                                             vpcm_call_t *answerer);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
@@ -2753,6 +2758,96 @@ static bool vpcm_call_transfer_codewords(vpcm_call_t *src_call,
     return read_len == (size_t) codeword_len;
 }
 
+static bool vpcm_drive_loopback_call_to_run(vpcm_call_t *caller,
+                                            vpcm_call_t *answerer,
+                                            vpcm_call_run_mode_t run_mode)
+{
+    if (!caller || !answerer)
+        return false;
+
+    vpcm_call_set_state(caller, VPCM_CALL_WAIT_DIALTONE);
+    vpcm_call_set_state(answerer, VPCM_CALL_WAIT_RINGING);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+
+    if (!vpcm_call_step(caller) || !vpcm_call_step(answerer))
+        return false;
+    vpcm_call_set_state(caller, VPCM_CALL_DIAL);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+
+    if (!vpcm_call_step(caller) || !vpcm_call_step(answerer))
+        return false;
+    vpcm_call_set_state(caller, VPCM_CALL_WAIT_RINGING);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+
+    if (!vpcm_call_step(caller) || !vpcm_call_step(answerer))
+        return false;
+    vpcm_call_set_state(answerer, VPCM_CALL_ANSWER);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+
+    if (!vpcm_call_step(caller) || !vpcm_call_step(answerer))
+        return false;
+    vpcm_call_set_run_mode(caller, run_mode);
+    vpcm_call_set_run_mode(answerer, run_mode);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s/%s answerer=%s/%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_run_mode_to_str(caller->run_mode),
+                       vpcm_call_state_to_str(answerer->state),
+                       vpcm_call_run_mode_to_str(answerer->run_mode));
+    return true;
+}
+
+static bool vpcm_drive_loopback_call_to_done(vpcm_call_t *caller,
+                                             vpcm_call_t *answerer)
+{
+    if (!caller || !answerer)
+        return false;
+
+    vpcm_call_set_state(caller, VPCM_CALL_HANGUP);
+    vpcm_call_set_state(answerer, VPCM_CALL_HANGUP);
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+    if (!vpcm_call_step_to_next_state(caller) || !vpcm_call_step_to_next_state(answerer))
+        return false;
+    vpcm_log_e2e_phase("CALL",
+                       "Call lifecycle: caller=%s answerer=%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_state_to_str(answerer->state));
+    return true;
+}
+
+static void vpcm_set_loopback_v91_state(vpcm_call_t *caller,
+                                        vpcm_call_t *answerer,
+                                        vpcm_v91_modem_state_t state)
+{
+    if (!caller || !answerer)
+        return;
+    vpcm_call_set_v91_state(caller, state);
+    vpcm_call_set_v91_state(answerer, state);
+    vpcm_log_e2e_phase("MODEM",
+                       "Call modem state: caller=%s/%s/%s answerer=%s/%s/%s",
+                       vpcm_call_state_to_str(caller->state),
+                       vpcm_call_run_mode_to_str(caller->run_mode),
+                       vpcm_v91_modem_state_to_str(caller->v91_state),
+                       vpcm_call_state_to_str(answerer->state),
+                       vpcm_call_run_mode_to_str(answerer->run_mode),
+                       vpcm_v91_modem_state_to_str(answerer->v91_state));
+}
+
 static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 const char *family_label,
                                                                 const char *path_label,
@@ -2835,6 +2930,46 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     a2c_mismatch_chunks = 0;
     c2a_chunks_checked = 0;
     a2c_chunks_checked = 0;
+    memset(&call_params, 0, sizeof(call_params));
+    call_params.law = law;
+    call_params.sample_rate = 8000;
+    call_params.frame_samples = 64;
+    call_params.caller_id = "caller";
+    call_params.callee_id = "answerer";
+    call_params.label = family_label;
+    caller_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    caller_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    if (!caller_tx_storage || !caller_rx_storage || !answerer_tx_storage || !answerer_rx_storage
+        || !vpcm_call_init(&caller_call,
+                           &call_params,
+                           caller_tx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY,
+                           caller_rx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY)
+        || !vpcm_call_init(&answerer_call,
+                           &call_params,
+                           answerer_tx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY,
+                           answerer_rx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY)) {
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
+        fprintf(stderr, "%s call object init failed\n", family_label);
+        return false;
+    }
+    if (!vpcm_drive_loopback_call_to_run(&caller_call, &answerer_call, VPCM_CALL_RUN_V91_MODEM)) {
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
+        fprintf(stderr, "%s call lifecycle progression failed\n", family_label);
+        return false;
+    }
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_PHASE1);
 
     vpcm_log_e2e_phase("MODEL",
                        "V.91 startup/data path begins after successful V.8 capability signalling");
@@ -2871,6 +3006,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     }
     vpcm_log_e2e_phase("PHASE1", "Ez exchanged (%d symbols)", V91_EZ_SYMBOLS);
 
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_INFO);
     if (v91_tx_info_codewords(&caller, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS) {
         fprintf(stderr, "%s caller INFO tx failed\n", family_label);
         return false;
@@ -2897,6 +3033,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                        answerer_info.tx_uses_alaw ? 1 : 0,
                        answerer_info.request_transparent_mode ? 1 : 0);
 
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_DIL);
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
@@ -2923,6 +3060,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     vpcm_log_e2e_phase("DIL", "Startup DIL sequence exchanged (caller=%d symbols, answerer=%d symbols)",
                        caller_startup_len, answerer_startup_len);
 
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_SCR);
     if (v91_tx_scr_codewords(&caller, scr_buf, (int) sizeof(scr_buf), 18) != 18) {
         fprintf(stderr, "%s caller SCR tx failed\n", family_label);
         return false;
@@ -2944,6 +3082,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     }
     vpcm_log_e2e_phase("SCR", "SCR/SCR' exchanged");
 
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_CP);
     cp_len = v91_tx_cp_codewords(&caller, cp_buf, (int) sizeof(cp_buf), &cp_offer, true);
     if (cp_len <= 0) {
         fprintf(stderr, "%s caller CP tx failed\n", family_label);
@@ -2975,6 +3114,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                        cp_ack.drn,
                        vpcm_cp_drn_to_bps(cp_ack.drn));
 
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_B1);
     if (v91_tx_es_codewords(&caller, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS) {
         fprintf(stderr, "%s caller Es tx failed\n", family_label);
         return false;
@@ -3024,37 +3164,7 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     caller_rx = caller;
     answerer_tx = answerer;
     answerer_rx = answerer;
-    memset(&call_params, 0, sizeof(call_params));
-    call_params.law = law;
-    call_params.sample_rate = 8000;
-    call_params.frame_samples = 64;
-    call_params.caller_id = "caller";
-    call_params.callee_id = "answerer";
-    call_params.label = family_label;
-    caller_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
-    caller_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
-    answerer_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
-    answerer_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
-    if (!caller_tx_storage || !caller_rx_storage || !answerer_tx_storage || !answerer_rx_storage
-        || !vpcm_call_init(&caller_call,
-                           &call_params,
-                           caller_tx_storage,
-                           VPCM_SESSION_STREAM_CAPACITY,
-                           caller_rx_storage,
-                           VPCM_SESSION_STREAM_CAPACITY)
-        || !vpcm_call_init(&answerer_call,
-                           &call_params,
-                           answerer_tx_storage,
-                           VPCM_SESSION_STREAM_CAPACITY,
-                           answerer_rx_storage,
-                           VPCM_SESSION_STREAM_CAPACITY)) {
-        free(caller_tx_storage);
-        free(caller_rx_storage);
-        free(answerer_tx_storage);
-        free(answerer_rx_storage);
-        fprintf(stderr, "%s call object init failed\n", family_label);
-        return false;
-    }
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_DATA);
     vpcm_log_e2e_phase("DATA", "Data mode active");
 
     data_frames = vpcm_data_frames_from_seconds(data_seconds);
@@ -3366,6 +3476,15 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     free(caller_pcm_rx);
     free(answerer_pcm_tx);
     free(answerer_pcm_rx);
+    vpcm_set_loopback_v91_state(&caller_call, &answerer_call, VPCM_V91_MODEM_CLEARDOWN);
+    if (!vpcm_drive_loopback_call_to_done(&caller_call, &answerer_call)) {
+        free(caller_tx_storage);
+        free(caller_rx_storage);
+        free(answerer_tx_storage);
+        free(answerer_rx_storage);
+        fprintf(stderr, "%s call hangup progression failed\n", family_label);
+        return false;
+    }
     free(caller_tx_storage);
     free(caller_rx_storage);
     free(answerer_tx_storage);
