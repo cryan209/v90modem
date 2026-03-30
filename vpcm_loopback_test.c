@@ -183,6 +183,7 @@ typedef struct {
     bool media_ready;
     bool media_codec_checked;
     bool media_codec_ok;
+    bool media_clock_wired;
     int disconnect_code;
     v91_law_t expected_law;
 } vpcm_pjsip_runtime_t;
@@ -283,18 +284,6 @@ typedef enum {
     VPCM_STARTUP_STAGE_COUNT = 8
 } vpcm_startup_stage_t;
 
-typedef struct {
-    pjmedia_transport base;
-    pj_pool_t *pool;
-    pjmedia_transport *slave_tp;
-    pj_bool_t del_base;
-    void *stream_user_data;
-    void *stream_ref;
-    void (*stream_rtp_cb)(void *user_data, void *pkt, pj_ssize_t size);
-    void (*stream_rtp_cb2)(pjmedia_tp_cb_param *param);
-    void (*stream_rtcp_cb)(void *user_data, void *pkt, pj_ssize_t size);
-} vpcm_tp_adapter_t;
-
 static void vpcm_log(const char *fmt, ...);
 static void vpcm_log_e2e_phase(const char *phase, const char *fmt, ...);
 static void fill_pattern(uint8_t *buf, int len, uint32_t seed);
@@ -334,10 +323,6 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
 static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role);
 static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env);
 static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_t seed);
-static pjmedia_transport *vpcm_pjsip_on_create_media_transport(pjsua_call_id call_id,
-                                                               unsigned media_idx,
-                                                               pjmedia_transport *base_tp,
-                                                               unsigned flags);
 static void vpcm_pjsip_modem_reset(void);
 static void vpcm_pjsip_modem_cleanup(void);
 static bool vpcm_pjsip_modem_prepare(v91_law_t law, int data_seconds, uint32_t seed,
@@ -535,273 +520,6 @@ static pj_status_t vpcm_pjsip_register_g711_passthrough(v91_law_t law)
     pjmedia_codec_passthrough_deinit();
     return pjmedia_codec_passthrough_init2(pjsua_get_pjmedia_endpt(), &setting);
 #endif
-}
-
-static pj_status_t vpcm_tp_get_info(pjmedia_transport *tp, pjmedia_transport_info *info)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_get_info(adapter->slave_tp, info);
-}
-
-static void vpcm_tp_rtcp_cb(void *user_data, void *pkt, pj_ssize_t size)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) user_data;
-    if (adapter->stream_rtcp_cb)
-        adapter->stream_rtcp_cb(adapter->stream_user_data, pkt, size);
-}
-
-static void vpcm_tp_rtp_cb2(pjmedia_tp_cb_param *param)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) param->user_data;
-    const pjmedia_rtp_hdr *hdr = NULL;
-    pjmedia_rtp_dec_hdr dec_hdr;
-    const void *payload = NULL;
-    unsigned payload_len = 0;
-
-    if (param->pkt && param->size > 0
-        && pjmedia_rtp_decode_rtp2(NULL,
-                                   param->pkt,
-                                   (int) param->size,
-                                   &hdr,
-                                   &dec_hdr,
-                                   &payload,
-                                   &payload_len) == PJ_SUCCESS) {
-        pj_uint8_t pt = (pj_uint8_t) (hdr->pt & 0x7F);
-        if ((pt == 0 || pt == 8) && payload && payload_len > 0)
-            vpcm_pjsip_modem_handle_rtp_rx_payload((const uint8_t *) payload, (int) payload_len);
-    }
-
-    if (adapter->stream_rtp_cb2) {
-        pjmedia_tp_cb_param cbparam;
-        pj_memcpy(&cbparam, param, sizeof(cbparam));
-        cbparam.user_data = adapter->stream_user_data;
-        adapter->stream_rtp_cb2(&cbparam);
-    } else if (adapter->stream_rtp_cb) {
-        adapter->stream_rtp_cb(adapter->stream_user_data, param->pkt, param->size);
-    }
-}
-
-static pj_status_t vpcm_tp_attach2(pjmedia_transport *tp,
-                                   pjmedia_transport_attach_param *att_param)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    pj_status_t st;
-
-    adapter->stream_user_data = att_param->user_data;
-    adapter->stream_ref = att_param->stream;
-    adapter->stream_rtp_cb = att_param->rtp_cb;
-    adapter->stream_rtp_cb2 = att_param->rtp_cb2;
-    adapter->stream_rtcp_cb = att_param->rtcp_cb;
-
-    att_param->rtp_cb2 = &vpcm_tp_rtp_cb2;
-    att_param->rtp_cb = NULL;
-    att_param->rtcp_cb = &vpcm_tp_rtcp_cb;
-    att_param->user_data = adapter;
-
-    st = pjmedia_transport_attach2(adapter->slave_tp, att_param);
-    if (st != PJ_SUCCESS) {
-        adapter->stream_user_data = NULL;
-        adapter->stream_ref = NULL;
-        adapter->stream_rtp_cb = NULL;
-        adapter->stream_rtp_cb2 = NULL;
-        adapter->stream_rtcp_cb = NULL;
-    }
-    return st;
-}
-
-static void vpcm_tp_detach(pjmedia_transport *tp, void *strm)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    PJ_UNUSED_ARG(strm);
-    if (adapter->stream_user_data != NULL)
-        pjmedia_transport_detach(adapter->slave_tp, adapter);
-    adapter->stream_user_data = NULL;
-    adapter->stream_ref = NULL;
-    adapter->stream_rtp_cb = NULL;
-    adapter->stream_rtp_cb2 = NULL;
-    adapter->stream_rtcp_cb = NULL;
-}
-
-static pj_status_t vpcm_tp_send_rtp(pjmedia_transport *tp, const void *pkt, pj_size_t size)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    const pjmedia_rtp_hdr *hdr = NULL;
-    pjmedia_rtp_dec_hdr dec_hdr;
-    const void *payload = NULL;
-    unsigned payload_len = 0;
-
-    if (pkt && size > 0
-        && pjmedia_rtp_decode_rtp2(NULL,
-                                   pkt,
-                                   (int) size,
-                                   &hdr,
-                                   &dec_hdr,
-                                   &payload,
-                                   &payload_len) == PJ_SUCCESS) {
-        pj_uint8_t pt = (pj_uint8_t) (hdr->pt & 0x7F);
-        if ((pt == 0 || pt == 8) && payload && payload_len > 0) {
-            pj_uint8_t *mutable_payload = (pj_uint8_t *) payload;
-            vpcm_pjsip_modem_fill_rtp_tx_payload(mutable_payload, (int) payload_len);
-        }
-    }
-
-    return pjmedia_transport_send_rtp(adapter->slave_tp, pkt, size);
-}
-
-static pj_status_t vpcm_tp_send_rtcp(pjmedia_transport *tp, const void *pkt, pj_size_t size)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_send_rtcp(adapter->slave_tp, pkt, size);
-}
-
-static pj_status_t vpcm_tp_send_rtcp2(pjmedia_transport *tp,
-                                      const pj_sockaddr_t *addr,
-                                      unsigned addr_len,
-                                      const void *pkt,
-                                      pj_size_t size)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_send_rtcp2(adapter->slave_tp, addr, addr_len, pkt, size);
-}
-
-static pj_status_t vpcm_tp_media_create(pjmedia_transport *tp,
-                                        pj_pool_t *sdp_pool,
-                                        unsigned options,
-                                        const pjmedia_sdp_session *rem_sdp,
-                                        unsigned media_index)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_media_create(adapter->slave_tp,
-                                          sdp_pool,
-                                          options,
-                                          rem_sdp,
-                                          media_index);
-}
-
-static pj_status_t vpcm_tp_encode_sdp(pjmedia_transport *tp,
-                                      pj_pool_t *sdp_pool,
-                                      pjmedia_sdp_session *local_sdp,
-                                      const pjmedia_sdp_session *rem_sdp,
-                                      unsigned media_index)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_encode_sdp(adapter->slave_tp,
-                                        sdp_pool,
-                                        local_sdp,
-                                        rem_sdp,
-                                        media_index);
-}
-
-static pj_status_t vpcm_tp_media_start(pjmedia_transport *tp,
-                                       pj_pool_t *pool,
-                                       const pjmedia_sdp_session *local_sdp,
-                                       const pjmedia_sdp_session *rem_sdp,
-                                       unsigned media_index)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_media_start(adapter->slave_tp,
-                                         pool,
-                                         local_sdp,
-                                         rem_sdp,
-                                         media_index);
-}
-
-static pj_status_t vpcm_tp_media_stop(pjmedia_transport *tp)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_media_stop(adapter->slave_tp);
-}
-
-static pj_status_t vpcm_tp_simulate_lost(pjmedia_transport *tp,
-                                         pjmedia_dir dir,
-                                         unsigned pct_lost)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    return pjmedia_transport_simulate_lost(adapter->slave_tp, dir, pct_lost);
-}
-
-static pj_status_t vpcm_tp_destroy(pjmedia_transport *tp)
-{
-    vpcm_tp_adapter_t *adapter = (vpcm_tp_adapter_t *) tp;
-    if (adapter->del_base && adapter->slave_tp)
-        pjmedia_transport_close(adapter->slave_tp);
-    if (adapter->pool)
-        pj_pool_release(adapter->pool);
-    return PJ_SUCCESS;
-}
-
-static struct pjmedia_transport_op vpcm_tp_adapter_op = {
-    &vpcm_tp_get_info,
-    NULL,
-    &vpcm_tp_detach,
-    &vpcm_tp_send_rtp,
-    &vpcm_tp_send_rtcp,
-    &vpcm_tp_send_rtcp2,
-    &vpcm_tp_media_create,
-    &vpcm_tp_encode_sdp,
-    &vpcm_tp_media_start,
-    &vpcm_tp_media_stop,
-    &vpcm_tp_simulate_lost,
-    &vpcm_tp_destroy,
-    &vpcm_tp_attach2
-};
-
-static pj_status_t vpcm_tp_adapter_create(pjmedia_transport *base_tp,
-                                          pj_bool_t del_base,
-                                          pjmedia_transport **p_tp)
-{
-    pjmedia_endpt *endpt = pjsua_get_pjmedia_endpt();
-    pj_pool_t *pool;
-    vpcm_tp_adapter_t *adapter;
-
-    if (!endpt || !base_tp || !p_tp)
-        return PJ_EINVAL;
-
-    pool = pjmedia_endpt_create_pool(endpt, "vpcm-tp", 1024, 1024);
-    if (!pool)
-        return PJ_ENOMEM;
-
-    adapter = PJ_POOL_ZALLOC_T(pool, vpcm_tp_adapter_t);
-    adapter->pool = pool;
-    adapter->slave_tp = base_tp;
-    adapter->del_base = del_base;
-    pj_ansi_strxcpy(adapter->base.name, pool->obj_name, sizeof(adapter->base.name));
-    adapter->base.type = (pjmedia_transport_type) (PJMEDIA_TRANSPORT_TYPE_USER + 7);
-    adapter->base.op = &vpcm_tp_adapter_op;
-    if (base_tp->grp_lock) {
-        adapter->base.grp_lock = base_tp->grp_lock;
-        pj_grp_lock_add_ref(adapter->base.grp_lock);
-    }
-    *p_tp = &adapter->base;
-    return PJ_SUCCESS;
-}
-
-static pjmedia_transport *
-vpcm_pjsip_on_create_media_transport(pjsua_call_id call_id,
-                                     unsigned media_idx,
-                                     pjmedia_transport *base_tp,
-                                     unsigned flags)
-{
-    pjmedia_transport *tp = base_tp;
-    pj_status_t st;
-
-    PJ_UNUSED_ARG(flags);
-
-    if (media_idx != 0 || !base_tp)
-        return base_tp;
-    if (g_vpcm_pjsip_runtime.call_id != PJSUA_INVALID_ID
-        && call_id != g_vpcm_pjsip_runtime.call_id)
-        return base_tp;
-
-    st = vpcm_tp_adapter_create(base_tp, PJ_FALSE, &tp);
-    if (st != PJ_SUCCESS) {
-        vpcm_log("PJSIP media transport adapter create failed: status=%d", st);
-        return base_tp;
-    }
-
-    g_vpcm_pjsip_runtime.media_tp = tp;
-    g_vpcm_pjsip_runtime.media_tp_ready = true;
-    return tp;
 }
 
 static void vpcm_pjsip_on_call_state(pjsua_call_id call_id, pjsip_event *e)
@@ -1068,6 +786,22 @@ static void vpcm_pjsip_on_call_media_state(pjsua_call_id call_id)
         g_vpcm_pjsip_runtime.media_codec_ok = true;
         g_vpcm_pjsip_runtime.media_ready = true;
         g_vpcm_pjsip_runtime.call_conf_port = pjsua_call_get_conf_port(call_id);
+        if (!g_vpcm_pjsip_runtime.media_clock_wired
+            && g_vpcm_pjsip_runtime.call_conf_port != PJSUA_INVALID_ID) {
+            pj_status_t st_a;
+            pj_status_t st_b;
+
+            st_a = pjsua_conf_connect(g_vpcm_pjsip_runtime.call_conf_port, 0);
+            st_b = pjsua_conf_connect(0, g_vpcm_pjsip_runtime.call_conf_port);
+            if (st_a == PJ_SUCCESS && st_b == PJ_SUCCESS) {
+                g_vpcm_pjsip_runtime.media_clock_wired = true;
+                vpcm_log("PJSIP media clock wired: conf %d <-> 0",
+                         g_vpcm_pjsip_runtime.call_conf_port);
+            } else {
+                vpcm_log("PJSIP media clock wiring failed: conf=%d st_a=%d st_b=%d",
+                         g_vpcm_pjsip_runtime.call_conf_port, st_a, st_b);
+            }
+        }
         vpcm_log("PJSIP media active: codec=%s pt=%u (G.711 passthrough)",
                  codec_name,
                  si.info.aud.fmt.pt);
@@ -4639,6 +4373,13 @@ static void init_v8_parms(v8_parms_t *parms,
     parms->jm_cm.t66 = -1;
 }
 
+static bool vpcm_v8_result_has_v91(const v8_parms_t *result)
+{
+    return result
+        && (result->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V91) != 0
+        && (result->jm_cm.pstn_access & V8_PSTN_ACCESS_DCE_ON_DIGITAL) != 0;
+}
+
 static bool run_v8_exchange(v91_law_t law,
                             const v8_parms_t *caller_parms,
                             const v8_parms_t *answer_parms,
@@ -6258,11 +5999,19 @@ static bool vpcm_run_pjsip_payload_loop(v91_law_t law, int data_seconds, uint32_
                                g_vpcm_pjsip_modem.v8_rx_packets,
                                g_vpcm_pjsip_modem.v8_rx_bytes);
             if (status == V8_STATUS_V8_CALL) {
-                g_vpcm_pjsip_modem.v8_complete = true;
                 vpcm_log_v8_result(vpcm_pjsip_role_to_str(g_vpcm_pjsip_runtime.role),
                                    &g_vpcm_pjsip_modem.v8_result.result);
-                vpcm_log_e2e_phase("V8",
-                                   "V.8 call acknowledged in-band; beginning receive-gated V.91 startup exchange");
+                if (vpcm_v8_result_has_v91(&g_vpcm_pjsip_modem.v8_result.result)) {
+                    g_vpcm_pjsip_modem.v8_complete = true;
+                    vpcm_log_e2e_phase("V8",
+                                       "V.8 result confirms V.91 PCM capability; beginning receive-gated V.91 startup exchange");
+                } else {
+                    fprintf(stderr,
+                            "V.8 negotiated a call but not V.91 PCM mode: pcm=0x%X pstn=0x%X\n",
+                            g_vpcm_pjsip_modem.v8_result.result.jm_cm.pcm_modem_availability,
+                            g_vpcm_pjsip_modem.v8_result.result.jm_cm.pstn_access);
+                    g_vpcm_pjsip_modem.failed = true;
+                }
             } else if (status == V8_STATUS_FAILED
                        || status == V8_STATUS_NON_V8_CALL
                        || status == V8_STATUS_CALLING_TONE_RECEIVED
@@ -6497,7 +6246,6 @@ static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint3
     ua_cfg.cb.on_call_state = &vpcm_pjsip_on_call_state;
     ua_cfg.cb.on_call_media_state = &vpcm_pjsip_on_call_media_state;
     ua_cfg.cb.on_stream_created2 = &vpcm_pjsip_on_stream_created2;
-    ua_cfg.cb.on_create_media_transport = &vpcm_pjsip_on_create_media_transport;
     log_cfg.console_level = (g_vpcm_session_diag || g_vpcm_verbose) ? 4 : 3;
     media_cfg.no_vad = PJ_TRUE;
     media_cfg.enable_ice = PJ_FALSE;
