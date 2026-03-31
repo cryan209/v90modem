@@ -36,6 +36,12 @@ Real V.90 is closer to:
 So the V.91 startup objects in `vpcm_v90_session` should be treated as a
 temporary compatibility layer, not the protocol model.
 
+One important consequence is that V.90 DIL is not the same protocol object as
+V.91 startup DIL. V.90 DIL is the Table 12 Phase 3 training descriptor
+selected after `Jd/Jd'`, while V.91 DIL is part of the simplified PCM startup
+contract. Reusing the same struct shape is acceptable as a temporary transport
+adapter, but it should not be treated as a semantic match.
+
 ## Role Mapping
 
 Throughout this document:
@@ -178,6 +184,13 @@ This is the first major place where V.90 diverges sharply from V.91.
 - `TRN`
 - `J`
 - then waits for answerer-side Phase 4 transition
+
+Implementation note:
+
+- For loopback testing we need a caller-side Ja profile that is suitable for
+  exercising the answerer parser and DIL branch. That profile should be treated
+  as a reusable test vector, not as a statement that all real modems emit the
+  same Ja sequence.
 
 ### Answerer / digital side
 

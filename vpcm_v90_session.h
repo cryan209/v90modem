@@ -61,6 +61,10 @@ typedef struct {
     uint8_t analogue_info1a_bits[(V90_INFO1A_BITS + 7) / 8];
     v91_info_frame_t caller_info;
     v91_info_frame_t answerer_info;
+    bool phase3_digital_dil_valid;
+    v90_dil_desc_t phase3_digital_dil;
+    bool phase3_digital_dil_analysis_valid;
+    v90_dil_analysis_t phase3_digital_dil_analysis;
     bool digital_dil_analysis_valid;
     v91_dil_analysis_t digital_dil_analysis;
     vpcm_cp_frame_t cp_down_offer;
@@ -86,8 +90,8 @@ typedef struct {
 void vpcm_v90_session_init(vpcm_v90_session_t *session, v91_law_t law);
 void vpcm_v90_session_reset(vpcm_v90_session_t *session);
 void vpcm_v90_session_set_state(vpcm_v90_session_t *session, vpcm_v90_modem_state_t state);
-void vpcm_v92_init_digital_dil_from_ja(v91_dil_desc_t *desc, bool echo_limited);
-void vpcm_v92_select_profile_from_dil(const v91_dil_analysis_t *analysis,
+bool vpcm_v92_init_digital_dil_from_ja(v90_dil_desc_t *desc, bool echo_limited);
+void vpcm_v92_select_profile_from_dil(const v90_dil_analysis_t *analysis,
                                       uint8_t *downstream_drn,
                                       uint8_t *upstream_drn);
 bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,

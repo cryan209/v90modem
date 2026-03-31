@@ -190,14 +190,99 @@ static bool vpcm_v90_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a
     return v90_info1a_validate(dst);
 }
 
-static bool vpcm_v90_dil_is_default(const v91_dil_desc_t *desc)
+static void vpcm_v90_init_default_like_dil(v90_dil_desc_t *desc)
 {
-    v91_dil_desc_t default_dil;
+    int i;
+    int pos;
 
     if (!desc)
-        return false;
-    v91_default_dil_init(&default_dil);
-    return memcmp(desc, &default_dil, sizeof(default_dil)) == 0;
+        return;
+
+    memset(desc, 0, sizeof(*desc));
+    desc->n = 125;
+    desc->lsp = 12;
+    desc->ltp = 12;
+    for (i = 0; i < 12; i++) {
+        desc->sp[i] = (uint8_t) ((0x0FC0U >> i) & 1U);
+        desc->tp[i] = (uint8_t) ((0x0FFFU >> i) & 1U);
+    }
+    for (i = 0; i < 8; i++) {
+        desc->h[i] = 1;
+        desc->ref[i] = 0;
+    }
+
+    pos = 0;
+    for (i = 0; i < 62; i++) {
+        desc->train_u[pos++] = (uint8_t) (124 - i);
+        desc->train_u[pos++] = (uint8_t) i;
+    }
+    desc->train_u[pos++] = 62;
+}
+
+static void vpcm_v90_init_test_ja_profile(v90_dil_desc_t *desc, bool echo_limited)
+{
+    int i;
+    static const uint8_t echo_train_u[8] = {60, 61, 62, 63, 64, 65, 66, 67};
+
+    if (!desc)
+        return;
+
+    vpcm_v90_init_default_like_dil(desc);
+    if (!echo_limited)
+        return;
+
+    desc->n = 96;
+    desc->lsp = 6;
+    desc->ltp = 6;
+    for (i = 0; i < 8; i++) {
+        desc->ref[i] = 1;
+        desc->h[i] = 1;
+    }
+    for (i = 0; i < desc->n; i++)
+        desc->train_u[i] = echo_train_u[i % 8];
+}
+
+static void vpcm_v90_copy_dil_to_v91_compat(v91_dil_desc_t *dst, const v90_dil_desc_t *src)
+{
+    if (!dst || !src)
+        return;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->n = src->n;
+    dst->lsp = src->lsp;
+    dst->ltp = src->ltp;
+    memcpy(dst->sp, src->sp, sizeof(dst->sp));
+    memcpy(dst->tp, src->tp, sizeof(dst->tp));
+    memcpy(dst->h, src->h, sizeof(dst->h));
+    memcpy(dst->ref, src->ref, sizeof(dst->ref));
+    memcpy(dst->train_u, src->train_u, sizeof(dst->train_u));
+}
+
+static void vpcm_v90_map_dil_analysis_to_v91_compat(v91_dil_analysis_t *dst,
+                                                     const v90_dil_analysis_t *src)
+{
+    if (!dst || !src)
+        return;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->n = src->n;
+    dst->lsp = src->lsp;
+    dst->ltp = src->ltp;
+    dst->unique_train_u = src->unique_train_u;
+    dst->repeated_uchords = src->used_uchords;
+    dst->non_default_refs = src->non_default_refs;
+    dst->non_default_h = src->non_default_h;
+    dst->impairment_score = src->impairment_score;
+    dst->default_like = src->looks_default_125x12;
+    dst->robbed_bit_limited = src->robbed_bit_limited;
+    dst->echo_limited = src->echo_limited;
+    dst->recommended_downstream_drn = src->recommended_downstream_drn;
+    dst->recommended_upstream_drn = src->recommended_upstream_drn;
+}
+
+static bool vpcm_v90_dil_is_default_like_for_v91_compat(const v90_dil_analysis_t *analysis)
+{
+    return analysis && analysis->looks_default_125x12;
 }
 
 static bool vpcm_v90_phase2_info_is_default_like(const v90_info0a_t *info0a,
@@ -230,7 +315,7 @@ static void vpcm_v90_init_placeholder_info_frame(v91_info_frame_t *info,
 }
 
 static void vpcm_v90_prepare_placeholder_info_frames(const vpcm_v90_startup_contract_params_t *params,
-                                                     const v91_dil_desc_t *digital_dil,
+                                                     const v90_dil_analysis_t *digital_dil_analysis,
                                                      const vpcm_v90_startup_contract_report_t *report,
                                                      v91_info_frame_t *digital_info,
                                                      v91_info_frame_t *analogue_info)
@@ -243,7 +328,7 @@ static void vpcm_v90_prepare_placeholder_info_frames(const vpcm_v90_startup_cont
     vpcm_v90_init_placeholder_info_frame(digital_info, params->law);
     vpcm_v90_init_placeholder_info_frame(analogue_info, params->law);
 
-    digital_info->request_default_dil = vpcm_v90_dil_is_default(digital_dil);
+    digital_info->request_default_dil = vpcm_v90_dil_is_default_like_for_v91_compat(digital_dil_analysis);
 
     analogue_default_like = report
         && report->phase2_received_info0a_valid
@@ -500,29 +585,27 @@ void vpcm_v90_session_set_state(vpcm_v90_session_t *session, vpcm_v90_modem_stat
     session->data_mode_active = (state == VPCM_V90_MODEM_DATA);
 }
 
-void vpcm_v92_init_digital_dil_from_ja(v91_dil_desc_t *desc, bool echo_limited)
+bool vpcm_v92_init_digital_dil_from_ja(v90_dil_desc_t *desc, bool echo_limited)
 {
-    int i;
-    static const uint8_t echo_train_u[8] = {60, 61, 62, 63, 64, 65, 66, 67};
+    v90_dil_desc_t profile;
+    v90_dil_desc_t parsed;
+    uint8_t bits[512];
+    int bit_len;
 
     if (!desc)
-        return;
-    v91_default_dil_init(desc);
-    if (!echo_limited)
-        return;
+        return false;
 
-    desc->n = 96;
-    desc->lsp = 6;
-    desc->ltp = 6;
-    for (i = 0; i < 8; i++) {
-        desc->ref[i] = 1;
-        desc->h[i] = 1;
-    }
-    for (i = 0; i < desc->n; i++)
-        desc->train_u[i] = echo_train_u[i % 8];
+    vpcm_v90_init_test_ja_profile(&profile, echo_limited);
+    if (!v90_build_dil_descriptor_bits(bits, (int) sizeof(bits), &bit_len, &profile))
+        return false;
+    if (!v90_parse_dil_descriptor(&parsed, bits, bit_len))
+        return false;
+
+    *desc = parsed;
+    return true;
 }
 
-void vpcm_v92_select_profile_from_dil(const v91_dil_analysis_t *analysis,
+void vpcm_v92_select_profile_from_dil(const v90_dil_analysis_t *analysis,
                                       uint8_t *downstream_drn,
                                       uint8_t *upstream_drn)
 {
@@ -543,8 +626,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                            vpcm_v90_startup_contract_report_t *report)
 {
     v91_dil_desc_t default_dil;
-    v91_dil_desc_t digital_dil;
-    v91_dil_analysis_t digital_dil_analysis;
+    v91_dil_desc_t digital_dil_compat;
+    v90_dil_desc_t digital_dil;
+    v90_dil_analysis_t digital_dil_analysis;
     v91_state_t caller_startup;
     v91_state_t answerer_startup;
     v91_state_t caller_rx;
@@ -610,7 +694,17 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                  local_report.analogue_info1a_bits,
                                  V90_INFO1A_BITS);
     v91_default_dil_init(&default_dil);
-    vpcm_v92_init_digital_dil_from_ja(&digital_dil, params->echo_limited);
+    if (!vpcm_v92_init_digital_dil_from_ja(&digital_dil, params->echo_limited))
+        return false;
+    vpcm_v90_copy_dil_to_v91_compat(&digital_dil_compat, &digital_dil);
+    if (!v90_analyse_dil_descriptor(&digital_dil, &digital_dil_analysis))
+        return false;
+    local_report.phase3_digital_dil = digital_dil;
+    local_report.phase3_digital_dil_valid = true;
+    local_report.phase3_digital_dil_analysis = digital_dil_analysis;
+    local_report.phase3_digital_dil_analysis_valid = true;
+    vpcm_v90_map_dil_analysis_to_v91_compat(&local_report.digital_dil_analysis, &digital_dil_analysis);
+    local_report.digital_dil_analysis_valid = true;
     v91_init(&caller_startup, params->law, V91_MODE_TRANSPARENT);
     v91_init(&answerer_startup, params->law, V91_MODE_TRANSPARENT);
     v91_init(&caller_rx, params->law, V91_MODE_TRANSPARENT);
@@ -642,7 +736,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                      V90_INFO1A_BITS);
     }
     vpcm_v90_prepare_placeholder_info_frames(params,
-                                             &digital_dil,
+                                             &digital_dil_analysis,
                                              &local_report,
                                              &local_report.caller_info,
                                              &local_report.answerer_info);
@@ -659,15 +753,13 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
-                                                        &digital_dil,
+                                                        &digital_dil_compat,
                                                         NULL);
     if (startup_len <= 0
-        || !v91_note_received_dil(&answerer_startup, &digital_dil, &digital_dil_analysis)
+        || !v91_note_received_dil(&answerer_startup, &digital_dil_compat, NULL)
         || !vpcm_v90_record_simplex(io, params->law, true, startup_buf, startup_len)) {
         return false;
     }
-    local_report.digital_dil_analysis = digital_dil_analysis;
-    local_report.digital_dil_analysis_valid = true;
     vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
 
     startup_len = v91_tx_startup_dil_sequence_codewords(&answerer_startup,

@@ -3019,6 +3019,18 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                  report.caller_info.request_default_dil ? "default" : "custom",
                  report.answerer_info.request_default_dil ? "default" : "custom",
                  report.answerer_info.acknowledge_info_frame ? "yes" : "no");
+        if (report.phase3_digital_dil_analysis_valid) {
+            vpcm_log("Native V.90 DIL analysis: N=%u LSP=%u LTP=%u unique=%u uchords=%u refs=%u h!=1=%u default125x12=%s echo_limited=%s",
+                     report.phase3_digital_dil_analysis.n,
+                     report.phase3_digital_dil_analysis.lsp,
+                     report.phase3_digital_dil_analysis.ltp,
+                     report.phase3_digital_dil_analysis.unique_train_u,
+                     report.phase3_digital_dil_analysis.used_uchords,
+                     report.phase3_digital_dil_analysis.non_default_refs,
+                     report.phase3_digital_dil_analysis.non_default_h,
+                     report.phase3_digital_dil_analysis.looks_default_125x12 ? "yes" : "no",
+                     report.phase3_digital_dil_analysis.echo_limited ? "yes" : "no");
+        }
     }
 
     if (report.digital_dil_analysis_valid)
@@ -4410,12 +4422,13 @@ static bool __attribute__((unused)) test_v8_v92_qc_exchange_over_analog_g711(v91
 
 static bool test_v92_dil_rate_adaptation(void)
 {
-    v91_dil_desc_t clean_dil;
-    v91_dil_desc_t echo_dil;
-    v91_dil_desc_t robbed_bit_dil;
-    v91_dil_analysis_t clean_analysis;
-    v91_dil_analysis_t echo_analysis;
-    v91_dil_analysis_t robbed_bit_analysis;
+    v90_dil_desc_t clean_dil;
+    v90_dil_desc_t echo_dil;
+    v90_dil_desc_t robbed_bit_dil;
+    v91_dil_desc_t robbed_bit_dil_compat;
+    v90_dil_analysis_t clean_analysis;
+    v90_dil_analysis_t echo_analysis;
+    v90_dil_analysis_t robbed_bit_analysis;
     char clean_down_rate[64];
     char clean_up_rate[64];
     char echo_down_rate[64];
@@ -4424,12 +4437,24 @@ static bool test_v92_dil_rate_adaptation(void)
 
     vpcm_log("Test: V.92 DIL-driven rate adaptation");
 
-    vpcm_v92_init_digital_dil_from_ja(&clean_dil, false);
-    vpcm_v92_init_digital_dil_from_ja(&echo_dil, true);
-    vpcm_init_robbed_bit_dil_profile(&robbed_bit_dil);
-    if (!v91_analyse_dil_descriptor(&clean_dil, &clean_analysis)
-        || !v91_analyse_dil_descriptor(&echo_dil, &echo_analysis)
-        || !v91_analyse_dil_descriptor(&robbed_bit_dil, &robbed_bit_analysis)) {
+    if (!vpcm_v92_init_digital_dil_from_ja(&clean_dil, false)
+        || !vpcm_v92_init_digital_dil_from_ja(&echo_dil, true)) {
+        fprintf(stderr, "V.92 Ja profile build/parse failed\n");
+        return false;
+    }
+    vpcm_init_robbed_bit_dil_profile(&robbed_bit_dil_compat);
+    memset(&robbed_bit_dil, 0, sizeof(robbed_bit_dil));
+    robbed_bit_dil.n = robbed_bit_dil_compat.n;
+    robbed_bit_dil.lsp = robbed_bit_dil_compat.lsp;
+    robbed_bit_dil.ltp = robbed_bit_dil_compat.ltp;
+    memcpy(robbed_bit_dil.sp, robbed_bit_dil_compat.sp, sizeof(robbed_bit_dil.sp));
+    memcpy(robbed_bit_dil.tp, robbed_bit_dil_compat.tp, sizeof(robbed_bit_dil.tp));
+    memcpy(robbed_bit_dil.h, robbed_bit_dil_compat.h, sizeof(robbed_bit_dil.h));
+    memcpy(robbed_bit_dil.ref, robbed_bit_dil_compat.ref, sizeof(robbed_bit_dil.ref));
+    memcpy(robbed_bit_dil.train_u, robbed_bit_dil_compat.train_u, sizeof(robbed_bit_dil.train_u));
+    if (!v90_analyse_dil_descriptor(&clean_dil, &clean_analysis)
+        || !v90_analyse_dil_descriptor(&echo_dil, &echo_analysis)
+        || !v90_analyse_dil_descriptor(&robbed_bit_dil, &robbed_bit_analysis)) {
         fprintf(stderr, "V.92 DIL analysis failed\n");
         return false;
     }

@@ -30,6 +30,22 @@ typedef struct {
     uint8_t train_u[255];
 } v90_dil_desc_t;
 
+typedef struct {
+    uint8_t n;
+    uint8_t lsp;
+    uint8_t ltp;
+    uint8_t unique_train_u;
+    uint8_t used_uchords;
+    uint8_t non_default_refs;
+    uint8_t non_default_h;
+    uint8_t impairment_score;
+    bool looks_default_125x12;
+    bool robbed_bit_limited;
+    bool echo_limited;
+    uint8_t recommended_downstream_drn;
+    uint8_t recommended_upstream_drn;
+} v90_dil_analysis_t;
+
 #define V90_INFO_FILL_AND_SYNC_BITS  0x4EF
 #define V90_INFO0A_BITS              49
 #define V90_INFO1A_BITS              70
@@ -182,6 +198,12 @@ bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t 
  * into a DIL descriptor. Returns true on success.
  */
 bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len);
+int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc);
+bool v90_build_dil_descriptor_bits(uint8_t *buf,
+                                   int buf_len,
+                                   int *bit_len_out,
+                                   const v90_dil_desc_t *desc);
+bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *analysis_out);
 
 /*
  * Notify the V.90 Phase 3 state machine that the far-end analogue modem's

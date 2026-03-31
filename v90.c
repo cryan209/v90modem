@@ -792,6 +792,78 @@ static uint16_t v90_crc16_bits(const uint8_t *bits, int bit_count)
     return crc;
 }
 
+static void v90_put_zero_range(uint8_t *buf, int *bit_pos, int count)
+{
+    if (!buf || !bit_pos || count <= 0)
+        return;
+    *bit_pos += count;
+}
+
+static void v90_put_framed_pattern(uint8_t *buf, int *bit_pos, const uint8_t *pattern, int pattern_len)
+{
+    int copied;
+
+    if (!buf || !bit_pos || !pattern || pattern_len < 0)
+        return;
+
+    copied = 0;
+    while (copied < pattern_len) {
+        int chunk;
+
+        chunk = pattern_len - copied;
+        if (chunk > 16)
+            chunk = 16;
+        v90_bits_put(buf, bit_pos, 0, 1);
+        for (int i = 0; i < chunk; i++)
+            v90_bits_put(buf, bit_pos, pattern[copied + i] ? 1U : 0U, 1);
+        v90_put_zero_range(buf, bit_pos, 16 - chunk);
+        copied += chunk;
+    }
+}
+
+static void v90_put_framed_byte_pairs(uint8_t *buf, int *bit_pos, const uint8_t *values, int value_count)
+{
+    int index;
+
+    if (!buf || !bit_pos || !values || value_count < 0)
+        return;
+
+    index = 0;
+    while (index < value_count) {
+        v90_bits_put(buf, bit_pos, 0, 1);
+        v90_bits_put(buf, bit_pos, values[index++] & 0x7FU, 7);
+        if (index < value_count) {
+            v90_bits_put(buf, bit_pos, 0, 1);
+            v90_bits_put(buf, bit_pos, values[index++] & 0x7FU, 7);
+        }
+    }
+}
+
+static void v90_put_framed_training_ucodes(uint8_t *buf, int *bit_pos, const v90_dil_desc_t *desc)
+{
+    int index;
+
+    if (!buf || !bit_pos || !desc)
+        return;
+
+    index = 0;
+    while (index < desc->n) {
+        int have_second;
+
+        v90_bits_put(buf, bit_pos, 0, 1);
+        v90_bits_put(buf, bit_pos, desc->train_u[index++] & 0x7FU, 7);
+        v90_bits_put(buf, bit_pos, 0, 1);
+        have_second = (index < desc->n);
+        if (have_second) {
+            v90_bits_put(buf, bit_pos, desc->train_u[index++] & 0x7FU, 7);
+        } else {
+            v90_put_zero_range(buf, bit_pos, 7);
+        }
+        if (index < desc->n)
+            v90_bits_put(buf, bit_pos, 0, 1);
+    }
+}
+
 static inline int v90_clamp_positive(int v, int max_v)
 {
     if (v < 1)
@@ -809,6 +881,26 @@ static inline int v90_dil_uchord_index(int training_ucode)
     if (idx > 7)
         idx = 7;
     return idx;
+}
+
+static uint8_t v90_count_distinct_train_u(const v90_dil_desc_t *desc)
+{
+    bool seen[128];
+    uint8_t count;
+    int i;
+
+    memset(seen, 0, sizeof(seen));
+    count = 0;
+    for (i = 0; i < desc->n; i++) {
+        int ucode;
+
+        ucode = desc->train_u[i] & 0x7F;
+        if (!seen[ucode]) {
+            seen[ucode] = true;
+            count++;
+        }
+    }
+    return count;
 }
 
 static void v90_dil_reset_tx(v90_state_t *s)
@@ -941,6 +1033,158 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
     if ((crc_start + 18) < bit_len && v90_get_packed_bit(bits, crc_start + 18) != 0)
         return false;
 
+    return true;
+}
+
+int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc)
+{
+    int alpha;
+    int beta;
+    int training_bits;
+
+    if (!desc)
+        return 0;
+    if (desc->n == 0 && (desc->lsp != 1 || desc->ltp != 1))
+        return 0;
+    if (desc->lsp > V90_DIL_MAX_PAT_BITS || desc->ltp > V90_DIL_MAX_PAT_BITS)
+        return 0;
+    if (desc->lsp < 1 || desc->ltp < 1)
+        return 0;
+
+    alpha = ((int) desc->lsp + 15) / 16 * 17;
+    beta = ((int) desc->ltp + 15) / 16 * 17;
+    training_bits = (((int) desc->n + 1) / 2) * 17;
+    return 187 + alpha + beta + training_bits + 18;
+}
+
+bool v90_build_dil_descriptor_bits(uint8_t *buf,
+                                   int buf_len,
+                                   int *bit_len_out,
+                                   const v90_dil_desc_t *desc)
+{
+    int bit_len;
+    int bit_pos;
+    int crc_start;
+    uint16_t crc;
+
+    if (!buf || !desc || buf_len <= 0)
+        return false;
+
+    bit_len = v90_dil_descriptor_bit_len(desc);
+    if (bit_len <= 0 || buf_len < ((bit_len + 7) / 8))
+        return false;
+
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = 0;
+    v90_bits_put(buf, &bit_pos, 0x1FFFFU, 17);
+    v90_bits_put(buf, &bit_pos, 0, 1);
+    v90_bits_put(buf, &bit_pos, desc->n, 8);
+    v90_put_zero_range(buf, &bit_pos, 8);
+    v90_bits_put(buf, &bit_pos, 0, 1);
+    v90_bits_put(buf, &bit_pos, (uint32_t) (desc->lsp - 1), 7);
+    v90_bits_put(buf, &bit_pos, 0, 1);
+    v90_bits_put(buf, &bit_pos, (uint32_t) (desc->ltp - 1), 7);
+    v90_bits_put(buf, &bit_pos, 0, 1);
+    v90_put_framed_pattern(buf, &bit_pos, desc->sp, desc->lsp);
+    v90_put_framed_pattern(buf, &bit_pos, desc->tp, desc->ltp);
+    v90_put_framed_byte_pairs(buf, &bit_pos, desc->h, 8);
+    v90_put_zero_range(buf, &bit_pos, 4);
+    v90_put_framed_byte_pairs(buf, &bit_pos, desc->ref, 8);
+    v90_put_zero_range(buf, &bit_pos, 4);
+    v90_put_framed_training_ucodes(buf, &bit_pos, desc);
+    crc_start = bit_pos;
+    v90_bits_put(buf, &bit_pos, 0, 1);
+    crc = v90_crc16_bits(buf, crc_start);
+    v90_bits_put(buf, &bit_pos, crc, 16);
+    v90_bits_put(buf, &bit_pos, 0, 1);
+
+    if (bit_pos != bit_len) {
+        return false;
+    }
+    if (bit_len_out)
+        *bit_len_out = bit_len;
+    return true;
+}
+
+bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *analysis_out)
+{
+    v90_dil_analysis_t analysis;
+    bool seen_uchord[8];
+    int i;
+
+    if (!desc || !analysis_out)
+        return false;
+
+    memset(&analysis, 0, sizeof(analysis));
+    memset(seen_uchord, 0, sizeof(seen_uchord));
+    analysis.n = desc->n;
+    analysis.lsp = desc->lsp;
+    analysis.ltp = desc->ltp;
+    analysis.unique_train_u = v90_count_distinct_train_u(desc);
+
+    for (i = 0; i < 8; i++) {
+        if (desc->ref[i] != 0)
+            analysis.non_default_refs++;
+        if (desc->h[i] != 1)
+            analysis.non_default_h++;
+    }
+    for (i = 0; i < desc->n; i++) {
+        int uchord_idx;
+
+        uchord_idx = v90_dil_uchord_index(desc->train_u[i] & 0x7F);
+        seen_uchord[uchord_idx] = true;
+    }
+    for (i = 0; i < 8; i++) {
+        if (seen_uchord[i])
+            analysis.used_uchords++;
+    }
+
+    analysis.looks_default_125x12 = (desc->n == 125
+                                     && desc->lsp == 12
+                                     && desc->ltp == 12
+                                     && analysis.unique_train_u >= 120
+                                     && analysis.non_default_refs == 0
+                                     && analysis.non_default_h == 0);
+    analysis.robbed_bit_limited = (desc->n == 125
+                                   && desc->lsp == 12
+                                   && desc->ltp == 6
+                                   && analysis.unique_train_u >= 120
+                                   && analysis.non_default_refs == 0
+                                   && analysis.non_default_h == 0);
+
+    if (desc->n < 125)
+        analysis.impairment_score++;
+    if (desc->n < 100)
+        analysis.impairment_score++;
+    if (desc->lsp != 12 || desc->ltp != 12)
+        analysis.impairment_score++;
+    if (desc->lsp < 12 || desc->ltp < 12)
+        analysis.impairment_score++;
+    if (analysis.unique_train_u < 64)
+        analysis.impairment_score++;
+    if (analysis.unique_train_u < 16)
+        analysis.impairment_score++;
+    if (analysis.non_default_refs != 0)
+        analysis.impairment_score++;
+    if (analysis.non_default_h != 0)
+        analysis.impairment_score++;
+
+    analysis.echo_limited = (!analysis.robbed_bit_limited && analysis.impairment_score >= 3);
+    if (analysis.robbed_bit_limited) {
+        analysis.recommended_downstream_drn = 22;
+        analysis.recommended_upstream_drn = 22;
+    } else if (analysis.impairment_score >= 5) {
+        analysis.recommended_downstream_drn = 13;
+        analysis.recommended_upstream_drn = 7;
+    } else if (analysis.echo_limited) {
+        analysis.recommended_downstream_drn = 16;
+        analysis.recommended_upstream_drn = 10;
+    } else {
+        analysis.recommended_downstream_drn = 19;
+        analysis.recommended_upstream_drn = 16;
+    }
+
+    *analysis_out = analysis;
     return true;
 }
 
