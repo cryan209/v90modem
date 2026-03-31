@@ -720,14 +720,21 @@ static bool v90_parse_table12_byte_pairs(uint8_t *out,
             return false;
         out[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
         pos += 7;
-        if (!v90_expect_zero_bit(bits, bit_len, pos))
-            return false;
-        pos++;
         if (index < out_count) {
+            if (!v90_expect_zero_bit(bits, bit_len, pos))
+                return false;
+            pos++;
             if (pos + 8 > bit_len)
                 return false;
             out[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
             pos += 7;
+            if (!v90_expect_zero_bit(bits, bit_len, pos))
+                return false;
+            pos++;
+        } else {
+            if (!v90_expect_zero_range(bits, bit_len, pos, 9))
+                return false;
+            pos += 9;
         }
     }
 
@@ -750,21 +757,21 @@ static bool v90_parse_table12_training_ucodes(v90_dil_desc_t *out,
             return false;
         out->train_u[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
         pos += 7;
-        if (!v90_expect_zero_bit(bits, bit_len, pos))
-            return false;
-        pos++;
         if (index < out->n) {
+            if (!v90_expect_zero_bit(bits, bit_len, pos))
+                return false;
+            pos++;
             if (pos + 8 > bit_len)
                 return false;
             out->train_u[index++] = (uint8_t)v90_get_packed_bits(bits, pos, 7);
             pos += 7;
-        } else {
-            int pad_bits = 7;
-            if ((out->n & 1) == 0)
-                pad_bits = 8;
-            if (!v90_expect_zero_range(bits, bit_len, pos, pad_bits))
+            if (!v90_expect_zero_bit(bits, bit_len, pos))
                 return false;
-            pos += pad_bits;
+            pos++;
+        } else {
+            if (!v90_expect_zero_range(bits, bit_len, pos, 9))
+                return false;
+            pos += 9;
         }
     }
 
@@ -835,6 +842,9 @@ static void v90_put_framed_byte_pairs(uint8_t *buf, int *bit_pos, const uint8_t 
         if (index < value_count) {
             v90_bits_put(buf, bit_pos, 0, 1);
             v90_bits_put(buf, bit_pos, values[index++] & 0x7FU, 7);
+            v90_bits_put(buf, bit_pos, 0, 1);
+        } else {
+            v90_put_zero_range(buf, bit_pos, 9);
         }
     }
 }
@@ -852,15 +862,14 @@ static void v90_put_framed_training_ucodes(uint8_t *buf, int *bit_pos, const v90
 
         v90_bits_put(buf, bit_pos, 0, 1);
         v90_bits_put(buf, bit_pos, desc->train_u[index++] & 0x7FU, 7);
-        v90_bits_put(buf, bit_pos, 0, 1);
         have_second = (index < desc->n);
         if (have_second) {
-            v90_bits_put(buf, bit_pos, desc->train_u[index++] & 0x7FU, 7);
-        } else {
-            v90_put_zero_range(buf, bit_pos, 7);
-        }
-        if (index < desc->n)
             v90_bits_put(buf, bit_pos, 0, 1);
+            v90_bits_put(buf, bit_pos, desc->train_u[index++] & 0x7FU, 7);
+            v90_bits_put(buf, bit_pos, 0, 1);
+        } else {
+            v90_put_zero_range(buf, bit_pos, 9);
+        }
     }
 }
 
@@ -968,6 +977,7 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
     int alpha;
     int beta;
     int training_start;
+    int training_bits;
     int crc_start;
     int descriptor_bits;
     uint16_t expected_crc;
@@ -1006,7 +1016,8 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
     alpha = ((int)out->lsp + 15) / 16 * 17;
     beta = alpha + (((int)out->ltp + 15) / 16) * 17;
     training_start = 187 + beta;
-    crc_start = training_start + (((int)out->n + 1) / 2) * 17;
+    training_bits = (((int)out->n + 1) / 2) * 17;
+    crc_start = training_start + training_bits;
     descriptor_bits = crc_start + 18;
 
     if (bit_len < descriptor_bits)
@@ -1088,9 +1099,7 @@ bool v90_build_dil_descriptor_bits(uint8_t *buf,
     v90_put_framed_pattern(buf, &bit_pos, desc->sp, desc->lsp);
     v90_put_framed_pattern(buf, &bit_pos, desc->tp, desc->ltp);
     v90_put_framed_byte_pairs(buf, &bit_pos, desc->h, 8);
-    v90_put_zero_range(buf, &bit_pos, 4);
     v90_put_framed_byte_pairs(buf, &bit_pos, desc->ref, 8);
-    v90_put_zero_range(buf, &bit_pos, 4);
     v90_put_framed_training_ucodes(buf, &bit_pos, desc);
     crc_start = bit_pos;
     v90_bits_put(buf, &bit_pos, 0, 1);
@@ -1142,14 +1151,12 @@ bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *
     analysis.looks_default_125x12 = (desc->n == 125
                                      && desc->lsp == 12
                                      && desc->ltp == 12
-                                     && analysis.unique_train_u >= 120
-                                     && analysis.non_default_refs == 0
+                                     && analysis.used_uchords >= 6
                                      && analysis.non_default_h == 0);
     analysis.robbed_bit_limited = (desc->n == 125
                                    && desc->lsp == 12
                                    && desc->ltp == 6
-                                   && analysis.unique_train_u >= 120
-                                   && analysis.non_default_refs == 0
+                                   && analysis.used_uchords >= 6
                                    && analysis.non_default_h == 0);
 
     if (desc->n < 125)
@@ -1160,11 +1167,13 @@ bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *
         analysis.impairment_score++;
     if (desc->lsp < 12 || desc->ltp < 12)
         analysis.impairment_score++;
-    if (analysis.unique_train_u < 64)
+    if (analysis.used_uchords < 6)
         analysis.impairment_score++;
-    if (analysis.unique_train_u < 16)
+    if (analysis.used_uchords < 3)
         analysis.impairment_score++;
-    if (analysis.non_default_refs != 0)
+    if (analysis.unique_train_u < 32)
+        analysis.impairment_score++;
+    if (analysis.unique_train_u < 12)
         analysis.impairment_score++;
     if (analysis.non_default_h != 0)
         analysis.impairment_score++;

@@ -192,8 +192,10 @@ static bool vpcm_v90_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a
 
 static void vpcm_v90_init_default_like_dil(v90_dil_desc_t *desc)
 {
+    static const uint8_t clean_training_offsets[8] = {2, 4, 6, 8, 10, 12, 14, 15};
+    static const uint16_t clean_sp_bits = 0x0A6DU;
+    static const uint16_t clean_tp_bits = 0x0DB7U;
     int i;
-    int pos;
 
     if (!desc)
         return;
@@ -203,26 +205,28 @@ static void vpcm_v90_init_default_like_dil(v90_dil_desc_t *desc)
     desc->lsp = 12;
     desc->ltp = 12;
     for (i = 0; i < 12; i++) {
-        desc->sp[i] = (uint8_t) ((0x0FC0U >> i) & 1U);
-        desc->tp[i] = (uint8_t) ((0x0FFFU >> i) & 1U);
+        desc->sp[i] = (uint8_t) ((clean_sp_bits >> i) & 1U);
+        desc->tp[i] = (uint8_t) ((clean_tp_bits >> i) & 1U);
     }
     for (i = 0; i < 8; i++) {
         desc->h[i] = 1;
-        desc->ref[i] = 0;
+        desc->ref[i] = (uint8_t) ((i << 4) | 1);
     }
+    for (i = 0; i < desc->n; i++) {
+        int uchord = i % 8;
+        int variant = (i / 8) % 8;
 
-    pos = 0;
-    for (i = 0; i < 62; i++) {
-        desc->train_u[pos++] = (uint8_t) (124 - i);
-        desc->train_u[pos++] = (uint8_t) i;
+        desc->train_u[i] = (uint8_t) ((uchord << 4) | clean_training_offsets[variant]);
     }
-    desc->train_u[pos++] = 62;
 }
 
 static void vpcm_v90_init_test_ja_profile(v90_dil_desc_t *desc, bool echo_limited)
 {
+    static const uint8_t echo_training_offsets[4] = {11, 13, 14, 15};
+    static const uint8_t echo_ref_ucodes[2] = {33, 49};
+    static const uint8_t echo_sp_bits[6] = {1, 0, 1, 1, 0, 0};
+    static const uint8_t echo_tp_bits[6] = {1, 0, 1, 0, 1, 0};
     int i;
-    static const uint8_t echo_train_u[8] = {60, 61, 62, 63, 64, 65, 66, 67};
 
     if (!desc)
         return;
@@ -234,12 +238,20 @@ static void vpcm_v90_init_test_ja_profile(v90_dil_desc_t *desc, bool echo_limite
     desc->n = 96;
     desc->lsp = 6;
     desc->ltp = 6;
+    memcpy(desc->sp, echo_sp_bits, sizeof(echo_sp_bits));
+    memcpy(desc->tp, echo_tp_bits, sizeof(echo_tp_bits));
     for (i = 0; i < 8; i++) {
-        desc->ref[i] = 1;
         desc->h[i] = 1;
+        desc->ref[i] = 0;
     }
-    for (i = 0; i < desc->n; i++)
-        desc->train_u[i] = echo_train_u[i % 8];
+    desc->ref[2] = echo_ref_ucodes[0];
+    desc->ref[3] = echo_ref_ucodes[1];
+    for (i = 0; i < desc->n; i++) {
+        int uchord = 2 + ((i / 12) & 1);
+        int variant = (i / 6) & 3;
+
+        desc->train_u[i] = (uint8_t) ((uchord << 4) | echo_training_offsets[variant]);
+    }
 }
 
 static void vpcm_v90_copy_dil_to_v91_compat(v91_dil_desc_t *dst, const v90_dil_desc_t *src)
