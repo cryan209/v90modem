@@ -327,6 +327,19 @@ SPAN_DECLARE(int) v34_get_phase3_trn_lock_score(v34_state_t *s);
     \return Non-zero once tx_data_mode is active. */
 SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s);
 
+/*! Override the per-direction MP signalling-rate advertisement used during
+    Phase 4. Rates use the V.34 MP N coding, where rate = N * 2400 bps and
+    N must be between 1 and 14 inclusive.
+    \param s The modem context.
+    \param bit_rate_a_to_c Maximum answerer-to-caller signalling rate N.
+    \param bit_rate_c_to_a Maximum caller-to-answerer signalling rate N. */
+SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, int bit_rate_c_to_a);
+
+/*! Clear any explicit MP signalling-rate override so Phase 4 falls back to the
+    modem's locally-derived defaults.
+    \param s The modem context. */
+SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s);
+
 /*! Force the transmitter/receiver pair into Phase 4 startup. Intended for
     external V.90 downstream implementations which handle Phase 3 themselves
     and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */

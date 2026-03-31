@@ -309,6 +309,8 @@ typedef struct
 {
     /*! \brief The code (0-16) for the maximum bit rate */
     int max_bit_rate_code;
+    /*! \brief Whether expanded shaping is enabled for this working mode. */
+    bool expanded_shaping;
     /*! \brief Parameters for the current bit rate and baud rate */
     int bit_rate;
     /*! \brief Bits per high mapping frame. A low mapping frame is one bit less. */
@@ -504,6 +506,13 @@ typedef struct
         mp_t mp;
         mph_t mph;
     };
+    /*! \brief Optional explicit MP direction-rate policy. When false, MP rate
+               advertisement falls back to locally-derived defaults. */
+    bool mp_rate_policy_valid;
+    /*! \brief Explicit MP maximum answerer-to-caller signalling rate (N*2400). */
+    int mp_rate_a_to_c;
+    /*! \brief Explicit MP maximum caller-to-answerer signalling rate (N*2400). */
+    int mp_rate_c_to_a;
 
     int persistence2;
 

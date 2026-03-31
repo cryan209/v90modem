@@ -431,6 +431,9 @@ static void pp_baud_init(v34_state_t *s);
 static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason);
+static int mp_rate_n_is_valid(int rate_n);
+static int v34_tx_current_trellis_code(const v34_tx_state_t *s);
+static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
 static void data_baud_init(v34_state_t *s);
@@ -4498,6 +4501,74 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
 }
 /*- End of function --------------------------------------------------------*/
 
+static int mp_rate_n_is_valid(int rate_n)
+{
+    return (rate_n >= 1 && rate_n <= 14);
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v34_tx_current_trellis_code(const v34_tx_state_t *s)
+{
+    if (s->conv_encode_table == v34_conv64_encode_table)
+        return V34_TRELLIS_64;
+    if (s->conv_encode_table == v34_conv32_encode_table)
+        return V34_TRELLIS_32;
+    return V34_TRELLIS_16;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
+{
+    int local_max_n;
+    int remote_max_n;
+
+    local_max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+    if (bit_rate_a_to_c)
+        *bit_rate_a_to_c = local_max_n;
+    /*endif*/
+    if (bit_rate_c_to_a)
+        *bit_rate_c_to_a = local_max_n;
+    /*endif*/
+    if (!bit_rate_a_to_c || !bit_rate_c_to_a)
+        return;
+    /*endif*/
+    if (s->tx.mp_rate_policy_valid
+        && mp_rate_n_is_valid(s->tx.mp_rate_a_to_c)
+        && mp_rate_n_is_valid(s->tx.mp_rate_c_to_a))
+    {
+        *bit_rate_a_to_c = s->tx.mp_rate_a_to_c;
+        *bit_rate_c_to_a = s->tx.mp_rate_c_to_a;
+        return;
+    }
+    /*endif*/
+
+    /* When the peer's Phase 2 rate advertisement carries a real V.34 max-data
+       field, use it to advertise the opposite direction. In V.90 caller INFO1a,
+       that field is repurposed as U_INFO, so only use remote maxima when the
+       Phase 2 format makes them trustworthy. */
+    if (s->calling_party)
+    {
+        remote_max_n = s->rx.info1c.rate_data[s->tx.baud_rate].max_bit_rate;
+        if (mp_rate_n_is_valid(remote_max_n))
+            *bit_rate_a_to_c = remote_max_n;
+        /*endif*/
+        *bit_rate_c_to_a = local_max_n;
+    }
+    else
+    {
+        if (!s->tx.v90_mode)
+        {
+            remote_max_n = s->rx.info1a.max_data_rate;
+            if (mp_rate_n_is_valid(remote_max_n))
+                *bit_rate_c_to_a = remote_max_n;
+            /*endif*/
+        }
+        /*endif*/
+        *bit_rate_a_to_c = local_max_n;
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
 static void phase4_wait_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
@@ -4620,19 +4691,17 @@ static void mp_or_mph_baud_init(v34_state_t *s)
 
     if (s->tx.duplex)
     {
-        int max_n;
+        int bit_rate_a_to_c;
+        int bit_rate_c_to_a;
         int i;
         int mask;
 
         /* Populate MP parameters from negotiated settings.
            V.34/Table 12 defines the MP sequence fields. */
         s->tx.mp.type = 0;  /* MP0 — no precoder coefficients initially */
-
-        /* Maximum data rate as N where rate = N * 2400 bps.
-           max_bit_rate_code uses internal encoding: code = (N-1)*2 */
-        max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
-        s->tx.mp.bit_rate_a_to_c = max_n;  /* answerer -> caller */
-        s->tx.mp.bit_rate_c_to_a = max_n;  /* caller -> answerer */
+        v34_tx_get_mp_rates(s, &bit_rate_a_to_c, &bit_rate_c_to_a);
+        s->tx.mp.bit_rate_a_to_c = bit_rate_a_to_c;
+        s->tx.mp.bit_rate_c_to_a = bit_rate_c_to_a;
 
         /* Build signalling rate capability mask from valid mappings
            at the selected baud rate.  Bit i = rate (i+1)*2400 bps. */
@@ -4645,11 +4714,11 @@ static void mp_or_mph_baud_init(v34_state_t *s)
         /*endfor*/
         s->tx.mp.signalling_rate_mask = mask;
 
-        s->tx.mp.trellis_size = 0;          /* 16-state trellis */
-        s->tx.mp.use_non_linear_encoder = false;
-        s->tx.mp.expanded_shaping = false;
+        s->tx.mp.trellis_size = v34_tx_current_trellis_code(&s->tx);
+        s->tx.mp.use_non_linear_encoder = s->tx.use_non_linear_encoder;
+        s->tx.mp.expanded_shaping = s->tx.parms.expanded_shaping;
         s->tx.mp.aux_channel_supported = false;
-        s->tx.mp.asymmetric_rates_allowed = false;
+        s->tx.mp.asymmetric_rates_allowed = (bit_rate_a_to_c != bit_rate_c_to_a);
         s->tx.mp.mp_acknowledged = false;
 
         log_mp(s->tx.logging, true, &s->tx.mp);
@@ -5259,6 +5328,7 @@ void v34_set_working_parameters(v34_parameters_t *s, int baud_rate, int bit_rate
 {
     /* This should be one of the normal V.34 modes. Not a control channel mode. */
     s->bit_rate = ((bit_rate >> 1) + 1)*2400 + (bit_rate & 1)*200;
+    s->expanded_shaping = (expanded != 0);
 
     s->b = baud_rate_parameters[baud_rate].mappings[bit_rate].b;
     /* V.34/9.2 */
@@ -5355,6 +5425,31 @@ SPAN_DECLARE(int) v34_get_phase3_trn_lock_score(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s)
 {
     return s->tx.tx_data_mode ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, int bit_rate_c_to_a)
+{
+    if (!s)
+        return;
+    /*endif*/
+    if (!mp_rate_n_is_valid(bit_rate_a_to_c) || !mp_rate_n_is_valid(bit_rate_c_to_a))
+        return;
+    /*endif*/
+    s->tx.mp_rate_policy_valid = true;
+    s->tx.mp_rate_a_to_c = bit_rate_a_to_c;
+    s->tx.mp_rate_c_to_a = bit_rate_c_to_a;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->tx.mp_rate_policy_valid = false;
+    s->tx.mp_rate_a_to_c = 0;
+    s->tx.mp_rate_c_to_a = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
