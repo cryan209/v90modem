@@ -9,14 +9,92 @@ enum { VPCM_V90_NOMINAL_10S_FRAMES = 13328 };
 enum { VPCM_V90_PHASE2_CHUNK_SAMPLES = 160 };
 enum { VPCM_V90_PHASE2_MAX_CHUNKS = 2500 };
 enum { VPCM_V90_PHASE2_V8_HANDOFF_CHUNKS = 4 };
+enum { VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES = 96 };
+enum { VPCM_V90_PHASE3_NATIVE_MAX_SAMPLES = 200000 };
+enum { VPCM_V90_PHASE3_V34_MAX_CHUNKS = 2500 };
+enum { VPCM_V90_PHASE4_V34_MAX_CHUNKS = 4000 };
 
 enum vpcm_v90_v34_rx_stages_e {
-    VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING = 11
+    VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING = 11,
+    VPCM_V90_V34_RX_STAGE_PHASE4_S = 13,
+    VPCM_V90_V34_RX_STAGE_PHASE4_TRN = 15,
+    VPCM_V90_V34_RX_STAGE_PHASE4_MP = 16,
+    VPCM_V90_V34_RX_STAGE_DATA = 17
+};
+
+enum vpcm_v90_v34_tx_stages_e {
+    VPCM_V90_V34_TX_STAGE_INITIAL_PREAMBLE = 1,
+    VPCM_V90_V34_TX_STAGE_INFO0,
+    VPCM_V90_V34_TX_STAGE_INITIAL_A,
+    VPCM_V90_V34_TX_STAGE_FIRST_A,
+    VPCM_V90_V34_TX_STAGE_FIRST_NOT_A,
+    VPCM_V90_V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN,
+    VPCM_V90_V34_TX_STAGE_SECOND_A,
+    VPCM_V90_V34_TX_STAGE_L1,
+    VPCM_V90_V34_TX_STAGE_L2,
+    VPCM_V90_V34_TX_STAGE_POST_L2_A,
+    VPCM_V90_V34_TX_STAGE_POST_L2_NOT_A,
+    VPCM_V90_V34_TX_STAGE_A_SILENCE,
+    VPCM_V90_V34_TX_STAGE_PRE_INFO1_A,
+    VPCM_V90_V34_TX_STAGE_V90_WAIT_TONE_A,
+    VPCM_V90_V34_TX_STAGE_V90_WAIT_INFO1A,
+    VPCM_V90_V34_TX_STAGE_V90_WAIT_RX_L2,
+    VPCM_V90_V34_TX_STAGE_V90_WAIT_TONE_A_REV,
+    VPCM_V90_V34_TX_STAGE_V90_B_REV_DELAY,
+    VPCM_V90_V34_TX_STAGE_V90_B_REV_10MS,
+    VPCM_V90_V34_TX_STAGE_V90_PHASE2_B,
+    VPCM_V90_V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
+    VPCM_V90_V34_TX_STAGE_INFO1,
+    VPCM_V90_V34_TX_STAGE_FIRST_B,
+    VPCM_V90_V34_TX_STAGE_FIRST_B_INFO_SEEN,
+    VPCM_V90_V34_TX_STAGE_FIRST_NOT_B_WAIT,
+    VPCM_V90_V34_TX_STAGE_FIRST_NOT_B,
+    VPCM_V90_V34_TX_STAGE_FIRST_B_SILENCE,
+    VPCM_V90_V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE,
+    VPCM_V90_V34_TX_STAGE_SECOND_B,
+    VPCM_V90_V34_TX_STAGE_SECOND_B_WAIT,
+    VPCM_V90_V34_TX_STAGE_SECOND_NOT_B,
+    VPCM_V90_V34_TX_STAGE_INFO0_RETRY,
+    VPCM_V90_V34_TX_STAGE_FIRST_S,
+    VPCM_V90_V34_TX_STAGE_FIRST_NOT_S,
+    VPCM_V90_V34_TX_STAGE_MD,
+    VPCM_V90_V34_TX_STAGE_SECOND_S,
+    VPCM_V90_V34_TX_STAGE_SECOND_NOT_S,
+    VPCM_V90_V34_TX_STAGE_TRN,
+    VPCM_V90_V34_TX_STAGE_J,
+    VPCM_V90_V34_TX_STAGE_J_DASHED,
+    VPCM_V90_V34_TX_STAGE_PHASE4_WAIT,
+    VPCM_V90_V34_TX_STAGE_PHASE4_S,
+    VPCM_V90_V34_TX_STAGE_PHASE4_NOT_S,
+    VPCM_V90_V34_TX_STAGE_PHASE4_TRN,
+    VPCM_V90_V34_TX_STAGE_MP,
+    VPCM_V90_V34_TX_STAGE_HDX_INITIAL_A,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_A,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_NOT_A,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_A_SILENCE,
+    VPCM_V90_V34_TX_STAGE_HDX_SECOND_A,
+    VPCM_V90_V34_TX_STAGE_HDX_SECOND_A_WAIT,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_B,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_NOT_B_WAIT,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_NOT_B,
+    VPCM_V90_V34_TX_STAGE_HDX_POST_L2_B,
+    VPCM_V90_V34_TX_STAGE_HDX_POST_L2_SILENCE,
+    VPCM_V90_V34_TX_STAGE_HDX_SH,
+    VPCM_V90_V34_TX_STAGE_HDX_FIRST_ALT,
+    VPCM_V90_V34_TX_STAGE_HDX_PPH,
+    VPCM_V90_V34_TX_STAGE_HDX_SECOND_ALT,
+    VPCM_V90_V34_TX_STAGE_HDX_MPH,
+    VPCM_V90_V34_TX_STAGE_HDX_E
 };
 
 enum vpcm_v90_v34_events_e {
+    VPCM_V90_V34_EVENT_NONE = 0,
     VPCM_V90_V34_EVENT_INFO0_OK = 5,
     VPCM_V90_V34_EVENT_INFO1_OK = 7,
+    VPCM_V90_V34_EVENT_S = 12,
+    VPCM_V90_V34_EVENT_J = 13,
+    VPCM_V90_V34_EVENT_J_DASHED = 14,
     VPCM_V90_V34_EVENT_TRAINING_FAILED = 16
 };
 
@@ -384,6 +462,326 @@ static void vpcm_v90_transport_linear(v91_law_t law,
     }
 }
 
+static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
+                                                  int u_info,
+                                                  const v90_dil_desc_t *digital_dil,
+                                                  const vpcm_v90_startup_contract_io_t *io)
+{
+    v90_state_t *digital;
+    int total_samples;
+    bool jd_termination_requested;
+    bool dil_termination_requested;
+    bool ok;
+
+    if (!digital_dil)
+        return false;
+
+    digital = v90_init_data_pump(vpcm_v90_data_law(law));
+    if (!digital) {
+        fprintf(stderr, "V.90 Phase 3: failed to initialize native downstream state\n");
+        return false;
+    }
+
+    v90_set_dil_descriptor(digital, digital_dil);
+    v90_start_phase3(digital, u_info);
+
+    total_samples = 0;
+    jd_termination_requested = false;
+    dil_termination_requested = false;
+    ok = false;
+    while (total_samples < VPCM_V90_PHASE3_NATIVE_MAX_SAMPLES) {
+        int16_t tx_linear[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+        uint8_t tx_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+        v90_tx_phase_t tx_phase;
+
+        v90_phase3_tx(digital, tx_linear, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
+        vpcm_v90_encode_linear_chunk_to_g711(law,
+                                             tx_linear,
+                                             tx_g711,
+                                             VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
+        if (!vpcm_v90_record_simplex(io,
+                                     law,
+                                     true,
+                                     tx_g711,
+                                     VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
+            fprintf(stderr, "V.90 Phase 3: failed to record native downstream chunk\n");
+            break;
+        }
+
+        total_samples += VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES;
+        tx_phase = v90_get_tx_phase(digital);
+        if (!jd_termination_requested && tx_phase == V90_TX_JD) {
+            v90_notify_s_detected(digital);
+            jd_termination_requested = true;
+        } else if (!dil_termination_requested && tx_phase == V90_TX_DIL) {
+            v90_notify_s_detected(digital);
+            dil_termination_requested = true;
+        }
+
+        if (tx_phase == V90_TX_PHASE4 || v90_using_internal_v34_tx(digital)) {
+            ok = true;
+            break;
+        }
+    }
+
+    if (!ok) {
+        fprintf(stderr,
+                "V.90 Phase 3: native downstream training did not reach Phase 4 (samples=%d jd_term=%d dil_term=%d tx_phase=%d)\n",
+                total_samples,
+                jd_termination_requested ? 1 : 0,
+                dil_termination_requested ? 1 : 0,
+                (int) v90_get_tx_phase(digital));
+    }
+
+    v90_free(digital);
+    return ok;
+}
+
+static bool vpcm_v90_continue_native_analogue_phase3(v91_law_t law,
+                                                     const vpcm_v90_startup_contract_io_t *io,
+                                                     v34_state_t *caller,
+                                                     v34_state_t *answerer,
+                                                     vpcm_v90_startup_contract_report_t *report)
+{
+    int chunk;
+    int final_caller_rx_stage;
+    int final_caller_rx_event;
+    int final_caller_j_bits;
+    int final_caller_j_trn16;
+    int final_caller_trn_lock_score;
+    int final_caller_tx_stage;
+    int final_answerer_rx_stage;
+    int final_answerer_rx_event;
+    int final_answerer_j_bits;
+    int final_answerer_j_trn16;
+    int final_answerer_trn_lock_score;
+    int final_answerer_tx_stage;
+    int recorded_chunks;
+    bool phase3_started;
+    bool ok;
+
+    if (!caller || !answerer) {
+        fprintf(stderr, "V.90 Phase 3: missing native analogue states\n");
+        return false;
+    }
+
+    recorded_chunks = 0;
+    phase3_started = (v34_get_tx_stage(caller) >= VPCM_V90_V34_TX_STAGE_FIRST_S);
+    final_caller_tx_stage = v34_get_tx_stage(caller);
+    final_caller_rx_stage = v34_get_rx_stage(caller);
+    final_caller_rx_event = v34_get_rx_event(caller);
+    final_caller_j_bits = v34_get_phase3_j_bits(caller);
+    final_caller_j_trn16 = v34_get_phase3_j_trn16(caller);
+    final_caller_trn_lock_score = v34_get_phase3_trn_lock_score(caller);
+    final_answerer_tx_stage = v34_get_tx_stage(answerer);
+    final_answerer_rx_stage = v34_get_rx_stage(answerer);
+    final_answerer_rx_event = v34_get_rx_event(answerer);
+    final_answerer_j_bits = v34_get_phase3_j_bits(answerer);
+    final_answerer_j_trn16 = v34_get_phase3_j_trn16(answerer);
+    final_answerer_trn_lock_score = v34_get_phase3_trn_lock_score(answerer);
+    ok = false;
+    for (chunk = 0; chunk < VPCM_V90_PHASE3_V34_MAX_CHUNKS; chunk++) {
+        int16_t caller_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t caller_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int caller_tx_stage;
+        int caller_event;
+        int answerer_event;
+
+        if (v34_tx(caller, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES
+            || v34_tx(answerer, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES) {
+            break;
+        }
+
+        caller_tx_stage = v34_get_tx_stage(caller);
+        if (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S
+            && caller_tx_stage < VPCM_V90_V34_TX_STAGE_PHASE4_WAIT) {
+            vpcm_v90_encode_linear_chunk_to_g711(law,
+                                                 caller_tx,
+                                                 caller_tx_g711,
+                                                 VPCM_V90_PHASE2_CHUNK_SAMPLES);
+            if (!vpcm_v90_record_simplex(io,
+                                         law,
+                                         false,
+                                         caller_tx_g711,
+                                         VPCM_V90_PHASE2_CHUNK_SAMPLES)) {
+                break;
+            }
+            phase3_started = true;
+            recorded_chunks++;
+        }
+
+        vpcm_v90_transport_linear(law, answer_rx, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_transport_linear(law, caller_rx, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (v34_rx(caller, caller_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answer_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0) {
+            break;
+        }
+
+        caller_event = v34_get_rx_event(caller);
+        answerer_event = v34_get_rx_event(answerer);
+        caller_tx_stage = v34_get_tx_stage(caller);
+        final_caller_tx_stage = caller_tx_stage;
+        final_caller_rx_stage = v34_get_rx_stage(caller);
+        final_caller_rx_event = caller_event;
+        final_caller_j_bits = v34_get_phase3_j_bits(caller);
+        final_caller_j_trn16 = v34_get_phase3_j_trn16(caller);
+        final_caller_trn_lock_score = v34_get_phase3_trn_lock_score(caller);
+        final_answerer_tx_stage = v34_get_tx_stage(answerer);
+        final_answerer_rx_stage = v34_get_rx_stage(answerer);
+        final_answerer_rx_event = answerer_event;
+        final_answerer_j_bits = v34_get_phase3_j_bits(answerer);
+        final_answerer_j_trn16 = v34_get_phase3_j_trn16(answerer);
+        final_answerer_trn_lock_score = v34_get_phase3_trn_lock_score(answerer);
+        if (phase3_started
+            && caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT) {
+            ok = true;
+            break;
+        }
+
+        if (caller_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
+            || answerer_event == VPCM_V90_V34_EVENT_TRAINING_FAILED) {
+            break;
+        }
+    }
+
+    if (report) {
+        report->phase3_native_analogue_started = phase3_started;
+        report->phase3_native_caller_tx_stage = final_caller_tx_stage;
+        report->phase3_native_caller_rx_stage = final_caller_rx_stage;
+        report->phase3_native_caller_rx_event = final_caller_rx_event;
+        report->phase3_native_caller_j_bits = final_caller_j_bits;
+        report->phase3_native_caller_j_trn16 = final_caller_j_trn16;
+        report->phase3_native_caller_trn_lock_score = final_caller_trn_lock_score;
+        report->phase3_native_answerer_tx_stage = final_answerer_tx_stage;
+        report->phase3_native_answerer_rx_stage = final_answerer_rx_stage;
+        report->phase3_native_answerer_rx_event = final_answerer_rx_event;
+        report->phase3_native_answerer_j_bits = final_answerer_j_bits;
+        report->phase3_native_answerer_j_trn16 = final_answerer_j_trn16;
+        report->phase3_native_answerer_trn_lock_score = final_answerer_trn_lock_score;
+    }
+
+    return ok && recorded_chunks > 0;
+}
+
+static bool vpcm_v90_continue_native_analogue_phase4(v91_law_t law,
+                                                     const vpcm_v90_startup_contract_io_t *io,
+                                                     v34_state_t *caller,
+                                                     v34_state_t *answerer,
+                                                     vpcm_v90_startup_contract_report_t *report)
+{
+    int chunk;
+    int final_caller_rx_event;
+    int final_caller_rx_stage;
+    int final_caller_tx_stage;
+    int final_answerer_rx_event;
+    int final_answerer_rx_stage;
+    int final_answerer_tx_stage;
+    int recorded_chunks;
+    bool final_caller_tx_data_mode;
+    bool final_answerer_tx_data_mode;
+    bool phase4_started;
+    bool ok;
+
+    if (!caller || !answerer) {
+        fprintf(stderr, "V.90 Phase 4: missing native analogue states\n");
+        return false;
+    }
+
+    recorded_chunks = 0;
+    phase4_started = (v34_get_tx_stage(caller) >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)
+                  || (v34_get_tx_stage(answerer) >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)
+                  || (v34_get_rx_stage(caller) >= VPCM_V90_V34_RX_STAGE_PHASE4_S)
+                  || (v34_get_rx_stage(answerer) >= VPCM_V90_V34_RX_STAGE_PHASE4_S);
+    final_caller_tx_stage = v34_get_tx_stage(caller);
+    final_caller_rx_stage = v34_get_rx_stage(caller);
+    final_caller_rx_event = v34_get_rx_event(caller);
+    final_caller_tx_data_mode = (v34_get_tx_data_mode(caller) != 0);
+    final_answerer_tx_stage = v34_get_tx_stage(answerer);
+    final_answerer_rx_stage = v34_get_rx_stage(answerer);
+    final_answerer_rx_event = v34_get_rx_event(answerer);
+    final_answerer_tx_data_mode = (v34_get_tx_data_mode(answerer) != 0);
+    ok = false;
+    for (chunk = 0; chunk < VPCM_V90_PHASE4_V34_MAX_CHUNKS; chunk++) {
+        int16_t caller_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answerer_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answerer_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t caller_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t answerer_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+
+        if (v34_tx(caller, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES
+            || v34_tx(answerer, answerer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES) {
+            break;
+        }
+
+        phase4_started = phase4_started
+                      || (v34_get_tx_stage(caller) >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)
+                      || (v34_get_tx_stage(answerer) >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)
+                      || (v34_get_rx_stage(caller) >= VPCM_V90_V34_RX_STAGE_PHASE4_S)
+                      || (v34_get_rx_stage(answerer) >= VPCM_V90_V34_RX_STAGE_PHASE4_S);
+        if (phase4_started) {
+            vpcm_v90_encode_linear_chunk_to_g711(law,
+                                                 caller_tx,
+                                                 caller_tx_g711,
+                                                 VPCM_V90_PHASE2_CHUNK_SAMPLES);
+            vpcm_v90_encode_linear_chunk_to_g711(law,
+                                                 answerer_tx,
+                                                 answerer_tx_g711,
+                                                 VPCM_V90_PHASE2_CHUNK_SAMPLES);
+            if (!vpcm_v90_record_duplex(io,
+                                        caller_tx_g711,
+                                        answerer_tx_g711,
+                                        VPCM_V90_PHASE2_CHUNK_SAMPLES)) {
+                break;
+            }
+            recorded_chunks++;
+        }
+
+        vpcm_v90_transport_linear(law, answerer_rx, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_transport_linear(law, caller_rx, answerer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (v34_rx(caller, caller_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answerer_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0) {
+            break;
+        }
+
+        final_caller_tx_stage = v34_get_tx_stage(caller);
+        final_caller_rx_stage = v34_get_rx_stage(caller);
+        final_caller_rx_event = v34_get_rx_event(caller);
+        final_caller_tx_data_mode = (v34_get_tx_data_mode(caller) != 0);
+        final_answerer_tx_stage = v34_get_tx_stage(answerer);
+        final_answerer_rx_stage = v34_get_rx_stage(answerer);
+        final_answerer_rx_event = v34_get_rx_event(answerer);
+        final_answerer_tx_data_mode = (v34_get_tx_data_mode(answerer) != 0);
+        if ((final_caller_tx_data_mode || final_caller_rx_stage >= VPCM_V90_V34_RX_STAGE_DATA)
+            && (final_answerer_tx_data_mode || final_answerer_rx_stage >= VPCM_V90_V34_RX_STAGE_DATA)) {
+            ok = true;
+            break;
+        }
+        if (final_caller_rx_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
+            || final_answerer_rx_event == VPCM_V90_V34_EVENT_TRAINING_FAILED) {
+            break;
+        }
+    }
+
+    if (report) {
+        report->phase4_native_analogue_started = phase4_started;
+        report->phase4_native_analogue_completed = ok;
+        report->phase4_native_caller_tx_data_mode = final_caller_tx_data_mode;
+        report->phase4_native_answerer_tx_data_mode = final_answerer_tx_data_mode;
+        report->phase4_native_caller_tx_stage = final_caller_tx_stage;
+        report->phase4_native_caller_rx_stage = final_caller_rx_stage;
+        report->phase4_native_caller_rx_event = final_caller_rx_event;
+        report->phase4_native_answerer_tx_stage = final_answerer_tx_stage;
+        report->phase4_native_answerer_rx_stage = final_answerer_rx_stage;
+        report->phase4_native_answerer_rx_event = final_answerer_rx_event;
+    }
+
+    return ok && recorded_chunks > 0;
+}
+
 static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
                                          const vpcm_v90_startup_contract_io_t *io,
                                          vpcm_v90_startup_contract_report_t *report)
@@ -395,10 +793,18 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
     v90_info0a_t received_info0a;
     v90_info1a_t received_info1a;
     int chunk;
+    int final_caller_tx_stage;
+    int final_caller_rx_stage;
+    int final_answerer_tx_stage;
+    int final_answerer_rx_stage;
+    bool caller_phase3_tx_ready;
+    bool answerer_phase3_tx_ready;
+    bool caller_saw_info1;
     bool answerer_saw_info0;
     bool answerer_saw_info1;
     bool answerer_saw_uinfo;
     bool phase3_seen;
+    bool phase2_ok;
     bool received_info0a_valid;
     bool received_info1a_valid;
     bool ok;
@@ -461,6 +867,13 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
     answerer_saw_info1 = false;
     answerer_saw_uinfo = false;
     phase3_seen = false;
+    caller_phase3_tx_ready = false;
+    answerer_phase3_tx_ready = false;
+    caller_saw_info1 = false;
+    final_caller_tx_stage = v34_get_tx_stage(caller);
+    final_caller_rx_stage = v34_get_rx_stage(caller);
+    final_answerer_tx_stage = v34_get_tx_stage(answerer);
+    final_answerer_rx_stage = v34_get_rx_stage(answerer);
     received_info0a_valid = false;
     received_info1a_valid = false;
     memset(&received_info0a, 0, sizeof(received_info0a));
@@ -477,6 +890,10 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         int answerer_event;
         int caller_rx_stage;
         int answerer_rx_stage;
+        int caller_tx_stage;
+        int answerer_tx_stage;
+        bool caller_phase3_tx_now;
+        bool answerer_phase3_tx_now;
 
         if (v34_tx(caller, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES
             || v34_tx(answerer, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES) {
@@ -501,9 +918,16 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
 
         caller_event = v34_get_rx_event(caller);
         answerer_event = v34_get_rx_event(answerer);
+        caller_tx_stage = v34_get_tx_stage(caller);
+        answerer_tx_stage = v34_get_tx_stage(answerer);
         caller_rx_stage = v34_get_rx_stage(caller);
         answerer_rx_stage = v34_get_rx_stage(answerer);
+        final_caller_tx_stage = caller_tx_stage;
+        final_caller_rx_stage = caller_rx_stage;
+        final_answerer_tx_stage = answerer_tx_stage;
+        final_answerer_rx_stage = answerer_rx_stage;
 
+        caller_saw_info1 |= (caller_event == VPCM_V90_V34_EVENT_INFO1_OK);
         answerer_saw_info0 |= (answerer_event == VPCM_V90_V34_EVENT_INFO0_OK);
         answerer_saw_info1 |= (answerer_event == VPCM_V90_V34_EVENT_INFO1_OK);
         answerer_saw_uinfo |= (v34_get_v90_u_info(answerer) > 0);
@@ -511,11 +935,19 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
                     || (answerer_rx_stage >= VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING)
                     || v34_get_primary_channel_active(caller)
                     || v34_get_primary_channel_active(answerer);
+        caller_phase3_tx_now = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S)
+                            && (caller_tx_stage < VPCM_V90_V34_TX_STAGE_PHASE4_WAIT);
+        answerer_phase3_tx_now = (answerer_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S)
+                              && (answerer_tx_stage < VPCM_V90_V34_TX_STAGE_PHASE4_WAIT);
+        caller_phase3_tx_ready |= caller_phase3_tx_now;
+        answerer_phase3_tx_ready |= answerer_phase3_tx_now;
 
         if (answerer_saw_info0
             && answerer_saw_info1
             && answerer_saw_uinfo
-            && phase3_seen) {
+            && phase3_seen
+            && caller_phase3_tx_now
+            && answerer_phase3_tx_now) {
             ok = true;
             break;
         }
@@ -537,6 +969,18 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         received_info1a_valid = true;
     }
 
+    if (!ok
+        && answerer_saw_info0
+        && answerer_saw_info1
+        && answerer_saw_uinfo
+        && phase3_seen
+        && (final_caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S)
+        && (final_caller_tx_stage < VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)
+        && (final_answerer_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S)
+        && (final_answerer_tx_stage < VPCM_V90_V34_TX_STAGE_PHASE4_WAIT)) {
+        ok = true;
+    }
+
     if (ok && (!received_info0a_valid || !received_info1a_valid)) {
         fprintf(stderr,
                 "V.90 Phase 2 probe could not consume received INFO frames: info0a=%d info1a=%d\n",
@@ -545,26 +989,76 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         ok = false;
     }
 
+    phase2_ok = ok;
     if (report) {
-        report->phase2_completed = ok;
+        report->phase2_completed = phase2_ok;
         report->phase2_phase3_seen = phase3_seen;
+        report->phase2_caller_saw_info1 = caller_saw_info1;
+        report->phase2_caller_phase3_tx_ready = caller_phase3_tx_ready;
         report->phase2_u_info = received_info1a_valid ? received_info1a.u_info : v34_get_v90_u_info(answerer);
+        report->phase2_caller_tx_stage = final_caller_tx_stage;
+        report->phase2_caller_rx_stage = final_caller_rx_stage;
+        report->phase2_answerer_tx_stage = final_answerer_tx_stage;
+        report->phase2_answerer_rx_stage = final_answerer_rx_stage;
         report->phase2_received_info0a_valid = received_info0a_valid;
         report->phase2_received_info1a_valid = received_info1a_valid;
         report->phase2_received_info0a = received_info0a;
         report->phase2_received_info1a = received_info1a;
+        report->phase3_native_analogue_started = false;
+        report->phase3_native_analogue_completed = false;
+        report->phase3_native_caller_tx_stage = final_caller_tx_stage;
+        report->phase3_native_caller_rx_stage = final_caller_rx_stage;
+        report->phase3_native_caller_rx_event = VPCM_V90_V34_EVENT_NONE;
+        report->phase3_native_caller_j_bits = 0;
+        report->phase3_native_caller_j_trn16 = -1;
+        report->phase3_native_caller_trn_lock_score = -1;
+        report->phase3_native_answerer_tx_stage = final_answerer_tx_stage;
+        report->phase3_native_answerer_rx_stage = final_answerer_rx_stage;
+        report->phase3_native_answerer_rx_event = VPCM_V90_V34_EVENT_NONE;
+        report->phase3_native_answerer_j_bits = 0;
+        report->phase3_native_answerer_j_trn16 = -1;
+        report->phase3_native_answerer_trn_lock_score = -1;
+        report->phase4_native_analogue_started = false;
+        report->phase4_native_analogue_completed = false;
+        report->phase4_native_caller_tx_data_mode = false;
+        report->phase4_native_answerer_tx_data_mode = false;
+        report->phase4_native_caller_tx_stage = final_caller_tx_stage;
+        report->phase4_native_caller_rx_stage = final_caller_rx_stage;
+        report->phase4_native_caller_rx_event = VPCM_V90_V34_EVENT_NONE;
+        report->phase4_native_answerer_tx_stage = final_answerer_tx_stage;
+        report->phase4_native_answerer_rx_stage = final_answerer_rx_stage;
+        report->phase4_native_answerer_rx_event = VPCM_V90_V34_EVENT_NONE;
     }
 
-    if (!ok) {
+    if (!phase2_ok) {
         fprintf(stderr,
-                "V.90 Phase 2 probe incomplete: info0=%d info1=%d uinfo=%d phase3=%d consumed_info0=%d consumed_info1=%d final_uinfo=%d\n",
+                "V.90 Phase 2 probe incomplete: caller_info1=%d caller_phase3_tx=%d answerer_phase3_tx=%d info0=%d info1=%d uinfo=%d phase3=%d consumed_info0=%d consumed_info1=%d final_stages caller=%d/%d answerer=%d/%d final_uinfo=%d\n",
+                caller_saw_info1 ? 1 : 0,
+                caller_phase3_tx_ready ? 1 : 0,
+                answerer_phase3_tx_ready ? 1 : 0,
                 answerer_saw_info0 ? 1 : 0,
                 answerer_saw_info1 ? 1 : 0,
                 answerer_saw_uinfo ? 1 : 0,
                 phase3_seen ? 1 : 0,
                 received_info0a_valid ? 1 : 0,
                 received_info1a_valid ? 1 : 0,
+                final_caller_tx_stage,
+                final_caller_rx_stage,
+                final_answerer_tx_stage,
+                final_answerer_rx_stage,
                 v34_get_v90_u_info(answerer));
+    } else {
+        bool native_analogue_ok;
+        bool native_phase4_ok;
+
+        native_analogue_ok = caller_phase3_tx_ready
+                          && vpcm_v90_continue_native_analogue_phase3(law, io, caller, answerer, report);
+        if (report)
+            report->phase3_native_analogue_completed = native_analogue_ok;
+        native_phase4_ok = native_analogue_ok
+                        && vpcm_v90_continue_native_analogue_phase4(law, io, caller, answerer, report);
+        if (report)
+            report->phase4_native_analogue_completed = native_phase4_ok;
     }
 
     v34_free(caller);
@@ -759,17 +1253,26 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                          &local_report.answerer_info,
                                          &local_report.caller_info);
 
-    /* Phase 3 is still using a compatibility path here (DIL/SCR) until the
-       session owns native caller/answerer V.90 training directly. */
+    /* Downstream Phase 3 is recorded through the native V.90 PCM answerer
+       path. We also probe for a native analogue caller-side Phase 3 continuation
+       on the live SpanDSP INFO connection; if that continuation is not yet
+       available over the current analog-over-G.711 path, the shared V.91-era
+       DIL/SCR path remains as the compatibility bridge for the analogue leg
+       and for later CP/B1 state priming. */
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE3);
+    if (!vpcm_v90_run_native_downstream_phase3(params->law,
+                                               local_report.analogue_info1a.u_info,
+                                               &digital_dil,
+                                               io)) {
+        return false;
+    }
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
                                                         &digital_dil_compat,
                                                         NULL);
     if (startup_len <= 0
-        || !v91_note_received_dil(&answerer_startup, &digital_dil_compat, NULL)
-        || !vpcm_v90_record_simplex(io, params->law, true, startup_buf, startup_len)) {
+        || !v91_note_received_dil(&answerer_startup, &digital_dil_compat, NULL)) {
         return false;
     }
     vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
@@ -781,21 +1284,25 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                                         NULL);
     if (startup_len <= 0
         || !v91_note_received_dil(&caller_startup, &default_dil, NULL)
-        || !vpcm_v90_record_simplex(io, params->law, false, startup_buf, startup_len)) {
+        || (!local_report.phase3_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, startup_buf, startup_len))) {
         return false;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE3);
     if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)
-        || !vpcm_v90_record_simplex(io, params->law, true, scr_buf, 18)
         || v91_tx_scr_codewords(&answerer_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)
-        || !vpcm_v90_record_simplex(io, params->law, false, scr_buf, 18)) {
+        || (!local_report.phase3_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, scr_buf, 18))) {
         return false;
     }
 
-    /* Phase 4 is still approximated by the shared CP/B1 compatibility path. */
+    /* Phase 4 is still approximated internally by the shared CP/B1
+       compatibility path. When the live native analogue probe already carried
+       the real Phase 4 waveform through MP/E/data, we suppress CP/B1 session
+       recording so the harness timeline reflects the native path. */
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     vpcm_cp_init(&local_report.cp_down_offer);
     local_report.cp_down_offer.transparent_mode_granted = false;
@@ -812,7 +1319,8 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     if (cp_len <= 0
         || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true)
         || !vpcm_cp_frames_equal(&local_report.cp_down_offer, &cp_rx)
-        || !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len))) {
         return false;
     }
 
@@ -826,17 +1334,20 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     if (cp_len <= 0
         || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true)
         || !vpcm_cp_frames_equal(&local_report.cp_down_ack, &cp_rx)
-        || !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len))) {
         return false;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
-        || !vpcm_v90_record_simplex(io, params->law, true, es_buf, V91_ES_SYMBOLS)
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, true, es_buf, V91_ES_SYMBOLS))
         || v91_tx_b1_codewords(&caller_startup, b1_buf, (int) sizeof(b1_buf), &local_report.cp_down_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &local_report.cp_down_ack)
-        || !vpcm_v90_record_simplex(io, params->law, true, b1_buf, V91_B1_SYMBOLS)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, true, b1_buf, V91_B1_SYMBOLS))) {
         return false;
     }
 
@@ -856,7 +1367,8 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     if (cp_len <= 0
         || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true)
         || !vpcm_cp_frames_equal(&local_report.cp_up_offer, &cp_rx)
-        || !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len))) {
         return false;
     }
 
@@ -870,17 +1382,20 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     if (cp_len <= 0
         || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true)
         || !vpcm_cp_frames_equal(&local_report.cp_up_ack, &cp_rx)
-        || !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len))) {
         return false;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
-        || !vpcm_v90_record_simplex(io, params->law, false, es_buf, V91_ES_SYMBOLS)
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, es_buf, V91_ES_SYMBOLS))
         || v91_tx_b1_codewords(&answerer_startup, b1_buf, (int) sizeof(b1_buf), &local_report.cp_up_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &local_report.cp_up_ack)
-        || !vpcm_v90_record_simplex(io, params->law, false, b1_buf, V91_B1_SYMBOLS)) {
+        || (!local_report.phase4_native_analogue_completed
+            && !vpcm_v90_record_simplex(io, params->law, false, b1_buf, V91_B1_SYMBOLS))) {
         return false;
     }
 

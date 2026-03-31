@@ -1057,6 +1057,17 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void mp_vote_reset(v34_rx_state_t *s)
+{
+    memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+    s->mp0_vote_frames = 0;
+    s->mp0_vote_hyp = -1;
+    memset(s->mp1_vote_counts, 0, sizeof(s->mp1_vote_counts));
+    s->mp1_vote_frames = 0;
+    s->mp1_vote_hyp = -1;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int phase3_j_pattern_bit(int pat_type, int bit_idx)
 {
     /* LSB-first pattern bits, per V.34 Table 18/19 representation used by TX:
@@ -4586,12 +4597,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             /*endif*/
 
-            /* Explicit Phase 3 J/J' detector (answerer side):
+            /* Explicit Phase 3 J/J' detector:
                - apply all dibit mapping hypotheses
                - undo differential encoding (Z_n -> I_n)
                - descramble
-               - correlate against J/J' 16-bit templates */
-            if (!s->calling_party)
+               - correlate against J/J' 16-bit templates
+
+               Both roles need the far-end J decode:
+               - answerer uses it to leave Phase 3 J and enter Phase 4 wait
+               - caller uses it to learn the far-end TRN/J mode before it can
+                 legally terminate its own J with J' once S is later seen */
             {
                 int h;
                 int best_score;
@@ -4763,13 +4778,23 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         else
                         {
-                            s->received_event = V34_EVENT_J;
                             s->phase3_j_lock_hyp = best_h;
                             s->phase3_j_trn16 = pat;
-                            span_log(s->logging, SPAN_LOG_FLOW,
-                                     "Rx - Phase 3: explicit J detected (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
-                                     best_h, best_p, best_score, s->phase3_j_bits,
-                                     pat ? "16-point" : "4-point");
+                            if (!s->calling_party)
+                            {
+                                s->received_event = V34_EVENT_J;
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 3: explicit J detected (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
+                                         best_h, best_p, best_score, s->phase3_j_bits,
+                                         pat ? "16-point" : "4-point");
+                            }
+                            else
+                            {
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 3: far-end J decoded for caller (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
+                                         best_h, best_p, best_score, s->phase3_j_bits,
+                                         pat ? "16-point" : "4-point");
+                            }
                         }
                     }
                     else
@@ -4845,7 +4870,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endif*/
             }
-            /*endif*/
 
             idx = (s->duration - 1) & 31;
             int old_sym = s->phase3_s_ring[idx] & 3;
@@ -4884,6 +4908,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      s->duration, mag_now, data_bits, s->s_detect_count, s->bit_count,
                      s->phase3_s_counts[0], s->phase3_s_counts[1],
                      s->phase3_s_counts[2], s->phase3_s_counts[3]);
+        }
+
+        if (s->calling_party
+            && s->phase3_j_trn16 >= 0
+            && s->received_event == V34_EVENT_NONE
+            && s->duration >= 64
+            && s->bit_count >= 24)
+        {
+            s->received_event = V34_EVENT_S;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: far-end S detected for caller after J decode (rev=%d/32 bits=%d trn=%s)\n",
+                     s->bit_count, s->phase3_j_bits,
+                     s->phase3_j_trn16 ? "16-point" : "4-point");
         }
 
         /* In this path detection is armed only after local J starts (Phase 3),
@@ -5327,6 +5364,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->scramble_reg = 0;
             phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
+            if (s->calling_party)
+            {
+                /* Caller-side Phase 4 does not wait for a far-end J':
+                   after detecting the answerer's S/S-bar handoff, the far end
+                   is already in TRN. Mark the J' gate as satisfied so Phase 4
+                   TRN scoring can begin immediately instead of timing out while
+                   waiting for a symbol pattern that the answerer never sends. */
+                s->phase4_j_seen = 1;
+                s->phase4_trn_after_j = 0;
+                s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: caller detected answerer S handoff; starting direct TRN scoring (phase3 hyp=%d)\n",
+                         s->phase3_j_lock_hyp);
+            }
+            /*endif*/
         }
         else if (s->duration >= 2048)
         {
@@ -5342,6 +5394,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->scramble_reg = 0;
             phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
+            if (s->calling_party)
+            {
+                s->phase4_j_seen = 1;
+                s->phase4_trn_after_j = 0;
+                s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: caller forcing direct TRN scoring after S timeout (phase3 hyp=%d)\n",
+                         s->phase3_j_lock_hyp);
+            }
+            /*endif*/
         }
         break;
 
@@ -5363,6 +5425,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->scramble_reg = 0;
             phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
+            if (s->calling_party)
+            {
+                s->phase4_j_seen = 1;
+                s->phase4_trn_after_j = 0;
+                s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: caller finished S-bar; starting direct TRN scoring (phase3 hyp=%d)\n",
+                         s->phase3_j_lock_hyp);
+            }
+            /*endif*/
         }
         break;
 
@@ -5946,6 +6018,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->mp_phase4_force_abs_active = 0;
             s->mp_phase4_diff_collapse_streak = 0;
             s->mp_phase4_diff_recover_streak = 0;
+            mp_vote_reset(s);
             if (s->phase4_trn_lock_hyp >= 0  &&  s->phase4_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
@@ -6343,9 +6416,12 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             && s->mp_seen == 0
             && (s->duration % 400) == 0)
         {
-            /* If TRN locked a hypothesis, keep those descrambler settings —
-               do NOT rotate through modes.  The TRN lock determined the correct
-               domain/tap/order; changing them will prevent MP detection. */
+            /* A pinned TRN lock is the best initial MP hint, but it is not
+               infallible. In A-law especially we can end up with the wrong
+               MP domain/order/tap while never locking any MP hypothesis at
+               all. Hold the pinned settings for a few no-lock windows first,
+               then rotate retry modes so we do not sit in PHASE4_MP until
+               timeout on a bad decode mode forever. */
             if (mp_phase4_has_pinned_trn_lock(s))
             {
                 s->mp_phase4_nolock_count++;
@@ -6382,7 +6458,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                 }
-                mp_reset_hypothesis_search(s);
+                if (s->mp_phase4_nolock_count >= MP_HINT_MAX_NOLOCKS)
+                {
+                    mp_phase4_rotate_retry_mode(s, "no MP hypothesis lock");
+                }
+                else
+                {
+                    mp_reset_hypothesis_search(s);
+                }
+                /*endif*/
             }
             else
             {
@@ -6950,32 +7034,29 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /* Majority-vote accumulator for MP0 frames */
                             if (type == 0  &&  s->mp_frame_target == 88)
                             {
-                                static int16_t vote_counts[88];
-                                static int vote_frames = 0;
-                                static int vote_hyp = -1;
                                 int vi;
 
                                 /* Reset accumulator if hypothesis changed */
-                                if (s->mp_hypothesis != vote_hyp)
+                                if (s->mp_hypothesis != s->mp0_vote_hyp)
                                 {
-                                    memset(vote_counts, 0, sizeof(vote_counts));
-                                    vote_frames = 0;
-                                    vote_hyp = s->mp_hypothesis;
+                                    memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+                                    s->mp0_vote_frames = 0;
+                                    s->mp0_vote_hyp = s->mp_hypothesis;
                                 }
                                 /* Accumulate: +1 for '1', -1 for '0' */
                                 for (vi = 0;  vi < 88;  vi++)
-                                    vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
-                                vote_frames++;
+                                    s->mp0_vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
+                                s->mp0_vote_frames++;
 
-                                if (vote_frames <= 2 || (vote_frames % 4) == 0)
+                                if (s->mp0_vote_frames <= 2 || (s->mp0_vote_frames % 4) == 0)
                                 {
                                     span_log(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP0 vote accumulator: %d frames (hyp=%d)\n",
-                                             vote_frames, vote_hyp);
+                                             s->mp0_vote_frames, s->mp0_vote_hyp);
                                 }
 
                                 /* Try majority-vote after every 3+ frames */
-                                if (vote_frames >= 3)
+                                if (s->mp0_vote_frames >= 3)
                                 {
                                     uint8_t voted_bits[88];
                                     uint16_t vote_rx_crc;
@@ -6984,7 +7065,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                     bool vote_fill_ok;
 
                                     for (vi = 0;  vi < 88;  vi++)
-                                        voted_bits[vi] = (vote_counts[vi] > 0) ? 1 : 0;
+                                        voted_bits[vi] = (s->mp0_vote_counts[vi] > 0) ? 1 : 0;
                                     /* Force known structural bits */
                                     voted_bits[17] = 0;  /* start bit */
                                     voted_bits[18] = 0;  /* type = MP0 */
@@ -6998,20 +7079,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                                     span_log(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP0 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
-                                             vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, vote_frames);
+                                             vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp0_vote_frames);
 
                                     if (vote_crc_ok  &&  vote_fill_ok)
                                     {
                                         int accepted_vote_frames;
 
-                                        accepted_vote_frames = vote_frames;
+                                        accepted_vote_frames = s->mp0_vote_frames;
                                         /* Replace frame bits with voted version and accept */
                                         memcpy(s->mp_frame_bits, voted_bits, 88);
                                         crc_good = true;
                                         fill_good = true;
                                         keep_hypothesis = true;
-                                        vote_frames = 0;
-                                        memset(vote_counts, 0, sizeof(vote_counts));
+                                        s->mp0_vote_frames = 0;
+                                        memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
 
                                         /* Process the accepted frame */
                                         if (s->duplex)
@@ -7055,27 +7136,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /* Majority-vote accumulator for MP1 frames */
                             else if (type == 1  &&  s->mp_frame_target == 188)
                             {
-                                static int16_t vote_counts[188];
-                                static int vote_frames = 0;
-                                static int vote_hyp = -1;
                                 int vi;
 
-                                if (s->mp_hypothesis != vote_hyp)
+                                if (s->mp_hypothesis != s->mp1_vote_hyp)
                                 {
-                                    memset(vote_counts, 0, sizeof(vote_counts));
-                                    vote_frames = 0;
-                                    vote_hyp = s->mp_hypothesis;
+                                    memset(s->mp1_vote_counts, 0, sizeof(s->mp1_vote_counts));
+                                    s->mp1_vote_frames = 0;
+                                    s->mp1_vote_hyp = s->mp_hypothesis;
                                 }
 
                                 for (vi = 0;  vi < 188;  vi++)
-                                    vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
-                                vote_frames++;
+                                    s->mp1_vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
+                                s->mp1_vote_frames++;
 
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP1 vote accumulator: %d frames (hyp=%d)\n",
-                                         vote_frames, vote_hyp);
+                                         s->mp1_vote_frames, s->mp1_vote_hyp);
 
-                                if (vote_frames >= 3)
+                                if (s->mp1_vote_frames >= 3)
                                 {
                                     uint8_t voted_bits[188];
                                     uint16_t vote_rx_crc;
@@ -7084,7 +7162,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                     bool vote_fill_ok;
 
                                     for (vi = 0;  vi < 188;  vi++)
-                                        voted_bits[vi] = (vote_counts[vi] > 0) ? 1 : 0;
+                                        voted_bits[vi] = (s->mp1_vote_counts[vi] > 0) ? 1 : 0;
                                     /* Force structural bits */
                                     voted_bits[17] = 0;
                                     voted_bits[18] = 1;
@@ -7104,7 +7182,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                                     span_log(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP1 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
-                                             vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, vote_frames);
+                                             vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp1_vote_frames);
 
                                     if (vote_crc_ok  &&  vote_fill_ok)
                                     {
@@ -7112,8 +7190,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                         crc_good = true;
                                         fill_good = true;
                                         keep_hypothesis = true;
-                                        vote_frames = 0;
-                                        memset(vote_counts, 0, sizeof(vote_counts));
+                                        s->mp1_vote_frames = 0;
+                                        memset(s->mp1_vote_counts, 0, sizeof(s->mp1_vote_counts));
 
                                         if (s->duplex)
                                         {
@@ -7816,6 +7894,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_phase4_diff_collapse_streak = 0;
     s->rx.mp_phase4_diff_recover_streak = 0;
     mp_reset_hypothesis_search(&s->rx);
+    mp_vote_reset(&s->rx);
     s->rx.last_logged_mp_diag_state = V34_MP_DIAG_STATE_NONE;
     s->rx.last_logged_stage = -1;
     s->rx.last_logged_event = -1;

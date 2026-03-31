@@ -886,9 +886,37 @@ static const char *vpcm_v34_rx_stage_to_str(int stage)
     case V34_RX_STAGE_L1_L2: return "L1_L2";
     case V34_RX_STAGE_INFO1C: return "INFO1C";
     case V34_RX_STAGE_INFO1A: return "INFO1A";
+    case V34_RX_STAGE_PHASE3_WAIT_S: return "PHASE3_WAIT_S";
     case V34_RX_STAGE_PHASE3_TRAINING: return "PHASE3_TRAINING";
+    case V34_RX_STAGE_PHASE4_S: return "PHASE4_S";
+    case V34_RX_STAGE_PHASE4_S_BAR: return "PHASE4_S_BAR";
+    case V34_RX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
+    case V34_RX_STAGE_PHASE4_MP: return "PHASE4_MP";
+    case V34_RX_STAGE_DATA: return "DATA";
     default: return "other";
     }
+}
+
+static const char *vpcm_v34_event_to_str(int event)
+{
+    switch (event)
+    {
+    case V34_EVENT_NONE: return "NONE";
+    case V34_EVENT_INFO0_OK: return "INFO0_OK";
+    case V34_EVENT_INFO1_OK: return "INFO1_OK";
+    case V34_EVENT_S: return "S";
+    case V34_EVENT_J: return "J";
+    case V34_EVENT_J_DASHED: return "J_DASHED";
+    case V34_EVENT_TRAINING_FAILED: return "TRAINING_FAILED";
+    default: return "other";
+    }
+}
+
+static const char *vpcm_v34_trn16_hint_to_str(int value)
+{
+    if (value < 0)
+        return "unknown";
+    return value ? "16-point" : "4-point";
 }
 
 static const char *vpcm_v34_tx_stage_to_str(int stage)
@@ -928,6 +956,18 @@ static const char *vpcm_v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_SECOND_NOT_B: return "SECOND_NOT_B";
     case V34_TX_STAGE_INFO0_RETRY: return "INFO0_RETRY";
     case V34_TX_STAGE_FIRST_S: return "FIRST_S";
+    case V34_TX_STAGE_FIRST_NOT_S: return "FIRST_NOT_S";
+    case V34_TX_STAGE_MD: return "MD";
+    case V34_TX_STAGE_SECOND_S: return "SECOND_S";
+    case V34_TX_STAGE_SECOND_NOT_S: return "SECOND_NOT_S";
+    case V34_TX_STAGE_TRN: return "TRN";
+    case V34_TX_STAGE_J: return "J";
+    case V34_TX_STAGE_J_DASHED: return "J_DASHED";
+    case V34_TX_STAGE_PHASE4_WAIT: return "PHASE4_WAIT";
+    case V34_TX_STAGE_PHASE4_S: return "PHASE4_S";
+    case V34_TX_STAGE_PHASE4_NOT_S: return "PHASE4_NOT_S";
+    case V34_TX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
+    case V34_TX_STAGE_MP: return "MP";
     default: {
         static char buf[32];
         snprintf(buf, sizeof(buf), "stage_%d", stage);
@@ -2954,8 +2994,8 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
         vpcm_log("Phase model: Phase 2 = real SpanDSP V.90 INFO transport plus shared INFO0a/INFO1a validation");
-        vpcm_log("Phase model: Phase 3 = caller/answerer V.90 training; current session still approximates this with shared DIL/SCR compatibility steps.");
-        vpcm_log("Phase model: Phase 4 = caller/answerer V.90 MP/data-mode handoff; current session still approximates this with shared CP/B1 compatibility steps.");
+        vpcm_log("Phase model: Phase 3 = caller/answerer V.90 training; downstream digital->analogue uses native V.90 Sd/TRN1d/Jd/Jd'/DIL, while analogue->digital currently probes native SpanDSP caller S/MD/TRN/J and falls back to the shared compatibility path when that continuation does not carry through this G.711 loopback yet.");
+        vpcm_log("Phase model: Phase 4 = caller/answerer V.90 MP/data-mode handoff; the session now probes the live native analogue Phase 4 path and only falls back to shared CP/B1 recording when that continuation does not reach data mode.");
         vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
     }
 
@@ -2994,6 +3034,13 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                  report.phase2_completed ? "yes" : "no",
                  report.phase2_phase3_seen ? "yes" : "no",
                  report.phase2_u_info);
+        vpcm_log("Shared V.90 Phase 2 caller handoff: info1d_seen=%s caller_phase3_tx=%s caller_tx=%s caller_rx=%s answerer_tx=%s answerer_rx=%s",
+                 report.phase2_caller_saw_info1 ? "yes" : "no",
+                 report.phase2_caller_phase3_tx_ready ? "yes" : "no",
+                 vpcm_v34_tx_stage_to_str(report.phase2_caller_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase2_caller_rx_stage),
+                 vpcm_v34_tx_stage_to_str(report.phase2_answerer_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase2_answerer_rx_stage));
         if (report.phase2_received_info0a_valid) {
             vpcm_log("Consumed V.90 INFO0a: 2743=%u 2800=%u 3429=%u 3000(low/high)=%u/%u 3200(low/high)=%u/%u delta=%u tx_clock=%u ack=%u",
                      report.phase2_received_info0a.support_2743 ? 1U : 0U,
@@ -3019,6 +3066,33 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                  report.caller_info.request_default_dil ? "default" : "custom",
                  report.answerer_info.request_default_dil ? "default" : "custom",
                  report.answerer_info.acknowledge_info_frame ? "yes" : "no");
+        vpcm_log("Phase 3 analogue caller probe: native=%s",
+                 report.phase3_native_analogue_completed ? "yes" : "fallback");
+        vpcm_log("Phase 3 analogue caller probe detail: started=%s caller_tx=%s caller_rx=%s caller_event=%s caller_j_bits=%d caller_j_trn=%s caller_trn_hint=%d%% answerer_tx=%s answerer_rx=%s answerer_event=%s answerer_j_bits=%d answerer_j_trn=%s answerer_trn_hint=%d%%",
+                 report.phase3_native_analogue_started ? "yes" : "no",
+                 vpcm_v34_tx_stage_to_str(report.phase3_native_caller_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase3_native_caller_rx_stage),
+                 vpcm_v34_event_to_str(report.phase3_native_caller_rx_event),
+                 report.phase3_native_caller_j_bits,
+                 vpcm_v34_trn16_hint_to_str(report.phase3_native_caller_j_trn16),
+                 report.phase3_native_caller_trn_lock_score,
+                 vpcm_v34_tx_stage_to_str(report.phase3_native_answerer_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase3_native_answerer_rx_stage),
+                 vpcm_v34_event_to_str(report.phase3_native_answerer_rx_event),
+                 report.phase3_native_answerer_j_bits,
+                 vpcm_v34_trn16_hint_to_str(report.phase3_native_answerer_j_trn16),
+                 report.phase3_native_answerer_trn_lock_score);
+        vpcm_log("Phase 4 analogue probe: native=%s started=%s caller_tx=%s caller_rx=%s caller_event=%s caller_tx_data=%s answerer_tx=%s answerer_rx=%s answerer_event=%s answerer_tx_data=%s",
+                 report.phase4_native_analogue_completed ? "yes" : "fallback",
+                 report.phase4_native_analogue_started ? "yes" : "no",
+                 vpcm_v34_tx_stage_to_str(report.phase4_native_caller_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase4_native_caller_rx_stage),
+                 vpcm_v34_event_to_str(report.phase4_native_caller_rx_event),
+                 report.phase4_native_caller_tx_data_mode ? "yes" : "no",
+                 vpcm_v34_tx_stage_to_str(report.phase4_native_answerer_tx_stage),
+                 vpcm_v34_rx_stage_to_str(report.phase4_native_answerer_rx_stage),
+                 vpcm_v34_event_to_str(report.phase4_native_answerer_rx_event),
+                 report.phase4_native_answerer_tx_data_mode ? "yes" : "no");
         if (report.phase3_digital_dil_analysis_valid) {
             vpcm_log("Native V.90 DIL analysis: N=%u LSP=%u LTP=%u unique=%u uchords=%u refs=%u h!=1=%u default125x12=%s echo_limited=%s",
                      report.phase3_digital_dil_analysis.n,

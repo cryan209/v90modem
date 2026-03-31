@@ -307,6 +307,26 @@ SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *
     \return The current rx.received_event value (v34_events_e). */
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
 
+/*! Get the number of Phase 3 J-detector bits accumulated so far.
+    \param s The modem context.
+    \return The current rx.phase3_j_bits counter. */
+SPAN_DECLARE(int) v34_get_phase3_j_bits(v34_state_t *s);
+
+/*! Get the current Phase 3 far-end J TRN mode hint.
+    \param s The modem context.
+    \return -1 if unknown, 0 for 4-point, 1 for 16-point. */
+SPAN_DECLARE(int) v34_get_phase3_j_trn16(v34_state_t *s);
+
+/*! Get the current Phase 3 TRN lock score hint.
+    \param s The modem context.
+    \return The current rx.phase3_trn_lock_score percentage, or -1 if unknown. */
+SPAN_DECLARE(int) v34_get_phase3_trn_lock_score(v34_state_t *s);
+
+/*! Get whether the transmitter has switched into data mode.
+    \param s The modem context.
+    \return Non-zero once tx_data_mode is active. */
+SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s);
+
 /*! Force the transmitter/receiver pair into Phase 4 startup. Intended for
     external V.90 downstream implementations which handle Phase 3 themselves
     and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */

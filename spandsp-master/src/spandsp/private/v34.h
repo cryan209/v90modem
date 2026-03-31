@@ -894,6 +894,12 @@ typedef struct
     int mp_frame_pos;
     int mp_frame_target;
     int mp_early_rejects;
+    int16_t mp0_vote_counts[88];
+    int mp0_vote_frames;
+    int mp0_vote_hyp;
+    int16_t mp1_vote_counts[188];
+    int mp1_vote_frames;
+    int mp1_vote_hyp;
     int mp_phase4_default_scrambler_tap;
     int mp_phase4_default_bit_order;
     int mp_phase4_default_domain;

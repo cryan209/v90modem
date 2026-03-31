@@ -430,6 +430,7 @@ static void s_not_s_baud_init(v34_state_t *s);
 static void pp_baud_init(v34_state_t *s);
 static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
+static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
 static void data_baud_init(v34_state_t *s);
@@ -3018,8 +3019,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
                  "Tx - V.90: INFO1a received while waiting for Tone A, proceeding directly to Phase 3 handoff\n");
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
-        tx_silence_init(s, 30000);
-        s->tx.stage = V34_TX_STAGE_FIRST_S;
+        s_not_s_baud_init(s);
         s->rx.received_event = V34_EVENT_NONE;
         return zero;
     }
@@ -3138,8 +3138,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.v90_phase2_info0_recovery_loops = 0;
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
-        tx_silence_init(s, 30000);
-        s->tx.stage = V34_TX_STAGE_FIRST_S;
+        s_not_s_baud_init(s);
         s->rx.received_event = V34_EVENT_NONE;
         return zero;
     }
@@ -3455,7 +3454,13 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
     bit = get_data_bit(&s->tx);
     if (s->tx.txptr >= s->tx.txbits)
     {
-        if (s->tx.calling_party)
+        if (s->tx.calling_party && s->tx.v90_mode)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: INFO1a complete, entering Phase 3 S/!S handoff\n");
+            s_not_s_baud_init(s);
+        }
+        else if (s->tx.calling_party)
         {
             tx_silence_init(s, 30000);
         }
@@ -3714,19 +3719,35 @@ static void s_not_s_baud_init(v34_state_t *s)
        demodulator active and the RX stage at INFO1A so that info_rx()
        can decode INFO1a.  The transition to PHASE3_TRAINING happens later
        in process_rx_info1a() once INFO1a is received. */
-    if (s->tx.v90_mode)
+    if (s->tx.v90_mode && s->tx.calling_party)
     {
-        s->rx.current_demodulator = V34_MODULATION_TONES;
-        if (s->rx.stage == V34_RX_STAGE_INFO1A)
+        /* V.90 caller has already finished INFO1a transmission at this point.
+           Unlike the digital answerer, it should now switch RX straight to the
+           primary channel for Phase 3 training rather than continuing to wait
+           on the control-channel INFO path. */
+        s->rx.current_demodulator = V34_MODULATION_V34;
+        s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+    }
+    else if (s->tx.v90_mode)
+    {
+        if (s->rx.stage >= V34_RX_STAGE_PHASE3_TRAINING
+            || s->rx.stage == V34_RX_STAGE_INFO1A
+            || s->rx.info1a.max_data_rate > 0)
         {
-            /* RX already transitioned to INFO1A via reversal detection
-               during L1/L2 — don't regress it back to TONE_B. */
+            /* RX already decoded INFO1a, or has already moved into primary-
+               channel training. Preserve that live V.90 Phase 3 receive
+               context instead of regressing back to Tone B while TX enters
+               S/!S. */
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: RX already at INFO1A, keeping CC demod active\n");
+                     "Tx - V.90: INFO1a already decoded, preserving primary-channel RX across S/!S handoff\n");
+            s->rx.current_demodulator = V34_MODULATION_V34;
+            if (s->rx.stage < V34_RX_STAGE_PHASE3_TRAINING)
+                s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
         }
         else
         {
-            /* RX hasn't reached INFO1A yet — stay on TONE_B and wait
+            s->rx.current_demodulator = V34_MODULATION_TONES;
+            /* RX hasn't reached INFO1a yet — stay on TONE_B and wait
                for reversals to trigger the natural transition. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: keeping RX on CC demod (TONE_B) for INFO1a reception\n");
@@ -3935,11 +3956,14 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                The caller can't send S until it detects our J, so any event
                from before J is spurious. Reset RX to wait for the real S.
                Must also reset stage to PHASE3_WAIT_S so the S detection code
-               runs during J — otherwise it stays at PHASE3_TRAINING (set by
-               the timeout) and the real caller S can never be detected.
-               V.90: don't touch RX state — the V.90 RX controls its own
-               stage transitions (INFO1a → PHASE3_TRAINING). */
-            if (!s->tx.v90_mode)
+               runs during J — otherwise it can stay at PHASE3_TRAINING and
+               miss the early J/S crossover.
+
+               For native V.90 caller/answerer continuation we still want this
+               arming step once local TRN is complete, but only if RX has not
+               already advanced beyond the Phase 3 conditioning stage. */
+            if (!s->tx.v90_mode
+                || s->rx.stage < V34_RX_STAGE_PHASE3_WAIT_S)
             {
                 s->rx.received_event = V34_EVENT_NONE;
                 s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
@@ -4184,6 +4208,15 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         bit = s->tx.diff;
         if (++s->tx.tone_duration >= 16)
         {
+            if (s->tx.calling_party)
+            {
+                /* Caller Phase 4 RX conditioning: once local J' is complete the
+                   far-end answerer begins S/S-bar/TRN before MP. Re-arm RX for
+                   explicit Phase 4 S detection here; otherwise the caller can
+                   enter MP TX while RX is still stuck in Phase 3 WAIT_S. */
+                phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S, "S/S-bar/TRN then MP");
+            }
+            /*endif*/
             /* After J', begin MP exchange (V.34/10.1.3.10) */
             mp_or_mph_baud_init(s);
         }
@@ -4378,30 +4411,11 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void phase4_wait_init(v34_state_t *s)
+static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
     s->primary_channel_active = true;
-    s->tx.current_modulator = V34_MODULATION_V34;
-    s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
-    s->tx.tone_duration = 0;
-    s->tx.diff = 0;
-    s->tx.current_getbaud = get_phase4_baud;
-    /* External V.90 Phase 3 may hand us back TX while the native V.34 side is
-       still parked on silence/control-channel state. Re-prime the V.34 TX
-       pulse-shaping path so Phase 4 S/S-bar/TRN starts on the actual primary
-       channel instead of remaining in the old SILENCE modulator. */
-    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
-    s->tx.baud_phase = 0;
-    s->tx.rrc_filter_step = 0;
-    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
-    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
-
-    /* Phase 4 answerer RX conditioning (V.34 11.4.1.2.1/11.4.1.2.2):
-       while sending S, condition receiver to detect caller J' followed by TRN,
-       then receive MP. We therefore enter TRN/descrambler conditioning directly
-       instead of waiting on a far-end S detector. */
-    s->rx.stage = V34_RX_STAGE_PHASE4_TRN;
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = initial_stage;
     s->rx.duration = 0;
     s->rx.s_detect_count = 0;
     s->rx.s_window = 0;
@@ -4455,27 +4469,16 @@ static void phase4_wait_init(v34_state_t *s)
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
 
-    /* Carry Phase 3 equalizer coefficients into Phase 4 — Phase 3 PP/TRN
-       conditioning has learned the channel response at unit magnitude (matching
-       AGC and CMA R²=1.0).  Only reset eq_target_mag so CMA seeds cleanly.
-       The eq_buf and timing state are flushed below since there's a signal gap. */
+    /* Carry Phase 3 equalizer coefficients into Phase 4 and re-seed the
+       surrounding timing/filter state for a clean Phase 4 acquisition. */
     s->rx.eq_target_mag = 0.0f;
     cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
     s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
     s->rx.baud_half = 0;
-
-    /* Reset carrier phase rate to nominal for Phase 4 — Phase 3 carrier
-       tracking may have adjusted it away from the correct frequency. */
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     s->rx.carrier_phase = 0;
-
-    /* Flush RRC filter buffer — stale Phase 3 samples would corrupt
-       the first few Phase 4 matched filter outputs. */
     memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
     s->rx.rrc_filter_step = 0;
-
-    /* Reset TED state for Phase 4 — Phase 3 TED may have accumulated
-       bias that prevents clean symbol sync acquisition. */
     s->rx.pri_ted.baud_phase = 0.0f;
     s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
     s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
@@ -4486,10 +4489,39 @@ static void phase4_wait_init(v34_state_t *s)
     s->rx.total_baud_timing_correction = 0;
 
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Rx - Phase 4: conditioned for J'/TRN then MP (baud_rate=%d, high_carrier=%d, "
-             "carrier=%.1f Hz)\n",
-             s->rx.baud_rate, s->rx.high_carrier,
+             "Rx - Phase 4: conditioned for %s (stage=%d, baud_rate=%d, high_carrier=%d, carrier=%.1f Hz)\n",
+             reason ? reason : "Phase 4 startup",
+             s->rx.stage,
+             s->rx.baud_rate,
+             s->rx.high_carrier,
              carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_wait_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
+    s->primary_channel_active = true;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
+    s->tx.tone_duration = 0;
+    s->tx.diff = 0;
+    s->tx.current_getbaud = get_phase4_baud;
+    /* External V.90 Phase 3 may hand us back TX while the native V.34 side is
+       still parked on silence/control-channel state. Re-prime the V.34 TX
+       pulse-shaping path so Phase 4 S/S-bar/TRN starts on the actual primary
+       channel instead of remaining in the old SILENCE modulator. */
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.baud_phase = 0;
+    s->tx.rrc_filter_step = 0;
+    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+
+    /* Phase 4 answerer RX conditioning (V.34 11.4.1.2.1/11.4.1.2.2):
+       while sending S, condition receiver to detect caller J' followed by TRN,
+       then receive MP. We therefore enter TRN/descrambler conditioning directly
+       instead of waiting on a far-end S detector. */
+    phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_TRN, "J'/TRN then MP");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4571,6 +4603,21 @@ static void mp_or_mph_baud_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - mp_baud_init()\n");
     s->tx.current_modulator = V34_MODULATION_V34;
+
+    if (s->tx.duplex
+        && s->tx.calling_party
+        && s->tx.v90_mode
+        && s->rx.stage < V34_RX_STAGE_PHASE4_S)
+    {
+        /* Caller-side safety net: native V.90 can reach MP TX through a few
+           different Phase 3 exit seams. If RX has not already been advanced
+           into Phase 4 by the time MP starts, force the caller onto explicit
+           S/S-bar/TRN receive conditioning here rather than carrying a stale
+           Phase 3 WAIT_S state into MP. */
+        phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S, "S/S-bar/TRN then MP");
+    }
+    /*endif*/
+
     if (s->tx.duplex)
     {
         int max_n;
@@ -5284,6 +5331,30 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
 {
     return s->tx.stage;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_phase3_j_bits(v34_state_t *s)
+{
+    return s->rx.phase3_j_bits;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_phase3_j_trn16(v34_state_t *s)
+{
+    return s->rx.phase3_j_trn16;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_phase3_trn_lock_score(v34_state_t *s)
+{
+    return s->rx.phase3_trn_lock_score;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s)
+{
+    return s->tx.tx_data_mode ? 1 : 0;
 }
 /*- End of function --------------------------------------------------------*/
 
