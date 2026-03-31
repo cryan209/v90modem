@@ -626,7 +626,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_INFO);
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE2);
     if (!vpcm_v90_run_phase2_exchange(params->law, io, &local_report)) {
         return false;
     }
@@ -653,7 +653,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                          &local_report.answerer_info,
                                          &local_report.caller_info);
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_DIL);
+    /* Phase 3 is still using a compatibility path here (DIL/SCR) until the
+       session owns native caller/answerer V.90 training directly. */
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE3);
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
                                                         startup_buf,
                                                         (int) sizeof(startup_buf),
@@ -679,7 +681,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_SCR);
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE3);
     if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)
         || !vpcm_v90_record_simplex(io, params->law, true, scr_buf, 18)
@@ -689,7 +691,8 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_DOWNSTREAM_CP);
+    /* Phase 4 is still approximated by the shared CP/B1 compatibility path. */
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     vpcm_cp_init(&local_report.cp_down_offer);
     local_report.cp_down_offer.transparent_mode_granted = false;
     local_report.cp_down_offer.v90_compatibility = true;
@@ -723,7 +726,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_DOWNSTREAM_B1);
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
         || !vpcm_v90_record_simplex(io, params->law, true, es_buf, V91_ES_SYMBOLS)
@@ -733,7 +736,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_UPSTREAM_CP);
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     vpcm_cp_init(&local_report.cp_up_offer);
     local_report.cp_up_offer.transparent_mode_granted = false;
     local_report.cp_up_offer.v90_compatibility = true;
@@ -767,7 +770,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         return false;
     }
 
-    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_UPSTREAM_B1);
+    vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
     if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
         || !vpcm_v90_record_simplex(io, params->law, false, es_buf, V91_ES_SYMBOLS)
@@ -940,13 +943,9 @@ const char *vpcm_v90_modem_state_to_str(vpcm_v90_modem_state_t state)
     switch (state) {
     case VPCM_V90_MODEM_IDLE: return "IDLE";
     case VPCM_V90_MODEM_PHASE1: return "PHASE1";
-    case VPCM_V90_MODEM_INFO: return "INFO";
-    case VPCM_V90_MODEM_DIL: return "DIL";
-    case VPCM_V90_MODEM_SCR: return "SCR";
-    case VPCM_V90_MODEM_DOWNSTREAM_CP: return "DOWNSTREAM_CP";
-    case VPCM_V90_MODEM_DOWNSTREAM_B1: return "DOWNSTREAM_B1";
-    case VPCM_V90_MODEM_UPSTREAM_CP: return "UPSTREAM_CP";
-    case VPCM_V90_MODEM_UPSTREAM_B1: return "UPSTREAM_B1";
+    case VPCM_V90_MODEM_PHASE2: return "PHASE2_INFO";
+    case VPCM_V90_MODEM_PHASE3: return "PHASE3";
+    case VPCM_V90_MODEM_PHASE4: return "PHASE4";
     case VPCM_V90_MODEM_DATA: return "DATA";
     case VPCM_V90_MODEM_CLEARDOWN: return "CLEARDOWN";
     default: return "UNKNOWN";

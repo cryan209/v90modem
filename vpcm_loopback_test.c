@@ -2954,8 +2954,9 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
         vpcm_log("Phase model: Phase 2 = real SpanDSP V.90 INFO transport plus shared INFO0a/INFO1a validation");
+        vpcm_log("Phase model: Phase 3 = caller/answerer V.90 training; current session still approximates this with shared DIL/SCR compatibility steps.");
+        vpcm_log("Phase model: Phase 4 = caller/answerer V.90 MP/data-mode handoff; current session still approximates this with shared CP/B1 compatibility steps.");
         vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
-        vpcm_log("Harness note: DIL/adaptation shown below is later-phase approximation, not part of Phase 2.");
     }
 
     memset(&params, 0, sizeof(params));
