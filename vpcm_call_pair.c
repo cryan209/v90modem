@@ -107,6 +107,8 @@ bool vpcm_call_pair_attach_taps(vpcm_call_pair_t *pair, const char *dir)
     char caller_rx_path[512];
     char answerer_tx_path[512];
     char answerer_rx_path[512];
+    char caller_wav_path[512];
+    char answerer_wav_path[512];
 
     if (!pair || !pair->caller || !pair->answerer)
         return false;
@@ -121,16 +123,63 @@ bool vpcm_call_pair_attach_taps(vpcm_call_pair_t *pair, const char *dir)
         || snprintf(answerer_tx_path, sizeof(answerer_tx_path), "%s/%s-answerer-tx.g711", dir, base)
             >= (int) sizeof(answerer_tx_path)
         || snprintf(answerer_rx_path, sizeof(answerer_rx_path), "%s/%s-answerer-rx.g711", dir, base)
-            >= (int) sizeof(answerer_rx_path)) {
+            >= (int) sizeof(answerer_rx_path)
+        || snprintf(caller_wav_path, sizeof(caller_wav_path), "%s/%s-caller.wav", dir, base)
+            >= (int) sizeof(caller_wav_path)
+        || snprintf(answerer_wav_path, sizeof(answerer_wav_path), "%s/%s-answerer.wav", dir, base)
+            >= (int) sizeof(answerer_wav_path)) {
         return false;
     }
 
     if (!vpcm_call_attach_stream_taps(pair->caller, caller_tx_path, caller_rx_path))
         return false;
+    if (!vpcm_call_attach_wav_tap(pair->caller, caller_wav_path)) {
+        vpcm_call_detach_stream_taps(pair->caller);
+        return false;
+    }
     if (!vpcm_call_attach_stream_taps(pair->answerer, answerer_tx_path, answerer_rx_path)) {
         vpcm_call_detach_stream_taps(pair->caller);
         return false;
     }
+    if (!vpcm_call_attach_wav_tap(pair->answerer, answerer_wav_path)) {
+        vpcm_call_detach_stream_taps(pair->caller);
+        vpcm_call_detach_stream_taps(pair->answerer);
+        return false;
+    }
+    return true;
+}
+
+bool vpcm_call_pair_record_g711_exchange(vpcm_call_pair_t *pair,
+                                         const uint8_t *caller_tx_codewords,
+                                         const uint8_t *answerer_tx_codewords,
+                                         size_t codeword_len)
+{
+    uint8_t caller_scratch[codeword_len];
+    uint8_t answerer_scratch[codeword_len];
+
+    if (!pair || !pair->caller || !pair->answerer
+        || !caller_tx_codewords || !answerer_tx_codewords || codeword_len == 0) {
+        return false;
+    }
+
+    if (vpcm_g711_stream_write(&pair->caller->tx_stream, caller_tx_codewords, codeword_len) != codeword_len
+        || vpcm_g711_stream_read(&pair->caller->tx_stream, caller_scratch, codeword_len) != codeword_len
+        || vpcm_g711_stream_write(&pair->answerer->rx_stream, caller_tx_codewords, codeword_len) != codeword_len
+        || vpcm_g711_stream_read(&pair->answerer->rx_stream, answerer_scratch, codeword_len) != codeword_len) {
+        return false;
+    }
+
+    if (vpcm_g711_stream_write(&pair->answerer->tx_stream, answerer_tx_codewords, codeword_len) != codeword_len
+        || vpcm_g711_stream_read(&pair->answerer->tx_stream, answerer_scratch, codeword_len) != codeword_len
+        || vpcm_g711_stream_write(&pair->caller->rx_stream, answerer_tx_codewords, codeword_len) != codeword_len
+        || vpcm_g711_stream_read(&pair->caller->rx_stream, caller_scratch, codeword_len) != codeword_len) {
+        return false;
+    }
+
+    vpcm_call_write_stereo_wav(pair->caller, caller_tx_codewords, answerer_tx_codewords, codeword_len);
+    vpcm_call_write_stereo_wav(pair->answerer, answerer_tx_codewords, caller_tx_codewords, codeword_len);
+    vpcm_call_advance_tick(pair->caller);
+    vpcm_call_advance_tick(pair->answerer);
     return true;
 }
 
@@ -278,6 +327,15 @@ bool vpcm_call_pair_run_v91_data(vpcm_call_pair_t *pair,
                                                  pair->answerer->tx_stream.capacity) != (size_t) chunk_codewords) {
             return false;
         }
+
+        vpcm_call_write_stereo_wav(pair->caller,
+                                   caller_pcm_tx + codeword_offset,
+                                   caller_pcm_rx + codeword_offset,
+                                   (size_t) chunk_codewords);
+        vpcm_call_write_stereo_wav(pair->answerer,
+                                   answerer_pcm_tx + codeword_offset,
+                                   answerer_pcm_rx + codeword_offset,
+                                   (size_t) chunk_codewords);
 
         if (!vpcm_v91_session_decode_duplex_chunk(session,
                                                   caller_rx,

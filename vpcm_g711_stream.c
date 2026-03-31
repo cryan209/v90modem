@@ -54,10 +54,12 @@ bool vpcm_g711_stream_attach_tap(vpcm_g711_stream_t *stream, const char *path)
 
 void vpcm_g711_stream_detach_tap(vpcm_g711_stream_t *stream)
 {
-    if (!stream || !stream->tap_file)
+    if (!stream)
         return;
-    fclose(stream->tap_file);
-    stream->tap_file = NULL;
+    if (stream->tap_file) {
+        fclose(stream->tap_file);
+        stream->tap_file = NULL;
+    }
 }
 
 size_t vpcm_g711_stream_frame_bytes(const vpcm_g711_stream_t *stream)

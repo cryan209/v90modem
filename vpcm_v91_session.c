@@ -1,5 +1,6 @@
 #include "vpcm_v91_session.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static void vpcm_v91_transport_codewords(bool robbed_bit,
@@ -191,12 +192,16 @@ bool vpcm_v91_session_run_dil(vpcm_v91_session_t *session,
         return false;
     *caller_startup_len = len;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, startup_buf, len);
+    if (!v91_note_received_dil(answerer, default_dil, NULL))
+        return false;
 
     len = v91_tx_startup_dil_sequence_codewords(answerer, startup_buf, startup_cap, default_dil, NULL);
     if (len <= 0)
         return false;
     *answerer_startup_len = len;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, startup_buf, len);
+    if (!v91_note_received_dil(caller, default_dil, NULL))
+        return false;
     (void) transport_cap;
     return true;
 }
@@ -352,6 +357,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                      startup_cap,
                                      transport_buf,
                                      transport_cap)) {
+        fprintf(stderr, "V.91 session startup failed at Phase1\n");
         return false;
     }
     if (!vpcm_v91_session_run_info(session,
@@ -362,6 +368,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                    transport_buf,
                                    transport_cap,
                                    robbed_bit)) {
+        fprintf(stderr, "V.91 session startup failed at INFO\n");
         return false;
     }
     if (!vpcm_v91_session_run_dil(session,
@@ -375,6 +382,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                   &local_report.caller_startup_len,
                                   &local_report.answerer_startup_len,
                                   robbed_bit)) {
+        fprintf(stderr, "V.91 session startup failed at DIL\n");
         return false;
     }
     if (!vpcm_v91_session_run_scr(session,
@@ -385,6 +393,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                   transport_buf,
                                   transport_cap,
                                   robbed_bit)) {
+        fprintf(stderr, "V.91 session startup failed at SCR\n");
         return false;
     }
     if (!vpcm_v91_session_run_cp(session,
@@ -397,6 +406,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                  transport_buf,
                                  transport_cap,
                                  robbed_bit)) {
+        fprintf(stderr, "V.91 session startup failed at CP\n");
         return false;
     }
     local_report.cp_ack = startup_cfg.cp_ack;
@@ -411,6 +421,7 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                  transport_buf,
                                  transport_cap,
                                  robbed_bit)) {
+        fprintf(stderr, "V.91 session startup failed at B1/Es\n");
         return false;
     }
     if (!vpcm_v91_session_activate_data(session,
@@ -421,6 +432,10 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                         caller_rx,
                                         answerer_tx,
                                         answerer_rx)) {
+        fprintf(stderr, "V.91 session startup failed at DATA activation (drn=%u, transparent=%d, constellations=%u)\n",
+                (unsigned) local_report.cp_ack.drn,
+                local_report.cp_ack.transparent_mode_granted ? 1 : 0,
+                (unsigned) local_report.cp_ack.constellation_count);
         return false;
     }
     if (report)

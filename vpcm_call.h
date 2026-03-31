@@ -6,6 +6,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 typedef struct {
@@ -41,6 +42,8 @@ typedef struct {
     vpcm_call_state_t state;
     vpcm_call_run_mode_t run_mode;
     vpcm_v91_session_t v91_session;
+    FILE *tap_wav_file;
+    uint32_t tap_wav_samples;
     uint64_t ticks;
     double elapsed_seconds;
 } vpcm_call_t;
@@ -61,6 +64,11 @@ bool vpcm_call_step_to_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode
 bool vpcm_call_attach_stream_taps(vpcm_call_t *call,
                                   const char *tx_path,
                                   const char *rx_path);
+bool vpcm_call_attach_wav_tap(vpcm_call_t *call, const char *wav_path);
+void vpcm_call_write_stereo_wav(vpcm_call_t *call,
+                                const uint8_t *tx_codewords,
+                                const uint8_t *rx_codewords,
+                                size_t len);
 void vpcm_call_detach_stream_taps(vpcm_call_t *call);
 
 void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state);

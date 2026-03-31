@@ -1,6 +1,60 @@
 #include "vpcm_call.h"
 
+#include <stdio.h>
 #include <string.h>
+
+static void vpcm_call_write_le16(FILE *f, uint16_t value)
+{
+    uint8_t bytes[2];
+
+    bytes[0] = (uint8_t) (value & 0xFFU);
+    bytes[1] = (uint8_t) ((value >> 8) & 0xFFU);
+    (void) fwrite(bytes, 1, sizeof(bytes), f);
+}
+
+static void vpcm_call_write_le32(FILE *f, uint32_t value)
+{
+    uint8_t bytes[4];
+
+    bytes[0] = (uint8_t) (value & 0xFFU);
+    bytes[1] = (uint8_t) ((value >> 8) & 0xFFU);
+    bytes[2] = (uint8_t) ((value >> 16) & 0xFFU);
+    bytes[3] = (uint8_t) ((value >> 24) & 0xFFU);
+    (void) fwrite(bytes, 1, sizeof(bytes), f);
+}
+
+static void vpcm_call_write_wav_header(vpcm_call_t *call, uint32_t samples)
+{
+    uint32_t channels = 2;
+    uint32_t bits_per_sample = 16;
+    uint32_t block_align;
+    uint32_t byte_rate;
+    uint32_t data_bytes;
+    uint32_t riff_size;
+
+    if (!call || !call->tap_wav_file)
+        return;
+
+    block_align = channels * (bits_per_sample / 8U);
+    byte_rate = call->params.sample_rate * block_align;
+    data_bytes = samples * block_align;
+    riff_size = 36U + data_bytes;
+
+    rewind(call->tap_wav_file);
+    (void) fwrite("RIFF", 1, 4, call->tap_wav_file);
+    vpcm_call_write_le32(call->tap_wav_file, riff_size);
+    (void) fwrite("WAVE", 1, 4, call->tap_wav_file);
+    (void) fwrite("fmt ", 1, 4, call->tap_wav_file);
+    vpcm_call_write_le32(call->tap_wav_file, 16U);
+    vpcm_call_write_le16(call->tap_wav_file, 1U);
+    vpcm_call_write_le16(call->tap_wav_file, (uint16_t) channels);
+    vpcm_call_write_le32(call->tap_wav_file, call->params.sample_rate);
+    vpcm_call_write_le32(call->tap_wav_file, byte_rate);
+    vpcm_call_write_le16(call->tap_wav_file, (uint16_t) block_align);
+    vpcm_call_write_le16(call->tap_wav_file, (uint16_t) bits_per_sample);
+    (void) fwrite("data", 1, 4, call->tap_wav_file);
+    vpcm_call_write_le32(call->tap_wav_file, data_bytes);
+}
 
 static bool vpcm_call_state_allows_run_mode(vpcm_call_state_t state)
 {
@@ -122,12 +176,55 @@ bool vpcm_call_attach_stream_taps(vpcm_call_t *call,
     return true;
 }
 
+bool vpcm_call_attach_wav_tap(vpcm_call_t *call, const char *wav_path)
+{
+    if (!call || !wav_path || !*wav_path)
+        return false;
+    if (call->tap_wav_file) {
+        vpcm_call_write_wav_header(call, call->tap_wav_samples);
+        fclose(call->tap_wav_file);
+        call->tap_wav_file = NULL;
+        call->tap_wav_samples = 0;
+    }
+    call->tap_wav_file = fopen(wav_path, "wb");
+    if (!call->tap_wav_file)
+        return false;
+    call->tap_wav_samples = 0;
+    vpcm_call_write_wav_header(call, 0);
+    return true;
+}
+
+void vpcm_call_write_stereo_wav(vpcm_call_t *call,
+                                const uint8_t *tx_codewords,
+                                const uint8_t *rx_codewords,
+                                size_t len)
+{
+    size_t i;
+
+    if (!call || !call->tap_wav_file || !tx_codewords || !rx_codewords || len == 0)
+        return;
+    for (i = 0; i < len; ++i) {
+        int16_t left = v91_codeword_to_linear(call->params.law, tx_codewords[i]);
+        int16_t right = v91_codeword_to_linear(call->params.law, rx_codewords[i]);
+
+        vpcm_call_write_le16(call->tap_wav_file, (uint16_t) left);
+        vpcm_call_write_le16(call->tap_wav_file, (uint16_t) right);
+    }
+    call->tap_wav_samples += (uint32_t) len;
+}
+
 void vpcm_call_detach_stream_taps(vpcm_call_t *call)
 {
     if (!call)
         return;
     vpcm_g711_stream_detach_tap(&call->tx_stream);
     vpcm_g711_stream_detach_tap(&call->rx_stream);
+    if (call->tap_wav_file) {
+        vpcm_call_write_wav_header(call, call->tap_wav_samples);
+        fclose(call->tap_wav_file);
+        call->tap_wav_file = NULL;
+        call->tap_wav_samples = 0;
+    }
 }
 
 void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state)

@@ -176,6 +176,12 @@ static void vpcm_log_call_pair_mode(const vpcm_call_pair_t *pair);
 static void vpcm_log_call_pair_v91_state(const vpcm_call_pair_t *pair);
 static void vpcm_log_call_pair_v91_chunk(const vpcm_call_pair_v91_chunk_t *chunk,
                                          void *user_data);
+static bool run_v8_exchange(v91_law_t law,
+                            const v8_parms_t *caller_parms,
+                            const v8_parms_t *answer_parms,
+                            vpcm_v8_result_t *caller_result,
+                            vpcm_v8_result_t *answer_result,
+                            vpcm_call_pair_t *call_pair);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
@@ -2828,6 +2834,8 @@ static void vpcm_log_call_pair_v91_chunk(const vpcm_call_pair_v91_chunk_t *chunk
 static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 const char *family_label,
                                                                 const char *path_label,
+                                                                const v8_parms_t *caller_v8_parms,
+                                                                const v8_parms_t *answer_v8_parms,
                                                                 const vpcm_cp_frame_t *cp_offer_template,
                                                                 bool robbed_bit,
                                                                 uint32_t data_seed,
@@ -2848,6 +2856,8 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     vpcm_v91_startup_report_t startup_report;
     vpcm_cp_frame_t cp_offer;
     vpcm_cp_frame_t cp_ack;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
     uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
     uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
     uint8_t scr_buf[18];
@@ -2862,7 +2872,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     vpcm_v91_loopback_run_t loopback_run;
     vpcm_call_pair_v91_data_report_t data_report;
 
-    v91_default_dil_init(&default_dil);
+    if (robbed_bit)
+        vpcm_init_robbed_bit_dil_profile(&default_dil);
+    else
+        v91_default_dil_init(&default_dil);
     v91_init(&caller, law, V91_MODE_TRANSPARENT);
     v91_init(&answerer, law, V91_MODE_TRANSPARENT);
     cp_offer = *cp_offer_template;
@@ -2927,6 +2940,24 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         return false;
     }
     vpcm_log_call_pair_mode(&call_pair);
+    if (caller_v8_parms && answer_v8_parms) {
+        vpcm_call_pair_set_v91_state(&call_pair, VPCM_V91_MODEM_V8);
+        vpcm_log_call_pair_v91_state(&call_pair);
+        if (!run_v8_exchange(law,
+                             caller_v8_parms,
+                             answer_v8_parms,
+                             &caller_result,
+                             &answer_result,
+                             &call_pair)) {
+            vpcm_call_pair_detach_taps(&call_pair);
+            free(caller_tx_storage);
+            free(caller_rx_storage);
+            free(answerer_tx_storage);
+            free(answerer_rx_storage);
+            fprintf(stderr, "%s V.8 call bring-up failed\n", family_label);
+            return false;
+        }
+    }
     vpcm_call_pair_set_v91_state(&call_pair, VPCM_V91_MODEM_PHASE1);
     vpcm_log_call_pair_v91_state(&call_pair);
 
@@ -4261,11 +4292,25 @@ static bool vpcm_v8_result_has_v91(const v8_parms_t *result)
         && (result->jm_cm.pstn_access & V8_PSTN_ACCESS_DCE_ON_DIGITAL) != 0;
 }
 
+static void vpcm_encode_linear_chunk_to_g711(v91_law_t law,
+                                             const int16_t *src,
+                                             uint8_t *dst,
+                                             int samples)
+{
+    int i;
+
+    if (!src || !dst || samples <= 0)
+        return;
+    for (i = 0; i < samples; ++i)
+        dst[i] = v91_linear_to_codeword(law, src[i]);
+}
+
 static bool run_v8_exchange(v91_law_t law,
                             const v8_parms_t *caller_parms,
                             const v8_parms_t *answer_parms,
                             vpcm_v8_result_t *caller_result,
-                            vpcm_v8_result_t *answer_result)
+                            vpcm_v8_result_t *answer_result,
+                            vpcm_call_pair_t *call_pair)
 {
     vpcm_channel_t analog_channel;
     v8_state_t *caller;
@@ -4296,9 +4341,24 @@ static bool run_v8_exchange(v91_law_t law,
         int16_t answer_tx[VPCM_CHUNK_SAMPLES];
         int16_t caller_rx[VPCM_CHUNK_SAMPLES];
         int16_t answer_rx[VPCM_CHUNK_SAMPLES];
+        uint8_t caller_tx_g711[VPCM_CHUNK_SAMPLES];
+        uint8_t answer_tx_g711[VPCM_CHUNK_SAMPLES];
 
         v8_tx(caller, caller_tx, VPCM_CHUNK_SAMPLES);
         v8_tx(answer, answer_tx, VPCM_CHUNK_SAMPLES);
+        if (call_pair) {
+            vpcm_encode_linear_chunk_to_g711(law, caller_tx, caller_tx_g711, VPCM_CHUNK_SAMPLES);
+            vpcm_encode_linear_chunk_to_g711(law, answer_tx, answer_tx_g711, VPCM_CHUNK_SAMPLES);
+            if (!vpcm_call_pair_record_g711_exchange(call_pair,
+                                                     caller_tx_g711,
+                                                     answer_tx_g711,
+                                                     (size_t) VPCM_CHUNK_SAMPLES)) {
+                v8_free(caller);
+                v8_free(answer);
+                fprintf(stderr, "failed to record V.8 exchange onto call streams\n");
+                return false;
+            }
+        }
         vpcm_transport_linear(analog_channel, answer_rx, caller_tx, VPCM_CHUNK_SAMPLES);
         vpcm_transport_linear(analog_channel, caller_rx, answer_tx, VPCM_CHUNK_SAMPLES);
         v8_rx(caller, caller_rx, VPCM_CHUNK_SAMPLES);
@@ -4349,7 +4409,7 @@ static bool test_v8_v90_startup_over_analog_g711(v91_law_t law)
     init_v8_parms(&caller_parms, true, expected_mods, expected_pcm);
     init_v8_parms(&answer_parms, false, expected_mods, expected_pcm);
 
-    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result, NULL))
         return false;
 
     if (caller_result.result.jm_cm.call_function != V8_CALL_V_SERIES
@@ -4618,7 +4678,7 @@ static bool test_v8_v91_advertisement_over_analog_g711(v91_law_t law)
     init_v8_parms(&caller_parms, true, expected_mods, expected_pcm);
     init_v8_parms(&answer_parms, false, expected_mods, expected_pcm);
 
-    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result, NULL))
         return false;
 
     if ((caller_result.result.jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V91) == 0
@@ -4658,7 +4718,7 @@ static bool __attribute__((unused)) test_v8_v92_qc_exchange_over_analog_g711(v91
     caller_parms.v92 = caller_v92;
     answer_parms.v92 = answer_v92;
 
-    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result, NULL))
         return false;
 
     if ((caller_result.result.jm_cm.modulations & expected_mods) != expected_mods
@@ -4760,7 +4820,7 @@ static bool test_v90_v92_startup_contract_path(v91_law_t law)
     vpcm_log_session_sequence_header("Digital", "Analogue");
     vpcm_log_session_sequence_row("V.8 TX", "waiting for V.8", "waiting for V.8", "V.8 RX/TX");
 
-    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result, NULL))
         return false;
     if ((caller_result.result.jm_cm.modulations & V8_MOD_V90) == 0
         || (answer_result.result.jm_cm.modulations & V8_MOD_V90) == 0) {
@@ -6369,8 +6429,6 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
 {
     v8_parms_t caller_parms;
     v8_parms_t answer_parms;
-    vpcm_v8_result_t caller_result;
-    vpcm_v8_result_t answer_result;
     vpcm_cp_frame_t cp_offer;
 
     if (g_vpcm_transport_backend == VPCM_TRANSPORT_PJ_SIP) {
@@ -6379,13 +6437,13 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
 
     init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
     init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
-    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result))
-        return false;
 
     vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, vpcm_cp_recommended_robbed_bit_drn(), false);
     return run_vpcm_full_phase_session(law,
                                        "V.91 single-call E2E",
                                        "robbed-bit-safe profile",
+                                       &caller_parms,
+                                       &answer_parms,
                                        &cp_offer,
                                        true,
                                        seed,

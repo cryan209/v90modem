@@ -58,6 +58,10 @@ bool vpcm_call_pair_init(vpcm_call_pair_t *pair,
                          const char *label);
 bool vpcm_call_pair_attach_taps(vpcm_call_pair_t *pair, const char *dir);
 void vpcm_call_pair_detach_taps(vpcm_call_pair_t *pair);
+bool vpcm_call_pair_record_g711_exchange(vpcm_call_pair_t *pair,
+                                         const uint8_t *caller_tx_codewords,
+                                         const uint8_t *answerer_tx_codewords,
+                                         size_t codeword_len);
 bool vpcm_call_pair_drive_to_run(vpcm_call_pair_t *pair,
                                  vpcm_call_run_mode_t run_mode);
 bool vpcm_call_pair_drive_to_done(vpcm_call_pair_t *pair);
