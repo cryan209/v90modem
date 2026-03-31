@@ -56,6 +56,12 @@ void vpcm_call_reset(vpcm_call_t *call);
 bool vpcm_call_advance_tick(vpcm_call_t *call);
 bool vpcm_call_step(vpcm_call_t *call);
 bool vpcm_call_step_to_next_state(vpcm_call_t *call);
+bool vpcm_call_step_until(vpcm_call_t *call, vpcm_call_state_t target_state);
+bool vpcm_call_step_to_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode);
+bool vpcm_call_attach_stream_taps(vpcm_call_t *call,
+                                  const char *tx_path,
+                                  const char *rx_path);
+void vpcm_call_detach_stream_taps(vpcm_call_t *call);
 
 void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state);
 void vpcm_call_set_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode);

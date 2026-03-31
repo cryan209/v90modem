@@ -43,6 +43,23 @@ void vpcm_g711_stream_reset(vpcm_g711_stream_t *stream)
     stream->frame_counter = 0;
 }
 
+bool vpcm_g711_stream_attach_tap(vpcm_g711_stream_t *stream, const char *path)
+{
+    if (!stream || !path || !*path)
+        return false;
+    vpcm_g711_stream_detach_tap(stream);
+    stream->tap_file = fopen(path, "wb");
+    return stream->tap_file != NULL;
+}
+
+void vpcm_g711_stream_detach_tap(vpcm_g711_stream_t *stream)
+{
+    if (!stream || !stream->tap_file)
+        return;
+    fclose(stream->tap_file);
+    stream->tap_file = NULL;
+}
+
 size_t vpcm_g711_stream_frame_bytes(const vpcm_g711_stream_t *stream)
 {
     if (!stream)
@@ -87,6 +104,8 @@ size_t vpcm_g711_stream_write(vpcm_g711_stream_t *stream,
     memcpy(stream->buf + stream->len, src, len);
     stream->len += len;
     stream->total_octets_in += len;
+    if (stream->tap_file)
+        (void) fwrite(src, 1, len, stream->tap_file);
     return len;
 }
 

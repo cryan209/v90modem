@@ -20,6 +20,19 @@ static void vpcm_v91_transport_codewords(bool robbed_bit,
         dst[i] &= 0xFE;
 }
 
+static bool vpcm_v91_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
+{
+    if (!a || !b)
+        return false;
+    return a->transparent_mode_granted == b->transparent_mode_granted
+        && a->v90_compatibility == b->v90_compatibility
+        && a->drn == b->drn
+        && a->acknowledge == b->acknowledge
+        && a->constellation_count == b->constellation_count
+        && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
+        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
+}
+
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law)
 {
     if (!session)
@@ -186,6 +199,213 @@ bool vpcm_v91_session_run_dil(vpcm_v91_session_t *session,
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, startup_buf, len);
     (void) transport_cap;
     return true;
+}
+
+bool vpcm_v91_session_run_scr(vpcm_v91_session_t *session,
+                              v91_state_t *caller,
+                              v91_state_t *answerer,
+                              uint8_t *scr_buf,
+                              int scr_cap,
+                              uint8_t *transport_buf,
+                              int transport_cap,
+                              bool robbed_bit)
+{
+    if (!session || !caller || !answerer || !scr_buf || !transport_buf)
+        return false;
+    vpcm_v91_session_enter_scr(session);
+    if (v91_tx_scr_codewords(caller, scr_buf, scr_cap, 18) != 18)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(answerer, transport_buf, 18, false))
+        return false;
+
+    if (v91_tx_scr_codewords(answerer, scr_buf, scr_cap, 18) != 18)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, scr_buf, 18);
+    if (!v91_rx_scr_codewords(caller, transport_buf, 18, false))
+        return false;
+    (void) transport_cap;
+    return true;
+}
+
+bool vpcm_v91_session_run_cp(vpcm_v91_session_t *session,
+                             v91_state_t *caller,
+                             v91_state_t *answerer,
+                             const vpcm_v91_startup_cfg_t *cfg,
+                             vpcm_cp_frame_t *cp_rx,
+                             uint8_t *cp_buf,
+                             int cp_cap,
+                             uint8_t *transport_buf,
+                             int transport_cap,
+                             bool robbed_bit)
+{
+    int cp_len;
+
+    if (!session || !caller || !answerer || !cfg || !cp_rx || !cp_buf || !transport_buf)
+        return false;
+    vpcm_v91_session_enter_cp(session);
+    cp_len = v91_tx_cp_codewords(caller, cp_buf, cp_cap, &cfg->cp_offer, true);
+    if (cp_len <= 0)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(answerer, transport_buf, cp_len, cp_rx, true)
+        || !vpcm_v91_cp_frames_equal(&cfg->cp_offer, cp_rx))
+        return false;
+
+    cp_len = v91_tx_cp_codewords(answerer, cp_buf, cp_cap, &cfg->cp_ack, true);
+    if (cp_len <= 0)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
+    if (!v91_rx_cp_codewords(caller, transport_buf, cp_len, cp_rx, true)
+        || !vpcm_v91_cp_frames_equal(&cfg->cp_ack, cp_rx))
+        return false;
+    (void) transport_cap;
+    return true;
+}
+
+bool vpcm_v91_session_run_b1(vpcm_v91_session_t *session,
+                             v91_state_t *caller,
+                             v91_state_t *answerer,
+                             const vpcm_cp_frame_t *cp_ack,
+                             uint8_t *es_buf,
+                             int es_cap,
+                             uint8_t *b1_buf,
+                             int b1_cap,
+                             uint8_t *transport_buf,
+                             int transport_cap,
+                             bool robbed_bit)
+{
+    if (!session || !caller || !answerer || !cp_ack || !es_buf || !b1_buf || !transport_buf)
+        return false;
+    vpcm_v91_session_enter_b1(session);
+    if (v91_tx_es_codewords(caller, es_buf, es_cap) != V91_ES_SYMBOLS)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(answerer, transport_buf, V91_ES_SYMBOLS, true))
+        return false;
+
+    if (v91_tx_b1_codewords(caller, b1_buf, b1_cap, cp_ack) != V91_B1_SYMBOLS)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(answerer, transport_buf, V91_B1_SYMBOLS, cp_ack))
+        return false;
+
+    if (v91_tx_es_codewords(answerer, es_buf, es_cap) != V91_ES_SYMBOLS)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, es_buf, V91_ES_SYMBOLS);
+    if (!v91_rx_es_codewords(caller, transport_buf, V91_ES_SYMBOLS, true))
+        return false;
+
+    if (v91_tx_b1_codewords(answerer, b1_buf, b1_cap, cp_ack) != V91_B1_SYMBOLS)
+        return false;
+    vpcm_v91_transport_codewords(robbed_bit, transport_buf, b1_buf, V91_B1_SYMBOLS);
+    if (!v91_rx_b1_codewords(caller, transport_buf, V91_B1_SYMBOLS, cp_ack))
+        return false;
+    (void) transport_cap;
+    return true;
+}
+
+bool vpcm_v91_session_activate_data(vpcm_v91_session_t *session,
+                                    v91_state_t *caller,
+                                    v91_state_t *answerer,
+                                    const vpcm_cp_frame_t *cp_ack,
+                                    v91_state_t *caller_tx,
+                                    v91_state_t *caller_rx,
+                                    v91_state_t *answerer_tx,
+                                    v91_state_t *answerer_rx)
+{
+    if (!session || !caller || !answerer || !cp_ack
+        || !caller_tx || !caller_rx || !answerer_tx || !answerer_rx)
+        return false;
+    if (!v91_activate_data_mode(caller, cp_ack) || !v91_activate_data_mode(answerer, cp_ack))
+        return false;
+    *caller_tx = *caller;
+    *caller_rx = *caller;
+    *answerer_tx = *answerer;
+    *answerer_rx = *answerer;
+    vpcm_v91_session_enter_data(session);
+    return true;
+}
+
+bool vpcm_v91_session_describe_chunk(const vpcm_cp_frame_t *cp_ack,
+                                     int total_codewords,
+                                     int codewords_per_report,
+                                     int codeword_offset,
+                                     int *chunk_codewords,
+                                     int *chunk_bytes,
+                                     int *byte_offset,
+                                     int *frame_index)
+{
+    int chunk_frames;
+
+    if (!cp_ack || !chunk_codewords || !chunk_bytes || !byte_offset || !frame_index)
+        return false;
+    *chunk_codewords = total_codewords - codeword_offset;
+    if (*chunk_codewords > codewords_per_report)
+        *chunk_codewords = codewords_per_report;
+    if (*chunk_codewords <= 0)
+        return false;
+    chunk_frames = *chunk_codewords / VPCM_CP_FRAME_INTERVALS;
+    *chunk_bytes = (chunk_frames * ((int) cp_ack->drn + 20)) / 8;
+    *byte_offset = (codeword_offset / VPCM_CP_FRAME_INTERVALS) * ((int) cp_ack->drn + 20) / 8;
+    *frame_index = codeword_offset / VPCM_CP_FRAME_INTERVALS;
+    return true;
+}
+
+bool vpcm_v91_session_codec_duplex_chunk(vpcm_v91_session_t *session,
+                                         v91_state_t *caller_tx,
+                                         v91_state_t *caller_rx,
+                                         v91_state_t *answerer_tx,
+                                         v91_state_t *answerer_rx,
+                                         const uint8_t *caller_data_in,
+                                         const uint8_t *answerer_data_in,
+                                         uint8_t *caller_data_out,
+                                         uint8_t *answerer_data_out,
+                                         uint8_t *caller_pcm_tx,
+                                         uint8_t *caller_pcm_rx,
+                                         uint8_t *answerer_pcm_tx,
+                                         uint8_t *answerer_pcm_rx,
+                                         int codeword_offset,
+                                         int chunk_codewords,
+                                         int byte_offset,
+                                         int chunk_bytes,
+                                         int *caller_produced,
+                                         int *answerer_produced,
+                                         int *caller_consumed,
+                                         int *answerer_consumed)
+{
+    if (!session || !caller_tx || !caller_rx || !answerer_tx || !answerer_rx
+        || !caller_data_in || !answerer_data_in || !caller_data_out || !answerer_data_out
+        || !caller_pcm_tx || !caller_pcm_rx || !answerer_pcm_tx || !answerer_pcm_rx
+        || !caller_produced || !answerer_produced || !caller_consumed || !answerer_consumed)
+        return false;
+    if (!session->data_mode_active)
+        return false;
+
+    *caller_produced = v91_tx_codewords(caller_tx,
+                                        caller_pcm_tx + codeword_offset,
+                                        chunk_codewords,
+                                        caller_data_in + byte_offset,
+                                        chunk_bytes);
+    *answerer_produced = v91_tx_codewords(answerer_tx,
+                                          answerer_pcm_tx + codeword_offset,
+                                          chunk_codewords,
+                                          answerer_data_in + byte_offset,
+                                          chunk_bytes);
+    if (*caller_produced != chunk_codewords || *answerer_produced != chunk_codewords)
+        return false;
+
+    *answerer_consumed = v91_rx_codewords(answerer_rx,
+                                          answerer_data_out + byte_offset,
+                                          chunk_bytes,
+                                          answerer_pcm_rx + codeword_offset,
+                                          chunk_codewords);
+    *caller_consumed = v91_rx_codewords(caller_rx,
+                                        caller_data_out + byte_offset,
+                                        chunk_bytes,
+                                        caller_pcm_rx + codeword_offset,
+                                        chunk_codewords);
+    return *answerer_consumed == chunk_bytes && *caller_consumed == chunk_bytes;
 }
 
 const char *vpcm_v91_modem_state_to_str(vpcm_v91_modem_state_t state)

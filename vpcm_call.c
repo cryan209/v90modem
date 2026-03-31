@@ -107,6 +107,29 @@ bool vpcm_call_advance_tick(vpcm_call_t *call)
     return true;
 }
 
+bool vpcm_call_attach_stream_taps(vpcm_call_t *call,
+                                  const char *tx_path,
+                                  const char *rx_path)
+{
+    if (!call)
+        return false;
+    if (tx_path && *tx_path && !vpcm_g711_stream_attach_tap(&call->tx_stream, tx_path))
+        return false;
+    if (rx_path && *rx_path && !vpcm_g711_stream_attach_tap(&call->rx_stream, rx_path)) {
+        vpcm_g711_stream_detach_tap(&call->tx_stream);
+        return false;
+    }
+    return true;
+}
+
+void vpcm_call_detach_stream_taps(vpcm_call_t *call)
+{
+    if (!call)
+        return;
+    vpcm_g711_stream_detach_tap(&call->tx_stream);
+    vpcm_g711_stream_detach_tap(&call->rx_stream);
+}
+
 void vpcm_call_set_state(vpcm_call_t *call, vpcm_call_state_t state)
 {
     if (!call)
@@ -229,6 +252,31 @@ bool vpcm_call_step_to_next_state(vpcm_call_t *call)
     }
 
     return vpcm_call_step(call);
+}
+
+bool vpcm_call_step_until(vpcm_call_t *call, vpcm_call_state_t target_state)
+{
+    if (!call)
+        return false;
+    if (call->state == target_state)
+        return true;
+    if ((int) target_state < (int) call->state)
+        return false;
+    while (call->state != target_state) {
+        if (!vpcm_call_step_to_next_state(call))
+            return false;
+    }
+    return true;
+}
+
+bool vpcm_call_step_to_run_mode(vpcm_call_t *call, vpcm_call_run_mode_t run_mode)
+{
+    if (!call)
+        return false;
+    if (!vpcm_call_step_until(call, VPCM_CALL_RUN))
+        return false;
+    vpcm_call_set_run_mode(call, run_mode);
+    return true;
 }
 
 size_t vpcm_call_frame_bytes(const vpcm_call_t *call)

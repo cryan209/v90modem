@@ -44,6 +44,7 @@ belong under the modem/session layer, not in the top-level call lifecycle.
 - full-duplex achieved by using separate TX and RX stream instances
 - internal frame cadence based on sample count
 - suitable for raw codeword carriage, not just voice-like audio
+- optional raw `.g711` tap output at the stream boundary
 
 Preferred internal cadence is 8 ms / 64 octets per frame. Larger transport
 packetizations can be formed by aggregating frames.
@@ -59,6 +60,9 @@ packetizations can be formed by aggregating frames.
 
 ### 4. Link / transport layers
 
+- `vpcm_call_pair.[ch]`
+  - in-process duplex phone-line helper for two call objects
+  - owns loopback call lifecycle progression and optional four-stream capture
 - loopback link
 - file taps for all four directions
 - network transports such as UDP/TCP/PJ-SIP
@@ -95,8 +99,17 @@ The first extraction step is in place:
 
 - `vpcm_g711_stream.[ch]`
 - `vpcm_call.[ch]`
+- `vpcm_call_pair.[ch]`
 - `vpcm_link.[ch]`
 - `vpcm_v91_session.[ch]`
 
 These modules are intentionally small and transport-agnostic so the next steps
 can move harness logic onto them without changing modem behavior all at once.
+
+The loopback harness can opt into raw capture by setting `VPCM_G711_TAP_DIR`,
+which writes four stream taps:
+
+- caller TX
+- caller RX
+- answerer TX
+- answerer RX

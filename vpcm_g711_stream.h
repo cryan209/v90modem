@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 #define VPCM_G711_STREAM_DEFAULT_SAMPLE_RATE 8000
@@ -22,6 +23,7 @@ typedef struct {
     uint8_t *buf;
     size_t capacity;
     size_t len;
+    FILE *tap_file;
     uint64_t total_octets_in;
     uint64_t total_octets_out;
     uint64_t frame_counter;
@@ -33,6 +35,8 @@ bool vpcm_g711_stream_init(vpcm_g711_stream_t *stream,
                            uint8_t *storage,
                            size_t storage_len);
 void vpcm_g711_stream_reset(vpcm_g711_stream_t *stream);
+bool vpcm_g711_stream_attach_tap(vpcm_g711_stream_t *stream, const char *path);
+void vpcm_g711_stream_detach_tap(vpcm_g711_stream_t *stream);
 
 size_t vpcm_g711_stream_frame_bytes(const vpcm_g711_stream_t *stream);
 double vpcm_g711_stream_frame_seconds(const vpcm_g711_stream_t *stream);
