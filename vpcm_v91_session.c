@@ -305,6 +305,129 @@ bool vpcm_v91_session_run_b1(vpcm_v91_session_t *session,
     return true;
 }
 
+bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
+                                  v91_state_t *caller,
+                                  v91_state_t *answerer,
+                                  const v91_dil_desc_t *default_dil,
+                                  const vpcm_cp_frame_t *cp_offer_template,
+                                  bool robbed_bit,
+                                  uint8_t *startup_buf,
+                                  int startup_cap,
+                                  uint8_t *transport_buf,
+                                  int transport_cap,
+                                  uint8_t *scr_buf,
+                                  int scr_cap,
+                                  uint8_t *cp_buf,
+                                  int cp_cap,
+                                  uint8_t *es_buf,
+                                  int es_cap,
+                                  uint8_t *b1_buf,
+                                  int b1_cap,
+                                  vpcm_v91_startup_report_t *report,
+                                  v91_state_t *caller_tx,
+                                  v91_state_t *caller_rx,
+                                  v91_state_t *answerer_tx,
+                                  v91_state_t *answerer_rx)
+{
+    vpcm_v91_startup_cfg_t startup_cfg;
+    v91_info_frame_t rx_info;
+    vpcm_cp_frame_t cp_rx;
+    vpcm_v91_startup_report_t local_report;
+
+    if (!session || !caller || !answerer || !default_dil || !cp_offer_template
+        || !startup_buf || !transport_buf || !scr_buf || !cp_buf || !es_buf || !b1_buf
+        || !caller_tx || !caller_rx || !answerer_tx || !answerer_rx) {
+        return false;
+    }
+
+    memset(&local_report, 0, sizeof(local_report));
+    vpcm_v91_startup_cfg_init(&startup_cfg, session->law, cp_offer_template);
+    local_report.caller_info = startup_cfg.caller_info;
+    local_report.answerer_info = startup_cfg.answerer_info;
+
+    if (!vpcm_v91_session_run_phase1(session,
+                                     caller,
+                                     answerer,
+                                     startup_buf,
+                                     startup_cap,
+                                     transport_buf,
+                                     transport_cap)) {
+        return false;
+    }
+    if (!vpcm_v91_session_run_info(session,
+                                   caller,
+                                   answerer,
+                                   &startup_cfg,
+                                   &rx_info,
+                                   transport_buf,
+                                   transport_cap,
+                                   robbed_bit)) {
+        return false;
+    }
+    if (!vpcm_v91_session_run_dil(session,
+                                  caller,
+                                  answerer,
+                                  default_dil,
+                                  startup_buf,
+                                  startup_cap,
+                                  transport_buf,
+                                  transport_cap,
+                                  &local_report.caller_startup_len,
+                                  &local_report.answerer_startup_len,
+                                  robbed_bit)) {
+        return false;
+    }
+    if (!vpcm_v91_session_run_scr(session,
+                                  caller,
+                                  answerer,
+                                  scr_buf,
+                                  scr_cap,
+                                  transport_buf,
+                                  transport_cap,
+                                  robbed_bit)) {
+        return false;
+    }
+    if (!vpcm_v91_session_run_cp(session,
+                                 caller,
+                                 answerer,
+                                 &startup_cfg,
+                                 &cp_rx,
+                                 cp_buf,
+                                 cp_cap,
+                                 transport_buf,
+                                 transport_cap,
+                                 robbed_bit)) {
+        return false;
+    }
+    local_report.cp_ack = startup_cfg.cp_ack;
+    if (!vpcm_v91_session_run_b1(session,
+                                 caller,
+                                 answerer,
+                                 &local_report.cp_ack,
+                                 es_buf,
+                                 es_cap,
+                                 b1_buf,
+                                 b1_cap,
+                                 transport_buf,
+                                 transport_cap,
+                                 robbed_bit)) {
+        return false;
+    }
+    if (!vpcm_v91_session_activate_data(session,
+                                        caller,
+                                        answerer,
+                                        &local_report.cp_ack,
+                                        caller_tx,
+                                        caller_rx,
+                                        answerer_tx,
+                                        answerer_rx)) {
+        return false;
+    }
+    if (report)
+        *report = local_report;
+    return true;
+}
+
 bool vpcm_v91_session_activate_data(vpcm_v91_session_t *session,
                                     v91_state_t *caller,
                                     v91_state_t *answerer,

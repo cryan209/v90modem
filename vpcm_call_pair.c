@@ -28,6 +28,65 @@ static void vpcm_call_pair_make_tap_name(char *dst, size_t dst_cap, const char *
     dst[out] = '\0';
 }
 
+static size_t vpcm_call_pair_transfer_codewords(vpcm_call_t *src_call,
+                                                vpcm_call_t *dst_call,
+                                                const uint8_t *tx_codewords,
+                                                int codeword_len,
+                                                bool robbed_bit,
+                                                uint8_t *rx_codewords,
+                                                size_t scratch_cap)
+{
+    size_t written;
+    size_t moved;
+    size_t read_len;
+    size_t i;
+
+    if (!src_call || !dst_call || !tx_codewords || !rx_codewords || codeword_len <= 0)
+        return 0;
+    (void) scratch_cap;
+
+    written = vpcm_g711_stream_write(&src_call->tx_stream, tx_codewords, (size_t) codeword_len);
+    if (written != (size_t) codeword_len)
+        return 0;
+
+    moved = vpcm_g711_stream_read(&src_call->tx_stream, rx_codewords, (size_t) codeword_len);
+    if (moved != (size_t) codeword_len)
+        return 0;
+    if (robbed_bit) {
+        for (i = 5; i < moved; i += 6)
+            rx_codewords[i] &= 0xFE;
+    }
+
+    moved = vpcm_g711_stream_write(&dst_call->rx_stream, rx_codewords, moved);
+    if (moved != (size_t) codeword_len)
+        return 0;
+
+    read_len = vpcm_g711_stream_read(&dst_call->rx_stream, rx_codewords, (size_t) codeword_len);
+    if (read_len == (size_t) codeword_len) {
+        vpcm_call_advance_tick(src_call);
+        vpcm_call_advance_tick(dst_call);
+    }
+    return read_len;
+}
+
+static uint64_t vpcm_call_pair_count_bit_errors(const uint8_t *a, const uint8_t *b, int len)
+{
+    uint64_t errors = 0;
+    int i;
+
+    if (!a || !b || len <= 0)
+        return 0;
+    for (i = 0; i < len; ++i) {
+        unsigned int diff = (unsigned int) (a[i] ^ b[i]);
+
+        while (diff != 0) {
+            errors += (uint64_t) (diff & 1U);
+            diff >>= 1;
+        }
+    }
+    return errors;
+}
+
 bool vpcm_call_pair_init(vpcm_call_pair_t *pair,
                          vpcm_call_t *caller,
                          vpcm_call_t *answerer,
@@ -129,4 +188,154 @@ void vpcm_call_pair_set_v91_state(vpcm_call_pair_t *pair,
         return;
     vpcm_call_set_v91_state(pair->caller, state);
     vpcm_call_set_v91_state(pair->answerer, state);
+}
+
+bool vpcm_call_pair_run_v91_data(vpcm_call_pair_t *pair,
+                                 vpcm_v91_session_t *session,
+                                 v91_state_t *caller_tx,
+                                 v91_state_t *caller_rx,
+                                 v91_state_t *answerer_tx,
+                                 v91_state_t *answerer_rx,
+                                 const vpcm_cp_frame_t *cp_ack,
+                                 uint8_t *caller_data_in,
+                                 uint8_t *caller_data_out,
+                                 uint8_t *answerer_data_in,
+                                 uint8_t *answerer_data_out,
+                                 uint8_t *caller_pcm_tx,
+                                 uint8_t *caller_pcm_rx,
+                                 uint8_t *answerer_pcm_tx,
+                                 uint8_t *answerer_pcm_rx,
+                                 int total_codewords,
+                                 int codewords_per_report,
+                                 bool robbed_bit,
+                                 vpcm_call_pair_v91_chunk_logger_fn chunk_logger,
+                                 void *chunk_logger_user_data,
+                                 vpcm_call_pair_v91_data_report_t *report)
+{
+    vpcm_call_pair_v91_data_report_t local_report;
+    int codeword_offset;
+
+    if (!pair || !pair->caller || !pair->answerer || !session
+        || !caller_tx || !caller_rx || !answerer_tx || !answerer_rx || !cp_ack
+        || !caller_data_in || !caller_data_out || !answerer_data_in || !answerer_data_out
+        || !caller_pcm_tx || !caller_pcm_rx || !answerer_pcm_tx || !answerer_pcm_rx) {
+        return false;
+    }
+
+    memset(&local_report, 0, sizeof(local_report));
+    for (codeword_offset = 0; codeword_offset < total_codewords; codeword_offset += codewords_per_report) {
+        vpcm_call_pair_v91_chunk_t chunk;
+        int chunk_codewords;
+        int chunk_bytes;
+        int byte_offset;
+        int frame_index;
+        int caller_produced;
+        int answerer_produced;
+        int caller_consumed;
+        int answerer_consumed;
+
+        memset(&chunk, 0, sizeof(chunk));
+        if (!vpcm_v91_session_describe_chunk(cp_ack,
+                                             total_codewords,
+                                             codewords_per_report,
+                                             codeword_offset,
+                                             &chunk_codewords,
+                                             &chunk_bytes,
+                                             &byte_offset,
+                                             &frame_index)) {
+            return false;
+        }
+
+        if (vpcm_call_pair_transfer_codewords(pair->caller,
+                                              pair->answerer,
+                                              caller_pcm_tx + codeword_offset,
+                                              chunk_codewords,
+                                              robbed_bit,
+                                              answerer_pcm_rx + codeword_offset,
+                                              pair->caller->tx_stream.capacity) != (size_t) chunk_codewords
+            || vpcm_call_pair_transfer_codewords(pair->answerer,
+                                                 pair->caller,
+                                                 answerer_pcm_tx + codeword_offset,
+                                                 chunk_codewords,
+                                                 robbed_bit,
+                                                 caller_pcm_rx + codeword_offset,
+                                                 pair->answerer->tx_stream.capacity) != (size_t) chunk_codewords) {
+            return false;
+        }
+
+        if (!vpcm_v91_session_codec_duplex_chunk(session,
+                                                 caller_tx,
+                                                 caller_rx,
+                                                 answerer_tx,
+                                                 answerer_rx,
+                                                 caller_data_in,
+                                                 answerer_data_in,
+                                                 caller_data_out,
+                                                 answerer_data_out,
+                                                 caller_pcm_tx,
+                                                 caller_pcm_rx,
+                                                 answerer_pcm_tx,
+                                                 answerer_pcm_rx,
+                                                 codeword_offset,
+                                                 chunk_codewords,
+                                                 byte_offset,
+                                                 chunk_bytes,
+                                                 &caller_produced,
+                                                 &answerer_produced,
+                                                 &caller_consumed,
+                                                 &answerer_consumed)) {
+            return false;
+        }
+
+        chunk.frame_index = frame_index;
+        chunk.codeword_offset = codeword_offset;
+        chunk.chunk_codewords = chunk_codewords;
+        chunk.chunk_bytes = chunk_bytes;
+        chunk.byte_offset = byte_offset;
+        chunk.caller_data_in = caller_data_in + byte_offset;
+        chunk.answerer_data_in = answerer_data_in + byte_offset;
+        chunk.caller_data_out = caller_data_out + byte_offset;
+        chunk.answerer_data_out = answerer_data_out + byte_offset;
+        chunk.caller_pcm_tx = caller_pcm_tx + codeword_offset;
+        chunk.caller_pcm_rx = caller_pcm_rx + codeword_offset;
+        chunk.answerer_pcm_tx = answerer_pcm_tx + codeword_offset;
+        chunk.answerer_pcm_rx = answerer_pcm_rx + codeword_offset;
+        chunk.caller_to_answerer_ok = (memcmp(chunk.caller_data_in,
+                                              chunk.answerer_data_out,
+                                              (size_t) chunk_bytes) == 0);
+        chunk.answerer_to_caller_ok = (memcmp(chunk.answerer_data_in,
+                                              chunk.caller_data_out,
+                                              (size_t) chunk_bytes) == 0);
+
+        local_report.c2a_chunks_checked++;
+        local_report.a2c_chunks_checked++;
+        local_report.c2a_bits_checked += ((uint64_t) chunk_bytes * 8ULL);
+        local_report.a2c_bits_checked += ((uint64_t) chunk_bytes * 8ULL);
+        local_report.c2a_bit_errors += vpcm_call_pair_count_bit_errors(chunk.caller_data_in,
+                                                                       chunk.answerer_data_out,
+                                                                       chunk_bytes);
+        local_report.a2c_bit_errors += vpcm_call_pair_count_bit_errors(chunk.answerer_data_in,
+                                                                       chunk.caller_data_out,
+                                                                       chunk_bytes);
+        if (!chunk.caller_to_answerer_ok)
+            local_report.c2a_mismatch_chunks++;
+        if (!chunk.answerer_to_caller_ok)
+            local_report.a2c_mismatch_chunks++;
+
+        chunk.c2a_bits_checked = local_report.c2a_bits_checked;
+        chunk.a2c_bits_checked = local_report.a2c_bits_checked;
+        chunk.c2a_bit_errors = local_report.c2a_bit_errors;
+        chunk.a2c_bit_errors = local_report.a2c_bit_errors;
+        chunk.c2a_mismatch_chunks = local_report.c2a_mismatch_chunks;
+        chunk.a2c_mismatch_chunks = local_report.a2c_mismatch_chunks;
+        chunk.c2a_chunks_checked = local_report.c2a_chunks_checked;
+        chunk.a2c_chunks_checked = local_report.a2c_chunks_checked;
+
+        if (chunk_logger)
+            chunk_logger(&chunk, chunk_logger_user_data);
+    }
+
+    if (report)
+        *report = local_report;
+    return true;
 }

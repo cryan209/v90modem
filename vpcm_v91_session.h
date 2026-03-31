@@ -31,6 +31,14 @@ typedef struct {
     vpcm_cp_frame_t cp_ack;
 } vpcm_v91_startup_cfg_t;
 
+typedef struct {
+    v91_info_frame_t caller_info;
+    v91_info_frame_t answerer_info;
+    vpcm_cp_frame_t cp_ack;
+    int caller_startup_len;
+    int answerer_startup_len;
+} vpcm_v91_startup_report_t;
+
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law);
 void vpcm_v91_session_reset(vpcm_v91_session_t *session);
 void vpcm_v91_session_set_state(vpcm_v91_session_t *session, vpcm_v91_modem_state_t state);
@@ -100,6 +108,29 @@ bool vpcm_v91_session_run_b1(vpcm_v91_session_t *session,
                              uint8_t *transport_buf,
                              int transport_cap,
                              bool robbed_bit);
+bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
+                                  v91_state_t *caller,
+                                  v91_state_t *answerer,
+                                  const v91_dil_desc_t *default_dil,
+                                  const vpcm_cp_frame_t *cp_offer_template,
+                                  bool robbed_bit,
+                                  uint8_t *startup_buf,
+                                  int startup_cap,
+                                  uint8_t *transport_buf,
+                                  int transport_cap,
+                                  uint8_t *scr_buf,
+                                  int scr_cap,
+                                  uint8_t *cp_buf,
+                                  int cp_cap,
+                                  uint8_t *es_buf,
+                                  int es_cap,
+                                  uint8_t *b1_buf,
+                                  int b1_cap,
+                                  vpcm_v91_startup_report_t *report,
+                                  v91_state_t *caller_tx,
+                                  v91_state_t *caller_rx,
+                                  v91_state_t *answerer_tx,
+                                  v91_state_t *answerer_rx);
 bool vpcm_v91_session_activate_data(vpcm_v91_session_t *session,
                                     v91_state_t *caller,
                                     v91_state_t *answerer,
