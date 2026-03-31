@@ -60,6 +60,13 @@ typedef enum {
  */
 v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law);
 
+/*
+ * Create a V.90 context for data/codeword processing without allocating a
+ * backing V.34 instance. Useful for loopback/session tests that only need the
+ * PCM mapping path.
+ */
+v90_state_t *v90_init_data_pump(v90_law_t law);
+
 v90_state_t *v90_init(int baud_rate,
                       int bit_rate,
                       bool calling_party,
@@ -136,6 +143,28 @@ bool v90_training_complete(v90_state_t *s);
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len);
 
 /*
+ * Encode downstream payload bytes directly into G.711 codewords.
+ * The current implementation uses the same simplified byte-per-symbol mapping
+ * as v90_tx_data(), but exposes it at the codeword level for loopback tests
+ * and session plumbing.
+ */
+int v90_tx_codewords(v90_state_t *s,
+                     uint8_t *g711_out,
+                     int g711_max,
+                     const uint8_t *data_in,
+                     int data_len);
+
+/*
+ * Decode downstream G.711 codewords produced by v90_tx_codewords() back into
+ * payload bytes.
+ */
+int v90_rx_codewords(v90_state_t *s,
+                     uint8_t *data_out,
+                     int data_max,
+                     const uint8_t *g711_in,
+                     int g711_len);
+
+/*
  * Encode downstream data into PCM codewords for the G.711 RTP stream.
  * Call this instead of v34_tx() once training completes.
  */
@@ -146,6 +175,9 @@ int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
  * Generate idle (silence) PCM samples when no data is available.
  */
 void v90_tx_idle(v90_state_t *s, int16_t amp[], int len);
+
+/* Get the idle G.711 codeword for the selected PCM law. */
+uint8_t v90_idle_codeword(v90_law_t law);
 
 /* Get the logging context for diagnostics. */
 logging_state_t *v90_get_logging_state(v90_state_t *s);

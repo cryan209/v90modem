@@ -47,9 +47,24 @@ static uint16_t vpcm_cp_crc_bits(const uint8_t *bits, int nbits)
 
 void vpcm_cp_init(vpcm_cp_frame_t *cp)
 {
+    if (!cp)
+        return;
     memset(cp, 0, sizeof(*cp));
     cp->v90_compatibility = true;
     cp->constellation_count = 1;
+}
+
+bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
+{
+    if (!a || !b)
+        return false;
+    return a->transparent_mode_granted == b->transparent_mode_granted
+        && a->v90_compatibility == b->v90_compatibility
+        && a->drn == b->drn
+        && a->acknowledge == b->acknowledge
+        && a->constellation_count == b->constellation_count
+        && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
+        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
 }
 
 bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len)
@@ -330,6 +345,13 @@ uint8_t vpcm_cp_recommended_robbed_bit_drn(void)
      * trunks are conventionally treated as 56 kbps-safe paths.
      */
     return 22;
+}
+
+void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])
+{
+    if (!mask)
+        return;
+    memset(mask, 0xFF, VPCM_CP_MASK_BYTES);
 }
 
 void vpcm_cp_enable_odd_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])

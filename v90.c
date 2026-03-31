@@ -86,6 +86,15 @@ static uint8_t v90_scramble_byte(v90_scrambler_t *sc, uint8_t in)
     return out;
 }
 
+static int v90_descramble_reg_bit(uint32_t *reg, int in_bit)
+{
+    int out_bit;
+
+    out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
+    *reg = (*reg << 1) | (uint32_t) in_bit;
+    return out_bit;
+}
+
 struct v90_state_s {
     v34_state_t     *v34;
     v90_law_t        law;
@@ -115,6 +124,8 @@ struct v90_state_s {
 
     /* Downstream PCM encoder state (data mode) */
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
+    uint32_t         rx_scramble_reg;
+    int              rx_prev_sign;
 
     bool             owns_v34;      /* true if we allocated v34 (v90_init), false if external */
 };
@@ -147,6 +158,77 @@ static inline int16_t v90_pcm_signed(v90_law_t law, int ucode, int sign)
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
     pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
     return v90_pcm_to_linear(law, pcm);
+}
+
+static int v90_codeword_to_ucode(v90_law_t law, uint8_t codeword)
+{
+    int ucode;
+
+    if (law == V90_LAW_ULAW)
+        return (0xFF - codeword) & 0x7F;
+
+    for (ucode = 0; ucode < 128; ucode++) {
+        if (v90_ucode_to_alaw[ucode] == codeword
+            || (v90_ucode_to_alaw[ucode] & 0x7F) == (codeword & 0x7F)) {
+            return ucode;
+        }
+    }
+    return -1;
+}
+
+static uint8_t v90_encode_octet_to_codeword(v90_state_t *s, uint8_t in_octet)
+{
+    uint8_t sc;
+    uint8_t mag;
+    int s_bit;
+    int sign;
+    uint8_t pcm;
+
+    sc = v90_scramble_byte(&s->scrambler, in_octet);
+    mag = sc & 0x7F;
+    s_bit = (sc >> 7) & 1;
+
+    sign = s_bit ^ s->prev_sign;
+    s->prev_sign = sign;
+
+    pcm = ucode_to_pcm_positive(s->law, mag);
+    if (sign == 0)
+        pcm &= 0x7F;
+    return pcm;
+}
+
+static bool v90_decode_codeword_to_octet(v90_state_t *s, uint8_t codeword, uint8_t *out_octet)
+{
+    int sign;
+    int scrambled_sign;
+    int mag;
+    uint8_t scrambled_octet;
+    uint8_t plain_octet;
+    int bit_idx;
+
+    if (!out_octet)
+        return false;
+
+    sign = (codeword & 0x80) ? 1 : 0;
+    scrambled_sign = sign ^ s->rx_prev_sign;
+    s->rx_prev_sign = sign;
+
+    mag = v90_codeword_to_ucode(s->law, codeword);
+    if (mag < 0)
+        return false;
+
+    scrambled_octet = (uint8_t) ((mag & 0x7F) | ((scrambled_sign & 1) << 7));
+    plain_octet = 0;
+    for (bit_idx = 0; bit_idx < 8; bit_idx++) {
+        int in_bit;
+        int out_bit;
+
+        in_bit = (scrambled_octet >> bit_idx) & 1;
+        out_bit = v90_descramble_reg_bit(&s->rx_scramble_reg, in_bit);
+        plain_octet |= (uint8_t) (out_bit << bit_idx);
+    }
+    *out_octet = plain_octet;
+    return true;
 }
 
 /* ---- Jd frame construction (Table 13) ---- */
@@ -712,6 +794,8 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
     s->prev_sign = 0;
+    s->rx_scramble_reg = 0;
+    s->rx_prev_sign = 0;
     s->phase4_hold_logged = false;
     s->jd_terminate_requested = false;
     s->training_complete = false;
@@ -721,6 +805,11 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     v90_dil_reset_tx(s);
 
     return s;
+}
+
+v90_state_t *v90_init_data_pump(v90_law_t law)
+{
+    return v90_init_with_v34(NULL, law);
 }
 
 v90_state_t *v90_init(int baud_rate,
@@ -742,6 +831,8 @@ v90_state_t *v90_init(int baud_rate,
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
     s->prev_sign = 0;
+    s->rx_scramble_reg = 0;
+    s->rx_prev_sign = 0;
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_requested = false;
@@ -816,6 +907,9 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->training_complete = false;
     s->dil_terminate_requested = false;
     s->use_internal_v34_tx = false;
+    s->prev_sign = 0;
+    s->rx_scramble_reg = 0;
+    s->rx_prev_sign = 0;
     v90_dil_reset_tx(s);
 
     s->tx_phase = V90_TX_SD;
@@ -870,6 +964,11 @@ int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
     return len;
 }
 
+uint8_t v90_idle_codeword(v90_law_t law)
+{
+    return v90_pcm_idle(law);
+}
+
 /*
  * Encode one 6-symbol data frame.
  * Fills pcm_out[0..5] with G.711 codewords.
@@ -877,24 +976,46 @@ int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
 static void v90_encode_frame(v90_state_t *s, const uint8_t *data_in,
                              uint8_t *pcm_out)
 {
-    int sign = s->prev_sign;
+    for (int i = 0; i < V90_FRAME_LEN; i++)
+        pcm_out[i] = v90_encode_octet_to_codeword(s, data_in[i]);
+}
 
-    for (int i = 0; i < V90_FRAME_LEN; i++) {
-        uint8_t sc = v90_scramble_byte(&s->scrambler, data_in[i]);
-        uint8_t mag   = sc & 0x7F;
-        int     s_bit = (sc >> 7) & 1;
+int v90_tx_codewords(v90_state_t *s,
+                     uint8_t *g711_out,
+                     int g711_max,
+                     const uint8_t *data_in,
+                     int data_len)
+{
+    int i;
+    int count;
 
-        /* §5.4.5.1 differential sign coding (Sr=0) */
-        sign = s_bit ^ sign;
+    if (!s || !g711_out || !data_in || g711_max <= 0 || data_len <= 0)
+        return 0;
 
-        uint8_t mu = ucode_to_pcm_positive(s->law, mag);
-        if (sign == 0)
-            mu &= 0x7F;  /* negative polarity */
+    count = (data_len < g711_max) ? data_len : g711_max;
+    for (i = 0; i < count; i++)
+        g711_out[i] = v90_encode_octet_to_codeword(s, data_in[i]);
+    return count;
+}
 
-        pcm_out[i] = mu;
+int v90_rx_codewords(v90_state_t *s,
+                     uint8_t *data_out,
+                     int data_max,
+                     const uint8_t *g711_in,
+                     int g711_len)
+{
+    int i;
+    int count;
+
+    if (!s || !data_out || !g711_in || data_max <= 0 || g711_len <= 0)
+        return 0;
+
+    count = (g711_len < data_max) ? g711_len : data_max;
+    for (i = 0; i < count; i++) {
+        if (!v90_decode_codeword_to_octet(s, g711_in[i], &data_out[i]))
+            return i;
     }
-
-    s->prev_sign = sign;
+    return count;
 }
 
 int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
@@ -906,7 +1027,7 @@ int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
     while (pos + V90_FRAME_LEN <= len) {
         if (consumed + V90_FRAME_LEN > data_len) {
             /* Not enough data — fill with idle */
-            uint8_t idle = v90_pcm_idle(s->law);
+            uint8_t idle = v90_idle_codeword(s->law);
             for (int i = 0; i < V90_FRAME_LEN && pos < len; i++)
                 amp[pos++] = v90_pcm_to_linear(s->law, idle);
             continue;
@@ -924,7 +1045,7 @@ int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
 
 void v90_tx_idle(v90_state_t *s, int16_t amp[], int len)
 {
-    uint8_t idle = v90_pcm_idle(s->law);
+    uint8_t idle = v90_idle_codeword(s->law);
     int16_t sample = v90_pcm_to_linear(s->law, idle);
     for (int i = 0; i < len; i++)
         amp[i] = sample;

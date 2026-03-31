@@ -21,19 +21,6 @@ static void vpcm_v91_transport_codewords(bool robbed_bit,
         dst[i] &= 0xFE;
 }
 
-static bool vpcm_v91_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
-{
-    if (!a || !b)
-        return false;
-    return a->transparent_mode_granted == b->transparent_mode_granted
-        && a->v90_compatibility == b->v90_compatibility
-        && a->drn == b->drn
-        && a->acknowledge == b->acknowledge
-        && a->constellation_count == b->constellation_count
-        && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
-        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
-}
-
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law)
 {
     if (!session)
@@ -254,7 +241,7 @@ bool vpcm_v91_session_run_cp(vpcm_v91_session_t *session,
         return false;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
     if (!v91_rx_cp_codewords(answerer, transport_buf, cp_len, cp_rx, true)
-        || !vpcm_v91_cp_frames_equal(&cfg->cp_offer, cp_rx))
+        || !vpcm_cp_frames_equal(&cfg->cp_offer, cp_rx))
         return false;
 
     cp_len = v91_tx_cp_codewords(answerer, cp_buf, cp_cap, &cfg->cp_ack, true);
@@ -262,7 +249,7 @@ bool vpcm_v91_session_run_cp(vpcm_v91_session_t *session,
         return false;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, cp_buf, cp_len);
     if (!v91_rx_cp_codewords(caller, transport_buf, cp_len, cp_rx, true)
-        || !vpcm_v91_cp_frames_equal(&cfg->cp_ack, cp_rx))
+        || !vpcm_cp_frames_equal(&cfg->cp_ack, cp_rx))
         return false;
     (void) transport_cap;
     return true;

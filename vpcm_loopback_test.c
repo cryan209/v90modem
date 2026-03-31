@@ -17,6 +17,7 @@
 #include "vpcm_call.h"
 #include "vpcm_call_pair.h"
 #include "vpcm_link.h"
+#include "vpcm_v90_session.h"
 #include "vpcm_v91_loopback.h"
 
 #include <spandsp.h>
@@ -191,10 +192,15 @@ static bool vpcm_record_call_duplex_g711(vpcm_call_pair_t *call_pair,
                                          const uint8_t *caller_tx_codewords,
                                          const uint8_t *answerer_tx_codewords,
                                          int codeword_len);
-static int vpcm_frames_from_seconds(int seconds);
-static int vpcm_align_frames_for_duplex_bytes(int frames,
-                                              int downstream_bits_per_frame,
-                                              int upstream_bits_per_frame);
+static bool vpcm_v90_record_call_simplex_g711(void *user_data,
+                                              v91_law_t law,
+                                              bool digital_to_analogue,
+                                              const uint8_t *tx_codewords,
+                                              int codeword_len);
+static bool vpcm_v90_record_call_duplex_g711(void *user_data,
+                                             const uint8_t *digital_tx_codewords,
+                                             const uint8_t *analogue_tx_codewords,
+                                             int codeword_len);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
@@ -358,7 +364,6 @@ static void vpcm_log_data_sample_named(const char *h1,
                                        int remote_data_rx_len);
 static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int len);
 static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len);
-static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
@@ -1141,17 +1146,6 @@ static bool vpcm_info_frames_equal(const v91_info_frame_t *a, const v91_info_fra
         && a->tx_uses_alaw == b->tx_uses_alaw
         && a->request_transparent_mode == b->request_transparent_mode
         && a->cleardown_if_transparent_denied == b->cleardown_if_transparent_denied;
-}
-
-static bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
-{
-    return a->transparent_mode_granted == b->transparent_mode_granted
-        && a->v90_compatibility == b->v90_compatibility
-        && a->drn == b->drn
-        && a->acknowledge == b->acknowledge
-        && a->constellation_count == b->constellation_count
-        && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
-        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
 }
 
 static bool test_vpcm_cp_robbed_bit_safe_profile(void)
@@ -2074,23 +2068,6 @@ static void vpcm_log_session_sequence_footer(void)
     vpcm_log("+----------------------+----------------------+----------------------+----------------------+");
 }
 
-static void vpcm_maybe_log_startup_frame_diag(const char *label,
-                                              v91_state_t *tx_state,
-                                              const v91_info_frame_t *tx_info,
-                                              const uint8_t *rx_codewords,
-                                              int rx_len)
-{
-    vpcm_maybe_log_info_session_diag(tx_state, tx_info, rx_codewords, rx_len, label);
-}
-
-static void vpcm_maybe_log_rate_request_diag(const char *label,
-                                             const vpcm_cp_frame_t *tx_cp,
-                                             const uint8_t *bits,
-                                             int nbits)
-{
-    vpcm_maybe_log_cp_session_diag(tx_cp, bits, nbits, label);
-}
-
 static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
 {
     double bps;
@@ -2104,32 +2081,6 @@ static void vpcm_format_rate(char *buf, size_t len, uint8_t drn)
         snprintf(buf, len, "%.2f bps", bps);
 }
 
-static void vpcm_v92_init_digital_dil_from_ja(v91_dil_desc_t *desc, bool echo_limited)
-{
-    int i;
-    static const uint8_t echo_train_u[8] = {60, 61, 62, 63, 64, 65, 66, 67};
-
-    v91_default_dil_init(desc);
-    if (!echo_limited)
-        return;
-
-    /*
-     * Harness approximation of a Ja-derived echo-limited profile:
-     * keep the default family framing, but constrain the DIL so the
-     * analogue side sees shorter/narrower training and requests a safer
-     * downstream/upstream pair.
-     */
-    desc->n = 96;
-    desc->lsp = 6;
-    desc->ltp = 6;
-    for (i = 0; i < 8; i++) {
-        desc->ref[i] = 1;
-        desc->h[i] = 1;
-    }
-    for (i = 0; i < desc->n; i++)
-        desc->train_u[i] = echo_train_u[i % 8];
-}
-
 static void vpcm_init_robbed_bit_dil_profile(v91_dil_desc_t *desc)
 {
     int i;
@@ -2138,19 +2089,6 @@ static void vpcm_init_robbed_bit_dil_profile(v91_dil_desc_t *desc)
     desc->ltp = 6;
     for (i = 0; i < desc->ltp; i++)
         desc->tp[i] = 1;
-}
-
-static void vpcm_v92_select_profile_from_dil(const v91_dil_analysis_t *analysis,
-                                             uint8_t *downstream_drn,
-                                             uint8_t *upstream_drn)
-{
-    if (analysis && analysis->recommended_downstream_drn != 0 && analysis->recommended_upstream_drn != 0) {
-        *downstream_drn = analysis->recommended_downstream_drn;
-        *upstream_drn = analysis->recommended_upstream_drn;
-    } else {
-        *downstream_drn = 19;
-        *upstream_drn = 16;
-    }
 }
 
 static void vpcm_log_dil_analysis(const char *label, const v91_dil_analysis_t *analysis)
@@ -3153,460 +3091,70 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                                                  vpcm_call_pair_t *call_pair,
                                                  int data_seconds)
 {
-    enum { NOMINAL_10S_FRAMES = 13328 };
-    v91_dil_desc_t default_dil;
-    v91_dil_desc_t digital_dil;
-    v91_dil_analysis_t digital_dil_analysis;
-    v91_state_t caller_startup;
-    v91_state_t answerer_startup;
-    v91_state_t caller_tx;
-    v91_state_t caller_rx;
-    v91_state_t answerer_tx;
-    v91_state_t answerer_rx;
-    v91_info_frame_t caller_info;
-    v91_info_frame_t answerer_info;
-    v91_info_frame_t rx_info;
-    vpcm_cp_frame_t cp_down_offer;
-    vpcm_cp_frame_t cp_down_ack;
-    vpcm_cp_frame_t cp_up_offer;
-    vpcm_cp_frame_t cp_up_ack;
-    vpcm_cp_frame_t cp_rx;
-    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
-    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
-    uint8_t scr_buf[18];
-    uint8_t cp_buf[VPCM_CP_MAX_BITS];
-    uint8_t es_buf[V91_ES_SYMBOLS];
-    uint8_t b1_buf[V91_B1_SYMBOLS];
-    uint8_t *down_data_in;
-    uint8_t *down_data_out;
-    uint8_t *up_data_in;
-    uint8_t *up_data_out;
-    uint8_t *down_pcm_tx;
-    uint8_t *down_pcm_rx;
-    uint8_t *up_pcm_tx;
-    uint8_t *up_pcm_rx;
+    vpcm_v90_session_t session;
+    vpcm_v90_startup_contract_params_t params;
+    vpcm_v90_startup_contract_io_t io;
+    vpcm_v90_startup_contract_report_t report;
     char down_rate_buf[64];
     char up_rate_buf[64];
-    uint8_t downstream_drn;
-    uint8_t upstream_drn;
-    int startup_len;
-    int cp_len;
-    int total_codewords;
-    int data_frames;
-    int down_total_bits;
-    int down_total_bytes;
-    int up_total_bits;
-    int up_total_bytes;
-    int down_produced;
-    int down_consumed;
-    int up_produced;
-    int up_consumed;
-    int sample_down_data_len;
-    int sample_up_data_len;
 
-    v91_default_dil_init(&default_dil);
-    v91_init(&caller_startup, law, V91_MODE_TRANSPARENT);
-    v91_init(&answerer_startup, law, V91_MODE_TRANSPARENT);
-    v91_init(&caller_tx, law, V91_MODE_TRANSPARENT);
-    v91_init(&caller_rx, law, V91_MODE_TRANSPARENT);
-    v91_init(&answerer_tx, law, V91_MODE_TRANSPARENT);
-    v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
-    v91_default_dil_init(&default_dil);
-    vpcm_v92_init_digital_dil_from_ja(&digital_dil, echo_limited);
-    if (data_seconds <= 0)
-        data_seconds = 10;
     vpcm_log_session_sequence_header("Digital", "Analogue");
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
         vpcm_log("Phase model: Phase 2 = INFO0 -> A/B -> L1/L2 -> INFO1 (not yet natively modelled here)");
-        vpcm_log("Harness note: rows below after V.8 are a startup contract placeholder built from shared PCM helpers.");
+        vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
         vpcm_log("Harness note: DIL/adaptation shown below is later-phase approximation, not part of Phase 2.");
     }
 
-    memset(&caller_info, 0, sizeof(caller_info));
-    caller_info.request_default_dil = true;
-    caller_info.tx_uses_alaw = (law == V91_LAW_ALAW);
-    caller_info.power_measured_after_digital_impairments = true;
-    memset(&answerer_info, 0, sizeof(answerer_info));
-    answerer_info.request_default_dil = true;
-    answerer_info.tx_uses_alaw = (law == V91_LAW_ALAW);
-    answerer_info.power_measured_after_digital_impairments = true;
+    memset(&params, 0, sizeof(params));
+    params.law = law;
+    params.echo_limited = echo_limited;
+    params.seed_base = seed_base;
+    params.data_seconds = data_seconds;
 
-    if (v91_tx_phase1_silence_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
-        || v91_tx_phase1_silence_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
-        fprintf(stderr, "V.90/V.92 startup contract path phase1 silence failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_duplex_g711(call_pair,
-                                      startup_buf,
-                                      transport_buf,
-                                      V91_PHASE1_SILENCE_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path phase1 recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("Phase2 preamble TX", "waiting for INFO0", "waiting for INFO0", "Phase2 preamble TX");
-    if (v91_tx_ez_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_EZ_SYMBOLS
-        || v91_tx_ez_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
-        fprintf(stderr, "V.90/V.92 startup contract path Ez failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_duplex_g711(call_pair,
-                                      startup_buf,
-                                      transport_buf,
-                                      V91_EZ_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path Ez recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("INFO0-like TX", "waiting for INFO0", "INFO0-like RX", "INFO0-like TX");
+    memset(&io, 0, sizeof(io));
+    io.record_simplex_g711 = vpcm_v90_record_call_simplex_g711;
+    io.record_duplex_g711 = vpcm_v90_record_call_duplex_g711;
+    io.user_data = call_pair;
 
-    if (v91_tx_info_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS
-        || !v91_rx_info_codewords(&answerer_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller INFO failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, transport_buf, V91_INFO_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller INFO recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("INFO0 ack TX", "waiting for A/B", "INFO0 ack RX", "waiting for A/B");
-    vpcm_maybe_log_startup_frame_diag("Digital -> Analogue startup frame",
-                                      &caller_startup,
-                                      &caller_info,
-                                      transport_buf,
-                                      V91_INFO_SYMBOLS);
-    if (v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS
-        || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer INFO failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, transport_buf, V91_INFO_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer INFO recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("A/B seen", "A/B seen", "waiting for L1/L2", "A/B TX");
-    vpcm_maybe_log_startup_frame_diag("Analogue -> Digital startup frame",
-                                      &answerer_startup,
-                                      &answerer_info,
-                                      transport_buf,
-                                      V91_INFO_SYMBOLS);
-
-    startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,
-                                                        startup_buf,
-                                                        (int) sizeof(startup_buf),
-                                                        &digital_dil,
-                                                        NULL);
-    if (startup_len <= 0) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller DIL failed\n");
-        return false;
-    }
-    memcpy(transport_buf, startup_buf, (size_t) startup_len);
-    if (!v91_note_received_dil(&answerer_startup, &digital_dil, &digital_dil_analysis)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL analysis failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, transport_buf, startup_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller DIL recording failed\n");
-        return false;
-    }
-    if (g_vpcm_session_diag)
-        vpcm_log("Later-phase adaptation block:");
-    vpcm_log_session_sequence_row("DIL TX", "waiting for DIL", "DIL RX/analyse", "waiting for DIL");
-    vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
-    vpcm_log_dil_analysis("Analogue side", &digital_dil_analysis);
-
-    startup_len = v91_tx_startup_dil_sequence_codewords(&answerer_startup,
-                                                        startup_buf,
-                                                        (int) sizeof(startup_buf),
-                                                        &default_dil,
-                                                        NULL);
-    if (startup_len <= 0) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL failed\n");
-        return false;
-    }
-    memcpy(transport_buf, startup_buf, (size_t) startup_len);
-    if (!v91_note_received_dil(&caller_startup, &default_dil, NULL)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller DIL tracking failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, transport_buf, startup_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("DIL RX", "DIL RX/track", "waiting for adapt", "DIL TX");
-
-    if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
-        || !v91_rx_scr_codewords(&answerer_startup, scr_buf, 18, false)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller conditioning failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, scr_buf, 18)) {
-        fprintf(stderr, "V.90/V.92 startup contract path caller SCR recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("adapt TX", "waiting for adapt", "adapt RX", "waiting for adapt");
-    if (v91_tx_scr_codewords(&answerer_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
-        || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer conditioning failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, scr_buf, 18)) {
-        fprintf(stderr, "V.90/V.92 startup contract path answerer SCR recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("adapt RX", "adapt RX", "waiting for req", "adapt TX");
-
-    vpcm_cp_init(&cp_down_offer);
-    cp_down_offer.transparent_mode_granted = false;
-    cp_down_offer.v90_compatibility = true;
-    cp_down_offer.drn = downstream_drn;
-    cp_down_offer.acknowledge = false;
-    cp_down_offer.constellation_count = 1;
-    memset(cp_down_offer.dfi, 0, sizeof(cp_down_offer.dfi));
-    vpcm_cp_enable_all_ucodes(cp_down_offer.masks[0]);
-
-    cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_offer, true);
-    if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_offer, &cp_rx)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream rate request failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, cp_buf, cp_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream INFO1 recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("INFO1 down TX", "waiting for INFO1 ack", "INFO1 down RX", "waiting for INFO1 ack");
-    vpcm_maybe_log_rate_request_diag("Digital -> Analogue downstream request",
-                                     &cp_down_offer,
-                                     cp_buf,
-                                     cp_len);
-    cp_down_ack = cp_down_offer;
-    cp_down_ack.acknowledge = true;
-    cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_down_ack, true);
-    if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_down_ack, &cp_rx)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream acknowledge failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, cp_buf, cp_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream ACK recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("INFO1 down RX", "INFO1 down RX", "waiting for train", "INFO1 down TX");
-    if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
-        || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
-        || v91_tx_b1_codewords(&caller_startup, b1_buf, (int) sizeof(b1_buf), &cp_down_ack) != V91_B1_SYMBOLS
-        || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &cp_down_ack)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream startup sequence failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, es_buf, V91_ES_SYMBOLS)
-        || !vpcm_record_call_simplex_g711(call_pair, law, true, b1_buf, V91_B1_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path downstream training recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("down train TX", "waiting for up INFO1", "down train RX", "waiting for up INFO1");
-
-    vpcm_cp_init(&cp_up_offer);
-    cp_up_offer.transparent_mode_granted = false;
-    cp_up_offer.v90_compatibility = true;
-    cp_up_offer.drn = upstream_drn;
-    cp_up_offer.acknowledge = false;
-    cp_up_offer.constellation_count = 1;
-    memset(cp_up_offer.dfi, 0, sizeof(cp_up_offer.dfi));
-    vpcm_cp_enable_all_ucodes(cp_up_offer.masks[0]);
-
-    cp_len = v91_tx_cp_codewords(&answerer_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_offer, true);
-    if (cp_len <= 0 || !v91_rx_cp_codewords(&caller_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_offer, &cp_rx)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream rate request failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, cp_buf, cp_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream INFO1 recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("waiting for up ack", "INFO1 up RX", "waiting for up ack", "INFO1 up TX");
-    vpcm_maybe_log_rate_request_diag("Analogue -> Digital upstream request",
-                                     &cp_up_offer,
-                                     cp_buf,
-                                     cp_len);
-    cp_up_ack = cp_up_offer;
-    cp_up_ack.acknowledge = true;
-    cp_len = v91_tx_cp_codewords(&caller_startup, cp_buf, (int) sizeof(cp_buf), &cp_up_ack, true);
-    if (cp_len <= 0 || !v91_rx_cp_codewords(&answerer_startup, cp_buf, cp_len, &cp_rx, true) || !vpcm_cp_frames_equal(&cp_up_ack, &cp_rx)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream acknowledge failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, true, cp_buf, cp_len)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream ACK recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("INFO1 up TX", "waiting for up train", "INFO1 up RX", "INFO1 up TX");
-    if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
-        || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
-        || v91_tx_b1_codewords(&answerer_startup, b1_buf, (int) sizeof(b1_buf), &cp_up_ack) != V91_B1_SYMBOLS
-        || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &cp_up_ack)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream startup sequence failed\n");
-        return false;
-    }
-    if (!vpcm_record_call_simplex_g711(call_pair, law, false, es_buf, V91_ES_SYMBOLS)
-        || !vpcm_record_call_simplex_g711(call_pair, law, false, b1_buf, V91_B1_SYMBOLS)) {
-        fprintf(stderr, "V.90/V.92 startup contract path upstream training recording failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("waiting for DATA", "up train RX", "waiting for DATA", "up train TX");
-
-    if (!v91_activate_data_mode(&caller_tx, &cp_down_ack)
-        || !v91_activate_data_mode(&answerer_rx, &cp_down_ack)
-        || !v91_activate_data_mode(&answerer_tx, &cp_up_ack)
-        || !v91_activate_data_mode(&caller_rx, &cp_up_ack)) {
-        fprintf(stderr, "V.90/V.92 startup contract path data-mode activation failed\n");
-        return false;
-    }
-    vpcm_log_session_sequence_row("DATA down TX", "DATA up RX", "DATA down RX", "DATA up TX");
-
-    data_frames = vpcm_frames_from_seconds(data_seconds);
-    if (data_frames < 1)
-        data_frames = NOMINAL_10S_FRAMES;
-    data_frames = vpcm_align_frames_for_duplex_bytes(data_frames,
-                                                     (int) cp_down_ack.drn + 20,
-                                                     (int) cp_up_ack.drn + 20);
-    total_codewords = data_frames * VPCM_CP_FRAME_INTERVALS;
-    down_total_bits = data_frames * ((int) cp_down_ack.drn + 20);
-    down_total_bytes = down_total_bits / 8;
-    up_total_bits = data_frames * ((int) cp_up_ack.drn + 20);
-    up_total_bytes = up_total_bits / 8;
-    down_data_in = (uint8_t *) malloc((size_t) down_total_bytes);
-    down_data_out = (uint8_t *) malloc((size_t) down_total_bytes);
-    up_data_in = (uint8_t *) malloc((size_t) up_total_bytes);
-    up_data_out = (uint8_t *) malloc((size_t) up_total_bytes);
-    down_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
-    down_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
-    up_pcm_tx = (uint8_t *) malloc((size_t) total_codewords);
-    up_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
-    if (!down_data_in || !down_data_out || !up_data_in || !up_data_out
-        || !down_pcm_tx || !down_pcm_rx || !up_pcm_tx || !up_pcm_rx) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        fprintf(stderr, "allocation failure in V.90/V.92 startup contract session\n");
+    memset(&report, 0, sizeof(report));
+    if (!vpcm_v90_session_run_startup_contract(&session, &params, &io, &report)) {
+        fprintf(stderr, "V.90/V.92 startup contract session failed in vpcm_v90_session\n");
         return false;
     }
 
-    fill_pattern(down_data_in, down_total_bytes, seed_base ^ 0x00D04E00U);
-    fill_pattern(up_data_in, up_total_bytes, seed_base ^ 0x00A0B000U);
-    memset(down_data_out, 0, (size_t) down_total_bytes);
-    memset(up_data_out, 0, (size_t) up_total_bytes);
-
-    down_produced = v91_tx_codewords(&caller_tx, down_pcm_tx, total_codewords, down_data_in, down_total_bytes);
-    up_produced = v91_tx_codewords(&answerer_tx, up_pcm_tx, total_codewords, up_data_in, up_total_bytes);
-    if (down_produced != total_codewords || up_produced != total_codewords) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        fprintf(stderr, "V.90/V.92 startup contract path tx length mismatch\n");
-        return false;
-    }
-
-    if (!vpcm_record_call_duplex_g711(call_pair, down_pcm_tx, up_pcm_tx, total_codewords)) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        fprintf(stderr, "V.90/V.92 startup contract path data recording failed\n");
-        return false;
-    }
-
-    memcpy(down_pcm_rx, down_pcm_tx, (size_t) total_codewords);
-    memcpy(up_pcm_rx, up_pcm_tx, (size_t) total_codewords);
-    down_consumed = v91_rx_codewords(&answerer_rx, down_data_out, down_total_bytes, down_pcm_rx, total_codewords);
-    up_consumed = v91_rx_codewords(&caller_rx, up_data_out, up_total_bytes, up_pcm_rx, total_codewords);
-    if (down_consumed != down_total_bytes || up_consumed != up_total_bytes) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        fprintf(stderr, "V.90/V.92 startup contract path rx length mismatch down=%d/%d up=%d/%d\n",
-                down_consumed, down_total_bytes, up_consumed, up_total_bytes);
-        return false;
-    }
-    if (!expect_equal("V.92 downstream payload", down_data_in, down_data_out, down_total_bytes)
-        || !expect_equal("V.92 upstream payload", up_data_in, up_data_out, up_total_bytes)) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        return false;
-    }
-
-    sample_down_data_len = (6 * ((int) cp_down_ack.drn + 20)) / 48;
-    sample_up_data_len = (6 * ((int) cp_up_ack.drn + 20)) / 48;
-    if (sample_down_data_len < 1)
-        sample_down_data_len = 1;
-    if (sample_up_data_len < 1)
-        sample_up_data_len = 1;
-    if (sample_down_data_len > down_total_bytes)
-        sample_down_data_len = down_total_bytes;
-    if (sample_up_data_len > up_total_bytes)
-        sample_up_data_len = up_total_bytes;
+    if (report.digital_dil_analysis_valid)
+        vpcm_log_dil_analysis("Analogue side", &report.digital_dil_analysis);
 
     vpcm_log("Digital -> Analogue sample");
-    vpcm_log_data_sample(down_data_in,
-                         sample_down_data_len,
-                         down_pcm_tx,
-                         6,
-                         down_pcm_rx,
-                         6,
-                         down_data_out,
-                         sample_down_data_len);
+    vpcm_log_data_sample(report.down_data_in_sample,
+                         report.sample_down_data_len,
+                         report.down_pcm_tx_sample,
+                         VPCM_V90_SAMPLE_PCM_LEN,
+                         report.down_pcm_rx_sample,
+                         VPCM_V90_SAMPLE_PCM_LEN,
+                         report.down_data_out_sample,
+                         report.sample_down_data_len);
     vpcm_log("Analogue -> Digital sample");
-    vpcm_log_data_sample(up_data_in,
-                         sample_up_data_len,
-                         up_pcm_tx,
-                         6,
-                         up_pcm_rx,
-                         6,
-                         up_data_out,
-                         sample_up_data_len);
+    vpcm_log_data_sample(report.up_data_in_sample,
+                         report.sample_up_data_len,
+                         report.up_pcm_tx_sample,
+                         VPCM_V90_SAMPLE_PCM_LEN,
+                         report.up_pcm_rx_sample,
+                         VPCM_V90_SAMPLE_PCM_LEN,
+                         report.up_data_out_sample,
+                         report.sample_up_data_len);
 
-    vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), cp_down_ack.drn);
-    vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), cp_up_ack.drn);
+    vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), report.cp_down_ack.drn);
+    vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), report.cp_up_ack.drn);
     vpcm_log("PASS: V.90/V.92 startup contract path (%s, %s, data_seconds=%d, digital->analogue=%s, analogue->digital=%s%s)",
              vpcm_law_to_str(law),
              path_label,
-             data_seconds,
+             report.data_seconds,
              down_rate_buf,
              up_rate_buf,
              echo_limited ? ", echo-adapted" : "");
     vpcm_log_session_sequence_footer();
-
-    free(down_data_in);
-    free(down_data_out);
-    free(up_data_in);
-    free(up_data_out);
-    free(down_pcm_tx);
-    free(down_pcm_rx);
-    free(up_pcm_tx);
-    free(up_pcm_rx);
     return true;
 }
 
@@ -4279,11 +3827,6 @@ static void vpcm_log_data_sample(const uint8_t *data_tx,
                                remote_data_rx_len);
 }
 
-static void vpcm_cp_enable_all_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES])
-{
-    memset(mask, 0xFF, VPCM_CP_MASK_BYTES);
-}
-
 static bool expect_equal(const char *label,
                          const uint8_t *expected,
                          const uint8_t *actual,
@@ -4413,6 +3956,30 @@ static uint8_t vpcm_call_silence_codeword(v91_law_t law)
     return v91_ucode_to_codeword(law, 0, true);
 }
 
+static bool vpcm_v90_record_call_duplex_g711(void *user_data,
+                                             const uint8_t *digital_tx_codewords,
+                                             const uint8_t *analogue_tx_codewords,
+                                             int codeword_len)
+{
+    return vpcm_record_call_duplex_g711((vpcm_call_pair_t *) user_data,
+                                        digital_tx_codewords,
+                                        analogue_tx_codewords,
+                                        codeword_len);
+}
+
+static bool vpcm_v90_record_call_simplex_g711(void *user_data,
+                                              v91_law_t law,
+                                              bool digital_to_analogue,
+                                              const uint8_t *tx_codewords,
+                                              int codeword_len)
+{
+    return vpcm_record_call_simplex_g711((vpcm_call_pair_t *) user_data,
+                                         law,
+                                         digital_to_analogue,
+                                         tx_codewords,
+                                         codeword_len);
+}
+
 static bool vpcm_record_call_duplex_g711(vpcm_call_pair_t *call_pair,
                                          const uint8_t *caller_tx_codewords,
                                          const uint8_t *answerer_tx_codewords,
@@ -4486,73 +4053,6 @@ static bool vpcm_record_call_simplex_g711(vpcm_call_pair_t *call_pair,
         offset += (int) chunk_len;
     }
     return true;
-}
-
-static int vpcm_frames_from_seconds(int seconds)
-{
-    long long frames;
-
-    if (seconds <= 0)
-        return 0;
-    frames = ((long long) seconds * 8000LL) / (long long) VPCM_CP_FRAME_INTERVALS;
-    if (frames < 1)
-        frames = 1;
-    frames -= (frames % 4LL);
-    if (frames < 4)
-        frames = 4;
-    if (frames > 2000000000LL)
-        frames = 2000000000LL;
-    return (int) frames;
-}
-
-static int vpcm_gcd_int(int a, int b)
-{
-    int t;
-
-    if (a < 0)
-        a = -a;
-    if (b < 0)
-        b = -b;
-    while (b != 0) {
-        t = a % b;
-        a = b;
-        b = t;
-    }
-    return (a == 0) ? 1 : a;
-}
-
-static int vpcm_lcm_int(int a, int b)
-{
-    int gcd;
-
-    if (a <= 0)
-        return b;
-    if (b <= 0)
-        return a;
-    gcd = vpcm_gcd_int(a, b);
-    return (a / gcd) * b;
-}
-
-static int vpcm_align_frames_for_duplex_bytes(int frames,
-                                              int downstream_bits_per_frame,
-                                              int upstream_bits_per_frame)
-{
-    int align_frames;
-    int down_align;
-    int up_align;
-
-    if (frames <= 0)
-        return 0;
-    down_align = 8 / vpcm_gcd_int(8, downstream_bits_per_frame);
-    up_align = 8 / vpcm_gcd_int(8, upstream_bits_per_frame);
-    align_frames = vpcm_lcm_int(4, down_align);
-    align_frames = vpcm_lcm_int(align_frames, up_align);
-    if (align_frames < 1)
-        align_frames = 1;
-    frames -= (frames % align_frames);
-    if (frames < align_frames)
-        frames = align_frames;
-    return frames;
 }
 
 static bool run_v8_exchange(v91_law_t law,
