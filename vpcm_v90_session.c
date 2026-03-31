@@ -236,6 +236,15 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         data_seconds = 10;
 
     vpcm_v90_session_init(session, params->law);
+    v90_info0a_init(&local_report.analogue_info0a);
+    v90_info1a_init(&local_report.analogue_info1a);
+    local_report.phase2_contract_valid =
+        v90_build_info0a_bits(local_report.analogue_info0a_bits,
+                              (int) sizeof(local_report.analogue_info0a_bits),
+                              &local_report.analogue_info0a)
+        && v90_build_info1a_bits(local_report.analogue_info1a_bits,
+                                 (int) sizeof(local_report.analogue_info1a_bits),
+                                 &local_report.analogue_info1a);
     v91_default_dil_init(&default_dil);
     vpcm_v92_init_digital_dil_from_ja(&digital_dil, params->echo_limited);
     v91_init(&caller_startup, params->law, V91_MODE_TRANSPARENT);

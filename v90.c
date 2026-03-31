@@ -160,6 +160,39 @@ static inline int16_t v90_pcm_signed(v90_law_t law, int ucode, int sign)
     return v90_pcm_to_linear(law, pcm);
 }
 
+static void v90_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
+{
+    int i;
+
+    for (i = 0; i < bits; i++) {
+        int pos = *bit_pos + i;
+        if (value & (1U << i))
+            buf[pos >> 3] |= (uint8_t) (1U << (pos & 7));
+    }
+    *bit_pos += bits;
+}
+
+static uint16_t v90_crc_bit_block(const uint8_t buf[], int first_bit, int last_bit, uint16_t crc)
+{
+    int pre;
+    int post;
+
+    last_bit++;
+    pre = first_bit & 0x7;
+    first_bit >>= 3;
+    if (pre) {
+        crc = crc_itu16_bits(buf[first_bit] >> pre, (8 - pre), crc);
+        first_bit++;
+    }
+    post = last_bit & 0x7;
+    last_bit >>= 3;
+    if ((last_bit - first_bit) != 0)
+        crc = crc_itu16_calc(buf + first_bit, last_bit - first_bit, crc);
+    if (post)
+        crc = crc_itu16_bits(buf[last_bit], post, crc);
+    return crc;
+}
+
 static int v90_codeword_to_ucode(v90_law_t law, uint8_t codeword)
 {
     int ucode;
@@ -229,6 +262,96 @@ static bool v90_decode_codeword_to_octet(v90_state_t *s, uint8_t codeword, uint8
     }
     *out_octet = plain_octet;
     return true;
+}
+
+void v90_info0a_init(v90_info0a_t *info)
+{
+    if (!info)
+        return;
+    memset(info, 0, sizeof(*info));
+    info->support_2743 = true;
+    info->support_2800 = true;
+    info->support_3429 = true;
+    info->support_3000_low = true;
+    info->support_3000_high = true;
+    info->support_3200_low = true;
+    info->support_3200_high = true;
+    info->rate_3429_allowed = true;
+    info->support_power_reduction = true;
+    info->max_baud_rate_difference = 0;
+    info->from_cme_modem = false;
+    info->support_1664_point_constellation = true;
+    info->tx_clock_source = 0;
+    info->acknowledge_info0d = false;
+}
+
+void v90_info1a_init(v90_info1a_t *info)
+{
+    if (!info)
+        return;
+    memset(info, 0, sizeof(*info));
+    info->md = 0;
+    info->u_info = 78;
+    info->upstream_symbol_rate_code = 4;
+    info->downstream_rate_code = 6;
+    info->freq_offset = 0;
+}
+
+bool v90_build_info0a_bits(uint8_t *buf, int buf_len, const v90_info0a_t *info)
+{
+    int bit_pos;
+    uint16_t crc;
+
+    if (!buf || !info || buf_len < ((V90_INFO0A_BITS + 7) / 8))
+        return false;
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = 0;
+    v90_bits_put(buf, &bit_pos, V90_INFO_FILL_AND_SYNC_BITS, 12);
+    v90_bits_put(buf, &bit_pos, info->support_2743 ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_2800 ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_3429 ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_3000_low ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_3000_high ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_3200_low ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_3200_high ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->rate_3429_allowed ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_power_reduction ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->max_baud_rate_difference & 0x7U, 3);
+    v90_bits_put(buf, &bit_pos, info->from_cme_modem ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->support_1664_point_constellation ? 1U : 0U, 1);
+    v90_bits_put(buf, &bit_pos, info->tx_clock_source & 0x3U, 2);
+    v90_bits_put(buf, &bit_pos, info->acknowledge_info0d ? 1U : 0U, 1);
+    crc = v90_crc_bit_block(buf, 12, 28, 0xFFFF);
+    v90_bits_put(buf, &bit_pos, crc, 16);
+    v90_bits_put(buf, &bit_pos, 0xFU, 4);
+    return bit_pos == V90_INFO0A_BITS;
+}
+
+bool v90_build_info1a_bits(uint8_t *buf, int buf_len, const v90_info1a_t *info)
+{
+    int bit_pos;
+    uint16_t crc;
+    uint16_t freq_bits;
+
+    if (!buf || !info || buf_len < ((V90_INFO1A_BITS + 7) / 8))
+        return false;
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = 0;
+    v90_bits_put(buf, &bit_pos, V90_INFO_FILL_AND_SYNC_BITS, 12);
+    v90_bits_put(buf, &bit_pos, 0, 6);
+    v90_bits_put(buf, &bit_pos, info->md & 0x7FU, 7);
+    v90_bits_put(buf, &bit_pos, info->u_info & 0x7FU, 7);
+    v90_bits_put(buf, &bit_pos, 0, 2);
+    v90_bits_put(buf, &bit_pos, info->upstream_symbol_rate_code & 0x7U, 3);
+    v90_bits_put(buf, &bit_pos, info->downstream_rate_code & 0x7U, 3);
+    freq_bits = (uint16_t) info->freq_offset;
+    if (info->freq_offset < 0)
+        freq_bits = (uint16_t) (0x400 + info->freq_offset);
+    v90_bits_put(buf, &bit_pos, freq_bits & 0x3FFU, 10);
+    crc = v90_crc_bit_block(buf, 12, 49, 0xFFFF);
+    v90_bits_put(buf, &bit_pos, crc, 16);
+    v90_bits_put(buf, &bit_pos, 0xFU, 4);
+    return bit_pos == V90_INFO1A_BITS;
 }
 
 /* ---- Jd frame construction (Table 13) ---- */

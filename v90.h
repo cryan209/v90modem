@@ -30,6 +30,35 @@ typedef struct {
     uint8_t train_u[255];
 } v90_dil_desc_t;
 
+#define V90_INFO_FILL_AND_SYNC_BITS  0x4EF
+#define V90_INFO0A_BITS              49
+#define V90_INFO1A_BITS              70
+
+typedef struct {
+    bool support_2743;
+    bool support_2800;
+    bool support_3429;
+    bool support_3000_low;
+    bool support_3000_high;
+    bool support_3200_low;
+    bool support_3200_high;
+    bool rate_3429_allowed;
+    bool support_power_reduction;
+    uint8_t max_baud_rate_difference;
+    bool from_cme_modem;
+    bool support_1664_point_constellation;
+    uint8_t tx_clock_source;
+    bool acknowledge_info0d;
+} v90_info0a_t;
+
+typedef struct {
+    uint8_t md;
+    uint8_t u_info;
+    uint8_t upstream_symbol_rate_code;
+    uint8_t downstream_rate_code;
+    int16_t freq_offset;
+} v90_info1a_t;
+
 /* PCM law selection */
 typedef enum {
     V90_LAW_ULAW = 0,
@@ -113,6 +142,14 @@ void v90_start_phase3(v90_state_t *s, int u_info);
  * A descriptor with n == 0 disables DIL transmission.
  */
 void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc);
+
+/* Initialise default analogue-side Phase 2 INFO contracts. */
+void v90_info0a_init(v90_info0a_t *info);
+void v90_info1a_init(v90_info1a_t *info);
+
+/* Pack analogue-side INFO frames bit-0 first for V.34/V.90 Phase 2 testing. */
+bool v90_build_info0a_bits(uint8_t *buf, int buf_len, const v90_info0a_t *info);
+bool v90_build_info1a_bits(uint8_t *buf, int buf_len, const v90_info1a_t *info);
 
 /*
  * Parse a packed Ja/DIL descriptor bitstream (Table 12/V.90, bit 0 first)

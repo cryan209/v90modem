@@ -948,68 +948,6 @@ static void vpcm_v34_dummy_put_bit(void *user_data, int bit)
     (void) bit;
 }
 
-#define VPCM_V90_INFO_FILL_AND_SYNC_BITS  0x4EF
-#define VPCM_V90_INFO0A_BITS              49
-#define VPCM_V90_INFO1A_BITS              70
-
-typedef struct {
-    bool support_2743;
-    bool support_2800;
-    bool support_3429;
-    bool support_3000_low;
-    bool support_3000_high;
-    bool support_3200_low;
-    bool support_3200_high;
-    bool rate_3429_allowed;
-    bool support_power_reduction;
-    uint8_t max_baud_rate_difference;
-    bool from_cme_modem;
-    bool support_1664_point_constellation;
-    uint8_t tx_clock_source;
-    bool acknowledge_info0d;
-} vpcm_v90_info0a_t;
-
-typedef struct {
-    uint8_t md;
-    uint8_t u_info;
-    uint8_t upstream_symbol_rate_code;
-    uint8_t downstream_rate_code;
-    int16_t freq_offset;
-} vpcm_v90_info1a_t;
-
-static void vpcm_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
-{
-    int i;
-
-    for (i = 0; i < bits; i++) {
-        int pos = *bit_pos + i;
-        if (value & (1U << i))
-            buf[pos >> 3] |= (uint8_t) (1U << (pos & 7));
-    }
-    *bit_pos += bits;
-}
-
-static uint16_t vpcm_crc_bit_block(const uint8_t buf[], int first_bit, int last_bit, uint16_t crc)
-{
-    int pre;
-    int post;
-
-    last_bit++;
-    pre = first_bit & 0x7;
-    first_bit >>= 3;
-    if (pre) {
-        crc = crc_itu16_bits(buf[first_bit] >> pre, (8 - pre), crc);
-        first_bit++;
-    }
-    post = last_bit & 0x7;
-    last_bit >>= 3;
-    if ((last_bit - first_bit) != 0)
-        crc = crc_itu16_calc(buf + first_bit, last_bit - first_bit, crc);
-    if (post)
-        crc = crc_itu16_bits(buf[last_bit], post, crc);
-    return crc;
-}
-
 static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)
 {
     int i;
@@ -1021,92 +959,6 @@ static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out
     for (i = 0; i < bit_count && pos + 1 < out_size; i++)
         out[pos++] = (buf[i >> 3] & (1U << (i & 7))) ? '1' : '0';
     out[pos] = '\0';
-}
-
-static void vpcm_v90_info0a_init(vpcm_v90_info0a_t *info)
-{
-    memset(info, 0, sizeof(*info));
-    info->support_2743 = true;
-    info->support_2800 = true;
-    info->support_3429 = true;
-    info->support_3000_low = true;
-    info->support_3000_high = true;
-    info->support_3200_low = true;
-    info->support_3200_high = true;
-    info->rate_3429_allowed = true;
-    info->support_power_reduction = true;
-    info->max_baud_rate_difference = 0;
-    info->from_cme_modem = false;
-    info->support_1664_point_constellation = true;
-    info->tx_clock_source = 0; /* internal */
-    info->acknowledge_info0d = false;
-}
-
-static void vpcm_v90_info1a_init(vpcm_v90_info1a_t *info)
-{
-    memset(info, 0, sizeof(*info));
-    info->md = 0;
-    info->u_info = 78;
-    info->upstream_symbol_rate_code = 4; /* 3200 baud */
-    info->downstream_rate_code = 6;      /* 8000 PCM */
-    info->freq_offset = 0;
-}
-
-static bool vpcm_v90_build_info0a_bits(uint8_t *buf, int buf_len, const vpcm_v90_info0a_t *info)
-{
-    int bit_pos;
-    uint16_t crc;
-
-    if (buf_len < ((VPCM_V90_INFO0A_BITS + 7) / 8))
-        return false;
-    memset(buf, 0, (size_t) buf_len);
-    bit_pos = 0;
-    vpcm_bits_put(buf, &bit_pos, VPCM_V90_INFO_FILL_AND_SYNC_BITS, 12);
-    vpcm_bits_put(buf, &bit_pos, info->support_2743 ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_2800 ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_3429 ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_3000_low ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_3000_high ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_3200_low ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_3200_high ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->rate_3429_allowed ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_power_reduction ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->max_baud_rate_difference & 0x7U, 3);
-    vpcm_bits_put(buf, &bit_pos, info->from_cme_modem ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->support_1664_point_constellation ? 1U : 0U, 1);
-    vpcm_bits_put(buf, &bit_pos, info->tx_clock_source & 0x3U, 2);
-    vpcm_bits_put(buf, &bit_pos, info->acknowledge_info0d ? 1U : 0U, 1);
-    crc = vpcm_crc_bit_block(buf, 12, 28, 0xFFFF);
-    vpcm_bits_put(buf, &bit_pos, crc, 16);
-    vpcm_bits_put(buf, &bit_pos, 0xFU, 4);
-    return bit_pos == VPCM_V90_INFO0A_BITS;
-}
-
-static bool vpcm_v90_build_info1a_bits(uint8_t *buf, int buf_len, const vpcm_v90_info1a_t *info)
-{
-    int bit_pos;
-    uint16_t crc;
-    uint16_t freq_bits;
-
-    if (buf_len < ((VPCM_V90_INFO1A_BITS + 7) / 8))
-        return false;
-    memset(buf, 0, (size_t) buf_len);
-    bit_pos = 0;
-    vpcm_bits_put(buf, &bit_pos, VPCM_V90_INFO_FILL_AND_SYNC_BITS, 12);
-    vpcm_bits_put(buf, &bit_pos, 0, 6); /* reserved */
-    vpcm_bits_put(buf, &bit_pos, info->md & 0x7FU, 7);
-    vpcm_bits_put(buf, &bit_pos, info->u_info & 0x7FU, 7);
-    vpcm_bits_put(buf, &bit_pos, 0, 2); /* reserved */
-    vpcm_bits_put(buf, &bit_pos, info->upstream_symbol_rate_code & 0x7U, 3);
-    vpcm_bits_put(buf, &bit_pos, info->downstream_rate_code & 0x7U, 3);
-    freq_bits = (uint16_t) info->freq_offset;
-    if (info->freq_offset < 0)
-        freq_bits = (uint16_t) (0x400 + info->freq_offset);
-    vpcm_bits_put(buf, &bit_pos, freq_bits & 0x3FFU, 10);
-    crc = vpcm_crc_bit_block(buf, 12, 49, 0xFFFF);
-    vpcm_bits_put(buf, &bit_pos, crc, 16);
-    vpcm_bits_put(buf, &bit_pos, 0xFU, 4);
-    return bit_pos == VPCM_V90_INFO1A_BITS;
 }
 
 static void vpcm_log(const char *fmt, ...)
@@ -3101,7 +2953,7 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     vpcm_log_session_sequence_header("Digital", "Analogue");
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
-        vpcm_log("Phase model: Phase 2 = INFO0 -> A/B -> L1/L2 -> INFO1 (not yet natively modelled here)");
+        vpcm_log("Phase model: Phase 2 contract = shared V.90 INFO0a/INFO1a definitions; transport still not natively modelled here");
         vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
         vpcm_log("Harness note: DIL/adaptation shown below is later-phase approximation, not part of Phase 2.");
     }
@@ -3121,6 +2973,22 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (!vpcm_v90_session_run_startup_contract(&session, &params, &io, &report)) {
         fprintf(stderr, "V.90/V.92 startup contract session failed in vpcm_v90_session\n");
         return false;
+    }
+
+    if (g_vpcm_session_diag && report.phase2_contract_valid) {
+        char info0a_str[V90_INFO0A_BITS + 1];
+        char info1a_str[V90_INFO1A_BITS + 1];
+
+        vpcm_packed_bits_to_str(report.analogue_info0a_bits, V90_INFO0A_BITS, info0a_str, sizeof(info0a_str));
+        vpcm_packed_bits_to_str(report.analogue_info1a_bits, V90_INFO1A_BITS, info1a_str, sizeof(info1a_str));
+        vpcm_log("Shared V.90 INFO0a contract bits: %s", info0a_str);
+        vpcm_log("Shared V.90 INFO1a contract bits: %s", info1a_str);
+        vpcm_log("Shared V.90 INFO1a fields: md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
+                 report.analogue_info1a.md,
+                 report.analogue_info1a.u_info,
+                 report.analogue_info1a.upstream_symbol_rate_code,
+                 report.analogue_info1a.downstream_rate_code,
+                 report.analogue_info1a.freq_offset);
     }
 
     if (report.digital_dil_analysis_valid)
@@ -4192,12 +4060,12 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
     vpcm_channel_t analog_channel;
     v34_state_t *caller;
     v34_state_t *answerer;
-    vpcm_v90_info0a_t analog_info0a;
-    vpcm_v90_info1a_t analog_info1a;
-    uint8_t info0a_bits[(VPCM_V90_INFO0A_BITS + 7) / 8];
-    uint8_t info1a_bits[(VPCM_V90_INFO1A_BITS + 7) / 8];
-    char info0a_str[VPCM_V90_INFO0A_BITS + 1];
-    char info1a_str[VPCM_V90_INFO1A_BITS + 1];
+    v90_info0a_t analog_info0a;
+    v90_info1a_t analog_info1a;
+    uint8_t info0a_bits[(V90_INFO0A_BITS + 7) / 8];
+    uint8_t info1a_bits[(V90_INFO1A_BITS + 7) / 8];
+    char info0a_str[V90_INFO0A_BITS + 1];
+    char info1a_str[V90_INFO1A_BITS + 1];
     bool caller_saw_info0;
     bool answerer_saw_info0;
     bool caller_saw_info1;
@@ -4215,16 +4083,16 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
     analog_channel.mode = VPCM_PATH_ANALOG_G711;
     vpcm_log("Test: SpanDSP V.90 INFO startup over analog-over-G.711 (%s)", vpcm_law_to_str(law));
 
-    vpcm_v90_info0a_init(&analog_info0a);
-    vpcm_v90_info1a_init(&analog_info1a);
-    if (!vpcm_v90_build_info0a_bits(info0a_bits, (int) sizeof(info0a_bits), &analog_info0a)
-        || !vpcm_v90_build_info1a_bits(info1a_bits, (int) sizeof(info1a_bits), &analog_info1a)) {
+    v90_info0a_init(&analog_info0a);
+    v90_info1a_init(&analog_info1a);
+    if (!v90_build_info0a_bits(info0a_bits, (int) sizeof(info0a_bits), &analog_info0a)
+        || !v90_build_info1a_bits(info1a_bits, (int) sizeof(info1a_bits), &analog_info1a)) {
         fprintf(stderr, "failed to build analogue-side V.90 INFO contract frames\n");
         return false;
     }
     if (g_vpcm_session_diag) {
-        vpcm_packed_bits_to_str(info0a_bits, VPCM_V90_INFO0A_BITS, info0a_str, sizeof(info0a_str));
-        vpcm_packed_bits_to_str(info1a_bits, VPCM_V90_INFO1A_BITS, info1a_str, sizeof(info1a_str));
+        vpcm_packed_bits_to_str(info0a_bits, V90_INFO0A_BITS, info0a_str, sizeof(info0a_str));
+        vpcm_packed_bits_to_str(info1a_bits, V90_INFO1A_BITS, info1a_str, sizeof(info1a_str));
         vpcm_log("Analogue-side INFO0a contract bits: %s", info0a_str);
         vpcm_log("Analogue-side INFO1a contract bits: %s", info1a_str);
         vpcm_log("Analogue-side INFO1a contract fields: md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",

@@ -1,6 +1,7 @@
 #ifndef VPCM_V90_SESSION_H
 #define VPCM_V90_SESSION_H
 
+#include "v90.h"
 #include "v91.h"
 
 #include <stdbool.h>
@@ -50,6 +51,11 @@ typedef struct {
 #define VPCM_V90_SAMPLE_DATA_MAX 16
 
 typedef struct {
+    bool phase2_contract_valid;
+    v90_info0a_t analogue_info0a;
+    v90_info1a_t analogue_info1a;
+    uint8_t analogue_info0a_bits[(V90_INFO0A_BITS + 7) / 8];
+    uint8_t analogue_info1a_bits[(V90_INFO1A_BITS + 7) / 8];
     v91_info_frame_t caller_info;
     v91_info_frame_t answerer_info;
     bool digital_dil_analysis_valid;
