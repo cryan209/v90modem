@@ -475,32 +475,24 @@ bool vpcm_v91_session_describe_chunk(const vpcm_cp_frame_t *cp_ack,
     return true;
 }
 
-bool vpcm_v91_session_codec_duplex_chunk(vpcm_v91_session_t *session,
-                                         v91_state_t *caller_tx,
-                                         v91_state_t *caller_rx,
-                                         v91_state_t *answerer_tx,
-                                         v91_state_t *answerer_rx,
-                                         const uint8_t *caller_data_in,
-                                         const uint8_t *answerer_data_in,
-                                         uint8_t *caller_data_out,
-                                         uint8_t *answerer_data_out,
-                                         uint8_t *caller_pcm_tx,
-                                         uint8_t *caller_pcm_rx,
-                                         uint8_t *answerer_pcm_tx,
-                                         uint8_t *answerer_pcm_rx,
-                                         int codeword_offset,
-                                         int chunk_codewords,
-                                         int byte_offset,
-                                         int chunk_bytes,
-                                         int *caller_produced,
-                                         int *answerer_produced,
-                                         int *caller_consumed,
-                                         int *answerer_consumed)
+bool vpcm_v91_session_encode_duplex_chunk(vpcm_v91_session_t *session,
+                                          v91_state_t *caller_tx,
+                                          v91_state_t *answerer_tx,
+                                          const uint8_t *caller_data_in,
+                                          const uint8_t *answerer_data_in,
+                                          uint8_t *caller_pcm_tx,
+                                          uint8_t *answerer_pcm_tx,
+                                          int codeword_offset,
+                                          int chunk_codewords,
+                                          int byte_offset,
+                                          int chunk_bytes,
+                                          int *caller_produced,
+                                          int *answerer_produced)
 {
-    if (!session || !caller_tx || !caller_rx || !answerer_tx || !answerer_rx
-        || !caller_data_in || !answerer_data_in || !caller_data_out || !answerer_data_out
-        || !caller_pcm_tx || !caller_pcm_rx || !answerer_pcm_tx || !answerer_pcm_rx
-        || !caller_produced || !answerer_produced || !caller_consumed || !answerer_consumed)
+    if (!session || !caller_tx || !answerer_tx
+        || !caller_data_in || !answerer_data_in
+        || !caller_pcm_tx || !answerer_pcm_tx
+        || !caller_produced || !answerer_produced)
         return false;
     if (!session->data_mode_active)
         return false;
@@ -515,7 +507,29 @@ bool vpcm_v91_session_codec_duplex_chunk(vpcm_v91_session_t *session,
                                           chunk_codewords,
                                           answerer_data_in + byte_offset,
                                           chunk_bytes);
-    if (*caller_produced != chunk_codewords || *answerer_produced != chunk_codewords)
+    return *caller_produced == chunk_codewords && *answerer_produced == chunk_codewords;
+}
+
+bool vpcm_v91_session_decode_duplex_chunk(vpcm_v91_session_t *session,
+                                          v91_state_t *caller_rx,
+                                          v91_state_t *answerer_rx,
+                                          uint8_t *caller_data_out,
+                                          uint8_t *answerer_data_out,
+                                          const uint8_t *caller_pcm_rx,
+                                          const uint8_t *answerer_pcm_rx,
+                                          int codeword_offset,
+                                          int chunk_codewords,
+                                          int byte_offset,
+                                          int chunk_bytes,
+                                          int *caller_consumed,
+                                          int *answerer_consumed)
+{
+    if (!session || !caller_rx || !answerer_rx
+        || !caller_data_out || !answerer_data_out
+        || !caller_pcm_rx || !answerer_pcm_rx
+        || !caller_consumed || !answerer_consumed)
+        return false;
+    if (!session->data_mode_active)
         return false;
 
     *answerer_consumed = v91_rx_codewords(answerer_rx,

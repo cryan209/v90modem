@@ -246,6 +246,22 @@ bool vpcm_call_pair_run_v91_data(vpcm_call_pair_t *pair,
             return false;
         }
 
+        if (!vpcm_v91_session_encode_duplex_chunk(session,
+                                                  caller_tx,
+                                                  answerer_tx,
+                                                  caller_data_in,
+                                                  answerer_data_in,
+                                                  caller_pcm_tx,
+                                                  answerer_pcm_tx,
+                                                  codeword_offset,
+                                                  chunk_codewords,
+                                                  byte_offset,
+                                                  chunk_bytes,
+                                                  &caller_produced,
+                                                  &answerer_produced)) {
+            return false;
+        }
+
         if (vpcm_call_pair_transfer_codewords(pair->caller,
                                               pair->answerer,
                                               caller_pcm_tx + codeword_offset,
@@ -263,27 +279,19 @@ bool vpcm_call_pair_run_v91_data(vpcm_call_pair_t *pair,
             return false;
         }
 
-        if (!vpcm_v91_session_codec_duplex_chunk(session,
-                                                 caller_tx,
-                                                 caller_rx,
-                                                 answerer_tx,
-                                                 answerer_rx,
-                                                 caller_data_in,
-                                                 answerer_data_in,
-                                                 caller_data_out,
-                                                 answerer_data_out,
-                                                 caller_pcm_tx,
-                                                 caller_pcm_rx,
-                                                 answerer_pcm_tx,
-                                                 answerer_pcm_rx,
-                                                 codeword_offset,
-                                                 chunk_codewords,
-                                                 byte_offset,
-                                                 chunk_bytes,
-                                                 &caller_produced,
-                                                 &answerer_produced,
-                                                 &caller_consumed,
-                                                 &answerer_consumed)) {
+        if (!vpcm_v91_session_decode_duplex_chunk(session,
+                                                  caller_rx,
+                                                  answerer_rx,
+                                                  caller_data_out,
+                                                  answerer_data_out,
+                                                  caller_pcm_rx,
+                                                  answerer_pcm_rx,
+                                                  codeword_offset,
+                                                  chunk_codewords,
+                                                  byte_offset,
+                                                  chunk_bytes,
+                                                  &caller_consumed,
+                                                  &answerer_consumed)) {
             return false;
         }
 
