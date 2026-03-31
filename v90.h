@@ -16,6 +16,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "vpcm_cp.h"
+
 /* V.90 downstream encoder state */
 typedef struct v90_state_s v90_state_t;
 
@@ -100,7 +102,8 @@ typedef enum {
 } v90_law_t;
 
 /* V.90 Phase 3/4 TX sub-states for the digital modem.
- * Order matches V.90 §9.3.1: Sd → S̄d → TRN1d → Jd → J'd → Phase 4 */
+ * Order matches V.90 §9.3.1/§9.4.1:
+ *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → CP → B1d → Data */
 typedef enum {
     V90_TX_PHASE2,        /* SpanDSP V.34 handles INFO exchange */
     V90_TX_SD,            /* Sending Sd — 64 reps of {+W,+0,+W,-W,-0,-W} */
@@ -108,8 +111,11 @@ typedef enum {
     V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
     V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
     V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
-    V90_TX_DIL,           /* Sending DIL (placeholder branch point) */
-    V90_TX_PHASE4,        /* Phase 4 (B1d, TRN2d, MP, CP exchange) */
+    V90_TX_DIL,           /* Sending DIL descriptor symbols */
+    V90_TX_RI,            /* Phase 4: Ri — retrain init (idle codewords, §9.4.1.1) */
+    V90_TX_TRN2D,         /* Phase 4: TRN2d — scrambled ones at U_INFO until CP ready */
+    V90_TX_CP,            /* Phase 4: CP frame — call parameters as PCM codewords */
+    V90_TX_B1D,           /* Phase 4: B1d — data-mode entry marker */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
 
@@ -213,10 +219,24 @@ void v90_notify_s_detected(v90_state_t *s);
 
 /*
  * Check whether the V.90 state machine has completed startup and may enter
- * data mode. Phase 4 is still incomplete, so this is currently only true
- * once a future implementation marks it complete.
+ * data mode. Returns true after B1d completes and the state enters V90_TX_DATA.
  */
 bool v90_training_complete(v90_state_t *s);
+
+/*
+ * Configure the CP frame to transmit during Phase 4.
+ * Must be called before v90_notify_cp_ready(). The frame is encoded
+ * immediately; the caller's cp pointer need not remain valid after return.
+ * Returns false if encoding fails (invalid cp frame).
+ */
+bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
+
+/*
+ * Signal that the analogue modem's MP frame has been received and the
+ * digital modem should transition from TRN2d into CP transmission.
+ * Has no effect unless the TX phase is currently V90_TX_TRN2D.
+ */
+void v90_notify_cp_ready(v90_state_t *s);
 
 /*
  * Generate V.90 Phase 3 TX samples (PCM codewords as linear samples).

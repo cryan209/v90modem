@@ -10,6 +10,7 @@
  */
 
 #include "v90.h"
+#include "vpcm_cp.h"
 
 #include <spandsp.h>
 
@@ -24,6 +25,10 @@
 
 /* Jd frame is 72 bits (Table 13): 17 sync + 51 data + 4 fill */
 #define V90_JD_BITS         72
+
+/* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
+#define V90_RI_SYMBOLS   64   /* Ri duration: ≥8 ms at 8 kHz */
+#define V90_B1D_SYMBOLS  48   /* B1d: 6 frame-intervals of 6 symbols each */
 
 /* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
 #define V90_SD_REPS     64
@@ -121,6 +126,13 @@ struct v90_state_s {
     v90_dil_desc_t   dil;
     int              dil_segment_index;
     int              dil_pos_in_segment;
+
+    /* Phase 4 CP state */
+    bool             cp_ready;                  /* TRN2d→CP transition armed */
+    vpcm_cp_frame_t  cp_frame;                  /* CP frame to transmit */
+    uint8_t          cp_bits[VPCM_CP_MAX_BITS]; /* Encoded CP bits (one per byte) */
+    int              cp_nbits;                  /* Total encoded CP bits */
+    int              cp_bit_pos;                /* Current bit index in cp_bits */
 
     /* Downstream PCM encoder state (data mode) */
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
@@ -935,7 +947,7 @@ static int16_t v90_dil_sample(v90_state_t *s)
 
     n = s->dil.n;
     if (n <= 0) {
-        s->tx_phase = V90_TX_PHASE4;
+        s->tx_phase = V90_TX_RI;
         s->sample_count = 0;
         s->phase4_hold_logged = false;
         return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
@@ -961,7 +973,7 @@ static int16_t v90_dil_sample(v90_state_t *s)
         if (s->dil_terminate_requested) {
             fprintf(stderr, "[V90] Phase 3: DIL termination requested, completed segment %d/%d and entering Phase 4\n",
                     seg_idx + 1, n);
-            s->tx_phase = V90_TX_PHASE4;
+            s->tx_phase = V90_TX_RI;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
         } else if ((s->dil_segment_index % n) == 0) {
@@ -1313,10 +1325,8 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                     fprintf(stderr, "[V90] Phase 3: J'd complete, entering DIL placeholder state\n");
                     s->tx_phase = V90_TX_DIL;
                 } else {
-                    fprintf(stderr, "[V90] Phase 3: J'd complete, handing off to native V.34 Phase 4\n");
-                    v34_force_phase4(s->v34);
-                    s->tx_phase = V90_TX_PHASE4;
-                    s->use_internal_v34_tx = true;
+                    fprintf(stderr, "[V90] Phase 3: J'd complete, entering Phase 4\n");
+                    s->tx_phase = V90_TX_RI;
                 }
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
@@ -1332,17 +1342,70 @@ static int16_t v90_phase3_sample(v90_state_t *s)
         }
         return v90_dil_sample(s);
 
-    case V90_TX_PHASE4:
-        /* Placeholder until real Phase 4 exists:
-           keep transmitting a TRN-like scrambled-ones waveform on U_INFO so the
-           far-end receiver does not lose carrier/equalizer lock immediately. */
+    case V90_TX_RI:
+        /* §9.4.1.1 Ri: retrain init — send idle codewords for V90_RI_SYMBOLS */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 placeholder: holding TRN-like waveform on U_INFO until MP/CP is implemented\n");
+            fprintf(stderr, "[V90] Phase 4: Ri (%d symbols)\n", V90_RI_SYMBOLS);
             s->phase4_hold_logged = true;
+        }
+        s->sample_count++;
+        if (s->sample_count >= V90_RI_SYMBOLS) {
+            s->tx_phase = V90_TX_TRN2D;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+        }
+        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+
+    case V90_TX_TRN2D:
+        /* §9.4.1.2 TRN2d: scrambled ones at U_INFO until cp_ready is set */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4: TRN2d at U_INFO=%d\n", s->u_info);
+            s->phase4_hold_logged = true;
+        }
+        if (s->cp_ready) {
+            s->tx_phase = V90_TX_CP;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+            s->diff_enc = 0;  /* reset differential encoder for CP */
         }
         sign = v90_scramble_bit(&s->scrambler, 1);
         s->sample_count++;
         return v90_pcm_signed(s->law, s->u_info, sign);
+
+    case V90_TX_CP:
+        /* §9.4.1.3 CP: call parameters frame as differentially-sign-encoded
+           PCM codewords at U_INFO. Each CP bit is scrambled then XORed into
+           the running sign. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4: CP (%d bits)\n", s->cp_nbits);
+            s->phase4_hold_logged = true;
+        }
+        if (s->cp_bit_pos >= s->cp_nbits) {
+            s->tx_phase = V90_TX_B1D;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        }
+        {
+            int cp_bit = s->cp_bits[s->cp_bit_pos++] & 1;
+            cp_bit = v90_scramble_bit(&s->scrambler, cp_bit);
+            s->diff_enc ^= cp_bit;
+            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+        }
+
+    case V90_TX_B1D:
+        /* §9.4.1.4 B1d: data-mode entry marker — brief idle burst then data */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4: B1d (%d symbols), entering data mode\n", V90_B1D_SYMBOLS);
+            s->phase4_hold_logged = true;
+            s->training_complete = true;
+        }
+        s->sample_count++;
+        if (s->sample_count >= V90_B1D_SYMBOLS) {
+            s->tx_phase = V90_TX_DATA;
+            s->sample_count = 0;
+        }
+        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
 
     default:
         break;
@@ -1528,6 +1591,23 @@ void v90_notify_s_detected(v90_state_t *s)
 bool v90_training_complete(v90_state_t *s)
 {
     return s ? s->training_complete : false;
+}
+
+bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
+{
+    if (!s || !cp)
+        return false;
+    if (!vpcm_cp_encode_bits(cp, s->cp_bits, &s->cp_nbits))
+        return false;
+    s->cp_frame = *cp;
+    s->cp_bit_pos = 0;
+    return true;
+}
+
+void v90_notify_cp_ready(v90_state_t *s)
+{
+    if (s && s->tx_phase == V90_TX_TRN2D)
+        s->cp_ready = true;
 }
 
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)

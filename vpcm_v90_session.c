@@ -462,23 +462,50 @@ static void vpcm_v90_transport_linear(v91_law_t law,
     }
 }
 
+/* Minimum TRN2d symbols before signalling CP ready (≥ 8 ms at 8 kHz; in
+ * practice we wait at least 1024 samples / ~128 ms to give the analogue side
+ * time to send its MP frame in a real deployment). */
+enum { VPCM_V90_MIN_TRN2D_SAMPLES = 1024 };
+
 static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
                                                   int u_info,
                                                   const v90_dil_desc_t *digital_dil,
+                                                  const v90_dil_analysis_t *dil_analysis,
                                                   const vpcm_v90_startup_contract_io_t *io)
 {
     v90_state_t *digital;
+    vpcm_cp_frame_t cp_frame;
+    uint8_t downstream_drn;
+    uint8_t upstream_drn;
     int total_samples;
+    int trn2d_samples;
     bool jd_termination_requested;
     bool dil_termination_requested;
+    bool cp_notified;
     bool ok;
 
-    if (!digital_dil)
+    if (!digital_dil || !dil_analysis)
         return false;
 
     digital = v90_init_data_pump(vpcm_v90_data_law(law));
     if (!digital) {
-        fprintf(stderr, "V.90 Phase 3: failed to initialize native downstream state\n");
+        fprintf(stderr, "V.90 Phase 3/4: failed to initialize native downstream state\n");
+        return false;
+    }
+
+    /* Build CP frame from DIL analysis so Phase 4 can stream it. */
+    vpcm_v92_select_profile_from_dil(dil_analysis, &downstream_drn, &upstream_drn);
+    vpcm_cp_init(&cp_frame);
+    cp_frame.transparent_mode_granted = false;
+    cp_frame.v90_compatibility = true;
+    cp_frame.drn = downstream_drn;
+    cp_frame.constellation_count = 1;
+    memset(cp_frame.dfi, 0, sizeof(cp_frame.dfi));
+    vpcm_cp_enable_all_ucodes(cp_frame.masks[0]);
+    if (!v90_set_phase4_cp(digital, &cp_frame)) {
+        fprintf(stderr, "V.90 Phase 4: failed to encode CP frame (drn=%u)\n",
+                (unsigned) downstream_drn);
+        v90_free(digital);
         return false;
     }
 
@@ -486,8 +513,10 @@ static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
     v90_start_phase3(digital, u_info);
 
     total_samples = 0;
+    trn2d_samples = 0;
     jd_termination_requested = false;
     dil_termination_requested = false;
+    cp_notified = false;
     ok = false;
     while (total_samples < VPCM_V90_PHASE3_NATIVE_MAX_SAMPLES) {
         int16_t tx_linear[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
@@ -504,12 +533,14 @@ static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
                                      true,
                                      tx_g711,
                                      VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
-            fprintf(stderr, "V.90 Phase 3: failed to record native downstream chunk\n");
+            fprintf(stderr, "V.90 Phase 3/4: failed to record native downstream chunk\n");
             break;
         }
 
         total_samples += VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES;
         tx_phase = v90_get_tx_phase(digital);
+
+        /* Phase 3 termination signals. */
         if (!jd_termination_requested && tx_phase == V90_TX_JD) {
             v90_notify_s_detected(digital);
             jd_termination_requested = true;
@@ -518,7 +549,21 @@ static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
             dil_termination_requested = true;
         }
 
-        if (tx_phase == V90_TX_PHASE4 || v90_using_internal_v34_tx(digital)) {
+        /* Phase 4: accumulate TRN2d and trigger CP when minimum elapsed. */
+        if (tx_phase == V90_TX_TRN2D) {
+            trn2d_samples += VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES;
+            if (!cp_notified && trn2d_samples >= VPCM_V90_MIN_TRN2D_SAMPLES) {
+                v90_notify_cp_ready(digital);
+                cp_notified = true;
+            }
+        }
+
+        if (v90_using_internal_v34_tx(digital)) {
+            /* Fell back to V.34 native — stop here. */
+            ok = true;
+            break;
+        }
+        if (v90_training_complete(digital)) {
             ok = true;
             break;
         }
@@ -526,10 +571,12 @@ static bool vpcm_v90_run_native_downstream_phase3(v91_law_t law,
 
     if (!ok) {
         fprintf(stderr,
-                "V.90 Phase 3: native downstream training did not reach Phase 4 (samples=%d jd_term=%d dil_term=%d tx_phase=%d)\n",
+                "V.90 Phase 3/4: native downstream training did not complete "
+                "(samples=%d jd_term=%d dil_term=%d cp_notified=%d tx_phase=%d)\n",
                 total_samples,
                 jd_termination_requested ? 1 : 0,
                 dil_termination_requested ? 1 : 0,
+                cp_notified ? 1 : 0,
                 (int) v90_get_tx_phase(digital));
     }
 
@@ -1263,6 +1310,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     if (!vpcm_v90_run_native_downstream_phase3(params->law,
                                                local_report.analogue_info1a.u_info,
                                                &digital_dil,
+                                               &digital_dil_analysis,
                                                io)) {
         return false;
     }
