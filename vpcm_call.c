@@ -253,7 +253,7 @@ void vpcm_call_set_v91_state(vpcm_call_t *call, vpcm_v91_modem_state_t state)
 {
     if (!call)
         return;
-    if (call->run_mode != VPCM_CALL_RUN_V91_MODEM)
+    if (call->run_mode == VPCM_CALL_RUN_NONE)
         call->run_mode = VPCM_CALL_RUN_V91_MODEM;
     if (call->state != VPCM_CALL_RUN)
         call->state = VPCM_CALL_RUN;

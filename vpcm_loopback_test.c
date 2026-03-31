@@ -182,6 +182,19 @@ static bool run_v8_exchange(v91_law_t law,
                             vpcm_v8_result_t *caller_result,
                             vpcm_v8_result_t *answer_result,
                             vpcm_call_pair_t *call_pair);
+static bool vpcm_record_call_simplex_g711(vpcm_call_pair_t *call_pair,
+                                          v91_law_t law,
+                                          bool caller_to_answerer,
+                                          const uint8_t *tx_codewords,
+                                          int codeword_len);
+static bool vpcm_record_call_duplex_g711(vpcm_call_pair_t *call_pair,
+                                         const uint8_t *caller_tx_codewords,
+                                         const uint8_t *answerer_tx_codewords,
+                                         int codeword_len);
+static int vpcm_frames_from_seconds(int seconds);
+static int vpcm_align_frames_for_duplex_bytes(int frames,
+                                              int downstream_bits_per_frame,
+                                              int upstream_bits_per_frame);
 
 static bool g_vpcm_verbose = false;
 static bool g_vpcm_session_diag = false;
@@ -351,6 +364,7 @@ static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
+static int run_v92_e2e_mode(v91_law_t law, int data_seconds);
 static bool run_v91_single_e2e_call_pjsip(v91_law_t law, int data_seconds, uint32_t seed);
 static const char *vpcm_pjsip_role_to_str(vpcm_pjsip_role_t role);
 static vpcm_pjsip_role_t vpcm_pjsip_parse_role(const char *role_env);
@@ -3135,7 +3149,9 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
 static bool run_v90_v92_startup_contract_session(v91_law_t law,
                                                  const char *path_label,
                                                  bool echo_limited,
-                                                 uint32_t seed_base)
+                                                 uint32_t seed_base,
+                                                 vpcm_call_pair_t *call_pair,
+                                                 int data_seconds)
 {
     enum { NOMINAL_10S_FRAMES = 13328 };
     v91_dil_desc_t default_dil;
@@ -3176,6 +3192,7 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     int startup_len;
     int cp_len;
     int total_codewords;
+    int data_frames;
     int down_total_bits;
     int down_total_bytes;
     int up_total_bits;
@@ -3196,6 +3213,8 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     v91_init(&answerer_rx, law, V91_MODE_TRANSPARENT);
     v91_default_dil_init(&default_dil);
     vpcm_v92_init_digital_dil_from_ja(&digital_dil, echo_limited);
+    if (data_seconds <= 0)
+        data_seconds = 10;
     vpcm_log_session_sequence_header("Digital", "Analogue");
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
@@ -3214,14 +3233,28 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     answerer_info.power_measured_after_digital_impairments = true;
 
     if (v91_tx_phase1_silence_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
-        || v91_tx_phase1_silence_codewords(&answerer_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
+        || v91_tx_phase1_silence_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_PHASE1_SILENCE_SYMBOLS) {
         fprintf(stderr, "V.90/V.92 startup contract path phase1 silence failed\n");
         return false;
     }
+    if (!vpcm_record_call_duplex_g711(call_pair,
+                                      startup_buf,
+                                      transport_buf,
+                                      V91_PHASE1_SILENCE_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path phase1 recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("Phase2 preamble TX", "waiting for INFO0", "waiting for INFO0", "Phase2 preamble TX");
-    if (v91_tx_ez_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
+    if (v91_tx_ez_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_EZ_SYMBOLS
         || v91_tx_ez_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS) {
         fprintf(stderr, "V.90/V.92 startup contract path Ez failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_duplex_g711(call_pair,
+                                      startup_buf,
+                                      transport_buf,
+                                      V91_EZ_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path Ez recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("INFO0-like TX", "waiting for INFO0", "INFO0-like RX", "INFO0-like TX");
@@ -3229,6 +3262,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (v91_tx_info_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf), &caller_info) != V91_INFO_SYMBOLS
         || !v91_rx_info_codewords(&answerer_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
         fprintf(stderr, "V.90/V.92 startup contract path caller INFO failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, transport_buf, V91_INFO_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path caller INFO recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("INFO0 ack TX", "waiting for A/B", "INFO0 ack RX", "waiting for A/B");
@@ -3240,6 +3277,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &answerer_info) != V91_INFO_SYMBOLS
         || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)) {
         fprintf(stderr, "V.90/V.92 startup contract path answerer INFO failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, transport_buf, V91_INFO_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path answerer INFO recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("A/B seen", "A/B seen", "waiting for L1/L2", "A/B TX");
@@ -3263,6 +3304,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path answerer DIL analysis failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, transport_buf, startup_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path caller DIL recording failed\n");
+        return false;
+    }
     if (g_vpcm_session_diag)
         vpcm_log("Later-phase adaptation block:");
     vpcm_log_session_sequence_row("DIL TX", "waiting for DIL", "DIL RX/analyse", "waiting for DIL");
@@ -3283,6 +3328,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path caller DIL tracking failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, transport_buf, startup_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path answerer DIL recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("DIL RX", "DIL RX/track", "waiting for adapt", "DIL TX");
 
     if (v91_tx_scr_codewords(&caller_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
@@ -3290,10 +3339,18 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path caller conditioning failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, scr_buf, 18)) {
+        fprintf(stderr, "V.90/V.92 startup contract path caller SCR recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("adapt TX", "waiting for adapt", "adapt RX", "waiting for adapt");
     if (v91_tx_scr_codewords(&answerer_startup, scr_buf, (int) sizeof(scr_buf), 18) != 18
         || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)) {
         fprintf(stderr, "V.90/V.92 startup contract path answerer conditioning failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, scr_buf, 18)) {
+        fprintf(stderr, "V.90/V.92 startup contract path answerer SCR recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("adapt RX", "adapt RX", "waiting for req", "adapt TX");
@@ -3312,6 +3369,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path downstream rate request failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, cp_buf, cp_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path downstream INFO1 recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("INFO1 down TX", "waiting for INFO1 ack", "INFO1 down RX", "waiting for INFO1 ack");
     vpcm_maybe_log_rate_request_diag("Digital -> Analogue downstream request",
                                      &cp_down_offer,
@@ -3324,12 +3385,21 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path downstream acknowledge failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, cp_buf, cp_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path downstream ACK recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("INFO1 down RX", "INFO1 down RX", "waiting for train", "INFO1 down TX");
     if (v91_tx_es_codewords(&caller_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&answerer_startup, es_buf, V91_ES_SYMBOLS, true)
         || v91_tx_b1_codewords(&caller_startup, b1_buf, (int) sizeof(b1_buf), &cp_down_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &cp_down_ack)) {
         fprintf(stderr, "V.90/V.92 startup contract path downstream startup sequence failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, es_buf, V91_ES_SYMBOLS)
+        || !vpcm_record_call_simplex_g711(call_pair, law, true, b1_buf, V91_B1_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path downstream training recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("down train TX", "waiting for up INFO1", "down train RX", "waiting for up INFO1");
@@ -3348,6 +3418,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path upstream rate request failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, cp_buf, cp_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path upstream INFO1 recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("waiting for up ack", "INFO1 up RX", "waiting for up ack", "INFO1 up TX");
     vpcm_maybe_log_rate_request_diag("Analogue -> Digital upstream request",
                                      &cp_up_offer,
@@ -3360,12 +3434,21 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         fprintf(stderr, "V.90/V.92 startup contract path upstream acknowledge failed\n");
         return false;
     }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, true, cp_buf, cp_len)) {
+        fprintf(stderr, "V.90/V.92 startup contract path upstream ACK recording failed\n");
+        return false;
+    }
     vpcm_log_session_sequence_row("INFO1 up TX", "waiting for up train", "INFO1 up RX", "INFO1 up TX");
     if (v91_tx_es_codewords(&answerer_startup, es_buf, (int) sizeof(es_buf)) != V91_ES_SYMBOLS
         || !v91_rx_es_codewords(&caller_startup, es_buf, V91_ES_SYMBOLS, true)
         || v91_tx_b1_codewords(&answerer_startup, b1_buf, (int) sizeof(b1_buf), &cp_up_ack) != V91_B1_SYMBOLS
         || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &cp_up_ack)) {
         fprintf(stderr, "V.90/V.92 startup contract path upstream startup sequence failed\n");
+        return false;
+    }
+    if (!vpcm_record_call_simplex_g711(call_pair, law, false, es_buf, V91_ES_SYMBOLS)
+        || !vpcm_record_call_simplex_g711(call_pair, law, false, b1_buf, V91_B1_SYMBOLS)) {
+        fprintf(stderr, "V.90/V.92 startup contract path upstream training recording failed\n");
         return false;
     }
     vpcm_log_session_sequence_row("waiting for DATA", "up train RX", "waiting for DATA", "up train TX");
@@ -3379,10 +3462,16 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     }
     vpcm_log_session_sequence_row("DATA down TX", "DATA up RX", "DATA down RX", "DATA up TX");
 
-    total_codewords = NOMINAL_10S_FRAMES * VPCM_CP_FRAME_INTERVALS;
-    down_total_bits = NOMINAL_10S_FRAMES * ((int) cp_down_ack.drn + 20);
+    data_frames = vpcm_frames_from_seconds(data_seconds);
+    if (data_frames < 1)
+        data_frames = NOMINAL_10S_FRAMES;
+    data_frames = vpcm_align_frames_for_duplex_bytes(data_frames,
+                                                     (int) cp_down_ack.drn + 20,
+                                                     (int) cp_up_ack.drn + 20);
+    total_codewords = data_frames * VPCM_CP_FRAME_INTERVALS;
+    down_total_bits = data_frames * ((int) cp_down_ack.drn + 20);
     down_total_bytes = down_total_bits / 8;
-    up_total_bits = NOMINAL_10S_FRAMES * ((int) cp_up_ack.drn + 20);
+    up_total_bits = data_frames * ((int) cp_up_ack.drn + 20);
     up_total_bytes = up_total_bits / 8;
     down_data_in = (uint8_t *) malloc((size_t) down_total_bytes);
     down_data_out = (uint8_t *) malloc((size_t) down_total_bytes);
@@ -3423,6 +3512,19 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
         free(up_pcm_tx);
         free(up_pcm_rx);
         fprintf(stderr, "V.90/V.92 startup contract path tx length mismatch\n");
+        return false;
+    }
+
+    if (!vpcm_record_call_duplex_g711(call_pair, down_pcm_tx, up_pcm_tx, total_codewords)) {
+        free(down_data_in);
+        free(down_data_out);
+        free(up_data_in);
+        free(up_data_out);
+        free(down_pcm_tx);
+        free(down_pcm_rx);
+        free(up_pcm_tx);
+        free(up_pcm_rx);
+        fprintf(stderr, "V.90/V.92 startup contract path data recording failed\n");
         return false;
     }
 
@@ -3488,9 +3590,10 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
 
     vpcm_format_rate(down_rate_buf, sizeof(down_rate_buf), cp_down_ack.drn);
     vpcm_format_rate(up_rate_buf, sizeof(up_rate_buf), cp_up_ack.drn);
-    vpcm_log("PASS: V.90/V.92 startup contract path (%s, %s, digital->analogue=%s, analogue->digital=%s%s)",
+    vpcm_log("PASS: V.90/V.92 startup contract path (%s, %s, data_seconds=%d, digital->analogue=%s, analogue->digital=%s%s)",
              vpcm_law_to_str(law),
              path_label,
+             data_seconds,
              down_rate_buf,
              up_rate_buf,
              echo_limited ? ", echo-adapted" : "");
@@ -4305,6 +4408,153 @@ static void vpcm_encode_linear_chunk_to_g711(v91_law_t law,
         dst[i] = v91_linear_to_codeword(law, src[i]);
 }
 
+static uint8_t vpcm_call_silence_codeword(v91_law_t law)
+{
+    return v91_ucode_to_codeword(law, 0, true);
+}
+
+static bool vpcm_record_call_duplex_g711(vpcm_call_pair_t *call_pair,
+                                         const uint8_t *caller_tx_codewords,
+                                         const uint8_t *answerer_tx_codewords,
+                                         int codeword_len)
+{
+    size_t frame_bytes;
+    int offset;
+
+    if (!call_pair)
+        return true;
+    if (!caller_tx_codewords || !answerer_tx_codewords || codeword_len < 0)
+        return false;
+    if (codeword_len == 0)
+        return true;
+
+    frame_bytes = vpcm_call_frame_bytes(call_pair->caller);
+    if (frame_bytes == 0)
+        frame_bytes = 64;
+
+    for (offset = 0; offset < codeword_len; ) {
+        size_t chunk_len = frame_bytes;
+
+        if (chunk_len > (size_t) (codeword_len - offset))
+            chunk_len = (size_t) (codeword_len - offset);
+        if (!vpcm_call_pair_record_g711_exchange(call_pair,
+                                                 caller_tx_codewords + offset,
+                                                 answerer_tx_codewords + offset,
+                                                 chunk_len)) {
+            return false;
+        }
+        offset += (int) chunk_len;
+    }
+    return true;
+}
+
+static bool vpcm_record_call_simplex_g711(vpcm_call_pair_t *call_pair,
+                                          v91_law_t law,
+                                          bool caller_to_answerer,
+                                          const uint8_t *tx_codewords,
+                                          int codeword_len)
+{
+    uint8_t reverse_silence[256];
+    uint8_t silence_codeword;
+    size_t frame_bytes;
+    int offset;
+
+    if (!call_pair)
+        return true;
+    if (!tx_codewords || codeword_len < 0)
+        return false;
+    if (codeword_len == 0)
+        return true;
+
+    frame_bytes = vpcm_call_frame_bytes(call_pair->caller);
+    if (frame_bytes == 0 || frame_bytes > sizeof(reverse_silence))
+        frame_bytes = sizeof(reverse_silence);
+    silence_codeword = vpcm_call_silence_codeword(law);
+    memset(reverse_silence, silence_codeword, frame_bytes);
+
+    for (offset = 0; offset < codeword_len; ) {
+        size_t chunk_len = frame_bytes;
+
+        if (chunk_len > (size_t) (codeword_len - offset))
+            chunk_len = (size_t) (codeword_len - offset);
+        if (!vpcm_call_pair_record_g711_exchange(call_pair,
+                                                 caller_to_answerer ? tx_codewords + offset : reverse_silence,
+                                                 caller_to_answerer ? reverse_silence : tx_codewords + offset,
+                                                 chunk_len)) {
+            return false;
+        }
+        offset += (int) chunk_len;
+    }
+    return true;
+}
+
+static int vpcm_frames_from_seconds(int seconds)
+{
+    long long frames;
+
+    if (seconds <= 0)
+        return 0;
+    frames = ((long long) seconds * 8000LL) / (long long) VPCM_CP_FRAME_INTERVALS;
+    if (frames < 1)
+        frames = 1;
+    frames -= (frames % 4LL);
+    if (frames < 4)
+        frames = 4;
+    if (frames > 2000000000LL)
+        frames = 2000000000LL;
+    return (int) frames;
+}
+
+static int vpcm_gcd_int(int a, int b)
+{
+    int t;
+
+    if (a < 0)
+        a = -a;
+    if (b < 0)
+        b = -b;
+    while (b != 0) {
+        t = a % b;
+        a = b;
+        b = t;
+    }
+    return (a == 0) ? 1 : a;
+}
+
+static int vpcm_lcm_int(int a, int b)
+{
+    int gcd;
+
+    if (a <= 0)
+        return b;
+    if (b <= 0)
+        return a;
+    gcd = vpcm_gcd_int(a, b);
+    return (a / gcd) * b;
+}
+
+static int vpcm_align_frames_for_duplex_bytes(int frames,
+                                              int downstream_bits_per_frame,
+                                              int upstream_bits_per_frame)
+{
+    int align_frames;
+    int down_align;
+    int up_align;
+
+    if (frames <= 0)
+        return 0;
+    down_align = 8 / vpcm_gcd_int(8, downstream_bits_per_frame);
+    up_align = 8 / vpcm_gcd_int(8, upstream_bits_per_frame);
+    align_frames = vpcm_lcm_int(4, down_align);
+    align_frames = vpcm_lcm_int(align_frames, up_align);
+    if (align_frames < 1)
+        align_frames = 1;
+    frames -= (frames % align_frames);
+    if (frames < align_frames)
+        frames = align_frames;
+    return frames;
+}
+
 static bool run_v8_exchange(v91_law_t law,
                             const v8_parms_t *caller_parms,
                             const v8_parms_t *answer_parms,
@@ -4349,10 +4599,10 @@ static bool run_v8_exchange(v91_law_t law,
         if (call_pair) {
             vpcm_encode_linear_chunk_to_g711(law, caller_tx, caller_tx_g711, VPCM_CHUNK_SAMPLES);
             vpcm_encode_linear_chunk_to_g711(law, answer_tx, answer_tx_g711, VPCM_CHUNK_SAMPLES);
-            if (!vpcm_call_pair_record_g711_exchange(call_pair,
-                                                     caller_tx_g711,
-                                                     answer_tx_g711,
-                                                     (size_t) VPCM_CHUNK_SAMPLES)) {
+            if (!vpcm_record_call_duplex_g711(call_pair,
+                                              caller_tx_g711,
+                                              answer_tx_g711,
+                                              VPCM_CHUNK_SAMPLES)) {
                 v8_free(caller);
                 v8_free(answer);
                 fprintf(stderr, "failed to record V.8 exchange onto call streams\n");
@@ -4835,11 +5085,15 @@ static bool test_v90_v92_startup_contract_path(v91_law_t law)
     return run_v90_v92_startup_contract_session(law,
                                                 "clean line",
                                                 false,
-                                                0x92000000U ^ ((uint32_t) law << 8))
+                                                0x92000000U ^ ((uint32_t) law << 8),
+                                                NULL,
+                                                10)
         && run_v90_v92_startup_contract_session(law,
                                                 "startup echo estimate",
                                                 true,
-                                                0x92100000U ^ ((uint32_t) law << 8));
+                                                0x92100000U ^ ((uint32_t) law << 8),
+                                                NULL,
+                                                10);
 }
 
 static bool test_v91_codeword_loopback(v91_law_t law)
@@ -6450,6 +6704,149 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
                                        data_seconds);
 }
 
+static bool run_v92_single_e2e_call(v91_law_t law, uint32_t seed, int data_seconds)
+{
+    enum { VPCM_SESSION_STREAM_CAPACITY = 8192 };
+    const int caller_v92 = 0x45;
+    const int answer_v92 = 0x46;
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
+    vpcm_call_t caller_call;
+    vpcm_call_t answerer_call;
+    vpcm_call_pair_t call_pair;
+    vpcm_call_params_t call_params;
+    uint8_t *caller_tx_storage;
+    uint8_t *caller_rx_storage;
+    uint8_t *answerer_tx_storage;
+    uint8_t *answerer_rx_storage;
+    bool taps_attached;
+    bool ok;
+
+    if (g_vpcm_transport_backend != VPCM_TRANSPORT_LOOPBACK) {
+        fprintf(stderr, "V.92 E2E call is currently implemented only for loopback transport\n");
+        return false;
+    }
+    if (data_seconds <= 0)
+        data_seconds = 10;
+
+    caller_tx_storage = NULL;
+    caller_rx_storage = NULL;
+    answerer_tx_storage = NULL;
+    answerer_rx_storage = NULL;
+    taps_attached = false;
+    ok = false;
+
+    init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
+    init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90, V8_PSTN_PCM_MODEM_V90_V92_DIGITAL);
+    caller_parms.v92 = caller_v92;
+    answer_parms.v92 = answer_v92;
+
+    memset(&call_params, 0, sizeof(call_params));
+    call_params.law = law;
+    call_params.sample_rate = 8000;
+    call_params.frame_samples = 64;
+    call_params.caller_id = "caller";
+    call_params.callee_id = "answerer";
+    call_params.label = "V.92 single-call E2E";
+
+    caller_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    caller_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_tx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    answerer_rx_storage = (uint8_t *) malloc(VPCM_SESSION_STREAM_CAPACITY);
+    if (!caller_tx_storage || !caller_rx_storage || !answerer_tx_storage || !answerer_rx_storage) {
+        fprintf(stderr, "V.92 call object allocation failed\n");
+        goto cleanup;
+    }
+    if (!vpcm_call_init(&caller_call,
+                        &call_params,
+                        caller_tx_storage,
+                        VPCM_SESSION_STREAM_CAPACITY,
+                        caller_rx_storage,
+                        VPCM_SESSION_STREAM_CAPACITY)
+        || !vpcm_call_init(&answerer_call,
+                           &call_params,
+                           answerer_tx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY,
+                           answerer_rx_storage,
+                           VPCM_SESSION_STREAM_CAPACITY)) {
+        fprintf(stderr, "V.92 call object init failed\n");
+        goto cleanup;
+    }
+    if (!vpcm_call_pair_init(&call_pair, &caller_call, &answerer_call, "V.92 single-call E2E")) {
+        fprintf(stderr, "V.92 call pair init failed\n");
+        goto cleanup;
+    }
+    if (!vpcm_call_pair_attach_taps(&call_pair, getenv("VPCM_G711_TAP_DIR"))) {
+        fprintf(stderr, "V.92 tap setup failed\n");
+        goto cleanup;
+    }
+    taps_attached = true;
+    if (getenv("VPCM_G711_TAP_DIR"))
+        vpcm_log_e2e_phase("CALL", "G.711 tap capture enabled in %s", getenv("VPCM_G711_TAP_DIR"));
+    if (!vpcm_call_pair_drive_to_run(&call_pair, VPCM_CALL_RUN_V90_MODEM)) {
+        fprintf(stderr, "V.92 call lifecycle progression failed\n");
+        goto cleanup;
+    }
+    vpcm_log_call_pair_mode(&call_pair);
+    vpcm_call_pair_set_v91_state(&call_pair, VPCM_V91_MODEM_V8);
+    vpcm_log_call_pair_v91_state(&call_pair);
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms, &caller_result, &answer_result, &call_pair)) {
+        fprintf(stderr, "V.92 V.8 call bring-up failed\n");
+        goto cleanup;
+    }
+    if ((caller_result.result.jm_cm.modulations & V8_MOD_V90) == 0
+        || (answer_result.result.jm_cm.modulations & V8_MOD_V90) == 0
+        || (caller_result.result.jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V90_V92_DIGITAL) == 0
+        || (answer_result.result.jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V90_V92_DIGITAL) == 0) {
+        fprintf(stderr, "V.92 V.8 capability result did not advertise the V.90/V.92 digital path\n");
+        goto cleanup;
+    }
+    if (caller_result.result.v92 != answer_v92 || answer_result.result.v92 != caller_v92) {
+        fprintf(stderr,
+                "V.92 V.8 QC/QCA exchange mismatch caller_rx=0x%X answer_rx=0x%X expected caller=0x%X answer=0x%X\n",
+                caller_result.result.v92,
+                answer_result.result.v92,
+                answer_v92,
+                caller_v92);
+        goto cleanup;
+    }
+    vpcm_log_e2e_phase("V8",
+                       "V.92 QC/QCA exchange complete (caller_rx=0x%02X answer_rx=0x%02X)",
+                       caller_result.result.v92,
+                       answer_result.result.v92);
+    vpcm_call_pair_set_v91_state(&call_pair, VPCM_V91_MODEM_INFO);
+    vpcm_log_call_pair_v91_state(&call_pair);
+    vpcm_log_e2e_phase("MODEL",
+                       "V.92 startup/data contract begins after successful V.8 V.90/V.92 capability signalling");
+    if (!run_v90_v92_startup_contract_session(law,
+                                              "loopback clean line",
+                                              false,
+                                              seed,
+                                              &call_pair,
+                                              data_seconds)) {
+        goto cleanup;
+    }
+    vpcm_call_pair_set_v91_state(&call_pair, VPCM_V91_MODEM_CLEARDOWN);
+    vpcm_log_call_pair_v91_state(&call_pair);
+    if (!vpcm_call_pair_drive_to_done(&call_pair)) {
+        fprintf(stderr, "V.92 call hangup progression failed\n");
+        goto cleanup;
+    }
+    vpcm_log_call_pair_state(&call_pair);
+    ok = true;
+
+cleanup:
+    if (taps_attached)
+        vpcm_call_pair_detach_taps(&call_pair);
+    free(caller_tx_storage);
+    free(caller_rx_storage);
+    free(answerer_tx_storage);
+    free(answerer_rx_storage);
+    return ok;
+}
+
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds)
 {
     double start_wall;
@@ -6498,14 +6895,65 @@ static int run_v91_e2e_mode(v91_law_t law, int data_seconds)
     return 0;
 }
 
+static int run_v92_e2e_mode(v91_law_t law, int data_seconds)
+{
+    double start_wall;
+    bool ok;
+    uint32_t seed;
+
+    seed = 0x09200000U ^ (uint32_t) law;
+    if (data_seconds <= 0)
+        data_seconds = 10;
+
+    signal(SIGINT, vpcm_handle_sigint);
+    signal(SIGTERM, vpcm_handle_sigint);
+    g_vpcm_compact_e2e = true;
+    start_wall = vpcm_monotonic_seconds();
+
+    vpcm_log("V.92 E2E mode starting (law=%s, transport=%s, realtime=%s, data_seconds=%d)",
+             vpcm_law_to_str(law),
+             (g_vpcm_transport_backend == VPCM_TRANSPORT_LOOPBACK) ? "loopback" : "pj-sip",
+             g_vpcm_realtime ? "on" : "off",
+             data_seconds);
+
+    if (g_vpcm_stop_requested) {
+        vpcm_log("V.92 E2E finished: reason=cancelled before call start elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+        g_vpcm_compact_e2e = false;
+        return 0;
+    }
+
+    vpcm_log("V.92 E2E call starting");
+    ok = run_v92_single_e2e_call(law, seed, data_seconds);
+    if (!ok) {
+        vpcm_log("V.92 E2E finished: reason=call collapsed elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+        g_vpcm_compact_e2e = false;
+        return 1;
+    }
+
+    if (g_vpcm_stop_requested) {
+        vpcm_log("V.92 E2E finished: reason=cancelled elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+    } else {
+        vpcm_log("V.92 E2E finished: reason=data duration reached elapsed=%.1fs",
+                 vpcm_monotonic_seconds() - start_wall);
+    }
+    g_vpcm_compact_e2e = false;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *verbose_env;
     bool run_sessions;
     bool run_primitives;
     bool run_v91_e2e_call;
+    bool run_v92_e2e_call;
     int v91_e2e_seconds;
+    int v92_e2e_seconds;
     v91_law_t v91_e2e_law;
+    v91_law_t v92_e2e_law;
     int i;
 
     verbose_env = getenv("VPCM_VERBOSE");
@@ -6513,8 +6961,11 @@ int main(int argc, char **argv)
     run_sessions = true;
     run_primitives = false;
     run_v91_e2e_call = false;
+    run_v92_e2e_call = false;
     v91_e2e_seconds = 0;
+    v92_e2e_seconds = 0;
     v91_e2e_law = V91_LAW_ULAW;
+    v92_e2e_law = V91_LAW_ULAW;
     g_vpcm_stop_requested = 0;
 
     for (i = 1; i < argc; i++) {
@@ -6551,6 +7002,10 @@ int main(int argc, char **argv)
             run_v91_e2e_call = true;
             run_sessions = false;
             run_primitives = false;
+        } else if (strcmp(argv[i], "--v92-e2e-call") == 0) {
+            run_v92_e2e_call = true;
+            run_sessions = false;
+            run_primitives = false;
         } else if (strcmp(argv[i], "--v91-e2e-seconds") == 0) {
             char *end = NULL;
             long v;
@@ -6565,6 +7020,20 @@ int main(int argc, char **argv)
                 return 2;
             }
             v91_e2e_seconds = (int) v;
+        } else if (strcmp(argv[i], "--v92-e2e-seconds") == 0) {
+            char *end = NULL;
+            long v;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--v92-e2e-seconds requires an integer argument\n");
+                return 2;
+            }
+            i++;
+            v = strtol(argv[i], &end, 10);
+            if (end == NULL || *end != '\0' || v < 0 || v > 86400) {
+                fprintf(stderr, "Invalid --v92-e2e-seconds value: %s (expected 0..86400)\n", argv[i]);
+                return 2;
+            }
+            v92_e2e_seconds = (int) v;
         } else if (strcmp(argv[i], "--v91-e2e-law") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "--v91-e2e-law requires one of: ulaw, alaw\n");
@@ -6577,6 +7046,20 @@ int main(int argc, char **argv)
                 v91_e2e_law = V91_LAW_ALAW;
             } else {
                 fprintf(stderr, "Unknown --v91-e2e-law value: %s\n", argv[i]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--v92-e2e-law") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--v92-e2e-law requires one of: ulaw, alaw\n");
+                return 2;
+            }
+            i++;
+            if (strcmp(argv[i], "ulaw") == 0) {
+                v92_e2e_law = V91_LAW_ULAW;
+            } else if (strcmp(argv[i], "alaw") == 0) {
+                v92_e2e_law = V91_LAW_ALAW;
+            } else {
+                fprintf(stderr, "Unknown --v92-e2e-law value: %s\n", argv[i]);
                 return 2;
             }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -6600,6 +7083,9 @@ int main(int argc, char **argv)
             printf("  --v91-e2e-call    Run V.91 single-call end-to-end mode (focus mode).\n");
             printf("  --v91-e2e-seconds <n> V.91 data transmit duration in seconds (default: 10).\n");
             printf("  --v91-e2e-law <ulaw|alaw> Set V.91 E2E law (default: ulaw).\n");
+            printf("  --v92-e2e-call    Run V.92 single-call end-to-end mode over loopback.\n");
+            printf("  --v92-e2e-seconds <n> V.92 data transmit duration in seconds (default: 10).\n");
+            printf("  --v92-e2e-law <ulaw|alaw> Set V.92 E2E law (default: ulaw).\n");
             return 0;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -6607,7 +7093,7 @@ int main(int argc, char **argv)
         }
     }
 
-    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s, experimental_v90_info=%s, realtime=%s, transport=%s, v91_e2e=%s)",
+    vpcm_log("PCM modem loopback harness starting (verbose=%s, session_diag=%s, sessions=%s, primitives=%s, experimental_v90_info=%s, realtime=%s, transport=%s, v91_e2e=%s, v92_e2e=%s)",
              g_vpcm_verbose ? "on" : "off",
              g_vpcm_session_diag ? "on" : "off",
              run_sessions ? "on" : "off",
@@ -6615,10 +7101,14 @@ int main(int argc, char **argv)
              g_vpcm_experimental_v90_info ? "on" : "off",
              g_vpcm_realtime ? "on" : "off",
              (g_vpcm_transport_backend == VPCM_TRANSPORT_LOOPBACK) ? "loopback" : "pj-sip",
-             run_v91_e2e_call ? "on" : "off");
+             run_v91_e2e_call ? "on" : "off",
+             run_v92_e2e_call ? "on" : "off");
 
     if (run_v91_e2e_call) {
         return run_v91_e2e_mode(v91_e2e_law, v91_e2e_seconds);
+    }
+    if (run_v92_e2e_call) {
+        return run_v92_e2e_mode(v92_e2e_law, v92_e2e_seconds);
     }
 
     if (run_sessions && !run_vpcm_session_suite())
