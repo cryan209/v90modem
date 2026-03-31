@@ -141,10 +141,10 @@ endif
 
 all: $(TARGET) $(TEST_TARGETS)
 
-$(TARGET): $(OBJS) $(SPANDSP_LIB) $(PJ_BUILD_PREREQ)
+$(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
-vpcm_loopback_test: $(TEST_OBJS) $(SPANDSP_LIB) $(PJ_BUILD_PREREQ)
+vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
 
 $(SPANDSP_LIB):

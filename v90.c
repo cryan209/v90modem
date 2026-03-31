@@ -172,6 +172,19 @@ static void v90_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
     *bit_pos += bits;
 }
 
+static int v90_bits_get(const uint8_t *buf, int bit_pos, int bits)
+{
+    int i;
+    int value;
+
+    value = 0;
+    for (i = 0; i < bits; i++) {
+        if (buf[(bit_pos + i) >> 3] & (1U << ((bit_pos + i) & 7)))
+            value |= 1U << i;
+    }
+    return value;
+}
+
 static uint16_t v90_crc_bit_block(const uint8_t buf[], int first_bit, int last_bit, uint16_t crc)
 {
     int pre;
@@ -191,6 +204,13 @@ static uint16_t v90_crc_bit_block(const uint8_t buf[], int first_bit, int last_b
     if (post)
         crc = crc_itu16_bits(buf[last_bit], post, crc);
     return crc;
+}
+
+static bool v90_info_fill_and_sync_ok(const uint8_t *bits, int expected_bits)
+{
+    return bits
+        && expected_bits >= 12
+        && v90_bits_get(bits, 0, 12) == V90_INFO_FILL_AND_SYNC_BITS;
 }
 
 static int v90_codeword_to_ucode(v90_law_t law, uint8_t codeword)
@@ -297,12 +317,32 @@ void v90_info1a_init(v90_info1a_t *info)
     info->freq_offset = 0;
 }
 
+bool v90_info0a_validate(const v90_info0a_t *info)
+{
+    if (!info)
+        return false;
+    return info->max_baud_rate_difference <= 7
+        && info->tx_clock_source <= 3;
+}
+
+bool v90_info1a_validate(const v90_info1a_t *info)
+{
+    if (!info)
+        return false;
+    return info->md <= 0x7F
+        && info->u_info <= 0x7F
+        && info->upstream_symbol_rate_code <= 0x7
+        && info->downstream_rate_code <= 0x7
+        && info->freq_offset >= -512
+        && info->freq_offset <= 511;
+}
+
 bool v90_build_info0a_bits(uint8_t *buf, int buf_len, const v90_info0a_t *info)
 {
     int bit_pos;
     uint16_t crc;
 
-    if (!buf || !info || buf_len < ((V90_INFO0A_BITS + 7) / 8))
+    if (!buf || !v90_info0a_validate(info) || buf_len < ((V90_INFO0A_BITS + 7) / 8))
         return false;
     memset(buf, 0, (size_t) buf_len);
     bit_pos = 0;
@@ -333,7 +373,7 @@ bool v90_build_info1a_bits(uint8_t *buf, int buf_len, const v90_info1a_t *info)
     uint16_t crc;
     uint16_t freq_bits;
 
-    if (!buf || !info || buf_len < ((V90_INFO1A_BITS + 7) / 8))
+    if (!buf || !v90_info1a_validate(info) || buf_len < ((V90_INFO1A_BITS + 7) / 8))
         return false;
     memset(buf, 0, (size_t) buf_len);
     bit_pos = 0;
@@ -352,6 +392,163 @@ bool v90_build_info1a_bits(uint8_t *buf, int buf_len, const v90_info1a_t *info)
     v90_bits_put(buf, &bit_pos, crc, 16);
     v90_bits_put(buf, &bit_pos, 0xFU, 4);
     return bit_pos == V90_INFO1A_BITS;
+}
+
+bool v90_parse_info0a_bits(v90_info0a_t *out, const uint8_t *bits, int bit_len)
+{
+    v90_info0a_t parsed;
+    uint16_t crc_field;
+    uint16_t crc_remainder;
+
+    if (!out || !bits || bit_len < V90_INFO0A_BITS)
+        return false;
+    if (!v90_info_fill_and_sync_ok(bits, bit_len))
+        return false;
+    if (v90_bits_get(bits, 45, 4) != 0xF)
+        return false;
+
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.support_2743 = v90_bits_get(bits, 12, 1) != 0;
+    parsed.support_2800 = v90_bits_get(bits, 13, 1) != 0;
+    parsed.support_3429 = v90_bits_get(bits, 14, 1) != 0;
+    parsed.support_3000_low = v90_bits_get(bits, 15, 1) != 0;
+    parsed.support_3000_high = v90_bits_get(bits, 16, 1) != 0;
+    parsed.support_3200_low = v90_bits_get(bits, 17, 1) != 0;
+    parsed.support_3200_high = v90_bits_get(bits, 18, 1) != 0;
+    parsed.rate_3429_allowed = v90_bits_get(bits, 19, 1) != 0;
+    parsed.support_power_reduction = v90_bits_get(bits, 20, 1) != 0;
+    parsed.max_baud_rate_difference = (uint8_t) v90_bits_get(bits, 21, 3);
+    parsed.from_cme_modem = v90_bits_get(bits, 24, 1) != 0;
+    parsed.support_1664_point_constellation = v90_bits_get(bits, 25, 1) != 0;
+    parsed.tx_clock_source = (uint8_t) v90_bits_get(bits, 26, 2);
+    parsed.acknowledge_info0d = v90_bits_get(bits, 28, 1) != 0;
+
+    if (!v90_info0a_validate(&parsed))
+        return false;
+    crc_field = (uint16_t) v90_bits_get(bits, 29, 16);
+    crc_remainder = v90_crc_bit_block(bits, 12, 28, 0xFFFF);
+    if (crc_field != crc_remainder)
+        return false;
+
+    *out = parsed;
+    return true;
+}
+
+bool v90_parse_info1a_bits(v90_info1a_t *out, const uint8_t *bits, int bit_len)
+{
+    v90_info1a_t parsed;
+    int raw_freq;
+    uint16_t crc_field;
+    uint16_t crc_remainder;
+
+    if (!out || !bits || bit_len < V90_INFO1A_BITS)
+        return false;
+    if (!v90_info_fill_and_sync_ok(bits, bit_len))
+        return false;
+    if (v90_bits_get(bits, 66, 4) != 0xF)
+        return false;
+    if (v90_bits_get(bits, 12, 6) != 0 || v90_bits_get(bits, 32, 2) != 0)
+        return false;
+
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.md = (uint8_t) v90_bits_get(bits, 18, 7);
+    parsed.u_info = (uint8_t) v90_bits_get(bits, 25, 7);
+    parsed.upstream_symbol_rate_code = (uint8_t) v90_bits_get(bits, 34, 3);
+    parsed.downstream_rate_code = (uint8_t) v90_bits_get(bits, 37, 3);
+    raw_freq = v90_bits_get(bits, 40, 10);
+    if (raw_freq & 0x200)
+        raw_freq -= 0x400;
+    parsed.freq_offset = (int16_t) raw_freq;
+
+    if (!v90_info1a_validate(&parsed))
+        return false;
+    crc_field = (uint16_t) v90_bits_get(bits, 50, 16);
+    crc_remainder = v90_crc_bit_block(bits, 12, 49, 0xFFFF);
+    if (crc_field != crc_remainder)
+        return false;
+
+    *out = parsed;
+    return true;
+}
+
+bool v90_info0a_build_diag(const v90_info0a_t *info, v90_info0a_diag_t *diag)
+{
+    int i;
+    uint8_t packed[(V90_INFO0A_BITS + 7) / 8];
+
+    if (!diag || !v90_build_info0a_bits(packed, (int) sizeof(packed), info))
+        return false;
+    memset(diag, 0, sizeof(*diag));
+    diag->frame = *info;
+    for (i = 0; i < V90_INFO0A_BITS; i++)
+        diag->bits[i] = (uint8_t) ((packed[i >> 3] >> (i & 7)) & 1U);
+    diag->crc_field = (uint16_t) v90_bits_get(packed, 29, 16);
+    diag->crc_remainder = v90_crc_bit_block(packed, 12, 28, 0xFFFF);
+    diag->fill_and_sync_ok = v90_info_fill_and_sync_ok(packed, V90_INFO0A_BITS)
+                          && v90_bits_get(packed, 45, 4) == 0xF;
+    diag->valid = diag->fill_and_sync_ok && diag->crc_field == diag->crc_remainder;
+    return true;
+}
+
+bool v90_info1a_build_diag(const v90_info1a_t *info, v90_info1a_diag_t *diag)
+{
+    int i;
+    uint8_t packed[(V90_INFO1A_BITS + 7) / 8];
+
+    if (!diag || !v90_build_info1a_bits(packed, (int) sizeof(packed), info))
+        return false;
+    memset(diag, 0, sizeof(*diag));
+    diag->frame = *info;
+    for (i = 0; i < V90_INFO1A_BITS; i++)
+        diag->bits[i] = (uint8_t) ((packed[i >> 3] >> (i & 7)) & 1U);
+    diag->crc_field = (uint16_t) v90_bits_get(packed, 50, 16);
+    diag->crc_remainder = v90_crc_bit_block(packed, 12, 49, 0xFFFF);
+    diag->fill_and_sync_ok = v90_info_fill_and_sync_ok(packed, V90_INFO1A_BITS)
+                          && v90_bits_get(packed, 66, 4) == 0xF;
+    diag->valid = diag->fill_and_sync_ok && diag->crc_field == diag->crc_remainder;
+    return true;
+}
+
+bool v90_info0a_decode_diag(const uint8_t *bits, int bit_len, v90_info0a_diag_t *diag)
+{
+    int i;
+    v90_info0a_t parsed;
+
+    if (!diag || !bits || bit_len < V90_INFO0A_BITS)
+        return false;
+    memset(diag, 0, sizeof(*diag));
+    for (i = 0; i < V90_INFO0A_BITS; i++)
+        diag->bits[i] = (uint8_t) ((bits[i >> 3] >> (i & 7)) & 1U);
+    diag->crc_field = (uint16_t) v90_bits_get(bits, 29, 16);
+    diag->crc_remainder = v90_crc_bit_block(bits, 12, 28, 0xFFFF);
+    diag->fill_and_sync_ok = v90_info_fill_and_sync_ok(bits, bit_len)
+                          && v90_bits_get(bits, 45, 4) == 0xF;
+    diag->valid = diag->fill_and_sync_ok && diag->crc_field == diag->crc_remainder;
+    if (!diag->valid || !v90_parse_info0a_bits(&parsed, bits, bit_len))
+        return false;
+    diag->frame = parsed;
+    return true;
+}
+
+bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t *diag)
+{
+    int i;
+    v90_info1a_t parsed;
+
+    if (!diag || !bits || bit_len < V90_INFO1A_BITS)
+        return false;
+    memset(diag, 0, sizeof(*diag));
+    for (i = 0; i < V90_INFO1A_BITS; i++)
+        diag->bits[i] = (uint8_t) ((bits[i >> 3] >> (i & 7)) & 1U);
+    diag->crc_field = (uint16_t) v90_bits_get(bits, 50, 16);
+    diag->crc_remainder = v90_crc_bit_block(bits, 12, 49, 0xFFFF);
+    diag->fill_and_sync_ok = v90_info_fill_and_sync_ok(bits, bit_len)
+                          && v90_bits_get(bits, 66, 4) == 0xF;
+    diag->valid = diag->fill_and_sync_ok && diag->crc_field == diag->crc_remainder;
+    if (!diag->valid || !v90_parse_info1a_bits(&parsed, bits, bit_len))
+        return false;
+    diag->frame = parsed;
+    return true;
 }
 
 /* ---- Jd frame construction (Table 13) ---- */

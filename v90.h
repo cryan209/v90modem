@@ -59,6 +59,24 @@ typedef struct {
     int16_t freq_offset;
 } v90_info1a_t;
 
+typedef struct {
+    v90_info0a_t frame;
+    uint8_t bits[V90_INFO0A_BITS];
+    uint16_t crc_field;
+    uint16_t crc_remainder;
+    bool fill_and_sync_ok;
+    bool valid;
+} v90_info0a_diag_t;
+
+typedef struct {
+    v90_info1a_t frame;
+    uint8_t bits[V90_INFO1A_BITS];
+    uint16_t crc_field;
+    uint16_t crc_remainder;
+    bool fill_and_sync_ok;
+    bool valid;
+} v90_info1a_diag_t;
+
 /* PCM law selection */
 typedef enum {
     V90_LAW_ULAW = 0,
@@ -148,8 +166,16 @@ void v90_info0a_init(v90_info0a_t *info);
 void v90_info1a_init(v90_info1a_t *info);
 
 /* Pack analogue-side INFO frames bit-0 first for V.34/V.90 Phase 2 testing. */
+bool v90_info0a_validate(const v90_info0a_t *info);
+bool v90_info1a_validate(const v90_info1a_t *info);
 bool v90_build_info0a_bits(uint8_t *buf, int buf_len, const v90_info0a_t *info);
 bool v90_build_info1a_bits(uint8_t *buf, int buf_len, const v90_info1a_t *info);
+bool v90_parse_info0a_bits(v90_info0a_t *out, const uint8_t *bits, int bit_len);
+bool v90_parse_info1a_bits(v90_info1a_t *out, const uint8_t *bits, int bit_len);
+bool v90_info0a_build_diag(const v90_info0a_t *info, v90_info0a_diag_t *diag);
+bool v90_info1a_build_diag(const v90_info1a_t *info, v90_info1a_diag_t *diag);
+bool v90_info0a_decode_diag(const uint8_t *bits, int bit_len, v90_info0a_diag_t *diag);
+bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t *diag);
 
 /*
  * Parse a packed Ja/DIL descriptor bitstream (Table 12/V.90, bit 0 first)

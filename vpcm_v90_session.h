@@ -52,6 +52,13 @@ typedef struct {
 
 typedef struct {
     bool phase2_contract_valid;
+    bool phase2_completed;
+    bool phase2_phase3_seen;
+    int phase2_u_info;
+    bool phase2_received_info0a_valid;
+    bool phase2_received_info1a_valid;
+    v90_info0a_t phase2_received_info0a;
+    v90_info1a_t phase2_received_info1a;
     v90_info0a_t analogue_info0a;
     v90_info1a_t analogue_info1a;
     uint8_t analogue_info0a_bits[(V90_INFO0A_BITS + 7) / 8];

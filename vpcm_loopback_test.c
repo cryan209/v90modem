@@ -2953,7 +2953,7 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     vpcm_log_session_sequence_header("Digital", "Analogue");
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
-        vpcm_log("Phase model: Phase 2 contract = shared V.90 INFO0a/INFO1a definitions; transport still not natively modelled here");
+        vpcm_log("Phase model: Phase 2 = real SpanDSP V.90 INFO transport plus shared INFO0a/INFO1a validation");
         vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
         vpcm_log("Harness note: DIL/adaptation shown below is later-phase approximation, not part of Phase 2.");
     }
@@ -2989,6 +2989,35 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                  report.analogue_info1a.upstream_symbol_rate_code,
                  report.analogue_info1a.downstream_rate_code,
                  report.analogue_info1a.freq_offset);
+        vpcm_log("Shared V.90 Phase 2 probe: completed=%s phase3_seen=%s u_info=%d",
+                 report.phase2_completed ? "yes" : "no",
+                 report.phase2_phase3_seen ? "yes" : "no",
+                 report.phase2_u_info);
+        if (report.phase2_received_info0a_valid) {
+            vpcm_log("Consumed V.90 INFO0a: 2743=%u 2800=%u 3429=%u 3000(low/high)=%u/%u 3200(low/high)=%u/%u delta=%u tx_clock=%u ack=%u",
+                     report.phase2_received_info0a.support_2743 ? 1U : 0U,
+                     report.phase2_received_info0a.support_2800 ? 1U : 0U,
+                     report.phase2_received_info0a.support_3429 ? 1U : 0U,
+                     report.phase2_received_info0a.support_3000_low ? 1U : 0U,
+                     report.phase2_received_info0a.support_3000_high ? 1U : 0U,
+                     report.phase2_received_info0a.support_3200_low ? 1U : 0U,
+                     report.phase2_received_info0a.support_3200_high ? 1U : 0U,
+                     report.phase2_received_info0a.max_baud_rate_difference,
+                     report.phase2_received_info0a.tx_clock_source,
+                     report.phase2_received_info0a.acknowledge_info0d ? 1U : 0U);
+        }
+        if (report.phase2_received_info1a_valid) {
+            vpcm_log("Consumed V.90 INFO1a: md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
+                     report.phase2_received_info1a.md,
+                     report.phase2_received_info1a.u_info,
+                     report.phase2_received_info1a.upstream_symbol_rate_code,
+                     report.phase2_received_info1a.downstream_rate_code,
+                     report.phase2_received_info1a.freq_offset);
+        }
+        vpcm_log("Phase 2 startup policy: digital_dil=%s analogue_dil=%s analogue_ack=%s",
+                 report.caller_info.request_default_dil ? "default" : "custom",
+                 report.answerer_info.request_default_dil ? "default" : "custom",
+                 report.answerer_info.acknowledge_info_frame ? "yes" : "no");
     }
 
     if (report.digital_dil_analysis_valid)
@@ -4062,6 +4091,8 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
     v34_state_t *answerer;
     v90_info0a_t analog_info0a;
     v90_info1a_t analog_info1a;
+    v90_info0a_diag_t info0a_diag;
+    v90_info1a_diag_t info1a_diag;
     uint8_t info0a_bits[(V90_INFO0A_BITS + 7) / 8];
     uint8_t info1a_bits[(V90_INFO1A_BITS + 7) / 8];
     char info0a_str[V90_INFO0A_BITS + 1];
@@ -4086,7 +4117,9 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
     v90_info0a_init(&analog_info0a);
     v90_info1a_init(&analog_info1a);
     if (!v90_build_info0a_bits(info0a_bits, (int) sizeof(info0a_bits), &analog_info0a)
-        || !v90_build_info1a_bits(info1a_bits, (int) sizeof(info1a_bits), &analog_info1a)) {
+        || !v90_build_info1a_bits(info1a_bits, (int) sizeof(info1a_bits), &analog_info1a)
+        || !v90_info0a_decode_diag(info0a_bits, V90_INFO0A_BITS, &info0a_diag)
+        || !v90_info1a_decode_diag(info1a_bits, V90_INFO1A_BITS, &info1a_diag)) {
         fprintf(stderr, "failed to build analogue-side V.90 INFO contract frames\n");
         return false;
     }
@@ -4101,6 +4134,11 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
                  analog_info1a.upstream_symbol_rate_code,
                  analog_info1a.downstream_rate_code,
                  analog_info1a.freq_offset);
+        vpcm_log("Analogue-side INFO diagnostics: info0a_crc=0x%04X valid=%s info1a_crc=0x%04X valid=%s",
+                 info0a_diag.crc_field,
+                 info0a_diag.valid ? "yes" : "no",
+                 info1a_diag.crc_field,
+                 info1a_diag.valid ? "yes" : "no");
     }
 
     caller = v34_init(NULL, 3200, 21600, true, true,

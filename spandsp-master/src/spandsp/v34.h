@@ -78,6 +78,33 @@ enum v34_half_duplex_modes_e
 */
 typedef struct v34_state_s v34_state_t;
 
+typedef struct
+{
+    bool support_2743;
+    bool support_2800;
+    bool support_3429;
+    bool support_3000_low;
+    bool support_3000_high;
+    bool support_3200_low;
+    bool support_3200_high;
+    bool rate_3429_allowed;
+    bool support_power_reduction;
+    uint8_t max_baud_rate_difference;
+    bool from_cme_modem;
+    bool support_1664_point_constellation;
+    uint8_t tx_clock_source;
+    bool acknowledge_info0d;
+} v34_v90_info0a_t;
+
+typedef struct
+{
+    int md;
+    int u_info;
+    int upstream_symbol_rate_code;
+    int downstream_rate_code;
+    int freq_offset;
+} v34_v90_info1a_t;
+
 #if defined(__cplusplus)
 extern "C"
 {
@@ -262,6 +289,18 @@ SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
     \param s The modem context.
     \return The U_INFO Ucode (0-127), or 0 if not yet received. */
 SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s);
+
+/*! Get the most recently decoded analogue-side INFO0a fields in V.90 mode.
+    \param s The modem context.
+    \param info Output frame fields.
+    \return 1 if a valid INFO0a has been received, otherwise 0. */
+SPAN_DECLARE(int) v34_get_v90_received_info0a(v34_state_t *s, v34_v90_info0a_t *info);
+
+/*! Get the most recently decoded analogue-side INFO1a fields in V.90 mode.
+    \param s The modem context.
+    \param info Output frame fields.
+    \return 1 if a valid INFO1a has been received, otherwise 0. */
+SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *info);
 
 /*! Get the most recent V.34/V.90 RX event code.
     \param s The modem context.

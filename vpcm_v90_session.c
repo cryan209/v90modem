@@ -6,6 +6,31 @@
 #include <stdio.h>
 
 enum { VPCM_V90_NOMINAL_10S_FRAMES = 13328 };
+enum { VPCM_V90_PHASE2_CHUNK_SAMPLES = 160 };
+enum { VPCM_V90_PHASE2_MAX_CHUNKS = 2500 };
+enum { VPCM_V90_PHASE2_V8_HANDOFF_CHUNKS = 4 };
+
+enum vpcm_v90_v34_rx_stages_e {
+    VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING = 11
+};
+
+enum vpcm_v90_v34_events_e {
+    VPCM_V90_V34_EVENT_INFO0_OK = 5,
+    VPCM_V90_V34_EVENT_INFO1_OK = 7,
+    VPCM_V90_V34_EVENT_TRAINING_FAILED = 16
+};
+
+static int vpcm_v90_dummy_get_bit(void *user_data)
+{
+    (void) user_data;
+    return 1;
+}
+
+static void vpcm_v90_dummy_put_bit(void *user_data, int bit)
+{
+    (void) user_data;
+    (void) bit;
+}
 
 static bool vpcm_v90_record_simplex(const vpcm_v90_startup_contract_io_t *io,
                                     v91_law_t law,
@@ -111,9 +136,343 @@ static void vpcm_v90_copy_sample(uint8_t *dst, int dst_len, const uint8_t *src, 
     memcpy(dst, src, (size_t) src_len);
 }
 
+static void vpcm_v90_seed_placeholder_info_state(v91_state_t *local,
+                                                 const v91_info_frame_t *local_info,
+                                                 const v91_info_frame_t *remote_info)
+{
+    if (!local || !local_info || !remote_info)
+        return;
+    local->last_tx_info = *local_info;
+    local->last_tx_info_valid = true;
+    local->last_rx_info = *remote_info;
+    local->last_rx_info_valid = true;
+}
+
 static v90_law_t vpcm_v90_data_law(v91_law_t law)
 {
     return (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+}
+
+static bool vpcm_v90_map_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src)
+{
+    if (!dst || !src)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->support_2743 = src->support_2743;
+    dst->support_2800 = src->support_2800;
+    dst->support_3429 = src->support_3429;
+    dst->support_3000_low = src->support_3000_low;
+    dst->support_3000_high = src->support_3000_high;
+    dst->support_3200_low = src->support_3200_low;
+    dst->support_3200_high = src->support_3200_high;
+    dst->rate_3429_allowed = src->rate_3429_allowed;
+    dst->support_power_reduction = src->support_power_reduction;
+    dst->max_baud_rate_difference = src->max_baud_rate_difference;
+    dst->from_cme_modem = src->from_cme_modem;
+    dst->support_1664_point_constellation = src->support_1664_point_constellation;
+    dst->tx_clock_source = src->tx_clock_source;
+    dst->acknowledge_info0d = src->acknowledge_info0d;
+    return v90_info0a_validate(dst);
+}
+
+static bool vpcm_v90_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src)
+{
+    if (!dst || !src)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->md = (uint8_t) src->md;
+    dst->u_info = (uint8_t) src->u_info;
+    dst->upstream_symbol_rate_code = (uint8_t) src->upstream_symbol_rate_code;
+    dst->downstream_rate_code = (uint8_t) src->downstream_rate_code;
+    dst->freq_offset = (int16_t) src->freq_offset;
+    return v90_info1a_validate(dst);
+}
+
+static bool vpcm_v90_dil_is_default(const v91_dil_desc_t *desc)
+{
+    v91_dil_desc_t default_dil;
+
+    if (!desc)
+        return false;
+    v91_default_dil_init(&default_dil);
+    return memcmp(desc, &default_dil, sizeof(default_dil)) == 0;
+}
+
+static bool vpcm_v90_phase2_info_is_default_like(const v90_info0a_t *info0a,
+                                                 const v90_info1a_t *info1a)
+{
+    v90_info0a_t default_info0a;
+    v90_info1a_t default_info1a;
+
+    if (!info0a || !info1a)
+        return false;
+
+    v90_info0a_init(&default_info0a);
+    v90_info1a_init(&default_info1a);
+    return memcmp(info0a, &default_info0a, sizeof(default_info0a)) == 0
+        && info1a->md == default_info1a.md
+        && info1a->upstream_symbol_rate_code == default_info1a.upstream_symbol_rate_code
+        && info1a->downstream_rate_code == default_info1a.downstream_rate_code
+        && info1a->freq_offset == default_info1a.freq_offset;
+}
+
+static void vpcm_v90_init_placeholder_info_frame(v91_info_frame_t *info,
+                                                 v91_law_t law)
+{
+    if (!info)
+        return;
+
+    memset(info, 0, sizeof(*info));
+    info->tx_uses_alaw = (law == V91_LAW_ALAW);
+    info->power_measured_after_digital_impairments = true;
+}
+
+static void vpcm_v90_prepare_placeholder_info_frames(const vpcm_v90_startup_contract_params_t *params,
+                                                     const v91_dil_desc_t *digital_dil,
+                                                     const vpcm_v90_startup_contract_report_t *report,
+                                                     v91_info_frame_t *digital_info,
+                                                     v91_info_frame_t *analogue_info)
+{
+    bool analogue_default_like;
+
+    if (!params || !digital_info || !analogue_info)
+        return;
+
+    vpcm_v90_init_placeholder_info_frame(digital_info, params->law);
+    vpcm_v90_init_placeholder_info_frame(analogue_info, params->law);
+
+    digital_info->request_default_dil = vpcm_v90_dil_is_default(digital_dil);
+
+    analogue_default_like = report
+        && report->phase2_received_info0a_valid
+        && report->phase2_received_info1a_valid
+        && vpcm_v90_phase2_info_is_default_like(&report->phase2_received_info0a,
+                                                &report->phase2_received_info1a);
+    analogue_info->request_default_dil = analogue_default_like;
+    analogue_info->acknowledge_info_frame =
+        report
+        && report->phase2_received_info0a_valid
+        && report->phase2_received_info0a.acknowledge_info0d;
+}
+
+static void vpcm_v90_encode_linear_chunk_to_g711(v91_law_t law,
+                                                 const int16_t *src,
+                                                 uint8_t *dst,
+                                                 int samples)
+{
+    int i;
+
+    if (!src || !dst || samples <= 0)
+        return;
+    for (i = 0; i < samples; i++)
+        dst[i] = v91_linear_to_codeword(law, src[i]);
+}
+
+static void vpcm_v90_transport_linear(v91_law_t law,
+                                      int16_t *dst,
+                                      const int16_t *src,
+                                      int len)
+{
+    int i;
+
+    if (!dst || !src || len <= 0)
+        return;
+    for (i = 0; i < len; i++) {
+        uint8_t codeword;
+
+        codeword = v91_linear_to_codeword(law, src[i]);
+        dst[i] = v91_codeword_to_linear(law, codeword);
+    }
+}
+
+static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
+                                         const vpcm_v90_startup_contract_io_t *io,
+                                         vpcm_v90_startup_contract_report_t *report)
+{
+    v34_state_t *caller;
+    v34_state_t *answerer;
+    v34_v90_info0a_t raw_info0a;
+    v34_v90_info1a_t raw_info1a;
+    v90_info0a_t received_info0a;
+    v90_info1a_t received_info1a;
+    int chunk;
+    bool answerer_saw_info0;
+    bool answerer_saw_info1;
+    bool answerer_saw_uinfo;
+    bool phase3_seen;
+    bool received_info0a_valid;
+    bool received_info1a_valid;
+    bool ok;
+
+    caller = v34_init(NULL, 3200, 21600, true, true,
+                      vpcm_v90_dummy_get_bit, NULL,
+                      vpcm_v90_dummy_put_bit, NULL);
+    answerer = v34_init(NULL, 3200, 21600, false, true,
+                        vpcm_v90_dummy_get_bit, NULL,
+                        vpcm_v90_dummy_put_bit, NULL);
+    if (!caller || !answerer) {
+        if (caller)
+            v34_free(caller);
+        if (answerer)
+            v34_free(answerer);
+        fprintf(stderr, "V.90 Phase 2 probe: failed to initialize V.34 states\n");
+        return false;
+    }
+
+    for (chunk = 0; chunk < VPCM_V90_PHASE2_V8_HANDOFF_CHUNKS; chunk++) {
+        int16_t caller_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t caller_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t answer_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+
+        if (v34_tx(caller, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES
+            || v34_tx(answerer, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES) {
+            fprintf(stderr, "V.90 Phase 2 probe: handoff TX failed\n");
+            v34_free(caller);
+            v34_free(answerer);
+            return false;
+        }
+
+        vpcm_v90_encode_linear_chunk_to_g711(law, caller_tx, caller_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_encode_linear_chunk_to_g711(law, answer_tx, answer_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (!vpcm_v90_record_duplex(io, caller_tx_g711, answer_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES)) {
+            fprintf(stderr, "V.90 Phase 2 probe: handoff recording failed\n");
+            v34_free(caller);
+            v34_free(answerer);
+            return false;
+        }
+
+        vpcm_v90_transport_linear(law, answer_rx, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_transport_linear(law, caller_rx, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (v34_rx(caller, caller_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answer_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0) {
+            fprintf(stderr, "V.90 Phase 2 probe: handoff RX failed\n");
+            v34_free(caller);
+            v34_free(answerer);
+            return false;
+        }
+    }
+
+    v34_set_v90_mode(caller, law == V91_LAW_ALAW ? 1 : 0);
+    v34_set_v90_mode(answerer, law == V91_LAW_ALAW ? 1 : 0);
+
+    answerer_saw_info0 = false;
+    answerer_saw_info1 = false;
+    answerer_saw_uinfo = false;
+    phase3_seen = false;
+    received_info0a_valid = false;
+    received_info1a_valid = false;
+    memset(&received_info0a, 0, sizeof(received_info0a));
+    memset(&received_info1a, 0, sizeof(received_info1a));
+    ok = false;
+    for (chunk = 0; chunk < VPCM_V90_PHASE2_MAX_CHUNKS; chunk++) {
+        int16_t caller_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_tx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t caller_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int16_t answer_rx[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t caller_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        uint8_t answer_tx_g711[VPCM_V90_PHASE2_CHUNK_SAMPLES];
+        int caller_event;
+        int answerer_event;
+        int caller_rx_stage;
+        int answerer_rx_stage;
+
+        if (v34_tx(caller, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES
+            || v34_tx(answerer, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != VPCM_V90_PHASE2_CHUNK_SAMPLES) {
+            fprintf(stderr, "V.90 Phase 2 probe: TX failed at chunk %d\n", chunk);
+            break;
+        }
+
+        vpcm_v90_encode_linear_chunk_to_g711(law, caller_tx, caller_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_encode_linear_chunk_to_g711(law, answer_tx, answer_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (!vpcm_v90_record_duplex(io, caller_tx_g711, answer_tx_g711, VPCM_V90_PHASE2_CHUNK_SAMPLES)) {
+            fprintf(stderr, "V.90 Phase 2 probe: recording failed at chunk %d\n", chunk);
+            break;
+        }
+
+        vpcm_v90_transport_linear(law, answer_rx, caller_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        vpcm_v90_transport_linear(law, caller_rx, answer_tx, VPCM_V90_PHASE2_CHUNK_SAMPLES);
+        if (v34_rx(caller, caller_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0
+            || v34_rx(answerer, answer_rx, VPCM_V90_PHASE2_CHUNK_SAMPLES) != 0) {
+            fprintf(stderr, "V.90 Phase 2 probe: RX failed at chunk %d\n", chunk);
+            break;
+        }
+
+        caller_event = v34_get_rx_event(caller);
+        answerer_event = v34_get_rx_event(answerer);
+        caller_rx_stage = v34_get_rx_stage(caller);
+        answerer_rx_stage = v34_get_rx_stage(answerer);
+
+        answerer_saw_info0 |= (answerer_event == VPCM_V90_V34_EVENT_INFO0_OK);
+        answerer_saw_info1 |= (answerer_event == VPCM_V90_V34_EVENT_INFO1_OK);
+        answerer_saw_uinfo |= (v34_get_v90_u_info(answerer) > 0);
+        phase3_seen |= (caller_rx_stage >= VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING)
+                    || (answerer_rx_stage >= VPCM_V90_V34_RX_STAGE_PHASE3_TRAINING)
+                    || v34_get_primary_channel_active(caller)
+                    || v34_get_primary_channel_active(answerer);
+
+        if (answerer_saw_info0
+            && answerer_saw_info1
+            && answerer_saw_uinfo
+            && phase3_seen) {
+            ok = true;
+            break;
+        }
+
+        if (caller_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
+            || answerer_event == VPCM_V90_V34_EVENT_TRAINING_FAILED) {
+            break;
+        }
+    }
+
+    if (answerer_saw_info0
+        && v34_get_v90_received_info0a(answerer, &raw_info0a) > 0
+        && vpcm_v90_map_received_info0a(&received_info0a, &raw_info0a)) {
+        received_info0a_valid = true;
+    }
+    if (answerer_saw_info1
+        && v34_get_v90_received_info1a(answerer, &raw_info1a) > 0
+        && vpcm_v90_map_received_info1a(&received_info1a, &raw_info1a)) {
+        received_info1a_valid = true;
+    }
+
+    if (ok && (!received_info0a_valid || !received_info1a_valid)) {
+        fprintf(stderr,
+                "V.90 Phase 2 probe could not consume received INFO frames: info0a=%d info1a=%d\n",
+                received_info0a_valid ? 1 : 0,
+                received_info1a_valid ? 1 : 0);
+        ok = false;
+    }
+
+    if (report) {
+        report->phase2_completed = ok;
+        report->phase2_phase3_seen = phase3_seen;
+        report->phase2_u_info = received_info1a_valid ? received_info1a.u_info : v34_get_v90_u_info(answerer);
+        report->phase2_received_info0a_valid = received_info0a_valid;
+        report->phase2_received_info1a_valid = received_info1a_valid;
+        report->phase2_received_info0a = received_info0a;
+        report->phase2_received_info1a = received_info1a;
+    }
+
+    if (!ok) {
+        fprintf(stderr,
+                "V.90 Phase 2 probe incomplete: info0=%d info1=%d uinfo=%d phase3=%d consumed_info0=%d consumed_info1=%d final_uinfo=%d\n",
+                answerer_saw_info0 ? 1 : 0,
+                answerer_saw_info1 ? 1 : 0,
+                answerer_saw_uinfo ? 1 : 0,
+                phase3_seen ? 1 : 0,
+                received_info0a_valid ? 1 : 0,
+                received_info1a_valid ? 1 : 0,
+                v34_get_v90_u_info(answerer));
+    }
+
+    v34_free(caller);
+    v34_free(answerer);
+    return ok;
 }
 
 void vpcm_v90_session_init(vpcm_v90_session_t *session, v91_law_t law)
@@ -190,10 +549,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     v91_state_t answerer_startup;
     v91_state_t caller_rx;
     v91_state_t answerer_tx;
-    v91_info_frame_t rx_info;
     vpcm_cp_frame_t cp_rx;
     vpcm_v90_startup_contract_report_t local_report;
-    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t phase1_peer_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
     uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
     uint8_t scr_buf[18];
     uint8_t cp_buf[VPCM_CP_MAX_BITS];
@@ -242,9 +600,15 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         v90_build_info0a_bits(local_report.analogue_info0a_bits,
                               (int) sizeof(local_report.analogue_info0a_bits),
                               &local_report.analogue_info0a)
+        && v90_parse_info0a_bits(&local_report.analogue_info0a,
+                                 local_report.analogue_info0a_bits,
+                                 V90_INFO0A_BITS)
         && v90_build_info1a_bits(local_report.analogue_info1a_bits,
                                  (int) sizeof(local_report.analogue_info1a_bits),
-                                 &local_report.analogue_info1a);
+                                 &local_report.analogue_info1a)
+        && v90_parse_info1a_bits(&local_report.analogue_info1a,
+                                 local_report.analogue_info1a_bits,
+                                 V90_INFO1A_BITS);
     v91_default_dil_init(&default_dil);
     vpcm_v92_init_digital_dil_from_ja(&digital_dil, params->echo_limited);
     v91_init(&caller_startup, params->law, V91_MODE_TRANSPARENT);
@@ -252,35 +616,42 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     v91_init(&caller_rx, params->law, V91_MODE_TRANSPARENT);
     v91_init(&answerer_tx, params->law, V91_MODE_TRANSPARENT);
 
-    memset(&local_report.caller_info, 0, sizeof(local_report.caller_info));
-    local_report.caller_info.request_default_dil = true;
-    local_report.caller_info.tx_uses_alaw = (params->law == V91_LAW_ALAW);
-    local_report.caller_info.power_measured_after_digital_impairments = true;
-
-    memset(&local_report.answerer_info, 0, sizeof(local_report.answerer_info));
-    local_report.answerer_info.request_default_dil = true;
-    local_report.answerer_info.tx_uses_alaw = (params->law == V91_LAW_ALAW);
-    local_report.answerer_info.power_measured_after_digital_impairments = true;
-
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE1);
     if (v91_tx_phase1_silence_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_PHASE1_SILENCE_SYMBOLS
-        || v91_tx_phase1_silence_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_PHASE1_SILENCE_SYMBOLS
-        || !vpcm_v90_record_duplex(io, startup_buf, transport_buf, V91_PHASE1_SILENCE_SYMBOLS)
+        || v91_tx_phase1_silence_codewords(&answerer_startup, phase1_peer_buf, (int) sizeof(phase1_peer_buf)) != V91_PHASE1_SILENCE_SYMBOLS
+        || !vpcm_v90_record_duplex(io, startup_buf, phase1_peer_buf, V91_PHASE1_SILENCE_SYMBOLS)
         || v91_tx_ez_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_EZ_SYMBOLS
-        || v91_tx_ez_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf)) != V91_EZ_SYMBOLS
-        || !vpcm_v90_record_duplex(io, startup_buf, transport_buf, V91_EZ_SYMBOLS)) {
+        || v91_tx_ez_codewords(&answerer_startup, phase1_peer_buf, (int) sizeof(phase1_peer_buf)) != V91_EZ_SYMBOLS
+        || !vpcm_v90_record_duplex(io, startup_buf, phase1_peer_buf, V91_EZ_SYMBOLS)) {
         return false;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_INFO);
-    if (v91_tx_info_codewords(&caller_startup, transport_buf, (int) sizeof(transport_buf), &local_report.caller_info) != V91_INFO_SYMBOLS
-        || !v91_rx_info_codewords(&answerer_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)
-        || !vpcm_v90_record_simplex(io, params->law, true, transport_buf, V91_INFO_SYMBOLS)
-        || v91_tx_info_codewords(&answerer_startup, transport_buf, (int) sizeof(transport_buf), &local_report.answerer_info) != V91_INFO_SYMBOLS
-        || !v91_rx_info_codewords(&caller_startup, transport_buf, V91_INFO_SYMBOLS, &rx_info)
-        || !vpcm_v90_record_simplex(io, params->law, false, transport_buf, V91_INFO_SYMBOLS)) {
+    if (!vpcm_v90_run_phase2_exchange(params->law, io, &local_report)) {
         return false;
     }
+    if (local_report.phase2_received_info1a_valid) {
+        local_report.analogue_info1a.u_info = local_report.phase2_received_info1a.u_info;
+        local_report.phase2_contract_valid =
+            local_report.phase2_contract_valid
+            && v90_build_info1a_bits(local_report.analogue_info1a_bits,
+                                     (int) sizeof(local_report.analogue_info1a_bits),
+                                     &local_report.analogue_info1a)
+            && v90_parse_info1a_bits(&local_report.analogue_info1a,
+                                     local_report.analogue_info1a_bits,
+                                     V90_INFO1A_BITS);
+    }
+    vpcm_v90_prepare_placeholder_info_frames(params,
+                                             &digital_dil,
+                                             &local_report,
+                                             &local_report.caller_info,
+                                             &local_report.answerer_info);
+    vpcm_v90_seed_placeholder_info_state(&caller_startup,
+                                         &local_report.caller_info,
+                                         &local_report.answerer_info);
+    vpcm_v90_seed_placeholder_info_state(&answerer_startup,
+                                         &local_report.answerer_info,
+                                         &local_report.caller_info);
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_DIL);
     startup_len = v91_tx_startup_dil_sequence_codewords(&caller_startup,

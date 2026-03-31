@@ -5293,6 +5293,43 @@ SPAN_DECLARE(int) v34_get_v90_u_info(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_v90_received_info0a(v34_state_t *s, v34_v90_info0a_t *info)
+{
+    if (!s || !info || !s->rx.v90_mode)
+        return 0;
+
+    info->support_2743 = s->rx.far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_2743];
+    info->support_2800 = s->rx.far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_2800];
+    info->support_3429 = s->rx.far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3429];
+    info->support_3000_low = s->rx.far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3000];
+    info->support_3000_high = s->rx.far_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3000];
+    info->support_3200_low = s->rx.far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3200];
+    info->support_3200_high = s->rx.far_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200];
+    info->rate_3429_allowed = s->rx.far_capabilities.rate_3429_allowed;
+    info->support_power_reduction = s->rx.far_capabilities.support_power_reduction;
+    info->max_baud_rate_difference = s->rx.far_capabilities.max_baud_rate_difference;
+    info->from_cme_modem = s->rx.far_capabilities.from_cme_modem;
+    info->support_1664_point_constellation = s->rx.far_capabilities.support_1664_point_constellation;
+    info->tx_clock_source = s->rx.far_capabilities.tx_clock_source;
+    info->acknowledge_info0d = s->rx.info0_acknowledgement;
+    return s->rx.info0_received ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *info)
+{
+    if (!s || !info || !s->rx.v90_mode)
+        return 0;
+
+    info->md = s->rx.info1a.md;
+    info->u_info = s->rx.info1a.max_data_rate;
+    info->upstream_symbol_rate_code = s->rx.info1a.baud_rate_a_to_c;
+    info->downstream_rate_code = s->rx.info1a.baud_rate_c_to_a;
+    info->freq_offset = s->rx.info1a.freq_offset;
+    return (s->rx.info1a.max_data_rate > 0) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
 {
     if (!s)
