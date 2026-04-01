@@ -48,6 +48,223 @@ static double sample_to_ms(int sample, int rate)
 }
 
 /* ------------------------------------------------------------------ */
+/* Call log event collection                                           */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int sample_offset;
+    int duration_samples;
+    char protocol[24];
+    char summary[160];
+    char detail[320];
+} call_log_event_t;
+
+typedef struct {
+    call_log_event_t *events;
+    size_t count;
+    size_t cap;
+} call_log_t;
+
+static void call_log_init(call_log_t *log)
+{
+    if (!log)
+        return;
+    log->events = NULL;
+    log->count = 0;
+    log->cap = 0;
+}
+
+static void call_log_reset(call_log_t *log)
+{
+    if (!log)
+        return;
+    free(log->events);
+    log->events = NULL;
+    log->count = 0;
+    log->cap = 0;
+}
+
+static bool call_log_append(call_log_t *log,
+                            int sample_offset,
+                            int duration_samples,
+                            const char *protocol,
+                            const char *summary,
+                            const char *detail)
+{
+    call_log_event_t *next;
+
+    if (!log || !protocol || !summary)
+        return false;
+    if (log->count == log->cap) {
+        size_t new_cap = (log->cap == 0) ? 16 : log->cap * 2;
+        next = realloc(log->events, new_cap * sizeof(*next));
+        if (!next)
+            return false;
+        log->events = next;
+        log->cap = new_cap;
+    }
+
+    log->events[log->count].sample_offset = sample_offset;
+    log->events[log->count].duration_samples = duration_samples;
+    snprintf(log->events[log->count].protocol,
+             sizeof(log->events[log->count].protocol),
+             "%s",
+             protocol);
+    snprintf(log->events[log->count].summary,
+             sizeof(log->events[log->count].summary),
+             "%s",
+             summary);
+    snprintf(log->events[log->count].detail,
+             sizeof(log->events[log->count].detail),
+             "%s",
+             detail ? detail : "");
+    log->count++;
+    return true;
+}
+
+static int call_log_event_cmp(const void *a, const void *b)
+{
+    const call_log_event_t *ea = a;
+    const call_log_event_t *eb = b;
+
+    if (ea->sample_offset < eb->sample_offset)
+        return -1;
+    if (ea->sample_offset > eb->sample_offset)
+        return 1;
+    if (ea->duration_samples < eb->duration_samples)
+        return -1;
+    if (ea->duration_samples > eb->duration_samples)
+        return 1;
+    return strcmp(ea->protocol, eb->protocol);
+}
+
+static void call_log_sort(call_log_t *log)
+{
+    if (!log || log->count < 2)
+        return;
+    qsort(log->events, log->count, sizeof(log->events[0]), call_log_event_cmp);
+}
+
+static void format_v91_info_summary(char *buf, size_t len, const v91_info_diag_t *diag)
+{
+    if (!buf || len == 0 || !diag) {
+        return;
+    }
+    snprintf(buf, len,
+             "default_dil=%s transparent=%s control=%s alaw=%s power=%u",
+             diag->frame.request_default_dil ? "yes" : "no",
+             diag->frame.request_transparent_mode ? "yes" : "no",
+             diag->frame.request_control_channel ? "yes" : "no",
+             diag->frame.tx_uses_alaw ? "yes" : "no",
+             (unsigned) diag->frame.max_tx_power);
+}
+
+static void format_cp_summary(char *buf, size_t len, const vpcm_cp_frame_t *cp)
+{
+    if (!buf || len == 0 || !cp)
+        return;
+    snprintf(buf, len,
+             "transparent=%s ack=%s drn=%u rate=%.0f bps constellations=%u",
+             cp->transparent_mode_granted ? "yes" : "no",
+             cp->acknowledge ? "yes" : "no",
+             (unsigned) cp->drn,
+             vpcm_cp_drn_to_bps(cp->drn),
+             (unsigned) cp->constellation_count);
+}
+
+static void format_v91_dil_summary(char *buf, size_t len, const v91_dil_analysis_t *analysis)
+{
+    if (!buf || len == 0 || !analysis)
+        return;
+    snprintf(buf, len,
+             "default_like=%s impairment=%u downstream=%.0f bps upstream=%.0f bps",
+             analysis->default_like ? "yes" : "no",
+             (unsigned) analysis->impairment_score,
+             vpcm_cp_drn_to_bps(analysis->recommended_downstream_drn),
+             vpcm_cp_drn_to_bps(analysis->recommended_upstream_drn));
+}
+
+static void format_v90_dil_summary(char *buf, size_t len, const v90_dil_analysis_t *analysis)
+{
+    if (!buf || len == 0 || !analysis)
+        return;
+    snprintf(buf, len,
+             "default_125x12=%s impairment=%u downstream=%.0f bps upstream=%.0f bps",
+             analysis->looks_default_125x12 ? "yes" : "no",
+             (unsigned) analysis->impairment_score,
+             vpcm_cp_drn_to_bps(analysis->recommended_downstream_drn),
+             vpcm_cp_drn_to_bps(analysis->recommended_upstream_drn));
+}
+
+static void print_call_log(const char *label,
+                           const call_log_t *log,
+                           int total_samples,
+                           int sample_rate)
+{
+    int covered_until = 0;
+    int coverage = 0;
+
+    if (!label || !log)
+        return;
+
+    printf("\n=== Call Log: %s ===\n", label);
+    printf("  Duration: %.3f seconds\n", (double) total_samples / (double) sample_rate);
+    printf("  Recognized events: %zu\n", log->count);
+
+    if (log->count == 0) {
+        printf("  No implemented call phases were recognized.\n");
+        return;
+    }
+
+    for (size_t i = 0; i < log->count; i++) {
+        int start = log->events[i].sample_offset;
+        int end = start + log->events[i].duration_samples;
+        if (end > covered_until) {
+            if (start < covered_until)
+                start = covered_until;
+            coverage += end - start;
+            covered_until = end;
+        }
+    }
+
+    printf("  Approximate covered time: %.1f ms (%.1f%%)\n",
+           sample_to_ms(coverage, sample_rate),
+           total_samples > 0 ? (100.0 * (double) coverage / (double) total_samples) : 0.0);
+
+    covered_until = 0;
+    for (size_t i = 0; i < log->count; i++) {
+        const call_log_event_t *event = &log->events[i];
+        double start_ms = sample_to_ms(event->sample_offset, sample_rate);
+        double dur_ms = sample_to_ms(event->duration_samples, sample_rate);
+
+        if (event->sample_offset > covered_until + (sample_rate / 20)) {
+            printf("  [%7.1f ms] GAP: no implemented decoder matched for %.1f ms\n",
+                   sample_to_ms(covered_until, sample_rate),
+                   sample_to_ms(event->sample_offset - covered_until, sample_rate));
+        }
+
+        printf("  [%7.1f ms] %-5s %s",
+               start_ms,
+               event->protocol,
+               event->summary);
+        if (event->duration_samples > 0)
+            printf(" (%.1f ms)", dur_ms);
+        printf("\n");
+        if (event->detail[0] != '\0')
+            printf("             %s\n", event->detail);
+
+        if (event->sample_offset + event->duration_samples > covered_until)
+            covered_until = event->sample_offset + event->duration_samples;
+    }
+
+    if (covered_until < total_samples - (sample_rate / 20)) {
+        printf("  [%7.1f ms] GAP: trailing undecoded span of %.1f ms\n",
+               sample_to_ms(covered_until, sample_rate),
+               sample_to_ms(total_samples - covered_until, sample_rate));
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* WAV reader                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -211,6 +428,67 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
     v8_free(v8);
 }
 
+static void collect_v8_event(call_log_t *log,
+                             const int16_t *samples,
+                             int total_samples,
+                             bool calling_party)
+{
+    v8_parms_t parms;
+    v8_state_t *v8;
+    int offset = 0;
+    char summary[160];
+    char detail[320];
+
+    if (!log || !samples || total_samples <= 0)
+        return;
+
+    memset(&parms, 0, sizeof(parms));
+    parms.modem_connect_tone = calling_party
+        ? MODEM_CONNECT_TONES_NONE
+        : MODEM_CONNECT_TONES_ANSAM;
+    parms.send_ci = calling_party;
+    parms.v92 = -1;
+    parms.jm_cm.modulations = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22
+                            | V8_MOD_V92 | V8_MOD_V21 | V8_MOD_V17
+                            | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V23
+                            | V8_MOD_V32;
+    parms.jm_cm.protocols = V8_PROTOCOL_LAPM_V42;
+    parms.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+    parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+
+    memset(&g_v8_result, 0, sizeof(g_v8_result));
+    v8 = v8_init(NULL, calling_party, &parms, v8_decode_result_handler, NULL);
+    if (!v8)
+        return;
+
+    span_log_set_level(v8_get_logging_state(v8), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
+    while (offset < total_samples && !g_v8_result.seen) {
+        int chunk = total_samples - offset;
+        int16_t tx_buf[160];
+
+        if (chunk > 160)
+            chunk = 160;
+        v8_rx(v8, (int16_t *)(samples + offset), chunk);
+        v8_tx(v8, tx_buf, chunk);
+        offset += chunk;
+    }
+
+    if (g_v8_result.seen) {
+        snprintf(summary, sizeof(summary),
+                 "V.8 negotiation decoded as %s",
+                 calling_party ? "caller" : "answerer");
+        snprintf(detail, sizeof(detail),
+                 "status=%s protocol=%s pcm=%s pstn=%s",
+                 v8_status_to_str(g_v8_result.result.status),
+                 v8_protocol_to_str(g_v8_result.result.jm_cm.protocols),
+                 v8_pcm_modem_availability_to_str(g_v8_result.result.jm_cm.pcm_modem_availability),
+                 v8_pstn_access_to_str(g_v8_result.result.jm_cm.pstn_access));
+        call_log_append(log, offset, 0, "V.8", summary, detail);
+    }
+
+    v8_free(v8);
+}
+
 /* ------------------------------------------------------------------ */
 /* V.91 signal detection                                               */
 /* ------------------------------------------------------------------ */
@@ -272,52 +550,6 @@ static void print_dil_analysis(const v91_dil_analysis_t *a)
     printf("    recommended_up_drn:       %d (%.0f bps)\n",
            a->recommended_upstream_drn,
            vpcm_cp_drn_to_bps(a->recommended_upstream_drn));
-}
-
-static void print_v90_dil_analysis(const v90_dil_analysis_t *a)
-{
-    printf("    n=%d  lsp=%d  ltp=%d\n", a->n, a->lsp, a->ltp);
-    printf("    unique_train_u:           %d\n", a->unique_train_u);
-    printf("    used_uchords:             %d\n", a->used_uchords);
-    printf("    non_default_refs:         %d\n", a->non_default_refs);
-    printf("    non_default_h:            %d\n", a->non_default_h);
-    printf("    impairment_score:         %d\n", a->impairment_score);
-    printf("    looks_default_125x12:     %s\n", a->looks_default_125x12 ? "yes" : "no");
-    printf("    robbed_bit_limited:       %s\n", a->robbed_bit_limited ? "yes" : "no");
-    printf("    echo_limited:             %s\n", a->echo_limited ? "yes" : "no");
-    printf("    recommended_down_drn:     %d (%.0f bps)\n",
-           a->recommended_downstream_drn,
-           vpcm_cp_drn_to_bps(a->recommended_downstream_drn));
-    printf("    recommended_up_drn:       %d (%.0f bps)\n",
-           a->recommended_upstream_drn,
-           vpcm_cp_drn_to_bps(a->recommended_upstream_drn));
-}
-
-static void print_v90_info0a(const v90_info0a_t *info)
-{
-    printf("    support_2743:              %s\n", info->support_2743 ? "yes" : "no");
-    printf("    support_2800:              %s\n", info->support_2800 ? "yes" : "no");
-    printf("    support_3429:              %s\n", info->support_3429 ? "yes" : "no");
-    printf("    support_3000_low:          %s\n", info->support_3000_low ? "yes" : "no");
-    printf("    support_3000_high:         %s\n", info->support_3000_high ? "yes" : "no");
-    printf("    support_3200_low:          %s\n", info->support_3200_low ? "yes" : "no");
-    printf("    support_3200_high:         %s\n", info->support_3200_high ? "yes" : "no");
-    printf("    rate_3429_allowed:         %s\n", info->rate_3429_allowed ? "yes" : "no");
-    printf("    support_power_reduction:   %s\n", info->support_power_reduction ? "yes" : "no");
-    printf("    max_baud_rate_difference:  %d\n", info->max_baud_rate_difference);
-    printf("    from_cme_modem:            %s\n", info->from_cme_modem ? "yes" : "no");
-    printf("    support_1664pt_const:      %s\n", info->support_1664_point_constellation ? "yes" : "no");
-    printf("    tx_clock_source:           %d\n", info->tx_clock_source);
-    printf("    acknowledge_info0d:        %s\n", info->acknowledge_info0d ? "yes" : "no");
-}
-
-static void print_v90_info1a(const v90_info1a_t *info)
-{
-    printf("    Md:                        %d\n", info->md);
-    printf("    U_INFO:                    %d\n", info->u_info);
-    printf("    upstream_symbol_rate_code:  %d\n", info->upstream_symbol_rate_code);
-    printf("    downstream_rate_code:       %d\n", info->downstream_rate_code);
-    printf("    freq_offset:               %d\n", info->freq_offset);
 }
 
 /*
@@ -521,6 +753,162 @@ static void decode_v91_signals(const uint8_t *codewords, int total,
                 continue;
             }
         }
+    }
+}
+
+static void collect_v91_events(call_log_t *log, const uint8_t *codewords, int total, v91_law_t law)
+{
+    uint8_t idle;
+    uint8_t ez_pos_cw;
+    uint8_t ez_neg_cw;
+    uint8_t eu_pattern[V91_EU_SYMBOLS];
+    uint8_t em_pattern[V91_EM_SYMBOLS];
+    uint8_t expected_dil[V91_DEFAULT_DIL_SYMBOLS];
+    int dil_pattern_len;
+    static const int cp_try_lengths[] = { 60, 66, 72, 120, 180, 294, 300, 600, 972 };
+    int n_cp_try = (int)(sizeof(cp_try_lengths) / sizeof(cp_try_lengths[0]));
+
+    if (!log || !codewords || total <= 0)
+        return;
+
+    idle = v91_idle_codeword(law);
+
+    {
+        int silence_start = -1;
+        int silence_len = 0;
+
+        for (int i = 0; i < total; i++) {
+            if (codewords[i] == idle) {
+                if (silence_start < 0)
+                    silence_start = i;
+                silence_len++;
+            } else {
+                if (silence_len >= 48) {
+                    char detail[128];
+                    snprintf(detail, sizeof(detail), "%d idle codewords", silence_len);
+                    call_log_append(log, silence_start, silence_len, "V.91", "Silence/idle", detail);
+                }
+                silence_start = -1;
+                silence_len = 0;
+            }
+        }
+        if (silence_len >= 48) {
+            char detail[128];
+            snprintf(detail, sizeof(detail), "%d idle codewords", silence_len);
+            call_log_append(log, silence_start, silence_len, "V.91", "Silence/idle", detail);
+        }
+    }
+
+    ez_pos_cw = v91_ucode_to_codeword(law, 127, true);
+    ez_neg_cw = v91_ucode_to_codeword(law, 127, false);
+
+    {
+        v91_state_t eu_state;
+        v91_state_t em_state;
+        v91_dil_desc_t desc;
+        v91_state_t dil_state;
+
+        v91_init(&eu_state, law, V91_MODE_TRANSPARENT);
+        v91_init(&em_state, law, V91_MODE_TRANSPARENT);
+        v91_tx_eu_codewords(&eu_state, eu_pattern, V91_EU_SYMBOLS);
+        v91_tx_em_codewords(&em_state, em_pattern, V91_EM_SYMBOLS);
+
+        v91_default_dil_init(&desc);
+        v91_init(&dil_state, law, V91_MODE_TRANSPARENT);
+        dil_pattern_len = v91_tx_default_dil_codewords(&dil_state, expected_dil,
+                                                       V91_DEFAULT_DIL_SYMBOLS);
+    }
+
+    for (int offset = 0; offset < total; offset += 6) {
+        if (offset + V91_EZ_SYMBOLS <= total) {
+            bool is_ez = true;
+
+            for (int i = 0; i < V91_EZ_SYMBOLS && is_ez; i++) {
+                uint8_t expected = (i % 2 == 0) ? ez_pos_cw : ez_neg_cw;
+                if (codewords[offset + i] != expected)
+                    is_ez = false;
+            }
+            if (is_ez) {
+                call_log_append(log, offset, V91_EZ_SYMBOLS, "V.91", "Ez alignment signal", "");
+                offset += V91_EZ_SYMBOLS - 6;
+                continue;
+            }
+        }
+
+        if (offset + V91_EU_SYMBOLS <= total
+            && memcmp(codewords + offset, eu_pattern, V91_EU_SYMBOLS) == 0) {
+            call_log_append(log, offset, V91_EU_SYMBOLS, "V.91", "Eu alignment signal", "");
+            offset += V91_EU_SYMBOLS - 6;
+            continue;
+        }
+
+        if (offset + V91_EM_SYMBOLS <= total
+            && memcmp(codewords + offset, em_pattern, V91_EM_SYMBOLS) == 0) {
+            call_log_append(log, offset, V91_EM_SYMBOLS, "V.91", "Em alignment signal", "");
+            offset += V91_EM_SYMBOLS - 6;
+            continue;
+        }
+
+        if (offset + V91_INFO_SYMBOLS <= total) {
+            v91_state_t info_state;
+            v91_info_diag_t diag;
+
+            v91_init(&info_state, law, V91_MODE_TRANSPARENT);
+            if (v91_info_decode_diag(&info_state, codewords + offset,
+                                     V91_INFO_SYMBOLS, &diag) && diag.valid) {
+                char detail[192];
+                format_v91_info_summary(detail, sizeof(detail), &diag);
+                call_log_append(log, offset, V91_INFO_SYMBOLS, "V.91", "INFO frame", detail);
+                offset += V91_INFO_SYMBOLS - 6;
+                continue;
+            }
+        }
+
+        if (offset + 60 <= total) {
+            bool found_cp = false;
+
+            for (int t = 0; t < n_cp_try; t++) {
+                int cp_try_len = cp_try_lengths[t];
+                v91_state_t try_state;
+                vpcm_cp_frame_t cp_out;
+                char detail[192];
+
+                if (offset + cp_try_len > total)
+                    continue;
+
+                v91_init(&try_state, law, V91_MODE_TRANSPARENT);
+                if (!v91_rx_cp_codewords(&try_state, codewords + offset,
+                                         cp_try_len, &cp_out, false)) {
+                    continue;
+                }
+
+                format_cp_summary(detail, sizeof(detail), &cp_out);
+                call_log_append(log, offset, cp_try_len, "V.91", "CP frame", detail);
+                offset += cp_try_len - 6;
+                found_cp = true;
+                break;
+            }
+            if (found_cp)
+                continue;
+        }
+
+        if (dil_pattern_len > 0 && offset + dil_pattern_len <= total
+            && memcmp(codewords + offset, expected_dil, (size_t) dil_pattern_len) == 0) {
+            v91_dil_desc_t desc;
+            v91_dil_analysis_t analysis;
+            char detail[192];
+
+            v91_default_dil_init(&desc);
+            if (v91_analyse_dil_descriptor(&desc, &analysis)) {
+                format_v91_dil_summary(detail, sizeof(detail), &analysis);
+            } else {
+                snprintf(detail, sizeof(detail), "default DIL sequence");
+            }
+            call_log_append(log, offset, dil_pattern_len, "V.91", "Default DIL", detail);
+            offset += dil_pattern_len - 6;
+            continue;
+        }
+
     }
 }
 
@@ -785,6 +1173,211 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
            "        They require V.34 demodulation and are not visible as raw G.711 codewords.\n");
 }
 
+static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int total, v91_law_t law)
+{
+    uint8_t idle;
+    uint8_t pos_zero;
+    uint8_t neg_zero;
+    bool found_sequence = false;
+
+    if (!log || !codewords || total <= 0)
+        return;
+
+    idle = v91_idle_codeword(law);
+    pos_zero = v91_ucode_to_codeword(law, 0, true);
+    neg_zero = v91_ucode_to_codeword(law, 0, false);
+
+    for (int u_info = 10; u_info <= 127 && !found_sequence; u_info++) {
+        int w_ucode = 16 + u_info;
+        uint8_t pos_w;
+        uint8_t neg_w;
+        uint8_t sd_pat[6];
+
+        if (w_ucode > 127)
+            w_ucode = 127;
+
+        pos_w = v91_ucode_to_codeword(law, w_ucode, true);
+        neg_w = v91_ucode_to_codeword(law, w_ucode, false);
+        sd_pat[0] = pos_w;
+        sd_pat[1] = pos_zero;
+        sd_pat[2] = pos_w;
+        sd_pat[3] = neg_w;
+        sd_pat[4] = neg_zero;
+        sd_pat[5] = neg_w;
+
+        for (int offset = 0; offset + 24 <= total && !found_sequence; offset += 6) {
+            int sd_reps = 0;
+            int pos;
+            char detail[192];
+
+            if (codewords[offset] != sd_pat[0])
+                continue;
+
+            for (int rep = 0; rep < 4; rep++) {
+                bool ok = true;
+                for (int j = 0; j < 6; j++) {
+                    if (codewords[offset + rep * 6 + j] != sd_pat[j]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    sd_reps = 0;
+                    break;
+                }
+                sd_reps++;
+            }
+            if (sd_reps < 4)
+                continue;
+
+            while (offset + (sd_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6; j++) {
+                    if (codewords[offset + sd_reps * 6 + j] != sd_pat[j]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok)
+                    break;
+                sd_reps++;
+            }
+
+            snprintf(detail, sizeof(detail), "w_ucode=%d u_info=%d reps=%d", w_ucode, u_info, sd_reps);
+            call_log_append(log, offset, sd_reps * 6, "V.90", "Sd sequence", detail);
+
+            pos = offset + sd_reps * 6;
+
+            {
+                uint8_t sbar_pat[6] = { neg_w, neg_zero, neg_w, pos_w, pos_zero, pos_w };
+                int sbar_reps = 0;
+
+                while (pos + (sbar_reps + 1) * 6 <= total) {
+                    bool ok = true;
+                    for (int j = 0; j < 6; j++) {
+                        if (codewords[pos + sbar_reps * 6 + j] != sbar_pat[j]) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (!ok)
+                        break;
+                    sbar_reps++;
+                }
+                if (sbar_reps > 0) {
+                    snprintf(detail, sizeof(detail), "reps=%d", sbar_reps);
+                    call_log_append(log, pos, sbar_reps * 6, "V.90", "S-bar sequence", detail);
+                    pos += sbar_reps * 6;
+                }
+            }
+
+            {
+                int start = pos;
+                int len = 0;
+
+                while (pos < total) {
+                    int u = codeword_to_ucode(law, codewords[pos]);
+                    if (u != u_info)
+                        break;
+                    len++;
+                    pos++;
+                }
+                if (len > 0) {
+                    snprintf(detail, sizeof(detail), "u_info=%d", u_info);
+                    call_log_append(log, start, len, "V.90", "TRN1d or Jd run", detail);
+                }
+            }
+
+            {
+                int dil_start = pos;
+                int dil_segments = 0;
+                v90_dil_analysis_t analysis;
+
+                while (pos + 24 <= total) {
+                    bool has_active = false;
+                    bool has_idle_tail = true;
+
+                    for (int i = 0; i < 12; i++) {
+                        if (codewords[pos + i] != idle) {
+                            has_active = true;
+                            break;
+                        }
+                    }
+                    for (int i = 12; i < 24; i++) {
+                        if (codewords[pos + i] != idle) {
+                            has_idle_tail = false;
+                            break;
+                        }
+                    }
+                    if (!has_active || !has_idle_tail)
+                        break;
+                    dil_segments++;
+                    pos += 24;
+                }
+                if (dil_segments >= 3) {
+                    v90_dil_desc_t default_like;
+                    memset(&default_like, 0, sizeof(default_like));
+                    default_like.n = V91_DEFAULT_DIL_SEGMENTS;
+                    default_like.lsp = 12;
+                    default_like.ltp = 12;
+                    for (int i = 0; i < 8; i++) {
+                        default_like.h[i] = (uint8_t) i;
+                        default_like.ref[i] = (uint8_t) i;
+                    }
+                    for (int i = 0; i < 255; i++)
+                        default_like.train_u[i] = 0x7F;
+                    if (v90_analyse_dil_descriptor(&default_like, &analysis)) {
+                        format_v90_dil_summary(detail, sizeof(detail), &analysis);
+                    } else {
+                        snprintf(detail, sizeof(detail), "%d apparent DIL segments", dil_segments);
+                    }
+                    call_log_append(log, dil_start, dil_segments * 24, "V.90", "Apparent DIL region", detail);
+                }
+            }
+
+            {
+                int start = pos;
+                int len = 0;
+                while (pos < total && codewords[pos] == idle) {
+                    len++;
+                    pos++;
+                }
+                if (len >= 8)
+                    call_log_append(log, start, len, "V.90", "Ri/B1 idle run", "");
+            }
+
+            {
+                int start = pos;
+                int len = 0;
+
+                while (pos < total) {
+                    int u = codeword_to_ucode(law, codewords[pos]);
+                    if (u != u_info)
+                        break;
+                    len++;
+                    pos++;
+                }
+                if (len > 0) {
+                    snprintf(detail, sizeof(detail), "u_info=%d", u_info);
+                    call_log_append(log, start, len, "V.90", "TRN2d/CP/data-magnitude run", detail);
+                }
+            }
+
+            if (pos < total) {
+                int remaining = total - pos;
+                snprintf(detail, sizeof(detail), "remaining carrier/data codewords=%d", remaining);
+                call_log_append(log, pos, remaining, "V.90", "Remaining data-bearing region", detail);
+            }
+
+            found_sequence = true;
+        }
+    }
+
+    call_log_append(log, total, 0, "V.90",
+                    "Phase 2 INFO0a/INFO1a not decoded here",
+                    "Those frames are V.34 DPSK symbols; this offline path currently logs only the PCM-visible portions.");
+}
+
 /* ------------------------------------------------------------------ */
 /* RMS energy profile                                                  */
 /* ------------------------------------------------------------------ */
@@ -877,17 +1470,82 @@ typedef enum {
     CH_MONO = 2
 } channel_select_t;
 
+typedef struct {
+    bool do_v8;
+    bool do_v91;
+    bool do_v90;
+    bool do_energy;
+    bool do_stats;
+    bool do_call_log;
+    bool raw_output_enabled;
+} decode_options_t;
+
+static void run_decode_suite(const char *label,
+                             const int16_t *linear_samples,
+                             const uint8_t *g711_codewords,
+                             int total_samples,
+                             int total_codewords,
+                             int sample_rate,
+                             v91_law_t law,
+                             const decode_options_t *opts)
+{
+    if (!linear_samples || !g711_codewords || !opts)
+        return;
+
+    printf("\n--- Channel: %s ---\n", label);
+
+    if (opts->raw_output_enabled && opts->do_stats)
+        print_codeword_stats(g711_codewords, total_codewords, law);
+
+    if (opts->raw_output_enabled && opts->do_energy)
+        print_energy_profile(linear_samples, total_samples, sample_rate);
+
+    if (opts->raw_output_enabled && opts->do_v8) {
+        printf("\n=== V.8 Decode (as answerer) ===\n");
+        decode_v8_pass(linear_samples, total_samples, false);
+        printf("\n=== V.8 Decode (as caller) ===\n");
+        decode_v8_pass(linear_samples, total_samples, true);
+    }
+
+    if (opts->raw_output_enabled && opts->do_v91)
+        decode_v91_signals(g711_codewords, total_codewords, law);
+
+    if (opts->raw_output_enabled && opts->do_v90)
+        decode_v90_signals(g711_codewords, total_codewords, law);
+
+    if (opts->do_call_log) {
+        call_log_t log;
+        call_log_init(&log);
+
+        if (opts->do_v8) {
+            collect_v8_event(&log, linear_samples, total_samples, false);
+            collect_v8_event(&log, linear_samples, total_samples, true);
+        }
+        if (opts->do_v91)
+            collect_v91_events(&log, g711_codewords, total_codewords, law);
+        if (opts->do_v90)
+            collect_v90_events(&log, g711_codewords, total_codewords, law);
+
+        call_log_sort(&log);
+        print_call_log(label, &log, total_samples, sample_rate);
+        call_log_reset(&log);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *input_path = NULL;
     v91_law_t law = V91_LAW_ULAW;
     input_format_t fmt = FMT_AUTO;
     channel_select_t channel = CH_MONO;
+    bool channel_explicit = false;
+    bool explicit_decode_output = false;
     bool do_v8 = false;
     bool do_v91 = false;
     bool do_v90 = false;
     bool do_energy = false;
     bool do_stats = false;
+    bool do_call_log = false;
     bool do_all = false;
 
     for (int i = 1; i < argc; i++) {
@@ -903,6 +1561,7 @@ int main(int argc, char **argv)
             fmt = FMT_G711;
         } else if (strcmp(argv[i], "--channel") == 0 && i + 1 < argc) {
             i++;
+            channel_explicit = true;
             if (strcasecmp(argv[i], "L") == 0 || strcasecmp(argv[i], "left") == 0)
                 channel = CH_LEFT;
             else if (strcasecmp(argv[i], "R") == 0 || strcasecmp(argv[i], "right") == 0)
@@ -911,16 +1570,24 @@ int main(int argc, char **argv)
                 channel = CH_MONO;
         } else if (strcmp(argv[i], "--v8") == 0) {
             do_v8 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--v91") == 0) {
             do_v91 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--v90") == 0) {
             do_v90 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--energy") == 0) {
             do_energy = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--stats") == 0) {
             do_stats = true;
+            explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--call-log") == 0) {
+            do_call_log = true;
         } else if (strcmp(argv[i], "--all") == 0) {
             do_all = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options] <file.wav|file.g711>\n\n"
                    "Options:\n"
@@ -934,6 +1601,7 @@ int main(int argc, char **argv)
                    "  --v90              Decode V.90 signals (Sd, CP, etc.)\n"
                    "  --energy           Print RMS energy profile\n"
                    "  --stats            Print codeword histogram/statistics\n"
+                   "  --call-log         Print a best-effort chronological call log\n"
                    "  --all              Enable all decoders (default)\n"
                    "\nWAV files should be 8000 Hz, 16-bit (mono or stereo).\n"
                    "G.711 files are raw codeword bytes at 8000 Hz.\n",
@@ -952,11 +1620,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats)
+    if (!do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log)
         do_all = true;
 
     if (do_all) {
-        do_v8 = do_v91 = do_v90 = do_energy = do_stats = true;
+        do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
+    }
+
+    if (do_call_log && !do_v8 && !do_v91 && !do_v90) {
+        do_v8 = true;
+        do_v91 = true;
+        do_v90 = true;
     }
 
     /* Auto-detect format from extension */
@@ -982,6 +1656,10 @@ int main(int argc, char **argv)
 
     int16_t *linear_samples = NULL;
     uint8_t *g711_codewords = NULL;
+    int16_t *left_linear_samples = NULL;
+    int16_t *right_linear_samples = NULL;
+    uint8_t *left_g711_codewords = NULL;
+    uint8_t *right_g711_codewords = NULL;
     int total_samples = 0;
     int total_codewords = 0;
     int sample_rate = 8000;
@@ -1021,6 +1699,12 @@ int main(int argc, char **argv)
         total_samples = total_frames;
         linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
         g711_codewords = malloc((size_t) total_samples);
+        if (wav.channels >= 2 && do_call_log && !channel_explicit) {
+            left_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
+            right_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
+            left_g711_codewords = malloc((size_t) total_samples);
+            right_g711_codewords = malloc((size_t) total_samples);
+        }
         if (!linear_samples || !g711_codewords) { fclose(f); return 1; }
 
         for (int i = 0; i < total_samples; i++) {
@@ -1028,6 +1712,11 @@ int main(int argc, char **argv)
                 linear_samples[i] = raw_data[i * wav.channels];
             else
                 linear_samples[i] = raw_data[i * wav.channels + (int) channel];
+
+            if (left_linear_samples && right_linear_samples) {
+                left_linear_samples[i] = raw_data[i * wav.channels];
+                right_linear_samples[i] = raw_data[i * wav.channels + 1];
+            }
         }
         free(raw_data);
 
@@ -1037,6 +1726,14 @@ int main(int argc, char **argv)
             g711_codewords[i] = (law == V91_LAW_ULAW)
                 ? linear_to_ulaw(linear_samples[i])
                 : linear_to_alaw(linear_samples[i]);
+            if (left_g711_codewords && right_g711_codewords) {
+                left_g711_codewords[i] = (law == V91_LAW_ULAW)
+                    ? linear_to_ulaw(left_linear_samples[i])
+                    : linear_to_alaw(left_linear_samples[i]);
+                right_g711_codewords[i] = (law == V91_LAW_ULAW)
+                    ? linear_to_ulaw(right_linear_samples[i])
+                    : linear_to_alaw(right_linear_samples[i]);
+            }
         }
 
         printf("Channel: %s, Law: %s\n",
@@ -1076,27 +1773,36 @@ int main(int argc, char **argv)
            (double) total_samples / (double) sample_rate, total_samples);
 
     /* Run decoders */
-    if (do_stats)
-        print_codeword_stats(g711_codewords, total_codewords, law);
+    {
+        decode_options_t opts;
+        opts.do_v8 = do_v8;
+        opts.do_v91 = do_v91;
+        opts.do_v90 = do_v90;
+        opts.do_energy = do_energy;
+        opts.do_stats = do_stats;
+        opts.do_call_log = do_call_log;
+        opts.raw_output_enabled = explicit_decode_output || !do_call_log;
 
-    if (do_energy)
-        print_energy_profile(linear_samples, total_samples, sample_rate);
-
-    if (do_v8) {
-        printf("\n=== V.8 Decode (as answerer) ===\n");
-        decode_v8_pass(linear_samples, total_samples, false);
-        printf("\n=== V.8 Decode (as caller) ===\n");
-        decode_v8_pass(linear_samples, total_samples, true);
+        if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
+            run_decode_suite("Left (TX)", left_linear_samples, left_g711_codewords,
+                             total_samples, total_codewords, sample_rate, law, &opts);
+            run_decode_suite("Right (RX)", right_linear_samples, right_g711_codewords,
+                             total_samples, total_codewords, sample_rate, law, &opts);
+        } else {
+            run_decode_suite(channel == CH_LEFT ? "Left (TX)"
+                             : channel == CH_RIGHT ? "Right (RX)"
+                             : "Mono",
+                             linear_samples, g711_codewords,
+                             total_samples, total_codewords, sample_rate, law, &opts);
+        }
     }
-
-    if (do_v91)
-        decode_v91_signals(g711_codewords, total_codewords, law);
-
-    if (do_v90)
-        decode_v90_signals(g711_codewords, total_codewords, law);
 
     free(linear_samples);
     free(g711_codewords);
+    free(left_linear_samples);
+    free(right_linear_samples);
+    free(left_g711_codewords);
+    free(right_g711_codewords);
 
     return 0;
 }
