@@ -1309,6 +1309,19 @@ static void collect_v34_events(call_log_t *log,
         APPEND_V34_STAGE_EVENT(&answerer, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
         APPEND_V34_STAGE_EVENT(&answerer, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
         APPEND_V34_STAGE_EVENT(&answerer, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
+        if (answerer.phase3_trn_lock_score >= 0) {
+            snprintf(detail, sizeof(detail),
+                     "role=answerer best_lock=%d%%%s%s",
+                     answerer.phase3_trn_lock_score,
+                     answerer.phase3_trn_strong_sample >= 0 ? " strong_lock=yes" : "",
+                     answerer.phase3_trn_strong_sample >= 0 ? "" : " strong_lock=no");
+            call_log_append(log,
+                            answerer.phase3_trn_lock_sample >= 0 ? answerer.phase3_trn_lock_sample : answerer.tx_trn_sample,
+                            0,
+                            "V.90 Phase 3",
+                            "Phase 3 TRN lock",
+                            detail);
+        }
         if (answerer.tx_ja_sample >= 0) {
             char ja_preview[129];
             int ja_bits = v34_effective_ja_bit_count(&answerer);
@@ -1382,6 +1395,19 @@ static void collect_v34_events(call_log_t *log,
         APPEND_V34_STAGE_EVENT(&caller, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
         APPEND_V34_STAGE_EVENT(&caller, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
         APPEND_V34_STAGE_EVENT(&caller, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
+        if (caller.phase3_trn_lock_score >= 0) {
+            snprintf(detail, sizeof(detail),
+                     "role=caller best_lock=%d%%%s%s",
+                     caller.phase3_trn_lock_score,
+                     caller.phase3_trn_strong_sample >= 0 ? " strong_lock=yes" : "",
+                     caller.phase3_trn_strong_sample >= 0 ? "" : " strong_lock=no");
+            call_log_append(log,
+                            caller.phase3_trn_lock_sample >= 0 ? caller.phase3_trn_lock_sample : caller.tx_trn_sample,
+                            0,
+                            "V.90 Phase 3",
+                            "Phase 3 TRN lock",
+                            detail);
+        }
         if (caller.tx_ja_sample >= 0) {
             char ja_preview[129];
             int ja_bits = v34_effective_ja_bit_count(&caller);
