@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <math.h>
 
 /* ------------------------------------------------------------------ */
@@ -45,6 +47,43 @@ static uint32_t read_le32(const uint8_t *p)
 static double sample_to_ms(int sample, int rate)
 {
     return (double) sample * 1000.0 / (double) rate;
+}
+
+typedef struct {
+    int saved_stderr_fd;
+    bool active;
+} stderr_silence_guard_t;
+
+static stderr_silence_guard_t silence_stderr_begin(void)
+{
+    stderr_silence_guard_t guard = { -1, false };
+
+    fflush(stderr);
+    guard.saved_stderr_fd = dup(STDERR_FILENO);
+    if (guard.saved_stderr_fd < 0)
+        return guard;
+
+    if (!freopen("/dev/null", "a", stderr)) {
+        close(guard.saved_stderr_fd);
+        guard.saved_stderr_fd = -1;
+        return guard;
+    }
+
+    guard.active = true;
+    return guard;
+}
+
+static void silence_stderr_end(stderr_silence_guard_t *guard)
+{
+    if (!guard || guard->saved_stderr_fd < 0)
+        return;
+
+    fflush(stderr);
+    dup2(guard->saved_stderr_fd, STDERR_FILENO);
+    clearerr(stderr);
+    close(guard->saved_stderr_fd);
+    guard->saved_stderr_fd = -1;
+    guard->active = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -375,10 +414,14 @@ typedef struct {
     bool info0_seen;
     bool info1_seen;
     bool phase3_seen;
+    bool phase4_ready_seen;
+    bool phase4_seen;
     bool training_failed;
     int info0_sample;
     int info1_sample;
     int phase3_sample;
+    int phase4_ready_sample;
+    int phase4_sample;
     int failure_sample;
     int final_rx_stage;
     int final_tx_stage;
@@ -387,6 +430,53 @@ typedef struct {
     v90_info0a_t info0a;
     v90_info1a_t info1a;
 } decode_v34_result_t;
+
+typedef struct {
+    bool adaptive_used;
+    double gain;
+    int bias;
+    int direct_v90_score;
+    int selected_v90_score;
+} codeword_stream_info_t;
+
+typedef struct {
+    bool ok;
+    bool calling_party;
+    int start_sample;
+    int u_info;
+    int decoded_octets;
+    int preview_len;
+    int printable_octets;
+    uint8_t preview[32];
+} post_phase3_decode_t;
+
+typedef struct {
+    bool ok;
+    bool calling_party;
+    int u_info;
+    int phase3_start_sample;
+    int jd_start_sample;
+    int jd_frame_errors;
+    int jd_repetitions;
+    bool jd_prime_seen;
+    int jd_prime_sample;
+    int jd_prime_zero_count;
+} jd_stage_decode_t;
+
+#define OFFLINE_V90_SD_SYMBOLS      (64 * 6)
+#define OFFLINE_V90_SBAR_SYMBOLS    (8 * 6)
+#define OFFLINE_V90_TRN1D_SYMBOLS   2046
+#define OFFLINE_V90_JD_BITS         72
+#define OFFLINE_V90_JD_PRIME_BITS   12
+
+static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_result_t *answerer,
+                                                          const decode_v34_result_t *caller,
+                                                          bool *calling_party_out);
+static bool decode_jd_stage(const uint8_t *codewords,
+                            int total_codewords,
+                            const decode_v34_result_t *answerer,
+                            const decode_v34_result_t *caller,
+                            jd_stage_decode_t *out);
 
 static decode_v8_result_t g_v8_result;
 
@@ -664,6 +754,7 @@ static bool decode_v34_pass(const int16_t *samples,
     v34_state_t *v34;
     v34_v90_info0a_t raw_info0a;
     v34_v90_info1a_t raw_info1a;
+    stderr_silence_guard_t stderr_guard;
     int offset = 0;
 
     if (!samples || total_samples <= 0 || !result)
@@ -673,6 +764,8 @@ static bool decode_v34_pass(const int16_t *samples,
     result->info0_sample = -1;
     result->info1_sample = -1;
     result->phase3_sample = -1;
+    result->phase4_ready_sample = -1;
+    result->phase4_sample = -1;
     result->failure_sample = -1;
 
     v34 = v34_init(NULL, 3200, 21600, calling_party, true,
@@ -683,11 +776,13 @@ static bool decode_v34_pass(const int16_t *samples,
 
     v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
     span_log_set_level(v34_get_logging_state(v34), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
+    stderr_guard = silence_stderr_begin();
 
     while (offset < total_samples) {
         int chunk = total_samples - offset;
         int16_t tx_buf[160];
         int rx_stage;
+        int tx_stage;
         int rx_event;
 
         if (chunk > 160)
@@ -698,6 +793,7 @@ static bool decode_v34_pass(const int16_t *samples,
         offset += chunk;
 
         rx_stage = v34_get_rx_stage(v34);
+        tx_stage = v34_get_tx_stage(v34);
         rx_event = v34_get_rx_event(v34);
 
         if (!result->info0_seen
@@ -718,15 +814,34 @@ static bool decode_v34_pass(const int16_t *samples,
             result->phase3_seen = true;
             result->phase3_sample = offset;
         }
+        if (!result->phase4_ready_seen && rx_event == 15) {
+            result->phase4_ready_seen = true;
+            result->phase4_ready_sample = offset;
+        }
+        if (!result->phase4_seen && (rx_stage >= 16 || tx_stage >= 41 || rx_event == 15)) {
+            result->phase4_seen = true;
+            result->phase4_sample = offset;
+        }
         if (!result->training_failed && rx_event == 16) {
             result->training_failed = true;
             result->failure_sample = offset;
         }
     }
 
+    silence_stderr_end(&stderr_guard);
+
     result->final_rx_stage = v34_get_rx_stage(v34);
     result->final_tx_stage = v34_get_tx_stage(v34);
     result->final_rx_event = v34_get_rx_event(v34);
+    if (!result->phase4_ready_seen && result->final_rx_event == 15) {
+        result->phase4_ready_seen = true;
+        result->phase4_ready_sample = offset;
+    }
+    if (!result->phase4_seen
+        && (result->final_rx_stage >= 16 || result->final_tx_stage >= 41 || result->final_rx_event == 15)) {
+        result->phase4_seen = true;
+        result->phase4_sample = offset;
+    }
     if (!result->u_info)
         result->u_info = v34_get_v90_u_info(v34);
 
@@ -772,6 +887,10 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
     }
     if (result->phase3_seen)
         printf("  Phase 3:         seen at %.1f ms\n", sample_to_ms(result->phase3_sample, 8000));
+    if (result->phase4_ready_seen)
+        printf("  Phase 4 ready:   seen at %.1f ms\n", sample_to_ms(result->phase4_ready_sample, 8000));
+    if (result->phase4_seen)
+        printf("  Phase 4 / MP:    seen at %.1f ms\n", sample_to_ms(result->phase4_sample, 8000));
     if (result->training_failed)
         printf("  Training fail:   observed at %.1f ms\n", sample_to_ms(result->failure_sample, 8000));
 }
@@ -812,6 +931,20 @@ static void collect_v34_events(call_log_t *log,
             snprintf(detail, sizeof(detail), "role=answerer u_info=%d", answerer.u_info);
             call_log_append(log, answerer.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
         }
+        if (answerer.phase4_ready_seen) {
+            snprintf(detail, sizeof(detail), "role=answerer event=%s (%d)",
+                     v34_event_to_str_local(answerer.final_rx_event),
+                     answerer.final_rx_event);
+            call_log_append(log, answerer.phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail);
+        }
+        if (answerer.phase4_seen) {
+            snprintf(detail, sizeof(detail), "role=answerer rx=%s(%d) tx=%s(%d)",
+                     v34_rx_stage_to_str_local(answerer.final_rx_stage),
+                     answerer.final_rx_stage,
+                     v34_tx_stage_to_str_local(answerer.final_tx_stage),
+                     answerer.final_tx_stage);
+            call_log_append(log, answerer.phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail);
+        }
     }
 
     if (decode_v34_pass(samples, total_samples, law, true, &caller)) {
@@ -837,6 +970,20 @@ static void collect_v34_events(call_log_t *log,
         if (caller.phase3_seen) {
             snprintf(detail, sizeof(detail), "role=caller u_info=%d", caller.u_info);
             call_log_append(log, caller.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
+        }
+        if (caller.phase4_ready_seen) {
+            snprintf(detail, sizeof(detail), "role=caller event=%s (%d)",
+                     v34_event_to_str_local(caller.final_rx_event),
+                     caller.final_rx_event);
+            call_log_append(log, caller.phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail);
+        }
+        if (caller.phase4_seen) {
+            snprintf(detail, sizeof(detail), "role=caller rx=%s(%d) tx=%s(%d)",
+                     v34_rx_stage_to_str_local(caller.final_rx_stage),
+                     caller.final_rx_stage,
+                     v34_tx_stage_to_str_local(caller.final_tx_stage),
+                     caller.final_tx_stage);
+            call_log_append(log, caller.phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail);
         }
     }
 }
@@ -1289,6 +1436,8 @@ static int codeword_to_ucode(v91_law_t law, uint8_t codeword)
 static void decode_v90_signals(const uint8_t *codewords, int total,
                                v91_law_t law)
 {
+    bool found_sequence = false;
+
     printf("\n=== V.90 Signal Scan ===\n");
 
     uint8_t idle = v91_idle_codeword(law);
@@ -1514,13 +1663,20 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                        data_ms > 0 ? (double) data_len * 8.0 * 1000.0 / data_ms : 0.0);
             }
 
+            found_sequence = true;
             /* Only report first Sd match per U_INFO value */
             goto next_u_info;
         }
         next_u_info:;
     }
 
-    /* Note about V.34 Phase 2 signals */
+    if (!found_sequence) {
+        printf("  No raw PCM-side V.90 sequence matched.\n");
+        printf("  This scanner expects exact downstream G.711/PCM codewords after INFO1a.\n");
+        printf("  These successful-call WAVs appear to be analog line audio, so later V.90/V.92\n");
+        printf("  startup is better inferred from the V.34 state machine than from raw codeword matching.\n");
+    }
+
     printf("  Note: V.90 INFO0a/INFO1a are V.34 Phase 2 DPSK modulated signals.\n"
            "        They require V.34 demodulation and are not visible as raw G.711 codewords.\n");
 }
@@ -1727,6 +1883,585 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
 
 }
 
+static void collect_post_phase3_stage_events(call_log_t *log,
+                                             const uint8_t *codewords,
+                                             int total_codewords,
+                                             const decode_v34_result_t *answerer,
+                                             const decode_v34_result_t *caller)
+{
+    jd_stage_decode_t jd_stage;
+    char detail[192];
+
+    if (!log || !codewords || total_codewords <= 0)
+        return;
+
+    if (!decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage))
+        return;
+
+    snprintf(detail, sizeof(detail),
+             "role=%s u_info=%d reps=%d frame_errors=%d",
+             jd_stage.calling_party ? "caller" : "answerer",
+             jd_stage.u_info,
+             jd_stage.jd_repetitions,
+             jd_stage.jd_frame_errors);
+    call_log_append(log,
+                    jd_stage.jd_start_sample,
+                    jd_stage.jd_repetitions * OFFLINE_V90_JD_BITS,
+                    "V.90",
+                    "Jd capability frames",
+                    detail);
+
+    if (jd_stage.jd_prime_seen) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s zero_bits=%d/12",
+                 jd_stage.calling_party ? "caller" : "answerer",
+                 jd_stage.jd_prime_zero_count);
+        call_log_append(log,
+                        jd_stage.jd_prime_sample,
+                        OFFLINE_V90_JD_PRIME_BITS,
+                        "V.90",
+                        "J'd termination",
+                        detail);
+    }
+}
+
+static int v90_sequence_score(const uint8_t *codewords, int total, v91_law_t law)
+{
+    uint8_t pos_zero;
+    uint8_t neg_zero;
+    int best_score = 0;
+
+    if (!codewords || total <= 0)
+        return 0;
+
+    pos_zero = v91_ucode_to_codeword(law, 0, true);
+    neg_zero = v91_ucode_to_codeword(law, 0, false);
+
+    for (int u_info = 10; u_info <= 127; u_info++) {
+        int w_ucode = 16 + u_info;
+        uint8_t pos_w;
+        uint8_t neg_w;
+        uint8_t sd_pat[6];
+
+        if (w_ucode > 127)
+            w_ucode = 127;
+
+        pos_w = v91_ucode_to_codeword(law, w_ucode, true);
+        neg_w = v91_ucode_to_codeword(law, w_ucode, false);
+        sd_pat[0] = pos_w;
+        sd_pat[1] = pos_zero;
+        sd_pat[2] = pos_w;
+        sd_pat[3] = neg_w;
+        sd_pat[4] = neg_zero;
+        sd_pat[5] = neg_w;
+
+        for (int offset = 0; offset + 24 <= total; offset += 6) {
+            int sd_reps = 0;
+            int pos;
+            int sbar_reps = 0;
+            int trn1d_len = 0;
+            int score;
+
+            if (codewords[offset] != sd_pat[0])
+                continue;
+
+            for (int rep = 0; rep < 4; rep++) {
+                bool ok = true;
+                for (int j = 0; j < 6; j++) {
+                    if (codewords[offset + rep * 6 + j] != sd_pat[j]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    sd_reps = 0;
+                    break;
+                }
+                sd_reps++;
+            }
+            if (sd_reps < 4)
+                continue;
+
+            while (offset + (sd_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6; j++) {
+                    if (codewords[offset + sd_reps * 6 + j] != sd_pat[j]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok)
+                    break;
+                sd_reps++;
+            }
+
+            pos = offset + sd_reps * 6;
+            {
+                uint8_t sbar_pat[6] = { neg_w, neg_zero, neg_w, pos_w, pos_zero, pos_w };
+                while (pos + (sbar_reps + 1) * 6 <= total) {
+                    bool ok = true;
+                    for (int j = 0; j < 6; j++) {
+                        if (codewords[pos + sbar_reps * 6 + j] != sbar_pat[j]) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (!ok)
+                        break;
+                    sbar_reps++;
+                }
+                pos += sbar_reps * 6;
+            }
+
+            while (pos < total) {
+                int u = codeword_to_ucode(law, codewords[pos]);
+                if (u != u_info)
+                    break;
+                trn1d_len++;
+                pos++;
+            }
+
+            score = sd_reps * 1000 + sbar_reps * 100 + (trn1d_len > 999 ? 999 : trn1d_len);
+            if (score > best_score)
+                best_score = score;
+        }
+    }
+
+    return best_score;
+}
+
+static void build_g711_codewords_from_linear(const int16_t *samples,
+                                             int total_samples,
+                                             v91_law_t law,
+                                             double gain,
+                                             int bias,
+                                             uint8_t *out)
+{
+    if (!samples || !out || total_samples <= 0)
+        return;
+
+    for (int i = 0; i < total_samples; i++) {
+        long scaled = lrint((double) samples[i] * gain) + bias;
+        if (scaled < -32768)
+            scaled = -32768;
+        else if (scaled > 32767)
+            scaled = 32767;
+        out[i] = (law == V91_LAW_ULAW)
+            ? linear_to_ulaw((int16_t) scaled)
+            : linear_to_alaw((int16_t) scaled);
+    }
+}
+
+static void adaptive_reslice_codewords(const int16_t *samples,
+                                       int total_samples,
+                                       v91_law_t law,
+                                       uint8_t *direct_codewords,
+                                       uint8_t *work_codewords,
+                                       codeword_stream_info_t *info)
+{
+    static const double gain_candidates[] = { 0.50, 0.67, 0.80, 1.00, 1.25, 1.50, 2.00 };
+    static const int bias_candidates[] = { -2048, -1024, -512, 0, 512, 1024, 2048 };
+    int direct_score;
+    int best_score;
+    double best_gain;
+    int best_bias;
+
+    if (!samples || !direct_codewords || !work_codewords || !info || total_samples <= 0)
+        return;
+
+    memset(info, 0, sizeof(*info));
+    direct_score = v90_sequence_score(direct_codewords, total_samples, law);
+    best_score = direct_score;
+    best_gain = 1.0;
+    best_bias = 0;
+
+    for (size_t gi = 0; gi < sizeof(gain_candidates) / sizeof(gain_candidates[0]); gi++) {
+        for (size_t bi = 0; bi < sizeof(bias_candidates) / sizeof(bias_candidates[0]); bi++) {
+            int score;
+
+            build_g711_codewords_from_linear(samples, total_samples, law,
+                                             gain_candidates[gi], bias_candidates[bi],
+                                             work_codewords);
+            score = v90_sequence_score(work_codewords, total_samples, law);
+            if (score > best_score) {
+                best_score = score;
+                best_gain = gain_candidates[gi];
+                best_bias = bias_candidates[bi];
+            }
+        }
+    }
+
+    info->direct_v90_score = direct_score;
+    info->selected_v90_score = best_score;
+    info->gain = best_gain;
+    info->bias = best_bias;
+    info->adaptive_used = (best_score > direct_score && (best_gain != 1.0 || best_bias != 0));
+
+    if (info->adaptive_used) {
+        build_g711_codewords_from_linear(samples, total_samples, law,
+                                         best_gain, best_bias, direct_codewords);
+    }
+}
+
+static int offline_v90_scramble_bit(uint32_t *sr, int in_bit)
+{
+    int fb = ((int)(*sr >> 22) ^ (int)(*sr >> 4)) & 1;
+    int out_bit = in_bit ^ fb;
+    *sr = ((*sr << 1) | (uint32_t) out_bit) & 0x7FFFFF;
+    return out_bit;
+}
+
+static int offline_v90_descramble_reg_bit(uint32_t *reg, int in_bit)
+{
+    int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
+    *reg = (*reg << 1) | (uint32_t) in_bit;
+    return out_bit;
+}
+
+static void offline_v90_build_jd_bits(uint8_t bits[OFFLINE_V90_JD_BITS])
+{
+    uint8_t packed[(OFFLINE_V90_JD_BITS + 7) / 8];
+    int pos = 0;
+    uint16_t crc = 0xFFFF;
+
+    memset(bits, 0, OFFLINE_V90_JD_BITS);
+    memset(packed, 0, sizeof(packed));
+
+    for (int i = 0; i < 17; i++)
+        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
+    pos++;
+    for (int i = 18; i <= 33; i++)
+        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
+    pos++;
+    for (int i = 35; i <= 40; i++)
+        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
+    pos += 6;
+    pos++;
+    pos++;
+    packed[pos / 8] |= (uint8_t) (1U << (pos % 8));
+    pos++;
+    pos++;
+    pos++;
+
+    for (int i = 0; i < 52; i++) {
+        int bit = (packed[i / 8] >> (i % 8)) & 1;
+        int fb = ((crc >> 15) ^ bit) & 1;
+        crc <<= 1;
+        if (fb)
+            crc ^= 0x8005;
+        crc &= 0xFFFF;
+    }
+    for (int i = 0; i < 16; i++) {
+        if ((crc >> (15 - i)) & 1)
+            packed[(52 + i) / 8] |= (uint8_t) (1U << ((52 + i) % 8));
+    }
+
+    for (int i = 0; i < OFFLINE_V90_JD_BITS; i++)
+        bits[i] = (uint8_t) ((packed[i / 8] >> (i % 8)) & 1U);
+}
+
+static void offline_v90_seed_after_trn1d(uint32_t *descramble_reg_out, int *last_sign_out)
+{
+    uint32_t tx_sr = 0;
+    uint32_t rx_reg = 0;
+    int last_sign = 0;
+
+    for (int i = 0; i < OFFLINE_V90_TRN1D_SYMBOLS; i++) {
+        int scrambled = offline_v90_scramble_bit(&tx_sr, 1);
+        last_sign = scrambled;
+        (void) offline_v90_descramble_reg_bit(&rx_reg, scrambled);
+    }
+
+    if (descramble_reg_out)
+        *descramble_reg_out = rx_reg;
+    if (last_sign_out)
+        *last_sign_out = last_sign;
+}
+
+static int offline_v90_decode_jd_bits(const uint8_t *codewords,
+                                      int total_codewords,
+                                      int start_sample,
+                                      bool invert_sign,
+                                      uint8_t out_bits[OFFLINE_V90_JD_BITS])
+{
+    uint32_t descramble_reg;
+    int prev_sign;
+    int errors = 0;
+    uint8_t expected[OFFLINE_V90_JD_BITS];
+
+    if (!codewords || !out_bits || start_sample < 0 || start_sample + OFFLINE_V90_JD_BITS > total_codewords)
+        return OFFLINE_V90_JD_BITS + 1;
+
+    offline_v90_build_jd_bits(expected);
+    offline_v90_seed_after_trn1d(&descramble_reg, &prev_sign);
+
+    for (int i = 0; i < OFFLINE_V90_JD_BITS; i++) {
+        int sign = (codewords[start_sample + i] & 0x80) ? 1 : 0;
+        int scrambled;
+        int plain;
+
+        if (invert_sign)
+            sign ^= 1;
+        scrambled = sign ^ prev_sign;
+        prev_sign = sign;
+        plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+        out_bits[i] = (uint8_t) plain;
+        if (plain != expected[i])
+            errors++;
+    }
+
+    return errors;
+}
+
+static bool decode_jd_stage(const uint8_t *codewords,
+                            int total_codewords,
+                            const decode_v34_result_t *answerer,
+                            const decode_v34_result_t *caller,
+                            jd_stage_decode_t *out)
+{
+    const decode_v34_result_t *src;
+    bool calling_party = false;
+    int search_start;
+    int search_end;
+    int best_errors = OFFLINE_V90_JD_BITS + 1;
+    int best_start = -1;
+    bool best_invert = false;
+
+    if (!codewords || total_codewords <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    src = pick_post_phase3_source(answerer, caller, &calling_party);
+    if (!src)
+        return false;
+
+    out->u_info = src->u_info;
+    out->calling_party = calling_party;
+    out->phase3_start_sample = src->phase3_sample >= 0 ? src->phase3_sample : src->info1_sample;
+    search_start = src->info1_sample >= 0 ? src->info1_sample : out->phase3_start_sample;
+    if (search_start < 0)
+        return false;
+
+    if (src->phase4_seen && src->phase4_sample > search_start)
+        search_end = src->phase4_sample;
+    else if (src->phase4_ready_seen && src->phase4_ready_sample > search_start)
+        search_end = src->phase4_ready_sample;
+    else if (src->failure_sample > search_start)
+        search_end = src->failure_sample;
+    else
+        search_end = search_start + 4096;
+    if (search_end > total_codewords - OFFLINE_V90_JD_BITS)
+        search_end = total_codewords - OFFLINE_V90_JD_BITS;
+    if (search_end < search_start)
+        return false;
+
+    for (int candidate = search_start; candidate <= search_end; candidate++) {
+        uint8_t decoded_bits[OFFLINE_V90_JD_BITS];
+
+        for (int invert = 0; invert <= 1; invert++) {
+            int errors = offline_v90_decode_jd_bits(codewords, total_codewords, candidate,
+                                                    invert != 0, decoded_bits);
+            if (errors < best_errors) {
+                best_errors = errors;
+                best_start = candidate;
+                best_invert = (invert != 0);
+            }
+        }
+    }
+
+    if (best_start < 0 || best_errors > 20)
+        return false;
+
+    out->ok = true;
+    out->jd_start_sample = best_start;
+    out->jd_frame_errors = best_errors;
+    out->jd_repetitions = 0;
+
+    for (int rep = 0; ; rep++) {
+        int rep_start = best_start + rep * OFFLINE_V90_JD_BITS;
+        uint8_t decoded_bits[OFFLINE_V90_JD_BITS];
+        int errors = offline_v90_decode_jd_bits(codewords, total_codewords, rep_start,
+                                                best_invert, decoded_bits);
+        if (errors > 16)
+            break;
+        out->jd_repetitions++;
+    }
+
+    {
+        int jd_prime_start = best_start + out->jd_repetitions * OFFLINE_V90_JD_BITS;
+        uint32_t descramble_reg;
+        int prev_sign;
+
+        offline_v90_seed_after_trn1d(&descramble_reg, &prev_sign);
+        for (int i = 0; i < out->jd_repetitions * OFFLINE_V90_JD_BITS; i++) {
+            int sign = (codewords[best_start + i] & 0x80) ? 1 : 0;
+            int scrambled;
+            if (best_invert)
+                sign ^= 1;
+            scrambled = sign ^ prev_sign;
+            prev_sign = sign;
+            (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+        }
+
+        if (jd_prime_start + OFFLINE_V90_JD_PRIME_BITS <= total_codewords) {
+            int zero_count = 0;
+            for (int i = 0; i < OFFLINE_V90_JD_PRIME_BITS; i++) {
+                int sign = (codewords[jd_prime_start + i] & 0x80) ? 1 : 0;
+                int scrambled;
+                int plain;
+                if (best_invert)
+                    sign ^= 1;
+                scrambled = sign ^ prev_sign;
+                prev_sign = sign;
+                plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+                if (plain == 0)
+                    zero_count++;
+            }
+            out->jd_prime_zero_count = zero_count;
+            if (zero_count >= 10) {
+                out->jd_prime_seen = true;
+                out->jd_prime_sample = jd_prime_start;
+            }
+        }
+    }
+
+    return true;
+}
+
+static void print_jd_stage_decode(const jd_stage_decode_t *result)
+{
+    if (!result || !result->ok)
+        return;
+
+    printf("\n=== Phase 3 Stage Decode ===\n");
+    printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
+    printf("  Phase 3 start:    %.1f ms\n", sample_to_ms(result->phase3_start_sample, 8000));
+    printf("  U_INFO:           %d\n", result->u_info);
+    printf("  Jd start:         %.1f ms\n", sample_to_ms(result->jd_start_sample, 8000));
+    printf("  Jd repetitions:   %d\n", result->jd_repetitions);
+    printf("  Jd frame errors:  %d/72 on best alignment\n", result->jd_frame_errors);
+    if (result->jd_prime_seen) {
+        printf("  J'd:              seen at %.1f ms (%d/12 zero bits)\n",
+               sample_to_ms(result->jd_prime_sample, 8000),
+               result->jd_prime_zero_count);
+    } else {
+        printf("  J'd:              not confirmed (%d/12 zero bits)\n",
+               result->jd_prime_zero_count);
+    }
+}
+
+static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_result_t *answerer,
+                                                          const decode_v34_result_t *caller,
+                                                          bool *calling_party_out)
+{
+    if (answerer && answerer->info1_seen && answerer->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = false;
+        return answerer;
+    }
+    if (caller && caller->info1_seen && caller->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = true;
+        return caller;
+    }
+    if (answerer && answerer->phase3_seen && answerer->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = false;
+        return answerer;
+    }
+    if (caller && caller->phase3_seen && caller->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = true;
+        return caller;
+    }
+    return NULL;
+}
+
+static bool decode_post_phase3_codewords(const uint8_t *codewords,
+                                         int total_codewords,
+                                         v91_law_t law,
+                                         const decode_v34_result_t *answerer,
+                                         const decode_v34_result_t *caller,
+                                         post_phase3_decode_t *out)
+{
+    const decode_v34_result_t *src;
+    v90_state_t *v90;
+    uint8_t decoded[512];
+    stderr_silence_guard_t stderr_guard;
+    int start;
+    int decode_len;
+    bool calling_party = false;
+
+    if (!codewords || total_codewords <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    src = pick_post_phase3_source(answerer, caller, &calling_party);
+    if (!src)
+        return false;
+
+    start = src->info1_seen ? src->info1_sample : src->phase3_sample;
+    if (start < 0 || start >= total_codewords)
+        return false;
+
+    v90 = v90_init_data_pump(law == V91_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW);
+    if (!v90)
+        return false;
+
+    stderr_guard = silence_stderr_begin();
+    v90_start_phase3(v90, src->u_info);
+    decode_len = total_codewords - start;
+    if (decode_len > (int) sizeof(decoded))
+        decode_len = (int) sizeof(decoded);
+
+    out->decoded_octets = v90_rx_codewords(v90, decoded, decode_len, codewords + start, decode_len);
+    silence_stderr_end(&stderr_guard);
+    out->ok = (out->decoded_octets > 0);
+    out->calling_party = calling_party;
+    out->start_sample = start;
+    out->u_info = src->u_info;
+    out->preview_len = out->decoded_octets;
+    if (out->preview_len > (int) sizeof(out->preview))
+        out->preview_len = (int) sizeof(out->preview);
+
+    for (int i = 0; i < out->preview_len; i++) {
+        out->preview[i] = decoded[i];
+        if (decoded[i] >= 32 && decoded[i] <= 126)
+            out->printable_octets++;
+    }
+
+    v90_free(v90);
+    return out->ok;
+}
+
+static void print_post_phase3_decode(const post_phase3_decode_t *result)
+{
+    if (!result || !result->ok)
+        return;
+
+    printf("\n=== Post-Phase-3 Codeword Decode ===\n");
+    printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
+    printf("  Start time:       %.1f ms\n", sample_to_ms(result->start_sample, 8000));
+    printf("  U_INFO:           %d\n", result->u_info);
+    printf("  Octets decoded:   %d\n", result->decoded_octets);
+    printf("  Printable ratio:  %.1f%% of first %d octets\n",
+           result->preview_len > 0 ? (100.0 * (double) result->printable_octets / (double) result->preview_len) : 0.0,
+           result->preview_len);
+    printf("  Preview hex:      ");
+    for (int i = 0; i < result->preview_len; i++) {
+        if (i > 0)
+            printf(" ");
+        printf("%02X", result->preview[i]);
+    }
+    printf("\n");
+    printf("  Preview ASCII:    ");
+    for (int i = 0; i < result->preview_len; i++) {
+        uint8_t c = result->preview[i];
+        putchar((c >= 32 && c <= 126) ? (int) c : '.');
+    }
+    printf("\n");
+}
+
 /* ------------------------------------------------------------------ */
 /* RMS energy profile                                                  */
 /* ------------------------------------------------------------------ */
@@ -1837,12 +2572,30 @@ static void run_decode_suite(const char *label,
                              int total_codewords,
                              int sample_rate,
                              v91_law_t law,
-                             const decode_options_t *opts)
+                             const decode_options_t *opts,
+                             const codeword_stream_info_t *codeword_info)
 {
+    decode_v34_result_t answerer;
+    decode_v34_result_t caller;
+    bool have_answerer = false;
+    bool have_caller = false;
+
     if (!linear_samples || !g711_codewords || !opts)
         return;
 
     printf("\n--- Channel: %s ---\n", label);
+    if (codeword_info && (opts->do_v90 || opts->do_v91 || opts->do_call_log)) {
+        if (codeword_info->adaptive_used) {
+            printf("Codewords: adaptive re-slice selected (gain=%.2f, bias=%d, V.90 score %d -> %d)\n",
+                   codeword_info->gain,
+                   codeword_info->bias,
+                   codeword_info->direct_v90_score,
+                   codeword_info->selected_v90_score);
+        } else {
+            printf("Codewords: direct companding retained (adaptive re-slice found no stronger V.90 candidate; score %d)\n",
+                   codeword_info->selected_v90_score);
+        }
+    }
 
     if (opts->raw_output_enabled && opts->do_stats)
         print_codeword_stats(g711_codewords, total_codewords, law);
@@ -1850,18 +2603,20 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
-    if (opts->raw_output_enabled && opts->do_v34) {
-        decode_v34_result_t answerer;
-        decode_v34_result_t caller;
+    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
+        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, &answerer);
+        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, &caller);
+    }
 
+    if (opts->raw_output_enabled && opts->do_v34) {
         printf("\n=== V.34/V.90 Phase 2 Decode (as answerer) ===\n");
-        if (decode_v34_pass(linear_samples, total_samples, law, false, &answerer))
+        if (have_answerer)
             print_v34_result(&answerer, false);
         else
             printf("  V.34 probe init failed\n");
 
         printf("\n=== V.34/V.90 Phase 2 Decode (as caller) ===\n");
-        if (decode_v34_pass(linear_samples, total_samples, law, true, &caller))
+        if (have_caller)
             print_v34_result(&caller, true);
         else
             printf("  V.34 probe init failed\n");
@@ -1877,8 +2632,24 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
-    if (opts->raw_output_enabled && opts->do_v90)
+    if (opts->raw_output_enabled && opts->do_v90) {
+        jd_stage_decode_t jd_stage;
+        post_phase3_decode_t post_phase3;
+
         decode_v90_signals(g711_codewords, total_codewords, law);
+        if (decode_jd_stage(g711_codewords, total_codewords,
+                            have_answerer ? &answerer : NULL,
+                            have_caller ? &caller : NULL,
+                            &jd_stage)) {
+            print_jd_stage_decode(&jd_stage);
+        }
+        if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
+                                         have_answerer ? &answerer : NULL,
+                                         have_caller ? &caller : NULL,
+                                         &post_phase3)) {
+            print_post_phase3_decode(&post_phase3);
+        }
+    }
 
     if (opts->do_call_log) {
         call_log_t log;
@@ -1892,8 +2663,16 @@ static void run_decode_suite(const char *label,
         }
         if (opts->do_v91)
             collect_v91_events(&log, g711_codewords, total_codewords, law);
-        if (opts->do_v90)
+        if (opts->do_v90) {
             collect_v90_events(&log, g711_codewords, total_codewords, law);
+            if (have_answerer || have_caller) {
+                collect_post_phase3_stage_events(&log,
+                                                 g711_codewords,
+                                                 total_codewords,
+                                                 have_answerer ? &answerer : NULL,
+                                                 have_caller ? &caller : NULL);
+            }
+        }
 
         call_log_sort(&log);
         print_call_log(label, &log, total_samples, sample_rate);
@@ -2035,6 +2814,12 @@ int main(int argc, char **argv)
     int16_t *right_linear_samples = NULL;
     uint8_t *left_g711_codewords = NULL;
     uint8_t *right_g711_codewords = NULL;
+    uint8_t *adaptive_work_codewords = NULL;
+    uint8_t *left_adaptive_work_codewords = NULL;
+    uint8_t *right_adaptive_work_codewords = NULL;
+    codeword_stream_info_t codeword_info = {0};
+    codeword_stream_info_t left_codeword_info = {0};
+    codeword_stream_info_t right_codeword_info = {0};
     int total_samples = 0;
     int total_codewords = 0;
     int sample_rate = 8000;
@@ -2074,13 +2859,16 @@ int main(int argc, char **argv)
         total_samples = total_frames;
         linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
         g711_codewords = malloc((size_t) total_samples);
+        adaptive_work_codewords = malloc((size_t) total_samples);
         if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34)) {
             left_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             right_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             left_g711_codewords = malloc((size_t) total_samples);
             right_g711_codewords = malloc((size_t) total_samples);
+            left_adaptive_work_codewords = malloc((size_t) total_samples);
+            right_adaptive_work_codewords = malloc((size_t) total_samples);
         }
-        if (!linear_samples || !g711_codewords) { fclose(f); return 1; }
+        if (!linear_samples || !g711_codewords || !adaptive_work_codewords) { fclose(f); return 1; }
 
         for (int i = 0; i < total_samples; i++) {
             if (channel == CH_MONO || wav.channels == 1)
@@ -2097,18 +2885,17 @@ int main(int argc, char **argv)
 
         /* Convert linear to G.711 codewords */
         total_codewords = total_samples;
-        for (int i = 0; i < total_codewords; i++) {
-            g711_codewords[i] = (law == V91_LAW_ULAW)
-                ? linear_to_ulaw(linear_samples[i])
-                : linear_to_alaw(linear_samples[i]);
-            if (left_g711_codewords && right_g711_codewords) {
-                left_g711_codewords[i] = (law == V91_LAW_ULAW)
-                    ? linear_to_ulaw(left_linear_samples[i])
-                    : linear_to_alaw(left_linear_samples[i]);
-                right_g711_codewords[i] = (law == V91_LAW_ULAW)
-                    ? linear_to_ulaw(right_linear_samples[i])
-                    : linear_to_alaw(right_linear_samples[i]);
-            }
+        build_g711_codewords_from_linear(linear_samples, total_codewords, law, 1.0, 0, g711_codewords);
+        adaptive_reslice_codewords(linear_samples, total_codewords, law,
+                                   g711_codewords, adaptive_work_codewords, &codeword_info);
+        if (left_g711_codewords && right_g711_codewords
+            && left_adaptive_work_codewords && right_adaptive_work_codewords) {
+            build_g711_codewords_from_linear(left_linear_samples, total_codewords, law, 1.0, 0, left_g711_codewords);
+            adaptive_reslice_codewords(left_linear_samples, total_codewords, law,
+                                       left_g711_codewords, left_adaptive_work_codewords, &left_codeword_info);
+            build_g711_codewords_from_linear(right_linear_samples, total_codewords, law, 1.0, 0, right_g711_codewords);
+            adaptive_reslice_codewords(right_linear_samples, total_codewords, law,
+                                       right_g711_codewords, right_adaptive_work_codewords, &right_codeword_info);
         }
 
         printf("Channel: %s, Law: %s\n",
@@ -2139,6 +2926,8 @@ int main(int argc, char **argv)
         printf("G.711: %d codewords (%.1f ms), Law: %s\n",
                total_codewords, sample_to_ms(total_codewords, 8000),
                law == V91_LAW_ULAW ? "µ-law" : "A-law");
+        codeword_info.direct_v90_score = v90_sequence_score(g711_codewords, total_codewords, law);
+        codeword_info.selected_v90_score = codeword_info.direct_v90_score;
     }
 
     fclose(f);
@@ -2161,15 +2950,15 @@ int main(int argc, char **argv)
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
             run_decode_suite("Left (TX)", left_linear_samples, left_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts);
+                             total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info);
             run_decode_suite("Right (RX)", right_linear_samples, right_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts);
+                             total_samples, total_codewords, sample_rate, law, &opts, &right_codeword_info);
         } else {
             run_decode_suite(channel == CH_LEFT ? "Left (TX)"
                              : channel == CH_RIGHT ? "Right (RX)"
                              : "Mono",
                              linear_samples, g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts);
+                             total_samples, total_codewords, sample_rate, law, &opts, &codeword_info);
         }
     }
 
@@ -2179,6 +2968,9 @@ int main(int argc, char **argv)
     free(right_linear_samples);
     free(left_g711_codewords);
     free(right_g711_codewords);
+    free(adaptive_work_codewords);
+    free(left_adaptive_work_codewords);
+    free(right_adaptive_work_codewords);
 
     return 0;
 }
