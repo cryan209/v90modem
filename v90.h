@@ -102,8 +102,10 @@ typedef enum {
 } v90_law_t;
 
 /* V.90 Phase 3/4 TX sub-states for the digital modem.
- * Order matches V.90 §9.3.1/§9.4.1:
- *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → CP → B1d → Data */
+ * V.90 order (§9.3.1/§9.4.1):
+ *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → CP → B1d → Data
+ * V.92 Phase 4 extension (§9.6.1/V.92):
+ *   … → TRN2d → SUVd → CPd → SUVd' → Ed → B1d → Data */
 typedef enum {
     V90_TX_PHASE2,        /* SpanDSP V.34 handles INFO exchange */
     V90_TX_SD,            /* Sending Sd — 64 reps of {+W,+0,+W,-W,-0,-W} */
@@ -114,7 +116,10 @@ typedef enum {
     V90_TX_DIL,           /* Sending DIL descriptor symbols */
     V90_TX_RI,            /* Phase 4: Ri — retrain init (idle codewords, §9.4.1.1) */
     V90_TX_TRN2D,         /* Phase 4: TRN2d — scrambled ones at U_INFO until CP ready */
+    V90_TX_SUVD,          /* V.92 Phase 4: SUVd (no ack) — short update values digital */
     V90_TX_CP,            /* Phase 4: CP frame — call parameters as PCM codewords */
+    V90_TX_SUVD_ACK,      /* V.92 Phase 4: SUVd' (ack bit set) — acknowledges CPu */
+    V90_TX_ED,            /* V.92 Phase 4: Ed — 2 data frames of scrambled zeros */
     V90_TX_B1D,           /* Phase 4: B1d — data-mode entry marker */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
@@ -233,10 +238,19 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
 
 /*
  * Signal that the analogue modem's MP frame has been received and the
- * digital modem should transition from TRN2d into CP transmission.
+ * digital modem should transition from TRN2d into CP transmission
+ * (V.90) or SUVd (V.92).
  * Has no effect unless the TX phase is currently V90_TX_TRN2D.
  */
 void v90_notify_cp_ready(v90_state_t *s);
+
+/*
+ * Enable V.92 Phase 4 mode on this digital modem context.
+ * When enabled, the Phase 4 sequence becomes:
+ *   TRN2d → SUVd → CPd → SUVd' (ack) → Ed → B1d → Data
+ * Must be called before v90_notify_cp_ready().
+ */
+void v90_enable_v92_mode(v90_state_t *s);
 
 /*
  * Generate V.90 Phase 3 TX samples (PCM codewords as linear samples).

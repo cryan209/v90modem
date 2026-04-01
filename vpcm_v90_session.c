@@ -520,6 +520,7 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
                                           int u_info,
                                           const v90_dil_desc_t *digital_dil,
                                           const v90_dil_analysis_t *dil_analysis,
+                                          bool v92_mode,
                                           const vpcm_v90_startup_contract_io_t *io,
                                           vpcm_v90_startup_contract_report_t *report)
 {

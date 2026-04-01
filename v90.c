@@ -30,6 +30,13 @@
 #define V90_RI_SYMBOLS   64   /* Ri duration: ≥8 ms at 8 kHz */
 #define V90_B1D_SYMBOLS  48   /* B1d: 6 frame-intervals of 6 symbols each */
 
+/* V.92 Phase 4 constants (ITU-T V.92 §8.8.5 Table 31) */
+/* SUVd: 17 sync + 1 start + 1 id + 13 rsv + 1 silent + 1 ack + 1 start
+ *       + 16 CRC + 1 fill = 52 bits → round to next multiple of 6 = 54 */
+#define V90_SUVD_BITS    54
+/* Ed: 2 downstream data frames × 6 symbols/frame = 12 codewords (§8.8.2/V.92) */
+#define V90_ED_SYMBOLS   12
+
 /* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
 #define V90_SD_REPS     64
 #define V90_SD_BAR_REPS 8
@@ -128,11 +135,16 @@ struct v90_state_s {
     int              dil_pos_in_segment;
 
     /* Phase 4 CP state */
-    bool             cp_ready;                  /* TRN2d→CP transition armed */
+    bool             cp_ready;                  /* TRN2d→CP/SUVd transition armed */
     vpcm_cp_frame_t  cp_frame;                  /* CP frame to transmit */
     uint8_t          cp_bits[VPCM_CP_MAX_BITS]; /* Encoded CP bits (one per byte) */
     int              cp_nbits;                  /* Total encoded CP bits */
     int              cp_bit_pos;                /* Current bit index in cp_bits */
+
+    /* V.92 Phase 4 state */
+    bool             v92_mode;                  /* V.92 Phase 4 enabled */
+    uint8_t          suv_bits[V90_SUVD_BITS];   /* Encoded SUVd bit stream (one bit per byte) */
+    int              suv_bit_pos;               /* Current bit index in suv_bits */
 
     /* Downstream PCM encoder state (data mode) */
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
@@ -216,6 +228,46 @@ static uint16_t v90_crc_bit_block(const uint8_t buf[], int first_bit, int last_b
     if (post)
         crc = crc_itu16_bits(buf[last_bit], post, crc);
     return crc;
+}
+
+/*
+ * Build a SUVd bit stream (Table 31/V.92) into a flat byte array (one bit per byte).
+ * 54 bits total: 17 sync ones + frame fields + 16-bit CRC + fill to multiple of 6.
+ * The ack bit (bit 33) is set when the digital modem has received CPu.
+ */
+static void v90_build_suvd(uint8_t bits[V90_SUVD_BITS], bool ack)
+{
+    int pos = 0;
+    int i;
+    uint16_t crc;
+
+    /* Frame Sync: 17 ones (bits 0:16) */
+    for (i = 0; i < 17; i++)
+        bits[pos++] = 1;
+    /* Start bit: 0 (bit 17) */
+    bits[pos++] = 0;
+    /* SUVd ID: 1 (bit 18) */
+    bits[pos++] = 1;
+    /* Reserved: 13 zeros (bits 19:31) */
+    for (i = 0; i < 13; i++)
+        bits[pos++] = 0;
+    /* Silent period request: 0 (bit 32) */
+    bits[pos++] = 0;
+    /* Acknowledge bit (bit 33): 1 = received CPu from analogue modem */
+    bits[pos++] = ack ? 1 : 0;
+    /* Start bit: 0 (bit 34) */
+    bits[pos++] = 0;
+    /* CRC-16 over bits 0..34 (bits 35:50) — bit 0 of CRC transmitted first */
+    crc = 0xFFFF;
+    for (i = 0; i < pos; i++)
+        crc = crc_itu16_bits(bits[i], 1, crc);
+    for (i = 0; i < 16; i++)
+        bits[pos++] = (crc >> i) & 1;
+    /* Fill bit: 0 (bit 51) */
+    bits[pos++] = 0;
+    /* Fill to next multiple of 6 (bits 52-53) */
+    while (pos < V90_SUVD_BITS)
+        bits[pos++] = 0;
 }
 
 static bool v90_info_fill_and_sync_ok(const uint8_t *bits, int expected_bits)
@@ -1359,18 +1411,49 @@ static int16_t v90_phase3_sample(v90_state_t *s)
     case V90_TX_TRN2D:
         /* §9.4.1.2 TRN2d: scrambled ones at U_INFO until cp_ready is set */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4: TRN2d at U_INFO=%d\n", s->u_info);
+            fprintf(stderr, "[V90] Phase 4: TRN2d at U_INFO=%d%s\n",
+                    s->u_info, s->v92_mode ? " (V.92)" : "");
             s->phase4_hold_logged = true;
         }
         if (s->cp_ready) {
-            s->tx_phase = V90_TX_CP;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            s->diff_enc = 0;  /* reset differential encoder for CP */
+            if (s->v92_mode) {
+                /* V.92: TRN2d → SUVd (no ack); diff_enc continues from TRN2d */
+                v90_build_suvd(s->suv_bits, false);
+                s->suv_bit_pos = 0;
+                s->tx_phase = V90_TX_SUVD;
+            } else {
+                /* V.90: TRN2d → CP; reset differential encoder per spec */
+                s->diff_enc = 0;
+                s->tx_phase = V90_TX_CP;
+            }
         }
         sign = v90_scramble_bit(&s->scrambler, 1);
         s->sample_count++;
         return v90_pcm_signed(s->law, s->u_info, sign);
+
+    case V90_TX_SUVD:
+        /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue), no ack.
+         * Scrambled and differentially encoded at U_INFO, 54 codewords. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=0)\n", V90_SUVD_BITS);
+            s->phase4_hold_logged = true;
+        }
+        if (s->suv_bit_pos >= V90_SUVD_BITS) {
+            /* SUVd complete → CPd; diff_enc continues */
+            s->tx_phase = V90_TX_CP;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+            s->cp_bit_pos = 0;
+            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        }
+        {
+            int suv_bit = s->suv_bits[s->suv_bit_pos++] & 1;
+            suv_bit = v90_scramble_bit(&s->scrambler, suv_bit);
+            s->diff_enc ^= suv_bit;
+            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+        }
 
     case V90_TX_CP:
         /* §9.4.1.3 CP: call parameters frame as differentially-sign-encoded
@@ -1381,15 +1464,64 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->phase4_hold_logged = true;
         }
         if (s->cp_bit_pos >= s->cp_nbits) {
-            s->tx_phase = V90_TX_B1D;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
+            if (s->v92_mode) {
+                /* V.92: CP → SUVd' (with ack bit set) */
+                v90_build_suvd(s->suv_bits, true);
+                s->suv_bit_pos = 0;
+                s->tx_phase = V90_TX_SUVD_ACK;
+            } else {
+                /* V.90: CP → B1d */
+                s->tx_phase = V90_TX_B1D;
+            }
             return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
         }
         {
             int cp_bit = s->cp_bits[s->cp_bit_pos++] & 1;
             cp_bit = v90_scramble_bit(&s->scrambler, cp_bit);
             s->diff_enc ^= cp_bit;
+            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+        }
+
+    case V90_TX_SUVD_ACK:
+        /* V.92 §9.6.1.1: SUVd' — Short Update Values with acknowledge bit set.
+         * Signals to analogue that digital has received CPu. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd' (%d bits, ack=1)\n", V90_SUVD_BITS);
+            s->phase4_hold_logged = true;
+        }
+        if (s->suv_bit_pos >= V90_SUVD_BITS) {
+            /* SUVd' complete → Ed */
+            s->tx_phase = V90_TX_ED;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        }
+        {
+            int suv_bit = s->suv_bits[s->suv_bit_pos++] & 1;
+            suv_bit = v90_scramble_bit(&s->scrambler, suv_bit);
+            s->diff_enc ^= suv_bit;
+            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+        }
+
+    case V90_TX_ED:
+        /* V.92 §8.8.2: Ed — 2 downstream data frames of scrambled binary zeros.
+         * TRN2d modulation; differential encoder continues from SUVd'. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4 V.92: Ed (%d symbols, scrambled zeros)\n",
+                    V90_ED_SYMBOLS);
+            s->phase4_hold_logged = true;
+        }
+        s->sample_count++;
+        if (s->sample_count >= V90_ED_SYMBOLS) {
+            s->tx_phase = V90_TX_B1D;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+        }
+        {
+            int zero_bit = v90_scramble_bit(&s->scrambler, 0);
+            s->diff_enc ^= zero_bit;
             return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
         }
 
@@ -1608,6 +1740,12 @@ void v90_notify_cp_ready(v90_state_t *s)
 {
     if (s && s->tx_phase == V90_TX_TRN2D)
         s->cp_ready = true;
+}
+
+void v90_enable_v92_mode(v90_state_t *s)
+{
+    if (s)
+        s->v92_mode = true;
 }
 
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
