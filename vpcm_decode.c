@@ -16,7 +16,6 @@
 #include "vpcm_cp.h"
 
 #include <spandsp.h>
-#include <spandsp/private/v34.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -904,7 +903,8 @@ static bool decode_v34_pass(const int16_t *samples,
             case 39:
                 note_first_sample(&result->tx_ja_sample, offset);
                 if (!result->ja_bits_known) {
-                    result->ja_trn16 = v34->tx.infoh.trn16 ? 1 : 0;
+                    /* In this SpanDSP checkout, local Phase 3 TX uses 4-point TRN/J. */
+                    result->ja_trn16 = 0;
                     result->ja_detector_bits = v34_get_phase3_j_bits(v34);
                     v34_phase3_ja_bits_to_str(result->ja_trn16, result->ja_bits);
                     result->ja_bits_known = true;
@@ -1073,10 +1073,11 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
         printf("\n");
     }
     if (result->ja_bits_known) {
-        printf("  Ja bits:         %s (%s-point TRN, detector_bits=%d)\n",
+        printf("  Ja bits:         %s (%s-point TRN, detector_bits=%d, source=%s)\n",
                result->ja_bits,
                result->ja_trn16 > 0 ? "16" : "4",
-               result->ja_detector_bits);
+               result->ja_detector_bits,
+               result->ja_bits_from_local_tx ? "local_tx_mode" : "phase3_j_detector");
     }
     if (result->rx_s_event_sample >= 0) {
         printf("  Far-end S:       seen at %.1f ms\n",
@@ -1158,10 +1159,11 @@ static void collect_v34_events(call_log_t *log,
         APPEND_V34_STAGE_EVENT(&answerer, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
         if (answerer.tx_ja_sample >= 0) {
             snprintf(detail, sizeof(detail),
-                     "role=answerer sequence=j%s%s%s",
+                     "role=answerer sequence=j%s%s%s%s",
                      answerer.ja_bits_known ? " bits=" : "",
                      answerer.ja_bits_known ? answerer.ja_bits : "",
-                     answerer.ja_bits_known ? (answerer.ja_trn16 > 0 ? " trn=16" : " trn=4") : "");
+                     answerer.ja_bits_known ? (answerer.ja_trn16 > 0 ? " trn=16" : " trn=4") : "",
+                     answerer.ja_bits_known ? (answerer.ja_bits_from_local_tx ? " source=local_tx_mode" : " source=phase3_j_detector") : "");
             call_log_append(log, answerer.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
         }
         APPEND_V34_STAGE_EVENT(&answerer, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
@@ -1220,10 +1222,11 @@ static void collect_v34_events(call_log_t *log,
         APPEND_V34_STAGE_EVENT(&caller, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
         if (caller.tx_ja_sample >= 0) {
             snprintf(detail, sizeof(detail),
-                     "role=caller sequence=j%s%s%s",
+                     "role=caller sequence=j%s%s%s%s",
                      caller.ja_bits_known ? " bits=" : "",
                      caller.ja_bits_known ? caller.ja_bits : "",
-                     caller.ja_bits_known ? (caller.ja_trn16 > 0 ? " trn=16" : " trn=4") : "");
+                     caller.ja_bits_known ? (caller.ja_trn16 > 0 ? " trn=16" : " trn=4") : "",
+                     caller.ja_bits_known ? (caller.ja_bits_from_local_tx ? " source=local_tx_mode" : " source=phase3_j_detector") : "");
             call_log_append(log, caller.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
         }
         APPEND_V34_STAGE_EVENT(&caller, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
