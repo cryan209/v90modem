@@ -23,6 +23,7 @@
 #include <spandsp/private/logging.h>
 #include <spandsp/private/v34.h>
 #include <spandsp/private/v8.h>
+#include <spandsp/tone_detect.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -459,8 +460,39 @@ typedef struct {
 } decode_v8_result_t;
 
 typedef struct {
+    const char *name;
+    const char *role;
+    int seg1_a_hz;
+    int seg1_b_hz;
+    int seg2_hz;
+} v8bis_signal_def_t;
+
+typedef struct {
+    bool seen;
+    int sample_offset;
+    int duration_samples;
+    double score;
+} v8bis_signal_hit_t;
+
+typedef struct {
+    v8bis_signal_hit_t hits[6];
+} v8bis_scan_result_t;
+
+enum
+{
+    V8_LOCAL_CALL_FUNCTION_TAG = 0x01,
+    V8_LOCAL_MODULATION_TAG = 0x05,
+    V8_LOCAL_PROTOCOLS_TAG = 0x0A,
+    V8_LOCAL_PSTN_ACCESS_TAG = 0x0D,
+    V8_LOCAL_NSF_TAG = 0x0F,
+    V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG = 0x07,
+    V8_LOCAL_T66_TAG = 0x0E
+};
+
+typedef struct {
     bool ok;
     bool calling_party;
+    bool cm_jm_salvaged;
     int ansam_sample;
     int ci_sample;
     int cm_jm_sample;
@@ -469,6 +501,21 @@ typedef struct {
     int last_status;
     v8_parms_t result;
 } v8_probe_result_t;
+
+#define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 10) / 1)
+#define V8BIS_SEGMENT1_SAMPLES          ((8000 * 400) / 1000)
+#define V8BIS_SEGMENT2_SAMPLES          ((8000 * 100) / 1000)
+#define V8BIS_SIGNAL_SAMPLES            (V8BIS_SEGMENT1_SAMPLES + V8BIS_SEGMENT2_SAMPLES)
+#define V8BIS_SCAN_STEP_SAMPLES         160
+
+static const v8bis_signal_def_t g_v8bis_signal_defs[] = {
+    { "MRe", "initiating", 1375, 2002,  650 },
+    { "CRe", "initiating", 1375, 2002,  400 },
+    { "ESi", "initiating", 1375, 2002,  980 },
+    { "MRd", "responding", 1529, 2225, 1150 },
+    { "CRd", "responding", 1529, 2225, 1900 },
+    { "ESr", "responding", 1529, 2225, 1650 }
+};
 
 typedef struct {
     bool info0_seen;
@@ -616,6 +663,384 @@ static void v8_note_first_sample(int *dst, int sample)
         *dst = sample;
 }
 
+static double window_energy(const int16_t *samples, int len)
+{
+    double sum = 0.0;
+
+    if (!samples || len <= 0)
+        return 0.0;
+    for (int i = 0; i < len; i++) {
+        double v = (double) samples[i];
+        sum += v * v;
+    }
+    return sum;
+}
+
+static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy)
+{
+    double w;
+    double cos_w;
+    double sin_w;
+    double osc_re;
+    double osc_im;
+    double re = 0.0;
+    double im = 0.0;
+
+    if (!samples || len <= 0 || sample_rate <= 0 || freq_hz <= 0.0 || total_energy <= 0.0)
+        return 0.0;
+
+    w = 2.0 * M_PI * freq_hz / (double) sample_rate;
+    cos_w = cos(w);
+    sin_w = sin(w);
+    osc_re = 1.0;
+    osc_im = 0.0;
+
+    for (int i = 0; i < len; i++) {
+        double sample = (double) samples[i];
+        double next_re = osc_re * cos_w - osc_im * sin_w;
+        double next_im = osc_im * cos_w + osc_re * sin_w;
+
+        re += sample * osc_re;
+        im -= sample * osc_im;
+        osc_re = next_re;
+        osc_im = next_im;
+    }
+
+    return (re * re + im * im) / (total_energy * (double) len);
+}
+
+static bool scan_v8bis_signals(const int16_t *samples,
+                               int total_samples,
+                               int max_sample,
+                               v8bis_scan_result_t *out)
+{
+    int limit;
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    limit = total_samples;
+    if (max_sample > 0 && max_sample < limit)
+        limit = max_sample;
+    if (limit < V8BIS_SIGNAL_SAMPLES)
+        return false;
+
+    for (int offset = 0; offset + V8BIS_SIGNAL_SAMPLES <= limit; offset += V8BIS_SCAN_STEP_SAMPLES) {
+        const int16_t *seg1 = samples + offset;
+        const int16_t *seg2 = seg1 + V8BIS_SEGMENT1_SAMPLES;
+        double seg1_energy = window_energy(seg1, V8BIS_SEGMENT1_SAMPLES);
+        double seg2_energy = window_energy(seg2, V8BIS_SEGMENT2_SAMPLES);
+
+        if (seg1_energy <= 1.0 || seg2_energy <= 1.0)
+            continue;
+
+        for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
+            const v8bis_signal_def_t *def = &g_v8bis_signal_defs[i];
+            double seg1_a_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_a_hz, seg1_energy);
+            double seg1_b_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_b_hz, seg1_energy);
+            double seg2_ratio = tone_energy_ratio(seg2, V8BIS_SEGMENT2_SAMPLES, 8000, def->seg2_hz, seg2_energy);
+            double dual_ratio = seg1_a_ratio + seg1_b_ratio;
+            double balance = 0.0;
+            double score;
+
+            if (seg1_a_ratio > 0.0 && seg1_b_ratio > 0.0) {
+                double hi = (seg1_a_ratio > seg1_b_ratio) ? seg1_a_ratio : seg1_b_ratio;
+                double lo = (seg1_a_ratio > seg1_b_ratio) ? seg1_b_ratio : seg1_a_ratio;
+                balance = lo / hi;
+            }
+
+            if (dual_ratio < 0.22 || seg1_a_ratio < 0.07 || seg1_b_ratio < 0.07 || balance < 0.25 || seg2_ratio < 0.15)
+                continue;
+
+            score = dual_ratio * 1000.0 + seg2_ratio * 1200.0 + balance * 200.0;
+            if (!out->hits[i].seen || score > out->hits[i].score) {
+                out->hits[i].seen = true;
+                out->hits[i].sample_offset = offset;
+                out->hits[i].duration_samples = V8BIS_SIGNAL_SAMPLES;
+                out->hits[i].score = score;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(out->hits)/sizeof(out->hits[0]); i++) {
+        if (out->hits[i].seen)
+            return true;
+    }
+    return false;
+}
+
+static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
+                                     const uint8_t *data,
+                                     int len,
+                                     bool calling_party)
+{
+    const uint8_t *p;
+    const uint8_t *end;
+    int modulations;
+    bool parsed_any = false;
+
+    if (!dst || !data || len <= 0)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->status = V8_STATUS_V8_OFFERED;
+    p = data;
+    end = data + len;
+
+    while (p < end && *p) {
+        switch (*p & 0x1F) {
+        case V8_LOCAL_CALL_FUNCTION_TAG:
+            dst->jm_cm.call_function = (*p >> 5) & 0x07;
+            p++;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_MODULATION_TAG:
+            modulations = 0;
+            if (*p & 0x80)
+                modulations |= V8_MOD_V34HDX;
+            if (*p & 0x40)
+                modulations |= V8_MOD_V34;
+            if (*p & 0x20)
+                modulations |= V8_MOD_V90;
+            p++;
+            if (p < end && (*p & 0x38) == 0x10) {
+                if (*p & 0x80)
+                    modulations |= V8_MOD_V27TER;
+                if (*p & 0x40)
+                    modulations |= V8_MOD_V29;
+                if (*p & 0x04)
+                    modulations |= V8_MOD_V17;
+                if (*p & 0x02)
+                    modulations |= V8_MOD_V22;
+                if (*p & 0x01)
+                    modulations |= V8_MOD_V32;
+                p++;
+                if (p < end && (*p & 0x38) == 0x10) {
+                    if (*p & 0x80)
+                        modulations |= V8_MOD_V21;
+                    if (*p & 0x40)
+                        modulations |= V8_MOD_V23HDX;
+                    if (*p & 0x04)
+                        modulations |= V8_MOD_V23;
+                    if (*p & 0x02)
+                        modulations |= V8_MOD_V26BIS;
+                    if (*p & 0x01)
+                        modulations |= V8_MOD_V26TER;
+                    p++;
+                }
+            }
+            if (!calling_party)
+                modulations &= V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22
+                             | V8_MOD_V92 | V8_MOD_V21 | V8_MOD_V17
+                             | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V23
+                             | V8_MOD_V32;
+            dst->jm_cm.modulations = modulations;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_PROTOCOLS_TAG:
+            dst->jm_cm.protocols = (*p >> 5) & 0x07;
+            p++;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_PSTN_ACCESS_TAG:
+            dst->jm_cm.pstn_access = (*p >> 5) & 0x07;
+            p++;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_NSF_TAG:
+            dst->jm_cm.nsf = 1;
+            p++;
+            while (p < end && (*p & 0x38) == 0x10)
+                p++;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG:
+            dst->jm_cm.pcm_modem_availability = (*p >> 5) & 0x07;
+            p++;
+            parsed_any = true;
+            break;
+        case V8_LOCAL_T66_TAG:
+            dst->jm_cm.t66 = (*p >> 5) & 0x07;
+            p++;
+            parsed_any = true;
+            break;
+        default:
+            p++;
+            break;
+        }
+        while (p < end && (*p & 0x38) == 0x10)
+            p++;
+    }
+
+    return parsed_any;
+}
+
+static void v8_salvage_partial_probe(v8_state_t *v8,
+                                     int sample_offset,
+                                     v8_probe_result_t *out)
+{
+    v8_parms_t parsed;
+
+    if (!v8 || !out)
+        return;
+    if (out->cm_jm_sample >= 0 || v8->cm_jm_len <= 0)
+        return;
+    if (!v8_parse_cm_jm_candidate(&parsed, v8->cm_jm_data, v8->cm_jm_len, out->calling_party))
+        return;
+
+    out->result = parsed;
+    out->last_status = parsed.status;
+    out->cm_jm_sample = sample_offset;
+    out->cm_jm_salvaged = true;
+}
+
+static int v8_probe_last_sample(const v8_probe_result_t *probe)
+{
+    int end = -1;
+
+    if (!probe)
+        return -1;
+    if (probe->ansam_sample >= 0)
+        end = probe->ansam_sample;
+    if (end < 0 || (probe->ci_sample >= 0 && probe->ci_sample > end))
+        end = probe->ci_sample;
+    if (end < 0 || (probe->cm_jm_sample >= 0 && probe->cm_jm_sample > end))
+        end = probe->cm_jm_sample;
+    if (end < 0 || (probe->cj_sample >= 0 && probe->cj_sample > end))
+        end = probe->cj_sample;
+    if (end < 0 || (probe->v8_call_sample >= 0 && probe->v8_call_sample > end))
+        end = probe->v8_call_sample;
+    return end;
+}
+
+static int v8_probe_first_sample(const v8_probe_result_t *probe)
+{
+    int start = -1;
+
+    if (!probe)
+        return -1;
+    if (probe->ansam_sample >= 0)
+        start = probe->ansam_sample;
+    if (start < 0 || (probe->ci_sample >= 0 && probe->ci_sample < start))
+        start = probe->ci_sample;
+    if (start < 0 || (probe->cm_jm_sample >= 0 && probe->cm_jm_sample < start))
+        start = probe->cm_jm_sample;
+    if (start < 0 || (probe->cj_sample >= 0 && probe->cj_sample < start))
+        start = probe->cj_sample;
+    if (start < 0 || (probe->v8_call_sample >= 0 && probe->v8_call_sample < start))
+        start = probe->v8_call_sample;
+    return start;
+}
+
+static int v8_probe_milestone_count(const v8_probe_result_t *probe)
+{
+    int count = 0;
+
+    if (!probe)
+        return 0;
+    if (probe->ansam_sample >= 0)
+        count++;
+    if (probe->ci_sample >= 0)
+        count++;
+    if (probe->cm_jm_sample >= 0)
+        count++;
+    if (probe->cj_sample >= 0)
+        count++;
+    if (probe->v8_call_sample >= 0 || probe->last_status == V8_STATUS_V8_CALL)
+        count++;
+    return count;
+}
+
+static int v8_probe_chain_score(const v8_probe_result_t *probe)
+{
+    int score = 0;
+    int prev = -1;
+    int ordered_steps = 0;
+    const int milestones[] = {
+        probe ? probe->ansam_sample : -1,
+        probe ? probe->ci_sample : -1,
+        probe ? probe->cm_jm_sample : -1,
+        probe ? probe->cj_sample : -1,
+        probe ? probe->v8_call_sample : -1
+    };
+
+    if (!probe || !probe->ok)
+        return -1;
+
+    if (probe->ansam_sample >= 0)
+        score += 100;
+    if (probe->ci_sample >= 0)
+        score += 300;
+    if (probe->cm_jm_sample >= 0)
+        score += 700;
+    if (probe->cj_sample >= 0)
+        score += 1000;
+    if (probe->v8_call_sample >= 0 || probe->last_status == V8_STATUS_V8_CALL)
+        score += 1400;
+    if (probe->result.jm_cm.pcm_modem_availability == V8_PSTN_PCM_MODEM_V90_V92_DIGITAL
+        || probe->result.jm_cm.pcm_modem_availability == (V8_PSTN_PCM_MODEM_V90_V92_DIGITAL | V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE))
+        score += 200;
+    if (probe->result.jm_cm.pstn_access & V8_PSTN_ACCESS_DCE_ON_DIGITAL)
+        score += 120;
+
+    for (size_t i = 0; i < sizeof(milestones)/sizeof(milestones[0]); i++) {
+        if (milestones[i] < 0)
+            continue;
+        if (prev < 0 || milestones[i] >= prev) {
+            ordered_steps++;
+            prev = milestones[i];
+        } else {
+            score -= 500;
+        }
+    }
+    score += ordered_steps * 120;
+
+    prev = v8_probe_last_sample(probe);
+    if (prev >= 0)
+        score -= prev / 160;
+    return score;
+}
+
+static int v8_probe_role_score(const v8_probe_result_t *probe)
+{
+    int score;
+    int first_sample;
+    int last_sample;
+
+    if (!probe || !probe->ok)
+        return -1;
+
+    score = v8_probe_chain_score(probe);
+    first_sample = v8_probe_first_sample(probe);
+    last_sample = v8_probe_last_sample(probe);
+
+    if (probe->calling_party) {
+        if (probe->ci_sample >= 0)
+            score += 600;
+        if (probe->cm_jm_sample >= 0)
+            score += 500;
+        if (probe->ci_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ci_sample)
+            score += 250;
+        if (probe->ansam_sample >= 0 && probe->ci_sample < 0 && probe->cm_jm_sample < 0)
+            score -= 350;
+    } else {
+        if (probe->ansam_sample >= 0)
+            score += 450;
+        if (probe->cm_jm_sample >= 0)
+            score += 700;
+        if (probe->cj_sample >= 0)
+            score += 250;
+        if (probe->ansam_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ansam_sample)
+            score += 350;
+    }
+
+    if (first_sample >= 0 && last_sample >= first_sample)
+        score -= (last_sample - first_sample) / 320;
+    score += v8_probe_milestone_count(probe) * 150;
+    return score;
+}
+
 static bool v8_collect_probe(const int16_t *samples,
                              int total_samples,
                              bool calling_party,
@@ -700,6 +1125,8 @@ static bool v8_collect_probe(const int16_t *samples,
         }
     }
 
+    v8_salvage_partial_probe(v8, offset, out);
+
     out->ok = (out->ansam_sample >= 0
                || out->ci_sample >= 0
                || out->cm_jm_sample >= 0
@@ -708,6 +1135,99 @@ static bool v8_collect_probe(const int16_t *samples,
 
     v8_free(v8);
     return out->ok;
+}
+
+static bool v8_select_best_probe(const int16_t *samples,
+                                 int total_samples,
+                                 bool calling_party,
+                                 int max_sample,
+                                 v8_probe_result_t *out)
+{
+    v8_probe_result_t best;
+    int best_score = -1;
+    int search_limit;
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    memset(&best, 0, sizeof(best));
+    best.ansam_sample = -1;
+    best.ci_sample = -1;
+    best.cm_jm_sample = -1;
+    best.cj_sample = -1;
+    best.v8_call_sample = -1;
+
+    search_limit = total_samples;
+    if (max_sample > 0 && max_sample < search_limit)
+        search_limit = max_sample;
+    if (search_limit > V8_EARLY_SEARCH_LIMIT_SAMPLES)
+        search_limit = V8_EARLY_SEARCH_LIMIT_SAMPLES;
+
+    for (int window_end = 3200; window_end <= search_limit; window_end += 1600) {
+        v8_probe_result_t candidate;
+        int score;
+
+        if (!v8_collect_probe(samples, total_samples, calling_party, window_end, &candidate))
+            continue;
+        score = v8_probe_chain_score(&candidate);
+        if (score > best_score) {
+            best = candidate;
+            best_score = score;
+        }
+    }
+
+    if (search_limit > 0) {
+        v8_probe_result_t full_candidate;
+        int full_score;
+
+        if (v8_collect_probe(samples, total_samples, calling_party, search_limit, &full_candidate)) {
+            full_score = v8_probe_chain_score(&full_candidate);
+            if (full_score > best_score) {
+                best = full_candidate;
+                best_score = full_score;
+            }
+        }
+    }
+
+    if (best_score < 0)
+        return false;
+    *out = best;
+    return true;
+}
+
+static bool v8_select_best_channel_probe(const int16_t *samples,
+                                         int total_samples,
+                                         int max_sample,
+                                         v8_probe_result_t *out)
+{
+    v8_probe_result_t caller_probe;
+    v8_probe_result_t answerer_probe;
+    int caller_score = -1;
+    int answerer_score = -1;
+    bool have_caller;
+    bool have_answerer;
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    have_answerer = v8_select_best_probe(samples, total_samples, false, max_sample, &answerer_probe);
+    have_caller = v8_select_best_probe(samples, total_samples, true, max_sample, &caller_probe);
+
+    if (!have_answerer && !have_caller)
+        return false;
+
+    if (have_answerer)
+        answerer_score = v8_probe_role_score(&answerer_probe);
+    if (have_caller)
+        caller_score = v8_probe_role_score(&caller_probe);
+
+    if (have_answerer && (!have_caller || answerer_score >= caller_score)) {
+        *out = answerer_probe;
+        return true;
+    }
+
+    *out = caller_probe;
+    return true;
 }
 
 static void print_v8_modulations(int mods)
@@ -1069,16 +1589,30 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                            bool calling_party)
 {
     v8_probe_result_t probe;
+    v8bis_scan_result_t v8bis;
 
-    if (v8_collect_probe(samples, total_samples, calling_party, total_samples, &probe)) {
+    if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
+        printf("  V.8bis signals:  ");
+        for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
+            if (!v8bis.hits[i].seen)
+                continue;
+            printf("%s@%.1f ",
+                   g_v8bis_signal_defs[i].name,
+                   sample_to_ms(v8bis.hits[i].sample_offset, 8000));
+        }
+        printf("\n");
+    }
+
+    if (v8_select_best_probe(samples, total_samples, calling_party, total_samples, &probe)) {
         printf("  Milestones:      ");
         if (probe.ansam_sample >= 0)
             printf("ANS@%.1f ", sample_to_ms(probe.ansam_sample, 8000));
         if (probe.ci_sample >= 0)
             printf("CI@%.1f ", sample_to_ms(probe.ci_sample, 8000));
         if (probe.cm_jm_sample >= 0)
-            printf("%s@%.1f ",
+            printf("%s%s@%.1f ",
                    calling_party ? "JM" : "CM",
+                   probe.cm_jm_salvaged ? "?" : "",
                    sample_to_ms(probe.cm_jm_sample, 8000));
         if (probe.cj_sample >= 0)
             printf("CJ@%.1f ", sample_to_ms(probe.cj_sample, 8000));
@@ -1090,9 +1624,13 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                    sample_to_ms(probe.v8_call_sample >= 0 ? probe.v8_call_sample : probe.cm_jm_sample, 8000));
             print_v8_result(&probe.result);
         } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
-            printf("  Partial V.8 decode only; final negotiation not yet confirmed\n");
+            printf("  Partial V.8 decode only; final negotiation not yet confirmed");
+            if (probe.cm_jm_salvaged)
+                printf(" (single CM/JM candidate salvage)");
+            printf("\n");
         } else {
-            printf("  Tone-level V.8 front-end detected, but no valid CI/CM/JM/CJ sequence yet\n");
+            printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
+            printf("  Possible V.8bis or clipped pre-V.8 exchange\n");
         }
     } else {
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
@@ -1103,7 +1641,6 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
 static void collect_v8_event(call_log_t *log,
                              const int16_t *samples,
                              int total_samples,
-                             bool calling_party,
                              int max_sample)
 {
     v8_probe_result_t probe;
@@ -1113,43 +1650,60 @@ static void collect_v8_event(call_log_t *log,
     if (!log || !samples || total_samples <= 0)
         return;
 
-    if (!v8_collect_probe(samples, total_samples, calling_party, max_sample, &probe))
+    if (!v8_select_best_channel_probe(samples, total_samples, max_sample, &probe))
         return;
     if (probe.ansam_sample >= 0) {
         snprintf(detail, sizeof(detail),
                  "role=%s",
-                 calling_party ? "caller" : "answerer");
+                 probe.calling_party ? "caller" : "answerer");
         call_log_append(log, probe.ansam_sample, 0, "V.8", "ANS/ANSam detected", detail);
     }
     if (probe.ci_sample >= 0) {
         snprintf(detail, sizeof(detail),
                  "role=%s call_function=%s",
-                 calling_party ? "caller" : "answerer",
+                 probe.calling_party ? "caller" : "answerer",
                  v8_call_function_to_str(probe.result.jm_cm.call_function));
         call_log_append(log, probe.ci_sample, 0, "V.8", "CI decoded", detail);
     }
     if (probe.cm_jm_sample >= 0) {
         snprintf(summary, sizeof(summary),
-                 "%s decoded",
-                 calling_party ? "JM" : "CM");
+                 "%s%s decoded",
+                 probe.calling_party ? "JM" : "CM",
+                 probe.cm_jm_salvaged ? "?" : "");
         snprintf(detail, sizeof(detail),
-                 "role=%s protocol=%s pcm=%s pstn=%s",
-                 calling_party ? "caller" : "answerer",
+                 "role=%s protocol=%s pcm=%s pstn=%s confidence=%s",
+                 probe.calling_party ? "caller" : "answerer",
                  v8_protocol_to_str(probe.result.jm_cm.protocols),
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
-                 v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
+                 v8_pstn_access_to_str(probe.result.jm_cm.pstn_access),
+                 probe.cm_jm_salvaged ? "salvaged_single_message" : "confirmed");
         call_log_append(log, probe.cm_jm_sample, 0, "V.8", summary, detail);
     }
     if (probe.cj_sample >= 0) {
         snprintf(detail, sizeof(detail),
                  "role=%s",
-                 calling_party ? "caller" : "answerer");
+                 probe.calling_party ? "caller" : "answerer");
         call_log_append(log, probe.cj_sample, 0, "V.8", "CJ decoded", detail);
+    }
+    if (probe.ansam_sample >= 0
+        && probe.ci_sample < 0
+        && probe.cm_jm_sample < 0
+        && probe.cj_sample < 0
+        && probe.v8_call_sample < 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s early negotiation energy without CI/CM/JM/CJ",
+                 probe.calling_party ? "caller" : "answerer");
+        call_log_append(log,
+                        probe.ansam_sample,
+                        0,
+                        "V.8bis?",
+                        "Possible V.8bis / pre-V.8 negotiation",
+                        detail);
     }
     if (probe.last_status == V8_STATUS_V8_CALL && probe.v8_call_sample >= 0) {
         snprintf(summary, sizeof(summary),
                  "V.8 negotiation decoded as %s",
-                 calling_party ? "caller" : "answerer");
+                 probe.calling_party ? "caller" : "answerer");
         snprintf(detail, sizeof(detail),
                  "status=%s protocol=%s pcm=%s pstn=%s",
                  v8_status_to_str(probe.result.status),
@@ -1157,6 +1711,40 @@ static void collect_v8_event(call_log_t *log,
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
                  v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
         call_log_append(log, probe.v8_call_sample, 0, "V.8", summary, detail);
+    }
+}
+
+static void collect_v8bis_events(call_log_t *log,
+                                 const int16_t *samples,
+                                 int total_samples,
+                                 int max_sample)
+{
+    v8bis_scan_result_t v8bis;
+    char summary[160];
+    char detail[320];
+
+    if (!log || !samples || total_samples <= 0)
+        return;
+    if (!scan_v8bis_signals(samples, total_samples, max_sample, &v8bis))
+        return;
+
+    for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
+        if (!v8bis.hits[i].seen)
+            continue;
+        snprintf(summary, sizeof(summary), "%s signal detected", g_v8bis_signal_defs[i].name);
+        snprintf(detail, sizeof(detail),
+                 "role=%s segment1=%d+%dHz segment2=%dHz score=%.0f",
+                 g_v8bis_signal_defs[i].role,
+                 g_v8bis_signal_defs[i].seg1_a_hz,
+                 g_v8bis_signal_defs[i].seg1_b_hz,
+                 g_v8bis_signal_defs[i].seg2_hz,
+                 v8bis.hits[i].score);
+        call_log_append(log,
+                        v8bis.hits[i].sample_offset,
+                        v8bis.hits[i].duration_samples,
+                        "V.8bis",
+                        summary,
+                        detail);
     }
 }
 
@@ -1822,8 +2410,8 @@ static void collect_stream_call_log(call_log_t *log,
     if (do_v34)
         collect_v34_events(log, linear_samples, total_samples, law);
     if (do_v8) {
-        collect_v8_event(log, linear_samples, total_samples, false, earliest_phase2_sample);
-        collect_v8_event(log, linear_samples, total_samples, true, earliest_phase2_sample);
+        collect_v8bis_events(log, linear_samples, total_samples, earliest_phase2_sample);
+        collect_v8_event(log, linear_samples, total_samples, earliest_phase2_sample);
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
