@@ -464,6 +464,16 @@ typedef struct {
     int jd_prime_zero_count;
 } jd_stage_decode_t;
 
+typedef struct {
+    bool ok;
+    bool calling_party;
+    int u_info;
+    int start_sample;
+    bool invert_sign;
+    v90_dil_desc_t desc;
+    v90_dil_analysis_t analysis;
+} ja_dil_decode_t;
+
 #define OFFLINE_V90_JD_BITS         72
 #define OFFLINE_V90_JD_PRIME_BITS   12
 #define OFFLINE_V90_SCRAMBLER_HISTORY 23
@@ -476,6 +486,12 @@ static bool decode_jd_stage(const uint8_t *codewords,
                             const decode_v34_result_t *answerer,
                             const decode_v34_result_t *caller,
                             jd_stage_decode_t *out);
+static bool decode_ja_dil_stage(const uint8_t *codewords,
+                                int total_codewords,
+                                const decode_v34_result_t *answerer,
+                                const decode_v34_result_t *caller,
+                                const jd_stage_decode_t *jd_stage,
+                                ja_dil_decode_t *out);
 
 static decode_v8_result_t g_v8_result;
 
@@ -1899,6 +1915,7 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                              const decode_v34_result_t *caller)
 {
     jd_stage_decode_t jd_stage;
+    ja_dil_decode_t ja_dil;
     char detail[192];
 
     if (!log || !codewords || total_codewords <= 0)
@@ -1930,6 +1947,24 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                         OFFLINE_V90_JD_PRIME_BITS,
                         "V.90",
                         "J'd termination",
+                        detail);
+    }
+
+    if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u",
+                 ja_dil.calling_party ? "caller" : "answerer",
+                 (unsigned) ja_dil.desc.n,
+                 (unsigned) ja_dil.desc.lsp,
+                 (unsigned) ja_dil.desc.ltp,
+                 (unsigned) ja_dil.analysis.unique_train_u,
+                 (unsigned) ja_dil.analysis.used_uchords,
+                 (unsigned) ja_dil.analysis.impairment_score);
+        call_log_append(log,
+                        ja_dil.start_sample,
+                        0,
+                        "V.90",
+                        "Ja/DIL descriptor decoded",
                         detail);
     }
 }
@@ -2211,6 +2246,57 @@ static int offline_v90_decode_jd_bits(const uint8_t *codewords,
     return errors;
 }
 
+static bool offline_v90_decode_plain_bits_packed(const uint8_t *codewords,
+                                                 int total_codewords,
+                                                 int start_sample,
+                                                 int bit_count,
+                                                 bool invert_sign,
+                                                 uint8_t *packed_out,
+                                                 int packed_len)
+{
+    uint32_t descramble_reg;
+    int prev_sign;
+
+    if (!codewords || !packed_out || packed_len <= 0 || bit_count <= 0
+        || start_sample < (OFFLINE_V90_SCRAMBLER_HISTORY + 1)
+        || start_sample + bit_count > total_codewords
+        || packed_len < ((bit_count + 7) / 8)) {
+        return false;
+    }
+
+    memset(packed_out, 0, (size_t) packed_len);
+    descramble_reg = 0;
+    prev_sign = ((codewords[start_sample - OFFLINE_V90_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
+    if (invert_sign)
+        prev_sign ^= 1;
+
+    for (int i = start_sample - OFFLINE_V90_SCRAMBLER_HISTORY; i < start_sample; i++) {
+        int sign = (codewords[i] & 0x80) ? 1 : 0;
+        int scrambled;
+        if (invert_sign)
+            sign ^= 1;
+        scrambled = sign ^ prev_sign;
+        prev_sign = sign;
+        (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+    }
+
+    for (int i = 0; i < bit_count; i++) {
+        int sign = (codewords[start_sample + i] & 0x80) ? 1 : 0;
+        int scrambled;
+        int plain;
+
+        if (invert_sign)
+            sign ^= 1;
+        scrambled = sign ^ prev_sign;
+        prev_sign = sign;
+        plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+        if (plain)
+            packed_out[i / 8] |= (uint8_t) (1U << (i % 8));
+    }
+
+    return true;
+}
+
 static bool decode_jd_stage(const uint8_t *codewords,
                             int total_codewords,
                             const decode_v34_result_t *answerer,
@@ -2354,6 +2440,128 @@ static void print_jd_stage_decode(const jd_stage_decode_t *result)
         printf("  J'd:              not confirmed (%d/12 zero bits)\n",
                result->jd_prime_zero_count);
     }
+}
+
+static bool decode_ja_dil_stage(const uint8_t *codewords,
+                                int total_codewords,
+                                const decode_v34_result_t *answerer,
+                                const decode_v34_result_t *caller,
+                                const jd_stage_decode_t *jd_stage,
+                                ja_dil_decode_t *out)
+{
+    const decode_v34_result_t *src;
+    bool calling_party = false;
+    int search_start;
+    int search_end;
+    int best_score = -1;
+    bool best_invert = false;
+    int best_start = -1;
+    v90_dil_desc_t best_desc;
+    v90_dil_analysis_t best_analysis;
+    uint8_t packed_bits[512];
+
+    if (!codewords || total_codewords <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    src = pick_post_phase3_source(answerer, caller, &calling_party);
+    if (!src)
+        return false;
+
+    if (jd_stage && jd_stage->ok) {
+        if (jd_stage->jd_prime_seen)
+            search_start = jd_stage->jd_prime_sample + OFFLINE_V90_JD_PRIME_BITS;
+        else if (jd_stage->jd_repetitions > 0)
+            search_start = jd_stage->jd_start_sample + jd_stage->jd_repetitions * OFFLINE_V90_JD_BITS;
+        else
+            search_start = jd_stage->jd_start_sample;
+    } else {
+        search_start = src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample;
+    }
+    if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
+        search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
+
+    if (src->phase4_seen && src->phase4_sample > search_start)
+        search_end = src->phase4_sample;
+    else if (src->phase4_ready_seen && src->phase4_ready_sample > search_start)
+        search_end = src->phase4_ready_sample;
+    else if (src->failure_sample > search_start)
+        search_end = src->failure_sample;
+    else
+        search_end = search_start + 4096;
+    if (search_end > total_codewords - 206)
+        search_end = total_codewords - 206;
+    if (search_end < search_start)
+        return false;
+
+    for (int candidate = search_start; candidate <= search_end; candidate++) {
+        for (int invert = 0; invert <= 1; invert++) {
+            v90_dil_desc_t desc;
+            v90_dil_analysis_t analysis;
+            int bit_count = total_codewords - candidate;
+            int packed_len;
+            int score;
+
+            if (bit_count > (int) sizeof(packed_bits) * 8)
+                bit_count = (int) sizeof(packed_bits) * 8;
+            packed_len = (bit_count + 7) / 8;
+            if (!offline_v90_decode_plain_bits_packed(codewords, total_codewords,
+                                                      candidate, bit_count, invert != 0,
+                                                      packed_bits, packed_len)) {
+                continue;
+            }
+            if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count))
+                continue;
+            if (!v90_analyse_dil_descriptor(&desc, &analysis))
+                continue;
+
+            score = analysis.unique_train_u * 100
+                  + analysis.used_uchords * 50
+                  - analysis.impairment_score * 10
+                  - analysis.non_default_h * 5;
+            if (score > best_score) {
+                best_score = score;
+                best_invert = (invert != 0);
+                best_start = candidate;
+                best_desc = desc;
+                best_analysis = analysis;
+            }
+        }
+    }
+
+    if (best_score < 0)
+        return false;
+
+    out->ok = true;
+    out->calling_party = calling_party;
+    out->u_info = src->u_info;
+    out->start_sample = best_start;
+    out->invert_sign = best_invert;
+    out->desc = best_desc;
+    out->analysis = best_analysis;
+    return true;
+}
+
+static void print_ja_dil_decode(const ja_dil_decode_t *result)
+{
+    if (!result || !result->ok)
+        return;
+
+    printf("\n=== Ja/DIL Decode ===\n");
+    printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
+    printf("  Start time:       %.1f ms\n", sample_to_ms(result->start_sample, 8000));
+    printf("  U_INFO:           %d\n", result->u_info);
+    printf("  Descriptor:       n=%u lsp=%u ltp=%u\n",
+           (unsigned) result->desc.n,
+           (unsigned) result->desc.lsp,
+           (unsigned) result->desc.ltp);
+    printf("  Analysis:         unique_train_u=%u used_uchords=%u impairment=%u\n",
+           (unsigned) result->analysis.unique_train_u,
+           (unsigned) result->analysis.used_uchords,
+           (unsigned) result->analysis.impairment_score);
+    printf("  Recommendations:  down_drn=%u up_drn=%u\n",
+           (unsigned) result->analysis.recommended_downstream_drn,
+           (unsigned) result->analysis.recommended_upstream_drn);
 }
 
 static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_result_t *answerer,
@@ -2650,6 +2858,7 @@ static void run_decode_suite(const char *label,
 
     if (opts->raw_output_enabled && opts->do_v90) {
         jd_stage_decode_t jd_stage;
+        ja_dil_decode_t ja_dil;
         post_phase3_decode_t post_phase3;
 
         decode_v90_signals(g711_codewords, total_codewords, law);
@@ -2658,6 +2867,13 @@ static void run_decode_suite(const char *label,
                             have_caller ? &caller : NULL,
                             &jd_stage)) {
             print_jd_stage_decode(&jd_stage);
+        }
+        if (decode_ja_dil_stage(g711_codewords, total_codewords,
+                                have_answerer ? &answerer : NULL,
+                                have_caller ? &caller : NULL,
+                                &jd_stage,
+                                &ja_dil)) {
+            print_ja_dil_decode(&ja_dil);
         }
         if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
                                          have_answerer ? &answerer : NULL,
