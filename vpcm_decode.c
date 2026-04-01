@@ -188,6 +188,47 @@ static void call_log_sort(call_log_t *log)
     qsort(log->events, log->count, sizeof(log->events[0]), call_log_event_cmp);
 }
 
+static bool call_log_event_is_phase2_boundary(const call_log_event_t *event)
+{
+    if (!event)
+        return false;
+    if (strcmp(event->protocol, "V.34") != 0)
+        return false;
+    return (strncmp(event->summary, "INFO0", 5) == 0
+            || strncmp(event->summary, "INFO1", 5) == 0);
+}
+
+static void call_log_prune_v8_after_phase2(call_log_t *log)
+{
+    int phase2_cutoff = -1;
+    size_t out = 0;
+
+    if (!log || log->count == 0)
+        return;
+
+    for (size_t i = 0; i < log->count; i++) {
+        if (call_log_event_is_phase2_boundary(&log->events[i])) {
+            phase2_cutoff = log->events[i].sample_offset;
+            break;
+        }
+    }
+    if (phase2_cutoff < 0)
+        return;
+
+    for (size_t i = 0; i < log->count; i++) {
+        const call_log_event_t *event = &log->events[i];
+
+        if (strcmp(event->protocol, "V.8") == 0
+            && event->sample_offset >= phase2_cutoff) {
+            continue;
+        }
+        if (out != i)
+            log->events[out] = log->events[i];
+        out++;
+    }
+    log->count = out;
+}
+
 static void format_v91_info_summary(char *buf, size_t len, const v91_info_diag_t *diag)
 {
     if (!buf || len == 0 || !diag) {
@@ -552,6 +593,67 @@ static void v8_decode_result_handler(void *user_data, v8_parms_t *result)
     g_v8_result.result = *result;
 }
 
+static bool v8_decode_probe(const int16_t *samples,
+                            int total_samples,
+                            bool calling_party,
+                            int max_sample,
+                            v8_parms_t *result_out,
+                            int *offset_out)
+{
+    v8_parms_t parms;
+    v8_state_t *v8;
+    int offset = 0;
+    int limit;
+    bool ok = false;
+
+    if (!samples || total_samples <= 0)
+        return false;
+
+    memset(&parms, 0, sizeof(parms));
+    parms.modem_connect_tone = calling_party
+        ? MODEM_CONNECT_TONES_NONE
+        : MODEM_CONNECT_TONES_ANSAM;
+    parms.send_ci = calling_party;
+    parms.v92 = -1;
+    parms.jm_cm.modulations = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22
+                            | V8_MOD_V92 | V8_MOD_V21 | V8_MOD_V17
+                            | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V23
+                            | V8_MOD_V32;
+    parms.jm_cm.protocols = V8_PROTOCOL_LAPM_V42;
+    parms.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+    parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+
+    memset(&g_v8_result, 0, sizeof(g_v8_result));
+    v8 = v8_init(NULL, calling_party, &parms, v8_decode_result_handler, NULL);
+    if (!v8)
+        return false;
+
+    span_log_set_level(v8_get_logging_state(v8), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
+    limit = total_samples;
+    if (max_sample > 0 && max_sample < limit)
+        limit = max_sample;
+
+    while (offset < limit && !g_v8_result.seen) {
+        int chunk = limit - offset;
+
+        if (chunk > 160)
+            chunk = 160;
+        v8_decode_rx(v8, samples + offset, chunk);
+        offset += chunk;
+    }
+
+    if (g_v8_result.seen) {
+        if (result_out)
+            *result_out = g_v8_result.result;
+        if (offset_out)
+            *offset_out = offset;
+        ok = true;
+    }
+
+    v8_free(v8);
+    return ok;
+}
+
 static void print_v8_modulations(int mods)
 {
     if (mods & V8_MOD_V17)    printf("  V.17");
@@ -910,117 +1012,47 @@ static const char *v34_event_to_str_local(int event)
 static void decode_v8_pass(const int16_t *samples, int total_samples,
                            bool calling_party)
 {
-    v8_parms_t parms;
-    v8_state_t *v8;
+    v8_parms_t result;
+    int offset = -1;
 
-    memset(&parms, 0, sizeof(parms));
-    parms.modem_connect_tone = calling_party
-        ? MODEM_CONNECT_TONES_NONE
-        : MODEM_CONNECT_TONES_ANSAM;
-    parms.send_ci = calling_party;
-    parms.v92 = -1;
-
-    parms.jm_cm.modulations = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22
-                            | V8_MOD_V92 | V8_MOD_V21 | V8_MOD_V17
-                            | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V23
-                            | V8_MOD_V32;
-    parms.jm_cm.protocols = V8_PROTOCOL_LAPM_V42;
-    parms.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-    parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
-
-    memset(&g_v8_result, 0, sizeof(g_v8_result));
-
-    v8 = v8_init(NULL, calling_party, &parms, v8_decode_result_handler, NULL);
-    if (!v8) {
-        fprintf(stderr, "  V.8 init failed\n");
-        return;
-    }
-    span_log_set_level(v8_get_logging_state(v8), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
-
-    /* Feed samples in 160-sample chunks */
-    int offset = 0;
-    while (offset < total_samples && !g_v8_result.seen) {
-        int chunk = total_samples - offset;
-        if (chunk > 160) chunk = 160;
-        /* v8_rx takes non-const int16_t* in some SpanDSP builds */
-        v8_rx(v8, (int16_t *)(samples + offset), chunk);
-        /* Also drive TX so the V.8 state machine progresses */
-        int16_t tx_buf[160];
-        v8_tx(v8, tx_buf, chunk);
-        offset += chunk;
-    }
-
-    if (g_v8_result.seen) {
+    if (v8_decode_probe(samples, total_samples, calling_party, total_samples, &result, &offset)) {
         printf("  V.8 negotiation decoded at ~%.1f ms:\n",
                sample_to_ms(offset, 8000));
-        print_v8_result(&g_v8_result.result);
+        print_v8_result(&result);
     } else {
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
                total_samples, sample_to_ms(total_samples, 8000));
     }
-
-    v8_free(v8);
 }
 
 static void collect_v8_event(call_log_t *log,
                              const int16_t *samples,
                              int total_samples,
-                             bool calling_party)
+                             bool calling_party,
+                             int max_sample)
 {
-    v8_parms_t parms;
-    v8_state_t *v8;
-    int offset = 0;
+    v8_parms_t result;
+    int offset = -1;
     char summary[160];
     char detail[320];
 
     if (!log || !samples || total_samples <= 0)
         return;
 
-    memset(&parms, 0, sizeof(parms));
-    parms.modem_connect_tone = calling_party
-        ? MODEM_CONNECT_TONES_NONE
-        : MODEM_CONNECT_TONES_ANSAM;
-    parms.send_ci = calling_party;
-    parms.v92 = -1;
-    parms.jm_cm.modulations = V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22
-                            | V8_MOD_V92 | V8_MOD_V21 | V8_MOD_V17
-                            | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V23
-                            | V8_MOD_V32;
-    parms.jm_cm.protocols = V8_PROTOCOL_LAPM_V42;
-    parms.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-    parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
-
-    memset(&g_v8_result, 0, sizeof(g_v8_result));
-    v8 = v8_init(NULL, calling_party, &parms, v8_decode_result_handler, NULL);
-    if (!v8)
+    if (!v8_decode_probe(samples, total_samples, calling_party, max_sample, &result, &offset))
         return;
-
-    span_log_set_level(v8_get_logging_state(v8), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
-    while (offset < total_samples && !g_v8_result.seen) {
-        int chunk = total_samples - offset;
-        int16_t tx_buf[160];
-
-        if (chunk > 160)
-            chunk = 160;
-        v8_rx(v8, (int16_t *)(samples + offset), chunk);
-        v8_tx(v8, tx_buf, chunk);
-        offset += chunk;
-    }
-
-    if (g_v8_result.seen) {
+    if (result.status == V8_STATUS_V8_CALL) {
         snprintf(summary, sizeof(summary),
                  "V.8 negotiation decoded as %s",
                  calling_party ? "caller" : "answerer");
         snprintf(detail, sizeof(detail),
                  "status=%s protocol=%s pcm=%s pstn=%s",
-                 v8_status_to_str(g_v8_result.result.status),
-                 v8_protocol_to_str(g_v8_result.result.jm_cm.protocols),
-                 v8_pcm_modem_availability_to_str(g_v8_result.result.jm_cm.pcm_modem_availability),
-                 v8_pstn_access_to_str(g_v8_result.result.jm_cm.pstn_access));
+                 v8_status_to_str(result.status),
+                 v8_protocol_to_str(result.jm_cm.protocols),
+                 v8_pcm_modem_availability_to_str(result.jm_cm.pcm_modem_availability),
+                 v8_pstn_access_to_str(result.jm_cm.pstn_access));
         call_log_append(log, offset, 0, "V.8", summary, detail);
     }
-
-    v8_free(v8);
 }
 
 static bool decode_v34_pass(const int16_t *samples,
@@ -1660,6 +1692,7 @@ static void collect_stream_call_log(call_log_t *log,
     decode_v34_result_t caller;
     bool have_answerer = false;
     bool have_caller = false;
+    int earliest_phase2_sample = -1;
 
     if (!log || !linear_samples || !g711_codewords)
         return;
@@ -1667,13 +1700,25 @@ static void collect_stream_call_log(call_log_t *log,
     if (do_v34 || do_v90) {
         have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, &answerer);
         have_caller = decode_v34_pass(linear_samples, total_samples, law, true, &caller);
+        if (have_answerer) {
+            if (answerer.info0_seen)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
+            if (answerer.info1_seen)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info1_sample);
+        }
+        if (have_caller) {
+            if (caller.info0_seen)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, caller.info0_sample);
+            if (caller.info1_seen)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, caller.info1_sample);
+        }
     }
 
     if (do_v34)
         collect_v34_events(log, linear_samples, total_samples, law);
     if (do_v8) {
-        collect_v8_event(log, linear_samples, total_samples, false);
-        collect_v8_event(log, linear_samples, total_samples, true);
+        collect_v8_event(log, linear_samples, total_samples, false, earliest_phase2_sample);
+        collect_v8_event(log, linear_samples, total_samples, true, earliest_phase2_sample);
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
@@ -1688,6 +1733,8 @@ static void collect_stream_call_log(call_log_t *log,
         }
     }
 
+    call_log_sort(log);
+    call_log_prune_v8_after_phase2(log);
     call_log_sort(log);
 }
 
