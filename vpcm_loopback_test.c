@@ -3957,9 +3957,12 @@ static bool vpcm_v90_record_call_simplex_g711(void *user_data,
                                               const uint8_t *tx_codewords,
                                               int codeword_len)
 {
+    /* pair->caller = analogue modem, pair->answerer = digital server.
+     * digital_to_analogue=true means the digital server (answerer) is TX,
+     * so caller_to_answerer = false. */
     return vpcm_record_call_simplex_g711((vpcm_call_pair_t *) user_data,
                                          law,
-                                         digital_to_analogue,
+                                         !digital_to_analogue,
                                          tx_codewords,
                                          codeword_len);
 }
