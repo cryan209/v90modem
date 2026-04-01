@@ -131,8 +131,9 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = vpcm_loopback_test
+TEST_TARGETS = vpcm_loopback_test vpcm_decode
 TEST_OBJS = vpcm_loopback_test.o v90.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o
+DECODE_OBJS = vpcm_decode.o v90.o v91.o vpcm_cp.o
 
 USE_V34_STUBS ?= 0
 ifeq ($(USE_V34_STUBS),1)
@@ -149,6 +150,9 @@ $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
+
+vpcm_decode: $(DECODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(DECODE_OBJS) -o $@ $(LDFLAGS)
 
 $(SPANDSP_LIB):
 	@if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
@@ -179,6 +183,7 @@ vpcm_v91_loopback.o: vpcm_v91_loopback.c vpcm_v91_loopback.h vpcm_call_pair.h vp
 ifeq ($(USE_V34_STUBS),1)
 v34_stubs.o:      v34_stubs.c
 endif
+vpcm_decode.o:    vpcm_decode.c    v90.h v91.h vpcm_cp.h
 vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call_pair.h vpcm_link.h vpcm_v90_session.h
 
 spandsp: $(SPANDSP_LIB)
@@ -191,4 +196,4 @@ pjproject:
 	$(MAKE) -C $(PJ_LOCAL_ROOT) lib
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(TEST_TARGETS)
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(TEST_TARGETS)

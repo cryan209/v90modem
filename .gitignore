@@ -56,3 +56,4 @@ pjproject/**/.objs/
 pjproject/**/.libs/
 core.3194
 core.3478
+vpcm_decode
