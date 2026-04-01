@@ -417,6 +417,7 @@ typedef struct {
     bool phase4_ready_seen;
     bool phase4_seen;
     bool training_failed;
+    bool u_info_from_info1a;
     int info0_sample;
     int info1_sample;
     int phase3_sample;
@@ -463,11 +464,9 @@ typedef struct {
     int jd_prime_zero_count;
 } jd_stage_decode_t;
 
-#define OFFLINE_V90_SD_SYMBOLS      (64 * 6)
-#define OFFLINE_V90_SBAR_SYMBOLS    (8 * 6)
-#define OFFLINE_V90_TRN1D_SYMBOLS   2046
 #define OFFLINE_V90_JD_BITS         72
 #define OFFLINE_V90_JD_PRIME_BITS   12
+#define OFFLINE_V90_SCRAMBLER_HISTORY 23
 
 static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_result_t *answerer,
                                                           const decode_v34_result_t *caller,
@@ -808,6 +807,7 @@ static bool decode_v34_pass(const int16_t *samples,
             result->info1_seen = true;
             result->info1_sample = offset;
             result->u_info = result->info1a.u_info;
+            result->u_info_from_info1a = true;
         }
         if (!result->phase3_seen
             && (rx_stage >= 11 || v34_get_primary_channel_active(v34))) {
@@ -885,6 +885,11 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
     } else {
         printf("  INFO1a:          not decoded\n");
     }
+    if (result->u_info > 0) {
+        printf("  U_INFO source:   %s (%d)\n",
+               result->u_info_from_info1a ? "INFO1a bits 25:31" : "SpanDSP fallback state",
+               result->u_info);
+    }
     if (result->phase3_seen)
         printf("  Phase 3:         seen at %.1f ms\n", sample_to_ms(result->phase3_sample, 8000));
     if (result->phase4_ready_seen)
@@ -928,7 +933,9 @@ static void collect_v34_events(call_log_t *log,
             call_log_append(log, answerer.info1_sample, 0, "V.34", "INFO1a decoded", detail);
         }
         if (answerer.phase3_seen) {
-            snprintf(detail, sizeof(detail), "role=answerer u_info=%d", answerer.u_info);
+            snprintf(detail, sizeof(detail), "role=answerer u_info=%d source=%s",
+                     answerer.u_info,
+                     answerer.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
             call_log_append(log, answerer.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
         }
         if (answerer.phase4_ready_seen) {
@@ -968,7 +975,9 @@ static void collect_v34_events(call_log_t *log,
             call_log_append(log, caller.info1_sample, 0, "V.34", "INFO1a decoded", detail);
         }
         if (caller.phase3_seen) {
-            snprintf(detail, sizeof(detail), "role=caller u_info=%d", caller.u_info);
+            snprintf(detail, sizeof(detail), "role=caller u_info=%d source=%s",
+                     caller.u_info,
+                     caller.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
             call_log_append(log, caller.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
         }
         if (caller.phase4_ready_seen) {
@@ -2103,14 +2112,6 @@ static void adaptive_reslice_codewords(const int16_t *samples,
     }
 }
 
-static int offline_v90_scramble_bit(uint32_t *sr, int in_bit)
-{
-    int fb = ((int)(*sr >> 22) ^ (int)(*sr >> 4)) & 1;
-    int out_bit = in_bit ^ fb;
-    *sr = ((*sr << 1) | (uint32_t) out_bit) & 0x7FFFFF;
-    return out_bit;
-}
-
 static int offline_v90_descramble_reg_bit(uint32_t *reg, int in_bit)
 {
     int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
@@ -2160,24 +2161,6 @@ static void offline_v90_build_jd_bits(uint8_t bits[OFFLINE_V90_JD_BITS])
         bits[i] = (uint8_t) ((packed[i / 8] >> (i % 8)) & 1U);
 }
 
-static void offline_v90_seed_after_trn1d(uint32_t *descramble_reg_out, int *last_sign_out)
-{
-    uint32_t tx_sr = 0;
-    uint32_t rx_reg = 0;
-    int last_sign = 0;
-
-    for (int i = 0; i < OFFLINE_V90_TRN1D_SYMBOLS; i++) {
-        int scrambled = offline_v90_scramble_bit(&tx_sr, 1);
-        last_sign = scrambled;
-        (void) offline_v90_descramble_reg_bit(&rx_reg, scrambled);
-    }
-
-    if (descramble_reg_out)
-        *descramble_reg_out = rx_reg;
-    if (last_sign_out)
-        *last_sign_out = last_sign;
-}
-
 static int offline_v90_decode_jd_bits(const uint8_t *codewords,
                                       int total_codewords,
                                       int start_sample,
@@ -2189,11 +2172,26 @@ static int offline_v90_decode_jd_bits(const uint8_t *codewords,
     int errors = 0;
     uint8_t expected[OFFLINE_V90_JD_BITS];
 
-    if (!codewords || !out_bits || start_sample < 0 || start_sample + OFFLINE_V90_JD_BITS > total_codewords)
+    if (!codewords || !out_bits
+        || start_sample < (OFFLINE_V90_SCRAMBLER_HISTORY + 1)
+        || start_sample + OFFLINE_V90_JD_BITS > total_codewords)
         return OFFLINE_V90_JD_BITS + 1;
 
     offline_v90_build_jd_bits(expected);
-    offline_v90_seed_after_trn1d(&descramble_reg, &prev_sign);
+    descramble_reg = 0;
+    prev_sign = ((codewords[start_sample - OFFLINE_V90_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
+    if (invert_sign)
+        prev_sign ^= 1;
+
+    for (int i = start_sample - OFFLINE_V90_SCRAMBLER_HISTORY; i < start_sample; i++) {
+        int sign = (codewords[i] & 0x80) ? 1 : 0;
+        int scrambled;
+        if (invert_sign)
+            sign ^= 1;
+        scrambled = sign ^ prev_sign;
+        prev_sign = sign;
+        (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+    }
 
     for (int i = 0; i < OFFLINE_V90_JD_BITS; i++) {
         int sign = (codewords[start_sample + i] & 0x80) ? 1 : 0;
@@ -2241,6 +2239,8 @@ static bool decode_jd_stage(const uint8_t *codewords,
     search_start = src->info1_sample >= 0 ? src->info1_sample : out->phase3_start_sample;
     if (search_start < 0)
         return false;
+    if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
+        search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
 
     if (src->phase4_seen && src->phase4_sample > search_start)
         search_end = src->phase4_sample;
@@ -2287,14 +2287,20 @@ static bool decode_jd_stage(const uint8_t *codewords,
         out->jd_repetitions++;
     }
 
+    if (out->jd_repetitions < 1)
+        return false;
+
     {
         int jd_prime_start = best_start + out->jd_repetitions * OFFLINE_V90_JD_BITS;
         uint32_t descramble_reg;
         int prev_sign;
 
-        offline_v90_seed_after_trn1d(&descramble_reg, &prev_sign);
-        for (int i = 0; i < out->jd_repetitions * OFFLINE_V90_JD_BITS; i++) {
-            int sign = (codewords[best_start + i] & 0x80) ? 1 : 0;
+        descramble_reg = 0;
+        prev_sign = ((codewords[best_start - OFFLINE_V90_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
+        if (best_invert)
+            prev_sign ^= 1;
+        for (int i = best_start - OFFLINE_V90_SCRAMBLER_HISTORY; i < best_start + out->jd_repetitions * OFFLINE_V90_JD_BITS; i++) {
+            int sign = (codewords[i] & 0x80) ? 1 : 0;
             int scrambled;
             if (best_invert)
                 sign ^= 1;
@@ -2354,6 +2360,16 @@ static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_resul
                                                           const decode_v34_result_t *caller,
                                                           bool *calling_party_out)
 {
+    if (answerer && answerer->u_info_from_info1a && answerer->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = false;
+        return answerer;
+    }
+    if (caller && caller->u_info_from_info1a && caller->u_info > 0) {
+        if (calling_party_out)
+            *calling_party_out = true;
+        return caller;
+    }
     if (answerer && answerer->info1_seen && answerer->u_info > 0) {
         if (calling_party_out)
             *calling_party_out = false;
