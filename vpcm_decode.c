@@ -18,8 +18,11 @@
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
 #include <spandsp/private/power_meter.h>
+#include <spandsp/private/fsk.h>
+#include <spandsp/private/modem_connect_tones.h>
 #include <spandsp/private/logging.h>
 #include <spandsp/private/v34.h>
+#include <spandsp/private/v8.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -456,6 +459,18 @@ typedef struct {
 } decode_v8_result_t;
 
 typedef struct {
+    bool ok;
+    bool calling_party;
+    int ansam_sample;
+    int ci_sample;
+    int cm_jm_sample;
+    int cj_sample;
+    int v8_call_sample;
+    int last_status;
+    v8_parms_t result;
+} v8_probe_result_t;
+
+typedef struct {
     bool info0_seen;
     bool info0_is_d;
     bool info1_seen;
@@ -593,21 +608,36 @@ static void v8_decode_result_handler(void *user_data, v8_parms_t *result)
     g_v8_result.result = *result;
 }
 
-static bool v8_decode_probe(const int16_t *samples,
-                            int total_samples,
-                            bool calling_party,
-                            int max_sample,
-                            v8_parms_t *result_out,
-                            int *offset_out)
+static void v8_note_first_sample(int *dst, int sample)
+{
+    if (!dst || sample < 0)
+        return;
+    if (*dst < 0)
+        *dst = sample;
+}
+
+static bool v8_collect_probe(const int16_t *samples,
+                             int total_samples,
+                             bool calling_party,
+                             int max_sample,
+                             v8_probe_result_t *out)
 {
     v8_parms_t parms;
     v8_state_t *v8;
     int offset = 0;
     int limit;
-    bool ok = false;
 
-    if (!samples || total_samples <= 0)
+    if (!samples || total_samples <= 0 || !out)
         return false;
+
+    memset(out, 0, sizeof(*out));
+    out->calling_party = calling_party;
+    out->ansam_sample = -1;
+    out->ci_sample = -1;
+    out->cm_jm_sample = -1;
+    out->cj_sample = -1;
+    out->v8_call_sample = -1;
+    out->last_status = V8_STATUS_IN_PROGRESS;
 
     memset(&parms, 0, sizeof(parms));
     parms.modem_connect_tone = calling_party
@@ -633,25 +663,51 @@ static bool v8_decode_probe(const int16_t *samples,
     if (max_sample > 0 && max_sample < limit)
         limit = max_sample;
 
-    while (offset < limit && !g_v8_result.seen) {
+    while (offset < limit) {
         int chunk = limit - offset;
+        int tone;
 
         if (chunk > 160)
             chunk = 160;
-        v8_decode_rx(v8, samples + offset, chunk);
+
+        modem_connect_tones_rx(&v8->ansam_rx, samples + offset, chunk);
+        if ((tone = modem_connect_tones_rx_get(&v8->ansam_rx)) != MODEM_CONNECT_TONES_NONE) {
+            if (tone == MODEM_CONNECT_TONES_ANSAM
+                || tone == MODEM_CONNECT_TONES_ANSAM_PR
+                || tone == MODEM_CONNECT_TONES_ANS
+                || tone == MODEM_CONNECT_TONES_ANS_PR) {
+                v8_note_first_sample(&out->ansam_sample, offset + chunk);
+            }
+        }
+        modem_connect_tones_rx(&v8->calling_tone_rx, samples + offset, chunk);
+        modem_connect_tones_rx_get(&v8->calling_tone_rx);
+        modem_connect_tones_rx(&v8->cng_tone_rx, samples + offset, chunk);
+        modem_connect_tones_rx_get(&v8->cng_tone_rx);
+        fsk_rx(&v8->v21rx, samples + offset, chunk);
         offset += chunk;
+
+        if (v8->got_ci)
+            v8_note_first_sample(&out->ci_sample, offset);
+        if (v8->got_cm_jm)
+            v8_note_first_sample(&out->cm_jm_sample, offset);
+        if (v8->got_cj)
+            v8_note_first_sample(&out->cj_sample, offset);
+        if (g_v8_result.seen) {
+            out->result = g_v8_result.result;
+            out->last_status = g_v8_result.result.status;
+            if (g_v8_result.result.status == V8_STATUS_V8_CALL)
+                v8_note_first_sample(&out->v8_call_sample, offset);
+        }
     }
 
-    if (g_v8_result.seen) {
-        if (result_out)
-            *result_out = g_v8_result.result;
-        if (offset_out)
-            *offset_out = offset;
-        ok = true;
-    }
+    out->ok = (out->ansam_sample >= 0
+               || out->ci_sample >= 0
+               || out->cm_jm_sample >= 0
+               || out->cj_sample >= 0
+               || out->v8_call_sample >= 0);
 
     v8_free(v8);
-    return ok;
+    return out->ok;
 }
 
 static void print_v8_modulations(int mods)
@@ -1012,13 +1068,32 @@ static const char *v34_event_to_str_local(int event)
 static void decode_v8_pass(const int16_t *samples, int total_samples,
                            bool calling_party)
 {
-    v8_parms_t result;
-    int offset = -1;
+    v8_probe_result_t probe;
 
-    if (v8_decode_probe(samples, total_samples, calling_party, total_samples, &result, &offset)) {
-        printf("  V.8 negotiation decoded at ~%.1f ms:\n",
-               sample_to_ms(offset, 8000));
-        print_v8_result(&result);
+    if (v8_collect_probe(samples, total_samples, calling_party, total_samples, &probe)) {
+        printf("  Milestones:      ");
+        if (probe.ansam_sample >= 0)
+            printf("ANS@%.1f ", sample_to_ms(probe.ansam_sample, 8000));
+        if (probe.ci_sample >= 0)
+            printf("CI@%.1f ", sample_to_ms(probe.ci_sample, 8000));
+        if (probe.cm_jm_sample >= 0)
+            printf("%s@%.1f ",
+                   calling_party ? "JM" : "CM",
+                   sample_to_ms(probe.cm_jm_sample, 8000));
+        if (probe.cj_sample >= 0)
+            printf("CJ@%.1f ", sample_to_ms(probe.cj_sample, 8000));
+        if (probe.v8_call_sample >= 0)
+            printf("V8CALL@%.1f ", sample_to_ms(probe.v8_call_sample, 8000));
+        printf("\n");
+        if (probe.v8_call_sample >= 0 || probe.last_status == V8_STATUS_V8_CALL) {
+            printf("  V.8 negotiation decoded at ~%.1f ms:\n",
+                   sample_to_ms(probe.v8_call_sample >= 0 ? probe.v8_call_sample : probe.cm_jm_sample, 8000));
+            print_v8_result(&probe.result);
+        } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
+            printf("  Partial V.8 decode only; final negotiation not yet confirmed\n");
+        } else {
+            printf("  Tone-level V.8 front-end detected, but no valid CI/CM/JM/CJ sequence yet\n");
+        }
     } else {
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
                total_samples, sample_to_ms(total_samples, 8000));
@@ -1031,27 +1106,57 @@ static void collect_v8_event(call_log_t *log,
                              bool calling_party,
                              int max_sample)
 {
-    v8_parms_t result;
-    int offset = -1;
+    v8_probe_result_t probe;
     char summary[160];
     char detail[320];
 
     if (!log || !samples || total_samples <= 0)
         return;
 
-    if (!v8_decode_probe(samples, total_samples, calling_party, max_sample, &result, &offset))
+    if (!v8_collect_probe(samples, total_samples, calling_party, max_sample, &probe))
         return;
-    if (result.status == V8_STATUS_V8_CALL) {
+    if (probe.ansam_sample >= 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s",
+                 calling_party ? "caller" : "answerer");
+        call_log_append(log, probe.ansam_sample, 0, "V.8", "ANS/ANSam detected", detail);
+    }
+    if (probe.ci_sample >= 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s call_function=%s",
+                 calling_party ? "caller" : "answerer",
+                 v8_call_function_to_str(probe.result.jm_cm.call_function));
+        call_log_append(log, probe.ci_sample, 0, "V.8", "CI decoded", detail);
+    }
+    if (probe.cm_jm_sample >= 0) {
+        snprintf(summary, sizeof(summary),
+                 "%s decoded",
+                 calling_party ? "JM" : "CM");
+        snprintf(detail, sizeof(detail),
+                 "role=%s protocol=%s pcm=%s pstn=%s",
+                 calling_party ? "caller" : "answerer",
+                 v8_protocol_to_str(probe.result.jm_cm.protocols),
+                 v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
+                 v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
+        call_log_append(log, probe.cm_jm_sample, 0, "V.8", summary, detail);
+    }
+    if (probe.cj_sample >= 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s",
+                 calling_party ? "caller" : "answerer");
+        call_log_append(log, probe.cj_sample, 0, "V.8", "CJ decoded", detail);
+    }
+    if (probe.last_status == V8_STATUS_V8_CALL && probe.v8_call_sample >= 0) {
         snprintf(summary, sizeof(summary),
                  "V.8 negotiation decoded as %s",
                  calling_party ? "caller" : "answerer");
         snprintf(detail, sizeof(detail),
                  "status=%s protocol=%s pcm=%s pstn=%s",
-                 v8_status_to_str(result.status),
-                 v8_protocol_to_str(result.jm_cm.protocols),
-                 v8_pcm_modem_availability_to_str(result.jm_cm.pcm_modem_availability),
-                 v8_pstn_access_to_str(result.jm_cm.pstn_access));
-        call_log_append(log, offset, 0, "V.8", summary, detail);
+                 v8_status_to_str(probe.result.status),
+                 v8_protocol_to_str(probe.result.jm_cm.protocols),
+                 v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
+                 v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
+        call_log_append(log, probe.v8_call_sample, 0, "V.8", summary, detail);
     }
 }
 
