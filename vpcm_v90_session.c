@@ -553,6 +553,8 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
         fprintf(stderr, "V.90 coupled training: failed to initialize digital state\n");
         return false;
     }
+    if (v92_mode)
+        v90_enable_v92_mode(digital);
 
     /* Pre-build CP frame from DIL analysis. */
     vpcm_v92_select_profile_from_dil(dil_analysis, &downstream_drn, &upstream_drn);
@@ -695,6 +697,7 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
                                          const vpcm_v90_startup_contract_io_t *io,
                                          const v90_dil_desc_t *digital_dil,
                                          const v90_dil_analysis_t *dil_analysis,
+                                         bool v92_mode,
                                          vpcm_v90_startup_contract_report_t *report,
                                          vpcm_v90_bit_feeder_t *caller_feeder,
                                          v34_state_t **caller_out)
@@ -972,7 +975,7 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         if (caller_phase3_tx_ready)
             vpcm_v90_run_coupled_training(law, caller, answerer,
                                           report ? report->phase2_u_info : 0,
-                                          digital_dil, dil_analysis, io, report);
+                                          digital_dil, dil_analysis, v92_mode, io, report);
     }
 
     /* answerer is always an internal training proxy; free it now. */
@@ -1276,6 +1279,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE2);
     if (!vpcm_v90_run_phase2_exchange(params->law, io,
                                        &digital_dil, &digital_dil_analysis,
+                                       params->v92_mode,
                                        &local_report,
                                        &caller_bit_feeder,
                                        &native_caller)) {

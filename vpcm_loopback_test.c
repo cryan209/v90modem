@@ -3002,6 +3002,7 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     memset(&params, 0, sizeof(params));
     params.law = law;
     params.echo_limited = echo_limited;
+    params.v92_mode = true;
     params.seed_base = seed_base;
     params.data_seconds = data_seconds;
 

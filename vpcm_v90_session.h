@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     v91_law_t law;
     bool echo_limited;
+    bool v92_mode;
     uint32_t seed_base;
     int data_seconds;
 } vpcm_v90_startup_contract_params_t;
