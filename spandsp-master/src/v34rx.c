@@ -77,6 +77,10 @@
 #include "spandsp/private/power_meter.h"
 #include "spandsp/private/v34.h"
 
+#ifndef V34_TRACE_DIAGNOSTICS
+#define V34_TRACE_DIAGNOSTICS 0
+#endif
+
 /* Phase 3 RX audio capture for offline analysis */
 static FILE *phase3_rx_dump_fp = NULL;
 static int phase3_rx_dump_count = 0;
@@ -3699,7 +3703,9 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     /*endif*/
 #endif
     /* Periodic TED + carrier tracking diagnostic (every 256 bauds) */
-    if ((s->duration & 0xFF) == 0  &&  s->stage >= V34_RX_STAGE_PHASE3_WAIT_S)
+    if (V34_TRACE_DIAGNOSTICS
+        && (s->duration & 0xFF) == 0
+        && s->stage >= V34_RX_STAGE_PHASE3_WAIT_S)
     {
         fprintf(stderr, "[V34 RX] baud=%d ted_phase=%.1f ted_corr=%d carrier=%.2fHz eq_step=%d\n",
                 s->duration, (double)s->pri_ted.baud_phase, s->total_baud_timing_correction,
@@ -3905,7 +3911,7 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     error = R2 - y_mag2;
 
     /* Log CMA error periodically */
-    if ((s->duration & 0xFF) == 0)
+    if (V34_TRACE_DIAGNOSTICS && ((s->duration & 0xFF) == 0))
     {
         fprintf(stderr, "[CMA] baud=%d err=%.4f mag=%.4f R=1.0000 delta=%.6f\n",
                 s->duration, error, sqrtf(y_mag2), s->eq_delta);
@@ -4544,7 +4550,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     eq_sample = equalizer_get(s);
     sym = &eq_sample;
 
-    if ((s->stage == V34_RX_STAGE_PHASE3_TRAINING || s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+    if (V34_TRACE_DIAGNOSTICS
+        && (s->stage == V34_RX_STAGE_PHASE3_TRAINING || s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
         && (s->duration == 0 || (s->duration % 256) == 0))
     {
         float sym_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
@@ -4577,7 +4584,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
 
-            if (s->duration == 1 || (s->duration % 256) == 0)
+            if (V34_TRACE_DIAGNOSTICS
+                && (s->duration == 1 || (s->duration % 256) == 0))
             {
                 fprintf(stderr,
                         "[V34 RAW] WAIT_S case: s=%p stage=%d demod=%d duration=%d event=%d j_bits=%d trn_bits=%d hint=%d/%d%%\n",

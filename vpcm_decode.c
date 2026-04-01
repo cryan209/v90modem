@@ -159,6 +159,43 @@ static void format_v91_info_summary(char *buf, size_t len, const v91_info_diag_t
              (unsigned) diag->frame.max_tx_power);
 }
 
+static bool map_v34_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src)
+{
+    if (!dst || !src)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->support_2743 = src->support_2743;
+    dst->support_2800 = src->support_2800;
+    dst->support_3429 = src->support_3429;
+    dst->support_3000_low = src->support_3000_low;
+    dst->support_3000_high = src->support_3000_high;
+    dst->support_3200_low = src->support_3200_low;
+    dst->support_3200_high = src->support_3200_high;
+    dst->rate_3429_allowed = src->rate_3429_allowed;
+    dst->support_power_reduction = src->support_power_reduction;
+    dst->max_baud_rate_difference = src->max_baud_rate_difference;
+    dst->from_cme_modem = src->from_cme_modem;
+    dst->support_1664_point_constellation = src->support_1664_point_constellation;
+    dst->tx_clock_source = src->tx_clock_source;
+    dst->acknowledge_info0d = src->acknowledge_info0d;
+    return v90_info0a_validate(dst);
+}
+
+static bool map_v34_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src)
+{
+    if (!dst || !src)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->md = (uint8_t) src->md;
+    dst->u_info = (uint8_t) src->u_info;
+    dst->upstream_symbol_rate_code = (uint8_t) src->upstream_symbol_rate_code;
+    dst->downstream_rate_code = (uint8_t) src->downstream_rate_code;
+    dst->freq_offset = (int16_t) src->freq_offset;
+    return v90_info1a_validate(dst);
+}
+
 static void format_cp_summary(char *buf, size_t len, const vpcm_cp_frame_t *cp)
 {
     if (!buf || len == 0 || !cp)
@@ -334,6 +371,23 @@ typedef struct {
     v8_parms_t result;
 } decode_v8_result_t;
 
+typedef struct {
+    bool info0_seen;
+    bool info1_seen;
+    bool phase3_seen;
+    bool training_failed;
+    int info0_sample;
+    int info1_sample;
+    int phase3_sample;
+    int failure_sample;
+    int final_rx_stage;
+    int final_tx_stage;
+    int final_rx_event;
+    int u_info;
+    v90_info0a_t info0a;
+    v90_info1a_t info1a;
+} decode_v34_result_t;
+
 static decode_v8_result_t g_v8_result;
 
 static void v8_decode_result_handler(void *user_data, v8_parms_t *result)
@@ -371,6 +425,118 @@ static void print_v8_result(const v8_parms_t *r)
            v8_pcm_modem_availability_to_str(r->jm_cm.pcm_modem_availability));
     if (r->v92 >= 0)
         printf("  V.92:           0x%02x\n", r->v92);
+}
+
+static int v34_dummy_get_bit(void *user_data)
+{
+    (void) user_data;
+    return 1;
+}
+
+static void v34_dummy_put_bit(void *user_data, int bit)
+{
+    (void) user_data;
+    (void) bit;
+}
+
+static const char *v34_rx_stage_to_str_local(int stage)
+{
+    switch (stage) {
+    case 1: return "INFO0";
+    case 2: return "INFOH";
+    case 3: return "INFO1C";
+    case 4: return "INFO1A";
+    case 5: return "TONE_A";
+    case 6: return "TONE_B";
+    case 7: return "L1_L2";
+    case 8: return "CC";
+    case 9: return "PRIMARY_CHANNEL";
+    case 10: return "PHASE3_WAIT_S";
+    case 11: return "PHASE3_TRAINING";
+    case 12: return "PHASE3_DONE";
+    case 13: return "PHASE4_S";
+    case 14: return "PHASE4_S_BAR";
+    case 15: return "PHASE4_TRN";
+    case 16: return "PHASE4_MP";
+    case 17: return "DATA";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *v34_tx_stage_to_str_local(int stage)
+{
+    switch (stage) {
+    case 1: return "INITIAL_PREAMBLE";
+    case 2: return "INFO0";
+    case 3: return "INITIAL_A";
+    case 4: return "FIRST_A";
+    case 5: return "FIRST_NOT_A";
+    case 6: return "FIRST_NOT_A_REV";
+    case 7: return "SECOND_A";
+    case 8: return "L1";
+    case 9: return "L2";
+    case 10: return "POST_L2_A";
+    case 11: return "POST_L2_NOT_A";
+    case 12: return "A_SILENCE";
+    case 13: return "PRE_INFO1_A";
+    case 14: return "V90_WAIT_TONE_A";
+    case 15: return "V90_WAIT_INFO1A";
+    case 16: return "V90_WAIT_RX_L2";
+    case 17: return "V90_WAIT_TONE_A_REV";
+    case 18: return "V90_B_REV_DELAY";
+    case 19: return "V90_B_REV_10MS";
+    case 20: return "V90_PHASE2_B";
+    case 21: return "V90_PHASE2_B_INFO0_SEEN";
+    case 22: return "INFO1";
+    case 23: return "FIRST_B";
+    case 24: return "FIRST_B_INFO_SEEN";
+    case 25: return "FIRST_NOT_B_WAIT";
+    case 26: return "FIRST_NOT_B";
+    case 27: return "FIRST_B_SILENCE";
+    case 28: return "FIRST_B_POST_REV";
+    case 29: return "SECOND_B";
+    case 30: return "SECOND_B_WAIT";
+    case 31: return "SECOND_NOT_B";
+    case 32: return "INFO0_RETRY";
+    case 33: return "FIRST_S";
+    case 34: return "FIRST_NOT_S";
+    case 35: return "MD";
+    case 36: return "SECOND_S";
+    case 37: return "SECOND_NOT_S";
+    case 38: return "TRN";
+    case 39: return "J";
+    case 40: return "J_DASHED";
+    case 41: return "PHASE4_WAIT";
+    case 42: return "PHASE4_S";
+    case 43: return "PHASE4_NOT_S";
+    case 44: return "PHASE4_TRN";
+    case 45: return "MP";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *v34_event_to_str_local(int event)
+{
+    switch (event) {
+    case 0: return "NONE";
+    case 1: return "TONE_SEEN";
+    case 2: return "REVERSAL_1";
+    case 3: return "REVERSAL_2";
+    case 4: return "REVERSAL_3";
+    case 5: return "INFO0_OK";
+    case 6: return "INFO0_BAD";
+    case 7: return "INFO1_OK";
+    case 8: return "INFO1_BAD";
+    case 9: return "INFOH_OK";
+    case 10: return "INFOH_BAD";
+    case 11: return "L2_SEEN";
+    case 12: return "S";
+    case 13: return "J";
+    case 14: return "J_DASHED";
+    case 15: return "PHASE4_TRN_READY";
+    case 16: return "TRAINING_FAILED";
+    default: return "UNKNOWN";
+    }
 }
 
 static void decode_v8_pass(const int16_t *samples, int total_samples,
@@ -487,6 +653,192 @@ static void collect_v8_event(call_log_t *log,
     }
 
     v8_free(v8);
+}
+
+static bool decode_v34_pass(const int16_t *samples,
+                            int total_samples,
+                            v91_law_t law,
+                            bool calling_party,
+                            decode_v34_result_t *result)
+{
+    v34_state_t *v34;
+    v34_v90_info0a_t raw_info0a;
+    v34_v90_info1a_t raw_info1a;
+    int offset = 0;
+
+    if (!samples || total_samples <= 0 || !result)
+        return false;
+
+    memset(result, 0, sizeof(*result));
+    result->info0_sample = -1;
+    result->info1_sample = -1;
+    result->phase3_sample = -1;
+    result->failure_sample = -1;
+
+    v34 = v34_init(NULL, 3200, 21600, calling_party, true,
+                   v34_dummy_get_bit, NULL,
+                   v34_dummy_put_bit, NULL);
+    if (!v34)
+        return false;
+
+    v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
+    span_log_set_level(v34_get_logging_state(v34), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
+
+    while (offset < total_samples) {
+        int chunk = total_samples - offset;
+        int16_t tx_buf[160];
+        int rx_stage;
+        int rx_event;
+
+        if (chunk > 160)
+            chunk = 160;
+
+        v34_rx(v34, samples + offset, chunk);
+        v34_tx(v34, tx_buf, chunk);
+        offset += chunk;
+
+        rx_stage = v34_get_rx_stage(v34);
+        rx_event = v34_get_rx_event(v34);
+
+        if (!result->info0_seen
+            && v34_get_v90_received_info0a(v34, &raw_info0a) > 0
+            && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
+            result->info0_seen = true;
+            result->info0_sample = offset;
+        }
+        if (!result->info1_seen
+            && v34_get_v90_received_info1a(v34, &raw_info1a) > 0
+            && map_v34_received_info1a(&result->info1a, &raw_info1a)) {
+            result->info1_seen = true;
+            result->info1_sample = offset;
+            result->u_info = result->info1a.u_info;
+        }
+        if (!result->phase3_seen
+            && (rx_stage >= 11 || v34_get_primary_channel_active(v34))) {
+            result->phase3_seen = true;
+            result->phase3_sample = offset;
+        }
+        if (!result->training_failed && rx_event == 16) {
+            result->training_failed = true;
+            result->failure_sample = offset;
+        }
+    }
+
+    result->final_rx_stage = v34_get_rx_stage(v34);
+    result->final_tx_stage = v34_get_tx_stage(v34);
+    result->final_rx_event = v34_get_rx_event(v34);
+    if (!result->u_info)
+        result->u_info = v34_get_v90_u_info(v34);
+
+    v34_free(v34);
+    return true;
+}
+
+static void print_v34_result(const decode_v34_result_t *result, bool calling_party)
+{
+    if (!result)
+        return;
+
+    printf("  Role:            %s\n", calling_party ? "caller" : "answerer");
+    printf("  Final RX stage:  %s (%d)\n",
+           v34_rx_stage_to_str_local(result->final_rx_stage),
+           result->final_rx_stage);
+    printf("  Final TX stage:  %s (%d)\n",
+           v34_tx_stage_to_str_local(result->final_tx_stage),
+           result->final_tx_stage);
+    printf("  Final RX event:  %s (%d)\n",
+           v34_event_to_str_local(result->final_rx_event),
+           result->final_rx_event);
+    if (result->info0_seen) {
+        printf("  INFO0a:          decoded at %.1f ms\n", sample_to_ms(result->info0_sample, 8000));
+        printf("                   3429=%s 1664pt=%s clock=%u ack_info0d=%s\n",
+               result->info0a.support_3429 ? "yes" : "no",
+               result->info0a.support_1664_point_constellation ? "yes" : "no",
+               (unsigned) result->info0a.tx_clock_source,
+               result->info0a.acknowledge_info0d ? "yes" : "no");
+    } else {
+        printf("  INFO0a:          not decoded\n");
+    }
+    if (result->info1_seen) {
+        printf("  INFO1a:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
+        printf("                   md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d\n",
+               (unsigned) result->info1a.md,
+               (unsigned) result->info1a.u_info,
+               (unsigned) result->info1a.upstream_symbol_rate_code,
+               (unsigned) result->info1a.downstream_rate_code,
+               result->info1a.freq_offset);
+    } else {
+        printf("  INFO1a:          not decoded\n");
+    }
+    if (result->phase3_seen)
+        printf("  Phase 3:         seen at %.1f ms\n", sample_to_ms(result->phase3_sample, 8000));
+    if (result->training_failed)
+        printf("  Training fail:   observed at %.1f ms\n", sample_to_ms(result->failure_sample, 8000));
+}
+
+static void collect_v34_events(call_log_t *log,
+                               const int16_t *samples,
+                               int total_samples,
+                               v91_law_t law)
+{
+    decode_v34_result_t answerer;
+    decode_v34_result_t caller;
+    char detail[256];
+
+    if (!log || !samples || total_samples <= 0)
+        return;
+
+    if (decode_v34_pass(samples, total_samples, law, false, &answerer)) {
+        if (answerer.info0_seen) {
+            snprintf(detail, sizeof(detail),
+                     "role=answerer 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
+                     answerer.info0a.support_3429 ? "yes" : "no",
+                     answerer.info0a.support_1664_point_constellation ? "yes" : "no",
+                     (unsigned) answerer.info0a.tx_clock_source,
+                     answerer.info0a.acknowledge_info0d ? "yes" : "no");
+            call_log_append(log, answerer.info0_sample, 0, "V.34", "INFO0a decoded", detail);
+        }
+        if (answerer.info1_seen) {
+            snprintf(detail, sizeof(detail),
+                     "role=answerer md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
+                     (unsigned) answerer.info1a.md,
+                     (unsigned) answerer.info1a.u_info,
+                     (unsigned) answerer.info1a.upstream_symbol_rate_code,
+                     (unsigned) answerer.info1a.downstream_rate_code,
+                     answerer.info1a.freq_offset);
+            call_log_append(log, answerer.info1_sample, 0, "V.34", "INFO1a decoded", detail);
+        }
+        if (answerer.phase3_seen) {
+            snprintf(detail, sizeof(detail), "role=answerer u_info=%d", answerer.u_info);
+            call_log_append(log, answerer.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
+        }
+    }
+
+    if (decode_v34_pass(samples, total_samples, law, true, &caller)) {
+        if (caller.info0_seen) {
+            snprintf(detail, sizeof(detail),
+                     "role=caller 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
+                     caller.info0a.support_3429 ? "yes" : "no",
+                     caller.info0a.support_1664_point_constellation ? "yes" : "no",
+                     (unsigned) caller.info0a.tx_clock_source,
+                     caller.info0a.acknowledge_info0d ? "yes" : "no");
+            call_log_append(log, caller.info0_sample, 0, "V.34", "INFO0a decoded", detail);
+        }
+        if (caller.info1_seen) {
+            snprintf(detail, sizeof(detail),
+                     "role=caller md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
+                     (unsigned) caller.info1a.md,
+                     (unsigned) caller.info1a.u_info,
+                     (unsigned) caller.info1a.upstream_symbol_rate_code,
+                     (unsigned) caller.info1a.downstream_rate_code,
+                     caller.info1a.freq_offset);
+            call_log_append(log, caller.info1_sample, 0, "V.34", "INFO1a decoded", detail);
+        }
+        if (caller.phase3_seen) {
+            snprintf(detail, sizeof(detail), "role=caller u_info=%d", caller.u_info);
+            call_log_append(log, caller.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1373,9 +1725,6 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
         }
     }
 
-    call_log_append(log, total, 0, "V.90",
-                    "Phase 2 INFO0a/INFO1a not decoded here",
-                    "Those frames are V.34 DPSK symbols; this offline path currently logs only the PCM-visible portions.");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1471,6 +1820,7 @@ typedef enum {
 } channel_select_t;
 
 typedef struct {
+    bool do_v34;
     bool do_v8;
     bool do_v91;
     bool do_v90;
@@ -1500,6 +1850,23 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
+    if (opts->raw_output_enabled && opts->do_v34) {
+        decode_v34_result_t answerer;
+        decode_v34_result_t caller;
+
+        printf("\n=== V.34/V.90 Phase 2 Decode (as answerer) ===\n");
+        if (decode_v34_pass(linear_samples, total_samples, law, false, &answerer))
+            print_v34_result(&answerer, false);
+        else
+            printf("  V.34 probe init failed\n");
+
+        printf("\n=== V.34/V.90 Phase 2 Decode (as caller) ===\n");
+        if (decode_v34_pass(linear_samples, total_samples, law, true, &caller))
+            print_v34_result(&caller, true);
+        else
+            printf("  V.34 probe init failed\n");
+    }
+
     if (opts->raw_output_enabled && opts->do_v8) {
         printf("\n=== V.8 Decode (as answerer) ===\n");
         decode_v8_pass(linear_samples, total_samples, false);
@@ -1517,6 +1884,8 @@ static void run_decode_suite(const char *label,
         call_log_t log;
         call_log_init(&log);
 
+        if (opts->do_v34)
+            collect_v34_events(&log, linear_samples, total_samples, law);
         if (opts->do_v8) {
             collect_v8_event(&log, linear_samples, total_samples, false);
             collect_v8_event(&log, linear_samples, total_samples, true);
@@ -1540,6 +1909,7 @@ int main(int argc, char **argv)
     channel_select_t channel = CH_MONO;
     bool channel_explicit = false;
     bool explicit_decode_output = false;
+    bool do_v34 = false;
     bool do_v8 = false;
     bool do_v91 = false;
     bool do_v90 = false;
@@ -1571,6 +1941,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--v8") == 0) {
             do_v8 = true;
             explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--v34") == 0) {
+            do_v34 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--v91") == 0) {
             do_v91 = true;
             explicit_decode_output = true;
@@ -1596,6 +1969,7 @@ int main(int argc, char **argv)
                    "  --g711             Force raw G.711 input format\n"
                    "  --channel L|R|mono Channel to decode from stereo WAV\n"
                    "                     (L=TX, R=RX for tap files; default: mono)\n"
+                   "  --v34              Decode V.34/V.90 Phase 2 symbols via SpanDSP\n"
                    "  --v8               Decode V.8 negotiation\n"
                    "  --v91              Decode V.91 signals (INFO, CP, DIL, Ez, etc.)\n"
                    "  --v90              Decode V.90 signals (Sd, CP, etc.)\n"
@@ -1620,14 +1994,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log)
         do_all = true;
 
     if (do_all) {
-        do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
+        do_v34 = do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
     }
 
-    if (do_call_log && !do_v8 && !do_v91 && !do_v90) {
+    if (do_call_log && !do_v34 && !do_v8 && !do_v91 && !do_v90) {
+        do_v34 = true;
         do_v8 = true;
         do_v91 = true;
         do_v90 = true;
@@ -1699,7 +2074,7 @@ int main(int argc, char **argv)
         total_samples = total_frames;
         linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
         g711_codewords = malloc((size_t) total_samples);
-        if (wav.channels >= 2 && do_call_log && !channel_explicit) {
+        if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34)) {
             left_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             right_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             left_g711_codewords = malloc((size_t) total_samples);
@@ -1775,6 +2150,7 @@ int main(int argc, char **argv)
     /* Run decoders */
     {
         decode_options_t opts;
+        opts.do_v34 = do_v34;
         opts.do_v8 = do_v8;
         opts.do_v91 = do_v91;
         opts.do_v90 = do_v90;

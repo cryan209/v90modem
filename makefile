@@ -141,7 +141,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all clean spandsp pjproject
+.PHONY: all clean spandsp pjproject v34-tone-matrix
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -197,3 +197,6 @@ pjproject:
 
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(TEST_TARGETS)
+
+v34-tone-matrix: vpcm_decode
+	bash scripts/v34_tone_matrix.sh
