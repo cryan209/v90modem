@@ -16,6 +16,10 @@
 #include "vpcm_cp.h"
 
 #include <spandsp.h>
+#include <spandsp/private/bitstream.h>
+#include <spandsp/private/power_meter.h>
+#include <spandsp/private/logging.h>
+#include <spandsp/private/v34.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -412,6 +416,7 @@ typedef struct {
 
 typedef struct {
     bool info0_seen;
+    bool info0_is_d;
     bool info1_seen;
     bool phase3_seen;
     bool phase4_ready_seen;
@@ -428,6 +433,14 @@ typedef struct {
     int tx_md_sample;
     int tx_second_s_sample;
     int tx_second_not_s_sample;
+    int tx_pp_sample;
+    int tx_pp_end_sample;
+    int rx_pp_detect_sample;
+    int rx_pp_complete_sample;
+    int rx_pp_phase;
+    int rx_pp_phase_score;
+    int rx_pp_acquire_hits;
+    bool rx_pp_started;
     int tx_trn_sample;
     int phase3_trn_lock_sample;
     int phase3_trn_strong_sample;
@@ -516,6 +529,19 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
                                 const decode_v34_result_t *caller,
                                 const jd_stage_decode_t *jd_stage,
                                 ja_dil_decode_t *out);
+static void collect_v91_events(call_log_t *log,
+                               const uint8_t *codewords,
+                               int total,
+                               v91_law_t law);
+static void collect_v90_events(call_log_t *log,
+                               const uint8_t *codewords,
+                               int total,
+                               v91_law_t law);
+static void collect_post_phase3_stage_events(call_log_t *log,
+                                             const uint8_t *codewords,
+                                             int total_codewords,
+                                             const decode_v34_result_t *answerer,
+                                             const decode_v34_result_t *caller);
 
 static decode_v8_result_t g_v8_result;
 
@@ -622,6 +648,128 @@ static void v34_phase3_repeat_ja_preview(int trn16, char *out, size_t out_len)
     for (size_t i = 0; i + 1 < out_len; i++)
         out[i] = pattern[i % 16];
     out[out_len - 1] = '\0';
+}
+
+static int samples_to_v34_symbols(int sample_count)
+{
+    if (sample_count <= 0)
+        return 0;
+    return (sample_count * 3200 + 4000) / 8000;
+}
+
+static int first_non_negative(int a, int b)
+{
+    if (a < 0)
+        return b;
+    if (b < 0)
+        return a;
+    return (a < b) ? a : b;
+}
+
+static int earliest_phase3_anchor_sample(const decode_v34_result_t *result)
+{
+    int anchor = -1;
+
+    if (!result)
+        return -1;
+    anchor = first_non_negative(anchor, result->tx_first_s_sample);
+    anchor = first_non_negative(anchor, result->tx_first_not_s_sample);
+    anchor = first_non_negative(anchor, result->tx_md_sample);
+    anchor = first_non_negative(anchor, result->tx_second_s_sample);
+    anchor = first_non_negative(anchor, result->tx_second_not_s_sample);
+    anchor = first_non_negative(anchor, result->tx_pp_sample);
+    anchor = first_non_negative(anchor, result->rx_pp_detect_sample);
+    anchor = first_non_negative(anchor, result->rx_pp_complete_sample);
+    anchor = first_non_negative(anchor, result->tx_trn_sample);
+    anchor = first_non_negative(anchor, result->phase3_trn_lock_sample);
+    anchor = first_non_negative(anchor, result->tx_ja_sample);
+    return anchor;
+}
+
+static void normalize_v34_result_to_spec_flow(decode_v34_result_t *result, bool calling_party)
+{
+    int phase3_anchor;
+
+    if (!result)
+        return;
+    phase3_anchor = earliest_phase3_anchor_sample(result);
+    if (phase3_anchor >= 0) {
+        result->phase3_seen = true;
+        result->phase3_sample = phase3_anchor;
+    } else if (result->phase3_seen && result->info1_seen && result->phase3_sample < result->info1_sample) {
+        result->phase3_sample = result->info1_sample;
+    } else if (!result->phase3_seen && !calling_party && result->info1_seen && result->final_rx_stage >= 11) {
+        result->phase3_seen = true;
+        result->phase3_sample = result->info1_sample;
+    }
+
+    if (result->info1_seen && result->phase3_seen && result->phase3_sample >= 0
+        && result->info1_sample > result->phase3_sample) {
+        result->info1_seen = false;
+        result->info1_sample = -1;
+        result->u_info_from_info1a = false;
+    }
+}
+
+static int v34_result_spec_score(const decode_v34_result_t *result)
+{
+    int score = 0;
+
+    if (!result)
+        return -1;
+    if (result->tx_ja_sample >= 0)
+        score += 4000;
+    if (result->tx_trn_sample >= 0)
+        score += 1500;
+    if (result->tx_pp_sample >= 0)
+        score += 800;
+    if (result->tx_first_s_sample >= 0 || result->tx_first_not_s_sample >= 0)
+        score += 400;
+    if (result->phase4_seen)
+        score += 1000;
+    if (result->phase4_ready_seen)
+        score += 300;
+    if (result->rx_pp_started)
+        score += 80;
+    if (result->phase3_seen)
+        score += 60;
+    if (result->info1_seen)
+        score += 20;
+    if (result->info0_seen)
+        score += 10;
+    return score;
+}
+
+static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
+{
+    if (sample < 0)
+        return false;
+    if (latest_allowed_sample < 0)
+        return true;
+    return sample <= latest_allowed_sample;
+}
+
+static const char *v34_info0_label(const decode_v34_result_t *result)
+{
+    return (result && result->info0_is_d) ? "INFO0d decoded" : "INFO0a decoded";
+}
+
+static const char *v34_info0_clock_or_law_label(const decode_v34_result_t *result)
+{
+    return (result && result->info0_is_d) ? "pcm_law" : "clock";
+}
+
+static const char *v34_info0_clock_or_law_value(const decode_v34_result_t *result)
+{
+    static const char *clock_values[] = { "0", "1", "2", "3" };
+
+    if (!result)
+        return "unknown";
+    if (result->info0_is_d)
+        return result->info0a.tx_clock_source ? "alaw" : "ulaw";
+    if (result->info0a.tx_clock_source < (int) (sizeof(clock_values) / sizeof(clock_values[0])))
+        return clock_values[result->info0a.tx_clock_source];
+    return "unknown";
 }
 
 static int v34_effective_ja_bit_count(const decode_v34_result_t *result)
@@ -904,6 +1052,14 @@ static bool decode_v34_pass(const int16_t *samples,
     result->tx_md_sample = -1;
     result->tx_second_s_sample = -1;
     result->tx_second_not_s_sample = -1;
+    result->tx_pp_sample = -1;
+    result->tx_pp_end_sample = -1;
+    result->rx_pp_detect_sample = -1;
+    result->rx_pp_complete_sample = -1;
+    result->rx_pp_phase = -1;
+    result->rx_pp_phase_score = -1;
+    result->rx_pp_acquire_hits = 0;
+    result->rx_pp_started = false;
     result->tx_trn_sample = -1;
     result->phase3_trn_lock_sample = -1;
     result->phase3_trn_strong_sample = -1;
@@ -964,6 +1120,19 @@ static bool decode_v34_pass(const int16_t *samples,
             }
         }
 
+        if (v34->rx.phase3_pp_phase >= 0) {
+            if (result->rx_pp_detect_sample < 0)
+                result->rx_pp_detect_sample = offset;
+            result->rx_pp_phase = v34->rx.phase3_pp_phase;
+            result->rx_pp_phase_score = v34->rx.phase3_pp_phase_score;
+            result->rx_pp_acquire_hits = v34->rx.phase3_pp_acquire_hits;
+        }
+        if (v34->rx.phase3_pp_started) {
+            result->rx_pp_started = true;
+            if (result->rx_pp_complete_sample < 0)
+                result->rx_pp_complete_sample = offset;
+        }
+
         if (!result->ja_bits_known && v34_get_phase3_j_trn16(v34) >= 0) {
         result->ja_trn16 = v34_get_phase3_j_trn16(v34);
         result->ja_detector_bits = v34_get_phase3_j_bits(v34);
@@ -990,8 +1159,11 @@ static bool decode_v34_pass(const int16_t *samples,
                 break;
             case 37:
                 note_first_sample(&result->tx_second_not_s_sample, offset);
+                note_first_sample(&result->tx_pp_sample, offset);
                 break;
             case 38:
+                if (result->tx_pp_sample >= 0 && result->tx_pp_end_sample < 0)
+                    result->tx_pp_end_sample = offset;
                 note_first_sample(&result->tx_trn_sample, offset);
                 break;
             case 39:
@@ -1043,6 +1215,7 @@ static bool decode_v34_pass(const int16_t *samples,
             && v34_get_v90_received_info0a(v34, &raw_info0a) > 0
             && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
             result->info0_seen = true;
+            result->info0_is_d = calling_party;
             result->info0_sample = offset;
         }
         if (!result->info1_seen
@@ -1128,6 +1301,8 @@ static bool decode_v34_pass(const int16_t *samples,
         }
     }
 
+    normalize_v34_result_to_spec_flow(result, calling_party);
+
     v34_free(v34);
     return true;
 }
@@ -1148,14 +1323,17 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
            v34_event_to_str_local(result->final_rx_event),
            result->final_rx_event);
     if (result->info0_seen) {
-        printf("  INFO0a:          decoded at %.1f ms\n", sample_to_ms(result->info0_sample, 8000));
-        printf("                   3429=%s 1664pt=%s clock=%u ack_info0d=%s\n",
+        printf("  %-16sdecoded at %.1f ms\n",
+               result->info0_is_d ? "INFO0d:" : "INFO0a:",
+               sample_to_ms(result->info0_sample, 8000));
+        printf("                   3429=%s 1664pt=%s %s=%s ack_info0d=%s\n",
                result->info0a.support_3429 ? "yes" : "no",
                result->info0a.support_1664_point_constellation ? "yes" : "no",
-               (unsigned) result->info0a.tx_clock_source,
+               v34_info0_clock_or_law_label(result),
+               v34_info0_clock_or_law_value(result),
                result->info0a.acknowledge_info0d ? "yes" : "no");
     } else {
-        printf("  INFO0a:          not decoded\n");
+        printf("  INFO0a/INFO0d:   not decoded\n");
     }
     if (result->info1_seen) {
         printf("  INFO1a:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
@@ -1206,6 +1384,34 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
             printf("J'@%.1f ",
                    sample_to_ms(result->tx_jdashed_sample, 8000));
         printf("\n");
+    }
+    if (result->tx_pp_sample >= 0) {
+        int pp_end = (result->tx_pp_end_sample >= 0) ? result->tx_pp_end_sample : result->tx_trn_sample;
+        int pp_samples = (pp_end > result->tx_pp_sample) ? (pp_end - result->tx_pp_sample) : 0;
+        int pp_symbols = samples_to_v34_symbols(pp_samples);
+        printf("  Phase 3 PP:      start@%.1f",
+               sample_to_ms(result->tx_pp_sample, 8000));
+        if (pp_end > result->tx_pp_sample) {
+            printf(" end@%.1f (~%d symbols, %.1f ms)",
+                   sample_to_ms(pp_end, 8000),
+                   pp_symbols,
+                   sample_to_ms(pp_samples, 8000));
+        } else {
+            printf(" end@unknown");
+        }
+        printf("\n");
+    }
+    if (result->rx_pp_detect_sample >= 0) {
+        printf("  Phase 3 PP RX:   detect@%.1f phase=%d score=%d hold=%d%s\n",
+               sample_to_ms(result->rx_pp_detect_sample, 8000),
+               result->rx_pp_phase,
+               result->rx_pp_phase_score,
+               result->rx_pp_acquire_hits,
+               result->rx_pp_started ? " started=yes" : "");
+    }
+    if (result->rx_pp_complete_sample >= 0) {
+        printf("  Phase 3 PP lock: start@%.1f\n",
+               sample_to_ms(result->rx_pp_complete_sample, 8000));
     }
     if (result->phase3_trn_lock_score >= 0) {
         printf("  Phase 3 TRN:     best_lock=%d%%", result->phase3_trn_lock_score);
@@ -1263,6 +1469,13 @@ static void collect_v34_events(call_log_t *log,
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
     char detail[256];
+    bool have_answerer = false;
+    bool have_caller = false;
+    const decode_v34_result_t *primary = NULL;
+    const decode_v34_result_t *secondary = NULL;
+    const char *primary_role = NULL;
+    const char *secondary_role = NULL;
+    int secondary_phase2_cutoff = -1;
 
     if (!log || !samples || total_samples <= 0)
         return;
@@ -1276,179 +1489,232 @@ static void collect_v34_events(call_log_t *log,
         } \
     } while (0)
 
-    if (decode_v34_pass(samples, total_samples, law, false, &answerer)) {
-        const char *role_name = "answerer";
-        if (answerer.info0_seen) {
-            snprintf(detail, sizeof(detail),
-                     "role=answerer 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
-                     answerer.info0a.support_3429 ? "yes" : "no",
-                     answerer.info0a.support_1664_point_constellation ? "yes" : "no",
-                     (unsigned) answerer.info0a.tx_clock_source,
-                     answerer.info0a.acknowledge_info0d ? "yes" : "no");
-            call_log_append(log, answerer.info0_sample, 0, "V.34", "INFO0a decoded", detail);
+    have_answerer = decode_v34_pass(samples, total_samples, law, false, &answerer);
+    have_caller = decode_v34_pass(samples, total_samples, law, true, &caller);
+
+    if (have_answerer && have_caller) {
+        if (v34_result_spec_score(&answerer) >= v34_result_spec_score(&caller)) {
+            primary = &answerer;
+            primary_role = "answerer";
+            secondary = &caller;
+            secondary_role = "caller";
+        } else {
+            primary = &caller;
+            primary_role = "caller";
+            secondary = &answerer;
+            secondary_role = "answerer";
         }
-        if (answerer.info1_seen) {
-            snprintf(detail, sizeof(detail),
-                     "role=answerer md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
-                     (unsigned) answerer.info1a.md,
-                     (unsigned) answerer.info1a.u_info,
-                     (unsigned) answerer.info1a.upstream_symbol_rate_code,
-                     (unsigned) answerer.info1a.downstream_rate_code,
-                     answerer.info1a.freq_offset);
-            call_log_append(log, answerer.info1_sample, 0, "V.34", "INFO1a decoded", detail);
-        }
-        if (answerer.phase3_seen) {
-            snprintf(detail, sizeof(detail), "role=answerer u_info=%d source=%s",
-                     answerer.u_info,
-                     answerer.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
-            call_log_append(log, answerer.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
-        }
-        APPEND_V34_STAGE_EVENT(&answerer, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s");
-        APPEND_V34_STAGE_EVENT(&answerer, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s");
-        APPEND_V34_STAGE_EVENT(&answerer, tx_md_sample, "Phase 3 TX MD", "sequence=md");
-        APPEND_V34_STAGE_EVENT(&answerer, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
-        APPEND_V34_STAGE_EVENT(&answerer, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
-        APPEND_V34_STAGE_EVENT(&answerer, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
-        if (answerer.phase3_trn_lock_score >= 0) {
-            snprintf(detail, sizeof(detail),
-                     "role=answerer best_lock=%d%%%s%s",
-                     answerer.phase3_trn_lock_score,
-                     answerer.phase3_trn_strong_sample >= 0 ? " strong_lock=yes" : "",
-                     answerer.phase3_trn_strong_sample >= 0 ? "" : " strong_lock=no");
-            call_log_append(log,
-                            answerer.phase3_trn_lock_sample >= 0 ? answerer.phase3_trn_lock_sample : answerer.tx_trn_sample,
-                            0,
-                            "V.90 Phase 3",
-                            "Phase 3 TRN lock",
-                            detail);
-        }
-        if (answerer.tx_ja_sample >= 0) {
-            char ja_preview[129];
-            int ja_bits = v34_effective_ja_bit_count(&answerer);
-            const char *ja_source = answerer.ja_bits_from_local_tx
-                ? (ja_bits > 16 ? "window_estimate" : "local_tx_mode")
-                : "phase3_j_detector";
-            v34_effective_ja_preview(&answerer, ja_preview, sizeof(ja_preview));
-            if (ja_bits > 0) {
-                snprintf(detail, sizeof(detail),
-                         "role=answerer sequence=j bits=%s total_bits=%d%s source=%s",
-                         ja_preview,
-                         ja_bits,
-                         answerer.ja_trn16 > 0 ? " trn=16" : " trn=4",
-                         ja_source);
-            } else {
-                snprintf(detail, sizeof(detail), "role=answerer sequence=j");
-            }
-            call_log_append(log, answerer.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
-        }
-        APPEND_V34_STAGE_EVENT(&answerer, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
-        APPEND_V34_STAGE_EVENT(&answerer, rx_s_event_sample, "Far-end S seen during Ja/Jd", "rx_event=s");
-        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_s_sample, "Far-end Phase 4 S", "rx_stage=phase4_s");
-        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_sbar_sample, "Far-end Phase 4 S-bar", "rx_stage=phase4_s_bar");
-        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn");
-        if (answerer.phase4_ready_seen) {
-            snprintf(detail, sizeof(detail), "role=answerer event=%s (%d)",
-                     v34_event_to_str_local(answerer.final_rx_event),
-                     answerer.final_rx_event);
-            call_log_append(log, answerer.phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail);
-        }
-        if (answerer.phase4_seen) {
-            snprintf(detail, sizeof(detail), "role=answerer rx=%s(%d) tx=%s(%d)",
-                     v34_rx_stage_to_str_local(answerer.final_rx_stage),
-                     answerer.final_rx_stage,
-                     v34_tx_stage_to_str_local(answerer.final_tx_stage),
-                     answerer.final_tx_stage);
-            call_log_append(log, answerer.phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail);
-        }
+    } else if (have_answerer) {
+        primary = &answerer;
+        primary_role = "answerer";
+    } else if (have_caller) {
+        primary = &caller;
+        primary_role = "caller";
     }
 
-    if (decode_v34_pass(samples, total_samples, law, true, &caller)) {
-        const char *role_name = "caller";
-        if (caller.info0_seen) {
-            snprintf(detail, sizeof(detail),
-                     "role=caller 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
-                     caller.info0a.support_3429 ? "yes" : "no",
-                     caller.info0a.support_1664_point_constellation ? "yes" : "no",
-                     (unsigned) caller.info0a.tx_clock_source,
-                     caller.info0a.acknowledge_info0d ? "yes" : "no");
-            call_log_append(log, caller.info0_sample, 0, "V.34", "INFO0a decoded", detail);
-        }
-        if (caller.info1_seen) {
-            snprintf(detail, sizeof(detail),
-                     "role=caller md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d",
-                     (unsigned) caller.info1a.md,
-                     (unsigned) caller.info1a.u_info,
-                     (unsigned) caller.info1a.upstream_symbol_rate_code,
-                     (unsigned) caller.info1a.downstream_rate_code,
-                     caller.info1a.freq_offset);
-            call_log_append(log, caller.info1_sample, 0, "V.34", "INFO1a decoded", detail);
-        }
-        if (caller.phase3_seen) {
-            snprintf(detail, sizeof(detail), "role=caller u_info=%d source=%s",
-                     caller.u_info,
-                     caller.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
-            call_log_append(log, caller.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
-        }
-        APPEND_V34_STAGE_EVENT(&caller, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s");
-        APPEND_V34_STAGE_EVENT(&caller, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s");
-        APPEND_V34_STAGE_EVENT(&caller, tx_md_sample, "Phase 3 TX MD", "sequence=md");
-        APPEND_V34_STAGE_EVENT(&caller, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
-        APPEND_V34_STAGE_EVENT(&caller, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
-        APPEND_V34_STAGE_EVENT(&caller, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
-        if (caller.phase3_trn_lock_score >= 0) {
-            snprintf(detail, sizeof(detail),
-                     "role=caller best_lock=%d%%%s%s",
-                     caller.phase3_trn_lock_score,
-                     caller.phase3_trn_strong_sample >= 0 ? " strong_lock=yes" : "",
-                     caller.phase3_trn_strong_sample >= 0 ? "" : " strong_lock=no");
-            call_log_append(log,
-                            caller.phase3_trn_lock_sample >= 0 ? caller.phase3_trn_lock_sample : caller.tx_trn_sample,
-                            0,
-                            "V.90 Phase 3",
-                            "Phase 3 TRN lock",
-                            detail);
-        }
-        if (caller.tx_ja_sample >= 0) {
-            char ja_preview[129];
-            int ja_bits = v34_effective_ja_bit_count(&caller);
-            const char *ja_source = caller.ja_bits_from_local_tx
-                ? (ja_bits > 16 ? "window_estimate" : "local_tx_mode")
-                : "phase3_j_detector";
-            v34_effective_ja_preview(&caller, ja_preview, sizeof(ja_preview));
-            if (ja_bits > 0) {
-                snprintf(detail, sizeof(detail),
-                         "role=caller sequence=j bits=%s total_bits=%d%s source=%s",
-                         ja_preview,
-                         ja_bits,
-                         caller.ja_trn16 > 0 ? " trn=16" : " trn=4",
-                         ja_source);
-            } else {
-                snprintf(detail, sizeof(detail), "role=caller sequence=j");
-            }
-            call_log_append(log, caller.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
-        }
-        APPEND_V34_STAGE_EVENT(&caller, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
-        APPEND_V34_STAGE_EVENT(&caller, rx_s_event_sample, "Far-end S seen during Ja/Jd", "rx_event=s");
-        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_s_sample, "Far-end Phase 4 S", "rx_stage=phase4_s");
-        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_sbar_sample, "Far-end Phase 4 S-bar", "rx_stage=phase4_s_bar");
-        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn");
-        if (caller.phase4_ready_seen) {
-            snprintf(detail, sizeof(detail), "role=caller event=%s (%d)",
-                     v34_event_to_str_local(caller.final_rx_event),
-                     caller.final_rx_event);
-            call_log_append(log, caller.phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail);
-        }
-        if (caller.phase4_seen) {
-            snprintf(detail, sizeof(detail), "role=caller rx=%s(%d) tx=%s(%d)",
-                     v34_rx_stage_to_str_local(caller.final_rx_stage),
-                     caller.final_rx_stage,
-                     v34_tx_stage_to_str_local(caller.final_tx_stage),
-                     caller.final_tx_stage);
-            call_log_append(log, caller.phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail);
-        }
-    }
+    if (primary && primary->phase3_seen)
+        secondary_phase2_cutoff = primary->phase3_sample;
+
+#define APPEND_V34_RESULT_EVENTS(RES_PTR, ROLE_STR, ALLOW_PHASE3_PLUS, PHASE2_CUTOFF) \
+    do { \
+        const decode_v34_result_t *res__ = (RES_PTR); \
+        const char *role_name = (ROLE_STR); \
+        if (!res__) \
+            break; \
+        if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+            snprintf(detail, sizeof(detail), \
+                     "role=%s 3429=%s 1664pt=%s %s=%s ack_info0d=%s", \
+                     role_name, \
+                     res__->info0a.support_3429 ? "yes" : "no", \
+                     res__->info0a.support_1664_point_constellation ? "yes" : "no", \
+                     v34_info0_clock_or_law_label(res__), \
+                     v34_info0_clock_or_law_value(res__), \
+                     res__->info0a.acknowledge_info0d ? "yes" : "no"); \
+            call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
+        } \
+        if (res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
+            snprintf(detail, sizeof(detail), \
+                     "role=%s md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d", \
+                     role_name, \
+                     (unsigned) res__->info1a.md, \
+                     (unsigned) res__->info1a.u_info, \
+                     (unsigned) res__->info1a.upstream_symbol_rate_code, \
+                     (unsigned) res__->info1a.downstream_rate_code, \
+                     res__->info1a.freq_offset); \
+            call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
+        } \
+        if (!(ALLOW_PHASE3_PLUS)) \
+            break; \
+        if (res__->phase3_seen) { \
+            snprintf(detail, sizeof(detail), "role=%s u_info=%d source=%s", \
+                     role_name, \
+                     res__->u_info, \
+                     res__->u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback"); \
+            call_log_append(log, res__->phase3_sample, 0, "V.34", "Phase 3 reached", detail); \
+        } \
+        APPEND_V34_STAGE_EVENT(res__, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s"); \
+        APPEND_V34_STAGE_EVENT(res__, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s"); \
+        APPEND_V34_STAGE_EVENT(res__, tx_md_sample, "Phase 3 TX MD", "sequence=md"); \
+        APPEND_V34_STAGE_EVENT(res__, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s"); \
+        APPEND_V34_STAGE_EVENT(res__, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s"); \
+        if (res__->tx_pp_sample >= 0) { \
+            int pp_end__ = (res__->tx_pp_end_sample >= 0) ? res__->tx_pp_end_sample : res__->tx_trn_sample; \
+            int pp_samples__ = (pp_end__ > res__->tx_pp_sample) ? (pp_end__ - res__->tx_pp_sample) : 0; \
+            snprintf(detail, sizeof(detail), \
+                     "role=%s start=%.1fms end=%.1fms symbols=%d", \
+                     role_name, \
+                     sample_to_ms(res__->tx_pp_sample, 8000), \
+                     pp_end__ > res__->tx_pp_sample ? sample_to_ms(pp_end__, 8000) : sample_to_ms(res__->tx_pp_sample, 8000), \
+                     samples_to_v34_symbols(pp_samples__)); \
+            call_log_append(log, res__->tx_pp_sample, pp_samples__, "V.90 Phase 3", "Phase 3 TX PP", detail); \
+        } \
+        if (res__->rx_pp_detect_sample >= 0) { \
+            snprintf(detail, sizeof(detail), \
+                     "role=%s phase=%d score=%d hold=%d started=%s", \
+                     role_name, \
+                     res__->rx_pp_phase, \
+                     res__->rx_pp_phase_score, \
+                     res__->rx_pp_acquire_hits, \
+                     res__->rx_pp_started ? "yes" : "no"); \
+            call_log_append(log, res__->rx_pp_detect_sample, 0, "V.90 Phase 3", "Phase 3 RX PP detect", detail); \
+        } \
+        if (res__->rx_pp_complete_sample >= 0) { \
+            snprintf(detail, sizeof(detail), "role=%s phase=%d score=%d", role_name, res__->rx_pp_phase, res__->rx_pp_phase_score); \
+            call_log_append(log, res__->rx_pp_complete_sample, 0, "V.90 Phase 3", "Phase 3 RX PP lock", detail); \
+        } \
+        APPEND_V34_STAGE_EVENT(res__, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn"); \
+        if (res__->phase3_trn_lock_score >= 0) { \
+            snprintf(detail, sizeof(detail), \
+                     "role=%s best_lock=%d%%%s%s", \
+                     role_name, \
+                     res__->phase3_trn_lock_score, \
+                     res__->phase3_trn_strong_sample >= 0 ? " strong_lock=yes" : "", \
+                     res__->phase3_trn_strong_sample >= 0 ? "" : " strong_lock=no"); \
+            call_log_append(log, \
+                            res__->phase3_trn_lock_sample >= 0 ? res__->phase3_trn_lock_sample : res__->tx_trn_sample, \
+                            0, \
+                            "V.90 Phase 3", \
+                            "Phase 3 TRN lock", \
+                            detail); \
+        } \
+        if (res__->tx_ja_sample >= 0) { \
+            char ja_preview__[129]; \
+            int ja_bits__ = v34_effective_ja_bit_count(res__); \
+            const char *ja_source__ = res__->ja_bits_from_local_tx \
+                ? (ja_bits__ > 16 ? "window_estimate" : "local_tx_mode") \
+                : "phase3_j_detector"; \
+            v34_effective_ja_preview(res__, ja_preview__, sizeof(ja_preview__)); \
+            if (ja_bits__ > 0) { \
+                snprintf(detail, sizeof(detail), \
+                         "role=%s sequence=j bits=%s total_bits=%d%s source=%s", \
+                         role_name, \
+                         ja_preview__, \
+                         ja_bits__, \
+                         res__->ja_trn16 > 0 ? " trn=16" : " trn=4", \
+                         ja_source__); \
+            } else { \
+                snprintf(detail, sizeof(detail), "role=%s sequence=j", role_name); \
+            } \
+            call_log_append(log, res__->tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail); \
+        } \
+        APPEND_V34_STAGE_EVENT(res__, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed"); \
+        APPEND_V34_STAGE_EVENT(res__, rx_s_event_sample, "Far-end S seen during Ja/Jd", "rx_event=s"); \
+        APPEND_V34_STAGE_EVENT(res__, rx_phase4_s_sample, "Far-end Phase 4 S", "rx_stage=phase4_s"); \
+        APPEND_V34_STAGE_EVENT(res__, rx_phase4_sbar_sample, "Far-end Phase 4 S-bar", "rx_stage=phase4_s_bar"); \
+        APPEND_V34_STAGE_EVENT(res__, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn"); \
+        if (res__->phase4_ready_seen) { \
+            snprintf(detail, sizeof(detail), "role=%s event=%s (%d)", role_name, v34_event_to_str_local(res__->final_rx_event), res__->final_rx_event); \
+            call_log_append(log, res__->phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail); \
+        } \
+        if (res__->phase4_seen) { \
+            snprintf(detail, sizeof(detail), "role=%s rx=%s(%d) tx=%s(%d)", \
+                     role_name, \
+                     v34_rx_stage_to_str_local(res__->final_rx_stage), \
+                     res__->final_rx_stage, \
+                     v34_tx_stage_to_str_local(res__->final_tx_stage), \
+                     res__->final_tx_stage); \
+            call_log_append(log, res__->phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail); \
+        } \
+    } while (0)
+
+    APPEND_V34_RESULT_EVENTS(primary, primary_role, true, -1);
+    APPEND_V34_RESULT_EVENTS(secondary, secondary_role, false, secondary_phase2_cutoff);
+
+#undef APPEND_V34_RESULT_EVENTS
 
 #undef APPEND_V34_STAGE_EVENT
+}
+
+static void collect_stream_call_log(call_log_t *log,
+                                    const int16_t *linear_samples,
+                                    const uint8_t *g711_codewords,
+                                    int total_samples,
+                                    int total_codewords,
+                                    v91_law_t law,
+                                    bool do_v34,
+                                    bool do_v8,
+                                    bool do_v91,
+                                    bool do_v90)
+{
+    decode_v34_result_t answerer;
+    decode_v34_result_t caller;
+    bool have_answerer = false;
+    bool have_caller = false;
+
+    if (!log || !linear_samples || !g711_codewords)
+        return;
+
+    if (do_v34 || do_v90) {
+        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, &answerer);
+        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, &caller);
+    }
+
+    if (do_v34)
+        collect_v34_events(log, linear_samples, total_samples, law);
+    if (do_v8) {
+        collect_v8_event(log, linear_samples, total_samples, false);
+        collect_v8_event(log, linear_samples, total_samples, true);
+    }
+    if (do_v91)
+        collect_v91_events(log, g711_codewords, total_codewords, law);
+    if (do_v90) {
+        collect_v90_events(log, g711_codewords, total_codewords, law);
+        if (have_answerer || have_caller) {
+            collect_post_phase3_stage_events(log,
+                                             g711_codewords,
+                                             total_codewords,
+                                             have_answerer ? &answerer : NULL,
+                                             have_caller ? &caller : NULL);
+        }
+    }
+
+    call_log_sort(log);
+}
+
+static void call_log_merge_with_channel(call_log_t *dst,
+                                        const call_log_t *src,
+                                        const char *channel_label)
+{
+    char detail[320];
+
+    if (!dst || !src || !channel_label)
+        return;
+
+    for (size_t i = 0; i < src->count; i++) {
+        const call_log_event_t *event = &src->events[i];
+
+        if (event->detail[0] != '\0')
+            snprintf(detail, sizeof(detail), "channel=%s %s", channel_label, event->detail);
+        else
+            snprintf(detail, sizeof(detail), "channel=%s", channel_label);
+
+        call_log_append(dst,
+                        event->sample_offset,
+                        event->duration_samples,
+                        event->protocol,
+                        event->summary,
+                        detail);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -3340,26 +3606,16 @@ static void run_decode_suite(const char *label,
         call_log_t log;
         call_log_init(&log);
 
-        if (opts->do_v34)
-            collect_v34_events(&log, linear_samples, total_samples, law);
-        if (opts->do_v8) {
-            collect_v8_event(&log, linear_samples, total_samples, false);
-            collect_v8_event(&log, linear_samples, total_samples, true);
-        }
-        if (opts->do_v91)
-            collect_v91_events(&log, g711_codewords, total_codewords, law);
-        if (opts->do_v90) {
-            collect_v90_events(&log, g711_codewords, total_codewords, law);
-            if (have_answerer || have_caller) {
-                collect_post_phase3_stage_events(&log,
-                                                 g711_codewords,
-                                                 total_codewords,
-                                                 have_answerer ? &answerer : NULL,
-                                                 have_caller ? &caller : NULL);
-            }
-        }
-
-        call_log_sort(&log);
+        collect_stream_call_log(&log,
+                                linear_samples,
+                                g711_codewords,
+                                total_samples,
+                                total_codewords,
+                                law,
+                                opts->do_v34,
+                                opts->do_v8,
+                                opts->do_v91,
+                                opts->do_v90);
         print_call_log(label, &log, total_samples, sample_rate);
         call_log_reset(&log);
     }
@@ -3432,7 +3688,7 @@ int main(int argc, char **argv)
                    "  --wav              Force WAV input format\n"
                    "  --g711             Force raw G.711 input format\n"
                    "  --channel L|R|mono Channel to decode from stereo WAV\n"
-                   "                     (L=TX, R=RX for tap files; default: mono)\n"
+                   "                     (default: mono; stereo auto-runs left+right)\n"
                    "  --v34              Decode V.34/V.90 Phase 2 symbols via SpanDSP\n"
                    "  --v8               Decode V.8 negotiation\n"
                    "  --v91              Decode V.91 signals (INFO, CP, DIL, Ez, etc.)\n"
@@ -3465,11 +3721,15 @@ int main(int argc, char **argv)
         do_v34 = do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
     }
 
-    if (do_call_log && !do_v34 && !do_v8 && !do_v91 && !do_v90) {
-        do_v34 = true;
+    if (do_call_log) {
+        if (!do_v34 && !do_v8 && !do_v91 && !do_v90) {
+            do_v34 = true;
+            do_v91 = true;
+            do_v90 = true;
+        }
+        /* V.8 helps establish caller/answerer orientation, so keep it in call logs
+           even when the user explicitly asks for only later-stage decoders. */
         do_v8 = true;
-        do_v91 = true;
-        do_v90 = true;
     }
 
     /* Auto-detect format from extension */
@@ -3584,7 +3844,7 @@ int main(int argc, char **argv)
         }
 
         printf("Channel: %s, Law: %s\n",
-               channel == CH_LEFT ? "Left (TX)" : channel == CH_RIGHT ? "Right (RX)" : "Mono",
+               channel == CH_LEFT ? "Left" : channel == CH_RIGHT ? "Right" : "Mono",
                law == V91_LAW_ULAW ? "µ-law" : "A-law");
 
     } else {
@@ -3634,13 +3894,51 @@ int main(int argc, char **argv)
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
-            run_decode_suite("Left (TX)", left_linear_samples, left_g711_codewords,
+            run_decode_suite("Left", left_linear_samples, left_g711_codewords,
                              total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info);
-            run_decode_suite("Right (RX)", right_linear_samples, right_g711_codewords,
+            run_decode_suite("Right", right_linear_samples, right_g711_codewords,
                              total_samples, total_codewords, sample_rate, law, &opts, &right_codeword_info);
+            if (opts.do_call_log) {
+                call_log_t left_log;
+                call_log_t right_log;
+                call_log_t combined_log;
+
+                call_log_init(&left_log);
+                call_log_init(&right_log);
+                call_log_init(&combined_log);
+
+                collect_stream_call_log(&left_log,
+                                        left_linear_samples,
+                                        left_g711_codewords,
+                                        total_samples,
+                                        total_codewords,
+                                        law,
+                                        opts.do_v34,
+                                        opts.do_v8,
+                                        opts.do_v91,
+                                        opts.do_v90);
+                collect_stream_call_log(&right_log,
+                                        right_linear_samples,
+                                        right_g711_codewords,
+                                        total_samples,
+                                        total_codewords,
+                                        law,
+                                        opts.do_v34,
+                                        opts.do_v8,
+                                        opts.do_v91,
+                                        opts.do_v90);
+                call_log_merge_with_channel(&combined_log, &left_log, "left");
+                call_log_merge_with_channel(&combined_log, &right_log, "right");
+                call_log_sort(&combined_log);
+                print_call_log("Stereo Combined", &combined_log, total_samples, sample_rate);
+
+                call_log_reset(&left_log);
+                call_log_reset(&right_log);
+                call_log_reset(&combined_log);
+            }
         } else {
-            run_decode_suite(channel == CH_LEFT ? "Left (TX)"
-                             : channel == CH_RIGHT ? "Right (RX)"
+            run_decode_suite(channel == CH_LEFT ? "Left"
+                             : channel == CH_RIGHT ? "Right"
                              : "Mono",
                              linear_samples, g711_codewords,
                              total_samples, total_codewords, sample_rate, law, &opts, &codeword_info);
