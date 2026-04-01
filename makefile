@@ -14,7 +14,8 @@ SPANDSP_MAKE = $(SPANDSP_ROOT)/Makefile
 # Shared defaults
 PJ_CFLAGS   ?=
 PJ_LIBS     ?=
-SYSTEM_LIBS ?= -ltiff -lssl -lcrypto -lm -lpthread
+TIFF_LDFLAGS := $(shell pkg-config --libs libtiff-4 2>/dev/null || echo "-L/opt/homebrew/lib -ltiff")
+SYSTEM_LIBS ?= $(TIFF_LDFLAGS) -lssl -lcrypto -lm -lpthread
 PJ_BUILD_PREREQ ?=
 
 ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))),)
@@ -114,9 +115,11 @@ else
   endif
 endif
 
+TIFF_CFLAGS := $(shell pkg-config --cflags libtiff-4 2>/dev/null || echo "-I/opt/homebrew/include")
+
 CFLAGS = -Wall -Wextra -O2 -g \
          -I$(SPANDSP_DIR) -I$(SPANDSP_DIR)/.. \
-         $(PJ_CFLAGS) \
+         $(PJ_CFLAGS) $(TIFF_CFLAGS) \
          -DPJ_AUTOCONF=1 -DPJ_IS_BIG_ENDIAN=0 -DPJ_IS_LITTLE_ENDIAN=1
 
 # To build on a different macOS version or arch, update ARCH_SUFFIX, e.g.:
@@ -148,9 +151,13 @@ vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
 
 $(SPANDSP_LIB):
-	@if [ ! -f "$(SPANDSP_LIB)" ]; then \
-		$(MAKE) -C $(SPANDSP_ROOT) ; \
+	@if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
+		echo "Configuring SpanDSP with V.34 support..."; \
+		(cd "$(SPANDSP_ROOT)" && \
+		 CFLAGS="$(TIFF_CFLAGS)" LDFLAGS="$(TIFF_LDFLAGS)" \
+		 ./configure --enable-v34); \
 	fi
+	$(MAKE) -C $(SPANDSP_ROOT)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -174,8 +181,7 @@ v34_stubs.o:      v34_stubs.c
 endif
 vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call_pair.h vpcm_link.h vpcm_v90_session.h
 
-spandsp:
-	$(MAKE) -C $(SPANDSP_ROOT)
+spandsp: $(SPANDSP_LIB)
 
 pjproject:
 	@if [ ! -f "$(PJ_LOCAL_ROOT)/build.mak" ]; then \

@@ -89,13 +89,13 @@
 #define HAVE_LIBTIFF 1
 
 /* Define to 1 if you have the <libxml/parser.h> header file. */
-/* #undef HAVE_LIBXML_PARSER_H */
+#define HAVE_LIBXML_PARSER_H 1
 
 /* Define to 1 if you have the <libxml/xinclude.h> header file. */
-/* #undef HAVE_LIBXML_XINCLUDE_H */
+#define HAVE_LIBXML_XINCLUDE_H 1
 
 /* Define to 1 if you have the <libxml/xmlmemory.h> header file. */
-/* #undef HAVE_LIBXML_XMLMEMORY_H */
+#define HAVE_LIBXML_XMLMEMORY_H 1
 
 /* Define if you have C99's llrint function. */
 #define HAVE_LLRINT 1
@@ -123,16 +123,16 @@
 
 /* Define to 1 if your system has a GNU libc compatible 'malloc' function, and
    to 0 otherwise. */
-#define HAVE_MALLOC 1
+/* #undef HAVE_MALLOC */
 
 /* Define to 1 if you have the <malloc.h> header file. */
-#define HAVE_MALLOC_H 1
+/* #undef HAVE_MALLOC_H */
 
 /* Define to 1 if you have the <math.h> header file. */
 #define HAVE_MATH_H 1
 
 /* Define to 1 if you have the 'memalign' function. */
-#define HAVE_MEMALIGN 1
+/* #undef HAVE_MEMALIGN */
 
 /* Define to 1 if you have the 'memmove' function. */
 #define HAVE_MEMMOVE 1
@@ -144,7 +144,7 @@
 #define HAVE_OPEN_MEMSTREAM 1
 
 /* Define to 1 if you have the <pcap.h> header file. */
-/* #undef HAVE_PCAP_H */
+#define HAVE_PCAP_H 1
 
 /* Define to 1 if you have the 'posix_memalign' function. */
 #define HAVE_POSIX_MEMALIGN 1
@@ -157,7 +157,7 @@
 
 /* Define to 1 if your system has a GNU libc compatible 'realloc' function,
    and to 0 otherwise. */
-#define HAVE_REALLOC 1
+/* #undef HAVE_REALLOC */
 
 /* Define to 1 if you have the 'select' function. */
 #define HAVE_SELECT 1
@@ -166,7 +166,7 @@
 #define HAVE_SINF 1
 
 /* Define to 1 if you have the <sndfile.h> header file. */
-/* #undef HAVE_SNDFILE_H */
+#define HAVE_SNDFILE_H 1
 
 /* Define to 1 if you have the <socket.h> header file. */
 /* #undef HAVE_SOCKET_H */
@@ -178,7 +178,7 @@
 #define HAVE_STDBOOL_H 1
 
 /* Define to 1 if you have the <stdfix.h> header file. */
-#define HAVE_STDFIX_H 1
+/* #undef HAVE_STDFIX_H */
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #define HAVE_STDINT_H 1
@@ -256,7 +256,7 @@
 #define HAVE_VPRINTF 1
 
 /* Define to 1 if you have the <X11/X.h> header file. */
-/* #undef HAVE_X11_X_H */
+#define HAVE_X11_X_H 1
 
 /* Define to the sub-directory where libtool stores uninstalled libraries. */
 #define LT_OBJDIR ".libs/"
@@ -325,19 +325,19 @@
 /* #undef SPANDSP_USE_AVX2 */
 
 /* Use the library symbol export capability of the compiler */
-#define SPANDSP_USE_EXPORT_CAPABILITY 1
+/* #undef SPANDSP_USE_EXPORT_CAPABILITY */
 
 /* Enable fixed point processing, where possible, instead of floating point */
 /* #undef SPANDSP_USE_FIXED_POINT */
 
 /* Use the MMX instruction set (i386 and x86_64 only). */
-#define SPANDSP_USE_MMX 1
+/* #undef SPANDSP_USE_MMX */
 
 /* Use the SSE instruction set (i386 and x86_64 only). */
-#define SPANDSP_USE_SSE 1
+/* #undef SPANDSP_USE_SSE */
 
 /* Use the SSE2 instruction set (i386 and x86_64 only). */
-#define SPANDSP_USE_SSE2 1
+/* #undef SPANDSP_USE_SSE2 */
 
 /* Use the SSE3 instruction set (i386 and x86_64 only). */
 /* #undef SPANDSP_USE_SSE3 */
