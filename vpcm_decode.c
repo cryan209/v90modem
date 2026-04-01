@@ -16,6 +16,7 @@
 #include "vpcm_cp.h"
 
 #include <spandsp.h>
+#include <spandsp/private/v34.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -418,9 +419,26 @@ typedef struct {
     bool phase4_seen;
     bool training_failed;
     bool u_info_from_info1a;
+    bool ja_bits_from_local_tx;
     int info0_sample;
     int info1_sample;
     int phase3_sample;
+    int tx_first_s_sample;
+    int tx_first_not_s_sample;
+    int tx_md_sample;
+    int tx_second_s_sample;
+    int tx_second_not_s_sample;
+    int tx_trn_sample;
+    int tx_ja_sample;
+    int tx_jdashed_sample;
+    bool ja_bits_known;
+    int ja_trn16;
+    int ja_detector_bits;
+    char ja_bits[17];
+    int rx_s_event_sample;
+    int rx_phase4_s_sample;
+    int rx_phase4_sbar_sample;
+    int rx_phase4_trn_sample;
     int phase4_ready_sample;
     int phase4_sample;
     int failure_sample;
@@ -456,6 +474,8 @@ typedef struct {
     bool calling_party;
     int u_info;
     int phase3_start_sample;
+    int analog_ja_sample;
+    int far_end_s_sample;
     int jd_start_sample;
     int jd_frame_errors;
     int jd_repetitions;
@@ -542,6 +562,28 @@ static void v34_dummy_put_bit(void *user_data, int bit)
 {
     (void) user_data;
     (void) bit;
+}
+
+static void note_first_sample(int *dst, int sample)
+{
+    if (!dst || sample < 0)
+        return;
+    if (*dst < 0)
+        *dst = sample;
+}
+
+static void v34_phase3_ja_bits_to_str(int trn16, char out[17])
+{
+    uint16_t pattern = 0x8990U;
+
+    if (!out)
+        return;
+    if (trn16 > 0)
+        pattern = 0x89B0U;
+
+    for (int i = 0; i < 16; i++)
+        out[i] = ((pattern >> (15 - i)) & 1U) ? '1' : '0';
+    out[16] = '\0';
 }
 
 static const char *v34_rx_stage_to_str_local(int stage)
@@ -771,6 +813,9 @@ static bool decode_v34_pass(const int16_t *samples,
     v34_v90_info1a_t raw_info1a;
     stderr_silence_guard_t stderr_guard;
     int offset = 0;
+    int prev_rx_stage = -1;
+    int prev_tx_stage = -1;
+    int prev_rx_event = -1;
 
     if (!samples || total_samples <= 0 || !result)
         return false;
@@ -779,6 +824,21 @@ static bool decode_v34_pass(const int16_t *samples,
     result->info0_sample = -1;
     result->info1_sample = -1;
     result->phase3_sample = -1;
+    result->tx_first_s_sample = -1;
+    result->tx_first_not_s_sample = -1;
+    result->tx_md_sample = -1;
+    result->tx_second_s_sample = -1;
+    result->tx_second_not_s_sample = -1;
+    result->tx_trn_sample = -1;
+    result->tx_ja_sample = -1;
+    result->tx_jdashed_sample = -1;
+    result->ja_trn16 = -1;
+    result->ja_detector_bits = -1;
+    result->ja_bits[0] = '\0';
+    result->rx_s_event_sample = -1;
+    result->rx_phase4_s_sample = -1;
+    result->rx_phase4_sbar_sample = -1;
+    result->rx_phase4_trn_sample = -1;
     result->phase4_ready_sample = -1;
     result->phase4_sample = -1;
     result->failure_sample = -1;
@@ -810,6 +870,78 @@ static bool decode_v34_pass(const int16_t *samples,
         rx_stage = v34_get_rx_stage(v34);
         tx_stage = v34_get_tx_stage(v34);
         rx_event = v34_get_rx_event(v34);
+
+    if (!result->ja_bits_known && v34_get_phase3_j_trn16(v34) >= 0) {
+        result->ja_trn16 = v34_get_phase3_j_trn16(v34);
+        result->ja_detector_bits = v34_get_phase3_j_bits(v34);
+        v34_phase3_ja_bits_to_str(result->ja_trn16, result->ja_bits);
+        result->ja_bits_known = true;
+        result->ja_bits_from_local_tx = false;
+    } else if (result->ja_bits_known) {
+        result->ja_detector_bits = v34_get_phase3_j_bits(v34);
+    }
+
+        if (tx_stage != prev_tx_stage) {
+            switch (tx_stage) {
+            case 33:
+                note_first_sample(&result->tx_first_s_sample, offset);
+                break;
+            case 34:
+                note_first_sample(&result->tx_first_not_s_sample, offset);
+                break;
+            case 35:
+                note_first_sample(&result->tx_md_sample, offset);
+                break;
+            case 36:
+                note_first_sample(&result->tx_second_s_sample, offset);
+                break;
+            case 37:
+                note_first_sample(&result->tx_second_not_s_sample, offset);
+                break;
+            case 38:
+                note_first_sample(&result->tx_trn_sample, offset);
+                break;
+            case 39:
+                note_first_sample(&result->tx_ja_sample, offset);
+                if (!result->ja_bits_known) {
+                    result->ja_trn16 = v34->tx.infoh.trn16 ? 1 : 0;
+                    result->ja_detector_bits = v34_get_phase3_j_bits(v34);
+                    v34_phase3_ja_bits_to_str(result->ja_trn16, result->ja_bits);
+                    result->ja_bits_known = true;
+                    result->ja_bits_from_local_tx = true;
+                }
+                break;
+            case 40:
+                note_first_sample(&result->tx_jdashed_sample, offset);
+                break;
+            default:
+                break;
+            }
+            prev_tx_stage = tx_stage;
+        }
+
+        if (rx_stage != prev_rx_stage) {
+            switch (rx_stage) {
+            case 13:
+                note_first_sample(&result->rx_phase4_s_sample, offset);
+                break;
+            case 14:
+                note_first_sample(&result->rx_phase4_sbar_sample, offset);
+                break;
+            case 15:
+                note_first_sample(&result->rx_phase4_trn_sample, offset);
+                break;
+            default:
+                break;
+            }
+            prev_rx_stage = rx_stage;
+        }
+
+        if (rx_event != prev_rx_event) {
+            if (rx_event == 12)
+                note_first_sample(&result->rx_s_event_sample, offset);
+            prev_rx_event = rx_event;
+        }
 
         if (!result->info0_seen
             && v34_get_v90_received_info0a(v34, &raw_info0a) > 0
@@ -908,6 +1040,60 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
     }
     if (result->phase3_seen)
         printf("  Phase 3:         seen at %.1f ms\n", sample_to_ms(result->phase3_sample, 8000));
+    if (result->tx_first_s_sample >= 0
+        || result->tx_first_not_s_sample >= 0
+        || result->tx_second_s_sample >= 0
+        || result->tx_trn_sample >= 0
+        || result->tx_ja_sample >= 0) {
+        printf("  Phase 3 TX:      ");
+        if (result->tx_first_s_sample >= 0)
+            printf("S@%.1f ",
+                   sample_to_ms(result->tx_first_s_sample, 8000));
+        if (result->tx_first_not_s_sample >= 0)
+            printf("S-bar@%.1f ",
+                   sample_to_ms(result->tx_first_not_s_sample, 8000));
+        if (result->tx_md_sample >= 0)
+            printf("MD@%.1f ",
+                   sample_to_ms(result->tx_md_sample, 8000));
+        if (result->tx_second_s_sample >= 0)
+            printf("S2@%.1f ",
+                   sample_to_ms(result->tx_second_s_sample, 8000));
+        if (result->tx_second_not_s_sample >= 0)
+            printf("S2-bar/PP@%.1f ",
+                   sample_to_ms(result->tx_second_not_s_sample, 8000));
+        if (result->tx_trn_sample >= 0)
+            printf("TRN@%.1f ",
+                   sample_to_ms(result->tx_trn_sample, 8000));
+        if (result->tx_ja_sample >= 0)
+            printf("J/Ja@%.1f ",
+                   sample_to_ms(result->tx_ja_sample, 8000));
+        if (result->tx_jdashed_sample >= 0)
+            printf("J'@%.1f ",
+                   sample_to_ms(result->tx_jdashed_sample, 8000));
+        printf("\n");
+    }
+    if (result->ja_bits_known) {
+        printf("  Ja bits:         %s (%s-point TRN, detector_bits=%d)\n",
+               result->ja_bits,
+               result->ja_trn16 > 0 ? "16" : "4",
+               result->ja_detector_bits);
+    }
+    if (result->rx_s_event_sample >= 0) {
+        printf("  Far-end S:       seen at %.1f ms\n",
+               sample_to_ms(result->rx_s_event_sample, 8000));
+    }
+    if (result->rx_phase4_s_sample >= 0
+        || result->rx_phase4_sbar_sample >= 0
+        || result->rx_phase4_trn_sample >= 0) {
+        printf("  Phase 4 RX:      ");
+        if (result->rx_phase4_s_sample >= 0)
+            printf("S@%.1f ", sample_to_ms(result->rx_phase4_s_sample, 8000));
+        if (result->rx_phase4_sbar_sample >= 0)
+            printf("S-bar@%.1f ", sample_to_ms(result->rx_phase4_sbar_sample, 8000));
+        if (result->rx_phase4_trn_sample >= 0)
+            printf("SCR/TRN@%.1f ", sample_to_ms(result->rx_phase4_trn_sample, 8000));
+        printf("\n");
+    }
     if (result->phase4_ready_seen)
         printf("  Phase 4 ready:   seen at %.1f ms\n", sample_to_ms(result->phase4_ready_sample, 8000));
     if (result->phase4_seen)
@@ -928,7 +1114,17 @@ static void collect_v34_events(call_log_t *log,
     if (!log || !samples || total_samples <= 0)
         return;
 
+#define APPEND_V34_STAGE_EVENT(RES_PTR, SAMPLE_FIELD, SUMMARY_STR, DETAIL_STR) \
+    do { \
+        if ((RES_PTR)->SAMPLE_FIELD >= 0) { \
+            snprintf(detail, sizeof(detail), "role=%s %s", \
+                     role_name, DETAIL_STR); \
+            call_log_append(log, (RES_PTR)->SAMPLE_FIELD, 0, "V.90 Phase 3", SUMMARY_STR, detail); \
+        } \
+    } while (0)
+
     if (decode_v34_pass(samples, total_samples, law, false, &answerer)) {
+        const char *role_name = "answerer";
         if (answerer.info0_seen) {
             snprintf(detail, sizeof(detail),
                      "role=answerer 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
@@ -954,6 +1150,25 @@ static void collect_v34_events(call_log_t *log,
                      answerer.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
             call_log_append(log, answerer.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
         }
+        APPEND_V34_STAGE_EVENT(&answerer, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s");
+        APPEND_V34_STAGE_EVENT(&answerer, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s");
+        APPEND_V34_STAGE_EVENT(&answerer, tx_md_sample, "Phase 3 TX MD", "sequence=md");
+        APPEND_V34_STAGE_EVENT(&answerer, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
+        APPEND_V34_STAGE_EVENT(&answerer, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
+        APPEND_V34_STAGE_EVENT(&answerer, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
+        if (answerer.tx_ja_sample >= 0) {
+            snprintf(detail, sizeof(detail),
+                     "role=answerer sequence=j%s%s%s",
+                     answerer.ja_bits_known ? " bits=" : "",
+                     answerer.ja_bits_known ? answerer.ja_bits : "",
+                     answerer.ja_bits_known ? (answerer.ja_trn16 > 0 ? " trn=16" : " trn=4") : "");
+            call_log_append(log, answerer.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
+        }
+        APPEND_V34_STAGE_EVENT(&answerer, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
+        APPEND_V34_STAGE_EVENT(&answerer, rx_s_event_sample, "Far-end S seen during Ja/Jd", "rx_event=s");
+        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_s_sample, "Far-end Phase 4 S", "rx_stage=phase4_s");
+        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_sbar_sample, "Far-end Phase 4 S-bar", "rx_stage=phase4_s_bar");
+        APPEND_V34_STAGE_EVENT(&answerer, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn");
         if (answerer.phase4_ready_seen) {
             snprintf(detail, sizeof(detail), "role=answerer event=%s (%d)",
                      v34_event_to_str_local(answerer.final_rx_event),
@@ -971,6 +1186,7 @@ static void collect_v34_events(call_log_t *log,
     }
 
     if (decode_v34_pass(samples, total_samples, law, true, &caller)) {
+        const char *role_name = "caller";
         if (caller.info0_seen) {
             snprintf(detail, sizeof(detail),
                      "role=caller 3429=%s 1664pt=%s clock=%u ack_info0d=%s",
@@ -996,6 +1212,25 @@ static void collect_v34_events(call_log_t *log,
                      caller.u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback");
             call_log_append(log, caller.phase3_sample, 0, "V.34", "Phase 3 reached", detail);
         }
+        APPEND_V34_STAGE_EVENT(&caller, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s");
+        APPEND_V34_STAGE_EVENT(&caller, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s");
+        APPEND_V34_STAGE_EVENT(&caller, tx_md_sample, "Phase 3 TX MD", "sequence=md");
+        APPEND_V34_STAGE_EVENT(&caller, tx_second_s_sample, "Phase 3 TX second S", "sequence=second_s");
+        APPEND_V34_STAGE_EVENT(&caller, tx_second_not_s_sample, "Phase 3 TX second S-bar / PP lead-in", "sequence=second_not_s");
+        APPEND_V34_STAGE_EVENT(&caller, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn");
+        if (caller.tx_ja_sample >= 0) {
+            snprintf(detail, sizeof(detail),
+                     "role=caller sequence=j%s%s%s",
+                     caller.ja_bits_known ? " bits=" : "",
+                     caller.ja_bits_known ? caller.ja_bits : "",
+                     caller.ja_bits_known ? (caller.ja_trn16 > 0 ? " trn=16" : " trn=4") : "");
+            call_log_append(log, caller.tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail);
+        }
+        APPEND_V34_STAGE_EVENT(&caller, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed");
+        APPEND_V34_STAGE_EVENT(&caller, rx_s_event_sample, "Far-end S seen during Ja/Jd", "rx_event=s");
+        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_s_sample, "Far-end Phase 4 S", "rx_stage=phase4_s");
+        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_sbar_sample, "Far-end Phase 4 S-bar", "rx_stage=phase4_s_bar");
+        APPEND_V34_STAGE_EVENT(&caller, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn");
         if (caller.phase4_ready_seen) {
             snprintf(detail, sizeof(detail), "role=caller event=%s (%d)",
                      v34_event_to_str_local(caller.final_rx_event),
@@ -1011,6 +1246,8 @@ static void collect_v34_events(call_log_t *log,
             call_log_append(log, caller.phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail);
         }
     }
+
+#undef APPEND_V34_STAGE_EVENT
 }
 
 /* ------------------------------------------------------------------ */
@@ -2322,13 +2559,21 @@ static bool decode_jd_stage(const uint8_t *codewords,
     out->u_info = src->u_info;
     out->calling_party = calling_party;
     out->phase3_start_sample = src->phase3_sample >= 0 ? src->phase3_sample : src->info1_sample;
-    search_start = src->info1_sample >= 0 ? src->info1_sample : out->phase3_start_sample;
+    out->analog_ja_sample = src->tx_ja_sample;
+    out->far_end_s_sample = src->rx_s_event_sample;
+    search_start = src->tx_ja_sample >= 0 ? src->tx_ja_sample
+                 : (src->tx_trn_sample >= 0 ? src->tx_trn_sample
+                    : (src->info1_sample >= 0 ? src->info1_sample : out->phase3_start_sample));
     if (search_start < 0)
         return false;
     if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
         search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
 
-    if (src->phase4_seen && src->phase4_sample > search_start)
+    if (src->tx_jdashed_sample > search_start)
+        search_end = src->tx_jdashed_sample;
+    else if (src->rx_phase4_s_sample > search_start)
+        search_end = src->rx_phase4_s_sample;
+    else if (src->phase4_seen && src->phase4_sample > search_start)
         search_end = src->phase4_sample;
     else if (src->phase4_ready_seen && src->phase4_ready_sample > search_start)
         search_end = src->phase4_ready_sample;
@@ -2429,6 +2674,10 @@ static void print_jd_stage_decode(const jd_stage_decode_t *result)
     printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
     printf("  Phase 3 start:    %.1f ms\n", sample_to_ms(result->phase3_start_sample, 8000));
     printf("  U_INFO:           %d\n", result->u_info);
+    if (result->analog_ja_sample >= 0)
+        printf("  Phase 3 TX J/Ja:  %.1f ms\n", sample_to_ms(result->analog_ja_sample, 8000));
+    if (result->far_end_s_sample >= 0)
+        printf("  Far-end S:        %.1f ms\n", sample_to_ms(result->far_end_s_sample, 8000));
     printf("  Jd start:         %.1f ms\n", sample_to_ms(result->jd_start_sample, 8000));
     printf("  Jd repetitions:   %d\n", result->jd_repetitions);
     printf("  Jd frame errors:  %d/72 on best alignment\n", result->jd_frame_errors);
@@ -2476,7 +2725,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
         else
             search_start = jd_stage->jd_start_sample;
     } else {
-        search_start = src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample;
+        search_start = src->tx_ja_sample >= 0 ? src->tx_ja_sample
+                     : (src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample);
     }
     if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
         search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
@@ -2485,6 +2735,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
         search_end = src->phase4_sample;
     else if (src->phase4_ready_seen && src->phase4_ready_sample > search_start)
         search_end = src->phase4_ready_sample;
+    else if (src->rx_phase4_trn_sample > search_start)
+        search_end = src->rx_phase4_trn_sample;
     else if (src->failure_sample > search_start)
         search_end = src->failure_sample;
     else
