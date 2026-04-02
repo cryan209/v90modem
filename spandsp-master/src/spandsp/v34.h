@@ -94,6 +94,14 @@ typedef struct
     bool support_1664_point_constellation;
     uint8_t tx_clock_source;
     bool acknowledge_info0d;
+    uint8_t raw_26_27;
+    uint8_t info0d_nominal_power_code;
+    uint8_t info0d_max_power_code;
+    bool info0d_power_measured_at_codec_output;
+    bool info0d_pcm_alaw;
+    bool info0d_upstream_3429_support;
+    uint8_t info0d_reserved_41;
+    bool info0d_extensions_valid;
 } v34_v90_info0a_t;
 
 typedef struct
@@ -103,7 +111,26 @@ typedef struct
     int upstream_symbol_rate_code;
     int downstream_rate_code;
     int freq_offset;
+    uint8_t raw_12_17;
+    uint8_t raw_32_33;
+    uint16_t raw_40_49;
 } v34_v90_info1a_t;
+
+typedef struct
+{
+    bool use_high_carrier;
+    int pre_emphasis;
+    int max_bit_rate;
+} v34_v90_info1d_baud_rate_parms_t;
+
+typedef struct
+{
+    int power_reduction;
+    int additional_power_reduction;
+    int md;
+    int freq_offset;
+    v34_v90_info1d_baud_rate_parms_t rate_data[6];
+} v34_v90_info1d_t;
 
 #if defined(__cplusplus)
 extern "C"
@@ -301,6 +328,12 @@ SPAN_DECLARE(int) v34_get_v90_received_info0a(v34_state_t *s, v34_v90_info0a_t *
     \param info Output frame fields.
     \return 1 if a valid INFO1a has been received, otherwise 0. */
 SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *info);
+
+/*! Get the most recently decoded digital-side INFO1d fields in V.90 mode.
+    \param s The modem context.
+    \param info Output frame fields.
+    \return 1 if a valid INFO1d has been received, otherwise 0. */
+SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *info);
 
 /*! Get the most recent V.34/V.90 RX event code.
     \param s The modem context.

@@ -287,3 +287,10 @@ SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *
     (void)info;
     return 0;
 }
+
+SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *info)
+{
+    (void)s;
+    (void)info;
+    return 0;
+}

@@ -5478,6 +5478,14 @@ SPAN_DECLARE(int) v34_get_v90_received_info0a(v34_state_t *s, v34_v90_info0a_t *
     info->support_1664_point_constellation = s->rx.far_capabilities.support_1664_point_constellation;
     info->tx_clock_source = s->rx.far_capabilities.tx_clock_source;
     info->acknowledge_info0d = s->rx.info0_acknowledgement;
+    info->raw_26_27 = s->rx.info0_raw_26_27;
+    info->info0d_nominal_power_code = s->rx.info0d_nominal_power_code;
+    info->info0d_max_power_code = s->rx.info0d_max_power_code;
+    info->info0d_power_measured_at_codec_output = s->rx.info0d_power_measured_at_codec_output;
+    info->info0d_pcm_alaw = s->rx.info0d_pcm_alaw;
+    info->info0d_upstream_3429_support = s->rx.info0d_upstream_3429_support;
+    info->info0d_reserved_41 = s->rx.info0d_reserved_41;
+    info->info0d_extensions_valid = s->rx.info0d_extensions_valid;
     return s->rx.info0_received ? 1 : 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -5492,7 +5500,30 @@ SPAN_DECLARE(int) v34_get_v90_received_info1a(v34_state_t *s, v34_v90_info1a_t *
     info->upstream_symbol_rate_code = s->rx.info1a.baud_rate_a_to_c;
     info->downstream_rate_code = s->rx.info1a.baud_rate_c_to_a;
     info->freq_offset = s->rx.info1a.freq_offset;
-    return (s->rx.info1a.max_data_rate > 0) ? 1 : 0;
+    info->raw_12_17 = s->rx.info1a_raw_12_17;
+    info->raw_32_33 = s->rx.info1a_raw_32_33;
+    info->raw_40_49 = s->rx.info1a_raw_40_49;
+    return s->rx.info1a_received ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *info)
+{
+    int i;
+
+    if (!s || !info || !s->rx.v90_mode)
+        return 0;
+
+    info->power_reduction = s->rx.info1c.power_reduction;
+    info->additional_power_reduction = s->rx.info1c.additional_power_reduction;
+    info->md = s->rx.info1c.md;
+    info->freq_offset = s->rx.info1c.freq_offset;
+    for (i = 0; i < 6; i++) {
+        info->rate_data[i].use_high_carrier = s->rx.info1c.rate_data[i].use_high_carrier;
+        info->rate_data[i].pre_emphasis = s->rx.info1c.rate_data[i].pre_emphasis;
+        info->rate_data[i].max_bit_rate = s->rx.info1c.rate_data[i].max_bit_rate;
+    }
+    return s->rx.info1c_received ? 1 : 0;
 }
 /*- End of function --------------------------------------------------------*/
 

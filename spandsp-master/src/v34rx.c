@@ -2287,8 +2287,17 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
 {
     bitstream_state_t bs;
     const uint8_t *t;
+    uint8_t raw_26_27;
 
     memset(&s->far_capabilities, 0, sizeof(s->far_capabilities));
+    s->info0d_extensions_valid = false;
+    s->info0_raw_26_27 = 0;
+    s->info0d_nominal_power_code = 0;
+    s->info0d_max_power_code = 0;
+    s->info0d_power_measured_at_codec_output = false;
+    s->info0d_pcm_alaw = false;
+    s->info0d_upstream_3429_support = false;
+    s->info0d_reserved_41 = 0;
     bitstream_init(&bs, true);
     t = buf;
     s->far_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_2400] =
@@ -2312,27 +2321,32 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
     {
         /* V.90 INFO0d (62 bits): bits 26-27 are reserved (not tx_clock_source),
            bit 28 is acknowledgement, then additional digital modem fields follow. */
-        bitstream_get(&bs, &t, 2);     /* 26:27 reserved */
+        raw_26_27 = bitstream_get(&bs, &t, 2);     /* 26:27 reserved (V.90), V.92 flags */
+        s->info0_raw_26_27 = raw_26_27;
         s->info0_acknowledgement = bitstream_get(&bs, &t, 1);  /* 28 */
         /* 29:32    Digital modem nominal TX power (-1 dBm0 steps, 0=-6 dBm0) */
-        bitstream_get(&bs, &t, 4);
+        s->info0d_nominal_power_code = bitstream_get(&bs, &t, 4);
         /* 33:37    Maximum digital modem TX power (-0.5 dBm0 steps) */
-        bitstream_get(&bs, &t, 5);
+        s->info0d_max_power_code = bitstream_get(&bs, &t, 5);
         /* 38       Power measurement location (1=codec output) */
-        bitstream_get(&bs, &t, 1);
+        s->info0d_power_measured_at_codec_output = bitstream_get(&bs, &t, 1);
         /* 39       PCM coding: 0=µ-law, 1=A-law */
         s->far_capabilities.tx_clock_source = bitstream_get(&bs, &t, 1);  /* reuse field for pcm_law */
+        s->info0d_pcm_alaw = (s->far_capabilities.tx_clock_source != 0);
         /* 40       V.90 upstream symbol rate 3429 support */
-        bitstream_get(&bs, &t, 1);
+        s->info0d_upstream_3429_support = bitstream_get(&bs, &t, 1);
         /* 41       Reserved */
-        bitstream_get(&bs, &t, 1);
+        s->info0d_reserved_41 = bitstream_get(&bs, &t, 1);
+        s->info0d_extensions_valid = true;
         span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO0d (V.90): PCM law=%s, ack=%d\n",
                  s->far_capabilities.tx_clock_source ? "A-law" : "u-law",
                  s->info0_acknowledgement);
     }
     else
     {
-        s->far_capabilities.tx_clock_source = bitstream_get(&bs, &t, 2);
+        raw_26_27 = bitstream_get(&bs, &t, 2);
+        s->info0_raw_26_27 = raw_26_27;
+        s->far_capabilities.tx_clock_source = raw_26_27;
         s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
     }
     /*endif*/
@@ -2405,6 +2419,7 @@ static int process_rx_info1c(v34_rx_state_t *s, info1c_t *info1c, uint8_t buf[])
     /*endif*/
 
     log_info1c(s->logging, false, info1c);
+    s->info1c_received = true;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2413,6 +2428,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
 {
     bitstream_state_t bs;
     const uint8_t *t;
+    uint16_t raw_freq;
 
     bitstream_init(&bs, true);
     t = buf;
@@ -2422,7 +2438,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         /* V.90 §8.2.3.2 Table 10: INFO1a from analog modem when V.90 is selected.
            Different field layout from V.34 INFO1a. */
         /* 12:17    Reserved for ITU (set to 0 by analog modem) */
-        bitstream_get(&bs, &t, 6);
+        s->info1a_raw_12_17 = bitstream_get(&bs, &t, 6);
         info1a->power_reduction = 0;
         info1a->additional_power_reduction = 0;
         /* 18:24    Length of MD to be transmitted by the analog modem during Phase 3 */
@@ -2434,13 +2450,15 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         info1a->use_high_carrier = false;
         info1a->preemphasis_filter = 0;
         /* 32:33    Reserved for ITU */
-        bitstream_get(&bs, &t, 2);
+        s->info1a_raw_32_33 = bitstream_get(&bs, &t, 2);
         /* 34:36    Symbol rate for analog→digital (upstream). 3=3000, 4=3200, 5=3429 */
         info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
         /* 37:39    Symbol rate of 8000 (the integer 6) — V.90 PCM downstream rate */
         info1a->baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
         /* 40:49    Frequency offset (same as V.34) */
-        info1a->freq_offset = bitstream_get(&bs, &t, 10);
+        raw_freq = (uint16_t) bitstream_get(&bs, &t, 10);
+        s->info1a_raw_40_49 = raw_freq;
+        info1a->freq_offset = (int) raw_freq;
         if ((info1a->freq_offset & 0x200))
             info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
         /*endif*/
@@ -2470,6 +2488,9 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
     }
     else
     {
+        s->info1a_raw_12_17 = 0;
+        s->info1a_raw_32_33 = 0;
+        s->info1a_raw_40_49 = 0;
         /* Standard V.34 INFO1a parsing */
         /* 12:14    Minimum power reduction */
         info1a->power_reduction = bitstream_get(&bs, &t, 3);
@@ -2502,6 +2523,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         log_info1a(s->logging, false, info1a);
     }
     /*endif*/
+    s->info1a_received = true;
 
 #if defined(SPANDSP_USE_FIXED_POINT)
     s->pri_ted.symbol_sync_low[0] = s->pri_ted.symbol_sync_low[1] = 0;
@@ -7874,6 +7896,19 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     phase4_trn_hyp_reset(&s->rx);
 
     s->rx.info0_received = false;
+    s->rx.info1a_received = false;
+    s->rx.info1c_received = false;
+    s->rx.info1a_raw_12_17 = 0;
+    s->rx.info1a_raw_32_33 = 0;
+    s->rx.info1a_raw_40_49 = 0;
+    s->rx.info0_raw_26_27 = 0;
+    s->rx.info0d_nominal_power_code = 0;
+    s->rx.info0d_max_power_code = 0;
+    s->rx.info0d_power_measured_at_codec_output = false;
+    s->rx.info0d_pcm_alaw = false;
+    s->rx.info0d_upstream_3429_support = false;
+    s->rx.info0d_reserved_41 = 0;
+    s->rx.info0d_extensions_valid = false;
     s->rx.v90_repeated_info0a_pending = false;
     s->rx.v90_info1d_sent = false;
     s->rx.stage = V34_RX_STAGE_INFO0;

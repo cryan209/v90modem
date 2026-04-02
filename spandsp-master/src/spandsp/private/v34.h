@@ -804,9 +804,22 @@ typedef struct
     span_sample_timer_t last_info_rx_power_peak_reset;
 
     bool info0_acknowledgement;
+    uint8_t info0_raw_26_27;
+    uint8_t info0d_nominal_power_code;
+    uint8_t info0d_max_power_code;
+    bool info0d_power_measured_at_codec_output;
+    bool info0d_pcm_alaw;
+    bool info0d_upstream_3429_support;
+    uint8_t info0d_reserved_41;
+    bool info0d_extensions_valid;
 
     /*! \brief Set true once a valid INFO0 has been received (survives event overwrites). */
     bool info0_received;
+    bool info1a_received;
+    bool info1c_received;
+    uint8_t info1a_raw_12_17;
+    uint8_t info1a_raw_32_33;
+    uint16_t info1a_raw_40_49;
     /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
                during the INFO1a wait window. */
     bool v90_repeated_info0a_pending;

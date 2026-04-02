@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
@@ -57,6 +58,24 @@ static uint32_t read_le32(const uint8_t *p)
 static double sample_to_ms(int sample, int rate)
 {
     return (double) sample * 1000.0 / (double) rate;
+}
+
+static void appendf(char *buf, size_t len, const char *fmt, ...)
+{
+    size_t used;
+    int wrote;
+    va_list ap;
+
+    if (!buf || len == 0 || !fmt)
+        return;
+    used = strlen(buf);
+    if (used >= len - 1)
+        return;
+    va_start(ap, fmt);
+    wrote = vsnprintf(buf + used, len - used, fmt, ap);
+    va_end(ap);
+    if (wrote < 0)
+        buf[len - 1] = '\0';
 }
 
 typedef struct {
@@ -275,6 +294,191 @@ static void format_v91_info_summary(char *buf, size_t len, const v91_info_diag_t
              diag->frame.request_control_channel ? "yes" : "no",
              diag->frame.tx_uses_alaw ? "yes" : "no",
              (unsigned) diag->frame.max_tx_power);
+}
+
+static void format_v34_info0_table_summary(char *buf,
+                                           size_t len,
+                                           const v90_info0a_t *info,
+                                           const v34_v90_info0a_t *raw_info,
+                                           const char *role_name,
+                                           bool info0_is_d)
+{
+    v90_info0a_diag_t diag;
+    bool have_crc = false;
+    uint8_t raw_26_27 = 0;
+
+    if (!buf || len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (!info) {
+        return;
+    }
+    if (!info0_is_d && v90_info0a_build_diag(info, &diag))
+        have_crc = true;
+
+    if (raw_info)
+        raw_26_27 = raw_info->raw_26_27;
+
+    appendf(buf, len, "role=%s", role_name ? role_name : "unknown");
+    appendf(buf, len, " profile=%s", info0_is_d ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
+    appendf(buf, len, " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+    appendf(buf, len, " b12_2743=%u", info->support_2743 ? 1U : 0U);
+    appendf(buf, len, " b13_2800=%u", info->support_2800 ? 1U : 0U);
+    appendf(buf, len, " b14_3429=%u", info->support_3429 ? 1U : 0U);
+    appendf(buf, len, " b15_3000l=%u", info->support_3000_low ? 1U : 0U);
+    appendf(buf, len, " b16_3000h=%u", info->support_3000_high ? 1U : 0U);
+    appendf(buf, len, " b17_3200l=%u", info->support_3200_low ? 1U : 0U);
+    appendf(buf, len, " b18_3200h=%u", info->support_3200_high ? 1U : 0U);
+    appendf(buf, len, " b19_3429ok=%u", info->rate_3429_allowed ? 1U : 0U);
+    appendf(buf, len, " b20_pwrred=%u", info->support_power_reduction ? 1U : 0U);
+    appendf(buf, len, " b21_23_maxbaud=%u", (unsigned) info->max_baud_rate_difference);
+    appendf(buf, len, " b24_cme=%u", info->from_cme_modem ? 1U : 0U);
+    appendf(buf, len, " b25_1664pt=%u", info->support_1664_point_constellation ? 1U : 0U);
+    if (info0_is_d) {
+        appendf(buf, len, " b26_shortp2_req=%u", (unsigned) (raw_26_27 & 0x01U));
+        appendf(buf, len, " b27_v92_cap=%u", (unsigned) ((raw_26_27 >> 1) & 0x01U));
+        appendf(buf, len, " b28_ack_i0a=%u", info->acknowledge_info0d ? 1U : 0U);
+        appendf(buf, len, " b29_32_nom_tx_pwr_code=%s",
+                (raw_info && raw_info->info0d_extensions_valid) ? "" : "unavailable");
+        if (raw_info && raw_info->info0d_extensions_valid)
+            appendf(buf, len, "%u", (unsigned) raw_info->info0d_nominal_power_code);
+        appendf(buf, len, " b33_37_max_tx_pwr_code=%s",
+                (raw_info && raw_info->info0d_extensions_valid) ? "" : "unavailable");
+        if (raw_info && raw_info->info0d_extensions_valid)
+            appendf(buf, len, "%u", (unsigned) raw_info->info0d_max_power_code);
+        appendf(buf, len, " b38_pwr_meas_codec_out=%s",
+                (raw_info && raw_info->info0d_extensions_valid)
+                    ? (raw_info->info0d_power_measured_at_codec_output ? "1" : "0")
+                    : "unavailable");
+        appendf(buf, len, " b39_pcm_law=%s",
+                (raw_info && raw_info->info0d_extensions_valid)
+                    ? (raw_info->info0d_pcm_alaw ? "alaw" : "ulaw")
+                    : "unavailable");
+        appendf(buf, len, " b40_v90_us3429=%s",
+                (raw_info && raw_info->info0d_extensions_valid)
+                    ? (raw_info->info0d_upstream_3429_support ? "1" : "0")
+                    : "unavailable");
+        appendf(buf, len, " b41_reserved=%s",
+                (raw_info && raw_info->info0d_extensions_valid)
+                    ? (raw_info->info0d_reserved_41 ? "1" : "0")
+                    : "unavailable");
+        appendf(buf, len, " crc_bits=42:57");
+        appendf(buf, len, " crc16=unavailable");
+        appendf(buf, len, " tail_bits=58:61");
+        appendf(buf, len, " tail=0xF");
+    } else {
+        appendf(buf, len, " b26_v92_cap=%u", (unsigned) (raw_26_27 & 0x01U));
+        appendf(buf, len, " b27_shortp2_req=%u", (unsigned) ((raw_26_27 >> 1) & 0x01U));
+        appendf(buf, len, " b28_ack_i0d=%u", info->acknowledge_info0d ? 1U : 0U);
+        appendf(buf, len, " crc_bits=29:44");
+        appendf(buf, len, " crc16=%s", have_crc ? "" : "n/a");
+        if (have_crc)
+            appendf(buf, len, "0x%04X", (unsigned) diag.crc_field);
+        appendf(buf, len, " tail_bits=45:48");
+        appendf(buf, len, " tail=0xF");
+    }
+}
+
+static void format_v34_info1_table15_summary(char *buf,
+                                             size_t len,
+                                             const v90_info1a_t *info,
+                                             const v34_v90_info1a_t *raw_info,
+                                             const char *role_name)
+{
+    v90_info1a_diag_t diag;
+    uint16_t freq_raw;
+    bool have_crc = false;
+    bool looks_like_v92_table18 = false;
+
+    if (!buf || len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (!info) {
+        return;
+    }
+    freq_raw = (info->freq_offset < 0)
+        ? (uint16_t) (0x400 + info->freq_offset)
+        : (uint16_t) info->freq_offset;
+    if (v90_info1a_build_diag(info, &diag))
+        have_crc = true;
+    if (raw_info
+        && raw_info->upstream_symbol_rate_code == 6
+        && raw_info->downstream_rate_code == 6) {
+        looks_like_v92_table18 = true;
+    }
+
+    appendf(buf, len, "role=%s", role_name ? role_name : "unknown");
+    appendf(buf, len, " table=%s",
+            looks_like_v92_table18
+                ? "V92_T18_INFO1a_pcm_upstream"
+                : "V90_T10_or_V92_T19_INFO1a_v34_upstream");
+    appendf(buf, len, " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+    appendf(buf, len, " b12_17_raw=%u", raw_info ? (unsigned) raw_info->raw_12_17 : 0U);
+    appendf(buf, len, " md=%u", (unsigned) info->md);
+    appendf(buf, len, " u_info=%u", (unsigned) info->u_info);
+    appendf(buf, len, " b32_33_raw=%u", raw_info ? (unsigned) raw_info->raw_32_33 : 0U);
+    appendf(buf, len, " upstream_symbol_rate_code=%u", (unsigned) info->upstream_symbol_rate_code);
+    appendf(buf, len, " downstream_rate_code=%u", (unsigned) info->downstream_rate_code);
+    appendf(buf, len, " freq_offset_10b=0x%03X(%+d)", (unsigned) (freq_raw & 0x3FFU), info->freq_offset);
+    appendf(buf, len, " crc_bits=50:65");
+    appendf(buf, len, " crc16=%s", have_crc ? "" : "n/a");
+    if (have_crc)
+        appendf(buf, len, "0x%04X", (unsigned) diag.crc_field);
+    appendf(buf, len, " tail_bits=66:69");
+    appendf(buf, len, " tail=0xF");
+}
+
+static void format_v34_info1d_table_summary(char *buf,
+                                            size_t len,
+                                            const v34_v90_info1d_t *info,
+                                            const char *role_name)
+{
+    if (!buf || len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (!info)
+        return;
+
+    appendf(buf, len, "role=%s", role_name ? role_name : "unknown");
+    appendf(buf, len, " table=V90_T9_or_V92_T17_INFO1d");
+    appendf(buf, len, " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+    appendf(buf, len, " b12_14_min_pwr_red=%d", info->power_reduction);
+    appendf(buf, len, " b15_17_addl_pwr_red=%d", info->additional_power_reduction);
+    appendf(buf, len, " b18_24_md=%d", info->md);
+    appendf(buf, len, " row2400_hicar=%u row2400_preemp=%d row2400_maxrate=%d",
+            info->rate_data[0].use_high_carrier ? 1U : 0U,
+            info->rate_data[0].pre_emphasis,
+            info->rate_data[0].max_bit_rate);
+    appendf(buf, len, " row2743_hicar=%u row2743_preemp=%d row2743_maxrate=%d",
+            info->rate_data[1].use_high_carrier ? 1U : 0U,
+            info->rate_data[1].pre_emphasis,
+            info->rate_data[1].max_bit_rate);
+    appendf(buf, len, " row2800_hicar=%u row2800_preemp=%d row2800_maxrate=%d",
+            info->rate_data[2].use_high_carrier ? 1U : 0U,
+            info->rate_data[2].pre_emphasis,
+            info->rate_data[2].max_bit_rate);
+    appendf(buf, len, " row3000_hicar=%u row3000_preemp=%d row3000_maxrate=%d",
+            info->rate_data[3].use_high_carrier ? 1U : 0U,
+            info->rate_data[3].pre_emphasis,
+            info->rate_data[3].max_bit_rate);
+    appendf(buf, len, " row3200_hicar=%u row3200_preemp=%d row3200_maxrate=%d",
+            info->rate_data[4].use_high_carrier ? 1U : 0U,
+            info->rate_data[4].pre_emphasis,
+            info->rate_data[4].max_bit_rate);
+    appendf(buf, len, " row3429_hicar_or_v92b70=%u row3429_preemp_or_v92b71_74=%d row3429_maxrate_or_v92b75_78=%d",
+            info->rate_data[5].use_high_carrier ? 1U : 0U,
+            info->rate_data[5].pre_emphasis,
+            info->rate_data[5].max_bit_rate);
+    appendf(buf, len, " freq_offset_10b=0x%03X(%+d)",
+            (unsigned) ((info->freq_offset < 0) ? (0x400 + info->freq_offset) : info->freq_offset) & 0x3FFU,
+            info->freq_offset);
+    appendf(buf, len, " crc_bits=89:104");
+    appendf(buf, len, " crc16=unavailable");
+    appendf(buf, len, " tail_bits=105:108");
+    appendf(buf, len, " tail=0xF");
 }
 
 static bool map_v34_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src)
@@ -572,6 +776,7 @@ typedef struct {
     bool info0_seen;
     bool info0_is_d;
     bool info1_seen;
+    bool info1_is_d;
     bool phase3_seen;
     bool phase4_ready_seen;
     bool phase4_seen;
@@ -607,6 +812,15 @@ typedef struct {
     int ja_observed_bits;
     char ja_bits[129];
     int rx_s_event_sample;
+    int rx_tone_a_sample;
+    int rx_tone_b_sample;
+    int rx_tone_a_reversal_sample;
+    int rx_tone_b_reversal_sample;
+    int tx_tone_a_sample;
+    int tx_tone_b_sample;
+    int tx_tone_a_reversal_sample;
+    int tx_tone_b_reversal_sample;
+    int tx_info1_sample;
     int rx_phase4_s_sample;
     int rx_phase4_sbar_sample;
     int rx_phase4_trn_sample;
@@ -617,8 +831,11 @@ typedef struct {
     int final_tx_stage;
     int final_rx_event;
     int u_info;
+    v34_v90_info0a_t info0_raw;
     v90_info0a_t info0a;
+    v34_v90_info1a_t info1a_raw;
     v90_info1a_t info1a;
+    v34_v90_info1d_t info1d;
 } decode_v34_result_t;
 
 typedef struct {
@@ -1102,6 +1319,217 @@ static void json_write_escaped(FILE *f, const char *text)
     fputc('"', f);
 }
 
+typedef struct {
+    char key[64];
+    char value[128];
+} detail_kv_t;
+
+static void append_html_escaped(char *out, size_t out_len, const char *text)
+{
+    const unsigned char *p = (const unsigned char *) text;
+
+    if (!out || out_len == 0)
+        return;
+    if (!text)
+        return;
+    for (; *p; p++) {
+        switch (*p) {
+        case '&': appendf(out, out_len, "&amp;"); break;
+        case '<': appendf(out, out_len, "&lt;"); break;
+        case '>': appendf(out, out_len, "&gt;"); break;
+        case '"': appendf(out, out_len, "&quot;"); break;
+        default:
+            if (*p >= 0x20)
+                appendf(out, out_len, "%c", *p);
+            break;
+        }
+    }
+}
+
+static int parse_detail_key_values(const char *detail, detail_kv_t *pairs, int max_pairs)
+{
+    char scratch[2048];
+    char *save = NULL;
+    char *tok;
+    int count = 0;
+
+    if (!detail || !pairs || max_pairs <= 0)
+        return 0;
+    snprintf(scratch, sizeof(scratch), "%s", detail);
+    tok = strtok_r(scratch, " ", &save);
+    while (tok && count < max_pairs) {
+        char *eq = strchr(tok, '=');
+        if (eq) {
+            *eq = '\0';
+            snprintf(pairs[count].key, sizeof(pairs[count].key), "%s", tok);
+            snprintf(pairs[count].value, sizeof(pairs[count].value), "%s", eq + 1);
+            count++;
+        }
+        tok = strtok_r(NULL, " ", &save);
+    }
+    return count;
+}
+
+static const char *detail_value(const detail_kv_t *pairs, int count, const char *key)
+{
+    if (!pairs || count <= 0 || !key)
+        return NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(pairs[i].key, key) == 0)
+            return pairs[i].value;
+    }
+    return NULL;
+}
+
+static const char *detail_bit_to_yes_no(const char *value)
+{
+    if (!value)
+        return "unknown";
+    if (strcmp(value, "1") == 0 || strcasecmp(value, "yes") == 0)
+        return "yes";
+    if (strcmp(value, "0") == 0 || strcasecmp(value, "no") == 0)
+        return "no";
+    return value;
+}
+
+static void append_html_label_value(char *out, size_t out_len, const char *label, const char *value)
+{
+    if (!out || out_len == 0 || !label)
+        return;
+    appendf(out, out_len, "<div><strong>");
+    append_html_escaped(out, out_len, label);
+    appendf(out, out_len, ":</strong> ");
+    append_html_escaped(out, out_len, value ? value : "unknown");
+    appendf(out, out_len, "</div>");
+}
+
+static void build_visual_event_detail_html(const call_log_event_t *event, char *out, size_t out_len)
+{
+    detail_kv_t pairs[64];
+    int pair_count;
+
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!event) {
+        return;
+    }
+
+    pair_count = parse_detail_key_values(event->detail, pairs, (int) (sizeof(pairs) / sizeof(pairs[0])));
+    if (strcmp(event->protocol, "V.90/V.92") == 0
+        && strncmp(event->summary, "Short Phase 2 sequence", 22) == 0
+        && pair_count > 0) {
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Figure", detail_value(pairs, pair_count, "figure"));
+        append_html_label_value(out, out_len, "Sequence", detail_value(pairs, pair_count, "sequence"));
+        append_html_label_value(out, out_len, "Local modem", detail_value(pairs, pair_count, "local_modem"));
+        append_html_label_value(out, out_len, "Short Phase 2 requested", detail_bit_to_yes_no(detail_value(pairs, pair_count, "shortp2_req")));
+        append_html_label_value(out, out_len, "V.92 capable", detail_bit_to_yes_no(detail_value(pairs, pair_count, "v92_cap")));
+        append_html_label_value(out, out_len, "INFO0 decoded at", detail_value(pairs, pair_count, "info0_ms"));
+        append_html_label_value(out, out_len, "TX tone start", detail_value(pairs, pair_count, "tx_tone_ms"));
+        append_html_label_value(out, out_len, "TX tone reversal", detail_value(pairs, pair_count, "tx_reversal_ms"));
+        append_html_label_value(out, out_len, "RX far-end tone", detail_value(pairs, pair_count, "rx_tone_ms"));
+        append_html_label_value(out, out_len, "RX far-end reversal", detail_value(pairs, pair_count, "rx_reversal_ms"));
+        append_html_label_value(out, out_len, "TX INFO1 start", detail_value(pairs, pair_count, "tx_info1_ms"));
+        append_html_label_value(out, out_len, "INFO1 seen", detail_bit_to_yes_no(detail_value(pairs, pair_count, "info1_seen")));
+        append_html_label_value(out, out_len, "INFO1 decoded at", detail_value(pairs, pair_count, "info1_ms"));
+        append_html_label_value(out, out_len, "Sequence status", detail_value(pairs, pair_count, "status"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+    if (strcmp(event->protocol, "V.34") == 0 && strncmp(event->summary, "INFO0", 5) == 0 && pair_count > 0) {
+        char rates[128] = "";
+        const char *profile = detail_value(pairs, pair_count, "profile");
+        bool is_info0d = false;
+
+        if (profile && strstr(profile, "INFO0d") != NULL)
+            is_info0d = true;
+        if (strncmp(event->summary, "INFO0d", 6) == 0)
+            is_info0d = true;
+
+        if (strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b12_2743")), "yes") == 0)
+            appendf(rates, sizeof(rates), "%s2743", rates[0] ? ", " : "");
+        if (strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b13_2800")), "yes") == 0)
+            appendf(rates, sizeof(rates), "%s2800", rates[0] ? ", " : "");
+        if (strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b15_3000l")), "yes") == 0
+            || strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b16_3000h")), "yes") == 0)
+            appendf(rates, sizeof(rates), "%s3000", rates[0] ? ", " : "");
+        if (strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b17_3200l")), "yes") == 0
+            || strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b18_3200h")), "yes") == 0)
+            appendf(rates, sizeof(rates), "%s3200", rates[0] ? ", " : "");
+        if (strcmp(detail_bit_to_yes_no(detail_value(pairs, pair_count, "b14_3429")), "yes") == 0)
+            appendf(rates, sizeof(rates), "%s3429", rates[0] ? ", " : "");
+        if (!rates[0])
+            snprintf(rates, sizeof(rates), "none");
+
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Profile", profile);
+        append_html_label_value(out, out_len, "Fill/sync", detail_value(pairs, pair_count, "fsync"));
+        append_html_label_value(out, out_len, "Supported symbol rates", rates);
+        append_html_label_value(out, out_len, "3429 allowed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b19_3429ok")));
+        append_html_label_value(out, out_len, "Power reduction", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b20_pwrred")));
+        append_html_label_value(out, out_len, "Max baud-rate difference code", detail_value(pairs, pair_count, "b21_23_maxbaud"));
+        append_html_label_value(out, out_len, "CME modem", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b24_cme")));
+        append_html_label_value(out, out_len, "1664-point constellation", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b25_1664pt")));
+        if (is_info0d) {
+            append_html_label_value(out, out_len, "Bit 26 short Phase 2 request", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b26_shortp2_req")));
+            append_html_label_value(out, out_len, "Bit 27 V.92 capability", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b27_v92_cap")));
+            append_html_label_value(out, out_len, "INFO0a acknowledged (bit 28)", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b28_ack_i0a")));
+            append_html_label_value(out, out_len, "Nominal TX power code bits 29:32", detail_value(pairs, pair_count, "b29_32_nom_tx_pwr_code"));
+            append_html_label_value(out, out_len, "Maximum TX power code bits 33:37", detail_value(pairs, pair_count, "b33_37_max_tx_pwr_code"));
+            append_html_label_value(out, out_len, "Power measured at codec output (bit 38)", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b38_pwr_meas_codec_out")));
+            append_html_label_value(out, out_len, "PCM law bit 39", detail_value(pairs, pair_count, "b39_pcm_law"));
+            append_html_label_value(out, out_len, "V.90 upstream 3429 support bit 40", detail_value(pairs, pair_count, "b40_v90_us3429"));
+            append_html_label_value(out, out_len, "Bit 41", detail_value(pairs, pair_count, "b41_reserved"));
+        } else {
+            append_html_label_value(out, out_len, "Bit 26 V.92 capability", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b26_v92_cap")));
+            append_html_label_value(out, out_len, "Bit 27 short Phase 2 request", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b27_shortp2_req")));
+            append_html_label_value(out, out_len, "INFO0d acknowledged (bit 28)", detail_bit_to_yes_no(detail_value(pairs, pair_count, "b28_ack_i0d")));
+        }
+        append_html_label_value(out, out_len, "CRC bit range", detail_value(pairs, pair_count, "crc_bits"));
+        append_html_label_value(out, out_len, "CRC16", detail_value(pairs, pair_count, "crc16"));
+        append_html_label_value(out, out_len, "Tail bit range", detail_value(pairs, pair_count, "tail_bits"));
+        append_html_label_value(out, out_len, "Tail", detail_value(pairs, pair_count, "tail"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+
+    if (strcmp(event->protocol, "V.34") == 0 && strncmp(event->summary, "INFO1", 5) == 0 && pair_count > 0) {
+        bool is_info1d = (strncmp(event->summary, "INFO1d", 6) == 0);
+
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Table", detail_value(pairs, pair_count, "table"));
+        append_html_label_value(out, out_len, "Fill/sync", detail_value(pairs, pair_count, "fsync"));
+        if (is_info1d) {
+            append_html_label_value(out, out_len, "Min power reduction bits 12:14", detail_value(pairs, pair_count, "b12_14_min_pwr_red"));
+            append_html_label_value(out, out_len, "Additional power reduction bits 15:17", detail_value(pairs, pair_count, "b15_17_addl_pwr_red"));
+            append_html_label_value(out, out_len, "MD bits 18:24", detail_value(pairs, pair_count, "b18_24_md"));
+            append_html_label_value(out, out_len, "2400 row", detail_value(pairs, pair_count, "row2400_hicar"));
+            append_html_label_value(out, out_len, "3429 row / V.92 bits 70:78", detail_value(pairs, pair_count, "row3429_hicar_or_v92b70"));
+        } else {
+            append_html_label_value(out, out_len, "Bits 12:17 (raw)", detail_value(pairs, pair_count, "b12_17_raw"));
+            append_html_label_value(out, out_len, "MD", detail_value(pairs, pair_count, "md"));
+            append_html_label_value(out, out_len, "U_INFO", detail_value(pairs, pair_count, "u_info"));
+            append_html_label_value(out, out_len, "Bits 32:33 (raw)", detail_value(pairs, pair_count, "b32_33_raw"));
+            append_html_label_value(out, out_len, "Upstream symbol-rate code", detail_value(pairs, pair_count, "upstream_symbol_rate_code"));
+            append_html_label_value(out, out_len, "Downstream rate code", detail_value(pairs, pair_count, "downstream_rate_code"));
+        }
+        append_html_label_value(out, out_len, "Frequency offset", detail_value(pairs, pair_count, "freq_offset_10b"));
+        append_html_label_value(out, out_len, "CRC bit range", detail_value(pairs, pair_count, "crc_bits"));
+        append_html_label_value(out, out_len, "CRC16", detail_value(pairs, pair_count, "crc16"));
+        append_html_label_value(out, out_len, "Tail bit range", detail_value(pairs, pair_count, "tail_bits"));
+        append_html_label_value(out, out_len, "Tail", detail_value(pairs, pair_count, "tail"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+
+    append_html_escaped(out, out_len, event->detail);
+}
+
 static void write_visualization_track_json(FILE *f,
                                            const char *label,
                                            const call_log_t *log,
@@ -1142,6 +1570,9 @@ static void write_visualization_track_json(FILE *f,
     fprintf(f, "],events:[");
     for (size_t i = 0; i < log->count; i++) {
         const call_log_event_t *event = &log->events[i];
+        char detail_html[2048];
+
+        build_visual_event_detail_html(event, detail_html, sizeof(detail_html));
         if (i) fputc(',', f);
         fprintf(f, "{start:%d,duration:%d,protocol:", event->sample_offset, event->duration_samples);
         json_write_escaped(f, event->protocol);
@@ -1149,6 +1580,8 @@ static void write_visualization_track_json(FILE *f,
         json_write_escaped(f, event->summary);
         fprintf(f, ",detail:");
         json_write_escaped(f, event->detail);
+        fprintf(f, ",detailHtml:");
+        json_write_escaped(f, detail_html);
         fprintf(f, "}");
     }
     fprintf(f, "]}");
@@ -1197,6 +1630,8 @@ static bool write_visualization_html(const char *output_path,
             ".hint{color:var(--muted);margin-top:8px;}\n"
             "table{width:100%%;border-collapse:collapse;font-size:13px;margin-top:12px;}\n"
             "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #eee3d3;vertical-align:top;}\n"
+            ".detail-kv div{margin:0 0 2px 0;line-height:1.3;}\n"
+            ".detail-kv strong{color:#3b3329;}\n"
             "tbody tr{cursor:pointer;}\n"
             "tbody tr:hover{background:#fff6e7;}\n"
             ".cursor{color:var(--accent);font-weight:700;}\n"
@@ -1249,7 +1684,7 @@ static bool write_visualization_html(const char *output_path,
             "function levelNorm(v,gamma,boost){const base=Math.max(0,Math.min(1,v/1000));return Math.min(1,Math.pow(base,gamma)*boost);}\n"
             "function heatColor(v,gamma,boost){const t=levelNorm(v,gamma,boost);const stops=[[8,19,29],[18,66,93],[31,140,168],[243,179,76],[251,238,197]];const seg=Math.min(stops.length-2,Math.floor(t*(stops.length-1)));const local=t*(stops.length-1)-seg;const a=stops[seg],b=stops[seg+1];const mix=n=>Math.round(a[n]+(b[n]-a[n])*local);return `rgb(${mix(0)},${mix(1)},${mix(2)})`;}\n"
             "function mergedTrack(a,b,mode,label){return{kind:'merged',label:label||'Merged',mode:mode||'overlay',primary:a,secondary:b,sampleRate:a.sampleRate,totalSamples:a.totalSamples,windowSamples:a.windowSamples,freqBinCount:a.freqBinCount,freqBinStartHz:a.freqBinStartHz,freqBinStepHz:a.freqBinStepHz};}\n"
-            "function renderTrack(track,mount){const root=mount||document.getElementById('tracks');root.innerHTML='';const merged=track.kind==='merged';const sharedSpectrogram=merged&&track.mode==='shared';const baseTrack=merged?track.primary:track;const otherTrack=merged?track.secondary:null;const card=document.createElement('div');card.className='card';card.innerHTML=`<div class=\"track-title\"><h2>${track.label}</h2><div class=\"hint\">${merged?(baseTrack.events.length+otherTrack.events.length):baseTrack.events.length} decoded events</div></div><div class=\"controls\"><div class=\"cursor\">Cursor: <span class=\"cursor-time\">0.0 ms</span></div><div class=\"hint hover-label\">Move across the chart to inspect this ${merged?(sharedSpectrogram?'shared diagnostic':'overlay'):'channel'}.</div></div><div class=\"controls\"><label>Spectral lift <input class=\"spec-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"320\"></label><label>Contrast <input class=\"spec-gamma\" type=\"range\" min=\"20\" max=\"100\" step=\"1\" value=\"42\"></label><label>Tone lift <input class=\"tone-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"260\"></label></div><div class=\"legend\"></div><canvas width=\"1360\" height=\"760\"></canvas><div class=\"hint\">${merged?(sharedSpectrogram?`Shared spectrogram with split tone overlays. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`:`Merged overlay view. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`):'Separate channel render.'} Lower-energy structure is display-boosted only; raw decode data is unchanged.</div><table><thead><tr><th>Start</th><th>Duration</th><th>Protocol</th><th>Summary</th><th>Detail</th></tr></thead><tbody></tbody></table>`;root.appendChild(card);const canvas=card.querySelector('canvas');const ctx=canvas.getContext('2d');const legend=card.querySelector('.legend');const tbody=card.querySelector('tbody');const cursorTime=card.querySelector('.cursor-time');const hoverLabel=card.querySelector('.hover-label');const specBoostInput=card.querySelector('.spec-boost');const specGammaInput=card.querySelector('.spec-gamma');const toneBoostInput=card.querySelector('.tone-boost');const enabled=new Set(baseTrack.tones.map(t=>t.key));let cursorIndex=0;function settings(){return{specBoost:Number(specBoostInput.value)/100,specGamma:Number(specGammaInput.value)/100,toneBoost:Number(toneBoostInput.value)/100};}function allEvents(){if(!merged)return baseTrack.events;return baseTrack.events.map(e=>({...e,trackLabel:baseTrack.label,trackColor:mergePalette.a})).concat(otherTrack.events.map(e=>({...e,trackLabel:otherTrack.label,trackColor:mergePalette.b}))).sort((x,y)=>x.start-y.start);}function draw(){const cfg=settings();const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const left=64,right=20,top=24,bottom=28;const plotW=w-left-right;const envelopeH=150;const gap=28;const specTop=top+envelopeH+gap;const specH=300;const toneTop=specTop+specH+gap;const toneAreaH=h-toneTop-bottom;const toneTrackH=toneAreaH/Math.max(1,baseTrack.tones.length);ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,w,h);for(let i=0;i<=10;i++){const x=left+(plotW*i/10);ctx.strokeStyle='#d9cfc0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,h-bottom);ctx.stroke();const ms=(baseTrack.totalSamples*i/10)*1000/baseTrack.sampleRate;ctx.fillStyle='#6a6257';ctx.fillText(ms.toFixed(0)+' ms',x-16,h-8);}for(let i=0;i<=6;i++){const y=top+(envelopeH*i/6);ctx.strokeStyle='#d9cfc0';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.fillStyle='#1d1b18';ctx.fillText(merged?'Envelope + Decoded Events (Overlay)':'Envelope + Decoded Events',left,16);allEvents().forEach(ev=>{const x1=left+(ev.start/baseTrack.totalSamples)*plotW;const x2=left+((ev.start+Math.max(ev.duration,baseTrack.windowSamples))/baseTrack.totalSamples)*plotW;ctx.fillStyle=(merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol))+'38';ctx.fillRect(x1,top,Math.max(2,x2-x1),envelopeH);ctx.strokeStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);ctx.beginPath();ctx.moveTo(x1,top);ctx.lineTo(x1,specTop+specH);ctx.stroke();});const envA=baseTrack.envelope;const envB=merged?otherTrack.envelope:null;ctx.beginPath();for(let i=0;i<envA.length;i++){const x=xForPoint(i,left,plotW,envA.length);const v=merged?Math.max(envA[i],envB[i]):envA[i];const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(left+plotW,top+envelopeH);ctx.lineTo(left,top+envelopeH);ctx.closePath();ctx.fillStyle=merged?'rgba(90,94,128,.20)':'rgba(177,77,45,.22)';ctx.fill();ctx.strokeStyle=merged?'#4f6b8a':'#b14d2d';ctx.lineWidth=1.6;ctx.stroke();if(merged){for(const series of [{env:envA,color:mergePalette.a},{env:envB,color:mergePalette.b}]){ctx.beginPath();series.env.forEach((v,i)=>{const x=xForPoint(i,left,plotW,series.env.length);const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=series.color;ctx.lineWidth=1.05;ctx.stroke();}}ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Frequency Diagnosis (Shared)':'Frequency Diagnosis (Overlay)'):'Frequency Diagnosis',left,specTop-8);const colW=plotW/Math.max(1,baseTrack.envelope.length);const rowH=specH/Math.max(1,baseTrack.freqBinCount);for(let i=0;i<baseTrack.envelope.length;i++){const x=left+i*colW;for(let b=0;b<baseTrack.freqBinCount;b++){const y=specTop+specH-(b+1)*rowH;if(merged&&sharedSpectrogram){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const v=va>vb?va:vb;ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else if(merged){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const a=levelNorm(va,cfg.specGamma,cfg.specBoost);const bb=levelNorm(vb,cfg.specGamma,cfg.specBoost);ctx.fillStyle=`rgba(198,106,43,${Math.min(.95,a)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));ctx.fillStyle=`rgba(31,122,140,${Math.min(.95,bb)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else{const v=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}}}ctx.strokeStyle='#d9cfc0';for(let j=0;j<=6;j++){const freq=baseTrack.freqBinStartHz+j*((baseTrack.freqBinCount-1)*baseTrack.freqBinStepHz/6);const bin=(freq-baseTrack.freqBinStartHz)/baseTrack.freqBinStepHz;const y=specTop+specH-bin*rowH;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(Math.round(freq)+' Hz',6,y+4);}ctx.strokeStyle='#8a7f70';ctx.strokeRect(left,specTop,plotW,specH);ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Tracked Tone Energies (Split)':'Tracked Tone Energies (Overlay)'):'Tracked Tone Energies',left,toneTop-8);baseTrack.tones.forEach((tone,toneIdx)=>{const y0=toneTop+toneIdx*toneTrackH;ctx.strokeStyle='#e6ddcf';ctx.beginPath();ctx.moveTo(left,y0+toneTrackH);ctx.lineTo(left+plotW,y0+toneTrackH);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(tone.label,left-4,y0+12);if(!enabled.has(tone.key))return;const drawTone=(values,color,width)=>{ctx.beginPath();values.forEach((v,i)=>{const x=xForPoint(i,left,plotW,baseTrack.envelope.length);const display=levelNorm(v,Math.min(0.85,cfg.specGamma+0.06),cfg.toneBoost);const y=y0+toneTrackH-display*(toneTrackH-6)-3;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();};if(merged){drawTone(baseTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(198,106,43,0.95)':mergePalette.a,sharedSpectrogram?1.3:1.15);drawTone(otherTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(31,122,140,0.95)':mergePalette.b,sharedSpectrogram?1.3:1.15);}else{drawTone(baseTrack.tones[toneIdx].values,palette[toneIdx%%palette.length],1.35);}});const seen=new Set();allEvents().forEach(ev=>{const tag=`${ev.trackLabel||''}:${ev.protocol}:${ev.summary}`;if(seen.has(tag))return;seen.add(tag);const x=left+(ev.start/baseTrack.totalSamples)*plotW;ctx.save();ctx.translate(x+2,top+12);ctx.rotate(-Math.PI/10);ctx.fillStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';const text=prefix+ev.summary;ctx.fillText(text.length>24?text.slice(0,24)+'...':text,0,0);ctx.restore();});const cursorX=xForPoint(cursorIndex,left,plotW,baseTrack.envelope.length);ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,h-bottom);ctx.stroke();}function updateCursor(index){const cfg=settings();cursorIndex=Math.max(0,Math.min(baseTrack.envelope.length-1,index));const start=cursorIndex*baseTrack.windowSamples;cursorTime.textContent=(start*1000/baseTrack.sampleRate).toFixed(1)+' ms';const toneSource=merged?baseTrack.tones.map(t=>({label:`${baseTrack.label} ${t.label}`,v:t.values[cursorIndex]})).concat(otherTrack.tones.map(t=>({label:`${otherTrack.label} ${t.label}`,v:t.values[cursorIndex]}))):baseTrack.tones.map(t=>({label:t.label,v:t.values[cursorIndex]}));const active=toneSource.sort((a,b)=>b.v-a.v).slice(0,4).filter(x=>x.v>6);let dominantA=0,dominantValA=-1;for(let b=0;b<baseTrack.freqBinCount;b++){const v=baseTrack.freqHeatmap[cursorIndex*baseTrack.freqBinCount+b];if(v>dominantValA){dominantValA=v;dominantA=b;}}let spectral=`dominant bin ${baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz} Hz raw ${(dominantValA/10).toFixed(1)}%% display x${cfg.specBoost.toFixed(1)}`;if(merged){let dominantB=0,dominantValB=-1;for(let b=0;b<otherTrack.freqBinCount;b++){const v=otherTrack.freqHeatmap[cursorIndex*otherTrack.freqBinCount+b];if(v>dominantValB){dominantValB=v;dominantB=b;}}spectral=sharedSpectrogram?`shared ${baseTrack.freqBinStartHz+((dominantValA>dominantValB?dominantA:dominantB)*baseTrack.freqBinStepHz)} Hz | ${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`:`${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`;}hoverLabel.textContent=active.length?`${spectral} | `+active.map(x=>x.label+' raw '+(x.v/10).toFixed(1)+'%%').join(' | '):spectral;draw();}function rebuildLegend(){legend.innerHTML='';baseTrack.tones.forEach((tone,toneIdx)=>{const b=document.createElement('button');b.textContent=tone.label;b.style.borderColor=merged?mergePalette.a:palette[toneIdx%%palette.length];if(!enabled.has(tone.key))b.classList.add('off');b.onclick=()=>{if(enabled.has(tone.key))enabled.delete(tone.key);else enabled.add(tone.key);rebuildLegend();updateCursor(cursorIndex);};legend.appendChild(b);});if(merged){const key=document.createElement('div');key.className='hint';key.textContent=sharedSpectrogram?`${baseTrack.label} and ${otherTrack.label} share the spectrogram; tone overlays stay split orange/teal`:`${baseTrack.label} = orange, ${otherTrack.label} = teal`;legend.appendChild(key);}}canvas.addEventListener('mousemove',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const left=64;const plotW=canvas.width-left-20;updateCursor(Math.round(((x-left)/plotW)*(baseTrack.envelope.length-1)));});canvas.addEventListener('click',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const sample=((x-64)/(canvas.width-84))*baseTrack.totalSamples;let best=null;allEvents().forEach((e,rowIdx)=>{const end=e.start+Math.max(e.duration,baseTrack.windowSamples);if(sample>=e.start&&sample<=end)best=rowIdx;});if(best!==null){tbody.querySelectorAll('tr')[best]?.scrollIntoView({block:'center'});}});specBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));specGammaInput.addEventListener('input',()=>updateCursor(cursorIndex));toneBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));allEvents().forEach(ev=>{const tr=document.createElement('tr');const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';tr.innerHTML=`<td>${(ev.start*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${(ev.duration*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${ev.protocol}</td><td>${prefix}${ev.summary}</td><td>${ev.detail||''}</td>`;tr.onclick=()=>updateCursor(Math.round(ev.start/baseTrack.windowSamples));tbody.appendChild(tr);});rebuildLegend();updateCursor(0);}\n"
+            "function renderTrack(track,mount){const root=mount||document.getElementById('tracks');root.innerHTML='';const merged=track.kind==='merged';const sharedSpectrogram=merged&&track.mode==='shared';const baseTrack=merged?track.primary:track;const otherTrack=merged?track.secondary:null;const card=document.createElement('div');card.className='card';card.innerHTML=`<div class=\"track-title\"><h2>${track.label}</h2><div class=\"hint\">${merged?(baseTrack.events.length+otherTrack.events.length):baseTrack.events.length} decoded events</div></div><div class=\"controls\"><div class=\"cursor\">Cursor: <span class=\"cursor-time\">0.0 ms</span></div><div class=\"hint hover-label\">Move across the chart to inspect this ${merged?(sharedSpectrogram?'shared diagnostic':'overlay'):'channel'}.</div></div><div class=\"controls\"><label>Spectral lift <input class=\"spec-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"320\"></label><label>Contrast <input class=\"spec-gamma\" type=\"range\" min=\"20\" max=\"100\" step=\"1\" value=\"42\"></label><label>Tone lift <input class=\"tone-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"260\"></label></div><div class=\"legend\"></div><canvas width=\"1360\" height=\"760\"></canvas><div class=\"hint\">${merged?(sharedSpectrogram?`Shared spectrogram with split tone overlays. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`:`Merged overlay view. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`):'Separate channel render.'} Lower-energy structure is display-boosted only; raw decode data is unchanged.</div><table><thead><tr><th>Start</th><th>Duration</th><th>Protocol</th><th>Summary</th><th>Detail</th></tr></thead><tbody></tbody></table>`;root.appendChild(card);const canvas=card.querySelector('canvas');const ctx=canvas.getContext('2d');const legend=card.querySelector('.legend');const tbody=card.querySelector('tbody');const cursorTime=card.querySelector('.cursor-time');const hoverLabel=card.querySelector('.hover-label');const specBoostInput=card.querySelector('.spec-boost');const specGammaInput=card.querySelector('.spec-gamma');const toneBoostInput=card.querySelector('.tone-boost');const enabled=new Set(baseTrack.tones.map(t=>t.key));let cursorIndex=0;function settings(){return{specBoost:Number(specBoostInput.value)/100,specGamma:Number(specGammaInput.value)/100,toneBoost:Number(toneBoostInput.value)/100};}function allEvents(){if(!merged)return baseTrack.events;return baseTrack.events.map(e=>({...e,trackLabel:baseTrack.label,trackColor:mergePalette.a})).concat(otherTrack.events.map(e=>({...e,trackLabel:otherTrack.label,trackColor:mergePalette.b}))).sort((x,y)=>x.start-y.start);}function draw(){const cfg=settings();const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const left=64,right=20,top=24,bottom=28;const plotW=w-left-right;const envelopeH=150;const gap=28;const specTop=top+envelopeH+gap;const specH=300;const toneTop=specTop+specH+gap;const toneAreaH=h-toneTop-bottom;const toneTrackH=toneAreaH/Math.max(1,baseTrack.tones.length);ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,w,h);for(let i=0;i<=10;i++){const x=left+(plotW*i/10);ctx.strokeStyle='#d9cfc0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,h-bottom);ctx.stroke();const ms=(baseTrack.totalSamples*i/10)*1000/baseTrack.sampleRate;ctx.fillStyle='#6a6257';ctx.fillText(ms.toFixed(0)+' ms',x-16,h-8);}for(let i=0;i<=6;i++){const y=top+(envelopeH*i/6);ctx.strokeStyle='#d9cfc0';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.fillStyle='#1d1b18';ctx.fillText(merged?'Envelope + Decoded Events (Overlay)':'Envelope + Decoded Events',left,16);allEvents().forEach(ev=>{const x1=left+(ev.start/baseTrack.totalSamples)*plotW;const x2=left+((ev.start+Math.max(ev.duration,baseTrack.windowSamples))/baseTrack.totalSamples)*plotW;ctx.fillStyle=(merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol))+'38';ctx.fillRect(x1,top,Math.max(2,x2-x1),envelopeH);ctx.strokeStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);ctx.beginPath();ctx.moveTo(x1,top);ctx.lineTo(x1,specTop+specH);ctx.stroke();});const envA=baseTrack.envelope;const envB=merged?otherTrack.envelope:null;ctx.beginPath();for(let i=0;i<envA.length;i++){const x=xForPoint(i,left,plotW,envA.length);const v=merged?Math.max(envA[i],envB[i]):envA[i];const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(left+plotW,top+envelopeH);ctx.lineTo(left,top+envelopeH);ctx.closePath();ctx.fillStyle=merged?'rgba(90,94,128,.20)':'rgba(177,77,45,.22)';ctx.fill();ctx.strokeStyle=merged?'#4f6b8a':'#b14d2d';ctx.lineWidth=1.6;ctx.stroke();if(merged){for(const series of [{env:envA,color:mergePalette.a},{env:envB,color:mergePalette.b}]){ctx.beginPath();series.env.forEach((v,i)=>{const x=xForPoint(i,left,plotW,series.env.length);const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=series.color;ctx.lineWidth=1.05;ctx.stroke();}}ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Frequency Diagnosis (Shared)':'Frequency Diagnosis (Overlay)'):'Frequency Diagnosis',left,specTop-8);const colW=plotW/Math.max(1,baseTrack.envelope.length);const rowH=specH/Math.max(1,baseTrack.freqBinCount);for(let i=0;i<baseTrack.envelope.length;i++){const x=left+i*colW;for(let b=0;b<baseTrack.freqBinCount;b++){const y=specTop+specH-(b+1)*rowH;if(merged&&sharedSpectrogram){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const v=va>vb?va:vb;ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else if(merged){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const a=levelNorm(va,cfg.specGamma,cfg.specBoost);const bb=levelNorm(vb,cfg.specGamma,cfg.specBoost);ctx.fillStyle=`rgba(198,106,43,${Math.min(.95,a)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));ctx.fillStyle=`rgba(31,122,140,${Math.min(.95,bb)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else{const v=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}}}ctx.strokeStyle='#d9cfc0';for(let j=0;j<=6;j++){const freq=baseTrack.freqBinStartHz+j*((baseTrack.freqBinCount-1)*baseTrack.freqBinStepHz/6);const bin=(freq-baseTrack.freqBinStartHz)/baseTrack.freqBinStepHz;const y=specTop+specH-bin*rowH;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(Math.round(freq)+' Hz',6,y+4);}ctx.strokeStyle='#8a7f70';ctx.strokeRect(left,specTop,plotW,specH);ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Tracked Tone Energies (Split)':'Tracked Tone Energies (Overlay)'):'Tracked Tone Energies',left,toneTop-8);baseTrack.tones.forEach((tone,toneIdx)=>{const y0=toneTop+toneIdx*toneTrackH;ctx.strokeStyle='#e6ddcf';ctx.beginPath();ctx.moveTo(left,y0+toneTrackH);ctx.lineTo(left+plotW,y0+toneTrackH);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(tone.label,left-4,y0+12);if(!enabled.has(tone.key))return;const drawTone=(values,color,width)=>{ctx.beginPath();values.forEach((v,i)=>{const x=xForPoint(i,left,plotW,baseTrack.envelope.length);const display=levelNorm(v,Math.min(0.85,cfg.specGamma+0.06),cfg.toneBoost);const y=y0+toneTrackH-display*(toneTrackH-6)-3;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();};if(merged){drawTone(baseTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(198,106,43,0.95)':mergePalette.a,sharedSpectrogram?1.3:1.15);drawTone(otherTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(31,122,140,0.95)':mergePalette.b,sharedSpectrogram?1.3:1.15);}else{drawTone(baseTrack.tones[toneIdx].values,palette[toneIdx%%palette.length],1.35);}});const seen=new Set();allEvents().forEach(ev=>{const tag=`${ev.trackLabel||''}:${ev.protocol}:${ev.summary}`;if(seen.has(tag))return;seen.add(tag);const x=left+(ev.start/baseTrack.totalSamples)*plotW;ctx.save();ctx.translate(x+2,top+12);ctx.rotate(-Math.PI/10);ctx.fillStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';const text=prefix+ev.summary;ctx.fillText(text.length>24?text.slice(0,24)+'...':text,0,0);ctx.restore();});const cursorX=xForPoint(cursorIndex,left,plotW,baseTrack.envelope.length);ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,h-bottom);ctx.stroke();}function updateCursor(index){const cfg=settings();cursorIndex=Math.max(0,Math.min(baseTrack.envelope.length-1,index));const start=cursorIndex*baseTrack.windowSamples;cursorTime.textContent=(start*1000/baseTrack.sampleRate).toFixed(1)+' ms';const toneSource=merged?baseTrack.tones.map(t=>({label:`${baseTrack.label} ${t.label}`,v:t.values[cursorIndex]})).concat(otherTrack.tones.map(t=>({label:`${otherTrack.label} ${t.label}`,v:t.values[cursorIndex]}))):baseTrack.tones.map(t=>({label:t.label,v:t.values[cursorIndex]}));const active=toneSource.sort((a,b)=>b.v-a.v).slice(0,4).filter(x=>x.v>6);let dominantA=0,dominantValA=-1;for(let b=0;b<baseTrack.freqBinCount;b++){const v=baseTrack.freqHeatmap[cursorIndex*baseTrack.freqBinCount+b];if(v>dominantValA){dominantValA=v;dominantA=b;}}let spectral=`dominant bin ${baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz} Hz raw ${(dominantValA/10).toFixed(1)}%% display x${cfg.specBoost.toFixed(1)}`;if(merged){let dominantB=0,dominantValB=-1;for(let b=0;b<otherTrack.freqBinCount;b++){const v=otherTrack.freqHeatmap[cursorIndex*otherTrack.freqBinCount+b];if(v>dominantValB){dominantValB=v;dominantB=b;}}spectral=sharedSpectrogram?`shared ${baseTrack.freqBinStartHz+((dominantValA>dominantValB?dominantA:dominantB)*baseTrack.freqBinStepHz)} Hz | ${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`:`${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`;}hoverLabel.textContent=active.length?`${spectral} | `+active.map(x=>x.label+' raw '+(x.v/10).toFixed(1)+'%%').join(' | '):spectral;draw();}function rebuildLegend(){legend.innerHTML='';baseTrack.tones.forEach((tone,toneIdx)=>{const b=document.createElement('button');b.textContent=tone.label;b.style.borderColor=merged?mergePalette.a:palette[toneIdx%%palette.length];if(!enabled.has(tone.key))b.classList.add('off');b.onclick=()=>{if(enabled.has(tone.key))enabled.delete(tone.key);else enabled.add(tone.key);rebuildLegend();updateCursor(cursorIndex);};legend.appendChild(b);});if(merged){const key=document.createElement('div');key.className='hint';key.textContent=sharedSpectrogram?`${baseTrack.label} and ${otherTrack.label} share the spectrogram; tone overlays stay split orange/teal`:`${baseTrack.label} = orange, ${otherTrack.label} = teal`;legend.appendChild(key);}}canvas.addEventListener('mousemove',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const left=64;const plotW=canvas.width-left-20;updateCursor(Math.round(((x-left)/plotW)*(baseTrack.envelope.length-1)));});canvas.addEventListener('click',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const sample=((x-64)/(canvas.width-84))*baseTrack.totalSamples;let best=null;allEvents().forEach((e,rowIdx)=>{const end=e.start+Math.max(e.duration,baseTrack.windowSamples);if(sample>=e.start&&sample<=end)best=rowIdx;});if(best!==null){tbody.querySelectorAll('tr')[best]?.scrollIntoView({block:'center'});}});specBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));specGammaInput.addEventListener('input',()=>updateCursor(cursorIndex));toneBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));allEvents().forEach(ev=>{const tr=document.createElement('tr');const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';tr.innerHTML=`<td>${(ev.start*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${(ev.duration*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${ev.protocol}</td><td>${prefix}${ev.summary}</td><td>${ev.detailHtml||ev.detail||''}</td>`;tr.onclick=()=>updateCursor(Math.round(ev.start/baseTrack.windowSamples));tbody.appendChild(tr);});rebuildLegend();updateCursor(0);}\n"
             "function initViewer(){const root=document.getElementById('tracks');if(data.tracks.length<=1){renderTrack(data.tracks[0],root);return;}root.innerHTML='';const shell=document.createElement('div');shell.className='card';shell.innerHTML='<div class=\"track-title\"><h2>View Selector</h2><div class=\"hint\">Choose Left, Right, Merged, or Split</div></div><div class=\"hint selector-copy\"></div><div class=\"modebar\"></div><div class=\"swatches merge-key\"></div><div class=\"track-mount\"></div>';root.appendChild(shell);const modebar=shell.querySelector('.modebar');const selectorCopy=shell.querySelector('.selector-copy');const mergeKey=shell.querySelector('.merge-key');const mount=shell.querySelector('.track-mount');const views=[{button:'L',hint:data.tracks[0].label,track:data.tracks[0]},{button:'R',hint:data.tracks[1].label,track:data.tracks[1]},{button:'Merged',hint:`Overlay ${data.tracks[0].label} and ${data.tracks[1].label}`,track:mergedTrack(data.tracks[0],data.tracks[1],'overlay','Merged')},{button:'Split',hint:`Shared spectrogram with split ${data.tracks[0].label}/${data.tracks[1].label} tones`,track:mergedTrack(data.tracks[0],data.tracks[1],'shared','Merged Split') }];function setView(idx){modebar.querySelectorAll('button').forEach((x,i)=>x.classList.toggle('active',i===idx));const view=views[idx];selectorCopy.textContent=view.hint;mergeKey.innerHTML=idx>=2?`<span class=\"swatch\"><i style=\"background:${mergePalette.a}\"></i>${data.tracks[0].label}</span><span class=\"swatch\"><i style=\"background:${mergePalette.b}\"></i>${data.tracks[1].label}</span>`:'';renderTrack(view.track,mount);}views.forEach((view,idx)=>{const b=document.createElement('button');b.textContent=view.button;b.title=view.hint;b.onclick=()=>setView(idx);modebar.appendChild(b);});setView(0);}\n"
             "initViewer();\n"
             "</script>\n"
@@ -3083,27 +3518,50 @@ static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
     return sample <= latest_allowed_sample;
 }
 
+static bool v34_info0_short_phase2_requested(const decode_v34_result_t *result)
+{
+    uint8_t raw_26_27;
+
+    if (!result || !result->info0_seen)
+        return false;
+
+    raw_26_27 = result->info0_raw.raw_26_27;
+    if (result->info0_is_d)
+        return (raw_26_27 & 0x01U) != 0;         /* INFO0d bit 26 */
+    return (raw_26_27 & 0x02U) != 0;             /* INFO0a bit 27 */
+}
+
+static bool v34_info0_v92_capable(const decode_v34_result_t *result)
+{
+    uint8_t raw_26_27;
+
+    if (!result || !result->info0_seen)
+        return false;
+
+    raw_26_27 = result->info0_raw.raw_26_27;
+    if (result->info0_is_d)
+        return (raw_26_27 & 0x02U) != 0;         /* INFO0d bit 27 */
+    return (raw_26_27 & 0x01U) != 0;             /* INFO0a bit 26 */
+}
+
+static const char *v34_short_phase2_sequence_id(const decode_v34_result_t *result)
+{
+    /* Receiving INFO0d implies local analogue modem path (Figure 9 upper/A line). */
+    if (result && result->info0_is_d)
+        return "A";
+    return "B";
+}
+
+static const char *v34_short_phase2_local_modem(const decode_v34_result_t *result)
+{
+    if (result && result->info0_is_d)
+        return "analogue";
+    return "digital";
+}
+
 static const char *v34_info0_label(const decode_v34_result_t *result)
 {
     return (result && result->info0_is_d) ? "INFO0d decoded" : "INFO0a decoded";
-}
-
-static const char *v34_info0_clock_or_law_label(const decode_v34_result_t *result)
-{
-    return (result && result->info0_is_d) ? "pcm_law" : "clock";
-}
-
-static const char *v34_info0_clock_or_law_value(const decode_v34_result_t *result)
-{
-    static const char *clock_values[] = { "0", "1", "2", "3" };
-
-    if (!result)
-        return "unknown";
-    if (result->info0_is_d)
-        return result->info0a.tx_clock_source ? "alaw" : "ulaw";
-    if (result->info0a.tx_clock_source < (int) (sizeof(clock_values) / sizeof(clock_values[0])))
-        return clock_values[result->info0a.tx_clock_source];
-    return "unknown";
 }
 
 static int v34_effective_ja_bit_count(const decode_v34_result_t *result)
@@ -3834,6 +4292,7 @@ static bool decode_v34_pass(const int16_t *samples,
     v34_state_t *v34;
     v34_v90_info0a_t raw_info0a;
     v34_v90_info1a_t raw_info1a;
+    v34_v90_info1d_t raw_info1d;
     stderr_silence_guard_t stderr_guard;
     v34_aux_bit_collector_t aux_bits;
     int offset = 0;
@@ -3873,6 +4332,15 @@ static bool decode_v34_pass(const int16_t *samples,
     result->ja_observed_bits = 0;
     result->ja_bits[0] = '\0';
     result->rx_s_event_sample = -1;
+    result->rx_tone_a_sample = -1;
+    result->rx_tone_b_sample = -1;
+    result->rx_tone_a_reversal_sample = -1;
+    result->rx_tone_b_reversal_sample = -1;
+    result->tx_tone_a_sample = -1;
+    result->tx_tone_b_sample = -1;
+    result->tx_tone_a_reversal_sample = -1;
+    result->tx_tone_b_reversal_sample = -1;
+    result->tx_info1_sample = -1;
     result->rx_phase4_s_sample = -1;
     result->rx_phase4_sbar_sample = -1;
     result->rx_phase4_trn_sample = -1;
@@ -3947,8 +4415,34 @@ static bool decode_v34_pass(const int16_t *samples,
 
         if (tx_stage != prev_tx_stage) {
             switch (tx_stage) {
+            case 3:
+                note_first_sample(&result->tx_tone_a_sample, offset);
+                break;
             case 33:
                 note_first_sample(&result->tx_first_s_sample, offset);
+                break;
+            case 4:
+            case 7:
+            case 10:
+                note_first_sample(&result->tx_tone_a_sample, offset);
+                break;
+            case 5:
+            case 11:
+                note_first_sample(&result->tx_tone_a_reversal_sample, offset);
+                break;
+            case 20:
+            case 21:
+            case 23:
+            case 24:
+            case 29:
+                note_first_sample(&result->tx_tone_b_sample, offset);
+                break;
+            case 19:
+            case 26:
+                note_first_sample(&result->tx_tone_b_reversal_sample, offset);
+                break;
+            case 22:
+                note_first_sample(&result->tx_info1_sample, offset);
                 break;
             case 34:
                 note_first_sample(&result->tx_first_not_s_sample, offset);
@@ -3992,6 +4486,12 @@ static bool decode_v34_pass(const int16_t *samples,
 
         if (rx_stage != prev_rx_stage) {
             switch (rx_stage) {
+            case 5:
+                note_first_sample(&result->rx_tone_a_sample, offset);
+                break;
+            case 6:
+                note_first_sample(&result->rx_tone_b_sample, offset);
+                break;
             case 13:
                 note_first_sample(&result->rx_phase4_s_sample, offset);
                 break;
@@ -4008,6 +4508,17 @@ static bool decode_v34_pass(const int16_t *samples,
         }
 
         if (rx_event != prev_rx_event) {
+            if (rx_event == 1) {
+                if (rx_stage == 5)
+                    note_first_sample(&result->rx_tone_a_sample, offset);
+                else if (rx_stage == 6)
+                    note_first_sample(&result->rx_tone_b_sample, offset);
+            } else if (rx_event == 2 || rx_event == 3 || rx_event == 4) {
+                if (rx_stage == 5)
+                    note_first_sample(&result->rx_tone_a_reversal_sample, offset);
+                else if (rx_stage == 6)
+                    note_first_sample(&result->rx_tone_b_reversal_sample, offset);
+            }
             if (rx_event == 12)
                 note_first_sample(&result->rx_s_event_sample, offset);
             prev_rx_event = rx_event;
@@ -4018,15 +4529,24 @@ static bool decode_v34_pass(const int16_t *samples,
             && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
             result->info0_seen = true;
             result->info0_is_d = calling_party;
+            result->info0_raw = raw_info0a;
             result->info0_sample = offset;
         }
-        if (!result->info1_seen
-            && v34_get_v90_received_info1a(v34, &raw_info1a) > 0
-            && map_v34_received_info1a(&result->info1a, &raw_info1a)) {
-            result->info1_seen = true;
-            result->info1_sample = offset;
-            result->u_info = result->info1a.u_info;
-            result->u_info_from_info1a = true;
+        if (!result->info1_seen) {
+            if (v34_get_v90_received_info1a(v34, &raw_info1a) > 0
+                && map_v34_received_info1a(&result->info1a, &raw_info1a)) {
+                result->info1_seen = true;
+                result->info1_is_d = false;
+                result->info1a_raw = raw_info1a;
+                result->info1_sample = offset;
+                result->u_info = result->info1a.u_info;
+                result->u_info_from_info1a = true;
+            } else if (v34_get_v90_received_info1d(v34, &raw_info1d) > 0) {
+                result->info1_seen = true;
+                result->info1_is_d = true;
+                result->info1d = raw_info1d;
+                result->info1_sample = offset;
+            }
         }
         if (!result->phase3_seen
             && (rx_stage >= 11 || v34_get_primary_channel_active(v34))) {
@@ -4125,28 +4645,42 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
            v34_event_to_str_local(result->final_rx_event),
            result->final_rx_event);
     if (result->info0_seen) {
+        char info0_detail[1024];
+
         printf("  %-16sdecoded at %.1f ms\n",
                result->info0_is_d ? "INFO0d:" : "INFO0a:",
                sample_to_ms(result->info0_sample, 8000));
-        printf("                   3429=%s 1664pt=%s %s=%s ack_info0d=%s\n",
-               result->info0a.support_3429 ? "yes" : "no",
-               result->info0a.support_1664_point_constellation ? "yes" : "no",
-               v34_info0_clock_or_law_label(result),
-               v34_info0_clock_or_law_value(result),
-               result->info0a.acknowledge_info0d ? "yes" : "no");
+        format_v34_info0_table_summary(info0_detail,
+                                       sizeof(info0_detail),
+                                       &result->info0a,
+                                       &result->info0_raw,
+                                       "active_pass",
+                                       result->info0_is_d);
+        printf("                   %s\n", info0_detail);
     } else {
         printf("  INFO0a/INFO0d:   not decoded\n");
     }
-    if (result->info1_seen) {
+    if (result->info1_seen && !result->info1_is_d) {
+        char info1_detail[1024];
+
         printf("  INFO1a:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
-        printf("                   md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d\n",
-               (unsigned) result->info1a.md,
-               (unsigned) result->info1a.u_info,
-               (unsigned) result->info1a.upstream_symbol_rate_code,
-               (unsigned) result->info1a.downstream_rate_code,
-               result->info1a.freq_offset);
+        format_v34_info1_table15_summary(info1_detail,
+                                         sizeof(info1_detail),
+                                         &result->info1a,
+                                         &result->info1a_raw,
+                                         "active_pass");
+        printf("                   %s\n", info1_detail);
+    } else if (result->info1_seen) {
+        char info1_detail[512];
+
+        printf("  INFO1d:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
+        format_v34_info1d_table_summary(info1_detail,
+                                        sizeof(info1_detail),
+                                        &result->info1d,
+                                        "active_pass");
+        printf("                   %s\n", info1_detail);
     } else {
-        printf("  INFO1a:          not decoded\n");
+        printf("  INFO1a/INFO1d:   not decoded\n");
     }
     if (result->u_info > 0) {
         printf("  U_INFO source:   %s (%d)\n",
@@ -4270,7 +4804,7 @@ static void collect_v34_events(call_log_t *log,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
-    char detail[256];
+    char detail[1024];
     bool have_answerer = false;
     bool have_caller = false;
     const decode_v34_result_t *primary = NULL;
@@ -4324,26 +4858,64 @@ static void collect_v34_events(call_log_t *log,
         if (!res__) \
             break; \
         if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
-            snprintf(detail, sizeof(detail), \
-                     "role=%s 3429=%s 1664pt=%s %s=%s ack_info0d=%s", \
-                     role_name, \
-                     res__->info0a.support_3429 ? "yes" : "no", \
-                     res__->info0a.support_1664_point_constellation ? "yes" : "no", \
-                     v34_info0_clock_or_law_label(res__), \
-                     v34_info0_clock_or_law_value(res__), \
-                     res__->info0a.acknowledge_info0d ? "yes" : "no"); \
+            format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d); \
             call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
         } \
         if (res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
-            snprintf(detail, sizeof(detail), \
-                     "role=%s md=%u u_info=%u up_rate_code=%u down_rate_code=%u freq_offset=%d", \
-                     role_name, \
-                     (unsigned) res__->info1a.md, \
-                     (unsigned) res__->info1a.u_info, \
-                     (unsigned) res__->info1a.upstream_symbol_rate_code, \
-                     (unsigned) res__->info1a.downstream_rate_code, \
-                     res__->info1a.freq_offset); \
-            call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
+            if (res__->info1_is_d) { \
+                format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
+                call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1d decoded", detail); \
+            } else { \
+                format_v34_info1_table15_summary(detail, sizeof(detail), &res__->info1a, &res__->info1a_raw, role_name); \
+                call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
+            } \
+        } \
+        if (res__->info0_seen \
+            && v34_info0_short_phase2_requested(res__) \
+            && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+            bool local_analogue__ = res__->info0_is_d; \
+            int phase2_start__ = res__->info0_sample; \
+            int tx_tone__ = local_analogue__ ? res__->tx_tone_a_sample : res__->tx_tone_b_sample; \
+            int tx_rev__ = local_analogue__ ? res__->tx_tone_a_reversal_sample : res__->tx_tone_b_reversal_sample; \
+            int rx_tone__ = local_analogue__ ? res__->rx_tone_b_sample : res__->rx_tone_a_sample; \
+            int rx_rev__ = local_analogue__ ? res__->rx_tone_b_reversal_sample : res__->rx_tone_a_reversal_sample; \
+            int tx_info1__ = res__->tx_info1_sample; \
+            if (tx_tone__ >= 0 && tx_tone__ < phase2_start__) tx_tone__ = -1; \
+            if (tx_rev__ >= 0 && tx_rev__ < phase2_start__) tx_rev__ = -1; \
+            if (rx_tone__ >= 0 && rx_tone__ < phase2_start__) rx_tone__ = -1; \
+            if (rx_rev__ >= 0 && rx_rev__ < phase2_start__) rx_rev__ = -1; \
+            if (tx_info1__ >= 0 && tx_info1__ < phase2_start__) tx_info1__ = -1; \
+            bool complete__ = local_analogue__ \
+                ? (tx_rev__ >= 0 && tx_info1__ >= 0) \
+                : (tx_rev__ >= 0 && rx_rev__ >= 0 && res__->info1_seen); \
+            detail[0] = '\0'; \
+            appendf(detail, sizeof(detail), "role=%s", role_name); \
+            appendf(detail, sizeof(detail), " figure=V92_Fig9"); \
+            appendf(detail, sizeof(detail), " shortp2_req=1"); \
+            appendf(detail, sizeof(detail), " v92_cap=%u", v34_info0_v92_capable(res__) ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " local_modem=%s", v34_short_phase2_local_modem(res__)); \
+            appendf(detail, sizeof(detail), " sequence=%s", v34_short_phase2_sequence_id(res__)); \
+            appendf(detail, sizeof(detail), " info0_ms=%.1f", sample_to_ms(res__->info0_sample, 8000)); \
+            appendf(detail, sizeof(detail), " tx_tone_ms=%s", tx_tone__ >= 0 ? "" : "n/a"); \
+            if (tx_tone__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_tone__, 8000)); \
+            appendf(detail, sizeof(detail), " tx_reversal_ms=%s", tx_rev__ >= 0 ? "" : "n/a"); \
+            if (tx_rev__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_rev__, 8000)); \
+            appendf(detail, sizeof(detail), " rx_tone_ms=%s", rx_tone__ >= 0 ? "" : "n/a"); \
+            if (rx_tone__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(rx_tone__, 8000)); \
+            appendf(detail, sizeof(detail), " rx_reversal_ms=%s", rx_rev__ >= 0 ? "" : "n/a"); \
+            if (rx_rev__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(rx_rev__, 8000)); \
+            appendf(detail, sizeof(detail), " tx_info1_ms=%s", tx_info1__ >= 0 ? "" : "n/a"); \
+            if (tx_info1__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_info1__, 8000)); \
+            appendf(detail, sizeof(detail), " info1_seen=%u", res__->info1_seen ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " info1_ms=%s", res__->info1_sample >= 0 ? "" : "n/a"); \
+            if (res__->info1_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(res__->info1_sample, 8000)); \
+            appendf(detail, sizeof(detail), " status=%s", complete__ ? "complete" : "in_progress"); \
+            call_log_append(log, \
+                            res__->info0_sample, \
+                            0, \
+                            "V.90/V.92", \
+                            local_analogue__ ? "Short Phase 2 sequence A (Figure 9)" : "Short Phase 2 sequence B (Figure 9)", \
+                            detail); \
         } \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
