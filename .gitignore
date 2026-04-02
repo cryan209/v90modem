@@ -48,6 +48,8 @@ spandsp-master/tests/.deps/
 spandsp-master/test-data/**/.deps/
 spandsp-master/Makefile
 spandsp-master/**/Makefile
+spandsp-master/INSTALL
+spandsp-master/test-data/itu/tiff-fx/Makefile.in
 spandsp-master/autom4te.cache/
 spandsp-master/config-h.in~
 spandsp-master/configure~
