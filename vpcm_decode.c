@@ -597,6 +597,14 @@ typedef struct {
     v8bis_signal_hit_t hits[V8BIS_NUM_SIGNALS];
 } v8bis_scan_result_t;
 
+typedef struct {
+    bool seen;
+    int signal_index;
+    int sample_offset;
+    int duration_samples;
+    double score;
+} v8bis_weak_candidate_t;
+
 enum
 {
     V8_LOCAL_CALL_FUNCTION_TAG = 0x01,
@@ -1399,6 +1407,67 @@ static bool scan_v8bis_signals(const int16_t *samples,
             return true;
     }
     return false;
+}
+
+static bool scan_v8bis_weak_candidate(const int16_t *samples,
+                                      int total_samples,
+                                      int max_sample,
+                                      v8bis_weak_candidate_t *out)
+{
+    int limit;
+    v8bis_weak_candidate_t best = {0};
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    limit = total_samples;
+    if (max_sample > 0 && max_sample < limit)
+        limit = max_sample;
+    if (limit < V8BIS_SIGNAL_SAMPLES)
+        return false;
+
+    for (int offset = 0; offset + V8BIS_SIGNAL_SAMPLES <= limit; offset += V8BIS_SCAN_STEP_SAMPLES) {
+        const int16_t *seg1 = samples + offset;
+        const int16_t *seg2 = seg1 + V8BIS_SEGMENT1_SAMPLES;
+        double seg1_energy = window_energy(seg1, V8BIS_SEGMENT1_SAMPLES);
+        double seg2_energy = window_energy(seg2, V8BIS_SEGMENT2_SAMPLES);
+
+        if (seg1_energy <= 1.0 || seg2_energy <= 1.0)
+            continue;
+
+        for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
+            const v8bis_signal_def_t *def = &g_v8bis_signal_defs[i];
+            double seg1_a_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_a_hz, seg1_energy);
+            double seg1_b_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_b_hz, seg1_energy);
+            double seg2_ratio = tone_energy_ratio(seg2, V8BIS_SEGMENT2_SAMPLES, 8000, def->seg2_hz, seg2_energy);
+            double dual_ratio = seg1_a_ratio + seg1_b_ratio;
+            double balance = 0.0;
+            double score;
+
+            if (seg1_a_ratio > 0.0 && seg1_b_ratio > 0.0) {
+                double hi = (seg1_a_ratio > seg1_b_ratio) ? seg1_a_ratio : seg1_b_ratio;
+                double lo = (seg1_a_ratio > seg1_b_ratio) ? seg1_b_ratio : seg1_a_ratio;
+                balance = lo / hi;
+            }
+
+            if (dual_ratio < 0.14 || seg1_a_ratio < 0.04 || seg1_b_ratio < 0.04 || balance < 0.15 || seg2_ratio < 0.08)
+                continue;
+
+            score = dual_ratio * 1000.0 + seg2_ratio * 1200.0 + balance * 200.0;
+            if (!best.seen || score > best.score) {
+                best.seen = true;
+                best.signal_index = (int) i;
+                best.sample_offset = offset;
+                best.duration_samples = V8BIS_SIGNAL_SAMPLES;
+                best.score = score;
+            }
+        }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
 }
 
 static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
@@ -2634,6 +2703,8 @@ static bool v8_scan_v92_window_candidate(const int16_t *samples,
                                          int search_start,
                                          int search_end,
                                          bool use_ch2,
+                                         int expected_qca,
+                                         int expected_digital,
                                          v8_raw_msg_hit_t *out)
 {
     const double mark_hz = use_ch2 ? 1650.0 : 980.0;
@@ -2694,6 +2765,10 @@ static bool v8_scan_v92_window_candidate(const int16_t *samples,
                     if (sync_score < 32)
                         continue;
                     if (!decode_v92_short_phase1_candidate(bits + i, bit_count - i, use_ch2, &v92c))
+                        continue;
+                    if (expected_qca >= 0 && (int) v92c.qca != expected_qca)
+                        continue;
+                    if (expected_digital >= 0 && (int) v92c.digital_modem != expected_digital)
                         continue;
 
                     score = ones_score + sync_score;
@@ -3628,9 +3703,11 @@ static void decode_v8_pass(const int16_t *samples,
 {
     v8_probe_result_t probe;
     v8bis_scan_result_t v8bis;
+    v8bis_weak_candidate_t weak_v8bis;
     ans_fallback_hit_t ans_fallback;
     v8_fsk_burst_hit_t v21_burst;
 
+    memset(&weak_v8bis, 0, sizeof(weak_v8bis));
     if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
         static const char *v8bis_desc[] = {
             "Modem Relay establishing (auto-answer)",
@@ -3651,6 +3728,13 @@ static void decode_v8_pass(const int16_t *samples,
                    i < sizeof(v8bis_desc)/sizeof(v8bis_desc[0]) ? v8bis_desc[i] : "",
                    sample_to_ms(v8bis.hits[i].sample_offset, 8000));
         }
+    } else if (scan_v8bis_weak_candidate(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &weak_v8bis)) {
+        const v8bis_signal_def_t *def = &g_v8bis_signal_defs[weak_v8bis.signal_index];
+
+        printf("  Weak V.8bis:     %s-like energy at %.1f ms (score %.0f)\n",
+               def->name,
+               sample_to_ms(weak_v8bis.sample_offset, 8000),
+               weak_v8bis.score);
     }
 
     if (v8_select_best_probe(samples, total_samples, calling_party, total_samples, &probe)) {
@@ -3684,12 +3768,14 @@ static void decode_v8_pass(const int16_t *samples,
 
                 memset(&pre_cm_candidate, 0, sizeof(pre_cm_candidate));
                 if (v8_scan_v92_window_candidate(samples,
-                                                total_samples,
-                                                8000,
-                                                probe.ansam_sample + 12000,
-                                                probe.cm_jm_sample,
-                                                false,
-                                                &pre_cm_candidate)
+                                                 total_samples,
+                                                 8000,
+                                                 probe.ansam_sample + 12000,
+                                                 probe.cm_jm_sample,
+                                                 false,
+                                                 0,
+                                                 0,
+                                                 &pre_cm_candidate)
                     && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
                     v92_short_phase1_candidate_t pre_cm_v92c;
 
@@ -3730,6 +3816,34 @@ static void decode_v8_pass(const int16_t *samples,
         } else {
             printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
             printf("  Possible V.8bis or clipped pre-V.8 exchange\n");
+            if (probe.ansam_sample >= 0) {
+                v8_raw_msg_hit_t post_ans_candidate;
+
+                memset(&post_ans_candidate, 0, sizeof(post_ans_candidate));
+                if (v8_scan_v92_window_candidate(samples,
+                                                 total_samples,
+                                                 8000,
+                                                 probe.ansam_sample + 12000,
+                                                 total_samples,
+                                                 !calling_party,
+                                                 !calling_party ? 1 : 0,
+                                                 -1,
+                                                 &post_ans_candidate)
+                    && post_ans_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+                    v92_short_phase1_candidate_t post_ans_v92c;
+
+                    if (decode_v92_short_phase1_candidate(post_ans_candidate.bit_run,
+                                                          post_ans_candidate.bit_len,
+                                                          !calling_party,
+                                                          &post_ans_v92c)) {
+                        printf("  Post-ANSam V.92: %s at %.1f-%.1f ms on %s pair\n",
+                               post_ans_v92c.name,
+                               sample_to_ms(post_ans_candidate.sample_offset, 8000),
+                               sample_to_ms(post_ans_candidate.sample_offset + 560, 8000),
+                               calling_party ? "980/1180 Hz" : "1650/1850 Hz");
+                    }
+                }
+            }
             if (probe.ansam_sample >= 0
                 && probe.cm_jm_sample < 0
                 && v8_detect_v21_burst(samples,
@@ -3913,6 +4027,8 @@ static void collect_v8_event(call_log_t *log,
                                          probe.ansam_sample + 12000,
                                          probe.cm_jm_sample,
                                          false,
+                                         0,
+                                         0,
                                          &pre_cm_candidate)
             && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
             v92_short_phase1_candidate_t pre_cm_v92c;
@@ -3942,6 +4058,8 @@ static void collect_v8_event(call_log_t *log,
         && probe.cm_jm_sample < 0
         && probe.cj_sample < 0
         && probe.v8_call_sample < 0) {
+        v8_raw_msg_hit_t post_ans_candidate;
+
         snprintf(detail, sizeof(detail),
                  "role=%s early negotiation energy without CI/CM/JM/CJ",
                  probe.calling_party ? "caller" : "answerer");
@@ -3951,6 +4069,33 @@ static void collect_v8_event(call_log_t *log,
                         "V.8bis?",
                         "Possible V.8bis / pre-V.8 negotiation",
                         detail);
+        memset(&post_ans_candidate, 0, sizeof(post_ans_candidate));
+        if (v8_scan_v92_window_candidate(samples,
+                                         total_samples,
+                                         8000,
+                                         probe.ansam_sample + 12000,
+                                         max_sample > 0 ? max_sample : total_samples,
+                                         !probe.calling_party,
+                                         !probe.calling_party ? 1 : 0,
+                                         -1,
+                                         &post_ans_candidate)
+            && post_ans_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+            v92_short_phase1_candidate_t post_ans_v92c;
+
+            if (decode_v92_short_phase1_candidate(post_ans_candidate.bit_run,
+                                                  post_ans_candidate.bit_len,
+                                                  !probe.calling_party,
+                                                  &post_ans_v92c)) {
+                snprintf(summary, sizeof(summary), "Post-ANSam %s", post_ans_v92c.name);
+                snprintf(detail, sizeof(detail),
+                         "role=%s start=%.1f ms duration=%.1f ms pair=%s post_ansam=yes",
+                         probe.calling_party ? "caller" : "answerer",
+                         sample_to_ms(post_ans_candidate.sample_offset, 8000),
+                         70.0,
+                         probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz");
+                call_log_append(log, post_ans_candidate.sample_offset, 560, "V.92", summary, detail);
+            }
+        }
     }
     if (probe.last_status == V8_STATUS_V8_CALL && probe.v8_call_sample >= 0) {
         snprintf(summary, sizeof(summary),
@@ -4442,13 +4587,31 @@ static void collect_v8bis_events(call_log_t *log,
                                  int max_sample)
 {
     v8bis_scan_result_t v8bis;
+    v8bis_weak_candidate_t weak_v8bis;
     char summary[160];
     char detail[320];
 
     if (!log || !samples || total_samples <= 0)
         return;
-    if (!scan_v8bis_signals(samples, total_samples, max_sample, &v8bis))
+    if (!scan_v8bis_signals(samples, total_samples, max_sample, &v8bis)) {
+        if (!scan_v8bis_weak_candidate(samples, total_samples, max_sample, &weak_v8bis))
+            return;
+        snprintf(summary, sizeof(summary), "Weak %s-like energy", g_v8bis_signal_defs[weak_v8bis.signal_index].name);
+        snprintf(detail, sizeof(detail),
+                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f weak=yes",
+                 g_v8bis_signal_defs[weak_v8bis.signal_index].role,
+                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_a_hz,
+                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_b_hz,
+                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg2_hz,
+                 weak_v8bis.score);
+        call_log_append(log,
+                        weak_v8bis.sample_offset,
+                        weak_v8bis.duration_samples,
+                        "V.8bis?",
+                        summary,
+                        detail);
         return;
+    }
 
     static const char *v8bis_descriptions[] = {
         "Modem Relay establishing (auto-answer)",
