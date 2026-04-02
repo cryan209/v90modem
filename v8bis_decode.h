@@ -23,7 +23,7 @@ typedef struct {
     int duration_samples;
     char protocol[24];
     char summary[160];
-    char detail[1024];
+    char detail[4096];
 } call_log_event_t;
 
 typedef struct {

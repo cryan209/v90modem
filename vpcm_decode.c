@@ -16,6 +16,7 @@
 #include "vpcm_cp.h"
 #include "v8bis_decode.h"
 #include "v92_short_phase1_decode.h"
+#include "v92_short_phase2_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -1420,6 +1421,8 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
     if (strcmp(event->protocol, "V.90/V.92") == 0
         && strncmp(event->summary, "Short Phase 2 sequence", 22) == 0
         && pair_count > 0) {
+        const char *seq = detail_value(pairs, pair_count, "sequence");
+        bool is_seq_a = (seq && strcmp(seq, "A") == 0);
         appendf(out, out_len, "<div class=\"detail-kv\">");
         append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
         append_html_label_value(out, out_len, "Figure", detail_value(pairs, pair_count, "figure"));
@@ -1436,6 +1439,19 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "INFO1 seen", detail_bit_to_yes_no(detail_value(pairs, pair_count, "info1_seen")));
         append_html_label_value(out, out_len, "INFO1 decoded at", detail_value(pairs, pair_count, "info1_ms"));
         append_html_label_value(out, out_len, "Sequence status", detail_value(pairs, pair_count, "status"));
+        appendf(out, out_len, "<hr><div><strong>Figure 9 State Machine:</strong></div>");
+        if (is_seq_a) {
+            append_html_label_value(out, out_len, "9.4.2.1.1 INFO0d received / Tone A sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94211")));
+            append_html_label_value(out, out_len, "9.4.2.1.2 Tone B detected while receiving INFO0d", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94212")));
+            append_html_label_value(out, out_len, "9.4.2.1.3 Tone B reversal then Tone A reversal sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94213")));
+            append_html_label_value(out, out_len, "9.4.2.1.4 INFO1a sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94214")));
+        } else {
+            append_html_label_value(out, out_len, "9.4.1.1.1 INFO0d sent / Tone B sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94111")));
+            append_html_label_value(out, out_len, "9.4.1.1.2 INFO0a received / Tone A detected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94112")));
+            append_html_label_value(out, out_len, "9.4.1.1.3 Tone B phase reversal sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94113")));
+            append_html_label_value(out, out_len, "9.4.1.1.4 Tone A phase reversal detected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94114")));
+            append_html_label_value(out, out_len, "9.4.1.1.5 INFO1a received", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94115")));
+        }
         appendf(out, out_len, "</div>");
         return;
     }
@@ -3518,47 +3534,6 @@ static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
     return sample <= latest_allowed_sample;
 }
 
-static bool v34_info0_short_phase2_requested(const decode_v34_result_t *result)
-{
-    uint8_t raw_26_27;
-
-    if (!result || !result->info0_seen)
-        return false;
-
-    raw_26_27 = result->info0_raw.raw_26_27;
-    if (result->info0_is_d)
-        return (raw_26_27 & 0x01U) != 0;         /* INFO0d bit 26 */
-    return (raw_26_27 & 0x02U) != 0;             /* INFO0a bit 27 */
-}
-
-static bool v34_info0_v92_capable(const decode_v34_result_t *result)
-{
-    uint8_t raw_26_27;
-
-    if (!result || !result->info0_seen)
-        return false;
-
-    raw_26_27 = result->info0_raw.raw_26_27;
-    if (result->info0_is_d)
-        return (raw_26_27 & 0x02U) != 0;         /* INFO0d bit 27 */
-    return (raw_26_27 & 0x01U) != 0;             /* INFO0a bit 26 */
-}
-
-static const char *v34_short_phase2_sequence_id(const decode_v34_result_t *result)
-{
-    /* Receiving INFO0d implies local analogue modem path (Figure 9 upper/A line). */
-    if (result && result->info0_is_d)
-        return "A";
-    return "B";
-}
-
-static const char *v34_short_phase2_local_modem(const decode_v34_result_t *result)
-{
-    if (result && result->info0_is_d)
-        return "analogue";
-    return "digital";
-}
-
 static const char *v34_info0_label(const decode_v34_result_t *result)
 {
     return (result && result->info0_is_d) ? "INFO0d decoded" : "INFO0a decoded";
@@ -4880,14 +4855,28 @@ static void collect_v34_events(call_log_t *log,
             int rx_tone__ = local_analogue__ ? res__->rx_tone_b_sample : res__->rx_tone_a_sample; \
             int rx_rev__ = local_analogue__ ? res__->rx_tone_b_reversal_sample : res__->rx_tone_a_reversal_sample; \
             int tx_info1__ = res__->tx_info1_sample; \
+            bool c94111__ = false, c94112__ = false, c94113__ = false, c94114__ = false, c94115__ = false; \
+            bool c94211__ = false, c94212__ = false, c94213__ = false, c94214__ = false; \
+            bool complete__ = false; \
             if (tx_tone__ >= 0 && tx_tone__ < phase2_start__) tx_tone__ = -1; \
             if (tx_rev__ >= 0 && tx_rev__ < phase2_start__) tx_rev__ = -1; \
             if (rx_tone__ >= 0 && rx_tone__ < phase2_start__) rx_tone__ = -1; \
             if (rx_rev__ >= 0 && rx_rev__ < phase2_start__) rx_rev__ = -1; \
             if (tx_info1__ >= 0 && tx_info1__ < phase2_start__) tx_info1__ = -1; \
-            bool complete__ = local_analogue__ \
-                ? (tx_rev__ >= 0 && tx_info1__ >= 0) \
-                : (tx_rev__ >= 0 && rx_rev__ >= 0 && res__->info1_seen); \
+            if (local_analogue__) { \
+                c94211__ = (res__->info0_seen && res__->info0_is_d); \
+                c94212__ = (c94211__ && rx_tone__ >= 0); \
+                c94213__ = (c94212__ && rx_rev__ >= 0 && tx_rev__ >= 0); \
+                c94214__ = (c94213__ && tx_info1__ >= 0); \
+                complete__ = c94214__; \
+            } else { \
+                c94111__ = (res__->info0_seen && !res__->info0_is_d); \
+                c94112__ = (c94111__ && rx_tone__ >= 0); \
+                c94113__ = (c94112__ && tx_rev__ >= 0); \
+                c94114__ = (c94113__ && rx_rev__ >= 0); \
+                c94115__ = (c94114__ && res__->info1_seen); \
+                complete__ = c94115__; \
+            } \
             detail[0] = '\0'; \
             appendf(detail, sizeof(detail), "role=%s", role_name); \
             appendf(detail, sizeof(detail), " figure=V92_Fig9"); \
@@ -4909,6 +4898,15 @@ static void collect_v34_events(call_log_t *log,
             appendf(detail, sizeof(detail), " info1_seen=%u", res__->info1_seen ? 1U : 0U); \
             appendf(detail, sizeof(detail), " info1_ms=%s", res__->info1_sample >= 0 ? "" : "n/a"); \
             if (res__->info1_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(res__->info1_sample, 8000)); \
+            appendf(detail, sizeof(detail), " c94111=%u", c94111__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94112=%u", c94112__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94113=%u", c94113__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94114=%u", c94114__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94115=%u", c94115__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94211=%u", c94211__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94212=%u", c94212__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94213=%u", c94213__ ? 1U : 0U); \
+            appendf(detail, sizeof(detail), " c94214=%u", c94214__ ? 1U : 0U); \
             appendf(detail, sizeof(detail), " status=%s", complete__ ? "complete" : "in_progress"); \
             call_log_append(log, \
                             res__->info0_sample, \
@@ -5085,7 +5083,7 @@ static void call_log_merge_with_channel(call_log_t *dst,
                                         const call_log_t *src,
                                         const char *channel_label)
 {
-    char detail[320];
+    char detail[4096];
 
     if (!dst || !src || !channel_label)
         return;
