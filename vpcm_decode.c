@@ -553,6 +553,13 @@ typedef struct {
 } v8_raw_msg_hit_t;
 
 typedef struct {
+    bool seen;
+    int start_sample;
+    int duration_samples;
+    double peak_strength;
+} v8_fsk_burst_hit_t;
+
+typedef struct {
     int preamble_type;
     uint32_t bit_stream;
     int bit_cnt;
@@ -1735,6 +1742,85 @@ static bool v8_scan_raw_cm_jm(const int16_t *samples,
     return true;
 }
 
+static bool v8_detect_v21_burst(const int16_t *samples,
+                                int total_samples,
+                                int sample_rate,
+                                int search_start,
+                                int search_end,
+                                bool use_ch2,
+                                v8_fsk_burst_hit_t *out)
+{
+    enum {
+        WINDOW_SAMPLES = 160,
+        STEP_SAMPLES = 80,
+        MIN_RUN_WINDOWS = 8
+    };
+    const double f0 = use_ch2 ? 1650.0 : 980.0;
+    const double f1 = use_ch2 ? 1850.0 : 1180.0;
+    int run_start = -1;
+    int run_windows = 0;
+    double run_peak = 0.0;
+    v8_fsk_burst_hit_t best = { false, 0, 0, 0.0 };
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !out)
+        return false;
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < WINDOW_SAMPLES)
+        return false;
+
+    for (int start = search_start; start + WINDOW_SAMPLES <= search_end; start += STEP_SAMPLES) {
+        double energy = window_energy(samples + start, WINDOW_SAMPLES);
+        double p0;
+        double p1;
+        double strength;
+
+        if (energy <= 0.0)
+            goto reset_run;
+        p0 = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, f0, energy);
+        p1 = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, f1, energy);
+        strength = p0 + p1;
+        if (strength >= 0.18) {
+            if (run_start < 0) {
+                run_start = start;
+                run_windows = 0;
+                run_peak = 0.0;
+            }
+            run_windows++;
+            if (strength > run_peak)
+                run_peak = strength;
+            continue;
+        }
+
+reset_run:
+        if (run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
+            best.seen = true;
+            best.start_sample = run_start;
+            best.duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
+            best.peak_strength = run_peak;
+            break;
+        }
+        run_start = -1;
+        run_windows = 0;
+        run_peak = 0.0;
+    }
+
+    if (!best.seen && run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
+        best.seen = true;
+        best.start_sample = run_start;
+        best.duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
+        best.peak_strength = run_peak;
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
 static void v8_salvage_partial_probe(v8_state_t *v8,
                                      int sample_offset,
                                      v8_probe_result_t *out)
@@ -2681,6 +2767,7 @@ static void collect_v8_event(call_log_t *log,
 {
     v8_probe_result_t probe;
     ans_fallback_hit_t ans_fallback;
+    v8_fsk_burst_hit_t v21_burst;
     char summary[160];
     char detail[320];
 
@@ -2753,6 +2840,32 @@ static void collect_v8_event(call_log_t *log,
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
                  v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
         call_log_append(log, probe.v8_call_sample, 0, "V.8", summary, detail);
+    }
+    if (probe.cm_jm_sample < 0
+        && probe.ansam_sample >= 0
+        && v8_detect_v21_burst(samples,
+                               total_samples,
+                               8000,
+                               probe.ansam_sample + 12000,
+                               max_sample > 0 ? max_sample : total_samples,
+                               !probe.calling_party,
+                               &v21_burst)) {
+        snprintf(summary, sizeof(summary),
+                 "%s-like V.21 burst candidate",
+                 probe.calling_party ? "CM" : "JM");
+        snprintf(detail, sizeof(detail),
+                 "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%%",
+                 probe.calling_party ? "caller" : "answerer",
+                 sample_to_ms(v21_burst.start_sample, 8000),
+                 sample_to_ms(v21_burst.duration_samples, 8000),
+                 probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                 v21_burst.peak_strength * 100.0);
+        call_log_append(log,
+                        v21_burst.start_sample,
+                        v21_burst.duration_samples,
+                        "V.8?",
+                        summary,
+                        detail);
     }
     if (probe.ansam_sample < 0
         && detect_standalone_ans_fallback(samples, total_samples, 8000, max_sample, &ans_fallback)) {
