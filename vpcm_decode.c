@@ -1926,6 +1926,112 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
     return true;
 }
 
+static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
+                                            int total_samples,
+                                            int sample_rate,
+                                            const v8_fsk_burst_hit_t *burst,
+                                            bool use_ch2,
+                                            v8_raw_msg_hit_t *out)
+{
+    const double mark_hz = use_ch2 ? 1650.0 : 980.0;
+    const double space_hz = use_ch2 ? 1850.0 : 1180.0;
+    const double symbol_samples = (double) sample_rate / 300.0;
+    int search_start;
+    int search_end;
+    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
+        return false;
+
+    search_start = burst->start_sample - 320;
+    search_end = burst->start_sample + burst->duration_samples + 320;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end > total_samples)
+        search_end = total_samples;
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+            double phase = (double) phase_q / 4.0;
+            uint8_t bits[512];
+            int bit_count = 0;
+
+            for (int k = 0; ; k++) {
+                int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                double e;
+                double pm;
+                double ps;
+                int bit;
+
+                if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                    break;
+                e = window_energy(samples + a, b - a);
+                if (e <= 0.0)
+                    break;
+                pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                bit = (pm >= ps) ? 1 : 0;
+                if (invert)
+                    bit ^= 1;
+                bits[bit_count++] = (uint8_t) bit;
+            }
+
+            for (int i = 0; i + 10 <= bit_count; i++) {
+                uint8_t bytes[16];
+                int byte_len = 0;
+                int score = 0;
+
+                for (int bit_pos = i; bit_pos + 10 <= bit_count && byte_len < (int) sizeof(bytes); bit_pos += 10) {
+                    uint8_t byte = 0;
+
+                    if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
+                        break;
+                    for (int j = 0; j < 8; j++)
+                        byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+                    bytes[byte_len++] = byte;
+                }
+                if (byte_len < 2)
+                    continue;
+
+                for (int j = 0; j < byte_len; j++) {
+                    uint8_t b = bytes[j];
+                    uint8_t tag = b & 0x1F;
+
+                    if (b == 0xE0)
+                        score += 40;
+                    else if (tag == V8_LOCAL_CALL_FUNCTION_TAG
+                             || tag == V8_LOCAL_MODULATION_TAG
+                             || tag == V8_LOCAL_PROTOCOLS_TAG
+                             || tag == V8_LOCAL_PSTN_ACCESS_TAG
+                             || tag == V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG
+                             || tag == V8_LOCAL_T66_TAG)
+                        score += 12;
+                    else if (b == 0 || b == 0x80 || b == 0xC0 || b == 0xE0
+                             || b == 0xF0 || b == 0xF8 || b == 0xFC || b == 0xFE || b == 0xFF)
+                        score -= 6;
+                    else
+                        score -= 1;
+                }
+                score += byte_len;
+                if (!best.seen || score > best.score) {
+                    memset(&best, 0, sizeof(best));
+                    best.seen = true;
+                    best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                    best.byte_len = byte_len;
+                    best.score = score;
+                    memcpy(best.bytes, bytes, (size_t) byte_len);
+                }
+            }
+        }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
 static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int byte_len)
 {
     size_t used = 0;
@@ -2920,12 +3026,26 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                                        total_samples,
                                        !calling_party,
                                        &v21_burst)) {
+                v8_raw_msg_hit_t raw_candidate;
+                char hexbuf[256];
+
+                hexbuf[0] = '\0';
+                if (v8_targeted_v21_bytes_candidate(samples,
+                                                    total_samples,
+                                                    8000,
+                                                    &v21_burst,
+                                                    !calling_party,
+                                                    &raw_candidate)) {
+                    format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
+                }
                 printf("  %s-like V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
                        calling_party ? "CM" : "JM",
                        sample_to_ms(v21_burst.start_sample, 8000),
                        sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
                        calling_party ? "980/1180 Hz" : "1650/1850 Hz",
                        v21_burst.peak_strength * 100.0);
+                if (hexbuf[0] != '\0')
+                    printf("  Candidate bytes: %s\n", hexbuf);
             }
         }
     } else {
@@ -3036,16 +3156,30 @@ static void collect_v8_event(call_log_t *log,
                                max_sample > 0 ? max_sample : total_samples,
                                !probe.calling_party,
                                &v21_burst)) {
+        v8_raw_msg_hit_t raw_candidate;
+        char hexbuf[256];
+
+        hexbuf[0] = '\0';
+        if (v8_targeted_v21_bytes_candidate(samples,
+                                            total_samples,
+                                            8000,
+                                            &v21_burst,
+                                            !probe.calling_party,
+                                            &raw_candidate)) {
+            format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
+        }
         snprintf(summary, sizeof(summary),
                  "%s-like V.21 burst candidate",
                  probe.calling_party ? "CM" : "JM");
         snprintf(detail, sizeof(detail),
-                 "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%%",
+                 "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%%%s%s",
                  probe.calling_party ? "caller" : "answerer",
                  sample_to_ms(v21_burst.start_sample, 8000),
                  sample_to_ms(v21_burst.duration_samples, 8000),
                  probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
-                 v21_burst.peak_strength * 100.0);
+                 v21_burst.peak_strength * 100.0,
+                 hexbuf[0] != '\0' ? " raw=" : "",
+                 hexbuf[0] != '\0' ? hexbuf : "");
         call_log_append(log,
                         v21_burst.start_sample,
                         v21_burst.duration_samples,
