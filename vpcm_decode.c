@@ -545,6 +545,28 @@ typedef struct {
 } ans_fallback_hit_t;
 
 typedef struct {
+    bool seen;
+    int sample_offset;
+    int byte_len;
+    int score;
+    uint8_t bytes[64];
+} v8_raw_msg_hit_t;
+
+typedef struct {
+    int preamble_type;
+    uint32_t bit_stream;
+    int bit_cnt;
+    int zero_byte_count;
+    int rx_data_ptr;
+    uint8_t rx_data[64];
+    int bits_seen;
+    int bit_count;
+    uint8_t bits[16384];
+    bool calling_party;
+    v8_raw_msg_hit_t best_cm_jm;
+} v8_raw_scan_state_t;
+
+typedef struct {
     const char *name;
     const char *role;
     int seg1_a_hz;
@@ -574,6 +596,14 @@ enum
     V8_LOCAL_NSF_TAG = 0x0F,
     V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG = 0x07,
     V8_LOCAL_T66_TAG = 0x0E
+};
+
+enum
+{
+    V8_LOCAL_SYNC_UNKNOWN = 0,
+    V8_LOCAL_SYNC_CI,
+    V8_LOCAL_SYNC_CM_JM,
+    V8_LOCAL_SYNC_V92
 };
 
 typedef struct {
@@ -1465,6 +1495,246 @@ static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
     return parsed_any;
 }
 
+static int v8_candidate_score(const v8_parms_t *parsed, int len)
+{
+    int score = 0;
+
+    if (!parsed || len <= 0)
+        return -1;
+
+    score += len * 8;
+    if (parsed->jm_cm.call_function != 0)
+        score += 120;
+    if (parsed->jm_cm.modulations != 0)
+        score += 180;
+    if (parsed->jm_cm.protocols != 0)
+        score += 70;
+    if (parsed->jm_cm.pcm_modem_availability != 0)
+        score += 90;
+    if (parsed->jm_cm.pstn_access != 0)
+        score += 60;
+    if (parsed->jm_cm.t66 >= 0)
+        score += 20;
+    if (parsed->jm_cm.nsf >= 0)
+        score += 10;
+    return score;
+}
+
+static void v8_raw_scan_process_message(v8_raw_scan_state_t *scan,
+                                        int preamble_type,
+                                        bool calling_party)
+{
+    v8_parms_t parsed;
+    v8_raw_msg_hit_t hit;
+    int approx_end_sample;
+
+    if (!scan || preamble_type != V8_LOCAL_SYNC_CM_JM || scan->rx_data_ptr <= 0)
+        return;
+    if (!v8_parse_cm_jm_candidate(&parsed, scan->rx_data, scan->rx_data_ptr, calling_party))
+        return;
+
+    memset(&hit, 0, sizeof(hit));
+    hit.seen = true;
+    hit.byte_len = scan->rx_data_ptr;
+    hit.score = v8_candidate_score(&parsed, scan->rx_data_ptr);
+    if (hit.score < 0)
+        return;
+    if (hit.byte_len > (int) sizeof(hit.bytes))
+        hit.byte_len = (int) sizeof(hit.bytes);
+    memcpy(hit.bytes, scan->rx_data, (size_t) hit.byte_len);
+
+    approx_end_sample = (scan->bits_seen * 8000) / 300;
+    hit.sample_offset = approx_end_sample - (scan->rx_data_ptr * 10 * 8000) / 300;
+    if (hit.sample_offset < 0)
+        hit.sample_offset = 0;
+
+    if (!scan->best_cm_jm.seen || hit.score > scan->best_cm_jm.score)
+        scan->best_cm_jm = hit;
+}
+
+static void v8_raw_scan_put_bit(void *user_data, int bit)
+{
+    v8_raw_scan_state_t *scan = user_data;
+    int new_preamble_type;
+    uint8_t data;
+
+    if (!scan)
+        return;
+    if (bit < 0)
+        return;
+
+    if (scan->bit_count < (int) sizeof(scan->bits))
+        scan->bits[scan->bit_count++] = (uint8_t) (bit & 1);
+    scan->bits_seen++;
+    scan->bit_stream = (scan->bit_stream >> 1) | ((uint32_t) bit << 19);
+    switch (scan->bit_stream) {
+    case 0x803FF:
+        new_preamble_type = V8_LOCAL_SYNC_CI;
+        break;
+    case 0xF03FF:
+        new_preamble_type = V8_LOCAL_SYNC_CM_JM;
+        break;
+    case 0xAABFF:
+        new_preamble_type = V8_LOCAL_SYNC_V92;
+        break;
+    default:
+        new_preamble_type = V8_LOCAL_SYNC_UNKNOWN;
+        break;
+    }
+
+    if (new_preamble_type != V8_LOCAL_SYNC_UNKNOWN) {
+        v8_raw_scan_process_message(scan, scan->preamble_type, scan->calling_party);
+        scan->preamble_type = new_preamble_type;
+        scan->bit_cnt = 0;
+        scan->rx_data_ptr = 0;
+        scan->zero_byte_count = 0;
+    }
+
+    if (scan->preamble_type != V8_LOCAL_SYNC_UNKNOWN) {
+        scan->bit_cnt++;
+        if ((scan->bit_stream & 0x80400) == 0x80000 && scan->bit_cnt >= 10) {
+            data = (uint8_t) ((scan->bit_stream >> 11) & 0xFF);
+            if (data == 0)
+                scan->zero_byte_count++;
+            else
+                scan->zero_byte_count = 0;
+            if (scan->rx_data_ptr < (int) (sizeof(scan->rx_data) - 1))
+                scan->rx_data[scan->rx_data_ptr++] = data;
+            scan->bit_cnt = 0;
+        }
+    }
+}
+
+static bool v8_decode_async_octet(const uint8_t *bits, int bit_count, int start, uint8_t *octet)
+{
+    uint8_t data = 0;
+
+    if (!bits || !octet || start < 0 || start + 10 > bit_count)
+        return false;
+    if (bits[start] != 0 || bits[start + 9] != 1)
+        return false;
+    for (int i = 0; i < 8; i++)
+        data |= (uint8_t) (bits[start + 1 + i] & 1) << i;
+    *octet = data;
+    return true;
+}
+
+static void v8_syncless_scan_bits(v8_raw_scan_state_t *scan)
+{
+    v8_raw_msg_hit_t hit;
+
+    if (!scan || scan->bit_count < 20)
+        return;
+
+    for (int start = 0; start + 20 <= scan->bit_count; start++) {
+        uint8_t first;
+        uint8_t bytes[64];
+        int byte_len = 0;
+        int bit = start;
+        v8_parms_t parsed;
+
+        if (!v8_decode_async_octet(scan->bits, scan->bit_count, start, &first))
+            continue;
+        if (first != 0xE0)
+            continue;
+
+        bit += 10;
+        while (bit + 10 <= scan->bit_count && byte_len < (int) sizeof(bytes)) {
+            uint8_t data;
+
+            if (!v8_decode_async_octet(scan->bits, scan->bit_count, bit, &data))
+                break;
+            bytes[byte_len++] = data;
+            bit += 10;
+            if (data == 0)
+                break;
+        }
+        if (byte_len <= 0)
+            continue;
+        if (!v8_parse_cm_jm_candidate(&parsed, bytes, byte_len, scan->calling_party))
+            continue;
+
+        memset(&hit, 0, sizeof(hit));
+        hit.seen = true;
+        hit.byte_len = byte_len;
+        hit.sample_offset = (start * 8000) / 300;
+        hit.score = v8_candidate_score(&parsed, byte_len) - 15;
+        memcpy(hit.bytes, bytes, (size_t) byte_len);
+
+        if (!scan->best_cm_jm.seen || hit.score > scan->best_cm_jm.score)
+            scan->best_cm_jm = hit;
+    }
+}
+
+static bool v8_scan_raw_cm_jm(const int16_t *samples,
+                              int total_samples,
+                              int max_sample,
+                              bool calling_party,
+                              v8_raw_msg_hit_t *out)
+{
+    int limit;
+    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    limit = total_samples;
+    if (max_sample > 0 && max_sample < limit)
+        limit = max_sample;
+
+    for (int pass = 0; pass < 4; pass++) {
+        v8_raw_scan_state_t scan;
+        fsk_rx_state_t fsk;
+        int16_t *scratch = NULL;
+        const int16_t *src = samples;
+        bool invert = (pass & 1) != 0;
+        bool use_ch2 = (pass & 2) != 0;
+
+        memset(&scan, 0, sizeof(scan));
+        scan.preamble_type = V8_LOCAL_SYNC_UNKNOWN;
+        scan.calling_party = calling_party;
+
+        if (invert) {
+            scratch = malloc((size_t) limit * sizeof(*scratch));
+            if (!scratch)
+                continue;
+            for (int i = 0; i < limit; i++)
+                scratch[i] = (int16_t) -samples[i];
+            src = scratch;
+        }
+
+        fsk_rx_init(&fsk,
+                    &preset_fsk_specs[use_ch2 ? FSK_V21CH2 : FSK_V21CH1],
+                    FSK_FRAME_MODE_ASYNC,
+                    v8_raw_scan_put_bit,
+                    &scan);
+        fsk_rx_set_signal_cutoff(&fsk, -45.5f);
+        fsk_rx(&fsk, src, limit);
+        v8_raw_scan_process_message(&scan, scan.preamble_type, calling_party);
+        if (!scan.best_cm_jm.seen)
+            v8_syncless_scan_bits(&scan);
+
+        if (scan.best_cm_jm.seen) {
+            int score = scan.best_cm_jm.score;
+
+            if (use_ch2 == calling_party)
+                score += 25;
+            if (invert)
+                score -= 5;
+            scan.best_cm_jm.score = score;
+            if (!best.seen || score > best.score)
+                best = scan.best_cm_jm;
+        }
+
+        free(scratch);
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
 static void v8_salvage_partial_probe(v8_state_t *v8,
                                      int sample_offset,
                                      v8_probe_result_t *out)
@@ -1750,6 +2020,18 @@ static bool v8_collect_probe(const int16_t *samples,
     }
 
     v8_salvage_partial_probe(v8, offset, out);
+    if (out->cm_jm_sample < 0) {
+        v8_raw_msg_hit_t raw_hit;
+        v8_parms_t parsed;
+
+        if (v8_scan_raw_cm_jm(samples, total_samples, limit, calling_party, &raw_hit)
+            && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
+            out->result = parsed;
+            out->last_status = parsed.status;
+            out->cm_jm_sample = raw_hit.sample_offset;
+            out->cm_jm_salvaged = true;
+        }
+    }
 
     if (out->ansam_sample < 0) {
         ans_fallback_hit_t ans_hit;
