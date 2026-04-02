@@ -1833,7 +1833,6 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
 {
     const double mark_hz = use_ch2 ? 1650.0 : 980.0;
     const double space_hz = use_ch2 ? 1850.0 : 1180.0;
-    const double symbol_samples = (double) sample_rate / 300.0;
     int search_start;
     int search_end;
     v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
@@ -1841,79 +1840,105 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
 
-    search_start = burst->start_sample - 320;
+    search_start = burst->start_sample - 800;
     search_end = burst->start_sample + burst->duration_samples + 320;
     if (search_start < 0)
         search_start = 0;
     if (search_end > total_samples)
         search_end = total_samples;
-    if (search_end - search_start < (int) symbol_samples * 12)
+    if (search_end - search_start < (sample_rate / 300) * 12)
         return false;
 
     for (int invert = 0; invert <= 1; invert++) {
-        for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
-            double phase = (double) phase_q / 4.0;
-            uint8_t bits[512];
-            int bit_count = 0;
+        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
 
-            for (int k = 0; ; k++) {
-                int a = search_start + (int) lround(phase + (double) k * symbol_samples);
-                int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
-                double pm;
-                double ps;
-                int bit;
+            for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                int bit_count = 0;
 
-                if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
-                    break;
-                pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, window_energy(samples + a, b - a));
-                ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, window_energy(samples + a, b - a));
-                bit = (pm >= ps) ? 1 : 0;
-                if (invert)
-                    bit ^= 1;
-                bits[bit_count++] = (uint8_t) bit;
-            }
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
 
-            for (int i = 0; i + 10 <= bit_count; i++) {
-                uint8_t sync_octet;
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                        break;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count++] = (uint8_t) bit;
+                }
 
-                if (bits[i] != 0 || bits[i + 9] != 1)
-                    continue;
-                sync_octet = 0;
-                for (int j = 0; j < 8; j++)
-                    sync_octet |= (uint8_t) (bits[i + 1 + j] & 1) << j;
-                if (sync_octet != 0xE0)
-                    continue;
+                for (int i = 0; i + 10 <= bit_count; i++) {
+                    for (int start_mode = 0; start_mode < 2; start_mode++) {
+                        uint8_t payload[64];
+                        int payload_len = 0;
+                        int bit_pos = i;
+                        int score_bias = 0;
+                        uint8_t first_tag;
+                        uint8_t second_tag;
+                        v8_parms_t parsed;
 
-                for (int limit_bytes = 1; limit_bytes <= 16; limit_bytes++) {
-                    uint8_t payload[64];
-                    int payload_len = 0;
-                    v8_parms_t parsed;
-                    int score;
+                        if (start_mode == 0) {
+                            uint8_t sync_octet = 0;
 
-                    for (int bit_pos = i + 10; bit_pos + 10 <= bit_count && payload_len < limit_bytes; bit_pos += 10) {
-                        uint8_t byte = 0;
+                            if (bits[i] != 0 || bits[i + 9] != 1)
+                                continue;
+                            for (int j = 0; j < 8; j++)
+                                sync_octet |= (uint8_t) (bits[i + 1 + j] & 1) << j;
+                            if (sync_octet != 0xE0)
+                                continue;
+                            bit_pos += 10;
+                            score_bias += 60;
+                        }
 
-                        if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
-                            break;
-                        for (int j = 0; j < 8; j++)
-                            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
-                        payload[payload_len++] = byte;
-                        if (byte == 0)
-                            break;
-                    }
-                    if (payload_len <= 0)
-                        continue;
-                    if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
-                        continue;
+                        while (bit_pos + 10 <= bit_count && payload_len < (int) sizeof(payload)) {
+                            uint8_t byte = 0;
 
-                    score = v8_candidate_score(&parsed, payload_len) + 80 - limit_bytes;
-                    if (!best.seen || score > best.score) {
-                        memset(&best, 0, sizeof(best));
-                        best.seen = true;
-                        best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
-                        best.byte_len = payload_len;
-                        best.score = score;
-                        memcpy(best.bytes, payload, (size_t) payload_len);
+                            if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
+                                break;
+                            for (int j = 0; j < 8; j++)
+                                byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+                            payload[payload_len++] = byte;
+                            bit_pos += 10;
+                            if (byte == 0)
+                                break;
+                        }
+                        if (payload_len <= 0)
+                            continue;
+                        first_tag = payload[0] & 0x1F;
+                        second_tag = (payload_len > 1) ? (payload[1] & 0x1F) : 0xFF;
+                        if (start_mode == 1) {
+                            if (payload_len < 2)
+                                continue;
+                            if (first_tag != V8_LOCAL_CALL_FUNCTION_TAG
+                                || second_tag != V8_LOCAL_MODULATION_TAG)
+                                continue;
+                        }
+                        if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
+                            continue;
+
+                        score_bias += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
+                        if (score_bias < 0)
+                            score_bias = 0;
+                        if (!best.seen || v8_candidate_score(&parsed, payload_len) + score_bias > best.score) {
+                            memset(&best, 0, sizeof(best));
+                            best.seen = true;
+                            best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                            best.byte_len = payload_len;
+                            best.score = v8_candidate_score(&parsed, payload_len) + score_bias;
+                            memcpy(best.bytes, payload, (size_t) payload_len);
+                        }
                     }
                 }
             }
@@ -1935,7 +1960,6 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
 {
     const double mark_hz = use_ch2 ? 1650.0 : 980.0;
     const double space_hz = use_ch2 ? 1850.0 : 1180.0;
-    const double symbol_samples = (double) sample_rate / 300.0;
     int search_start;
     int search_end;
     v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
@@ -1943,7 +1967,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
 
-    search_start = burst->start_sample - 320;
+    search_start = burst->start_sample - 800;
     search_end = burst->start_sample + burst->duration_samples + 320;
     if (search_start < 0)
         search_start = 0;
@@ -1951,76 +1975,104 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
         search_end = total_samples;
 
     for (int invert = 0; invert <= 1; invert++) {
-        for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
-            double phase = (double) phase_q / 4.0;
-            uint8_t bits[512];
-            int bit_count = 0;
+        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
 
-            for (int k = 0; ; k++) {
-                int a = search_start + (int) lround(phase + (double) k * symbol_samples);
-                int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
-                double e;
-                double pm;
-                double ps;
-                int bit;
+            for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                int bit_count = 0;
 
-                if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
-                    break;
-                e = window_energy(samples + a, b - a);
-                if (e <= 0.0)
-                    break;
-                pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
-                ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
-                bit = (pm >= ps) ? 1 : 0;
-                if (invert)
-                    bit ^= 1;
-                bits[bit_count++] = (uint8_t) bit;
-            }
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
 
-            for (int i = 0; i + 10 <= bit_count; i++) {
-                uint8_t bytes[16];
-                int byte_len = 0;
-                int score = 0;
-
-                for (int bit_pos = i; bit_pos + 10 <= bit_count && byte_len < (int) sizeof(bytes); bit_pos += 10) {
-                    uint8_t byte = 0;
-
-                    if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
                         break;
-                    for (int j = 0; j < 8; j++)
-                        byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
-                    bytes[byte_len++] = byte;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count++] = (uint8_t) bit;
                 }
-                if (byte_len < 2)
-                    continue;
 
-                for (int j = 0; j < byte_len; j++) {
-                    uint8_t b = bytes[j];
-                    uint8_t tag = b & 0x1F;
+                for (int i = 0; i + 10 <= bit_count; i++) {
+                    uint8_t bytes[16];
+                    int byte_len = 0;
+                    int score = 0;
+                    uint8_t prev_tag = 0xFF;
+                    bool saw_sync = false;
 
-                    if (b == 0xE0)
-                        score += 40;
-                    else if (tag == V8_LOCAL_CALL_FUNCTION_TAG
-                             || tag == V8_LOCAL_MODULATION_TAG
-                             || tag == V8_LOCAL_PROTOCOLS_TAG
-                             || tag == V8_LOCAL_PSTN_ACCESS_TAG
-                             || tag == V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG
-                             || tag == V8_LOCAL_T66_TAG)
-                        score += 12;
-                    else if (b == 0 || b == 0x80 || b == 0xC0 || b == 0xE0
-                             || b == 0xF0 || b == 0xF8 || b == 0xFC || b == 0xFE || b == 0xFF)
-                        score -= 6;
-                    else
-                        score -= 1;
-                }
-                score += byte_len;
-                if (!best.seen || score > best.score) {
-                    memset(&best, 0, sizeof(best));
-                    best.seen = true;
-                    best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
-                    best.byte_len = byte_len;
-                    best.score = score;
-                    memcpy(best.bytes, bytes, (size_t) byte_len);
+                    for (int bit_pos = i; bit_pos + 10 <= bit_count && byte_len < (int) sizeof(bytes); bit_pos += 10) {
+                        uint8_t byte = 0;
+
+                        if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
+                            break;
+                        for (int j = 0; j < 8; j++)
+                            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+                        bytes[byte_len++] = byte;
+                    }
+                    if (byte_len < 2)
+                        continue;
+                    if (bytes[0] == 0xE0)
+                        saw_sync = true;
+                    if (!saw_sync) {
+                        if (byte_len < 3)
+                            continue;
+                        if ((bytes[0] & 0x1F) != V8_LOCAL_CALL_FUNCTION_TAG
+                            || (bytes[1] & 0x1F) != V8_LOCAL_MODULATION_TAG)
+                            continue;
+                    }
+
+                    for (int j = 0; j < byte_len; j++) {
+                        uint8_t b = bytes[j];
+                        uint8_t tag = b & 0x1F;
+
+                        if (b == 0xE0) {
+                            score += 40;
+                        } else if (j == 0 && tag == V8_LOCAL_CALL_FUNCTION_TAG) {
+                            score += 20;
+                        } else if (j == 1 && tag == V8_LOCAL_MODULATION_TAG) {
+                            score += 18;
+                        } else if (tag == V8_LOCAL_CALL_FUNCTION_TAG
+                                   || tag == V8_LOCAL_MODULATION_TAG
+                                   || tag == V8_LOCAL_PROTOCOLS_TAG
+                                   || tag == V8_LOCAL_PSTN_ACCESS_TAG
+                                   || tag == V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG
+                                   || tag == V8_LOCAL_T66_TAG
+                                   || tag == V8_LOCAL_NSF_TAG) {
+                            score += 8;
+                        } else if ((tag & 0x18) == 0x10
+                                   && (prev_tag == V8_LOCAL_MODULATION_TAG || (prev_tag & 0x18) == 0x10)) {
+                            score += 6;
+                        } else if (tag == 0) {
+                            score -= 6;
+                        } else {
+                            score -= 4;
+                        }
+                        prev_tag = tag;
+                    }
+                    score += byte_len * 2;
+                    score += 8 - abs(bit_rate - 302);
+                    score -= i / 2;
+                    if (invert)
+                        score -= 2;
+                    if (!best.seen || score > best.score) {
+                        memset(&best, 0, sizeof(best));
+                        best.seen = true;
+                        best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        best.byte_len = byte_len;
+                        best.score = score;
+                        memcpy(best.bytes, bytes, (size_t) byte_len);
+                    }
                 }
             }
         }
@@ -2204,6 +2256,8 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
             score += 500;
         if (probe->ci_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ci_sample)
             score += 250;
+        if (probe->cm_jm_sample >= 0 && probe->ci_sample < 0)
+            score -= 900;
         if (probe->ansam_sample >= 0 && probe->ci_sample < 0 && probe->cm_jm_sample < 0)
             score -= 350;
     } else {
@@ -2216,6 +2270,9 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
         if (probe->ansam_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ansam_sample)
             score += 350;
     }
+
+    if (probe->cm_jm_salvaged && probe->cm_jm_raw_len <= 1)
+        score -= 700;
 
     if (first_sample >= 0 && last_sample >= first_sample)
         score -= (last_sample - first_sample) / 320;
