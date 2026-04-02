@@ -204,8 +204,8 @@ static const float line_probe_samples[LINE_PROBE_SAMPLES] =
 /* See V.34/10.1.3.5 */
 #define PP_REPEATS 6
 #define PP_SYMBOLS (8*PP_REPEATS)
-#define PP_TOTAL_SYMBOLS PP_SYMBOLS
-#define PP_PERIOD_SYMBOLS 8
+#define PP_PERIOD_SYMBOLS PP_SYMBOLS
+#define PP_TOTAL_SYMBOLS (6*PP_SYMBOLS)
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
 static const complexi16_t pp_symbols[PP_SYMBOLS] =

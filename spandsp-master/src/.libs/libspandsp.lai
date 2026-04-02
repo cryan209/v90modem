@@ -5,19 +5,19 @@
 # It is necessary for linking the library.
 
 # The name that we can dlopen(3).
-dlname='libspandsp.3.dylib'
+dlname='libspandsp.so.3'
 
 # Names of this library.
-library_names='libspandsp.3.dylib libspandsp.dylib'
+library_names='libspandsp.so.3.0.0 libspandsp.so.3 libspandsp.so'
 
 # The name of the static archive.
 old_library='libspandsp.a'
 
 # Linker flags that cannot go in dependency_libs.
-inherited_linker_flags=' '
+inherited_linker_flags=''
 
 # Libraries that this one depends upon.
-dependency_libs=' -L/opt/homebrew/lib -ltiff -lm -ljpeg'
+dependency_libs=' -ltiff -lm -ljpeg'
 
 # Names of additional weak libraries provided by this library
 weak_library_names=''

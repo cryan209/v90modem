@@ -474,8 +474,10 @@ typedef struct {
     double score;
 } v8bis_signal_hit_t;
 
+#define V8BIS_NUM_SIGNALS 8
+
 typedef struct {
-    v8bis_signal_hit_t hits[6];
+    v8bis_signal_hit_t hits[V8BIS_NUM_SIGNALS];
 } v8bis_scan_result_t;
 
 enum
@@ -509,12 +511,14 @@ typedef struct {
 #define V8BIS_SCAN_STEP_SAMPLES         160
 
 static const v8bis_signal_def_t g_v8bis_signal_defs[] = {
-    { "MRe", "initiating", 1375, 2002,  650 },
-    { "CRe", "initiating", 1375, 2002,  400 },
-    { "ESi", "initiating", 1375, 2002,  980 },
-    { "MRd", "responding", 1529, 2225, 1150 },
-    { "CRd", "responding", 1529, 2225, 1900 },
-    { "ESr", "responding", 1529, 2225, 1650 }
+    { "MRe",   "initiating", 1375, 2002,  650 },  /* Modem Relay establishing (auto-answer) */
+    { "CRe",   "initiating", 1375, 2002,  400 },  /* Call Relay establishing (auto-answer) */
+    { "ESi",   "initiating", 1375, 2002,  980 },  /* Extension Signal initiating */
+    { "MRd_i", "initiating", 1375, 2002, 1150 },  /* Modem Relay detected (initiating/calling-side, in-call) */
+    { "CRd_i", "initiating", 1375, 2002, 1900 },  /* Call Relay detected (initiating/calling-side, in-call) */
+    { "MRd",   "responding", 1529, 2225, 1150 },  /* Modem Relay detected (responding) */
+    { "CRd",   "responding", 1529, 2225, 1900 },  /* Call Relay detected (responding) */
+    { "ESr",   "responding", 1529, 2225, 1650 }   /* Extension Signal responding */
 };
 
 typedef struct {
@@ -1235,12 +1239,14 @@ static void print_v8_modulations(int mods)
     if (mods & V8_MOD_V17)    printf("  V.17");
     if (mods & V8_MOD_V21)    printf("  V.21");
     if (mods & V8_MOD_V22)    printf("  V.22bis");
+    if (mods & V8_MOD_V23HDX) printf("  V.23hdx");
     if (mods & V8_MOD_V23)    printf("  V.23");
     if (mods & V8_MOD_V26BIS) printf("  V.26bis");
     if (mods & V8_MOD_V26TER) printf("  V.26ter");
     if (mods & V8_MOD_V27TER) printf("  V.27ter");
     if (mods & V8_MOD_V29)    printf("  V.29");
     if (mods & V8_MOD_V32)    printf("  V.32bis");
+    if (mods & V8_MOD_V34HDX) printf("  V.34hdx");
     if (mods & V8_MOD_V34)    printf("  V.34");
     if (mods & V8_MOD_V90)    printf("  V.90");
     if (mods & V8_MOD_V92)    printf("  V.92");
@@ -1250,14 +1256,21 @@ static void print_v8_modulations(int mods)
 static void print_v8_result(const v8_parms_t *r)
 {
     printf("  Status:         %s\n", v8_status_to_str(r->status));
+    printf("  Call function:  %s\n", v8_call_function_to_str(r->jm_cm.call_function));
     printf("  Modulations:   ");
     print_v8_modulations(r->jm_cm.modulations);
     printf("  Protocol:       %s\n", v8_protocol_to_str(r->jm_cm.protocols));
     printf("  PSTN access:    %s\n", v8_pstn_access_to_str(r->jm_cm.pstn_access));
     printf("  PCM modem:      %s\n",
            v8_pcm_modem_availability_to_str(r->jm_cm.pcm_modem_availability));
+    if (r->jm_cm.nsf >= 0)
+        printf("  NSF:            %s\n", v8_nsf_to_str(r->jm_cm.nsf));
+    if (r->jm_cm.t66 >= 0)
+        printf("  T.66:           %s\n", v8_t66_to_str(r->jm_cm.t66));
     if (r->v92 >= 0)
         printf("  V.92:           0x%02x\n", r->v92);
+    if (r->gateway_mode)
+        printf("  Gateway mode:   yes\n");
 }
 
 static int v34_dummy_get_bit(void *user_data)
@@ -1592,15 +1605,25 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
     v8bis_scan_result_t v8bis;
 
     if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
-        printf("  V.8bis signals:  ");
+        static const char *v8bis_desc[] = {
+            "Modem Relay establishing (auto-answer)",
+            "Call Relay establishing (auto-answer)",
+            "Extension Signal initiating",
+            "Modem Relay detected (initiating/calling-side)",
+            "Call Relay detected (initiating/calling-side)",
+            "Modem Relay detected (responding)",
+            "Call Relay detected (responding)",
+            "Extension Signal responding"
+        };
+        printf("  V.8bis signals detected:\n");
         for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
             if (!v8bis.hits[i].seen)
                 continue;
-            printf("%s@%.1f ",
+            printf("    %s (%s) at %.1f ms\n",
                    g_v8bis_signal_defs[i].name,
+                   i < sizeof(v8bis_desc)/sizeof(v8bis_desc[0]) ? v8bis_desc[i] : "",
                    sample_to_ms(v8bis.hits[i].sample_offset, 8000));
         }
-        printf("\n");
     }
 
     if (v8_select_best_probe(samples, total_samples, calling_party, total_samples, &probe)) {
@@ -1624,10 +1647,26 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                    sample_to_ms(probe.v8_call_sample >= 0 ? probe.v8_call_sample : probe.cm_jm_sample, 8000));
             print_v8_result(&probe.result);
         } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
-            printf("  Partial V.8 decode only; final negotiation not yet confirmed");
-            if (probe.cm_jm_salvaged)
-                printf(" (single CM/JM candidate salvage)");
-            printf("\n");
+            printf("  Partial V.8 decode%s; final negotiation not yet confirmed\n",
+                   probe.cm_jm_salvaged ? " (single CM/JM candidate salvage)" : "");
+            if (probe.cm_jm_sample >= 0) {
+                printf("  Partial CM/JM fields at ~%.1f ms:\n",
+                       sample_to_ms(probe.cm_jm_sample, 8000));
+                printf("  Call function:  %s\n",
+                       v8_call_function_to_str(probe.result.jm_cm.call_function));
+                printf("  Modulations:   ");
+                print_v8_modulations(probe.result.jm_cm.modulations);
+                printf("  Protocol:       %s\n",
+                       v8_protocol_to_str(probe.result.jm_cm.protocols));
+                printf("  PSTN access:    %s\n",
+                       v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
+                printf("  PCM modem:      %s\n",
+                       v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability));
+                if (probe.result.jm_cm.nsf >= 0)
+                    printf("  NSF:            %s\n", v8_nsf_to_str(probe.result.jm_cm.nsf));
+                if (probe.result.jm_cm.t66 >= 0)
+                    printf("  T.66:           %s\n", v8_t66_to_str(probe.result.jm_cm.t66));
+            }
         } else {
             printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
             printf("  Possible V.8bis or clipped pre-V.8 exchange\n");
@@ -1671,8 +1710,9 @@ static void collect_v8_event(call_log_t *log,
                  probe.calling_party ? "JM" : "CM",
                  probe.cm_jm_salvaged ? "?" : "");
         snprintf(detail, sizeof(detail),
-                 "role=%s protocol=%s pcm=%s pstn=%s confidence=%s",
+                 "role=%s call_fn=%s protocol=%s pcm=%s pstn=%s confidence=%s",
                  probe.calling_party ? "caller" : "answerer",
+                 v8_call_function_to_str(probe.result.jm_cm.call_function),
                  v8_protocol_to_str(probe.result.jm_cm.protocols),
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
                  v8_pstn_access_to_str(probe.result.jm_cm.pstn_access),
@@ -1728,12 +1768,26 @@ static void collect_v8bis_events(call_log_t *log,
     if (!scan_v8bis_signals(samples, total_samples, max_sample, &v8bis))
         return;
 
+    static const char *v8bis_descriptions[] = {
+        "Modem Relay establishing (auto-answer)",
+        "Call Relay establishing (auto-answer)",
+        "Extension Signal initiating",
+        "Modem Relay detected (initiating/calling-side)",
+        "Call Relay detected (initiating/calling-side)",
+        "Modem Relay detected (responding)",
+        "Call Relay detected (responding)",
+        "Extension Signal responding"
+    };
+
     for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
         if (!v8bis.hits[i].seen)
             continue;
-        snprintf(summary, sizeof(summary), "%s signal detected", g_v8bis_signal_defs[i].name);
+        snprintf(summary, sizeof(summary), "%s — %s",
+                 g_v8bis_signal_defs[i].name,
+                 i < sizeof(v8bis_descriptions)/sizeof(v8bis_descriptions[0])
+                     ? v8bis_descriptions[i] : "");
         snprintf(detail, sizeof(detail),
-                 "role=%s segment1=%d+%dHz segment2=%dHz score=%.0f",
+                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f",
                  g_v8bis_signal_defs[i].role,
                  g_v8bis_signal_defs[i].seg1_a_hz,
                  g_v8bis_signal_defs[i].seg1_b_hz,

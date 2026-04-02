@@ -178,6 +178,8 @@ static void make_pp_signal(void)
     printf("/* See V.34/10.1.3.5 */\n");
     printf("#define PP_REPEATS 6\n");
     printf("#define PP_SYMBOLS (8*PP_REPEATS)\n");
+    printf("#define PP_PERIOD_SYMBOLS PP_SYMBOLS\n");
+    printf("#define PP_TOTAL_SYMBOLS (6*PP_SYMBOLS)\n");
     printf("\n");
     gain = 1.0f;
     printf("#if defined(SPANDSP_USE_FIXED_POINTx)\n");
