@@ -14,6 +14,7 @@
 #include "v90.h"
 #include "v91.h"
 #include "vpcm_cp.h"
+#include "v8bis_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -98,19 +99,7 @@ static void silence_stderr_end(stderr_silence_guard_t *guard)
 /* Call log event collection                                           */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
-    int sample_offset;
-    int duration_samples;
-    char protocol[24];
-    char summary[160];
-    char detail[320];
-} call_log_event_t;
-
-typedef struct {
-    call_log_event_t *events;
-    size_t count;
-    size_t cap;
-} call_log_t;
+/* call_log_event_t and call_log_t are defined in v8bis_decode.h */
 
 typedef struct {
     const char *key;
@@ -171,12 +160,12 @@ static void call_log_reset(call_log_t *log)
     log->cap = 0;
 }
 
-static bool call_log_append(call_log_t *log,
-                            int sample_offset,
-                            int duration_samples,
-                            const char *protocol,
-                            const char *summary,
-                            const char *detail)
+bool call_log_append(call_log_t *log,
+                     int sample_offset,
+                     int duration_samples,
+                     const char *protocol,
+                     const char *summary,
+                     const char *detail)
 {
     call_log_event_t *next;
 
@@ -240,43 +229,6 @@ static bool call_log_event_is_phase2_boundary(const call_log_event_t *event)
         return false;
     return (strncmp(event->summary, "INFO0", 5) == 0
             || strncmp(event->summary, "INFO1", 5) == 0);
-}
-
-/* Remove near-duplicate V.8bis FSK messages from the combined stereo log.
- * Both channels independently decode the same FSK signal; keep only the
- * first occurrence of each message type within a 500ms (4000-sample) window. */
-static void call_log_dedup_v8bis_msgs(call_log_t *log)
-{
-    size_t out = 0;
-
-    if (!log || log->count == 0)
-        return;
-
-    /* For each V.8bis FSK event (not tone events which have duration>0),
-     * check if a prior event with the same summary is within 4000 samples. */
-    for (size_t i = 0; i < log->count; i++) {
-        const call_log_event_t *event = &log->events[i];
-        bool is_dup = false;
-
-        if (strcmp(event->protocol, "V.8bis") == 0 && event->duration_samples == 0) {
-            for (size_t j = 0; j < out; j++) {
-                const call_log_event_t *prev = &log->events[j];
-                if (strcmp(prev->protocol, "V.8bis") == 0
-                    && prev->duration_samples == 0
-                    && strcmp(prev->summary, event->summary) == 0
-                    && abs(event->sample_offset - prev->sample_offset) < 8000) {
-                    is_dup = true;
-                    break;
-                }
-            }
-        }
-        if (!is_dup) {
-            if (out != i)
-                log->events[out] = log->events[i];
-            out++;
-        }
-    }
-    log->count = out;
 }
 
 static void call_log_prune_v8_after_phase2(call_log_t *log)
@@ -576,34 +528,7 @@ typedef struct {
     v8_raw_msg_hit_t best_cm_jm;
 } v8_raw_scan_state_t;
 
-typedef struct {
-    const char *name;
-    const char *role;
-    int seg1_a_hz;
-    int seg1_b_hz;
-    int seg2_hz;
-} v8bis_signal_def_t;
-
-typedef struct {
-    bool seen;
-    int sample_offset;
-    int duration_samples;
-    double score;
-} v8bis_signal_hit_t;
-
-#define V8BIS_NUM_SIGNALS 8
-
-typedef struct {
-    v8bis_signal_hit_t hits[V8BIS_NUM_SIGNALS];
-} v8bis_scan_result_t;
-
-typedef struct {
-    bool seen;
-    int signal_index;
-    int sample_offset;
-    int duration_samples;
-    double score;
-} v8bis_weak_candidate_t;
+/* V.8bis types, signal defs, and scan/decode functions are in v8bis_decode.h/c */
 
 enum
 {
@@ -641,21 +566,6 @@ typedef struct {
 } v8_probe_result_t;
 
 #define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 10) / 1)
-#define V8BIS_SEGMENT1_SAMPLES          ((8000 * 400) / 1000)
-#define V8BIS_SEGMENT2_SAMPLES          ((8000 * 100) / 1000)
-#define V8BIS_SIGNAL_SAMPLES            (V8BIS_SEGMENT1_SAMPLES + V8BIS_SEGMENT2_SAMPLES)
-#define V8BIS_SCAN_STEP_SAMPLES         160
-
-static const v8bis_signal_def_t g_v8bis_signal_defs[] = {
-    { "MRe",   "initiating", 1375, 2002,  650 },  /* Modem Relay establishing (auto-answer) */
-    { "CRe",   "initiating", 1375, 2002,  400 },  /* Call Relay establishing (auto-answer) */
-    { "ESi",   "initiating", 1375, 2002,  980 },  /* Extension Signal initiating */
-    { "MRd_i", "initiating", 1375, 2002, 1150 },  /* Modem Relay detected (initiating/calling-side, in-call) */
-    { "CRd_i", "initiating", 1375, 2002, 1900 },  /* Call Relay detected (initiating/calling-side, in-call) */
-    { "MRd",   "responding", 1529, 2225, 1150 },  /* Modem Relay detected (responding) */
-    { "CRd",   "responding", 1529, 2225, 1900 },  /* Call Relay detected (responding) */
-    { "ESr",   "responding", 1529, 2225, 1650 }   /* Extension Signal responding */
-};
 
 typedef struct {
     bool info0_seen;
@@ -803,8 +713,8 @@ static void v8_note_first_sample(int *dst, int sample)
         *dst = sample;
 }
 
-static double window_energy(const int16_t *samples, int len);
-static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy);
+double window_energy(const int16_t *samples, int len);
+double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy);
 static double series_energy_ratio(const double *samples, int len, int sample_rate, double freq_hz, double total_energy);
 
 static bool detect_ansam_am(const int16_t *samples,
@@ -981,7 +891,7 @@ reset_run:
     return true;
 }
 
-static double window_energy(const int16_t *samples, int len)
+double window_energy(const int16_t *samples, int len)
 {
     double sum = 0.0;
 
@@ -994,7 +904,7 @@ static double window_energy(const int16_t *samples, int len)
     return sum;
 }
 
-static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy)
+double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy)
 {
     double w;
     double cos_w;
@@ -1348,127 +1258,7 @@ static bool write_visualization_html(const char *output_path,
     return true;
 }
 
-static bool scan_v8bis_signals(const int16_t *samples,
-                               int total_samples,
-                               int max_sample,
-                               v8bis_scan_result_t *out)
-{
-    int limit;
-
-    if (!samples || total_samples <= 0 || !out)
-        return false;
-
-    memset(out, 0, sizeof(*out));
-    limit = total_samples;
-    if (max_sample > 0 && max_sample < limit)
-        limit = max_sample;
-    if (limit < V8BIS_SIGNAL_SAMPLES)
-        return false;
-
-    for (int offset = 0; offset + V8BIS_SIGNAL_SAMPLES <= limit; offset += V8BIS_SCAN_STEP_SAMPLES) {
-        const int16_t *seg1 = samples + offset;
-        const int16_t *seg2 = seg1 + V8BIS_SEGMENT1_SAMPLES;
-        double seg1_energy = window_energy(seg1, V8BIS_SEGMENT1_SAMPLES);
-        double seg2_energy = window_energy(seg2, V8BIS_SEGMENT2_SAMPLES);
-
-        if (seg1_energy <= 1.0 || seg2_energy <= 1.0)
-            continue;
-
-        for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
-            const v8bis_signal_def_t *def = &g_v8bis_signal_defs[i];
-            double seg1_a_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_a_hz, seg1_energy);
-            double seg1_b_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_b_hz, seg1_energy);
-            double seg2_ratio = tone_energy_ratio(seg2, V8BIS_SEGMENT2_SAMPLES, 8000, def->seg2_hz, seg2_energy);
-            double dual_ratio = seg1_a_ratio + seg1_b_ratio;
-            double balance = 0.0;
-            double score;
-
-            if (seg1_a_ratio > 0.0 && seg1_b_ratio > 0.0) {
-                double hi = (seg1_a_ratio > seg1_b_ratio) ? seg1_a_ratio : seg1_b_ratio;
-                double lo = (seg1_a_ratio > seg1_b_ratio) ? seg1_b_ratio : seg1_a_ratio;
-                balance = lo / hi;
-            }
-
-            if (dual_ratio < 0.22 || seg1_a_ratio < 0.07 || seg1_b_ratio < 0.07 || balance < 0.25 || seg2_ratio < 0.15)
-                continue;
-
-            score = dual_ratio * 1000.0 + seg2_ratio * 1200.0 + balance * 200.0;
-            if (!out->hits[i].seen || score > out->hits[i].score) {
-                out->hits[i].seen = true;
-                out->hits[i].sample_offset = offset;
-                out->hits[i].duration_samples = V8BIS_SIGNAL_SAMPLES;
-                out->hits[i].score = score;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < sizeof(out->hits)/sizeof(out->hits[0]); i++) {
-        if (out->hits[i].seen)
-            return true;
-    }
-    return false;
-}
-
-static bool scan_v8bis_weak_candidate(const int16_t *samples,
-                                      int total_samples,
-                                      int max_sample,
-                                      v8bis_weak_candidate_t *out)
-{
-    int limit;
-    v8bis_weak_candidate_t best = {0};
-
-    if (!samples || total_samples <= 0 || !out)
-        return false;
-
-    limit = total_samples;
-    if (max_sample > 0 && max_sample < limit)
-        limit = max_sample;
-    if (limit < V8BIS_SIGNAL_SAMPLES)
-        return false;
-
-    for (int offset = 0; offset + V8BIS_SIGNAL_SAMPLES <= limit; offset += V8BIS_SCAN_STEP_SAMPLES) {
-        const int16_t *seg1 = samples + offset;
-        const int16_t *seg2 = seg1 + V8BIS_SEGMENT1_SAMPLES;
-        double seg1_energy = window_energy(seg1, V8BIS_SEGMENT1_SAMPLES);
-        double seg2_energy = window_energy(seg2, V8BIS_SEGMENT2_SAMPLES);
-
-        if (seg1_energy <= 1.0 || seg2_energy <= 1.0)
-            continue;
-
-        for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
-            const v8bis_signal_def_t *def = &g_v8bis_signal_defs[i];
-            double seg1_a_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_a_hz, seg1_energy);
-            double seg1_b_ratio = tone_energy_ratio(seg1, V8BIS_SEGMENT1_SAMPLES, 8000, def->seg1_b_hz, seg1_energy);
-            double seg2_ratio = tone_energy_ratio(seg2, V8BIS_SEGMENT2_SAMPLES, 8000, def->seg2_hz, seg2_energy);
-            double dual_ratio = seg1_a_ratio + seg1_b_ratio;
-            double balance = 0.0;
-            double score;
-
-            if (seg1_a_ratio > 0.0 && seg1_b_ratio > 0.0) {
-                double hi = (seg1_a_ratio > seg1_b_ratio) ? seg1_a_ratio : seg1_b_ratio;
-                double lo = (seg1_a_ratio > seg1_b_ratio) ? seg1_b_ratio : seg1_a_ratio;
-                balance = lo / hi;
-            }
-
-            if (dual_ratio < 0.14 || seg1_a_ratio < 0.04 || seg1_b_ratio < 0.04 || balance < 0.15 || seg2_ratio < 0.08)
-                continue;
-
-            score = dual_ratio * 1000.0 + seg2_ratio * 1200.0 + balance * 200.0;
-            if (!best.seen || score > best.score) {
-                best.seen = true;
-                best.signal_index = (int) i;
-                best.sample_offset = offset;
-                best.duration_samples = V8BIS_SIGNAL_SAMPLES;
-                best.score = score;
-            }
-        }
-    }
-
-    if (!best.seen)
-        return false;
-    *out = best;
-    return true;
-}
+/* scan_v8bis_signals and scan_v8bis_weak_candidate moved to v8bis_decode.c */
 
 static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
                                      const uint8_t *data,
@@ -3708,7 +3498,7 @@ static void decode_v8_pass(const int16_t *samples,
     v8_fsk_burst_hit_t v21_burst;
 
     memset(&weak_v8bis, 0, sizeof(weak_v8bis));
-    if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
+    if (v8bis_scan_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
         static const char *v8bis_desc[] = {
             "Modem Relay establishing (auto-answer)",
             "Call Relay establishing (auto-answer)",
@@ -3728,7 +3518,7 @@ static void decode_v8_pass(const int16_t *samples,
                    i < sizeof(v8bis_desc)/sizeof(v8bis_desc[0]) ? v8bis_desc[i] : "",
                    sample_to_ms(v8bis.hits[i].sample_offset, 8000));
         }
-    } else if (scan_v8bis_weak_candidate(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &weak_v8bis)) {
+    } else if (v8bis_scan_weak_candidate(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &weak_v8bis)) {
         const v8bis_signal_def_t *def = &g_v8bis_signal_defs[weak_v8bis.signal_index];
 
         printf("  Weak V.8bis:     %s-like energy at %.1f ms (score %.0f)\n",
@@ -4272,380 +4062,9 @@ fallback_only:
     }
 }
 
-/* ---- V.8bis HDLC message decoder (V.21 FSK at 300 bps) ---- */
+/* V.8bis HDLC message decoder, signal/event collectors, and helpers
+ * have been moved to v8bis_decode.c / v8bis_decode.h */
 
-/* Message types per V.8bis Table 3 */
-static const char *v8bis_msg_type_to_str(int type)
-{
-    switch (type) {
-    case 0x1: return "MS";      /* Mode Select */
-    case 0x2: return "CL";      /* Capabilities List */
-    case 0x3: return "CLR";     /* Capabilities List Request */
-    case 0x4: return "ACK(1)";  /* Acknowledge / terminate transaction */
-    case 0x5: return "ACK(2)";  /* Acknowledge / request more info */
-    case 0x8: return "NAK(1)";  /* Cannot interpret */
-    case 0x9: return "NAK(2)";  /* Temporarily unable */
-    case 0xA: return "NAK(3)";  /* Does not support requested mode */
-    case 0xB: return "NAK(4)";  /* Cannot interpret, request retransmit */
-    default:  return "unknown";
-    }
-}
-
-/* V.8bis mode selected (SPar(1) bit 1 = Data) */
-static const char *v8bis_spar1_mode_to_str(int spar1_bits)
-{
-    /* Table 6-2: SPar(1)s bits (lower 7) */
-    if (spar1_bits & 0x01) return "Data";
-    if (spar1_bits & 0x02) return "Simultaneous voice and data";
-    if (spar1_bits & 0x04) return "H.324 multimedia";
-    if (spar1_bits & 0x08) return "V.18 text telephone";
-    if (spar1_bits & 0x10) return "Reserved";
-    if (spar1_bits & 0x20) return "Analogue telephony";
-    if (spar1_bits & 0x40) return "T.101 videotex";
-    return "unknown";
-}
-
-#define V8BIS_MSG_MAX 12
-
-typedef struct {
-    uint8_t msg_type;
-    uint8_t revision;
-    uint8_t info[66];
-    int info_len;
-    int sample_offset;
-    int channel;        /* 0 = initiating/CH1, 1 = responding/CH2 */
-} v8bis_decoded_msg_t;
-
-typedef struct {
-    /* HDLC decoding state */
-    int ones_run;
-    bool flag_seen;
-    bool in_frame;
-    uint8_t frame_buf[80];
-    int frame_byte_count;
-    int byte_bits;
-    uint8_t byte_val;
-    int frame_start_bit;
-    int bit_count;
-    /* Sample position tracking: updated by caller before each fsk_rx() chunk */
-    int current_chunk_sample;  /* sample offset of the current 160-sample chunk */
-    int carrier_on_sample;     /* sample offset when SIG_STATUS_CARRIER_UP fired */
-    /* Debug counters */
-    int dbg_flags_seen;
-    int dbg_frames_ok;
-    int dbg_frames_bad_crc;
-    int dbg_bits_total;
-    /* Results */
-    v8bis_decoded_msg_t msgs[V8BIS_MSG_MAX];
-    int msg_count;
-    int channel;
-} v8bis_hdlc_rx_t;
-
-static uint16_t v8bis_crc16(const uint8_t *data, int len)
-{
-    uint16_t crc = 0xFFFF;
-    for (int i = 0; i < len; i++) {
-        crc ^= (uint16_t)data[i];
-        for (int j = 0; j < 8; j++)
-            crc = (crc & 1) ? (crc >> 1) ^ 0x8408 : (crc >> 1);
-    }
-    return crc;
-}
-
-static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
-{
-    v8bis_decoded_msg_t *msg;
-
-    /* Need at least: 1 I-field byte + 2 FCS bytes = 3.
-     * The closing HDLC flag (0x7E = 0,1,1,1,1,1,1,0 LSB-first) always deposits
-     * exactly 7 bits into byte_val before the flag fires (the prefix 0,1,1,1,1,1,1).
-     * So byte_bits must be exactly 7 for a byte-aligned frame. */
-    if (rx->frame_byte_count < 3 || rx->byte_bits != 7)
-        return;
-    if (rx->msg_count >= V8BIS_MSG_MAX)
-        return;
-
-    /* CRC check: process all bytes; result must be 0xF0B8 for valid frame */
-    if (v8bis_crc16(rx->frame_buf, rx->frame_byte_count) != 0xF0B8)
-        return;
-
-    msg = &rx->msgs[rx->msg_count++];
-    msg->msg_type = rx->frame_buf[0] & 0x0F;
-    msg->revision = (rx->frame_buf[0] >> 4) & 0x0F;
-    /* info = I-field bytes after type/revision byte, before 2 FCS bytes */
-    msg->info_len = rx->frame_byte_count - 3;
-    if (msg->info_len > 0 && msg->info_len <= (int)sizeof(msg->info))
-        memcpy(msg->info, rx->frame_buf + 1, msg->info_len);
-    else
-        msg->info_len = 0;
-    /* Sample offset: bits-from-carrier-on / 300bps * 8000Hz + carrier-on sample */
-    msg->sample_offset = rx->carrier_on_sample
-        + (int)((double)rx->frame_start_bit / 300.0 * 8000.0);
-    msg->channel = rx->channel;
-}
-
-static void v8bis_hdlc_put_bit(void *user_data, int bit)
-{
-    v8bis_hdlc_rx_t *rx = (v8bis_hdlc_rx_t *) user_data;
-
-    if (bit < 0) {
-        /* SIG_STATUS_CARRIER_UP = -2: record sample position of carrier arrival */
-        if (bit == -2)
-            rx->carrier_on_sample = rx->current_chunk_sample;
-        return;
-    }
-
-    rx->bit_count++;
-
-    if (bit == 1) {
-        rx->ones_run++;
-        if (rx->ones_run >= 7) {
-            /* Abort sequence (7+ consecutive ones) */
-            rx->ones_run = 7;  /* cap to avoid overflow on long idle periods */
-            rx->in_frame = false;
-            rx->frame_byte_count = 0;
-            rx->byte_bits = 0;
-            rx->byte_val = 0;
-            return;
-        }
-        /* Fall through: real data bit */
-    } else {
-        /* bit == 0 */
-        if (rx->ones_run == 5) {
-            /* Stuffed zero — discard */
-            rx->ones_run = 0;
-            return;
-        }
-        if (rx->ones_run == 6) {
-            /* Flag byte (6 ones + 0 = 0x7E) */
-            if (rx->in_frame)
-                v8bis_hdlc_commit_frame(rx);
-            rx->in_frame = true;
-            rx->flag_seen = true;
-            rx->frame_byte_count = 0;
-            rx->byte_bits = 0;
-            rx->byte_val = 0;
-            rx->ones_run = 0;
-            rx->frame_start_bit = rx->bit_count;
-            return;
-        }
-        rx->ones_run = 0;
-        /* Fall through: real data bit */
-    }
-
-    if (!rx->in_frame)
-        return;
-
-    /* Accumulate byte (LSB first) */
-    rx->byte_val |= (uint8_t)(bit << rx->byte_bits);
-    if (++rx->byte_bits == 8) {
-        if (rx->frame_byte_count < (int)sizeof(rx->frame_buf))
-            rx->frame_buf[rx->frame_byte_count++] = rx->byte_val;
-        rx->byte_val = 0;
-        rx->byte_bits = 0;
-    }
-}
-
-static void collect_v8bis_msg_events(call_log_t *log,
-                                     const int16_t *samples,
-                                     int total_samples,
-                                     int max_sample)
-{
-    fsk_rx_state_t *fsk_ch1;
-    fsk_rx_state_t *fsk_ch2;
-    v8bis_hdlc_rx_t rx_ch1;
-    v8bis_hdlc_rx_t rx_ch2;
-    v8bis_decoded_msg_t *all_msgs[V8BIS_MSG_MAX * 2];
-    int all_count;
-    int limit;
-    char summary[160];
-    char detail[320];
-
-    if (!log || !samples || total_samples <= 0)
-        return;
-
-    limit = total_samples;
-    if (max_sample > 0 && max_sample < limit)
-        limit = max_sample;
-    if (limit > V8_EARLY_SEARCH_LIMIT_SAMPLES)
-        limit = V8_EARLY_SEARCH_LIMIT_SAMPLES;
-
-    memset(&rx_ch1, 0, sizeof(rx_ch1));
-    rx_ch1.channel = 0;  /* initiating / V.21 CH1 */
-    memset(&rx_ch2, 0, sizeof(rx_ch2));
-    rx_ch2.channel = 1;  /* responding / V.21 CH2 */
-
-    fsk_ch1 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH1],
-                           FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch1);
-    fsk_ch2 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH2],
-                           FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch2);
-    if (!fsk_ch1 || !fsk_ch2) {
-        if (fsk_ch1) fsk_rx_free(fsk_ch1);
-        if (fsk_ch2) fsk_rx_free(fsk_ch2);
-        return;
-    }
-    /* Lower detection threshold — V.8bis messages can be weak, and CRe/MRe are
-       specified at -12 to -15dB below normal per V.8bis §7.1.4 */
-    fsk_rx_set_signal_cutoff(fsk_ch1, -45.0f);
-    fsk_rx_set_signal_cutoff(fsk_ch2, -45.0f);
-
-    /* Feed samples in 160-sample chunks; update current_chunk_sample before each
-     * call so SIG_STATUS_CARRIER_UP can record an accurate sample position */
-    for (int offset = 0; offset < limit; ) {
-        int len = limit - offset;
-        if (len > 160) len = 160;
-        rx_ch1.current_chunk_sample = offset;
-        rx_ch2.current_chunk_sample = offset;
-        fsk_rx(fsk_ch1, samples + offset, len);
-        fsk_rx(fsk_ch2, samples + offset, len);
-        offset += len;
-    }
-
-    fsk_rx_free(fsk_ch1);
-    fsk_rx_free(fsk_ch2);
-
-    /* Collect and sort all valid messages by sample offset */
-    all_count = 0;
-    for (int i = 0; i < rx_ch1.msg_count; i++)
-        all_msgs[all_count++] = &rx_ch1.msgs[i];
-    for (int i = 0; i < rx_ch2.msg_count; i++)
-        all_msgs[all_count++] = &rx_ch2.msgs[i];
-    for (int i = 0; i < all_count - 1; i++) {
-        for (int j = i + 1; j < all_count; j++) {
-            if (all_msgs[j]->sample_offset < all_msgs[i]->sample_offset) {
-                v8bis_decoded_msg_t *tmp = all_msgs[i];
-                all_msgs[i] = all_msgs[j];
-                all_msgs[j] = tmp;
-            }
-        }
-    }
-
-    /* Dedup: skip a message if an identical type was already emitted within 400ms
-     * (crosstalk causes both stereo channels to decode the same FSK frame) */
-    int last_emitted_sample[16];
-    uint8_t last_emitted_type[16];
-    int emitted_count = 0;
-    memset(last_emitted_sample, -1, sizeof(last_emitted_sample));
-
-    for (int i = 0; i < all_count; i++) {
-        const v8bis_decoded_msg_t *msg = all_msgs[i];
-        const char *type_str = v8bis_msg_type_to_str(msg->msg_type);
-        const char *ch_str = (msg->channel == 0) ? "initiating/CH1" : "responding/CH2";
-
-        /* Skip frames with unknown/undefined type (type=0 or out-of-range) */
-        if (msg->msg_type == 0 || strcmp(type_str, "unknown") == 0)
-            continue;
-
-        /* Dedup: skip if same type decoded within ~400ms (3200 samples) */
-        bool is_dup = false;
-        for (int k = 0; k < emitted_count; k++) {
-            if (last_emitted_type[k] == msg->msg_type
-                && abs(msg->sample_offset - last_emitted_sample[k]) < 3200) {
-                is_dup = true;
-                break;
-            }
-        }
-        if (is_dup)
-            continue;
-        if (emitted_count < 16) {
-            last_emitted_type[emitted_count] = msg->msg_type;
-            last_emitted_sample[emitted_count] = msg->sample_offset;
-            emitted_count++;
-        }
-
-        snprintf(summary, sizeof(summary), "%s", type_str);
-
-        if (msg->info_len > 0) {
-            /* Show capability byte summary for MS/CL/CLR */
-            char hex[100];
-            int hlen = (msg->info_len < 12) ? msg->info_len : 12;
-            int pos = 0;
-            for (int j = 0; j < hlen; j++)
-                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", msg->info[j]);
-            /* SPar(1) is at info[0] if present — decode mode */
-            if (msg->info_len >= 1 && (msg->msg_type == 0x1 || msg->msg_type == 0x2 || msg->msg_type == 0x3)) {
-                int spar1 = msg->info[0] & 0x7F;
-                snprintf(detail, sizeof(detail),
-                         "fsk_ch=%s rev=%d mode=%s info=[%s]",
-                         ch_str, msg->revision,
-                         v8bis_spar1_mode_to_str(spar1), hex);
-            } else {
-                snprintf(detail, sizeof(detail),
-                         "fsk_ch=%s rev=%d info=[%s]", ch_str, msg->revision, hex);
-            }
-        } else {
-            snprintf(detail, sizeof(detail), "fsk_ch=%s rev=%d", ch_str, msg->revision);
-        }
-
-        call_log_append(log, msg->sample_offset, 0, "V.8bis", summary, detail);
-    }
-}
-
-static void collect_v8bis_events(call_log_t *log,
-                                 const int16_t *samples,
-                                 int total_samples,
-                                 int max_sample)
-{
-    v8bis_scan_result_t v8bis;
-    v8bis_weak_candidate_t weak_v8bis;
-    char summary[160];
-    char detail[320];
-
-    if (!log || !samples || total_samples <= 0)
-        return;
-    if (!scan_v8bis_signals(samples, total_samples, max_sample, &v8bis)) {
-        if (!scan_v8bis_weak_candidate(samples, total_samples, max_sample, &weak_v8bis))
-            return;
-        snprintf(summary, sizeof(summary), "Weak %s-like energy", g_v8bis_signal_defs[weak_v8bis.signal_index].name);
-        snprintf(detail, sizeof(detail),
-                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f weak=yes",
-                 g_v8bis_signal_defs[weak_v8bis.signal_index].role,
-                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_a_hz,
-                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_b_hz,
-                 g_v8bis_signal_defs[weak_v8bis.signal_index].seg2_hz,
-                 weak_v8bis.score);
-        call_log_append(log,
-                        weak_v8bis.sample_offset,
-                        weak_v8bis.duration_samples,
-                        "V.8bis?",
-                        summary,
-                        detail);
-        return;
-    }
-
-    static const char *v8bis_descriptions[] = {
-        "Modem Relay establishing (auto-answer)",
-        "Call Relay establishing (auto-answer)",
-        "Extension Signal initiating",
-        "Modem Relay detected (initiating/calling-side)",
-        "Call Relay detected (initiating/calling-side)",
-        "Modem Relay detected (responding)",
-        "Call Relay detected (responding)",
-        "Extension Signal responding"
-    };
-
-    for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
-        if (!v8bis.hits[i].seen)
-            continue;
-        snprintf(summary, sizeof(summary), "%s — %s",
-                 g_v8bis_signal_defs[i].name,
-                 i < sizeof(v8bis_descriptions)/sizeof(v8bis_descriptions[0])
-                     ? v8bis_descriptions[i] : "");
-        snprintf(detail, sizeof(detail),
-                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f",
-                 g_v8bis_signal_defs[i].role,
-                 g_v8bis_signal_defs[i].seg1_a_hz,
-                 g_v8bis_signal_defs[i].seg1_b_hz,
-                 g_v8bis_signal_defs[i].seg2_hz,
-                 v8bis.hits[i].score);
-        call_log_append(log,
-                        v8bis.hits[i].sample_offset,
-                        v8bis.hits[i].duration_samples,
-                        "V.8bis",
-                        summary,
-                        detail);
-    }
-}
 
 static bool decode_v34_pass(const int16_t *samples,
                             int total_samples,
@@ -5309,8 +4728,8 @@ static void collect_stream_call_log(call_log_t *log,
     if (do_v34)
         collect_v34_events(log, linear_samples, total_samples, law);
     if (do_v8) {
-        collect_v8bis_events(log, linear_samples, total_samples, earliest_phase2_sample);
-        collect_v8bis_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
+        v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
+        v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
         collect_v8_event(log, linear_samples, g711_codewords, total_samples, earliest_phase2_sample, law);
     }
     if (do_v91)
@@ -7591,7 +7010,7 @@ int main(int argc, char **argv)
                 call_log_merge_with_channel(&combined_log, &left_log, "left");
                 call_log_merge_with_channel(&combined_log, &right_log, "right");
                 call_log_sort(&combined_log);
-                call_log_dedup_v8bis_msgs(&combined_log);
+                v8bis_dedup_msgs(&combined_log);
                 print_call_log("Stereo Combined", &combined_log, total_samples, sample_rate);
 
                 call_log_reset(&left_log);
