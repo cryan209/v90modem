@@ -546,6 +546,7 @@ typedef struct {
 
 typedef struct {
     bool seen;
+    int preamble_type;
     int sample_offset;
     int byte_len;
     int score;
@@ -1628,6 +1629,96 @@ static bool v8_decode_async_octet(const uint8_t *bits, int bit_count, int start,
     return true;
 }
 
+static int v8_sync_score(const uint8_t *bits,
+                         const double *confidence,
+                         int bit_count,
+                         int start,
+                         const uint8_t pattern[10])
+{
+    double score = 0.0;
+
+    if (!bits || !confidence || !pattern || start < 0 || start + 10 > bit_count)
+        return -1000000;
+
+    for (int i = 0; i < 10; i++) {
+        double w = confidence[start + i];
+
+        if (w < 0.015)
+            w = 0.015;
+        if (bits[start + i] == pattern[i])
+            score += 1.0 + 12.0 * w;
+        else
+            score -= 1.0 + 12.0 * w;
+    }
+
+    return (int) lround(score * 10.0);
+}
+
+static int v8_ones_lock_score(const uint8_t *bits,
+                              const double *confidence,
+                              int bit_count,
+                              int start)
+{
+    static const uint8_t ones_pattern[10] = {
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    };
+
+    return v8_sync_score(bits, confidence, bit_count, start, ones_pattern);
+}
+
+static int v8_sync_lock_score(const uint8_t *bits,
+                              const double *confidence,
+                              int bit_count,
+                              int start,
+                              int preamble_type)
+{
+    static const uint8_t cm_jm_sync_pattern[10] = {
+        0, 0, 0, 0, 0, 0, 1, 1, 1, 1
+    };
+    static const uint8_t v92_sync_pattern[10] = {
+        0, 1, 0, 1, 0, 1, 0, 1, 0, 1
+    };
+
+    if (preamble_type == V8_LOCAL_SYNC_CM_JM)
+        return v8_sync_score(bits, confidence, bit_count, start, cm_jm_sync_pattern);
+    if (preamble_type == V8_LOCAL_SYNC_V92)
+        return v8_sync_score(bits, confidence, bit_count, start, v92_sync_pattern);
+    return -1000000;
+}
+
+static int v8_decode_soft_async_bytes(const uint8_t *bits,
+                                      const double *confidence,
+                                      int bit_count,
+                                      int start,
+                                      uint8_t *bytes,
+                                      int max_bytes,
+                                      int *framing_penalty_out)
+{
+    int byte_len = 0;
+    int penalty = 0;
+
+    if (!bits || !confidence || !bytes || max_bytes <= 0 || start < 0)
+        return 0;
+
+    for (int bit_pos = start; bit_pos + 10 <= bit_count && byte_len < max_bytes; bit_pos += 10) {
+        uint8_t byte = 0;
+
+        if (bits[bit_pos] != 0)
+            penalty += 20 + (int) lround(confidence[bit_pos] * 80.0);
+        if (bits[bit_pos + 9] != 1)
+            penalty += 20 + (int) lround(confidence[bit_pos + 9] * 80.0);
+        for (int j = 0; j < 8; j++)
+            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+        bytes[byte_len++] = byte;
+        if (byte == 0)
+            break;
+    }
+
+    if (framing_penalty_out)
+        *framing_penalty_out = penalty;
+    return byte_len;
+}
+
 static void v8_syncless_scan_bits(v8_raw_scan_state_t *scan)
 {
     v8_raw_msg_hit_t hit;
@@ -1682,7 +1773,7 @@ static bool v8_scan_raw_cm_jm(const int16_t *samples,
                               v8_raw_msg_hit_t *out)
 {
     int limit;
-    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+    v8_raw_msg_hit_t best = {0};
 
     if (!samples || total_samples <= 0 || !out)
         return false;
@@ -1835,7 +1926,7 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
     const double space_hz = use_ch2 ? 1850.0 : 1180.0;
     int search_start;
     int search_end;
-    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+    v8_raw_msg_hit_t best = {0};
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
@@ -1856,6 +1947,7 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
             for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
                 double phase = (double) phase_q / 4.0;
                 uint8_t bits[512];
+                double confidence[512];
                 int bit_count = 0;
 
                 for (int k = 0; ; k++) {
@@ -1877,68 +1969,57 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
                     if (invert)
                         bit ^= 1;
                     bits[bit_count++] = (uint8_t) bit;
+                    confidence[bit_count - 1] = fabs(pm - ps);
                 }
 
-                for (int i = 0; i + 10 <= bit_count; i++) {
-                    for (int start_mode = 0; start_mode < 2; start_mode++) {
-                        uint8_t payload[64];
-                        int payload_len = 0;
-                        int bit_pos = i;
-                        int score_bias = 0;
-                        uint8_t first_tag;
-                        uint8_t second_tag;
-                        v8_parms_t parsed;
+                for (int i = 0; i + 20 <= bit_count; i++) {
+                    uint8_t payload[64];
+                    int payload_len;
+                    int framing_penalty = 0;
+                    int ones_score;
+                    int sync_score;
+                    int score_bias;
+                    uint8_t first_tag;
+                    uint8_t second_tag;
+                    v8_parms_t parsed;
 
-                        if (start_mode == 0) {
-                            uint8_t sync_octet = 0;
+                    ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
+                    if (ones_score < 40)
+                        continue;
+                    sync_score = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_CM_JM);
+                    if (sync_score < 40)
+                        continue;
 
-                            if (bits[i] != 0 || bits[i + 9] != 1)
-                                continue;
-                            for (int j = 0; j < 8; j++)
-                                sync_octet |= (uint8_t) (bits[i + 1 + j] & 1) << j;
-                            if (sync_octet != 0xE0)
-                                continue;
-                            bit_pos += 10;
-                            score_bias += 60;
-                        }
+                    payload_len = v8_decode_soft_async_bytes(bits,
+                                                             confidence,
+                                                             bit_count,
+                                                             i + 20,
+                                                             payload,
+                                                             (int) sizeof(payload),
+                                                             &framing_penalty);
+                    if (payload_len <= 0)
+                        continue;
+                    first_tag = payload[0] & 0x1F;
+                    second_tag = (payload_len > 1) ? (payload[1] & 0x1F) : 0xFF;
+                    if (payload_len < 2)
+                        continue;
+                    if (first_tag != V8_LOCAL_CALL_FUNCTION_TAG
+                        || second_tag != V8_LOCAL_MODULATION_TAG)
+                        continue;
+                    if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
+                        continue;
 
-                        while (bit_pos + 10 <= bit_count && payload_len < (int) sizeof(payload)) {
-                            uint8_t byte = 0;
-
-                            if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
-                                break;
-                            for (int j = 0; j < 8; j++)
-                                byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
-                            payload[payload_len++] = byte;
-                            bit_pos += 10;
-                            if (byte == 0)
-                                break;
-                        }
-                        if (payload_len <= 0)
-                            continue;
-                        first_tag = payload[0] & 0x1F;
-                        second_tag = (payload_len > 1) ? (payload[1] & 0x1F) : 0xFF;
-                        if (start_mode == 1) {
-                            if (payload_len < 2)
-                                continue;
-                            if (first_tag != V8_LOCAL_CALL_FUNCTION_TAG
-                                || second_tag != V8_LOCAL_MODULATION_TAG)
-                                continue;
-                        }
-                        if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
-                            continue;
-
-                        score_bias += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
-                        if (score_bias < 0)
-                            score_bias = 0;
-                        if (!best.seen || v8_candidate_score(&parsed, payload_len) + score_bias > best.score) {
-                            memset(&best, 0, sizeof(best));
-                            best.seen = true;
-                            best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
-                            best.byte_len = payload_len;
-                            best.score = v8_candidate_score(&parsed, payload_len) + score_bias;
-                            memcpy(best.bytes, payload, (size_t) payload_len);
-                        }
+                    score_bias = ones_score + sync_score;
+                    score_bias += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
+                    score_bias -= framing_penalty;
+                    if (!best.seen || v8_candidate_score(&parsed, payload_len) + score_bias > best.score) {
+                        memset(&best, 0, sizeof(best));
+                        best.seen = true;
+                        best.preamble_type = V8_LOCAL_SYNC_CM_JM;
+                        best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        best.byte_len = payload_len;
+                        best.score = v8_candidate_score(&parsed, payload_len) + score_bias;
+                        memcpy(best.bytes, payload, (size_t) payload_len);
                     }
                 }
             }
@@ -1962,7 +2043,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
     const double space_hz = use_ch2 ? 1850.0 : 1180.0;
     int search_start;
     int search_end;
-    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+    v8_raw_msg_hit_t best = {0};
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
@@ -1981,6 +2062,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
             for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
                 double phase = (double) phase_q / 4.0;
                 uint8_t bits[512];
+                double confidence[512];
                 int bit_count = 0;
 
                 for (int k = 0; ; k++) {
@@ -2002,36 +2084,66 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     if (invert)
                         bit ^= 1;
                     bits[bit_count++] = (uint8_t) bit;
+                    confidence[bit_count - 1] = fabs(pm - ps);
                 }
 
-                for (int i = 0; i + 10 <= bit_count; i++) {
+                for (int i = 0; i + 20 <= bit_count; i++) {
                     uint8_t bytes[16];
                     int byte_len = 0;
                     int score = 0;
+                    int framing_penalty = 0;
+                    int ones_score;
+                    int sync_score_v92;
+                    int sync_score_cm_jm;
                     uint8_t prev_tag = 0xFF;
-                    bool saw_sync = false;
 
-                    for (int bit_pos = i; bit_pos + 10 <= bit_count && byte_len < (int) sizeof(bytes); bit_pos += 10) {
-                        uint8_t byte = 0;
+                    ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
+                    if (ones_score < 40)
+                        continue;
 
-                        if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
-                            break;
-                        for (int j = 0; j < 8; j++)
-                            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
-                        bytes[byte_len++] = byte;
+                    sync_score_v92 = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_V92);
+                    if (sync_score_v92 >= 40) {
+                        byte_len = v8_decode_soft_async_bytes(bits,
+                                                              confidence,
+                                                              bit_count,
+                                                              i + 20,
+                                                              bytes,
+                                                              (int) sizeof(bytes),
+                                                              &framing_penalty);
+                        if (byte_len > 0) {
+                            score = ones_score + sync_score_v92 + byte_len * 12 + 8 - abs(bit_rate - 300) - framing_penalty - i / 2;
+                            if (invert)
+                                score -= 2;
+                            if (!best.seen || score > best.score) {
+                                memset(&best, 0, sizeof(best));
+                                best.seen = true;
+                                best.preamble_type = V8_LOCAL_SYNC_V92;
+                                best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                                best.byte_len = byte_len;
+                                best.score = score;
+                                memcpy(best.bytes, bytes, (size_t) byte_len);
+                            }
+                        }
                     }
+
+                    sync_score_cm_jm = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_CM_JM);
+                    if (sync_score_cm_jm < 40)
+                        continue;
+
+                    byte_len = v8_decode_soft_async_bytes(bits,
+                                                          confidence,
+                                                          bit_count,
+                                                          i + 20,
+                                                          bytes,
+                                                          (int) sizeof(bytes),
+                                                          &framing_penalty);
                     if (byte_len < 2)
                         continue;
-                    if (bytes[0] == 0xE0)
-                        saw_sync = true;
-                    if (!saw_sync) {
-                        if (byte_len < 3)
-                            continue;
-                        if ((bytes[0] & 0x1F) != V8_LOCAL_CALL_FUNCTION_TAG
-                            || (bytes[1] & 0x1F) != V8_LOCAL_MODULATION_TAG)
-                            continue;
-                    }
+                    if ((bytes[0] & 0x1F) != V8_LOCAL_CALL_FUNCTION_TAG
+                        || (bytes[1] & 0x1F) != V8_LOCAL_MODULATION_TAG)
+                        continue;
 
+                    score = 0;
                     for (int j = 0; j < byte_len; j++) {
                         uint8_t b = bytes[j];
                         uint8_t tag = b & 0x1F;
@@ -2060,14 +2172,19 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                         }
                         prev_tag = tag;
                     }
+                    score += ones_score + sync_score_cm_jm;
                     score += byte_len * 2;
                     score += 8 - abs(bit_rate - 302);
+                    if (use_ch2)
+                        score += 6;
+                    score -= framing_penalty;
                     score -= i / 2;
                     if (invert)
                         score -= 2;
                     if (!best.seen || score > best.score) {
                         memset(&best, 0, sizeof(best));
                         best.seen = true;
+                        best.preamble_type = V8_LOCAL_SYNC_CM_JM;
                         best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
                         best.byte_len = byte_len;
                         best.score = score;
@@ -2103,6 +2220,18 @@ static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int by
         if (written < 0 || (size_t) written >= len - used)
             break;
         used += (size_t) written;
+    }
+}
+
+static const char *v8_preamble_to_candidate_label(int preamble_type, bool calling_party)
+{
+    switch (preamble_type) {
+    case V8_LOCAL_SYNC_CM_JM:
+        return calling_party ? "CM-like" : "JM-like";
+    case V8_LOCAL_SYNC_V92:
+        return "V.92-like";
+    default:
+        return calling_party ? "CM-like" : "JM-like";
     }
 }
 
@@ -3086,6 +3215,7 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                 v8_raw_msg_hit_t raw_candidate;
                 char hexbuf[256];
 
+                memset(&raw_candidate, 0, sizeof(raw_candidate));
                 hexbuf[0] = '\0';
                 if (v8_targeted_v21_bytes_candidate(samples,
                                                     total_samples,
@@ -3095,8 +3225,8 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                                                     &raw_candidate)) {
                     format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
                 }
-                printf("  %s-like V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
-                       calling_party ? "CM" : "JM",
+                printf("  %s V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
+                       v8_preamble_to_candidate_label(raw_candidate.preamble_type, calling_party),
                        sample_to_ms(v21_burst.start_sample, 8000),
                        sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
                        calling_party ? "980/1180 Hz" : "1650/1850 Hz",
@@ -3216,6 +3346,7 @@ static void collect_v8_event(call_log_t *log,
         v8_raw_msg_hit_t raw_candidate;
         char hexbuf[256];
 
+        memset(&raw_candidate, 0, sizeof(raw_candidate));
         hexbuf[0] = '\0';
         if (v8_targeted_v21_bytes_candidate(samples,
                                             total_samples,
@@ -3226,8 +3357,8 @@ static void collect_v8_event(call_log_t *log,
             format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
         }
         snprintf(summary, sizeof(summary),
-                 "%s-like V.21 burst candidate",
-                 probe.calling_party ? "CM" : "JM");
+                 "%s V.21 burst candidate",
+                 v8_preamble_to_candidate_label(raw_candidate.preamble_type, probe.calling_party));
         snprintf(detail, sizeof(detail),
                  "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%%%s%s",
                  probe.calling_party ? "caller" : "answerer",
