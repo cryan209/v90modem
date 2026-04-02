@@ -619,6 +619,8 @@ typedef struct {
     bool cm_jm_salvaged;
     int ansam_sample;
     int ansam_tone;
+    int cm_jm_raw_len;
+    uint8_t cm_jm_raw[64];
     int ci_sample;
     int cm_jm_sample;
     int cj_sample;
@@ -1821,6 +1823,131 @@ reset_run:
     return true;
 }
 
+static bool v8_targeted_v21_decode(const int16_t *samples,
+                                   int total_samples,
+                                   int sample_rate,
+                                   const v8_fsk_burst_hit_t *burst,
+                                   bool use_ch2,
+                                   bool calling_party,
+                                   v8_raw_msg_hit_t *out)
+{
+    const double mark_hz = use_ch2 ? 1650.0 : 980.0;
+    const double space_hz = use_ch2 ? 1850.0 : 1180.0;
+    const double symbol_samples = (double) sample_rate / 300.0;
+    int search_start;
+    int search_end;
+    v8_raw_msg_hit_t best = { false, 0, 0, 0, {0} };
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
+        return false;
+
+    search_start = burst->start_sample - 320;
+    search_end = burst->start_sample + burst->duration_samples + 320;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < (int) symbol_samples * 12)
+        return false;
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+            double phase = (double) phase_q / 4.0;
+            uint8_t bits[512];
+            int bit_count = 0;
+
+            for (int k = 0; ; k++) {
+                int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                double pm;
+                double ps;
+                int bit;
+
+                if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                    break;
+                pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, window_energy(samples + a, b - a));
+                ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, window_energy(samples + a, b - a));
+                bit = (pm >= ps) ? 1 : 0;
+                if (invert)
+                    bit ^= 1;
+                bits[bit_count++] = (uint8_t) bit;
+            }
+
+            for (int i = 0; i + 10 <= bit_count; i++) {
+                uint8_t sync_octet;
+
+                if (bits[i] != 0 || bits[i + 9] != 1)
+                    continue;
+                sync_octet = 0;
+                for (int j = 0; j < 8; j++)
+                    sync_octet |= (uint8_t) (bits[i + 1 + j] & 1) << j;
+                if (sync_octet != 0xE0)
+                    continue;
+
+                for (int limit_bytes = 1; limit_bytes <= 16; limit_bytes++) {
+                    uint8_t payload[64];
+                    int payload_len = 0;
+                    v8_parms_t parsed;
+                    int score;
+
+                    for (int bit_pos = i + 10; bit_pos + 10 <= bit_count && payload_len < limit_bytes; bit_pos += 10) {
+                        uint8_t byte = 0;
+
+                        if (bits[bit_pos] != 0 || bits[bit_pos + 9] != 1)
+                            break;
+                        for (int j = 0; j < 8; j++)
+                            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+                        payload[payload_len++] = byte;
+                        if (byte == 0)
+                            break;
+                    }
+                    if (payload_len <= 0)
+                        continue;
+                    if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
+                        continue;
+
+                    score = v8_candidate_score(&parsed, payload_len) + 80 - limit_bytes;
+                    if (!best.seen || score > best.score) {
+                        memset(&best, 0, sizeof(best));
+                        best.seen = true;
+                        best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        best.byte_len = payload_len;
+                        best.score = score;
+                        memcpy(best.bytes, payload, (size_t) payload_len);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
+static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int byte_len)
+{
+    size_t used = 0;
+
+    if (!buf || len == 0)
+        return;
+    buf[0] = '\0';
+    if (!bytes || byte_len <= 0)
+        return;
+
+    for (int i = 0; i < byte_len; i++) {
+        int written = snprintf(buf + used,
+                               len - used,
+                               "%s%02X",
+                               (i == 0) ? "" : " ",
+                               bytes[i]);
+        if (written < 0 || (size_t) written >= len - used)
+            break;
+        used += (size_t) written;
+    }
+}
+
 static void v8_salvage_partial_probe(v8_state_t *v8,
                                      int sample_offset,
                                      v8_probe_result_t *out)
@@ -1838,6 +1965,10 @@ static void v8_salvage_partial_probe(v8_state_t *v8,
     out->last_status = parsed.status;
     out->cm_jm_sample = sample_offset;
     out->cm_jm_salvaged = true;
+    out->cm_jm_raw_len = v8->cm_jm_len;
+    if (out->cm_jm_raw_len > (int) sizeof(out->cm_jm_raw))
+        out->cm_jm_raw_len = (int) sizeof(out->cm_jm_raw);
+    memcpy(out->cm_jm_raw, v8->cm_jm_data, (size_t) out->cm_jm_raw_len);
 }
 
 static int v8_probe_last_sample(const v8_probe_result_t *probe)
@@ -2036,6 +2167,7 @@ static bool v8_collect_probe(const int16_t *samples,
     out->calling_party = calling_party;
     out->ansam_sample = -1;
     out->ansam_tone = MODEM_CONNECT_TONES_NONE;
+    out->cm_jm_raw_len = 0;
     out->ci_sample = -1;
     out->cm_jm_sample = -1;
     out->cj_sample = -1;
@@ -2116,6 +2248,33 @@ static bool v8_collect_probe(const int16_t *samples,
             out->last_status = parsed.status;
             out->cm_jm_sample = raw_hit.sample_offset;
             out->cm_jm_salvaged = true;
+            out->cm_jm_raw_len = raw_hit.byte_len;
+            memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
+        } else if (out->ansam_sample >= 0) {
+            v8_fsk_burst_hit_t burst;
+
+            if (v8_detect_v21_burst(samples,
+                                    total_samples,
+                                    8000,
+                                    out->ansam_sample + 12000,
+                                    limit,
+                                    !calling_party,
+                                    &burst)
+                && v8_targeted_v21_decode(samples,
+                                          total_samples,
+                                          8000,
+                                          &burst,
+                                          !calling_party,
+                                          calling_party,
+                                          &raw_hit)
+                && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
+                out->result = parsed;
+                out->last_status = parsed.status;
+                out->cm_jm_sample = raw_hit.sample_offset;
+                out->cm_jm_salvaged = true;
+                out->cm_jm_raw_len = raw_hit.byte_len;
+                memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
+            }
         }
     }
 
@@ -2727,6 +2886,9 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
             printf("  Partial V.8 decode%s; final negotiation not yet confirmed\n",
                    probe.cm_jm_salvaged ? " (single CM/JM candidate salvage)" : "");
             if (probe.cm_jm_sample >= 0) {
+                char hexbuf[256];
+
+                format_hex_bytes(hexbuf, sizeof(hexbuf), probe.cm_jm_raw, probe.cm_jm_raw_len);
                 printf("  Partial CM/JM fields at ~%.1f ms:\n",
                        sample_to_ms(probe.cm_jm_sample, 8000));
                 printf("  Call function:  %s\n",
@@ -2743,6 +2905,8 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                     printf("  NSF:            %s\n", v8_nsf_to_str(probe.result.jm_cm.nsf));
                 if (probe.result.jm_cm.t66 >= 0)
                     printf("  T.66:           %s\n", v8_t66_to_str(probe.result.jm_cm.t66));
+                if (hexbuf[0] != '\0')
+                    printf("  Raw bytes:      %s\n", hexbuf);
             }
         } else {
             printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
@@ -2811,18 +2975,23 @@ static void collect_v8_event(call_log_t *log,
         call_log_append(log, probe.ci_sample, 0, "V.8", "CI decoded", detail);
     }
     if (probe.cm_jm_sample >= 0) {
+        char hexbuf[256];
+
+        format_hex_bytes(hexbuf, sizeof(hexbuf), probe.cm_jm_raw, probe.cm_jm_raw_len);
         snprintf(summary, sizeof(summary),
                  "%s%s decoded",
                  probe.calling_party ? "JM" : "CM",
                  probe.cm_jm_salvaged ? "?" : "");
         snprintf(detail, sizeof(detail),
-                 "role=%s call_fn=%s protocol=%s pcm=%s pstn=%s confidence=%s",
+                 "role=%s call_fn=%s protocol=%s pcm=%s pstn=%s confidence=%s%s%s",
                  probe.calling_party ? "caller" : "answerer",
                  v8_call_function_to_str(probe.result.jm_cm.call_function),
                  v8_protocol_to_str(probe.result.jm_cm.protocols),
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
                  v8_pstn_access_to_str(probe.result.jm_cm.pstn_access),
-                 probe.cm_jm_salvaged ? "salvaged_single_message" : "confirmed");
+                 probe.cm_jm_salvaged ? "salvaged_single_message" : "confirmed",
+                 hexbuf[0] != '\0' ? " raw=" : "",
+                 hexbuf[0] != '\0' ? hexbuf : "");
         call_log_append(log, probe.cm_jm_sample, 0, "V.8", summary, detail);
     }
     if (probe.cj_sample >= 0) {
