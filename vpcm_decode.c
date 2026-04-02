@@ -2202,6 +2202,47 @@ static const char *v8_preamble_detail(int preamble_type)
     }
 }
 
+static bool is_v92_qc2_label(const char *summary)
+{
+    if (!summary)
+        return false;
+    return strcmp(summary, "QC2a") == 0
+        || strcmp(summary, "QCA2a") == 0
+        || strcmp(summary, "QC2d") == 0
+        || strcmp(summary, "QCA2d") == 0;
+}
+
+static void print_v92_qc2_from_v8bis_messages(const int16_t *samples,
+                                              int total_samples)
+{
+    call_log_t msg_log;
+    int max_sample;
+    bool printed_header = false;
+
+    if (!samples || total_samples <= 0)
+        return;
+
+    call_log_init(&msg_log);
+    max_sample = total_samples;
+    if (max_sample > V8_EARLY_SEARCH_LIMIT_SAMPLES)
+        max_sample = V8_EARLY_SEARCH_LIMIT_SAMPLES;
+    v8bis_collect_msg_events(&msg_log, samples, total_samples, max_sample);
+    for (size_t i = 0; i < msg_log.count; i++) {
+        const call_log_event_t *event = &msg_log.events[i];
+
+        if (strcmp(event->protocol, "V.92") != 0 || !is_v92_qc2_label(event->summary))
+            continue;
+        if (!printed_header) {
+            printf("  V.92 QC2/QCA2 via V.8bis ID field:\n");
+            printed_header = true;
+        }
+        printf("    %s at %.1f ms\n", event->summary, sample_to_ms(event->sample_offset, 8000));
+        if (event->detail[0] != '\0')
+            printf("      %s\n", event->detail);
+    }
+    call_log_reset(&msg_log);
+}
+
 static bool v8_scan_v92_window_candidate(const int16_t *samples,
                                          int total_samples,
                                          int sample_rate,
@@ -3241,6 +3282,7 @@ static void decode_v8_pass(const int16_t *samples,
                sample_to_ms(weak_v8bis.sample_offset, 8000),
                weak_v8bis.score);
     }
+    print_v92_qc2_from_v8bis_messages(samples, total_samples);
 
     if (v8_select_best_probe(samples, total_samples, calling_party, total_samples, &probe)) {
         printf("  Milestones:      ");
