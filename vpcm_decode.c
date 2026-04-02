@@ -1753,7 +1753,7 @@ static bool v8_detect_v21_burst(const int16_t *samples,
     enum {
         WINDOW_SAMPLES = 160,
         STEP_SAMPLES = 80,
-        MIN_RUN_WINDOWS = 8
+        MIN_RUN_WINDOWS = 3
     };
     const double f0 = use_ch2 ? 1650.0 : 980.0;
     const double f1 = use_ch2 ? 1850.0 : 1180.0;
@@ -2677,6 +2677,7 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
     v8_probe_result_t probe;
     v8bis_scan_result_t v8bis;
     ans_fallback_hit_t ans_fallback;
+    v8_fsk_burst_hit_t v21_burst;
 
     if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
         static const char *v8bis_desc[] = {
@@ -2746,6 +2747,22 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
         } else {
             printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
             printf("  Possible V.8bis or clipped pre-V.8 exchange\n");
+            if (probe.ansam_sample >= 0
+                && probe.cm_jm_sample < 0
+                && v8_detect_v21_burst(samples,
+                                       total_samples,
+                                       8000,
+                                       probe.ansam_sample + 12000,
+                                       total_samples,
+                                       !calling_party,
+                                       &v21_burst)) {
+                printf("  %s-like V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
+                       calling_party ? "CM" : "JM",
+                       sample_to_ms(v21_burst.start_sample, 8000),
+                       sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
+                       calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                       v21_burst.peak_strength * 100.0);
+            }
         }
     } else {
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
