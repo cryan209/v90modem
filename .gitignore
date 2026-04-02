@@ -46,6 +46,7 @@ spandsp-master/src/.libs/
 spandsp-master/spandsp-sim/.deps/
 spandsp-master/tests/.deps/
 spandsp-master/test-data/**/.deps/
+spandsp-master/**/Makefile
 spandsp-master/autom4te.cache/
 spandsp-master/config-h.in~
 spandsp-master/configure~
