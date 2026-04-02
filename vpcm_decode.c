@@ -551,6 +551,8 @@ typedef struct {
     int byte_len;
     int score;
     uint8_t bytes[64];
+    int bit_len;
+    uint8_t bit_run[96];
 } v8_raw_msg_hit_t;
 
 typedef struct {
@@ -2185,6 +2187,12 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                                 best.byte_len = byte_len;
                                 best.score = score;
                                 memcpy(best.bytes, bytes, (size_t) byte_len);
+                                best.bit_len = bit_count - i;
+                                if (best.bit_len > 70)
+                                    best.bit_len = 70;
+                                if (best.bit_len > (int) sizeof(best.bit_run))
+                                    best.bit_len = (int) sizeof(best.bit_run);
+                                memcpy(best.bit_run, bits + i, (size_t) best.bit_len);
                             }
                         }
                     }
@@ -2252,6 +2260,12 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                         best.byte_len = byte_len;
                         best.score = score;
                         memcpy(best.bytes, bytes, (size_t) byte_len);
+                        best.bit_len = bit_count - i;
+                        if (best.bit_len > 70)
+                            best.bit_len = 70;
+                        if (best.bit_len > (int) sizeof(best.bit_run))
+                            best.bit_len = (int) sizeof(best.bit_run);
+                        memcpy(best.bit_run, bits + i, (size_t) best.bit_len);
                     }
                 }
             }
@@ -2284,6 +2298,22 @@ static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int by
             break;
         used += (size_t) written;
     }
+}
+
+static void format_bit_slice(char *buf, size_t len, const uint8_t *bits, int start, int count)
+{
+    size_t used = 0;
+
+    if (!buf || len == 0)
+        return;
+    buf[0] = '\0';
+    if (!bits || start < 0 || count <= 0)
+        return;
+
+    for (int i = 0; i < count && used + 2 < len; i++) {
+        buf[used++] = bits[start + i] ? '1' : '0';
+    }
+    buf[used] = '\0';
 }
 
 static const char *v8_preamble_to_candidate_label(int preamble_type, bool calling_party)
@@ -3362,6 +3392,8 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                     v92_short_phase1_candidate_t v92c;
 
                     if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
+                        char ones1[16], sync1[16], frame1[16], ones2[16], sync2[16], frame2[16], tail[16];
+
                         printf("  %s candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
                                v92c.name,
                                sample_to_ms(v21_burst.start_sample, 8000),
@@ -3380,6 +3412,20 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                             printf("  Repeat frame:    %02X (%s)\n",
                                    v92c.frame2,
                                    v92c.repeat_match ? "matches" : "differs");
+                        }
+                        if (raw_candidate.bit_len >= 60) {
+                            format_bit_slice(ones1, sizeof(ones1), raw_candidate.bit_run, 0, 10);
+                            format_bit_slice(sync1, sizeof(sync1), raw_candidate.bit_run, 10, 10);
+                            format_bit_slice(frame1, sizeof(frame1), raw_candidate.bit_run, 20, 10);
+                            format_bit_slice(ones2, sizeof(ones2), raw_candidate.bit_run, 30, 10);
+                            format_bit_slice(sync2, sizeof(sync2), raw_candidate.bit_run, 40, 10);
+                            format_bit_slice(frame2, sizeof(frame2), raw_candidate.bit_run, 50, 10);
+                            if (raw_candidate.bit_len >= 70)
+                                format_bit_slice(tail, sizeof(tail), raw_candidate.bit_run, 60, 10);
+                            else
+                                format_bit_slice(tail, sizeof(tail), raw_candidate.bit_run, 60, raw_candidate.bit_len - 60);
+                            printf("  Bit run:         %s | %s | %s | %s | %s | %s | %s\n",
+                                   ones1, sync1, frame1, ones2, sync2, frame2, tail);
                         }
                     } else {
                         printf("  %s V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
@@ -3531,16 +3577,35 @@ static void collect_v8_event(call_log_t *log,
 
             if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
                 char auxbuf[64];
+                char bitbuf[128];
 
                 if (v92c.digital_modem)
                     snprintf(auxbuf, sizeof(auxbuf), "anspcm_level=%s", v92_anspcm_level_to_str(v92c.aux_value));
                 else
                     snprintf(auxbuf, sizeof(auxbuf), "uqts_index=0x%X", v92c.aux_value);
+                bitbuf[0] = '\0';
+                if (raw_candidate.bit_len >= 60) {
+                    char ones1[16], sync1[16], frame1[16], ones2[16], sync2[16], frame2[16], tail[16];
+
+                    format_bit_slice(ones1, sizeof(ones1), raw_candidate.bit_run, 0, 10);
+                    format_bit_slice(sync1, sizeof(sync1), raw_candidate.bit_run, 10, 10);
+                    format_bit_slice(frame1, sizeof(frame1), raw_candidate.bit_run, 20, 10);
+                    format_bit_slice(ones2, sizeof(ones2), raw_candidate.bit_run, 30, 10);
+                    format_bit_slice(sync2, sizeof(sync2), raw_candidate.bit_run, 40, 10);
+                    format_bit_slice(frame2, sizeof(frame2), raw_candidate.bit_run, 50, 10);
+                    if (raw_candidate.bit_len >= 70)
+                        format_bit_slice(tail, sizeof(tail), raw_candidate.bit_run, 60, 10);
+                    else
+                        format_bit_slice(tail, sizeof(tail), raw_candidate.bit_run, 60, raw_candidate.bit_len - 60);
+                    snprintf(bitbuf, sizeof(bitbuf),
+                             " bits=%s|%s|%s|%s|%s|%s|%s",
+                             ones1, sync1, frame1, ones2, sync2, frame2, tail);
+                }
                 snprintf(summary, sizeof(summary),
                          "%s candidate",
                          v92c.name);
                 snprintf(detail, sizeof(detail),
-                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\" lapm=%s %s repeat=%s%s%s",
+                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\" lapm=%s %s repeat=%s%s%s%s",
                          probe.calling_party ? "caller" : "answerer",
                          sample_to_ms(v21_burst.start_sample, 8000),
                          sample_to_ms(v21_burst.duration_samples, 8000),
@@ -3550,6 +3615,7 @@ static void collect_v8_event(call_log_t *log,
                          v92c.lapm ? "yes" : "no",
                          auxbuf,
                          v92c.repeat_seen ? (v92c.repeat_match ? "match" : "differs") : "missing",
+                         bitbuf,
                          hexbuf[0] != '\0' ? " raw=" : "",
                          hexbuf[0] != '\0' ? hexbuf : "");
             } else {
