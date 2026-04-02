@@ -541,6 +541,7 @@ typedef struct {
     int start_sample;
     int duration_samples;
     double peak_ratio;
+    int tone_type;
 } ans_fallback_hit_t;
 
 typedef struct {
@@ -754,6 +755,80 @@ static void v8_note_first_sample(int *dst, int sample)
 
 static double window_energy(const int16_t *samples, int len);
 static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy);
+static double series_energy_ratio(const double *samples, int len, int sample_rate, double freq_hz, double total_energy);
+
+static bool detect_ansam_am(const int16_t *samples,
+                            int len,
+                            int sample_rate)
+{
+    enum { BLOCK_SAMPLES = 80 };
+    static const double competitor_freqs[] = { 10.0, 12.0, 18.0, 20.0, 23.0 };
+    double carrier_w;
+    double carrier_cos;
+    double carrier_sin;
+    double osc_re = 1.0;
+    double osc_im = 0.0;
+    double env_energy = 0.0;
+    double env_15_ratio;
+    double env_competitor_peak = 0.0;
+    double *env;
+    double env_mean = 0.0;
+    int env_len;
+
+    if (!samples || len < BLOCK_SAMPLES * 20 || sample_rate <= 0)
+        return false;
+
+    env_len = len / BLOCK_SAMPLES;
+    env = calloc((size_t) env_len, sizeof(*env));
+    if (!env)
+        return false;
+
+    carrier_w = 2.0 * M_PI * 2100.0 / (double) sample_rate;
+    carrier_cos = cos(carrier_w);
+    carrier_sin = sin(carrier_w);
+
+    for (int i = 0; i < env_len; i++) {
+        double re = 0.0;
+        double im = 0.0;
+
+        for (int j = 0; j < BLOCK_SAMPLES; j++) {
+            double sample = (double) samples[i * BLOCK_SAMPLES + j];
+            double next_re = osc_re * carrier_cos - osc_im * carrier_sin;
+            double next_im = osc_im * carrier_cos + osc_re * carrier_sin;
+
+            re += sample * osc_re;
+            im -= sample * osc_im;
+            osc_re = next_re;
+            osc_im = next_im;
+        }
+        env[i] = sqrt(re * re + im * im) / (double) BLOCK_SAMPLES;
+        env_mean += env[i];
+    }
+
+    env_mean /= (double) env_len;
+    for (int i = 0; i < env_len; i++) {
+        env[i] -= env_mean;
+        env_energy += env[i] * env[i];
+    }
+    if (env_energy <= 0.0) {
+        free(env);
+        return false;
+    }
+
+    env_15_ratio = series_energy_ratio(env, env_len, sample_rate / BLOCK_SAMPLES, 15.0, env_energy);
+    for (size_t i = 0; i < sizeof(competitor_freqs)/sizeof(competitor_freqs[0]); i++) {
+        double ratio = series_energy_ratio(env,
+                                           env_len,
+                                           sample_rate / BLOCK_SAMPLES,
+                                           competitor_freqs[i],
+                                           env_energy);
+        if (ratio > env_competitor_peak)
+            env_competitor_peak = ratio;
+    }
+
+    free(env);
+    return (env_15_ratio >= 0.05 && env_15_ratio >= env_competitor_peak * 3.0);
+}
 
 static bool detect_standalone_ans_fallback(const int16_t *samples,
                                            int total_samples,
@@ -772,7 +847,7 @@ static bool detect_standalone_ans_fallback(const int16_t *samples,
     int run_windows = 0;
     int gap_windows = 0;
     double run_peak = 0.0;
-    ans_fallback_hit_t best = { false, -1, 0, 0.0 };
+    ans_fallback_hit_t best = { false, -1, 0, 0.0, MODEM_CONNECT_TONES_NONE };
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !out)
         return false;
@@ -825,6 +900,11 @@ reset_run:
             best.start_sample = run_start;
             best.duration_samples = run_windows * WINDOW_SAMPLES;
             best.peak_ratio = run_peak;
+            best.tone_type = detect_ansam_am(samples + run_start,
+                                             run_windows * WINDOW_SAMPLES,
+                                             sample_rate)
+                           ? MODEM_CONNECT_TONES_ANSAM
+                           : MODEM_CONNECT_TONES_ANS;
             break;
         }
         run_start = -1;
@@ -838,6 +918,11 @@ reset_run:
         best.start_sample = run_start;
         best.duration_samples = run_windows * WINDOW_SAMPLES;
         best.peak_ratio = run_peak;
+        best.tone_type = detect_ansam_am(samples + run_start,
+                                         run_windows * WINDOW_SAMPLES,
+                                         sample_rate)
+                       ? MODEM_CONNECT_TONES_ANSAM
+                       : MODEM_CONNECT_TONES_ANS;
     }
 
     if (!best.seen)
@@ -880,6 +965,39 @@ static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate
 
     for (int i = 0; i < len; i++) {
         double sample = (double) samples[i];
+        double next_re = osc_re * cos_w - osc_im * sin_w;
+        double next_im = osc_im * cos_w + osc_re * sin_w;
+
+        re += sample * osc_re;
+        im -= sample * osc_im;
+        osc_re = next_re;
+        osc_im = next_im;
+    }
+
+    return (re * re + im * im) / (total_energy * (double) len);
+}
+
+static double series_energy_ratio(const double *samples, int len, int sample_rate, double freq_hz, double total_energy)
+{
+    double w;
+    double cos_w;
+    double sin_w;
+    double osc_re;
+    double osc_im;
+    double re = 0.0;
+    double im = 0.0;
+
+    if (!samples || len <= 0 || sample_rate <= 0 || freq_hz <= 0.0 || total_energy <= 0.0)
+        return 0.0;
+
+    w = 2.0 * M_PI * freq_hz / (double) sample_rate;
+    cos_w = cos(w);
+    sin_w = sin(w);
+    osc_re = 1.0;
+    osc_im = 0.0;
+
+    for (int i = 0; i < len; i++) {
+        double sample = samples[i];
         double next_re = osc_re * cos_w - osc_im * sin_w;
         double next_im = osc_im * cos_w + osc_re * sin_w;
 
@@ -1638,7 +1756,7 @@ static bool v8_collect_probe(const int16_t *samples,
 
         if (detect_standalone_ans_fallback(samples, total_samples, 8000, limit, &ans_hit)) {
             out->ansam_sample = ans_hit.start_sample;
-            out->ansam_tone = MODEM_CONNECT_TONES_ANS;
+            out->ansam_tone = ans_hit.tone_type;
         }
     }
 
@@ -1652,11 +1770,11 @@ static bool v8_collect_probe(const int16_t *samples,
     return out->ok;
 }
 
-static bool v8_select_best_probe(const int16_t *samples,
-                                 int total_samples,
-                                 bool calling_party,
-                                 int max_sample,
-                                 v8_probe_result_t *out)
+static bool v8_select_best_probe_core(const int16_t *samples,
+                                      int total_samples,
+                                      bool calling_party,
+                                      int max_sample,
+                                      v8_probe_result_t *out)
 {
     v8_probe_result_t best;
     int best_score = -1;
@@ -1706,7 +1824,65 @@ static bool v8_select_best_probe(const int16_t *samples,
 
     if (best_score < 0)
         return false;
+    if (best.ansam_sample >= 0) {
+        ans_fallback_hit_t refined_ans;
+
+        if (detect_standalone_ans_fallback(samples, total_samples, 8000, search_limit, &refined_ans)) {
+            int delta = refined_ans.start_sample - best.ansam_sample;
+
+            if (delta < 0)
+                delta = -delta;
+            if (delta <= 800 && refined_ans.tone_type == MODEM_CONNECT_TONES_ANSAM)
+                best.ansam_tone = MODEM_CONNECT_TONES_ANSAM;
+        }
+    }
     *out = best;
+    return true;
+}
+
+static bool v8_select_best_probe(const int16_t *samples,
+                                 int total_samples,
+                                 bool calling_party,
+                                 int max_sample,
+                                 v8_probe_result_t *out)
+{
+    v8_probe_result_t normal_probe;
+    v8_probe_result_t inverted_probe;
+    int normal_score = -1;
+    int inverted_score = -1;
+    int16_t *inverted_samples = NULL;
+    bool have_normal;
+    bool have_inverted = false;
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    have_normal = v8_select_best_probe_core(samples, total_samples, calling_party, max_sample, &normal_probe);
+    if (have_normal)
+        normal_score = v8_probe_chain_score(&normal_probe);
+
+    inverted_samples = malloc((size_t) total_samples * sizeof(*inverted_samples));
+    if (inverted_samples) {
+        for (int i = 0; i < total_samples; i++)
+            inverted_samples[i] = (int16_t) -samples[i];
+        have_inverted = v8_select_best_probe_core(inverted_samples,
+                                                  total_samples,
+                                                  calling_party,
+                                                  max_sample,
+                                                  &inverted_probe);
+        if (have_inverted)
+            inverted_score = v8_probe_chain_score(&inverted_probe);
+        free(inverted_samples);
+    }
+
+    if (!have_normal && !have_inverted)
+        return false;
+    if (have_inverted && (!have_normal || inverted_score > normal_score)) {
+        *out = inverted_probe;
+        return true;
+    }
+
+    *out = normal_probe;
     return true;
 }
 
@@ -2207,7 +2383,8 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
                total_samples, sample_to_ms(total_samples, 8000));
         if (detect_standalone_ans_fallback(samples, total_samples, 8000, total_samples, &ans_fallback)) {
-            printf("  Standalone 2100 Hz answer tone candidate at %.1f-%.1f ms (peak %.1f%%)\n",
+            printf("  Standalone %s candidate at %.1f-%.1f ms (peak %.1f%%)\n",
+                   v8_answer_tone_name(ans_fallback.tone_type),
                    sample_to_ms(ans_fallback.start_sample, 8000),
                    sample_to_ms(ans_fallback.start_sample + ans_fallback.duration_samples, 8000),
                    ans_fallback.peak_ratio * 100.0);
@@ -2298,14 +2475,15 @@ static void collect_v8_event(call_log_t *log,
     if (probe.ansam_sample < 0
         && detect_standalone_ans_fallback(samples, total_samples, 8000, max_sample, &ans_fallback)) {
         snprintf(detail, sizeof(detail),
-                 "duration=%.1f ms peak_2100=%.1f%%",
+                 "duration=%.1f ms peak_2100=%.1f%% tone=%s",
                  sample_to_ms(ans_fallback.duration_samples, 8000),
-                 ans_fallback.peak_ratio * 100.0);
+                 ans_fallback.peak_ratio * 100.0,
+                 v8_answer_tone_detail(ans_fallback.tone_type));
         call_log_append(log,
                         ans_fallback.start_sample,
                         ans_fallback.duration_samples,
                         "V.8?",
-                        "Standalone 2100 Hz answer tone candidate",
+                        "Standalone answer tone candidate",
                         detail);
     }
     return;
@@ -2313,14 +2491,15 @@ static void collect_v8_event(call_log_t *log,
 fallback_only:
     if (detect_standalone_ans_fallback(samples, total_samples, 8000, max_sample, &ans_fallback)) {
         snprintf(detail, sizeof(detail),
-                 "duration=%.1f ms peak_2100=%.1f%%",
+                 "duration=%.1f ms peak_2100=%.1f%% tone=%s",
                  sample_to_ms(ans_fallback.duration_samples, 8000),
-                 ans_fallback.peak_ratio * 100.0);
+                 ans_fallback.peak_ratio * 100.0,
+                 v8_answer_tone_detail(ans_fallback.tone_type));
         call_log_append(log,
                         ans_fallback.start_sample,
                         ans_fallback.duration_samples,
                         "V.8?",
-                        "Standalone 2100 Hz answer tone candidate",
+                        "Standalone answer tone candidate",
                         detail);
     }
 }

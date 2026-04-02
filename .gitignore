@@ -91,3 +91,4 @@ pjproject/**/.libs/
 core.3194
 core.3478
 vpcm_decode
+left_neg_test.wav
