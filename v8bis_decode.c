@@ -228,6 +228,93 @@ typedef struct {
     int channel;
 } v8bis_hdlc_rx_t;
 
+typedef struct {
+    bool ok;
+    const char *name;           /* QC2a, QCA2a, QC2d, QCA2d */
+    bool digital_modem;
+    bool qca;
+    bool lapm;
+    int revision;               /* V.8bis revision nibble */
+    int wxyz;                   /* analogue forms */
+    int uqts_ucode;             /* analogue forms */
+    int lm;                     /* digital forms */
+    uint8_t id_octet;           /* bits 8..15 */
+} v92_qc2_id_t;
+
+static int v92_uqts_from_wxyz(int wxyz)
+{
+    static const int table[16] = {
+        61, 62, 63, 66,
+        67, 70, 71, 74,
+        75, 78, 79, 82,
+        83, 86, 87, 87
+    };
+
+    if (wxyz < 0 || wxyz > 15)
+        return -1;
+    return table[wxyz];
+}
+
+static const char *v92_anspcm_level_to_str(int level)
+{
+    switch (level & 0x03) {
+    case 0: return "-9.5 dBm0";
+    case 1: return "-12 dBm0";
+    case 2: return "-15 dBm0";
+    case 3: return "-18 dBm0";
+    default: return "unknown";
+    }
+}
+
+static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
+                              v92_qc2_id_t *out)
+{
+    uint8_t b;
+    bool digital_modem;
+    bool qca;
+    bool lapm;
+
+    if (!msg || !out)
+        return false;
+    /* V.92 QC2/QCA2 identification field uses V.8bis message type 1011b */
+    if (msg->msg_type != 0xB || msg->info_len < 1)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    b = msg->info[0];
+    out->id_octet = b;
+    out->revision = msg->revision & 0x0F;
+
+    qca = ((b >> 6) & 0x01U) != 0;          /* bit 14 */
+    digital_modem = ((b >> 7) & 0x01U) != 0;/* bit 15 */
+    lapm = ((b >> 5) & 0x01U) != 0;         /* bit 13 */
+
+    out->qca = qca;
+    out->digital_modem = digital_modem;
+    out->lapm = lapm;
+
+    if (digital_modem) {
+        int lm = (int) (b & 0x03U);         /* bits 8..9 */
+
+        /* bits 10..12 reserved=000 for QC2d/QCA2d */
+        if ((b & 0x1CU) != 0)
+            return false;
+        out->lm = lm;
+        out->name = qca ? "QCA2d" : "QC2d";
+        out->ok = true;
+        return true;
+    }
+
+    out->wxyz = (int) (b & 0x0FU);          /* bits 8..11 */
+    /* bit 12 reserved=0 for QC2a/QCA2a */
+    if ((b & 0x10U) != 0)
+        return false;
+    out->uqts_ucode = v92_uqts_from_wxyz(out->wxyz);
+    out->name = qca ? "QCA2a" : "QC2a";
+    out->ok = true;
+    return true;
+}
+
 /* CRC-16/CCITT (x^16 + x^12 + x^5 + 1) per ISO/IEC 3309 / V.8bis §7.2.7 */
 static uint16_t v8bis_crc16(const uint8_t *data, int len)
 {
@@ -423,6 +510,7 @@ void v8bis_collect_msg_events(call_log_t *log,
         const v8bis_decoded_msg_t *msg = all_msgs[i];
         const char *type_str = v8bis_msg_type_str(msg->msg_type);
         const char *ch_str = (msg->channel == 0) ? "initiating/CH1" : "responding/CH2";
+        v92_qc2_id_t v92_qc2;
 
         /* Skip frames with unknown/undefined type */
         if (msg->msg_type == 0 || strcmp(type_str, "unknown") == 0)
@@ -470,6 +558,30 @@ void v8bis_collect_msg_events(call_log_t *log,
         }
 
         call_log_append(log, msg->sample_offset, 0, "V.8bis", summary, detail);
+
+        /* Also emit explicit V.92 QC2/QCA2 identification when present. */
+        if (v92_decode_qc2_id(msg, &v92_qc2)) {
+            snprintf(summary, sizeof(summary), "%s", v92_qc2.name);
+            if (v92_qc2.digital_modem) {
+                snprintf(detail, sizeof(detail),
+                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s anspcm_level=%s id_octet=%02X",
+                         v92_qc2.revision,
+                         ch_str,
+                         v92_qc2.lapm ? "yes" : "no",
+                         v92_anspcm_level_to_str(v92_qc2.lm),
+                         v92_qc2.id_octet);
+            } else {
+                snprintf(detail, sizeof(detail),
+                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s uqts_index=0x%X uqts_ucode=%d id_octet=%02X",
+                         v92_qc2.revision,
+                         ch_str,
+                         v92_qc2.lapm ? "yes" : "no",
+                         v92_qc2.wxyz,
+                         v92_qc2.uqts_ucode,
+                         v92_qc2.id_octet);
+            }
+            call_log_append(log, msg->sample_offset, 0, "V.92", summary, detail);
+        }
     }
 }
 

@@ -15,6 +15,7 @@
 #include "v91.h"
 #include "vpcm_cp.h"
 #include "v8bis_decode.h"
+#include "v92_short_phase1_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -695,6 +696,7 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                              int total_codewords,
                                              const decode_v34_result_t *answerer,
                                              const decode_v34_result_t *caller);
+static int codeword_to_ucode(v91_law_t law, uint8_t codeword);
 
 static decode_v8_result_t g_v8_result;
 
@@ -2200,293 +2202,6 @@ static const char *v8_preamble_detail(int preamble_type)
     }
 }
 
-typedef struct {
-    bool ok;
-    const char *name;
-    bool digital_modem;
-    bool qca;
-    bool lapm;
-    int aux_value;
-    int uqts_ucode;
-    uint16_t frame1_bits;
-    uint16_t frame2_bits;
-    uint16_t decoded_frame_bits;
-    int decoded_frame_index;
-    bool repeat_seen;
-    bool repeat_match;
-} v92_short_phase1_candidate_t;
-
-typedef struct {
-    bool seen;
-    int start_sample;
-    int qts_reps;
-    int qts_bar_reps;
-} v92_qts_hit_t;
-
-static int v92_uqts_from_wxyz(int wxyz)
-{
-    static const int table[16] = {
-        61, 62, 63, 66,
-        67, 70, 71, 74,
-        75, 78, 79, 82,
-        83, 86, 87, 87
-    };
-
-    if (wxyz < 0 || wxyz > 15)
-        return -1;
-    return table[wxyz];
-}
-
-static uint16_t pack_lsb_bits(const uint8_t *bits, int start, int count)
-{
-    uint16_t packed = 0;
-
-    if (!bits || start < 0 || count <= 0 || count > 16)
-        return 0;
-    for (int i = 0; i < count; i++)
-        packed |= (uint16_t) (bits[start + i] & 1) << i;
-    return packed;
-}
-
-static bool v92_frame_matches_channel_bits(uint16_t frame_bits, bool use_ch2)
-{
-    bool qca = ((frame_bits >> 2) & 1U) != 0;
-
-    return use_ch2 ? qca : !qca;
-}
-
-static bool v92_unpack_frame_bits(uint16_t frame_bits,
-                                  v92_short_phase1_candidate_t *out)
-{
-    bool digital_modem;
-    bool qca;
-    bool lapm;
-
-    if (!out)
-        return false;
-    if ((frame_bits & 0x001U) != 0)
-        return false;
-
-    memset(out, 0, sizeof(*out));
-    digital_modem = ((frame_bits >> 1) & 1U) != 0;
-    qca = ((frame_bits >> 2) & 1U) != 0;
-    lapm = ((frame_bits >> 3) & 1U) != 0;
-
-    out->digital_modem = digital_modem;
-    out->qca = qca;
-    out->lapm = lapm;
-
-    if (digital_modem) {
-        int lm;
-
-        if (((frame_bits >> 4) & 0x7U) != 0 || ((frame_bits >> 9) & 1U) != 1)
-            return false;
-        lm = (int) ((frame_bits >> 7) & 0x3U);
-        out->name = qca ? "QCA1d" : "QC1d";
-        out->aux_value = lm;
-        out->uqts_ucode = -1;
-    } else {
-        int wxyz;
-
-        if (((frame_bits >> 5) & 1U) != 0 || ((frame_bits >> 9) & 1U) != 1)
-            return false;
-        wxyz = (int) ((((frame_bits >> 4) & 1U) << 3)
-                    | (((frame_bits >> 6) & 1U) << 2)
-                    | (((frame_bits >> 7) & 1U) << 1)
-                    | ((frame_bits >> 8) & 1U));
-        out->name = qca ? "QCA1a" : "QC1a";
-        out->aux_value = wxyz;
-        out->uqts_ucode = v92_uqts_from_wxyz(wxyz);
-    }
-    out->ok = true;
-    return true;
-}
-
-static bool v92_same_decoded_payload(const v92_short_phase1_candidate_t *a,
-                                     const v92_short_phase1_candidate_t *b)
-{
-    if (!a || !b || !a->ok || !b->ok)
-        return false;
-    return a->digital_modem == b->digital_modem
-        && a->qca == b->qca
-        && a->lapm == b->lapm
-        && a->aux_value == b->aux_value;
-}
-
-static bool decode_v92_short_phase1_candidate(const uint8_t *bits,
-                                              int bit_len,
-                                              bool use_ch2,
-                                              v92_short_phase1_candidate_t *out)
-{
-    v92_short_phase1_candidate_t first = {0};
-    v92_short_phase1_candidate_t repeat = {0};
-    bool first_ok;
-    bool repeat_ok = false;
-    int chosen_index = -1;
-
-    if (!bits || bit_len < 30 || !out)
-        return false;
-
-    memset(out, 0, sizeof(*out));
-    out->frame1_bits = pack_lsb_bits(bits, 20, 10);
-    first_ok = v92_unpack_frame_bits(out->frame1_bits, &first);
-    if (bit_len >= 60) {
-        out->frame2_bits = pack_lsb_bits(bits, 50, 10);
-        out->repeat_seen = true;
-        repeat_ok = v92_unpack_frame_bits(out->frame2_bits, &repeat);
-        out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
-    }
-
-    if (repeat_ok && v92_frame_matches_channel_bits(out->frame2_bits, use_ch2)) {
-        *out = repeat;
-        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
-        if (bit_len >= 60) {
-            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
-            out->repeat_seen = true;
-            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
-        }
-        chosen_index = 1;
-    } else if (first_ok && v92_frame_matches_channel_bits(out->frame1_bits, use_ch2)) {
-        *out = first;
-        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
-        if (bit_len >= 60) {
-            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
-            out->repeat_seen = true;
-            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
-        }
-        chosen_index = 0;
-    } else if (repeat_ok) {
-        *out = repeat;
-        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
-        out->frame2_bits = pack_lsb_bits(bits, 50, 10);
-        out->repeat_seen = bit_len >= 60;
-        out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
-        chosen_index = 1;
-    } else if (first_ok) {
-        *out = first;
-        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
-        if (bit_len >= 60) {
-            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
-            out->repeat_seen = true;
-            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
-        }
-        chosen_index = 0;
-    } else {
-        return false;
-    }
-
-    out->decoded_frame_index = chosen_index;
-    out->decoded_frame_bits = (chosen_index > 0) ? out->frame2_bits : out->frame1_bits;
-    out->ok = true;
-    return true;
-}
-
-static const char *v92_anspcm_level_to_str(int level)
-{
-    switch (level & 0x03) {
-    case 0: return "-9.5 dBm0";
-    case 1: return "-12 dBm0";
-    case 2: return "-15 dBm0";
-    case 3: return "-18 dBm0";
-    default: return "unknown";
-    }
-}
-
-static int codeword_to_ucode(v91_law_t law, uint8_t codeword);
-
-static bool v92_matches_pcm_symbol(v91_law_t law,
-                                   uint8_t codeword,
-                                   int target_ucode,
-                                   bool positive)
-{
-    int ucode;
-    bool sign_positive;
-    int tolerance;
-
-    ucode = codeword_to_ucode(law, codeword);
-    if (ucode < 0)
-        return false;
-    sign_positive = (codeword & 0x80) != 0;
-    if (sign_positive != positive)
-        return false;
-    tolerance = (target_ucode == 0) ? 1 : 2;
-    return abs(ucode - target_ucode) <= tolerance;
-}
-
-static bool detect_v92_qts_sequence(const uint8_t *codewords,
-                                    int total,
-                                    v91_law_t law,
-                                    int uqts_ucode,
-                                    int search_start,
-                                    int search_end,
-                                    v92_qts_hit_t *out)
-{
-    v92_qts_hit_t best = {0};
-
-    if (!codewords || total <= 0 || uqts_ucode < 0 || !out)
-        return false;
-
-    if (search_start < 0)
-        search_start = 0;
-    if (search_end <= 0 || search_end > total)
-        search_end = total;
-    if (search_end - search_start < 6 * 12)
-        return false;
-
-    for (int offset = search_start; offset + 6 * 12 <= search_end; offset++) {
-        int qts_reps = 0;
-        int qts_bar_reps = 0;
-        int pos = offset;
-
-        if (!v92_matches_pcm_symbol(law, codewords[offset], uqts_ucode, true))
-            continue;
-
-        while (pos + 6 <= search_end) {
-            bool ok = true;
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 0], uqts_ucode, true);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 1], 0, true);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 2], uqts_ucode, true);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 3], uqts_ucode, false);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 4], 0, false);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 5], uqts_ucode, false);
-            if (!ok)
-                break;
-            qts_reps++;
-            pos += 6;
-        }
-        if (qts_reps < 8)
-            continue;
-
-        while (pos + 6 <= search_end) {
-            bool ok = true;
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 0], uqts_ucode, false);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 1], 0, false);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 2], uqts_ucode, false);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 3], uqts_ucode, true);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 4], 0, true);
-            ok &= v92_matches_pcm_symbol(law, codewords[pos + 5], uqts_ucode, true);
-            if (!ok)
-                break;
-            qts_bar_reps++;
-            pos += 6;
-        }
-
-        if (!best.seen
-            || qts_reps > best.qts_reps
-            || (qts_reps == best.qts_reps && qts_bar_reps > best.qts_bar_reps)) {
-            best.seen = true;
-            best.start_sample = offset;
-            best.qts_reps = qts_reps;
-            best.qts_bar_reps = qts_bar_reps;
-        }
-    }
-
-    if (!best.seen)
-        return false;
-    *out = best;
-    return true;
-}
-
 static bool v8_scan_v92_window_candidate(const int16_t *samples,
                                          int total_samples,
                                          int sample_rate,
@@ -2554,7 +2269,7 @@ static bool v8_scan_v92_window_candidate(const int16_t *samples,
                     sync_score = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_V92);
                     if (sync_score < 32)
                         continue;
-                    if (!decode_v92_short_phase1_candidate(bits + i, bit_count - i, use_ch2, &v92c))
+                    if (!v92_decode_short_phase1_candidate(bits + i, bit_count - i, use_ch2, &v92c))
                         continue;
                     if (expected_qca >= 0 && (int) v92c.qca != expected_qca)
                         continue;
@@ -3569,7 +3284,7 @@ static void decode_v8_pass(const int16_t *samples,
                     && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
                     v92_short_phase1_candidate_t pre_cm_v92c;
 
-                    if (decode_v92_short_phase1_candidate(pre_cm_candidate.bit_run,
+                    if (v92_decode_short_phase1_candidate(pre_cm_candidate.bit_run,
                                                           pre_cm_candidate.bit_len,
                                                           false,
                                                           &pre_cm_v92c)) {
@@ -3622,7 +3337,7 @@ static void decode_v8_pass(const int16_t *samples,
                     && post_ans_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
                     v92_short_phase1_candidate_t post_ans_v92c;
 
-                    if (decode_v92_short_phase1_candidate(post_ans_candidate.bit_run,
+                    if (v92_decode_short_phase1_candidate(post_ans_candidate.bit_run,
                                                           post_ans_candidate.bit_len,
                                                           !calling_party,
                                                           &post_ans_v92c)) {
@@ -3660,7 +3375,7 @@ static void decode_v8_pass(const int16_t *samples,
                     v92_short_phase1_candidate_t v92c;
                     v92_qts_hit_t qts_hit;
 
-                    if (decode_v92_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !calling_party, &v92c)) {
+                    if (v92_decode_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !calling_party, &v92c)) {
                         char ones1[16], sync1[16], frame1[16], ones2[16], sync2[16], frame2[16], tail[16];
 
                         printf("  %s candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
@@ -3682,13 +3397,14 @@ static void decode_v8_pass(const int16_t *samples,
                             printf("  UQTS index:      0x%X (Ucode %d)\n", v92c.aux_value, v92c.uqts_ucode);
                             if (codewords
                                 && v92c.uqts_ucode >= 0
-                                && detect_v92_qts_sequence(codewords,
-                                                           total_samples,
-                                                           law,
-                                                           v92c.uqts_ucode,
-                                                           v21_burst.start_sample + v21_burst.duration_samples + 400,
-                                                           v21_burst.start_sample + v21_burst.duration_samples + 4000,
-                                                           &qts_hit)) {
+                            && v92_detect_qts_sequence(codewords,
+                                                       total_samples,
+                                                       law,
+                                                       v92c.uqts_ucode,
+                                                       v21_burst.start_sample + v21_burst.duration_samples + 400,
+                                                       v21_burst.start_sample + v21_burst.duration_samples + 4000,
+                                                       codeword_to_ucode,
+                                                       &qts_hit)) {
                                 printf("  QTS candidate:   %.1f ms (%d QTS reps, %d QTS\\\\ reps)\n",
                                        sample_to_ms(qts_hit.start_sample, 8000),
                                        qts_hit.qts_reps,
@@ -3823,7 +3539,7 @@ static void collect_v8_event(call_log_t *log,
             && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
             v92_short_phase1_candidate_t pre_cm_v92c;
 
-            if (decode_v92_short_phase1_candidate(pre_cm_candidate.bit_run,
+            if (v92_decode_short_phase1_candidate(pre_cm_candidate.bit_run,
                                                   pre_cm_candidate.bit_len,
                                                   false,
                                                   &pre_cm_v92c)) {
@@ -3872,7 +3588,7 @@ static void collect_v8_event(call_log_t *log,
             && post_ans_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
             v92_short_phase1_candidate_t post_ans_v92c;
 
-            if (decode_v92_short_phase1_candidate(post_ans_candidate.bit_run,
+            if (v92_decode_short_phase1_candidate(post_ans_candidate.bit_run,
                                                   post_ans_candidate.bit_len,
                                                   !probe.calling_party,
                                                   &post_ans_v92c)) {
@@ -3925,7 +3641,7 @@ static void collect_v8_event(call_log_t *log,
             v92_short_phase1_candidate_t v92c;
             v92_qts_hit_t qts_hit;
 
-            if (decode_v92_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !probe.calling_party, &v92c)) {
+            if (v92_decode_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !probe.calling_party, &v92c)) {
                 char auxbuf[64];
                 char bitbuf[128];
                 char framebuf[64];
@@ -3961,12 +3677,13 @@ static void collect_v8_event(call_log_t *log,
                 if (!v92c.digital_modem
                     && codewords
                     && v92c.uqts_ucode >= 0
-                    && detect_v92_qts_sequence(codewords,
+                    && v92_detect_qts_sequence(codewords,
                                                total_samples,
                                                law,
                                                v92c.uqts_ucode,
                                                v21_burst.start_sample + v21_burst.duration_samples + 400,
                                                v21_burst.start_sample + v21_burst.duration_samples + 4000,
+                                               codeword_to_ucode,
                                                &qts_hit)) {
                     snprintf(qtsbuf, sizeof(qtsbuf),
                              " qts=%.1fms/%dreps qts_bar=%dreps",
