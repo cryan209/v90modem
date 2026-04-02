@@ -2278,6 +2278,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
     return true;
 }
 
+
 static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int byte_len)
 {
     size_t used = 0;
@@ -2347,42 +2348,176 @@ typedef struct {
     bool qca;
     bool lapm;
     int aux_value;
-    uint8_t frame1;
-    uint8_t frame2;
+    int uqts_ucode;
+    uint16_t frame1_bits;
+    uint16_t frame2_bits;
+    uint16_t decoded_frame_bits;
+    int decoded_frame_index;
     bool repeat_seen;
     bool repeat_match;
 } v92_short_phase1_candidate_t;
 
-static bool decode_v92_short_phase1_candidate(const uint8_t *bytes,
-                                              int byte_len,
-                                              v92_short_phase1_candidate_t *out)
-{
-    uint8_t b;
+typedef struct {
+    bool seen;
+    int start_sample;
+    int qts_reps;
+    int qts_bar_reps;
+} v92_qts_hit_t;
 
-    if (!bytes || byte_len <= 0 || !out)
+static int v92_uqts_from_wxyz(int wxyz)
+{
+    static const int table[16] = {
+        61, 62, 63, 66,
+        67, 70, 71, 74,
+        75, 78, 79, 82,
+        83, 86, 87, 87
+    };
+
+    if (wxyz < 0 || wxyz > 15)
+        return -1;
+    return table[wxyz];
+}
+
+static uint16_t pack_lsb_bits(const uint8_t *bits, int start, int count)
+{
+    uint16_t packed = 0;
+
+    if (!bits || start < 0 || count <= 0 || count > 16)
+        return 0;
+    for (int i = 0; i < count; i++)
+        packed |= (uint16_t) (bits[start + i] & 1) << i;
+    return packed;
+}
+
+static bool v92_frame_matches_channel_bits(uint16_t frame_bits, bool use_ch2)
+{
+    bool qca = ((frame_bits >> 2) & 1U) != 0;
+
+    return use_ch2 ? qca : !qca;
+}
+
+static bool v92_unpack_frame_bits(uint16_t frame_bits,
+                                  v92_short_phase1_candidate_t *out)
+{
+    bool digital_modem;
+    bool qca;
+    bool lapm;
+
+    if (!out)
+        return false;
+    if ((frame_bits & 0x001U) != 0)
         return false;
 
     memset(out, 0, sizeof(*out));
-    b = bytes[0];
-    out->digital_modem = (b & 0x01) != 0;
-    out->qca = (b & 0x02) != 0;
-    out->lapm = (b & 0x04) != 0;
-    out->frame1 = b;
-    if (byte_len > 1) {
-        out->frame2 = bytes[1];
-        out->repeat_seen = true;
-        out->repeat_match = (bytes[1] == b);
-    }
-    if (out->digital_modem) {
-        out->name = out->qca ? "QCA1d" : "QC1d";
-        out->aux_value = (b >> 6) & 0x03;
+    digital_modem = ((frame_bits >> 1) & 1U) != 0;
+    qca = ((frame_bits >> 2) & 1U) != 0;
+    lapm = ((frame_bits >> 3) & 1U) != 0;
+
+    out->digital_modem = digital_modem;
+    out->qca = qca;
+    out->lapm = lapm;
+
+    if (digital_modem) {
+        int lm;
+
+        if (((frame_bits >> 4) & 0x7U) != 0 || ((frame_bits >> 9) & 1U) != 1)
+            return false;
+        lm = (int) ((frame_bits >> 7) & 0x3U);
+        out->name = qca ? "QCA1d" : "QC1d";
+        out->aux_value = lm;
+        out->uqts_ucode = -1;
     } else {
-        out->name = out->qca ? "QCA1a" : "QC1a";
-        out->aux_value = (((b >> 3) & 0x01) << 3)
-                       | (((b >> 5) & 0x01) << 2)
-                       | (((b >> 6) & 0x01) << 1)
-                       | ((b >> 7) & 0x01);
+        int wxyz;
+
+        if (((frame_bits >> 5) & 1U) != 0 || ((frame_bits >> 9) & 1U) != 1)
+            return false;
+        wxyz = (int) ((((frame_bits >> 4) & 1U) << 3)
+                    | (((frame_bits >> 6) & 1U) << 2)
+                    | (((frame_bits >> 7) & 1U) << 1)
+                    | ((frame_bits >> 8) & 1U));
+        out->name = qca ? "QCA1a" : "QC1a";
+        out->aux_value = wxyz;
+        out->uqts_ucode = v92_uqts_from_wxyz(wxyz);
     }
+    out->ok = true;
+    return true;
+}
+
+static bool v92_same_decoded_payload(const v92_short_phase1_candidate_t *a,
+                                     const v92_short_phase1_candidate_t *b)
+{
+    if (!a || !b || !a->ok || !b->ok)
+        return false;
+    return a->digital_modem == b->digital_modem
+        && a->qca == b->qca
+        && a->lapm == b->lapm
+        && a->aux_value == b->aux_value;
+}
+
+static bool decode_v92_short_phase1_candidate(const uint8_t *bits,
+                                              int bit_len,
+                                              bool use_ch2,
+                                              v92_short_phase1_candidate_t *out)
+{
+    v92_short_phase1_candidate_t first = {0};
+    v92_short_phase1_candidate_t repeat = {0};
+    bool first_ok;
+    bool repeat_ok = false;
+    int chosen_index = -1;
+
+    if (!bits || bit_len < 30 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+    first_ok = v92_unpack_frame_bits(out->frame1_bits, &first);
+    if (bit_len >= 60) {
+        out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+        out->repeat_seen = true;
+        repeat_ok = v92_unpack_frame_bits(out->frame2_bits, &repeat);
+        out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+    }
+
+    if (repeat_ok && v92_frame_matches_channel_bits(out->frame2_bits, use_ch2)) {
+        *out = repeat;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        if (bit_len >= 60) {
+            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+            out->repeat_seen = true;
+            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        }
+        chosen_index = 1;
+    } else if (first_ok && v92_frame_matches_channel_bits(out->frame1_bits, use_ch2)) {
+        *out = first;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        if (bit_len >= 60) {
+            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+            out->repeat_seen = true;
+            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        }
+        chosen_index = 0;
+    } else if (repeat_ok) {
+        *out = repeat;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+        out->repeat_seen = bit_len >= 60;
+        out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        chosen_index = 1;
+    } else if (first_ok) {
+        *out = first;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        if (bit_len >= 60) {
+            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+            out->repeat_seen = true;
+            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        }
+        chosen_index = 0;
+    } else {
+        return false;
+    }
+
+    out->decoded_frame_index = chosen_index;
+    out->decoded_frame_bits = (chosen_index > 0) ? out->frame2_bits : out->frame1_bits;
     out->ok = true;
     return true;
 }
@@ -2396,6 +2531,206 @@ static const char *v92_anspcm_level_to_str(int level)
     case 3: return "-18 dBm0";
     default: return "unknown";
     }
+}
+
+static int codeword_to_ucode(v91_law_t law, uint8_t codeword);
+
+static bool v92_matches_pcm_symbol(v91_law_t law,
+                                   uint8_t codeword,
+                                   int target_ucode,
+                                   bool positive)
+{
+    int ucode;
+    bool sign_positive;
+    int tolerance;
+
+    ucode = codeword_to_ucode(law, codeword);
+    if (ucode < 0)
+        return false;
+    sign_positive = (codeword & 0x80) != 0;
+    if (sign_positive != positive)
+        return false;
+    tolerance = (target_ucode == 0) ? 1 : 2;
+    return abs(ucode - target_ucode) <= tolerance;
+}
+
+static bool detect_v92_qts_sequence(const uint8_t *codewords,
+                                    int total,
+                                    v91_law_t law,
+                                    int uqts_ucode,
+                                    int search_start,
+                                    int search_end,
+                                    v92_qts_hit_t *out)
+{
+    v92_qts_hit_t best = {0};
+
+    if (!codewords || total <= 0 || uqts_ucode < 0 || !out)
+        return false;
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total)
+        search_end = total;
+    if (search_end - search_start < 6 * 12)
+        return false;
+
+    for (int offset = search_start; offset + 6 * 12 <= search_end; offset++) {
+        int qts_reps = 0;
+        int qts_bar_reps = 0;
+        int pos = offset;
+
+        if (!v92_matches_pcm_symbol(law, codewords[offset], uqts_ucode, true))
+            continue;
+
+        while (pos + 6 <= search_end) {
+            bool ok = true;
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 0], uqts_ucode, true);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 1], 0, true);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 2], uqts_ucode, true);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 3], uqts_ucode, false);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 4], 0, false);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 5], uqts_ucode, false);
+            if (!ok)
+                break;
+            qts_reps++;
+            pos += 6;
+        }
+        if (qts_reps < 8)
+            continue;
+
+        while (pos + 6 <= search_end) {
+            bool ok = true;
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 0], uqts_ucode, false);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 1], 0, false);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 2], uqts_ucode, false);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 3], uqts_ucode, true);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 4], 0, true);
+            ok &= v92_matches_pcm_symbol(law, codewords[pos + 5], uqts_ucode, true);
+            if (!ok)
+                break;
+            qts_bar_reps++;
+            pos += 6;
+        }
+
+        if (!best.seen
+            || qts_reps > best.qts_reps
+            || (qts_reps == best.qts_reps && qts_bar_reps > best.qts_bar_reps)) {
+            best.seen = true;
+            best.start_sample = offset;
+            best.qts_reps = qts_reps;
+            best.qts_bar_reps = qts_bar_reps;
+        }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
+static bool v8_scan_v92_window_candidate(const int16_t *samples,
+                                         int total_samples,
+                                         int sample_rate,
+                                         int search_start,
+                                         int search_end,
+                                         bool use_ch2,
+                                         v8_raw_msg_hit_t *out)
+{
+    const double mark_hz = use_ch2 ? 1650.0 : 980.0;
+    const double space_hz = use_ch2 ? 1850.0 : 1180.0;
+    v8_raw_msg_hit_t best = {0};
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !out)
+        return false;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < 160)
+        return false;
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
+
+            for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                double confidence[512];
+                int bit_count = 0;
+
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
+
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                        break;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count++] = (uint8_t) bit;
+                    confidence[bit_count - 1] = fabs(pm - ps);
+                }
+
+                for (int i = 0; i + 30 <= bit_count; i++) {
+                    int ones_score;
+                    int sync_score;
+                    int score;
+                    v92_short_phase1_candidate_t v92c;
+
+                    ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
+                    if (ones_score < 32)
+                        continue;
+                    sync_score = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_V92);
+                    if (sync_score < 32)
+                        continue;
+                    if (!decode_v92_short_phase1_candidate(bits + i, bit_count - i, use_ch2, &v92c))
+                        continue;
+
+                    score = ones_score + sync_score;
+                    if (v92c.repeat_seen)
+                        score += v92c.repeat_match ? 30 : 8;
+                    if (v92c.qca == use_ch2)
+                        score += 10;
+                    if (bit_rate == 300)
+                        score += 8;
+                    else
+                        score += 6 - abs(bit_rate - 300);
+                    score -= i / 2;
+                    if (invert)
+                        score -= 2;
+
+                    if (!best.seen || score > best.score) {
+                        memset(&best, 0, sizeof(best));
+                        best.seen = true;
+                        best.preamble_type = V8_LOCAL_SYNC_V92;
+                        best.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        best.score = score;
+                        best.bit_len = bit_count - i;
+                        if (best.bit_len > 70)
+                            best.bit_len = 70;
+                        if (best.bit_len > (int) sizeof(best.bit_run))
+                            best.bit_len = (int) sizeof(best.bit_run);
+                        memcpy(best.bit_run, bits + i, (size_t) best.bit_len);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
 }
 
 static void v8_salvage_partial_probe(v8_state_t *v8,
@@ -3285,7 +3620,10 @@ static const char *v34_event_to_str_local(int event)
     }
 }
 
-static void decode_v8_pass(const int16_t *samples, int total_samples,
+static void decode_v8_pass(const int16_t *samples,
+                           const uint8_t *codewords,
+                           int total_samples,
+                           v91_law_t law,
                            bool calling_party)
 {
     v8_probe_result_t probe;
@@ -3340,6 +3678,32 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
         } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
             printf("  Partial V.8 decode%s; final negotiation not yet confirmed\n",
                    probe.cm_jm_salvaged ? " (single CM/JM candidate salvage)" : "");
+            if (probe.ansam_sample >= 0
+                && probe.cm_jm_sample > probe.ansam_sample) {
+                v8_raw_msg_hit_t pre_cm_candidate;
+
+                memset(&pre_cm_candidate, 0, sizeof(pre_cm_candidate));
+                if (v8_scan_v92_window_candidate(samples,
+                                                total_samples,
+                                                8000,
+                                                probe.ansam_sample + 12000,
+                                                probe.cm_jm_sample,
+                                                false,
+                                                &pre_cm_candidate)
+                    && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+                    v92_short_phase1_candidate_t pre_cm_v92c;
+
+                    if (decode_v92_short_phase1_candidate(pre_cm_candidate.bit_run,
+                                                          pre_cm_candidate.bit_len,
+                                                          false,
+                                                          &pre_cm_v92c)) {
+                        printf("  Pre-CM V.92:     %s at %.1f-%.1f ms on 980/1180 Hz pair\n",
+                               pre_cm_v92c.name,
+                               sample_to_ms(pre_cm_candidate.sample_offset, 8000),
+                               sample_to_ms(pre_cm_candidate.sample_offset + 70 * 8000 / 1000, 8000));
+                    }
+                }
+            }
             if (probe.cm_jm_sample >= 0) {
                 char hexbuf[256];
 
@@ -3390,8 +3754,9 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                 }
                 if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
                     v92_short_phase1_candidate_t v92c;
+                    v92_qts_hit_t qts_hit;
 
-                    if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
+                    if (decode_v92_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !calling_party, &v92c)) {
                         char ones1[16], sync1[16], frame1[16], ones2[16], sync2[16], frame2[16], tail[16];
 
                         printf("  %s candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
@@ -3402,15 +3767,33 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                                v21_burst.peak_strength * 100.0);
                         printf("  Lock detail:     %s\n",
                                v8_preamble_detail(raw_candidate.preamble_type));
+                        if (v92c.decoded_frame_index > 0)
+                            printf("  Decoded frame:   %03X (selected from repeated frame)\n", v92c.decoded_frame_bits);
+                        else
+                            printf("  Decoded frame:   %03X\n", v92c.decoded_frame_bits);
                         if (v92c.digital_modem) {
                             printf("  ANSpcm level:    %s\n",
                                    v92_anspcm_level_to_str(v92c.aux_value));
                         } else {
-                            printf("  UQTS index:      0x%X\n", v92c.aux_value);
+                            printf("  UQTS index:      0x%X (Ucode %d)\n", v92c.aux_value, v92c.uqts_ucode);
+                            if (codewords
+                                && v92c.uqts_ucode >= 0
+                                && detect_v92_qts_sequence(codewords,
+                                                           total_samples,
+                                                           law,
+                                                           v92c.uqts_ucode,
+                                                           v21_burst.start_sample + v21_burst.duration_samples + 400,
+                                                           v21_burst.start_sample + v21_burst.duration_samples + 4000,
+                                                           &qts_hit)) {
+                                printf("  QTS candidate:   %.1f ms (%d QTS reps, %d QTS\\\\ reps)\n",
+                                       sample_to_ms(qts_hit.start_sample, 8000),
+                                       qts_hit.qts_reps,
+                                       qts_hit.qts_bar_reps);
+                            }
                         }
                         if (v92c.repeat_seen) {
-                            printf("  Repeat frame:    %02X (%s)\n",
-                                   v92c.frame2,
+                            printf("  Repeat frame:    %03X (%s)\n",
+                                   v92c.frame2_bits,
                                    v92c.repeat_match ? "matches" : "differs");
                         }
                         if (raw_candidate.bit_len >= 60) {
@@ -3466,8 +3849,10 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
 
 static void collect_v8_event(call_log_t *log,
                              const int16_t *samples,
+                             const uint8_t *codewords,
                              int total_samples,
-                             int max_sample)
+                             int max_sample,
+                             v91_law_t law)
 {
     v8_probe_result_t probe;
     ans_fallback_hit_t ans_fallback;
@@ -3516,6 +3901,35 @@ static void collect_v8_event(call_log_t *log,
                  hexbuf[0] != '\0' ? " raw=" : "",
                  hexbuf[0] != '\0' ? hexbuf : "");
         call_log_append(log, probe.cm_jm_sample, 0, "V.8", summary, detail);
+    }
+    if (probe.ansam_sample >= 0
+        && probe.cm_jm_sample > probe.ansam_sample) {
+        v8_raw_msg_hit_t pre_cm_candidate;
+
+        memset(&pre_cm_candidate, 0, sizeof(pre_cm_candidate));
+        if (v8_scan_v92_window_candidate(samples,
+                                         total_samples,
+                                         8000,
+                                         probe.ansam_sample + 12000,
+                                         probe.cm_jm_sample,
+                                         false,
+                                         &pre_cm_candidate)
+            && pre_cm_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+            v92_short_phase1_candidate_t pre_cm_v92c;
+
+            if (decode_v92_short_phase1_candidate(pre_cm_candidate.bit_run,
+                                                  pre_cm_candidate.bit_len,
+                                                  false,
+                                                  &pre_cm_v92c)) {
+                snprintf(summary, sizeof(summary), "Pre-CM %s", pre_cm_v92c.name);
+                snprintf(detail, sizeof(detail),
+                         "role=%s start=%.1f ms duration=%.1f ms pair=980/1180 Hz pre_cm=yes",
+                         probe.calling_party ? "caller" : "answerer",
+                         sample_to_ms(pre_cm_candidate.sample_offset, 8000),
+                         70.0);
+                call_log_append(log, pre_cm_candidate.sample_offset, 560, "V.92", summary, detail);
+            }
+        }
     }
     if (probe.cj_sample >= 0) {
         snprintf(detail, sizeof(detail),
@@ -3574,16 +3988,24 @@ static void collect_v8_event(call_log_t *log,
         }
         if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
             v92_short_phase1_candidate_t v92c;
+            v92_qts_hit_t qts_hit;
 
-            if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
+            if (decode_v92_short_phase1_candidate(raw_candidate.bit_run, raw_candidate.bit_len, !probe.calling_party, &v92c)) {
                 char auxbuf[64];
                 char bitbuf[128];
+                char framebuf[64];
+                char qtsbuf[96];
 
                 if (v92c.digital_modem)
                     snprintf(auxbuf, sizeof(auxbuf), "anspcm_level=%s", v92_anspcm_level_to_str(v92c.aux_value));
                 else
-                    snprintf(auxbuf, sizeof(auxbuf), "uqts_index=0x%X", v92c.aux_value);
+                    snprintf(auxbuf, sizeof(auxbuf), "uqts_index=0x%X uqts_ucode=%d", v92c.aux_value, v92c.uqts_ucode);
+                if (v92c.decoded_frame_index > 0)
+                    snprintf(framebuf, sizeof(framebuf), " decoded=%03X/repeat", v92c.decoded_frame_bits);
+                else
+                    snprintf(framebuf, sizeof(framebuf), " decoded=%03X", v92c.decoded_frame_bits);
                 bitbuf[0] = '\0';
+                qtsbuf[0] = '\0';
                 if (raw_candidate.bit_len >= 60) {
                     char ones1[16], sync1[16], frame1[16], ones2[16], sync2[16], frame2[16], tail[16];
 
@@ -3601,11 +4023,27 @@ static void collect_v8_event(call_log_t *log,
                              " bits=%s|%s|%s|%s|%s|%s|%s",
                              ones1, sync1, frame1, ones2, sync2, frame2, tail);
                 }
+                if (!v92c.digital_modem
+                    && codewords
+                    && v92c.uqts_ucode >= 0
+                    && detect_v92_qts_sequence(codewords,
+                                               total_samples,
+                                               law,
+                                               v92c.uqts_ucode,
+                                               v21_burst.start_sample + v21_burst.duration_samples + 400,
+                                               v21_burst.start_sample + v21_burst.duration_samples + 4000,
+                                               &qts_hit)) {
+                    snprintf(qtsbuf, sizeof(qtsbuf),
+                             " qts=%.1fms/%dreps qts_bar=%dreps",
+                             sample_to_ms(qts_hit.start_sample, 8000),
+                             qts_hit.qts_reps,
+                             qts_hit.qts_bar_reps);
+                }
                 snprintf(summary, sizeof(summary),
                          "%s candidate",
                          v92c.name);
                 snprintf(detail, sizeof(detail),
-                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\" lapm=%s %s repeat=%s%s%s%s",
+                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\" lapm=%s %s%s repeat=%s%s%s%s%s",
                          probe.calling_party ? "caller" : "answerer",
                          sample_to_ms(v21_burst.start_sample, 8000),
                          sample_to_ms(v21_burst.duration_samples, 8000),
@@ -3614,7 +4052,9 @@ static void collect_v8_event(call_log_t *log,
                          v8_preamble_detail(raw_candidate.preamble_type),
                          v92c.lapm ? "yes" : "no",
                          auxbuf,
+                         framebuf,
                          v92c.repeat_seen ? (v92c.repeat_match ? "match" : "differs") : "missing",
+                         qtsbuf,
                          bitbuf,
                          hexbuf[0] != '\0' ? " raw=" : "",
                          hexbuf[0] != '\0' ? hexbuf : "");
@@ -4708,7 +5148,7 @@ static void collect_stream_call_log(call_log_t *log,
     if (do_v8) {
         collect_v8bis_events(log, linear_samples, total_samples, earliest_phase2_sample);
         collect_v8bis_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
-        collect_v8_event(log, linear_samples, total_samples, earliest_phase2_sample);
+        collect_v8_event(log, linear_samples, g711_codewords, total_samples, earliest_phase2_sample, law);
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
@@ -6616,9 +7056,9 @@ static void run_decode_suite(const char *label,
 
     if (opts->raw_output_enabled && opts->do_v8) {
         printf("\n=== V.8 Decode (as answerer) ===\n");
-        decode_v8_pass(linear_samples, total_samples, false);
+        decode_v8_pass(linear_samples, g711_codewords, total_samples, law, false);
         printf("\n=== V.8 Decode (as caller) ===\n");
-        decode_v8_pass(linear_samples, total_samples, true);
+        decode_v8_pass(linear_samples, g711_codewords, total_samples, law, true);
     }
 
     if (opts->raw_output_enabled && opts->do_v91)
