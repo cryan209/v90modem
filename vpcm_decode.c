@@ -537,6 +537,13 @@ typedef struct {
 } decode_v8_result_t;
 
 typedef struct {
+    bool seen;
+    int start_sample;
+    int duration_samples;
+    double peak_ratio;
+} ans_fallback_hit_t;
+
+typedef struct {
     const char *name;
     const char *role;
     int seg1_a_hz;
@@ -573,6 +580,7 @@ typedef struct {
     bool calling_party;
     bool cm_jm_salvaged;
     int ansam_sample;
+    int ansam_tone;
     int ci_sample;
     int cm_jm_sample;
     int cj_sample;
@@ -742,6 +750,100 @@ static void v8_note_first_sample(int *dst, int sample)
         return;
     if (*dst < 0)
         *dst = sample;
+}
+
+static double window_energy(const int16_t *samples, int len);
+static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate, double freq_hz, double total_energy);
+
+static bool detect_standalone_ans_fallback(const int16_t *samples,
+                                           int total_samples,
+                                           int sample_rate,
+                                           int max_sample,
+                                           ans_fallback_hit_t *out)
+{
+    enum {
+        WINDOW_SAMPLES = 160,
+        MIN_RUN_WINDOWS = 40,
+        MAX_GAP_WINDOWS = 4
+    };
+    static const double competitor_freqs[] = { 1300.0, 1375.0, 1529.0, 1650.0, 2002.0, 2225.0, 2743.0, 3000.0, 3429.0 };
+    int limit;
+    int run_start = -1;
+    int run_windows = 0;
+    int gap_windows = 0;
+    double run_peak = 0.0;
+    ans_fallback_hit_t best = { false, -1, 0, 0.0 };
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->start_sample = -1;
+
+    limit = total_samples;
+    if (max_sample > 0 && max_sample < limit)
+        limit = max_sample;
+
+    for (int start = 0; start + WINDOW_SAMPLES <= limit; start += WINDOW_SAMPLES) {
+        double energy = window_energy(samples + start, WINDOW_SAMPLES);
+        double ans_ratio;
+        double competitor_peak = 0.0;
+        bool strong_ans = false;
+
+        if (energy <= 0.0)
+            goto reset_run;
+
+        ans_ratio = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, 2100.0, energy);
+        for (size_t i = 0; i < sizeof(competitor_freqs)/sizeof(competitor_freqs[0]); i++) {
+            double ratio = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, competitor_freqs[i], energy);
+            if (ratio > competitor_peak)
+                competitor_peak = ratio;
+        }
+
+        strong_ans = (ans_ratio >= 0.12 && ans_ratio >= competitor_peak * 2.0);
+        if (strong_ans) {
+            if (run_start < 0) {
+                run_start = start;
+                run_windows = 0;
+                run_peak = 0.0;
+            }
+            run_windows++;
+            gap_windows = 0;
+            if (ans_ratio > run_peak)
+                run_peak = ans_ratio;
+            continue;
+        }
+
+reset_run:
+        if (run_start >= 0 && gap_windows < MAX_GAP_WINDOWS) {
+            gap_windows++;
+            run_windows++;
+            continue;
+        }
+        if (run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
+            best.seen = true;
+            best.start_sample = run_start;
+            best.duration_samples = run_windows * WINDOW_SAMPLES;
+            best.peak_ratio = run_peak;
+            break;
+        }
+        run_start = -1;
+        run_windows = 0;
+        gap_windows = 0;
+        run_peak = 0.0;
+    }
+
+    if (!best.seen && run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
+        best.seen = true;
+        best.start_sample = run_start;
+        best.duration_samples = run_windows * WINDOW_SAMPLES;
+        best.peak_ratio = run_peak;
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
 }
 
 static double window_energy(const int16_t *samples, int len)
@@ -1410,6 +1512,38 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
     return score;
 }
 
+static const char *v8_answer_tone_name(int tone)
+{
+    switch (tone) {
+    case MODEM_CONNECT_TONES_ANSAM:
+        return "ANSam";
+    case MODEM_CONNECT_TONES_ANSAM_PR:
+        return "ANSam+PR";
+    case MODEM_CONNECT_TONES_ANS:
+        return "ANS";
+    case MODEM_CONNECT_TONES_ANS_PR:
+        return "ANS+PR";
+    default:
+        return "ANS/ANSam";
+    }
+}
+
+static const char *v8_answer_tone_detail(int tone)
+{
+    switch (tone) {
+    case MODEM_CONNECT_TONES_ANSAM:
+        return "2100 Hz answer tone with phase reversals disabled";
+    case MODEM_CONNECT_TONES_ANSAM_PR:
+        return "2100 Hz answer tone with phase reversals";
+    case MODEM_CONNECT_TONES_ANS:
+        return "2100 Hz answer tone without ANSam modulation";
+    case MODEM_CONNECT_TONES_ANS_PR:
+        return "2100 Hz answer tone with phase reversals and no ANSam modulation";
+    default:
+        return "2100 Hz answer tone";
+    }
+}
+
 static bool v8_collect_probe(const int16_t *samples,
                              int total_samples,
                              bool calling_party,
@@ -1427,6 +1561,7 @@ static bool v8_collect_probe(const int16_t *samples,
     memset(out, 0, sizeof(*out));
     out->calling_party = calling_party;
     out->ansam_sample = -1;
+    out->ansam_tone = MODEM_CONNECT_TONES_NONE;
     out->ci_sample = -1;
     out->cm_jm_sample = -1;
     out->cj_sample = -1;
@@ -1471,6 +1606,8 @@ static bool v8_collect_probe(const int16_t *samples,
                 || tone == MODEM_CONNECT_TONES_ANS
                 || tone == MODEM_CONNECT_TONES_ANS_PR) {
                 v8_note_first_sample(&out->ansam_sample, offset + chunk);
+                if (out->ansam_tone == MODEM_CONNECT_TONES_NONE)
+                    out->ansam_tone = tone;
             }
         }
         modem_connect_tones_rx(&v8->calling_tone_rx, samples + offset, chunk);
@@ -1495,6 +1632,15 @@ static bool v8_collect_probe(const int16_t *samples,
     }
 
     v8_salvage_partial_probe(v8, offset, out);
+
+    if (out->ansam_sample < 0) {
+        ans_fallback_hit_t ans_hit;
+
+        if (detect_standalone_ans_fallback(samples, total_samples, 8000, limit, &ans_hit)) {
+            out->ansam_sample = ans_hit.start_sample;
+            out->ansam_tone = MODEM_CONNECT_TONES_ANS;
+        }
+    }
 
     out->ok = (out->ansam_sample >= 0
                || out->ci_sample >= 0
@@ -1722,7 +1868,16 @@ static int first_non_negative(int a, int b)
     return (a < b) ? a : b;
 }
 
-static int earliest_phase3_anchor_sample(const decode_v34_result_t *result)
+static int max_non_negative(int a, int b)
+{
+    if (a < 0)
+        return b;
+    if (b < 0)
+        return a;
+    return (a > b) ? a : b;
+}
+
+static int earliest_explicit_phase3_anchor_sample(const decode_v34_result_t *result)
 {
     int anchor = -1;
 
@@ -1734,11 +1889,7 @@ static int earliest_phase3_anchor_sample(const decode_v34_result_t *result)
     anchor = first_non_negative(anchor, result->tx_second_s_sample);
     anchor = first_non_negative(anchor, result->tx_second_not_s_sample);
     anchor = first_non_negative(anchor, result->tx_pp_sample);
-    anchor = first_non_negative(anchor, result->rx_pp_detect_sample);
-    anchor = first_non_negative(anchor, result->rx_pp_complete_sample);
     anchor = first_non_negative(anchor, result->tx_trn_sample);
-    anchor = first_non_negative(anchor, result->phase3_trn_lock_sample);
-    anchor = first_non_negative(anchor, result->tx_ja_sample);
     return anchor;
 }
 
@@ -1748,7 +1899,7 @@ static void normalize_v34_result_to_spec_flow(decode_v34_result_t *result, bool 
 
     if (!result)
         return;
-    phase3_anchor = earliest_phase3_anchor_sample(result);
+    phase3_anchor = earliest_explicit_phase3_anchor_sample(result);
     if (phase3_anchor >= 0) {
         result->phase3_seen = true;
         result->phase3_sample = phase3_anchor;
@@ -1761,10 +1912,23 @@ static void normalize_v34_result_to_spec_flow(decode_v34_result_t *result, bool 
 
     if (result->info1_seen && result->phase3_seen && result->phase3_sample >= 0
         && result->info1_sample > result->phase3_sample) {
-        result->info1_seen = false;
-        result->info1_sample = -1;
-        result->u_info_from_info1a = false;
+        result->phase3_sample = result->info1_sample;
     }
+
+    if (result->tx_pp_end_sample >= 0 && result->tx_pp_sample >= 0
+        && result->tx_pp_end_sample < result->tx_pp_sample) {
+        result->tx_pp_end_sample = result->tx_pp_sample;
+    }
+    if (result->tx_trn_sample >= 0)
+        result->tx_trn_sample = max_non_negative(result->tx_trn_sample, result->tx_pp_end_sample);
+    if (result->tx_ja_sample >= 0)
+        result->tx_ja_sample = max_non_negative(result->tx_ja_sample, result->tx_trn_sample);
+    if (result->tx_jdashed_sample >= 0)
+        result->tx_jdashed_sample = max_non_negative(result->tx_jdashed_sample, result->tx_ja_sample);
+    if (result->phase4_ready_sample >= 0)
+        result->phase4_ready_sample = max_non_negative(result->phase4_ready_sample, result->rx_phase4_trn_sample);
+    if (result->phase4_sample >= 0)
+        result->phase4_sample = max_non_negative(result->phase4_sample, result->rx_phase4_s_sample);
 }
 
 static int v34_result_spec_score(const decode_v34_result_t *result)
@@ -1968,6 +2132,7 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
 {
     v8_probe_result_t probe;
     v8bis_scan_result_t v8bis;
+    ans_fallback_hit_t ans_fallback;
 
     if (scan_v8bis_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
         static const char *v8bis_desc[] = {
@@ -1994,7 +2159,9 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
     if (v8_select_best_probe(samples, total_samples, calling_party, total_samples, &probe)) {
         printf("  Milestones:      ");
         if (probe.ansam_sample >= 0)
-            printf("ANS@%.1f ", sample_to_ms(probe.ansam_sample, 8000));
+            printf("%s@%.1f ",
+                   v8_answer_tone_name(probe.ansam_tone),
+                   sample_to_ms(probe.ansam_sample, 8000));
         if (probe.ci_sample >= 0)
             printf("CI@%.1f ", sample_to_ms(probe.ci_sample, 8000));
         if (probe.cm_jm_sample >= 0)
@@ -2039,6 +2206,12 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
     } else {
         printf("  No V.8 negotiation detected in %d samples (%.1f ms)\n",
                total_samples, sample_to_ms(total_samples, 8000));
+        if (detect_standalone_ans_fallback(samples, total_samples, 8000, total_samples, &ans_fallback)) {
+            printf("  Standalone 2100 Hz answer tone candidate at %.1f-%.1f ms (peak %.1f%%)\n",
+                   sample_to_ms(ans_fallback.start_sample, 8000),
+                   sample_to_ms(ans_fallback.start_sample + ans_fallback.duration_samples, 8000),
+                   ans_fallback.peak_ratio * 100.0);
+        }
     }
 }
 
@@ -2048,6 +2221,7 @@ static void collect_v8_event(call_log_t *log,
                              int max_sample)
 {
     v8_probe_result_t probe;
+    ans_fallback_hit_t ans_fallback;
     char summary[160];
     char detail[320];
 
@@ -2055,12 +2229,16 @@ static void collect_v8_event(call_log_t *log,
         return;
 
     if (!v8_select_best_channel_probe(samples, total_samples, max_sample, &probe))
-        return;
+        goto fallback_only;
     if (probe.ansam_sample >= 0) {
+        snprintf(summary, sizeof(summary),
+                 "%s detected",
+                 v8_answer_tone_name(probe.ansam_tone));
         snprintf(detail, sizeof(detail),
-                 "role=%s",
-                 probe.calling_party ? "caller" : "answerer");
-        call_log_append(log, probe.ansam_sample, 0, "V.8", "ANS/ANSam detected", detail);
+                 "role=%s tone=%s",
+                 probe.calling_party ? "caller" : "answerer",
+                 v8_answer_tone_detail(probe.ansam_tone));
+        call_log_append(log, probe.ansam_sample, 0, "V.8", summary, detail);
     }
     if (probe.ci_sample >= 0) {
         snprintf(detail, sizeof(detail),
@@ -2116,6 +2294,34 @@ static void collect_v8_event(call_log_t *log,
                  v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability),
                  v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
         call_log_append(log, probe.v8_call_sample, 0, "V.8", summary, detail);
+    }
+    if (probe.ansam_sample < 0
+        && detect_standalone_ans_fallback(samples, total_samples, 8000, max_sample, &ans_fallback)) {
+        snprintf(detail, sizeof(detail),
+                 "duration=%.1f ms peak_2100=%.1f%%",
+                 sample_to_ms(ans_fallback.duration_samples, 8000),
+                 ans_fallback.peak_ratio * 100.0);
+        call_log_append(log,
+                        ans_fallback.start_sample,
+                        ans_fallback.duration_samples,
+                        "V.8?",
+                        "Standalone 2100 Hz answer tone candidate",
+                        detail);
+    }
+    return;
+
+fallback_only:
+    if (detect_standalone_ans_fallback(samples, total_samples, 8000, max_sample, &ans_fallback)) {
+        snprintf(detail, sizeof(detail),
+                 "duration=%.1f ms peak_2100=%.1f%%",
+                 sample_to_ms(ans_fallback.duration_samples, 8000),
+                 ans_fallback.peak_ratio * 100.0);
+        call_log_append(log,
+                        ans_fallback.start_sample,
+                        ans_fallback.duration_samples,
+                        "V.8?",
+                        "Standalone 2100 Hz answer tone candidate",
+                        detail);
     }
 }
 
@@ -4653,7 +4859,14 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     if (!src)
         return false;
 
-    if (jd_stage && jd_stage->ok) {
+    /*
+     * Prefer the locally decoded Ja anchor when it exists. The DIL descriptor
+     * is determined by the negotiated Ja parameters, so using a later Jd/J'd
+     * alignment as the primary seed can pull the search onto the wrong region.
+     */
+    if (src->tx_ja_sample >= 0) {
+        search_start = src->tx_ja_sample;
+    } else if (jd_stage && jd_stage->ok) {
         if (jd_stage->jd_prime_seen)
             search_start = jd_stage->jd_prime_sample + OFFLINE_V90_JD_PRIME_BITS;
         else if (jd_stage->jd_repetitions > 0)
@@ -4661,8 +4874,7 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
         else
             search_start = jd_stage->jd_start_sample;
     } else {
-        search_start = src->tx_ja_sample >= 0 ? src->tx_ja_sample
-                     : (src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample);
+        search_start = src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample;
     }
     if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
         search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
@@ -4707,6 +4919,12 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
                   + analysis.used_uchords * 50
                   - analysis.impairment_score * 10
                   - analysis.non_default_h * 5;
+            if (src->tx_ja_sample >= 0) {
+                int dist = candidate - src->tx_ja_sample;
+                if (dist < 0)
+                    dist = -dist;
+                score -= dist / 8;
+            }
             if (score > best_score) {
                 best_score = score;
                 best_invert = (invert != 0);
