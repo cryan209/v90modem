@@ -1719,6 +1719,32 @@ static int v8_decode_soft_async_bytes(const uint8_t *bits,
     return byte_len;
 }
 
+static bool v8_decode_soft_async_octet(const uint8_t *bits,
+                                       const double *confidence,
+                                       int bit_count,
+                                       int start,
+                                       uint8_t *octet,
+                                       int *framing_penalty_out)
+{
+    uint8_t byte = 0;
+    int penalty = 0;
+
+    if (!bits || !confidence || !octet || start < 0 || start + 10 > bit_count)
+        return false;
+
+    if (bits[start] != 0)
+        penalty += 20 + (int) lround(confidence[start] * 80.0);
+    if (bits[start + 9] != 1)
+        penalty += 20 + (int) lround(confidence[start + 9] * 80.0);
+    for (int j = 0; j < 8; j++)
+        byte |= (uint8_t) (bits[start + 1 + j] & 1) << j;
+
+    *octet = byte;
+    if (framing_penalty_out)
+        *framing_penalty_out = penalty;
+    return true;
+}
+
 static void v8_syncless_scan_bits(v8_raw_scan_state_t *scan)
 {
     v8_raw_msg_hit_t hit;
@@ -2103,15 +2129,52 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
 
                     sync_score_v92 = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_V92);
                     if (sync_score_v92 >= 40) {
-                        byte_len = v8_decode_soft_async_bytes(bits,
+                        int repeat_penalty = 0;
+                        int tail_ones_score = 0;
+
+                        byte_len = 0;
+                        framing_penalty = 0;
+                        if (v8_decode_soft_async_octet(bits,
+                                                       confidence,
+                                                       bit_count,
+                                                       i + 20,
+                                                       &bytes[byte_len],
+                                                       &framing_penalty)) {
+                            byte_len++;
+                        }
+                        if (i + 60 <= bit_count) {
+                            int repeat_ones_score = v8_ones_lock_score(bits, confidence, bit_count, i + 30);
+                            int repeat_sync_score = v8_sync_lock_score(bits, confidence, bit_count, i + 40, V8_LOCAL_SYNC_V92);
+                            uint8_t repeat_byte = 0;
+                            int repeat_frame_penalty = 0;
+
+                            if (repeat_ones_score >= 40 && repeat_sync_score >= 40
+                                && v8_decode_soft_async_octet(bits,
                                                               confidence,
                                                               bit_count,
-                                                              i + 20,
-                                                              bytes,
-                                                              (int) sizeof(bytes),
-                                                              &framing_penalty);
+                                                              i + 50,
+                                                              &repeat_byte,
+                                                              &repeat_frame_penalty)) {
+                                bytes[byte_len++] = repeat_byte;
+                                repeat_penalty += repeat_frame_penalty;
+                                score = ones_score + sync_score_v92 + repeat_ones_score + repeat_sync_score;
+                                if (byte_len >= 2 && bytes[0] == bytes[1])
+                                    score += 30;
+                                else if (byte_len >= 2)
+                                    score -= 20;
+                                if (i + 70 <= bit_count) {
+                                    tail_ones_score = v8_ones_lock_score(bits, confidence, bit_count, i + 60);
+                                    if (tail_ones_score >= 40)
+                                        score += tail_ones_score;
+                                }
+                            } else {
+                                score = ones_score + sync_score_v92;
+                            }
+                        } else {
+                            score = ones_score + sync_score_v92;
+                        }
                         if (byte_len > 0) {
-                            score = ones_score + sync_score_v92 + byte_len * 12 + 8 - abs(bit_rate - 300) - framing_penalty - i / 2;
+                            score += byte_len * 12 + 8 - abs(bit_rate - 300) - framing_penalty - repeat_penalty - i / 2;
                             if (invert)
                                 score -= 2;
                             if (!best.seen || score > best.score) {
@@ -2229,9 +2292,79 @@ static const char *v8_preamble_to_candidate_label(int preamble_type, bool callin
     case V8_LOCAL_SYNC_CM_JM:
         return calling_party ? "CM-like" : "JM-like";
     case V8_LOCAL_SYNC_V92:
-        return "V.92-like";
+        return "V.92 short Phase 1 control-like";
     default:
         return calling_party ? "CM-like" : "JM-like";
+    }
+}
+
+static const char *v8_preamble_detail(int preamble_type)
+{
+    switch (preamble_type) {
+    case V8_LOCAL_SYNC_CM_JM:
+        return "V.8 CM/JM-style preamble";
+    case V8_LOCAL_SYNC_V92:
+        return "V.92 short Phase 1 sync (10 ones + 0101010101)";
+    default:
+        return "unclassified V.21 burst";
+    }
+}
+
+typedef struct {
+    bool ok;
+    const char *name;
+    bool digital_modem;
+    bool qca;
+    bool lapm;
+    int aux_value;
+    uint8_t frame1;
+    uint8_t frame2;
+    bool repeat_seen;
+    bool repeat_match;
+} v92_short_phase1_candidate_t;
+
+static bool decode_v92_short_phase1_candidate(const uint8_t *bytes,
+                                              int byte_len,
+                                              v92_short_phase1_candidate_t *out)
+{
+    uint8_t b;
+
+    if (!bytes || byte_len <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    b = bytes[0];
+    out->digital_modem = (b & 0x01) != 0;
+    out->qca = (b & 0x02) != 0;
+    out->lapm = (b & 0x04) != 0;
+    out->frame1 = b;
+    if (byte_len > 1) {
+        out->frame2 = bytes[1];
+        out->repeat_seen = true;
+        out->repeat_match = (bytes[1] == b);
+    }
+    if (out->digital_modem) {
+        out->name = out->qca ? "QCA1d" : "QC1d";
+        out->aux_value = (b >> 6) & 0x03;
+    } else {
+        out->name = out->qca ? "QCA1a" : "QC1a";
+        out->aux_value = (((b >> 3) & 0x01) << 3)
+                       | (((b >> 5) & 0x01) << 2)
+                       | (((b >> 6) & 0x01) << 1)
+                       | ((b >> 7) & 0x01);
+    }
+    out->ok = true;
+    return true;
+}
+
+static const char *v92_anspcm_level_to_str(int level)
+{
+    switch (level & 0x03) {
+    case 0: return "-9.5 dBm0";
+    case 1: return "-12 dBm0";
+    case 2: return "-15 dBm0";
+    case 3: return "-18 dBm0";
+    default: return "unknown";
     }
 }
 
@@ -3225,12 +3358,49 @@ static void decode_v8_pass(const int16_t *samples, int total_samples,
                                                     &raw_candidate)) {
                     format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
                 }
-                printf("  %s V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
-                       v8_preamble_to_candidate_label(raw_candidate.preamble_type, calling_party),
-                       sample_to_ms(v21_burst.start_sample, 8000),
-                       sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
-                       calling_party ? "980/1180 Hz" : "1650/1850 Hz",
-                       v21_burst.peak_strength * 100.0);
+                if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+                    v92_short_phase1_candidate_t v92c;
+
+                    if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
+                        printf("  %s candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
+                               v92c.name,
+                               sample_to_ms(v21_burst.start_sample, 8000),
+                               sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
+                               calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                               v21_burst.peak_strength * 100.0);
+                        printf("  Lock detail:     %s\n",
+                               v8_preamble_detail(raw_candidate.preamble_type));
+                        if (v92c.digital_modem) {
+                            printf("  ANSpcm level:    %s\n",
+                                   v92_anspcm_level_to_str(v92c.aux_value));
+                        } else {
+                            printf("  UQTS index:      0x%X\n", v92c.aux_value);
+                        }
+                        if (v92c.repeat_seen) {
+                            printf("  Repeat frame:    %02X (%s)\n",
+                                   v92c.frame2,
+                                   v92c.repeat_match ? "matches" : "differs");
+                        }
+                    } else {
+                        printf("  %s V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
+                               v8_preamble_to_candidate_label(raw_candidate.preamble_type, calling_party),
+                               sample_to_ms(v21_burst.start_sample, 8000),
+                               sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
+                               calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                               v21_burst.peak_strength * 100.0);
+                        printf("  Lock detail:     %s\n",
+                               v8_preamble_detail(raw_candidate.preamble_type));
+                    }
+                } else {
+                    printf("  %s V.21 burst candidate at %.1f-%.1f ms on %s pair (peak %.1f%%)\n",
+                           v8_preamble_to_candidate_label(raw_candidate.preamble_type, calling_party),
+                           sample_to_ms(v21_burst.start_sample, 8000),
+                           sample_to_ms(v21_burst.start_sample + v21_burst.duration_samples, 8000),
+                           calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                           v21_burst.peak_strength * 100.0);
+                    printf("  Lock detail:     %s\n",
+                           v8_preamble_detail(raw_candidate.preamble_type));
+                }
                 if (hexbuf[0] != '\0')
                     printf("  Candidate bytes: %s\n", hexbuf);
             }
@@ -3356,18 +3526,62 @@ static void collect_v8_event(call_log_t *log,
                                             &raw_candidate)) {
             format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
         }
-        snprintf(summary, sizeof(summary),
-                 "%s V.21 burst candidate",
-                 v8_preamble_to_candidate_label(raw_candidate.preamble_type, probe.calling_party));
-        snprintf(detail, sizeof(detail),
-                 "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%%%s%s",
-                 probe.calling_party ? "caller" : "answerer",
-                 sample_to_ms(v21_burst.start_sample, 8000),
-                 sample_to_ms(v21_burst.duration_samples, 8000),
-                 probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
-                 v21_burst.peak_strength * 100.0,
-                 hexbuf[0] != '\0' ? " raw=" : "",
-                 hexbuf[0] != '\0' ? hexbuf : "");
+        if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+            v92_short_phase1_candidate_t v92c;
+
+            if (decode_v92_short_phase1_candidate(raw_candidate.bytes, raw_candidate.byte_len, &v92c)) {
+                char auxbuf[64];
+
+                if (v92c.digital_modem)
+                    snprintf(auxbuf, sizeof(auxbuf), "anspcm_level=%s", v92_anspcm_level_to_str(v92c.aux_value));
+                else
+                    snprintf(auxbuf, sizeof(auxbuf), "uqts_index=0x%X", v92c.aux_value);
+                snprintf(summary, sizeof(summary),
+                         "%s candidate",
+                         v92c.name);
+                snprintf(detail, sizeof(detail),
+                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\" lapm=%s %s repeat=%s%s%s",
+                         probe.calling_party ? "caller" : "answerer",
+                         sample_to_ms(v21_burst.start_sample, 8000),
+                         sample_to_ms(v21_burst.duration_samples, 8000),
+                         probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                         v21_burst.peak_strength * 100.0,
+                         v8_preamble_detail(raw_candidate.preamble_type),
+                         v92c.lapm ? "yes" : "no",
+                         auxbuf,
+                         v92c.repeat_seen ? (v92c.repeat_match ? "match" : "differs") : "missing",
+                         hexbuf[0] != '\0' ? " raw=" : "",
+                         hexbuf[0] != '\0' ? hexbuf : "");
+            } else {
+                snprintf(summary, sizeof(summary),
+                         "%s V.21 burst candidate",
+                         v8_preamble_to_candidate_label(raw_candidate.preamble_type, probe.calling_party));
+                snprintf(detail, sizeof(detail),
+                         "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\"%s%s",
+                         probe.calling_party ? "caller" : "answerer",
+                         sample_to_ms(v21_burst.start_sample, 8000),
+                         sample_to_ms(v21_burst.duration_samples, 8000),
+                         probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                         v21_burst.peak_strength * 100.0,
+                         v8_preamble_detail(raw_candidate.preamble_type),
+                         hexbuf[0] != '\0' ? " raw=" : "",
+                         hexbuf[0] != '\0' ? hexbuf : "");
+            }
+        } else {
+            snprintf(summary, sizeof(summary),
+                     "%s V.21 burst candidate",
+                     v8_preamble_to_candidate_label(raw_candidate.preamble_type, probe.calling_party));
+            snprintf(detail, sizeof(detail),
+                     "role=%s start=%.1f ms duration=%.1f ms pair=%s peak=%.1f%% lock=\"%s\"%s%s",
+                     probe.calling_party ? "caller" : "answerer",
+                     sample_to_ms(v21_burst.start_sample, 8000),
+                     sample_to_ms(v21_burst.duration_samples, 8000),
+                     probe.calling_party ? "980/1180 Hz" : "1650/1850 Hz",
+                     v21_burst.peak_strength * 100.0,
+                     v8_preamble_detail(raw_candidate.preamble_type),
+                     hexbuf[0] != '\0' ? " raw=" : "",
+                     hexbuf[0] != '\0' ? hexbuf : "");
+        }
         call_log_append(log,
                         v21_burst.start_sample,
                         v21_burst.duration_samples,
