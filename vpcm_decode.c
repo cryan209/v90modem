@@ -112,6 +112,26 @@ typedef struct {
     size_t cap;
 } call_log_t;
 
+typedef struct {
+    const char *key;
+    const char *label;
+    double freq_hz;
+} visual_tone_def_t;
+
+typedef struct {
+    int sample_rate;
+    int total_samples;
+    int window_samples;
+    int point_count;
+    int freq_bin_count;
+    int freq_bin_start_hz;
+    int freq_bin_step_hz;
+    int *envelope;
+    int *freq_heatmap;
+    int *tone_levels;
+    int tone_count;
+} audio_visualization_t;
+
 static void call_log_init(call_log_t *log)
 {
     if (!log)
@@ -119,6 +139,26 @@ static void call_log_init(call_log_t *log)
     log->events = NULL;
     log->count = 0;
     log->cap = 0;
+}
+
+static void audio_visualization_reset(audio_visualization_t *viz)
+{
+    if (!viz)
+        return;
+    free(viz->envelope);
+    free(viz->freq_heatmap);
+    free(viz->tone_levels);
+    viz->envelope = NULL;
+    viz->freq_heatmap = NULL;
+    viz->tone_levels = NULL;
+    viz->sample_rate = 0;
+    viz->total_samples = 0;
+    viz->window_samples = 0;
+    viz->point_count = 0;
+    viz->freq_bin_count = 0;
+    viz->freq_bin_start_hz = 0;
+    viz->freq_bin_step_hz = 0;
+    viz->tone_count = 0;
 }
 
 static void call_log_reset(call_log_t *log)
@@ -748,6 +788,296 @@ static double tone_energy_ratio(const int16_t *samples, int len, int sample_rate
     }
 
     return (re * re + im * im) / (total_energy * (double) len);
+}
+
+static const visual_tone_def_t g_visual_tone_defs[] = {
+    { "ansam_2100", "2100 Hz ANSam/ANS", 2100.0 },
+    { "v8_ci_1300", "1300 Hz CI", 1300.0 },
+    { "v8bis_1375", "1375 Hz V.8bis", 1375.0 },
+    { "v8bis_1529", "1529 Hz V.8bis", 1529.0 },
+    { "v8bis_1650", "1650 Hz ESr", 1650.0 },
+    { "v8bis_1900", "1900 Hz CRd", 1900.0 },
+    { "v8bis_2002", "2002 Hz V.8bis", 2002.0 },
+    { "v8bis_2225", "2225 Hz V.8bis", 2225.0 },
+    { "v34_2743", "2743 Hz", 2743.0 },
+    { "v34_2800", "2800 Hz", 2800.0 },
+    { "v34_3000", "3000 Hz", 3000.0 },
+    { "v34_3200", "3200 Hz", 3200.0 },
+    { "v34_3429", "3429 Hz", 3429.0 }
+};
+
+static bool build_audio_visualization(audio_visualization_t *viz,
+                                      const int16_t *samples,
+                                      int total_samples,
+                                      int sample_rate)
+{
+    const int window_samples = (sample_rate > 0) ? (sample_rate / 100) : 80;
+    const int tone_count = (int) (sizeof(g_visual_tone_defs) / sizeof(g_visual_tone_defs[0]));
+    const int freq_bin_count = 48;
+    const int freq_bin_start_hz = 200;
+    const int freq_bin_step_hz = 75;
+    int point_count;
+
+    if (!viz || !samples || total_samples <= 0 || sample_rate <= 0 || window_samples <= 0)
+        return false;
+
+    memset(viz, 0, sizeof(*viz));
+    point_count = (total_samples + window_samples - 1) / window_samples;
+    viz->envelope = calloc((size_t) point_count, sizeof(*viz->envelope));
+    viz->freq_heatmap = calloc((size_t) point_count * (size_t) freq_bin_count, sizeof(*viz->freq_heatmap));
+    viz->tone_levels = calloc((size_t) point_count * (size_t) tone_count, sizeof(*viz->tone_levels));
+    if (!viz->envelope || !viz->freq_heatmap || !viz->tone_levels) {
+        audio_visualization_reset(viz);
+        return false;
+    }
+
+    viz->sample_rate = sample_rate;
+    viz->total_samples = total_samples;
+    viz->window_samples = window_samples;
+    viz->point_count = point_count;
+    viz->freq_bin_count = freq_bin_count;
+    viz->freq_bin_start_hz = freq_bin_start_hz;
+    viz->freq_bin_step_hz = freq_bin_step_hz;
+    viz->tone_count = tone_count;
+
+    for (int point = 0; point < point_count; point++) {
+        int start = point * window_samples;
+        int len = window_samples;
+        double energy;
+        double rms_norm;
+
+        if (start + len > total_samples)
+            len = total_samples - start;
+        if (len <= 0)
+            break;
+
+        energy = window_energy(samples + start, len);
+        rms_norm = sqrt(energy / (double) len) / 32768.0;
+        if (rms_norm > 1.0)
+            rms_norm = 1.0;
+        viz->envelope[point] = (int) lrint(rms_norm * 1000.0);
+
+        if (energy > 0.0) {
+            for (int bin = 0; bin < freq_bin_count; bin++) {
+                double freq_hz = (double) (freq_bin_start_hz + bin * freq_bin_step_hz);
+                double ratio = tone_energy_ratio(samples + start, len, sample_rate, freq_hz, energy);
+                int scaled = (int) lrint(ratio * 1600.0);
+
+                if (scaled < 0)
+                    scaled = 0;
+                if (scaled > 1000)
+                    scaled = 1000;
+                viz->freq_heatmap[point * freq_bin_count + bin] = scaled;
+            }
+            for (int tone = 0; tone < tone_count; tone++) {
+                double ratio = tone_energy_ratio(samples + start,
+                                                 len,
+                                                 sample_rate,
+                                                 g_visual_tone_defs[tone].freq_hz,
+                                                 energy);
+                int scaled = (int) lrint(ratio * 1000.0);
+
+                if (scaled < 0)
+                    scaled = 0;
+                if (scaled > 1000)
+                    scaled = 1000;
+                viz->tone_levels[point * tone_count + tone] = scaled;
+            }
+        }
+    }
+
+    return true;
+}
+
+static void json_write_escaped(FILE *f, const char *text)
+{
+    const unsigned char *p = (const unsigned char *) text;
+
+    if (!f) return;
+    fputc('"', f);
+    if (!p) {
+        fputc('"', f);
+        return;
+    }
+
+    for (; *p; p++) {
+        switch (*p) {
+        case '\\': fputs("\\\\", f); break;
+        case '"':  fputs("\\\"", f); break;
+        case '\b': fputs("\\b", f); break;
+        case '\f': fputs("\\f", f); break;
+        case '\n': fputs("\\n", f); break;
+        case '\r': fputs("\\r", f); break;
+        case '\t': fputs("\\t", f); break;
+        default:
+            if (*p < 0x20)
+                fprintf(f, "\\u%04x", (unsigned) *p);
+            else
+                fputc(*p, f);
+            break;
+        }
+    }
+    fputc('"', f);
+}
+
+static bool write_visualization_html(const char *output_path,
+                                     const char *input_path,
+                                     const char *label,
+                                     const call_log_t *log,
+                                     const audio_visualization_t *viz)
+{
+    FILE *f;
+
+    if (!output_path || !input_path || !label || !log || !viz
+        || !viz->envelope || !viz->freq_heatmap || !viz->tone_levels)
+        return false;
+
+    f = fopen(output_path, "w");
+    if (!f)
+        return false;
+
+    fprintf(f,
+            "<!doctype html>\n"
+            "<html lang=\"en\">\n"
+            "<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+            "<title>vpcm_decode visualization</title>\n"
+            "<style>\n"
+            ":root{--bg:#f7f3ea;--panel:#fffdf8;--ink:#1d1b18;--muted:#6a6257;--grid:#d9cfc0;--accent:#b14d2d;--accent2:#186d7a;--event:#f0c36a;}\n"
+            "body{margin:0;font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;background:linear-gradient(180deg,#efe6d4 0,#f7f3ea 45%%,#f3eee5 100%%);color:var(--ink);}\n"
+            ".wrap{max-width:1400px;margin:0 auto;padding:24px;}\n"
+            ".card{background:rgba(255,253,248,.92);backdrop-filter:blur(6px);border:1px solid #e3d9ca;border-radius:18px;box-shadow:0 18px 40px rgba(67,44,20,.08);padding:18px 20px;margin-bottom:18px;}\n"
+            "h1,h2{margin:0 0 10px 0;font-weight:700;letter-spacing:.02em;}\n"
+            ".meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px;color:var(--muted);margin-bottom:14px;}\n"
+            ".controls{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:14px;}\n"
+            ".legend{display:flex;flex-wrap:wrap;gap:8px;}\n"
+            ".legend button{border:1px solid #d5cab8;background:#fff8ee;color:var(--ink);padding:6px 10px;border-radius:999px;cursor:pointer;}\n"
+            ".legend button.off{opacity:.45;background:#f3ede3;}\n"
+            "canvas{width:100%%;height:760px;display:block;background:linear-gradient(180deg,#fffaf2 0,#fffefb 100%%);border-radius:14px;border:1px solid #eadfcf;}\n"
+            ".hint{color:var(--muted);margin-top:8px;}\n"
+            "table{width:100%%;border-collapse:collapse;font-size:13px;}\n"
+            "th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #eee3d3;vertical-align:top;}\n"
+            "tbody tr{cursor:pointer;}\n"
+            "tbody tr:hover{background:#fff6e7;}\n"
+            ".cursor{color:var(--accent);font-weight:700;}\n"
+            ".swatches{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--muted);margin-top:8px;}\n"
+            ".swatch{display:inline-flex;gap:6px;align-items:center;}\n"
+            ".swatch i{display:inline-block;width:26px;height:10px;border-radius:999px;}\n"
+            "</style>\n"
+            "</head>\n"
+            "<body>\n"
+            "<div class=\"wrap\">\n"
+            "<div class=\"card\">\n"
+            "<h1>vpcm_decode HTML visualization</h1>\n"
+            "<div class=\"meta\">\n");
+
+    fprintf(f, "<div><strong>Input:</strong> ");
+    json_write_escaped(f, input_path);
+    fprintf(f, "</div>\n<div><strong>Track:</strong> ");
+    json_write_escaped(f, label);
+    fprintf(f, "</div>\n<div><strong>Duration:</strong> %.3f s</div>\n", (double) viz->total_samples / (double) viz->sample_rate);
+    fprintf(f, "<div><strong>Window:</strong> %d samples (%.1f ms)</div>\n", viz->window_samples, sample_to_ms(viz->window_samples, viz->sample_rate));
+    fprintf(f, "<div><strong>Events:</strong> %zu</div>\n", log->count);
+    fprintf(f, "<div><strong>Tone tracks:</strong> %d</div>\n", viz->tone_count);
+    fprintf(f,
+            "</div>\n"
+            "<div class=\"controls\"><div class=\"cursor\">Cursor: <span id=\"cursorTime\">0.0 ms</span></div><div id=\"hoverLabel\" class=\"hint\">Move across the chart to inspect envelope and tone energy.</div></div>\n"
+            "<div id=\"legend\" class=\"legend\"></div>\n"
+            "<canvas id=\"viz\" width=\"1360\" height=\"760\"></canvas>\n"
+            "<div class=\"hint\">The top band shows envelope and event spans. The middle heatmap shows frequency-vs-time energy for modem-band bins, and the lower panel keeps the tracked modem tones visible as individual traces.</div>\n"
+            "<div class=\"swatches\"><span class=\"swatch\"><i style=\"background:linear-gradient(90deg,#08131d,#12425d,#1f8ca8,#f3b34c,#fbeec5)\"></i> weaker to stronger spectral energy</span></div>\n"
+            "</div>\n"
+            "<div class=\"card\">\n"
+            "<h2>Decoded Events</h2>\n"
+            "<table>\n"
+            "<thead><tr><th>Start</th><th>Duration</th><th>Protocol</th><th>Summary</th><th>Detail</th></tr></thead>\n"
+            "<tbody id=\"events\"></tbody>\n"
+            "</table>\n"
+            "</div>\n"
+            "</div>\n"
+            "<script>\n"
+            "const data={\n");
+
+    fprintf(f, "sampleRate:%d,totalSamples:%d,windowSamples:%d,freqBinCount:%d,freqBinStartHz:%d,freqBinStepHz:%d,label:",
+            viz->sample_rate,
+            viz->total_samples,
+            viz->window_samples,
+            viz->freq_bin_count,
+            viz->freq_bin_start_hz,
+            viz->freq_bin_step_hz);
+    json_write_escaped(f, label);
+    fprintf(f, ",input:");
+    json_write_escaped(f, input_path);
+    fprintf(f, ",envelope:[");
+    for (int i = 0; i < viz->point_count; i++) {
+        if (i) fputc(',', f);
+        fprintf(f, "%d", viz->envelope[i]);
+    }
+    fprintf(f, "],freqHeatmap:[");
+    for (int i = 0; i < viz->point_count * viz->freq_bin_count; i++) {
+        if (i) fputc(',', f);
+        fprintf(f, "%d", viz->freq_heatmap[i]);
+    }
+    fprintf(f, "],tones:[");
+    for (int tone = 0; tone < viz->tone_count; tone++) {
+        if (tone) fputc(',', f);
+        fprintf(f, "{key:");
+        json_write_escaped(f, g_visual_tone_defs[tone].key);
+        fprintf(f, ",label:");
+        json_write_escaped(f, g_visual_tone_defs[tone].label);
+        fprintf(f, ",freq:%.1f,values:[", g_visual_tone_defs[tone].freq_hz);
+        for (int i = 0; i < viz->point_count; i++) {
+            if (i) fputc(',', f);
+            fprintf(f, "%d", viz->tone_levels[i * viz->tone_count + tone]);
+        }
+        fprintf(f, "]}");
+    }
+    fprintf(f, "],events:[");
+    for (size_t i = 0; i < log->count; i++) {
+        const call_log_event_t *event = &log->events[i];
+        if (i) fputc(',', f);
+        fprintf(f, "{start:%d,duration:%d,protocol:", event->sample_offset, event->duration_samples);
+        json_write_escaped(f, event->protocol);
+        fprintf(f, ",summary:");
+        json_write_escaped(f, event->summary);
+        fprintf(f, ",detail:");
+        json_write_escaped(f, event->detail);
+        fprintf(f, "}");
+    }
+    fprintf(f,
+            "]};\n"
+            "const palette=['#b14d2d','#186d7a','#5d7a1f','#8b5cf6','#d97706','#2563eb','#a21caf','#0f766e','#c02626','#4338ca','#ca8a04','#7c3aed','#0f766e'];\n"
+            "const enabled=new Set(data.tones.map(t=>t.key));\n"
+            "const canvas=document.getElementById('viz');\n"
+            "const ctx=canvas.getContext('2d');\n"
+            "const cursorTime=document.getElementById('cursorTime');\n"
+            "const hoverLabel=document.getElementById('hoverLabel');\n"
+            "const legend=document.getElementById('legend');\n"
+            "const tbody=document.getElementById('events');\n"
+            "let cursorIndex=0;\n"
+            "function msForSample(s){return s*1000/data.sampleRate;}\n"
+            "function xForPoint(i,left,width){return left+(i/Math.max(1,data.envelope.length-1))*width;}\n"
+            "function eventColor(protocol){if(protocol==='V.8'||protocol==='V.8bis')return '#f08a5d';if(protocol==='V.34')return '#d4a017';if(protocol==='V.90 Phase 3'||protocol==='V.90')return '#2f7f6f';if(protocol==='V.90/V.92')return '#6b5b95';if(protocol==='V.91')return '#2d5fb1';return '#777';}\n"
+            "function heatColor(v){const t=Math.max(0,Math.min(1,v/1000));const stops=[[8,19,29],[18,66,93],[31,140,168],[243,179,76],[251,238,197]];const seg=Math.min(stops.length-2,Math.floor(t*(stops.length-1)));const local=t*(stops.length-1)-seg;const a=stops[seg],b=stops[seg+1];const mix=n=>Math.round(a[n]+(b[n]-a[n])*local);return `rgb(${mix(0)},${mix(1)},${mix(2)})`;}\n"
+            "function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const left=64,right=20,top=24,bottom=28;const plotW=w-left-right;const envelopeH=150;const gap=28;const specTop=top+envelopeH+gap;const specH=300;const toneTop=specTop+specH+gap;const toneAreaH=h-toneTop-bottom;const toneTrackH=toneAreaH/Math.max(1,data.tones.length);ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,w,h);ctx.strokeStyle='#d9cfc0';ctx.lineWidth=1;for(let i=0;i<=10;i++){const x=left+(plotW*i/10);ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,h-bottom);ctx.stroke();const ms=(data.totalSamples*i/10)*1000/data.sampleRate;ctx.fillStyle='#6a6257';ctx.fillText(ms.toFixed(0)+' ms',x-16,h-8);}for(let i=0;i<=6;i++){const y=top+(envelopeH*i/6);ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.fillStyle='#1d1b18';ctx.fillText('Envelope + Decoded Events',left,16);\n"
+            "data.events.forEach(ev=>{const x1=left+(ev.start/data.totalSamples)*plotW;const x2=left+((ev.start+Math.max(ev.duration,data.windowSamples))/data.totalSamples)*plotW;ctx.fillStyle=eventColor(ev.protocol)+'38';ctx.fillRect(x1,top,Math.max(2,x2-x1),envelopeH);ctx.strokeStyle=eventColor(ev.protocol);ctx.beginPath();ctx.moveTo(x1,top);ctx.lineTo(x1,specTop+specH);ctx.stroke();});\n"
+            "ctx.beginPath();for(let i=0;i<data.envelope.length;i++){const x=xForPoint(i,left,plotW);const y=top+envelopeH-(data.envelope[i]/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(left+plotW,top+envelopeH);ctx.lineTo(left,top+envelopeH);ctx.closePath();ctx.fillStyle='rgba(177,77,45,.22)';ctx.fill();ctx.strokeStyle='#b14d2d';ctx.lineWidth=1.6;ctx.stroke();\n"
+            "ctx.fillStyle='#1d1b18';ctx.fillText('Frequency Diagnosis',left,specTop-8);const colW=plotW/Math.max(1,data.envelope.length);const rowH=specH/Math.max(1,data.freqBinCount);for(let i=0;i<data.envelope.length;i++){const x=left+i*colW;for(let b=0;b<data.freqBinCount;b++){const v=data.freqHeatmap[i*data.freqBinCount+b];const y=specTop+specH-(b+1)*rowH;ctx.fillStyle=heatColor(v);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}}ctx.strokeStyle='#d9cfc0';for(let j=0;j<=6;j++){const freq=data.freqBinStartHz+j*((data.freqBinCount-1)*data.freqBinStepHz/6);const bin=(freq-data.freqBinStartHz)/data.freqBinStepHz;const y=specTop+specH-bin*rowH;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(Math.round(freq)+' Hz',6,y+4);}ctx.strokeStyle='#8a7f70';ctx.strokeRect(left,specTop,plotW,specH);\n"
+            "ctx.fillStyle='#1d1b18';ctx.fillText('Tracked Tone Energies',left,toneTop-8);data.tones.forEach((tone,idx)=>{const y0=toneTop+idx*toneTrackH;ctx.strokeStyle='#e6ddcf';ctx.beginPath();ctx.moveTo(left,y0+toneTrackH);ctx.lineTo(left+plotW,y0+toneTrackH);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(tone.label,left-4,y0+12);if(!enabled.has(tone.key))return;ctx.beginPath();tone.values.forEach((v,i)=>{const x=xForPoint(i,left,plotW);const y=y0+toneTrackH-(v/1000)*(toneTrackH-6)-3;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=palette[idx%%palette.length];ctx.lineWidth=1.25;ctx.stroke();});\n"
+            "const seen=new Set();data.events.forEach(ev=>{const tag=`${ev.protocol}:${ev.summary}`;if(seen.has(tag))return;seen.add(tag);const x=left+(ev.start/data.totalSamples)*plotW;ctx.save();ctx.translate(x+2,top+12);ctx.rotate(-Math.PI/10);ctx.fillStyle=eventColor(ev.protocol);ctx.fillText(ev.summary.length>24?ev.summary.slice(0,24)+'...':ev.summary,0,0);ctx.restore();});const cursorX=xForPoint(cursorIndex,left,plotW);ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,h-bottom);ctx.stroke();}\n"
+            "function updateCursor(index){cursorIndex=Math.max(0,Math.min(data.envelope.length-1,index));const start=cursorIndex*data.windowSamples;cursorTime.textContent=msForSample(start).toFixed(1)+' ms';const active=data.tones.filter(t=>enabled.has(t.key)).map(t=>({label:t.label,v:t.values[cursorIndex]})).sort((a,b)=>b.v-a.v).slice(0,4).filter(x=>x.v>20);let dominantBin=0;let dominantVal=-1;for(let b=0;b<data.freqBinCount;b++){const v=data.freqHeatmap[cursorIndex*data.freqBinCount+b];if(v>dominantVal){dominantVal=v;dominantBin=b;}}const dominantFreq=data.freqBinStartHz+dominantBin*data.freqBinStepHz;const spectral=`dominant bin ${dominantFreq} Hz ${(dominantVal/10).toFixed(1)}%%`;hoverLabel.textContent=active.length?`${spectral} | `+active.map(x=>x.label+' '+(x.v/10).toFixed(1)+'%%').join(' | '):spectral;draw();}\n"
+            "function rebuildLegend(){legend.innerHTML='';data.tones.forEach((tone,idx)=>{const b=document.createElement('button');b.textContent=tone.label;b.style.borderColor=palette[idx%%palette.length];if(!enabled.has(tone.key))b.classList.add('off');b.onclick=()=>{if(enabled.has(tone.key))enabled.delete(tone.key);else enabled.add(tone.key);rebuildLegend();draw();updateCursor(cursorIndex);};legend.appendChild(b);});}\n"
+            "canvas.addEventListener('mousemove',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const left=64,right=20;const plotW=canvas.width-left-right;updateCursor(Math.round(((x-left)/plotW)*(data.envelope.length-1)));});\n"
+            "canvas.addEventListener('click',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const sample=((x-64)/(canvas.width-84))*data.totalSamples;let best=null;data.events.forEach((e,idx)=>{const end=e.start+Math.max(e.duration,data.windowSamples);if(sample>=e.start&&sample<=end)best=idx;});if(best!==null){document.querySelectorAll('tbody tr')[best]?.scrollIntoView({block:'center'});}});\n"
+            "data.events.forEach((ev,idx)=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${msForSample(ev.start).toFixed(1)} ms</td><td>${msForSample(ev.duration).toFixed(1)} ms</td><td>${ev.protocol}</td><td>${ev.summary}</td><td>${ev.detail||''}</td>`;tr.onclick=()=>updateCursor(Math.round(ev.start/data.windowSamples));tbody.appendChild(tr);});\n"
+            "rebuildLegend();updateCursor(0);\n"
+            "</script>\n"
+            "</body>\n"
+            "</html>\n");
+
+    fclose(f);
+    return true;
 }
 
 static bool scan_v8bis_signals(const int16_t *samples,
@@ -4765,6 +5095,7 @@ static void run_decode_suite(const char *label,
 int main(int argc, char **argv)
 {
     const char *input_path = NULL;
+    const char *visualize_html_path = NULL;
     v91_law_t law = V91_LAW_ULAW;
     input_format_t fmt = FMT_AUTO;
     channel_select_t channel = CH_MONO;
@@ -4778,6 +5109,7 @@ int main(int argc, char **argv)
     bool do_stats = false;
     bool do_call_log = false;
     bool do_all = false;
+    bool do_visualize_html = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--law") == 0 && i + 1 < argc) {
@@ -4819,6 +5151,9 @@ int main(int argc, char **argv)
             explicit_decode_output = true;
         } else if (strcmp(argv[i], "--call-log") == 0) {
             do_call_log = true;
+        } else if (strcmp(argv[i], "--visualize-html") == 0 && i + 1 < argc) {
+            do_visualize_html = true;
+            visualize_html_path = argv[++i];
         } else if (strcmp(argv[i], "--all") == 0) {
             do_all = true;
             explicit_decode_output = true;
@@ -4837,6 +5172,7 @@ int main(int argc, char **argv)
                    "  --energy           Print RMS energy profile\n"
                    "  --stats            Print codeword histogram/statistics\n"
                    "  --call-log         Print a best-effort chronological call log\n"
+                   "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
                    "  --all              Enable all decoders (default)\n"
                    "\nWAV files should be 8000 Hz, 16-bit (mono or stereo).\n"
                    "G.711 files are raw codeword bytes at 8000 Hz.\n",
@@ -4855,12 +5191,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log && !do_visualize_html)
         do_all = true;
 
     if (do_all) {
         do_v34 = do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
     }
+
+    if (do_visualize_html)
+        do_call_log = true;
 
     if (do_call_log) {
         if (!do_v34 && !do_v8 && !do_v91 && !do_v90) {
@@ -4898,6 +5237,7 @@ int main(int argc, char **argv)
     uint8_t *g711_codewords = NULL;
     int16_t *left_linear_samples = NULL;
     int16_t *right_linear_samples = NULL;
+    int16_t *visual_linear_samples = NULL;
     uint8_t *left_g711_codewords = NULL;
     uint8_t *right_g711_codewords = NULL;
     uint8_t *adaptive_work_codewords = NULL;
@@ -4965,6 +5305,17 @@ int main(int argc, char **argv)
             if (left_linear_samples && right_linear_samples) {
                 left_linear_samples[i] = raw_data[i * wav.channels];
                 right_linear_samples[i] = raw_data[i * wav.channels + 1];
+            }
+        }
+        if (left_linear_samples && right_linear_samples && do_visualize_html) {
+            visual_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
+            if (!visual_linear_samples) {
+                fclose(f);
+                return 1;
+            }
+            for (int i = 0; i < total_samples; i++) {
+                int mixed = (int) left_linear_samples[i] + (int) right_linear_samples[i];
+                visual_linear_samples[i] = (int16_t) (mixed / 2);
             }
         }
         free(raw_data);
@@ -5085,12 +5436,91 @@ int main(int argc, char **argv)
                              linear_samples, g711_codewords,
                              total_samples, total_codewords, sample_rate, law, &opts, &codeword_info);
         }
+
+        if (do_visualize_html) {
+            call_log_t viz_log;
+            audio_visualization_t viz_data;
+            const int16_t *viz_samples = linear_samples;
+            const char *viz_label = channel == CH_LEFT ? "Left"
+                                   : channel == CH_RIGHT ? "Right"
+                                   : "Mono";
+            bool wrote_html = false;
+
+            call_log_init(&viz_log);
+            memset(&viz_data, 0, sizeof(viz_data));
+
+            if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
+                call_log_t left_log;
+                call_log_t right_log;
+
+                call_log_init(&left_log);
+                call_log_init(&right_log);
+                collect_stream_call_log(&left_log,
+                                        left_linear_samples,
+                                        left_g711_codewords,
+                                        total_samples,
+                                        total_codewords,
+                                        law,
+                                        opts.do_v34,
+                                        opts.do_v8,
+                                        opts.do_v91,
+                                        opts.do_v90);
+                collect_stream_call_log(&right_log,
+                                        right_linear_samples,
+                                        right_g711_codewords,
+                                        total_samples,
+                                        total_codewords,
+                                        law,
+                                        opts.do_v34,
+                                        opts.do_v8,
+                                        opts.do_v91,
+                                        opts.do_v90);
+                call_log_merge_with_channel(&viz_log, &left_log, "left");
+                call_log_merge_with_channel(&viz_log, &right_log, "right");
+                call_log_sort(&viz_log);
+                call_log_dedup_v8bis_msgs(&viz_log);
+                call_log_reset(&left_log);
+                call_log_reset(&right_log);
+                if (visual_linear_samples) {
+                    viz_samples = visual_linear_samples;
+                    viz_label = "Stereo Combined";
+                }
+            } else {
+                collect_stream_call_log(&viz_log,
+                                        linear_samples,
+                                        g711_codewords,
+                                        total_samples,
+                                        total_codewords,
+                                        law,
+                                        opts.do_v34,
+                                        opts.do_v8,
+                                        opts.do_v91,
+                                        opts.do_v90);
+            }
+
+            if (build_audio_visualization(&viz_data, viz_samples, total_samples, sample_rate)) {
+                wrote_html = write_visualization_html(visualize_html_path,
+                                                      input_path,
+                                                      viz_label,
+                                                      &viz_log,
+                                                      &viz_data);
+            }
+
+            if (wrote_html)
+                printf("\nVisualization HTML written to %s\n", visualize_html_path);
+            else
+                fprintf(stderr, "\nFailed to write visualization HTML: %s\n", visualize_html_path);
+
+            audio_visualization_reset(&viz_data);
+            call_log_reset(&viz_log);
+        }
     }
 
     free(linear_samples);
     free(g711_codewords);
     free(left_linear_samples);
     free(right_linear_samples);
+    free(visual_linear_samples);
     free(left_g711_codewords);
     free(right_g711_codewords);
     free(adaptive_work_codewords);
