@@ -4010,6 +4010,40 @@ static bool find_v90_dil_in_aux_any(const decode_v34_result_t *src,
         best_tap = -1;
         best_raw = false;
     }
+
+    /*
+     * The ja_aux_bits are raw QAM-demodulated sign bits from SpanDSP's V.34
+     * receiver.  The V.90 DIL is encoded with the x^23+x^5+1 scrambler before
+     * being placed into the V.34 J-phase payload, so we must descramble before
+     * parsing.  Try both possible V.90 scrambler tap configurations (tap 4 =
+     * x^5, the standard V.90 polynomial; tap 17 as an alternative).
+     */
+    {
+        static const int taps[2] = {4, 17};
+        char descrambled[8193];
+
+        for (int ti = 0; ti < 2; ti++) {
+            v90_aux_dil_hit_t hit;
+            int score;
+
+            memset(&hit, 0, sizeof(hit));
+            if (src->ja_aux_bit_len < 206 || src->ja_aux_bits[0] == '\0')
+                break;
+            v34_descramble_bits(src->ja_aux_bits, src->ja_aux_bit_len,
+                                taps[ti], descrambled, (int) sizeof(descrambled));
+            if (!find_v90_dil_in_aux_str(descrambled, src->ja_aux_bit_len, &hit))
+                continue;
+            score = v90_aux_dil_hit_score(&hit) + 1; /* slight preference over raw */
+            if (score > best_score) {
+                best_score = score;
+                best_hit = hit;
+                best_hyp = -1;
+                best_tap = taps[ti];
+                best_raw = true;
+            }
+        }
+    }
+
     for (int h = 0; h < 8; h++) {
         v90_aux_dil_hit_t hit;
         int score;
@@ -8418,10 +8452,13 @@ int main(int argc, char **argv)
             do_v34 = true;
             do_v91 = true;
             do_v90 = true;
+            /* V.8 helps establish caller/answerer orientation; include it
+               when we are auto-selecting all decoders. */
+            do_v8 = true;
         }
-        /* V.8 helps establish caller/answerer orientation, so keep it in call logs
-           even when the user explicitly asks for only later-stage decoders. */
-        do_v8 = true;
+        /* When the user has explicitly listed decoders, respect that choice.
+           V.34 orientation (caller/answerer) is inferred from the V.34 decode
+           itself, so V.8 is not strictly required. */
     }
 
     /* Auto-detect format from extension */
