@@ -76,8 +76,11 @@ can resolve after a single D/A conversion at the far-end ATA/FXS port.
 ## Building
 
 ```bash
-# Linux dependencies
-sudo apt install libpjproject-dev libspandsp-dev
+# Ubuntu/Debian build deps for the bundled libraries
+sudo apt install build-essential autoconf automake libtool pkg-config \
+                 libasound2-dev libssl-dev libopus-dev libtiff-dev \
+                 libavformat-dev libavcodec-dev libswscale-dev \
+                 libavutil-dev libv4l-dev
 
 # Build
 make
@@ -91,7 +94,8 @@ make
 ### macOS notes
 
 - Install dependencies (Homebrew), then build with `make`.
-- The Makefile auto-detects macOS and uses Homebrew-style pjproject naming.
+- `spandsp-master/` is always used for SpanDSP; no system `spandsp` package is required.
+- The Makefile auto-detects Homebrew where possible and will reconfigure vendored deps if you move the tree between macOS and Linux.
 - If your pjproject install uses a different architecture/version suffix, override:
   - `make ARCH_SUFFIX=<your-suffix>`
   - e.g. `make ARCH_SUFFIX=arm64-apple-darwin23.0.0`
@@ -99,6 +103,7 @@ make
 ### Using bundled pjproject
 
 - The top-level `make` now prefers the in-repo `pjproject/` tree by default.
+- The bundled `spandsp-master/` and local `pjproject/` builds are host-specific, and `make` will automatically rebuild them when the host OS/arch changes.
 - If needed, disable this and use system/Homebrew pjproject with:
   - `make USE_LOCAL_PJPROJECT=0`
 

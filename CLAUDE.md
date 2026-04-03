@@ -28,14 +28,15 @@ No automated test suite exists. Testing is done manually with a real analog mode
 
 ## Platform Notes (macOS Apple Silicon)
 
-Dependencies are hardcoded to Homebrew paths:
-- `PJPROJ_DIR = /opt/homebrew/Cellar/pjproject/2.16`
-- SpanDSP 3.0 is compiled from source in `spandsp-master/` (not installed system-wide)
-- `ARCH_SUFFIX = aarch64-apple-darwin24.6.0` must match your macOS version
+Build defaults:
+- SpanDSP 3.0 is compiled from source in `spandsp-master/` and should not be replaced with a system `spandsp`
+- The top-level `make` prefers the in-repo `pjproject/` tree when present
+- Vendored `spandsp-master/` and `pjproject/` builds are host-specific; `make` will automatically `distclean` and reconfigure them when switching OS/arch
+- Homebrew paths are auto-detected when available; `ARCH_SUFFIX` can still be overridden if a system/Homebrew pjproject install uses a different suffix
 
 To find the correct `ARCH_SUFFIX` for your system:
 ```bash
-ls /opt/homebrew/lib/libpj-*.a | sed 's/.*libpj-//' | sed 's/\.a//'
+ls "$(brew --prefix)/lib"/libpj-*.a | sed 's/.*libpj-//' | sed 's/\.a//'
 ```
 
 ## Architecture

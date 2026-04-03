@@ -41,6 +41,7 @@ config.status
 libtool
 
 # SpanDSP local build byproducts
+spandsp-master/.build-host
 spandsp-master/src/.deps/
 spandsp-master/src/.libs/
 spandsp-master/spandsp-sim/.deps/
@@ -85,6 +86,7 @@ spandsp-master/spandsp.pc
 spandsp-master/src/libspandsp.la
 
 # pjproject build intermediates
+pjproject/.build-host
 pjproject/**/.depend
 pjproject/**/.objs/
 pjproject/**/.libs/

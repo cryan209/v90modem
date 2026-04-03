@@ -1,27 +1,34 @@
 CC = gcc
 
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+HOST_TAG := $(UNAME_S)-$(UNAME_M)
+BREW_PREFIX := $(shell command -v brew >/dev/null 2>&1 && brew --prefix 2>/dev/null)
+HOMEBREW_PREFIX := $(if $(BREW_PREFIX),$(BREW_PREFIX),/opt/homebrew)
+AUTO_ARCH_SUFFIX := $(patsubst $(HOMEBREW_PREFIX)/lib/libpj-%.a,%,$(firstword $(wildcard $(HOMEBREW_PREFIX)/lib/libpj-*.a)))
 USE_LOCAL_PJPROJECT ?= 1
 PJ_LOCAL_ROOT ?= pjproject
 PJ_LOCAL_MAKEFILE := $(PJ_LOCAL_ROOT)/Makefile
+PJ_HOST_STAMP := $(PJ_LOCAL_ROOT)/.build-host
 
 # Local SpanDSP 3.0.0 build (with V.34 support)
 SPANDSP_ROOT = spandsp-master
 SPANDSP_DIR  = $(SPANDSP_ROOT)/src
 SPANDSP_LIB  = $(SPANDSP_DIR)/.libs/libspandsp.a
 SPANDSP_MAKE = $(SPANDSP_ROOT)/Makefile
+SPANDSP_HOST_STAMP := $(SPANDSP_ROOT)/.build-host
 
 # Shared defaults
 PJ_CFLAGS   ?=
 PJ_LIBS     ?=
-TIFF_LDFLAGS := $(shell pkg-config --libs libtiff-4 2>/dev/null || echo "-L/opt/homebrew/lib -ltiff")
+TIFF_LDFLAGS := $(shell pkg-config --libs libtiff-4 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -ltiff")
 SYSTEM_LIBS ?= $(TIFF_LDFLAGS) -lssl -lcrypto -lm -lpthread
 PJ_BUILD_PREREQ ?=
 
 ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))),)
   PJ_BUILD_PREREQ := pjproject
-  PJ_LOCAL_PJSUA  := $(firstword $(wildcard $(PJ_LOCAL_ROOT)/pjsip/lib/libpjsua-*.a))
-  PJ_LOCAL_SUFFIX := $(patsubst $(PJ_LOCAL_ROOT)/pjsip/lib/libpjsua-%.a,%,$(PJ_LOCAL_PJSUA))
+  PJ_LOCAL_PJSUA  = $(firstword $(wildcard $(PJ_LOCAL_ROOT)/pjsip/lib/libpjsua-*.a))
+  PJ_LOCAL_SUFFIX = $(patsubst $(PJ_LOCAL_ROOT)/pjsip/lib/libpjsua-%.a,%,$(PJ_LOCAL_PJSUA))
   PJ_CFLAGS += -I$(PJ_LOCAL_ROOT)/pjlib/include \
                -I$(PJ_LOCAL_ROOT)/pjlib-util/include \
                -I$(PJ_LOCAL_ROOT)/pjnath/include \
@@ -69,10 +76,10 @@ ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))
 else
   ifeq ($(UNAME_S),Darwin)
     # pjproject 2.16 on Apple Silicon macOS
-    PJPROJ_DIR  ?= /opt/homebrew/Cellar/pjproject/2.16
-    ARCH_SUFFIX ?= aarch64-apple-darwin24.6.0
+    PJPROJ_DIR  ?= $(HOMEBREW_PREFIX)/Cellar/pjproject/2.16
+    ARCH_SUFFIX ?= $(if $(AUTO_ARCH_SUFFIX),$(AUTO_ARCH_SUFFIX),aarch64-apple-darwin24.6.0)
 
-    PJ_CFLAGS += -I$(PJPROJ_DIR)/include -I/opt/homebrew/include
+    PJ_CFLAGS += -I$(PJPROJ_DIR)/include -I$(HOMEBREW_PREFIX)/include
     PJ_LIBS   += -L$(PJPROJ_DIR)/lib \
                  -lpjsua-$(ARCH_SUFFIX) \
                  -lpjsip-ua-$(ARCH_SUFFIX) \
@@ -91,7 +98,7 @@ else
                  -lilbccodec-$(ARCH_SUFFIX) \
                  -lg7221codec-$(ARCH_SUFFIX) \
                  -lwebrtc-$(ARCH_SUFFIX)
-    SYSTEM_LIBS += -L/opt/homebrew/lib \
+    SYSTEM_LIBS += -L$(HOMEBREW_PREFIX)/lib \
                    -framework CoreAudio \
                    -framework CoreServices \
                    -framework AudioUnit \
@@ -115,16 +122,16 @@ else
   endif
 endif
 
-TIFF_CFLAGS := $(shell pkg-config --cflags libtiff-4 2>/dev/null || echo "-I/opt/homebrew/include")
+TIFF_CFLAGS := $(shell pkg-config --cflags libtiff-4 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include")
 
 CFLAGS = -Wall -Wextra -O2 -g \
          -I$(SPANDSP_DIR) -I$(SPANDSP_DIR)/.. \
          $(PJ_CFLAGS) $(TIFF_CFLAGS) \
          -DPJ_AUTOCONF=1 -DPJ_IS_BIG_ENDIAN=0 -DPJ_IS_LITTLE_ENDIAN=1
 
-# To build on a different macOS version or arch, update ARCH_SUFFIX, e.g.:
+# To build against a non-default system pjproject on macOS, update ARCH_SUFFIX, e.g.:
 #   ARCH_SUFFIX = arm64-apple-darwin23.0.0
-# Or run: ls /opt/homebrew/lib/libpj-*.a | sed 's/.*libpj-//' | sed 's/\.a//'
+# Or run: ls $(HOMEBREW_PREFIX)/lib/libpj-*.a | sed 's/.*libpj-//' | sed 's/\.a//'
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
@@ -141,7 +148,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all clean spandsp pjproject v34-tone-matrix
+.PHONY: all clean distclean spandsp pjproject v34-tone-matrix FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -154,14 +161,28 @@ vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 vpcm_decode: $(DECODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(DECODE_OBJS) -o $@ $(LDFLAGS)
 
-$(SPANDSP_LIB):
-	@if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
-		echo "Configuring SpanDSP with V.34 support..."; \
+$(SPANDSP_LIB): FORCE
+	@set -e; \
+	current_host="$(HOST_TAG)"; \
+	previous_host=""; \
+	if [ -f "$(SPANDSP_HOST_STAMP)" ]; then \
+		previous_host="$$(cat "$(SPANDSP_HOST_STAMP)")"; \
+	fi; \
+	if [ "$$previous_host" != "$$current_host" ]; then \
+		echo "Preparing SpanDSP for $$current_host"; \
+		if [ -f "$(SPANDSP_ROOT)/Makefile" ]; then \
+			$(MAKE) -C "$(SPANDSP_ROOT)" distclean >/dev/null 2>&1 || true; \
+		fi; \
+		rm -f "$(SPANDSP_HOST_STAMP)"; \
+	fi; \
+	if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
+		echo "Configuring SpanDSP with V.34 support for $$current_host..."; \
 		(cd "$(SPANDSP_ROOT)" && \
 		 CFLAGS="$(TIFF_CFLAGS)" LDFLAGS="$(TIFF_LDFLAGS)" \
 		 ./configure --enable-v34); \
-	fi
-	$(MAKE) -C $(SPANDSP_ROOT)
+	fi; \
+	$(MAKE) -C "$(SPANDSP_ROOT)"; \
+	printf '%s\n' "$$current_host" > "$(SPANDSP_HOST_STAMP)"
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -195,14 +216,39 @@ vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call
 spandsp: $(SPANDSP_LIB)
 
 pjproject:
-	@if [ ! -f "$(PJ_LOCAL_ROOT)/build.mak" ]; then \
+	@set -e; \
+	current_host="$(HOST_TAG)"; \
+	previous_host=""; \
+	if [ -f "$(PJ_HOST_STAMP)" ]; then \
+		previous_host="$$(cat "$(PJ_HOST_STAMP)")"; \
+	fi; \
+	if [ "$$previous_host" != "$$current_host" ]; then \
+		echo "Preparing local pjproject for $$current_host"; \
+		if [ -f "$(PJ_LOCAL_ROOT)/build.mak" ]; then \
+			$(MAKE) -C "$(PJ_LOCAL_ROOT)" distclean >/dev/null 2>&1 || true; \
+		fi; \
+		rm -f "$(PJ_HOST_STAMP)"; \
+	fi; \
+	if [ ! -f "$(PJ_LOCAL_ROOT)/build.mak" ]; then \
 		echo "Configuring local pjproject in $(PJ_LOCAL_ROOT)"; \
 		(cd "$(PJ_LOCAL_ROOT)" && ./aconfigure); \
-	fi
-	$(MAKE) -C $(PJ_LOCAL_ROOT) lib
+	fi; \
+	$(MAKE) -C "$(PJ_LOCAL_ROOT)" lib; \
+	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"
 
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(TEST_TARGETS)
 
+distclean: clean
+	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)"
+	@if [ -f "$(SPANDSP_ROOT)/Makefile" ]; then \
+		$(MAKE) -C "$(SPANDSP_ROOT)" distclean >/dev/null 2>&1 || true; \
+	fi
+	@if [ -f "$(PJ_LOCAL_ROOT)/build.mak" ]; then \
+		$(MAKE) -C "$(PJ_LOCAL_ROOT)" distclean >/dev/null 2>&1 || true; \
+	fi
+
 v34-tone-matrix: vpcm_decode
 	bash scripts/v34_tone_matrix.sh
+
+FORCE:
