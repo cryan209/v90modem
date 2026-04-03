@@ -776,10 +776,12 @@ typedef struct {
 
 typedef struct {
     bool seen;
+    bool repeated_confirmed;
     int preamble_type;
     int sample_offset;
     int byte_len;
     int score;
+    int repeat_count;
     uint8_t bytes[64];
     int bit_len;
     uint8_t bit_run[96];
@@ -803,6 +805,7 @@ typedef struct {
     int bit_count;
     uint8_t bits[16384];
     bool calling_party;
+    v8_raw_msg_hit_t last_cm_jm;
     v8_raw_msg_hit_t best_cm_jm;
 } v8_raw_scan_state_t;
 
@@ -830,9 +833,12 @@ enum
 typedef struct {
     bool ok;
     bool calling_party;
+    bool cm_jm_complete;
     bool cm_jm_salvaged;
     int ansam_sample;
     int ansam_tone;
+    int ct_sample;
+    int cng_sample;
     int cm_jm_raw_len;
     uint8_t cm_jm_raw[64];
     int ci_sample;
@@ -845,25 +851,23 @@ typedef struct {
 
 static bool v8_probe_has_cm_jm_capabilities(const v8_probe_result_t *probe)
 {
-    return probe && probe->ok && probe->cm_jm_sample >= 0;
+    return probe && probe->ok && probe->cm_jm_complete && probe->cm_jm_sample >= 0;
 }
 
-static bool v8_probe_is_v34_only(const v8_probe_result_t *probe)
+static bool v8_probe_allows_v90_v92_digital(const v8_probe_result_t *probe)
 {
     int mods;
     int pcm;
 
     if (!v8_probe_has_cm_jm_capabilities(probe))
-        return false;
+        return true;
 
     mods = probe->result.jm_cm.modulations;
     pcm = probe->result.jm_cm.pcm_modem_availability;
 
-    if ((mods & (V8_MOD_V34 | V8_MOD_V34HDX)) == 0)
+    if ((mods & (V8_MOD_V90 | V8_MOD_V92)) == 0)
         return false;
-    if ((mods & (V8_MOD_V90 | V8_MOD_V92)) != 0)
-        return false;
-    if ((pcm & (V8_PSTN_PCM_MODEM_V90_V92_DIGITAL | V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE)) != 0)
+    if ((pcm & V8_PSTN_PCM_MODEM_V90_V92_DIGITAL) == 0)
         return false;
     return true;
 }
@@ -2278,6 +2282,74 @@ static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
     return parsed_any;
 }
 
+static bool v8_byte_is_valid_top_level_tag(uint8_t byte)
+{
+    switch (byte & 0x1F) {
+    case V8_LOCAL_CALL_FUNCTION_TAG:
+    case V8_LOCAL_MODULATION_TAG:
+    case V8_LOCAL_PROTOCOLS_TAG:
+    case V8_LOCAL_PSTN_ACCESS_TAG:
+    case V8_LOCAL_NSF_TAG:
+    case V8_LOCAL_PCM_MODEM_AVAILABILITY_TAG:
+    case V8_LOCAL_T66_TAG:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool v8_byte_is_continuation_tag(uint8_t byte)
+{
+    return (byte & 0x18) == 0x10;
+}
+
+static bool v8_cm_jm_candidate_plausible(const uint8_t *data,
+                                         int len,
+                                         const v8_parms_t *parsed)
+{
+    int first_tag = -1;
+    int top_level_count = 0;
+    int modulation_tag_count = 0;
+    int continuation_count = 0;
+
+    if (!data || len <= 0 || !parsed)
+        return false;
+
+    for (int i = 0; i < len; i++) {
+        uint8_t byte = data[i];
+
+        if (byte == 0)
+            break;
+        if (v8_byte_is_continuation_tag(byte)) {
+            continuation_count++;
+            continue;
+        }
+        if (!v8_byte_is_valid_top_level_tag(byte))
+            continue;
+        if (first_tag < 0)
+            first_tag = byte & 0x1F;
+        top_level_count++;
+        if ((byte & 0x1F) == V8_LOCAL_MODULATION_TAG)
+            modulation_tag_count++;
+    }
+
+    if (first_tag < 0)
+        return false;
+    if (first_tag != V8_LOCAL_CALL_FUNCTION_TAG
+        && first_tag != V8_LOCAL_MODULATION_TAG)
+        return false;
+    if (parsed->jm_cm.modulations == 0
+        && parsed->jm_cm.protocols == 0
+        && parsed->jm_cm.pstn_access == 0
+        && parsed->jm_cm.pcm_modem_availability == 0)
+        return false;
+    if (parsed->jm_cm.modulations != 0)
+        return true;
+    if (modulation_tag_count > 0 || continuation_count > 0)
+        return top_level_count >= 1;
+    return top_level_count >= 2;
+}
+
 static int v8_candidate_score(const v8_parms_t *parsed, int len)
 {
     int score = 0;
@@ -2303,6 +2375,61 @@ static int v8_candidate_score(const v8_parms_t *parsed, int len)
     return score;
 }
 
+static bool v8_raw_hits_similar(const v8_raw_msg_hit_t *a, const v8_raw_msg_hit_t *b)
+{
+    int overlap;
+    int matches = 0;
+    int mismatches = 0;
+
+    if (!a || !b || !a->seen || !b->seen)
+        return false;
+    if (a->preamble_type != b->preamble_type)
+        return false;
+
+    overlap = (a->byte_len < b->byte_len) ? a->byte_len : b->byte_len;
+    if (overlap < 3)
+        return false;
+
+    for (int i = 0; i < overlap; i++) {
+        if (a->bytes[i] == b->bytes[i])
+            matches++;
+        else
+            mismatches++;
+    }
+
+    if (matches < 3)
+        return false;
+    if (matches * 4 < overlap * 3)
+        return false;
+    if (mismatches > 1 && mismatches * 3 > overlap)
+        return false;
+    return true;
+}
+
+static void v8_raw_scan_consider_hit(v8_raw_scan_state_t *scan, const v8_raw_msg_hit_t *hit)
+{
+    v8_raw_msg_hit_t candidate;
+
+    if (!scan || !hit || !hit->seen)
+        return;
+
+    candidate = *hit;
+    candidate.repeat_count = 1;
+    candidate.repeated_confirmed = false;
+
+    if (scan->last_cm_jm.seen
+        && v8_raw_hits_similar(&scan->last_cm_jm, &candidate)
+        && abs(candidate.sample_offset - scan->last_cm_jm.sample_offset) >= 80) {
+        candidate.repeat_count = scan->last_cm_jm.repeat_count + 1;
+        candidate.repeated_confirmed = (candidate.repeat_count >= 2);
+        candidate.score += (candidate.repeat_count - 1) * 80;
+    }
+
+    scan->last_cm_jm = candidate;
+    if (!scan->best_cm_jm.seen || candidate.score > scan->best_cm_jm.score)
+        scan->best_cm_jm = candidate;
+}
+
 static void v8_raw_scan_process_message(v8_raw_scan_state_t *scan,
                                         int preamble_type,
                                         bool calling_party)
@@ -2314,6 +2441,8 @@ static void v8_raw_scan_process_message(v8_raw_scan_state_t *scan,
     if (!scan || preamble_type != V8_LOCAL_SYNC_CM_JM || scan->rx_data_ptr <= 0)
         return;
     if (!v8_parse_cm_jm_candidate(&parsed, scan->rx_data, scan->rx_data_ptr, calling_party))
+        return;
+    if (!v8_cm_jm_candidate_plausible(scan->rx_data, scan->rx_data_ptr, &parsed))
         return;
 
     memset(&hit, 0, sizeof(hit));
@@ -2331,8 +2460,7 @@ static void v8_raw_scan_process_message(v8_raw_scan_state_t *scan,
     if (hit.sample_offset < 0)
         hit.sample_offset = 0;
 
-    if (!scan->best_cm_jm.seen || hit.score > scan->best_cm_jm.score)
-        scan->best_cm_jm = hit;
+    v8_raw_scan_consider_hit(scan, &hit);
 }
 
 static void v8_raw_scan_put_bit(void *user_data, int bit)
@@ -2552,6 +2680,8 @@ static void v8_syncless_scan_bits(v8_raw_scan_state_t *scan)
             continue;
         if (!v8_parse_cm_jm_candidate(&parsed, bytes, byte_len, scan->calling_party))
             continue;
+        if (!v8_cm_jm_candidate_plausible(bytes, byte_len, &parsed))
+            continue;
 
         memset(&hit, 0, sizeof(hit));
         hit.seen = true;
@@ -2560,8 +2690,7 @@ static void v8_syncless_scan_bits(v8_raw_scan_state_t *scan)
         hit.score = v8_candidate_score(&parsed, byte_len) - 15;
         memcpy(hit.bytes, bytes, (size_t) byte_len);
 
-        if (!scan->best_cm_jm.seen || hit.score > scan->best_cm_jm.score)
-            scan->best_cm_jm = hit;
+        v8_raw_scan_consider_hit(scan, &hit);
     }
 }
 
@@ -2778,8 +2907,6 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
                     int ones_score;
                     int sync_score;
                     int score_bias;
-                    uint8_t first_tag;
-                    uint8_t second_tag;
                     v8_parms_t parsed;
 
                     ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
@@ -2798,14 +2925,9 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
                                                              &framing_penalty);
                     if (payload_len <= 0)
                         continue;
-                    first_tag = payload[0] & 0x1F;
-                    second_tag = (payload_len > 1) ? (payload[1] & 0x1F) : 0xFF;
-                    if (payload_len < 2)
-                        continue;
-                    if (first_tag != V8_LOCAL_CALL_FUNCTION_TAG
-                        || second_tag != V8_LOCAL_MODULATION_TAG)
-                        continue;
                     if (!v8_parse_cm_jm_candidate(&parsed, payload, payload_len, calling_party))
+                        continue;
+                    if (!v8_cm_jm_candidate_plausible(payload, payload_len, &parsed))
                         continue;
 
                     score_bias = ones_score + sync_score;
@@ -2836,6 +2958,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                                             int sample_rate,
                                             const v8_fsk_burst_hit_t *burst,
                                             bool use_ch2,
+                                            bool calling_party,
                                             v8_raw_msg_hit_t *out)
 {
     const double mark_hz = use_ch2 ? 1650.0 : 980.0;
@@ -2895,6 +3018,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     int sync_score_v92;
                     int sync_score_cm_jm;
                     uint8_t prev_tag = 0xFF;
+                    v8_parms_t parsed;
 
                     ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
                     if (ones_score < 40)
@@ -2979,10 +3103,9 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                                                           bytes,
                                                           (int) sizeof(bytes),
                                                           &framing_penalty);
-                    if (byte_len < 2)
+                    if (!v8_parse_cm_jm_candidate(&parsed, bytes, byte_len, calling_party))
                         continue;
-                    if ((bytes[0] & 0x1F) != V8_LOCAL_CALL_FUNCTION_TAG
-                        || (bytes[1] & 0x1F) != V8_LOCAL_MODULATION_TAG)
+                    if (!v8_cm_jm_candidate_plausible(bytes, byte_len, &parsed))
                         continue;
 
                     score = 0;
@@ -3016,6 +3139,12 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     }
                     score += ones_score + sync_score_cm_jm;
                     score += byte_len * 2;
+                    if (parsed.jm_cm.modulations & V8_MOD_V34)
+                        score += 18;
+                    if (parsed.jm_cm.modulations & (V8_MOD_V90 | V8_MOD_V92))
+                        score += 10;
+                    if (parsed.jm_cm.pcm_modem_availability != 0)
+                        score += 8;
                     score += 8 - abs(bit_rate - 302);
                     if (use_ch2)
                         score += 6;
@@ -3328,10 +3457,13 @@ static void v8_salvage_partial_probe(v8_state_t *v8,
         return;
     if (!v8_parse_cm_jm_candidate(&parsed, v8->cm_jm_data, v8->cm_jm_len, out->calling_party))
         return;
+    if (!v8_cm_jm_candidate_plausible(v8->cm_jm_data, v8->cm_jm_len, &parsed))
+        return;
 
     out->result = parsed;
     out->last_status = parsed.status;
     out->cm_jm_sample = sample_offset;
+    out->cm_jm_complete = false;
     out->cm_jm_salvaged = true;
     out->cm_jm_raw_len = v8->cm_jm_len;
     if (out->cm_jm_raw_len > (int) sizeof(out->cm_jm_raw))
@@ -3347,6 +3479,10 @@ static int v8_probe_last_sample(const v8_probe_result_t *probe)
         return -1;
     if (probe->ansam_sample >= 0)
         end = probe->ansam_sample;
+    if (end < 0 || (probe->ct_sample >= 0 && probe->ct_sample > end))
+        end = probe->ct_sample;
+    if (end < 0 || (probe->cng_sample >= 0 && probe->cng_sample > end))
+        end = probe->cng_sample;
     if (end < 0 || (probe->ci_sample >= 0 && probe->ci_sample > end))
         end = probe->ci_sample;
     if (end < 0 || (probe->cm_jm_sample >= 0 && probe->cm_jm_sample > end))
@@ -3366,6 +3502,10 @@ static int v8_probe_first_sample(const v8_probe_result_t *probe)
         return -1;
     if (probe->ansam_sample >= 0)
         start = probe->ansam_sample;
+    if (start < 0 || (probe->ct_sample >= 0 && probe->ct_sample < start))
+        start = probe->ct_sample;
+    if (start < 0 || (probe->cng_sample >= 0 && probe->cng_sample < start))
+        start = probe->cng_sample;
     if (start < 0 || (probe->ci_sample >= 0 && probe->ci_sample < start))
         start = probe->ci_sample;
     if (start < 0 || (probe->cm_jm_sample >= 0 && probe->cm_jm_sample < start))
@@ -3385,6 +3525,10 @@ static int v8_probe_milestone_count(const v8_probe_result_t *probe)
         return 0;
     if (probe->ansam_sample >= 0)
         count++;
+    if (probe->ct_sample >= 0)
+        count++;
+    if (probe->cng_sample >= 0)
+        count++;
     if (probe->ci_sample >= 0)
         count++;
     if (probe->cm_jm_sample >= 0)
@@ -3403,6 +3547,8 @@ static int v8_probe_chain_score(const v8_probe_result_t *probe)
     int ordered_steps = 0;
     const int milestones[] = {
         probe ? probe->ansam_sample : -1,
+        probe ? probe->ct_sample : -1,
+        probe ? probe->cng_sample : -1,
         probe ? probe->ci_sample : -1,
         probe ? probe->cm_jm_sample : -1,
         probe ? probe->cj_sample : -1,
@@ -3414,6 +3560,10 @@ static int v8_probe_chain_score(const v8_probe_result_t *probe)
 
     if (probe->ansam_sample >= 0)
         score += 100;
+    if (probe->ct_sample >= 0)
+        score += 220;
+    if (probe->cng_sample >= 0)
+        score += 220;
     if (probe->ci_sample >= 0)
         score += 300;
     if (probe->cm_jm_sample >= 0)
@@ -3522,6 +3672,18 @@ static const char *v8_answer_tone_detail(int tone)
     }
 }
 
+static const char *v8_aux_tone_name(int tone)
+{
+    switch (tone) {
+    case MODEM_CONNECT_TONES_CALLING_TONE:
+        return "CT";
+    case MODEM_CONNECT_TONES_FAX_CNG:
+        return "CNG";
+    default:
+        return "Tone";
+    }
+}
+
 static bool v8_collect_probe(const int16_t *samples,
                              int total_samples,
                              bool calling_party,
@@ -3540,6 +3702,9 @@ static bool v8_collect_probe(const int16_t *samples,
     out->calling_party = calling_party;
     out->ansam_sample = -1;
     out->ansam_tone = MODEM_CONNECT_TONES_NONE;
+    out->ct_sample = -1;
+    out->cng_sample = -1;
+    out->cm_jm_complete = false;
     out->cm_jm_raw_len = 0;
     out->ci_sample = -1;
     out->cm_jm_sample = -1;
@@ -3590,9 +3755,11 @@ static bool v8_collect_probe(const int16_t *samples,
             }
         }
         modem_connect_tones_rx(&v8->calling_tone_rx, samples + offset, chunk);
-        modem_connect_tones_rx_get(&v8->calling_tone_rx);
+        if ((tone = modem_connect_tones_rx_get(&v8->calling_tone_rx)) == MODEM_CONNECT_TONES_CALLING_TONE)
+            v8_note_first_sample(&out->ct_sample, offset + chunk);
         modem_connect_tones_rx(&v8->cng_tone_rx, samples + offset, chunk);
-        modem_connect_tones_rx_get(&v8->cng_tone_rx);
+        if ((tone = modem_connect_tones_rx_get(&v8->cng_tone_rx)) == MODEM_CONNECT_TONES_FAX_CNG)
+            v8_note_first_sample(&out->cng_sample, offset + chunk);
         fsk_rx(&v8->v21rx, samples + offset, chunk);
         offset += chunk;
 
@@ -3600,6 +3767,8 @@ static bool v8_collect_probe(const int16_t *samples,
             v8_note_first_sample(&out->ci_sample, offset);
         if (v8->got_cm_jm)
             v8_note_first_sample(&out->cm_jm_sample, offset);
+        if (v8->got_cm_jm)
+            out->cm_jm_complete = true;
         if (v8->got_cj)
             v8_note_first_sample(&out->cj_sample, offset);
         if (g_v8_result.seen) {
@@ -3620,6 +3789,7 @@ static bool v8_collect_probe(const int16_t *samples,
             out->result = parsed;
             out->last_status = parsed.status;
             out->cm_jm_sample = raw_hit.sample_offset;
+            out->cm_jm_complete = raw_hit.repeated_confirmed;
             out->cm_jm_salvaged = true;
             out->cm_jm_raw_len = raw_hit.byte_len;
             memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
@@ -3644,6 +3814,7 @@ static bool v8_collect_probe(const int16_t *samples,
                 out->result = parsed;
                 out->last_status = parsed.status;
                 out->cm_jm_sample = raw_hit.sample_offset;
+                out->cm_jm_complete = raw_hit.repeated_confirmed;
                 out->cm_jm_salvaged = true;
                 out->cm_jm_raw_len = raw_hit.byte_len;
                 memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
@@ -3661,6 +3832,8 @@ static bool v8_collect_probe(const int16_t *samples,
     }
 
     out->ok = (out->ansam_sample >= 0
+               || out->ct_sample >= 0
+               || out->cng_sample >= 0
                || out->ci_sample >= 0
                || out->cm_jm_sample >= 0
                || out->cj_sample >= 0
@@ -5079,13 +5252,17 @@ static void decode_v8_pass(const int16_t *samples,
             printf("%s@%.1f ",
                    v8_answer_tone_name(probe.ansam_tone),
                    sample_to_ms(probe.ansam_sample, 8000));
+        if (probe.ct_sample >= 0)
+            printf("CT@%.1f ", sample_to_ms(probe.ct_sample, 8000));
+        if (probe.cng_sample >= 0)
+            printf("CNG@%.1f ", sample_to_ms(probe.cng_sample, 8000));
         if (probe.ci_sample >= 0)
             printf("CI@%.1f ", sample_to_ms(probe.ci_sample, 8000));
         if (probe.cm_jm_sample >= 0)
             printf("%s@%.1f%s ",
                    calling_party ? "JM" : "CM",
                    sample_to_ms(probe.cm_jm_sample, 8000),
-                   probe.cm_jm_salvaged ? "(single-msg)" : "");
+                   probe.cm_jm_complete ? "" : "(candidate)");
         if (probe.cj_sample >= 0)
             printf("CJ@%.1f ", sample_to_ms(probe.cj_sample, 8000));
         if (probe.v8_call_sample >= 0)
@@ -5097,9 +5274,9 @@ static void decode_v8_pass(const int16_t *samples,
             print_v8_result(&probe.result);
         } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
             printf("  Partial V.8 decode; %s\n",
-                   probe.cm_jm_salvaged
-                   ? "decoded from single CM/JM message (no CJ confirmation)"
-                   : "final V8_CALL not yet confirmed");
+                   probe.cm_jm_complete
+                   ? "final V8_CALL not yet confirmed"
+                   : "CM/JM fragment recovered but not promoted to a full decode");
             if (probe.ansam_sample >= 0
                 && probe.cm_jm_sample > probe.ansam_sample) {
                 for (int ch = 0; ch <= 1; ch++) {
@@ -5137,7 +5314,7 @@ static void decode_v8_pass(const int16_t *samples,
                 char hexbuf[256];
 
                 format_hex_bytes(hexbuf, sizeof(hexbuf), probe.cm_jm_raw, probe.cm_jm_raw_len);
-                printf("  Partial CM/JM fields at ~%.1f ms:\n",
+                printf("  CM/JM candidate fields at ~%.1f ms:\n",
                        sample_to_ms(probe.cm_jm_sample, 8000));
                 printf("  Call function:  %s\n",
                        v8_call_function_to_str(probe.result.jm_cm.call_function));
@@ -5155,6 +5332,9 @@ static void decode_v8_pass(const int16_t *samples,
                     printf("  T.66:           %s\n", v8_t66_to_str(probe.result.jm_cm.t66));
                 if (hexbuf[0] != '\0')
                     printf("  Raw bytes:      %s\n", hexbuf);
+                if (probe.cm_jm_salvaged)
+                    printf("  Repeat status:  %s\n",
+                           probe.cm_jm_complete ? "stable repeated CM/JM candidate" : "single-burst fragment");
             }
         } else {
             printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
@@ -5215,6 +5395,7 @@ static void decode_v8_pass(const int16_t *samples,
                                                         8000,
                                                         &v21_burst,
                                                         use_ch2,
+                                                        !use_ch2,
                                                         &raw_candidate)) {
                         format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
                     }
@@ -5346,6 +5527,20 @@ static void collect_v8_event(call_log_t *log,
                  s_tone);
         call_log_append(log, probe.ansam_sample, 0, "V.8", summary, detail);
     }
+    if (probe.ct_sample >= 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s tone=%s",
+                 probe.calling_party ? "caller" : "answerer",
+                 v8_aux_tone_name(MODEM_CONNECT_TONES_CALLING_TONE));
+        call_log_append(log, probe.ct_sample, 0, "V.8", "CT detected", detail);
+    }
+    if (probe.cng_sample >= 0) {
+        snprintf(detail, sizeof(detail),
+                 "role=%s tone=%s",
+                 probe.calling_party ? "caller" : "answerer",
+                 v8_aux_tone_name(MODEM_CONNECT_TONES_FAX_CNG));
+        call_log_append(log, probe.cng_sample, 0, "V.8", "CNG detected", detail);
+    }
     if (probe.ci_sample >= 0) {
         char s_ci_fn[64];
 
@@ -5369,13 +5564,14 @@ static void collect_v8_event(call_log_t *log,
         sanitize_detail_value(s_pcm, sizeof(s_pcm), v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability));
         sanitize_detail_value(s_pstn, sizeof(s_pstn), v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
         snprintf(summary, sizeof(summary),
-                 "%s decoded",
-                 probe.calling_party ? "JM" : "CM");
+                 "%s %s",
+                 probe.calling_party ? "JM" : "CM",
+                 probe.cm_jm_complete ? "decoded" : "candidate");
         pos = snprintf(detail, sizeof(detail),
                  "role=%s msg=%s confidence=%s call_fn=%s modulations=%s protocol=%s pcm=%s pstn=%s",
                  probe.calling_party ? "caller" : "answerer",
                  probe.calling_party ? "JM" : "CM",
-                 probe.cm_jm_salvaged ? "single_message" : "confirmed",
+                 probe.cm_jm_complete ? "confirmed" : "candidate_fragment",
                  s_call_fn,
                  modbuf[0] ? modbuf : "none",
                  s_proto,
@@ -5531,6 +5727,7 @@ static void collect_v8_event(call_log_t *log,
                                                 8000,
                                                 &v21_burst,
                                                 use_ch2,
+                                                !use_ch2,
                                                 &raw_candidate)) {
                 format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
             }
@@ -6253,7 +6450,7 @@ static void print_v34_result(const decode_v34_result_t *result,
            v34_event_to_str_local(result->final_rx_event),
            result->final_rx_event);
     if (suppress_v90_phase2) {
-        printf("  INFO0a/INFO0d:   suppressed by V.8 gate (CM/JM advertised V.34-only)\n");
+        printf("  INFO0a/INFO0d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
     } else if (result->info0_seen) {
         char info0_detail[1024];
 
@@ -6271,7 +6468,7 @@ static void print_v34_result(const decode_v34_result_t *result,
         printf("  INFO0a/INFO0d:   not decoded\n");
     }
     if (suppress_v90_phase2) {
-        printf("  INFO1a/INFO1d:   suppressed by V.8 gate (CM/JM advertised V.34-only)\n");
+        printf("  INFO1a/INFO1d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
     } else if (result->info1_seen && !result->info1_is_d) {
         char info1_detail[1024];
 
@@ -6606,7 +6803,7 @@ static void collect_v34_events(call_log_t *log,
             break; \
         if (res__->phase3_seen) { \
             if (suppress_v90_phase2) { \
-                snprintf(detail, sizeof(detail), "role=%s u_info=n/a source=v8_v34_only_gate", role_name); \
+                snprintf(detail, sizeof(detail), "role=%s u_info=n/a source=v8_no_digital_pcm_gate", role_name); \
             } else { \
                 snprintf(detail, sizeof(detail), "role=%s u_info=%d source=%s", \
                          role_name, \
@@ -6737,7 +6934,7 @@ static void collect_stream_call_log(call_log_t *log,
                                                          total_samples,
                                                          total_samples,
                                                          &capability_probe);
-    suppress_v90_phase2 = have_capability_probe && v8_probe_is_v34_only(&capability_probe);
+    suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
 
     if (do_v34 || do_v90) {
         decode_v34_pair_with_rescue(linear_samples,
@@ -8601,13 +8798,14 @@ static void run_decode_suite(const char *label,
                                                          total_samples,
                                                          total_samples,
                                                          &capability_probe);
-    suppress_v90_phase2 = have_capability_probe && v8_probe_is_v34_only(&capability_probe);
+    suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
     if (suppress_v90_phase2 && opts->raw_output_enabled && (opts->do_v34 || opts->do_v90)) {
         char modbuf[256];
 
         format_v8_modulations_str(capability_probe.result.jm_cm.modulations, modbuf, sizeof(modbuf));
-        printf("V.8 gate: CM/JM advertised V.34-only modulation set (%s), so V.90/V.92 decode paths are suppressed.\n",
-               modbuf[0] ? modbuf : "none");
+        printf("V.8 gate: CM/JM does not advertise V.90/V.92 digital capability (mods=%s pcm=%s), so V.90/V.92 decode paths are suppressed.\n",
+               modbuf[0] ? modbuf : "none",
+               v8_pcm_modem_availability_to_str(capability_probe.result.jm_cm.pcm_modem_availability));
     }
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
@@ -8669,7 +8867,7 @@ static void run_decode_suite(const char *label,
         }
     } else if (opts->raw_output_enabled && opts->do_v90 && suppress_v90_phase2) {
         printf("\n=== V.90/V.92 PCM Decode ===\n");
-        printf("  Suppressed by V.8 gate: decoded CM/JM capabilities only advertise V.34-class modulation.\n");
+        printf("  Suppressed by V.8 gate: decoded CM/JM does not advertise V.90/V.92 digital PCM capability.\n");
     }
 
     if (opts->do_call_log) {
