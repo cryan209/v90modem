@@ -767,12 +767,17 @@ int p3_segment_symbols(p3_result_t *result)
         uint16_t j_trn16 = 0;
         int j_hyp = 0;
 
+
         /* Skip silence */
         if (is_silence(syms, pos, (remaining < 6) ? remaining : 6,
                        silence_threshold)) {
             int end = pos;
             while (end < n && syms[end].magnitude < silence_threshold)
                 end++;
+            /* Guarantee forward progress: if window-average was silence but no
+             * individual sample was below threshold, skip at least 1 symbol. */
+            if (end <= pos)
+                end = pos + 1;
             add_segment(result, P3_SIGNAL_SILENCE, pos, end - pos, syms);
             pos = end;
             continue;
@@ -783,12 +788,19 @@ int p3_segment_symbols(p3_result_t *result)
 
         /* Check for Ru/uR (V.92, 6-symbol 2-point pattern). */
         if (remaining >= 18 && is_ru_pattern(syms, pos, 18, &ru_positive)) {
+            /* Extend incrementally: check new 6 symbols match the period-6 2-point pattern */
             seg_len = 18;
             while (pos + seg_len + 6 <= n) {
-                bool next_positive = ru_positive;
-                if (!is_ru_pattern(syms, pos, seg_len + 6, &next_positive))
-                    break;
-                if (next_positive != ru_positive)
+                int ext_match = 0;
+                for (int ei = 0; ei < 6; ei++) {
+                    int d = syms[pos + seg_len + ei].dibit;
+                    int pos_in_period = (seg_len + ei) % 6;
+                    bool first_half = (pos_in_period < 3);
+                    int expected = (first_half == ru_positive) ? 0 : 2;
+                    if (d == expected)
+                        ext_match++;
+                }
+                if (ext_match < 4)  /* Need 4/6 match to continue */
                     break;
                 seg_len += 6;
             }
@@ -807,13 +819,17 @@ int p3_segment_symbols(p3_result_t *result)
 
         /* Check for S / S-bar (6-symbol repeating) */
         if (remaining >= 12 && is_s_pattern(syms, pos, 12, &s_complement)) {
-            /* Extend while the same S/S-bar class holds. */
+            /* Extend incrementally: check 6-symbol consistency of new chunk */
             seg_len = 12;
             while (pos + seg_len + 6 <= n) {
-                bool next_complement = s_complement;
-                if (!is_s_pattern(syms, pos, seg_len + 6, &next_complement))
-                    break;
-                if (next_complement != s_complement)
+                int ext_ok = 1;
+                for (int ei = 0; ei < 6; ei++) {
+                    if (syms[pos + seg_len + ei].dibit != syms[pos + (seg_len + ei) % 6].dibit) {
+                        ext_ok = 0;
+                        break;
+                    }
+                }
+                if (!ext_ok)
                     break;
                 seg_len += 6;
             }
@@ -827,10 +843,25 @@ int p3_segment_symbols(p3_result_t *result)
 
         /* Check for TRN (scrambled ones) */
         if (remaining >= 24 && is_trn_pattern(syms, pos, 24)) {
+            /* Extend incrementally: check scrambler recurrence on new symbols */
             seg_len = 24;
-            while (pos + seg_len + 12 <= n
-                   && is_trn_pattern(syms, pos, seg_len + 12))
+            while (pos + seg_len + 12 <= n) {
+                int ext_errors = 0;
+                int ext_checks = 0;
+                int ext_total_bits = (seg_len + 12) * 2;
+                for (int b = seg_len * 2; b < ext_total_bits && b >= 23; b++) {
+                    int prev23 = symbol_scrambled_bit(syms, pos, b - 23);
+                    int prev5 = symbol_scrambled_bit(syms, pos, b - 5);
+                    int expect = 1 ^ prev23 ^ prev5;
+                    int got = symbol_scrambled_bit(syms, pos, b);
+                    ext_checks++;
+                    if (got != expect)
+                        ext_errors++;
+                }
+                if (ext_checks > 0 && (ext_checks - ext_errors) * 100 < ext_checks * 70)
+                    break;
                 seg_len += 12;
+            }
             {
                 int checks = 0;
                 int error_bits = trn_recurrence_errors(syms, pos, seg_len, &checks);
@@ -850,14 +881,21 @@ int p3_segment_symbols(p3_result_t *result)
         /* Check for J frame (16-bit repeating descrambled pattern) */
         if (remaining >= 48
             && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp)) {
+            /* Extend incrementally: verify new bits match the 16-bit pattern */
             seg_len = 48;
             while (pos + seg_len + 8 <= n) {
-                uint16_t next_trn16;
-                int next_hyp;
-                if (!detect_j_pattern(syms, pos, seg_len + 8, &next_trn16, &next_hyp))
+                int ext_matches = 0;
+                int ext_total = 16;
+                for (int ei = 0; ei < 8; ei++) {
+                    int b0 = symbol_descrambled_bit(syms, pos, (seg_len + ei) * 2);
+                    int b1 = symbol_descrambled_bit(syms, pos, (seg_len + ei) * 2 + 1);
+                    int e0 = (int)((j_trn16 >> (((seg_len + ei) * 2 - j_hyp) % 16)) & 1);
+                    int e1 = (int)((j_trn16 >> (((seg_len + ei) * 2 + 1 - j_hyp) % 16)) & 1);
+                    if (b0 == e0) ext_matches++;
+                    if (b1 == e1) ext_matches++;
+                }
+                if (ext_matches * 100 < ext_total * 70)
                     break;
-                j_trn16 = next_trn16;
-                j_hyp = next_hyp;
                 seg_len += 8;
             }
             {
@@ -995,7 +1033,7 @@ p3_result_t *p3_demod_run(const int16_t *samples,
 {
     p3_result_t *best_result = NULL;
     float best_score = -FLT_MAX;
-    int trials = 4;
+    int trials;
     int est_symbols;
 
     if (!samples || sample_count <= 0)
@@ -1003,6 +1041,15 @@ p3_result_t *p3_demod_run(const int16_t *samples,
 
     /* Estimate max symbols: samples / (samples_per_symbol) + margin */
     est_symbols = (int)((float)sample_count * 2.0f) + 100;
+
+    /* Reduce trials on long inputs to avoid excessive runtime.
+     * Phase strobe sweep matters most for short, targeted windows. */
+    if (sample_count > 40000)
+        trials = 1;
+    else if (sample_count > 16000)
+        trials = 2;
+    else
+        trials = 4;
 
     for (int t = 0; t < trials; t++) {
         p3_demod_t demod;
@@ -1170,6 +1217,11 @@ int p3_scan_all_hypotheses(const int16_t *samples,
             scan_len = active_end - active_start;
         }
     }
+
+    /* Cap scan length to avoid very long demod runs on full-stream fallback.
+     * Phase 3 is typically 2-8 seconds; 5 seconds is generous. */
+    if (scan_len > 5 * sample_rate)
+        scan_len = 5 * sample_rate;
 
     /* Quick pre-score: correlate a short window with each carrier.
      * For short Phase 3 windows we evaluate all hypotheses; for long

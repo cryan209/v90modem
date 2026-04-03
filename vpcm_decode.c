@@ -7974,6 +7974,15 @@ static void p3_demod_scan_window(const int16_t *samples,
            sample_to_ms(sample_offset, sample_rate),
            sample_to_ms(sample_offset + sample_count, sample_rate),
            sample_to_ms(sample_count, sample_rate));
+
+    /* p3_scan_all_hypotheses internally caps/narrows the scan range;
+     * cap the detail run similarly to avoid huge demod on full streams. */
+    {
+        int detail_cap = 5 * sample_rate;
+        if (sample_count > detail_cap)
+            sample_count = detail_cap;
+    }
+
     printf("  Scanning all %d baud/carrier hypotheses...\n", P3_BAUD_COUNT * 2);
 
     count = p3_scan_all_hypotheses(samples,
@@ -10510,7 +10519,7 @@ static void run_decode_suite(const char *label,
                v8_pcm_modem_availability_to_str(capability_probe.result.jm_cm.pcm_modem_availability));
     }
 
-    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90 || opts->do_p3))) {
+    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
         decode_v34_pair_with_rescue(linear_samples,
                                     total_samples,
                                     law,
