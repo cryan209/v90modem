@@ -3646,11 +3646,11 @@ static const char *v8_preamble_to_candidate_label(int preamble_type, bool callin
 {
     switch (preamble_type) {
     case V8_LOCAL_SYNC_CM_JM:
-        return calling_party ? "CM candidate" : "JM candidate";
+        return calling_party ? "CM observed" : "JM observed";
     case V8_LOCAL_SYNC_V92:
-        return "V.92 short Phase 1 control-like";
+        return "V.92 short Phase 1 control observed";
     default:
-        return calling_party ? "CM candidate" : "JM candidate";
+        return calling_party ? "CM observed" : "JM observed";
     }
 }
 
@@ -4718,20 +4718,20 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
         print_v8_flow_step("Caller CI", caller_ch, caller->ci_sample, ci_end, "");
         first_msg = caller->ci_sample;
     } else {
-        printf("  Caller (%s):      CI not yet recovered\n", caller_ch);
+        printf("  Caller (%s):      CI not observed\n", caller_ch);
     }
     if (caller->cm_jm_sample >= 0) {
         print_v8_flow_step("Caller CM",
                            caller_ch,
                            caller->cm_jm_sample,
                            cm_end,
-                           caller->cm_jm_complete ? "" : " (candidate)");
+                           caller->cm_jm_complete ? "" : " [weak field decode]");
         if (first_msg < 0 || caller->cm_jm_sample < first_msg)
             first_msg = caller->cm_jm_sample;
         if (caller->cm_jm_complete)
             last_msg = caller->cm_jm_sample;
     } else {
-        printf("  Caller (%s):      CM not yet recovered\n", caller_ch);
+        printf("  Caller (%s):      CM not observed\n", caller_ch);
     }
     if (answerer->ansam_sample >= 0) {
         char suffix[48];
@@ -4741,41 +4741,41 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
         if (first_msg < 0 || answerer->ansam_sample < first_msg)
             first_msg = answerer->ansam_sample;
     } else {
-        printf("  Answerer (%s):    ANSam not yet recovered\n", answerer_ch);
+        printf("  Answerer (%s):    answer tone not observed\n", answerer_ch);
     }
     if (answerer->cm_jm_sample >= 0) {
         print_v8_flow_step("Answerer JM",
                            answerer_ch,
                            answerer->cm_jm_sample,
                            jm_end,
-                           answerer->cm_jm_complete ? "" : " (candidate)");
+                           answerer->cm_jm_complete ? "" : " [weak field decode]");
         if (first_msg < 0 || answerer->cm_jm_sample < first_msg)
             first_msg = answerer->cm_jm_sample;
         if (answerer->cm_jm_complete)
             last_msg = answerer->cm_jm_sample;
     } else {
-        printf("  Answerer (%s):    JM not yet recovered\n", answerer_ch);
+        printf("  Answerer (%s):    JM not observed\n", answerer_ch);
     }
     if (caller->cj_sample >= 0) {
         print_v8_flow_step("Caller CJ", caller_ch, caller->cj_sample, cj_end, "");
         if (last_msg < caller->cj_sample)
             last_msg = caller->cj_sample;
     } else {
-        printf("  Caller (%s):      CJ not yet recovered\n", caller_ch);
+        printf("  Caller (%s):      CJ not observed\n", caller_ch);
     }
     if (answerer->cj_sample >= 0) {
         printf("  Answerer (%s):    CJ-like echo at %.1f ms\n",
                answerer_ch, sample_to_ms(answerer->cj_sample, 8000));
     }
     if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample < 0) {
-        printf("  Exchange state:   caller-side CM is present; waiting for clear JM on %s\n",
+        printf("  Exchange state:   caller-side CM observed; no clear JM observed on %s\n",
                answerer_ch);
     } else if (caller->cm_jm_sample < 0 && answerer->cm_jm_sample >= 0) {
-        printf("  Exchange state:   answerer-side JM is present; caller CM is still missing or buried by echo\n");
+        printf("  Exchange state:   answerer-side JM observed; caller CM is missing or buried by echo\n");
     } else if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample >= 0 && caller->cj_sample < 0) {
-        printf("  Exchange state:   CM/JM present; waiting for caller-side CJ terminator\n");
+        printf("  Exchange state:   CM/JM reconstructed; caller-side CJ not observed\n");
     } else if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample >= 0 && caller->cj_sample >= 0) {
-        printf("  Exchange state:   CM/JM/CJ sequence seen across stereo pair\n");
+        printf("  Exchange state:   CM/JM/CJ sequence reconstructed across stereo pair\n");
     }
     if (first_msg >= 0 && last_msg >= first_msg) {
         printf("  Exchange span:    %.1f ms to %.1f ms\n",
@@ -5990,7 +5990,7 @@ static void decode_v8_pass(const int16_t *samples,
             printf("%s@%.1f%s ",
                    v8_cm_jm_name(calling_party),
                    sample_to_ms(probe.cm_jm_sample, 8000),
-                   probe.cm_jm_complete ? "" : "(candidate)");
+                   probe.cm_jm_complete ? "" : "(weak)");
         if (probe.cj_sample >= 0)
             printf("CJ@%.1f ", sample_to_ms(probe.cj_sample, 8000));
         if (probe.v8_call_sample >= 0)
@@ -6001,10 +6001,10 @@ static void decode_v8_pass(const int16_t *samples,
                    sample_to_ms(probe.v8_call_sample >= 0 ? probe.v8_call_sample : probe.cm_jm_sample, 8000));
             print_v8_result(&probe.result);
         } else if (probe.ci_sample >= 0 || probe.cm_jm_sample >= 0 || probe.cj_sample >= 0) {
-            printf("  Partial V.8 decode; %s\n",
+            printf("  Observed V.8 signaling; %s\n",
                    probe.cm_jm_complete
-                   ? "final V8_CALL not yet confirmed"
-                   : "CM/JM fragment recovered but not promoted to a full decode");
+                   ? "message timing is coherent, but full CM/JM fields are still incomplete"
+                   : "message timing is present, but field decode is weak");
             if (probe.ansam_sample >= 0
                 && probe.cm_jm_sample > probe.ansam_sample) {
                 for (int ch = 0; ch <= 1; ch++) {
@@ -6064,7 +6064,7 @@ static void decode_v8_pass(const int16_t *samples,
                         rawbitbuf[used] = '\0';
                     }
                 }
-                printf("  CM/JM candidate fields at ~%.1f ms:\n",
+                printf("  CM/JM observed fields at ~%.1f ms:\n",
                        sample_to_ms(probe.cm_jm_sample, 8000));
                 printf("  Call function:  %s\n",
                        v8_call_function_to_str(probe.result.jm_cm.call_function));
@@ -6085,11 +6085,11 @@ static void decode_v8_pass(const int16_t *samples,
                 if (rawbitbuf[0] != '\0')
                     printf("  Raw bits:       %s\n", rawbitbuf);
                 if (probe.cm_jm_salvaged)
-                    printf("  Repeat status:  %s\n",
-                           probe.cm_jm_complete ? "stable repeated CM/JM candidate" : "single-burst fragment");
+                    printf("  Decode quality: %s\n",
+                           probe.cm_jm_complete ? "stable repeated CM/JM observation" : "single-burst weak observation");
             }
         } else {
-            printf("  Tone-level early negotiation detected, but no valid CI/CM/JM/CJ sequence yet\n");
+            printf("  Tone-level early negotiation observed, but no CI/CM/JM/CJ sequence was reconstructed\n");
             printf("  Possible V.8bis or clipped pre-V.8 exchange\n");
             if (probe.ansam_sample >= 0) {
                 for (int ch = 0; ch <= 1; ch++) {
