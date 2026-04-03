@@ -1445,12 +1445,19 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
             append_html_label_value(out, out_len, "9.4.2.1.2 Tone B detected while receiving INFO0d", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94212")));
             append_html_label_value(out, out_len, "9.4.2.1.3 Tone B reversal then Tone A reversal sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94213")));
             append_html_label_value(out, out_len, "9.4.2.1.4 INFO1a sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94214")));
+            appendf(out, out_len, "<hr><div><strong>Recovery (9.4.2.2):</strong></div>");
+            append_html_label_value(out, out_len, "9.4.2.2.1 repeated INFO0 handling observed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94221")));
+            append_html_label_value(out, out_len, "9.4.2.2.2 retrain/timeout observed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94222")));
         } else {
             append_html_label_value(out, out_len, "9.4.1.1.1 INFO0d sent / Tone B sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94111")));
             append_html_label_value(out, out_len, "9.4.1.1.2 INFO0a received / Tone A detected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94112")));
             append_html_label_value(out, out_len, "9.4.1.1.3 Tone B phase reversal sent", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94113")));
             append_html_label_value(out, out_len, "9.4.1.1.4 Tone A phase reversal detected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94114")));
             append_html_label_value(out, out_len, "9.4.1.1.5 INFO1a received", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94115")));
+            appendf(out, out_len, "<hr><div><strong>Recovery (9.4.1.2):</strong></div>");
+            append_html_label_value(out, out_len, "9.4.1.2.1 repeated INFO0 handling observed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94121")));
+            append_html_label_value(out, out_len, "9.4.1.2.2 fallback to full Phase 2 observed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94122")));
+            append_html_label_value(out, out_len, "9.4.1.2.3 INFO1a timeout fallback observed", detail_bit_to_yes_no(detail_value(pairs, pair_count, "c94123")));
         }
         appendf(out, out_len, "</div>");
         return;
@@ -4262,6 +4269,7 @@ static bool decode_v34_pass(const int16_t *samples,
                             int total_samples,
                             v91_law_t law,
                             bool calling_party,
+                            float initial_signal_cutoff_db,
                             decode_v34_result_t *result)
 {
     v34_state_t *v34;
@@ -4275,6 +4283,8 @@ static bool decode_v34_pass(const int16_t *samples,
     int prev_tx_stage = -1;
     int prev_rx_event = -1;
     int ja_aux_start_bit = -1;
+    bool flow_debug = false;
+    bool info_cutoff_relaxed = false;
 
     if (!samples || total_samples <= 0 || !result)
         return false;
@@ -4330,10 +4340,17 @@ static bool decode_v34_pass(const int16_t *samples,
         return false;
 
     v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
+    /* Start slightly stricter to preserve early INFO0a lock, then relax
+       after INFO0 to improve INFO1a acquisition in offline captures. */
+    v34_rx_set_signal_cutoff(v34, initial_signal_cutoff_db);
     memset(&aux_bits, 0, sizeof(aux_bits));
     v34_set_put_aux_bit(v34, v34_collect_aux_bit, &aux_bits);
-    span_log_set_level(v34_get_logging_state(v34), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_WARNING);
-    stderr_guard = silence_stderr_begin();
+    if (getenv("VPCM_V34_FLOW"))
+        flow_debug = true;
+    span_log_set_level(v34_get_logging_state(v34),
+                       SPAN_LOG_SHOW_SEVERITY | (flow_debug ? SPAN_LOG_FLOW : SPAN_LOG_WARNING));
+    if (!flow_debug)
+        stderr_guard = silence_stderr_begin();
 
     while (offset < total_samples) {
         int chunk = total_samples - offset;
@@ -4506,6 +4523,10 @@ static bool decode_v34_pass(const int16_t *samples,
             result->info0_is_d = calling_party;
             result->info0_raw = raw_info0a;
             result->info0_sample = offset;
+            if (!info_cutoff_relaxed) {
+                v34_rx_set_signal_cutoff(v34, -60.0f);
+                info_cutoff_relaxed = true;
+            }
         }
         if (!result->info1_seen) {
             if (v34_get_v90_received_info1a(v34, &raw_info1a) > 0
@@ -4542,7 +4563,8 @@ static bool decode_v34_pass(const int16_t *samples,
         }
     }
 
-    silence_stderr_end(&stderr_guard);
+    if (!flow_debug)
+        silence_stderr_end(&stderr_guard);
 
     result->final_rx_stage = v34_get_rx_stage(v34);
     result->final_tx_stage = v34_get_tx_stage(v34);
@@ -4779,7 +4801,7 @@ static void collect_v34_events(call_log_t *log,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
-    char detail[1024];
+    char detail[2048];
     bool have_answerer = false;
     bool have_caller = false;
     const decode_v34_result_t *primary = NULL;
@@ -4800,8 +4822,37 @@ static void collect_v34_events(call_log_t *log,
         } \
     } while (0)
 
-    have_answerer = decode_v34_pass(samples, total_samples, law, false, &answerer);
-    have_caller = decode_v34_pass(samples, total_samples, law, true, &caller);
+    have_answerer = decode_v34_pass(samples, total_samples, law, false, -60.0f, &answerer);
+    have_caller = decode_v34_pass(samples, total_samples, law, true, -60.0f, &caller);
+
+    if (have_answerer && !answerer.info0_seen && answerer.info1_seen) {
+        decode_v34_result_t info0_rescue;
+
+        if (decode_v34_pass(samples, total_samples, law, false, -52.0f, &info0_rescue)
+            && info0_rescue.info0_seen) {
+            answerer.info0_seen = true;
+            answerer.info0_is_d = info0_rescue.info0_is_d;
+            answerer.info0a = info0_rescue.info0a;
+            answerer.info0_raw = info0_rescue.info0_raw;
+            answerer.info0_sample = info0_rescue.info0_sample;
+            if (answerer.rx_tone_a_sample < 0)
+                answerer.rx_tone_a_sample = info0_rescue.rx_tone_a_sample;
+            if (answerer.rx_tone_b_sample < 0)
+                answerer.rx_tone_b_sample = info0_rescue.rx_tone_b_sample;
+            if (answerer.rx_tone_a_reversal_sample < 0)
+                answerer.rx_tone_a_reversal_sample = info0_rescue.rx_tone_a_reversal_sample;
+            if (answerer.rx_tone_b_reversal_sample < 0)
+                answerer.rx_tone_b_reversal_sample = info0_rescue.rx_tone_b_reversal_sample;
+            if (answerer.tx_tone_a_sample < 0)
+                answerer.tx_tone_a_sample = info0_rescue.tx_tone_a_sample;
+            if (answerer.tx_tone_b_sample < 0)
+                answerer.tx_tone_b_sample = info0_rescue.tx_tone_b_sample;
+            if (answerer.tx_tone_a_reversal_sample < 0)
+                answerer.tx_tone_a_reversal_sample = info0_rescue.tx_tone_a_reversal_sample;
+            if (answerer.tx_tone_b_reversal_sample < 0)
+                answerer.tx_tone_b_reversal_sample = info0_rescue.tx_tone_b_reversal_sample;
+        }
+    }
 
     if (have_answerer && have_caller) {
         if (v34_result_spec_score(&answerer) >= v34_result_spec_score(&caller)) {
@@ -4845,75 +4896,75 @@ static void collect_v34_events(call_log_t *log,
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
             } \
         } \
-        if (res__->info0_seen \
-            && v34_info0_short_phase2_requested(res__) \
-            && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
-            bool local_analogue__ = res__->info0_is_d; \
-            int phase2_start__ = res__->info0_sample; \
-            int tx_tone__ = local_analogue__ ? res__->tx_tone_a_sample : res__->tx_tone_b_sample; \
-            int tx_rev__ = local_analogue__ ? res__->tx_tone_a_reversal_sample : res__->tx_tone_b_reversal_sample; \
-            int rx_tone__ = local_analogue__ ? res__->rx_tone_b_sample : res__->rx_tone_a_sample; \
-            int rx_rev__ = local_analogue__ ? res__->rx_tone_b_reversal_sample : res__->rx_tone_a_reversal_sample; \
-            int tx_info1__ = res__->tx_info1_sample; \
-            bool c94111__ = false, c94112__ = false, c94113__ = false, c94114__ = false, c94115__ = false; \
-            bool c94211__ = false, c94212__ = false, c94213__ = false, c94214__ = false; \
-            bool complete__ = false; \
-            if (tx_tone__ >= 0 && tx_tone__ < phase2_start__) tx_tone__ = -1; \
-            if (tx_rev__ >= 0 && tx_rev__ < phase2_start__) tx_rev__ = -1; \
-            if (rx_tone__ >= 0 && rx_tone__ < phase2_start__) rx_tone__ = -1; \
-            if (rx_rev__ >= 0 && rx_rev__ < phase2_start__) rx_rev__ = -1; \
-            if (tx_info1__ >= 0 && tx_info1__ < phase2_start__) tx_info1__ = -1; \
-            if (local_analogue__) { \
-                c94211__ = (res__->info0_seen && res__->info0_is_d); \
-                c94212__ = (c94211__ && rx_tone__ >= 0); \
-                c94213__ = (c94212__ && rx_rev__ >= 0 && tx_rev__ >= 0); \
-                c94214__ = (c94213__ && tx_info1__ >= 0); \
-                complete__ = c94214__; \
-            } else { \
-                c94111__ = (res__->info0_seen && !res__->info0_is_d); \
-                c94112__ = (c94111__ && rx_tone__ >= 0); \
-                c94113__ = (c94112__ && tx_rev__ >= 0); \
-                c94114__ = (c94113__ && rx_rev__ >= 0); \
-                c94115__ = (c94114__ && res__->info1_seen); \
-                complete__ = c94115__; \
+        if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+            v92_short_phase2_observation_t sp2_obs__; \
+            v92_short_phase2_result_t sp2_res__; \
+            memset(&sp2_obs__, 0, sizeof(sp2_obs__)); \
+            sp2_obs__.info0_seen = res__->info0_seen; \
+            sp2_obs__.info0_is_d = res__->info0_is_d; \
+            sp2_obs__.short_phase2_requested = v92_short_phase2_req_from_info0_bits(res__->info0_is_d, res__->info0_raw.raw_26_27); \
+            sp2_obs__.v92_capable = v92_short_phase2_v92_cap_from_info0_bits(res__->info0_is_d, res__->info0_raw.raw_26_27); \
+            sp2_obs__.info0_ack = res__->info0a.acknowledge_info0d; \
+            sp2_obs__.info1_seen = res__->info1_seen; \
+            sp2_obs__.phase3_seen = res__->phase3_seen; \
+            sp2_obs__.training_failed = res__->training_failed; \
+            sp2_obs__.info0_sample = res__->info0_sample; \
+            sp2_obs__.info1_sample = res__->info1_sample; \
+            sp2_obs__.tx_tone_a_sample = res__->tx_tone_a_sample; \
+            sp2_obs__.tx_tone_b_sample = res__->tx_tone_b_sample; \
+            sp2_obs__.tx_tone_a_reversal_sample = res__->tx_tone_a_reversal_sample; \
+            sp2_obs__.tx_tone_b_reversal_sample = res__->tx_tone_b_reversal_sample; \
+            sp2_obs__.rx_tone_a_sample = res__->rx_tone_a_sample; \
+            sp2_obs__.rx_tone_b_sample = res__->rx_tone_b_sample; \
+            sp2_obs__.rx_tone_a_reversal_sample = res__->rx_tone_a_reversal_sample; \
+            sp2_obs__.rx_tone_b_reversal_sample = res__->rx_tone_b_reversal_sample; \
+            sp2_obs__.tx_info1_sample = res__->tx_info1_sample; \
+            if (v92_short_phase2_analyze(&sp2_obs__, &sp2_res__)) { \
+                detail[0] = '\0'; \
+                appendf(detail, sizeof(detail), "role=%s", role_name); \
+                appendf(detail, sizeof(detail), " figure=V92_Fig9"); \
+                appendf(detail, sizeof(detail), " shortp2_req=1"); \
+                appendf(detail, sizeof(detail), " v92_cap=%u", sp2_res__.v92_capable ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " local_modem=%s", v92_short_phase2_local_modem(sp2_res__.sequence)); \
+                appendf(detail, sizeof(detail), " sequence=%s", v92_short_phase2_sequence_id(sp2_res__.sequence)); \
+                appendf(detail, sizeof(detail), " info0_ms=%.1f", sample_to_ms(res__->info0_sample, 8000)); \
+                appendf(detail, sizeof(detail), " tx_tone_ms=%s", sp2_res__.tx_tone_sample >= 0 ? "" : "n/a"); \
+                if (sp2_res__.tx_tone_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(sp2_res__.tx_tone_sample, 8000)); \
+                appendf(detail, sizeof(detail), " tx_reversal_ms=%s", sp2_res__.tx_reversal_sample >= 0 ? "" : "n/a"); \
+                if (sp2_res__.tx_reversal_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(sp2_res__.tx_reversal_sample, 8000)); \
+                appendf(detail, sizeof(detail), " rx_tone_ms=%s", sp2_res__.rx_tone_sample >= 0 ? "" : "n/a"); \
+                if (sp2_res__.rx_tone_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(sp2_res__.rx_tone_sample, 8000)); \
+                appendf(detail, sizeof(detail), " rx_reversal_ms=%s", sp2_res__.rx_reversal_sample >= 0 ? "" : "n/a"); \
+                if (sp2_res__.rx_reversal_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(sp2_res__.rx_reversal_sample, 8000)); \
+                appendf(detail, sizeof(detail), " tx_info1_ms=%s", sp2_res__.tx_info1_sample >= 0 ? "" : "n/a"); \
+                if (sp2_res__.tx_info1_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(sp2_res__.tx_info1_sample, 8000)); \
+                appendf(detail, sizeof(detail), " info1_seen=%u", res__->info1_seen ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " info1_ms=%s", res__->info1_sample >= 0 ? "" : "n/a"); \
+                if (res__->info1_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(res__->info1_sample, 8000)); \
+                appendf(detail, sizeof(detail), " c94111=%u", sp2_res__.c94111 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94112=%u", sp2_res__.c94112 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94113=%u", sp2_res__.c94113 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94114=%u", sp2_res__.c94114 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94115=%u", sp2_res__.c94115 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94121=%u", sp2_res__.c94121 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94122=%u", sp2_res__.c94122 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94123=%u", sp2_res__.c94123 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94211=%u", sp2_res__.c94211 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94212=%u", sp2_res__.c94212 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94213=%u", sp2_res__.c94213 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94214=%u", sp2_res__.c94214 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94221=%u", sp2_res__.c94221 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " c94222=%u", sp2_res__.c94222 ? 1U : 0U); \
+                appendf(detail, sizeof(detail), " status=%s", sp2_res__.status ? sp2_res__.status : "in_progress"); \
+                call_log_append(log, \
+                                res__->info0_sample, \
+                                0, \
+                                "V.90/V.92", \
+                                (sp2_res__.sequence == V92_SHORT_PHASE2_SEQUENCE_A) \
+                                    ? "Short Phase 2 sequence A (Figure 9)" \
+                                    : "Short Phase 2 sequence B (Figure 9)", \
+                                detail); \
             } \
-            detail[0] = '\0'; \
-            appendf(detail, sizeof(detail), "role=%s", role_name); \
-            appendf(detail, sizeof(detail), " figure=V92_Fig9"); \
-            appendf(detail, sizeof(detail), " shortp2_req=1"); \
-            appendf(detail, sizeof(detail), " v92_cap=%u", v34_info0_v92_capable(res__) ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " local_modem=%s", v34_short_phase2_local_modem(res__)); \
-            appendf(detail, sizeof(detail), " sequence=%s", v34_short_phase2_sequence_id(res__)); \
-            appendf(detail, sizeof(detail), " info0_ms=%.1f", sample_to_ms(res__->info0_sample, 8000)); \
-            appendf(detail, sizeof(detail), " tx_tone_ms=%s", tx_tone__ >= 0 ? "" : "n/a"); \
-            if (tx_tone__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_tone__, 8000)); \
-            appendf(detail, sizeof(detail), " tx_reversal_ms=%s", tx_rev__ >= 0 ? "" : "n/a"); \
-            if (tx_rev__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_rev__, 8000)); \
-            appendf(detail, sizeof(detail), " rx_tone_ms=%s", rx_tone__ >= 0 ? "" : "n/a"); \
-            if (rx_tone__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(rx_tone__, 8000)); \
-            appendf(detail, sizeof(detail), " rx_reversal_ms=%s", rx_rev__ >= 0 ? "" : "n/a"); \
-            if (rx_rev__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(rx_rev__, 8000)); \
-            appendf(detail, sizeof(detail), " tx_info1_ms=%s", tx_info1__ >= 0 ? "" : "n/a"); \
-            if (tx_info1__ >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(tx_info1__, 8000)); \
-            appendf(detail, sizeof(detail), " info1_seen=%u", res__->info1_seen ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " info1_ms=%s", res__->info1_sample >= 0 ? "" : "n/a"); \
-            if (res__->info1_sample >= 0) appendf(detail, sizeof(detail), "%.1f", sample_to_ms(res__->info1_sample, 8000)); \
-            appendf(detail, sizeof(detail), " c94111=%u", c94111__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94112=%u", c94112__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94113=%u", c94113__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94114=%u", c94114__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94115=%u", c94115__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94211=%u", c94211__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94212=%u", c94212__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94213=%u", c94213__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " c94214=%u", c94214__ ? 1U : 0U); \
-            appendf(detail, sizeof(detail), " status=%s", complete__ ? "complete" : "in_progress"); \
-            call_log_append(log, \
-                            res__->info0_sample, \
-                            0, \
-                            "V.90/V.92", \
-                            local_analogue__ ? "Short Phase 2 sequence A (Figure 9)" : "Short Phase 2 sequence B (Figure 9)", \
-                            detail); \
         } \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
@@ -5038,8 +5089,8 @@ static void collect_stream_call_log(call_log_t *log,
         return;
 
     if (do_v34 || do_v90) {
-        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, &answerer);
-        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, &caller);
+        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, -60.0f, &answerer);
+        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, -60.0f, &caller);
         if (have_answerer) {
             if (answerer.info0_seen)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
@@ -6947,8 +6998,8 @@ static void run_decode_suite(const char *label,
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
-        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, &answerer);
-        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, &caller);
+        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, -60.0f, &answerer);
+        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, -60.0f, &caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {

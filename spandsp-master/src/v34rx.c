@@ -3174,6 +3174,17 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                             &&
                             s->stage == V34_RX_STAGE_L1_L2)
                            ||
+                           /* V.90 answerer: once INFO1d has been sent, keep INFO1a
+                              sync search active across all Tone A/B event states so
+                              we can lock immediately after the 10 ms A-bar period. */
+                           (s->v90_mode
+                            && !s->calling_party
+                            && s->v90_info1d_sent
+                            && (s->stage == V34_RX_STAGE_TONE_A
+                                || s->stage == V34_RX_STAGE_TONE_B
+                                || s->stage == V34_RX_STAGE_L1_L2
+                                || s->stage == V34_RX_STAGE_CC))
+                           ||
                            ((s->stage == V34_RX_STAGE_TONE_A
                              ||
                              s->stage == V34_RX_STAGE_TONE_B)
@@ -3183,6 +3194,17 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              s->received_event == V34_EVENT_INFO0_BAD
                              ||
                              s->received_event == V34_EVENT_TONE_SEEN)));
+    if (s->v90_mode
+        && !s->calling_party
+        && s->v90_info1d_sent
+        && s->info0_received
+        && info_search_enabled
+        && s->target_bits != (70 - (4 + 8 + 4)))
+    {
+        /* Bias framing toward INFO1a in the post-INFO1d window, even when
+           we are still traversing Tone A/B transitions. */
+        s->target_bits = 70 - (4 + 8 + 4);
+    }
     /* Search for INFO0, INFOh, INFO1a or INFO1c messages. */
     if (!info_search_enabled)
     {
@@ -3227,11 +3249,15 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                      && s->target_bits == (70 - (4 + 8 + 4))
                                      && (s->stage == V34_RX_STAGE_TONE_A
                                          || s->stage == V34_RX_STAGE_TONE_B
+                                         || s->stage == V34_RX_STAGE_L1_L2
+                                         || s->stage == V34_RX_STAGE_CC
                                          || s->stage == V34_RX_STAGE_INFO1A));
                 switch (s->stage)
                 {
                 case V34_RX_STAGE_TONE_A:
                 case V34_RX_STAGE_TONE_B:
+                case V34_RX_STAGE_L1_L2:
+                case V34_RX_STAGE_CC:
                 case V34_RX_STAGE_INFO0:
                     if (v90_info1a_search)
                     {
@@ -3330,6 +3356,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                      && s->target_bits == (70 - (4 + 8 + 4))
                                      && (s->stage == V34_RX_STAGE_TONE_A
                                          || s->stage == V34_RX_STAGE_TONE_B
+                                         || s->stage == V34_RX_STAGE_L1_L2
+                                         || s->stage == V34_RX_STAGE_CC
                                          || s->stage == V34_RX_STAGE_INFO1A));
                 if (v90_info1a_search)
                     info_log_candidate_diag(s, s->info_buf, s->target_bits, s->crc);
@@ -3390,6 +3418,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 {
                 case V34_RX_STAGE_TONE_A:
                 case V34_RX_STAGE_TONE_B:
+                case V34_RX_STAGE_L1_L2:
+                case V34_RX_STAGE_CC:
                 case V34_RX_STAGE_INFO0:
                     s->received_event = v90_info1a_search ? V34_EVENT_INFO1_BAD : V34_EVENT_INFO0_BAD;
                 case V34_RX_STAGE_INFOH:
