@@ -100,6 +100,11 @@ bool v8bis_scan_signals(const int16_t *samples,
                 out->hits[i].sample_offset = offset;
                 out->hits[i].duration_samples = V8BIS_SIGNAL_SAMPLES;
                 out->hits[i].score = score;
+                out->hits[i].seg1_a_ratio = seg1_a_ratio;
+                out->hits[i].seg1_b_ratio = seg1_b_ratio;
+                out->hits[i].seg1_dual_ratio = dual_ratio;
+                out->hits[i].seg1_balance = balance;
+                out->hits[i].seg2_ratio = seg2_ratio;
             }
         }
     }
@@ -163,6 +168,11 @@ bool v8bis_scan_weak_candidate(const int16_t *samples,
                 best.sample_offset = offset;
                 best.duration_samples = V8BIS_SIGNAL_SAMPLES;
                 best.score = score;
+                best.seg1_a_ratio = seg1_a_ratio;
+                best.seg1_b_ratio = seg1_b_ratio;
+                best.seg1_dual_ratio = dual_ratio;
+                best.seg1_balance = balance;
+                best.seg2_ratio = seg2_ratio;
             }
         }
     }
@@ -602,11 +612,16 @@ void v8bis_collect_signal_events(call_log_t *log,
             return;
         snprintf(summary, sizeof(summary), "Weak %s-like energy", g_v8bis_signal_defs[weak_v8bis.signal_index].name);
         snprintf(detail, sizeof(detail),
-                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f weak=yes",
+                 "role=%s seg1=%d+%dHz seg2=%dHz seg1_ms=400 seg2_ms=100 seg1_a=%.1f%% seg1_b=%.1f%% dual=%.1f%% balance=%.1f%% seg2_strength=%.1f%% score=%.0f weak=yes",
                  g_v8bis_signal_defs[weak_v8bis.signal_index].role,
                  g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_a_hz,
                  g_v8bis_signal_defs[weak_v8bis.signal_index].seg1_b_hz,
                  g_v8bis_signal_defs[weak_v8bis.signal_index].seg2_hz,
+                 weak_v8bis.seg1_a_ratio * 100.0,
+                 weak_v8bis.seg1_b_ratio * 100.0,
+                 weak_v8bis.seg1_dual_ratio * 100.0,
+                 weak_v8bis.seg1_balance * 100.0,
+                 weak_v8bis.seg2_ratio * 100.0,
                  weak_v8bis.score);
         call_log_append(log,
                         weak_v8bis.sample_offset,
@@ -636,11 +651,16 @@ void v8bis_collect_signal_events(call_log_t *log,
                  i < (int)(sizeof(v8bis_descriptions)/sizeof(v8bis_descriptions[0]))
                      ? v8bis_descriptions[i] : "");
         snprintf(detail, sizeof(detail),
-                 "role=%s seg1=%d+%dHz seg2=%dHz score=%.0f",
+                 "role=%s seg1=%d+%dHz seg2=%dHz seg1_ms=400 seg2_ms=100 seg1_a=%.1f%% seg1_b=%.1f%% dual=%.1f%% balance=%.1f%% seg2_strength=%.1f%% score=%.0f",
                  g_v8bis_signal_defs[i].role,
                  g_v8bis_signal_defs[i].seg1_a_hz,
                  g_v8bis_signal_defs[i].seg1_b_hz,
                  g_v8bis_signal_defs[i].seg2_hz,
+                 v8bis.hits[i].seg1_a_ratio * 100.0,
+                 v8bis.hits[i].seg1_b_ratio * 100.0,
+                 v8bis.hits[i].seg1_dual_ratio * 100.0,
+                 v8bis.hits[i].seg1_balance * 100.0,
+                 v8bis.hits[i].seg2_ratio * 100.0,
                  v8bis.hits[i].score);
         call_log_append(log,
                         v8bis.hits[i].sample_offset,

@@ -1714,6 +1714,50 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         return;
     }
 
+    /* V.8bis tone-signal events */
+    if ((strcmp(event->protocol, "V.8bis") == 0 || strcmp(event->protocol, "V.8bis?") == 0)
+        && detail_value(pairs, pair_count, "seg1") != NULL
+        && detail_value(pairs, pair_count, "seg2") != NULL) {
+        char seg1_start[32];
+        char seg1_end[32];
+        char seg2_start[32];
+        char seg2_end[32];
+
+        snprintf(seg1_start, sizeof(seg1_start), "%.1f ms", sample_to_ms(event->sample_offset, 8000));
+        snprintf(seg1_end, sizeof(seg1_end), "%.1f ms",
+                 sample_to_ms(event->sample_offset + V8BIS_SEGMENT1_SAMPLES, 8000));
+        snprintf(seg2_start, sizeof(seg2_start), "%.1f ms",
+                 sample_to_ms(event->sample_offset + V8BIS_SEGMENT1_SAMPLES, 8000));
+        snprintf(seg2_end, sizeof(seg2_end), "%.1f ms",
+                 sample_to_ms(event->sample_offset + V8BIS_SEGMENT1_SAMPLES + V8BIS_SEGMENT2_SAMPLES, 8000));
+
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Segment 1 dual-tone", detail_value(pairs, pair_count, "seg1"));
+        append_html_label_value(out, out_len, "Segment 1 start", seg1_start);
+        append_html_label_value(out, out_len, "Segment 1 end", seg1_end);
+        append_html_label_value(out, out_len, "Segment 1 duration", detail_value(pairs, pair_count, "seg1_ms"));
+        append_html_label_value(out, out_len, "Segment 2 identifying tone", detail_value(pairs, pair_count, "seg2"));
+        append_html_label_value(out, out_len, "Segment 2 start", seg2_start);
+        append_html_label_value(out, out_len, "Segment 2 end", seg2_end);
+        append_html_label_value(out, out_len, "Segment 2 duration", detail_value(pairs, pair_count, "seg2_ms"));
+        if (detail_value(pairs, pair_count, "seg1_a"))
+            append_html_label_value(out, out_len, "Segment 1 tone A strength", detail_value(pairs, pair_count, "seg1_a"));
+        if (detail_value(pairs, pair_count, "seg1_b"))
+            append_html_label_value(out, out_len, "Segment 1 tone B strength", detail_value(pairs, pair_count, "seg1_b"));
+        if (detail_value(pairs, pair_count, "dual"))
+            append_html_label_value(out, out_len, "Segment 1 combined strength", detail_value(pairs, pair_count, "dual"));
+        if (detail_value(pairs, pair_count, "balance"))
+            append_html_label_value(out, out_len, "Segment 1 tone balance", detail_value(pairs, pair_count, "balance"));
+        if (detail_value(pairs, pair_count, "seg2_strength"))
+            append_html_label_value(out, out_len, "Segment 2 tone strength", detail_value(pairs, pair_count, "seg2_strength"));
+        append_html_label_value(out, out_len, "Detector score", detail_value(pairs, pair_count, "score"));
+        if (detail_value(pairs, pair_count, "weak"))
+            append_html_label_value(out, out_len, "Weak candidate", detail_bit_to_yes_no(detail_value(pairs, pair_count, "weak")));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+
     /* V.8 CI event */
     if (strcmp(event->protocol, "V.8") == 0
         && strcmp(event->summary, "CI decoded") == 0

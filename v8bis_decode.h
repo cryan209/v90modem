@@ -60,6 +60,11 @@ typedef struct {
     int sample_offset;
     int duration_samples;
     double score;
+    double seg1_a_ratio;
+    double seg1_b_ratio;
+    double seg1_dual_ratio;
+    double seg1_balance;
+    double seg2_ratio;
 } v8bis_signal_hit_t;
 
 #define V8BIS_NUM_SIGNALS 8
@@ -74,6 +79,11 @@ typedef struct {
     int sample_offset;
     int duration_samples;
     double score;
+    double seg1_a_ratio;
+    double seg1_b_ratio;
+    double seg1_dual_ratio;
+    double seg1_balance;
+    double seg2_ratio;
 } v8bis_weak_candidate_t;
 
 /* ------------------------------------------------------------------ */
