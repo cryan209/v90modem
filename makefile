@@ -133,7 +133,7 @@ OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode
 TEST_OBJS = vpcm_loopback_test.o v90.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o
-DECODE_OBJS = vpcm_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v90.o v91.o vpcm_cp.o
+DECODE_OBJS = vpcm_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v90.o v91.o vpcm_cp.o
 
 USE_V34_STUBS ?= 0
 ifeq ($(USE_V34_STUBS),1)
@@ -188,6 +188,7 @@ v92_short_phase1_decode.o: v92_short_phase1_decode.c v92_short_phase1_decode.h v
 v92_short_phase2_decode.o: v92_short_phase2_decode.c v92_short_phase2_decode.h
 v92_phase3_decode.o: v92_phase3_decode.c v92_phase3_decode.h v92_phase3_ru.h
 v92_phase3_ru.o: v92_phase3_ru.c v92_phase3_ru.h v92_phase3_decode.h
+v92_phase4_decode.o: v92_phase4_decode.c v92_phase4_decode.h
 vpcm_decode.o:    vpcm_decode.c    v90.h v91.h vpcm_cp.h v8bis_decode.h v92_short_phase1_decode.h v92_short_phase2_decode.h v92_phase3_decode.h
 vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call_pair.h vpcm_link.h vpcm_v90_session.h
 

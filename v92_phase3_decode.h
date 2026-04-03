@@ -61,6 +61,13 @@ typedef struct {
     bool ru_seen;
     bool sequence_started;
     bool sequence_complete;
+    bool phase4_started;
+    bool ru_precoder_bypass_expected;
+    bool ru_prefilter_bypass_expected;
+    bool ru_trn1u_structure_expected;
+    const char *ru_pattern_primary;
+    const char *ru_pattern_complement;
+    const char *phase4_status;
     const char *status;
 } v92_phase3_result_t;
 

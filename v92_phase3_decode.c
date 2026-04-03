@@ -5,6 +5,7 @@
 #include "v92_phase3_decode.h"
 
 #include "v92_phase3_ru.h"
+#include "v92_phase4_decode.h"
 
 #include <string.h>
 
@@ -30,6 +31,9 @@ const char *v92_phase3_ru_source_id(v92_phase3_ru_source_t source)
 bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
                         v92_phase3_result_t *out)
 {
+    v92_phase4_observation_t p4_obs;
+    v92_phase4_result_t p4;
+
     if (!obs || !out)
         return false;
 
@@ -44,6 +48,21 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
     out->phase3_sample = obs->phase3_sample;
     out->phase4_sample = obs->phase4_sample;
     out->ru_seen = out->ru_sample >= 0;
+    /* V.92 8.5.5: Ru/uR are 6-symbol 2-point sequences with opposite polarity. */
+    out->ru_pattern_primary = "+LU,+LU,+LU,-LU,-LU,-LU";
+    out->ru_pattern_complement = "-LU,-LU,-LU,+LU,+LU,+LU";
+    out->ru_precoder_bypass_expected = true;
+    out->ru_prefilter_bypass_expected = true;
+    out->ru_trn1u_structure_expected = true;
+
+    memset(&p4_obs, 0, sizeof(p4_obs));
+    p4_obs.phase4_seen = obs->phase4_seen;
+    p4_obs.training_failed = obs->training_failed;
+    p4_obs.phase4_sample = obs->phase4_sample;
+    if (v92_phase4_analyze(&p4_obs, &p4)) {
+        out->phase4_started = p4.started;
+        out->phase4_status = p4.status;
+    }
 
     out->sequence_started = out->ru_seen
                             || obs->tx_pp_sample >= 0

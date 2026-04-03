@@ -1468,13 +1468,20 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         && pair_count > 0) {
         appendf(out, out_len, "<div class=\"detail-kv\">");
         append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Spec profile", detail_value(pairs, pair_count, "spec"));
         append_html_label_value(out, out_len, "Local modem", detail_value(pairs, pair_count, "local_modem"));
         append_html_label_value(out, out_len, "Short Phase 2 requested", detail_bit_to_yes_no(detail_value(pairs, pair_count, "shortp2_req")));
         append_html_label_value(out, out_len, "V.92 capable", detail_bit_to_yes_no(detail_value(pairs, pair_count, "v92_cap")));
         append_html_label_value(out, out_len, "Ru source", detail_value(pairs, pair_count, "ru_source"));
         append_html_label_value(out, out_len, "Ru start", detail_value(pairs, pair_count, "ru_ms"));
+        append_html_label_value(out, out_len, "Ru pattern", detail_value(pairs, pair_count, "ru_pattern_primary"));
+        append_html_label_value(out, out_len, "uR complement pattern", detail_value(pairs, pair_count, "ru_pattern_complement"));
+        append_html_label_value(out, out_len, "Ru precoder bypass expected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_precoder_bypass")));
+        append_html_label_value(out, out_len, "Ru prefilter bypass expected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_prefilter_bypass")));
+        append_html_label_value(out, out_len, "Ru uses TRN1u structure", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_trn1u_structure")));
         append_html_label_value(out, out_len, "Phase 3 marker", detail_value(pairs, pair_count, "phase3_ms"));
         append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
+        append_html_label_value(out, out_len, "Phase 4 status", detail_value(pairs, pair_count, "phase4_status"));
         append_html_label_value(out, out_len, "Status", detail_value(pairs, pair_count, "status"));
         appendf(out, out_len, "</div>");
         return;
@@ -3606,7 +3613,7 @@ static void collect_v92_phase3_event(call_log_t *log,
         return;
 
     snprintf(detail, sizeof(detail),
-             "role=%s local_modem=%s shortp2_req=%u v92_cap=%u ru_source=%s status=%s",
+             "role=%s spec=V92_tables15_19 local_modem=%s shortp2_req=%u v92_cap=%u ru_source=%s status=%s",
              role_name ? role_name : "unknown",
              v92_phase3_role_id(phase3.local_role),
              phase3.short_phase2_requested ? 1U : 0U,
@@ -3622,6 +3629,18 @@ static void collect_v92_phase3_event(call_log_t *log,
     appendf(detail, sizeof(detail), " phase4_ms=%s", phase3.phase4_sample >= 0 ? "" : "n/a");
     if (phase3.phase4_sample >= 0)
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.phase4_sample, 8000));
+    appendf(detail, sizeof(detail), " phase4_status=%s",
+            phase3.phase4_status ? phase3.phase4_status : "unknown");
+    appendf(detail, sizeof(detail), " ru_pattern_primary=%s",
+            phase3.ru_pattern_primary ? phase3.ru_pattern_primary : "unknown");
+    appendf(detail, sizeof(detail), " ru_pattern_complement=%s",
+            phase3.ru_pattern_complement ? phase3.ru_pattern_complement : "unknown");
+    appendf(detail, sizeof(detail), " ru_precoder_bypass=%u",
+            phase3.ru_precoder_bypass_expected ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_prefilter_bypass=%u",
+            phase3.ru_prefilter_bypass_expected ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_trn1u_structure=%u",
+            phase3.ru_trn1u_structure_expected ? 1U : 0U);
 
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
