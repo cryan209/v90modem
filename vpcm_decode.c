@@ -3646,12 +3646,17 @@ static const char *v8_preamble_to_candidate_label(int preamble_type, bool callin
 {
     switch (preamble_type) {
     case V8_LOCAL_SYNC_CM_JM:
-        return calling_party ? "CM-like" : "JM-like";
+        return calling_party ? "CM candidate" : "JM candidate";
     case V8_LOCAL_SYNC_V92:
         return "V.92 short Phase 1 control-like";
     default:
-        return calling_party ? "CM-like" : "JM-like";
+        return calling_party ? "CM candidate" : "JM candidate";
     }
+}
+
+static const char *v8_cm_jm_name(bool calling_party)
+{
+    return calling_party ? "CM" : "JM";
 }
 
 static const char *v8_preamble_detail(int preamble_type)
@@ -4009,6 +4014,10 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
     if (probe->calling_party) {
         if (probe->ci_sample >= 0)
             score += 600;
+        if (probe->ct_sample >= 0)
+            score += 500;
+        if (probe->cng_sample >= 0)
+            score += 220;
         if (probe->cm_jm_sample >= 0)
             score += 500;
         if (probe->ci_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ci_sample)
@@ -4020,6 +4029,10 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
     } else {
         if (probe->ansam_sample >= 0)
             score += 450;
+        if (probe->ct_sample >= 0)
+            score -= 420;
+        if (probe->cng_sample >= 0)
+            score -= 160;
         if (probe->cm_jm_sample >= 0)
             score += 700;
         if (probe->cj_sample >= 0)
@@ -4048,6 +4061,10 @@ static int v8_probe_stereo_role_fit(const v8_probe_result_t *probe, bool expect_
     if (expect_caller) {
         if (probe->ci_sample >= 0)
             score += 400;
+        if (probe->ct_sample >= 0)
+            score += 360;
+        if (probe->cng_sample >= 0)
+            score += 120;
         if (probe->cm_jm_sample >= 0 && probe->calling_party)
             score += probe->cm_jm_complete ? 500 : 220;
         if (probe->cj_sample >= 0)
@@ -4061,6 +4078,10 @@ static int v8_probe_stereo_role_fit(const v8_probe_result_t *probe, bool expect_
     } else {
         if (probe->ansam_sample >= 0)
             score += 420;
+        if (probe->ct_sample >= 0)
+            score -= 360;
+        if (probe->cng_sample >= 0)
+            score -= 120;
         if (probe->cm_jm_sample >= 0 && !probe->calling_party)
             score += probe->cm_jm_complete ? 500 : 220;
         if (probe->cj_sample >= 0)
@@ -4329,7 +4350,7 @@ static bool v8_collect_probe(const int16_t *samples,
         }
     }
 
-    if (!calling_party && out->cj_sample < 0 && out->cm_jm_sample >= 0) {
+    if (calling_party && out->cj_sample < 0 && out->cm_jm_sample >= 0) {
         int cj_search_start = out->cm_jm_sample + 400;
         int cj_search_end = out->cm_jm_sample + 8000;
         int cj_sample;
@@ -4411,7 +4432,14 @@ static bool v8_select_best_probe_core(const int16_t *samples,
         }
     }
 
-    if (best_score < 0)
+    if (best_score < 0
+        && best.ansam_sample < 0
+        && best.ct_sample < 0
+        && best.cng_sample < 0
+        && best.ci_sample < 0
+        && best.cm_jm_sample < 0
+        && best.cj_sample < 0
+        && best.v8_call_sample < 0)
         return false;
     if (best.ansam_sample >= 0) {
         ans_fallback_hit_t refined_ans;
@@ -5936,7 +5964,7 @@ static void decode_v8_pass(const int16_t *samples,
             printf("CI@%.1f ", sample_to_ms(probe.ci_sample, 8000));
         if (probe.cm_jm_sample >= 0)
             printf("%s@%.1f%s ",
-                   calling_party ? "JM" : "CM",
+                   v8_cm_jm_name(calling_party),
                    sample_to_ms(probe.cm_jm_sample, 8000),
                    probe.cm_jm_complete ? "" : "(candidate)");
         if (probe.cj_sample >= 0)
@@ -6284,12 +6312,12 @@ static void collect_v8_event(call_log_t *log,
         sanitize_detail_value(s_pstn, sizeof(s_pstn), v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
         snprintf(summary, sizeof(summary),
                  "%s %s",
-                 probe.calling_party ? "JM" : "CM",
+                 v8_cm_jm_name(probe.calling_party),
                  probe.cm_jm_complete ? "decoded" : "candidate");
         pos = snprintf(detail, sizeof(detail),
                  "role=%s msg=%s confidence=%s call_fn=%s modulations=%s protocol=%s pcm=%s pstn=%s",
                  probe.calling_party ? "caller" : "answerer",
-                 probe.calling_party ? "JM" : "CM",
+                 v8_cm_jm_name(probe.calling_party),
                  probe.cm_jm_complete ? "confirmed" : "candidate_fragment",
                  s_call_fn,
                  modbuf[0] ? modbuf : "none",
