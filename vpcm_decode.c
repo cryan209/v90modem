@@ -1414,7 +1414,7 @@ static void append_html_label_value(char *out, size_t out_len, const char *label
 
 static void build_visual_event_detail_html(const call_log_event_t *event, char *out, size_t out_len)
 {
-    detail_kv_t pairs[64];
+    detail_kv_t pairs[128];
     int pair_count;
 
     if (!out || out_len == 0) {
@@ -1507,6 +1507,33 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "LU reference", detail_value(pairs, pair_count, "lu_reference"));
         append_html_label_value(out, out_len, "Ru/LU consistency with TRN1U", detail_value(pairs, pair_count, "ru_lu_consistency"));
         append_html_label_value(out, out_len, "Ru/LU to TRN1U ratio", detail_value(pairs, pair_count, "ru_lu_ratio"));
+        appendf(out, out_len, "<hr><div><strong>Ja Sequencing (9.5.1.1.3):</strong></div>");
+        append_html_label_value(out, out_len, "TRNlu to Ja (T)", detail_value(pairs, pair_count, "trn_to_ja_t"));
+        append_html_label_value(out, out_len, "Ja timing anchor", detail_value(pairs, pair_count, "ja_anchor_source"));
+        append_html_label_value(out, out_len, "TRNlu first-2040T requirement", detail_value(pairs, pair_count, "trn_first_2040t"));
+        append_html_label_value(out, out_len, "TRNlu 2040T reached before Ja", detail_bit_to_yes_no(detail_value(pairs, pair_count, "trn_2040t_ready")));
+        append_html_label_value(out, out_len, "Ja start", detail_value(pairs, pair_count, "ja_ms"));
+        append_html_label_value(out, out_len, "Ja DIL descriptor decoded", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ja_dil_seen")));
+        append_html_label_value(out, out_len, "Ja DIL start", detail_value(pairs, pair_count, "ja_dil_ms"));
+        append_html_label_value(out, out_len, "Ja DIL bits", detail_value(pairs, pair_count, "ja_dil_bits"));
+        append_html_label_value(out, out_len, "Ja DIL end", detail_value(pairs, pair_count, "ja_dil_end_ms"));
+        append_html_label_value(out, out_len, "Ja descriptor n", detail_value(pairs, pair_count, "ja_n"));
+        append_html_label_value(out, out_len, "Ja descriptor lsp", detail_value(pairs, pair_count, "ja_lsp"));
+        append_html_label_value(out, out_len, "Ja descriptor ltp", detail_value(pairs, pair_count, "ja_ltp"));
+        append_html_label_value(out, out_len, "Ja unique train-U", detail_value(pairs, pair_count, "ja_unique_u"));
+        append_html_label_value(out, out_len, "Ja used uchords", detail_value(pairs, pair_count, "ja_uchords"));
+        append_html_label_value(out, out_len, "Ja impairment score", detail_value(pairs, pair_count, "ja_impairment"));
+        append_html_label_value(out, out_len, "Sd start", detail_value(pairs, pair_count, "sd_ms"));
+        append_html_label_value(out, out_len, "Sd duration (T)", detail_value(pairs, pair_count, "sd_t"));
+        append_html_label_value(out, out_len, "Sd repetitions", detail_value(pairs, pair_count, "sd_reps"));
+        append_html_label_value(out, out_len, "dS start", detail_value(pairs, pair_count, "ds_ms"));
+        append_html_label_value(out, out_len, "dS duration (T)", detail_value(pairs, pair_count, "ds_t"));
+        append_html_label_value(out, out_len, "dS repetitions", detail_value(pairs, pair_count, "ds_reps"));
+        append_html_label_value(out, out_len, "Sd wait after Ja DIL", detail_value(pairs, pair_count, "sd_wait_ms"));
+        append_html_label_value(out, out_len, "Sd wait <= 500 ms", detail_bit_to_yes_no(detail_value(pairs, pair_count, "sd_wait_le_500ms")));
+        append_html_label_value(out, out_len, "Sd matches 384T", detail_bit_to_yes_no(detail_value(pairs, pair_count, "sd_384t_ok")));
+        append_html_label_value(out, out_len, "dS matches 48T", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ds_48t_ok")));
+        append_html_label_value(out, out_len, "Ja status", detail_value(pairs, pair_count, "ja_status"));
         append_html_label_value(out, out_len, "Phase 3 marker", detail_value(pairs, pair_count, "phase3_ms"));
         append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
         append_html_label_value(out, out_len, "Phase 4 status", detail_value(pairs, pair_count, "phase4_status"));
@@ -3624,16 +3651,156 @@ static int ru_window_two_point_score(const uint8_t *symbols, int len)
     }
 }
 
+typedef struct {
+    bool found;
+    int sd_sample;
+    int sd_reps;
+    int sd_t;
+    int ds_sample;
+    int ds_reps;
+    int ds_t;
+} v90_sd_ds_hit_t;
+
+static bool find_v90_sd_ds_after(const uint8_t *codewords,
+                                 int total_codewords,
+                                 v91_law_t law,
+                                 int u_info,
+                                 int search_start,
+                                 int search_end,
+                                 v90_sd_ds_hit_t *out)
+{
+    uint8_t pos_zero;
+    uint8_t neg_zero;
+    int w_ucode;
+    uint8_t pos_w;
+    uint8_t neg_w;
+    uint8_t sd_pat[6];
+    uint8_t ds_pat[6];
+    v90_sd_ds_hit_t best;
+
+    if (!codewords || total_codewords <= 0 || !out || u_info < 10 || u_info > 127)
+        return false;
+
+    memset(&best, 0, sizeof(best));
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total_codewords)
+        search_end = total_codewords;
+    if (search_end - search_start < 24)
+        return false;
+
+    pos_zero = v91_ucode_to_codeword(law, 0, true);
+    neg_zero = v91_ucode_to_codeword(law, 0, false);
+    w_ucode = 16 + u_info;
+    if (w_ucode > 127)
+        w_ucode = 127;
+    pos_w = v91_ucode_to_codeword(law, w_ucode, true);
+    neg_w = v91_ucode_to_codeword(law, w_ucode, false);
+    sd_pat[0] = pos_w;
+    sd_pat[1] = pos_zero;
+    sd_pat[2] = pos_w;
+    sd_pat[3] = neg_w;
+    sd_pat[4] = neg_zero;
+    sd_pat[5] = neg_w;
+    ds_pat[0] = neg_w;
+    ds_pat[1] = neg_zero;
+    ds_pat[2] = neg_w;
+    ds_pat[3] = pos_w;
+    ds_pat[4] = pos_zero;
+    ds_pat[5] = pos_w;
+
+    for (int offset = search_start; offset + 24 <= search_end; offset++) {
+        int sd_reps = 0;
+        int ds_reps = 0;
+        int pos;
+
+        if (codewords[offset] != sd_pat[0])
+            continue;
+        for (int rep = 0; rep < 4; rep++) {
+            bool ok = true;
+
+            for (int j = 0; j < 6; j++) {
+                if (codewords[offset + rep * 6 + j] != sd_pat[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                sd_reps = 0;
+                break;
+            }
+            sd_reps++;
+        }
+        if (sd_reps < 4)
+            continue;
+        while (offset + (sd_reps + 1) * 6 <= search_end) {
+            bool ok = true;
+
+            for (int j = 0; j < 6; j++) {
+                if (codewords[offset + sd_reps * 6 + j] != sd_pat[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok)
+                break;
+            sd_reps++;
+        }
+        if (sd_reps < 8)
+            continue;
+
+        pos = offset + sd_reps * 6;
+        while (pos + (ds_reps + 1) * 6 <= search_end) {
+            bool ok = true;
+
+            for (int j = 0; j < 6; j++) {
+                if (codewords[pos + ds_reps * 6 + j] != ds_pat[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok)
+                break;
+            ds_reps++;
+        }
+
+        if (!best.found
+            || sd_reps > best.sd_reps
+            || (sd_reps == best.sd_reps && ds_reps > best.ds_reps)
+            || (sd_reps == best.sd_reps && ds_reps == best.ds_reps && offset < best.sd_sample)) {
+            best.found = true;
+            best.sd_sample = offset;
+            best.sd_reps = sd_reps;
+            best.sd_t = sd_reps * 6;
+            best.ds_sample = ds_reps > 0 ? pos : -1;
+            best.ds_reps = ds_reps;
+            best.ds_t = ds_reps * 6;
+        }
+    }
+
+    if (!best.found)
+        return false;
+    *out = best;
+    return true;
+}
+
 static void collect_v92_phase3_event(call_log_t *log,
                                      const decode_v34_result_t *res,
                                      const char *role_name,
-                                     int latest_allowed_sample)
+                                     int latest_allowed_sample,
+                                     const uint8_t *codewords,
+                                     int total_codewords,
+                                     v91_law_t law,
+                                     const decode_v34_result_t *answerer,
+                                     const decode_v34_result_t *caller)
 {
     v92_phase3_observation_t obs;
     v92_phase3_result_t phase3;
+    const decode_v34_result_t *peer = NULL;
     uint8_t raw_26_27;
     int event_sample;
-    char detail[4096];
+    const char *ja_anchor_source = "local";
+    char detail[8192];
 
     if (!log || !res || !res->info0_seen)
         return;
@@ -3641,6 +3808,10 @@ static void collect_v92_phase3_event(call_log_t *log,
         return;
 
     raw_26_27 = res->info0_raw.raw_26_27;
+    if (res == answerer && caller)
+        peer = caller;
+    else if (res == caller && answerer)
+        peer = answerer;
     memset(&obs, 0, sizeof(obs));
     obs.info0_seen = res->info0_seen;
     obs.info0_is_d = res->info0_is_d;
@@ -3660,6 +3831,21 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.tx_pp_sample = res->tx_pp_sample;
     obs.tx_trn_sample = res->tx_trn_sample;
     obs.tx_ja_sample = res->tx_ja_sample;
+    obs.tx_jdashed_sample = res->tx_jdashed_sample;
+    if (peer) {
+        if (obs.tx_trn_sample < 0 && peer->tx_trn_sample >= 0) {
+            obs.tx_trn_sample = peer->tx_trn_sample;
+            ja_anchor_source = "peer";
+        }
+        if (obs.tx_ja_sample < 0 && peer->tx_ja_sample >= 0) {
+            obs.tx_ja_sample = peer->tx_ja_sample;
+            ja_anchor_source = "peer";
+        }
+        if (obs.tx_jdashed_sample < 0 && peer->tx_jdashed_sample >= 0)
+            obs.tx_jdashed_sample = peer->tx_jdashed_sample;
+    }
+    if (obs.tx_ja_sample < 0)
+        ja_anchor_source = "none";
     obs.rx_s_event_sample = res->rx_s_event_sample;
     obs.ru_window_len = res->ru_window_len;
     obs.ru_window_score = res->ru_window_score;
@@ -3670,6 +3856,60 @@ static void collect_v92_phase3_event(call_log_t *log,
     if (obs.ru_window_len > 0) {
         memcpy(obs.ru_window_symbols, res->ru_window_symbols, (size_t) obs.ru_window_len);
         memcpy(obs.ru_window_mags, res->ru_window_mags, (size_t) obs.ru_window_len * sizeof(float));
+    }
+    if (codewords && total_codewords > 0) {
+        jd_stage_decode_t jd_stage;
+        ja_dil_decode_t ja_dil;
+        memset(&jd_stage, 0, sizeof(jd_stage));
+        memset(&ja_dil, 0, sizeof(ja_dil));
+
+        if (decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage)
+            && decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)
+            && ja_dil.ok) {
+            int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
+
+            if (bit_len > 0) {
+                obs.ja_dil_seen = true;
+                obs.ja_dil_sample = ja_dil.start_sample;
+                obs.ja_dil_bits = bit_len;
+                obs.ja_dil_n = ja_dil.desc.n;
+                obs.ja_dil_lsp = ja_dil.desc.lsp;
+                obs.ja_dil_ltp = ja_dil.desc.ltp;
+                obs.ja_dil_unique_train_u = ja_dil.analysis.unique_train_u;
+                obs.ja_dil_uchords = ja_dil.analysis.used_uchords;
+                obs.ja_dil_impairment = ja_dil.analysis.impairment_score;
+            }
+        }
+
+        if (res->u_info >= 10 && res->u_info <= 127) {
+            v90_sd_ds_hit_t sd_ds;
+            int search_start = obs.ja_dil_seen
+                               ? (obs.ja_dil_sample + obs.ja_dil_bits)
+                               : (res->tx_ja_sample >= 0 ? res->tx_ja_sample : res->info1_sample);
+            int search_end = search_start + 12000;
+
+            if (search_start < 0)
+                search_start = 0;
+            if (search_end > total_codewords)
+                search_end = total_codewords;
+            memset(&sd_ds, 0, sizeof(sd_ds));
+            if (find_v90_sd_ds_after(codewords,
+                                     total_codewords,
+                                     law,
+                                     res->u_info,
+                                     search_start,
+                                     search_end,
+                                     &sd_ds)) {
+                obs.sd_seen = true;
+                obs.sd_sample = sd_ds.sd_sample;
+                obs.sd_t = sd_ds.sd_t;
+                obs.sd_reps = sd_ds.sd_reps;
+                obs.ds_seen = sd_ds.ds_reps > 0;
+                obs.ds_sample = sd_ds.ds_sample;
+                obs.ds_t = sd_ds.ds_t;
+                obs.ds_reps = sd_ds.ds_reps;
+            }
+        }
     }
 
     if (!v92_phase3_analyze(&obs, &phase3))
@@ -3700,6 +3940,75 @@ static void collect_v92_phase3_event(call_log_t *log,
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.phase4_sample, 8000));
     appendf(detail, sizeof(detail), " phase4_status=%s",
             phase3.phase4_status ? phase3.phase4_status : "unknown");
+    appendf(detail, sizeof(detail), " ja_anchor_source=%s", ja_anchor_source);
+    appendf(detail, sizeof(detail), " trn_to_ja_t=%s",
+            phase3.ja_seen && phase3.trnlu_to_ja_t > 0 ? "" : "n/a");
+    if (phase3.ja_seen && phase3.trnlu_to_ja_t > 0)
+        appendf(detail, sizeof(detail), "%d", phase3.trnlu_to_ja_t);
+    appendf(detail, sizeof(detail), " trn_first_2040t=%d", phase3.trnlu_first_2040_t);
+    appendf(detail, sizeof(detail), " trn_2040t_ready=%u",
+            phase3.trnlu_2040_t_ready_for_ja ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ja_ms=%s", phase3.ja_sample >= 0 ? "" : "n/a");
+    if (phase3.ja_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_sample, 8000));
+    appendf(detail, sizeof(detail), " ja_dil_seen=%u", phase3.ja_dil_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ja_dil_ms=%s", phase3.ja_dil_sample >= 0 ? "" : "n/a");
+    if (phase3.ja_dil_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_dil_sample, 8000));
+    appendf(detail, sizeof(detail), " ja_dil_bits=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_bits);
+    appendf(detail, sizeof(detail), " ja_dil_end_ms=%s", phase3.ja_dil_end_sample >= 0 ? "" : "n/a");
+    if (phase3.ja_dil_end_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_dil_end_sample, 8000));
+    appendf(detail, sizeof(detail), " ja_n=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_n);
+    appendf(detail, sizeof(detail), " ja_lsp=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_lsp);
+    appendf(detail, sizeof(detail), " ja_ltp=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_ltp);
+    appendf(detail, sizeof(detail), " ja_unique_u=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_unique_train_u);
+    appendf(detail, sizeof(detail), " ja_uchords=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_uchords);
+    appendf(detail, sizeof(detail), " ja_impairment=%s", phase3.ja_dil_seen ? "" : "n/a");
+    if (phase3.ja_dil_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ja_dil_impairment);
+    appendf(detail, sizeof(detail), " sd_ms=%s", phase3.sd_seen ? "" : "n/a");
+    if (phase3.sd_seen)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.sd_sample, 8000));
+    appendf(detail, sizeof(detail), " sd_t=%s", phase3.sd_seen ? "" : "n/a");
+    if (phase3.sd_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.sd_t);
+    appendf(detail, sizeof(detail), " sd_reps=%s", phase3.sd_seen ? "" : "n/a");
+    if (phase3.sd_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.sd_reps);
+    appendf(detail, sizeof(detail), " ds_ms=%s", phase3.ds_seen ? "" : "n/a");
+    if (phase3.ds_seen)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ds_sample, 8000));
+    appendf(detail, sizeof(detail), " ds_t=%s", phase3.ds_seen ? "" : "n/a");
+    if (phase3.ds_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ds_t);
+    appendf(detail, sizeof(detail), " ds_reps=%s", phase3.ds_seen ? "" : "n/a");
+    if (phase3.ds_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.ds_reps);
+    appendf(detail, sizeof(detail), " sd_wait_ms=%s",
+            phase3.ja_dil_end_sample >= 0 && phase3.sd_seen ? "" : "n/a");
+    if (phase3.ja_dil_end_sample >= 0 && phase3.sd_seen)
+        appendf(detail, sizeof(detail), "%d", phase3.sd_wait_after_ja_dil_ms);
+    appendf(detail, sizeof(detail), " sd_wait_le_500ms=%u",
+            phase3.sd_wait_within_500ms ? 1U : 0U);
+    appendf(detail, sizeof(detail), " sd_384t_ok=%u",
+            phase3.sd_duration_384t_ok ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ds_48t_ok=%u",
+            phase3.ds_duration_48t_ok ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ja_status=%s",
+            phase3.ja_status ? phase3.ja_status : "unknown");
     appendf(detail, sizeof(detail), " ru_pattern_primary=%s",
             phase3.ru_pattern_primary ? phase3.ru_pattern_primary : "unknown");
     appendf(detail, sizeof(detail), " ru_pattern_complement=%s",
@@ -3751,7 +4060,6 @@ static void collect_v92_phase3_event(call_log_t *log,
             phase3.ru_lu_ratio > 0.0f ? "" : "n/a");
     if (phase3.ru_lu_ratio > 0.0f)
         appendf(detail, sizeof(detail), "%.3f", phase3.ru_lu_ratio);
-
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
                     0,
@@ -5136,6 +5444,8 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
 static void collect_v34_events(call_log_t *log,
                                const int16_t *samples,
                                int total_samples,
+                               const uint8_t *g711_codewords,
+                               int total_codewords,
                                v91_law_t law)
 {
     decode_v34_result_t answerer;
@@ -5281,7 +5591,15 @@ static void collect_v34_events(call_log_t *log,
                                 detail); \
             } \
         } \
-        collect_v92_phase3_event(log, res__, role_name, (PHASE2_CUTOFF)); \
+        collect_v92_phase3_event(log, \
+                                 res__, \
+                                 role_name, \
+                                 (PHASE2_CUTOFF), \
+                                 g711_codewords, \
+                                 total_codewords, \
+                                 law, \
+                                 have_answerer ? &answerer : NULL, \
+                                 have_caller ? &caller : NULL); \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
         if (res__->phase3_seen) { \
@@ -5427,7 +5745,12 @@ static void collect_stream_call_log(call_log_t *log,
     }
 
     if (do_v34)
-        collect_v34_events(log, linear_samples, total_samples, law);
+        collect_v34_events(log,
+                           linear_samples,
+                           total_samples,
+                           g711_codewords,
+                           total_codewords,
+                           law);
     if (do_v8) {
         v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
         v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);

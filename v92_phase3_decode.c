@@ -10,6 +10,20 @@
 #include <math.h>
 #include <string.h>
 
+static int samples_to_t_nearest(int samples)
+{
+    if (samples <= 0)
+        return 0;
+    return (samples * 3200 + 4000) / 8000;
+}
+
+static int samples_to_ms_nearest(int samples)
+{
+    if (samples <= 0)
+        return 0;
+    return (samples * 1000 + 4000) / 8000;
+}
+
 static void decode_ru_window(v92_phase3_result_t *out, const v92_phase3_observation_t *obs)
 {
     int counts[4] = {0, 0, 0, 0};
@@ -133,6 +147,74 @@ static void evaluate_lu_trn1u_consistency(v92_phase3_result_t *out,
         (ratio >= 0.70f && ratio <= 1.43f) ? "pass_measured" : "fail_measured";
 }
 
+static void analyze_ja_sequence(v92_phase3_result_t *out,
+                                const v92_phase3_observation_t *obs)
+{
+    int trn_to_ja_samples = -1;
+    int wait_samples = -1;
+
+    if (!out || !obs)
+        return;
+
+    out->trnlu_first_2040_t = 2040;
+    out->ja_seen = (obs->tx_ja_sample >= 0);
+    out->ja_sample = obs->tx_ja_sample;
+    out->ja_dil_seen = obs->ja_dil_seen && obs->ja_dil_sample >= 0 && obs->ja_dil_bits > 0;
+    out->ja_dil_sample = out->ja_dil_seen ? obs->ja_dil_sample : -1;
+    out->ja_dil_bits = out->ja_dil_seen ? obs->ja_dil_bits : 0;
+    out->ja_dil_end_sample = out->ja_dil_seen ? (obs->ja_dil_sample + obs->ja_dil_bits) : -1;
+    out->ja_dil_n = out->ja_dil_seen ? obs->ja_dil_n : -1;
+    out->ja_dil_lsp = out->ja_dil_seen ? obs->ja_dil_lsp : -1;
+    out->ja_dil_ltp = out->ja_dil_seen ? obs->ja_dil_ltp : -1;
+    out->ja_dil_unique_train_u = out->ja_dil_seen ? obs->ja_dil_unique_train_u : -1;
+    out->ja_dil_uchords = out->ja_dil_seen ? obs->ja_dil_uchords : -1;
+    out->ja_dil_impairment = out->ja_dil_seen ? obs->ja_dil_impairment : -1;
+    out->sd_seen = obs->sd_seen && obs->sd_sample >= 0;
+    out->sd_sample = out->sd_seen ? obs->sd_sample : -1;
+    out->sd_t = out->sd_seen ? obs->sd_t : 0;
+    out->sd_reps = out->sd_seen ? obs->sd_reps : 0;
+    out->ds_seen = obs->ds_seen && obs->ds_sample >= 0;
+    out->ds_sample = out->ds_seen ? obs->ds_sample : -1;
+    out->ds_t = out->ds_seen ? obs->ds_t : 0;
+    out->ds_reps = out->ds_seen ? obs->ds_reps : 0;
+
+    if (obs->tx_trn_sample >= 0 && obs->tx_ja_sample >= 0 && obs->tx_ja_sample >= obs->tx_trn_sample) {
+        trn_to_ja_samples = obs->tx_ja_sample - obs->tx_trn_sample;
+        out->trnlu_to_ja_t = samples_to_t_nearest(trn_to_ja_samples);
+        out->trnlu_2040_t_ready_for_ja = (out->trnlu_to_ja_t >= out->trnlu_first_2040_t);
+    } else {
+        out->trnlu_to_ja_t = 0;
+        out->trnlu_2040_t_ready_for_ja = false;
+    }
+
+    if (out->ja_dil_end_sample >= 0 && out->sd_sample >= out->ja_dil_end_sample) {
+        wait_samples = out->sd_sample - out->ja_dil_end_sample;
+        out->sd_wait_after_ja_dil_ms = samples_to_ms_nearest(wait_samples);
+        out->sd_wait_within_500ms = (out->sd_wait_after_ja_dil_ms <= 500);
+    } else {
+        out->sd_wait_after_ja_dil_ms = 0;
+        out->sd_wait_within_500ms = false;
+    }
+
+    out->sd_duration_384t_ok = out->sd_seen && out->sd_t >= 360 && out->sd_t <= 408;
+    out->ds_duration_48t_ok = out->ds_seen && out->ds_t >= 36 && out->ds_t <= 60;
+
+    if (!out->ja_seen)
+        out->ja_status = "waiting_ja";
+    else if (!out->ja_dil_seen)
+        out->ja_status = "waiting_ja_dil";
+    else if (!out->sd_seen)
+        out->ja_status = "waiting_sd";
+    else if (!out->sd_wait_within_500ms)
+        out->ja_status = "sd_wait_over_500ms";
+    else if (!out->sd_duration_384t_ok)
+        out->ja_status = "sd_duration_mismatch";
+    else if (!out->ds_duration_48t_ok)
+        out->ja_status = "ds_duration_mismatch";
+    else
+        out->ja_status = "ja_complete";
+}
+
 const char *v92_phase3_role_id(v92_phase3_role_t role)
 {
     switch (role) {
@@ -192,6 +274,7 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
     out->ru_lu_consistency_with_trn1u = "inconclusive";
     decode_ru_window(out, obs);
     evaluate_lu_trn1u_consistency(out, obs);
+    analyze_ja_sequence(out, obs);
 
     memset(&p4_obs, 0, sizeof(p4_obs));
     p4_obs.phase4_seen = obs->phase4_seen;
