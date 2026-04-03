@@ -797,6 +797,25 @@ typedef struct {
 #define V8_MAX_TARGETED_BURSTS 8
 
 typedef struct {
+    bool seen;
+    int burst_count;
+    int best_burst_index;
+    int best_preamble_type;
+    int best_score;
+    int best_ones_score;
+    int best_sync_score;
+    int best_bit_rate;
+    int best_invert;
+    int best_phase_q;
+    int best_bit_count;
+    int best_byte_len;
+    int best_sample_offset;
+    int repeat_count;
+    bool repeated_confirmed;
+    uint8_t best_bytes[16];
+} v8_targeted_diag_t;
+
+typedef struct {
     int preamble_type;
     uint32_t bit_stream;
     int bit_cnt;
@@ -850,6 +869,20 @@ typedef struct {
     int last_status;
     v8_parms_t result;
 } v8_probe_result_t;
+
+typedef struct {
+    bool ok;
+    bool left_is_caller;
+    v8_probe_result_t left_probe;
+    v8_probe_result_t right_probe;
+    int score;
+} v8_stereo_pair_result_t;
+
+static bool v8_select_best_probe(const int16_t *samples,
+                                 int total_samples,
+                                 bool calling_party,
+                                 int max_sample,
+                                 v8_probe_result_t *out);
 
 static bool v8_probe_has_cm_jm_capabilities(const v8_probe_result_t *probe)
 {
@@ -2808,7 +2841,7 @@ static int v8_collect_v21_bursts(const int16_t *samples,
     enum {
         WINDOW_SAMPLES = 160,
         STEP_SAMPLES = 80,
-        MIN_RUN_WINDOWS = 3,
+        MIN_RUN_WINDOWS = 2,
         MERGE_GAP_SAMPLES = 240
     };
     const double f0 = use_ch2 ? 1650.0 : 980.0;
@@ -2841,7 +2874,7 @@ static int v8_collect_v21_bursts(const int16_t *samples,
         p0 = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, f0, energy);
         p1 = tone_energy_ratio(samples + start, WINDOW_SAMPLES, sample_rate, f1, energy);
         strength = p0 + p1;
-        if (strength >= 0.18) {
+        if (strength >= 0.12) {
             if (run_start < 0) {
                 run_start = start;
                 run_windows = 0;
@@ -2913,8 +2946,8 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
 
-    search_start = burst->start_sample - 800;
-    search_end = burst->start_sample + burst->duration_samples + 320;
+    search_start = burst->start_sample - 1600;
+    search_end = burst->start_sample + burst->duration_samples + 800;
     if (search_start < 0)
         search_start = 0;
     if (search_end > total_samples)
@@ -2923,7 +2956,7 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
         return false;
 
     for (int invert = 0; invert <= 1; invert++) {
-        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+        for (int bit_rate = 294; bit_rate <= 306; bit_rate++) {
             double symbol_samples = (double) sample_rate / (double) bit_rate;
 
             for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
@@ -2964,10 +2997,10 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
                     v8_parms_t parsed;
 
                     ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
-                    if (ones_score < 40)
+                    if (ones_score < 32)
                         continue;
                     sync_score = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_CM_JM);
-                    if (sync_score < 40)
+                    if (sync_score < 32)
                         continue;
 
                     payload_len = v8_decode_soft_async_bytes(bits,
@@ -3052,7 +3085,8 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                                             const v8_fsk_burst_hit_t *burst,
                                             bool use_ch2,
                                             bool calling_party,
-                                            v8_raw_msg_hit_t *out)
+                                            v8_raw_msg_hit_t *out,
+                                            v8_targeted_diag_t *diag)
 {
     const double mark_hz = use_ch2 ? 1650.0 : 980.0;
     const double space_hz = use_ch2 ? 1850.0 : 1180.0;
@@ -3063,15 +3097,22 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !burst || !burst->seen || !out)
         return false;
 
-    search_start = burst->start_sample - 800;
-    search_end = burst->start_sample + burst->duration_samples + 320;
+    if (diag) {
+        memset(diag, 0, sizeof(*diag));
+        diag->best_burst_index = -1;
+        diag->best_bit_rate = -1;
+        diag->best_phase_q = -1;
+    }
+
+    search_start = burst->start_sample - 1600;
+    search_end = burst->start_sample + burst->duration_samples + 800;
     if (search_start < 0)
         search_start = 0;
     if (search_end > total_samples)
         search_end = total_samples;
 
     for (int invert = 0; invert <= 1; invert++) {
-        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+        for (int bit_rate = 294; bit_rate <= 306; bit_rate++) {
             double symbol_samples = (double) sample_rate / (double) bit_rate;
 
             for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
@@ -3114,11 +3155,11 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     v8_parms_t parsed;
 
                     ones_score = v8_ones_lock_score(bits, confidence, bit_count, i);
-                    if (ones_score < 40)
+                    if (ones_score < 32)
                         continue;
 
                     sync_score_v92 = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_V92);
-                    if (sync_score_v92 >= 40) {
+                    if (sync_score_v92 >= 32) {
                         int repeat_penalty = 0;
                         int tail_ones_score = 0;
 
@@ -3138,7 +3179,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                             uint8_t repeat_byte = 0;
                             int repeat_frame_penalty = 0;
 
-                            if (repeat_ones_score >= 40 && repeat_sync_score >= 40
+                            if (repeat_ones_score >= 32 && repeat_sync_score >= 32
                                 && v8_decode_soft_async_octet(bits,
                                                               confidence,
                                                               bit_count,
@@ -3154,7 +3195,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                                     score -= 20;
                                 if (i + 70 <= bit_count) {
                                     tail_ones_score = v8_ones_lock_score(bits, confidence, bit_count, i + 60);
-                                    if (tail_ones_score >= 40)
+                                    if (tail_ones_score >= 32)
                                         score += tail_ones_score;
                                 }
                             } else {
@@ -3167,6 +3208,22 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                             score += byte_len * 12 + 8 - abs(bit_rate - 300) - framing_penalty - repeat_penalty - i / 2;
                             if (invert)
                                 score -= 2;
+                            if (diag && (!diag->seen || score > diag->best_score)) {
+                                diag->seen = true;
+                                diag->best_preamble_type = V8_LOCAL_SYNC_V92;
+                                diag->best_score = score;
+                                diag->best_ones_score = ones_score;
+                                diag->best_sync_score = sync_score_v92;
+                                diag->best_bit_rate = bit_rate;
+                                diag->best_invert = invert;
+                                diag->best_phase_q = phase_q;
+                                diag->best_bit_count = bit_count;
+                                diag->best_byte_len = byte_len;
+                                diag->best_sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                                if (diag->best_byte_len > (int) sizeof(diag->best_bytes))
+                                    diag->best_byte_len = (int) sizeof(diag->best_bytes);
+                                memcpy(diag->best_bytes, bytes, (size_t) diag->best_byte_len);
+                            }
                             if (!best.seen || score > best.score) {
                                 memset(&best, 0, sizeof(best));
                                 best.seen = true;
@@ -3186,7 +3243,7 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     }
 
                     sync_score_cm_jm = v8_sync_lock_score(bits, confidence, bit_count, i + 10, V8_LOCAL_SYNC_CM_JM);
-                    if (sync_score_cm_jm < 40)
+                    if (sync_score_cm_jm < 32)
                         continue;
 
                     byte_len = v8_decode_soft_async_bytes(bits,
@@ -3245,6 +3302,22 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                     score -= i / 2;
                     if (invert)
                         score -= 2;
+                    if (diag && (!diag->seen || score > diag->best_score)) {
+                        diag->seen = true;
+                        diag->best_preamble_type = V8_LOCAL_SYNC_CM_JM;
+                        diag->best_score = score;
+                        diag->best_ones_score = ones_score;
+                        diag->best_sync_score = sync_score_cm_jm;
+                        diag->best_bit_rate = bit_rate;
+                        diag->best_invert = invert;
+                        diag->best_phase_q = phase_q;
+                        diag->best_bit_count = bit_count;
+                        diag->best_byte_len = byte_len;
+                        diag->best_sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        if (diag->best_byte_len > (int) sizeof(diag->best_bytes))
+                            diag->best_byte_len = (int) sizeof(diag->best_bytes);
+                        memcpy(diag->best_bytes, bytes, (size_t) diag->best_byte_len);
+                    }
                     if (!best.seen || score > best.score) {
                         memset(&best, 0, sizeof(best));
                         best.seen = true;
@@ -3278,7 +3351,8 @@ static bool v8_targeted_v21_bytes_candidate_repeated(const int16_t *samples,
                                                      int burst_count,
                                                      bool use_ch2,
                                                      bool calling_party,
-                                                     v8_raw_msg_hit_t *out)
+                                                     v8_raw_msg_hit_t *out,
+                                                     v8_targeted_diag_t *diag)
 {
     v8_raw_msg_hit_t best = {0};
     v8_raw_msg_hit_t last = {0};
@@ -3286,8 +3360,17 @@ static bool v8_targeted_v21_bytes_candidate_repeated(const int16_t *samples,
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !bursts || burst_count <= 0 || !out)
         return false;
 
+    if (diag) {
+        memset(diag, 0, sizeof(*diag));
+        diag->burst_count = burst_count;
+        diag->best_burst_index = -1;
+        diag->best_bit_rate = -1;
+        diag->best_phase_q = -1;
+    }
+
     for (int i = 0; i < burst_count; i++) {
         v8_raw_msg_hit_t hit;
+        v8_targeted_diag_t burst_diag;
 
         memset(&hit, 0, sizeof(hit));
         if (!bursts[i].seen)
@@ -3298,15 +3381,34 @@ static bool v8_targeted_v21_bytes_candidate_repeated(const int16_t *samples,
                                              &bursts[i],
                                              use_ch2,
                                              calling_party,
-                                             &hit)) {
+                                             &hit,
+                                             &burst_diag)) {
+            if (diag && burst_diag.seen && (!diag->seen || burst_diag.best_score > diag->best_score)) {
+                *diag = burst_diag;
+                diag->burst_count = burst_count;
+                diag->best_burst_index = i;
+            }
             continue;
         }
+        if (diag && burst_diag.seen && (!diag->seen || burst_diag.best_score > diag->best_score)) {
+            *diag = burst_diag;
+            diag->burst_count = burst_count;
+            diag->best_burst_index = i;
+        }
         v8_consider_repeated_hit(&last, &best, &hit, 160, 100);
+        if (diag) {
+            diag->repeat_count = best.repeat_count;
+            diag->repeated_confirmed = best.repeated_confirmed;
+        }
     }
 
     if (!best.seen)
         return false;
     *out = best;
+    if (diag) {
+        diag->repeat_count = best.repeat_count;
+        diag->repeated_confirmed = best.repeated_confirmed;
+    }
     return true;
 }
 
@@ -3399,6 +3501,44 @@ static void append_v92_short_phase1_fields(char *detail,
                  " repeat=%s",
                  v92c->repeat_seen ? (v92c->repeat_match ? "match" : "differs") : "missing");
     }
+}
+
+static const char *v8_preamble_detail(int preamble_type);
+
+static void print_v8_targeted_diag(const v8_targeted_diag_t *diag,
+                                   const v8_fsk_burst_hit_t *bursts,
+                                   bool use_ch2)
+{
+    char hexbuf[96];
+
+    if (!diag || !diag->seen)
+        return;
+
+    hexbuf[0] = '\0';
+    format_hex_bytes(hexbuf, sizeof(hexbuf), diag->best_bytes, diag->best_byte_len);
+    printf("  Lock debug:      bursts=%d best_burst=%d pair=%s preamble=%s score=%d ones=%d sync=%d bitrate=%d invert=%s phase=%.2f bits=%d",
+           diag->burst_count,
+           diag->best_burst_index,
+           use_ch2 ? "1650/1850 Hz" : "980/1180 Hz",
+           v8_preamble_detail(diag->best_preamble_type),
+           diag->best_score,
+           diag->best_ones_score,
+           diag->best_sync_score,
+           diag->best_bit_rate,
+           diag->best_invert ? "yes" : "no",
+           diag->best_phase_q >= 0 ? ((double) diag->best_phase_q / 4.0) : -1.0,
+           diag->best_bit_count);
+    if (diag->repeat_count > 0)
+        printf(" repeats=%d%s", diag->repeat_count, diag->repeated_confirmed ? " confirmed" : "");
+    printf("\n");
+    if (diag->best_burst_index >= 0 && bursts && diag->best_burst_index < diag->burst_count && bursts[diag->best_burst_index].seen) {
+        printf("  Lock window:     %.1f-%.1f ms peak %.1f%%\n",
+               sample_to_ms(bursts[diag->best_burst_index].start_sample, 8000),
+               sample_to_ms(bursts[diag->best_burst_index].start_sample + bursts[diag->best_burst_index].duration_samples, 8000),
+               bursts[diag->best_burst_index].peak_strength * 100.0);
+    }
+    if (hexbuf[0] != '\0')
+        printf("  Lock bytes:      %s\n", hexbuf);
 }
 
 static const char *v8_preamble_to_candidate_label(int preamble_type, bool calling_party)
@@ -3649,6 +3789,30 @@ static int v8_probe_first_sample(const v8_probe_result_t *probe)
     return start;
 }
 
+static int v8_probe_targeted_search_start(const v8_probe_result_t *probe, int total_samples)
+{
+    int start = -1;
+
+    if (!probe)
+        return 0;
+    if (probe->ansam_sample >= 0)
+        start = probe->ansam_sample + 12000;
+    else if (probe->ct_sample >= 0)
+        start = probe->ct_sample + 2000;
+    else if (probe->cng_sample >= 0)
+        start = probe->cng_sample + 2000;
+    else if (probe->ci_sample >= 0)
+        start = probe->ci_sample;
+    else
+        start = v8_probe_first_sample(probe);
+
+    if (start < 0)
+        start = 0;
+    if (total_samples > 0 && start > total_samples)
+        start = total_samples;
+    return start;
+}
+
 static int v8_probe_milestone_count(const v8_probe_result_t *probe)
 {
     int count = 0;
@@ -3770,6 +3934,103 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
         score -= (last_sample - first_sample) / 320;
     score += v8_probe_milestone_count(probe) * 150;
     return score;
+}
+
+static int v8_probe_stereo_role_fit(const v8_probe_result_t *probe, bool expect_caller)
+{
+    int score;
+
+    if (!probe || !probe->ok)
+        return -1000000;
+
+    score = v8_probe_role_score(probe);
+    if (expect_caller) {
+        if (probe->ci_sample >= 0)
+            score += 400;
+        if (probe->cm_jm_sample >= 0 && probe->calling_party)
+            score += probe->cm_jm_complete ? 500 : 220;
+        if (probe->cj_sample >= 0)
+            score += 220;
+        if (probe->cm_jm_sample >= 0 && probe->cj_sample >= probe->cm_jm_sample)
+            score += 320;
+        if (probe->cj_sample >= 0 && probe->cm_jm_sample < 0)
+            score -= 120;
+        if (probe->ansam_sample >= 0)
+            score -= 260;
+    } else {
+        if (probe->ansam_sample >= 0)
+            score += 420;
+        if (probe->cm_jm_sample >= 0 && !probe->calling_party)
+            score += probe->cm_jm_complete ? 500 : 220;
+        if (probe->cj_sample >= 0)
+            score -= 180;
+        if (probe->ci_sample >= 0)
+            score -= 180;
+        if (probe->ansam_sample >= 0 && probe->cm_jm_sample >= probe->ansam_sample)
+            score += 260;
+    }
+
+    return score;
+}
+
+static bool v8_select_best_stereo_pair(const int16_t *left_samples,
+                                       const int16_t *right_samples,
+                                       int total_samples,
+                                       int max_sample,
+                                       v8_stereo_pair_result_t *out)
+{
+    v8_probe_result_t left_caller;
+    v8_probe_result_t left_answerer;
+    v8_probe_result_t right_caller;
+    v8_probe_result_t right_answerer;
+    bool have_left_caller;
+    bool have_left_answerer;
+    bool have_right_caller;
+    bool have_right_answerer;
+    int left_caller_score;
+    int left_answerer_score;
+    int right_caller_score;
+    int right_answerer_score;
+    int score_lr;
+    int score_rl;
+
+    if (!left_samples || !right_samples || total_samples <= 0 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+
+    have_left_caller = v8_select_best_probe(left_samples, total_samples, true, max_sample, &left_caller);
+    have_left_answerer = v8_select_best_probe(left_samples, total_samples, false, max_sample, &left_answerer);
+    have_right_caller = v8_select_best_probe(right_samples, total_samples, true, max_sample, &right_caller);
+    have_right_answerer = v8_select_best_probe(right_samples, total_samples, false, max_sample, &right_answerer);
+
+    if ((!have_left_caller && !have_left_answerer) || (!have_right_caller && !have_right_answerer))
+        return false;
+
+    left_caller_score = have_left_caller ? v8_probe_stereo_role_fit(&left_caller, true) : -1000000;
+    left_answerer_score = have_left_answerer ? v8_probe_stereo_role_fit(&left_answerer, false) : -1000000;
+    right_caller_score = have_right_caller ? v8_probe_stereo_role_fit(&right_caller, true) : -1000000;
+    right_answerer_score = have_right_answerer ? v8_probe_stereo_role_fit(&right_answerer, false) : -1000000;
+
+    score_lr = left_caller_score + right_answerer_score;
+    score_rl = left_answerer_score + right_caller_score;
+
+    if (score_lr <= -1000000 && score_rl <= -1000000)
+        return false;
+
+    out->ok = true;
+    if (score_lr >= score_rl) {
+        out->left_is_caller = true;
+        out->left_probe = left_caller;
+        out->right_probe = right_answerer;
+        out->score = score_lr;
+    } else {
+        out->left_is_caller = false;
+        out->left_probe = left_answerer;
+        out->right_probe = right_caller;
+        out->score = score_rl;
+    }
+    return true;
 }
 
 static const char *v8_answer_tone_name(int tone)
@@ -3925,14 +4186,14 @@ static bool v8_collect_probe(const int16_t *samples,
             out->cm_jm_salvaged = true;
             out->cm_jm_raw_len = raw_hit.byte_len;
             memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
-        } else if (out->ansam_sample >= 0) {
+        } else if (out->ansam_sample >= 0 || out->ct_sample >= 0 || out->cng_sample >= 0) {
             v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
             int burst_count;
 
             burst_count = v8_collect_v21_bursts(samples,
                                                 total_samples,
                                                 8000,
-                                                out->ansam_sample + 12000,
+                                                v8_probe_targeted_search_start(out, limit),
                                                 limit,
                                                 !calling_party,
                                                 bursts,
@@ -4193,6 +4454,48 @@ static void print_v8_result(const v8_parms_t *r)
         printf("  V.92:           0x%02x\n", r->v92);
     if (r->gateway_mode)
         printf("  Gateway mode:   yes\n");
+}
+
+static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
+{
+    const v8_probe_result_t *caller;
+    const v8_probe_result_t *answerer;
+    const char *caller_ch;
+    const char *answerer_ch;
+
+    if (!pair || !pair->ok)
+        return;
+
+    caller = pair->left_is_caller ? &pair->left_probe : &pair->right_probe;
+    answerer = pair->left_is_caller ? &pair->right_probe : &pair->left_probe;
+    caller_ch = pair->left_is_caller ? "Left" : "Right";
+    answerer_ch = pair->left_is_caller ? "Right" : "Left";
+
+    printf("\n=== Stereo V.8 Pairing ===\n");
+    printf("  Best orientation: %s=caller, %s=answerer (score %d)\n",
+           caller_ch, answerer_ch, pair->score);
+    if (caller->ci_sample >= 0)
+        printf("  Caller evidence:  CI at %.1f ms\n", sample_to_ms(caller->ci_sample, 8000));
+    if (caller->cm_jm_sample >= 0)
+        printf("  Caller message:   %s at %.1f ms%s\n",
+               caller->calling_party ? "JM-like" : "CM-like",
+               sample_to_ms(caller->cm_jm_sample, 8000),
+               caller->cm_jm_complete ? "" : " (candidate)");
+    if (caller->cj_sample >= 0)
+        printf("  Caller terminator: CJ at %.1f ms\n",
+               sample_to_ms(caller->cj_sample, 8000));
+    if (answerer->ansam_sample >= 0)
+        printf("  Answer tone:      %s at %.1f ms\n",
+               v8_answer_tone_name(answerer->ansam_tone),
+               sample_to_ms(answerer->ansam_sample, 8000));
+    if (answerer->cm_jm_sample >= 0)
+        printf("  Answer message:   %s at %.1f ms%s\n",
+               answerer->calling_party ? "JM-like" : "CM-like",
+               sample_to_ms(answerer->cm_jm_sample, 8000),
+               answerer->cm_jm_complete ? "" : " (candidate)");
+    if (answerer->cj_sample >= 0)
+        printf("  Answer CJ echo:   CJ-like energy at %.1f ms\n",
+               sample_to_ms(answerer->cj_sample, 8000));
 }
 
 static int v34_dummy_get_bit(void *user_data)
@@ -5348,6 +5651,7 @@ static void decode_v8_pass(const int16_t *samples,
     ans_fallback_hit_t ans_fallback;
     bool calling_party = false;
     v8_fsk_burst_hit_t v21_burst;
+    bool have_cre = false;
 
     memset(&weak_v8bis, 0, sizeof(weak_v8bis));
     if (v8bis_scan_signals(samples, total_samples, V8_EARLY_SEARCH_LIMIT_SAMPLES, &v8bis)) {
@@ -5365,6 +5669,8 @@ static void decode_v8_pass(const int16_t *samples,
         for (size_t i = 0; i < sizeof(g_v8bis_signal_defs)/sizeof(g_v8bis_signal_defs[0]); i++) {
             if (!v8bis.hits[i].seen)
                 continue;
+            if (strcmp(g_v8bis_signal_defs[i].name, "CRe") == 0)
+                have_cre = true;
             printf("    %s (%s) at %.1f ms\n",
                    g_v8bis_signal_defs[i].name,
                    i < sizeof(v8bis_desc)/sizeof(v8bis_desc[0]) ? v8bis_desc[i] : "",
@@ -5512,19 +5818,21 @@ static void decode_v8_pass(const int16_t *samples,
                 const char *ch_label = use_ch2 ? "answering/CH2" : "calling/CH1";
                 const char *hz_label = use_ch2 ? "1650/1850 Hz" : "980/1180 Hz";
 
-                if (probe.ansam_sample >= 0
+                if ((probe.ansam_sample >= 0 || probe.ct_sample >= 0 || probe.cng_sample >= 0)
                     && probe.cm_jm_sample < 0) {
                     v8_raw_msg_hit_t raw_candidate;
                     v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
+                    v8_targeted_diag_t diag;
                     int burst_count;
                     char hexbuf[256];
 
                     memset(&raw_candidate, 0, sizeof(raw_candidate));
+                    memset(&diag, 0, sizeof(diag));
                     hexbuf[0] = '\0';
                     burst_count = v8_collect_v21_bursts(samples,
                                                         total_samples,
                                                         8000,
-                                                        probe.ansam_sample + 12000,
+                                                        v8_probe_targeted_search_start(&probe, total_samples),
                                                         total_samples,
                                                         use_ch2,
                                                         bursts,
@@ -5539,10 +5847,14 @@ static void decode_v8_pass(const int16_t *samples,
                                                                  burst_count,
                                                                  use_ch2,
                                                                  !use_ch2,
-                                                                 &raw_candidate)) {
+                                                                 &raw_candidate,
+                                                                 &diag)) {
                         format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
                     }
-                    if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
+                    print_v8_targeted_diag(&diag, bursts, use_ch2);
+                    if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92 && have_cre) {
+                        printf("  V.92 short-Phase-1 interpretation suppressed because CRe indicates a V.8bis/V.34 relay path\n");
+                    } else if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
                         v92_short_phase1_candidate_t v92c;
                         v92_qts_hit_t qts_hit;
 
@@ -5620,6 +5932,12 @@ static void decode_v8_pass(const int16_t *samples,
                                v21_burst.peak_strength * 100.0);
                         printf("  Lock detail:     %s\n",
                                v8_preamble_detail(raw_candidate.preamble_type));
+                        if (raw_candidate.preamble_type == V8_LOCAL_SYNC_CM_JM && diag.repeat_count > 0) {
+                            printf("  Repeat status:   %d burst%s%s\n",
+                                   diag.repeat_count,
+                                   diag.repeat_count == 1 ? "" : "s",
+                                   diag.repeated_confirmed ? ", stable repeat" : "");
+                        }
                     }
                     if (hexbuf[0] != '\0')
                         printf("  Candidate bytes: %s\n", hexbuf);
@@ -5852,7 +6170,7 @@ static void collect_v8_event(call_log_t *log,
         const char *hz_label = use_ch2 ? "1650/1850 Hz" : "980/1180 Hz";
 
         if (probe.cm_jm_sample < 0
-            && probe.ansam_sample >= 0) {
+            && (probe.ansam_sample >= 0 || probe.ct_sample >= 0 || probe.cng_sample >= 0)) {
             v8_raw_msg_hit_t raw_candidate;
             v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
             int burst_count;
@@ -5863,7 +6181,7 @@ static void collect_v8_event(call_log_t *log,
             burst_count = v8_collect_v21_bursts(samples,
                                                 total_samples,
                                                 8000,
-                                                probe.ansam_sample + 12000,
+                                                v8_probe_targeted_search_start(&probe, max_sample > 0 ? max_sample : total_samples),
                                                 max_sample > 0 ? max_sample : total_samples,
                                                 use_ch2,
                                                 bursts,
@@ -5878,7 +6196,8 @@ static void collect_v8_event(call_log_t *log,
                                                          burst_count,
                                                          use_ch2,
                                                          !use_ch2,
-                                                         &raw_candidate)) {
+                                                         &raw_candidate,
+                                                         NULL)) {
                 format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
             }
             if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
@@ -9235,7 +9554,7 @@ int main(int argc, char **argv)
         linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
         g711_codewords = malloc((size_t) total_samples);
         adaptive_work_codewords = malloc((size_t) total_samples);
-        if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34)) {
+        if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34 || do_v8)) {
             left_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             right_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             left_g711_codewords = malloc((size_t) total_samples);
@@ -9274,7 +9593,9 @@ int main(int argc, char **argv)
         }
 
         printf("Channel: %s, Law: %s\n",
-               channel == CH_LEFT ? "Left" : channel == CH_RIGHT ? "Right" : "Mono",
+               (left_linear_samples && right_linear_samples)
+                   ? "Stereo auto (L+R)"
+                   : (channel == CH_LEFT ? "Left" : channel == CH_RIGHT ? "Right" : "Mono"),
                law == V91_LAW_ULAW ? "µ-law" : "A-law");
 
     } else {
@@ -9332,6 +9653,17 @@ int main(int argc, char **argv)
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
+            if (opts.raw_output_enabled && opts.do_v8) {
+                v8_stereo_pair_result_t stereo_pair;
+
+                if (v8_select_best_stereo_pair(left_linear_samples,
+                                               right_linear_samples,
+                                               total_samples,
+                                               total_samples,
+                                               &stereo_pair)) {
+                    print_v8_stereo_pair_summary(&stereo_pair);
+                }
+            }
             run_decode_suite("Left", left_linear_samples, left_g711_codewords,
                              total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info,
                              expected_rate_1, expected_rate_2);
