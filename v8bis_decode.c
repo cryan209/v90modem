@@ -219,6 +219,16 @@ const char *v8bis_spar1_mode_str(int spar1_bits)
 
 /* HDLC receiver state for one V.21 channel */
 typedef struct {
+    int sample_offset;
+    int channel;
+    int frame_byte_count;
+    int byte_bits;
+    bool crc_ok;
+    uint8_t first_octet;
+    uint8_t frame_buf[16];
+} v8bis_partial_frame_t;
+
+typedef struct {
     /* HDLC decoding state */
     int ones_run;
     bool flag_seen;
@@ -235,6 +245,8 @@ typedef struct {
     /* Results */
     v8bis_decoded_msg_t msgs[V8BIS_MSG_MAX];
     int msg_count;
+    v8bis_partial_frame_t partials[V8BIS_MSG_MAX];
+    int partial_count;
     int channel;
 } v8bis_hdlc_rx_t;
 
@@ -337,22 +349,54 @@ static uint16_t v8bis_crc16(const uint8_t *data, int len)
     return crc;
 }
 
+static void v8bis_hdlc_record_partial(v8bis_hdlc_rx_t *rx, bool crc_ok)
+{
+    v8bis_partial_frame_t *partial;
+    int copy_len;
+
+    if (!rx || rx->partial_count >= V8BIS_MSG_MAX)
+        return;
+    if (rx->frame_byte_count <= 0 && rx->byte_bits <= 0)
+        return;
+
+    partial = &rx->partials[rx->partial_count++];
+    memset(partial, 0, sizeof(*partial));
+    partial->channel = rx->channel;
+    partial->frame_byte_count = rx->frame_byte_count;
+    partial->byte_bits = rx->byte_bits;
+    partial->crc_ok = crc_ok;
+    partial->sample_offset = rx->carrier_on_sample
+        + (int)((double)rx->frame_start_bit / 300.0 * 8000.0);
+    partial->first_octet = (rx->frame_byte_count > 0) ? rx->frame_buf[0] : rx->byte_val;
+    copy_len = rx->frame_byte_count;
+    if (copy_len > (int) sizeof(partial->frame_buf))
+        copy_len = (int) sizeof(partial->frame_buf);
+    if (copy_len > 0)
+        memcpy(partial->frame_buf, rx->frame_buf, (size_t) copy_len);
+}
+
 static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
 {
     v8bis_decoded_msg_t *msg;
+    uint16_t crc;
 
     /* Need at least: 1 I-field byte + 2 FCS bytes = 3.
      * The closing HDLC flag (0x7E) always deposits exactly 7 bits into
      * byte_val before the flag fires (the prefix 0,1,1,1,1,1,1).
      * So byte_bits must be exactly 7 for a byte-aligned frame. */
-    if (rx->frame_byte_count < 3 || rx->byte_bits != 7)
+    if (rx->frame_byte_count < 3 || rx->byte_bits != 7) {
+        v8bis_hdlc_record_partial(rx, false);
         return;
+    }
     if (rx->msg_count >= V8BIS_MSG_MAX)
         return;
 
     /* CRC check: good frame residual is 0xF0B8 */
-    if (v8bis_crc16(rx->frame_buf, rx->frame_byte_count) != 0xF0B8)
+    crc = v8bis_crc16(rx->frame_buf, rx->frame_byte_count);
+    if (crc != 0xF0B8) {
+        v8bis_hdlc_record_partial(rx, false);
         return;
+    }
 
     msg = &rx->msgs[rx->msg_count++];
     msg->msg_type = rx->frame_buf[0] & 0x0F;
@@ -449,6 +493,9 @@ void v8bis_collect_msg_events(call_log_t *log,
     int limit;
     char summary[160];
     char detail[320];
+    int last_partial_sample[16];
+    uint8_t last_partial_type[16];
+    int partial_emitted_count = 0;
 
     if (!log || !samples || total_samples <= 0)
         return;
@@ -515,6 +562,7 @@ void v8bis_collect_msg_events(call_log_t *log,
     uint8_t last_emitted_type[16];
     int emitted_count = 0;
     memset(last_emitted_sample, -1, sizeof(last_emitted_sample));
+    memset(last_partial_sample, -1, sizeof(last_partial_sample));
 
     for (int i = 0; i < all_count; i++) {
         const v8bis_decoded_msg_t *msg = all_msgs[i];
@@ -591,6 +639,52 @@ void v8bis_collect_msg_events(call_log_t *log,
                          v92_qc2.id_octet);
             }
             call_log_append(log, msg->sample_offset, 0, "V.92", summary, detail);
+        }
+    }
+
+    for (int pass = 0; pass < 2; pass++) {
+        const v8bis_hdlc_rx_t *rx = (pass == 0) ? &rx_ch1 : &rx_ch2;
+
+        for (int i = 0; i < rx->partial_count; i++) {
+            const v8bis_partial_frame_t *partial = &rx->partials[i];
+            const char *ch_str = partial->channel == 0 ? "CH1/initiating" : "CH2/responding";
+            const char *type_str = v8bis_msg_type_str(partial->first_octet & 0x0F);
+            char hex[80];
+            int hex_len = partial->frame_byte_count;
+            int pos = 0;
+            bool is_dup = false;
+
+            if (hex_len > 6)
+                hex_len = 6;
+            hex[0] = '\0';
+            for (int j = 0; j < hex_len; j++)
+                pos += snprintf(hex + pos, sizeof(hex) - (size_t) pos, "%s%02X", j == 0 ? "" : " ", partial->frame_buf[j]);
+
+            for (int k = 0; k < partial_emitted_count; k++) {
+                if (last_partial_type[k] == (partial->first_octet & 0x0F)
+                    && abs(partial->sample_offset - last_partial_sample[k]) < 3200) {
+                    is_dup = true;
+                    break;
+                }
+            }
+            if (is_dup)
+                continue;
+            if (partial_emitted_count < 16) {
+                last_partial_type[partial_emitted_count] = (uint8_t) (partial->first_octet & 0x0F);
+                last_partial_sample[partial_emitted_count] = partial->sample_offset;
+                partial_emitted_count++;
+            }
+
+            snprintf(summary, sizeof(summary), "Partial %s frame", type_str);
+            snprintf(detail, sizeof(detail),
+                     "fsk_ch=%s rev=%d bytes=%d trailing_bits=%d crc=%s raw=%s",
+                     ch_str,
+                     (partial->first_octet >> 4) & 0x0F,
+                     partial->frame_byte_count,
+                     partial->byte_bits,
+                     partial->crc_ok ? "ok" : "failed",
+                     hex[0] != '\0' ? hex : "n/a");
+            call_log_append(log, partial->sample_offset, 0, "V.8bis?", summary, detail);
         }
     }
 }
