@@ -828,8 +828,11 @@ typedef struct {
     int rx_phase4_trn_sample;
     int ru_window_len;
     uint8_t ru_window_symbols[32];
+    float ru_window_mags[32];
     bool ru_window_captured;
     int ru_window_score;
+    float trn1u_mag_mean;
+    int trn1u_mag_count;
     int phase4_ready_sample;
     int phase4_sample;
     int failure_sample;
@@ -1493,6 +1496,8 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "Ru/uR repeat after MD", detail_value(pairs, pair_count, "repeats_after_md_status"));
         append_html_label_value(out, out_len, "Ru symbol window size", detail_value(pairs, pair_count, "ru_window_symbols"));
         append_html_label_value(out, out_len, "Ru 2-point window score", detail_value(pairs, pair_count, "ru_window_score"));
+        append_html_label_value(out, out_len, "TRN1U mean symbol magnitude", detail_value(pairs, pair_count, "trn1u_mag_mean"));
+        append_html_label_value(out, out_len, "TRN1U magnitude sample count", detail_value(pairs, pair_count, "trn1u_mag_count"));
         append_html_label_value(out, out_len, "Ru decoded from symbols", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_decoded")));
         append_html_label_value(out, out_len, "Ru pattern match", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_match")));
         append_html_label_value(out, out_len, "Ru pattern match percent", detail_value(pairs, pair_count, "ru_match_pct"));
@@ -1501,6 +1506,7 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "LU absolute level", detail_value(pairs, pair_count, "lu_absolute_level"));
         append_html_label_value(out, out_len, "LU reference", detail_value(pairs, pair_count, "lu_reference"));
         append_html_label_value(out, out_len, "Ru/LU consistency with TRN1U", detail_value(pairs, pair_count, "ru_lu_consistency"));
+        append_html_label_value(out, out_len, "Ru/LU to TRN1U ratio", detail_value(pairs, pair_count, "ru_lu_ratio"));
         append_html_label_value(out, out_len, "Phase 3 marker", detail_value(pairs, pair_count, "phase3_ms"));
         append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
         append_html_label_value(out, out_len, "Phase 4 status", detail_value(pairs, pair_count, "phase4_status"));
@@ -3657,10 +3663,14 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.rx_s_event_sample = res->rx_s_event_sample;
     obs.ru_window_len = res->ru_window_len;
     obs.ru_window_score = res->ru_window_score;
+    obs.trn1u_mag_mean = res->trn1u_mag_mean;
+    obs.trn1u_mag_count = res->trn1u_mag_count;
     if (obs.ru_window_len > 32)
         obs.ru_window_len = 32;
-    if (obs.ru_window_len > 0)
+    if (obs.ru_window_len > 0) {
         memcpy(obs.ru_window_symbols, res->ru_window_symbols, (size_t) obs.ru_window_len);
+        memcpy(obs.ru_window_mags, res->ru_window_mags, (size_t) obs.ru_window_len * sizeof(float));
+    }
 
     if (!v92_phase3_analyze(&obs, &phase3))
         return;
@@ -3717,6 +3727,10 @@ static void collect_v92_phase3_event(call_log_t *log,
     appendf(detail, sizeof(detail), " ru_window_score=%s", obs.ru_window_score >= 0 ? "" : "n/a");
     if (obs.ru_window_score >= 0)
         appendf(detail, sizeof(detail), "%d", obs.ru_window_score);
+    appendf(detail, sizeof(detail), " trn1u_mag_mean=%s", obs.trn1u_mag_count > 0 ? "" : "n/a");
+    if (obs.trn1u_mag_count > 0)
+        appendf(detail, sizeof(detail), "%.3f", obs.trn1u_mag_mean);
+    appendf(detail, sizeof(detail), " trn1u_mag_count=%d", obs.trn1u_mag_count);
     appendf(detail, sizeof(detail), " ru_decoded=%u", phase3.ru_pattern_decoded ? 1U : 0U);
     appendf(detail, sizeof(detail), " ru_match=%u", phase3.ru_pattern_match ? 1U : 0U);
     appendf(detail, sizeof(detail), " ru_match_pct=%s", phase3.ru_pattern_decoded ? "" : "n/a");
@@ -3733,6 +3747,10 @@ static void collect_v92_phase3_event(call_log_t *log,
             phase3.lu_reference ? phase3.lu_reference : "unknown");
     appendf(detail, sizeof(detail), " ru_lu_consistency=%s",
             phase3.ru_lu_consistency_with_trn1u ? phase3.ru_lu_consistency_with_trn1u : "unknown");
+    appendf(detail, sizeof(detail), " ru_lu_ratio=%s",
+            phase3.ru_lu_ratio > 0.0f ? "" : "n/a");
+    if (phase3.ru_lu_ratio > 0.0f)
+        appendf(detail, sizeof(detail), "%.3f", phase3.ru_lu_ratio);
 
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
@@ -4532,8 +4550,11 @@ static bool decode_v34_pass(const int16_t *samples,
     result->rx_phase4_trn_sample = -1;
     result->ru_window_len = 0;
     memset(result->ru_window_symbols, 0, sizeof(result->ru_window_symbols));
+    memset(result->ru_window_mags, 0, sizeof(result->ru_window_mags));
     result->ru_window_captured = false;
     result->ru_window_score = -1;
+    result->trn1u_mag_mean = 0.0f;
+    result->trn1u_mag_count = 0;
     result->phase4_ready_sample = -1;
     result->phase4_sample = -1;
     result->failure_sample = -1;
@@ -4763,6 +4784,7 @@ static bool decode_v34_pass(const int16_t *samples,
                     int baud = start + i;
                     int idx = (baud - 1) & 31;
                     result->ru_window_symbols[i] = (uint8_t) (v34->rx.phase3_s_ring[idx] & 0x3);
+                    result->ru_window_mags[i] = v34->rx.phase3_s_mag_ring[idx];
                 }
                 result->ru_window_len = len;
                 result->ru_window_captured = true;
@@ -4786,6 +4808,11 @@ static bool decode_v34_pass(const int16_t *samples,
                 score = ru_window_two_point_score(candidate, len);
                 if (score > result->ru_window_score) {
                     memcpy(result->ru_window_symbols, candidate, (size_t) len);
+                    for (int i = 0; i < len; i++) {
+                        int baud = start + i;
+                        int idx = (baud - 1) & 31;
+                        result->ru_window_mags[i] = v34->rx.phase3_s_mag_ring[idx];
+                    }
                     result->ru_window_len = len;
                     result->ru_window_score = score;
                     result->ru_window_captured = true;
@@ -4828,6 +4855,10 @@ static bool decode_v34_pass(const int16_t *samples,
     }
     if (!result->u_info)
         result->u_info = v34_get_v90_u_info(v34);
+    if (v34->rx.phase3_trn_mag_count > 0) {
+        result->trn1u_mag_count = v34->rx.phase3_trn_mag_count;
+        result->trn1u_mag_mean = v34->rx.phase3_trn_mag_sum / (float) v34->rx.phase3_trn_mag_count;
+    }
 
     if (ja_aux_start_bit >= 0
         && ja_aux_start_bit < aux_bits.preview_len

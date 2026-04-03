@@ -51,6 +51,9 @@ typedef struct {
     int ru_window_len;
     int ru_window_score;
     uint8_t ru_window_symbols[32];
+    float ru_window_mags[32];
+    float trn1u_mag_mean;
+    int trn1u_mag_count;
 } v92_phase3_observation_t;
 
 typedef struct {
@@ -88,6 +91,7 @@ typedef struct {
     const char *lu_absolute_level;
     const char *lu_reference;
     const char *ru_lu_consistency_with_trn1u;
+    float ru_lu_ratio;
     const char *phase4_status;
     const char *status;
 } v92_phase3_result_t;

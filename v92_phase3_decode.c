@@ -7,6 +7,7 @@
 #include "v92_phase3_ru.h"
 #include "v92_phase4_decode.h"
 
+#include <math.h>
 #include <string.h>
 
 static void decode_ru_window(v92_phase3_result_t *out, const v92_phase3_observation_t *obs)
@@ -79,6 +80,59 @@ static void decode_ru_window(v92_phase3_result_t *out, const v92_phase3_observat
     out->ru_pattern_match = (best_pct >= 75);
 }
 
+static void evaluate_lu_trn1u_consistency(v92_phase3_result_t *out,
+                                          const v92_phase3_observation_t *obs)
+{
+    float sum_a = 0.0f;
+    float sum_b = 0.0f;
+    int n_a = 0;
+    int n_b = 0;
+    float mean_a;
+    float mean_b;
+    float ru_lu;
+    float ratio;
+    int n;
+
+    if (!out || !obs)
+        return;
+    if (!out->ru_pattern_decoded)
+        return;
+    if (!out->ru_pattern_match) {
+        out->ru_lu_consistency_with_trn1u = "fail_measured_pattern";
+        return;
+    }
+    if (obs->trn1u_mag_count < 8 || obs->trn1u_mag_mean <= 0.0f)
+        return;
+
+    n = obs->ru_window_len;
+    if (n > 32)
+        n = 32;
+    for (int i = 0; i < n; i++) {
+        int s = obs->ru_window_symbols[i] & 0x3;
+        float m = obs->ru_window_mags[i];
+
+        if (!isfinite(m) || m <= 0.0f)
+            continue;
+        if (s == out->ru_symbol_a) {
+            sum_a += m;
+            n_a++;
+        } else if (s == out->ru_symbol_b) {
+            sum_b += m;
+            n_b++;
+        }
+    }
+    if (n_a < 3 || n_b < 3)
+        return;
+
+    mean_a = sum_a / (float) n_a;
+    mean_b = sum_b / (float) n_b;
+    ru_lu = 0.5f * (mean_a + mean_b);
+    ratio = ru_lu / obs->trn1u_mag_mean;
+    out->ru_lu_ratio = ratio;
+    out->ru_lu_consistency_with_trn1u =
+        (ratio >= 0.70f && ratio <= 1.43f) ? "pass_measured" : "fail_measured";
+}
+
 const char *v92_phase3_role_id(v92_phase3_role_t role)
 {
     switch (role) {
@@ -133,16 +187,11 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
     out->ru_prefilter_bypass_expected = true;
     out->ru_trn1u_structure_expected = true;
     out->lu_definition = "trn1u_power_calibrated";
-    out->lu_absolute_level = "derived";
+    out->lu_absolute_level = "derived_from_trn1u";
     out->lu_reference = "V92_3.8";
     out->ru_lu_consistency_with_trn1u = "inconclusive";
     decode_ru_window(out, obs);
-    if (out->ru_pattern_decoded) {
-        if (out->ru_pattern_match && obs->ru_window_score >= 60)
-            out->ru_lu_consistency_with_trn1u = "pass_proxy";
-        else
-            out->ru_lu_consistency_with_trn1u = "fail_proxy";
-    }
+    evaluate_lu_trn1u_consistency(out, obs);
 
     memset(&p4_obs, 0, sizeof(p4_obs));
     p4_obs.phase4_seen = obs->phase4_seen;

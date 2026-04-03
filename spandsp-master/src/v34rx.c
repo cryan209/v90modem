@@ -4902,6 +4902,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endfor*/
                     s->phase3_trn_bits += 2;
+                    {
+                        float trn_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
+                        if (isfinite(trn_mag) && trn_mag > 0.0f) {
+                            s->phase3_trn_mag_sum += trn_mag;
+                            s->phase3_trn_mag_count++;
+                        }
+                    }
                     if (s->phase3_trn_bits >= 256  &&  best_trn_h >= 0)
                     {
                         int score_pct;
@@ -4938,6 +4945,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_s_counts[old_sym]--;
             /*endif*/
             s->phase3_s_ring[idx] = (uint8_t) (data_bits & 3);
+            s->phase3_s_mag_ring[idx] = sqrtf(sym->re*sym->re + sym->im*sym->im);
             s->phase3_s_counts[data_bits & 3]++;
             s->s_detect_count = s->phase3_s_counts[0];
             if (s->phase3_s_counts[1] > s->s_detect_count)
@@ -4999,6 +5007,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->bit_count = 0;
             s->s_window = 0;
             memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
+            memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
             memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
             s->phase3_s_pos = 0;
             memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
@@ -5015,6 +5024,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_ja_bits = 0;
             s->phase3_ja_hyp = -1;
             phase3_trn_hyp_reset(s);
+            s->phase3_trn_mag_sum = 0.0f;
+            s->phase3_trn_mag_count = 0;
             s->phase4_j_seen = 0;
             s->phase4_j_lock_hyp = -1;
             s->phase4_trn_after_j = 0;
@@ -5256,6 +5267,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             }
             /*endfor*/
             s->phase3_trn_bits += 2;
+            {
+                float trn_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
+                if (isfinite(trn_mag) && trn_mag > 0.0f) {
+                    s->phase3_trn_mag_sum += trn_mag;
+                    s->phase3_trn_mag_count++;
+                }
+            }
             if (trn_refine_baud == 1)
             {
                 span_log(s->logging, SPAN_LOG_FLOW,
@@ -5299,6 +5317,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->bit_count = 0;
                 s->s_window = 0;
                 memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
+                memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
                 memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
                 s->phase3_s_pos = 0;
                 memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
@@ -5315,6 +5334,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_ja_bits = 0;
                 s->phase3_ja_hyp = -1;
                 phase3_trn_hyp_reset(s);
+                s->phase3_trn_mag_sum = 0.0f;
+                s->phase3_trn_mag_count = 0;
             }
             /*endif*/
         }
@@ -7902,6 +7923,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+    memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
     s->rx.phase3_s_pos = 0;
     phase3_pp_reset(&s->rx);
@@ -7919,6 +7941,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_ja_bits = 0;
     s->rx.phase3_ja_hyp = -1;
     phase3_trn_hyp_reset(&s->rx);
+    s->rx.phase3_trn_mag_sum = 0.0f;
+    s->rx.phase3_trn_mag_count = 0;
     s->rx.phase4_j_seen = 0;
     s->rx.phase4_j_lock_hyp = -1;
     s->rx.phase4_trn_after_j = 0;

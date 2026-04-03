@@ -840,6 +840,7 @@ typedef struct
     int phase3_s_guard_samples;
     int phase3_s_hits;
     uint8_t phase3_s_ring[32];
+    float phase3_s_mag_ring[32];
     int phase3_s_counts[4];
     int phase3_s_pos;
     uint8_t phase3_pp_lag8[8];
@@ -863,6 +864,8 @@ typedef struct
     int phase3_trn_bits;
     int phase3_trn_lock_hyp;
     int phase3_trn_lock_score;
+    float phase3_trn_mag_sum;
+    int phase3_trn_mag_count;
     uint32_t phase3_ja_scramble[8];
     uint8_t phase3_ja_prev_z[8];
     uint8_t phase3_ja_prev_valid[8];
