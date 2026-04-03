@@ -1372,24 +1372,59 @@ static void append_html_escaped(char *out, size_t out_len, const char *text)
 
 static int parse_detail_key_values(const char *detail, detail_kv_t *pairs, int max_pairs)
 {
-    char scratch[2048];
-    char *save = NULL;
-    char *tok;
     int count = 0;
+    const char *p = detail;
 
     if (!detail || !pairs || max_pairs <= 0)
         return 0;
-    snprintf(scratch, sizeof(scratch), "%s", detail);
-    tok = strtok_r(scratch, " ", &save);
-    while (tok && count < max_pairs) {
-        char *eq = strchr(tok, '=');
-        if (eq) {
-            *eq = '\0';
-            snprintf(pairs[count].key, sizeof(pairs[count].key), "%s", tok);
-            snprintf(pairs[count].value, sizeof(pairs[count].value), "%s", eq + 1);
-            count++;
+
+    while (*p != '\0' && count < max_pairs) {
+        const char *key_start;
+        const char *key_end;
+        const char *value_start;
+        const char *value_end;
+        size_t key_len;
+        size_t value_len;
+
+        while (*p == ' ')
+            p++;
+        if (*p == '\0')
+            break;
+
+        key_start = p;
+        while (*p != '\0' && *p != '=' && *p != ' ')
+            p++;
+        key_end = p;
+        if (*p != '=') {
+            while (*p != '\0' && *p != ' ')
+                p++;
+            continue;
         }
-        tok = strtok_r(NULL, " ", &save);
+        p++;
+
+        if (*p == '"') {
+            p++;
+            value_start = p;
+            while (*p != '\0' && *p != '"')
+                p++;
+            value_end = p;
+            if (*p == '"')
+                p++;
+        } else {
+            value_start = p;
+            while (*p != '\0' && *p != ' ')
+                p++;
+            value_end = p;
+        }
+
+        key_len = (size_t) (key_end - key_start);
+        value_len = (size_t) (value_end - value_start);
+        if (key_len == 0)
+            continue;
+
+        snprintf(pairs[count].key, sizeof(pairs[count].key), "%.*s", (int) key_len, key_start);
+        snprintf(pairs[count].value, sizeof(pairs[count].value), "%.*s", (int) value_len, value_start);
+        count++;
     }
     return count;
 }
@@ -1751,6 +1786,10 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         && pair_count > 0) {
         appendf(out, out_len, "<div class=\"detail-kv\">");
         append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        if (detail_value(pairs, pair_count, "pre_cm"))
+            append_html_label_value(out, out_len, "Window", "Pre-CM");
+        if (detail_value(pairs, pair_count, "post_ansam"))
+            append_html_label_value(out, out_len, "Window", "Post-ANSam");
         append_html_label_value(out, out_len, "Start", detail_value(pairs, pair_count, "start"));
         append_html_label_value(out, out_len, "Duration", detail_value(pairs, pair_count, "duration"));
         append_html_label_value(out, out_len, "FSK pair", detail_value(pairs, pair_count, "pair"));
@@ -1770,6 +1809,14 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
             append_html_label_value(out, out_len, "Repeat frame", detail_value(pairs, pair_count, "repeat"));
         if (detail_value(pairs, pair_count, "decoded"))
             append_html_label_value(out, out_len, "Decoded frame", detail_value(pairs, pair_count, "decoded"));
+        if (detail_value(pairs, pair_count, "qts"))
+            append_html_label_value(out, out_len, "QTS candidate", detail_value(pairs, pair_count, "qts"));
+        if (detail_value(pairs, pair_count, "qts_bar"))
+            append_html_label_value(out, out_len, "QTS\\ reps", detail_value(pairs, pair_count, "qts_bar"));
+        if (detail_value(pairs, pair_count, "bits"))
+            append_html_label_value(out, out_len, "Bit slices", detail_value(pairs, pair_count, "bits"));
+        if (detail_value(pairs, pair_count, "raw"))
+            append_html_label_value(out, out_len, "Raw bytes", detail_value(pairs, pair_count, "raw"));
         appendf(out, out_len, "</div>");
         return;
     }
@@ -2871,6 +2918,58 @@ static void format_bit_slice(char *buf, size_t len, const uint8_t *bits, int sta
         buf[used++] = bits[start + i] ? '1' : '0';
     }
     buf[used] = '\0';
+}
+
+static void append_v92_short_phase1_fields(char *detail,
+                                           size_t detail_len,
+                                           const v92_short_phase1_candidate_t *v92c)
+{
+    size_t used;
+
+    if (!detail || detail_len == 0 || !v92c)
+        return;
+
+    used = strlen(detail);
+    if (used >= detail_len)
+        return;
+
+    if (v92c->digital_modem) {
+        snprintf(detail + used,
+                 detail_len - used,
+                 " lapm=%s anspcm_level=%s",
+                 v92c->lapm ? "yes" : "no",
+                 v92_anspcm_level_to_str(v92c->aux_value));
+    } else {
+        snprintf(detail + used,
+                 detail_len - used,
+                 " lapm=%s uqts_index=0x%X uqts_ucode=%d",
+                 v92c->lapm ? "yes" : "no",
+                 v92c->aux_value,
+                 v92c->uqts_ucode);
+    }
+
+    used = strlen(detail);
+    if (used < detail_len) {
+        if (v92c->decoded_frame_index > 0) {
+            snprintf(detail + used,
+                     detail_len - used,
+                     " decoded=%03X/repeat",
+                     v92c->decoded_frame_bits);
+        } else {
+            snprintf(detail + used,
+                     detail_len - used,
+                     " decoded=%03X",
+                     v92c->decoded_frame_bits);
+        }
+    }
+
+    used = strlen(detail);
+    if (used < detail_len) {
+        snprintf(detail + used,
+                 detail_len - used,
+                 " repeat=%s",
+                 v92c->repeat_seen ? (v92c->repeat_match ? "match" : "differs") : "missing");
+    }
 }
 
 static const char *v8_preamble_to_candidate_label(int preamble_type, bool calling_party)
@@ -5159,11 +5258,13 @@ static void collect_v8_event(call_log_t *log,
                              pre_cm_v92c.name,
                              use_ch2 ? "answering/CH2" : "calling/CH1");
                     snprintf(detail, sizeof(detail),
-                             "role=%s start=%.1f ms duration=%.1f ms pair=%s pre_cm=yes",
+                             "role=%s start=%.1f ms duration=%.1f ms pair=%s pre_cm=yes lock=\"%s\"",
                              use_ch2 ? "answering" : "calling",
                              sample_to_ms(pre_cm_candidate.sample_offset, 8000),
                              70.0,
-                             use_ch2 ? "1650/1850 Hz" : "980/1180 Hz");
+                             use_ch2 ? "1650/1850 Hz" : "980/1180 Hz",
+                             v8_preamble_detail(pre_cm_candidate.preamble_type));
+                    append_v92_short_phase1_fields(detail, sizeof(detail), &pre_cm_v92c);
                     call_log_append(log, pre_cm_candidate.sample_offset, 560, "V.92", summary, detail);
                 }
             }
@@ -5214,11 +5315,13 @@ static void collect_v8_event(call_log_t *log,
                              post_ans_v92c.name,
                              use_ch2 ? "answering/CH2" : "calling/CH1");
                     snprintf(detail, sizeof(detail),
-                             "role=%s start=%.1f ms duration=%.1f ms pair=%s post_ansam=yes",
+                             "role=%s start=%.1f ms duration=%.1f ms pair=%s post_ansam=yes lock=\"%s\"",
                              use_ch2 ? "answering" : "calling",
                              sample_to_ms(post_ans_ch_candidate.sample_offset, 8000),
                              70.0,
-                             use_ch2 ? "1650/1850 Hz" : "980/1180 Hz");
+                             use_ch2 ? "1650/1850 Hz" : "980/1180 Hz",
+                             v8_preamble_detail(post_ans_ch_candidate.preamble_type));
+                    append_v92_short_phase1_fields(detail, sizeof(detail), &post_ans_v92c);
                     call_log_append(log, post_ans_ch_candidate.sample_offset, 560, "V.92", summary, detail);
                 }
             }
