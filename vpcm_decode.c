@@ -794,6 +794,8 @@ typedef struct {
     double peak_strength;
 } v8_fsk_burst_hit_t;
 
+#define V8_MAX_TARGETED_BURSTS 8
+
 typedef struct {
     int preamble_type;
     uint32_t bit_stream;
@@ -2430,6 +2432,37 @@ static void v8_raw_scan_consider_hit(v8_raw_scan_state_t *scan, const v8_raw_msg
         scan->best_cm_jm = candidate;
 }
 
+static void v8_consider_repeated_hit(v8_raw_msg_hit_t *last,
+                                     v8_raw_msg_hit_t *best,
+                                     const v8_raw_msg_hit_t *hit,
+                                     int min_repeat_gap,
+                                     int repeat_score_bonus)
+{
+    v8_raw_msg_hit_t candidate;
+
+    if (!best || !hit || !hit->seen)
+        return;
+
+    candidate = *hit;
+    if (candidate.repeat_count <= 0)
+        candidate.repeat_count = 1;
+    candidate.repeated_confirmed = false;
+
+    if (last
+        && last->seen
+        && v8_raw_hits_similar(last, &candidate)
+        && abs(candidate.sample_offset - last->sample_offset) >= min_repeat_gap) {
+        candidate.repeat_count = last->repeat_count + 1;
+        candidate.repeated_confirmed = (candidate.repeat_count >= 2);
+        candidate.score += (candidate.repeat_count - 1) * repeat_score_bonus;
+    }
+
+    if (last)
+        *last = candidate;
+    if (!best->seen || candidate.score > best->score)
+        *best = candidate;
+}
+
 static void v8_raw_scan_process_message(v8_raw_scan_state_t *scan,
                                         int preamble_type,
                                         bool calling_party)
@@ -2763,35 +2796,39 @@ static bool v8_scan_raw_cm_jm(const int16_t *samples,
     return true;
 }
 
-static bool v8_detect_v21_burst(const int16_t *samples,
-                                int total_samples,
-                                int sample_rate,
-                                int search_start,
-                                int search_end,
-                                bool use_ch2,
-                                v8_fsk_burst_hit_t *out)
+static int v8_collect_v21_bursts(const int16_t *samples,
+                                 int total_samples,
+                                 int sample_rate,
+                                 int search_start,
+                                 int search_end,
+                                 bool use_ch2,
+                                 v8_fsk_burst_hit_t *bursts,
+                                 int max_bursts)
 {
     enum {
         WINDOW_SAMPLES = 160,
         STEP_SAMPLES = 80,
-        MIN_RUN_WINDOWS = 3
+        MIN_RUN_WINDOWS = 3,
+        MERGE_GAP_SAMPLES = 240
     };
     const double f0 = use_ch2 ? 1650.0 : 980.0;
     const double f1 = use_ch2 ? 1850.0 : 1180.0;
     int run_start = -1;
     int run_windows = 0;
     double run_peak = 0.0;
-    v8_fsk_burst_hit_t best = { false, 0, 0, 0.0 };
+    int burst_count = 0;
 
-    if (!samples || total_samples <= 0 || sample_rate <= 0 || !out)
-        return false;
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !bursts || max_bursts <= 0)
+        return 0;
 
     if (search_start < 0)
         search_start = 0;
     if (search_end <= 0 || search_end > total_samples)
         search_end = total_samples;
     if (search_end - search_start < WINDOW_SAMPLES)
-        return false;
+        return 0;
+
+    memset(bursts, 0, (size_t) max_bursts * sizeof(*bursts));
 
     for (int start = search_start; start + WINDOW_SAMPLES <= search_end; start += STEP_SAMPLES) {
         double energy = window_energy(samples + start, WINDOW_SAMPLES);
@@ -2818,28 +2855,45 @@ static bool v8_detect_v21_burst(const int16_t *samples,
 
 reset_run:
         if (run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
-            best.seen = true;
-            best.start_sample = run_start;
-            best.duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
-            best.peak_strength = run_peak;
-            break;
+            v8_fsk_burst_hit_t candidate;
+
+            memset(&candidate, 0, sizeof(candidate));
+            candidate.seen = true;
+            candidate.start_sample = run_start;
+            candidate.duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
+            candidate.peak_strength = run_peak;
+
+            if (burst_count > 0
+                && candidate.start_sample <= bursts[burst_count - 1].start_sample
+                                          + bursts[burst_count - 1].duration_samples
+                                          + MERGE_GAP_SAMPLES) {
+                int prev_end = bursts[burst_count - 1].start_sample + bursts[burst_count - 1].duration_samples;
+                int new_end = candidate.start_sample + candidate.duration_samples;
+
+                if (new_end > prev_end)
+                    bursts[burst_count - 1].duration_samples = new_end - bursts[burst_count - 1].start_sample;
+                if (candidate.peak_strength > bursts[burst_count - 1].peak_strength)
+                    bursts[burst_count - 1].peak_strength = candidate.peak_strength;
+            } else if (burst_count < max_bursts) {
+                bursts[burst_count++] = candidate;
+            } else {
+                break;
+            }
         }
         run_start = -1;
         run_windows = 0;
         run_peak = 0.0;
     }
 
-    if (!best.seen && run_start >= 0 && run_windows >= MIN_RUN_WINDOWS) {
-        best.seen = true;
-        best.start_sample = run_start;
-        best.duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
-        best.peak_strength = run_peak;
+    if (run_start >= 0 && run_windows >= MIN_RUN_WINDOWS && burst_count < max_bursts) {
+        bursts[burst_count].seen = true;
+        bursts[burst_count].start_sample = run_start;
+        bursts[burst_count].duration_samples = run_windows * STEP_SAMPLES + (WINDOW_SAMPLES - STEP_SAMPLES);
+        bursts[burst_count].peak_strength = run_peak;
+        burst_count++;
     }
 
-    if (!best.seen)
-        return false;
-    *out = best;
-    return true;
+    return burst_count;
 }
 
 static bool v8_targeted_v21_decode(const int16_t *samples,
@@ -2945,6 +2999,45 @@ static bool v8_targeted_v21_decode(const int16_t *samples,
                 }
             }
         }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
+static bool v8_targeted_v21_decode_repeated(const int16_t *samples,
+                                            int total_samples,
+                                            int sample_rate,
+                                            const v8_fsk_burst_hit_t *bursts,
+                                            int burst_count,
+                                            bool use_ch2,
+                                            bool calling_party,
+                                            v8_raw_msg_hit_t *out)
+{
+    v8_raw_msg_hit_t best = {0};
+    v8_raw_msg_hit_t last = {0};
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !bursts || burst_count <= 0 || !out)
+        return false;
+
+    for (int i = 0; i < burst_count; i++) {
+        v8_raw_msg_hit_t hit;
+
+        memset(&hit, 0, sizeof(hit));
+        if (!bursts[i].seen)
+            continue;
+        if (!v8_targeted_v21_decode(samples,
+                                    total_samples,
+                                    sample_rate,
+                                    &bursts[i],
+                                    use_ch2,
+                                    calling_party,
+                                    &hit)) {
+            continue;
+        }
+        v8_consider_repeated_hit(&last, &best, &hit, 160, 100);
     }
 
     if (!best.seen)
@@ -3170,6 +3263,45 @@ static bool v8_targeted_v21_bytes_candidate(const int16_t *samples,
                 }
             }
         }
+    }
+
+    if (!best.seen)
+        return false;
+    *out = best;
+    return true;
+}
+
+static bool v8_targeted_v21_bytes_candidate_repeated(const int16_t *samples,
+                                                     int total_samples,
+                                                     int sample_rate,
+                                                     const v8_fsk_burst_hit_t *bursts,
+                                                     int burst_count,
+                                                     bool use_ch2,
+                                                     bool calling_party,
+                                                     v8_raw_msg_hit_t *out)
+{
+    v8_raw_msg_hit_t best = {0};
+    v8_raw_msg_hit_t last = {0};
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !bursts || burst_count <= 0 || !out)
+        return false;
+
+    for (int i = 0; i < burst_count; i++) {
+        v8_raw_msg_hit_t hit;
+
+        memset(&hit, 0, sizeof(hit));
+        if (!bursts[i].seen)
+            continue;
+        if (!v8_targeted_v21_bytes_candidate(samples,
+                                             total_samples,
+                                             sample_rate,
+                                             &bursts[i],
+                                             use_ch2,
+                                             calling_party,
+                                             &hit)) {
+            continue;
+        }
+        v8_consider_repeated_hit(&last, &best, &hit, 160, 100);
     }
 
     if (!best.seen)
@@ -3794,22 +3926,26 @@ static bool v8_collect_probe(const int16_t *samples,
             out->cm_jm_raw_len = raw_hit.byte_len;
             memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
         } else if (out->ansam_sample >= 0) {
-            v8_fsk_burst_hit_t burst;
+            v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
+            int burst_count;
 
-            if (v8_detect_v21_burst(samples,
-                                    total_samples,
-                                    8000,
-                                    out->ansam_sample + 12000,
-                                    limit,
-                                    !calling_party,
-                                    &burst)
-                && v8_targeted_v21_decode(samples,
-                                          total_samples,
-                                          8000,
-                                          &burst,
-                                          !calling_party,
-                                          calling_party,
-                                          &raw_hit)
+            burst_count = v8_collect_v21_bursts(samples,
+                                                total_samples,
+                                                8000,
+                                                out->ansam_sample + 12000,
+                                                limit,
+                                                !calling_party,
+                                                bursts,
+                                                V8_MAX_TARGETED_BURSTS);
+            if (burst_count > 0
+                && v8_targeted_v21_decode_repeated(samples,
+                                                   total_samples,
+                                                   8000,
+                                                   bursts,
+                                                   burst_count,
+                                                   !calling_party,
+                                                   calling_party,
+                                                   &raw_hit)
                 && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
                 out->result = parsed;
                 out->last_status = parsed.status;
@@ -5377,26 +5513,33 @@ static void decode_v8_pass(const int16_t *samples,
                 const char *hz_label = use_ch2 ? "1650/1850 Hz" : "980/1180 Hz";
 
                 if (probe.ansam_sample >= 0
-                    && probe.cm_jm_sample < 0
-                    && v8_detect_v21_burst(samples,
-                                           total_samples,
-                                           8000,
-                                           probe.ansam_sample + 12000,
-                                           total_samples,
-                                           use_ch2,
-                                           &v21_burst)) {
+                    && probe.cm_jm_sample < 0) {
                     v8_raw_msg_hit_t raw_candidate;
+                    v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
+                    int burst_count;
                     char hexbuf[256];
 
                     memset(&raw_candidate, 0, sizeof(raw_candidate));
                     hexbuf[0] = '\0';
-                    if (v8_targeted_v21_bytes_candidate(samples,
+                    burst_count = v8_collect_v21_bursts(samples,
                                                         total_samples,
                                                         8000,
-                                                        &v21_burst,
+                                                        probe.ansam_sample + 12000,
+                                                        total_samples,
                                                         use_ch2,
-                                                        !use_ch2,
-                                                        &raw_candidate)) {
+                                                        bursts,
+                                                        V8_MAX_TARGETED_BURSTS);
+                    if (burst_count <= 0)
+                        continue;
+                    v21_burst = bursts[0];
+                    if (v8_targeted_v21_bytes_candidate_repeated(samples,
+                                                                 total_samples,
+                                                                 8000,
+                                                                 bursts,
+                                                                 burst_count,
+                                                                 use_ch2,
+                                                                 !use_ch2,
+                                                                 &raw_candidate)) {
                         format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
                     }
                     if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
@@ -5709,26 +5852,33 @@ static void collect_v8_event(call_log_t *log,
         const char *hz_label = use_ch2 ? "1650/1850 Hz" : "980/1180 Hz";
 
         if (probe.cm_jm_sample < 0
-            && probe.ansam_sample >= 0
-            && v8_detect_v21_burst(samples,
-                                   total_samples,
-                                   8000,
-                                   probe.ansam_sample + 12000,
-                                   max_sample > 0 ? max_sample : total_samples,
-                                   use_ch2,
-                                   &v21_burst)) {
+            && probe.ansam_sample >= 0) {
             v8_raw_msg_hit_t raw_candidate;
+            v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
+            int burst_count;
             char hexbuf[256];
 
             memset(&raw_candidate, 0, sizeof(raw_candidate));
             hexbuf[0] = '\0';
-            if (v8_targeted_v21_bytes_candidate(samples,
+            burst_count = v8_collect_v21_bursts(samples,
                                                 total_samples,
                                                 8000,
-                                                &v21_burst,
+                                                probe.ansam_sample + 12000,
+                                                max_sample > 0 ? max_sample : total_samples,
                                                 use_ch2,
-                                                !use_ch2,
-                                                &raw_candidate)) {
+                                                bursts,
+                                                V8_MAX_TARGETED_BURSTS);
+            if (burst_count <= 0)
+                continue;
+            v21_burst = bursts[0];
+            if (v8_targeted_v21_bytes_candidate_repeated(samples,
+                                                         total_samples,
+                                                         8000,
+                                                         bursts,
+                                                         burst_count,
+                                                         use_ch2,
+                                                         !use_ch2,
+                                                         &raw_candidate)) {
                 format_hex_bytes(hexbuf, sizeof(hexbuf), raw_candidate.bytes, raw_candidate.byte_len);
             }
             if (raw_candidate.preamble_type == V8_LOCAL_SYNC_V92) {
