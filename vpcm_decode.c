@@ -7312,6 +7312,297 @@ static bool decode_v34_pass(const int16_t *samples,
 /*  Lightweight Phase 3 demodulator — supplementary analysis          */
 /* ------------------------------------------------------------------ */
 
+static int p3_find_symbol_index_at_or_after(const p3_result_t *detail, int sample)
+{
+    if (!detail || detail->symbol_count <= 0)
+        return 0;
+    for (int i = 0; i < detail->symbol_count; i++) {
+        if (detail->symbols[i].sample_index >= sample)
+            return i;
+    }
+    return detail->symbol_count;
+}
+
+static float p3_repeat6_score(const p3_result_t *detail, int sym_start, int sym_end)
+{
+    int checks = 0;
+    int matches = 0;
+
+    if (!detail || sym_end - sym_start < 12)
+        return 0.0f;
+    if (sym_start < 0)
+        sym_start = 0;
+    if (sym_end > detail->symbol_count)
+        sym_end = detail->symbol_count;
+    for (int i = sym_start + 6; i < sym_end; i++) {
+        checks++;
+        if (detail->symbols[i].dibit == detail->symbols[i - 6].dibit)
+            matches++;
+    }
+    return (checks > 0) ? ((float) matches / (float) checks) : 0.0f;
+}
+
+static int p3_symbol_scrambled_bit(const p3_result_t *detail, int sym_start, int bit_pos)
+{
+    int sym_idx = sym_start + (bit_pos / 2);
+    int bit_sel = bit_pos & 1;
+    int dibit;
+
+    if (!detail || sym_idx < 0 || sym_idx >= detail->symbol_count)
+        return 0;
+    dibit = detail->symbols[sym_idx].dibit;
+    return bit_sel ? ((dibit >> 1) & 1) : (dibit & 1);
+}
+
+static float p3_trn_recurrence_score(const p3_result_t *detail, int sym_start, int sym_end)
+{
+    int bits;
+    int checks = 0;
+    int errors = 0;
+
+    if (!detail)
+        return 0.0f;
+    if (sym_start < 0)
+        sym_start = 0;
+    if (sym_end > detail->symbol_count)
+        sym_end = detail->symbol_count;
+    bits = (sym_end - sym_start) * 2;
+    if (bits < 24)
+        return 0.0f;
+
+    for (int b = 23; b < bits; b++) {
+        int prev23 = p3_symbol_scrambled_bit(detail, sym_start, b - 23);
+        int prev5 = p3_symbol_scrambled_bit(detail, sym_start, b - 5);
+        int expected = 1 ^ prev23 ^ prev5;
+        int got = p3_symbol_scrambled_bit(detail, sym_start, b);
+        checks++;
+        if (got != expected)
+            errors++;
+    }
+    return (checks > 0) ? ((float) (checks - errors) / (float) checks) : 0.0f;
+}
+
+static int p3_segment_descrambled_bit(const p3_result_t *detail,
+                                      const p3_segment_t *seg,
+                                      int bit_pos)
+{
+    int sym_idx;
+    int bit_sel;
+
+    if (!detail || !seg || bit_pos < 0)
+        return 0;
+    sym_idx = seg->start_symbol + (bit_pos / 2);
+    bit_sel = bit_pos & 1;
+    if (sym_idx < 0 || sym_idx >= detail->symbol_count)
+        return 0;
+    return bit_sel ? detail->symbols[sym_idx].bit1 : detail->symbols[sym_idx].bit0;
+}
+
+static void p3_segment_bit_preview(const p3_result_t *detail,
+                                   const p3_segment_t *seg,
+                                   bool descrambled,
+                                   int max_bits,
+                                   char *out,
+                                   size_t out_len)
+{
+    int bits;
+    int limit;
+
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!detail || !seg || seg->length <= 0)
+        return;
+
+    bits = seg->length * 2;
+    limit = bits;
+    if (max_bits > 0 && limit > max_bits)
+        limit = max_bits;
+    if (limit > (int) out_len - 1)
+        limit = (int) out_len - 1;
+    if (limit < 0)
+        limit = 0;
+
+    for (int b = 0; b < limit; b++) {
+        int bit = descrambled
+            ? p3_segment_descrambled_bit(detail, seg, b)
+            : p3_symbol_scrambled_bit(detail, seg->start_symbol, b);
+        out[b] = bit ? '1' : '0';
+    }
+    out[limit] = '\0';
+}
+
+static float p3_segment_descrambled_one_rate(const p3_result_t *detail,
+                                             const p3_segment_t *seg)
+{
+    int bits;
+    int ones = 0;
+
+    if (!detail || !seg || seg->length <= 0)
+        return 0.0f;
+    bits = seg->length * 2;
+    if (bits <= 0)
+        return 0.0f;
+    for (int b = 0; b < bits; b++) {
+        if (p3_segment_descrambled_bit(detail, seg, b))
+            ones++;
+    }
+    return (float) ones / (float) bits;
+}
+
+static void p3_u16_to_bitstr(uint16_t value, char out[17])
+{
+    if (!out)
+        return;
+    for (int i = 0; i < 16; i++) {
+        int bit = (value >> (15 - i)) & 1U;
+        out[i] = bit ? '1' : '0';
+    }
+    out[16] = '\0';
+}
+
+static void p3_print_data_signatures(const p3_result_t *detail)
+{
+    const p3_segment_t *best_j = NULL;
+    const p3_segment_t *best_trn = NULL;
+    const p3_segment_t *best_ru = NULL;
+    int s_like_symbols = 0;
+    int trn_symbols = 0;
+    int j_symbols = 0;
+    int ru_symbols = 0;
+
+    if (!detail)
+        return;
+
+    for (int i = 0; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+        switch (seg->type) {
+        case P3_SIGNAL_S:
+        case P3_SIGNAL_S_BAR:
+            s_like_symbols += seg->length;
+            break;
+        case P3_SIGNAL_TRN:
+            trn_symbols += seg->length;
+            if (!best_trn || seg->length > best_trn->length)
+                best_trn = seg;
+            break;
+        case P3_SIGNAL_J:
+            j_symbols += seg->length;
+            if (!best_j || seg->length > best_j->length)
+                best_j = seg;
+            break;
+        case P3_SIGNAL_RU:
+        case P3_SIGNAL_UR:
+            ru_symbols += seg->length;
+            if (!best_ru || seg->length > best_ru->length)
+                best_ru = seg;
+            break;
+        default:
+            break;
+        }
+    }
+
+    printf("    Data signatures: S-like=%d sym, TRN=%d sym, J=%d sym, Ru/uR=%d sym\n",
+           s_like_symbols, trn_symbols, j_symbols, ru_symbols);
+
+    if (best_j) {
+        char trn16_bits[17];
+        char j_preview[65];
+
+        p3_u16_to_bitstr(best_j->j_trn16, trn16_bits);
+        p3_segment_bit_preview(detail, best_j, true, 64, j_preview, sizeof(j_preview));
+        printf("      J longest: %d sym, trn16=0x%04X (%s), phase=%d, bits(desc)=%s\n",
+               best_j->length,
+               best_j->j_trn16,
+               trn16_bits,
+               best_j->j_hypothesis,
+               j_preview);
+    }
+
+    if (best_trn) {
+        char trn_scr[65];
+        char trn_desc[65];
+        float trn_rec = p3_trn_recurrence_score(detail,
+                                                best_trn->start_symbol,
+                                                best_trn->start_symbol + best_trn->length);
+        float one_rate = p3_segment_descrambled_one_rate(detail, best_trn);
+
+        p3_segment_bit_preview(detail, best_trn, false, 64, trn_scr, sizeof(trn_scr));
+        p3_segment_bit_preview(detail, best_trn, true, 64, trn_desc, sizeof(trn_desc));
+        printf("      TRN longest: %d sym, recurrence=%.1f%%, ones(desc)=%.1f%%\n",
+               best_trn->length,
+               100.0f * trn_rec,
+               100.0f * one_rate);
+        printf("        bits(scr)=%s\n", trn_scr);
+        printf("        bits(desc)=%s\n", trn_desc);
+    }
+
+    if (best_ru) {
+        char ru_bits[49];
+        p3_segment_bit_preview(detail, best_ru, false, 48, ru_bits, sizeof(ru_bits));
+        printf("      %s longest: %d sym, orientation=%s, dibit-bits(scr)=%s\n",
+               (best_ru->type == P3_SIGNAL_RU) ? "Ru" : "uR",
+               best_ru->length,
+               best_ru->ru_positive_first ? "+first" : "-first",
+               ru_bits);
+    }
+}
+
+static float p3_sequence_guided_score(const p3_result_t *detail,
+                                      const decode_v34_result_t *result,
+                                      int phase3_start,
+                                      int phase3_end)
+{
+    int s_start;
+    int sbar_start;
+    int trn_start;
+    int phase3_len;
+    int i0, i1, i2, i3;
+    float s_score;
+    float sbar_score;
+    float trn_score;
+
+    if (!detail || !result || phase3_end <= phase3_start)
+        return 0.0f;
+
+    s_start = (result->tx_first_s_sample >= 0) ? result->tx_first_s_sample : phase3_start;
+    sbar_start = result->tx_first_not_s_sample;
+    trn_start = result->tx_trn_sample;
+    phase3_len = phase3_end - phase3_start;
+
+    if (sbar_start < 0 || sbar_start <= s_start)
+        sbar_start = s_start + phase3_len/3;
+    if (trn_start < 0 || trn_start <= sbar_start)
+        trn_start = sbar_start + phase3_len/3;
+
+    if (s_start < phase3_start) s_start = phase3_start;
+    if (sbar_start < phase3_start) sbar_start = phase3_start;
+    if (trn_start < phase3_start) trn_start = phase3_start;
+    if (s_start > phase3_end) s_start = phase3_end;
+    if (sbar_start > phase3_end) sbar_start = phase3_end;
+    if (trn_start > phase3_end) trn_start = phase3_end;
+
+    if (sbar_start <= s_start)
+        sbar_start = s_start;
+    if (trn_start <= sbar_start)
+        trn_start = sbar_start;
+
+    i0 = p3_find_symbol_index_at_or_after(detail, s_start);
+    i1 = p3_find_symbol_index_at_or_after(detail, sbar_start);
+    i2 = p3_find_symbol_index_at_or_after(detail, trn_start);
+    i3 = detail->symbol_count;
+
+    if (i1 < i0) i1 = i0;
+    if (i2 < i1) i2 = i1;
+
+    s_score = p3_repeat6_score(detail, i0, i1);
+    sbar_score = p3_repeat6_score(detail, i1, i2);
+    trn_score = p3_trn_recurrence_score(detail, i2, i3);
+
+    return 28.0f*s_score + 28.0f*sbar_score + 44.0f*trn_score;
+}
+
 static void p3_demod_analyse_phase3(const int16_t *samples,
                                     int total_samples,
                                     const decode_v34_result_t *result,
@@ -7358,7 +7649,10 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
         p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
         int count;
         int best_idx = -1;
-        float best_score = -1.0f;
+        float best_total_score = -1.0f;
+        float best_base_score = 0.0f;
+        float best_seq_score = 0.0f;
+        p3_result_t *best_detail = NULL;
 
         count = p3_scan_all_hypotheses(samples + phase3_start,
                                        phase3_len,
@@ -7370,11 +7664,26 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
         printf("  Hypotheses tested: %d\n", count);
         for (int i = 0; i < count; i++) {
             const p3_hypothesis_t *h = &hypotheses[i];
-            if (h->score > best_score) {
-                best_score = h->score;
+            p3_result_t *candidate = p3_demod_run(samples + phase3_start,
+                                                  phase3_len,
+                                                  phase3_start,
+                                                  h->baud_code,
+                                                  h->carrier_sel,
+                                                  8000);
+            float seq_score = p3_sequence_guided_score(candidate, result, phase3_start, phase3_end);
+            float total_score = h->score + seq_score;
+
+            if (total_score > best_total_score) {
+                best_total_score = total_score;
+                best_base_score = h->score;
+                best_seq_score = seq_score;
                 best_idx = i;
+                if (best_detail)
+                    p3_result_free(best_detail);
+                best_detail = candidate;
+                candidate = NULL;
             }
-            printf("    [%d] %d baud %s carrier (%.0f Hz): %d symbols, %d segments, score=%.1f%s%s%s%s\n",
+            printf("    [%d] %d baud %s carrier (%.0f Hz): %d symbols, %d segments, score=%.1f seq=%.1f total=%.1f%s%s%s%s\n",
                    i,
                    (int)h->baud_rate,
                    h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
@@ -7382,29 +7691,37 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                    h->symbol_count,
                    h->segment_count,
                    h->score,
+                   seq_score,
+                   total_score,
                    h->has_s ? " [S]" : "",
                    h->has_trn ? " [TRN]" : "",
                    h->has_j ? " [J]" : "",
                    h->has_ru ? " [Ru]" : "");
+            if (candidate)
+                p3_result_free(candidate);
         }
 
-        if (best_idx >= 0 && best_score > 0.0f) {
+        if (best_idx >= 0 && best_total_score > 0.0f) {
             const p3_hypothesis_t *best = &hypotheses[best_idx];
-            p3_result_t *detail;
+            p3_result_t *detail = best_detail;
 
-            printf("  Best: %d baud %s carrier (%.0f Hz), score=%.1f\n",
+            printf("  Best: %d baud %s carrier (%.0f Hz), total=%.1f (base=%.1f seq=%.1f)\n",
                    (int)best->baud_rate,
                    best->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
                    best->carrier_hz,
-                   best->score);
+                   best_total_score,
+                   best_base_score,
+                   best_seq_score);
 
             /* Run detailed demod on the best hypothesis */
-            detail = p3_demod_run(samples + phase3_start,
-                                  phase3_len,
-                                  phase3_start,
-                                  best->baud_code,
-                                  best->carrier_sel,
-                                  8000);
+            if (!detail) {
+                detail = p3_demod_run(samples + phase3_start,
+                                      phase3_len,
+                                      phase3_start,
+                                      best->baud_code,
+                                      best->carrier_sel,
+                                      8000);
+            }
             if (detail) {
                 printf("  Symbols: %d, Segments: %d\n",
                        detail->symbol_count, detail->segment_count);
@@ -7414,7 +7731,13 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
 
                 for (int i = 0; i < detail->segment_count; i++) {
                     const p3_segment_t *seg = &detail->segments[i];
-                    if (seg->type == P3_SIGNAL_SILENCE || seg->type == P3_SIGNAL_UNKNOWN)
+                    if (!(seg->type == P3_SIGNAL_S
+                          || seg->type == P3_SIGNAL_S_BAR
+                          || seg->type == P3_SIGNAL_TRN
+                          || seg->type == P3_SIGNAL_J
+                          || seg->type == P3_SIGNAL_J_PRIME
+                          || seg->type == P3_SIGNAL_RU
+                          || seg->type == P3_SIGNAL_UR))
                         continue;
                     printf("    [%d] %s: symbols %d–%d (%d), samples %d–%d (%.1f–%.1f ms), mag=%.3f conf=%.2f",
                            i,
@@ -7436,9 +7759,12 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                         printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                     printf("\n");
                 }
+                p3_print_data_signatures(detail);
                 p3_result_free(detail);
             }
         } else {
+            if (best_detail)
+                p3_result_free(best_detail);
             printf("  No recognizable Phase 3 signals found by p3_demod\n");
         }
     }
@@ -7569,6 +7895,7 @@ static void p3_demod_scan_window(const int16_t *samples,
                     printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                 printf("\n");
             }
+            p3_print_data_signatures(detail);
             p3_result_free(detail);
         }
     } else {

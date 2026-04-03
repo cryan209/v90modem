@@ -7,6 +7,7 @@
 
 #include "p3_demod.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -135,6 +136,14 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->baud_phase = 0.0f;
     d->ted_alpha = 0.02f;
 
+    /* Matched-filter state */
+    memset(d->mf_hist_re, 0, sizeof(d->mf_hist_re));
+    memset(d->mf_hist_im, 0, sizeof(d->mf_hist_im));
+    d->mf_hist_pos = 0;
+    d->mf_prev_re = 0.0f;
+    d->mf_prev_im = 0.0f;
+    d->mf_prev_valid = false;
+
     /* AGC */
     d->agc_gain = 1.0f / 8000.0f;  /* Initial conservative gain */
     d->agc_target = 1.0f;
@@ -163,6 +172,12 @@ void p3_demod_reset(p3_demod_t *d)
     d->idum_re = 0.0f;
     d->idum_im = 0.0f;
     d->idum_count = 0;
+    memset(d->mf_hist_re, 0, sizeof(d->mf_hist_re));
+    memset(d->mf_hist_im, 0, sizeof(d->mf_hist_im));
+    d->mf_hist_pos = 0;
+    d->mf_prev_re = 0.0f;
+    d->mf_prev_im = 0.0f;
+    d->mf_prev_valid = false;
     d->prev_re = 0.0f;
     d->prev_im = 0.0f;
     d->prev_valid = false;
@@ -363,6 +378,7 @@ int p3_demod_process(p3_demod_t *d,
 {
     int start_count;
     float spb;
+    static const float mf_taps[5] = {0.40f, 0.25f, 0.18f, 0.11f, 0.06f};
 
     if (!d || !samples || sample_count <= 0 || !result)
         return 0;
@@ -373,35 +389,56 @@ int p3_demod_process(p3_demod_t *d,
     for (int i = 0; i < sample_count; i++) {
         float sample = (float)samples[i];
         float cos_val, sin_val;
+        float bb_re, bb_im;
+        float filt_re = 0.0f, filt_im = 0.0f;
+        float phase_prev;
 
         /* Mix down to baseband */
         nco_get(d->nco_phase, &cos_val, &sin_val);
         d->nco_phase += d->nco_phase_inc;
 
-        d->idum_re += sample * cos_val;
-        d->idum_im += sample * (-sin_val);
-        d->idum_count++;
+        bb_re = sample * cos_val;
+        bb_im = sample * (-sin_val);
+
+        /* Push into short causal FIR (matched-filter approximation). */
+        d->mf_hist_re[d->mf_hist_pos] = bb_re;
+        d->mf_hist_im[d->mf_hist_pos] = bb_im;
+        d->mf_hist_pos = (d->mf_hist_pos + 1) % 5;
+        for (int k = 0; k < 5; k++) {
+            int idx = d->mf_hist_pos - 1 - k;
+            if (idx < 0)
+                idx += 5;
+            filt_re += mf_taps[k] * d->mf_hist_re[idx];
+            filt_im += mf_taps[k] * d->mf_hist_im[idx];
+        }
 
         /* Check for baud strobe */
+        phase_prev = d->baud_phase;
         d->baud_phase += 1.0f;
         if (d->baud_phase >= spb) {
-            d->baud_phase -= spb;
+            float frac = spb - phase_prev;
+            float sym_re = filt_re;
+            float sym_im = filt_im;
 
-            /* Normalize integrate-and-dump */
-            if (d->idum_count > 0) {
-                float norm = 1.0f / (float)d->idum_count;
-                emit_symbol(d,
-                            d->idum_re * norm,
-                            d->idum_im * norm,
-                            sample_offset + i,
-                            result);
+            if (frac < 0.0f)
+                frac = 0.0f;
+            if (frac > 1.0f)
+                frac = 1.0f;
+            if (d->mf_prev_valid) {
+                sym_re = d->mf_prev_re*(1.0f - frac) + filt_re*frac;
+                sym_im = d->mf_prev_im*(1.0f - frac) + filt_im*frac;
             }
 
-            /* Reset accumulator */
-            d->idum_re = 0.0f;
-            d->idum_im = 0.0f;
-            d->idum_count = 0;
+            emit_symbol(d,
+                        sym_re,
+                        sym_im,
+                        sample_offset + i,
+                        result);
+            d->baud_phase -= spb;
         }
+        d->mf_prev_re = filt_re;
+        d->mf_prev_im = filt_im;
+        d->mf_prev_valid = true;
     }
 
     return result->symbol_count - start_count;
@@ -421,8 +458,22 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
 {
     int matches = 0;
     int period = 6;
+    int dibit_mask = 0;
+    int unique_dibits = 0;
 
     if (len < 12)
+        return false;
+
+    /* Reject trivial 2-point repeats; S/S-bar should exercise multiple dibits. */
+    for (int i = 0; i < period; i++) {
+        int d = syms[start + i].dibit & 3;
+        dibit_mask |= (1 << d);
+    }
+    for (int d = 0; d < 4; d++) {
+        if (dibit_mask & (1 << d))
+            unique_dibits++;
+    }
+    if (unique_dibits < 3)
         return false;
 
     /* Check consistency of 6-symbol repeat */
@@ -623,6 +674,28 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
     if (best_matches * 100 < best_checks * 82)
         return false;
 
+    /* Reject degenerate low-entropy patterns that arise from false locks. */
+    {
+        int ones = 0;
+        for (int b = 0; b < 16; b++)
+            ones += (best_pat >> b) & 1;
+        if (ones < 3 || ones > 13)
+            return false;
+    }
+    for (int p = 1; p <= 8; p <<= 1) {
+        bool repeats = true;
+        for (int b = p; b < 16; b++) {
+            int bit = (best_pat >> b) & 1;
+            int prev = (best_pat >> (b - p)) & 1;
+            if (bit != prev) {
+                repeats = false;
+                break;
+            }
+        }
+        if (repeats)
+            return false;
+    }
+
     if (trn16) *trn16 = best_pat;
     if (hypothesis) *hypothesis = best_phase;
     return true;
@@ -708,34 +781,42 @@ int p3_segment_symbols(p3_result_t *result)
         /* Try to identify the signal type.
          * Test patterns from most specific to least specific. */
 
-        /* Check for Ru/uR (V.92, 6-symbol 2-point pattern) */
-        if (remaining >= 18) {
-            int end = pos;
-            while (end < n && is_ru_pattern(syms, pos, end - pos + 6,
-                                            &ru_positive)
-                   && end + 6 <= n)
-                end += 6;
-            if (end - pos >= 18) {
+        /* Check for Ru/uR (V.92, 6-symbol 2-point pattern). */
+        if (remaining >= 18 && is_ru_pattern(syms, pos, 18, &ru_positive)) {
+            seg_len = 18;
+            while (pos + seg_len + 6 <= n) {
+                bool next_positive = ru_positive;
+                if (!is_ru_pattern(syms, pos, seg_len + 6, &next_positive))
+                    break;
+                if (next_positive != ru_positive)
+                    break;
+                seg_len += 6;
+            }
+            {
                 p3_segment_t *seg;
                 add_segment(result,
                             ru_positive ? P3_SIGNAL_RU : P3_SIGNAL_UR,
-                            pos, end - pos, syms);
+                            pos, seg_len, syms);
                 seg = &result->segments[result->segment_count - 1];
                 seg->ru_positive_first = ru_positive;
                 seg->confidence = 0.9f;
-                pos = end;
-                continue;
             }
+            pos += seg_len;
+            continue;
         }
 
         /* Check for S / S-bar (6-symbol repeating) */
-        if (remaining >= 12 && is_s_pattern(syms, pos, remaining,
-                                            &s_complement)) {
-            /* Find extent of S pattern */
+        if (remaining >= 12 && is_s_pattern(syms, pos, 12, &s_complement)) {
+            /* Extend while the same S/S-bar class holds. */
             seg_len = 12;
-            while (pos + seg_len + 6 <= n
-                   && is_s_pattern(syms, pos, seg_len + 6, NULL))
+            while (pos + seg_len + 6 <= n) {
+                bool next_complement = s_complement;
+                if (!is_s_pattern(syms, pos, seg_len + 6, &next_complement))
+                    break;
+                if (next_complement != s_complement)
+                    break;
                 seg_len += 6;
+            }
             add_segment(result,
                         s_complement ? P3_SIGNAL_S_BAR : P3_SIGNAL_S,
                         pos, seg_len, syms);
@@ -745,13 +826,11 @@ int p3_segment_symbols(p3_result_t *result)
         }
 
         /* Check for TRN (scrambled ones) */
-        if (remaining >= 24 && is_trn_pattern(syms, pos, remaining)) {
-            seg_len = remaining;
-            for (int try_len = 24; try_len + 12 <= remaining; try_len += 12) {
-                if (!is_trn_pattern(syms, pos, try_len + 12))
-                    break;
-                seg_len = try_len + 12;
-            }
+        if (remaining >= 24 && is_trn_pattern(syms, pos, 24)) {
+            seg_len = 24;
+            while (pos + seg_len + 12 <= n
+                   && is_trn_pattern(syms, pos, seg_len + 12))
+                seg_len += 12;
             {
                 int checks = 0;
                 int error_bits = trn_recurrence_errors(syms, pos, seg_len, &checks);
@@ -770,13 +849,16 @@ int p3_segment_symbols(p3_result_t *result)
 
         /* Check for J frame (16-bit repeating descrambled pattern) */
         if (remaining >= 48
-            && detect_j_pattern(syms, pos, remaining, &j_trn16, &j_hyp)) {
-            seg_len = remaining;
-            /* Trim to where the J pattern fades */
-            for (int try_len = 48; try_len + 8 <= remaining; try_len += 8) {
-                if (!detect_j_pattern(syms, pos, try_len + 8, NULL, NULL))
+            && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp)) {
+            seg_len = 48;
+            while (pos + seg_len + 8 <= n) {
+                uint16_t next_trn16;
+                int next_hyp;
+                if (!detect_j_pattern(syms, pos, seg_len + 8, &next_trn16, &next_hyp))
                     break;
-                seg_len = try_len + 8;
+                j_trn16 = next_trn16;
+                j_hyp = next_hyp;
+                seg_len += 8;
             }
             {
                 p3_segment_t *seg;
@@ -898,6 +980,8 @@ static float coarse_j16_periodicity_score(const p3_symbol_t *syms, int n)
     return (best_checks > 0) ? ((float) best_matches / (float) best_checks) : 0.0f;
 }
 
+static float score_result(const p3_result_t *result);
+
 /* ------------------------------------------------------------------ */
 /*  Convenience: run full demodulation on a sample range              */
 /* ------------------------------------------------------------------ */
@@ -909,8 +993,9 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                           int carrier_sel,
                           int sample_rate)
 {
-    p3_demod_t demod;
-    p3_result_t *result;
+    p3_result_t *best_result = NULL;
+    float best_score = -FLT_MAX;
+    int trials = 4;
     int est_symbols;
 
     if (!samples || sample_count <= 0)
@@ -918,23 +1003,43 @@ p3_result_t *p3_demod_run(const int16_t *samples,
 
     /* Estimate max symbols: samples / (samples_per_symbol) + margin */
     est_symbols = (int)((float)sample_count * 2.0f) + 100;
-    result = p3_result_alloc(est_symbols, est_symbols / 4 + 16);
-    if (!result)
-        return NULL;
 
-    p3_demod_init(&demod, baud_code, carrier_sel, sample_rate);
-    p3_demod_process(&demod, samples, sample_count, sample_offset, result);
-    p3_segment_symbols(result);
+    for (int t = 0; t < trials; t++) {
+        p3_demod_t demod;
+        p3_result_t *result;
+        float s;
 
-    result->carrier_freq_estimate = demod.carrier_hz + demod.pll_freq_err;
-    result->baud_rate_estimate = demod.baud_rate;
-    result->locked = (demod.magnitude_count > 24);
-    if (demod.magnitude_count > 0 && demod.magnitude_sum > 0.0f) {
-        float avg_mag = demod.magnitude_sum / (float)demod.magnitude_count;
-        /* Very rough SNR estimate from magnitude variance */
-        result->snr_estimate_db = 20.0f * log10f(avg_mag + 1e-10f);
+        result = p3_result_alloc(est_symbols, est_symbols / 4 + 16);
+        if (!result)
+            continue;
+
+        p3_demod_init(&demod, baud_code, carrier_sel, sample_rate);
+        /* Sweep initial strobe phase to reduce aliasing to a bad symbol cut. */
+        demod.baud_phase = ((float) t / (float) trials) * demod.samples_per_symbol;
+        p3_demod_process(&demod, samples, sample_count, sample_offset, result);
+        p3_segment_symbols(result);
+
+        result->carrier_freq_estimate = demod.carrier_hz + demod.pll_freq_err;
+        result->baud_rate_estimate = demod.baud_rate;
+        result->locked = (demod.magnitude_count > 24);
+        if (demod.magnitude_count > 0 && demod.magnitude_sum > 0.0f) {
+            float avg_mag = demod.magnitude_sum / (float)demod.magnitude_count;
+            /* Very rough SNR estimate from magnitude variance */
+            result->snr_estimate_db = 20.0f * log10f(avg_mag + 1e-10f);
+        }
+
+        s = score_result(result);
+        if (!best_result || s > best_score) {
+            if (best_result)
+                p3_result_free(best_result);
+            best_result = result;
+            best_score = s;
+        } else {
+            p3_result_free(result);
+        }
     }
-    return result;
+
+    return best_result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -944,6 +1049,7 @@ p3_result_t *p3_demod_run(const int16_t *samples,
 static float score_result(const p3_result_t *result)
 {
     float score = 0.0f;
+    int unknown_symbols = 0;
 
     if (!result)
         return -1000.0f;
@@ -955,25 +1061,34 @@ static float score_result(const p3_result_t *result)
         switch (seg->type) {
         case P3_SIGNAL_S:
         case P3_SIGNAL_S_BAR:
-            score += seg_score * 2.0f;
+            if (seg->length >= 18)
+                score += seg_score * 1.7f;
             break;
         case P3_SIGNAL_TRN:
-            score += seg_score * 1.5f;
+            if (seg->length >= 24)
+                score += seg_score * 1.5f;
             break;
         case P3_SIGNAL_J:
-            score += seg_score * 3.0f;
+            if (seg->length >= 64)
+                score += seg_score * 3.0f;
             break;
         case P3_SIGNAL_RU:
         case P3_SIGNAL_UR:
-            score += seg_score * 2.5f;
+            if (seg->length >= 18)
+                score += seg_score * 2.0f;
             break;
         case P3_SIGNAL_SILENCE:
+            break;
         case P3_SIGNAL_UNKNOWN:
+            unknown_symbols += seg->length;
+            break;
         case P3_SIGNAL_PP:
         case P3_SIGNAL_J_PRIME:
             break;
         }
     }
+    score -= 0.20f * (float) result->segment_count;
+    score -= 0.03f * (float) unknown_symbols;
     return score;
 }
 

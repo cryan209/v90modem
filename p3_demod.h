@@ -99,6 +99,14 @@ typedef struct {
     float idum_im;
     int   idum_count;
 
+    /* Simple matched-filter state (causal FIR over mixed baseband) */
+    float mf_hist_re[5];
+    float mf_hist_im[5];
+    int   mf_hist_pos;
+    float mf_prev_re;
+    float mf_prev_im;
+    bool  mf_prev_valid;
+
     /* Previous symbol for differential decode */
     float prev_re;
     float prev_im;
