@@ -449,21 +449,81 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
     return true;
 }
 
+static int symbol_scrambled_bit(const p3_symbol_t *syms, int start, int bit_pos)
+{
+    int sym_idx = bit_pos / 2;
+    int bit_sel = bit_pos & 1;
+    int dibit = syms[start + sym_idx].dibit;
+
+    return bit_sel ? ((dibit >> 1) & 1) : (dibit & 1);
+}
+
+static int symbol_descrambled_bit(const p3_symbol_t *syms, int start, int bit_pos)
+{
+    int sym_idx = bit_pos / 2;
+    int bit_sel = bit_pos & 1;
+
+    return bit_sel ? syms[start + sym_idx].bit1 : syms[start + sym_idx].bit0;
+}
+
+/* For TRN, the scrambled bitstream follows:
+ * in[n] = 1 ^ in[n-23] ^ in[n-5]
+ * This recurrence is independent of descrambler start state once we have
+ * enough history, so it gives a robust pattern test on mid-stream captures. */
+static int trn_recurrence_errors(const p3_symbol_t *syms, int start, int len, int *checks_out)
+{
+    int total_bits;
+    int checks = 0;
+    int errors = 0;
+
+    if (!syms || len <= 0) {
+        if (checks_out)
+            *checks_out = 0;
+        return 0;
+    }
+
+    total_bits = len * 2;
+    for (int b = 23; b < total_bits; b++) {
+        int prev23 = symbol_scrambled_bit(syms, start, b - 23);
+        int prev5 = symbol_scrambled_bit(syms, start, b - 5);
+        int expect = 1 ^ prev23 ^ prev5;
+        int got = symbol_scrambled_bit(syms, start, b);
+        checks++;
+        if (got != expect)
+            errors++;
+    }
+    if (checks_out)
+        *checks_out = checks;
+    return errors;
+}
+
 /* Check if a run of symbols looks like TRN (scrambled ones) */
 static bool is_trn_pattern(const p3_symbol_t *syms, int start, int len)
 {
-    int ones = 0;
+    int checks;
+    int errors;
+    int descr_ones = 0;
+    int descr_bits = 0;
 
     if (len < 24)
         return false;
+
+    errors = trn_recurrence_errors(syms, start, len, &checks);
+    if (checks >= 24) {
+        /* Recurrence match >= 78% */
+        if ((checks - errors) * 100 >= checks * 78)
+            return true;
+    }
+
+    /* Fallback when recurrence window is short/noisy */
     for (int i = 0; i < len; i++) {
         if (syms[start + i].bit0 == 1)
-            ones++;
+            descr_ones++;
         if (syms[start + i].bit1 == 1)
-            ones++;
+            descr_ones++;
+        descr_bits += 2;
     }
-    /* TRN = all descrambled ones; allow 15% error for acquisition */
-    return ones * 100 >= len * 2 * 85;
+    return (descr_ones * 100 >= descr_bits * 80);
 }
 
 /* Check for Ru/uR 2-point pattern (V.92 §3.8):
@@ -515,7 +575,9 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
                              uint16_t *trn16, int *hypothesis)
 {
     uint16_t best_pat = 0;
+    int best_phase = 0;
     int best_matches = 0;
+    int best_checks = 0;
     int total_bits;
 
     if (len < 16)
@@ -523,43 +585,46 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
 
     total_bits = len * 2;
 
-    /* Try all 16-bit patterns from the first 16 bits */
-    if (total_bits < 32)
+    /* Need enough repeats to avoid random periodic false positives. */
+    if (total_bits < 64)
         return false;
 
-    {
+    for (int phase = 0; phase < 16; phase++) {
         uint16_t pat = 0;
-        int matches;
+        int matches = 0;
+        int checks = 0;
 
+        if (phase + 16 > total_bits)
+            break;
         for (int b = 0; b < 16; b++) {
-            int sym_idx = b / 2;
-            int bit_sel = b & 1;
-            int bit = bit_sel ? syms[start + sym_idx].bit1 : syms[start + sym_idx].bit0;
-            pat |= (uint16_t)(bit & 1) << b;
+            int bit = symbol_descrambled_bit(syms, start, phase + b);
+            pat |= (uint16_t) (bit & 1) << b;
         }
 
-        /* Count how many times this 16-bit pattern repeats */
-        matches = 0;
-        for (int b = 0; b < total_bits; b++) {
-            int sym_idx = b / 2;
-            int bit_sel = b & 1;
-            int bit = bit_sel ? syms[start + sym_idx].bit1 : syms[start + sym_idx].bit0;
-            int expected = (int)((pat >> (b % 16)) & 1);
+        for (int b = phase; b < total_bits; b++) {
+            int bit = symbol_descrambled_bit(syms, start, b);
+            int expected = (int) ((pat >> ((b - phase) % 16)) & 1);
+            checks++;
             if (bit == expected)
                 matches++;
         }
-
-        if (matches * 100 >= total_bits * 80) {
+        if (checks > 0 && (matches > best_matches
+                           || (matches == best_matches && checks > best_checks))) {
             best_pat = pat;
+            best_phase = phase;
             best_matches = matches;
+            best_checks = checks;
         }
     }
 
-    if (best_matches == 0)
+    if (best_checks == 0)
+        return false;
+    /* Require strong periodicity for J detection. */
+    if (best_matches * 100 < best_checks * 82)
         return false;
 
     if (trn16) *trn16 = best_pat;
-    if (hypothesis) *hypothesis = 0;
+    if (hypothesis) *hypothesis = best_phase;
     return true;
 }
 
@@ -679,12 +744,36 @@ int p3_segment_symbols(p3_result_t *result)
             continue;
         }
 
+        /* Check for TRN (scrambled ones) */
+        if (remaining >= 24 && is_trn_pattern(syms, pos, remaining)) {
+            seg_len = remaining;
+            for (int try_len = 24; try_len + 12 <= remaining; try_len += 12) {
+                if (!is_trn_pattern(syms, pos, try_len + 12))
+                    break;
+                seg_len = try_len + 12;
+            }
+            {
+                int checks = 0;
+                int error_bits = trn_recurrence_errors(syms, pos, seg_len, &checks);
+                float conf;
+                add_segment(result, P3_SIGNAL_TRN, pos, seg_len, syms);
+                result->segments[result->segment_count - 1].trn_errors = error_bits;
+                if (checks > 0)
+                    conf = 1.0f - (float) error_bits / (float) checks;
+                else
+                    conf = 0.5f;
+                result->segments[result->segment_count - 1].confidence = conf;
+            }
+            pos += seg_len;
+            continue;
+        }
+
         /* Check for J frame (16-bit repeating descrambled pattern) */
-        if (remaining >= 16
+        if (remaining >= 48
             && detect_j_pattern(syms, pos, remaining, &j_trn16, &j_hyp)) {
             seg_len = remaining;
             /* Trim to where the J pattern fades */
-            for (int try_len = 16; try_len + 8 <= remaining; try_len += 8) {
+            for (int try_len = 48; try_len + 8 <= remaining; try_len += 8) {
                 if (!detect_j_pattern(syms, pos, try_len + 8, NULL, NULL))
                     break;
                 seg_len = try_len + 8;
@@ -695,30 +784,7 @@ int p3_segment_symbols(p3_result_t *result)
                 seg = &result->segments[result->segment_count - 1];
                 seg->j_trn16 = j_trn16;
                 seg->j_hypothesis = j_hyp;
-                seg->confidence = 0.8f;
-            }
-            pos += seg_len;
-            continue;
-        }
-
-        /* Check for TRN (scrambled ones) */
-        if (remaining >= 24 && is_trn_pattern(syms, pos, remaining)) {
-            seg_len = remaining;
-            for (int try_len = 24; try_len + 12 <= remaining; try_len += 12) {
-                if (!is_trn_pattern(syms, pos, try_len + 12))
-                    break;
-                seg_len = try_len + 12;
-            }
-            {
-                int error_bits = 0;
-                for (int i = 0; i < seg_len; i++) {
-                    if (syms[pos + i].bit0 != 1) error_bits++;
-                    if (syms[pos + i].bit1 != 1) error_bits++;
-                }
-                add_segment(result, P3_SIGNAL_TRN, pos, seg_len, syms);
-                result->segments[result->segment_count - 1].trn_errors = error_bits;
-                result->segments[result->segment_count - 1].confidence =
-                    1.0f - (float)error_bits / (float)(seg_len * 2);
+                seg->confidence = 0.78f;
             }
             pos += seg_len;
             continue;
@@ -731,6 +797,105 @@ int p3_segment_symbols(p3_result_t *result)
     }
 
     return result->segment_count;
+}
+
+static float coarse_s6_repeat_score(const p3_symbol_t *syms, int n)
+{
+    int checks = 0;
+    int matches = 0;
+
+    if (!syms || n < 12)
+        return 0.0f;
+    for (int i = 6; i < n; i++) {
+        checks++;
+        if (syms[i].dibit == syms[i - 6].dibit)
+            matches++;
+    }
+    return (checks > 0) ? ((float) matches / (float) checks) : 0.0f;
+}
+
+static float coarse_ru_repeat_score(const p3_symbol_t *syms, int n)
+{
+    int best_match = 0;
+    int best_checks = 0;
+
+    if (!syms || n < 18)
+        return 0.0f;
+
+    for (int phase = 0; phase < 6; phase++) {
+        int checks = 0;
+        int match_normal = 0;
+        int match_complement = 0;
+        for (int i = phase; i < n; i++) {
+            int d = syms[i].dibit;
+            int pos = (i - phase) % 6;
+            bool first_half = (pos < 3);
+            checks++;
+            if (first_half) {
+                if (d == 0) match_normal++;
+                if (d == 2) match_complement++;
+            } else {
+                if (d == 2) match_normal++;
+                if (d == 0) match_complement++;
+            }
+        }
+        if (checks > 0) {
+            int match = (match_normal > match_complement) ? match_normal : match_complement;
+            if (match > best_match) {
+                best_match = match;
+                best_checks = checks;
+            }
+        }
+    }
+    return (best_checks > 0) ? ((float) best_match / (float) best_checks) : 0.0f;
+}
+
+static float coarse_trn_recurrence_score(const p3_symbol_t *syms, int n)
+{
+    int checks = 0;
+    int errors;
+
+    if (!syms || n < 24)
+        return 0.0f;
+    errors = trn_recurrence_errors(syms, 0, n, &checks);
+    return (checks > 0) ? ((float) (checks - errors) / (float) checks) : 0.0f;
+}
+
+static float coarse_j16_periodicity_score(const p3_symbol_t *syms, int n)
+{
+    int total_bits;
+    int best_matches = 0;
+    int best_checks = 0;
+
+    if (!syms || n < 16)
+        return 0.0f;
+    total_bits = n * 2;
+    if (total_bits < 64)
+        return 0.0f;
+
+    for (int phase = 0; phase < 16; phase++) {
+        uint16_t pat = 0;
+        int checks = 0;
+        int matches = 0;
+        if (phase + 16 > total_bits)
+            break;
+        for (int b = 0; b < 16; b++) {
+            int bit = symbol_descrambled_bit(syms, 0, phase + b);
+            pat |= (uint16_t) (bit & 1) << b;
+        }
+        for (int b = phase; b < total_bits; b++) {
+            int bit = symbol_descrambled_bit(syms, 0, b);
+            int expect = (int) ((pat >> ((b - phase) % 16)) & 1);
+            checks++;
+            if (bit == expect)
+                matches++;
+        }
+        if (matches > best_matches || (matches == best_matches && checks > best_checks)) {
+            best_matches = matches;
+            best_checks = checks;
+        }
+    }
+    return (best_checks > 0) ? ((float) best_matches / (float) best_checks) : 0.0f;
 }
 
 /* ------------------------------------------------------------------ */
@@ -880,8 +1045,10 @@ int p3_scan_all_hypotheses(const int16_t *samples,
     if (!samples || sample_count <= 0 || !hypotheses || max_hypotheses <= 0)
         return 0;
 
-    /* Narrow to active energy region to avoid demodulating silence */
-    {
+    /* Narrow to active energy region on long scans to avoid demodulating
+     * large silence spans. For already-targeted Phase 3 windows, keep the
+     * full window so ordering/pattern context is preserved. */
+    if (sample_count > 12000) {
         int active_start, active_end;
         if (find_active_region(samples, sample_count, &active_start, &active_end)) {
             scan_start = active_start;
@@ -889,11 +1056,14 @@ int p3_scan_all_hypotheses(const int16_t *samples,
         }
     }
 
-    /* Quick pre-score: correlate a short window with each carrier to rank
-     * hypotheses, then only fully demodulate the best few. */
+    /* Quick pre-score: correlate a short window with each carrier.
+     * For short Phase 3 windows we evaluate all hypotheses; for long
+     * fallback scans we cap the number of full demod runs. */
     {
         float pre_scores[P3_BAUD_COUNT * 2];
+        int order[P3_BAUD_COUNT * 2];
         int n_hyp = 0;
+        int candidates_to_run;
         /* Use a 2000-sample window from the middle of the active region */
         int pre_len = (scan_len < 2000) ? scan_len : 2000;
         int pre_start = scan_start + (scan_len - pre_len) / 2;
@@ -932,34 +1102,38 @@ int p3_scan_all_hypotheses(const int16_t *samples,
             }
         }
 
-        /* Find the top 2 hypotheses by pre-score */
-        int top_indices[2] = {-1, -1};
-        float top_scores[2] = {-1.0f, -1.0f};
+        for (int i = 0; i < n_hyp; i++)
+            order[i] = i;
+
+        /* Sort candidate indices by descending pre-score (small N=12). */
         for (int i = 0; i < n_hyp; i++) {
-            if (pre_scores[i] > top_scores[0]) {
-                top_scores[1] = top_scores[0];
-                top_indices[1] = top_indices[0];
-                top_scores[0] = pre_scores[i];
-                top_indices[0] = i;
-            } else if (pre_scores[i] > top_scores[1]) {
-                top_scores[1] = pre_scores[i];
-                top_indices[1] = i;
+            for (int j = i + 1; j < n_hyp; j++) {
+                if (pre_scores[order[j]] > pre_scores[order[i]]) {
+                    int tmp = order[i];
+                    order[i] = order[j];
+                    order[j] = tmp;
+                }
             }
         }
 
-        /* Only fully demodulate the top candidates */
-        for (int ti = 0; ti < 2 && count < max_hypotheses; ti++) {
-            if (top_indices[ti] < 0 || top_scores[ti] <= 0.0f)
-                continue;
-            {
-                int idx = top_indices[ti];
-                int baud = idx / 2;
-                int carrier = idx % 2;
+        if (scan_len <= 12000)
+            candidates_to_run = n_hyp;          /* targeted phase-3 window */
+        else if (scan_len <= 30000)
+            candidates_to_run = (n_hyp < 8) ? n_hyp : 8;
+        else
+            candidates_to_run = (n_hyp < 4) ? n_hyp : 4;
 
-    for (int baud_unused = baud; baud_unused == baud; baud_unused++) {
-        for (int carrier_unused = carrier; carrier_unused == carrier; carrier_unused++) {
+        /* Fully demodulate ranked candidates. */
+        for (int ti = 0; ti < candidates_to_run && count < max_hypotheses; ti++) {
             p3_result_t *result;
             p3_hypothesis_t *h;
+            int idx;
+            int baud;
+            int carrier;
+
+            idx = order[ti];
+            baud = idx / 2;
+            carrier = idx % 2;
 
             result = p3_demod_run(samples + scan_start, scan_len,
                                   sample_offset + scan_start,
@@ -976,6 +1150,22 @@ int p3_scan_all_hypotheses(const int16_t *samples,
             h->symbol_count = result->symbol_count;
             h->segment_count = result->segment_count;
             h->score = score_result(result);
+
+            {
+                float s6_score = coarse_s6_repeat_score(result->symbols, result->symbol_count);
+                float trn_score = coarse_trn_recurrence_score(result->symbols, result->symbol_count);
+                float ru_score = coarse_ru_repeat_score(result->symbols, result->symbol_count);
+                float j16_score = coarse_j16_periodicity_score(result->symbols, result->symbol_count);
+
+                if (s6_score >= 0.72f) h->has_s = true;
+                if (trn_score >= 0.74f) h->has_trn = true;
+                if (j16_score >= 0.78f) h->has_j = true;
+                if (ru_score >= 0.72f) h->has_ru = true;
+
+                /* Add weak-evidence scoring so we can still surface
+                 * candidate hypotheses when strict segmentation fails. */
+                h->score += 20.0f*s6_score + 22.0f*trn_score + 18.0f*ru_score + 24.0f*j16_score;
+            }
 
             for (int i = 0; i < result->segment_count; i++) {
                 switch (result->segments[i].type) {

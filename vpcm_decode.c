@@ -7317,12 +7317,15 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                                     const decode_v34_result_t *result,
                                     bool calling_party)
 {
-    int phase3_start;
-    int phase3_end;
+    int phase3_start = -1;
+    int phase3_end = -1;
     int phase3_len;
     const char *role = calling_party ? "caller" : "answerer";
 
     /* Determine Phase 3 sample range from V.34 decode results */
+    if (!result)
+        return;
+
     phase3_start = result->phase3_sample;
     if (phase3_start < 0)
         phase3_start = result->tx_first_s_sample;
@@ -7371,19 +7374,18 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                 best_score = h->score;
                 best_idx = i;
             }
-            if (h->score > 0.0f || h->has_s || h->has_trn || h->has_j || h->has_ru)
-                printf("    [%d] %d baud %s carrier (%.0f Hz): %d symbols, %d segments, score=%.1f%s%s%s%s\n",
-                       i,
-                       (int)h->baud_rate,
-                       h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
-                       h->carrier_hz,
-                       h->symbol_count,
-                       h->segment_count,
-                       h->score,
-                       h->has_s ? " [S]" : "",
-                       h->has_trn ? " [TRN]" : "",
-                       h->has_j ? " [J]" : "",
-                       h->has_ru ? " [Ru]" : "");
+            printf("    [%d] %d baud %s carrier (%.0f Hz): %d symbols, %d segments, score=%.1f%s%s%s%s\n",
+                   i,
+                   (int)h->baud_rate,
+                   h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                   h->carrier_hz,
+                   h->symbol_count,
+                   h->segment_count,
+                   h->score,
+                   h->has_s ? " [S]" : "",
+                   h->has_trn ? " [TRN]" : "",
+                   h->has_j ? " [J]" : "",
+                   h->has_ru ? " [Ru]" : "");
         }
 
         if (best_idx >= 0 && best_score > 0.0f) {
@@ -7412,6 +7414,8 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
 
                 for (int i = 0; i < detail->segment_count; i++) {
                     const p3_segment_t *seg = &detail->segments[i];
+                    if (seg->type == P3_SIGNAL_SILENCE || seg->type == P3_SIGNAL_UNKNOWN)
+                        continue;
                     printf("    [%d] %s: symbols %d–%d (%d), samples %d–%d (%.1f–%.1f ms), mag=%.3f conf=%.2f",
                            i,
                            p3_signal_type_name(seg->type),
@@ -7437,6 +7441,138 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
         } else {
             printf("  No recognizable Phase 3 signals found by p3_demod\n");
         }
+    }
+}
+
+static bool p3_demod_get_phase3_window(const decode_v34_result_t *result,
+                                       int total_samples,
+                                       int *phase3_start_out,
+                                       int *phase3_end_out)
+{
+    int phase3_start;
+    int phase3_end;
+
+    if (!result || !phase3_start_out || !phase3_end_out || total_samples <= 0)
+        return false;
+
+    phase3_start = result->phase3_sample;
+    if (phase3_start < 0)
+        phase3_start = result->tx_first_s_sample;
+    if (phase3_start < 0 || phase3_start >= total_samples)
+        return false;
+
+    phase3_end = result->phase4_sample;
+    if (phase3_end < 0)
+        phase3_end = result->phase4_ready_sample;
+    if (phase3_end < 0)
+        phase3_end = result->failure_sample;
+    if (phase3_end < 0 || phase3_end > total_samples)
+        phase3_end = total_samples;
+    if (phase3_end <= phase3_start)
+        return false;
+
+    if ((phase3_end - phase3_start) < 200)
+        return false;
+
+    *phase3_start_out = phase3_start;
+    *phase3_end_out = phase3_end;
+    return true;
+}
+
+static void p3_demod_scan_window(const int16_t *samples,
+                                 int sample_count,
+                                 int sample_offset,
+                                 int sample_rate,
+                                 const char *label)
+{
+    p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+    int count;
+    int best_idx = -1;
+    float best_score = -1.0f;
+
+    if (!samples || sample_count <= 0)
+        return;
+
+    printf("  %s: %.1f–%.1f ms (%.1f ms)\n",
+           label,
+           sample_to_ms(sample_offset, sample_rate),
+           sample_to_ms(sample_offset + sample_count, sample_rate),
+           sample_to_ms(sample_count, sample_rate));
+    printf("  Scanning all %d baud/carrier hypotheses...\n", P3_BAUD_COUNT * 2);
+
+    count = p3_scan_all_hypotheses(samples,
+                                   sample_count,
+                                   sample_offset,
+                                   sample_rate,
+                                   hypotheses,
+                                   P3_BAUD_COUNT * 2);
+
+    for (int i = 0; i < count; i++) {
+        const p3_hypothesis_t *h = &hypotheses[i];
+        if (h->score > best_score) {
+            best_score = h->score;
+            best_idx = i;
+        }
+        printf("    [%d] %d baud %s (%.0f Hz): %d sym, %d seg, score=%.1f%s%s%s%s\n",
+               i,
+               (int) h->baud_rate,
+               h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+               h->carrier_hz,
+               h->symbol_count,
+               h->segment_count,
+               h->score,
+               h->has_s ? " [S]" : "",
+               h->has_trn ? " [TRN]" : "",
+               h->has_j ? " [J]" : "",
+               h->has_ru ? " [Ru]" : "");
+    }
+
+    if (best_idx >= 0 && best_score > 0.0f) {
+        const p3_hypothesis_t *best = &hypotheses[best_idx];
+        p3_result_t *detail;
+
+        printf("    Best: %d baud %s (%.0f Hz), score=%.1f\n",
+               (int) best->baud_rate,
+               best->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+               best->carrier_hz,
+               best->score);
+
+        detail = p3_demod_run(samples,
+                              sample_count,
+                              sample_offset,
+                              best->baud_code,
+                              best->carrier_sel,
+                              sample_rate);
+        if (detail) {
+            printf("    Symbols: %d, Segments: %d\n",
+                   detail->symbol_count, detail->segment_count);
+            printf("    Carrier: %.1f Hz, SNR: %.1f dB\n",
+                   detail->carrier_freq_estimate,
+                   detail->snr_estimate_db);
+
+            for (int i = 0; i < detail->segment_count; i++) {
+                const p3_segment_t *seg = &detail->segments[i];
+                if (seg->type == P3_SIGNAL_SILENCE || seg->type == P3_SIGNAL_UNKNOWN)
+                    continue;
+                printf("      %s: %.1f–%.1f ms (%d sym) mag=%.3f conf=%.2f",
+                       p3_signal_type_name(seg->type),
+                       sample_to_ms(seg->start_sample, sample_rate),
+                       sample_to_ms(seg->end_sample, sample_rate),
+                       seg->length,
+                       seg->avg_magnitude,
+                       seg->confidence);
+                if (seg->type == P3_SIGNAL_TRN)
+                    printf(" errors=%d", seg->trn_errors);
+                if (seg->type == P3_SIGNAL_J)
+                    printf(" trn16=0x%04X", seg->j_trn16);
+                if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
+                    printf(" %s-first", seg->ru_positive_first ? "+" : "-");
+                printf("\n");
+            }
+            p3_result_free(detail);
+        }
+    } else {
+        printf("    No recognizable Phase 3 signals found\n");
     }
 }
 
@@ -9879,7 +10015,7 @@ static void run_decode_suite(const char *label,
                v8_pcm_modem_availability_to_str(capability_probe.result.jm_cm.pcm_modem_availability));
     }
 
-    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
+    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90 || opts->do_p3))) {
         decode_v34_pair_with_rescue(linear_samples,
                                     total_samples,
                                     law,
@@ -9948,89 +10084,47 @@ static void run_decode_suite(const char *label,
     }
 
     if (opts->raw_output_enabled && opts->do_p3) {
+        int phase3_start = -1;
+        int phase3_end = -1;
+        int last_phase3_start = -1;
+        int last_phase3_end = -1;
+        bool scanned_targeted_window = false;
+
         printf("\n=== Phase 3 Lightweight Demodulator Scan ===\n");
-        printf("  Scanning all %d baud/carrier hypotheses...\n", P3_BAUD_COUNT * 2);
-        {
-            p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
-            int count;
-            int best_idx = -1;
-            float best_score = -1.0f;
 
-            count = p3_scan_all_hypotheses(linear_samples,
-                                           total_samples,
-                                           0,
-                                           sample_rate,
-                                           hypotheses,
-                                           P3_BAUD_COUNT * 2);
+        if (have_answerer
+            && p3_demod_get_phase3_window(&answerer, total_samples, &phase3_start, &phase3_end)) {
+            p3_demod_scan_window(linear_samples + phase3_start,
+                                 phase3_end - phase3_start,
+                                 phase3_start,
+                                 sample_rate,
+                                 "Answerer Phase 3 window");
+            scanned_targeted_window = true;
+            last_phase3_start = phase3_start;
+            last_phase3_end = phase3_end;
+        }
 
-            for (int i = 0; i < count; i++) {
-                const p3_hypothesis_t *h = &hypotheses[i];
-                if (h->score > best_score) {
-                    best_score = h->score;
-                    best_idx = i;
-                }
-                if (h->score > 0.0f)
-                    printf("  [%d] %d baud %s (%.0f Hz): %d sym, %d seg, score=%.1f%s%s%s%s\n",
-                           i,
-                           (int)h->baud_rate,
-                           h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
-                           h->carrier_hz,
-                           h->symbol_count,
-                           h->segment_count,
-                           h->score,
-                           h->has_s ? " [S]" : "",
-                           h->has_trn ? " [TRN]" : "",
-                           h->has_j ? " [J]" : "",
-                           h->has_ru ? " [Ru]" : "");
+        if (have_caller
+            && p3_demod_get_phase3_window(&caller, total_samples, &phase3_start, &phase3_end)) {
+            if (!scanned_targeted_window
+                || phase3_start != last_phase3_start
+                || phase3_end != last_phase3_end) {
+                p3_demod_scan_window(linear_samples + phase3_start,
+                                     phase3_end - phase3_start,
+                                     phase3_start,
+                                     sample_rate,
+                                     "Caller Phase 3 window");
+                scanned_targeted_window = true;
             }
+        }
 
-            if (best_idx >= 0 && best_score > 0.0f) {
-                const p3_hypothesis_t *best = &hypotheses[best_idx];
-                p3_result_t *detail;
-
-                printf("  Best: %d baud %s (%.0f Hz), score=%.1f\n",
-                       (int)best->baud_rate,
-                       best->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
-                       best->carrier_hz,
-                       best->score);
-
-                detail = p3_demod_run(linear_samples,
-                                      total_samples,
-                                      0,
-                                      best->baud_code,
-                                      best->carrier_sel,
-                                      sample_rate);
-                if (detail) {
-                    printf("  Symbols: %d, Segments: %d\n",
-                           detail->symbol_count, detail->segment_count);
-                    printf("  Carrier: %.1f Hz, SNR: %.1f dB\n",
-                           detail->carrier_freq_estimate,
-                           detail->snr_estimate_db);
-
-                    for (int i = 0; i < detail->segment_count; i++) {
-                        const p3_segment_t *seg = &detail->segments[i];
-                        if (seg->type == P3_SIGNAL_SILENCE || seg->type == P3_SIGNAL_UNKNOWN)
-                            continue;
-                        printf("    %s: %.1f–%.1f ms (%d sym) mag=%.3f conf=%.2f",
-                               p3_signal_type_name(seg->type),
-                               sample_to_ms(seg->start_sample, sample_rate),
-                               sample_to_ms(seg->end_sample, sample_rate),
-                               seg->length,
-                               seg->avg_magnitude,
-                               seg->confidence);
-                        if (seg->type == P3_SIGNAL_TRN)
-                            printf(" errors=%d", seg->trn_errors);
-                        if (seg->type == P3_SIGNAL_J)
-                            printf(" trn16=0x%04X", seg->j_trn16);
-                        if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
-                            printf(" %s-first", seg->ru_positive_first ? "+" : "-");
-                        printf("\n");
-                    }
-                    p3_result_free(detail);
-                }
-            } else {
-                printf("  No recognizable Phase 3 signals found\n");
-            }
+        if (!scanned_targeted_window) {
+            printf("  Phase 3 boundaries unavailable from V.34 decode; falling back to full-stream scan.\n");
+            p3_demod_scan_window(linear_samples,
+                                 total_samples,
+                                 0,
+                                 sample_rate,
+                                 "Full stream fallback");
         }
     }
 
@@ -10157,7 +10251,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_energy && !do_stats && !do_call_log && !do_visualize_html)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_stats && !do_call_log && !do_visualize_html)
         do_all = true;
 
     if (do_all) {
