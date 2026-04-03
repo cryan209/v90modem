@@ -5988,8 +5988,30 @@ static void decode_v8_pass(const int16_t *samples,
             }
             if (probe.cm_jm_sample >= 0) {
                 char hexbuf[256];
+                char rawbitbuf[512];
+                int approx_bits;
 
                 format_hex_bytes(hexbuf, sizeof(hexbuf), probe.cm_jm_raw, probe.cm_jm_raw_len);
+                rawbitbuf[0] = '\0';
+                approx_bits = probe.cm_jm_raw_len * 10;
+                if (approx_bits > 0) {
+                    if (approx_bits > (int) sizeof(probe.cm_jm_raw) * 10)
+                        approx_bits = (int) sizeof(probe.cm_jm_raw) * 10;
+                    if (approx_bits > (int) sizeof(rawbitbuf) - 1)
+                        approx_bits = (int) sizeof(rawbitbuf) - 1;
+                    for (int i = 0; i < probe.cm_jm_raw_len && (i * 10 + 10) <= approx_bits; i++) {
+                        size_t used = strlen(rawbitbuf);
+                        snprintf(rawbitbuf + used,
+                                 sizeof(rawbitbuf) - used,
+                                 "%s0",
+                                 (i == 0) ? "" : " ");
+                        used = strlen(rawbitbuf);
+                        for (int b = 0; b < 8 && used + 2 < sizeof(rawbitbuf); b++)
+                            rawbitbuf[used++] = (probe.cm_jm_raw[i] & (1U << b)) ? '1' : '0';
+                        rawbitbuf[used++] = '1';
+                        rawbitbuf[used] = '\0';
+                    }
+                }
                 printf("  CM/JM candidate fields at ~%.1f ms:\n",
                        sample_to_ms(probe.cm_jm_sample, 8000));
                 printf("  Call function:  %s\n",
@@ -6008,6 +6030,8 @@ static void decode_v8_pass(const int16_t *samples,
                     printf("  T.66:           %s\n", v8_t66_to_str(probe.result.jm_cm.t66));
                 if (hexbuf[0] != '\0')
                     printf("  Raw bytes:      %s\n", hexbuf);
+                if (rawbitbuf[0] != '\0')
+                    printf("  Raw bits:       %s\n", rawbitbuf);
                 if (probe.cm_jm_salvaged)
                     printf("  Repeat status:  %s\n",
                            probe.cm_jm_complete ? "stable repeated CM/JM candidate" : "single-burst fragment");
