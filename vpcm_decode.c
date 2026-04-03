@@ -907,6 +907,32 @@ static bool v8_probe_allows_v90_v92_digital(const v8_probe_result_t *probe)
     return true;
 }
 
+static bool v8_result_has_analog_only_pcm(const v8_parms_t *r)
+{
+    if (!r)
+        return false;
+    return (r->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0
+        && (r->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V90_V92_DIGITAL) == 0;
+}
+
+static bool v8_result_looks_like_v34_relay(const v8_parms_t *r)
+{
+    if (!r)
+        return false;
+    return (r->jm_cm.modulations & V8_MOD_V34) != 0
+        && v8_result_has_analog_only_pcm(r);
+}
+
+static void print_v8_capability_note(const v8_parms_t *r)
+{
+    if (!r)
+        return;
+    if (v8_result_has_analog_only_pcm(r)
+        && (r->jm_cm.modulations & (V8_MOD_V90 | V8_MOD_V92)) != 0) {
+        printf("  Capability note: V.90/V.92 is advertised without digital PCM; treat this as analogue-side endpoint capability, not a digital V.90/V.92 path.\n");
+    }
+}
+
 #define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 14) / 1)
 
 typedef struct {
@@ -2225,6 +2251,9 @@ static bool v8_parse_cm_jm_candidate(v8_parms_t *dst,
         return false;
 
     memset(dst, 0, sizeof(*dst));
+    dst->jm_cm.nsf = -1;
+    dst->jm_cm.t66 = -1;
+    dst->v92 = -1;
     dst->status = V8_STATUS_V8_OFFERED;
     p = data;
     end = data + len;
@@ -2383,6 +2412,78 @@ static bool v8_cm_jm_candidate_plausible(const uint8_t *data,
     if (modulation_tag_count > 0 || continuation_count > 0)
         return top_level_count >= 1;
     return top_level_count >= 2;
+}
+
+static int v8_candidate_score(const v8_parms_t *parsed, int len);
+
+static bool v8_extract_best_cm_jm_payload(v8_parms_t *dst,
+                                          uint8_t *cleaned,
+                                          int *cleaned_len,
+                                          const uint8_t *data,
+                                          int len,
+                                          bool calling_party)
+{
+    v8_parms_t best_parsed;
+    int best_start = -1;
+    int best_len = 0;
+    int best_score = -1000000;
+
+    if (dst)
+        memset(dst, 0, sizeof(*dst));
+    if (cleaned_len)
+        *cleaned_len = 0;
+    if (!data || len <= 0)
+        return false;
+
+    for (int start = 0; start < len; start++) {
+        int end;
+
+        if (!v8_byte_is_valid_top_level_tag(data[start]))
+            continue;
+        for (end = start; end < len; end++) {
+            v8_parms_t parsed;
+            int span_len;
+            int score;
+
+            if (data[end] == 0)
+                break;
+            if (end > start
+                && !v8_byte_is_valid_top_level_tag(data[end])
+                && !v8_byte_is_continuation_tag(data[end])) {
+                break;
+            }
+            span_len = end - start + 1;
+            if (!v8_parse_cm_jm_candidate(&parsed, data + start, span_len, calling_party))
+                continue;
+            if (!v8_cm_jm_candidate_plausible(data + start, span_len, &parsed))
+                continue;
+            score = v8_candidate_score(&parsed, span_len);
+            if ((data[start] & 0x1F) == V8_LOCAL_CALL_FUNCTION_TAG)
+                score += 24;
+            if ((data[start] & 0x1F) == V8_LOCAL_MODULATION_TAG)
+                score += 12;
+            if (end + 1 < len && data[end + 1] == 0)
+                score += 8;
+            if (score > best_score) {
+                best_score = score;
+                best_start = start;
+                best_len = span_len;
+                best_parsed = parsed;
+            }
+        }
+    }
+
+    if (best_start < 0 || best_len <= 0)
+        return false;
+    if (dst)
+        *dst = best_parsed;
+    if (cleaned && cleaned_len && *cleaned_len >= 0) {
+        memcpy(cleaned, data + best_start, (size_t) best_len);
+        *cleaned_len = best_len;
+    } else if (cleaned_len) {
+        *cleaned_len = best_len;
+    }
+    return true;
 }
 
 static int v8_candidate_score(const v8_parms_t *parsed, int len)
@@ -3833,9 +3934,16 @@ static void v8_salvage_partial_probe(v8_state_t *v8,
         return;
     if (out->cm_jm_sample >= 0 || v8->cm_jm_len <= 0)
         return;
-    if (!v8_parse_cm_jm_candidate(&parsed, v8->cm_jm_data, v8->cm_jm_len, out->calling_party))
-        return;
-    if (!v8_cm_jm_candidate_plausible(v8->cm_jm_data, v8->cm_jm_len, &parsed))
+    out->cm_jm_raw_len = v8->cm_jm_len;
+    if (out->cm_jm_raw_len > (int) sizeof(out->cm_jm_raw))
+        out->cm_jm_raw_len = (int) sizeof(out->cm_jm_raw);
+    memcpy(out->cm_jm_raw, v8->cm_jm_data, (size_t) out->cm_jm_raw_len);
+    if (!v8_extract_best_cm_jm_payload(&parsed,
+                                       out->cm_jm_raw,
+                                       &out->cm_jm_raw_len,
+                                       out->cm_jm_raw,
+                                       out->cm_jm_raw_len,
+                                       out->calling_party))
         return;
 
     out->result = parsed;
@@ -3843,10 +3951,6 @@ static void v8_salvage_partial_probe(v8_state_t *v8,
     out->cm_jm_sample = sample_offset;
     out->cm_jm_complete = false;
     out->cm_jm_salvaged = true;
-    out->cm_jm_raw_len = v8->cm_jm_len;
-    if (out->cm_jm_raw_len > (int) sizeof(out->cm_jm_raw))
-        out->cm_jm_raw_len = (int) sizeof(out->cm_jm_raw);
-    memcpy(out->cm_jm_raw, v8->cm_jm_data, (size_t) out->cm_jm_raw_len);
 }
 
 static int v8_probe_last_sample(const v8_probe_result_t *probe)
@@ -4282,8 +4386,27 @@ static bool v8_collect_probe(const int16_t *samples,
             v8_note_first_sample(&out->ci_sample, offset);
         if (v8->got_cm_jm)
             v8_note_first_sample(&out->cm_jm_sample, offset);
-        if (v8->got_cm_jm)
+        if (v8->got_cm_jm) {
             out->cm_jm_complete = true;
+            out->cm_jm_raw_len = v8->cm_jm_len;
+            if (out->cm_jm_raw_len > (int) sizeof(out->cm_jm_raw))
+                out->cm_jm_raw_len = (int) sizeof(out->cm_jm_raw);
+            if (out->cm_jm_raw_len > 0)
+                memcpy(out->cm_jm_raw, v8->cm_jm_data, (size_t) out->cm_jm_raw_len);
+            if (out->cm_jm_raw_len > 0) {
+                v8_parms_t reparsed;
+
+                if (v8_extract_best_cm_jm_payload(&reparsed,
+                                                  out->cm_jm_raw,
+                                                  &out->cm_jm_raw_len,
+                                                  out->cm_jm_raw,
+                                                  out->cm_jm_raw_len,
+                                                  calling_party)) {
+                    out->result = reparsed;
+                    out->last_status = reparsed.status;
+                }
+            }
+        }
         if (v8->got_cj)
             v8_note_first_sample(&out->cj_sample, offset);
         if (g_v8_result.seen) {
@@ -4300,7 +4423,12 @@ static bool v8_collect_probe(const int16_t *samples,
         v8_parms_t parsed;
 
         if (v8_scan_raw_cm_jm(samples, total_samples, limit, calling_party, &raw_hit)
-            && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
+            && v8_extract_best_cm_jm_payload(&parsed,
+                                             raw_hit.bytes,
+                                             &raw_hit.byte_len,
+                                             raw_hit.bytes,
+                                             raw_hit.byte_len,
+                                             calling_party)) {
             out->result = parsed;
             out->last_status = parsed.status;
             out->cm_jm_sample = raw_hit.sample_offset;
@@ -4330,7 +4458,12 @@ static bool v8_collect_probe(const int16_t *samples,
                                                    !calling_party,
                                                    calling_party,
                                                    &raw_hit)
-                && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
+                && v8_extract_best_cm_jm_payload(&parsed,
+                                                 raw_hit.bytes,
+                                                 &raw_hit.byte_len,
+                                                 raw_hit.bytes,
+                                                 raw_hit.byte_len,
+                                                 calling_party)) {
                 out->result = parsed;
                 out->last_status = parsed.status;
                 out->cm_jm_sample = raw_hit.sample_offset;
@@ -4352,8 +4485,12 @@ static bool v8_collect_probe(const int16_t *samples,
                                                             &raw_hit,
                                                             NULL)
                 && raw_hit.preamble_type == V8_LOCAL_SYNC_CM_JM
-                && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)
-                && v8_cm_jm_candidate_plausible(raw_hit.bytes, raw_hit.byte_len, &parsed)) {
+                && v8_extract_best_cm_jm_payload(&parsed,
+                                                 raw_hit.bytes,
+                                                 &raw_hit.byte_len,
+                                                 raw_hit.bytes,
+                                                 raw_hit.byte_len,
+                                                 calling_party)) {
                 out->result = parsed;
                 out->last_status = parsed.status;
                 out->cm_jm_sample = raw_hit.sample_offset;
@@ -4617,6 +4754,7 @@ static void print_v8_result(const v8_parms_t *r)
     printf("  PSTN access:    %s\n", v8_pstn_access_to_str(r->jm_cm.pstn_access));
     printf("  PCM modem:      %s\n",
            v8_pcm_modem_availability_to_str(r->jm_cm.pcm_modem_availability));
+    print_v8_capability_note(r);
     if (r->jm_cm.nsf >= 0)
         printf("  NSF:            %s\n", v8_nsf_to_str(r->jm_cm.nsf));
     if (r->jm_cm.t66 >= 0)
@@ -6005,7 +6143,9 @@ static void decode_v8_pass(const int16_t *samples,
                    probe.cm_jm_complete
                    ? "message timing is coherent, but full CM/JM fields are still incomplete"
                    : "message timing is present, but field decode is weak");
-            if (probe.ansam_sample >= 0
+            if (!have_cre
+                && !v8_result_looks_like_v34_relay(&probe.result)
+                && probe.ansam_sample >= 0
                 && probe.cm_jm_sample > probe.ansam_sample) {
                 for (int ch = 0; ch <= 1; ch++) {
                     bool use_ch2 = (ch == 1);
@@ -6076,6 +6216,7 @@ static void decode_v8_pass(const int16_t *samples,
                        v8_pstn_access_to_str(probe.result.jm_cm.pstn_access));
                 printf("  PCM modem:      %s\n",
                        v8_pcm_modem_availability_to_str(probe.result.jm_cm.pcm_modem_availability));
+                print_v8_capability_note(&probe.result);
                 if (probe.result.jm_cm.nsf >= 0)
                     printf("  NSF:            %s\n", v8_nsf_to_str(probe.result.jm_cm.nsf));
                 if (probe.result.jm_cm.t66 >= 0)
