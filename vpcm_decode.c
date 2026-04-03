@@ -843,6 +843,31 @@ typedef struct {
     v8_parms_t result;
 } v8_probe_result_t;
 
+static bool v8_probe_has_cm_jm_capabilities(const v8_probe_result_t *probe)
+{
+    return probe && probe->ok && probe->cm_jm_sample >= 0;
+}
+
+static bool v8_probe_is_v34_only(const v8_probe_result_t *probe)
+{
+    int mods;
+    int pcm;
+
+    if (!v8_probe_has_cm_jm_capabilities(probe))
+        return false;
+
+    mods = probe->result.jm_cm.modulations;
+    pcm = probe->result.jm_cm.pcm_modem_availability;
+
+    if ((mods & (V8_MOD_V34 | V8_MOD_V34HDX)) == 0)
+        return false;
+    if ((mods & (V8_MOD_V90 | V8_MOD_V92)) != 0)
+        return false;
+    if ((pcm & (V8_PSTN_PCM_MODEM_V90_V92_DIGITAL | V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE)) != 0)
+        return false;
+    return true;
+}
+
 #define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 10) / 1)
 
 typedef struct {
@@ -6211,7 +6236,8 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
 static void print_v34_result(const decode_v34_result_t *result,
                              bool calling_party,
                              int expected_rate_1,
-                             int expected_rate_2)
+                             int expected_rate_2,
+                             bool suppress_v90_phase2)
 {
     if (!result)
         return;
@@ -6226,7 +6252,9 @@ static void print_v34_result(const decode_v34_result_t *result,
     printf("  Final RX event:  %s (%d)\n",
            v34_event_to_str_local(result->final_rx_event),
            result->final_rx_event);
-    if (result->info0_seen) {
+    if (suppress_v90_phase2) {
+        printf("  INFO0a/INFO0d:   suppressed by V.8 gate (CM/JM advertised V.34-only)\n");
+    } else if (result->info0_seen) {
         char info0_detail[1024];
 
         printf("  %-16sdecoded at %.1f ms\n",
@@ -6242,7 +6270,9 @@ static void print_v34_result(const decode_v34_result_t *result,
     } else {
         printf("  INFO0a/INFO0d:   not decoded\n");
     }
-    if (result->info1_seen && !result->info1_is_d) {
+    if (suppress_v90_phase2) {
+        printf("  INFO1a/INFO1d:   suppressed by V.8 gate (CM/JM advertised V.34-only)\n");
+    } else if (result->info1_seen && !result->info1_is_d) {
         char info1_detail[1024];
 
         printf("  INFO1a:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
@@ -6264,7 +6294,7 @@ static void print_v34_result(const decode_v34_result_t *result,
     } else {
         printf("  INFO1a/INFO1d:   not decoded\n");
     }
-    if (result->u_info > 0) {
+    if (!suppress_v90_phase2 && result->u_info > 0) {
         printf("  U_INFO source:   %s (%d)\n",
                result->u_info_from_info1a ? "INFO1a bits 25:31" : "SpanDSP fallback state",
                result->u_info);
@@ -6413,7 +6443,8 @@ static void collect_v34_events(call_log_t *log,
                                int total_samples,
                                const uint8_t *g711_codewords,
                                int total_codewords,
-                               v91_law_t law)
+                               v91_law_t law,
+                               bool suppress_v90_phase2)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -6479,11 +6510,11 @@ static void collect_v34_events(call_log_t *log,
             ? "V.92 Phase 3" : "V.90 Phase 3"; \
         if (!res__) \
             break; \
-        if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
             format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d); \
             call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
         } \
-        if (res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
             if (res__->info1_is_d) { \
                 format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1d decoded", detail); \
@@ -6492,7 +6523,7 @@ static void collect_v34_events(call_log_t *log,
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
             } \
         } \
-        if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
             v92_short_phase2_observation_t sp2_obs__; \
             v92_short_phase2_result_t sp2_res__; \
             memset(&sp2_obs__, 0, sizeof(sp2_obs__)); \
@@ -6574,10 +6605,14 @@ static void collect_v34_events(call_log_t *log,
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
         if (res__->phase3_seen) { \
-            snprintf(detail, sizeof(detail), "role=%s u_info=%d source=%s", \
-                     role_name, \
-                     res__->u_info, \
-                     res__->u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback"); \
+            if (suppress_v90_phase2) { \
+                snprintf(detail, sizeof(detail), "role=%s u_info=n/a source=v8_v34_only_gate", role_name); \
+            } else { \
+                snprintf(detail, sizeof(detail), "role=%s u_info=%d source=%s", \
+                         role_name, \
+                         res__->u_info, \
+                         res__->u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback"); \
+            } \
             append_v34_mp_detail_fields(detail, sizeof(detail), res__); \
             call_log_append(log, res__->phase3_sample, 0, "V.34", "Phase 3 reached", detail); \
         } \
@@ -6688,12 +6723,21 @@ static void collect_stream_call_log(call_log_t *log,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
+    v8_probe_result_t capability_probe;
     bool have_answerer = false;
     bool have_caller = false;
+    bool have_capability_probe = false;
+    bool suppress_v90_phase2 = false;
     int earliest_phase2_sample = -1;
 
     if (!log || !linear_samples || !g711_codewords)
         return;
+
+    have_capability_probe = v8_select_best_channel_probe(linear_samples,
+                                                         total_samples,
+                                                         total_samples,
+                                                         &capability_probe);
+    suppress_v90_phase2 = have_capability_probe && v8_probe_is_v34_only(&capability_probe);
 
     if (do_v34 || do_v90) {
         decode_v34_pair_with_rescue(linear_samples,
@@ -6723,7 +6767,8 @@ static void collect_stream_call_log(call_log_t *log,
                            total_samples,
                            g711_codewords,
                            total_codewords,
-                           law);
+                           law,
+                           suppress_v90_phase2);
     if (do_v8) {
         v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
         v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
@@ -6731,7 +6776,7 @@ static void collect_stream_call_log(call_log_t *log,
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
-    if (do_v90)
+    if (do_v90 && !suppress_v90_phase2)
         collect_v90_events(log, g711_codewords, total_codewords, law);
 
     /*
@@ -6739,7 +6784,7 @@ static void collect_stream_call_log(call_log_t *log,
      * for both V.90 and V.92 calls.  Run whenever we have V.34 decode results,
      * regardless of whether the explicit --v90 flag was set.
      */
-    if ((do_v34 || do_v90) && (have_answerer || have_caller)) {
+    if (!suppress_v90_phase2 && (do_v34 || do_v90) && (have_answerer || have_caller)) {
         collect_post_phase3_stage_events(log,
                                          g711_codewords,
                                          total_codewords,
@@ -8523,8 +8568,11 @@ static void run_decode_suite(const char *label,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
+    v8_probe_result_t capability_probe;
     bool have_answerer = false;
     bool have_caller = false;
+    bool have_capability_probe = false;
+    bool suppress_v90_phase2 = false;
 
     if (!linear_samples || !g711_codewords || !opts)
         return;
@@ -8549,6 +8597,19 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
+    have_capability_probe = v8_select_best_channel_probe(linear_samples,
+                                                         total_samples,
+                                                         total_samples,
+                                                         &capability_probe);
+    suppress_v90_phase2 = have_capability_probe && v8_probe_is_v34_only(&capability_probe);
+    if (suppress_v90_phase2 && opts->raw_output_enabled && (opts->do_v34 || opts->do_v90)) {
+        char modbuf[256];
+
+        format_v8_modulations_str(capability_probe.result.jm_cm.modulations, modbuf, sizeof(modbuf));
+        printf("V.8 gate: CM/JM advertised V.34-only modulation set (%s), so V.90/V.92 decode paths are suppressed.\n",
+               modbuf[0] ? modbuf : "none");
+    }
+
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
         decode_v34_pair_with_rescue(linear_samples,
                                     total_samples,
@@ -8562,13 +8623,13 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v34) {
         printf("\n=== V.34/V.90 Phase 2 Decode (as answerer) ===\n");
         if (have_answerer)
-            print_v34_result(&answerer, false, expected_rate_1, expected_rate_2);
+            print_v34_result(&answerer, false, expected_rate_1, expected_rate_2, suppress_v90_phase2);
         else
             printf("  V.34 probe init failed\n");
 
         printf("\n=== V.34/V.90 Phase 2 Decode (as caller) ===\n");
         if (have_caller)
-            print_v34_result(&caller, true, expected_rate_1, expected_rate_2);
+            print_v34_result(&caller, true, expected_rate_1, expected_rate_2, suppress_v90_phase2);
         else
             printf("  V.34 probe init failed\n");
     }
@@ -8581,7 +8642,7 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
-    if (opts->raw_output_enabled && opts->do_v90) {
+    if (opts->raw_output_enabled && opts->do_v90 && !suppress_v90_phase2) {
         jd_stage_decode_t jd_stage;
         ja_dil_decode_t ja_dil;
         post_phase3_decode_t post_phase3;
@@ -8606,6 +8667,9 @@ static void run_decode_suite(const char *label,
                                          &post_phase3)) {
             print_post_phase3_decode(&post_phase3);
         }
+    } else if (opts->raw_output_enabled && opts->do_v90 && suppress_v90_phase2) {
+        printf("\n=== V.90/V.92 PCM Decode ===\n");
+        printf("  Suppressed by V.8 gate: decoded CM/JM capabilities only advertise V.34-class modulation.\n");
     }
 
     if (opts->do_call_log) {
