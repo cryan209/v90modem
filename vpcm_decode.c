@@ -7675,6 +7675,15 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     else
         search_end = search_start + 4096;
 
+    /*
+     * When the Ja onset is known (tx_ja_sample), the DIL descriptor starts
+     * within a few hundred symbols of it.  The maximum descriptor bit-length
+     * is bounded by the Ja protocol timing (n≤128 U-chords ≈ 2000 bits).
+     * Clamp search_end to avoid scanning megabytes of training audio.
+     */
+    if (src->tx_ja_sample >= 0 && search_end > src->tx_ja_sample + 4096)
+        search_end = src->tx_ja_sample + 4096;
+
     params.search_start  = search_start;
     params.search_end    = search_end;
     params.tx_ja_sample  = src->tx_ja_sample;
