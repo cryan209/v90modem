@@ -110,13 +110,18 @@ make
 ## Offline Tone Regression
 
 - `vpcm_decode` can now probe V.34/V.90 Phase 2 from captured WAVs with `--v34`.
-- For the stereo tone set in `gough-lui-v90-v92-modem-sounds/`, channel quality matters:
-  some files only recover `INFO1a` on the right channel.
+- For the stereo tone sets in `gough-lui-v34-modem-sounds/` and
+  `gough-lui-v90-v92-modem-sounds/`, channel quality matters:
+  some files only recover `INFO1a` on one side.
 - To batch-score the tone corpus for `INFO0a`, `INFO1a`, and Phase 3 recovery, run:
 
 ```bash
 make v34-tone-matrix
 ```
+
+- `make v34-tone-matrix` now defaults to `gough-lui-v34-modem-sounds/` when present,
+  and falls back to `gough-lui-v90-v92-modem-sounds/`. You can still pass a directory
+  explicitly.
 
 ## Usage
 

@@ -4,7 +4,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DECODER="${ROOT_DIR}/vpcm_decode"
-TONE_DIR="${1:-${ROOT_DIR}/gough-lui-v90-v92-modem-sounds}"
+if [[ $# -ge 1 ]]; then
+    TONE_DIR="$1"
+elif [[ -d "${ROOT_DIR}/gough-lui-v34-modem-sounds" ]]; then
+    TONE_DIR="${ROOT_DIR}/gough-lui-v34-modem-sounds"
+else
+    TONE_DIR="${ROOT_DIR}/gough-lui-v90-v92-modem-sounds"
+fi
 LAW="${LAW:-ulaw}"
 
 if [[ ! -x "${DECODER}" ]]; then
@@ -24,8 +30,18 @@ printf "%-42s %-3s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
 for wav in "${TONE_DIR}"/*.wav; do
     [[ -e "${wav}" ]] || continue
 
-    for ch in L R; do
-        output="$("${DECODER}" --v34 --channel "${ch}" --law "${LAW}" "${wav}" 2>/dev/null)"
+    channels=(L R)
+    first_output="$("${DECODER}" --v34 --channel L --law "${LAW}" "${wav}" 2>/dev/null)"
+    if printf '%s\n' "${first_output}" | grep -q '^Channel: Mono,'; then
+        channels=(mono)
+    fi
+
+    for ch in "${channels[@]}"; do
+        if [[ "${ch}" == "L" ]]; then
+            output="${first_output}"
+        else
+            output="$("${DECODER}" --v34 --channel "${ch}" --law "${LAW}" "${wav}" 2>/dev/null)"
+        fi
 
         info0="no"
         info1="no"
