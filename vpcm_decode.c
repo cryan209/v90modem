@@ -4456,12 +4456,59 @@ static void print_v8_result(const v8_parms_t *r)
         printf("  Gateway mode:   yes\n");
 }
 
+static int v8_next_sample_after(int sample, int a, int b, int c)
+{
+    int next = -1;
+    const int vals[3] = { a, b, c };
+
+    for (int i = 0; i < 3; i++) {
+        if (vals[i] < 0 || vals[i] <= sample)
+            continue;
+        if (next < 0 || vals[i] < next)
+            next = vals[i];
+    }
+    return next;
+}
+
+static void print_v8_flow_step(const char *label,
+                               const char *channel,
+                               int start_sample,
+                               int end_sample,
+                               const char *suffix)
+{
+    if (!label || !channel || start_sample < 0)
+        return;
+
+    if (end_sample > start_sample) {
+        printf("  %-18s %s %.1f-%.1f ms (%.1f ms)%s\n",
+               label,
+               channel,
+               sample_to_ms(start_sample, 8000),
+               sample_to_ms(end_sample, 8000),
+               sample_to_ms(end_sample - start_sample, 8000),
+               suffix ? suffix : "");
+    } else {
+        printf("  %-18s %s at %.1f ms%s\n",
+               label,
+               channel,
+               sample_to_ms(start_sample, 8000),
+               suffix ? suffix : "");
+    }
+}
+
 static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
 {
     const v8_probe_result_t *caller;
     const v8_probe_result_t *answerer;
     const char *caller_ch;
     const char *answerer_ch;
+    int first_msg = -1;
+    int last_msg = -1;
+    int ci_end;
+    int cm_end;
+    int ansam_end;
+    int jm_end;
+    int cj_end;
 
     if (!pair || !pair->ok)
         return;
@@ -4474,28 +4521,96 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
     printf("\n=== Stereo V.8 Pairing ===\n");
     printf("  Best orientation: %s=caller, %s=answerer (score %d)\n",
            caller_ch, answerer_ch, pair->score);
-    if (caller->ci_sample >= 0)
-        printf("  Caller evidence:  CI at %.1f ms\n", sample_to_ms(caller->ci_sample, 8000));
-    if (caller->cm_jm_sample >= 0)
-        printf("  Caller message:   %s at %.1f ms%s\n",
-               caller->calling_party ? "JM-like" : "CM-like",
-               sample_to_ms(caller->cm_jm_sample, 8000),
-               caller->cm_jm_complete ? "" : " (candidate)");
-    if (caller->cj_sample >= 0)
-        printf("  Caller terminator: CJ at %.1f ms\n",
-               sample_to_ms(caller->cj_sample, 8000));
-    if (answerer->ansam_sample >= 0)
-        printf("  Answer tone:      %s at %.1f ms\n",
-               v8_answer_tone_name(answerer->ansam_tone),
-               sample_to_ms(answerer->ansam_sample, 8000));
-    if (answerer->cm_jm_sample >= 0)
-        printf("  Answer message:   %s at %.1f ms%s\n",
-               answerer->calling_party ? "JM-like" : "CM-like",
-               sample_to_ms(answerer->cm_jm_sample, 8000),
-               answerer->cm_jm_complete ? "" : " (candidate)");
-    if (answerer->cj_sample >= 0)
-        printf("  Answer CJ echo:   CJ-like energy at %.1f ms\n",
-               sample_to_ms(answerer->cj_sample, 8000));
+    printf("  Reconstructed flow:\n");
+    ci_end = v8_next_sample_after(caller->ci_sample,
+                                  caller->cm_jm_sample,
+                                  answerer->cm_jm_sample,
+                                  caller->cj_sample);
+    cm_end = v8_next_sample_after(caller->cm_jm_sample,
+                                  answerer->cm_jm_sample,
+                                  caller->cj_sample,
+                                  -1);
+    ansam_end = v8_next_sample_after(answerer->ansam_sample,
+                                     answerer->cm_jm_sample,
+                                     caller->cm_jm_sample,
+                                     caller->cj_sample);
+    jm_end = v8_next_sample_after(answerer->cm_jm_sample,
+                                  caller->cj_sample,
+                                  -1,
+                                  -1);
+    cj_end = v8_next_sample_after(caller->cj_sample,
+                                  answerer->cj_sample,
+                                  -1,
+                                  -1);
+
+    if (caller->ci_sample >= 0) {
+        print_v8_flow_step("Caller CI", caller_ch, caller->ci_sample, ci_end, "");
+        first_msg = caller->ci_sample;
+    } else {
+        printf("  Caller (%s):      CI not yet recovered\n", caller_ch);
+    }
+    if (caller->cm_jm_sample >= 0) {
+        print_v8_flow_step("Caller CM",
+                           caller_ch,
+                           caller->cm_jm_sample,
+                           cm_end,
+                           caller->cm_jm_complete ? "" : " (candidate)");
+        if (first_msg < 0 || caller->cm_jm_sample < first_msg)
+            first_msg = caller->cm_jm_sample;
+        if (caller->cm_jm_complete)
+            last_msg = caller->cm_jm_sample;
+    } else {
+        printf("  Caller (%s):      CM not yet recovered\n", caller_ch);
+    }
+    if (answerer->ansam_sample >= 0) {
+        char suffix[48];
+
+        snprintf(suffix, sizeof(suffix), " [%s]", v8_answer_tone_name(answerer->ansam_tone));
+        print_v8_flow_step("Answerer tone", answerer_ch, answerer->ansam_sample, ansam_end, suffix);
+        if (first_msg < 0 || answerer->ansam_sample < first_msg)
+            first_msg = answerer->ansam_sample;
+    } else {
+        printf("  Answerer (%s):    ANSam not yet recovered\n", answerer_ch);
+    }
+    if (answerer->cm_jm_sample >= 0) {
+        print_v8_flow_step("Answerer JM",
+                           answerer_ch,
+                           answerer->cm_jm_sample,
+                           jm_end,
+                           answerer->cm_jm_complete ? "" : " (candidate)");
+        if (first_msg < 0 || answerer->cm_jm_sample < first_msg)
+            first_msg = answerer->cm_jm_sample;
+        if (answerer->cm_jm_complete)
+            last_msg = answerer->cm_jm_sample;
+    } else {
+        printf("  Answerer (%s):    JM not yet recovered\n", answerer_ch);
+    }
+    if (caller->cj_sample >= 0) {
+        print_v8_flow_step("Caller CJ", caller_ch, caller->cj_sample, cj_end, "");
+        if (last_msg < caller->cj_sample)
+            last_msg = caller->cj_sample;
+    } else {
+        printf("  Caller (%s):      CJ not yet recovered\n", caller_ch);
+    }
+    if (answerer->cj_sample >= 0) {
+        printf("  Answerer (%s):    CJ-like echo at %.1f ms\n",
+               answerer_ch, sample_to_ms(answerer->cj_sample, 8000));
+    }
+    if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample < 0) {
+        printf("  Exchange state:   caller-side CM is present; waiting for clear JM on %s\n",
+               answerer_ch);
+    } else if (caller->cm_jm_sample < 0 && answerer->cm_jm_sample >= 0) {
+        printf("  Exchange state:   answerer-side JM is present; caller CM is still missing or buried by echo\n");
+    } else if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample >= 0 && caller->cj_sample < 0) {
+        printf("  Exchange state:   CM/JM present; waiting for caller-side CJ terminator\n");
+    } else if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample >= 0 && caller->cj_sample >= 0) {
+        printf("  Exchange state:   CM/JM/CJ sequence seen across stereo pair\n");
+    }
+    if (first_msg >= 0 && last_msg >= first_msg) {
+        printf("  Exchange span:    %.1f ms to %.1f ms\n",
+               sample_to_ms(first_msg, 8000),
+               sample_to_ms(last_msg, 8000));
+    }
 }
 
 static int v34_dummy_get_bit(void *user_data)
