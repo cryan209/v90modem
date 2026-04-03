@@ -19,6 +19,7 @@
 #include "v92_short_phase2_decode.h"
 #include "v92_phase3_decode.h"
 #include "v92_ja_decode.h"
+#include "p3_demod.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -7307,6 +7308,138 @@ static bool decode_v34_pass(const int16_t *samples,
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Lightweight Phase 3 demodulator — supplementary analysis          */
+/* ------------------------------------------------------------------ */
+
+static void p3_demod_analyse_phase3(const int16_t *samples,
+                                    int total_samples,
+                                    const decode_v34_result_t *result,
+                                    bool calling_party)
+{
+    int phase3_start;
+    int phase3_end;
+    int phase3_len;
+    const char *role = calling_party ? "caller" : "answerer";
+
+    /* Determine Phase 3 sample range from V.34 decode results */
+    phase3_start = result->phase3_sample;
+    if (phase3_start < 0)
+        phase3_start = result->tx_first_s_sample;
+    if (phase3_start < 0)
+        return;
+
+    phase3_end = result->phase4_sample;
+    if (phase3_end < 0)
+        phase3_end = result->phase4_ready_sample;
+    if (phase3_end < 0)
+        phase3_end = result->failure_sample;
+    if (phase3_end < 0 || phase3_end > total_samples)
+        phase3_end = total_samples;
+    if (phase3_end <= phase3_start)
+        return;
+
+    phase3_len = phase3_end - phase3_start;
+    if (phase3_len < 200)
+        return;
+
+    printf("\n  --- p3_demod Phase 3 analysis (%s) ---\n", role);
+    printf("  Sample range: %d – %d (%.1f ms – %.1f ms, %.1f ms)\n",
+           phase3_start, phase3_end,
+           sample_to_ms(phase3_start, 8000),
+           sample_to_ms(phase3_end, 8000),
+           (float)phase3_len / 8.0f);
+
+    /* Try all baud/carrier combinations */
+    {
+        p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+        int count;
+        int best_idx = -1;
+        float best_score = -1.0f;
+
+        count = p3_scan_all_hypotheses(samples + phase3_start,
+                                       phase3_len,
+                                       phase3_start,
+                                       8000,
+                                       hypotheses,
+                                       P3_BAUD_COUNT * 2);
+
+        printf("  Hypotheses tested: %d\n", count);
+        for (int i = 0; i < count; i++) {
+            const p3_hypothesis_t *h = &hypotheses[i];
+            if (h->score > best_score) {
+                best_score = h->score;
+                best_idx = i;
+            }
+            if (h->score > 0.0f || h->has_s || h->has_trn || h->has_j || h->has_ru)
+                printf("    [%d] %d baud %s carrier (%.0f Hz): %d symbols, %d segments, score=%.1f%s%s%s%s\n",
+                       i,
+                       (int)h->baud_rate,
+                       h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                       h->carrier_hz,
+                       h->symbol_count,
+                       h->segment_count,
+                       h->score,
+                       h->has_s ? " [S]" : "",
+                       h->has_trn ? " [TRN]" : "",
+                       h->has_j ? " [J]" : "",
+                       h->has_ru ? " [Ru]" : "");
+        }
+
+        if (best_idx >= 0 && best_score > 0.0f) {
+            const p3_hypothesis_t *best = &hypotheses[best_idx];
+            p3_result_t *detail;
+
+            printf("  Best: %d baud %s carrier (%.0f Hz), score=%.1f\n",
+                   (int)best->baud_rate,
+                   best->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                   best->carrier_hz,
+                   best->score);
+
+            /* Run detailed demod on the best hypothesis */
+            detail = p3_demod_run(samples + phase3_start,
+                                  phase3_len,
+                                  phase3_start,
+                                  best->baud_code,
+                                  best->carrier_sel,
+                                  8000);
+            if (detail) {
+                printf("  Symbols: %d, Segments: %d\n",
+                       detail->symbol_count, detail->segment_count);
+                printf("  Carrier estimate: %.1f Hz, SNR: %.1f dB\n",
+                       detail->carrier_freq_estimate,
+                       detail->snr_estimate_db);
+
+                for (int i = 0; i < detail->segment_count; i++) {
+                    const p3_segment_t *seg = &detail->segments[i];
+                    printf("    [%d] %s: symbols %d–%d (%d), samples %d–%d (%.1f–%.1f ms), mag=%.3f conf=%.2f",
+                           i,
+                           p3_signal_type_name(seg->type),
+                           seg->start_symbol,
+                           seg->start_symbol + seg->length - 1,
+                           seg->length,
+                           seg->start_sample,
+                           seg->end_sample,
+                           sample_to_ms(seg->start_sample, 8000),
+                           sample_to_ms(seg->end_sample, 8000),
+                           seg->avg_magnitude,
+                           seg->confidence);
+                    if (seg->type == P3_SIGNAL_TRN)
+                        printf(" errors=%d", seg->trn_errors);
+                    if (seg->type == P3_SIGNAL_J)
+                        printf(" trn16=0x%04X", seg->j_trn16);
+                    if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
+                        printf(" %s-first", seg->ru_positive_first ? "+" : "-");
+                    printf("\n");
+                }
+                p3_result_free(detail);
+            }
+        } else {
+            printf("  No recognizable Phase 3 signals found by p3_demod\n");
+        }
+    }
+}
+
 static void merge_info0_from_rescue(decode_v34_result_t *dst, const decode_v34_result_t *src)
 {
     if (!dst || !src || !src->info0_seen)
@@ -9682,6 +9815,7 @@ typedef struct {
     bool do_v8;
     bool do_v91;
     bool do_v90;
+    bool do_p3;
     bool do_energy;
     bool do_stats;
     bool do_call_log;
@@ -9767,6 +9901,12 @@ static void run_decode_suite(const char *label,
             print_v34_result(&caller, true, expected_rate_1, expected_rate_2, suppress_v90_phase2);
         else
             printf("  V.34 probe init failed\n");
+
+        /* Lightweight Phase 3 demodulation (supplementary) */
+        if (have_answerer && answerer.phase3_seen)
+            p3_demod_analyse_phase3(linear_samples, total_samples, &answerer, false);
+        if (have_caller && caller.phase3_seen)
+            p3_demod_analyse_phase3(linear_samples, total_samples, &caller, true);
     }
 
     if (opts->raw_output_enabled && opts->do_v8) {
@@ -9807,6 +9947,93 @@ static void run_decode_suite(const char *label,
         printf("  Suppressed by V.8 gate: decoded CM/JM does not advertise V.90/V.92 digital PCM capability.\n");
     }
 
+    if (opts->raw_output_enabled && opts->do_p3) {
+        printf("\n=== Phase 3 Lightweight Demodulator Scan ===\n");
+        printf("  Scanning all %d baud/carrier hypotheses...\n", P3_BAUD_COUNT * 2);
+        {
+            p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+            int count;
+            int best_idx = -1;
+            float best_score = -1.0f;
+
+            count = p3_scan_all_hypotheses(linear_samples,
+                                           total_samples,
+                                           0,
+                                           sample_rate,
+                                           hypotheses,
+                                           P3_BAUD_COUNT * 2);
+
+            for (int i = 0; i < count; i++) {
+                const p3_hypothesis_t *h = &hypotheses[i];
+                if (h->score > best_score) {
+                    best_score = h->score;
+                    best_idx = i;
+                }
+                if (h->score > 0.0f)
+                    printf("  [%d] %d baud %s (%.0f Hz): %d sym, %d seg, score=%.1f%s%s%s%s\n",
+                           i,
+                           (int)h->baud_rate,
+                           h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                           h->carrier_hz,
+                           h->symbol_count,
+                           h->segment_count,
+                           h->score,
+                           h->has_s ? " [S]" : "",
+                           h->has_trn ? " [TRN]" : "",
+                           h->has_j ? " [J]" : "",
+                           h->has_ru ? " [Ru]" : "");
+            }
+
+            if (best_idx >= 0 && best_score > 0.0f) {
+                const p3_hypothesis_t *best = &hypotheses[best_idx];
+                p3_result_t *detail;
+
+                printf("  Best: %d baud %s (%.0f Hz), score=%.1f\n",
+                       (int)best->baud_rate,
+                       best->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                       best->carrier_hz,
+                       best->score);
+
+                detail = p3_demod_run(linear_samples,
+                                      total_samples,
+                                      0,
+                                      best->baud_code,
+                                      best->carrier_sel,
+                                      sample_rate);
+                if (detail) {
+                    printf("  Symbols: %d, Segments: %d\n",
+                           detail->symbol_count, detail->segment_count);
+                    printf("  Carrier: %.1f Hz, SNR: %.1f dB\n",
+                           detail->carrier_freq_estimate,
+                           detail->snr_estimate_db);
+
+                    for (int i = 0; i < detail->segment_count; i++) {
+                        const p3_segment_t *seg = &detail->segments[i];
+                        if (seg->type == P3_SIGNAL_SILENCE || seg->type == P3_SIGNAL_UNKNOWN)
+                            continue;
+                        printf("    %s: %.1f–%.1f ms (%d sym) mag=%.3f conf=%.2f",
+                               p3_signal_type_name(seg->type),
+                               sample_to_ms(seg->start_sample, sample_rate),
+                               sample_to_ms(seg->end_sample, sample_rate),
+                               seg->length,
+                               seg->avg_magnitude,
+                               seg->confidence);
+                        if (seg->type == P3_SIGNAL_TRN)
+                            printf(" errors=%d", seg->trn_errors);
+                        if (seg->type == P3_SIGNAL_J)
+                            printf(" trn16=0x%04X", seg->j_trn16);
+                        if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
+                            printf(" %s-first", seg->ru_positive_first ? "+" : "-");
+                        printf("\n");
+                    }
+                    p3_result_free(detail);
+                }
+            } else {
+                printf("  No recognizable Phase 3 signals found\n");
+            }
+        }
+    }
+
     if (opts->do_call_log) {
         call_log_t log;
         call_log_init(&log);
@@ -9844,6 +10071,7 @@ int main(int argc, char **argv)
     bool do_call_log = false;
     bool do_all = false;
     bool do_visualize_html = false;
+    bool do_p3 = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--law") == 0 && i + 1 < argc) {
@@ -9877,6 +10105,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--v90") == 0) {
             do_v90 = true;
             explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--p3") == 0) {
+            do_p3 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--energy") == 0) {
             do_energy = true;
             explicit_decode_output = true;
@@ -9903,6 +10134,7 @@ int main(int argc, char **argv)
                    "  --v8               Decode V.8 negotiation\n"
                    "  --v91              Decode V.91 signals (INFO, CP, DIL, Ez, etc.)\n"
                    "  --v90              Decode V.90 signals (Sd, CP, etc.)\n"
+                   "  --p3               Lightweight Phase 3 demodulator scan\n"
                    "  --energy           Print RMS energy profile\n"
                    "  --stats            Print codeword histogram/statistics\n"
                    "  --call-log         Print a best-effort chronological call log\n"
@@ -9929,7 +10161,7 @@ int main(int argc, char **argv)
         do_all = true;
 
     if (do_all) {
-        do_v34 = do_v8 = do_v91 = do_v90 = do_energy = do_stats = do_call_log = true;
+        do_v34 = do_v8 = do_v91 = do_v90 = do_p3 = do_energy = do_stats = do_call_log = true;
     }
 
     if (do_visualize_html)
@@ -10115,6 +10347,7 @@ int main(int argc, char **argv)
         opts.do_v8 = do_v8;
         opts.do_v91 = do_v91;
         opts.do_v90 = do_v90;
+        opts.do_p3 = do_p3;
         opts.do_energy = do_energy;
         opts.do_stats = do_stats;
         opts.do_call_log = do_call_log;
