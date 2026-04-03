@@ -854,6 +854,9 @@ typedef struct {
     bool phase4_ready_seen;
     bool phase4_seen;
     bool training_failed;
+    bool mp_seen;
+    bool mp_remote_ack_seen;
+    bool mp_rates_valid;
     bool u_info_from_info1a;
     bool ja_bits_from_local_tx;
     bool ja_bits_estimated;
@@ -916,6 +919,8 @@ typedef struct {
     int final_rx_stage;
     int final_tx_stage;
     int final_rx_event;
+    int mp_rate_a_to_c_bps;
+    int mp_rate_c_to_a_bps;
     int u_info;
     v34_v90_info0a_t info0_raw;
     v90_info0a_t info0a;
@@ -931,6 +936,29 @@ typedef struct {
     int direct_v90_score;
     int selected_v90_score;
 } codeword_stream_info_t;
+
+static int v34_mp_rate_n_to_bps(int rate_n)
+{
+    if (rate_n < 1 || rate_n > 14)
+        return -1;
+    return rate_n * 2400;
+}
+
+static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const decode_v34_result_t *result)
+{
+    if (!detail || detail_len == 0 || !result)
+        return;
+
+    appendf(detail, detail_len, " mp_seen=%u", result->mp_seen ? 1U : 0U);
+    appendf(detail, detail_len, " mp_remote_ack=%u", result->mp_remote_ack_seen ? 1U : 0U);
+    appendf(detail, detail_len, " mp_rate_a_to_c=%s", result->mp_rate_a_to_c_bps > 0 ? "" : "n/a");
+    if (result->mp_rate_a_to_c_bps > 0)
+        appendf(detail, detail_len, "%d", result->mp_rate_a_to_c_bps);
+    appendf(detail, detail_len, " mp_rate_c_to_a=%s", result->mp_rate_c_to_a_bps > 0 ? "" : "n/a");
+    if (result->mp_rate_c_to_a_bps > 0)
+        appendf(detail, detail_len, "%d", result->mp_rate_c_to_a_bps);
+    appendf(detail, detail_len, " mp_rates_valid=%u", result->mp_rates_valid ? 1U : 0U);
+}
 
 typedef struct {
     bool ok;
@@ -5706,6 +5734,8 @@ static bool decode_v34_pass(const int16_t *samples,
     result->phase4_ready_sample = -1;
     result->phase4_sample = -1;
     result->failure_sample = -1;
+    result->mp_rate_a_to_c_bps = -1;
+    result->mp_rate_c_to_a_bps = -1;
 
     v34 = v34_init(NULL, 3200, 21600, calling_party, true,
                    v34_dummy_get_bit, NULL,
@@ -6009,6 +6039,11 @@ static bool decode_v34_pass(const int16_t *samples,
     }
     if (!result->u_info)
         result->u_info = v34_get_v90_u_info(v34);
+    result->mp_seen = (v34->rx.mp_seen >= 1);
+    result->mp_remote_ack_seen = (v34->rx.mp_remote_ack_seen > 0);
+    result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_a_to_c);
+    result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_c_to_a);
+    result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
     if (v34->rx.phase3_trn_mag_count > 0) {
         result->trn1u_mag_count = v34->rx.phase3_trn_mag_count;
         result->trn1u_mag_mean = v34->rx.phase3_trn_mag_sum / (float) v34->rx.phase3_trn_mag_count;
@@ -6173,7 +6208,10 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
     }
 }
 
-static void print_v34_result(const decode_v34_result_t *result, bool calling_party)
+static void print_v34_result(const decode_v34_result_t *result,
+                             bool calling_party,
+                             int expected_rate_1,
+                             int expected_rate_2)
 {
     if (!result)
         return;
@@ -6337,6 +6375,35 @@ static void print_v34_result(const decode_v34_result_t *result, bool calling_par
         printf("  Phase 4 ready:   seen at %.1f ms\n", sample_to_ms(result->phase4_ready_sample, 8000));
     if (result->phase4_seen)
         printf("  Phase 4 / MP:    seen at %.1f ms\n", sample_to_ms(result->phase4_sample, 8000));
+    if (result->mp_seen || result->mp_rates_valid) {
+        printf("  MP exchange:     seen=%s remote_ack=%s",
+               result->mp_seen ? "yes" : "no",
+               result->mp_remote_ack_seen ? "yes" : "no");
+        if (result->mp_rates_valid) {
+            printf(" negotiated A->C/C->A=%d/%d bps",
+                   result->mp_rate_a_to_c_bps,
+                   result->mp_rate_c_to_a_bps);
+            if (expected_rate_1 > 0 && expected_rate_2 > 0) {
+                bool direct_match = (result->mp_rate_a_to_c_bps == expected_rate_1
+                                     && result->mp_rate_c_to_a_bps == expected_rate_2);
+                bool swapped_match = (result->mp_rate_a_to_c_bps == expected_rate_2
+                                      && result->mp_rate_c_to_a_bps == expected_rate_1);
+
+                printf(" filename=%d/%d", expected_rate_1, expected_rate_2);
+                if (direct_match)
+                    printf(" match=direct");
+                else if (swapped_match)
+                    printf(" match=swapped");
+                else
+                    printf(" match=no");
+            }
+        }
+        printf("\n");
+    } else if (expected_rate_1 > 0 && expected_rate_2 > 0) {
+        printf("  MP exchange:     seen=no remote_ack=no filename=%d/%d\n",
+               expected_rate_1,
+               expected_rate_2);
+    }
     if (result->training_failed)
         printf("  Training fail:   observed at %.1f ms\n", sample_to_ms(result->failure_sample, 8000));
 }
@@ -6511,6 +6578,7 @@ static void collect_v34_events(call_log_t *log,
                      role_name, \
                      res__->u_info, \
                      res__->u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback"); \
+            append_v34_mp_detail_fields(detail, sizeof(detail), res__); \
             call_log_append(log, res__->phase3_sample, 0, "V.34", "Phase 3 reached", detail); \
         } \
         APPEND_V34_STAGE_EVENT(res__, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s"); \
@@ -6594,6 +6662,7 @@ static void collect_v34_events(call_log_t *log,
                      res__->final_rx_stage, \
                      v34_tx_stage_to_str_local(res__->final_tx_stage), \
                      res__->final_tx_stage); \
+            append_v34_mp_detail_fields(detail, sizeof(detail), res__); \
             call_log_append(log, res__->phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail); \
         } \
     } while (0)
@@ -8448,7 +8517,9 @@ static void run_decode_suite(const char *label,
                              int sample_rate,
                              v91_law_t law,
                              const decode_options_t *opts,
-                             const codeword_stream_info_t *codeword_info)
+                             const codeword_stream_info_t *codeword_info,
+                             int expected_rate_1,
+                             int expected_rate_2)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -8491,13 +8562,13 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v34) {
         printf("\n=== V.34/V.90 Phase 2 Decode (as answerer) ===\n");
         if (have_answerer)
-            print_v34_result(&answerer, false);
+            print_v34_result(&answerer, false, expected_rate_1, expected_rate_2);
         else
             printf("  V.34 probe init failed\n");
 
         printf("\n=== V.34/V.90 Phase 2 Decode (as caller) ===\n");
         if (have_caller)
-            print_v34_result(&caller, true);
+            print_v34_result(&caller, true, expected_rate_1, expected_rate_2);
         else
             printf("  V.34 probe init failed\n");
     }
@@ -8824,22 +8895,20 @@ int main(int argc, char **argv)
 
     fclose(f);
 
-    printf("File: %s\n", input_path);
-    printf("Duration: %.3f seconds (%d samples)\n\n",
-           (double) total_samples / (double) sample_rate, total_samples);
     {
-        int expected_rate_1;
-        int expected_rate_2;
+        int expected_rate_1 = -1;
+        int expected_rate_2 = -1;
 
+        printf("File: %s\n", input_path);
+        printf("Duration: %.3f seconds (%d samples)\n\n",
+               (double) total_samples / (double) sample_rate, total_samples);
         if (parse_filename_rate_pair(input_path, &expected_rate_1, &expected_rate_2)) {
             printf("Filename expected negotiated rates: %d / %d bps\n\n",
                    expected_rate_1,
                    expected_rate_2);
         }
-    }
 
-    /* Run decoders */
-    {
+        /* Run decoders */
         decode_options_t opts;
         opts.do_v34 = do_v34;
         opts.do_v8 = do_v8;
@@ -8852,9 +8921,11 @@ int main(int argc, char **argv)
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
             run_decode_suite("Left", left_linear_samples, left_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info);
+                             total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info,
+                             expected_rate_1, expected_rate_2);
             run_decode_suite("Right", right_linear_samples, right_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &right_codeword_info);
+                             total_samples, total_codewords, sample_rate, law, &opts, &right_codeword_info,
+                             expected_rate_1, expected_rate_2);
             if (opts.do_call_log) {
                 call_log_t left_log;
                 call_log_t right_log;
@@ -8899,7 +8970,8 @@ int main(int argc, char **argv)
                              : channel == CH_RIGHT ? "Right"
                              : "Mono",
                              linear_samples, g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &codeword_info);
+                             total_samples, total_codewords, sample_rate, law, &opts, &codeword_info,
+                             expected_rate_1, expected_rate_2);
         }
 
         if (do_visualize_html) {
