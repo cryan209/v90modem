@@ -3412,6 +3412,107 @@ static bool v8_targeted_v21_bytes_candidate_repeated(const int16_t *samples,
     return true;
 }
 
+static bool v8_detect_cj_run(const int16_t *samples,
+                             int total_samples,
+                             int sample_rate,
+                             int search_start,
+                             int search_end,
+                             bool use_ch2,
+                             int *cj_sample_out)
+{
+    const double mark_hz = use_ch2 ? 1650.0 : 980.0;
+    const double space_hz = use_ch2 ? 1850.0 : 1180.0;
+    int best_score = -1;
+    int best_sample = -1;
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !cj_sample_out)
+        return false;
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < 40)
+        return false;
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int bit_rate = 294; bit_rate <= 306; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
+
+            for (int phase_q = 0; phase_q < (int) (symbol_samples * 4.0); phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                double confidence[512];
+                int bit_count = 0;
+
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
+
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                        break;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count++] = (uint8_t) bit;
+                    confidence[bit_count - 1] = fabs(pm - ps);
+                }
+
+                for (int i = 0; i + 30 <= bit_count; i++) {
+                    int zero_count = 0;
+                    int framing_penalty = 0;
+                    int confidence_bonus = 0;
+
+                    for (int j = 0; j < 3; j++) {
+                        int pos = i + j * 10;
+
+                        if (bits[pos] != 0)
+                            framing_penalty += 25 + (int) lround(confidence[pos] * 80.0);
+                        if (bits[pos + 9] != 1)
+                            framing_penalty += 25 + (int) lround(confidence[pos + 9] * 80.0);
+                        for (int k = 0; k < 8; k++) {
+                            if (bits[pos + 1 + k] != 0)
+                                framing_penalty += 10 + (int) lround(confidence[pos + 1 + k] * 60.0);
+                            else
+                                confidence_bonus += (int) lround(confidence[pos + 1 + k] * 20.0);
+                        }
+                        if (framing_penalty < 140)
+                            zero_count++;
+                    }
+
+                    if (zero_count < 3)
+                        continue;
+
+                    {
+                        int score = 700 + confidence_bonus - framing_penalty - abs(bit_rate - 300) * 4;
+
+                        if (invert)
+                            score -= 4;
+                        if (score > best_score) {
+                            best_score = score;
+                            best_sample = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (best_sample < 0)
+        return false;
+    *cj_sample_out = best_sample;
+    return true;
+}
+
 
 static void format_hex_bytes(char *buf, size_t len, const uint8_t *bytes, int byte_len)
 {
@@ -4225,6 +4326,24 @@ static bool v8_collect_probe(const int16_t *samples,
         if (detect_standalone_ans_fallback(samples, total_samples, 8000, limit, &ans_hit)) {
             out->ansam_sample = ans_hit.start_sample;
             out->ansam_tone = ans_hit.tone_type;
+        }
+    }
+
+    if (!calling_party && out->cj_sample < 0 && out->cm_jm_sample >= 0) {
+        int cj_search_start = out->cm_jm_sample + 400;
+        int cj_search_end = out->cm_jm_sample + 8000;
+        int cj_sample;
+
+        if (cj_search_end > limit)
+            cj_search_end = limit;
+        if (v8_detect_cj_run(samples,
+                             total_samples,
+                             8000,
+                             cj_search_start,
+                             cj_search_end,
+                             false,
+                             &cj_sample)) {
+            out->cj_sample = cj_sample;
         }
     }
 
