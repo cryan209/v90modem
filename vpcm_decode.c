@@ -959,7 +959,13 @@ typedef struct {
     bool training_failed;
     bool mp_seen;
     bool mp_remote_ack_seen;
+    bool mp_from_rx_frame;
     bool mp_rates_valid;
+    bool mp_aux_channel_supported;
+    bool mp_use_non_linear_encoder;
+    bool mp_expanded_shaping;
+    bool mp_asymmetric_rates_allowed;
+    bool mp_local_ack_bit;
     bool u_info_from_info1a;
     bool ja_bits_from_local_tx;
     bool ja_bits_estimated;
@@ -1022,6 +1028,10 @@ typedef struct {
     int final_rx_stage;
     int final_tx_stage;
     int final_rx_event;
+    int mp_type;
+    int mp_trellis_size;
+    int mp_signalling_rate_mask;
+    int mp_frame_bits_captured;
     int mp_rate_a_to_c_bps;
     int mp_rate_c_to_a_bps;
     int u_info;
@@ -1047,6 +1057,100 @@ static int v34_mp_rate_n_to_bps(int rate_n)
     return rate_n * 2400;
 }
 
+static const char *v34_mp_trellis_name(int trellis_size)
+{
+    switch (trellis_size) {
+    case 0: return "16-state";
+    case 1: return "32-state";
+    case 2: return "64-state";
+    default: return "reserved";
+    }
+}
+
+static void v34_mp_rate_mask_to_text(int mask, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    for (int i = 0; i < 14; i++) {
+        if ((mask & (1 << i)) == 0)
+            continue;
+        appendf(out, out_len, "%s%d", out[0] ? "," : "", (i + 1) * 2400);
+    }
+    if (!out[0])
+        appendf(out, out_len, "none");
+}
+
+static bool v34_parse_mp_from_frame_bits(const uint8_t frame_bits[188],
+                                         int mp_seen,
+                                         int frame_target,
+                                         mp_t *mp_out,
+                                         int *bit_count_out)
+{
+    bitstream_state_t bs;
+    uint8_t packed[25];
+    uint8_t *t;
+    const uint8_t *r;
+    int type;
+    int limit;
+
+    if (!frame_bits || !mp_out)
+        return false;
+    if (mp_seen < 1)
+        return false;
+
+    type = frame_bits[18] & 1;
+    limit = (type == 1) ? 188 : 88;
+    if (frame_target == 88 || frame_target == 188) {
+        if (frame_target < limit)
+            return false;
+    }
+
+    memset(packed, 0, sizeof(packed));
+    bitstream_init(&bs, true);
+    t = packed;
+    for (int i = 18; i < limit; i++)
+        bitstream_put(&bs, &t, frame_bits[i] & 1, 1);
+    bitstream_flush(&bs, &t);
+
+    memset(mp_out, 0, sizeof(*mp_out));
+    bitstream_init(&bs, true);
+    r = packed;
+    mp_out->type = bitstream_get(&bs, &r, 1);
+    bitstream_get(&bs, &r, 1); /* reserved bit 19 */
+    mp_out->bit_rate_c_to_a = bitstream_get(&bs, &r, 4);
+    mp_out->bit_rate_a_to_c = bitstream_get(&bs, &r, 4);
+    mp_out->aux_channel_supported = bitstream_get(&bs, &r, 1);
+    mp_out->trellis_size = bitstream_get(&bs, &r, 2);
+    mp_out->use_non_linear_encoder = bitstream_get(&bs, &r, 1);
+    mp_out->expanded_shaping = bitstream_get(&bs, &r, 1);
+    mp_out->mp_acknowledged = bitstream_get(&bs, &r, 1);
+    bitstream_get(&bs, &r, 1); /* start bit 34 */
+    mp_out->signalling_rate_mask = bitstream_get(&bs, &r, 15);
+    mp_out->asymmetric_rates_allowed = bitstream_get(&bs, &r, 1);
+    if (mp_out->type == 1) {
+        for (int i = 0; i < 3; i++) {
+            bitstream_get(&bs, &r, 1);
+            mp_out->precoder_coeffs[i].re = bitstream_get(&bs, &r, 16);
+            bitstream_get(&bs, &r, 1);
+            mp_out->precoder_coeffs[i].im = bitstream_get(&bs, &r, 16);
+        }
+    }
+
+    if (mp_out->type != type)
+        return false;
+    if (mp_out->bit_rate_a_to_c < 1 || mp_out->bit_rate_a_to_c > 14)
+        return false;
+    if (mp_out->bit_rate_c_to_a < 1 || mp_out->bit_rate_c_to_a > 14)
+        return false;
+    if (mp_out->trellis_size < 0 || mp_out->trellis_size > 2)
+        return false;
+
+    if (bit_count_out)
+        *bit_count_out = limit;
+    return true;
+}
+
 static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const decode_v34_result_t *result)
 {
     if (!detail || detail_len == 0 || !result)
@@ -1054,12 +1158,26 @@ static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const d
 
     appendf(detail, detail_len, " mp_seen=%u", result->mp_seen ? 1U : 0U);
     appendf(detail, detail_len, " mp_remote_ack=%u", result->mp_remote_ack_seen ? 1U : 0U);
+    appendf(detail, detail_len, " mp_source=%s", result->mp_from_rx_frame ? "rx_frame" : "tx_state");
     appendf(detail, detail_len, " mp_rate_a_to_c=%s", result->mp_rate_a_to_c_bps > 0 ? "" : "n/a");
     if (result->mp_rate_a_to_c_bps > 0)
         appendf(detail, detail_len, "%d", result->mp_rate_a_to_c_bps);
     appendf(detail, detail_len, " mp_rate_c_to_a=%s", result->mp_rate_c_to_a_bps > 0 ? "" : "n/a");
     if (result->mp_rate_c_to_a_bps > 0)
         appendf(detail, detail_len, "%d", result->mp_rate_c_to_a_bps);
+    appendf(detail, detail_len, " mp_type=%s", result->mp_type >= 0 ? "" : "n/a");
+    if (result->mp_type >= 0)
+        appendf(detail, detail_len, "%d", result->mp_type);
+    appendf(detail, detail_len, " mp_trellis=%s", result->mp_trellis_size >= 0 ? "" : "n/a");
+    if (result->mp_trellis_size >= 0)
+        appendf(detail, detail_len, "%d", result->mp_trellis_size);
+    appendf(detail, detail_len, " mp_aux=%u", result->mp_aux_channel_supported ? 1U : 0U);
+    appendf(detail, detail_len, " mp_q3125=%u", result->mp_use_non_linear_encoder ? 1U : 0U);
+    appendf(detail, detail_len, " mp_expanded_shaping=%u", result->mp_expanded_shaping ? 1U : 0U);
+    appendf(detail, detail_len, " mp_asymmetric=%u", result->mp_asymmetric_rates_allowed ? 1U : 0U);
+    appendf(detail, detail_len, " mp_local_ack_bit=%u", result->mp_local_ack_bit ? 1U : 0U);
+    appendf(detail, detail_len, " mp_mask=0x%04X", (unsigned) (result->mp_signalling_rate_mask & 0x7FFF));
+    appendf(detail, detail_len, " mp_frame_bits=%d", result->mp_frame_bits_captured);
     appendf(detail, detail_len, " mp_rates_valid=%u", result->mp_rates_valid ? 1U : 0U);
 }
 
@@ -6836,6 +6954,8 @@ static bool decode_v34_pass(const int16_t *samples,
     int prev_tx_stage = -1;
     int prev_rx_event = -1;
     int ja_aux_start_bit = -1;
+    mp_t rx_mp;
+    bool have_rx_mp = false;
     bool flow_debug = false;
     bool info_cutoff_relaxed = false;
 
@@ -6894,6 +7014,16 @@ static bool decode_v34_pass(const int16_t *samples,
     result->phase4_ready_sample = -1;
     result->phase4_sample = -1;
     result->failure_sample = -1;
+    result->mp_from_rx_frame = false;
+    result->mp_aux_channel_supported = false;
+    result->mp_use_non_linear_encoder = false;
+    result->mp_expanded_shaping = false;
+    result->mp_asymmetric_rates_allowed = false;
+    result->mp_local_ack_bit = false;
+    result->mp_type = -1;
+    result->mp_trellis_size = -1;
+    result->mp_signalling_rate_mask = 0;
+    result->mp_frame_bits_captured = 0;
     result->mp_rate_a_to_c_bps = -1;
     result->mp_rate_c_to_a_bps = -1;
 
@@ -7201,9 +7331,29 @@ static bool decode_v34_pass(const int16_t *samples,
         result->u_info = v34_get_v90_u_info(v34);
     result->mp_seen = (v34->rx.mp_seen >= 1);
     result->mp_remote_ack_seen = (v34->rx.mp_remote_ack_seen > 0);
-    result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_a_to_c);
-    result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_c_to_a);
-    result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
+    have_rx_mp = v34_parse_mp_from_frame_bits(v34->rx.mp_frame_bits,
+                                              v34->rx.mp_seen,
+                                              v34->rx.mp_frame_target,
+                                              &rx_mp,
+                                              &result->mp_frame_bits_captured);
+    if (have_rx_mp) {
+        result->mp_from_rx_frame = true;
+        result->mp_type = rx_mp.type;
+        result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(rx_mp.bit_rate_a_to_c);
+        result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(rx_mp.bit_rate_c_to_a);
+        result->mp_aux_channel_supported = (rx_mp.aux_channel_supported != 0);
+        result->mp_trellis_size = rx_mp.trellis_size;
+        result->mp_use_non_linear_encoder = rx_mp.use_non_linear_encoder;
+        result->mp_expanded_shaping = rx_mp.expanded_shaping;
+        result->mp_asymmetric_rates_allowed = rx_mp.asymmetric_rates_allowed;
+        result->mp_local_ack_bit = rx_mp.mp_acknowledged;
+        result->mp_signalling_rate_mask = rx_mp.signalling_rate_mask;
+        result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
+    } else {
+        result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_a_to_c);
+        result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_c_to_a);
+        result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
+    }
     if (v34->rx.phase3_trn_mag_count > 0) {
         result->trn1u_mag_count = v34->rx.phase3_trn_mag_count;
         result->trn1u_mag_mean = v34->rx.phase3_trn_mag_sum / (float) v34->rx.phase3_trn_mag_count;
@@ -8139,6 +8289,7 @@ static void print_v34_result(const decode_v34_result_t *result,
         printf("  MP exchange:     seen=%s remote_ack=%s",
                result->mp_seen ? "yes" : "no",
                result->mp_remote_ack_seen ? "yes" : "no");
+        printf(" source=%s", result->mp_from_rx_frame ? "rx_frame" : "tx_state");
         if (result->mp_rates_valid) {
             printf(" negotiated A->C/C->A=%d/%d bps",
                    result->mp_rate_a_to_c_bps,
@@ -8159,6 +8310,23 @@ static void print_v34_result(const decode_v34_result_t *result,
             }
         }
         printf("\n");
+        if (result->mp_from_rx_frame) {
+            char rate_mask[160];
+
+            v34_mp_rate_mask_to_text(result->mp_signalling_rate_mask, rate_mask, sizeof(rate_mask));
+            printf("  MP decode:       type=MP%d bits=%d local_ack=%s trellis=%s aux=%s q3125=%s shaping=%s asym=%s mask={%s}\n",
+                   result->mp_type,
+                   result->mp_frame_bits_captured,
+                   result->mp_local_ack_bit ? "yes" : "no",
+                   v34_mp_trellis_name(result->mp_trellis_size),
+                   result->mp_aux_channel_supported ? "yes" : "no",
+                   result->mp_use_non_linear_encoder ? "yes" : "no",
+                   result->mp_expanded_shaping ? "expanded" : "min",
+                   result->mp_asymmetric_rates_allowed ? "yes" : "no",
+                   rate_mask);
+        } else {
+            printf("  MP decode:       no accepted RX MP frame decoded; using TX-state negotiated settings\n");
+        }
     } else if (expected_rate_1 > 0 && expected_rate_2 > 0) {
         printf("  MP exchange:     seen=no remote_ack=no filename=%d/%d\n",
                expected_rate_1,
