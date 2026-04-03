@@ -1758,6 +1758,23 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         return;
     }
 
+    /* V.8bis partial HDLC frame events */
+    if (strcmp(event->protocol, "V.8bis?") == 0
+        && strncmp(event->summary, "Partial ", 8) == 0
+        && pair_count > 0
+        && detail_value(pairs, pair_count, "fsk_ch") != NULL) {
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "FSK channel", detail_value(pairs, pair_count, "fsk_ch"));
+        append_html_label_value(out, out_len, "Revision nibble", detail_value(pairs, pair_count, "rev"));
+        append_html_label_value(out, out_len, "Captured bytes", detail_value(pairs, pair_count, "bytes"));
+        append_html_label_value(out, out_len, "Trailing bits", detail_value(pairs, pair_count, "trailing_bits"));
+        append_html_label_value(out, out_len, "CRC", detail_value(pairs, pair_count, "crc"));
+        append_html_label_value(out, out_len, "Reject reason", detail_value(pairs, pair_count, "reason"));
+        append_html_label_value(out, out_len, "Raw bytes", detail_value(pairs, pair_count, "raw"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+
     /* V.8 CI event */
     if (strcmp(event->protocol, "V.8") == 0
         && strcmp(event->summary, "CI decoded") == 0

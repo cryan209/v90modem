@@ -218,12 +218,20 @@ const char *v8bis_spar1_mode_str(int spar1_bits)
 }
 
 /* HDLC receiver state for one V.21 channel */
+typedef enum {
+    V8BIS_PARTIAL_SHORT_FRAME = 0,
+    V8BIS_PARTIAL_NON_BYTE_ALIGNED,
+    V8BIS_PARTIAL_BAD_CRC,
+    V8BIS_PARTIAL_ABORT_SEQUENCE
+} v8bis_partial_reason_t;
+
 typedef struct {
     int sample_offset;
     int channel;
     int frame_byte_count;
     int byte_bits;
     bool crc_ok;
+    v8bis_partial_reason_t reason;
     uint8_t first_octet;
     uint8_t frame_buf[16];
 } v8bis_partial_frame_t;
@@ -349,7 +357,25 @@ static uint16_t v8bis_crc16(const uint8_t *data, int len)
     return crc;
 }
 
-static void v8bis_hdlc_record_partial(v8bis_hdlc_rx_t *rx, bool crc_ok)
+static const char *v8bis_partial_reason_str(v8bis_partial_reason_t reason)
+{
+    switch (reason) {
+    case V8BIS_PARTIAL_SHORT_FRAME:
+        return "short_frame";
+    case V8BIS_PARTIAL_NON_BYTE_ALIGNED:
+        return "non_byte_aligned";
+    case V8BIS_PARTIAL_BAD_CRC:
+        return "bad_crc";
+    case V8BIS_PARTIAL_ABORT_SEQUENCE:
+        return "abort_sequence";
+    default:
+        return "unknown";
+    }
+}
+
+static void v8bis_hdlc_record_partial(v8bis_hdlc_rx_t *rx,
+                                      bool crc_ok,
+                                      v8bis_partial_reason_t reason)
 {
     v8bis_partial_frame_t *partial;
     int copy_len;
@@ -365,6 +391,7 @@ static void v8bis_hdlc_record_partial(v8bis_hdlc_rx_t *rx, bool crc_ok)
     partial->frame_byte_count = rx->frame_byte_count;
     partial->byte_bits = rx->byte_bits;
     partial->crc_ok = crc_ok;
+    partial->reason = reason;
     partial->sample_offset = rx->carrier_on_sample
         + (int)((double)rx->frame_start_bit / 300.0 * 8000.0);
     partial->first_octet = (rx->frame_byte_count > 0) ? rx->frame_buf[0] : rx->byte_val;
@@ -385,7 +412,10 @@ static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
      * byte_val before the flag fires (the prefix 0,1,1,1,1,1,1).
      * So byte_bits must be exactly 7 for a byte-aligned frame. */
     if (rx->frame_byte_count < 3 || rx->byte_bits != 7) {
-        v8bis_hdlc_record_partial(rx, false);
+        v8bis_hdlc_record_partial(rx,
+                                  false,
+                                  rx->frame_byte_count < 3 ? V8BIS_PARTIAL_SHORT_FRAME
+                                                           : V8BIS_PARTIAL_NON_BYTE_ALIGNED);
         return;
     }
     if (rx->msg_count >= V8BIS_MSG_MAX)
@@ -394,7 +424,7 @@ static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
     /* CRC check: good frame residual is 0xF0B8 */
     crc = v8bis_crc16(rx->frame_buf, rx->frame_byte_count);
     if (crc != 0xF0B8) {
-        v8bis_hdlc_record_partial(rx, false);
+        v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_BAD_CRC);
         return;
     }
 
@@ -430,6 +460,8 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
         rx->ones_run++;
         if (rx->ones_run >= 7) {
             /* Abort sequence (7+ consecutive ones) */
+            if (rx->in_frame)
+                v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_ABORT_SEQUENCE);
             rx->ones_run = 7;
             rx->in_frame = false;
             rx->frame_byte_count = 0;
@@ -677,12 +709,13 @@ void v8bis_collect_msg_events(call_log_t *log,
 
             snprintf(summary, sizeof(summary), "Partial %s frame", type_str);
             snprintf(detail, sizeof(detail),
-                     "fsk_ch=%s rev=%d bytes=%d trailing_bits=%d crc=%s raw=%s",
+                     "fsk_ch=%s rev=%d bytes=%d trailing_bits=%d crc=%s reason=%s raw=%s",
                      ch_str,
                      (partial->first_octet >> 4) & 0x0F,
                      partial->frame_byte_count,
                      partial->byte_bits,
                      partial->crc_ok ? "ok" : "failed",
+                     v8bis_partial_reason_str(partial->reason),
                      hex[0] != '\0' ? hex : "n/a");
             call_log_append(log, partial->sample_offset, 0, "V.8bis?", summary, detail);
         }
