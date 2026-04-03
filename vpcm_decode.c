@@ -18,6 +18,7 @@
 #include "v92_short_phase1_decode.h"
 #include "v92_short_phase2_decode.h"
 #include "v92_phase3_decode.h"
+#include "v92_ja_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -888,15 +889,7 @@ typedef struct {
     int jd_prime_zero_count;
 } jd_stage_decode_t;
 
-typedef struct {
-    bool ok;
-    bool calling_party;
-    int u_info;
-    int start_sample;
-    bool invert_sign;
-    v90_dil_desc_t desc;
-    v90_dil_analysis_t analysis;
-} ja_dil_decode_t;
+/* ja_dil_decode_t is now defined in v92_ja_decode.h */
 
 #define OFFLINE_V90_JD_BITS         72
 #define OFFLINE_V90_JD_PRIME_BITS   12
@@ -4118,8 +4111,16 @@ static void collect_v92_phase3_event(call_log_t *log,
         memset(&jd_stage, 0, sizeof(jd_stage));
         memset(&ja_dil, 0, sizeof(ja_dil));
 
-        if (decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage)
-            && decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)
+        /*
+         * V.90: Jd capability frames precede the DIL — decode Jd first so
+         *       its timing anchors the Ja DIL search window.
+         * V.92: There is no Jd; the analog modem moves directly from TRN1u
+         *       to Ja.  Skip Jd entirely and rely on tx_ja_sample instead.
+         */
+        if (!obs.v92_capable)
+            decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage);
+
+        if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)
             && ja_dil.ok) {
             int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
 
@@ -5866,7 +5867,7 @@ static void collect_v34_events(call_log_t *log,
         if ((RES_PTR)->SAMPLE_FIELD >= 0) { \
             snprintf(detail, sizeof(detail), "role=%s %s", \
                      role_name, DETAIL_STR); \
-            call_log_append(log, (RES_PTR)->SAMPLE_FIELD, 0, "V.90 Phase 3", SUMMARY_STR, detail); \
+            call_log_append(log, (RES_PTR)->SAMPLE_FIELD, 0, phase3_proto__, SUMMARY_STR, detail); \
         } \
     } while (0)
 
@@ -5905,6 +5906,10 @@ static void collect_v34_events(call_log_t *log,
     do { \
         const decode_v34_result_t *res__ = (RES_PTR); \
         const char *role_name = (ROLE_STR); \
+        const char *phase3_proto__ = (res__ && res__->info0_seen && \
+            v92_short_phase2_v92_cap_from_info0_bits(res__->info0_is_d, \
+                                                     res__->info0_raw.raw_26_27)) \
+            ? "V.92 Phase 3" : "V.90 Phase 3"; \
         if (!res__) \
             break; \
         if (res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
@@ -6157,15 +6162,20 @@ static void collect_stream_call_log(call_log_t *log,
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
-    if (do_v90) {
+    if (do_v90)
         collect_v90_events(log, g711_codewords, total_codewords, law);
-        if (have_answerer || have_caller) {
-            collect_post_phase3_stage_events(log,
-                                             g711_codewords,
-                                             total_codewords,
-                                             have_answerer ? &answerer : NULL,
-                                             have_caller ? &caller : NULL);
-        }
+
+    /*
+     * Post-Phase 3 stage events (Jd/Ja frames, DIL descriptor) are relevant
+     * for both V.90 and V.92 calls.  Run whenever we have V.34 decode results,
+     * regardless of whether the explicit --v90 flag was set.
+     */
+    if ((do_v34 || do_v90) && (have_answerer || have_caller)) {
+        collect_post_phase3_stage_events(log,
+                                         g711_codewords,
+                                         total_codewords,
+                                         have_answerer ? &answerer : NULL,
+                                         have_caller ? &caller : NULL);
     }
 
     call_log_sort(log);
@@ -7102,40 +7112,65 @@ static void collect_post_phase3_stage_events(call_log_t *log,
 {
     jd_stage_decode_t jd_stage;
     ja_dil_decode_t ja_dil;
+    const decode_v34_result_t *src;
+    bool is_v92 = false;
     char detail[192];
 
     if (!log || !codewords || total_codewords <= 0)
         return;
 
-    if (!decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage))
-        return;
+    /*
+     * Determine whether this is a V.92 call from INFO0 so we know whether
+     * to expect Jd capability frames before the DIL descriptor.
+     */
+    src = pick_post_phase3_source(answerer, caller, NULL);
+    if (src && src->info0_seen)
+        is_v92 = v92_short_phase2_v92_cap_from_info0_bits(src->info0_is_d,
+                                                          src->info0_raw.raw_26_27);
 
-    snprintf(detail, sizeof(detail),
-             "role=%s u_info=%d reps=%d frame_errors=%d",
-             jd_stage.calling_party ? "caller" : "answerer",
-             jd_stage.u_info,
-             jd_stage.jd_repetitions,
-             jd_stage.jd_frame_errors);
-    call_log_append(log,
-                    jd_stage.jd_start_sample,
-                    jd_stage.jd_repetitions * OFFLINE_V90_JD_BITS,
-                    "V.90",
-                    "Jd capability frames",
-                    detail);
+    memset(&jd_stage, 0, sizeof(jd_stage));
 
-    if (jd_stage.jd_prime_seen) {
+    if (!is_v92) {
+        /*
+         * V.90: Jd capability frames are mandatory before the DIL.
+         * Bail out early if they cannot be found — without them we have no
+         * reliable timing anchor for the DIL search.
+         */
+        if (!decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage))
+            return;
+
         snprintf(detail, sizeof(detail),
-                 "role=%s zero_bits=%d/12",
+                 "role=%s u_info=%d reps=%d frame_errors=%d",
                  jd_stage.calling_party ? "caller" : "answerer",
-                 jd_stage.jd_prime_zero_count);
+                 jd_stage.u_info,
+                 jd_stage.jd_repetitions,
+                 jd_stage.jd_frame_errors);
         call_log_append(log,
-                        jd_stage.jd_prime_sample,
-                        OFFLINE_V90_JD_PRIME_BITS,
+                        jd_stage.jd_start_sample,
+                        jd_stage.jd_repetitions * OFFLINE_V90_JD_BITS,
                         "V.90",
-                        "J'd termination",
+                        "Jd capability frames",
                         detail);
+
+        if (jd_stage.jd_prime_seen) {
+            snprintf(detail, sizeof(detail),
+                     "role=%s zero_bits=%d/12",
+                     jd_stage.calling_party ? "caller" : "answerer",
+                     jd_stage.jd_prime_zero_count);
+            call_log_append(log,
+                            jd_stage.jd_prime_sample,
+                            OFFLINE_V90_JD_PRIME_BITS,
+                            "V.90",
+                            "J'd termination",
+                            detail);
+        }
     }
 
+    /*
+     * Decode the Ja/DIL descriptor for both V.90 and V.92.
+     * For V.90 the jd_stage result above provides the timing anchor.
+     * For V.92 decode_ja_dil_stage() falls back to tx_ja_sample.
+     */
     if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)) {
         snprintf(detail, sizeof(detail),
                  "role=%s n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u",
@@ -7149,7 +7184,7 @@ static void collect_post_phase3_stage_events(call_log_t *log,
         call_log_append(log,
                         ja_dil.start_sample,
                         0,
-                        "V.90",
+                        is_v92 ? "V.92 Phase 3" : "V.90",
                         "Ja/DIL descriptor decoded",
                         detail);
     }
@@ -7432,57 +7467,6 @@ static int offline_v90_decode_jd_bits(const uint8_t *codewords,
     return errors;
 }
 
-static bool offline_v90_decode_plain_bits_packed(const uint8_t *codewords,
-                                                 int total_codewords,
-                                                 int start_sample,
-                                                 int bit_count,
-                                                 bool invert_sign,
-                                                 uint8_t *packed_out,
-                                                 int packed_len)
-{
-    uint32_t descramble_reg;
-    int prev_sign;
-
-    if (!codewords || !packed_out || packed_len <= 0 || bit_count <= 0
-        || start_sample < (OFFLINE_V90_SCRAMBLER_HISTORY + 1)
-        || start_sample + bit_count > total_codewords
-        || packed_len < ((bit_count + 7) / 8)) {
-        return false;
-    }
-
-    memset(packed_out, 0, (size_t) packed_len);
-    descramble_reg = 0;
-    prev_sign = ((codewords[start_sample - OFFLINE_V90_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
-    if (invert_sign)
-        prev_sign ^= 1;
-
-    for (int i = start_sample - OFFLINE_V90_SCRAMBLER_HISTORY; i < start_sample; i++) {
-        int sign = (codewords[i] & 0x80) ? 1 : 0;
-        int scrambled;
-        if (invert_sign)
-            sign ^= 1;
-        scrambled = sign ^ prev_sign;
-        prev_sign = sign;
-        (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
-    }
-
-    for (int i = 0; i < bit_count; i++) {
-        int sign = (codewords[start_sample + i] & 0x80) ? 1 : 0;
-        int scrambled;
-        int plain;
-
-        if (invert_sign)
-            sign ^= 1;
-        scrambled = sign ^ prev_sign;
-        prev_sign = sign;
-        plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
-        if (plain)
-            packed_out[i / 8] |= (uint8_t) (1U << (i % 8));
-    }
-
-    return true;
-}
-
 static bool decode_jd_stage(const uint8_t *codewords,
                             int total_codewords,
                             const decode_v34_result_t *answerer,
@@ -7649,27 +7633,23 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
 {
     const decode_v34_result_t *src;
     bool calling_party = false;
+    ja_dil_search_params_t params;
     int search_start;
     int search_end;
-    int best_score = -1;
-    bool best_invert = false;
-    int best_start = -1;
-    v90_dil_desc_t best_desc;
-    v90_dil_analysis_t best_analysis;
-    uint8_t packed_bits[512];
 
     if (!codewords || total_codewords <= 0 || !out)
         return false;
 
-    memset(out, 0, sizeof(*out));
     src = pick_post_phase3_source(answerer, caller, &calling_party);
     if (!src)
         return false;
 
     /*
-     * Prefer the locally decoded Ja anchor when it exists. The DIL descriptor
-     * is determined by the negotiated Ja parameters, so using a later Jd/J'd
-     * alignment as the primary seed can pull the search onto the wrong region.
+     * Compute the search window from the V.34 decode context.
+     *
+     * Prefer the locally decoded Ja anchor when it exists — using a later
+     * Jd/J'd alignment as the primary seed can pull the search onto the
+     * wrong region.
      */
     if (src->tx_ja_sample >= 0) {
         search_start = src->tx_ja_sample;
@@ -7683,8 +7663,6 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     } else {
         search_start = src->info1_sample >= 0 ? src->info1_sample : src->phase3_sample;
     }
-    if (search_start < (OFFLINE_V90_SCRAMBLER_HISTORY + 1))
-        search_start = OFFLINE_V90_SCRAMBLER_HISTORY + 1;
 
     if (src->phase4_seen && src->phase4_sample > search_start)
         search_end = src->phase4_sample;
@@ -7696,63 +7674,14 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
         search_end = src->failure_sample;
     else
         search_end = search_start + 4096;
-    if (search_end > total_codewords - 206)
-        search_end = total_codewords - 206;
-    if (search_end < search_start)
-        return false;
 
-    for (int candidate = search_start; candidate <= search_end; candidate++) {
-        for (int invert = 0; invert <= 1; invert++) {
-            v90_dil_desc_t desc;
-            v90_dil_analysis_t analysis;
-            int bit_count = total_codewords - candidate;
-            int packed_len;
-            int score;
+    params.search_start  = search_start;
+    params.search_end    = search_end;
+    params.tx_ja_sample  = src->tx_ja_sample;
+    params.u_info        = src->u_info;
+    params.calling_party = calling_party;
 
-            if (bit_count > (int) sizeof(packed_bits) * 8)
-                bit_count = (int) sizeof(packed_bits) * 8;
-            packed_len = (bit_count + 7) / 8;
-            if (!offline_v90_decode_plain_bits_packed(codewords, total_codewords,
-                                                      candidate, bit_count, invert != 0,
-                                                      packed_bits, packed_len)) {
-                continue;
-            }
-            if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count))
-                continue;
-            if (!v90_analyse_dil_descriptor(&desc, &analysis))
-                continue;
-
-            score = analysis.unique_train_u * 100
-                  + analysis.used_uchords * 50
-                  - analysis.impairment_score * 10
-                  - analysis.non_default_h * 5;
-            if (src->tx_ja_sample >= 0) {
-                int dist = candidate - src->tx_ja_sample;
-                if (dist < 0)
-                    dist = -dist;
-                score -= dist / 8;
-            }
-            if (score > best_score) {
-                best_score = score;
-                best_invert = (invert != 0);
-                best_start = candidate;
-                best_desc = desc;
-                best_analysis = analysis;
-            }
-        }
-    }
-
-    if (best_score < 0)
-        return false;
-
-    out->ok = true;
-    out->calling_party = calling_party;
-    out->u_info = src->u_info;
-    out->start_sample = best_start;
-    out->invert_sign = best_invert;
-    out->desc = best_desc;
-    out->analysis = best_analysis;
-    return true;
+    return v92_ja_dil_search(codewords, total_codewords, &params, out);
 }
 
 static void print_ja_dil_decode(const ja_dil_decode_t *result)
