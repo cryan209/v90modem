@@ -907,7 +907,7 @@ static bool v8_probe_allows_v90_v92_digital(const v8_probe_result_t *probe)
     return true;
 }
 
-#define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 10) / 1)
+#define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 14) / 1)
 
 typedef struct {
     bool info0_seen;
@@ -4311,6 +4311,7 @@ static bool v8_collect_probe(const int16_t *samples,
         } else if (out->ansam_sample >= 0 || out->ct_sample >= 0 || out->cng_sample >= 0) {
             v8_fsk_burst_hit_t bursts[V8_MAX_TARGETED_BURSTS];
             int burst_count;
+            bool have_targeted_candidate = false;
 
             burst_count = v8_collect_v21_bursts(samples,
                                                 total_samples,
@@ -4330,6 +4331,29 @@ static bool v8_collect_probe(const int16_t *samples,
                                                    calling_party,
                                                    &raw_hit)
                 && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)) {
+                out->result = parsed;
+                out->last_status = parsed.status;
+                out->cm_jm_sample = raw_hit.sample_offset;
+                out->cm_jm_complete = raw_hit.repeated_confirmed;
+                out->cm_jm_salvaged = true;
+                out->cm_jm_raw_len = raw_hit.byte_len;
+                memcpy(out->cm_jm_raw, raw_hit.bytes, (size_t) raw_hit.byte_len);
+                have_targeted_candidate = true;
+            }
+            if (!have_targeted_candidate
+                && burst_count > 0
+                && v8_targeted_v21_bytes_candidate_repeated(samples,
+                                                            total_samples,
+                                                            8000,
+                                                            bursts,
+                                                            burst_count,
+                                                            !calling_party,
+                                                            calling_party,
+                                                            &raw_hit,
+                                                            NULL)
+                && raw_hit.preamble_type == V8_LOCAL_SYNC_CM_JM
+                && v8_parse_cm_jm_candidate(&parsed, raw_hit.bytes, raw_hit.byte_len, calling_party)
+                && v8_cm_jm_candidate_plausible(raw_hit.bytes, raw_hit.byte_len, &parsed)) {
                 out->result = parsed;
                 out->last_status = parsed.status;
                 out->cm_jm_sample = raw_hit.sample_offset;
