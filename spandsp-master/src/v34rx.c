@@ -697,6 +697,27 @@ static void phase3_trn_hyp_reset(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void phase3_ja_capture_append(v34_rx_state_t *s, int bit0, int bit1)
+{
+    if (!s)
+        return;
+    /*endif*/
+    if (s->phase3_ja_capture_len + 2 > (int) sizeof(s->phase3_ja_capture))
+        return;
+    /*endif*/
+    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (bit0 & 1);
+    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (bit1 & 1);
+    s->phase3_ja_bits += 2;
+    if (s->phase3_ja_bits == 2 || (s->phase3_ja_bits % 256) == 0)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 3 Ja capture: emitted %d bits using hyp=%d\n",
+                 s->phase3_ja_bits, s->phase3_ja_hyp);
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static int mp_alternate_scrambler_tap(int tap)
 {
     /* V.34 uses the two complementary scrambler taps (x^-5 and x^-18),
@@ -4672,10 +4693,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int best_score;
                 int best_h;
                 int best_p;
+                int cap_bit0[8];
+                int cap_bit1[8];
+                uint8_t cap_valid[8];
 
                 best_score = 0;
                 best_h = -1;
                 best_p = 0;
+                memset(cap_bit0, 0, sizeof(cap_bit0));
+                memset(cap_bit1, 0, sizeof(cap_bit1));
+                memset(cap_valid, 0, sizeof(cap_valid));
                 for (h = 0;  h < 8;  h++)
                 {
                     int raw_sym;
@@ -4693,6 +4720,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                         dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
                         s->phase3_j_scramble[h] = reg;
+                        cap_bit0[h] = dbit[0];
+                        cap_bit1[h] = dbit[1];
+                        cap_valid[h] = 1;
+                        if (s->phase3_ja_capture_hyp_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp[h]))
+                        {
+                            s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[0] & 1);
+                            s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[1] & 1);
+                        }
+                        /*endif*/
+                        if (s->phase3_ja_capture_hyp_raw_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp_raw[h]))
+                        {
+                            s->phase3_ja_capture_hyp_raw[h][s->phase3_ja_capture_hyp_raw_len[h]++] = (uint8_t) (in_sym & 1);
+                            s->phase3_ja_capture_hyp_raw[h][s->phase3_ja_capture_hyp_raw_len[h]++] = (uint8_t) ((in_sym >> 1) & 1);
+                        }
+                        /*endif*/
                         s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
                         s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[1]) & 0xFFFFFFFFU;
 
@@ -4737,6 +4779,42 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endfor*/
                 s->phase3_j_bits += 2;
+                {
+                    int capture_h;
+
+                    capture_h = -1;
+                    if (s->phase3_j_lock_hyp >= 0
+                        && s->phase3_j_lock_hyp < 8
+                        && cap_valid[s->phase3_j_lock_hyp])
+                    {
+                        capture_h = s->phase3_j_lock_hyp;
+                    }
+                    else if (s->phase3_ja_hyp >= 0
+                             && s->phase3_ja_hyp < 8
+                             && cap_valid[s->phase3_ja_hyp])
+                    {
+                        capture_h = s->phase3_ja_hyp;
+                    }
+                    else if (s->phase3_trn_lock_hyp >= 0
+                             && s->phase3_trn_lock_hyp < 8
+                             && cap_valid[s->phase3_trn_lock_hyp])
+                    {
+                        capture_h = s->phase3_trn_lock_hyp;
+                    }
+                    else if (best_h >= 0
+                             && best_h < 8
+                             && cap_valid[best_h])
+                    {
+                        capture_h = best_h;
+                    }
+                    /*endif*/
+                    if (capture_h >= 0)
+                    {
+                        s->phase3_ja_hyp = capture_h;
+                        phase3_ja_capture_append(s, cap_bit0[capture_h], cap_bit1[capture_h]);
+                    }
+                    /*endif*/
+                }
                 if (s->phase3_j_bits <= 8
                     || (s->phase3_j_bits % 64) == 0)
                 {
@@ -5021,7 +5099,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
             memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
             memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
-            s->phase3_ja_bits = 0;
+            s->phase3_ja_bits = s->phase3_ja_capture_len;
             s->phase3_ja_hyp = -1;
             phase3_trn_hyp_reset(s);
             s->phase3_trn_mag_sum = 0.0f;
@@ -5333,20 +5411,31 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
                 s->phase3_ja_bits = 0;
                 s->phase3_ja_hyp = -1;
+                memset(s->phase3_ja_capture, 0, sizeof(s->phase3_ja_capture));
+                s->phase3_ja_capture_len = 0;
+                memset(s->phase3_ja_capture_hyp, 0, sizeof(s->phase3_ja_capture_hyp));
+                memset(s->phase3_ja_capture_hyp_len, 0, sizeof(s->phase3_ja_capture_hyp_len));
+                memset(s->phase3_ja_capture_hyp_raw, 0, sizeof(s->phase3_ja_capture_hyp_raw));
+                memset(s->phase3_ja_capture_hyp_raw_len, 0, sizeof(s->phase3_ja_capture_hyp_raw_len));
                 phase3_trn_hyp_reset(s);
                 s->phase3_trn_mag_sum = 0.0f;
                 s->phase3_trn_mag_count = 0;
             }
             /*endif*/
         }
-        else if (s->put_aux_bit
-                 && s->phase3_trn_lock_hyp >= 0
-                 && s->phase3_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
+        else
         {
             int h;
             int raw_sym;
+            int lock_h = (s->phase3_trn_lock_hyp >= 0
+                          && s->phase3_trn_lock_hyp < MP_HYPOTHESIS_COUNT)
+                         ? s->phase3_trn_lock_hyp
+                         : s->phase3_j_lock_hyp;
 
-            h = s->phase3_trn_lock_hyp;
+            if (lock_h < 0 || lock_h >= MP_HYPOTHESIS_COUNT)
+                goto phase3_training_done;
+
+            h = lock_h;
             raw_sym = map_phase4_raw_bits(data_bits, h);
             if (s->phase3_ja_prev_valid[h])
             {
@@ -5360,8 +5449,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 b0 = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                 b1 = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
                 s->phase3_ja_scramble[h] = reg;
-                s->put_aux_bit(s->put_aux_bit_user_data, b0);
-                s->put_aux_bit(s->put_aux_bit_user_data, b1);
+                if (s->put_aux_bit)
+                {
+                    s->put_aux_bit(s->put_aux_bit_user_data, b0);
+                    s->put_aux_bit(s->put_aux_bit_user_data, b1);
+                }
+                /* Persist Ja bits for offline analyzers even when no aux callback is armed. */
+                if (s->phase3_ja_capture_len + 2 <= (int) sizeof(s->phase3_ja_capture))
+                {
+                    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (b0 & 1);
+                    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (b1 & 1);
+                }
                 s->phase3_ja_bits += 2;
                 s->phase3_ja_hyp = h;
                 if (s->phase3_ja_bits == 2 || (s->phase3_ja_bits % 256) == 0)
@@ -7940,6 +8038,12 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase3_ja_prev_valid, 0, sizeof(s->rx.phase3_ja_prev_valid));
     s->rx.phase3_ja_bits = 0;
     s->rx.phase3_ja_hyp = -1;
+    memset(s->rx.phase3_ja_capture, 0, sizeof(s->rx.phase3_ja_capture));
+    s->rx.phase3_ja_capture_len = 0;
+    memset(s->rx.phase3_ja_capture_hyp, 0, sizeof(s->rx.phase3_ja_capture_hyp));
+    memset(s->rx.phase3_ja_capture_hyp_len, 0, sizeof(s->rx.phase3_ja_capture_hyp_len));
+    memset(s->rx.phase3_ja_capture_hyp_raw, 0, sizeof(s->rx.phase3_ja_capture_hyp_raw));
+    memset(s->rx.phase3_ja_capture_hyp_raw_len, 0, sizeof(s->rx.phase3_ja_capture_hyp_raw_len));
     phase3_trn_hyp_reset(&s->rx);
     s->rx.phase3_trn_mag_sum = 0.0f;
     s->rx.phase3_trn_mag_count = 0;

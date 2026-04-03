@@ -871,6 +871,12 @@ typedef struct
     uint8_t phase3_ja_prev_valid[8];
     int phase3_ja_bits;
     int phase3_ja_hyp;
+    uint8_t phase3_ja_capture[8192];
+    int phase3_ja_capture_len;
+    uint8_t phase3_ja_capture_hyp[8][8192];
+    int phase3_ja_capture_hyp_len[8];
+    uint8_t phase3_ja_capture_hyp_raw[8][8192];
+    int phase3_ja_capture_hyp_raw_len[8];
     int phase4_j_seen;
     int phase4_j_lock_hyp;
     int phase4_j_bits;

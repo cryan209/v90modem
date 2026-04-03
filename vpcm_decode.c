@@ -39,6 +39,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include <limits.h>
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -813,6 +814,12 @@ typedef struct {
     int ja_detector_bits;
     int ja_observed_bits;
     char ja_bits[129];
+    int ja_aux_bit_len;
+    char ja_aux_bits[8193];
+    int ja_aux_hyp_bit_len[8];
+    char ja_aux_hyp_bits[8][8193];
+    int ja_aux_hyp_raw_bit_len[8];
+    char ja_aux_hyp_raw_bits[8][8193];
     int rx_s_event_sample;
     int rx_tone_a_sample;
     int rx_tone_b_sample;
@@ -1510,10 +1517,13 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         appendf(out, out_len, "<hr><div><strong>Ja Sequencing (9.5.1.1.3):</strong></div>");
         append_html_label_value(out, out_len, "TRNlu to Ja (T)", detail_value(pairs, pair_count, "trn_to_ja_t"));
         append_html_label_value(out, out_len, "Ja timing anchor", detail_value(pairs, pair_count, "ja_anchor_source"));
+        append_html_label_value(out, out_len, "Ja aux bits (local)", detail_value(pairs, pair_count, "ja_aux_bits_local"));
+        append_html_label_value(out, out_len, "Ja aux bits (peer)", detail_value(pairs, pair_count, "ja_aux_bits_peer"));
         append_html_label_value(out, out_len, "TRNlu first-2040T requirement", detail_value(pairs, pair_count, "trn_first_2040t"));
         append_html_label_value(out, out_len, "TRNlu 2040T reached before Ja", detail_bit_to_yes_no(detail_value(pairs, pair_count, "trn_2040t_ready")));
         append_html_label_value(out, out_len, "Ja start", detail_value(pairs, pair_count, "ja_ms"));
         append_html_label_value(out, out_len, "Ja DIL descriptor decoded", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ja_dil_seen")));
+        append_html_label_value(out, out_len, "Ja DIL source", detail_value(pairs, pair_count, "ja_dil_source"));
         append_html_label_value(out, out_len, "Ja DIL start", detail_value(pairs, pair_count, "ja_dil_ms"));
         append_html_label_value(out, out_len, "Ja DIL bits", detail_value(pairs, pair_count, "ja_dil_bits"));
         append_html_label_value(out, out_len, "Ja DIL end", detail_value(pairs, pair_count, "ja_dil_end_ms"));
@@ -3451,6 +3461,9 @@ typedef struct {
     int total_bits;
     int preview_len;
     char preview[257];
+    int capture_start_bit;
+    int capture_len;
+    char capture[8193];
 } v34_aux_bit_collector_t;
 
 static void v34_collect_aux_bit(void *user_data, int bit)
@@ -3459,6 +3472,12 @@ static void v34_collect_aux_bit(void *user_data, int bit)
 
     if (!collector)
         return;
+    if (collector->capture_start_bit >= 0
+        && collector->total_bits >= collector->capture_start_bit
+        && collector->capture_len < (int) sizeof(collector->capture) - 1) {
+        collector->capture[collector->capture_len++] = bit ? '1' : '0';
+        collector->capture[collector->capture_len] = '\0';
+    }
     if (collector->preview_len < (int) sizeof(collector->preview) - 1)
         collector->preview[collector->preview_len++] = bit ? '1' : '0';
     collector->preview[collector->preview_len] = '\0';
@@ -3661,6 +3680,218 @@ typedef struct {
     int ds_t;
 } v90_sd_ds_hit_t;
 
+typedef struct {
+    bool found;
+    int bit_offset;
+    bool invert_bits;
+    v90_dil_desc_t desc;
+    v90_dil_analysis_t analysis;
+} v90_aux_dil_hit_t;
+
+static bool find_v90_dil_in_aux_str(const char *bit_str,
+                                    int bit_len,
+                                    v90_aux_dil_hit_t *out)
+{
+    int max_offset;
+    int best_score = -1;
+    v90_aux_dil_hit_t best;
+    uint8_t packed[1024];
+
+    if (!bit_str || !out || bit_len < 206 || bit_str[0] == '\0')
+        return false;
+
+    memset(&best, 0, sizeof(best));
+    if (bit_len > 8192)
+        bit_len = 8192;
+    max_offset = bit_len - 206;
+
+    for (int offset = 0; offset <= max_offset; offset++) {
+        int candidate_bits = bit_len - offset;
+        int packed_len = (candidate_bits + 7) / 8;
+
+        if (packed_len <= 0 || packed_len > (int) sizeof(packed))
+            continue;
+        for (int swap_pairs = 0; swap_pairs <= 1; swap_pairs++) {
+            if (swap_pairs && candidate_bits < 2)
+                continue;
+            for (int invert = 0; invert <= 1; invert++) {
+            v90_dil_desc_t desc;
+            v90_dil_analysis_t analysis;
+            int score;
+            bool valid = true;
+
+            memset(packed, 0, (size_t) packed_len);
+            for (int i = 0; i < candidate_bits; i++) {
+                int bit;
+                int src_i = offset + i;
+                char c;
+
+                if (swap_pairs)
+                    src_i = offset + (i & ~1) + (1 - (i & 1));
+                c = bit_str[src_i];
+
+                if (c != '0' && c != '1') {
+                    valid = false;
+                    break;
+                }
+                bit = (c == '1') ? 1 : 0;
+                if (invert)
+                    bit ^= 1;
+                if (bit)
+                    packed[i / 8] |= (uint8_t) (1U << (i % 8));
+            }
+            if (!valid)
+                continue;
+            if (!v90_parse_dil_descriptor(&desc, packed, candidate_bits))
+                continue;
+            if (!v90_analyse_dil_descriptor(&desc, &analysis))
+                continue;
+
+            score = analysis.unique_train_u * 100
+                  + analysis.used_uchords * 50
+                  - analysis.impairment_score * 10
+                  - analysis.non_default_h * 5
+                  - offset / 4
+                  - (swap_pairs ? 8 : 0);
+            if (score > best_score) {
+                best_score = score;
+                best.found = true;
+                best.bit_offset = offset;
+                best.invert_bits = (invert != 0);
+                best.desc = desc;
+                best.analysis = analysis;
+            }
+        }
+        }
+    }
+
+    if (!best.found)
+        return false;
+    *out = best;
+    return true;
+}
+
+static int v90_aux_dil_hit_score(const v90_aux_dil_hit_t *hit)
+{
+    if (!hit || !hit->found)
+        return INT_MIN;
+    return hit->analysis.unique_train_u * 100
+         + hit->analysis.used_uchords * 50
+         - hit->analysis.impairment_score * 10
+         - hit->analysis.non_default_h * 5
+         - hit->bit_offset / 4
+         - (hit->invert_bits ? 4 : 0);
+}
+
+static void v34_descramble_bits(const char *src_bits,
+                                int bit_len,
+                                int scrambler_tap,
+                                char *out_bits,
+                                int out_cap)
+{
+    uint32_t reg = 0;
+    int n;
+
+    if (!out_bits || out_cap <= 0)
+        return;
+    if (!src_bits || bit_len <= 0) {
+        out_bits[0] = '\0';
+        return;
+    }
+    n = bit_len;
+    if (n > out_cap - 1)
+        n = out_cap - 1;
+    for (int i = 0; i < n; i++) {
+        int in_bit = (src_bits[i] == '1') ? 1 : 0;
+        int out_bit = (in_bit ^ ((int) (reg >> scrambler_tap)) ^ ((int) (reg >> (23 - 1)))) & 1;
+
+        reg = (reg << 1) | (uint32_t) in_bit;
+        out_bits[i] = out_bit ? '1' : '0';
+    }
+    out_bits[n] = '\0';
+}
+
+static bool find_v90_dil_in_aux_any(const decode_v34_result_t *src,
+                                    v90_aux_dil_hit_t *out,
+                                    int *hyp_idx_out,
+                                    int *tap_out,
+                                    bool *raw_out)
+{
+    int best_score = INT_MIN;
+    v90_aux_dil_hit_t best_hit;
+    int best_hyp = -1;
+    int best_tap = -1;
+    bool best_raw = false;
+
+    if (!src || !out)
+        return false;
+    memset(&best_hit, 0, sizeof(best_hit));
+
+    if (find_v90_dil_in_aux_str(src->ja_aux_bits, src->ja_aux_bit_len, out)) {
+        int score = v90_aux_dil_hit_score(out);
+
+        best_score = score;
+        best_hit = *out;
+        best_hyp = -1;
+        best_tap = -1;
+        best_raw = false;
+    }
+    for (int h = 0; h < 8; h++) {
+        v90_aux_dil_hit_t hit;
+        int score;
+
+        memset(&hit, 0, sizeof(hit));
+        if (!find_v90_dil_in_aux_str(src->ja_aux_hyp_bits[h], src->ja_aux_hyp_bit_len[h], &hit))
+            continue;
+        score = v90_aux_dil_hit_score(&hit);
+        if (score > best_score) {
+            best_score = score;
+            best_hit = hit;
+            best_hyp = h;
+            best_tap = -1;
+            best_raw = false;
+        }
+    }
+    for (int h = 0; h < 8; h++) {
+        static const int taps[2] = {17, 4};
+
+        for (int ti = 0; ti < 2; ti++) {
+            char descrambled[8193];
+            v90_aux_dil_hit_t hit;
+            int score;
+
+            memset(&hit, 0, sizeof(hit));
+            if (src->ja_aux_hyp_raw_bit_len[h] < 206 || src->ja_aux_hyp_raw_bits[h][0] == '\0')
+                continue;
+            v34_descramble_bits(src->ja_aux_hyp_raw_bits[h],
+                                src->ja_aux_hyp_raw_bit_len[h],
+                                taps[ti],
+                                descrambled,
+                                (int) sizeof(descrambled));
+            if (!find_v90_dil_in_aux_str(descrambled, src->ja_aux_hyp_raw_bit_len[h], &hit))
+                continue;
+            score = v90_aux_dil_hit_score(&hit) + 2;
+            if (score > best_score) {
+                best_score = score;
+                best_hit = hit;
+                best_hyp = h;
+                best_tap = taps[ti];
+                best_raw = true;
+            }
+        }
+    }
+    if (best_score == INT_MIN)
+        return false;
+    *out = best_hit;
+    if (hyp_idx_out)
+        *hyp_idx_out = best_hyp;
+    if (tap_out)
+        *tap_out = best_tap;
+    if (raw_out)
+        *raw_out = best_raw;
+    return true;
+}
+
 static bool find_v90_sd_ds_after(const uint8_t *codewords,
                                  int total_codewords,
                                  v91_law_t law,
@@ -3797,9 +4028,15 @@ static void collect_v92_phase3_event(call_log_t *log,
     v92_phase3_observation_t obs;
     v92_phase3_result_t phase3;
     const decode_v34_result_t *peer = NULL;
+    const decode_v34_result_t *ja_aux_src = NULL;
+    int ja_aux_hyp = -2;
+    int ja_aux_tap = -1;
+    bool ja_aux_raw = false;
     uint8_t raw_26_27;
     int event_sample;
     const char *ja_anchor_source = "local";
+    const char *ja_dil_source = "none";
+    char ja_dil_source_buf[32];
     char detail[8192];
 
     if (!log || !res || !res->info0_seen)
@@ -3813,6 +4050,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     else if (res == caller && answerer)
         peer = answerer;
     memset(&obs, 0, sizeof(obs));
+    ja_dil_source_buf[0] = '\0';
     obs.info0_seen = res->info0_seen;
     obs.info0_is_d = res->info0_is_d;
     obs.short_phase2_requested = v92_short_phase2_req_from_info0_bits(res->info0_is_d, raw_26_27);
@@ -3878,6 +4116,7 @@ static void collect_v92_phase3_event(call_log_t *log,
                 obs.ja_dil_unique_train_u = ja_dil.analysis.unique_train_u;
                 obs.ja_dil_uchords = ja_dil.analysis.used_uchords;
                 obs.ja_dil_impairment = ja_dil.analysis.impairment_score;
+                ja_dil_source = "pcm";
             }
         }
 
@@ -3911,6 +4150,47 @@ static void collect_v92_phase3_event(call_log_t *log,
             }
         }
     }
+    if (!obs.ja_dil_seen) {
+        v90_aux_dil_hit_t aux_hit;
+
+        memset(&aux_hit, 0, sizeof(aux_hit));
+        if (find_v90_dil_in_aux_any(res, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
+            ja_aux_src = res;
+        } else if (peer && find_v90_dil_in_aux_any(peer, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
+            ja_aux_src = peer;
+        }
+
+        if (ja_aux_src && aux_hit.found) {
+            int bit_len = v90_dil_descriptor_bit_len(&aux_hit.desc);
+            int bit_to_sample = (aux_hit.bit_offset * 5 + 2) / 4;
+            int base_sample = (ja_aux_src->tx_ja_sample >= 0)
+                              ? ja_aux_src->tx_ja_sample
+                              : (obs.tx_ja_sample >= 0 ? obs.tx_ja_sample : res->info1_sample);
+
+            if (bit_len > 0 && base_sample >= 0) {
+                obs.ja_dil_seen = true;
+                if (ja_aux_hyp >= 0) {
+                    snprintf(ja_dil_source_buf,
+                             sizeof(ja_dil_source_buf),
+                             "%s_h%d%s",
+                             (ja_aux_src == res) ? "ja_aux_local" : "ja_aux_peer",
+                             ja_aux_hyp,
+                             ja_aux_raw ? (ja_aux_tap == 4 ? "_rawtap4" : "_rawtap17") : "");
+                    ja_dil_source = ja_dil_source_buf;
+                } else {
+                    ja_dil_source = (ja_aux_src == res) ? "ja_aux_local" : "ja_aux_peer";
+                }
+                obs.ja_dil_sample = base_sample + bit_to_sample;
+                obs.ja_dil_bits = bit_len;
+                obs.ja_dil_n = aux_hit.desc.n;
+                obs.ja_dil_lsp = aux_hit.desc.lsp;
+                obs.ja_dil_ltp = aux_hit.desc.ltp;
+                obs.ja_dil_unique_train_u = aux_hit.analysis.unique_train_u;
+                obs.ja_dil_uchords = aux_hit.analysis.used_uchords;
+                obs.ja_dil_impairment = aux_hit.analysis.impairment_score;
+            }
+        }
+    }
 
     if (!v92_phase3_analyze(&obs, &phase3))
         return;
@@ -3941,6 +4221,8 @@ static void collect_v92_phase3_event(call_log_t *log,
     appendf(detail, sizeof(detail), " phase4_status=%s",
             phase3.phase4_status ? phase3.phase4_status : "unknown");
     appendf(detail, sizeof(detail), " ja_anchor_source=%s", ja_anchor_source);
+    appendf(detail, sizeof(detail), " ja_aux_bits_local=%d", res->ja_aux_bit_len);
+    appendf(detail, sizeof(detail), " ja_aux_bits_peer=%d", peer ? peer->ja_aux_bit_len : 0);
     appendf(detail, sizeof(detail), " trn_to_ja_t=%s",
             phase3.ja_seen && phase3.trnlu_to_ja_t > 0 ? "" : "n/a");
     if (phase3.ja_seen && phase3.trnlu_to_ja_t > 0)
@@ -3952,6 +4234,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     if (phase3.ja_sample >= 0)
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_sample, 8000));
     appendf(detail, sizeof(detail), " ja_dil_seen=%u", phase3.ja_dil_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ja_dil_source=%s", ja_dil_source);
     appendf(detail, sizeof(detail), " ja_dil_ms=%s", phase3.ja_dil_sample >= 0 ? "" : "n/a");
     if (phase3.ja_dil_sample >= 0)
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_dil_sample, 8000));
@@ -4843,6 +5126,8 @@ static bool decode_v34_pass(const int16_t *samples,
     result->ja_detector_bits = -1;
     result->ja_observed_bits = 0;
     result->ja_bits[0] = '\0';
+    result->ja_aux_bit_len = 0;
+    result->ja_aux_bits[0] = '\0';
     result->rx_s_event_sample = -1;
     result->rx_tone_a_sample = -1;
     result->rx_tone_b_sample = -1;
@@ -4878,6 +5163,7 @@ static bool decode_v34_pass(const int16_t *samples,
        after INFO0 to improve INFO1a acquisition in offline captures. */
     v34_rx_set_signal_cutoff(v34, initial_signal_cutoff_db);
     memset(&aux_bits, 0, sizeof(aux_bits));
+    aux_bits.capture_start_bit = -1;
     v34_set_put_aux_bit(v34, v34_collect_aux_bit, &aux_bits);
     if (getenv("VPCM_V34_FLOW"))
         flow_debug = true;
@@ -4987,11 +5273,16 @@ static bool decode_v34_pass(const int16_t *samples,
                 if (result->tx_pp_sample >= 0 && result->tx_pp_end_sample < 0)
                     result->tx_pp_end_sample = offset;
                 note_first_sample(&result->tx_trn_sample, offset);
+                if (aux_bits.capture_start_bit < 0)
+                    aux_bits.capture_start_bit = aux_bits.total_bits;
                 break;
             case 39:
                 note_first_sample(&result->tx_ja_sample, offset);
-                if (ja_aux_start_bit < 0)
+                if (ja_aux_start_bit < 0) {
                     ja_aux_start_bit = aux_bits.total_bits;
+                    if (aux_bits.capture_start_bit < 0)
+                        aux_bits.capture_start_bit = ja_aux_start_bit;
+                }
                 if (!result->ja_bits_known) {
                     /* In this SpanDSP checkout, local Phase 3 TX uses 4-point TRN/J. */
                     result->ja_trn16 = 0;
@@ -5167,19 +5458,73 @@ static bool decode_v34_pass(const int16_t *samples,
         result->trn1u_mag_count = v34->rx.phase3_trn_mag_count;
         result->trn1u_mag_mean = v34->rx.phase3_trn_mag_sum / (float) v34->rx.phase3_trn_mag_count;
     }
+    if (v34->rx.phase3_ja_capture_len > 0) {
+        int n = v34->rx.phase3_ja_capture_len;
+
+        if (n > (int) sizeof(result->ja_aux_bits) - 1)
+            n = (int) sizeof(result->ja_aux_bits) - 1;
+        for (int i = 0; i < n; i++)
+            result->ja_aux_bits[i] = (v34->rx.phase3_ja_capture[i] & 1U) ? '1' : '0';
+        result->ja_aux_bits[n] = '\0';
+        result->ja_aux_bit_len = n;
+        if (result->ja_observed_bits <= 0)
+            result->ja_observed_bits = n;
+        if (!result->ja_bits_known && n > 0) {
+            int copy_len = n;
+
+            if (copy_len > (int) sizeof(result->ja_bits) - 1)
+                copy_len = (int) sizeof(result->ja_bits) - 1;
+            memcpy(result->ja_bits, result->ja_aux_bits, (size_t) copy_len);
+            result->ja_bits[copy_len] = '\0';
+            result->ja_bits_known = true;
+            result->ja_bits_from_local_tx = false;
+        }
+    }
+    for (int h = 0; h < 8; h++) {
+        int n = v34->rx.phase3_ja_capture_hyp_len[h];
+        int raw_n = v34->rx.phase3_ja_capture_hyp_raw_len[h];
+
+        if (n < 0)
+            n = 0;
+        if (n > (int) sizeof(result->ja_aux_hyp_bits[h]) - 1)
+            n = (int) sizeof(result->ja_aux_hyp_bits[h]) - 1;
+        result->ja_aux_hyp_bit_len[h] = n;
+        for (int i = 0; i < n; i++)
+            result->ja_aux_hyp_bits[h][i] = (v34->rx.phase3_ja_capture_hyp[h][i] & 1U) ? '1' : '0';
+        result->ja_aux_hyp_bits[h][n] = '\0';
+
+        if (raw_n < 0)
+            raw_n = 0;
+        if (raw_n > (int) sizeof(result->ja_aux_hyp_raw_bits[h]) - 1)
+            raw_n = (int) sizeof(result->ja_aux_hyp_raw_bits[h]) - 1;
+        result->ja_aux_hyp_raw_bit_len[h] = raw_n;
+        for (int i = 0; i < raw_n; i++)
+            result->ja_aux_hyp_raw_bits[h][i] = (v34->rx.phase3_ja_capture_hyp_raw[h][i] & 1U) ? '1' : '0';
+        result->ja_aux_hyp_raw_bits[h][raw_n] = '\0';
+    }
 
     if (ja_aux_start_bit >= 0
-        && ja_aux_start_bit < aux_bits.preview_len
-        && aux_bits.total_bits > ja_aux_start_bit) {
+        && aux_bits.capture_start_bit >= 0
+        && aux_bits.total_bits > ja_aux_start_bit
+        && aux_bits.capture_len > 0) {
         int available = aux_bits.total_bits - ja_aux_start_bit;
-        int stored = aux_bits.preview_len - ja_aux_start_bit;
-        int copy_len = stored;
+        int copy_aux_len = aux_bits.capture_len;
+        int copy_preview_len = aux_bits.capture_len;
 
-        if (copy_len > (int) sizeof(result->ja_bits) - 1)
-            copy_len = (int) sizeof(result->ja_bits) - 1;
-        memcpy(result->ja_bits, aux_bits.preview + ja_aux_start_bit, (size_t) copy_len);
-        result->ja_bits[copy_len] = '\0';
+        if (copy_aux_len > (int) sizeof(result->ja_aux_bits) - 1)
+            copy_aux_len = (int) sizeof(result->ja_aux_bits) - 1;
+        memcpy(result->ja_aux_bits, aux_bits.capture, (size_t) copy_aux_len);
+        result->ja_aux_bits[copy_aux_len] = '\0';
+        result->ja_aux_bit_len = available;
+        if (result->ja_aux_bit_len > copy_aux_len)
+            result->ja_aux_bit_len = copy_aux_len;
+        if (copy_preview_len > (int) sizeof(result->ja_bits) - 1)
+            copy_preview_len = (int) sizeof(result->ja_bits) - 1;
+        memcpy(result->ja_bits, aux_bits.capture, (size_t) copy_preview_len);
+        result->ja_bits[copy_preview_len] = '\0';
         result->ja_observed_bits = available;
+        if (result->ja_observed_bits > copy_aux_len)
+            result->ja_observed_bits = copy_aux_len;
         result->ja_bits_known = true;
     }
     if (result->tx_ja_sample >= 0 && result->ja_observed_bits == 0) {
