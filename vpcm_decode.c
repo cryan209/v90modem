@@ -923,6 +923,18 @@ static bool v8_result_looks_like_v34_relay(const v8_parms_t *r)
         && v8_result_has_analog_only_pcm(r);
 }
 
+static bool v8_samples_near(int a, int b, int max_delta)
+{
+    int delta;
+
+    if (a < 0 || b < 0)
+        return false;
+    delta = a - b;
+    if (delta < 0)
+        delta = -delta;
+    return delta <= max_delta;
+}
+
 static void print_v8_capability_note(const v8_parms_t *r)
 {
     if (!r)
@@ -4140,7 +4152,7 @@ static int v8_probe_role_score(const v8_probe_result_t *probe)
         if (probe->cm_jm_sample >= 0)
             score += 700;
         if (probe->cj_sample >= 0)
-            score += 250;
+            score -= 220;
         if (probe->ansam_sample >= 0 && probe->cm_jm_sample >= 0 && probe->cm_jm_sample >= probe->ansam_sample)
             score += 350;
     }
@@ -4811,6 +4823,7 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
     const v8_probe_result_t *answerer;
     const char *caller_ch;
     const char *answerer_ch;
+    bool answerer_cj_is_echo = false;
     int first_msg = -1;
     int last_msg = -1;
     int ci_end;
@@ -4851,6 +4864,7 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
                                   answerer->cj_sample,
                                   -1,
                                   -1);
+    answerer_cj_is_echo = v8_samples_near(answerer->cj_sample, caller->cj_sample, 1200);
 
     if (caller->ci_sample >= 0) {
         print_v8_flow_step("Caller CI", caller_ch, caller->ci_sample, ci_end, "");
@@ -4901,8 +4915,11 @@ static void print_v8_stereo_pair_summary(const v8_stereo_pair_result_t *pair)
     } else {
         printf("  Caller (%s):      CJ not observed\n", caller_ch);
     }
-    if (answerer->cj_sample >= 0) {
+    if (answerer->cj_sample >= 0 && answerer_cj_is_echo) {
         printf("  Answerer (%s):    CJ-like echo at %.1f ms\n",
+               answerer_ch, sample_to_ms(answerer->cj_sample, 8000));
+    } else if (answerer->cj_sample >= 0) {
+        printf("  Answerer (%s):    CJ also observed at %.1f ms\n",
                answerer_ch, sample_to_ms(answerer->cj_sample, 8000));
     }
     if (caller->cm_jm_sample >= 0 && answerer->cm_jm_sample < 0) {
