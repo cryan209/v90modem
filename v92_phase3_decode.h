@@ -1,0 +1,77 @@
+/*
+ * v92_phase3_decode.h — V.92 Phase 3 analyzer scaffold
+ *
+ * Starts at Ru detection (analog modem Phase 3 entry) and tracks a
+ * best-effort progression into Phase 4 using already-collected markers.
+ */
+
+#ifndef V92_PHASE3_DECODE_H
+#define V92_PHASE3_DECODE_H
+
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    V92_PHASE3_ROLE_UNKNOWN = 0,
+    V92_PHASE3_ROLE_ANALOGUE,
+    V92_PHASE3_ROLE_DIGITAL
+} v92_phase3_role_t;
+
+typedef enum {
+    V92_PHASE3_RU_SOURCE_NONE = 0,
+    V92_PHASE3_RU_SOURCE_LOCAL_S,
+    V92_PHASE3_RU_SOURCE_REMOTE_S_EVENT,
+    V92_PHASE3_RU_SOURCE_PHASE3_GATE
+} v92_phase3_ru_source_t;
+
+typedef struct {
+    bool info0_seen;
+    bool info0_is_d;
+    bool short_phase2_requested;
+    bool v92_capable;
+    bool phase3_seen;
+    bool phase4_seen;
+    bool training_failed;
+    int info0_sample;
+    int phase3_sample;
+    int phase4_sample;
+    int tx_first_s_sample;
+    int tx_first_not_s_sample;
+    int tx_md_sample;
+    int tx_second_s_sample;
+    int tx_second_not_s_sample;
+    int tx_pp_sample;
+    int tx_trn_sample;
+    int tx_ja_sample;
+    int rx_s_event_sample;
+} v92_phase3_observation_t;
+
+typedef struct {
+    bool valid;
+    v92_phase3_role_t local_role;
+    v92_phase3_ru_source_t ru_source;
+    bool short_phase2_requested;
+    bool v92_capable;
+    int ru_sample;
+    int phase3_sample;
+    int phase4_sample;
+    bool ru_seen;
+    bool sequence_started;
+    bool sequence_complete;
+    const char *status;
+} v92_phase3_result_t;
+
+bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
+                        v92_phase3_result_t *out);
+
+const char *v92_phase3_role_id(v92_phase3_role_t role);
+const char *v92_phase3_ru_source_id(v92_phase3_ru_source_t source);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* V92_PHASE3_DECODE_H */

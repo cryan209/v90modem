@@ -17,6 +17,7 @@
 #include "v8bis_decode.h"
 #include "v92_short_phase1_decode.h"
 #include "v92_short_phase2_decode.h"
+#include "v92_phase3_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/private/bitstream.h>
@@ -1462,6 +1463,22 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         appendf(out, out_len, "</div>");
         return;
     }
+    if (strcmp(event->protocol, "V.92 Phase 3") == 0
+        && strcmp(event->summary, "Phase 3 sequence from Ru") == 0
+        && pair_count > 0) {
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_value(out, out_len, "Local modem", detail_value(pairs, pair_count, "local_modem"));
+        append_html_label_value(out, out_len, "Short Phase 2 requested", detail_bit_to_yes_no(detail_value(pairs, pair_count, "shortp2_req")));
+        append_html_label_value(out, out_len, "V.92 capable", detail_bit_to_yes_no(detail_value(pairs, pair_count, "v92_cap")));
+        append_html_label_value(out, out_len, "Ru source", detail_value(pairs, pair_count, "ru_source"));
+        append_html_label_value(out, out_len, "Ru start", detail_value(pairs, pair_count, "ru_ms"));
+        append_html_label_value(out, out_len, "Phase 3 marker", detail_value(pairs, pair_count, "phase3_ms"));
+        append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
+        append_html_label_value(out, out_len, "Status", detail_value(pairs, pair_count, "status"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
     if (strcmp(event->protocol, "V.34") == 0 && strncmp(event->summary, "INFO0", 5) == 0 && pair_count > 0) {
         char rates[128] = "";
         const char *profile = detail_value(pairs, pair_count, "profile");
@@ -1703,7 +1720,7 @@ static bool write_visualization_html(const char *output_path,
             "const palette=['#b14d2d','#186d7a','#5d7a1f','#8b5cf6','#d97706','#2563eb','#a21caf','#0f766e','#c02626','#4338ca','#ca8a04','#7c3aed','#0f766e'];\n"
             "const mergePalette={a:'#c66a2b',b:'#1f7a8c'};\n"
             "function xForPoint(i,left,width,count){return left+(i/Math.max(1,count-1))*width;}\n"
-            "function eventColor(protocol){if(protocol==='V.8'||protocol==='V.8bis')return '#f08a5d';if(protocol==='V.34')return '#d4a017';if(protocol==='V.90 Phase 3'||protocol==='V.90')return '#2f7f6f';if(protocol==='V.90/V.92')return '#6b5b95';if(protocol==='V.91')return '#2d5fb1';return '#777';}\n"
+            "function eventColor(protocol){if(protocol==='V.8'||protocol==='V.8bis')return '#f08a5d';if(protocol==='V.34')return '#d4a017';if(protocol==='V.90 Phase 3'||protocol==='V.90')return '#2f7f6f';if(protocol==='V.92 Phase 3')return '#4b8a3f';if(protocol==='V.90/V.92')return '#6b5b95';if(protocol==='V.91')return '#2d5fb1';return '#777';}\n"
             "function levelNorm(v,gamma,boost){const base=Math.max(0,Math.min(1,v/1000));return Math.min(1,Math.pow(base,gamma)*boost);}\n"
             "function heatColor(v,gamma,boost){const t=levelNorm(v,gamma,boost);const stops=[[8,19,29],[18,66,93],[31,140,168],[243,179,76],[251,238,197]];const seg=Math.min(stops.length-2,Math.floor(t*(stops.length-1)));const local=t*(stops.length-1)-seg;const a=stops[seg],b=stops[seg+1];const mix=n=>Math.round(a[n]+(b[n]-a[n])*local);return `rgb(${mix(0)},${mix(1)},${mix(2)})`;}\n"
             "function mergedTrack(a,b,mode,label){return{kind:'merged',label:label||'Merged',mode:mode||'overlay',primary:a,secondary:b,sampleRate:a.sampleRate,totalSamples:a.totalSamples,windowSamples:a.windowSamples,freqBinCount:a.freqBinCount,freqBinStartHz:a.freqBinStartHz,freqBinStepHz:a.freqBinStepHz};}\n"
@@ -3541,6 +3558,79 @@ static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
     return sample <= latest_allowed_sample;
 }
 
+static void collect_v92_phase3_event(call_log_t *log,
+                                     const decode_v34_result_t *res,
+                                     const char *role_name,
+                                     int latest_allowed_sample)
+{
+    v92_phase3_observation_t obs;
+    v92_phase3_result_t phase3;
+    uint8_t raw_26_27;
+    int event_sample;
+    char detail[512];
+
+    if (!log || !res || !res->info0_seen)
+        return;
+    if (!should_emit_phase2_event(res->info0_sample, latest_allowed_sample))
+        return;
+
+    raw_26_27 = res->info0_raw.raw_26_27;
+    memset(&obs, 0, sizeof(obs));
+    obs.info0_seen = res->info0_seen;
+    obs.info0_is_d = res->info0_is_d;
+    obs.short_phase2_requested = v92_short_phase2_req_from_info0_bits(res->info0_is_d, raw_26_27);
+    obs.v92_capable = v92_short_phase2_v92_cap_from_info0_bits(res->info0_is_d, raw_26_27);
+    obs.phase3_seen = res->phase3_seen;
+    obs.phase4_seen = res->phase4_seen;
+    obs.training_failed = res->training_failed;
+    obs.info0_sample = res->info0_sample;
+    obs.phase3_sample = res->phase3_sample;
+    obs.phase4_sample = res->phase4_sample;
+    obs.tx_first_s_sample = res->tx_first_s_sample;
+    obs.tx_first_not_s_sample = res->tx_first_not_s_sample;
+    obs.tx_md_sample = res->tx_md_sample;
+    obs.tx_second_s_sample = res->tx_second_s_sample;
+    obs.tx_second_not_s_sample = res->tx_second_not_s_sample;
+    obs.tx_pp_sample = res->tx_pp_sample;
+    obs.tx_trn_sample = res->tx_trn_sample;
+    obs.tx_ja_sample = res->tx_ja_sample;
+    obs.rx_s_event_sample = res->rx_s_event_sample;
+
+    if (!v92_phase3_analyze(&obs, &phase3))
+        return;
+
+    event_sample = phase3.ru_sample;
+    if (event_sample < 0)
+        event_sample = res->phase3_sample;
+    if (!should_emit_phase2_event(event_sample, latest_allowed_sample))
+        return;
+
+    snprintf(detail, sizeof(detail),
+             "role=%s local_modem=%s shortp2_req=%u v92_cap=%u ru_source=%s status=%s",
+             role_name ? role_name : "unknown",
+             v92_phase3_role_id(phase3.local_role),
+             phase3.short_phase2_requested ? 1U : 0U,
+             phase3.v92_capable ? 1U : 0U,
+             v92_phase3_ru_source_id(phase3.ru_source),
+             phase3.status ? phase3.status : "unknown");
+    appendf(detail, sizeof(detail), " ru_ms=%s", phase3.ru_sample >= 0 ? "" : "n/a");
+    if (phase3.ru_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ru_sample, 8000));
+    appendf(detail, sizeof(detail), " phase3_ms=%s", phase3.phase3_sample >= 0 ? "" : "n/a");
+    if (phase3.phase3_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.phase3_sample, 8000));
+    appendf(detail, sizeof(detail), " phase4_ms=%s", phase3.phase4_sample >= 0 ? "" : "n/a");
+    if (phase3.phase4_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.phase4_sample, 8000));
+
+    call_log_append(log,
+                    event_sample >= 0 ? event_sample : res->info0_sample,
+                    0,
+                    "V.92 Phase 3",
+                    "Phase 3 sequence from Ru",
+                    detail);
+}
+
 static const char *v34_info0_label(const decode_v34_result_t *result)
 {
     return (result && result->info0_is_d) ? "INFO0d decoded" : "INFO0a decoded";
@@ -4626,6 +4716,66 @@ static bool decode_v34_pass(const int16_t *samples,
     return true;
 }
 
+static void merge_info0_from_rescue(decode_v34_result_t *dst, const decode_v34_result_t *src)
+{
+    if (!dst || !src || !src->info0_seen)
+        return;
+
+    dst->info0_seen = true;
+    dst->info0_is_d = src->info0_is_d;
+    dst->info0a = src->info0a;
+    dst->info0_raw = src->info0_raw;
+    dst->info0_sample = src->info0_sample;
+    if (dst->rx_tone_a_sample < 0)
+        dst->rx_tone_a_sample = src->rx_tone_a_sample;
+    if (dst->rx_tone_b_sample < 0)
+        dst->rx_tone_b_sample = src->rx_tone_b_sample;
+    if (dst->rx_tone_a_reversal_sample < 0)
+        dst->rx_tone_a_reversal_sample = src->rx_tone_a_reversal_sample;
+    if (dst->rx_tone_b_reversal_sample < 0)
+        dst->rx_tone_b_reversal_sample = src->rx_tone_b_reversal_sample;
+    if (dst->tx_tone_a_sample < 0)
+        dst->tx_tone_a_sample = src->tx_tone_a_sample;
+    if (dst->tx_tone_b_sample < 0)
+        dst->tx_tone_b_sample = src->tx_tone_b_sample;
+    if (dst->tx_tone_a_reversal_sample < 0)
+        dst->tx_tone_a_reversal_sample = src->tx_tone_a_reversal_sample;
+    if (dst->tx_tone_b_reversal_sample < 0)
+        dst->tx_tone_b_reversal_sample = src->tx_tone_b_reversal_sample;
+}
+
+static void decode_v34_pair_with_rescue(const int16_t *samples,
+                                        int total_samples,
+                                        v91_law_t law,
+                                        decode_v34_result_t *answerer,
+                                        bool *have_answerer,
+                                        decode_v34_result_t *caller,
+                                        bool *have_caller)
+{
+    if (have_answerer)
+        *have_answerer = false;
+    if (have_caller)
+        *have_caller = false;
+    if (!samples || total_samples <= 0 || !answerer || !caller || !have_answerer || !have_caller)
+        return;
+
+    *have_answerer = decode_v34_pass(samples, total_samples, law, false, -60.0f, answerer);
+    *have_caller = decode_v34_pass(samples, total_samples, law, true, -60.0f, caller);
+
+    if (*have_answerer && !answerer->info0_seen && answerer->info1_seen) {
+        decode_v34_result_t rescue;
+
+        if (decode_v34_pass(samples, total_samples, law, false, -52.0f, &rescue) && rescue.info0_seen)
+            merge_info0_from_rescue(answerer, &rescue);
+    }
+    if (*have_caller && !caller->info0_seen && caller->info1_seen) {
+        decode_v34_result_t rescue;
+
+        if (decode_v34_pass(samples, total_samples, law, true, -52.0f, &rescue) && rescue.info0_seen)
+            merge_info0_from_rescue(caller, &rescue);
+    }
+}
+
 static void print_v34_result(const decode_v34_result_t *result, bool calling_party)
 {
     if (!result)
@@ -4822,37 +4972,13 @@ static void collect_v34_events(call_log_t *log,
         } \
     } while (0)
 
-    have_answerer = decode_v34_pass(samples, total_samples, law, false, -60.0f, &answerer);
-    have_caller = decode_v34_pass(samples, total_samples, law, true, -60.0f, &caller);
-
-    if (have_answerer && !answerer.info0_seen && answerer.info1_seen) {
-        decode_v34_result_t info0_rescue;
-
-        if (decode_v34_pass(samples, total_samples, law, false, -52.0f, &info0_rescue)
-            && info0_rescue.info0_seen) {
-            answerer.info0_seen = true;
-            answerer.info0_is_d = info0_rescue.info0_is_d;
-            answerer.info0a = info0_rescue.info0a;
-            answerer.info0_raw = info0_rescue.info0_raw;
-            answerer.info0_sample = info0_rescue.info0_sample;
-            if (answerer.rx_tone_a_sample < 0)
-                answerer.rx_tone_a_sample = info0_rescue.rx_tone_a_sample;
-            if (answerer.rx_tone_b_sample < 0)
-                answerer.rx_tone_b_sample = info0_rescue.rx_tone_b_sample;
-            if (answerer.rx_tone_a_reversal_sample < 0)
-                answerer.rx_tone_a_reversal_sample = info0_rescue.rx_tone_a_reversal_sample;
-            if (answerer.rx_tone_b_reversal_sample < 0)
-                answerer.rx_tone_b_reversal_sample = info0_rescue.rx_tone_b_reversal_sample;
-            if (answerer.tx_tone_a_sample < 0)
-                answerer.tx_tone_a_sample = info0_rescue.tx_tone_a_sample;
-            if (answerer.tx_tone_b_sample < 0)
-                answerer.tx_tone_b_sample = info0_rescue.tx_tone_b_sample;
-            if (answerer.tx_tone_a_reversal_sample < 0)
-                answerer.tx_tone_a_reversal_sample = info0_rescue.tx_tone_a_reversal_sample;
-            if (answerer.tx_tone_b_reversal_sample < 0)
-                answerer.tx_tone_b_reversal_sample = info0_rescue.tx_tone_b_reversal_sample;
-        }
-    }
+    decode_v34_pair_with_rescue(samples,
+                                total_samples,
+                                law,
+                                &answerer,
+                                &have_answerer,
+                                &caller,
+                                &have_caller);
 
     if (have_answerer && have_caller) {
         if (v34_result_spec_score(&answerer) >= v34_result_spec_score(&caller)) {
@@ -4966,6 +5092,7 @@ static void collect_v34_events(call_log_t *log,
                                 detail); \
             } \
         } \
+        collect_v92_phase3_event(log, res__, role_name, (PHASE2_CUTOFF)); \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
         if (res__->phase3_seen) { \
@@ -5089,8 +5216,13 @@ static void collect_stream_call_log(call_log_t *log,
         return;
 
     if (do_v34 || do_v90) {
-        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, -60.0f, &answerer);
-        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, -60.0f, &caller);
+        decode_v34_pair_with_rescue(linear_samples,
+                                    total_samples,
+                                    law,
+                                    &answerer,
+                                    &have_answerer,
+                                    &caller,
+                                    &have_caller);
         if (have_answerer) {
             if (answerer.info0_seen)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
@@ -6998,8 +7130,13 @@ static void run_decode_suite(const char *label,
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
-        have_answerer = decode_v34_pass(linear_samples, total_samples, law, false, -60.0f, &answerer);
-        have_caller = decode_v34_pass(linear_samples, total_samples, law, true, -60.0f, &caller);
+        decode_v34_pair_with_rescue(linear_samples,
+                                    total_samples,
+                                    law,
+                                    &answerer,
+                                    &have_answerer,
+                                    &caller,
+                                    &have_caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {
