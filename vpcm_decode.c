@@ -64,6 +64,60 @@ static double sample_to_ms(int sample, int rate)
     return (double) sample * 1000.0 / (double) rate;
 }
 
+static bool span_is_decimal(const char *start, const char *end)
+{
+    if (!start || !end || start >= end)
+        return false;
+    for (const char *p = start; p < end; p++) {
+        if (*p < '0' || *p > '9')
+            return false;
+    }
+    return true;
+}
+
+static bool parse_filename_rate_pair(const char *path, int *first_bps, int *second_bps)
+{
+    const char *base;
+    const char *dot;
+    const char *last_dash;
+    const char *prev_dash;
+
+    if (first_bps)
+        *first_bps = -1;
+    if (second_bps)
+        *second_bps = -1;
+    if (!path)
+        return false;
+
+    base = strrchr(path, '/');
+    base = base ? (base + 1) : path;
+    dot = strrchr(base, '.');
+    if (!dot)
+        dot = base + strlen(base);
+
+    last_dash = dot;
+    while (last_dash > base && *last_dash != '-')
+        last_dash--;
+    if (last_dash <= base || *last_dash != '-')
+        return false;
+
+    prev_dash = last_dash - 1;
+    while (prev_dash > base && *prev_dash != '-')
+        prev_dash--;
+    if (prev_dash < base || *prev_dash != '-')
+        return false;
+
+    if (!span_is_decimal(prev_dash + 1, last_dash)
+        || !span_is_decimal(last_dash + 1, dot))
+        return false;
+
+    if (first_bps)
+        *first_bps = atoi(prev_dash + 1);
+    if (second_bps)
+        *second_bps = atoi(last_dash + 1);
+    return true;
+}
+
 static void appendf(char *buf, size_t len, const char *fmt, ...)
 {
     size_t used;
@@ -8773,6 +8827,16 @@ int main(int argc, char **argv)
     printf("File: %s\n", input_path);
     printf("Duration: %.3f seconds (%d samples)\n\n",
            (double) total_samples / (double) sample_rate, total_samples);
+    {
+        int expected_rate_1;
+        int expected_rate_2;
+
+        if (parse_filename_rate_pair(input_path, &expected_rate_1, &expected_rate_2)) {
+            printf("Filename expected negotiated rates: %d / %d bps\n\n",
+                   expected_rate_1,
+                   expected_rate_2);
+        }
+    }
 
     /* Run decoders */
     {

@@ -25,10 +25,15 @@ if [[ ! -d "${TONE_DIR}" ]]; then
 fi
 
 printf "%-42s %-3s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
-    "file" "ch" "info0a" "info1a" "phase3" "info0_ms" "info1_ms" "phase3_ms"
+    "file" "ch" "exp_rates" "info0a" "info1a" "phase3" "info0_ms" "info1_ms" "phase3_ms"
 
 for wav in "${TONE_DIR}"/*.wav; do
     [[ -e "${wav}" ]] || continue
+
+    expected_rates="-"
+    if [[ "$(basename "${wav}")" =~ -([0-9]{4,5})-([0-9]{4,5})\.[Ww][Aa][Vv]$ ]]; then
+        expected_rates="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
 
     channels=(L R)
     first_output="$("${DECODER}" --v34 --channel L --law "${LAW}" "${wav}" 2>/dev/null)"
@@ -68,8 +73,8 @@ for wav in "${TONE_DIR}"/*.wav; do
             [[ -n "${phase3_ms}" ]] || phase3_ms="-"
         fi
 
-        printf "%-42s %-3s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
-            "$(basename "${wav}")" "${ch}" "${info0}" "${info1}" "${phase3}" \
+        printf "%-42s %-3s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
+            "$(basename "${wav}")" "${ch}" "${expected_rates}" "${info0}" "${info1}" "${phase3}" \
             "${info0_ms}" "${info1_ms}" "${phase3_ms}"
     done
 done
