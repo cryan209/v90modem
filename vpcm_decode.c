@@ -826,6 +826,10 @@ typedef struct {
     int rx_phase4_s_sample;
     int rx_phase4_sbar_sample;
     int rx_phase4_trn_sample;
+    int ru_window_len;
+    uint8_t ru_window_symbols[32];
+    bool ru_window_captured;
+    int ru_window_score;
     int phase4_ready_sample;
     int phase4_sample;
     int failure_sample;
@@ -1479,6 +1483,24 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "Ru precoder bypass expected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_precoder_bypass")));
         append_html_label_value(out, out_len, "Ru prefilter bypass expected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_prefilter_bypass")));
         append_html_label_value(out, out_len, "Ru uses TRN1u structure", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_trn1u_structure")));
+        append_html_label_value(out, out_len, "Ru transmitter", detail_value(pairs, pair_count, "ru_tx_modem"));
+        append_html_label_value(out, out_len, "Digital quiet before Sd", detail_bit_to_yes_no(detail_value(pairs, pair_count, "digital_quiet_pre_sd")));
+        append_html_label_value(out, out_len, "First digital signal is Sd during Ja", detail_bit_to_yes_no(detail_value(pairs, pair_count, "first_digital_signal_sd_ja")));
+        append_html_label_value(out, out_len, "Ru duration (T)", detail_value(pairs, pair_count, "ru_t"));
+        append_html_label_value(out, out_len, "uR duration (T)", detail_value(pairs, pair_count, "ur_t"));
+        append_html_label_value(out, out_len, "Ru+uR cycle (T)", detail_value(pairs, pair_count, "ru_ur_cycle_t"));
+        append_html_label_value(out, out_len, "Ru/uR repeat after MD expected", detail_bit_to_yes_no(detail_value(pairs, pair_count, "repeats_after_md_expected")));
+        append_html_label_value(out, out_len, "Ru/uR repeat after MD", detail_value(pairs, pair_count, "repeats_after_md_status"));
+        append_html_label_value(out, out_len, "Ru symbol window size", detail_value(pairs, pair_count, "ru_window_symbols"));
+        append_html_label_value(out, out_len, "Ru 2-point window score", detail_value(pairs, pair_count, "ru_window_score"));
+        append_html_label_value(out, out_len, "Ru decoded from symbols", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_decoded")));
+        append_html_label_value(out, out_len, "Ru pattern match", detail_bit_to_yes_no(detail_value(pairs, pair_count, "ru_match")));
+        append_html_label_value(out, out_len, "Ru pattern match percent", detail_value(pairs, pair_count, "ru_match_pct"));
+        append_html_label_value(out, out_len, "Ru symbol pair (A/B)", detail_value(pairs, pair_count, "ru_symbols"));
+        append_html_label_value(out, out_len, "LU definition", detail_value(pairs, pair_count, "lu_definition"));
+        append_html_label_value(out, out_len, "LU absolute level", detail_value(pairs, pair_count, "lu_absolute_level"));
+        append_html_label_value(out, out_len, "LU reference", detail_value(pairs, pair_count, "lu_reference"));
+        append_html_label_value(out, out_len, "Ru/LU consistency with TRN1U", detail_value(pairs, pair_count, "ru_lu_consistency"));
         append_html_label_value(out, out_len, "Phase 3 marker", detail_value(pairs, pair_count, "phase3_ms"));
         append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
         append_html_label_value(out, out_len, "Phase 4 status", detail_value(pairs, pair_count, "phase4_status"));
@@ -3565,6 +3587,37 @@ static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
     return sample <= latest_allowed_sample;
 }
 
+static int ru_window_two_point_score(const uint8_t *symbols, int len)
+{
+    int counts[4] = {0, 0, 0, 0};
+    int best = 0;
+    int second = 0;
+
+    if (!symbols || len <= 0)
+        return -1;
+    for (int i = 0; i < len; i++) {
+        int s = symbols[i] & 0x3;
+        counts[s]++;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (counts[i] > best) {
+            second = best;
+            best = counts[i];
+        } else if (counts[i] > second) {
+            second = counts[i];
+        }
+    }
+    /* Reward two-point occupancy and balance between the two points.
+       Single-point windows should score near 0. */
+    if (best + second <= 0)
+        return 0;
+    {
+        int occupancy = ((best + second) * 100 + len / 2) / len;
+        int balance = (second * 100 + (best + second) / 2) / (best + second);
+        return (occupancy * balance + 50) / 100;
+    }
+}
+
 static void collect_v92_phase3_event(call_log_t *log,
                                      const decode_v34_result_t *res,
                                      const char *role_name,
@@ -3574,7 +3627,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     v92_phase3_result_t phase3;
     uint8_t raw_26_27;
     int event_sample;
-    char detail[512];
+    char detail[4096];
 
     if (!log || !res || !res->info0_seen)
         return;
@@ -3602,6 +3655,12 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.tx_trn_sample = res->tx_trn_sample;
     obs.tx_ja_sample = res->tx_ja_sample;
     obs.rx_s_event_sample = res->rx_s_event_sample;
+    obs.ru_window_len = res->ru_window_len;
+    obs.ru_window_score = res->ru_window_score;
+    if (obs.ru_window_len > 32)
+        obs.ru_window_len = 32;
+    if (obs.ru_window_len > 0)
+        memcpy(obs.ru_window_symbols, res->ru_window_symbols, (size_t) obs.ru_window_len);
 
     if (!v92_phase3_analyze(&obs, &phase3))
         return;
@@ -3641,6 +3700,39 @@ static void collect_v92_phase3_event(call_log_t *log,
             phase3.ru_prefilter_bypass_expected ? 1U : 0U);
     appendf(detail, sizeof(detail), " ru_trn1u_structure=%u",
             phase3.ru_trn1u_structure_expected ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_tx_modem=%s",
+            phase3.ru_transmitter_is_analogue ? "analogue" : "unknown");
+    appendf(detail, sizeof(detail), " digital_quiet_pre_sd=%u",
+            phase3.digital_quiet_before_sd ? 1U : 0U);
+    appendf(detail, sizeof(detail), " first_digital_signal_sd_ja=%u",
+            phase3.first_digital_signal_sd_during_ja ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_t=%d", phase3.ru_expected_t);
+    appendf(detail, sizeof(detail), " ur_t=%d", phase3.ur_expected_t);
+    appendf(detail, sizeof(detail), " ru_ur_cycle_t=%d", phase3.ru_ur_cycle_t);
+    appendf(detail, sizeof(detail), " repeats_after_md_expected=%u",
+            phase3.ru_ur_repeats_after_md_expected ? 1U : 0U);
+    appendf(detail, sizeof(detail), " repeats_after_md_status=%s",
+            phase3.ru_ur_repeats_after_md_status ? phase3.ru_ur_repeats_after_md_status : "unknown");
+    appendf(detail, sizeof(detail), " ru_window_symbols=%d", obs.ru_window_len);
+    appendf(detail, sizeof(detail), " ru_window_score=%s", obs.ru_window_score >= 0 ? "" : "n/a");
+    if (obs.ru_window_score >= 0)
+        appendf(detail, sizeof(detail), "%d", obs.ru_window_score);
+    appendf(detail, sizeof(detail), " ru_decoded=%u", phase3.ru_pattern_decoded ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_match=%u", phase3.ru_pattern_match ? 1U : 0U);
+    appendf(detail, sizeof(detail), " ru_match_pct=%s", phase3.ru_pattern_decoded ? "" : "n/a");
+    if (phase3.ru_pattern_decoded)
+        appendf(detail, sizeof(detail), "%d", phase3.ru_match_percent);
+    appendf(detail, sizeof(detail), " ru_symbols=%s", phase3.ru_pattern_decoded ? "" : "n/a");
+    if (phase3.ru_pattern_decoded)
+        appendf(detail, sizeof(detail), "%d/%d", phase3.ru_symbol_a, phase3.ru_symbol_b);
+    appendf(detail, sizeof(detail), " lu_definition=%s",
+            phase3.lu_definition ? phase3.lu_definition : "unknown");
+    appendf(detail, sizeof(detail), " lu_absolute_level=%s",
+            phase3.lu_absolute_level ? phase3.lu_absolute_level : "unknown");
+    appendf(detail, sizeof(detail), " lu_reference=%s",
+            phase3.lu_reference ? phase3.lu_reference : "unknown");
+    appendf(detail, sizeof(detail), " ru_lu_consistency=%s",
+            phase3.ru_lu_consistency_with_trn1u ? phase3.ru_lu_consistency_with_trn1u : "unknown");
 
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
@@ -4438,6 +4530,10 @@ static bool decode_v34_pass(const int16_t *samples,
     result->rx_phase4_s_sample = -1;
     result->rx_phase4_sbar_sample = -1;
     result->rx_phase4_trn_sample = -1;
+    result->ru_window_len = 0;
+    memset(result->ru_window_symbols, 0, sizeof(result->ru_window_symbols));
+    result->ru_window_captured = false;
+    result->ru_window_score = -1;
     result->phase4_ready_sample = -1;
     result->phase4_sample = -1;
     result->failure_sample = -1;
@@ -4651,6 +4747,49 @@ static bool decode_v34_pass(const int16_t *samples,
                 result->info1_is_d = true;
                 result->info1d = raw_info1d;
                 result->info1_sample = offset;
+            }
+        }
+        if (!result->ru_window_captured
+            && (rx_stage == 10 || rx_stage == 11)) {
+            int d = v34->rx.duration;
+            int len = d;
+
+            if (len > 32)
+                len = 32;
+            if (len >= 12) {
+                int start = d - len + 1;
+
+                for (int i = 0; i < len; i++) {
+                    int baud = start + i;
+                    int idx = (baud - 1) & 31;
+                    result->ru_window_symbols[i] = (uint8_t) (v34->rx.phase3_s_ring[idx] & 0x3);
+                }
+                result->ru_window_len = len;
+                result->ru_window_captured = true;
+                result->ru_window_score = ru_window_two_point_score(result->ru_window_symbols, len);
+            }
+        } else if ((rx_stage == 10 || rx_stage == 11)) {
+            int d = v34->rx.duration;
+            int len = d;
+            uint8_t candidate[32];
+            int score;
+
+            if (len > 32)
+                len = 32;
+            if (len >= 12) {
+                int start = d - len + 1;
+                for (int i = 0; i < len; i++) {
+                    int baud = start + i;
+                    int idx = (baud - 1) & 31;
+                    candidate[i] = (uint8_t) (v34->rx.phase3_s_ring[idx] & 0x3);
+                }
+                score = ru_window_two_point_score(candidate, len);
+                if (score > result->ru_window_score) {
+                    memcpy(result->ru_window_symbols, candidate, (size_t) len);
+                    result->ru_window_len = len;
+                    result->ru_window_score = score;
+                    result->ru_window_captured = true;
+                }
             }
         }
         if (!result->phase3_seen

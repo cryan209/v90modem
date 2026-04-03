@@ -9,6 +9,7 @@
 #define V92_PHASE3_DECODE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +23,7 @@ typedef enum {
 
 typedef enum {
     V92_PHASE3_RU_SOURCE_NONE = 0,
-    V92_PHASE3_RU_SOURCE_LOCAL_S,
+    V92_PHASE3_RU_SOURCE_LOCAL_TX_PHASE3_MARKER,
     V92_PHASE3_RU_SOURCE_REMOTE_S_EVENT,
     V92_PHASE3_RU_SOURCE_PHASE3_GATE
 } v92_phase3_ru_source_t;
@@ -47,6 +48,9 @@ typedef struct {
     int tx_trn_sample;
     int tx_ja_sample;
     int rx_s_event_sample;
+    int ru_window_len;
+    int ru_window_score;
+    uint8_t ru_window_symbols[32];
 } v92_phase3_observation_t;
 
 typedef struct {
@@ -62,11 +66,28 @@ typedef struct {
     bool sequence_started;
     bool sequence_complete;
     bool phase4_started;
+    bool ru_transmitter_is_analogue;
+    bool digital_quiet_before_sd;
+    bool first_digital_signal_sd_during_ja;
+    int ru_expected_t;
+    int ur_expected_t;
+    int ru_ur_cycle_t;
+    bool ru_ur_repeats_after_md_expected;
+    const char *ru_ur_repeats_after_md_status;
     bool ru_precoder_bypass_expected;
     bool ru_prefilter_bypass_expected;
     bool ru_trn1u_structure_expected;
     const char *ru_pattern_primary;
     const char *ru_pattern_complement;
+    bool ru_pattern_decoded;
+    bool ru_pattern_match;
+    int ru_symbol_a;
+    int ru_symbol_b;
+    int ru_match_percent;
+    const char *lu_definition;
+    const char *lu_absolute_level;
+    const char *lu_reference;
+    const char *ru_lu_consistency_with_trn1u;
     const char *phase4_status;
     const char *status;
 } v92_phase3_result_t;
