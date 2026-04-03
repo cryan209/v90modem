@@ -4015,6 +4015,9 @@ static bool find_v90_sd_ds_after(const uint8_t *codewords,
     return true;
 }
 
+static const decode_v34_result_t *pick_analogue_phase2_side(const decode_v34_result_t *answerer,
+                                                             const decode_v34_result_t *caller);
+
 static void collect_v92_phase3_event(call_log_t *log,
                                      const decode_v34_result_t *res,
                                      const char *role_name,
@@ -4028,6 +4031,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     v92_phase3_observation_t obs;
     v92_phase3_result_t phase3;
     const decode_v34_result_t *peer = NULL;
+    const decode_v34_result_t *analogue_side = NULL;
     const decode_v34_result_t *ja_aux_src = NULL;
     int ja_aux_hyp = -2;
     int ja_aux_tap = -1;
@@ -4049,6 +4053,7 @@ static void collect_v92_phase3_event(call_log_t *log,
         peer = caller;
     else if (res == caller && answerer)
         peer = answerer;
+    analogue_side = pick_analogue_phase2_side(answerer, caller);
     memset(&obs, 0, sizeof(obs));
     ja_dil_source_buf[0] = '\0';
     obs.info0_seen = res->info0_seen;
@@ -4070,6 +4075,18 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.tx_trn_sample = res->tx_trn_sample;
     obs.tx_ja_sample = res->tx_ja_sample;
     obs.tx_jdashed_sample = res->tx_jdashed_sample;
+    if (analogue_side) {
+        if (obs.tx_trn_sample < 0 && analogue_side->tx_trn_sample >= 0) {
+            obs.tx_trn_sample = analogue_side->tx_trn_sample;
+            ja_anchor_source = (analogue_side == res) ? "local" : "peer";
+        }
+        if (obs.tx_ja_sample < 0 && analogue_side->tx_ja_sample >= 0) {
+            obs.tx_ja_sample = analogue_side->tx_ja_sample;
+            ja_anchor_source = (analogue_side == res) ? "local" : "peer";
+        }
+        if (obs.tx_jdashed_sample < 0 && analogue_side->tx_jdashed_sample >= 0)
+            obs.tx_jdashed_sample = analogue_side->tx_jdashed_sample;
+    }
     if (peer) {
         if (obs.tx_trn_sample < 0 && peer->tx_trn_sample >= 0) {
             obs.tx_trn_sample = peer->tx_trn_sample;
@@ -4152,12 +4169,22 @@ static void collect_v92_phase3_event(call_log_t *log,
     }
     if (!obs.ja_dil_seen) {
         v90_aux_dil_hit_t aux_hit;
+        const decode_v34_result_t *primary_aux = NULL;
+        const decode_v34_result_t *secondary_aux = NULL;
 
         memset(&aux_hit, 0, sizeof(aux_hit));
-        if (find_v90_dil_in_aux_any(res, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
-            ja_aux_src = res;
-        } else if (peer && find_v90_dil_in_aux_any(peer, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
-            ja_aux_src = peer;
+        primary_aux = analogue_side ? analogue_side : res;
+        if (primary_aux == res)
+            secondary_aux = peer;
+        else if (primary_aux == peer)
+            secondary_aux = res;
+        else
+            secondary_aux = res;
+
+        if (primary_aux && find_v90_dil_in_aux_any(primary_aux, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
+            ja_aux_src = primary_aux;
+        } else if (secondary_aux && find_v90_dil_in_aux_any(secondary_aux, &aux_hit, &ja_aux_hyp, &ja_aux_tap, &ja_aux_raw)) {
+            ja_aux_src = secondary_aux;
         }
 
         if (ja_aux_src && aux_hit.found) {
@@ -4349,6 +4376,33 @@ static void collect_v92_phase3_event(call_log_t *log,
                     "V.92 Phase 3",
                     "Phase 3 sequence from Ru",
                     detail);
+}
+
+static const decode_v34_result_t *pick_analogue_phase2_side(const decode_v34_result_t *answerer,
+                                                             const decode_v34_result_t *caller)
+{
+    const decode_v34_result_t *a = NULL;
+
+    if (answerer && answerer->info0_seen && !answerer->info0_is_d)
+        a = answerer;
+    if (caller && caller->info0_seen && !caller->info0_is_d) {
+        if (!a) {
+            a = caller;
+        } else {
+            int score_a = 0;
+            int score_c = 0;
+
+            if (a->tx_ja_sample >= 0) score_a += 4;
+            if (a->phase3_seen) score_a += 2;
+            if (a->ja_aux_bit_len > 0) score_a += 1;
+            if (caller->tx_ja_sample >= 0) score_c += 4;
+            if (caller->phase3_seen) score_c += 2;
+            if (caller->ja_aux_bit_len > 0) score_c += 1;
+            if (score_c > score_a)
+                a = caller;
+        }
+    }
+    return a;
 }
 
 static const char *v34_info0_label(const decode_v34_result_t *result)
@@ -5939,7 +5993,7 @@ static void collect_v34_events(call_log_t *log,
         collect_v92_phase3_event(log, \
                                  res__, \
                                  role_name, \
-                                 (PHASE2_CUTOFF), \
+                                 -1, \
                                  g711_codewords, \
                                  total_codewords, \
                                  law, \
