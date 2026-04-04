@@ -12435,7 +12435,7 @@ int main(int argc, char **argv)
         linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
         g711_codewords = malloc((size_t) total_samples);
         adaptive_work_codewords = malloc((size_t) total_samples);
-        if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34 || do_v8)) {
+        if (wav.channels >= 2 && !channel_explicit && (do_call_log || do_v34 || do_v8 || do_phase12)) {
             left_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             right_linear_samples = malloc((size_t) total_samples * sizeof(int16_t));
             left_g711_codewords = malloc((size_t) total_samples);

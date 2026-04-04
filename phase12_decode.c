@@ -16,6 +16,7 @@
 #include "v92_short_phase2_decode.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1054,11 +1055,23 @@ static bool detect_tone(const int16_t *samples,
 
 tone_gap:
         if (run_start >= 0 && run_windows >= min_run_windows) {
-            out->detected = true;
-            out->start_sample = run_start;
-            out->duration_samples = (run_windows - 1) * TONE_STEP_SAMPLES + TONE_WINDOW_SAMPLES;
-            out->peak_ratio = run_peak;
-            return true;
+            int run_end = run_start + (run_windows - 1) * TONE_STEP_SAMPLES + TONE_WINDOW_SAMPLES;
+            if (!out->detected) {
+                out->detected = true;
+                out->start_sample = run_start;
+            }
+            out->duration_samples = run_end - out->start_sample;
+            if (run_peak > out->peak_ratio)
+                out->peak_ratio = run_peak;
+            /* Non-cadenced: return on first qualifying run */
+            if (!require_cadence)
+                return true;
+        } else if (out->detected && require_cadence) {
+            /* Check whether the gap since the last confirmed run end is too
+             * long to be a cadence interval (CNG repeats every ~3.5 s). */
+            int gap_samples = pos - (out->start_sample + out->duration_samples);
+            if (gap_samples > (4000 * sample_rate) / 1000)
+                return true; /* cadence ended */
         }
         run_start = -1;
         run_windows = 0;
@@ -1067,15 +1080,17 @@ tone_gap:
 
     /* Check trailing run */
     if (run_start >= 0 && run_windows >= min_run_windows) {
-        out->detected = true;
-        out->start_sample = run_start;
-        out->duration_samples = (run_windows - 1) * TONE_STEP_SAMPLES + TONE_WINDOW_SAMPLES;
-        out->peak_ratio = run_peak;
-        return true;
+        int run_end = run_start + (run_windows - 1) * TONE_STEP_SAMPLES + TONE_WINDOW_SAMPLES;
+        if (!out->detected) {
+            out->detected = true;
+            out->start_sample = run_start;
+        }
+        out->duration_samples = run_end - out->start_sample;
+        if (run_peak > out->peak_ratio)
+            out->peak_ratio = run_peak;
     }
 
-    (void)require_cadence;
-    return false;
+    return out->detected;
 }
 
 /*
@@ -1629,23 +1644,32 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                                 channel, (bool)inv,
                                 v8_msg_decoder_put_bit, &decoder);
 
-            /* Check for CJ: sustained all-marks */
+            /* Check for CJ: find the longest sustained all-marks run in the burst.
+             * CJ follows JM directly, so the JM+CJ burst will have a long mark
+             * run at the end.  The old 80%-of-all-bits test failed because JM
+             * bytes dilute the mark ratio.  Instead accept any run of at least
+             * CJ_MIN_MARK_BITS consecutive marks. */
             if (cj_out && !cj_out->detected && decoder.raw_bit_count >= CJ_MIN_MARK_BITS) {
-                int mark_run = 0, max_mark_run = 0;
+                int mark_run = 0, best_run = 0, best_start = 0, cur_start = 0;
                 for (int i = 0; i < decoder.raw_bit_count; i++) {
-                    if (decoder.raw_bits[i])
+                    if (decoder.raw_bits[i]) {
+                        if (mark_run == 0) cur_start = i;
                         mark_run++;
-                    else {
-                        if (mark_run > max_mark_run) max_mark_run = mark_run;
+                        if (mark_run > best_run) {
+                            best_run = mark_run;
+                            best_start = cur_start;
+                        }
+                    } else {
                         mark_run = 0;
                     }
                 }
-                if (mark_run > max_mark_run) max_mark_run = mark_run;
-                /* CJ is all marks for >= 10ms (3 bits at 300 baud) */
-                if (max_mark_run >= CJ_MIN_MARK_BITS
-                    && max_mark_run > decoder.raw_bit_count * 0.8) {
+                if (best_run >= CJ_MIN_MARK_BITS) {
                     cj_out->detected = true;
-                    cj_out->sample_offset = start;
+                    /* Approximate sample offset to where the mark run begins */
+                    int samp_per_bit = sample_rate / 300;
+                    int offset = start + best_start * samp_per_bit;
+                    if (offset < 0) offset = 0;
+                    cj_out->sample_offset = offset;
                 }
             }
 
@@ -2125,14 +2149,9 @@ static void detect_phase2_info(const int16_t *samples,
         search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
     if (result->cj.detected && result->cj.sample_offset > search_start)
         search_start = result->cj.sample_offset;
-    if (result->cm.detected
-        && result->cm.sample_offset + result->cm.duration_samples > search_start) {
-        search_start = result->cm.sample_offset + result->cm.duration_samples;
-    }
-    if (result->jm.detected
-        && result->jm.sample_offset + result->jm.duration_samples > search_start) {
-        search_start = result->jm.sample_offset + result->jm.duration_samples;
-    }
+    /* Do NOT advance search_start based on CM/JM end.  Those merged bursts can
+     * span into Phase 2 (caller keeps repeating CM after CJ) and would push
+     * the Phase 2 scan past the INFO0 frame that precedes Tone A/B. */
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
     p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
@@ -2602,8 +2621,26 @@ static const char *p12_tone_type_name(p12_tone_type_t type)
     }
 }
 
+static void appendf(char *buf, size_t len, const char *fmt, ...)
+{
+    size_t used;
+    int wrote;
+    va_list ap;
+
+    if (!buf || len == 0 || !fmt)
+        return;
+    used = strlen(buf);
+    if (used >= len - 1)
+        return;
+    va_start(ap, fmt);
+    wrote = vsnprintf(buf + used, len - used, fmt, ap);
+    va_end(ap);
+    if (wrote < 0)
+        buf[len - 1] = '\0';
+}
+
 static void emit_tone_event(call_log_t *log, const p12_tone_hit_t *tone,
-                            const char *protocol)
+                            const char *protocol, bool is_caller)
 {
     char summary[160];
     char detail[256];
@@ -2612,7 +2649,11 @@ static void emit_tone_event(call_log_t *log, const p12_tone_hit_t *tone,
         return;
 
     snprintf(summary, sizeof(summary), "%s tone detected", p12_tone_type_name(tone->type));
-    snprintf(detail, sizeof(detail), "peak_ratio=%.3f duration=%.1fms",
+    /* Include role= and tone= so the HTML renderer can apply its specialized
+     * V.8 tone template (same keys as the spandsp-based decode path). */
+    snprintf(detail, sizeof(detail), "role=%s tone=%s peak_ratio=%.3f duration=%.1fms",
+             is_caller ? "caller" : "answerer",
+             p12_tone_type_name(tone->type),
              tone->peak_ratio,
              (double) tone->duration_samples * 1000.0 / 8000.0);
     call_log_append(log, tone->start_sample, tone->duration_samples,
@@ -2644,18 +2685,20 @@ static void emit_answer_tone_handoff_event(call_log_t *log,
 }
 
 static void emit_cm_jm_event(call_log_t *log, const p12_cm_jm_hit_t *msg,
-                              const char *label)
+                              const char *label, bool is_caller)
 {
     char summary[160];
     char detail[1024];
+    char modbuf[256];
+    char hexbuf[192];
+    size_t dlen;
+    int i;
 
     if (!msg->detected)
         return;
 
-    snprintf(summary, sizeof(summary), "%s decoded", label);
-    detail[0] = '\0';
-
-    /* Format modulation flags */
+    /* Build modulation string (comma-separated, no spaces — HTML renderer
+     * adds ", " when displaying). */
     static const struct { int flag; const char *name; } mod_table[] = {
         { P12_MOD_V17, "V.17" }, { P12_MOD_V21, "V.21" },
         { P12_MOD_V22, "V.22bis" }, { P12_MOD_V23, "V.23" },
@@ -2663,22 +2706,43 @@ static void emit_cm_jm_event(call_log_t *log, const p12_cm_jm_hit_t *msg,
         { P12_MOD_V32, "V.32bis" }, { P12_MOD_V34, "V.34" },
         { P12_MOD_V90, "V.90" }, { P12_MOD_V92, "V.92" }
     };
-
-    snprintf(detail, sizeof(detail), "modulations=");
-    for (int i = 0; i < (int)(sizeof(mod_table) / sizeof(mod_table[0])); i++) {
+    modbuf[0] = '\0';
+    for (i = 0; i < (int)(sizeof(mod_table) / sizeof(mod_table[0])); i++) {
         if (msg->modulations & mod_table[i].flag) {
-            size_t dlen = strlen(detail);
-            snprintf(detail + dlen, sizeof(detail) - dlen, "%s%s",
-                     dlen > 12 ? "," : "", mod_table[i].name);
+            dlen = strlen(modbuf);
+            snprintf(modbuf + dlen, sizeof(modbuf) - dlen,
+                     "%s%s", modbuf[0] ? "," : "", mod_table[i].name);
         }
     }
+    if (!modbuf[0])
+        snprintf(modbuf, sizeof(modbuf), "none");
 
-    {
-        size_t dlen = strlen(detail);
-        snprintf(detail + dlen, sizeof(detail) - dlen,
-                 " call_function=%d protocols=%d pstn=%d pcm_modem=%d bytes=%d",
-                 msg->call_function, msg->protocols, msg->pstn_access,
-                 msg->pcm_modem_availability, msg->byte_count);
+    /* Hex-encode raw bytes for the raw= field */
+    hexbuf[0] = '\0';
+    for (i = 0; i < msg->byte_count && i < 32; i++) {
+        dlen = strlen(hexbuf);
+        snprintf(hexbuf + dlen, sizeof(hexbuf) - dlen,
+                 "%s%02X", i ? "_" : "", msg->bytes[i]);
+    }
+
+    /* Use the same key names as the spandsp decode path so the HTML renderer
+     * (which looks for role=, msg=, confidence=, call_fn=, modulations=,
+     * protocol=, pcm=, pstn=, raw=) can apply its CM/JM template. */
+    snprintf(summary, sizeof(summary), "%s decoded", label);
+    snprintf(detail, sizeof(detail),
+             "role=%s msg=%s confidence=%s call_fn=%d modulations=%s"
+             " protocol=%d pcm=%d pstn=%d",
+             is_caller ? "caller" : "answerer",
+             label,
+             msg->complete ? "confirmed" : "candidate_fragment",
+             msg->call_function,
+             modbuf,
+             msg->protocols,
+             msg->pcm_modem_availability,
+             msg->pstn_access);
+    if (hexbuf[0]) {
+        dlen = strlen(detail);
+        snprintf(detail + dlen, sizeof(detail) - dlen, " raw=%s", hexbuf);
     }
 
     call_log_append(log, msg->sample_offset, msg->duration_samples,
@@ -2803,12 +2867,10 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
     if (!result || !log)
         return;
 
-    (void)sample_rate;
-
     /* Phase 1 tones */
-    emit_tone_event(log, &result->cng, "V.8");
-    emit_tone_event(log, &result->ct, "V.8");
-    emit_tone_event(log, &result->answer_tone, "V.8");
+    emit_tone_event(log, &result->cng, "V.8", result->is_caller);
+    emit_tone_event(log, &result->ct, "V.8", result->is_caller);
+    emit_tone_event(log, &result->answer_tone, "V.8", result->is_caller);
     emit_answer_tone_handoff_event(log, &result->answer_tone);
     if (result->call_init.v8bis_signal_seen) {
         char summary[160];
@@ -2838,31 +2900,169 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
     }
 
     /* Phase 1 V.8 messages */
-    emit_cm_jm_event(log, &result->cm, "CM");
-    emit_cm_jm_event(log, &result->jm, "JM");
+    emit_cm_jm_event(log, &result->cm, "CM", result->is_caller);
+    emit_cm_jm_event(log, &result->jm, "JM", result->is_caller);
 
     if (result->cj.detected) {
+        char cj_detail[64];
+        snprintf(cj_detail, sizeof(cj_detail), "role=%s",
+                 result->is_caller ? "caller" : "answerer");
         call_log_append(log, result->cj.sample_offset, 0,
-                        "V.8", "CJ (ack)", NULL);
+                        "V.8", "CJ decoded", cj_detail);
     }
 
     /* Phase 2 INFO frames */
     if (result->info0.detected) {
         char summary[160];
+        char detail[1024];
+        const char *role_name = result->role_detected
+            ? (result->is_caller ? "caller" : "answerer") : "unknown";
+
+        detail[0] = '\0';
         snprintf(summary, sizeof(summary), "INFO0%s decoded",
                  result->info0.is_info0d ? "d" : "a");
+        appendf(detail, sizeof(detail), "role=%s", role_name);
+        appendf(detail, sizeof(detail), " profile=%s",
+                result->info0.is_info0d
+                    ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
+        appendf(detail, sizeof(detail), " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+        appendf(detail, sizeof(detail), " b12_2743=%u",
+                result->info0.parsed.support_2743 ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b13_2800=%u",
+                result->info0.parsed.support_2800 ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b14_3429=%u",
+                result->info0.parsed.support_3429 ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b15_3000l=%u",
+                result->info0.parsed.support_3000_low ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b16_3000h=%u",
+                result->info0.parsed.support_3000_high ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b17_3200l=%u",
+                result->info0.parsed.support_3200_low ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b18_3200h=%u",
+                result->info0.parsed.support_3200_high ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b19_3429ok=%u",
+                result->info0.parsed.rate_3429_allowed ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b20_pwrred=%u",
+                result->info0.parsed.support_power_reduction ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b21_23_maxbaud=%u",
+                (unsigned) result->info0.parsed.max_baud_rate_difference);
+        appendf(detail, sizeof(detail), " b24_cme=%u",
+                result->info0.parsed.from_cme_modem ? 1U : 0U);
+        appendf(detail, sizeof(detail), " b25_1664pt=%u",
+                result->info0.parsed.support_1664_point_constellation ? 1U : 0U);
+        if (result->info0.is_info0d) {
+            appendf(detail, sizeof(detail), " b26_shortp2_req=%u",
+                    (unsigned) (result->info0.raw.raw_26_27 & 0x01U));
+            appendf(detail, sizeof(detail), " b27_v92_cap=%u",
+                    (unsigned) ((result->info0.raw.raw_26_27 >> 1) & 0x01U));
+            appendf(detail, sizeof(detail), " b28_ack_i0a=%u",
+                    result->info0.parsed.acknowledge_info0d ? 1U : 0U);
+            appendf(detail, sizeof(detail), " crc16=unavailable tail=0xF");
+        } else {
+            v90_info0a_diag_t diag;
+            bool have_crc = v90_info0a_build_diag(&result->info0.parsed, &diag);
+            appendf(detail, sizeof(detail), " b26_v92_cap=%u",
+                    (unsigned) (result->info0.raw.raw_26_27 & 0x01U));
+            appendf(detail, sizeof(detail), " b27_shortp2_req=%u",
+                    (unsigned) ((result->info0.raw.raw_26_27 >> 1) & 0x01U));
+            appendf(detail, sizeof(detail), " b28_ack_i0d=%u",
+                    result->info0.parsed.acknowledge_info0d ? 1U : 0U);
+            if (have_crc)
+                appendf(detail, sizeof(detail), " crc16=0x%04X", (unsigned) diag.crc_field);
+            else
+                appendf(detail, sizeof(detail), " crc16=n/a");
+            appendf(detail, sizeof(detail), " tail=0xF");
+        }
         call_log_append(log, result->info0.sample_offset,
                         result->info0.duration_samples,
-                        "V.34", summary, NULL);
+                        "V.34", summary, detail);
     }
 
     if (result->info1.detected) {
         char summary[160];
+        char detail[1024];
+        const char *role_name = result->role_detected
+            ? (result->is_caller ? "caller" : "answerer") : "unknown";
+
+        detail[0] = '\0';
         snprintf(summary, sizeof(summary), "INFO1%s decoded",
                  result->info1.is_info1d ? "d" : "a");
+        if (result->info1.is_info1d) {
+            const v34_v90_info1d_t *i1d = &result->info1.info1d;
+            appendf(detail, sizeof(detail), "role=%s", role_name);
+            appendf(detail, sizeof(detail), " table=V90_T9_or_V92_T17_INFO1d");
+            appendf(detail, sizeof(detail), " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+            appendf(detail, sizeof(detail), " b12_14_min_pwr_red=%d",
+                    i1d->power_reduction);
+            appendf(detail, sizeof(detail), " b15_17_addl_pwr_red=%d",
+                    i1d->additional_power_reduction);
+            appendf(detail, sizeof(detail), " b18_24_md=%d", i1d->md);
+            appendf(detail, sizeof(detail),
+                    " row2400_hicar=%u row2400_preemp=%d row2400_maxrate=%d",
+                    i1d->rate_data[0].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[0].pre_emphasis, i1d->rate_data[0].max_bit_rate);
+            appendf(detail, sizeof(detail),
+                    " row2743_hicar=%u row2743_preemp=%d row2743_maxrate=%d",
+                    i1d->rate_data[1].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[1].pre_emphasis, i1d->rate_data[1].max_bit_rate);
+            appendf(detail, sizeof(detail),
+                    " row2800_hicar=%u row2800_preemp=%d row2800_maxrate=%d",
+                    i1d->rate_data[2].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[2].pre_emphasis, i1d->rate_data[2].max_bit_rate);
+            appendf(detail, sizeof(detail),
+                    " row3000_hicar=%u row3000_preemp=%d row3000_maxrate=%d",
+                    i1d->rate_data[3].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[3].pre_emphasis, i1d->rate_data[3].max_bit_rate);
+            appendf(detail, sizeof(detail),
+                    " row3200_hicar=%u row3200_preemp=%d row3200_maxrate=%d",
+                    i1d->rate_data[4].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[4].pre_emphasis, i1d->rate_data[4].max_bit_rate);
+            appendf(detail, sizeof(detail),
+                    " row3429_hicar_or_v92b70=%u row3429_preemp_or_v92b71_74=%d row3429_maxrate_or_v92b75_78=%d",
+                    i1d->rate_data[5].use_high_carrier ? 1U : 0U,
+                    i1d->rate_data[5].pre_emphasis, i1d->rate_data[5].max_bit_rate);
+            appendf(detail, sizeof(detail), " freq_offset_10b=0x%03X(%+d)",
+                    (unsigned) ((i1d->freq_offset < 0)
+                        ? (0x400 + i1d->freq_offset) : i1d->freq_offset) & 0x3FFU,
+                    i1d->freq_offset);
+            appendf(detail, sizeof(detail), " crc16=unavailable tail=0xF");
+        } else {
+            const v90_info1a_t *i1a = &result->info1.info1a_parsed;
+            const v34_v90_info1a_t *r1a = &result->info1.info1a_raw;
+            v90_info1a_diag_t diag;
+            bool have_crc = v90_info1a_build_diag(i1a, &diag);
+            bool looks_v92 = (r1a->upstream_symbol_rate_code == 6
+                              && r1a->downstream_rate_code == 6);
+            uint16_t freq_raw = (i1a->freq_offset < 0)
+                ? (uint16_t)(0x400 + i1a->freq_offset)
+                : (uint16_t) i1a->freq_offset;
+
+            appendf(detail, sizeof(detail), "role=%s", role_name);
+            appendf(detail, sizeof(detail), " table=%s",
+                    looks_v92 ? "V92_T18_INFO1a_pcm_upstream"
+                              : "V90_T10_or_V92_T19_INFO1a_v34_upstream");
+            appendf(detail, sizeof(detail), " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+            appendf(detail, sizeof(detail), " b12_17_raw=%u",
+                    (unsigned) r1a->raw_12_17);
+            appendf(detail, sizeof(detail), " md=%u", (unsigned) i1a->md);
+            appendf(detail, sizeof(detail), " u_info=%u", (unsigned) i1a->u_info);
+            appendf(detail, sizeof(detail), " b32_33_raw=%u",
+                    (unsigned) r1a->raw_32_33);
+            appendf(detail, sizeof(detail), " upstream_symbol_rate_code=%u",
+                    (unsigned) i1a->upstream_symbol_rate_code);
+            appendf(detail, sizeof(detail), " downstream_rate_code=%u",
+                    (unsigned) i1a->downstream_rate_code);
+            appendf(detail, sizeof(detail), " freq_offset_10b=0x%03X(%+d)",
+                    (unsigned)(freq_raw & 0x3FFU), i1a->freq_offset);
+            if (have_crc)
+                appendf(detail, sizeof(detail), " crc16=0x%04X", (unsigned) diag.crc_field);
+            else
+                appendf(detail, sizeof(detail), " crc16=n/a");
+            appendf(detail, sizeof(detail), " tail=0xF");
+        }
         call_log_append(log, result->info1.sample_offset,
                         result->info1.duration_samples,
-                        "V.34", summary, NULL);
+                        "V.34", summary, detail);
     }
 
     if (result->phase2_window_known || result->pcm_modem_capable || result->short_phase2_analysis_valid) {
