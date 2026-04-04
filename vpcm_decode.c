@@ -12034,6 +12034,9 @@ static void run_decode_suite(const char *label,
                        sample_to_ms(p12.answer_tone.start_sample, sample_rate),
                        sample_to_ms(p12.answer_tone.duration_samples, sample_rate),
                        p12.answer_tone.peak_ratio);
+                printf("  Answer-tone handoff at %.1f ms\n",
+                       sample_to_ms(p12.answer_tone.start_sample + p12.answer_tone.duration_samples,
+                                    sample_rate));
             }
 
             /* V.21 FSK bursts */

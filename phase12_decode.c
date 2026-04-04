@@ -84,6 +84,16 @@ enum {
     P12_PHASE2_SIGNAL_MIN_MS = 40
 };
 
+enum {
+    P12_PHASE2_CC_WINDOW_SAMPLES = 80,
+    P12_PHASE2_CC_STEP_SAMPLES = 40
+};
+
+enum {
+    P12_ANS_WINDOW_SAMPLES = 160,
+    P12_ANS_STEP_SAMPLES = 80
+};
+
 /* Tone detection thresholds */
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
@@ -293,37 +303,208 @@ static void p12_fill_handoff_info0_hint(p12_timing_hint_t *hint,
     hint->window_end_sample = window_end;
 }
 
-static bool p12_detect_phase2_cc_tone(const int16_t *samples,
-                                      int total_samples,
-                                      int sample_rate,
-                                      double freq_hz,
-                                      int min_run_ms,
-                                      p12_tone_hit_t *hit)
+static bool p12_detect_phase2_cc_run(const int16_t *samples,
+                                     int total_samples,
+                                     int sample_rate,
+                                     double freq_hz,
+                                     int min_run_ms,
+                                     p12_tone_hit_t *out)
 {
-    double competitors[4];
-    int n = 0;
+    int min_windows = (min_run_ms * sample_rate) / (1000 * P12_PHASE2_CC_STEP_SAMPLES);
+    int run_start = -1;
+    int run_windows = 0;
+    double run_peak = 0.0;
+    double alt_freq = (freq_hz < 1800.0) ? 2400.0 : 1200.0;
 
-    if (!samples || !hit)
+    if (!samples || !out || total_samples < P12_PHASE2_CC_WINDOW_SAMPLES)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (min_windows < 1)
+        min_windows = 1;
+
+    for (int pos = 0; pos + P12_PHASE2_CC_WINDOW_SAMPLES <= total_samples; pos += P12_PHASE2_CC_STEP_SAMPLES) {
+        double energy = window_energy(samples + pos, P12_PHASE2_CC_WINDOW_SAMPLES);
+        double ratio;
+        double alt_ratio;
+        double guard_1800;
+        double guard_2100;
+
+        if (energy <= 0.0)
+            goto cc_gap;
+
+        ratio = tone_energy_ratio(samples + pos, P12_PHASE2_CC_WINDOW_SAMPLES, sample_rate, freq_hz, energy);
+        alt_ratio = tone_energy_ratio(samples + pos, P12_PHASE2_CC_WINDOW_SAMPLES, sample_rate, alt_freq, energy);
+        guard_1800 = tone_energy_ratio(samples + pos, P12_PHASE2_CC_WINDOW_SAMPLES, sample_rate, 1800.0, energy);
+        guard_2100 = tone_energy_ratio(samples + pos, P12_PHASE2_CC_WINDOW_SAMPLES, sample_rate, 2100.0, energy);
+
+        if (ratio < 0.07)
+            goto cc_gap;
+        if (alt_ratio > ratio * 0.85)
+            goto cc_gap;
+        if (guard_1800 > ratio * 0.80 || guard_2100 > ratio * 0.80)
+            goto cc_gap;
+
+        if (run_start < 0)
+            run_start = pos;
+        run_windows++;
+        if (ratio > run_peak)
+            run_peak = ratio;
+        continue;
+
+cc_gap:
+        if (run_start >= 0 && run_windows >= min_windows) {
+            out->detected = true;
+            out->start_sample = run_start;
+            out->duration_samples = (run_windows - 1) * P12_PHASE2_CC_STEP_SAMPLES + P12_PHASE2_CC_WINDOW_SAMPLES;
+            out->peak_ratio = run_peak;
+            return true;
+        }
+        run_start = -1;
+        run_windows = 0;
+        run_peak = 0.0;
+    }
+
+    if (run_start >= 0 && run_windows >= min_windows) {
+        out->detected = true;
+        out->start_sample = run_start;
+        out->duration_samples = (run_windows - 1) * P12_PHASE2_CC_STEP_SAMPLES + P12_PHASE2_CC_WINDOW_SAMPLES;
+        out->peak_ratio = run_peak;
+        return true;
+    }
+    return false;
+}
+
+static bool detect_answer_tone_run(const int16_t *samples,
+                                   int total_samples,
+                                   int sample_rate,
+                                   int min_run_ms,
+                                   p12_tone_hit_t *out)
+{
+    int min_windows = (min_run_ms * sample_rate) / (1000 * P12_ANS_STEP_SAMPLES);
+    int run_start = -1;
+    int run_windows = 0;
+    double run_peak = 0.0;
+    int best_start = -1;
+    int best_windows = 0;
+    double best_peak = 0.0;
+
+    if (!samples || !out || total_samples < P12_ANS_WINDOW_SAMPLES)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (min_windows < 1)
+        min_windows = 1;
+
+    for (int pos = 0; pos + P12_ANS_WINDOW_SAMPLES <= total_samples; pos += P12_ANS_STEP_SAMPLES) {
+        double energy = window_energy(samples + pos, P12_ANS_WINDOW_SAMPLES);
+        double r2100;
+        double r1800;
+        double r2400;
+        double r1650;
+        double r1850;
+        bool good = false;
+
+        if (energy > 0.0) {
+            goertzel_result_t g2100 = goertzel_analyze(samples + pos, P12_ANS_WINDOW_SAMPLES, sample_rate, 2100.0);
+            goertzel_result_t g1800 = goertzel_analyze(samples + pos, P12_ANS_WINDOW_SAMPLES, sample_rate, 1800.0);
+            goertzel_result_t g2400 = goertzel_analyze(samples + pos, P12_ANS_WINDOW_SAMPLES, sample_rate, 2400.0);
+            goertzel_result_t g1650 = goertzel_analyze(samples + pos, P12_ANS_WINDOW_SAMPLES, sample_rate, 1650.0);
+            goertzel_result_t g1850 = goertzel_analyze(samples + pos, P12_ANS_WINDOW_SAMPLES, sample_rate, 1850.0);
+            r2100 = g2100.energy / (energy * (double) P12_ANS_WINDOW_SAMPLES);
+            r1800 = g1800.energy / (energy * (double) P12_ANS_WINDOW_SAMPLES);
+            r2400 = g2400.energy / (energy * (double) P12_ANS_WINDOW_SAMPLES);
+            r1650 = g1650.energy / (energy * (double) P12_ANS_WINDOW_SAMPLES);
+            r1850 = g1850.energy / (energy * (double) P12_ANS_WINDOW_SAMPLES);
+            good = (r2100 >= 0.08
+                    && r1800 < r2100 * 0.35
+                    && r2400 < r2100 * 0.35
+                    && r1650 < r2100 * 0.25
+                    && r1850 < r2100 * 0.25);
+        }
+
+        if (good) {
+            if (run_start < 0)
+                run_start = pos;
+            run_windows++;
+            if (r2100 > run_peak)
+                run_peak = r2100;
+            continue;
+        }
+
+        if (run_start >= 0 && run_windows >= min_windows) {
+            if (run_windows > best_windows || (run_windows == best_windows && run_peak > best_peak)) {
+                best_start = run_start;
+                best_windows = run_windows;
+                best_peak = run_peak;
+            }
+        }
+        run_start = -1;
+        run_windows = 0;
+        run_peak = 0.0;
+    }
+
+    if (run_start >= 0 && run_windows >= min_windows) {
+        if (run_windows > best_windows || (run_windows == best_windows && run_peak > best_peak)) {
+            best_start = run_start;
+            best_windows = run_windows;
+            best_peak = run_peak;
+        }
+    }
+
+    if (best_start < 0)
         return false;
 
-    if (fabs(freq_hz - 1200.0) > 1.0)
-        competitors[n++] = 1200.0;
-    if (fabs(freq_hz - 1800.0) > 1.0)
-        competitors[n++] = 1800.0;
-    if (fabs(freq_hz - 2100.0) > 1.0)
-        competitors[n++] = 2100.0;
-    if (fabs(freq_hz - 2400.0) > 1.0)
-        competitors[n++] = 2400.0;
+    out->detected = true;
+    out->start_sample = best_start;
+    out->duration_samples = (best_windows - 1) * P12_ANS_STEP_SAMPLES + P12_ANS_WINDOW_SAMPLES;
+    out->peak_ratio = best_peak;
+    if (p12_debug_enabled()) {
+        fprintf(stderr,
+                "[p12] answer tone candidate start=%.1fms dur=%.1fms peak=%.3f windows=%d\n",
+                (double) out->start_sample * 1000.0 / (double) sample_rate,
+                (double) out->duration_samples * 1000.0 / (double) sample_rate,
+                out->peak_ratio,
+                best_windows);
+    }
+    return true;
+}
 
-    return detect_tone(samples,
-                       total_samples,
-                       sample_rate,
-                       freq_hz,
-                       competitors,
-                       n,
-                       min_run_ms,
-                       false,
-                       hit);
+static bool detect_phase_reversals_at_freq(const int16_t *samples,
+                                           int len,
+                                           int sample_rate,
+                                           double freq_hz,
+                                           int *reversal_count_out)
+{
+    enum { PHASE_WINDOW = 80 };
+    int n_windows = len / PHASE_WINDOW;
+    double prev_phase = 0.0;
+    bool have_prev = false;
+    int reversals = 0;
+
+    for (int w = 0; w < n_windows; w++) {
+        goertzel_result_t r = goertzel_analyze(samples + w * PHASE_WINDOW,
+                                               PHASE_WINDOW,
+                                               sample_rate,
+                                               freq_hz);
+        double phase;
+
+        if (r.energy < 1e5)
+            continue;
+
+        phase = atan2(r.im, r.re);
+        if (have_prev) {
+            double diff = fabs(phase - prev_phase);
+            if (diff > M_PI)
+                diff = 2.0 * M_PI - diff;
+            if (diff > 2.3 && diff < 3.9)
+                reversals++;
+        }
+        prev_phase = phase;
+        have_prev = true;
+    }
+
+    if (reversal_count_out)
+        *reversal_count_out = reversals;
+    return reversals >= 1;
 }
 
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
@@ -375,12 +556,12 @@ static bool detect_phase2_signal_tone_runs(const int16_t *samples,
 
     for (int i = 0; i < freq_count; i++) {
         memset(&hit, 0, sizeof(hit));
-        if (!p12_detect_phase2_cc_tone(samples + search_start,
-                                       search_end - search_start,
-                                       sample_rate,
-                                       freqs[i],
-                                       P12_PHASE2_SIGNAL_MIN_MS,
-                                       &hit)) {
+        if (!p12_detect_phase2_cc_run(samples + search_start,
+                                      search_end - search_start,
+                                      sample_rate,
+                                      freqs[i],
+                                      P12_PHASE2_SIGNAL_MIN_MS,
+                                      &hit)) {
             continue;
         }
         if (is_tone_a[i]) {
@@ -388,10 +569,11 @@ static bool detect_phase2_signal_tone_runs(const int16_t *samples,
             tone_a->start_sample = search_start + hit.start_sample;
             tone_a->duration_samples = hit.duration_samples;
             tone_a->freq_hz = freqs[i];
-            tone_a->phase_reversal_seen = detect_phase_reversals(samples + tone_a->start_sample,
-                                                                 tone_a->duration_samples,
-                                                                 sample_rate,
-                                                                 NULL);
+            tone_a->phase_reversal_seen = detect_phase_reversals_at_freq(samples + tone_a->start_sample,
+                                                                         tone_a->duration_samples,
+                                                                         sample_rate,
+                                                                         freqs[i],
+                                                                         NULL);
             if (tone_a->phase_reversal_seen)
                 tone_a->reversal_sample = tone_a->start_sample + tone_a->duration_samples/2;
         } else {
@@ -399,10 +581,11 @@ static bool detect_phase2_signal_tone_runs(const int16_t *samples,
             tone_b->start_sample = search_start + hit.start_sample;
             tone_b->duration_samples = hit.duration_samples;
             tone_b->freq_hz = freqs[i];
-            tone_b->phase_reversal_seen = detect_phase_reversals(samples + tone_b->start_sample,
-                                                                 tone_b->duration_samples,
-                                                                 sample_rate,
-                                                                 NULL);
+            tone_b->phase_reversal_seen = detect_phase_reversals_at_freq(samples + tone_b->start_sample,
+                                                                         tone_b->duration_samples,
+                                                                         sample_rate,
+                                                                         freqs[i],
+                                                                         NULL);
             if (tone_b->phase_reversal_seen)
                 tone_b->reversal_sample = tone_b->start_sample + tone_b->duration_samples/2;
         }
@@ -641,8 +824,6 @@ static void detect_phase1_tones(const int16_t *samples,
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
     static const double cng_competitors[] = { 980.0, 1180.0, 1300.0 };
     static const double ct_competitors[] = { 1100.0, 1180.0, 980.0 };
-    static const double ans_competitors[] = { 1800.0, 2400.0, 1650.0, 1850.0 };
-
     /* CNG: 1100 Hz */
     if (detect_tone(samples, limit, sample_rate, CNG_FREQ_HZ,
                     cng_competitors, 3, MIN_CNG_RUN_MS, true, &result->cng)) {
@@ -656,8 +837,8 @@ static void detect_phase1_tones(const int16_t *samples,
     }
 
     /* ANS/ANSam: 2100 Hz */
-    if (detect_tone(samples, limit, sample_rate, ANS_FREQ_HZ,
-                    ans_competitors, 4, MIN_ANS_RUN_MS, false, &result->answer_tone)) {
+    if (detect_answer_tone_run(samples, limit, sample_rate,
+                               MIN_ANS_RUN_MS, &result->answer_tone)) {
         /* Classify: check for AM modulation and phase reversals */
         int ans_start = result->answer_tone.start_sample;
         int ans_len = result->answer_tone.duration_samples;
@@ -1956,9 +2137,35 @@ static void emit_tone_event(call_log_t *log, const p12_tone_hit_t *tone,
         return;
 
     snprintf(summary, sizeof(summary), "%s tone detected", p12_tone_type_name(tone->type));
-    snprintf(detail, sizeof(detail), "peak_ratio=%.3f", tone->peak_ratio);
+    snprintf(detail, sizeof(detail), "peak_ratio=%.3f duration=%.1fms",
+             tone->peak_ratio,
+             (double) tone->duration_samples * 1000.0 / 8000.0);
     call_log_append(log, tone->start_sample, tone->duration_samples,
                     protocol, summary, detail);
+}
+
+static void emit_answer_tone_handoff_event(call_log_t *log,
+                                           const p12_tone_hit_t *tone)
+{
+    char detail[256];
+    int handoff_sample;
+
+    if (!log || !tone || !tone->detected)
+        return;
+
+    handoff_sample = tone->start_sample + tone->duration_samples;
+    snprintf(detail, sizeof(detail),
+             "tone=%s start=%.1fms end=%.1fms duration=%.1fms",
+             p12_tone_type_name(tone->type),
+             (double) tone->start_sample * 1000.0 / 8000.0,
+             (double) handoff_sample * 1000.0 / 8000.0,
+             (double) tone->duration_samples * 1000.0 / 8000.0);
+    call_log_append(log,
+                    handoff_sample,
+                    0,
+                    "V.8",
+                    "Answer-tone handoff",
+                    detail);
 }
 
 static void emit_cm_jm_event(call_log_t *log, const p12_cm_jm_hit_t *msg,
@@ -2126,6 +2333,7 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
     emit_tone_event(log, &result->cng, "V.8");
     emit_tone_event(log, &result->ct, "V.8");
     emit_tone_event(log, &result->answer_tone, "V.8");
+    emit_answer_tone_handoff_event(log, &result->answer_tone);
 
     /* Phase 1 V.8 messages */
     emit_cm_jm_event(log, &result->cm, "CM");
@@ -2169,6 +2377,15 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                  result->digital_side_likely ? 1U : 0U,
                  result->phase2_window_known ? (double) result->phase2_start_sample * 1000.0 / (double) sample_rate : -1.0,
                  result->phase2_window_known ? (double) result->phase2_end_sample * 1000.0 / (double) sample_rate : -1.0);
+        if (result->answer_tone.detected) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " ans=%s ans_start=%.1fms ans_end=%.1fms ans_dur=%.1fms",
+                     p12_tone_type_name(result->answer_tone.type),
+                     (double) result->answer_tone.start_sample * 1000.0 / (double) sample_rate,
+                     (double) (result->answer_tone.start_sample + result->answer_tone.duration_samples) * 1000.0 / (double) sample_rate,
+                     (double) result->answer_tone.duration_samples * 1000.0 / (double) sample_rate);
+        }
         if (result->info_path_known) {
             size_t dlen = strlen(detail);
             snprintf(detail + dlen, sizeof(detail) - dlen,
