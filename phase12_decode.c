@@ -304,6 +304,45 @@ static void p12_fill_timing_hint_from_jm_end(p12_timing_hint_t *hint,
         hint->window_end_sample = hint->window_start_sample;
 }
 
+static bool p12_cm_jm_has_phase1_capability(const p12_cm_jm_hit_t *msg)
+{
+    if (!msg || !msg->detected)
+        return false;
+    return msg->modulations != 0 || msg->pcm_modem_availability != 0;
+}
+
+static int p12_cm_jm_credibility_score(const p12_cm_jm_hit_t *msg)
+{
+    int score = 0;
+
+    if (!msg || !msg->detected)
+        return -1000;
+
+    if (msg->modulations != 0)
+        score += 40;
+    if (msg->pcm_modem_availability != 0)
+        score += 30;
+    if (msg->call_function != 0)
+        score += 8;
+    if (msg->protocols != 0)
+        score += 6;
+    if (msg->pstn_access != 0)
+        score += 4;
+
+    score += msg->byte_count * 2;
+    score += msg->observed_count * 10;
+    score -= msg->differing_count * 14;
+
+    if (msg->complete)
+        score += 20;
+    if (msg->observed_count > 0 && msg->differing_count >= msg->observed_count)
+        score -= 25;
+    if (msg->modulations == 0 && msg->pcm_modem_availability == 0)
+        score -= 40;
+
+    return score;
+}
+
 static void p12_append_retry_window(p12_fsk_burst_t *bursts,
                                     int *burst_count,
                                     int max_bursts,
@@ -2055,6 +2094,88 @@ static void p12_debug_dump_v8_stream(const char *label,
     fputc('\n', stderr);
 }
 
+static int p12_v8_sync_score(const uint8_t *bits,
+                             const double *confidence,
+                             int bit_count,
+                             int start,
+                             const uint8_t pattern[10])
+{
+    double score = 0.0;
+
+    if (!bits || !confidence || !pattern || start < 0 || start + 10 > bit_count)
+        return -1000000;
+
+    for (int i = 0; i < 10; i++) {
+        double w = confidence[start + i];
+
+        if (w < 0.015)
+            w = 0.015;
+        if (bits[start + i] == pattern[i])
+            score += 1.0 + 12.0 * w;
+        else
+            score -= 1.0 + 12.0 * w;
+    }
+
+    return (int) lround(score * 10.0);
+}
+
+static int p12_v8_ones_lock_score(const uint8_t *bits,
+                                  const double *confidence,
+                                  int bit_count,
+                                  int start)
+{
+    static const uint8_t ones_pattern[10] = {
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    };
+
+    return p12_v8_sync_score(bits, confidence, bit_count, start, ones_pattern);
+}
+
+static int p12_v8_cm_jm_sync_lock_score(const uint8_t *bits,
+                                        const double *confidence,
+                                        int bit_count,
+                                        int start)
+{
+    static const uint8_t cm_jm_sync_pattern[10] = {
+        0, 0, 0, 0, 0, 0, 1, 1, 1, 1
+    };
+
+    return p12_v8_sync_score(bits, confidence, bit_count, start, cm_jm_sync_pattern);
+}
+
+static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
+                                          const double *confidence,
+                                          int bit_count,
+                                          int start,
+                                          uint8_t *bytes,
+                                          int max_bytes,
+                                          int *framing_penalty_out)
+{
+    int byte_len = 0;
+    int penalty = 0;
+
+    if (!bits || !confidence || !bytes || max_bytes <= 0 || start < 0)
+        return 0;
+
+    for (int bit_pos = start; bit_pos + 10 <= bit_count && byte_len < max_bytes; bit_pos += 10) {
+        uint8_t byte = 0;
+
+        if (bits[bit_pos] != 0)
+            penalty += 20 + (int) lround(confidence[bit_pos] * 80.0);
+        if (bits[bit_pos + 9] != 1)
+            penalty += 20 + (int) lround(confidence[bit_pos + 9] * 80.0);
+        for (int j = 0; j < 8; j++)
+            byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
+        bytes[byte_len++] = byte;
+        if (byte == 0)
+            break;
+    }
+
+    if (framing_penalty_out)
+        *framing_penalty_out = penalty;
+    return byte_len;
+}
+
 static void v8_msg_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
     v8_msg_decoder_t *d = (v8_msg_decoder_t *)ctx;
@@ -2210,6 +2331,246 @@ static bool parse_cm_jm_bytes(const uint8_t *data, int len,
     return (modulations != 0 || out->call_function != 0);
 }
 
+static bool p12_v8_byte_is_valid_top_level_tag(uint8_t byte)
+{
+    switch (byte & 0x1F) {
+    case P12_V8_TAG_CALL_FUNCTION:
+    case P12_V8_TAG_MODULATION:
+    case P12_V8_TAG_PROTOCOLS:
+    case P12_V8_TAG_PSTN_ACCESS:
+    case P12_V8_TAG_NSF:
+    case P12_V8_TAG_PCM_MODEM:
+    case P12_V8_TAG_T66:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool p12_v8_byte_is_continuation_tag(uint8_t byte)
+{
+    return (byte & 0x18) == 0x10;
+}
+
+static bool p12_cm_jm_candidate_plausible(const uint8_t *data,
+                                          int len,
+                                          const p12_cm_jm_hit_t *parsed)
+{
+    int first_tag = -1;
+    int top_level_count = 0;
+    int modulation_tag_count = 0;
+    int continuation_count = 0;
+
+    if (!data || len <= 0 || !parsed)
+        return false;
+
+    for (int i = 0; i < len; i++) {
+        uint8_t byte = data[i];
+
+        if (byte == 0)
+            break;
+        if (p12_v8_byte_is_continuation_tag(byte)) {
+            continuation_count++;
+            continue;
+        }
+        if (!p12_v8_byte_is_valid_top_level_tag(byte))
+            continue;
+        if (first_tag < 0)
+            first_tag = byte & 0x1F;
+        top_level_count++;
+        if ((byte & 0x1F) == P12_V8_TAG_MODULATION)
+            modulation_tag_count++;
+    }
+
+    if (first_tag < 0)
+        return false;
+    if (first_tag != P12_V8_TAG_CALL_FUNCTION
+        && first_tag != P12_V8_TAG_MODULATION)
+        return false;
+    if (parsed->modulations == 0 && parsed->pcm_modem_availability == 0)
+        return false;
+    if (parsed->modulations == 0
+        && parsed->protocols == 0
+        && parsed->pstn_access == 0
+        && parsed->pcm_modem_availability == 0)
+        return false;
+    if (parsed->modulations != 0)
+        return true;
+    if (modulation_tag_count > 0 || continuation_count > 0)
+        return top_level_count >= 1;
+    return top_level_count >= 2;
+}
+
+static int p12_cm_jm_candidate_score(const p12_cm_jm_hit_t *candidate)
+{
+    int score = 0;
+
+    if (!candidate || !candidate->detected)
+        return -1;
+    if (candidate->modulations != 0)
+        score += 8;
+    if (candidate->call_function != 0)
+        score += 3;
+    if (candidate->protocols != 0)
+        score += 2;
+    if (candidate->pstn_access != 0)
+        score += 1;
+    if (candidate->pcm_modem_availability != 0)
+        score += 2;
+    score += candidate->byte_count;
+    return score;
+}
+
+static bool p12_targeted_v21_decode_cm_jm(const int16_t *samples,
+                                          int total_samples,
+                                          int sample_rate,
+                                          int channel,
+                                          int burst_start,
+                                          int burst_len,
+                                          p12_cm_jm_hit_t *out,
+                                          int *message_end_bit_out,
+                                          int *message_search_start_out)
+{
+    const double mark_hz = (channel == V21_CH2) ? 1650.0 : 980.0;
+    const double space_hz = (channel == V21_CH2) ? 1850.0 : 1180.0;
+    p12_cm_jm_hit_t best = {0};
+    int best_score = -1000000;
+    int best_end_bit = -1;
+    int best_search_start = 0;
+    int search_start;
+    int search_end;
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || burst_len <= 0 || !out)
+        return false;
+
+    search_start = burst_start - 1600;
+    search_end = burst_start + burst_len + 800;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < sample_rate / 20)
+        return false;
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int bit_rate = 294; bit_rate <= 306; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
+            int phase_count = (int) floor(symbol_samples * 4.0);
+
+            if (phase_count < 1)
+                phase_count = 1;
+            for (int phase_q = 0; phase_q < phase_count; phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                double confidence[512];
+                int bit_count = 0;
+
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
+
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                        break;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count] = (uint8_t) bit;
+                    confidence[bit_count] = fabs(pm - ps);
+                    bit_count++;
+                }
+
+                for (int i = 0; i + 20 <= bit_count; i++) {
+                    uint8_t bytes[64];
+                    p12_cm_jm_hit_t candidate;
+                    int byte_len;
+                    int framing_penalty = 0;
+                    int ones_score;
+                    int sync_score;
+                    int score;
+
+                    ones_score = p12_v8_ones_lock_score(bits, confidence, bit_count, i);
+                    if (ones_score < 32)
+                        continue;
+                    sync_score = p12_v8_cm_jm_sync_lock_score(bits, confidence, bit_count, i + 10);
+                    if (sync_score < 32)
+                        continue;
+
+                    byte_len = p12_v8_decode_soft_async_bytes(bits,
+                                                              confidence,
+                                                              bit_count,
+                                                              i + 20,
+                                                              bytes,
+                                                              (int) sizeof(bytes),
+                                                              &framing_penalty);
+                    if (byte_len <= 0)
+                        continue;
+
+                    memset(&candidate, 0, sizeof(candidate));
+                    candidate.byte_count = byte_len;
+                    memcpy(candidate.bytes, bytes, (size_t) byte_len);
+                    if (!parse_cm_jm_bytes(bytes, byte_len, &candidate))
+                        continue;
+                    if (!p12_cm_jm_candidate_plausible(bytes, byte_len, &candidate))
+                        continue;
+
+                    candidate.detected = true;
+                    candidate.sample_offset = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                    candidate.duration_samples = (int) lround((double) (20 + 10 * byte_len) * symbol_samples);
+                    score = p12_cm_jm_candidate_score(&candidate);
+                    score += ones_score + sync_score;
+                    score += 8 - abs(bit_rate - 300);
+                    score -= framing_penalty;
+                    score -= i / 2;
+                    if (invert)
+                        score -= 2;
+                    if (channel == V21_CH2)
+                        score += 4;
+
+                    if (p12_dump_v8_enabled()) {
+                        fprintf(stderr,
+                                "[p12] V8 soft message label=%s inv=%d rate=%d phase=%.2f bit_pos=%d score=%d bytes=",
+                                channel == V21_CH1 ? "CH1" : "CH2",
+                                invert,
+                                bit_rate,
+                                phase,
+                                i,
+                                score);
+                        for (int k = 0; k < byte_len; k++)
+                            fprintf(stderr, "%s%02X", k ? "_" : "", bytes[k]);
+                        fputc('\n', stderr);
+                    }
+
+                    if (score > best_score) {
+                        best_score = score;
+                        best = candidate;
+                        best_end_bit = i + 20 + 10 * byte_len;
+                        best_search_start = search_start;
+                    }
+                }
+            }
+        }
+    }
+
+    if (best_score < 0 || !best.detected)
+        return false;
+
+    *out = best;
+    if (message_end_bit_out)
+        *message_end_bit_out = best_end_bit;
+    if (message_search_start_out)
+        *message_search_start_out = best_search_start;
+    return true;
+}
+
 static bool p12_cm_jm_bytes_equal(const p12_cm_jm_hit_t *msg,
                                   const uint8_t *bytes,
                                   int byte_count)
@@ -2299,6 +2660,9 @@ static void decode_v8_fsk_channel(const int16_t *samples,
         v8_msg_decoder_t decoder;
         int start, len;
         int pre_pad, post_pad;
+        int message_end_bit = -1;
+        int message_search_start = 0;
+        bool found_message_this_burst = false;
 
         if (!bursts[b].seen)
             continue;
@@ -2321,15 +2685,29 @@ static void decode_v8_fsk_channel(const int16_t *samples,
         if (start < 0 || start + len > total_samples)
             continue;
 
-        /* Try both polarities */
-        for (int inv = 0; inv < 2; inv++) {
-            int message_end_bit = -1;
-            bool found_message_this_pass = false;
+        if (cm_jm_out) {
+            p12_cm_jm_hit_t candidate;
 
+            memset(&candidate, 0, sizeof(candidate));
+            if (p12_targeted_v21_decode_cm_jm(samples,
+                                              total_samples,
+                                              sample_rate,
+                                              channel,
+                                              start,
+                                              len,
+                                              &candidate,
+                                              &message_end_bit,
+                                              &message_search_start)) {
+                p12_record_cm_jm_observation(cm_jm_out, &candidate);
+                found_message_this_burst = true;
+            }
+        }
+
+        for (int inv = 0; inv < 2; inv++) {
             v8_msg_decoder_init(&decoder);
 
             v21_fsk_demod_block(samples + start, len, sample_rate,
-                                channel, (bool)inv,
+                                channel, (bool) inv,
                                 v8_msg_decoder_put_bit, &decoder);
             p12_debug_dump_v8_stream(channel == V21_CH1 ? "CH1" : "CH2",
                                      decoder.raw_bits,
@@ -2338,79 +2716,6 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                                      start,
                                      inv);
 
-            /* Try extracting CM/JM bytes from raw bits using async framing */
-            if (cm_jm_out && decoder.raw_bit_count >= 20) {
-                /* Scan raw bits for async-framed CM/JM messages */
-                for (int bit_pos = 0; bit_pos + 10 <= decoder.raw_bit_count; bit_pos++) {
-                    uint8_t msg_bytes[64];
-                    int msg_len = 0;
-                    int scan_pos = bit_pos;
-
-                    /* Look for 0xE0 start byte (async: 0-00000111-1 LSB-first) */
-                    if (decoder.raw_bits[scan_pos] != 0)  /* start bit must be 0 */
-                        continue;
-
-                    /* Extract first byte */
-                    if (scan_pos + 10 > decoder.raw_bit_count)
-                        continue;
-
-                    uint8_t first = 0;
-                    for (int j = 0; j < 8; j++)
-                        first |= (decoder.raw_bits[scan_pos + 1 + j] << j);
-
-                    if (first != 0xE0)
-                        continue;
-
-                    /* Found 0xE0 preamble; extract subsequent bytes */
-                    scan_pos += 10;
-                    while (scan_pos + 10 <= decoder.raw_bit_count && msg_len < 64) {
-                        if (decoder.raw_bits[scan_pos] != 0)
-                            break;  /* no valid start bit */
-
-                        uint8_t byte_val = 0;
-                        for (int j = 0; j < 8; j++)
-                            byte_val |= (decoder.raw_bits[scan_pos + 1 + j] << j);
-
-                        msg_bytes[msg_len++] = byte_val;
-                        scan_pos += 10;
-                        if (byte_val == 0)
-                            break;
-                    }
-
-                    if (msg_len > 0) {
-                        p12_cm_jm_hit_t candidate;
-                        memset(&candidate, 0, sizeof(candidate));
-                        candidate.byte_count = msg_len;
-                        memcpy(candidate.bytes, msg_bytes, (size_t)msg_len);
-
-                        if (parse_cm_jm_bytes(msg_bytes, msg_len, &candidate)) {
-                            candidate.detected = true;
-                            candidate.complete = false;
-                            candidate.sample_offset = start;
-                            candidate.duration_samples = len;
-                            p12_record_cm_jm_observation(cm_jm_out, &candidate);
-                            if (p12_dump_v8_enabled()) {
-                                fprintf(stderr,
-                                        "[p12] V8 message label=%s inv=%d bit_pos=%d bits_end=%d bytes=",
-                                        channel == V21_CH1 ? "CH1" : "CH2",
-                                        inv,
-                                        bit_pos,
-                                        scan_pos);
-                                for (int k = 0; k < msg_len; k++)
-                                    fprintf(stderr, "%s%02X", k ? "_" : "", msg_bytes[k]);
-                                fputc('\n', stderr);
-                            }
-                            message_end_bit = scan_pos;
-                            found_message_this_pass = true;
-                            bit_pos = scan_pos - 1;
-                        }
-                    }
-                }
-            }
-
-            /* Check for CJ only after a valid CM/JM path exists.
-             * This prevents stray all-mark runs from being labeled as CJ
-             * before negotiation has actually been reconstructed. */
             if (cj_out && !cj_out->detected
                 && cm_jm_out && cm_jm_out->detected
                 && decoder.raw_bit_count >= 30) {
@@ -2419,8 +2724,14 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                 int cj_start_bit = -1;
                 int cj_end_bit = -1;
 
-                if (message_end_bit > 0)
+                if (message_end_bit > 0) {
                     search_bit = message_end_bit;
+                    if (message_search_start > start) {
+                        int delta_bits = (message_search_start - start) / samp_per_bit;
+                        if (delta_bits > 0)
+                            search_bit += delta_bits;
+                    }
+                }
                 if (p12_find_cj_zero_octets(decoder.raw_bits,
                                             decoder.raw_bit_count,
                                             search_bit,
@@ -2430,7 +2741,8 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                     int duration = (cj_end_bit - cj_start_bit) * samp_per_bit;
 
                     cj_out->detected = true;
-                    if (offset < 0) offset = 0;
+                    if (offset < 0)
+                        offset = 0;
                     if (duration < samp_per_bit)
                         duration = samp_per_bit;
                     cj_out->sample_offset = offset;
@@ -2445,12 +2757,13 @@ static void decode_v8_fsk_channel(const int16_t *samples,
             }
 
             if (cj_out && cj_out->detected)
-                break; /* CJ ends the repeating CM/JM phase */
-            if (found_message_this_pass)
-                continue; /* keep decoding repeats until CJ is found */
+                break;
         }
+
         if (cj_out && cj_out->detected)
             break;
+        if (found_message_this_burst)
+            continue;
     }
 }
 
@@ -2466,6 +2779,9 @@ static void detect_phase1_v8(const int16_t *samples,
     int phase1_ch1_window_count;
     int phase1_ch2_window_count;
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
+
+    if (limit > (sample_rate * P12_CALL_INIT_MAX_MS) / 1000)
+        limit = (sample_rate * P12_CALL_INIT_MAX_MS) / 1000;
 
     /* Find V.21 FSK bursts on both channels */
     result->ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
@@ -3571,7 +3887,7 @@ static void detect_phase2_info(const int16_t *samples,
         search_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate);
-    if (result->jm.detected && result->jm.duration_samples > 0) {
+    if (p12_cm_jm_has_phase1_capability(&result->jm) && result->jm.duration_samples > 0) {
         int jm_info_start = result->jm.sample_offset
                           + result->jm.duration_samples
                           + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
@@ -3588,7 +3904,7 @@ static void detect_phase2_info(const int16_t *samples,
     }
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
-    if (result->jm.detected && result->jm.duration_samples > 0)
+    if (p12_cm_jm_has_phase1_capability(&result->jm) && result->jm.duration_samples > 0)
         p12_fill_timing_hint_from_jm_end(&result->info0_from_cj_hint, &result->jm, sample_rate, limit);
     else
         p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
