@@ -2237,6 +2237,8 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
                                             int offset,
                                             double symbol_samples,
                                             bool invert,
+                                            double *mark_energy_out,
+                                            double *space_energy_out,
                                             bool *ok_out)
 {
     double mark_hz = 980.0;
@@ -2249,6 +2251,10 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
 
     if (ok_out)
         *ok_out = false;
+    if (mark_energy_out)
+        *mark_energy_out = 0.0;
+    if (space_energy_out)
+        *space_energy_out = 0.0;
     if (!samples || total_samples <= 0 || sample_rate <= 0 || offset < 0)
         return 0.0;
 
@@ -2263,6 +2269,10 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
 
     mark_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, mark_hz);
     space_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, space_hz);
+    if (mark_energy_out)
+        *mark_energy_out = mark_r.energy;
+    if (space_energy_out)
+        *space_energy_out = space_r.energy;
     total_energy = mark_r.energy + space_r.energy;
     if (total_energy <= 1e-12)
         decision = 0.0;
@@ -2273,6 +2283,91 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
     if (ok_out)
         *ok_out = true;
     return decision;
+}
+
+static void p12_debug_dump_symbol_trace(const int16_t *samples,
+                                        int total_samples,
+                                        int sample_rate,
+                                        int channel,
+                                        int sync_start,
+                                        int target_bits,
+                                        bool invert,
+                                        double symbol_samples,
+                                        double bias)
+{
+    int dump_sync = V34_INFO_SYNC_BITS;
+    int dump_payload = (target_bits < 12) ? target_bits : 12;
+
+    if (!p12_debug_enabled())
+        return;
+
+    fprintf(stderr,
+            "[p12] INFO symbol-trace channel=%d sync=%.1fms invert=%u bias=%.6f\n",
+            channel,
+            (double) sync_start * 1000.0 / (double) sample_rate,
+            invert ? 1U : 0U,
+            bias);
+    for (int i = 0; i < dump_sync; i++) {
+        bool ok = false;
+        double mark_energy = 0.0;
+        double space_energy = 0.0;
+        double decision;
+        int offset = sync_start + (int) floor((double) i * symbol_samples + 0.5);
+        int expected_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
+
+        decision = p12_v21_symbol_decision_value(samples,
+                                                 total_samples,
+                                                 sample_rate,
+                                                 channel,
+                                                 offset,
+                                                 symbol_samples,
+                                                 invert,
+                                                 &mark_energy,
+                                                 &space_energy,
+                                                 &ok);
+        if (!ok)
+            break;
+        fprintf(stderr,
+                "[p12]   sync[%02d] off=%.1fms exp=%d mark=%.3e space=%.3e dec=%.6f slice=%.6f\n",
+                i,
+                (double) offset * 1000.0 / (double) sample_rate,
+                expected_bit,
+                mark_energy,
+                space_energy,
+                decision,
+                decision + bias);
+    }
+    for (int i = 0; i < dump_payload; i++) {
+        bool ok = false;
+        double mark_energy = 0.0;
+        double space_energy = 0.0;
+        double decision;
+        int offset = sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5);
+        int bit;
+
+        decision = p12_v21_symbol_decision_value(samples,
+                                                 total_samples,
+                                                 sample_rate,
+                                                 channel,
+                                                 offset,
+                                                 symbol_samples,
+                                                 invert,
+                                                 &mark_energy,
+                                                 &space_energy,
+                                                 &ok);
+        if (!ok)
+            break;
+        bit = (decision + bias >= 0.0) ? 1 : 0;
+        fprintf(stderr,
+                "[p12]   data[%02d] off=%.1fms bit=%d mark=%.3e space=%.3e dec=%.6f slice=%.6f\n",
+                i,
+                (double) offset * 1000.0 / (double) sample_rate,
+                bit,
+                mark_energy,
+                space_energy,
+                decision,
+                decision + bias);
+    }
 }
 
 static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
@@ -2324,6 +2419,8 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
             double upper_bias = 1e300;
             double sync_score = 0.0;
             int sync_start;
+            bool have_lower = false;
+            bool have_upper = false;
             bool valid = true;
 
             if (pass == 0) {
@@ -2352,6 +2449,8 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                                                          sync_start + (int) floor((double) i * symbol_samples + 0.5),
                                                          symbol_samples,
                                                          invert,
+                                                         NULL,
+                                                         NULL,
                                                          &ok);
                 if (!ok) {
                     valid = false;
@@ -2362,18 +2461,21 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                 signed_margin = expected_bit ? decision : -decision;
                 sync_score += signed_margin;
                 threshold = -decision;
-                if (expected_bit)
+                if (expected_bit) {
                     lower_bias = fmax(lower_bias, threshold);
-                else
+                    have_lower = true;
+                } else {
                     upper_bias = fmin(upper_bias, threshold);
+                    have_upper = true;
+                }
             }
 
             if (!valid)
                 continue;
-            if (!(lower_bias < upper_bias)) {
-                if (lower_bias > 1e299 || upper_bias < -1e299)
-                    continue;
-            }
+            if (!have_lower || !have_upper)
+                continue;
+            if (!(lower_bias < upper_bias))
+                continue;
             if (sync_score > best_sync_score) {
                 best_sync_score = sync_score;
                 best_sync_start = sync_start;
@@ -2415,6 +2517,8 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                                                      best_sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5),
                                                      symbol_samples,
                                                      invert,
+                                                     NULL,
+                                                     NULL,
                                                      &ok);
             if (!ok)
                 return false;
@@ -2445,6 +2549,17 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                 fprintf(stderr, "%s%.3f", (i == 0) ? "" : ",", payload_conf[i]);
             }
             fprintf(stderr, "\n");
+            if (target_bits <= P12_INFO0D_PAYLOAD_BITS) {
+                p12_debug_dump_symbol_trace(samples,
+                                            total_samples,
+                                            sample_rate,
+                                            channel,
+                                            best_sync_start,
+                                            target_bits,
+                                            invert,
+                                            symbol_samples,
+                                            best_bias);
+            }
         }
 
         p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
