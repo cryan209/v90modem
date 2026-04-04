@@ -2502,90 +2502,146 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
         uint8_t payload_bits[256];
         double payload_conf[256];
         uint8_t payload[V34_INFO_MAX_BUF_BYTES];
+        int recovery_shift = 0;
+        int recovery_pivot = 0;
         int flip_a = -1;
         int flip_b = -1;
 
-        for (int i = 0; i < target_bits; i++) {
-            bool ok = false;
-            double decision;
-            int bit;
+        for (int payload_shift = -1; payload_shift <= 1; payload_shift++) {
+            bool payload_ok = true;
 
-            decision = p12_v21_symbol_decision_value(samples,
-                                                     total_samples,
-                                                     sample_rate,
-                                                     channel,
-                                                     best_sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5),
-                                                     symbol_samples,
-                                                     invert,
-                                                     NULL,
-                                                     NULL,
-                                                     &ok);
-            if (!ok)
-                return false;
-            bit = (decision + best_bias >= 0.0) ? 1 : 0;
-            payload_bits[i] = (uint8_t) bit;
-            payload_conf[i] = fabs(decision + best_bias);
-        }
+            for (int i = 0; i < target_bits; i++) {
+                bool ok = false;
+                double decision;
+                int bit;
 
-        if (p12_debug_enabled()) {
-            fprintf(stderr,
-                    "[p12] INFO sync-scan target=%d best_sync=%.1fms bias=%.3f score=%.3f top=[%.1fms %.3f][%.1fms %.3f][%.1fms %.3f]\n",
-                    target_bits,
-                    (double) best_sync_start * 1000.0 / (double) sample_rate,
-                    best_bias,
-                    best_sync_score,
-                    top_starts[0] >= 0 ? (double) top_starts[0] * 1000.0 / (double) sample_rate : -1.0,
-                    top_scores[0],
-                    top_starts[1] >= 0 ? (double) top_starts[1] * 1000.0 / (double) sample_rate : -1.0,
-                    top_scores[1],
-                    top_starts[2] >= 0 ? (double) top_starts[2] * 1000.0 / (double) sample_rate : -1.0,
-                    top_scores[2]);
-            fprintf(stderr, "[p12] INFO payload-soft target=%d bits=", target_bits);
-            for (int i = 0; i < target_bits && i < 24; i++) {
-                fprintf(stderr, "%u", (unsigned) payload_bits[i]);
+                decision = p12_v21_symbol_decision_value(samples,
+                                                         total_samples,
+                                                         sample_rate,
+                                                         channel,
+                                                         best_sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift + i) * symbol_samples + 0.5),
+                                                         symbol_samples,
+                                                         invert,
+                                                         NULL,
+                                                         NULL,
+                                                         &ok);
+                if (!ok) {
+                    payload_ok = false;
+                    break;
+                }
+                bit = (decision + best_bias >= 0.0) ? 1 : 0;
+                payload_bits[i] = (uint8_t) bit;
+                payload_conf[i] = fabs(decision + best_bias);
             }
-            fprintf(stderr, " conf=");
-            for (int i = 0; i < target_bits && i < 8; i++) {
-                fprintf(stderr, "%s%.3f", (i == 0) ? "" : ",", payload_conf[i]);
-            }
-            fprintf(stderr, "\n");
-            if (target_bits <= P12_INFO0D_PAYLOAD_BITS) {
-                p12_debug_dump_symbol_trace(samples,
-                                            total_samples,
-                                            sample_rate,
-                                            channel,
-                                            best_sync_start,
-                                            target_bits,
-                                            invert,
-                                            symbol_samples,
-                                            best_bias);
-            }
-        }
+            if (!payload_ok)
+                continue;
 
-        p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
-        if (v34_info_validate_frame_bytes(payload, target_bits)) {
-            p12_build_info_frame_from_payload(frame_out, payload, target_bits);
-            if (frame_sample_out)
-                *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
-            return true;
-        }
-
-        if (p12_try_soft_bit_flips(frame_out,
-                                   payload_bits,
-                                   payload_conf,
-                                   target_bits,
-                                   &flip_a,
-                                   &flip_b)) {
             if (p12_debug_enabled()) {
                 fprintf(stderr,
-                        "[p12] INFO sync-soft recovery flip_a=%d flip_b=%d target=%d\n",
-                        flip_a,
-                        flip_b,
-                        target_bits);
+                        "[p12] INFO sync-scan target=%d best_sync=%.1fms bias=%.3f score=%.3f payload_shift=%d top=[%.1fms %.3f][%.1fms %.3f][%.1fms %.3f]\n",
+                        target_bits,
+                        (double) best_sync_start * 1000.0 / (double) sample_rate,
+                        best_bias,
+                        best_sync_score,
+                        payload_shift,
+                        top_starts[0] >= 0 ? (double) top_starts[0] * 1000.0 / (double) sample_rate : -1.0,
+                        top_scores[0],
+                        top_starts[1] >= 0 ? (double) top_starts[1] * 1000.0 / (double) sample_rate : -1.0,
+                        top_scores[1],
+                        top_starts[2] >= 0 ? (double) top_starts[2] * 1000.0 / (double) sample_rate : -1.0,
+                        top_scores[2]);
+                fprintf(stderr, "[p12] INFO payload-soft target=%d bits=", target_bits);
+                for (int i = 0; i < target_bits && i < 24; i++) {
+                    fprintf(stderr, "%u", (unsigned) payload_bits[i]);
+                }
+                fprintf(stderr, " conf=");
+                for (int i = 0; i < target_bits && i < 8; i++) {
+                    fprintf(stderr, "%s%.3f", (i == 0) ? "" : ",", payload_conf[i]);
+                }
+                fprintf(stderr, "\n");
+                if (payload_shift == 0 && target_bits <= P12_INFO0D_PAYLOAD_BITS) {
+                    p12_debug_dump_symbol_trace(samples,
+                                                total_samples,
+                                                sample_rate,
+                                                channel,
+                                                best_sync_start,
+                                                target_bits,
+                                                invert,
+                                                symbol_samples,
+                                                best_bias);
+                }
             }
-            if (frame_sample_out)
-                *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
-            return true;
+
+            p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
+            if (v34_info_validate_frame_bytes(payload, target_bits)) {
+                p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+                if (frame_sample_out) {
+                    *frame_sample_out = best_sync_start
+                                        + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift) * symbol_samples + 0.5);
+                }
+                return true;
+            }
+
+            if (v34_info_try_boundary_recovery(payload,
+                                               payload,
+                                               target_bits,
+                                               &recovery_shift)) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO sync-boundary recovery shift=%d payload_shift=%d target=%d\n",
+                            recovery_shift,
+                            payload_shift,
+                            target_bits);
+                }
+                p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+                if (frame_sample_out) {
+                    *frame_sample_out = best_sync_start
+                                        + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift) * symbol_samples + 0.5);
+                }
+                return true;
+            }
+
+            if (v34_info_try_local_slip_recovery(payload,
+                                                 payload,
+                                                 target_bits,
+                                                 &recovery_pivot,
+                                                 &recovery_shift)) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO sync-local-slip recovery pivot=%d shift=%d payload_shift=%d target=%d\n",
+                            recovery_pivot,
+                            recovery_shift,
+                            payload_shift,
+                            target_bits);
+                }
+                p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+                if (frame_sample_out) {
+                    *frame_sample_out = best_sync_start
+                                        + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift) * symbol_samples + 0.5);
+                }
+                return true;
+            }
+
+            if (p12_try_soft_bit_flips(frame_out,
+                                       payload_bits,
+                                       payload_conf,
+                                       target_bits,
+                                       &flip_a,
+                                       &flip_b)) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO sync-soft recovery flip_a=%d flip_b=%d payload_shift=%d target=%d\n",
+                            flip_a,
+                            flip_b,
+                            payload_shift,
+                            target_bits);
+                }
+                if (frame_sample_out) {
+                    *frame_sample_out = best_sync_start
+                                        + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift) * symbol_samples + 0.5);
+                }
+                return true;
+            }
         }
     }
 
