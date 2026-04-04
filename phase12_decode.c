@@ -255,6 +255,7 @@ static void p12_append_retry_window(p12_fsk_burst_t *bursts,
     retry.start_sample = hint->window_start_sample;
     retry.duration_samples = hint->window_end_sample - hint->window_start_sample;
     retry.peak_energy = 0.0;
+    retry.hint_id = 0;
     bursts[*burst_count] = retry;
     (*burst_count)++;
 }
@@ -2245,6 +2246,42 @@ static void p12_debug_dump_payload_bytes(const char *label,
     fprintf(stderr, "\n");
 }
 
+static bool p12_try_payload_pack_variants(v34_info_frame_t *frame_out,
+                                          const uint8_t *payload_bits,
+                                          int target_bits)
+{
+    uint8_t payload_lsb[V34_INFO_MAX_BUF_BYTES];
+    uint8_t payload_msb[V34_INFO_MAX_BUF_BYTES];
+
+    if (!frame_out || !payload_bits || target_bits <= 0)
+        return false;
+
+    p12_pack_lsb_bits(payload_lsb, (int) sizeof(payload_lsb), payload_bits, target_bits);
+    if (v34_info_validate_frame_bytes(payload_lsb, target_bits)) {
+        p12_build_info_frame_from_payload(frame_out, payload_lsb, target_bits);
+        return true;
+    }
+
+    p12_pack_msb_bits(payload_msb, (int) sizeof(payload_msb), payload_bits, target_bits);
+    if (v34_info_validate_frame_bytes(payload_msb, target_bits)) {
+        if (p12_debug_enabled())
+            fprintf(stderr, "[p12] INFO pack-variant recovery kind=msb target=%d\n", target_bits);
+        p12_build_info_frame_from_payload(frame_out, payload_msb, target_bits);
+        return true;
+    }
+
+    for (int i = 0; i < (target_bits + 7) / 8 && i < V34_INFO_MAX_BUF_BYTES; i++)
+        payload_msb[i] = bit_reverse8(payload_lsb[i]);
+    if (v34_info_validate_frame_bytes(payload_msb, target_bits)) {
+        if (p12_debug_enabled())
+            fprintf(stderr, "[p12] INFO pack-variant recovery kind=byte-reverse target=%d\n", target_bits);
+        p12_build_info_frame_from_payload(frame_out, payload_msb, target_bits);
+        return true;
+    }
+
+    return false;
+}
+
 static bool p12_try_soft_bit_flips(v34_info_frame_t *frame_out,
                                    const uint8_t *base_bits,
                                    const double *confidences,
@@ -2668,8 +2705,7 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
             }
 
             p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
-            if (v34_info_validate_frame_bytes(payload, target_bits)) {
-                p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+            if (p12_try_payload_pack_variants(frame_out, payload_bits, target_bits)) {
                 if (frame_sample_out) {
                     *frame_sample_out = best_sync_start
                                         + (int) floor((double) (V34_INFO_SYNC_BITS + payload_shift) * symbol_samples + 0.5);
@@ -3384,6 +3420,8 @@ static void detect_phase2_info(const int16_t *samples,
                                 &phase2_ch2_burst_count,
                                 P12_MAX_FSK_BURSTS,
                                 &alt_handoff_info0_hint);
+        if (phase2_ch2_burst_count > before_alt)
+            phase2_ch2_bursts[phase2_ch2_burst_count - 1].hint_id = 1;
         if (p12_debug_enabled() && phase2_ch2_burst_count > before_alt) {
             fprintf(stderr,
                     "[p12] appended ALT INFO0 retry window role=%s window=%.1f-%.1fms\n",
@@ -3544,6 +3582,10 @@ static void detect_phase2_info(const int16_t *samples,
     /* Try to decode INFO0 from CH2 sequence windows. */
     /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch2_burst_count && !result->info0.detected; b++) {
+        const p12_timing_hint_t *decode_hint =
+            (phase2_ch2_bursts[b].hint_id == 1 && alt_handoff_info0_hint.valid)
+                ? &alt_handoff_info0_hint
+                : (handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint);
         p12_fsk_burst_t decode_burst;
         v34_info_frame_t frame;
         int frame_sample = 0;
@@ -3552,17 +3594,21 @@ static void detect_phase2_info(const int16_t *samples,
 
         p12_prepare_info0_decode_burst(&decode_burst,
                                        &phase2_ch2_bursts[b],
-                                       handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                       decode_hint,
                                        tone_anchor_sample,
                                        sample_rate);
         if (!decode_burst.seen || decode_burst.duration_samples <= 0)
             continue;
         for (int prev = 0; prev < b; prev++) {
+            const p12_timing_hint_t *prev_hint =
+                (phase2_ch2_bursts[prev].hint_id == 1 && alt_handoff_info0_hint.valid)
+                    ? &alt_handoff_info0_hint
+                    : (handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint);
             p12_fsk_burst_t prev_decode;
 
             p12_prepare_info0_decode_burst(&prev_decode,
                                            &phase2_ch2_bursts[prev],
-                                           handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                           prev_hint,
                                            tone_anchor_sample,
                                            sample_rate);
             if (!prev_decode.seen || prev_decode.duration_samples <= 0)
@@ -3592,13 +3638,14 @@ static void detect_phase2_info(const int16_t *samples,
 
             if (p12_debug_enabled()) {
                 fprintf(stderr,
-                        "[p12] INFO0 try window=%d target=%d start=%.1fms dur=%.1fms raw=%.1f-%.1fms\n",
+                        "[p12] INFO0 try window=%d target=%d start=%.1fms dur=%.1fms raw=%.1f-%.1fms hint=%u\n",
                         b + 1,
                         target,
                         (double) decode_burst.start_sample * 1000.0 / (double) sample_rate,
                         (double) decode_burst.duration_samples * 1000.0 / (double) sample_rate,
                         (double) phase2_ch2_bursts[b].start_sample * 1000.0 / (double) sample_rate,
-                        (double) p12_burst_end_sample(&phase2_ch2_bursts[b]) * 1000.0 / (double) sample_rate);
+                        (double) p12_burst_end_sample(&phase2_ch2_bursts[b]) * 1000.0 / (double) sample_rate,
+                        (unsigned) phase2_ch2_bursts[b].hint_id);
             }
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,

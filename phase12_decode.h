@@ -224,6 +224,7 @@ typedef struct {
     int duration_samples;
     double peak_energy;
     double peak_signal_energy;
+    uint8_t hint_id;
 } p12_fsk_burst_t;
 
 #define P12_MAX_FSK_BURSTS 16
