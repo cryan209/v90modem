@@ -616,28 +616,42 @@ static bool snapshot_v34_info1a_from_rx_state(v34_v90_info1a_t *dst, const v34_s
 
 static bool parse_v34_info0_from_rx_buf(v34_v90_info0a_t *raw_out,
                                         v90_info0a_t *mapped_out,
-                                        const v34_state_t *v34)
+                                        const v34_info_collector_t *collector)
 {
-    if (!v34 || !v34->rx.v90_mode)
+    if (!collector)
         return false;
-    return v34_info_parse_info0a_v90(v34->rx.info_buf, raw_out, mapped_out);
+    return v34_info_parse_info0a_v90(collector->info_buf, raw_out, mapped_out);
 }
 
 static bool parse_v34_info1a_from_rx_buf(v34_v90_info1a_t *raw_out,
                                          v90_info1a_t *mapped_out,
-                                         const v34_state_t *v34)
+                                         const v34_info_collector_t *collector)
 {
-    if (!v34 || !v34->rx.v90_mode)
+    if (!collector)
         return false;
-    return v34_info_parse_info1a_v90(v34->rx.info_buf, raw_out, mapped_out);
+    return v34_info_parse_info1a_v90(collector->info_buf, raw_out, mapped_out);
 }
 
 static bool parse_v34_info1d_from_rx_buf(v34_v90_info1d_t *raw_out,
-                                         const v34_state_t *v34)
+                                         const v34_info_collector_t *collector)
 {
-    if (!v34 || !v34->rx.v90_mode)
+    if (!collector)
         return false;
-    return v34_info_parse_info1d_v90(v34->rx.info_buf, raw_out);
+    return v34_info_parse_info1d_v90(collector->info_buf, raw_out);
+}
+
+static void sync_v34_info_collector_from_rx(v34_info_collector_t *collector,
+                                            const v34_state_t *v34)
+{
+    if (!collector || !v34 || !v34->rx.v90_mode)
+        return;
+    v34_info_collector_load_snapshot(collector,
+                                     (uint16_t) (v34->rx.bitstream & 0xFFFFU),
+                                     v34->rx.crc,
+                                     v34->rx.bit_count,
+                                     v34->rx.target_bits,
+                                     v34->rx.info_buf,
+                                     (int) sizeof(v34->rx.info_buf));
 }
 
 static void format_cp_summary(char *buf, size_t len, const vpcm_cp_frame_t *cp)
@@ -7382,6 +7396,8 @@ static bool decode_v34_pass_mode(const int16_t *samples,
     mp_t rx_mp;
     mp_t recovered_mp;
     mp_t heuristic_mp;
+    v34_info_collector_t info0_collector;
+    v34_info_collector_t info1_collector;
     bool have_rx_mp = false;
     bool have_recovered_mp = false;
     bool have_heuristic_mp = false;
@@ -7405,6 +7421,8 @@ static bool decode_v34_pass_mode(const int16_t *samples,
 
     memset(result, 0, sizeof(*result));
     memset(mp_tuple_votes, 0, sizeof(mp_tuple_votes));
+    v34_info_collector_init(&info0_collector, 62 - (4 + 8 + 4));
+    v34_info_collector_init(&info1_collector, 70 - (4 + 8 + 4));
     result->info0_sample = -1;
     result->info1_sample = -1;
     result->info0_ok_event_sample = -1;
@@ -7533,6 +7551,20 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         rx_stage = v34_get_rx_stage(v34);
         tx_stage = v34_get_tx_stage(v34);
         rx_event = v34_get_rx_event(v34);
+
+        if (phase2_only) {
+            if (rx_stage == V34_RX_STAGE_INFO0
+                || rx_event == V34_EVENT_INFO0_OK
+                || rx_event == V34_EVENT_INFO0_BAD) {
+                sync_v34_info_collector_from_rx(&info0_collector, v34);
+            }
+            if (rx_stage == V34_RX_STAGE_INFO1A
+                || rx_stage == V34_RX_STAGE_INFO1C
+                || rx_event == V34_EVENT_INFO1_OK
+                || rx_event == V34_EVENT_INFO1_BAD) {
+                sync_v34_info_collector_from_rx(&info1_collector, v34);
+            }
+        }
 
         {
             int trn_score = v34_get_phase3_trn_lock_score(v34);
@@ -7705,7 +7737,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             int have_info0 = 0;
 
             if (phase2_only && rx_event == V34_EVENT_INFO0_OK
-                && parse_v34_info0_from_rx_buf(&raw_info0a, &result->info0a, v34)) {
+                && parse_v34_info0_from_rx_buf(&raw_info0a, &result->info0a, &info0_collector)) {
                 have_info0 = 1;
             } else {
                 have_info0 = v34_get_v90_received_info0a(v34, &raw_info0a);
@@ -7734,7 +7766,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
 
             if (phase2_only && rx_event == V34_EVENT_INFO1_OK
                 && !calling_party
-                && parse_v34_info1a_from_rx_buf(&raw_info1a, &result->info1a, v34)) {
+                && parse_v34_info1a_from_rx_buf(&raw_info1a, &result->info1a, &info1_collector)) {
                 have_info1a = 1;
             } else {
                 have_info1a = v34_get_v90_received_info1a(v34, &raw_info1a);
@@ -7755,7 +7787,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 result->u_info_from_info1a = true;
                 last_progress_sample = offset;
             } else if ((phase2_only && rx_event == V34_EVENT_INFO1_OK && calling_party
-                        && parse_v34_info1d_from_rx_buf(&raw_info1d, v34))
+                        && parse_v34_info1d_from_rx_buf(&raw_info1d, &info1_collector))
                        || v34_get_v90_received_info1d(v34, &raw_info1d) > 0) {
                 result->info1_seen = true;
                 result->info1_is_d = true;

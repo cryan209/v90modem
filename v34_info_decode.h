@@ -25,6 +25,13 @@ typedef struct {
 
 void v34_info_collector_init(v34_info_collector_t *collector, int target_bits);
 void v34_info_collector_reset(v34_info_collector_t *collector, int target_bits);
+void v34_info_collector_load_snapshot(v34_info_collector_t *collector,
+                                      uint16_t bitstream,
+                                      uint16_t crc,
+                                      int bit_count,
+                                      int target_bits,
+                                      const uint8_t *info_buf,
+                                      int info_buf_len);
 bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  int bit,
                                  uint8_t *frame_out,

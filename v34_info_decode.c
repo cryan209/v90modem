@@ -21,6 +21,29 @@ void v34_info_collector_reset(v34_info_collector_t *collector, int target_bits)
     memset(collector->info_buf, 0, sizeof(collector->info_buf));
 }
 
+void v34_info_collector_load_snapshot(v34_info_collector_t *collector,
+                                      uint16_t bitstream,
+                                      uint16_t crc,
+                                      int bit_count,
+                                      int target_bits,
+                                      const uint8_t *info_buf,
+                                      int info_buf_len)
+{
+    if (!collector)
+        return;
+
+    collector->bitstream = bitstream;
+    collector->crc = crc;
+    collector->bit_count = bit_count;
+    collector->target_bits = target_bits;
+    memset(collector->info_buf, 0, sizeof(collector->info_buf));
+    if (info_buf && info_buf_len > 0) {
+        if (info_buf_len > (int) sizeof(collector->info_buf))
+            info_buf_len = (int) sizeof(collector->info_buf);
+        memcpy(collector->info_buf, info_buf, (size_t) info_buf_len);
+    }
+}
+
 bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  int bit,
                                  uint8_t *frame_out,
