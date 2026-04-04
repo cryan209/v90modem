@@ -8033,6 +8033,7 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
     int count;
     float best_total = -1.0e30f;
     const p3_segment_t *best_j = NULL;
+    const p3_segment_t *best_ru = NULL;
     p3_j_role_eval_t eval;
 
     if (!out)
@@ -8082,7 +8083,7 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
         return false;
 
     p3_evaluate_j_role_flow(best_detail, calling_party, standard, &eval);
-    if (!eval.j_seen) {
+    if (!eval.j_seen && !(standard == P3_FLOW_STANDARD_V92 && eval.ru_seen)) {
         p3_result_free(best_detail);
         return false;
     }
@@ -8091,10 +8092,16 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
         const p3_segment_t *seg = &best_detail->segments[i];
         if (seg->type == P3_SIGNAL_J && (!best_j || seg->length > best_j->length))
             best_j = seg;
+        if ((seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
+            && (!best_ru || seg->length > best_ru->length)) {
+            best_ru = seg;
+        }
     }
     out->valid = true;
     out->standard = eval.standard;
-    out->event_sample = best_j ? best_j->start_sample : result->tx_ja_sample;
+    out->event_sample = best_j
+        ? best_j->start_sample
+        : (best_ru ? best_ru->start_sample : result->tx_ja_sample);
     out->j_table_bits = eval.j_table_bits;
     out->j_table_match_pct = eval.j_table_match_pct;
     out->jprime_seen = eval.jprime_seen;
@@ -8771,6 +8778,8 @@ static void print_v34_result(const decode_v34_result_t *result,
     if (!result)
         return;
     phase3_target = p3_detect_flow_standard(result, NULL);
+    if (phase3_target == P3_FLOW_STANDARD_UNKNOWN)
+        phase3_target = suppress_v90_phase2 ? P3_FLOW_STANDARD_V34 : P3_FLOW_STANDARD_V90;
 
     printf("  Role:            %s\n", calling_party ? "caller" : "answerer");
     if (!suppress_v90_phase2) {
@@ -9321,6 +9330,7 @@ static void collect_v34_events(call_log_t *log,
                 : ((phase3_standard_global == P3_FLOW_STANDARD_V92) \
                     ? "Phase 3 Ru/Jp flow" \
                     : "Phase 3 Ja/Jd flow"); \
+            bool jflow_emitted__ = false; \
             memset(&jflow__, 0, sizeof(jflow__)); \
             if (p3_extract_j_log_summary(samples, total_samples, res__, calling_role__, phase3_standard_global, &jflow__) \
                 && jflow__.valid \
@@ -9342,6 +9352,29 @@ static void collect_v34_events(call_log_t *log,
                 if (jflow__.notes[0]) \
                     appendf(detail, sizeof(detail), " notes=%s", jflow__.notes); \
                 call_log_append(log, jflow__.event_sample, 0, phase3_proto__, flow_summary__, detail); \
+                jflow_emitted__ = true; \
+            } \
+            if (!jflow_emitted__ && phase3_standard_global == P3_FLOW_STANDARD_V92) { \
+                int flow_sample__ = res__->phase3_sample; \
+                bool ru_ok__ = res__->ru_window_captured && res__->ru_window_score >= 35; \
+                bool jprime_hint__ = res__->tx_jdashed_sample >= 0; \
+                bool trn_after_hint__ = (res__->tx_trn_sample >= 0 && res__->tx_ja_sample >= res__->tx_trn_sample); \
+                if (flow_sample__ < 0) \
+                    flow_sample__ = res__->tx_first_s_sample; \
+                if (flow_sample__ < 0) \
+                    flow_sample__ = res__->tx_trn_sample; \
+                if (flow_sample__ >= 0 && should_emit_phase2_event(flow_sample__, (PHASE2_CUTOFF))) { \
+                    snprintf(detail, sizeof(detail), \
+                             "role=%s standard=V.92 class=unknown match=0%% jprime=%s trn_after=%s ru=%s status=%s ru_window=%d score=%d notes=fallback_from_ru_window", \
+                             role_name, \
+                             jprime_hint__ ? "yes" : "no", \
+                             trn_after_hint__ ? "yes" : "no", \
+                             ru_ok__ ? "yes" : "no", \
+                             ru_ok__ ? "partial" : "weak", \
+                             res__->ru_window_len, \
+                             res__->ru_window_score); \
+                    call_log_append(log, flow_sample__, 0, phase3_proto__, flow_summary__, detail); \
+                } \
             } \
         } \
         APPEND_V34_STAGE_EVENT(res__, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed"); \
