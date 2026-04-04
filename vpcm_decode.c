@@ -815,6 +815,83 @@ static double rms_energy_db(const int16_t *samples, int len)
     return 20.0 * log10(rms / 32768.0);
 }
 
+static bool find_decode_activity_window(const int16_t *samples,
+                                        int total_samples,
+                                        int sample_rate,
+                                        int *start_out,
+                                        int *end_out)
+{
+    enum {
+        WINDOW_MS = 100,
+        STEP_MS = 50,
+        PAD_MS = 300
+    };
+    const double activity_floor_db = -58.0;
+    int window;
+    int step;
+    int pad;
+    double max_db = -100.0;
+    int first_active = -1;
+    int last_active = -1;
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !start_out || !end_out)
+        return false;
+
+    window = (sample_rate * WINDOW_MS) / 1000;
+    step = (sample_rate * STEP_MS) / 1000;
+    pad = (sample_rate * PAD_MS) / 1000;
+    if (window <= 0 || step <= 0) {
+        *start_out = 0;
+        *end_out = total_samples;
+        return false;
+    }
+
+    for (int start = 0; start < total_samples; start += step) {
+        int len = total_samples - start;
+        double db;
+
+        if (len > window)
+            len = window;
+        db = rms_energy_db(samples + start, len);
+        if (db > max_db)
+            max_db = db;
+    }
+
+    if (max_db <= activity_floor_db) {
+        *start_out = 0;
+        *end_out = total_samples;
+        return false;
+    }
+
+    for (int start = 0; start < total_samples; start += step) {
+        int len = total_samples - start;
+        double db;
+
+        if (len > window)
+            len = window;
+        db = rms_energy_db(samples + start, len);
+        if (db < activity_floor_db)
+            continue;
+        if (first_active < 0)
+            first_active = start;
+        last_active = start + len;
+    }
+
+    if (first_active < 0 || last_active <= first_active) {
+        *start_out = 0;
+        *end_out = total_samples;
+        return false;
+    }
+
+    *start_out = first_active - pad;
+    *end_out = last_active + pad;
+    if (*start_out < 0)
+        *start_out = 0;
+    if (*end_out > total_samples)
+        *end_out = total_samples;
+    return (*end_out - *start_out) < total_samples;
+}
+
 /* ------------------------------------------------------------------ */
 /* V.8 decode pass                                                     */
 /* ------------------------------------------------------------------ */
@@ -1124,6 +1201,33 @@ typedef struct {
     v90_info1a_t info1a;
     v34_v90_info1d_t info1d;
 } decode_v34_result_t;
+
+typedef struct {
+    bool valid;
+    const int16_t *samples;
+    int total_samples;
+    int max_sample;
+    v8_probe_result_t probe;
+} v8_probe_cache_entry_t;
+
+typedef struct {
+    bool valid;
+    const int16_t *samples;
+    int total_samples;
+    v91_law_t law;
+    bool allow_info_rate_infer;
+    decode_v34_result_t answerer;
+    decode_v34_result_t caller;
+    bool have_answerer;
+    bool have_caller;
+} v34_pair_cache_entry_t;
+
+#define VPCM_PREPASS_CACHE_SLOTS 8
+
+static v8_probe_cache_entry_t g_v8_probe_cache[VPCM_PREPASS_CACHE_SLOTS];
+static int g_v8_probe_cache_next = 0;
+static v34_pair_cache_entry_t g_v34_pair_cache[VPCM_PREPASS_CACHE_SLOTS];
+static int g_v34_pair_cache_next = 0;
 
 typedef struct {
     bool adaptive_used;
@@ -7474,6 +7578,9 @@ static bool decode_v34_pass(const int16_t *samples,
     bool flow_debug = false;
     bool info_cutoff_relaxed = false;
     float post_info_signal_cutoff_db;
+    int decode_start = 0;
+    int decode_end = total_samples;
+    int last_progress_sample = 0;
 
     if (!samples || total_samples <= 0 || !result)
         return false;
@@ -7570,6 +7677,8 @@ static bool decode_v34_pass(const int16_t *samples,
     if (!v34)
         return false;
 
+    find_decode_activity_window(samples, total_samples, 8000, &decode_start, &decode_end);
+
     v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
     /* Keep a stricter threshold for initial INFO0 lock, then relax after
        INFO0. For already-permissive rescue passes, preserve that permissive
@@ -7588,8 +7697,10 @@ static bool decode_v34_pass(const int16_t *samples,
     if (!flow_debug)
         stderr_guard = silence_stderr_begin();
 
-    while (offset < total_samples) {
-        int chunk = total_samples - offset;
+    offset = decode_start;
+    last_progress_sample = decode_start;
+    while (offset < decode_end) {
+        int chunk = decode_end - offset;
         int16_t tx_buf[160];
         int rx_stage;
         int tx_stage;
@@ -7643,6 +7754,7 @@ static bool decode_v34_pass(const int16_t *samples,
     }
 
         if (tx_stage != prev_tx_stage) {
+            last_progress_sample = offset;
             switch (tx_stage) {
             case 3:
                 note_first_sample(&result->tx_tone_a_sample, offset);
@@ -7719,6 +7831,7 @@ static bool decode_v34_pass(const int16_t *samples,
         }
 
         if (rx_stage != prev_rx_stage) {
+            last_progress_sample = offset;
             switch (rx_stage) {
             case 5:
                 note_first_sample(&result->rx_tone_a_sample, offset);
@@ -7742,6 +7855,7 @@ static bool decode_v34_pass(const int16_t *samples,
         }
 
         if (rx_event != prev_rx_event) {
+            last_progress_sample = offset;
             if (rx_event == V34_EVENT_INFO0_OK) {
                 result->info0_ok_event_seen = true;
                 note_first_sample(&result->info0_ok_event_sample, offset);
@@ -7779,14 +7893,15 @@ static bool decode_v34_pass(const int16_t *samples,
                 have_info0 = 1;
             }
             if (have_info0 > 0 && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
-            result->info0_seen = true;
-            result->info0_is_d = calling_party;
-            result->info0_raw = raw_info0a;
-            result->info0_sample = offset;
-            if (!info_cutoff_relaxed) {
-                v34_rx_set_signal_cutoff(v34, post_info_signal_cutoff_db);
-                info_cutoff_relaxed = true;
-            }
+                result->info0_seen = true;
+                result->info0_is_d = calling_party;
+                result->info0_raw = raw_info0a;
+                result->info0_sample = offset;
+                last_progress_sample = offset;
+                if (!info_cutoff_relaxed) {
+                    v34_rx_set_signal_cutoff(v34, post_info_signal_cutoff_db);
+                    info_cutoff_relaxed = true;
+                }
             }
         }
         if (!result->info1_seen) {
@@ -7804,11 +7919,13 @@ static bool decode_v34_pass(const int16_t *samples,
                 result->info1_sample = offset;
                 result->u_info = result->info1a.u_info;
                 result->u_info_from_info1a = true;
+                last_progress_sample = offset;
             } else if (v34_get_v90_received_info1d(v34, &raw_info1d) > 0) {
                 result->info1_seen = true;
                 result->info1_is_d = true;
                 result->info1d = raw_info1d;
                 result->info1_sample = offset;
+                last_progress_sample = offset;
             }
         }
         if (!result->ru_window_captured
@@ -7864,6 +7981,7 @@ static bool decode_v34_pass(const int16_t *samples,
             && (rx_stage >= 11 || v34_get_primary_channel_active(v34))) {
             result->phase3_seen = true;
             result->phase3_sample = offset;
+            last_progress_sample = offset;
         }
         {
             int target = v34->rx.mp_frame_target;
@@ -7930,14 +8048,25 @@ static bool decode_v34_pass(const int16_t *samples,
         if (!result->phase4_ready_seen && rx_event == 15) {
             result->phase4_ready_seen = true;
             result->phase4_ready_sample = offset;
+            last_progress_sample = offset;
         }
         if (!result->phase4_seen && (rx_stage >= 16 || tx_stage >= 41 || rx_event == 15)) {
             result->phase4_seen = true;
             result->phase4_sample = offset;
+            last_progress_sample = offset;
         }
         if (!result->training_failed && rx_event == 16) {
             result->training_failed = true;
             result->failure_sample = offset;
+            last_progress_sample = offset;
+        }
+        if ((result->phase4_seen || result->training_failed)
+            && offset >= max_non_negative(result->phase4_sample, result->failure_sample) + 8000) {
+            break;
+        }
+        if ((result->info1_seen || result->phase3_seen)
+            && offset >= last_progress_sample + 16000) {
+            break;
         }
     }
 
@@ -9053,6 +9182,40 @@ static bool p3_demod_get_phase3_window(const decode_v34_result_t *result,
     return true;
 }
 
+static bool get_cached_v8_channel_probe(const int16_t *samples,
+                                        int total_samples,
+                                        int max_sample,
+                                        v8_probe_result_t *out)
+{
+    v8_probe_cache_entry_t *slot;
+
+    if (!samples || total_samples <= 0 || !out)
+        return false;
+
+    for (int i = 0; i < VPCM_PREPASS_CACHE_SLOTS; i++) {
+        const v8_probe_cache_entry_t *entry = &g_v8_probe_cache[i];
+
+        if (!entry->valid)
+            continue;
+        if (entry->samples != samples || entry->total_samples != total_samples || entry->max_sample != max_sample)
+            continue;
+        *out = entry->probe;
+        return true;
+    }
+
+    if (!v8_select_best_channel_probe(samples, total_samples, max_sample, out))
+        return false;
+
+    slot = &g_v8_probe_cache[g_v8_probe_cache_next];
+    g_v8_probe_cache_next = (g_v8_probe_cache_next + 1) % VPCM_PREPASS_CACHE_SLOTS;
+    slot->valid = true;
+    slot->samples = samples;
+    slot->total_samples = total_samples;
+    slot->max_sample = max_sample;
+    slot->probe = *out;
+    return true;
+}
+
 static void p3_demod_scan_window(const int16_t *samples,
                                  int sample_count,
                                  int sample_offset,
@@ -9357,6 +9520,64 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
                 break;
         }
     }
+}
+
+static void decode_v34_pair_with_rescue_cached(const int16_t *samples,
+                                               int total_samples,
+                                               v91_law_t law,
+                                               bool allow_info_rate_infer,
+                                               decode_v34_result_t *answerer,
+                                               bool *have_answerer,
+                                               decode_v34_result_t *caller,
+                                               bool *have_caller)
+{
+    v34_pair_cache_entry_t *slot;
+
+    if (have_answerer)
+        *have_answerer = false;
+    if (have_caller)
+        *have_caller = false;
+    if (!samples || total_samples <= 0 || !answerer || !caller || !have_answerer || !have_caller)
+        return;
+
+    for (int i = 0; i < VPCM_PREPASS_CACHE_SLOTS; i++) {
+        const v34_pair_cache_entry_t *entry = &g_v34_pair_cache[i];
+
+        if (!entry->valid)
+            continue;
+        if (entry->samples != samples
+            || entry->total_samples != total_samples
+            || entry->law != law
+            || entry->allow_info_rate_infer != allow_info_rate_infer) {
+            continue;
+        }
+        *answerer = entry->answerer;
+        *caller = entry->caller;
+        *have_answerer = entry->have_answerer;
+        *have_caller = entry->have_caller;
+        return;
+    }
+
+    decode_v34_pair_with_rescue(samples,
+                                total_samples,
+                                law,
+                                allow_info_rate_infer,
+                                answerer,
+                                have_answerer,
+                                caller,
+                                have_caller);
+
+    slot = &g_v34_pair_cache[g_v34_pair_cache_next];
+    g_v34_pair_cache_next = (g_v34_pair_cache_next + 1) % VPCM_PREPASS_CACHE_SLOTS;
+    slot->valid = true;
+    slot->samples = samples;
+    slot->total_samples = total_samples;
+    slot->law = law;
+    slot->allow_info_rate_infer = allow_info_rate_infer;
+    slot->answerer = *answerer;
+    slot->caller = *caller;
+    slot->have_answerer = *have_answerer;
+    slot->have_caller = *have_caller;
 }
 
 static void print_v34_result(const decode_v34_result_t *result,
@@ -10072,21 +10293,21 @@ static void collect_stream_call_log(call_log_t *log,
     if (!log || !linear_samples || !g711_codewords)
         return;
 
-    have_capability_probe = v8_select_best_channel_probe(linear_samples,
-                                                         total_samples,
-                                                         total_samples,
-                                                         &capability_probe);
+    have_capability_probe = get_cached_v8_channel_probe(linear_samples,
+                                                        total_samples,
+                                                        total_samples,
+                                                        &capability_probe);
     suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
 
     if (do_v34 || do_v90) {
-        decode_v34_pair_with_rescue(linear_samples,
-                                    total_samples,
-                                    law,
-                                    !suppress_v90_phase2,
-                                    &answerer,
-                                    &have_answerer,
-                                    &caller,
-                                    &have_caller);
+        decode_v34_pair_with_rescue_cached(linear_samples,
+                                           total_samples,
+                                           law,
+                                           !suppress_v90_phase2,
+                                           &answerer,
+                                           &have_answerer,
+                                           &caller,
+                                           &have_caller);
         if (have_answerer) {
             if (answerer.info0_seen)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
@@ -11938,10 +12159,10 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
-    have_capability_probe = v8_select_best_channel_probe(linear_samples,
-                                                         total_samples,
-                                                         total_samples,
-                                                         &capability_probe);
+    have_capability_probe = get_cached_v8_channel_probe(linear_samples,
+                                                        total_samples,
+                                                        total_samples,
+                                                        &capability_probe);
     suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
     if (suppress_v90_phase2 && opts->raw_output_enabled && (opts->do_v34 || opts->do_v90)) {
         char modbuf[256];
@@ -11953,14 +12174,14 @@ static void run_decode_suite(const char *label,
     }
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
-        decode_v34_pair_with_rescue(linear_samples,
-                                    total_samples,
-                                    law,
-                                    !suppress_v90_phase2,
-                                    &answerer,
-                                    &have_answerer,
-                                    &caller,
-                                    &have_caller);
+        decode_v34_pair_with_rescue_cached(linear_samples,
+                                           total_samples,
+                                           law,
+                                           !suppress_v90_phase2,
+                                           &answerer,
+                                           &have_answerer,
+                                           &caller,
+                                           &have_caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {
