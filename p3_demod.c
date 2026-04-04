@@ -500,6 +500,117 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
     return true;
 }
 
+/* PP reference from V.34 §10.1.3.6.
+ * One PP block is a 48-symbol sequence repeated six times (288T). */
+#define P3_PP_PERIOD_SYMBOLS 48
+
+static void pp_reference_symbol(int idx, float *re_out, float *im_out)
+{
+    int i = idx % P3_PP_PERIOD_SYMBOLS;
+    int k = i / 4;
+    int I = i & 3;
+    int num = ((k % 3) == 1) ? (k * I + 4) : (k * I);
+    float angle = (float)M_PI * (float)num / 6.0f;
+
+    if (re_out)
+        *re_out = cosf(angle);
+    if (im_out)
+        *im_out = sinf(angle);
+}
+
+/* Coherent correlation against one 48-symbol PP block.
+ * Use magnitude only (non-coherent w.r.t. unknown constant phase),
+ * and also test conjugate polarity to absorb I/Q inversion ambiguity. */
+static float pp_block_correlation(const p3_symbol_t *syms, int start_sym, int phase_offset)
+{
+    float sum1_re = 0.0f, sum1_im = 0.0f;
+    float sum2_re = 0.0f, sum2_im = 0.0f;
+    int valid = 0;
+
+    for (int i = 0; i < P3_PP_PERIOD_SYMBOLS; i++) {
+        float ref_re, ref_im;
+        float zr, zi, mag;
+
+        pp_reference_symbol((phase_offset + i) % P3_PP_PERIOD_SYMBOLS, &ref_re, &ref_im);
+        zr = syms[start_sym + i].re;
+        zi = syms[start_sym + i].im;
+        mag = sqrtf(zr * zr + zi * zi);
+        if (mag < 1.0e-6f)
+            continue;
+        zr /= mag;
+        zi /= mag;
+
+        /* z * conj(ref) */
+        sum1_re += zr * ref_re + zi * ref_im;
+        sum1_im += zi * ref_re - zr * ref_im;
+
+        /* z * ref (conjugate polarity hypothesis) */
+        sum2_re += zr * ref_re - zi * ref_im;
+        sum2_im += zi * ref_re + zr * ref_im;
+        valid++;
+    }
+
+    if (valid < (P3_PP_PERIOD_SYMBOLS * 3) / 4)
+        return 0.0f;
+    {
+        float c1 = hypotf(sum1_re, sum1_im) / (float)valid;
+        float c2 = hypotf(sum2_re, sum2_im) / (float)valid;
+        return (c1 > c2) ? c1 : c2;
+    }
+}
+
+static bool is_pp_pattern(const p3_symbol_t *syms, int start, int len,
+                          int *phase_out, int *match_len_out, float *conf_out)
+{
+    float best_first = 0.0f;
+    int best_phase = 0;
+    int max_blocks;
+    int blocks = 0;
+    float score_sum = 0.0f;
+
+    if (!syms || len < 2 * P3_PP_PERIOD_SYMBOLS)
+        return false;
+
+    for (int phase = 0; phase < P3_PP_PERIOD_SYMBOLS; phase++) {
+        float c = pp_block_correlation(syms, start, phase);
+        if (c > best_first) {
+            best_first = c;
+            best_phase = phase;
+        }
+    }
+    if (best_first < 0.58f)
+        return false;
+
+    max_blocks = len / P3_PP_PERIOD_SYMBOLS;
+    for (int b = 0; b < max_blocks; b++) {
+        float c = pp_block_correlation(syms,
+                                       start + b * P3_PP_PERIOD_SYMBOLS,
+                                       best_phase);
+        if (b == 0) {
+            if (c < 0.58f)
+                break;
+        } else {
+            if (c < 0.52f)
+                break;
+        }
+        score_sum += c;
+        blocks++;
+    }
+
+    if (blocks < 2)
+        return false;
+    if ((score_sum / (float)blocks) < 0.56f)
+        return false;
+
+    if (phase_out)
+        *phase_out = best_phase;
+    if (match_len_out)
+        *match_len_out = blocks * P3_PP_PERIOD_SYMBOLS;
+    if (conf_out)
+        *conf_out = score_sum / (float)blocks;
+    return true;
+}
+
 static int symbol_scrambled_bit(const p3_symbol_t *syms, int start, int bit_pos)
 {
     int sym_idx = bit_pos / 2;
@@ -764,6 +875,9 @@ int p3_segment_symbols(p3_result_t *result)
         int seg_len;
         bool s_complement = false;
         bool ru_positive = false;
+        int pp_phase = 0;
+        int pp_match_len = 0;
+        float pp_conf = 0.0f;
         uint16_t j_trn16 = 0;
         int j_hyp = 0;
 
@@ -838,6 +952,20 @@ int p3_segment_symbols(p3_result_t *result)
                         pos, seg_len, syms);
             result->segments[result->segment_count - 1].confidence = 0.85f;
             pos += seg_len;
+            continue;
+        }
+
+        /* Check for PP (48-symbol block repeated >=2 times). */
+        if (remaining >= 2 * P3_PP_PERIOD_SYMBOLS
+            && is_pp_pattern(syms, pos, remaining, &pp_phase, &pp_match_len, &pp_conf)) {
+            p3_segment_t *seg;
+
+            add_segment(result, P3_SIGNAL_PP, pos, pp_match_len, syms);
+            seg = &result->segments[result->segment_count - 1];
+            seg->pp_phase = pp_phase;
+            seg->pp_blocks = pp_match_len / P3_PP_PERIOD_SYMBOLS;
+            seg->confidence = pp_conf;
+            pos += pp_match_len;
             continue;
         }
 
@@ -1124,12 +1252,15 @@ static float score_result(const p3_result_t *result)
             if (seg->length >= 18)
                 score += seg_score * 2.0f;
             break;
+        case P3_SIGNAL_PP:
+            if (seg->length >= 2 * P3_PP_PERIOD_SYMBOLS)
+                score += seg_score * 1.2f;
+            break;
         case P3_SIGNAL_SILENCE:
             break;
         case P3_SIGNAL_UNKNOWN:
             unknown_symbols += seg->length;
             break;
-        case P3_SIGNAL_PP:
         case P3_SIGNAL_J_PRIME:
             break;
         }

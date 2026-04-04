@@ -7800,9 +7800,11 @@ static void p3_u16_to_bitstr(uint16_t value, char out[17])
 static void p3_print_data_signatures(const p3_result_t *detail)
 {
     const p3_segment_t *best_j = NULL;
+    const p3_segment_t *best_pp = NULL;
     const p3_segment_t *best_trn = NULL;
     const p3_segment_t *best_ru = NULL;
     int s_like_symbols = 0;
+    int pp_symbols = 0;
     int trn_symbols = 0;
     int j_symbols = 0;
     int ru_symbols = 0;
@@ -7822,6 +7824,11 @@ static void p3_print_data_signatures(const p3_result_t *detail)
             if (!best_trn || seg->length > best_trn->length)
                 best_trn = seg;
             break;
+        case P3_SIGNAL_PP:
+            pp_symbols += seg->length;
+            if (!best_pp || seg->length > best_pp->length)
+                best_pp = seg;
+            break;
         case P3_SIGNAL_J:
             j_symbols += seg->length;
             if (!best_j || seg->length > best_j->length)
@@ -7838,8 +7845,16 @@ static void p3_print_data_signatures(const p3_result_t *detail)
         }
     }
 
-    printf("    Data signatures: S-like=%d sym, TRN=%d sym, J=%d sym, Ru/uR=%d sym\n",
-           s_like_symbols, trn_symbols, j_symbols, ru_symbols);
+    printf("    Data signatures: S-like=%d sym, PP=%d sym, TRN=%d sym, J=%d sym, Ru/uR=%d sym\n",
+           s_like_symbols, pp_symbols, trn_symbols, j_symbols, ru_symbols);
+
+    if (best_pp) {
+        printf("      PP longest: %d sym (%d x 48T), phase=%d, corr=%.2f\n",
+               best_pp->length,
+               best_pp->pp_blocks,
+               best_pp->pp_phase,
+               best_pp->confidence);
+    }
 
     if (best_j) {
         char trn16_bits[17];
@@ -8068,6 +8083,7 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                     const p3_segment_t *seg = &detail->segments[i];
                     if (!(seg->type == P3_SIGNAL_S
                           || seg->type == P3_SIGNAL_S_BAR
+                          || seg->type == P3_SIGNAL_PP
                           || seg->type == P3_SIGNAL_TRN
                           || seg->type == P3_SIGNAL_J
                           || seg->type == P3_SIGNAL_J_PRIME
@@ -8088,6 +8104,8 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                            seg->confidence);
                     if (seg->type == P3_SIGNAL_TRN)
                         printf(" errors=%d", seg->trn_errors);
+                    if (seg->type == P3_SIGNAL_PP)
+                        printf(" blocks=%d phase=%d", seg->pp_blocks, seg->pp_phase);
                     if (seg->type == P3_SIGNAL_J)
                         printf(" trn16=0x%04X", seg->j_trn16);
                     if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)

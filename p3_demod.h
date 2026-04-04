@@ -144,6 +144,10 @@ typedef struct {
 
     /* For Ru/uR */
     bool  ru_positive_first;      /* true = +LU first (Ru), false = -LU (uR) */
+
+    /* For PP */
+    int   pp_phase;               /* Best 48-symbol phase offset (0..47) */
+    int   pp_blocks;              /* Number of 48-symbol blocks matched */
 } p3_segment_t;
 
 /* Batch demodulation result */
