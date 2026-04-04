@@ -447,6 +447,199 @@ static void p12_refine_info0_hint_from_tone(p12_timing_hint_t *hint,
     hint->window_end_sample = refined_end;
 }
 
+static int p12_burst_end_sample(const p12_fsk_burst_t *burst)
+{
+    if (!burst)
+        return -1;
+    return burst->start_sample + burst->duration_samples;
+}
+
+static int p12_burst_center_sample(const p12_fsk_burst_t *burst)
+{
+    int end;
+
+    if (!burst)
+        return -1;
+    end = p12_burst_end_sample(burst);
+    if (end < burst->start_sample)
+        return burst->start_sample;
+    return burst->start_sample + (end - burst->start_sample) / 2;
+}
+
+static int p12_burst_window_distance(const p12_fsk_burst_t *burst,
+                                     int window_start,
+                                     int window_end)
+{
+    int burst_end;
+
+    if (!burst || window_end <= window_start)
+        return 0;
+
+    burst_end = p12_burst_end_sample(burst);
+    if (burst_end <= window_start)
+        return window_start - burst_end;
+    if (burst->start_sample >= window_end)
+        return burst->start_sample - window_end;
+    return 0;
+}
+
+static bool p12_info_burst_precedes(const p12_fsk_burst_t *a,
+                                    const p12_fsk_burst_t *b,
+                                    const p12_timing_hint_t *hint,
+                                    int tone_anchor_sample)
+{
+    int a_end;
+    int b_end;
+    bool a_before_tone;
+    bool b_before_tone;
+    bool a_hits_hint = false;
+    bool b_hits_hint = false;
+    int a_hint_dist = 0;
+    int b_hint_dist = 0;
+    int a_expected_dist = 0;
+    int b_expected_dist = 0;
+
+    if (!a || !b)
+        return false;
+
+    a_end = p12_burst_end_sample(a);
+    b_end = p12_burst_end_sample(b);
+    a_before_tone = (tone_anchor_sample < 0) || (a_end <= tone_anchor_sample);
+    b_before_tone = (tone_anchor_sample < 0) || (b_end <= tone_anchor_sample);
+    if (a_before_tone != b_before_tone)
+        return a_before_tone;
+
+    if (hint && hint->valid && hint->window_end_sample > hint->window_start_sample) {
+        a_hint_dist = p12_burst_window_distance(a, hint->window_start_sample, hint->window_end_sample);
+        b_hint_dist = p12_burst_window_distance(b, hint->window_start_sample, hint->window_end_sample);
+        a_hits_hint = (a_hint_dist == 0);
+        b_hits_hint = (b_hint_dist == 0);
+
+        if (a_hits_hint != b_hits_hint)
+            return a_hits_hint;
+        if (a_hint_dist != b_hint_dist)
+            return a_hint_dist < b_hint_dist;
+
+        a_expected_dist = abs(p12_burst_center_sample(a) - hint->expected_sample);
+        b_expected_dist = abs(p12_burst_center_sample(b) - hint->expected_sample);
+        if (a_expected_dist != b_expected_dist)
+            return a_expected_dist < b_expected_dist;
+    } else if (tone_anchor_sample >= 0) {
+        a_expected_dist = abs(a_end - tone_anchor_sample);
+        b_expected_dist = abs(b_end - tone_anchor_sample);
+        if (a_expected_dist != b_expected_dist)
+            return a_expected_dist < b_expected_dist;
+    }
+
+    if (a->peak_signal_energy != b->peak_signal_energy)
+        return a->peak_signal_energy > b->peak_signal_energy;
+    if (a->peak_energy != b->peak_energy)
+        return a->peak_energy > b->peak_energy;
+    if (a->start_sample != b->start_sample)
+        return a->start_sample < b->start_sample;
+    return a->duration_samples < b->duration_samples;
+}
+
+static void p12_rank_bursts_for_info(p12_fsk_burst_t *bursts,
+                                     int burst_count,
+                                     const p12_timing_hint_t *hint,
+                                     int tone_anchor_sample,
+                                     const char *label,
+                                     int sample_rate)
+{
+    if (!bursts || burst_count <= 1)
+        return;
+
+    for (int i = 1; i < burst_count; i++) {
+        p12_fsk_burst_t key = bursts[i];
+        int j = i - 1;
+
+        while (j >= 0 && p12_info_burst_precedes(&key, &bursts[j], hint, tone_anchor_sample)) {
+            bursts[j + 1] = bursts[j];
+            j--;
+        }
+        bursts[j + 1] = key;
+    }
+
+    if (p12_debug_enabled()) {
+        fprintf(stderr,
+                "[p12] ranked %s bursts=%d tone_anchor=%.1fms hint=%s\n",
+                label ? label : "INFO",
+                burst_count,
+                (tone_anchor_sample >= 0) ? ((double) tone_anchor_sample * 1000.0 / (double) sample_rate) : -1.0,
+                (hint && hint->valid) ? "yes" : "no");
+        for (int i = 0; i < burst_count; i++) {
+            int end = p12_burst_end_sample(&bursts[i]);
+            int hint_dist = 0;
+
+            if (hint && hint->valid)
+                hint_dist = p12_burst_window_distance(&bursts[i], hint->window_start_sample, hint->window_end_sample);
+            fprintf(stderr,
+                    "[p12]   rank #%d start=%.1fms end=%.1fms hint_dist=%.1fms sig=%.0f peak=%.3f\n",
+                    i + 1,
+                    (double) bursts[i].start_sample * 1000.0 / (double) sample_rate,
+                    (double) end * 1000.0 / (double) sample_rate,
+                    (double) hint_dist * 1000.0 / (double) sample_rate,
+                    bursts[i].peak_signal_energy,
+                    bursts[i].peak_energy);
+        }
+    }
+}
+
+static void p12_focus_bursts_to_window(p12_fsk_burst_t *bursts,
+                                       int burst_count,
+                                       const p12_timing_hint_t *hint,
+                                       int tone_anchor_sample,
+                                       const char *label,
+                                       int sample_rate)
+{
+    int focus_start = -1;
+    int focus_end = -1;
+
+    if (!bursts || burst_count <= 0)
+        return;
+
+    if (hint && hint->valid && hint->window_end_sample > hint->window_start_sample) {
+        focus_start = hint->window_start_sample;
+        focus_end = hint->window_end_sample;
+    }
+    if (tone_anchor_sample >= 0 && (focus_end < 0 || tone_anchor_sample < focus_end))
+        focus_end = tone_anchor_sample;
+    if (focus_end <= focus_start)
+        return;
+
+    for (int i = 0; i < burst_count; i++) {
+        int burst_start = bursts[i].start_sample;
+        int burst_end = p12_burst_end_sample(&bursts[i]);
+        int clipped_start = burst_start;
+        int clipped_end = burst_end;
+
+        if (burst_end <= focus_start || burst_start >= focus_end)
+            continue;
+        if (clipped_start < focus_start)
+            clipped_start = focus_start;
+        if (clipped_end > focus_end)
+            clipped_end = focus_end;
+        if (clipped_end <= clipped_start)
+            continue;
+
+        if (clipped_start != burst_start || clipped_end != burst_end) {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] focused %s burst #%d from %.1f-%.1fms to %.1f-%.1fms\n",
+                        label ? label : "INFO",
+                        i + 1,
+                        (double) burst_start * 1000.0 / (double) sample_rate,
+                        (double) burst_end * 1000.0 / (double) sample_rate,
+                        (double) clipped_start * 1000.0 / (double) sample_rate,
+                        (double) clipped_end * 1000.0 / (double) sample_rate);
+            }
+            bursts[i].start_sample = clipped_start;
+            bursts[i].duration_samples = clipped_end - clipped_start;
+        }
+    }
+}
+
 static bool p12_detect_phase2_cc_run(const int16_t *samples,
                                      int total_samples,
                                      int sample_rate,
@@ -2670,6 +2863,7 @@ static void detect_phase2_info(const int16_t *samples,
     int phase2_cap = (sample_rate * PHASE2_MAX_SCAN_MS) / 1000;
     int phase2_end_hint = -1;
     int phase2_merge_gap = (sample_rate * P12_PHASE2_REPEAT_GAP_MS) / 1000;
+    int tone_anchor_sample = -1;
     p12_phase2_role_t phase2_role = p12_phase2_role_from_observations(result);
     p12_timing_hint_t handoff_info0_hint;
 
@@ -2727,6 +2921,10 @@ static void detect_phase2_info(const int16_t *samples,
                     result->tone_a.phase_reversal_seen ? "yes" : "no");
         }
     }
+    if (result->tone_a.detected)
+        tone_anchor_sample = result->tone_a.start_sample;
+    else if (result->tone_b.detected)
+        tone_anchor_sample = result->tone_b.start_sample;
 
     /* INFO0 is sent on V.21 CH2 (answerer → caller direction)
      * INFO1 is sent on V.21 CH1 (caller → answerer direction)
@@ -2780,6 +2978,18 @@ static void detect_phase2_info(const int16_t *samples,
                     (double) handoff_info0_hint.anchor_sample * 1000.0 / (double) sample_rate);
         }
     }
+    p12_focus_bursts_to_window(phase2_ch2_bursts,
+                               phase2_ch2_burst_count,
+                               handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                               tone_anchor_sample,
+                               "phase2 CH2/INFO0",
+                               sample_rate);
+    p12_rank_bursts_for_info(phase2_ch2_bursts,
+                             phase2_ch2_burst_count,
+                             handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                             tone_anchor_sample,
+                             "phase2 CH2/INFO0",
+                             sample_rate);
     p12_debug_log_bursts("phase2 CH2 windows", phase2_ch2_bursts, phase2_ch2_burst_count, sample_rate);
     p12_debug_log_bursts("phase2 CH1 windows", phase2_ch1_bursts, phase2_ch1_burst_count, sample_rate);
 
@@ -2799,8 +3009,7 @@ static void detect_phase2_info(const int16_t *samples,
      * expected INFO0 window.  INFO0 must precede Tone A/B, so any burst
      * that starts at or after the tone start cannot be the INFO0 frame. */
     {
-        int tone_start = result->tone_a.detected ? result->tone_a.start_sample
-                       : result->tone_b.detected ? result->tone_b.start_sample : -1;
+        int tone_start = tone_anchor_sample;
         bool bursts_before_tone = false;
 
         if (tone_start >= 0) {
@@ -2860,6 +3069,18 @@ static void detect_phase2_info(const int16_t *samples,
                             (double) (phase2_ch2_bursts[i].start_sample + phase2_ch2_bursts[i].duration_samples) * 1000.0 / (double) sample_rate);
                 }
             }
+            p12_focus_bursts_to_window(phase2_ch2_bursts,
+                                       phase2_ch2_burst_count,
+                                       handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                       tone_start,
+                                       "phase2 CH2/INFO0 retry",
+                                       sample_rate);
+            p12_rank_bursts_for_info(phase2_ch2_bursts,
+                                     phase2_ch2_burst_count,
+                                     handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                     tone_start,
+                                     "phase2 CH2/INFO0 retry",
+                                     sample_rate);
         }
     }
 
@@ -2892,6 +3113,18 @@ static void detect_phase2_info(const int16_t *samples,
                         (double) (phase2_ch2_bursts[i].start_sample + phase2_ch2_bursts[i].duration_samples) * 1000.0 / (double) sample_rate);
             }
         }
+        p12_focus_bursts_to_window(phase2_ch2_bursts,
+                                   phase2_ch2_burst_count,
+                                   &handoff_info0_hint,
+                                   tone_anchor_sample,
+                                   "phase2 CH2/INFO0 fallback",
+                                   sample_rate);
+        p12_rank_bursts_for_info(phase2_ch2_bursts,
+                                 phase2_ch2_burst_count,
+                                 &handoff_info0_hint,
+                                 tone_anchor_sample,
+                                 "phase2 CH2/INFO0 fallback",
+                                 sample_rate);
     }
 
     /* Try to decode INFO0 from CH2 sequence windows. */
