@@ -2038,6 +2038,95 @@ static void append_html_label_desanitized(char *out, size_t out_len, const char 
     append_html_label_value(out, out_len, label, clean);
 }
 
+static bool detail_value_present(const char *value)
+{
+    return value && value[0] != '\0' && strcmp(value, "n/a") != 0 && strcmp(value, "unknown") != 0;
+}
+
+static void append_html_label_if_present(char *out, size_t out_len, const char *label, const char *value)
+{
+    if (detail_value_present(value))
+        append_html_label_value(out, out_len, label, value);
+}
+
+static const char *v34_mp_source_label(const char *source)
+{
+    if (!source)
+        return "unknown";
+    if (strcmp(source, "rx_frame_recovered") == 0)
+        return "Recovered RX MP frame";
+    if (strcmp(source, "rx_frame") == 0)
+        return "RX MP frame";
+    if (strcmp(source, "info_sequence") == 0)
+        return "INFO-sequence inferred";
+    if (strcmp(source, "tx_state") == 0)
+        return "TX-state inferred";
+    return source;
+}
+
+static const char *v34_mp_trellis_label_from_detail(const char *value)
+{
+    if (!value || !*value)
+        return "unknown";
+    if (strcmp(value, "0") == 0)
+        return "16-state";
+    if (strcmp(value, "1") == 0)
+        return "32-state";
+    if (strcmp(value, "2") == 0)
+        return "64-state";
+    return value;
+}
+
+static void append_v34_mp_html_section(char *out,
+                                       size_t out_len,
+                                       detail_kv_t *pairs,
+                                       int pair_count,
+                                       bool include_candidate)
+{
+    const char *mp_seen = detail_value(pairs, pair_count, "mp_seen");
+    const char *mp_candidate = detail_value(pairs, pair_count, "mp_candidate");
+
+    if (!out || out_len == 0 || !pairs || pair_count <= 0)
+        return;
+
+    if (!(mp_seen && strcmp(mp_seen, "1") == 0)
+        && !(include_candidate && mp_candidate && strcmp(mp_candidate, "1") == 0))
+        return;
+
+    appendf(out, out_len, "<hr><div><strong>Phase 4 MP:</strong></div>");
+    append_html_label_value(out, out_len, "MP seen", detail_bit_to_yes_no(mp_seen));
+    append_html_label_value(out, out_len, "Remote ACK", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_remote_ack")));
+    append_html_label_value(out, out_len, "Decode source", v34_mp_source_label(detail_value(pairs, pair_count, "mp_source")));
+    append_html_label_if_present(out, out_len, "Negotiated A->C rate", detail_value(pairs, pair_count, "mp_rate_a_to_c"));
+    append_html_label_if_present(out, out_len, "Negotiated C->A rate", detail_value(pairs, pair_count, "mp_rate_c_to_a"));
+    append_html_label_if_present(out, out_len, "MP type", detail_value(pairs, pair_count, "mp_type"));
+    append_html_label_if_present(out, out_len, "Trellis", v34_mp_trellis_label_from_detail(detail_value(pairs, pair_count, "mp_trellis")));
+    append_html_label_value(out, out_len, "Aux channel", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_aux")));
+    append_html_label_value(out, out_len, "Non-linear encoder", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_q3125")));
+    append_html_label_value(out, out_len, "Shaping", strcmp(detail_value(pairs, pair_count, "mp_expanded_shaping"), "1") == 0 ? "Expanded" : "Minimal");
+    append_html_label_value(out, out_len, "Asymmetric rates", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_asymmetric")));
+    append_html_label_value(out, out_len, "Local ACK bit", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_local_ack_bit")));
+    append_html_label_if_present(out, out_len, "Signalling-rate mask", detail_value(pairs, pair_count, "mp_mask"));
+    append_html_label_if_present(out, out_len, "Frame bits captured", detail_value(pairs, pair_count, "mp_frame_bits"));
+    append_html_label_value(out, out_len, "CRC valid", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_crc")));
+    append_html_label_value(out, out_len, "Fill valid", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_fill")));
+    append_html_label_if_present(out, out_len, "Frame-start errors", detail_value(pairs, pair_count, "mp_start_err"));
+    append_html_label_value(out, out_len, "Rates valid", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_rates_valid")));
+
+    if (include_candidate && mp_candidate && strcmp(mp_candidate, "1") == 0) {
+        appendf(out, out_len, "<hr><div><strong>Fallback MP Candidate:</strong></div>");
+        append_html_label_if_present(out, out_len, "Votes", detail_value(pairs, pair_count, "mp_candidate_votes"));
+        append_html_label_if_present(out, out_len, "Candidate A->C rate", detail_value(pairs, pair_count, "mp_candidate_rate_a_to_c"));
+        append_html_label_if_present(out, out_len, "Candidate C->A rate", detail_value(pairs, pair_count, "mp_candidate_rate_c_to_a"));
+        append_html_label_if_present(out, out_len, "Candidate type", detail_value(pairs, pair_count, "mp_candidate_type"));
+        append_html_label_if_present(out, out_len, "Candidate trellis", v34_mp_trellis_label_from_detail(detail_value(pairs, pair_count, "mp_candidate_trellis")));
+        append_html_label_if_present(out, out_len, "Candidate mask", detail_value(pairs, pair_count, "mp_candidate_mask"));
+        append_html_label_value(out, out_len, "Candidate CRC valid", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_candidate_crc")));
+        append_html_label_value(out, out_len, "Candidate fill valid", detail_bit_to_yes_no(detail_value(pairs, pair_count, "mp_candidate_fill")));
+        append_html_label_if_present(out, out_len, "Candidate frame-start errors", detail_value(pairs, pair_count, "mp_candidate_start_err"));
+    }
+}
+
 static void build_visual_event_detail_html(const call_log_event_t *event, char *out, size_t out_len)
 {
     detail_kv_t pairs[128];
@@ -2167,6 +2256,20 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "Phase 4 marker", detail_value(pairs, pair_count, "phase4_ms"));
         append_html_label_value(out, out_len, "Phase 4 status", detail_value(pairs, pair_count, "phase4_status"));
         append_html_label_value(out, out_len, "Status", detail_value(pairs, pair_count, "status"));
+        append_v34_mp_html_section(out, out_len, pairs, pair_count, true);
+        appendf(out, out_len, "</div>");
+        return;
+    }
+    if (strcmp(event->protocol, "V.90/V.92") == 0
+        && (strcmp(event->summary, "Phase 4 / MP reached") == 0
+            || strcmp(event->summary, "Phase 4 training ready") == 0)
+        && pair_count > 0) {
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "Role", detail_value(pairs, pair_count, "role"));
+        append_html_label_if_present(out, out_len, "RX stage", detail_value(pairs, pair_count, "rx"));
+        append_html_label_if_present(out, out_len, "TX stage", detail_value(pairs, pair_count, "tx"));
+        append_html_label_if_present(out, out_len, "Event", detail_value(pairs, pair_count, "event"));
+        append_v34_mp_html_section(out, out_len, pairs, pair_count, true);
         appendf(out, out_len, "</div>");
         return;
     }
