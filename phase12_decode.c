@@ -3177,11 +3177,19 @@ static void detect_phase2_info(const int16_t *samples,
     int phase2_merge_gap = (sample_rate * P12_PHASE2_REPEAT_GAP_MS) / 1000;
     int tone_anchor_sample = -1;
     p12_phase2_role_t phase2_role = p12_phase2_role_from_observations(result);
+    p12_phase2_role_t alt_phase2_role = P12_PHASE2_ROLE_UNKNOWN;
+    p12_signal_tone_hit_t alt_tone_a;
+    p12_signal_tone_hit_t alt_tone_b;
+    bool keep_alt_v90_hypothesis = false;
     p12_timing_hint_t handoff_info0_hint;
+    p12_timing_hint_t alt_handoff_info0_hint;
 
     memset(phase2_ch1_bursts, 0, sizeof(phase2_ch1_bursts));
     memset(phase2_ch2_bursts, 0, sizeof(phase2_ch2_bursts));
     memset(&handoff_info0_hint, 0, sizeof(handoff_info0_hint));
+    memset(&alt_handoff_info0_hint, 0, sizeof(alt_handoff_info0_hint));
+    memset(&alt_tone_a, 0, sizeof(alt_tone_a));
+    memset(&alt_tone_b, 0, sizeof(alt_tone_b));
 
     if (result->answer_tone.detected)
         search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
@@ -3255,6 +3263,9 @@ static void detect_phase2_info(const int16_t *samples,
                             "[p12] selected alternate v90 tone hypothesis role=%s\n",
                             phase12_phase2_role_name(phase2_role));
                 }
+            } else if (alt_score == base_score && alt_score > 0) {
+                keep_alt_v90_hypothesis = true;
+                alt_phase2_role = alt_role;
             }
         }
     }
@@ -3318,17 +3329,67 @@ static void detect_phase2_info(const int16_t *samples,
                                 phase2_ch1_bursts,
                                 phase2_ch1_burst_count,
                                 sample_rate);
+    if (keep_alt_v90_hypothesis) {
+        p12_fill_handoff_info0_hint(&alt_handoff_info0_hint,
+                                    alt_phase2_role,
+                                    search_start,
+                                    limit,
+                                    phase2_ch1_bursts,
+                                    phase2_ch1_burst_count,
+                                    sample_rate);
+    }
     if (!result->info0.detected) {
         if (result->tone_b.detected)
             p12_refine_info0_hint_from_tone(&handoff_info0_hint, &result->tone_b, sample_rate);
         else if (result->tone_a.detected)
             p12_refine_info0_hint_from_tone(&handoff_info0_hint, &result->tone_a, sample_rate);
+        if (keep_alt_v90_hypothesis) {
+            if (alt_tone_b.detected)
+                p12_refine_info0_hint_from_tone(&alt_handoff_info0_hint, &alt_tone_b, sample_rate);
+            else if (alt_tone_a.detected)
+                p12_refine_info0_hint_from_tone(&alt_handoff_info0_hint, &alt_tone_a, sample_rate);
+        }
         if (p12_debug_enabled() && handoff_info0_hint.valid) {
             fprintf(stderr,
                     "[p12] refined INFO0 handoff window=%.1f-%.1fms anchor=%.1fms\n",
                     (double) handoff_info0_hint.window_start_sample * 1000.0 / (double) sample_rate,
                     (double) handoff_info0_hint.window_end_sample * 1000.0 / (double) sample_rate,
                     (double) handoff_info0_hint.anchor_sample * 1000.0 / (double) sample_rate);
+        }
+        if (p12_debug_enabled() && keep_alt_v90_hypothesis && alt_handoff_info0_hint.valid) {
+            fprintf(stderr,
+                    "[p12] refined ALT INFO0 handoff window=%.1f-%.1fms anchor=%.1fms role=%s\n",
+                    (double) alt_handoff_info0_hint.window_start_sample * 1000.0 / (double) sample_rate,
+                    (double) alt_handoff_info0_hint.window_end_sample * 1000.0 / (double) sample_rate,
+                    (double) alt_handoff_info0_hint.anchor_sample * 1000.0 / (double) sample_rate,
+                    phase12_phase2_role_name(alt_phase2_role));
+        }
+        if (keep_alt_v90_hypothesis && alt_handoff_info0_hint.valid) {
+            if (!handoff_info0_hint.valid) {
+                handoff_info0_hint = alt_handoff_info0_hint;
+            } else {
+                if (alt_handoff_info0_hint.window_start_sample < handoff_info0_hint.window_start_sample)
+                    handoff_info0_hint.window_start_sample = alt_handoff_info0_hint.window_start_sample;
+                if (alt_handoff_info0_hint.window_end_sample > handoff_info0_hint.window_end_sample)
+                    handoff_info0_hint.window_end_sample = alt_handoff_info0_hint.window_end_sample;
+                if (alt_handoff_info0_hint.expected_sample < handoff_info0_hint.expected_sample)
+                    handoff_info0_hint.expected_sample = alt_handoff_info0_hint.expected_sample;
+            }
+        }
+    }
+    if (keep_alt_v90_hypothesis && alt_handoff_info0_hint.valid) {
+        int before_alt = phase2_ch2_burst_count;
+
+        p12_append_retry_window(phase2_ch2_bursts,
+                                &phase2_ch2_burst_count,
+                                P12_MAX_FSK_BURSTS,
+                                &alt_handoff_info0_hint);
+        if (p12_debug_enabled() && phase2_ch2_burst_count > before_alt) {
+            fprintf(stderr,
+                    "[p12] appended ALT INFO0 retry window role=%s window=%.1f-%.1fms\n",
+                    phase12_phase2_role_name(alt_phase2_role),
+                    (double) alt_handoff_info0_hint.window_start_sample * 1000.0 / (double) sample_rate,
+                    (double) alt_handoff_info0_hint.window_end_sample * 1000.0 / (double) sample_rate);
         }
     }
     p12_focus_bursts_to_window(phase2_ch2_bursts,
