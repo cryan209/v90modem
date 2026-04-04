@@ -62,6 +62,50 @@ bool v34_info_collector_push_bit(v34_info_collector_t *collector,
     return collector->crc == 0;
 }
 
+bool v34_info_validate_frame_bytes(const uint8_t *buf, int target_bits)
+{
+    v34_info_collector_t collector;
+    uint8_t replay[V34_INFO_MAX_BUF_BYTES];
+    int payload_bits_remaining;
+    int total_bytes;
+
+    if (!buf || target_bits <= 0)
+        return false;
+
+    v34_info_collector_init(&collector, target_bits);
+    for (int bit = 9; bit >= 0; bit--) {
+        (void) v34_info_collector_push_bit(&collector,
+                                           (V34_INFO_SYNC_CODE >> bit) & 1,
+                                           replay,
+                                           (int) sizeof(replay));
+    }
+
+    payload_bits_remaining = target_bits;
+    total_bytes = (target_bits + 7) / 8;
+    if (total_bytes > V34_INFO_MAX_BUF_BYTES)
+        total_bytes = V34_INFO_MAX_BUF_BYTES;
+    for (int i = 0; i < total_bytes; i++) {
+        int bits_this_byte = payload_bits_remaining;
+
+        if (bits_this_byte > 8)
+            bits_this_byte = 8;
+        for (int bit = 0; bit < bits_this_byte; bit++) {
+            if (v34_info_collector_push_bit(&collector,
+                                            (buf[i] >> bit) & 1,
+                                            replay,
+                                            (int) sizeof(replay))) {
+                int compare_bytes = (target_bits + 7) / 8;
+
+                if (compare_bytes > V34_INFO_MAX_BUF_BYTES)
+                    compare_bytes = V34_INFO_MAX_BUF_BYTES;
+                return memcmp(replay, buf, (size_t) compare_bytes) == 0;
+            }
+        }
+        payload_bits_remaining -= bits_this_byte;
+    }
+    return false;
+}
+
 bool v34_map_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src)
 {
     if (!dst || !src)
@@ -107,7 +151,7 @@ bool v34_info_parse_info0a_v90(const uint8_t *buf,
     const uint8_t *t;
     v34_v90_info0a_t parsed;
 
-    if (!buf)
+    if (!buf || !v34_info_validate_frame_bytes(buf, 62 - (4 + 8 + 4)))
         return false;
 
     memset(&parsed, 0, sizeof(parsed));
@@ -152,7 +196,7 @@ bool v34_info_parse_info1a_v90(const uint8_t *buf,
     uint16_t raw_freq;
     v34_v90_info1a_t parsed;
 
-    if (!buf)
+    if (!buf || !v34_info_validate_frame_bytes(buf, 70 - (4 + 8 + 4)))
         return false;
 
     memset(&parsed, 0, sizeof(parsed));
@@ -184,7 +228,7 @@ bool v34_info_parse_info1d_v90(const uint8_t *buf,
     const uint8_t *t;
     v34_v90_info1d_t parsed;
 
-    if (!buf || !raw_out)
+    if (!buf || !raw_out || !v34_info_validate_frame_bytes(buf, 109 - (4 + 8 + 4)))
         return false;
 
     memset(&parsed, 0, sizeof(parsed));

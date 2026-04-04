@@ -614,6 +614,32 @@ static bool snapshot_v34_info1a_from_rx_state(v34_v90_info1a_t *dst, const v34_s
     return true;
 }
 
+static bool parse_v34_info0_from_rx_buf(v34_v90_info0a_t *raw_out,
+                                        v90_info0a_t *mapped_out,
+                                        const v34_state_t *v34)
+{
+    if (!v34 || !v34->rx.v90_mode)
+        return false;
+    return v34_info_parse_info0a_v90(v34->rx.info_buf, raw_out, mapped_out);
+}
+
+static bool parse_v34_info1a_from_rx_buf(v34_v90_info1a_t *raw_out,
+                                         v90_info1a_t *mapped_out,
+                                         const v34_state_t *v34)
+{
+    if (!v34 || !v34->rx.v90_mode)
+        return false;
+    return v34_info_parse_info1a_v90(v34->rx.info_buf, raw_out, mapped_out);
+}
+
+static bool parse_v34_info1d_from_rx_buf(v34_v90_info1d_t *raw_out,
+                                         const v34_state_t *v34)
+{
+    if (!v34 || !v34->rx.v90_mode)
+        return false;
+    return v34_info_parse_info1d_v90(v34->rx.info_buf, raw_out);
+}
+
 static void format_cp_summary(char *buf, size_t len, const vpcm_cp_frame_t *cp)
 {
     if (!buf || len == 0 || !cp)
@@ -7676,13 +7702,22 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         }
 
         if (!result->info0_seen) {
-            int have_info0 = v34_get_v90_received_info0a(v34, &raw_info0a);
+            int have_info0 = 0;
+
+            if (phase2_only && rx_event == V34_EVENT_INFO0_OK
+                && parse_v34_info0_from_rx_buf(&raw_info0a, &result->info0a, v34)) {
+                have_info0 = 1;
+            } else {
+                have_info0 = v34_get_v90_received_info0a(v34, &raw_info0a);
+            }
 
             if (have_info0 <= 0 && rx_event == V34_EVENT_INFO0_OK
                 && snapshot_v34_info0a_from_rx_state(&raw_info0a, v34)) {
                 have_info0 = 1;
             }
-            if (have_info0 > 0 && v34_map_received_info0a(&result->info0a, &raw_info0a)) {
+            if (have_info0 > 0
+                && ((phase2_only && rx_event == V34_EVENT_INFO0_OK)
+                    || v34_map_received_info0a(&result->info0a, &raw_info0a))) {
                 result->info0_seen = true;
                 result->info0_is_d = calling_party;
                 result->info0_raw = raw_info0a;
@@ -7695,14 +7730,23 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             }
         }
         if (!result->info1_seen) {
-            int have_info1a = v34_get_v90_received_info1a(v34, &raw_info1a);
+            int have_info1a = 0;
+
+            if (phase2_only && rx_event == V34_EVENT_INFO1_OK
+                && !calling_party
+                && parse_v34_info1a_from_rx_buf(&raw_info1a, &result->info1a, v34)) {
+                have_info1a = 1;
+            } else {
+                have_info1a = v34_get_v90_received_info1a(v34, &raw_info1a);
+            }
 
             if (have_info1a <= 0 && rx_event == V34_EVENT_INFO1_OK
                 && snapshot_v34_info1a_from_rx_state(&raw_info1a, v34)) {
                 have_info1a = 1;
             }
             if (have_info1a > 0
-                && v34_map_received_info1a(&result->info1a, &raw_info1a)) {
+                && ((phase2_only && rx_event == V34_EVENT_INFO1_OK && !calling_party)
+                    || v34_map_received_info1a(&result->info1a, &raw_info1a))) {
                 result->info1_seen = true;
                 result->info1_is_d = false;
                 result->info1a_raw = raw_info1a;
@@ -7710,7 +7754,9 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 result->u_info = result->info1a.u_info;
                 result->u_info_from_info1a = true;
                 last_progress_sample = offset;
-            } else if (v34_get_v90_received_info1d(v34, &raw_info1d) > 0) {
+            } else if ((phase2_only && rx_event == V34_EVENT_INFO1_OK && calling_party
+                        && parse_v34_info1d_from_rx_buf(&raw_info1d, v34))
+                       || v34_get_v90_received_info1d(v34, &raw_info1d) > 0) {
                 result->info1_seen = true;
                 result->info1_is_d = true;
                 result->info1d = raw_info1d;

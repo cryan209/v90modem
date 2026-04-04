@@ -29,6 +29,7 @@ bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  int bit,
                                  uint8_t *frame_out,
                                  int frame_out_len);
+bool v34_info_validate_frame_bytes(const uint8_t *buf, int target_bits);
 
 bool v34_map_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src);
 bool v34_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src);
