@@ -10034,18 +10034,13 @@ static void collect_stream_call_log(call_log_t *log,
     bool have_capability_probe = false;
     bool have_phase12 = false;
     bool suppress_v90_phase2 = false;
+    bool have_phase12_capability = false;
     int earliest_phase2_sample = -1;
 
     if (!log || !linear_samples || !g711_codewords)
         return;
 
     phase12_result_init(&phase12);
-
-    have_capability_probe = get_cached_v8_channel_probe(linear_samples,
-                                                        total_samples,
-                                                        total_samples,
-                                                        &capability_probe);
-    suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
 
     if (do_v8 || do_v34 || do_v90) {
         have_phase12 = phase12_decode(linear_samples,
@@ -10055,11 +10050,23 @@ static void collect_stream_call_log(call_log_t *log,
                                       &phase12);
         if (have_phase12) {
             phase12_merge_to_call_log(&phase12, log, 8000);
+            have_phase12_capability = phase12.cm.detected || phase12.jm.detected
+                                      || phase12.info0.detected || phase12.info1.detected;
+            if (have_phase12_capability)
+                suppress_v90_phase2 = !(phase12.pcm_modem_capable || phase12.v90_capable || phase12.v92_capable);
             if (phase12.info0.detected)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info0.sample_offset);
             if (phase12.info1.detected)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info1.sample_offset);
         }
+    }
+
+    if (!have_phase12_capability) {
+        have_capability_probe = get_cached_v8_channel_probe(linear_samples,
+                                                            total_samples,
+                                                            total_samples,
+                                                            &capability_probe);
+        suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
     }
 
     if (do_v34 || do_v90) {
@@ -11897,14 +11904,19 @@ static void run_decode_suite(const char *label,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
+    phase12_result_t p12;
     v8_probe_result_t capability_probe;
     bool have_answerer = false;
     bool have_caller = false;
     bool have_capability_probe = false;
+    bool have_phase12 = false;
+    bool have_phase12_capability = false;
     bool suppress_v90_phase2 = false;
 
     if (!linear_samples || !g711_codewords || !opts)
         return;
+
+    phase12_result_init(&p12);
 
     printf("\n--- Channel: %s ---\n", label);
     if (codeword_info && (opts->do_v90 || opts->do_v91 || opts->do_call_log)) {
@@ -11926,18 +11938,41 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
-    have_capability_probe = get_cached_v8_channel_probe(linear_samples,
-                                                        total_samples,
-                                                        total_samples,
-                                                        &capability_probe);
-    suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
+    if (opts->do_phase12 || opts->do_v34 || opts->do_v90 || opts->do_v8) {
+        have_phase12 = phase12_decode(linear_samples, total_samples, sample_rate, 0, &p12);
+        if (have_phase12)
+            have_phase12_capability = p12.cm.detected || p12.jm.detected
+                                      || p12.info0.detected || p12.info1.detected;
+        if (have_phase12_capability)
+            suppress_v90_phase2 = !(p12.pcm_modem_capable || p12.v90_capable || p12.v92_capable);
+    }
+    if (!have_phase12_capability) {
+        have_capability_probe = get_cached_v8_channel_probe(linear_samples,
+                                                            total_samples,
+                                                            total_samples,
+                                                            &capability_probe);
+        suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
+    }
     if (suppress_v90_phase2 && opts->raw_output_enabled && (opts->do_v34 || opts->do_v90)) {
         char modbuf[256];
 
-        format_v8_modulations_str(capability_probe.result.jm_cm.modulations, modbuf, sizeof(modbuf));
-        printf("V.8 gate: CM/JM does not advertise V.90/V.92 digital capability (mods=%s pcm=%s), so V.90/V.92 decode paths are suppressed.\n",
-               modbuf[0] ? modbuf : "none",
-               v8_pcm_modem_availability_to_str(capability_probe.result.jm_cm.pcm_modem_availability));
+        if (have_phase12_capability) {
+            unsigned mods = 0;
+
+            if (p12.cm.detected)
+                mods |= (unsigned) p12.cm.modulations;
+            if (p12.jm.detected)
+                mods |= (unsigned) p12.jm.modulations;
+            format_v8_modulations_str((int) mods, modbuf, sizeof(modbuf));
+            printf("Phase 1/2 gate: standalone Phase 1/2 decode does not indicate V.90/V.92 digital capability (mods=%s pcm=%s), so V.90/V.92 decode paths are suppressed.\n",
+                   modbuf[0] ? modbuf : "none",
+                   p12.pcm_modem_capable ? "available" : "not_available");
+        } else {
+            format_v8_modulations_str(capability_probe.result.jm_cm.modulations, modbuf, sizeof(modbuf));
+            printf("V.8 gate: CM/JM does not advertise V.90/V.92 digital capability (mods=%s pcm=%s), so V.90/V.92 decode paths are suppressed.\n",
+                   modbuf[0] ? modbuf : "none",
+                   v8_pcm_modem_availability_to_str(capability_probe.result.jm_cm.pcm_modem_availability));
+        }
     }
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
@@ -11978,11 +12013,8 @@ static void run_decode_suite(const char *label,
     }
 
     if (opts->raw_output_enabled && opts->do_phase12) {
-        phase12_result_t p12;
-
-        phase12_result_init(&p12);
         printf("\n=== Standalone Phase 1/2 Decode (no spandsp) ===\n");
-        if (phase12_decode(linear_samples, total_samples, sample_rate, 0, &p12)) {
+        if (have_phase12) {
             /* Phase 1 tones */
             if (p12.cng.detected)
                 printf("  CNG tone at %.1f ms (%.0f ms, ratio %.3f)\n",
@@ -12076,7 +12108,6 @@ static void run_decode_suite(const char *label,
         } else {
             printf("  No Phase 1/2 signals detected.\n");
         }
-        phase12_result_reset(&p12);
     }
 
     if (opts->raw_output_enabled && opts->do_v91)
@@ -12174,6 +12205,8 @@ static void run_decode_suite(const char *label,
         print_call_log(label, &log, total_samples, sample_rate);
         call_log_reset(&log);
     }
+
+    phase12_result_reset(&p12);
 }
 
 int main(int argc, char **argv)

@@ -919,6 +919,10 @@ static void detect_phase2_info(const int16_t *samples,
                                int max_sample,
                                phase12_result_t *result)
 {
+    p12_fsk_burst_t phase2_ch1_bursts[P12_MAX_FSK_BURSTS];
+    p12_fsk_burst_t phase2_ch2_bursts[P12_MAX_FSK_BURSTS];
+    int phase2_ch1_burst_count = 0;
+    int phase2_ch2_burst_count = 0;
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
     int search_start = 0;
     int phase2_cap = (sample_rate * PHASE2_MAX_SCAN_MS) / 1000;
@@ -946,21 +950,19 @@ static void detect_phase2_info(const int16_t *samples,
      * The v34_info_collector handles sync code detection (0x372).
      */
 
-    /* Refresh burst detection if not already done (in case phase1 was skipped) */
-    if (result->ch2_burst_count == 0) {
-        result->ch2_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
-                                                     search_start, limit, V21_CH2,
-                                                     result->ch2_bursts, P12_MAX_FSK_BURSTS);
-    }
-    if (result->ch1_burst_count == 0) {
-        result->ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
-                                                     search_start, limit, V21_CH1,
-                                                     result->ch1_bursts, P12_MAX_FSK_BURSTS);
-    }
+    /* Always rescan V.21 bursts for Phase 2 from the handoff point onward.
+       Reusing the broad Phase 1 burst list can hide later INFO bursts on
+       long captures where the early negotiation already filled the cache. */
+    phase2_ch2_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
+                                               search_start, limit, V21_CH2,
+                                               phase2_ch2_bursts, P12_MAX_FSK_BURSTS);
+    phase2_ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
+                                               search_start, limit, V21_CH1,
+                                               phase2_ch1_bursts, P12_MAX_FSK_BURSTS);
 
     /* Try to decode INFO0 from CH2 bursts */
     /* INFO0a is 49 bits (Table 8), INFO0d is 62 bits (Table 7) */
-    for (int b = 0; b < result->ch2_burst_count && !result->info0.detected; b++) {
+    for (int b = 0; b < phase2_ch2_burst_count && !result->info0.detected; b++) {
         uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
         int frame_sample = 0;
 
@@ -969,7 +971,7 @@ static void detect_phase2_info(const int16_t *samples,
             int target = try_info0d ? 62 : 49;
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
-                                           V21_CH2, &result->ch2_bursts[b],
+                                           V21_CH2, &phase2_ch2_bursts[b],
                                            target, frame_bytes, &frame_sample)) {
                 v34_info_frame_t frame;
                 v34_v90_info0a_t raw;
@@ -984,7 +986,7 @@ static void detect_phase2_info(const int16_t *samples,
                 if (v34_info_parse_info0a_v90_frame(&frame, &raw, &mapped)) {
                     result->info0.detected = true;
                     result->info0.sample_offset = frame_sample;
-                    result->info0.duration_samples = result->ch2_bursts[b].duration_samples;
+                    result->info0.duration_samples = phase2_ch2_bursts[b].duration_samples;
                     result->info0.is_info0d = (bool)try_info0d;
                     result->info0.raw = raw;
                     result->info0.parsed = mapped;
@@ -996,7 +998,7 @@ static void detect_phase2_info(const int16_t *samples,
 
     /* Try to decode INFO1 from CH1 bursts */
     /* INFO1d is 109 bits (Table 9), INFO1a is 70 bits (Table 10) */
-    for (int b = 0; b < result->ch1_burst_count && !result->info1.detected; b++) {
+    for (int b = 0; b < phase2_ch1_burst_count && !result->info1.detected; b++) {
         uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
         int frame_sample = 0;
 
@@ -1005,7 +1007,7 @@ static void detect_phase2_info(const int16_t *samples,
             int target = try_1d ? 109 : 70;
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
-                                           V21_CH1, &result->ch1_bursts[b],
+                                           V21_CH1, &phase2_ch1_bursts[b],
                                            target, frame_bytes, &frame_sample)) {
                 v34_info_frame_t frame;
 
@@ -1021,7 +1023,7 @@ static void detect_phase2_info(const int16_t *samples,
                     if (v34_info_parse_info1d_v90_frame(&frame, &info1d)) {
                         result->info1.detected = true;
                         result->info1.sample_offset = frame_sample;
-                        result->info1.duration_samples = result->ch1_bursts[b].duration_samples;
+                        result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
                         result->info1.is_info1d = true;
                         result->info1.info1d = info1d;
                         if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
@@ -1034,7 +1036,7 @@ static void detect_phase2_info(const int16_t *samples,
                     if (v34_info_parse_info1a_v90_frame(&frame, &raw, &mapped)) {
                         result->info1.detected = true;
                         result->info1.sample_offset = frame_sample;
-                        result->info1.duration_samples = result->ch1_bursts[b].duration_samples;
+                        result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
                         result->info1.is_info1d = false;
                         result->info1.info1a_raw = raw;
                         result->info1.info1a_parsed = mapped;
