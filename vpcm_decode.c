@@ -1028,12 +1028,16 @@ typedef struct {
 
 static v8_probe_cache_entry_t g_v8_probe_cache[VPCM_PREPASS_CACHE_SLOTS];
 static int g_v8_probe_cache_next = 0;
+static const v34_offline_decode_config_t g_v34_offline_decode_config = {
+    .enable_tx = false,
+};
 static bool decode_v34_pass_mode(const int16_t *samples,
                                  int total_samples,
                                  v91_law_t law,
                                  bool calling_party,
                                  float initial_signal_cutoff_db,
                                  bool allow_info_rate_infer,
+                                 const v34_offline_decode_config_t *config,
                                  bool phase2_only,
                                  decode_v34_result_t *result);
 
@@ -1043,6 +1047,7 @@ static bool decode_v34_pass(const int16_t *samples,
                             bool calling_party,
                             float info_db_cutoff,
                             bool allow_info_rate_infer,
+                            const v34_offline_decode_config_t *config,
                             decode_v34_result_t *result);
 static bool decode_v34_phase2_only_pass(const int16_t *samples,
                                         int total_samples,
@@ -1050,6 +1055,7 @@ static bool decode_v34_phase2_only_pass(const int16_t *samples,
                                         bool calling_party,
                                         float info_db_cutoff,
                                         bool allow_info_rate_infer,
+                                        const v34_offline_decode_config_t *config,
                                         decode_v34_result_t *result);
 
 static bool decode_v34_pass_bridge(void *ctx,
@@ -1061,13 +1067,15 @@ static bool decode_v34_pass_bridge(void *ctx,
                                    bool allow_info_rate_infer,
                                    decode_v34_result_t *result)
 {
-    (void) ctx;
+    const v34_offline_decode_config_t *config = (const v34_offline_decode_config_t *) ctx;
+
     return decode_v34_pass(samples,
                            total_samples,
                            law,
                            calling_party,
                            info_db_cutoff,
                            allow_info_rate_infer,
+                           config,
                            result);
 }
 
@@ -1080,21 +1088,23 @@ static bool decode_v34_phase2_only_pass_bridge(void *ctx,
                                                bool allow_info_rate_infer,
                                                decode_v34_result_t *result)
 {
-    (void) ctx;
+    const v34_offline_decode_config_t *config = (const v34_offline_decode_config_t *) ctx;
+
     return decode_v34_phase2_only_pass(samples,
                                        total_samples,
                                        law,
                                        calling_party,
                                        info_db_cutoff,
                                        allow_info_rate_infer,
+                                       config,
                                        result);
 }
 
 static v34_phase2_engine_t g_v34_phase2_engine = {
     .decode_pass = decode_v34_pass_bridge,
-    .decode_pass_ctx = NULL,
+    .decode_pass_ctx = (void *) &g_v34_offline_decode_config,
     .decode_phase2_pass = decode_v34_phase2_only_pass_bridge,
-    .decode_phase2_pass_ctx = NULL,
+    .decode_phase2_pass_ctx = (void *) &g_v34_offline_decode_config,
 };
 
 typedef struct {
@@ -7385,6 +7395,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                                  bool calling_party,
                                  float initial_signal_cutoff_db,
                                  bool allow_info_rate_infer,
+                                 const v34_offline_decode_config_t *config,
                                  bool phase2_only,
                                  decode_v34_result_t *result)
 {
@@ -7513,7 +7524,10 @@ static bool decode_v34_pass_mode(const int16_t *samples,
     result->mp_rate_a_to_c_bps = -1;
     result->mp_rate_c_to_a_bps = -1;
 
-    v34 = v34_init(NULL, 3200, 21600, calling_party, true,
+    if (!config)
+        config = &g_v34_offline_decode_config;
+
+    v34 = v34_init(NULL, 3200, 21600, calling_party, config->enable_tx,
                    v34_dummy_get_bit, NULL,
                    v34_dummy_put_bit, NULL);
     if (!v34)
@@ -7551,7 +7565,8 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             chunk = phase2_chunk;
 
         v34_rx(v34, samples + offset, chunk);
-        v34_tx(v34, tx_buf, chunk);
+        if (config->enable_tx)
+            v34_tx(v34, tx_buf, chunk);
         offset += chunk;
 
         rx_stage = v34_get_rx_stage(v34);
@@ -7940,6 +7955,22 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             && offset >= last_progress_sample + 160) {
             break;
         }
+        if (!result->phase3_seen && !result->phase4_seen && !result->training_failed) {
+            int phase2_dead_end_anchor = -1;
+            int phase2_dead_end_holdoff = phase2_only ? 4000 : 8000;
+            int phase2_dead_end_idle = phase2_only ? 2000 : 4000;
+
+            if (result->info1_bad_event_seen && !result->info1_seen) {
+                phase2_dead_end_anchor = result->info1_bad_event_sample;
+            } else if (result->info0_bad_event_seen && !result->info0_seen) {
+                phase2_dead_end_anchor = result->info0_bad_event_sample;
+            }
+            if (phase2_dead_end_anchor >= 0
+                && offset >= phase2_dead_end_anchor + phase2_dead_end_holdoff
+                && offset >= last_progress_sample + phase2_dead_end_idle) {
+                break;
+            }
+        }
         if ((result->phase4_seen || result->training_failed)
             && offset >= max_non_negative(result->phase4_sample, result->failure_sample) + 8000) {
             break;
@@ -8174,6 +8205,7 @@ static bool decode_v34_pass(const int16_t *samples,
                             bool calling_party,
                             float initial_signal_cutoff_db,
                             bool allow_info_rate_infer,
+                            const v34_offline_decode_config_t *config,
                             decode_v34_result_t *result)
 {
     return decode_v34_pass_mode(samples,
@@ -8182,6 +8214,7 @@ static bool decode_v34_pass(const int16_t *samples,
                                 calling_party,
                                 initial_signal_cutoff_db,
                                 allow_info_rate_infer,
+                                config,
                                 false,
                                 result);
 }
@@ -8192,6 +8225,7 @@ static bool decode_v34_phase2_only_pass(const int16_t *samples,
                                         bool calling_party,
                                         float info_db_cutoff,
                                         bool allow_info_rate_infer,
+                                        const v34_offline_decode_config_t *config,
                                         decode_v34_result_t *result)
 {
     return decode_v34_pass_mode(samples,
@@ -8200,6 +8234,7 @@ static bool decode_v34_phase2_only_pass(const int16_t *samples,
                                 calling_party,
                                 info_db_cutoff,
                                 allow_info_rate_infer,
+                                config,
                                 true,
                                 result);
 }

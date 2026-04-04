@@ -11,8 +11,99 @@ typedef struct {
 } v34_phase2_candidate_window_t;
 
 enum {
-    V34_PHASE2_MAX_CANDIDATE_WINDOWS = 6
+    V34_PHASE2_MAX_CANDIDATE_WINDOWS = 6,
+    V34_PHASE2_MAX_TRIES_PER_SIDE = 2
 };
+
+static void v34_phase2_insert_candidate_window(v34_phase2_candidate_window_t *windows,
+                                               int *count,
+                                               int max_windows,
+                                               const v34_phase2_candidate_window_t *candidate);
+
+static void v34_phase2_emit_candidate_region(v34_phase2_candidate_window_t *windows,
+                                             int *count,
+                                             int max_windows,
+                                             int total_samples,
+                                             int sample_rate,
+                                             int region_start,
+                                             int region_end,
+                                             int region_active_hits,
+                                             double region_peak_db,
+                                             int pad)
+{
+    enum {
+        MAX_WINDOW_MS = 7000,
+        SLICE_STEP_MS = 2500
+    };
+    int region_len;
+    int max_window_samples;
+    int slice_step_samples;
+
+    if (!windows || !count || max_windows <= 0 || sample_rate <= 0)
+        return;
+    if (region_end <= region_start)
+        return;
+
+    region_len = region_end - region_start;
+    max_window_samples = (sample_rate * MAX_WINDOW_MS) / 1000;
+    slice_step_samples = (sample_rate * SLICE_STEP_MS) / 1000;
+    if (max_window_samples <= 0)
+        max_window_samples = region_len;
+    if (slice_step_samples <= 0)
+        slice_step_samples = max_window_samples;
+
+    if (region_len <= max_window_samples) {
+        v34_phase2_candidate_window_t candidate;
+
+        candidate.start_sample = region_start - pad;
+        candidate.end_sample = region_end + pad;
+        if (candidate.start_sample < 0)
+            candidate.start_sample = 0;
+        if (candidate.end_sample > total_samples)
+            candidate.end_sample = total_samples;
+        candidate.active_hits = region_active_hits;
+        candidate.peak_db = region_peak_db;
+        if (candidate.end_sample > candidate.start_sample)
+            v34_phase2_insert_candidate_window(windows, count, max_windows, &candidate);
+        return;
+    }
+
+    for (int slice_start = region_start;
+         slice_start < region_end && *count < max_windows;
+         slice_start += slice_step_samples) {
+        v34_phase2_candidate_window_t candidate;
+        int slice_end = slice_start + max_window_samples;
+        int covered_len;
+        int scaled_hits;
+
+        if (slice_end > region_end)
+            slice_end = region_end;
+        if (slice_end <= slice_start)
+            break;
+
+        covered_len = slice_end - slice_start;
+        scaled_hits = 1;
+        if (region_len > 0 && region_active_hits > 0) {
+            scaled_hits = (region_active_hits * covered_len) / region_len;
+            if (scaled_hits <= 0)
+                scaled_hits = 1;
+        }
+
+        candidate.start_sample = slice_start - pad;
+        candidate.end_sample = slice_end + pad;
+        if (candidate.start_sample < 0)
+            candidate.start_sample = 0;
+        if (candidate.end_sample > total_samples)
+            candidate.end_sample = total_samples;
+        candidate.active_hits = scaled_hits;
+        candidate.peak_db = region_peak_db;
+        if (candidate.end_sample > candidate.start_sample)
+            v34_phase2_insert_candidate_window(windows, count, max_windows, &candidate);
+
+        if (slice_end >= region_end)
+            break;
+    }
+}
 
 static double v34_phase2_rms_energy_db(const int16_t *samples, int len)
 {
@@ -33,6 +124,7 @@ static int v34_phase2_candidate_rank(const v34_phase2_candidate_window_t *window
 {
     int duration_samples;
     int peak_term;
+    int early_bonus;
 
     if (!window)
         return INT_MIN;
@@ -40,7 +132,8 @@ static int v34_phase2_candidate_rank(const v34_phase2_candidate_window_t *window
     if (duration_samples < 0)
         duration_samples = 0;
     peak_term = (int) ((window->peak_db + 100.0) * 10.0);
-    return duration_samples + (window->active_hits * 400) + peak_term;
+    early_bonus = 160000 - (window->start_sample / 2);
+    return (window->active_hits * 1200) + (peak_term * 8) + early_bonus - (duration_samples / 4);
 }
 
 static void v34_phase2_insert_candidate_window(v34_phase2_candidate_window_t *windows,
@@ -165,18 +258,16 @@ static int v34_phase2_find_candidate_windows(const int16_t *samples,
             continue;
 
         if (region_end > region_start) {
-            v34_phase2_candidate_window_t candidate;
-
-            candidate.start_sample = region_start - pad;
-            candidate.end_sample = region_end + pad;
-            if (candidate.start_sample < 0)
-                candidate.start_sample = 0;
-            if (candidate.end_sample > total_samples)
-                candidate.end_sample = total_samples;
-            candidate.active_hits = region_active_hits;
-            candidate.peak_db = region_peak_db;
-            if (candidate.end_sample > candidate.start_sample)
-                v34_phase2_insert_candidate_window(windows, &found, max_windows, &candidate);
+            v34_phase2_emit_candidate_region(windows,
+                                             &found,
+                                             max_windows,
+                                             total_samples,
+                                             sample_rate,
+                                             region_start,
+                                             region_end,
+                                             region_active_hits,
+                                             region_peak_db,
+                                             pad);
         }
 
         in_region = false;
@@ -335,6 +426,19 @@ static int v34_phase2_result_quality(const decode_v34_result_t *result, bool hav
     if (result->info0_sample >= 0)
         score -= result->info0_sample / 4000;
     return score;
+}
+
+static bool v34_phase2_result_is_sufficient(const decode_v34_result_t *result, bool have_result)
+{
+    if (!have_result || !result)
+        return false;
+    if (result->phase3_seen || result->phase4_seen || result->training_failed)
+        return true;
+    if (result->info0_seen || result->info1_seen)
+        return true;
+    if (result->info0_bad_event_seen || result->info1_bad_event_seen)
+        return true;
+    return false;
 }
 
 static bool v34_phase2_decode_candidate_with_pass(v34_phase2_pass_fn_t pass_fn,
@@ -555,6 +659,8 @@ void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
     int window_count;
     int answerer_windows_tried = 0;
     int caller_windows_tried = 0;
+    bool answerer_done = false;
+    bool caller_done = false;
 
     if (have_answerer)
         *have_answerer = false;
@@ -580,35 +686,38 @@ void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
     }
 
     for (int i = 0; i < window_count; i++) {
-        if (v34_phase2_try_candidate_side(engine,
-                                          samples,
-                                          total_samples,
-                                          &windows[i],
-                                          i,
-                                          law,
-                                          false,
-                                          allow_info_rate_infer,
-                                          answerer,
-                                          have_answerer)) {
-            answerer_windows_tried++;
+        if (!answerer_done && answerer_windows_tried < V34_PHASE2_MAX_TRIES_PER_SIDE) {
+            if (v34_phase2_try_candidate_side(engine,
+                                              samples,
+                                              total_samples,
+                                              &windows[i],
+                                              i,
+                                              law,
+                                              false,
+                                              allow_info_rate_infer,
+                                              answerer,
+                                              have_answerer)) {
+                answerer_windows_tried++;
+                answerer_done = v34_phase2_result_is_sufficient(answerer, *have_answerer);
+            }
         }
-        if (v34_phase2_try_candidate_side(engine,
-                                          samples,
-                                          total_samples,
-                                          &windows[i],
-                                          i,
-                                          law,
-                                          true,
-                                          allow_info_rate_infer,
-                                          caller,
-                                          have_caller)) {
-            caller_windows_tried++;
+        if (!caller_done && caller_windows_tried < V34_PHASE2_MAX_TRIES_PER_SIDE) {
+            if (v34_phase2_try_candidate_side(engine,
+                                              samples,
+                                              total_samples,
+                                              &windows[i],
+                                              i,
+                                              law,
+                                              true,
+                                              allow_info_rate_infer,
+                                              caller,
+                                              have_caller)) {
+                caller_windows_tried++;
+                caller_done = v34_phase2_result_is_sufficient(caller, *have_caller);
+            }
         }
 
-        if (*have_answerer && *have_caller
-            && answerer->info0_seen && answerer->info1_seen
-            && caller->info0_seen && caller->info1_seen
-            && (answerer->phase3_seen || caller->phase3_seen)) {
+        if (answerer_done && caller_done) {
             break;
         }
     }

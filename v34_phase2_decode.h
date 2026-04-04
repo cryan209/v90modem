@@ -153,6 +153,10 @@ typedef bool (*v34_phase2_pass_fn_t)(void *ctx,
                                      decode_v34_result_t *result);
 
 typedef struct {
+    bool enable_tx;
+} v34_offline_decode_config_t;
+
+typedef struct {
     bool valid;
     const int16_t *samples;
     int total_samples;
