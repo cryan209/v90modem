@@ -1895,84 +1895,136 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                                                v34_info_frame_t *frame_out,
                                                int *frame_sample_out)
 {
-    double lower_bias = -1e300;
-    double upper_bias = 1e300;
-    double bias;
-    int sync_start;
-    v34_info_collector_t collector;
-    uint8_t replay[V34_INFO_MAX_BUF_BYTES];
+    double best_sync_score = -1e300;
+    double best_bias = 0.0;
+    int best_sync_start = -1;
+    int coarse_step;
+    int fine_step;
 
     if (!samples || !frame_out || target_bits <= 0 || symbol_samples <= 0.0)
         return false;
 
-    sync_start = start + phase_offset + candidate_sample_offset
-                 - (int) floor((double) (target_bits - 1 + V34_INFO_SYNC_BITS) * symbol_samples + 0.5);
-    if (sync_start < 0)
+    coarse_step = (int) floor(symbol_samples / 4.0 + 0.5);
+    fine_step = 1;
+    if (coarse_step < 1)
+        coarse_step = 1;
+
+    for (int pass = 0; pass < 2; pass++) {
+        int delta_min;
+        int delta_max;
+        int delta_step;
+
+        if (pass == 0) {
+            delta_min = -2 * coarse_step;
+            delta_max = 2 * coarse_step;
+            delta_step = coarse_step;
+        } else {
+            delta_min = -coarse_step;
+            delta_max = coarse_step;
+            delta_step = fine_step;
+        }
+
+        for (int delta = delta_min; delta <= delta_max; delta += delta_step) {
+            double lower_bias = -1e300;
+            double upper_bias = 1e300;
+            double sync_score = 0.0;
+            int sync_start;
+            bool valid = true;
+
+            if (pass == 0) {
+                sync_start = start + phase_offset + candidate_sample_offset
+                             - (int) floor((double) (target_bits - 1 + V34_INFO_SYNC_BITS) * symbol_samples + 0.5)
+                             + delta;
+            } else {
+                if (best_sync_start < 0)
+                    continue;
+                sync_start = best_sync_start + delta;
+            }
+            if (sync_start < 0)
+                continue;
+
+            for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
+                bool ok = false;
+                double decision;
+                int expected_bit;
+                double signed_margin;
+                double threshold;
+
+                decision = p12_v21_symbol_decision_value(samples,
+                                                         total_samples,
+                                                         sample_rate,
+                                                         channel,
+                                                         sync_start + (int) floor((double) i * symbol_samples + 0.5),
+                                                         symbol_samples,
+                                                         invert,
+                                                         &ok);
+                if (!ok) {
+                    valid = false;
+                    break;
+                }
+
+                expected_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
+                signed_margin = expected_bit ? decision : -decision;
+                sync_score += signed_margin;
+                threshold = -decision;
+                if (expected_bit)
+                    lower_bias = fmax(lower_bias, threshold);
+                else
+                    upper_bias = fmin(upper_bias, threshold);
+            }
+
+            if (!valid)
+                continue;
+            if (!(lower_bias < upper_bias)) {
+                if (lower_bias > 1e299 || upper_bias < -1e299)
+                    continue;
+            }
+            if (sync_score > best_sync_score) {
+                best_sync_score = sync_score;
+                best_sync_start = sync_start;
+                best_bias = 0.5 * (lower_bias + upper_bias);
+            }
+        }
+    }
+
+    if (best_sync_start < 0)
         return false;
 
-    for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
-        bool ok = false;
-        double decision;
-        int expected_bit;
-        double threshold;
+    {
+        v34_info_collector_t collector;
+        uint8_t replay[V34_INFO_MAX_BUF_BYTES];
 
-        decision = p12_v21_symbol_decision_value(samples,
-                                                 total_samples,
-                                                 sample_rate,
-                                                 channel,
-                                                 sync_start + (int) floor((double) i * symbol_samples + 0.5),
-                                                 symbol_samples,
-                                                 invert,
-                                                 &ok);
-        if (!ok)
-            return false;
+        v34_info_collector_init(&collector, target_bits);
+        memset(replay, 0, sizeof(replay));
+        for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
+            int sync_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
 
-        expected_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
-        threshold = -decision;
-        if (expected_bit)
-            lower_bias = fmax(lower_bias, threshold);
-        else
-            upper_bias = fmin(upper_bias, threshold);
-    }
+            (void) v34_info_collector_push_bit(&collector, sync_bit, replay, (int) sizeof(replay));
+        }
 
-    if (!(lower_bias < upper_bias)) {
-        if (lower_bias > 1e299 || upper_bias < -1e299)
-            return false;
-        bias = 0.5 * (lower_bias + upper_bias);
-    } else {
-        bias = 0.5 * (lower_bias + upper_bias);
-    }
+        for (int i = 0; i < target_bits; i++) {
+            bool ok = false;
+            double decision;
+            int bit;
 
-    v34_info_collector_init(&collector, target_bits);
-    memset(replay, 0, sizeof(replay));
-    for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
-        int sync_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
-
-        (void) v34_info_collector_push_bit(&collector, sync_bit, replay, (int) sizeof(replay));
-    }
-
-    for (int i = 0; i < target_bits; i++) {
-        bool ok = false;
-        double decision;
-        int bit;
-
-        decision = p12_v21_symbol_decision_value(samples,
-                                                 total_samples,
-                                                 sample_rate,
-                                                 channel,
-                                                 sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5),
-                                                 symbol_samples,
-                                                 invert,
-                                                 &ok);
-        if (!ok)
-            return false;
-        bit = (decision + bias >= 0.0) ? 1 : 0;
-        if (v34_info_collector_push_bit(&collector, bit, replay, (int) sizeof(replay))) {
-            if (!v34_info_frame_from_collector(frame_out, &collector))
+            decision = p12_v21_symbol_decision_value(samples,
+                                                     total_samples,
+                                                     sample_rate,
+                                                     channel,
+                                                     best_sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5),
+                                                     symbol_samples,
+                                                     invert,
+                                                     &ok);
+            if (!ok)
                 return false;
-            if (frame_sample_out)
-                *frame_sample_out = sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
-            return true;
+            bit = (decision + best_bias >= 0.0) ? 1 : 0;
+            if (v34_info_collector_push_bit(&collector, bit, replay, (int) sizeof(replay))) {
+                if (!v34_info_frame_from_collector(frame_out, &collector))
+                    return false;
+                if (frame_sample_out)
+                    *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
+                return true;
+            }
         }
     }
 
