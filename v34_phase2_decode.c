@@ -337,24 +337,24 @@ static int v34_phase2_result_quality(const decode_v34_result_t *result, bool hav
     return score;
 }
 
-static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
-                                          const int16_t *samples,
-                                          int total_samples,
-                                          const v34_phase2_candidate_window_t *window,
-                                          int candidate_index,
-                                          v91_law_t law,
-                                          bool calling_party,
-                                          bool allow_info_rate_infer,
-                                          decode_v34_result_t *best_result,
-                                          bool *have_best)
+static bool v34_phase2_decode_candidate_with_pass(v34_phase2_pass_fn_t pass_fn,
+                                                  void *pass_ctx,
+                                                  const int16_t *samples,
+                                                  int total_samples,
+                                                  const v34_phase2_candidate_window_t *window,
+                                                  int candidate_index,
+                                                  v91_law_t law,
+                                                  bool calling_party,
+                                                  bool allow_info_rate_infer,
+                                                  decode_v34_result_t *result_out)
 {
     static const float rescue_cutoffs[] = { -60.0f, -68.0f };
     decode_v34_result_t candidate;
-    bool have_candidate;
+    bool have_candidate = false;
     int decode_start;
     int decode_end;
 
-    if (!engine || !engine->decode_pass || !samples || !window || !best_result || !have_best)
+    if (!pass_fn || !samples || !window || !result_out)
         return false;
     decode_start = window->start_sample;
     decode_end = window->end_sample;
@@ -365,14 +365,14 @@ static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
     if (decode_end <= decode_start)
         return false;
 
-    have_candidate = engine->decode_pass(engine->decode_pass_ctx,
-                                         samples + decode_start,
-                                         decode_end - decode_start,
-                                         law,
-                                         calling_party,
-                                         -52.0f,
-                                         allow_info_rate_infer,
-                                         &candidate);
+    have_candidate = pass_fn(pass_ctx,
+                             samples + decode_start,
+                             decode_end - decode_start,
+                             law,
+                             calling_party,
+                             -52.0f,
+                             allow_info_rate_infer,
+                             &candidate);
     if (!have_candidate)
         return false;
     v34_phase2_offset_result_samples(&candidate, decode_start);
@@ -381,14 +381,14 @@ static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
         for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
             decode_v34_result_t rescue;
 
-            if (!engine->decode_pass(engine->decode_pass_ctx,
-                                     samples + decode_start,
-                                     decode_end - decode_start,
-                                     law,
-                                     calling_party,
-                                     rescue_cutoffs[i],
-                                     allow_info_rate_infer,
-                                     &rescue)) {
+            if (!pass_fn(pass_ctx,
+                         samples + decode_start,
+                         decode_end - decode_start,
+                         law,
+                         calling_party,
+                         rescue_cutoffs[i],
+                         allow_info_rate_infer,
+                         &rescue)) {
                 continue;
             }
             v34_phase2_offset_result_samples(&rescue, decode_start);
@@ -407,13 +407,94 @@ static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
     candidate.phase2_selected_window_end_sample = decode_end;
     candidate.phase2_selected_window_active_hits = window->active_hits;
     candidate.phase2_selected_window_peak_db_tenths = (int) (window->peak_db * 10.0);
+    *result_out = candidate;
+    return true;
+}
 
+static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
+                                          const int16_t *samples,
+                                          int total_samples,
+                                          const v34_phase2_candidate_window_t *window,
+                                          int candidate_index,
+                                          v91_law_t law,
+                                          bool calling_party,
+                                          bool allow_info_rate_infer,
+                                          decode_v34_result_t *best_result,
+                                          bool *have_best)
+{
+    decode_v34_result_t candidate;
+    v34_phase2_pass_fn_t pass_fn;
+    void *pass_ctx;
+
+    if (!engine || !samples || !window || !best_result || !have_best)
+        return false;
+    pass_fn = engine->decode_phase2_pass ? engine->decode_phase2_pass : engine->decode_pass;
+    pass_ctx = engine->decode_phase2_pass ? engine->decode_phase2_pass_ctx : engine->decode_pass_ctx;
+    if (!v34_phase2_decode_candidate_with_pass(pass_fn,
+                                               pass_ctx,
+                                               samples,
+                                               total_samples,
+                                               window,
+                                               candidate_index,
+                                               law,
+                                               calling_party,
+                                               allow_info_rate_infer,
+                                               &candidate)) {
+        return false;
+    }
     if (!*have_best
         || v34_phase2_result_quality(&candidate, true) > v34_phase2_result_quality(best_result, true)) {
         *best_result = candidate;
         *have_best = true;
     }
     return true;
+}
+
+static void v34_phase2_finalize_selected_side(v34_phase2_engine_t *engine,
+                                              const int16_t *samples,
+                                              int total_samples,
+                                              v91_law_t law,
+                                              bool calling_party,
+                                              bool allow_info_rate_infer,
+                                              decode_v34_result_t *result,
+                                              bool *have_result)
+{
+    decode_v34_result_t full_result;
+    v34_phase2_candidate_window_t window;
+
+    if (!engine || !engine->decode_pass || !result || !have_result || !*have_result)
+        return;
+    if (!engine->decode_phase2_pass
+        || (engine->decode_phase2_pass == engine->decode_pass
+            && engine->decode_phase2_pass_ctx == engine->decode_pass_ctx)) {
+        return;
+    }
+
+    window.start_sample = result->phase2_selected_window_start_sample;
+    window.end_sample = result->phase2_selected_window_end_sample;
+    window.active_hits = result->phase2_selected_window_active_hits;
+    window.peak_db = (double) result->phase2_selected_window_peak_db_tenths / 10.0;
+    if (!v34_phase2_decode_candidate_with_pass(engine->decode_pass,
+                                               engine->decode_pass_ctx,
+                                               samples,
+                                               total_samples,
+                                               &window,
+                                               result->phase2_selected_window_index,
+                                               law,
+                                               calling_party,
+                                               allow_info_rate_infer,
+                                               &full_result)) {
+        return;
+    }
+
+    if (!full_result.info0_seen && result->info0_seen)
+        merge_info0_from_rescue(&full_result, result);
+    if (!full_result.info1_seen && result->info1_seen)
+        merge_info1_from_rescue(&full_result, result);
+    merge_info_event_diagnostics_from_rescue(&full_result, result);
+    full_result.phase2_candidate_windows_seen = result->phase2_candidate_windows_seen;
+    full_result.phase2_candidate_windows_tried = result->phase2_candidate_windows_tried;
+    *result = full_result;
 }
 
 void v34_phase2_engine_init(v34_phase2_engine_t *engine,
@@ -426,6 +507,8 @@ void v34_phase2_engine_init(v34_phase2_engine_t *engine,
     memset(engine, 0, sizeof(*engine));
     engine->decode_pass = decode_pass;
     engine->decode_pass_ctx = decode_pass_ctx;
+    engine->decode_phase2_pass = decode_pass;
+    engine->decode_phase2_pass_ctx = decode_pass_ctx;
 }
 
 int v34_phase2_result_spec_score(const decode_v34_result_t *result)
@@ -533,10 +616,26 @@ void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
     if (*have_answerer) {
         answerer->phase2_candidate_windows_seen = window_count;
         answerer->phase2_candidate_windows_tried = answerer_windows_tried;
+        v34_phase2_finalize_selected_side(engine,
+                                          samples,
+                                          total_samples,
+                                          law,
+                                          false,
+                                          allow_info_rate_infer,
+                                          answerer,
+                                          have_answerer);
     }
     if (*have_caller) {
         caller->phase2_candidate_windows_seen = window_count;
         caller->phase2_candidate_windows_tried = caller_windows_tried;
+        v34_phase2_finalize_selected_side(engine,
+                                          samples,
+                                          total_samples,
+                                          law,
+                                          true,
+                                          allow_info_rate_infer,
+                                          caller,
+                                          have_caller);
     }
 }
 

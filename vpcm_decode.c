@@ -1018,6 +1018,15 @@ typedef struct {
 
 static v8_probe_cache_entry_t g_v8_probe_cache[VPCM_PREPASS_CACHE_SLOTS];
 static int g_v8_probe_cache_next = 0;
+static bool decode_v34_pass_mode(const int16_t *samples,
+                                 int total_samples,
+                                 v91_law_t law,
+                                 bool calling_party,
+                                 float initial_signal_cutoff_db,
+                                 bool allow_info_rate_infer,
+                                 bool phase2_only,
+                                 decode_v34_result_t *result);
+
 static bool decode_v34_pass(const int16_t *samples,
                             int total_samples,
                             v91_law_t law,
@@ -1025,6 +1034,13 @@ static bool decode_v34_pass(const int16_t *samples,
                             float info_db_cutoff,
                             bool allow_info_rate_infer,
                             decode_v34_result_t *result);
+static bool decode_v34_phase2_only_pass(const int16_t *samples,
+                                        int total_samples,
+                                        v91_law_t law,
+                                        bool calling_party,
+                                        float info_db_cutoff,
+                                        bool allow_info_rate_infer,
+                                        decode_v34_result_t *result);
 
 static bool decode_v34_pass_bridge(void *ctx,
                                    const int16_t *samples,
@@ -1045,9 +1061,30 @@ static bool decode_v34_pass_bridge(void *ctx,
                            result);
 }
 
+static bool decode_v34_phase2_only_pass_bridge(void *ctx,
+                                               const int16_t *samples,
+                                               int total_samples,
+                                               v91_law_t law,
+                                               bool calling_party,
+                                               float info_db_cutoff,
+                                               bool allow_info_rate_infer,
+                                               decode_v34_result_t *result)
+{
+    (void) ctx;
+    return decode_v34_phase2_only_pass(samples,
+                                       total_samples,
+                                       law,
+                                       calling_party,
+                                       info_db_cutoff,
+                                       allow_info_rate_infer,
+                                       result);
+}
+
 static v34_phase2_engine_t g_v34_phase2_engine = {
     .decode_pass = decode_v34_pass_bridge,
     .decode_pass_ctx = NULL,
+    .decode_phase2_pass = decode_v34_phase2_only_pass_bridge,
+    .decode_phase2_pass_ctx = NULL,
 };
 
 typedef struct {
@@ -7332,13 +7369,14 @@ fallback_only:
  * have been moved to v8bis_decode.c / v8bis_decode.h */
 
 
-static bool decode_v34_pass(const int16_t *samples,
-                            int total_samples,
-                            v91_law_t law,
-                            bool calling_party,
-                            float initial_signal_cutoff_db,
-                            bool allow_info_rate_infer,
-                            decode_v34_result_t *result)
+static bool decode_v34_pass_mode(const int16_t *samples,
+                                 int total_samples,
+                                 v91_law_t law,
+                                 bool calling_party,
+                                 float initial_signal_cutoff_db,
+                                 bool allow_info_rate_infer,
+                                 bool phase2_only,
+                                 decode_v34_result_t *result)
 {
     v34_state_t *v34;
     v34_v90_info0a_t raw_info0a;
@@ -7848,6 +7886,12 @@ static bool decode_v34_pass(const int16_t *samples,
             result->failure_sample = offset;
             last_progress_sample = offset;
         }
+        if (phase2_only
+            && result->info0_seen
+            && result->info1_seen
+            && offset >= last_progress_sample + 160) {
+            break;
+        }
         if ((result->phase4_seen || result->training_failed)
             && offset >= max_non_negative(result->phase4_sample, result->failure_sample) + 8000) {
             break;
@@ -8069,6 +8113,42 @@ static bool decode_v34_pass(const int16_t *samples,
 
     v34_free(v34);
     return true;
+}
+
+static bool decode_v34_pass(const int16_t *samples,
+                            int total_samples,
+                            v91_law_t law,
+                            bool calling_party,
+                            float initial_signal_cutoff_db,
+                            bool allow_info_rate_infer,
+                            decode_v34_result_t *result)
+{
+    return decode_v34_pass_mode(samples,
+                                total_samples,
+                                law,
+                                calling_party,
+                                initial_signal_cutoff_db,
+                                allow_info_rate_infer,
+                                false,
+                                result);
+}
+
+static bool decode_v34_phase2_only_pass(const int16_t *samples,
+                                        int total_samples,
+                                        v91_law_t law,
+                                        bool calling_party,
+                                        float info_db_cutoff,
+                                        bool allow_info_rate_infer,
+                                        decode_v34_result_t *result)
+{
+    return decode_v34_pass_mode(samples,
+                                total_samples,
+                                law,
+                                calling_party,
+                                info_db_cutoff,
+                                allow_info_rate_infer,
+                                true,
+                                result);
 }
 
 /* ------------------------------------------------------------------ */

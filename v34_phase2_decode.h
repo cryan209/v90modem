@@ -167,6 +167,8 @@ typedef struct {
 typedef struct {
     v34_phase2_pass_fn_t decode_pass;
     void *decode_pass_ctx;
+    v34_phase2_pass_fn_t decode_phase2_pass;
+    void *decode_phase2_pass_ctx;
     v34_phase2_cache_entry_t cache[V34_PHASE2_CACHE_SLOTS];
     int cache_next;
 } v34_phase2_engine_t;
