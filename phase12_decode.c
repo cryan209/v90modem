@@ -2253,6 +2253,74 @@ static void detect_phase2_info(const int16_t *samples,
                 fprintf(stderr, "[p12] appended INFO0 retry window from CJ timing hint\n");
         }
     }
+    /* Also try the retry bank if all detected CH2 bursts fall after the
+     * expected INFO0 window.  INFO0 must precede Tone A/B, so any burst
+     * that starts at or after the tone start cannot be the INFO0 frame. */
+    {
+        int tone_start = result->tone_a.detected ? result->tone_a.start_sample
+                       : result->tone_b.detected ? result->tone_b.start_sample : -1;
+        bool bursts_before_tone = false;
+
+        if (tone_start >= 0) {
+            for (int i = 0; i < phase2_ch2_burst_count; i++) {
+                if (phase2_ch2_bursts[i].start_sample < tone_start) {
+                    bursts_before_tone = true;
+                    break;
+                }
+            }
+        } else {
+            /* No tone detected — existing burst list is our best guess. */
+            bursts_before_tone = (phase2_ch2_burst_count > 0);
+        }
+
+        if (!result->info0.detected && !bursts_before_tone) {
+            int before_count = phase2_ch2_burst_count;
+
+            if (handoff_info0_hint.valid) {
+                p12_append_info0_retry_bank(phase2_ch2_bursts,
+                                            &phase2_ch2_burst_count,
+                                            P12_MAX_FSK_BURSTS,
+                                            &handoff_info0_hint,
+                                            tone_start,
+                                            search_start,
+                                            limit,
+                                            sample_rate);
+            } else if (tone_start >= 0 && phase2_ch2_burst_count < P12_MAX_FSK_BURSTS) {
+                /* Role unknown (no CM/JM decoded) but Tone A/B is present.
+                 * In V.34 Phase 2 INFO0 always precedes Tone A, so synthesize
+                 * a search window anchored directly to the tone timing. */
+                int guard     = (sample_rate * P12_INFO0_PRE_TONE_GUARD_MS) / 1000;
+                int max_span  = (sample_rate * P12_INFO0_PRE_TONE_MAX_MS)   / 1000;
+                int win_end   = tone_start - guard;
+                int win_start = win_end - max_span;
+
+                if (win_start < search_start)
+                    win_start = search_start;
+                if (win_end > win_start) {
+                    p12_fsk_burst_t *b = &phase2_ch2_bursts[phase2_ch2_burst_count];
+                    b->seen             = true;
+                    b->start_sample     = win_start;
+                    b->duration_samples = win_end - win_start;
+                    b->peak_energy      = 0.0;
+                    phase2_ch2_burst_count++;
+                }
+            }
+            if (p12_debug_enabled() && phase2_ch2_burst_count > before_count) {
+                fprintf(stderr,
+                        "[p12] appended INFO0 tone-anchor retry bank role=%s windows=%d\n",
+                        phase12_phase2_role_name(phase2_role),
+                        phase2_ch2_burst_count - before_count);
+                for (int i = before_count; i < phase2_ch2_burst_count; i++) {
+                    fprintf(stderr,
+                            "[p12]   INFO0 tone-retry #%d window=%.1f-%.1fms\n",
+                            i - before_count + 1,
+                            (double) phase2_ch2_bursts[i].start_sample * 1000.0 / (double) sample_rate,
+                            (double) (phase2_ch2_bursts[i].start_sample + phase2_ch2_bursts[i].duration_samples) * 1000.0 / (double) sample_rate);
+                }
+            }
+        }
+    }
+
     if (!result->info0.detected
         && phase2_ch2_burst_count == 0
         && handoff_info0_hint.valid) {
