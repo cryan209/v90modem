@@ -11884,11 +11884,90 @@ typedef struct {
     bool do_v90;
     bool do_p3;
     bool do_energy;
+    bool do_tone_probe;
     bool do_stats;
     bool do_call_log;
     bool do_phase12;
     bool raw_output_enabled;
+    double tone_probe_start_ms;
+    double tone_probe_duration_ms;
 } decode_options_t;
+
+static void print_tone_probe(const char *label,
+                             const int16_t *samples,
+                             int total_samples,
+                             int sample_rate,
+                             double start_ms,
+                             double duration_ms)
+{
+    static const double freqs[] = { 1200.0, 1800.0, 2100.0, 2400.0 };
+    int start_sample;
+    int window_samples;
+    int end_sample;
+    double energy;
+    double rms_db;
+    double ratios[sizeof(freqs) / sizeof(freqs[0])];
+
+    if (!label || !samples || total_samples <= 0 || sample_rate <= 0)
+        return;
+
+    if (start_ms < 0.0)
+        start_ms = 0.0;
+    if (duration_ms <= 0.0)
+        return;
+
+    start_sample = (int) llrint(start_ms * (double) sample_rate / 1000.0);
+    window_samples = (int) llrint(duration_ms * (double) sample_rate / 1000.0);
+    if (window_samples <= 0)
+        return;
+    if (start_sample >= total_samples)
+        return;
+
+    end_sample = start_sample + window_samples;
+    if (end_sample > total_samples)
+        end_sample = total_samples;
+    window_samples = end_sample - start_sample;
+    if (window_samples <= 0)
+        return;
+
+    energy = window_energy(samples + start_sample, window_samples);
+    rms_db = rms_energy_db(samples + start_sample, window_samples);
+
+    printf("\n=== Tone Probe (%s) ===\n", label);
+    printf("  Window: %.1f-%.1f ms (%.1f ms, %d samples)\n",
+           sample_to_ms(start_sample, sample_rate),
+           sample_to_ms(end_sample, sample_rate),
+           sample_to_ms(window_samples, sample_rate),
+           window_samples);
+    printf("  RMS: %.1f dBFS\n", rms_db);
+
+    if (energy <= 0.0) {
+        printf("  No signal energy in probe window.\n");
+        return;
+    }
+
+    for (size_t i = 0; i < sizeof(freqs) / sizeof(freqs[0]); i++) {
+        ratios[i] = tone_energy_ratio(samples + start_sample,
+                                      window_samples,
+                                      sample_rate,
+                                      freqs[i],
+                                      energy);
+        printf("  %4.0f Hz: ratio=%.6f\n", freqs[i], ratios[i]);
+    }
+
+    if (ratios[0] > 0.0 && ratios[3] > 0.0) {
+        printf("  2400 vs 1200: %.2f dB\n",
+               10.0 * log10(ratios[3] / ratios[0]));
+    }
+    if (ratios[1] > 0.0 && ratios[3] > 0.0) {
+        printf("  1800 vs 2400: %.2f dB\n",
+               10.0 * log10(ratios[1] / ratios[3]));
+    }
+    if (ratios[1] > 0.0 && ratios[0] > 0.0) {
+        printf("  1800 vs 1200: %.2f dB\n",
+               10.0 * log10(ratios[1] / ratios[0]));
+    }
+}
 
 static void run_decode_suite(const char *label,
                              const int16_t *linear_samples,
@@ -11937,6 +12016,15 @@ static void run_decode_suite(const char *label,
 
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
+
+    if (opts->do_tone_probe) {
+        print_tone_probe(label,
+                         linear_samples,
+                         total_samples,
+                         sample_rate,
+                         opts->tone_probe_start_ms,
+                         opts->tone_probe_duration_ms);
+    }
 
     if (opts->do_phase12 || opts->do_v34 || opts->do_v90 || opts->do_v8) {
         have_phase12 = phase12_decode(linear_samples, total_samples, sample_rate, 0, &p12);
@@ -12245,12 +12333,15 @@ int main(int argc, char **argv)
     bool do_v91 = false;
     bool do_v90 = false;
     bool do_energy = false;
+    bool do_tone_probe = false;
     bool do_stats = false;
     bool do_call_log = false;
     bool do_all = false;
     bool do_visualize_html = false;
     bool do_p3 = false;
     bool do_phase12 = false;
+    double tone_probe_start_ms = 0.0;
+    double tone_probe_duration_ms = 0.0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--law") == 0 && i + 1 < argc) {
@@ -12290,6 +12381,19 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--energy") == 0) {
             do_energy = true;
             explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--tone-probe") == 0 && i + 2 < argc) {
+            char *end1 = NULL;
+            char *end2 = NULL;
+
+            tone_probe_start_ms = strtod(argv[++i], &end1);
+            tone_probe_duration_ms = strtod(argv[++i], &end2);
+            if (!end1 || *end1 != '\0' || !end2 || *end2 != '\0'
+                || tone_probe_start_ms < 0.0 || tone_probe_duration_ms <= 0.0) {
+                fprintf(stderr, "Invalid --tone-probe arguments. Use: --tone-probe <start_ms> <duration_ms>\n");
+                return 1;
+            }
+            do_tone_probe = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--stats") == 0) {
             do_stats = true;
             explicit_decode_output = true;
@@ -12319,6 +12423,7 @@ int main(int argc, char **argv)
                    "  --p3               Lightweight Phase 3 demodulator scan\n"
                    "  --phase12          Standalone Phase 1/2 decoder (no spandsp)\n"
                    "  --energy           Print RMS energy profile\n"
+                   "  --tone-probe a b   Print tone ratios in window a..a+b ms\n"
                    "  --stats            Print codeword histogram/statistics\n"
                    "  --call-log         Print a best-effort chronological call log\n"
                    "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
@@ -12340,7 +12445,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_stats && !do_call_log && !do_visualize_html && !do_phase12)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_tone_probe && !do_stats && !do_call_log && !do_visualize_html && !do_phase12)
         do_all = true;
 
     if (do_all) {
@@ -12532,10 +12637,13 @@ int main(int argc, char **argv)
         opts.do_v90 = do_v90;
         opts.do_p3 = do_p3;
         opts.do_energy = do_energy;
+        opts.do_tone_probe = do_tone_probe;
         opts.do_stats = do_stats;
         opts.do_call_log = do_call_log;
         opts.do_phase12 = do_phase12;
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
+        opts.tone_probe_start_ms = tone_probe_start_ms;
+        opts.tone_probe_duration_ms = tone_probe_duration_ms;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
             if (opts.raw_output_enabled && opts.do_v8) {

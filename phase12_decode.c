@@ -94,6 +94,11 @@ enum {
 };
 
 enum {
+    P12_INFO0_SUBWINDOW_MS = 90,
+    P12_INFO0_SUBWINDOW_STEP_MS = 20
+};
+
+enum {
     P12_PHASE2_SIGNAL_MIN_MS = 40
 };
 
@@ -111,6 +116,10 @@ enum {
     P12_CALL_INIT_MAX_MS = 10000
 };
 
+enum {
+    P12_ANSAM_END_GRACE_MS = 30
+};
+
 /* Tone detection thresholds */
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
@@ -122,6 +131,21 @@ static bool p12_debug_enabled(void)
     if (g_p12_debug_enabled < 0)
         g_p12_debug_enabled = (getenv("VPCM_P12_DEBUG") != NULL) ? 1 : 0;
     return g_p12_debug_enabled != 0;
+}
+
+static int p12_answer_tone_post_hold_samples(const p12_tone_hit_t *tone,
+                                             int sample_rate)
+{
+    if (!tone || !tone->detected || sample_rate <= 0)
+        return 0;
+
+    switch (tone->type) {
+    case P12_TONE_ANSAM:
+    case P12_TONE_ANSAM_PR:
+        return (sample_rate * P12_ANSAM_END_GRACE_MS) / 1000;
+    default:
+        return 0;
+    }
 }
 
 static void p12_debug_log_bursts(const char *label,
@@ -209,6 +233,7 @@ static void p12_fill_timing_hint_from_cj(p12_timing_hint_t *hint,
                                          int sample_rate,
                                          int limit)
 {
+    int cj_end;
     int expected;
     int tol;
     int retry_len;
@@ -219,12 +244,47 @@ static void p12_fill_timing_hint_from_cj(p12_timing_hint_t *hint,
     if (!cj || !cj->detected || sample_rate <= 0)
         return;
 
-    expected = cj->sample_offset + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
+    cj_end = cj->sample_offset + cj->duration_samples;
+    expected = cj_end + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
     tol = (sample_rate * P12_CJ_TO_INFO0_TOL_MS) / 1000;
     retry_len = (sample_rate * P12_INFO_RETRY_WINDOW_MS) / 1000;
 
     hint->valid = true;
-    hint->anchor_sample = cj->sample_offset;
+    hint->anchor_sample = cj_end;
+    hint->expected_sample = expected;
+    hint->window_start_sample = expected - tol;
+    hint->window_end_sample = hint->window_start_sample + retry_len;
+    if (hint->window_start_sample < 0)
+        hint->window_start_sample = 0;
+    if (limit > 0 && hint->window_end_sample > limit)
+        hint->window_end_sample = limit;
+    if (hint->window_end_sample < hint->window_start_sample)
+        hint->window_end_sample = hint->window_start_sample;
+}
+
+static void p12_fill_timing_hint_from_jm_end(p12_timing_hint_t *hint,
+                                             const p12_cm_jm_hit_t *jm,
+                                             int sample_rate,
+                                             int limit)
+{
+    int jm_end;
+    int expected;
+    int tol;
+    int retry_len;
+
+    if (!hint)
+        return;
+    memset(hint, 0, sizeof(*hint));
+    if (!jm || !jm->detected || sample_rate <= 0 || jm->duration_samples <= 0)
+        return;
+
+    jm_end = jm->sample_offset + jm->duration_samples;
+    expected = jm_end + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
+    tol = (sample_rate * P12_CJ_TO_INFO0_TOL_MS) / 1000;
+    retry_len = (sample_rate * P12_INFO_RETRY_WINDOW_MS) / 1000;
+
+    hint->valid = true;
+    hint->anchor_sample = jm_end;
     hint->expected_sample = expected;
     hint->window_start_sample = expected - tol;
     hint->window_end_sample = hint->window_start_sample + retry_len;
@@ -692,6 +752,105 @@ static void p12_prepare_info0_decode_burst(p12_fsk_burst_t *dst,
     }
     dst->start_sample = start;
     dst->duration_samples = end - start;
+}
+
+static double p12_info0_tone_window_score(const int16_t *samples,
+                                          int total_samples,
+                                          int sample_rate,
+                                          int start_sample,
+                                          int duration_samples)
+{
+    double energy;
+    double r1200;
+    double r1800;
+    double r2100;
+    double r2400;
+    double v90_pair;
+    double score;
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || duration_samples <= 0)
+        return -1.0;
+    if (start_sample < 0 || start_sample + duration_samples > total_samples)
+        return -1.0;
+
+    energy = window_energy(samples + start_sample, duration_samples);
+    if (energy <= 0.0)
+        return -1.0;
+
+    r1200 = tone_energy_ratio(samples + start_sample, duration_samples, sample_rate, 1200.0, energy);
+    r1800 = tone_energy_ratio(samples + start_sample, duration_samples, sample_rate, 1800.0, energy);
+    r2100 = tone_energy_ratio(samples + start_sample, duration_samples, sample_rate, 2100.0, energy);
+    r2400 = tone_energy_ratio(samples + start_sample, duration_samples, sample_rate, 2400.0, energy);
+
+    /* Reward either a clean 1200 Hz side or the 2400 Hz side carrying
+       companion 1800 Hz energy, and strongly penalize lingering 2100 Hz. */
+    v90_pair = r2400 + (0.75 * r1800) + (2.0 * sqrt(r2400 * r1800));
+    score = fmax(r1200, v90_pair) - (3.0 * r2100);
+
+    /* If 2100 Hz still clearly dominates, treat the window as likely
+       ANSam/probe overlap rather than INFO-bearing phase 2. */
+    if (r2100 > (fmax(fmax(r1200, r1800), r2400) * 1.5))
+        score -= (2.0 * r2100);
+
+    return score;
+}
+
+static void p12_refine_info0_decode_burst_by_tone(p12_fsk_burst_t *burst,
+                                                  const int16_t *samples,
+                                                  int total_samples,
+                                                  int sample_rate)
+{
+    int subwindow_samples;
+    int step_samples;
+    int burst_end;
+    double best_score;
+    int best_start;
+    int best_len;
+
+    if (!burst || !burst->seen || !samples || total_samples <= 0 || sample_rate <= 0)
+        return;
+
+    subwindow_samples = (sample_rate * P12_INFO0_SUBWINDOW_MS) / 1000;
+    step_samples = (sample_rate * P12_INFO0_SUBWINDOW_STEP_MS) / 1000;
+    if (subwindow_samples <= 0 || step_samples <= 0 || burst->duration_samples <= subwindow_samples)
+        return;
+
+    burst_end = p12_burst_end_sample(burst);
+    best_score = p12_info0_tone_window_score(samples,
+                                             total_samples,
+                                             sample_rate,
+                                             burst->start_sample,
+                                             burst->duration_samples);
+    best_start = burst->start_sample;
+    best_len = burst->duration_samples;
+
+    for (int pos = burst->start_sample; pos + subwindow_samples <= burst_end; pos += step_samples) {
+        double score = p12_info0_tone_window_score(samples,
+                                                   total_samples,
+                                                   sample_rate,
+                                                   pos,
+                                                   subwindow_samples);
+
+        if (score > best_score + 1e-9) {
+            best_score = score;
+            best_start = pos;
+            best_len = subwindow_samples;
+        }
+    }
+
+    if (best_start != burst->start_sample || best_len != burst->duration_samples) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] INFO0 tone-refined window %.1f-%.1fms -> %.1f-%.1fms score=%.5f\n",
+                    (double) burst->start_sample * 1000.0 / (double) sample_rate,
+                    (double) burst_end * 1000.0 / (double) sample_rate,
+                    (double) best_start * 1000.0 / (double) sample_rate,
+                    (double) (best_start + best_len) * 1000.0 / (double) sample_rate,
+                    best_score);
+        }
+        burst->start_sample = best_start;
+        burst->duration_samples = best_len;
+    }
 }
 
 static bool p12_detect_phase2_cc_run(const int16_t *samples,
@@ -2042,12 +2201,16 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                     }
                 }
                 if (best_run >= CJ_MIN_MARK_BITS) {
-                    cj_out->detected = true;
-                    /* Approximate sample offset to where the mark run begins */
                     int samp_per_bit = sample_rate / 300;
                     int offset = start + best_start * samp_per_bit;
+                    int duration = best_run * samp_per_bit;
+
+                    cj_out->detected = true;
                     if (offset < 0) offset = 0;
+                    if (duration < samp_per_bit)
+                        duration = samp_per_bit;
                     cj_out->sample_offset = offset;
+                    cj_out->duration_samples = duration;
                 }
             }
 
@@ -3228,15 +3391,30 @@ static void detect_phase2_info(const int16_t *samples,
     memset(&alt_tone_b, 0, sizeof(alt_tone_b));
 
     if (result->answer_tone.detected)
-        search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
-    if (result->cj.detected && result->cj.sample_offset > search_start)
-        search_start = result->cj.sample_offset;
-    /* Do NOT advance search_start based on CM/JM end.  Those merged bursts can
-     * span into Phase 2 (caller keeps repeating CM after CJ) and would push
-     * the Phase 2 scan past the INFO0 frame that precedes Tone A/B. */
+        search_start = result->answer_tone.start_sample
+                     + result->answer_tone.duration_samples
+                     + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate);
+    if (result->jm.detected && result->jm.duration_samples > 0) {
+        int jm_info_start = result->jm.sample_offset
+                          + result->jm.duration_samples
+                          + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
+
+        if (jm_info_start > search_start)
+            search_start = jm_info_start;
+    } else if (result->cj.detected && result->cj.duration_samples > 0) {
+        int cj_info_start = result->cj.sample_offset
+                          + result->cj.duration_samples
+                          + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
+
+        if (cj_info_start > search_start)
+            search_start = cj_info_start;
+    }
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
-    p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
+    if (result->jm.detected && result->jm.duration_samples > 0)
+        p12_fill_timing_hint_from_jm_end(&result->info0_from_cj_hint, &result->jm, sample_rate, limit);
+    else
+        p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
     if (p12_debug_enabled()) {
         fprintf(stderr,
                 "[p12] phase2 search start=%.1fms limit=%.1fms cap=%.1fms\n",
@@ -3245,7 +3423,7 @@ static void detect_phase2_info(const int16_t *samples,
                 (double) phase2_cap * 1000.0 / (double) sample_rate);
         if (result->info0_from_cj_hint.valid) {
             fprintf(stderr,
-                    "[p12] info0-from-cj hint anchor=%.1fms expected=%.1fms window=%.1f-%.1fms\n",
+                    "[p12] info0 timing hint anchor=%.1fms expected=%.1fms window=%.1f-%.1fms\n",
                     (double) result->info0_from_cj_hint.anchor_sample * 1000.0 / (double) sample_rate,
                     (double) result->info0_from_cj_hint.expected_sample * 1000.0 / (double) sample_rate,
                     (double) result->info0_from_cj_hint.window_start_sample * 1000.0 / (double) sample_rate,
@@ -3597,6 +3775,10 @@ static void detect_phase2_info(const int16_t *samples,
                                        decode_hint,
                                        tone_anchor_sample,
                                        sample_rate);
+        p12_refine_info0_decode_burst_by_tone(&decode_burst,
+                                              samples,
+                                              total_samples,
+                                              sample_rate);
         if (!decode_burst.seen || decode_burst.duration_samples <= 0)
             continue;
         for (int prev = 0; prev < b; prev++) {
@@ -3611,6 +3793,10 @@ static void detect_phase2_info(const int16_t *samples,
                                            prev_hint,
                                            tone_anchor_sample,
                                            sample_rate);
+            p12_refine_info0_decode_burst_by_tone(&prev_decode,
+                                                  samples,
+                                                  total_samples,
+                                                  sample_rate);
             if (!prev_decode.seen || prev_decode.duration_samples <= 0)
                 continue;
             if (prev_decode.start_sample == decode_burst.start_sample
@@ -3835,7 +4021,9 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
         return;
 
     if (result->answer_tone.detected)
-        phase2_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
+        phase2_start = result->answer_tone.start_sample
+                     + result->answer_tone.duration_samples
+                     + p12_answer_tone_post_hold_samples(&result->answer_tone, 8000);
     if (result->cj.detected)
         phase2_start = p12_first_non_negative(phase2_start, result->cj.sample_offset);
     if (result->cm.detected)

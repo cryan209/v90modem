@@ -82,6 +82,7 @@ typedef struct {
 typedef struct {
     bool detected;
     int sample_offset;
+    int duration_samples;
 } p12_cj_hit_t;
 
 /* ------------------------------------------------------------------ */
