@@ -22,6 +22,7 @@
 #include "p3_demod.h"
 
 #include <spandsp.h>
+#include <spandsp/crc.h>
 #include <spandsp/private/bitstream.h>
 #include <spandsp/private/power_meter.h>
 #include <spandsp/private/fsk.h>
@@ -960,8 +961,11 @@ typedef struct {
     bool mp_seen;
     bool mp_remote_ack_seen;
     bool mp_from_rx_frame;
+    bool mp_from_rx_recovery;
     bool mp_from_info_sequence;
     bool mp_rates_valid;
+    bool mp_crc_valid;
+    bool mp_fill_valid;
     bool mp_aux_channel_supported;
     bool mp_use_non_linear_encoder;
     bool mp_expanded_shaping;
@@ -1033,6 +1037,7 @@ typedef struct {
     int mp_trellis_size;
     int mp_signalling_rate_mask;
     int mp_frame_bits_captured;
+    int mp_start_error_count;
     int mp_rate_a_to_c_bps;
     int mp_rate_c_to_a_bps;
     int u_info;
@@ -1141,11 +1146,10 @@ static void v34_mp_rate_mask_to_text(int mask, char *out, size_t out_len)
         appendf(out, out_len, "none");
 }
 
-static bool v34_parse_mp_from_frame_bits(const uint8_t frame_bits[188],
-                                         int mp_seen,
-                                         int frame_target,
-                                         mp_t *mp_out,
-                                         int *bit_count_out)
+static bool v34_parse_mp_from_raw_bits(const uint8_t frame_bits[188],
+                                       int frame_target,
+                                       mp_t *mp_out,
+                                       int *bit_count_out)
 {
     bitstream_state_t bs;
     uint8_t packed[25];
@@ -1155,8 +1159,6 @@ static bool v34_parse_mp_from_frame_bits(const uint8_t frame_bits[188],
     int limit;
 
     if (!frame_bits || !mp_out)
-        return false;
-    if (mp_seen < 1)
         return false;
 
     type = frame_bits[18] & 1;
@@ -1211,6 +1213,71 @@ static bool v34_parse_mp_from_frame_bits(const uint8_t frame_bits[188],
     return true;
 }
 
+static bool v34_parse_mp_from_frame_bits(const uint8_t frame_bits[188],
+                                         int mp_seen,
+                                         int frame_target,
+                                         mp_t *mp_out,
+                                         int *bit_count_out)
+{
+    if (mp_seen < 1)
+        return false;
+    return v34_parse_mp_from_raw_bits(frame_bits,
+                                      frame_target,
+                                      mp_out,
+                                      bit_count_out);
+}
+
+static uint16_t v34_mp_crc_bits(const uint8_t bits[188], int type)
+{
+    uint16_t crc = 0xFFFF;
+    int len = (type == 1) ? 170 : 68;
+
+    for (int i = 17; i < len; i += 17) {
+        for (int j = 0; j < 16; j++)
+            crc = crc_itu16_bits(bits[i + 1 + j] & 1U, 1, crc);
+    }
+    return crc;
+}
+
+static bool v34_mp_crc_ok(const uint8_t bits[188], int type)
+{
+    int crc_start = (type == 1) ? 171 : 69;
+    uint16_t crc = v34_mp_crc_bits(bits, type);
+
+    for (int i = 0; i < 16; i++)
+        crc = crc_itu16_bits(bits[crc_start + i] & 1U, 1, crc);
+    return (crc == 0);
+}
+
+static bool v34_mp_fill_ok(const uint8_t bits[188], int type)
+{
+    if (type == 1)
+        return (bits[187] & 1U) == 0;
+    return (((bits[85] | bits[86] | bits[87]) & 1U) == 0);
+}
+
+static int v34_mp_start_error_count(const uint8_t bits[188], int type, int target)
+{
+    int errs = 0;
+    int limit = target;
+
+    if (type == 0 && (limit <= 0 || limit > 88))
+        limit = 88;
+    else if (type == 1 && (limit <= 0 || limit > 188))
+        limit = 188;
+
+    for (int i = 17; i < limit; i++) {
+        bool is_start = (i == 17 || i == 34 || i == 51 || i == 68);
+        if (type == 1) {
+            if (i == 85 || i == 102 || i == 119 || i == 136 || i == 153 || i == 170)
+                is_start = true;
+        }
+        if (is_start && (bits[i] & 1U) != 0)
+            errs++;
+    }
+    return errs;
+}
+
 static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const decode_v34_result_t *result)
 {
     if (!detail || detail_len == 0 || !result)
@@ -1219,8 +1286,9 @@ static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const d
     appendf(detail, detail_len, " mp_seen=%u", result->mp_seen ? 1U : 0U);
     appendf(detail, detail_len, " mp_remote_ack=%u", result->mp_remote_ack_seen ? 1U : 0U);
     appendf(detail, detail_len, " mp_source=%s",
-            result->mp_from_rx_frame ? "rx_frame"
-            : (result->mp_from_info_sequence ? "info_sequence" : "tx_state"));
+        result->mp_from_rx_recovery ? "rx_frame_recovered"
+            : (result->mp_from_rx_frame ? "rx_frame"
+               : (result->mp_from_info_sequence ? "info_sequence" : "tx_state")));
     appendf(detail, detail_len, " mp_rate_a_to_c=%s", result->mp_rate_a_to_c_bps > 0 ? "" : "n/a");
     if (result->mp_rate_a_to_c_bps > 0)
         appendf(detail, detail_len, "%d", result->mp_rate_a_to_c_bps);
@@ -1240,6 +1308,9 @@ static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const d
     appendf(detail, detail_len, " mp_local_ack_bit=%u", result->mp_local_ack_bit ? 1U : 0U);
     appendf(detail, detail_len, " mp_mask=0x%04X", (unsigned) (result->mp_signalling_rate_mask & 0x7FFF));
     appendf(detail, detail_len, " mp_frame_bits=%d", result->mp_frame_bits_captured);
+    appendf(detail, detail_len, " mp_crc=%u", result->mp_crc_valid ? 1U : 0U);
+    appendf(detail, detail_len, " mp_fill=%u", result->mp_fill_valid ? 1U : 0U);
+    appendf(detail, detail_len, " mp_start_err=%d", result->mp_start_error_count);
     appendf(detail, detail_len, " mp_rates_valid=%u", result->mp_rates_valid ? 1U : 0U);
 }
 
@@ -5459,6 +5530,37 @@ static int ru_window_two_point_score(const uint8_t *symbols, int len)
     }
 }
 
+static int v92_ru_flow_min_score(const decode_v34_result_t *result)
+{
+    int min_score = 40;
+
+    if (!result)
+        return min_score;
+
+    /* If INFO0 indicates short Phase 2 desire, allow slightly weaker Ru windows. */
+    if (result->info0_seen
+        && v92_short_phase2_req_from_info0_bits(result->info0_is_d,
+                                                result->info0_raw.raw_26_27)) {
+        min_score -= 2;
+    }
+
+    /* Strong local Phase 3 anchors increase confidence in the Ru interpretation. */
+    if (result->tx_trn_sample >= 0)
+        min_score -= 2;
+    if (result->tx_ja_sample >= 0)
+        min_score -= 2;
+
+    /* RX PP/TRN lock evidence supports this being true Phase 3 training. */
+    if (result->rx_pp_started)
+        min_score -= 2;
+    if (result->phase3_trn_lock_score >= 50)
+        min_score -= 2;
+
+    if (min_score < 34)
+        min_score = 34;
+    return min_score;
+}
+
 typedef struct {
     bool found;
     int sd_sample;
@@ -7132,7 +7234,20 @@ static bool decode_v34_pass(const int16_t *samples,
     int prev_rx_event = -1;
     int ja_aux_start_bit = -1;
     mp_t rx_mp;
+    mp_t recovered_mp;
+    mp_t heuristic_mp;
     bool have_rx_mp = false;
+    bool have_recovered_mp = false;
+    bool have_heuristic_mp = false;
+    int recovered_mp_bits = 0;
+    int recovered_mp_start_errs = INT_MAX;
+    bool recovered_mp_crc_ok = false;
+    bool recovered_mp_fill_ok = false;
+    int heuristic_mp_bits = 0;
+    int heuristic_mp_start_errs = INT_MAX;
+    bool heuristic_mp_fill_ok = false;
+    int heuristic_mp_votes = 0;
+    int mp_tuple_votes[2][15][15][3];
     bool flow_debug = false;
     bool info_cutoff_relaxed = false;
 
@@ -7140,6 +7255,7 @@ static bool decode_v34_pass(const int16_t *samples,
         return false;
 
     memset(result, 0, sizeof(*result));
+    memset(mp_tuple_votes, 0, sizeof(mp_tuple_votes));
     result->info0_sample = -1;
     result->info1_sample = -1;
     result->phase3_sample = -1;
@@ -7192,7 +7308,10 @@ static bool decode_v34_pass(const int16_t *samples,
     result->phase4_sample = -1;
     result->failure_sample = -1;
     result->mp_from_rx_frame = false;
+    result->mp_from_rx_recovery = false;
     result->mp_from_info_sequence = false;
+    result->mp_crc_valid = false;
+    result->mp_fill_valid = false;
     result->mp_aux_channel_supported = false;
     result->mp_use_non_linear_encoder = false;
     result->mp_expanded_shaping = false;
@@ -7202,6 +7321,7 @@ static bool decode_v34_pass(const int16_t *samples,
     result->mp_trellis_size = -1;
     result->mp_signalling_rate_mask = 0;
     result->mp_frame_bits_captured = 0;
+    result->mp_start_error_count = -1;
     result->mp_rate_a_to_c_bps = -1;
     result->mp_rate_c_to_a_bps = -1;
 
@@ -7476,6 +7596,66 @@ static bool decode_v34_pass(const int16_t *samples,
             result->phase3_seen = true;
             result->phase3_sample = offset;
         }
+        {
+            int target = v34->rx.mp_frame_target;
+            int type = v34->rx.mp_frame_bits[18] & 1U;
+            int expected_target = type ? 188 : 88;
+
+            if (target <= 0)
+                target = expected_target;
+            if (target >= expected_target) {
+                    bool crc_ok = v34_mp_crc_ok(v34->rx.mp_frame_bits, type);
+                    bool fill_ok = v34_mp_fill_ok(v34->rx.mp_frame_bits, type);
+                    int start_errs = v34_mp_start_error_count(v34->rx.mp_frame_bits, type, target);
+                    mp_t candidate_mp;
+                    int candidate_bits = 0;
+
+                    if (v34_parse_mp_from_raw_bits(v34->rx.mp_frame_bits,
+                                                   target,
+                                                   &candidate_mp,
+                                                   &candidate_bits)
+                        && fill_ok
+                        && start_errs <= 2
+                        && candidate_mp.bit_rate_a_to_c >= 1
+                        && candidate_mp.bit_rate_a_to_c <= 14
+                        && candidate_mp.bit_rate_c_to_a >= 1
+                        && candidate_mp.bit_rate_c_to_a <= 14
+                        && candidate_mp.trellis_size >= 0
+                        && candidate_mp.trellis_size <= 2) {
+                        int votes = ++mp_tuple_votes[type]
+                                                   [candidate_mp.bit_rate_a_to_c]
+                                                   [candidate_mp.bit_rate_c_to_a]
+                                                   [candidate_mp.trellis_size];
+                        if (!have_heuristic_mp
+                            || votes > heuristic_mp_votes
+                            || (votes == heuristic_mp_votes && start_errs < heuristic_mp_start_errs)) {
+                            heuristic_mp = candidate_mp;
+                            heuristic_mp_bits = candidate_bits;
+                            heuristic_mp_start_errs = start_errs;
+                            heuristic_mp_fill_ok = fill_ok;
+                            heuristic_mp_votes = votes;
+                            have_heuristic_mp = true;
+                        }
+                    }
+
+                    if (crc_ok
+                        && fill_ok
+                        && start_errs <= 2
+                        && v34_parse_mp_from_raw_bits(v34->rx.mp_frame_bits,
+                                                      target,
+                                                      &candidate_mp,
+                                                      &candidate_bits)) {
+                        if (!have_recovered_mp || start_errs < recovered_mp_start_errs) {
+                            recovered_mp = candidate_mp;
+                            recovered_mp_bits = candidate_bits;
+                            recovered_mp_start_errs = start_errs;
+                            recovered_mp_crc_ok = crc_ok;
+                            recovered_mp_fill_ok = fill_ok;
+                            have_recovered_mp = true;
+                        }
+                    }
+                }
+        }
         if (!result->phase4_ready_seen && rx_event == 15) {
             result->phase4_ready_seen = true;
             result->phase4_ready_sample = offset;
@@ -7514,8 +7694,63 @@ static bool decode_v34_pass(const int16_t *samples,
                                               v34->rx.mp_frame_target,
                                               &rx_mp,
                                               &result->mp_frame_bits_captured);
+    if (!have_rx_mp && have_recovered_mp) {
+        rx_mp = recovered_mp;
+        result->mp_frame_bits_captured = recovered_mp_bits;
+        result->mp_start_error_count = recovered_mp_start_errs;
+        result->mp_crc_valid = recovered_mp_crc_ok;
+        result->mp_fill_valid = recovered_mp_fill_ok;
+        have_rx_mp = true;
+        result->mp_from_rx_recovery = true;
+    }
+    if (!have_rx_mp
+        && have_heuristic_mp
+        && heuristic_mp_votes >= 2) {
+        rx_mp = heuristic_mp;
+        result->mp_frame_bits_captured = heuristic_mp_bits;
+        result->mp_start_error_count = heuristic_mp_start_errs;
+        result->mp_crc_valid = false;
+        result->mp_fill_valid = heuristic_mp_fill_ok;
+        have_rx_mp = true;
+        result->mp_from_rx_recovery = true;
+    }
+    if (!have_rx_mp) {
+        int target = v34->rx.mp_frame_target;
+        int type = v34->rx.mp_frame_bits[18] & 1U;
+        int expected_target = type ? 188 : 88;
+        int start_errs = -1;
+        bool crc_ok = false;
+        bool fill_ok = false;
+
+        if (target <= 0)
+            target = expected_target;
+        if (target >= expected_target) {
+            start_errs = v34_mp_start_error_count(v34->rx.mp_frame_bits, type, target);
+            crc_ok = v34_mp_crc_ok(v34->rx.mp_frame_bits, type);
+            fill_ok = v34_mp_fill_ok(v34->rx.mp_frame_bits, type);
+            if (crc_ok
+                && fill_ok
+                && start_errs <= 2
+                && v34_parse_mp_from_raw_bits(v34->rx.mp_frame_bits,
+                                              target,
+                                              &rx_mp,
+                                              &result->mp_frame_bits_captured)) {
+                have_rx_mp = true;
+                result->mp_from_rx_recovery = true;
+            }
+        }
+        result->mp_crc_valid = crc_ok;
+        result->mp_fill_valid = fill_ok;
+        result->mp_start_error_count = start_errs;
+    } else if (!result->mp_from_rx_recovery) {
+        int type = v34->rx.mp_frame_bits[18] & 1U;
+        int target = v34->rx.mp_frame_target > 0 ? v34->rx.mp_frame_target : (type ? 188 : 88);
+        result->mp_crc_valid = v34_mp_crc_ok(v34->rx.mp_frame_bits, type);
+        result->mp_fill_valid = v34_mp_fill_ok(v34->rx.mp_frame_bits, type);
+        result->mp_start_error_count = v34_mp_start_error_count(v34->rx.mp_frame_bits, type, target);
+    }
     if (have_rx_mp) {
-        result->mp_from_rx_frame = true;
+        result->mp_from_rx_frame = !result->mp_from_rx_recovery;
         result->mp_type = rx_mp.type;
         result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(rx_mp.bit_rate_a_to_c);
         result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(rx_mp.bit_rate_c_to_a);
@@ -9025,8 +9260,9 @@ static void print_v34_result(const decode_v34_result_t *result,
                result->mp_seen ? "yes" : "no",
                result->mp_remote_ack_seen ? "yes" : "no");
         printf(" source=%s",
-               result->mp_from_rx_frame ? "rx_frame"
-               : (result->mp_from_info_sequence ? "info_sequence" : "tx_state"));
+               result->mp_from_rx_recovery ? "rx_frame_recovered"
+               : (result->mp_from_rx_frame ? "rx_frame"
+                  : (result->mp_from_info_sequence ? "info_sequence" : "tx_state")));
         if (result->mp_rates_valid) {
             printf(" negotiated A->C/C->A=%d/%d bps",
                    result->mp_rate_a_to_c_bps,
@@ -9047,11 +9283,11 @@ static void print_v34_result(const decode_v34_result_t *result,
             }
         }
         printf("\n");
-        if (result->mp_from_rx_frame) {
+        if (result->mp_from_rx_frame || result->mp_from_rx_recovery) {
             char rate_mask[160];
 
             v34_mp_rate_mask_to_text(result->mp_signalling_rate_mask, rate_mask, sizeof(rate_mask));
-            printf("  MP decode:       type=MP%d bits=%d local_ack=%s trellis=%s aux=%s q3125=%s shaping=%s asym=%s mask={%s}\n",
+            printf("  MP decode:       type=MP%d bits=%d local_ack=%s trellis=%s aux=%s q3125=%s shaping=%s asym=%s mask={%s}%s crc=%s fill=%s start_err=%d\n",
                    result->mp_type,
                    result->mp_frame_bits_captured,
                    result->mp_local_ack_bit ? "yes" : "no",
@@ -9060,7 +9296,11 @@ static void print_v34_result(const decode_v34_result_t *result,
                    result->mp_use_non_linear_encoder ? "yes" : "no",
                    result->mp_expanded_shaping ? "expanded" : "min",
                    result->mp_asymmetric_rates_allowed ? "yes" : "no",
-                   rate_mask);
+                   rate_mask,
+                   result->mp_from_rx_recovery ? " recovered=yes" : "",
+                   result->mp_crc_valid ? "ok" : "no",
+                   result->mp_fill_valid ? "ok" : "no",
+                   result->mp_start_error_count);
         } else if (result->mp_from_info_sequence) {
             printf("  MP decode:       no accepted RX MP frame; negotiated rates inferred from INFO sequences\n");
         } else {
@@ -9234,15 +9474,17 @@ static void collect_v34_events(call_log_t *log,
                                 detail); \
             } \
         } \
-        collect_v92_phase3_event(log, \
-                                 res__, \
-                                 role_name, \
-                                 -1, \
-                                 g711_codewords, \
-                                 total_codewords, \
-                                 law, \
-                                 have_answerer ? &answerer : NULL, \
-                                 have_caller ? &caller : NULL); \
+        if (phase3_standard_global == P3_FLOW_STANDARD_V92 || p3_result_indicates_v92(res__)) { \
+            collect_v92_phase3_event(log, \
+                                     res__, \
+                                     role_name, \
+                                     -1, \
+                                     g711_codewords, \
+                                     total_codewords, \
+                                     law, \
+                                     have_answerer ? &answerer : NULL, \
+                                     have_caller ? &caller : NULL); \
+        } \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
         if (res__->phase3_seen) { \
@@ -9255,7 +9497,7 @@ static void collect_v34_events(call_log_t *log,
                          res__->u_info_from_info1a ? "info1a_bits25_31" : "spandsp_fallback"); \
             } \
             append_v34_mp_detail_fields(detail, sizeof(detail), res__); \
-            call_log_append(log, res__->phase3_sample, 0, "V.34", "Phase 3 reached", detail); \
+            call_log_append(log, res__->phase3_sample, 0, phase3_proto__, "Phase 3 reached", detail); \
         } \
         APPEND_V34_STAGE_EVENT(res__, tx_first_s_sample, "Phase 3 TX S", "sequence_start=s"); \
         APPEND_V34_STAGE_EVENT(res__, tx_first_not_s_sample, "Phase 3 TX S-bar", "sequence=first_not_s"); \
@@ -9356,7 +9598,8 @@ static void collect_v34_events(call_log_t *log,
             } \
             if (!jflow_emitted__ && phase3_standard_global == P3_FLOW_STANDARD_V92) { \
                 int flow_sample__ = res__->phase3_sample; \
-                bool ru_ok__ = res__->ru_window_captured && res__->ru_window_score >= 35; \
+                int ru_min_score__ = v92_ru_flow_min_score(res__); \
+                bool ru_ok__ = res__->ru_window_captured && res__->ru_window_score >= ru_min_score__; \
                 bool jprime_hint__ = res__->tx_jdashed_sample >= 0; \
                 bool trn_after_hint__ = (res__->tx_trn_sample >= 0 && res__->tx_ja_sample >= res__->tx_trn_sample); \
                 if (flow_sample__ < 0) \
@@ -9365,14 +9608,15 @@ static void collect_v34_events(call_log_t *log,
                     flow_sample__ = res__->tx_trn_sample; \
                 if (flow_sample__ >= 0 && should_emit_phase2_event(flow_sample__, (PHASE2_CUTOFF))) { \
                     snprintf(detail, sizeof(detail), \
-                             "role=%s standard=V.92 class=unknown match=0%% jprime=%s trn_after=%s ru=%s status=%s ru_window=%d score=%d notes=fallback_from_ru_window", \
+                             "role=%s standard=V.92 class=unknown match=0%% jprime=%s trn_after=%s ru=%s status=%s ru_window=%d score=%d min_score=%d notes=fallback_from_ru_window", \
                              role_name, \
                              jprime_hint__ ? "yes" : "no", \
                              trn_after_hint__ ? "yes" : "no", \
                              ru_ok__ ? "yes" : "no", \
                              ru_ok__ ? "partial" : "weak", \
                              res__->ru_window_len, \
-                             res__->ru_window_score); \
+                             res__->ru_window_score, \
+                             ru_min_score__); \
                     call_log_append(log, flow_sample__, 0, phase3_proto__, flow_summary__, detail); \
                 } \
             } \
