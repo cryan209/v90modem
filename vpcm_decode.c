@@ -12145,18 +12145,22 @@ static void run_decode_suite(const char *label,
 
             /* V.8 messages */
             if (p12.cm.detected) {
-                printf("  CM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes)\n",
+                printf("  CM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes, seen=%d, drift=%d)\n",
                        sample_to_ms(p12.cm.sample_offset, sample_rate),
                        p12.cm.modulations, p12.cm.call_function,
                        p12.cm.protocols, p12.cm.pcm_modem_availability,
-                       p12.cm.byte_count);
+                       p12.cm.byte_count,
+                       p12.cm.observed_count,
+                       p12.cm.differing_count);
             }
             if (p12.jm.detected) {
-                printf("  JM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes)\n",
+                printf("  JM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes, seen=%d, drift=%d)\n",
                        sample_to_ms(p12.jm.sample_offset, sample_rate),
                        p12.jm.modulations, p12.jm.call_function,
                        p12.jm.protocols, p12.jm.pcm_modem_availability,
-                       p12.jm.byte_count);
+                       p12.jm.byte_count,
+                       p12.jm.observed_count,
+                       p12.jm.differing_count);
             }
             if (p12.cj.detected)
                 printf("  CJ at %.1f ms\n",

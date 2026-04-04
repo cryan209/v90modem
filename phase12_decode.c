@@ -4431,7 +4431,7 @@ static void emit_cm_jm_event(call_log_t *log, const p12_cm_jm_hit_t *msg,
     snprintf(summary, sizeof(summary), "%s decoded", label);
     snprintf(detail, sizeof(detail),
              "role=%s msg=%s confidence=%s call_fn=%d modulations=%s"
-             " protocol=%d pcm=%d pstn=%d",
+             " protocol=%d pcm=%d pstn=%d seen=%d drift=%d",
              is_caller ? "caller" : "answerer",
              label,
              msg->complete ? "confirmed" : "candidate_fragment",
@@ -4439,7 +4439,9 @@ static void emit_cm_jm_event(call_log_t *log, const p12_cm_jm_hit_t *msg,
              modbuf,
              msg->protocols,
              msg->pcm_modem_availability,
-             msg->pstn_access);
+             msg->pstn_access,
+             msg->observed_count,
+             msg->differing_count);
     if (hexbuf[0]) {
         dlen = strlen(detail);
         snprintf(detail + dlen, sizeof(detail) - dlen, " raw=%s", hexbuf);
