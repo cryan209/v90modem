@@ -457,6 +457,7 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
                          bool *is_complement)
 {
     int matches = 0;
+    int checks = 0;
     int period = 6;
     int dibit_mask = 0;
     int unique_dibits = 0;
@@ -478,10 +479,13 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
 
     /* Check consistency of 6-symbol repeat */
     for (int i = period; i < len; i++) {
+        checks++;
         if (syms[start + i].dibit == syms[start + i % period].dibit)
             matches++;
     }
-    if (matches * 5 < (len - period) * 4)  /* Need 80% match */
+    if (checks <= 0)
+        return false;
+    if (matches * 5 < checks * 4)  /* Need >=80% periodic match */
         return false;
 
     /* Check if dibits have the S-bar complement relationship.
@@ -932,30 +936,47 @@ static void classify_j_table18(const p3_symbol_t *syms,
 
 static bool detect_j_prime_after_j(const p3_symbol_t *syms,
                                    int start,
+                                   int max_len_symbols,
                                    int force_transform,
+                                   int *start_offset_out,
                                    int *phase_out,
                                    int *match_pct_out)
 {
+    int best_off = 0;
     int best_phase = 0;
     int best_pct = -1;
     int xform_start = 0;
     int xform_end = 4;
+    int max_off;
 
-    if (!syms)
+    if (!syms || max_len_symbols < 8)
         return false;
     if (force_transform >= 0 && force_transform < 4) {
         xform_start = force_transform;
         xform_end = force_transform + 1;
     }
-    for (int xform = xform_start; xform < xform_end; xform++) {
-        for (int phase = 0; phase < 16; phase++) {
-            int pct = j_match_single_block_pct(syms, start, j_table19_prime_bits, phase, xform);
-            if (pct > best_pct) {
-                best_pct = pct;
-                best_phase = phase;
+    max_off = max_len_symbols - 8;
+    if (max_off > 24)
+        max_off = 24;
+
+    for (int off = 0; off <= max_off; off++) {
+        for (int xform = xform_start; xform < xform_end; xform++) {
+            for (int phase = 0; phase < 16; phase++) {
+                int pct = j_match_single_block_pct(syms,
+                                                   start + off,
+                                                   j_table19_prime_bits,
+                                                   phase,
+                                                   xform);
+                if (pct > best_pct) {
+                    best_pct = pct;
+                    best_phase = phase;
+                    best_off = off;
+                }
             }
         }
     }
+    if (start_offset_out)
+        *start_offset_out = best_off;
     if (phase_out)
         *phase_out = best_phase;
     if (match_pct_out)
@@ -1087,14 +1108,15 @@ int p3_segment_symbols(p3_result_t *result)
             /* Extend incrementally: check 6-symbol consistency of new chunk */
             seg_len = 12;
             while (pos + seg_len + 6 <= n) {
-                int ext_ok = 1;
+                int ext_match = 0;
                 for (int ei = 0; ei < 6; ei++) {
-                    if (syms[pos + seg_len + ei].dibit != syms[pos + (seg_len + ei) % 6].dibit) {
-                        ext_ok = 0;
-                        break;
-                    }
+                    int d = syms[pos + seg_len + ei].dibit;
+                    int ref = syms[pos + (seg_len + ei) % 6].dibit;
+                    if (d == ref)
+                        ext_match++;
                 }
-                if (!ext_ok)
+                /* Allow one symbol error per 6-symbol extension chunk. */
+                if (ext_match < 5)
                     break;
                 seg_len += 6;
             }
@@ -1164,6 +1186,7 @@ int p3_segment_symbols(p3_result_t *result)
             int j_table_phase = 0;
             int j_table_transform = 0;
             int j_table_match_pct = 0;
+            int jprime_offset = 0;
             int jprime_phase = 0;
             int jprime_pct = 0;
             bool have_jprime = false;
@@ -1207,11 +1230,13 @@ int p3_segment_symbols(p3_result_t *result)
                 if (pos + seg_len + 8 <= n
                     && detect_j_prime_after_j(syms,
                                               pos + seg_len,
+                                              n - (pos + seg_len),
                                               j_table_transform,
+                                              &jprime_offset,
                                               &jprime_phase,
                                               &jprime_pct)) {
                     p3_segment_t *jp;
-                    add_segment(result, P3_SIGNAL_J_PRIME, pos + seg_len, 8, syms);
+                    add_segment(result, P3_SIGNAL_J_PRIME, pos + seg_len + jprime_offset, 8, syms);
                     jp = &result->segments[result->segment_count - 1];
                     jp->j_table_phase = jprime_phase;
                     jp->j_table_transform = j_table_transform;
@@ -1221,7 +1246,7 @@ int p3_segment_symbols(p3_result_t *result)
                     seg->jprime_match_pct = jprime_pct;
                 }
             }
-            pos += seg_len + (have_jprime ? 8 : 0);
+            pos += seg_len + (have_jprime ? (jprime_offset + 8) : 0);
             continue;
         }
 
