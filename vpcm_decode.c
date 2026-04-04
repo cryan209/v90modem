@@ -12050,6 +12050,29 @@ static void run_decode_suite(const char *label,
                        sample_to_ms(p12.probe_tones[pt].start_sample, sample_rate),
                        sample_to_ms(p12.probe_tones[pt].duration_samples, sample_rate),
                        p12.probe_tones[pt].peak_ratio);
+
+            if (p12.phase2_window_known) {
+                printf("  Phase 2 window: %.1f ms to %.1f ms\n",
+                       sample_to_ms(p12.phase2_start_sample, sample_rate),
+                       sample_to_ms(p12.phase2_end_sample, sample_rate));
+            }
+            printf("  Phase 1/2 diag: pcm=%s v90=%s v92=%s short_p2=%s digital_side=%s\n",
+                   p12.pcm_modem_capable ? "yes" : "no",
+                   p12.v90_capable ? "yes" : "no",
+                   p12.v92_capable ? "yes" : "no",
+                   p12.short_phase2_requested ? "yes" : "no",
+                   p12.digital_side_likely ? "yes" : "no");
+            if (p12.info_path_known) {
+                printf("  INFO handoff: u_info=%d up_code=%d down_code=%d\n",
+                       p12.inferred_u_info,
+                       p12.inferred_upstream_symbol_rate_code,
+                       p12.inferred_downstream_rate_code);
+            }
+            if (p12.short_phase2_analysis_valid) {
+                printf("  Short Phase 2: seq=%s status=%s\n",
+                       v92_short_phase2_sequence_id(p12.short_phase2.sequence),
+                       p12.short_phase2.status ? p12.short_phase2.status : "unknown");
+            }
         } else {
             printf("  No Phase 1/2 signals detected.\n");
         }

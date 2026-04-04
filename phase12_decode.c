@@ -12,6 +12,7 @@
 #include "v21_fsk_demod.h"
 #include "v34_info_decode.h"
 #include "v90.h"
+#include "v92_short_phase2_decode.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -54,6 +55,15 @@ enum {
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
 static const double FSK_BURST_THRESHOLD = 0.12;
+
+static int p12_first_non_negative(int a, int b)
+{
+    if (a >= 0 && b >= 0)
+        return (a < b) ? a : b;
+    if (a >= 0)
+        return a;
+    return b;
+}
 
 /* ------------------------------------------------------------------ */
 /* Tone detection                                                      */
@@ -1052,6 +1062,97 @@ static void detect_phase2_info(const int16_t *samples,
     }
 }
 
+static void phase12_finalize_diagnostics(phase12_result_t *result)
+{
+    int phase2_start = -1;
+    int phase2_end = -1;
+
+    if (!result)
+        return;
+
+    if (result->answer_tone.detected)
+        phase2_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
+    if (result->cj.detected)
+        phase2_start = p12_first_non_negative(phase2_start, result->cj.sample_offset);
+    if (result->cm.detected)
+        phase2_start = p12_first_non_negative(phase2_start,
+                                              result->cm.sample_offset + result->cm.duration_samples);
+    if (result->jm.detected)
+        phase2_start = p12_first_non_negative(phase2_start,
+                                              result->jm.sample_offset + result->jm.duration_samples);
+
+    if (result->info0.detected) {
+        phase2_start = p12_first_non_negative(phase2_start, result->info0.sample_offset);
+        phase2_end = p12_first_non_negative(phase2_end,
+                                            result->info0.sample_offset + result->info0.duration_samples);
+    }
+    if (result->info1.detected) {
+        phase2_start = p12_first_non_negative(phase2_start, result->info1.sample_offset);
+        phase2_end = p12_first_non_negative(phase2_end,
+                                            result->info1.sample_offset + result->info1.duration_samples);
+    }
+    for (int i = 0; i < result->probe_tone_count; i++) {
+        phase2_start = p12_first_non_negative(phase2_start, result->probe_tones[i].start_sample);
+        phase2_end = p12_first_non_negative(phase2_end,
+                                            result->probe_tones[i].start_sample
+                                            + result->probe_tones[i].duration_samples);
+    }
+    if (phase2_start >= 0) {
+        result->phase2_window_known = true;
+        result->phase2_start_sample = phase2_start;
+        result->phase2_end_sample = (phase2_end >= phase2_start) ? phase2_end : phase2_start;
+    }
+
+    if (result->cm.detected) {
+        result->pcm_modem_capable = (result->cm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
+                                    || result->cm.pcm_modem_availability > 0;
+        result->v90_capable = (result->cm.modulations & P12_MOD_V90) != 0;
+        result->v92_capable = (result->cm.modulations & P12_MOD_V92) != 0;
+    }
+    if (result->jm.detected) {
+        result->pcm_modem_capable = result->pcm_modem_capable
+                                    || (result->jm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
+                                    || result->jm.pcm_modem_availability > 0;
+        result->v90_capable = result->v90_capable || ((result->jm.modulations & P12_MOD_V90) != 0);
+        result->v92_capable = result->v92_capable || ((result->jm.modulations & P12_MOD_V92) != 0);
+    }
+
+    if (result->info0.detected) {
+        result->short_phase2_requested = v92_short_phase2_req_from_info0_bits(result->info0.is_info0d,
+                                                                               result->info0.raw.raw_26_27);
+        result->v92_capable = result->v92_capable
+                              || v92_short_phase2_v92_cap_from_info0_bits(result->info0.is_info0d,
+                                                                          result->info0.raw.raw_26_27);
+        result->v90_capable = result->v90_capable || result->info0.parsed.acknowledge_info0d;
+        result->digital_side_likely = result->info0.is_info0d;
+        result->info_path_known = true;
+    }
+    if (result->info1.detected && !result->info1.is_info1d) {
+        result->inferred_u_info = result->info1.info1a_parsed.u_info;
+        result->inferred_upstream_symbol_rate_code = result->info1.info1a_parsed.upstream_symbol_rate_code;
+        result->inferred_downstream_rate_code = result->info1.info1a_parsed.downstream_rate_code;
+        result->info_path_known = true;
+    }
+    if (result->role_detected)
+        result->role_confident = true;
+
+    if (result->info0.detected) {
+        v92_short_phase2_observation_t obs;
+
+        memset(&obs, 0, sizeof(obs));
+        obs.info0_seen = true;
+        obs.info0_is_d = result->info0.is_info0d;
+        obs.short_phase2_requested = result->short_phase2_requested;
+        obs.v92_capable = result->v92_capable;
+        obs.info0_ack = result->info0.parsed.acknowledge_info0d;
+        obs.info1_seen = result->info1.detected;
+        obs.info0_sample = result->info0.sample_offset;
+        obs.info1_sample = result->info1.detected ? result->info1.sample_offset : -1;
+        if (v92_short_phase2_analyze(&obs, &result->short_phase2))
+            result->short_phase2_analysis_valid = true;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Call log event generation                                           */
 /* ------------------------------------------------------------------ */
@@ -1161,6 +1262,7 @@ bool phase12_decode_phase1(const int16_t *samples,
 
     detect_phase1_tones(samples, total_samples, sample_rate, max_sample, result);
     detect_phase1_v8(samples, total_samples, sample_rate, max_sample, result);
+    phase12_finalize_diagnostics(result);
 
     return (result->cng.detected || result->ct.detected
             || result->answer_tone.detected
@@ -1189,6 +1291,7 @@ bool phase12_decode_phase2(const int16_t *samples,
     }
 
     detect_phase2_info(samples, total_samples, sample_rate, max_sample, result);
+    phase12_finalize_diagnostics(result);
 
     return (result->info0.detected || result->info1.detected
             || result->probe_tone_count > 0);
@@ -1251,6 +1354,38 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
         call_log_append(log, result->info1.sample_offset,
                         result->info1.duration_samples,
                         "V.34", summary, NULL);
+    }
+
+    if (result->phase2_window_known || result->pcm_modem_capable || result->short_phase2_analysis_valid) {
+        char detail[512];
+        int event_sample = result->phase2_window_known ? result->phase2_start_sample : 0;
+
+        snprintf(detail, sizeof(detail),
+                 "role=%s pcm_modem=%u v90=%u v92=%u short_p2_req=%u digital_side=%u phase2_start=%.1fms phase2_end=%.1fms",
+                 result->role_detected ? (result->is_caller ? "caller" : "answerer") : "unknown",
+                 result->pcm_modem_capable ? 1U : 0U,
+                 result->v90_capable ? 1U : 0U,
+                 result->v92_capable ? 1U : 0U,
+                 result->short_phase2_requested ? 1U : 0U,
+                 result->digital_side_likely ? 1U : 0U,
+                 result->phase2_window_known ? (double) result->phase2_start_sample * 1000.0 / (double) sample_rate : -1.0,
+                 result->phase2_window_known ? (double) result->phase2_end_sample * 1000.0 / (double) sample_rate : -1.0);
+        if (result->info_path_known) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " u_info=%d up_code=%d down_code=%d",
+                     result->inferred_u_info,
+                     result->inferred_upstream_symbol_rate_code,
+                     result->inferred_downstream_rate_code);
+        }
+        if (result->short_phase2_analysis_valid) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " short_p2_seq=%s status=%s",
+                     v92_short_phase2_sequence_id(result->short_phase2.sequence),
+                     result->short_phase2.status ? result->short_phase2.status : "unknown");
+        }
+        call_log_append(log, event_sample, 0, "V.34", "Phase 1/2 diagnostic", detail);
     }
 
     /* Phase 2 probing tones */

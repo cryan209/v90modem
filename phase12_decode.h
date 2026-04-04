@@ -27,6 +27,7 @@
 #include "v8bis_decode.h"   /* call_log_t, call_log_event_t */
 #include "v90.h"            /* v90_info0a_t, v90_info1a_t, v34_v90_info* */
 #include "v34_info_decode.h"
+#include "v92_short_phase2_decode.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -165,6 +166,23 @@ typedef struct {
     /* Phase 2 INFO */
     p12_info0_hit_t info0;
     p12_info1_hit_t info1;
+
+    /* Derived call diagnostics */
+    bool phase2_window_known;
+    int phase2_start_sample;
+    int phase2_end_sample;
+    bool pcm_modem_capable;
+    bool v90_capable;
+    bool v92_capable;
+    bool short_phase2_requested;
+    bool role_confident;
+    bool digital_side_likely;
+    bool info_path_known;
+    int inferred_u_info;
+    int inferred_upstream_symbol_rate_code;
+    int inferred_downstream_rate_code;
+    bool short_phase2_analysis_valid;
+    v92_short_phase2_result_t short_phase2;
 
     /* Phase 2 probing tones */
     int probe_tone_count;
