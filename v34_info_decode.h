@@ -13,13 +13,17 @@
 #include <stdint.h>
 
 #define V34_INFO_SYNC_CODE 0x372
+#define V34_INFO_SYNC_BITS 10
 #define V34_INFO_MAX_BUF_BYTES 25
 
 typedef struct {
     bool valid;
     int target_bits;
     int payload_bytes;
+    int total_bits;
+    int total_bytes;
     uint8_t payload[V34_INFO_MAX_BUF_BYTES];
+    uint8_t bytes[V34_INFO_MAX_BUF_BYTES];
 } v34_info_frame_t;
 
 typedef struct {
@@ -61,6 +65,11 @@ bool v34_info_try_local_slip_recovery(uint8_t *out,
                                       int nbits,
                                       int *pivot_out,
                                       int *shift_out);
+bool v34_info_try_bit_error_recovery(uint8_t *out,
+                                     const uint8_t *in,
+                                     int nbits,
+                                     int *bit_a_out,
+                                     int *bit_b_out);
 
 bool v34_map_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src);
 bool v34_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src);

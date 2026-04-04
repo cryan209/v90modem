@@ -31,6 +31,36 @@ static uint16_t v34_info_crc_from_bits(const uint8_t bits[], int nbits)
     return crc;
 }
 
+static void v34_info_build_full_frame_bytes(uint8_t *out,
+                                            int out_len,
+                                            const uint8_t *payload,
+                                            int target_bits)
+{
+    uint8_t bits[256];
+    int total_bits;
+
+    if (!out || out_len <= 0)
+        return;
+
+    memset(out, 0, (size_t) out_len);
+    if (!payload || target_bits <= 0)
+        return;
+
+    total_bits = V34_INFO_SYNC_BITS + target_bits;
+    if (total_bits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return;
+
+    for (int i = 0; i < V34_INFO_SYNC_BITS; i++)
+        bits[i] = (uint8_t) ((V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1);
+    v34_info_unpack_bits(bits + V34_INFO_SYNC_BITS, target_bits, payload);
+
+    memset(out, 0, (size_t) out_len);
+    for (int i = 0; i < total_bits; i++) {
+        if (bits[i])
+            out[i >> 3] |= (uint8_t) (1U << (i & 7));
+    }
+}
+
 void v34_info_collector_init(v34_info_collector_t *collector, int target_bits)
 {
     if (!collector)
@@ -77,6 +107,7 @@ bool v34_info_frame_from_collector(v34_info_frame_t *frame,
                                    const v34_info_collector_t *collector)
 {
     int payload_bytes;
+    int total_bytes;
 
     if (!frame)
         return false;
@@ -87,9 +118,18 @@ bool v34_info_frame_from_collector(v34_info_frame_t *frame,
     payload_bytes = (collector->target_bits + 7) / 8;
     if (payload_bytes > V34_INFO_MAX_BUF_BYTES)
         payload_bytes = V34_INFO_MAX_BUF_BYTES;
+    total_bytes = (V34_INFO_SYNC_BITS + collector->target_bits + 7) / 8;
+    if (total_bytes > V34_INFO_MAX_BUF_BYTES)
+        total_bytes = V34_INFO_MAX_BUF_BYTES;
     frame->target_bits = collector->target_bits;
     frame->payload_bytes = payload_bytes;
+    frame->total_bits = V34_INFO_SYNC_BITS + collector->target_bits;
+    frame->total_bytes = total_bytes;
     memcpy(frame->payload, collector->info_buf, (size_t) payload_bytes);
+    v34_info_build_full_frame_bytes(frame->bytes,
+                                    frame->total_bytes,
+                                    frame->payload,
+                                    frame->target_bits);
     frame->valid = v34_info_validate_frame_bytes(frame->payload, frame->target_bits);
     return frame->valid;
 }
@@ -231,6 +271,61 @@ bool v34_info_try_local_slip_recovery(uint8_t *out,
     return false;
 }
 
+bool v34_info_try_bit_error_recovery(uint8_t *out,
+                                     const uint8_t *in,
+                                     int nbits,
+                                     int *bit_a_out,
+                                     int *bit_b_out)
+{
+    uint8_t bits[128];
+    uint8_t trial[128];
+
+    if (!out || !in || nbits <= 0 || nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return false;
+
+    v34_info_unpack_bits(bits, nbits, in);
+
+    memcpy(trial, bits, (size_t) nbits);
+    for (int a = 0; a < nbits; a++) {
+        uint16_t crc;
+
+        trial[a] ^= 1;
+        crc = v34_info_crc_from_bits(trial, nbits);
+        if (crc == 0) {
+            v34_info_pack_bits(out, trial, nbits);
+            if (bit_a_out)
+                *bit_a_out = a;
+            if (bit_b_out)
+                *bit_b_out = -1;
+            return true;
+        }
+        trial[a] ^= 1;
+    }
+
+    memcpy(trial, bits, (size_t) nbits);
+    for (int a = 0; a < nbits; a++) {
+        trial[a] ^= 1;
+        for (int b = a + 1; b < nbits; b++) {
+            uint16_t crc;
+
+            trial[b] ^= 1;
+            crc = v34_info_crc_from_bits(trial, nbits);
+            if (crc == 0) {
+                v34_info_pack_bits(out, trial, nbits);
+                if (bit_a_out)
+                    *bit_a_out = a;
+                if (bit_b_out)
+                    *bit_b_out = b;
+                return true;
+            }
+            trial[b] ^= 1;
+        }
+        trial[a] ^= 1;
+    }
+
+    return false;
+}
+
 bool v34_info_validate_frame_bytes(const uint8_t *buf, int target_bits)
 {
     v34_info_collector_t collector;
@@ -319,9 +414,18 @@ bool v34_info_parse_info0a_v90(const uint8_t *buf,
     bitstream_state_t bs;
     const uint8_t *t;
     v34_v90_info0a_t parsed;
+    int target_bits;
 
-    if (!buf || !v34_info_validate_frame_bytes(buf, 62 - (4 + 8 + 4)))
+    if (!buf)
         return false;
+
+    if (v34_info_validate_frame_bytes(buf, 49 - (4 + 8 + 4))) {
+        target_bits = 49 - (4 + 8 + 4);
+    } else if (v34_info_validate_frame_bytes(buf, 62 - (4 + 8 + 4))) {
+        target_bits = 62 - (4 + 8 + 4);
+    } else {
+        return false;
+    }
 
     memset(&parsed, 0, sizeof(parsed));
     bitstream_init(&bs, true);
@@ -338,16 +442,22 @@ bool v34_info_parse_info0a_v90(const uint8_t *buf,
     parsed.max_baud_rate_difference = (uint8_t) bitstream_get(&bs, &t, 3);
     parsed.from_cme_modem = bitstream_get(&bs, &t, 1);
     parsed.support_1664_point_constellation = bitstream_get(&bs, &t, 1);
-    parsed.raw_26_27 = (uint8_t) bitstream_get(&bs, &t, 2);
-    parsed.acknowledge_info0d = bitstream_get(&bs, &t, 1);
-    parsed.info0d_nominal_power_code = (uint8_t) bitstream_get(&bs, &t, 4);
-    parsed.info0d_max_power_code = (uint8_t) bitstream_get(&bs, &t, 5);
-    parsed.info0d_power_measured_at_codec_output = bitstream_get(&bs, &t, 1);
-    parsed.tx_clock_source = (uint8_t) bitstream_get(&bs, &t, 1);
-    parsed.info0d_pcm_alaw = (parsed.tx_clock_source != 0);
-    parsed.info0d_upstream_3429_support = bitstream_get(&bs, &t, 1);
-    parsed.info0d_reserved_41 = (uint8_t) bitstream_get(&bs, &t, 1);
-    parsed.info0d_extensions_valid = true;
+    if (target_bits == (49 - (4 + 8 + 4))) {
+        parsed.tx_clock_source = (uint8_t) bitstream_get(&bs, &t, 2);
+        parsed.acknowledge_info0d = bitstream_get(&bs, &t, 1);
+        parsed.info0d_extensions_valid = false;
+    } else {
+        parsed.raw_26_27 = (uint8_t) bitstream_get(&bs, &t, 2);
+        parsed.acknowledge_info0d = bitstream_get(&bs, &t, 1);
+        parsed.info0d_nominal_power_code = (uint8_t) bitstream_get(&bs, &t, 4);
+        parsed.info0d_max_power_code = (uint8_t) bitstream_get(&bs, &t, 5);
+        parsed.info0d_power_measured_at_codec_output = bitstream_get(&bs, &t, 1);
+        parsed.tx_clock_source = (uint8_t) bitstream_get(&bs, &t, 1);
+        parsed.info0d_pcm_alaw = (parsed.tx_clock_source != 0);
+        parsed.info0d_upstream_3429_support = bitstream_get(&bs, &t, 1);
+        parsed.info0d_reserved_41 = (uint8_t) bitstream_get(&bs, &t, 1);
+        parsed.info0d_extensions_valid = true;
+    }
 
     if (mapped_out && !v34_map_received_info0a(mapped_out, &parsed))
         return false;
@@ -422,8 +532,12 @@ bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
                                      v34_v90_info0a_t *raw_out,
                                      v90_info0a_t *mapped_out)
 {
-    if (!frame || !frame->valid || frame->target_bits != (62 - (4 + 8 + 4)))
+    if (!frame || !frame->valid)
         return false;
+    if (frame->target_bits != (49 - (4 + 8 + 4))
+        && frame->target_bits != (62 - (4 + 8 + 4))) {
+        return false;
+    }
     return v34_info_parse_info0a_v90(frame->payload, raw_out, mapped_out);
 }
 

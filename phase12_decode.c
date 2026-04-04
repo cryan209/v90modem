@@ -1805,13 +1805,51 @@ typedef struct {
     v34_info_collector_t collector;
     bool frame_complete;
     bool frame_candidate_seen;
-    uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
     uint8_t candidate_bytes[V34_INFO_MAX_BUF_BYTES];
-    int frame_byte_count;
+    v34_info_frame_t frame;
     int frame_sample_offset;
     int candidate_sample_offset;
     uint16_t candidate_crc;
 } info_frame_decoder_t;
+
+static void p12_build_info_frame_from_payload(v34_info_frame_t *frame,
+                                              const uint8_t *payload,
+                                              int target_bits)
+{
+    uint8_t bits[256];
+
+    if (!frame)
+        return;
+
+    memset(frame, 0, sizeof(*frame));
+    if (!payload || target_bits <= 0)
+        return;
+
+    frame->valid = true;
+    frame->target_bits = target_bits;
+    frame->payload_bytes = (target_bits + 7) / 8;
+    if (frame->payload_bytes > V34_INFO_MAX_BUF_BYTES)
+        frame->payload_bytes = V34_INFO_MAX_BUF_BYTES;
+    frame->total_bits = V34_INFO_SYNC_BITS + target_bits;
+    frame->total_bytes = (frame->total_bits + 7) / 8;
+    if (frame->total_bytes > V34_INFO_MAX_BUF_BYTES)
+        frame->total_bytes = V34_INFO_MAX_BUF_BYTES;
+    memcpy(frame->payload, payload, (size_t) frame->payload_bytes);
+
+    memset(bits, 0, sizeof(bits));
+    for (int i = 0; i < V34_INFO_SYNC_BITS; i++)
+        bits[i] = (uint8_t) ((V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1);
+    for (int i = 0; i < target_bits; i++) {
+        uint8_t octet = bit_reverse8(payload[i >> 3]);
+
+        bits[V34_INFO_SYNC_BITS + i] = (octet >> (7 - (i & 7))) & 1;
+    }
+    memset(frame->bytes, 0, sizeof(frame->bytes));
+    for (int i = 0; i < frame->total_bits; i++) {
+        if (bits[i])
+            frame->bytes[i >> 3] |= (uint8_t) (1U << (i & 7));
+    }
+}
 
 static void info_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
@@ -1823,11 +1861,11 @@ static void info_decoder_put_bit(void *ctx, int bit, int sample_offset)
         return;
 
     if (v34_info_collector_push_bit_verbose(&d->collector, bit,
-                                            d->frame_bytes, V34_INFO_MAX_BUF_BYTES,
+                                            NULL, 0,
                                             &frame_done, &crc)) {
         d->frame_complete = true;
+        (void) v34_info_frame_from_collector(&d->frame, &d->collector);
         d->frame_sample_offset = sample_offset;
-        d->frame_byte_count = (d->collector.target_bits + 7) / 8;
         return;
     }
     if (frame_done) {
@@ -1848,7 +1886,7 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                                        int channel,
                                        const p12_fsk_burst_t *burst,
                                        int target_bits,
-                                       uint8_t *frame_out,
+                                       v34_info_frame_t *frame_out,
                                        int *frame_sample_out)
 {
     info_frame_decoder_t decoder;
@@ -1888,12 +1926,12 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
         memset(&decoder, 0, sizeof(decoder));
         v34_info_collector_init(&decoder.collector, target_bits);
 
-        v21_fsk_demod_block(samples + start, len, sample_rate,
+                    v21_fsk_demod_block(samples + start, len, sample_rate,
                             channel, (bool)inv,
                             info_decoder_put_bit, &decoder);
 
         if (decoder.frame_complete) {
-            memcpy(frame_out, decoder.frame_bytes, V34_INFO_MAX_BUF_BYTES);
+            *frame_out = decoder.frame;
             if (frame_sample_out)
                 *frame_sample_out = start + decoder.frame_sample_offset;
             return true;
@@ -1901,6 +1939,8 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
         if (decoder.frame_candidate_seen) {
             int recovery_shift = 0;
             int recovery_pivot = 0;
+            int recovery_bit_a = -1;
+            int recovery_bit_b = -1;
 
             if (p12_debug_enabled()) {
                 fprintf(stderr,
@@ -1911,10 +1951,11 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                         (double) (start + decoder.candidate_sample_offset) * 1000.0 / (double) sample_rate);
             }
 
-            if (v34_info_try_boundary_recovery(frame_out,
+            if (v34_info_try_boundary_recovery(decoder.candidate_bytes,
                                                decoder.candidate_bytes,
                                                target_bits,
                                                &recovery_shift)) {
+                p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
                 if (p12_debug_enabled()) {
                     fprintf(stderr,
                             "[p12] INFO boundary recovery shift=%d target=%d inv=%d mode=block\n",
@@ -1926,16 +1967,35 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                     *frame_sample_out = start + decoder.candidate_sample_offset;
                 return true;
             }
-            if (v34_info_try_local_slip_recovery(frame_out,
+            if (v34_info_try_local_slip_recovery(decoder.candidate_bytes,
                                                  decoder.candidate_bytes,
                                                  target_bits,
                                                  &recovery_pivot,
                                                  &recovery_shift)) {
+                p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
                 if (p12_debug_enabled()) {
                     fprintf(stderr,
                             "[p12] INFO local-slip recovery pivot=%d shift=%d target=%d inv=%d mode=block\n",
                             recovery_pivot,
                             recovery_shift,
+                            target_bits,
+                            inv);
+                }
+                if (frame_sample_out)
+                    *frame_sample_out = start + decoder.candidate_sample_offset;
+                return true;
+            }
+            if (v34_info_try_bit_error_recovery(decoder.candidate_bytes,
+                                                decoder.candidate_bytes,
+                                                target_bits,
+                                                &recovery_bit_a,
+                                                &recovery_bit_b)) {
+                p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO bit-error recovery bit_a=%d bit_b=%d target=%d inv=%d mode=block\n",
+                            recovery_bit_a,
+                            recovery_bit_b,
                             target_bits,
                             inv);
                 }
@@ -1983,7 +2043,7 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                     v21_fsk_stream_rx(&stream, samples + start + phase_offset, len - phase_offset);
 
                     if (decoder.frame_complete) {
-                        memcpy(frame_out, decoder.frame_bytes, V34_INFO_MAX_BUF_BYTES);
+                        *frame_out = decoder.frame;
                         if (frame_sample_out)
                             *frame_sample_out = start + phase_offset + decoder.frame_sample_offset;
                         return true;
@@ -1991,6 +2051,8 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                     if (decoder.frame_candidate_seen) {
                         int recovery_shift = 0;
                         int recovery_pivot = 0;
+                        int recovery_bit_a = -1;
+                        int recovery_bit_b = -1;
 
                         if (p12_debug_enabled()) {
                             fprintf(stderr,
@@ -2003,10 +2065,11 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                                     (double) (start + phase_offset + decoder.candidate_sample_offset) * 1000.0 / (double) sample_rate);
                         }
 
-                        if (v34_info_try_boundary_recovery(frame_out,
+                        if (v34_info_try_boundary_recovery(decoder.candidate_bytes,
                                                            decoder.candidate_bytes,
                                                            target_bits,
                                                            &recovery_shift)) {
+                            p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
                             if (p12_debug_enabled()) {
                                 fprintf(stderr,
                                         "[p12] INFO boundary recovery shift=%d target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
@@ -2020,16 +2083,37 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                                 *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
                             return true;
                         }
-                        if (v34_info_try_local_slip_recovery(frame_out,
+                        if (v34_info_try_local_slip_recovery(decoder.candidate_bytes,
                                                              decoder.candidate_bytes,
                                                              target_bits,
                                                              &recovery_pivot,
                                                              &recovery_shift)) {
+                            p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
                             if (p12_debug_enabled()) {
                                 fprintf(stderr,
                                         "[p12] INFO local-slip recovery pivot=%d shift=%d target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
                                         recovery_pivot,
                                         recovery_shift,
+                                        target_bits,
+                                        inv,
+                                        baud_variants[baud_idx],
+                                        phase);
+                            }
+                            if (frame_sample_out)
+                                *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
+                            return true;
+                        }
+                        if (v34_info_try_bit_error_recovery(decoder.candidate_bytes,
+                                                            decoder.candidate_bytes,
+                                                            target_bits,
+                                                            &recovery_bit_a,
+                                                            &recovery_bit_b)) {
+                            p12_build_info_frame_from_payload(frame_out, decoder.candidate_bytes, target_bits);
+                            if (p12_debug_enabled()) {
+                                fprintf(stderr,
+                                        "[p12] INFO bit-error recovery bit_a=%d bit_b=%d target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
+                                        recovery_bit_a,
+                                        recovery_bit_b,
                                         target_bits,
                                         inv,
                                         baud_variants[baud_idx],
@@ -2355,7 +2439,7 @@ static void detect_phase2_info(const int16_t *samples,
     /* Try to decode INFO0 from CH2 sequence windows. */
     /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch2_burst_count && !result->info0.detected; b++) {
-        uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
+        v34_info_frame_t frame;
         int frame_sample = 0;
 
         /* Try INFO0a first, then INFO0d. */
@@ -2373,16 +2457,9 @@ static void detect_phase2_info(const int16_t *samples,
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
                                            V21_CH2, &phase2_ch2_bursts[b],
-                                           target, frame_bytes, &frame_sample)) {
-                v34_info_frame_t frame;
+                                           target, &frame, &frame_sample)) {
                 v34_v90_info0a_t raw;
                 v90_info0a_t mapped;
-
-                memset(&frame, 0, sizeof(frame));
-                frame.valid = true;
-                frame.target_bits = target;
-                frame.payload_bytes = (target + 7) / 8;
-                memcpy(frame.payload, frame_bytes, (size_t)frame.payload_bytes);
 
                 if (v34_info_parse_info0a_v90_frame(&frame, &raw, &mapped)) {
                     result->info0.detected = true;
@@ -2411,7 +2488,7 @@ static void detect_phase2_info(const int16_t *samples,
     /* Try to decode INFO1 from CH1 sequence windows. */
     /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch1_burst_count && !result->info1.detected; b++) {
-        uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
+        v34_info_frame_t frame;
         int frame_sample = 0;
 
         /* Try INFO1a first, then INFO1d. */
@@ -2429,15 +2506,7 @@ static void detect_phase2_info(const int16_t *samples,
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
                                            V21_CH1, &phase2_ch1_bursts[b],
-                                           target, frame_bytes, &frame_sample)) {
-                v34_info_frame_t frame;
-
-                memset(&frame, 0, sizeof(frame));
-                frame.valid = true;
-                frame.target_bits = target;
-                frame.payload_bytes = (target + 7) / 8;
-                memcpy(frame.payload, frame_bytes, (size_t)frame.payload_bytes);
-
+                                           target, &frame, &frame_sample)) {
                 if (try_1d) {
                     /* INFO1d */
                     v34_v90_info1d_t info1d;
