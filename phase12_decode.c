@@ -51,10 +51,48 @@ enum {
     PHASE2_MAX_SCAN_MS = 15000  /* max ms to scan for Phase 2 signals */
 };
 
+enum {
+    P12_INFO0A_PAYLOAD_BITS = 49 - (4 + 8 + 4),
+    P12_INFO0D_PAYLOAD_BITS = 62 - (4 + 8 + 4),
+    P12_INFO1A_PAYLOAD_BITS = 70 - (4 + 8 + 4),
+    P12_INFO1D_PAYLOAD_BITS = 109 - (4 + 8 + 4)
+};
+
+enum {
+    P12_INFO_PRE_PAD_MS = 120,
+    P12_INFO_POST_PAD_MS = 160
+};
+
 /* Tone detection thresholds */
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
 static const double FSK_BURST_THRESHOLD = 0.12;
+static int g_p12_debug_enabled = -1;
+
+static bool p12_debug_enabled(void)
+{
+    if (g_p12_debug_enabled < 0)
+        g_p12_debug_enabled = (getenv("VPCM_P12_DEBUG") != NULL) ? 1 : 0;
+    return g_p12_debug_enabled != 0;
+}
+
+static void p12_debug_log_bursts(const char *label,
+                                 const p12_fsk_burst_t *bursts,
+                                 int burst_count,
+                                 int sample_rate)
+{
+    if (!p12_debug_enabled())
+        return;
+    fprintf(stderr, "[p12] %s bursts=%d\n", label ? label : "?", burst_count);
+    for (int i = 0; i < burst_count; i++) {
+        fprintf(stderr,
+                "[p12]   #%d start=%.1fms dur=%.1fms peak=%.3f\n",
+                i + 1,
+                (double) bursts[i].start_sample * 1000.0 / (double) sample_rate,
+                (double) bursts[i].duration_samples * 1000.0 / (double) sample_rate,
+                bursts[i].peak_energy);
+    }
+}
 
 static int p12_first_non_negative(int a, int b)
 {
@@ -63,6 +101,42 @@ static int p12_first_non_negative(int a, int b)
     if (a >= 0)
         return a;
     return b;
+}
+
+static int p12_merge_bursts_in_place(p12_fsk_burst_t *bursts,
+                                     int burst_count,
+                                     int merge_gap_samples)
+{
+    int write_idx = 0;
+
+    if (!bursts || burst_count <= 0)
+        return 0;
+
+    for (int i = 0; i < burst_count; i++) {
+        if (!bursts[i].seen)
+            continue;
+        if (write_idx > 0) {
+            int prev_end = bursts[write_idx - 1].start_sample
+                           + bursts[write_idx - 1].duration_samples;
+            if (bursts[i].start_sample <= prev_end + merge_gap_samples) {
+                int new_end = bursts[i].start_sample + bursts[i].duration_samples;
+
+                if (new_end > prev_end)
+                    bursts[write_idx - 1].duration_samples =
+                        new_end - bursts[write_idx - 1].start_sample;
+                if (bursts[i].peak_energy > bursts[write_idx - 1].peak_energy)
+                    bursts[write_idx - 1].peak_energy = bursts[i].peak_energy;
+                continue;
+            }
+        }
+        if (write_idx != i)
+            bursts[write_idx] = bursts[i];
+        write_idx++;
+    }
+
+    for (int i = write_idx; i < burst_count; i++)
+        memset(&bursts[i], 0, sizeof(bursts[i]));
+    return write_idx;
 }
 
 /* ------------------------------------------------------------------ */
@@ -788,23 +862,41 @@ static void detect_phase1_v8(const int16_t *samples,
 typedef struct {
     v34_info_collector_t collector;
     bool frame_complete;
+    bool frame_candidate_seen;
     uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
+    uint8_t candidate_bytes[V34_INFO_MAX_BUF_BYTES];
     int frame_byte_count;
     int frame_sample_offset;
+    int candidate_sample_offset;
+    uint16_t candidate_crc;
 } info_frame_decoder_t;
 
 static void info_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
     info_frame_decoder_t *d = (info_frame_decoder_t *)ctx;
+    bool frame_done;
+    uint16_t crc;
 
     if (!d || d->frame_complete)
         return;
 
-    if (v34_info_collector_push_bit(&d->collector, bit,
-                                     d->frame_bytes, V34_INFO_MAX_BUF_BYTES)) {
+    if (v34_info_collector_push_bit_verbose(&d->collector, bit,
+                                            d->frame_bytes, V34_INFO_MAX_BUF_BYTES,
+                                            &frame_done, &crc)) {
         d->frame_complete = true;
         d->frame_sample_offset = sample_offset;
         d->frame_byte_count = (d->collector.target_bits + 7) / 8;
+        return;
+    }
+    if (frame_done) {
+        int byte_count = (d->collector.target_bits + 7) / 8;
+
+        if (byte_count > V34_INFO_MAX_BUF_BYTES)
+            byte_count = V34_INFO_MAX_BUF_BYTES;
+        memcpy(d->candidate_bytes, d->collector.info_buf, (size_t) byte_count);
+        d->frame_candidate_seen = true;
+        d->candidate_sample_offset = sample_offset;
+        d->candidate_crc = crc;
     }
 }
 
@@ -818,12 +910,34 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                                        int *frame_sample_out)
 {
     info_frame_decoder_t decoder;
+    int pre_pad;
+    int post_pad;
 
     if (!burst || !burst->seen || !frame_out)
         return false;
 
     int start = burst->start_sample;
     int len = burst->duration_samples;
+
+    pre_pad = (sample_rate * P12_INFO_PRE_PAD_MS) / 1000;
+    post_pad = (sample_rate * P12_INFO_POST_PAD_MS) / 1000;
+    if (pre_pad < 0)
+        pre_pad = 0;
+    if (post_pad < 0)
+        post_pad = 0;
+
+    if (start > pre_pad) {
+        start -= pre_pad;
+        len += pre_pad;
+    } else {
+        len += start;
+        start = 0;
+    }
+    if (start + len + post_pad <= total_samples)
+        len += post_pad;
+    else
+        len = total_samples - start;
+
     if (start < 0 || start + len > total_samples)
         return false;
 
@@ -841,6 +955,59 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
             if (frame_sample_out)
                 *frame_sample_out = start + decoder.frame_sample_offset;
             return true;
+        }
+        if (decoder.frame_candidate_seen) {
+            int recovery_shift = 0;
+            int recovery_pivot = 0;
+
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO candidate crc=0x%04x target=%d inv=%d sample=%.1fms\n",
+                        decoder.candidate_crc,
+                        target_bits,
+                        inv,
+                        (double) (start + decoder.candidate_sample_offset) * 1000.0 / (double) sample_rate);
+            }
+
+            if (v34_info_try_boundary_recovery(frame_out,
+                                               decoder.candidate_bytes,
+                                               target_bits,
+                                               &recovery_shift)) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO boundary recovery shift=%d target=%d inv=%d\n",
+                            recovery_shift,
+                            target_bits,
+                            inv);
+                }
+                if (frame_sample_out)
+                    *frame_sample_out = start + decoder.candidate_sample_offset;
+                return true;
+            }
+            if (v34_info_try_local_slip_recovery(frame_out,
+                                                 decoder.candidate_bytes,
+                                                 target_bits,
+                                                 &recovery_pivot,
+                                                 &recovery_shift)) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO local-slip recovery pivot=%d shift=%d target=%d inv=%d\n",
+                            recovery_pivot,
+                            recovery_shift,
+                            target_bits,
+                            inv);
+                }
+                if (frame_sample_out)
+                    *frame_sample_out = start + decoder.candidate_sample_offset;
+                return true;
+            }
+        } else if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] INFO no candidate target=%d inv=%d window=%.1f-%.1fms\n",
+                    target_bits,
+                    inv,
+                    (double) start * 1000.0 / (double) sample_rate,
+                    (double) (start + len) * 1000.0 / (double) sample_rate);
         }
     }
 
@@ -927,6 +1094,10 @@ static void detect_phase2_info(const int16_t *samples,
     int search_start = 0;
     int phase2_cap = (sample_rate * PHASE2_MAX_SCAN_MS) / 1000;
     int phase2_end_hint = -1;
+    int phase2_merge_gap = sample_rate / 10;
+
+    memset(phase2_ch1_bursts, 0, sizeof(phase2_ch1_bursts));
+    memset(phase2_ch2_bursts, 0, sizeof(phase2_ch2_bursts));
 
     if (result->answer_tone.detected)
         search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
@@ -942,6 +1113,13 @@ static void detect_phase2_info(const int16_t *samples,
     }
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
+    if (p12_debug_enabled()) {
+        fprintf(stderr,
+                "[p12] phase2 search start=%.1fms limit=%.1fms cap=%.1fms\n",
+                (double) search_start * 1000.0 / (double) sample_rate,
+                (double) limit * 1000.0 / (double) sample_rate,
+                (double) phase2_cap * 1000.0 / (double) sample_rate);
+    }
 
     /* INFO0 is sent on V.21 CH2 (answerer → caller direction)
      * INFO1 is sent on V.21 CH1 (caller → answerer direction)
@@ -959,16 +1137,33 @@ static void detect_phase2_info(const int16_t *samples,
     phase2_ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
                                                search_start, limit, V21_CH1,
                                                phase2_ch1_bursts, P12_MAX_FSK_BURSTS);
+    phase2_ch2_burst_count = p12_merge_bursts_in_place(phase2_ch2_bursts,
+                                                       phase2_ch2_burst_count,
+                                                       phase2_merge_gap);
+    phase2_ch1_burst_count = p12_merge_bursts_in_place(phase2_ch1_bursts,
+                                                       phase2_ch1_burst_count,
+                                                       phase2_merge_gap);
+    p12_debug_log_bursts("phase2 CH2", phase2_ch2_bursts, phase2_ch2_burst_count, sample_rate);
+    p12_debug_log_bursts("phase2 CH1", phase2_ch1_bursts, phase2_ch1_burst_count, sample_rate);
 
     /* Try to decode INFO0 from CH2 bursts */
-    /* INFO0a is 49 bits (Table 8), INFO0d is 62 bits (Table 7) */
+    /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch2_burst_count && !result->info0.detected; b++) {
         uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
         int frame_sample = 0;
 
-        /* Try INFO0a (49 bits) first, then INFO0d (62 bits) */
+        /* Try INFO0a first, then INFO0d. */
         for (int try_info0d = 0; try_info0d < 2 && !result->info0.detected; try_info0d++) {
-            int target = try_info0d ? 62 : 49;
+            int target = try_info0d ? P12_INFO0D_PAYLOAD_BITS : P12_INFO0A_PAYLOAD_BITS;
+
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO0 try burst=%d target=%d start=%.1fms dur=%.1fms\n",
+                        b + 1,
+                        target,
+                        (double) phase2_ch2_bursts[b].start_sample * 1000.0 / (double) sample_rate,
+                        (double) phase2_ch2_bursts[b].duration_samples * 1000.0 / (double) sample_rate);
+            }
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
                                            V21_CH2, &phase2_ch2_bursts[b],
@@ -991,20 +1186,40 @@ static void detect_phase2_info(const int16_t *samples,
                     result->info0.raw = raw;
                     result->info0.parsed = mapped;
                     phase2_end_hint = result->info0.sample_offset + result->info0.duration_samples;
+                    if (p12_debug_enabled()) {
+                        fprintf(stderr,
+                                "[p12] INFO0 hit target=%d sample=%.1fms is_d=%u\n",
+                                target,
+                                (double) result->info0.sample_offset * 1000.0 / (double) sample_rate,
+                                result->info0.is_info0d ? 1U : 0U);
+                    }
+                } else if (p12_debug_enabled()) {
+                    fprintf(stderr, "[p12] INFO0 frame candidate failed parse target=%d\n", target);
                 }
+            } else if (p12_debug_enabled()) {
+                fprintf(stderr, "[p12] INFO0 no frame target=%d\n", target);
             }
         }
     }
 
     /* Try to decode INFO1 from CH1 bursts */
-    /* INFO1d is 109 bits (Table 9), INFO1a is 70 bits (Table 10) */
+    /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch1_burst_count && !result->info1.detected; b++) {
         uint8_t frame_bytes[V34_INFO_MAX_BUF_BYTES];
         int frame_sample = 0;
 
-        /* Try INFO1a (70 bits) first, then INFO1d (109 bits) */
+        /* Try INFO1a first, then INFO1d. */
         for (int try_1d = 0; try_1d < 2 && !result->info1.detected; try_1d++) {
-            int target = try_1d ? 109 : 70;
+            int target = try_1d ? P12_INFO1D_PAYLOAD_BITS : P12_INFO1A_PAYLOAD_BITS;
+
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO1 try burst=%d target=%d start=%.1fms dur=%.1fms\n",
+                        b + 1,
+                        target,
+                        (double) phase2_ch1_bursts[b].start_sample * 1000.0 / (double) sample_rate,
+                        (double) phase2_ch1_bursts[b].duration_samples * 1000.0 / (double) sample_rate);
+            }
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
                                            V21_CH1, &phase2_ch1_bursts[b],
@@ -1028,6 +1243,14 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.info1d = info1d;
                         if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
                             phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
+                        if (p12_debug_enabled()) {
+                            fprintf(stderr,
+                                    "[p12] INFO1d hit target=%d sample=%.1fms\n",
+                                    target,
+                                    (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
+                        }
+                    } else if (p12_debug_enabled()) {
+                        fprintf(stderr, "[p12] INFO1d frame candidate failed parse target=%d\n", target);
                     }
                 } else {
                     /* INFO1a */
@@ -1042,8 +1265,18 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.info1a_parsed = mapped;
                         if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
                             phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
+                        if (p12_debug_enabled()) {
+                            fprintf(stderr,
+                                    "[p12] INFO1a hit target=%d sample=%.1fms\n",
+                                    target,
+                                    (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
+                        }
+                    } else if (p12_debug_enabled()) {
+                        fprintf(stderr, "[p12] INFO1a frame candidate failed parse target=%d\n", target);
                     }
                 }
+            } else if (p12_debug_enabled()) {
+                fprintf(stderr, "[p12] INFO1 no frame target=%d\n", target);
             }
         }
     }

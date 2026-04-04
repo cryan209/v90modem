@@ -2,6 +2,35 @@
 
 #include <string.h>
 
+static void v34_info_unpack_bits(uint8_t bits[], int nbits, const uint8_t buf[])
+{
+    for (int i = 0; i < nbits; i++) {
+        uint8_t octet;
+
+        octet = bit_reverse8(buf[i >> 3]);
+        bits[i] = (octet >> (7 - (i & 7))) & 1;
+    }
+}
+
+static void v34_info_pack_bits(uint8_t buf[V34_INFO_MAX_BUF_BYTES], const uint8_t bits[], int nbits)
+{
+    memset(buf, 0, V34_INFO_MAX_BUF_BYTES);
+    for (int i = 0; i < nbits; i++) {
+        if (bits[i])
+            buf[i >> 3] |= (1 << (i & 7));
+    }
+}
+
+static uint16_t v34_info_crc_from_bits(const uint8_t bits[], int nbits)
+{
+    uint16_t crc;
+
+    crc = 0xFFFF;
+    for (int i = 0; i < nbits; i++)
+        crc = crc_itu16_bits(bits[i], 1, crc);
+    return crc;
+}
+
 void v34_info_collector_init(v34_info_collector_t *collector, int target_bits)
 {
     if (!collector)
@@ -70,10 +99,29 @@ bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  uint8_t *frame_out,
                                  int frame_out_len)
 {
+    return v34_info_collector_push_bit_verbose(collector,
+                                               bit,
+                                               frame_out,
+                                               frame_out_len,
+                                               NULL,
+                                               NULL);
+}
+
+bool v34_info_collector_push_bit_verbose(v34_info_collector_t *collector,
+                                         int bit,
+                                         uint8_t *frame_out,
+                                         int frame_out_len,
+                                         bool *frame_complete_out,
+                                         uint16_t *crc_out)
+{
     int bytes_to_copy;
 
     if (!collector)
         return false;
+    if (frame_complete_out)
+        *frame_complete_out = false;
+    if (crc_out)
+        *crc_out = 0;
 
     collector->bitstream = (uint16_t) ((collector->bitstream << 1) | (bit & 1));
     if (collector->bit_count == 0) {
@@ -93,6 +141,10 @@ bool v34_info_collector_push_bit(v34_info_collector_t *collector,
     collector->crc = crc_itu16_bits((uint8_t) (bit & 1), 1, collector->crc);
     if (collector->bit_count++ != collector->target_bits)
         return false;
+    if (frame_complete_out)
+        *frame_complete_out = true;
+    if (crc_out)
+        *crc_out = collector->crc;
 
     bytes_to_copy = (collector->target_bits + 7) / 8;
     if (bytes_to_copy > frame_out_len)
@@ -104,6 +156,79 @@ bool v34_info_collector_push_bit(v34_info_collector_t *collector,
 
     collector->bit_count = 0;
     return collector->crc == 0;
+}
+
+bool v34_info_try_boundary_recovery(uint8_t *out,
+                                    const uint8_t *in,
+                                    int nbits,
+                                    int *shift_out)
+{
+    uint8_t bits[128];
+    uint8_t trial[128];
+
+    if (!out || !in || nbits <= 0 || nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return false;
+
+    v34_info_unpack_bits(bits, nbits, in);
+    for (int shift = -2; shift <= 2; shift++) {
+        uint16_t crc;
+
+        if (shift == 0)
+            continue;
+        for (int i = 0; i < nbits; i++) {
+            int src = i + shift;
+
+            trial[i] = (src >= 0 && src < nbits) ? bits[src] : 0;
+        }
+        crc = v34_info_crc_from_bits(trial, nbits);
+        if (crc == 0) {
+            v34_info_pack_bits(out, trial, nbits);
+            if (shift_out)
+                *shift_out = shift;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool v34_info_try_local_slip_recovery(uint8_t *out,
+                                      const uint8_t *in,
+                                      int nbits,
+                                      int *pivot_out,
+                                      int *shift_out)
+{
+    uint8_t bits[128];
+    uint8_t trial[128];
+
+    if (!out || !in || nbits <= 0 || nbits > (int) (sizeof(bits)/sizeof(bits[0])))
+        return false;
+
+    v34_info_unpack_bits(bits, nbits, in);
+    for (int pivot = 4; pivot < nbits - 4; pivot++) {
+        for (int shift = -1; shift <= 1; shift += 2) {
+            uint16_t crc;
+
+            for (int i = 0; i < nbits; i++) {
+                int src;
+
+                if (i < pivot)
+                    src = i;
+                else
+                    src = i + shift;
+                trial[i] = (src >= 0 && src < nbits) ? bits[src] : 0;
+            }
+            crc = v34_info_crc_from_bits(trial, nbits);
+            if (crc == 0) {
+                v34_info_pack_bits(out, trial, nbits);
+                if (pivot_out)
+                    *pivot_out = pivot;
+                if (shift_out)
+                    *shift_out = shift;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool v34_info_validate_frame_bytes(const uint8_t *buf, int target_bits)
