@@ -176,6 +176,21 @@ typedef struct {
     p12_timing_hint_t info1_hint;
 } p12_phase2_state_t;
 
+typedef struct {
+    bool v8bis_signal_seen;
+    bool v8bis_signal_weak;
+    int v8bis_signal_sample;
+    int v8bis_signal_duration;
+    char v8bis_signal_name[16];
+
+    bool v92_qc2_seen;
+    int v92_qc2_sample;
+    char v92_qc2_name[16];
+
+    bool answer_tone_handoff_known;
+    int answer_tone_handoff_sample;
+} p12_call_init_t;
+
 /* ------------------------------------------------------------------ */
 /* Phase 2 V.21 FSK burst detection                                    */
 /* ------------------------------------------------------------------ */
@@ -241,6 +256,9 @@ typedef struct {
     /* Phase 2 timing hints */
     p12_timing_hint_t info0_from_cj_hint;
     p12_phase2_state_t phase2_state;
+
+    /* Call initiation / pre-V.8 findings */
+    p12_call_init_t call_init;
 
     /* V.21 FSK bursts detected */
     int ch1_burst_count;

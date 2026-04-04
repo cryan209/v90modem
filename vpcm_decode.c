@@ -12038,6 +12038,18 @@ static void run_decode_suite(const char *label,
                        sample_to_ms(p12.answer_tone.start_sample + p12.answer_tone.duration_samples,
                                     sample_rate));
             }
+            if (p12.call_init.v8bis_signal_seen) {
+                printf("  Pre-ANS V.8bis: %s%s at %.1f ms (%.0f ms)\n",
+                       p12.call_init.v8bis_signal_weak ? "weak " : "",
+                       p12.call_init.v8bis_signal_name,
+                       sample_to_ms(p12.call_init.v8bis_signal_sample, sample_rate),
+                       sample_to_ms(p12.call_init.v8bis_signal_duration, sample_rate));
+            }
+            if (p12.call_init.v92_qc2_seen) {
+                printf("  Call-init QC: %s at %.1f ms\n",
+                       p12.call_init.v92_qc2_name,
+                       sample_to_ms(p12.call_init.v92_qc2_sample, sample_rate));
+            }
 
             /* V.21 FSK bursts */
             printf("  V.21 CH1 bursts: %d, CH2 bursts: %d\n",

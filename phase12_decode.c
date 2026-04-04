@@ -94,6 +94,10 @@ enum {
     P12_ANS_STEP_SAMPLES = 80
 };
 
+enum {
+    P12_CALL_INIT_MAX_MS = 10000
+};
+
 /* Tone detection thresholds */
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
@@ -505,6 +509,95 @@ static bool detect_phase_reversals_at_freq(const int16_t *samples,
     if (reversal_count_out)
         *reversal_count_out = reversals;
     return reversals >= 1;
+}
+
+static void detect_call_initiation_signals(const int16_t *samples,
+                                           int total_samples,
+                                           int sample_rate,
+                                           int max_sample,
+                                           phase12_result_t *result)
+{
+    int limit;
+    v8bis_scan_result_t strong;
+    v8bis_weak_candidate_t weak;
+    call_log_t tmp_log;
+
+    if (!samples || !result || sample_rate <= 0)
+        return;
+
+    limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
+    if (limit <= 0)
+        return;
+    if (result->answer_tone.detected && result->answer_tone.start_sample > 0 && result->answer_tone.start_sample < limit)
+        limit = result->answer_tone.start_sample;
+    if (limit > (sample_rate * P12_CALL_INIT_MAX_MS) / 1000)
+        limit = (sample_rate * P12_CALL_INIT_MAX_MS) / 1000;
+    if (limit <= 0)
+        return;
+
+    memset(&strong, 0, sizeof(strong));
+    memset(&weak, 0, sizeof(weak));
+    if (v8bis_scan_signals(samples, total_samples, limit, &strong)) {
+        int best_idx = -1;
+        double best_score = -1.0;
+        for (int i = 0; i < V8BIS_NUM_SIGNALS; i++) {
+            if (!strong.hits[i].seen)
+                continue;
+            if (strong.hits[i].score > best_score) {
+                best_idx = i;
+                best_score = strong.hits[i].score;
+            }
+        }
+        if (best_idx >= 0) {
+            result->call_init.v8bis_signal_seen = true;
+            result->call_init.v8bis_signal_sample = strong.hits[best_idx].sample_offset;
+            result->call_init.v8bis_signal_duration = strong.hits[best_idx].duration_samples;
+            snprintf(result->call_init.v8bis_signal_name,
+                     sizeof(result->call_init.v8bis_signal_name),
+                     "%s",
+                     g_v8bis_signal_defs[best_idx].name);
+        }
+    } else if (v8bis_scan_weak_candidate(samples, total_samples, limit, &weak)) {
+        result->call_init.v8bis_signal_seen = true;
+        result->call_init.v8bis_signal_weak = true;
+        result->call_init.v8bis_signal_sample = weak.sample_offset;
+        result->call_init.v8bis_signal_duration = weak.duration_samples;
+        snprintf(result->call_init.v8bis_signal_name,
+                 sizeof(result->call_init.v8bis_signal_name),
+                 "%s",
+                 g_v8bis_signal_defs[weak.signal_index].name);
+    }
+
+    memset(&tmp_log, 0, sizeof(tmp_log));
+    v8bis_collect_msg_events(&tmp_log, samples, total_samples, limit);
+    for (size_t i = 0; i < tmp_log.count; i++) {
+        const call_log_event_t *ev = &tmp_log.events[i];
+        if (strcmp(ev->protocol, "V.92") != 0)
+            continue;
+        if (!(strcmp(ev->summary, "QC2a") == 0
+              || strcmp(ev->summary, "QCA2a") == 0
+              || strcmp(ev->summary, "QC2d") == 0
+              || strcmp(ev->summary, "QCA2d") == 0)) {
+            continue;
+        }
+        result->call_init.v92_qc2_seen = true;
+        result->call_init.v92_qc2_sample = ev->sample_offset;
+        snprintf(result->call_init.v92_qc2_name,
+                 sizeof(result->call_init.v92_qc2_name),
+                 "%s",
+                 ev->summary);
+        break;
+    }
+    free(tmp_log.events);
+    tmp_log.events = NULL;
+    tmp_log.count = 0;
+    tmp_log.cap = 0;
+
+    if (result->answer_tone.detected) {
+        result->call_init.answer_tone_handoff_known = true;
+        result->call_init.answer_tone_handoff_sample =
+            result->answer_tone.start_sample + result->answer_tone.duration_samples;
+    }
 }
 
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
@@ -2267,6 +2360,7 @@ bool phase12_decode_phase1(const int16_t *samples,
         return false;
 
     detect_phase1_tones(samples, total_samples, sample_rate, max_sample, result);
+    detect_call_initiation_signals(samples, total_samples, sample_rate, max_sample, result);
     detect_phase1_v8(samples, total_samples, sample_rate, max_sample, result);
     phase12_finalize_diagnostics(result);
 
@@ -2334,6 +2428,32 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
     emit_tone_event(log, &result->ct, "V.8");
     emit_tone_event(log, &result->answer_tone, "V.8");
     emit_answer_tone_handoff_event(log, &result->answer_tone);
+    if (result->call_init.v8bis_signal_seen) {
+        char summary[160];
+        char detail[256];
+
+        snprintf(summary, sizeof(summary), "%s%s detected before ANS",
+                 result->call_init.v8bis_signal_weak ? "Weak " : "",
+                 result->call_init.v8bis_signal_name[0] ? result->call_init.v8bis_signal_name : "V.8bis");
+        snprintf(detail, sizeof(detail),
+                 "duration=%.1fms weak=%s",
+                 (double) result->call_init.v8bis_signal_duration * 1000.0 / (double) sample_rate,
+                 result->call_init.v8bis_signal_weak ? "yes" : "no");
+        call_log_append(log,
+                        result->call_init.v8bis_signal_sample,
+                        result->call_init.v8bis_signal_duration,
+                        result->call_init.v92_qc2_seen ? "V.92" : "V.8bis",
+                        summary,
+                        detail);
+    }
+    if (result->call_init.v92_qc2_seen) {
+        call_log_append(log,
+                        result->call_init.v92_qc2_sample,
+                        0,
+                        "V.92",
+                        result->call_init.v92_qc2_name,
+                        "source=call_initiation");
+    }
 
     /* Phase 1 V.8 messages */
     emit_cm_jm_event(log, &result->cm, "CM");
@@ -2385,6 +2505,21 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                      (double) result->answer_tone.start_sample * 1000.0 / (double) sample_rate,
                      (double) (result->answer_tone.start_sample + result->answer_tone.duration_samples) * 1000.0 / (double) sample_rate,
                      (double) result->answer_tone.duration_samples * 1000.0 / (double) sample_rate);
+        }
+        if (result->call_init.v8bis_signal_seen) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " pre_v8bis=%s%s@%.1fms",
+                     result->call_init.v8bis_signal_weak ? "weak_" : "",
+                     result->call_init.v8bis_signal_name,
+                     (double) result->call_init.v8bis_signal_sample * 1000.0 / (double) sample_rate);
+        }
+        if (result->call_init.v92_qc2_seen) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " qc=%s@%.1fms",
+                     result->call_init.v92_qc2_name,
+                     (double) result->call_init.v92_qc2_sample * 1000.0 / (double) sample_rate);
         }
         if (result->info_path_known) {
             size_t dlen = strlen(detail);
