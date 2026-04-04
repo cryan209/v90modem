@@ -45,7 +45,7 @@ typedef enum {
     P3_SIGNAL_PP,           /* PP (probing period) — not yet demodulated */
     P3_SIGNAL_TRN,          /* TRN (scrambled ones) */
     P3_SIGNAL_J,            /* J frame (16-bit repeating pattern) */
-    P3_SIGNAL_J_PRIME,      /* J' (12 scrambled zeros) */
+    P3_SIGNAL_J_PRIME,      /* J' (Table 19, transmitted once) */
     P3_SIGNAL_RU,           /* V.92 Ru (analog, 2-point, +LU pattern) */
     P3_SIGNAL_UR,           /* V.92 uR (analog, 2-point, -LU pattern) */
 } p3_signal_type_t;
@@ -138,6 +138,11 @@ typedef struct {
     /* For J frames */
     uint16_t j_trn16;            /* 16-bit repeating pattern */
     int   j_hypothesis;           /* Best-fit hypothesis (0-7) */
+    int   j_table_bits;           /* 4, 16, or 0 if no Table 18 match */
+    int   j_table_phase;          /* Best Table 18 phase offset (0-15) */
+    int   j_table_transform;      /* 0=none,1=invert,2=swap,3=swap+invert */
+    int   j_table_match_pct;      /* Best periodic Table 18 match percentage */
+    int   jprime_match_pct;       /* Best Table 19 one-block match percentage */
 
     /* For TRN */
     int   trn_errors;             /* Number of descrambled bits != 1 */

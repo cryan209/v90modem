@@ -812,6 +812,157 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
     return true;
 }
 
+/* Table 18 / Table 19 canonical bit patterns (left-most bit is first in time). */
+static const uint8_t j_table18_4pt_bits[16]  = {0,0,0,0,1,0,0,1,1,0,0,1,0,0,0,1};
+static const uint8_t j_table18_16pt_bits[16] = {0,0,0,0,1,1,0,1,1,0,0,1,0,0,0,1};
+static const uint8_t j_table19_prime_bits[16] = {1,1,1,1,1,0,0,1,1,0,0,1,0,0,0,1};
+
+static int j_transformed_bit(const p3_symbol_t *syms, int start, int bit_pos, int transform)
+{
+    int sym_idx = bit_pos / 2;
+    int bsel = bit_pos & 1;
+    int b0 = symbol_descrambled_bit(syms, start, sym_idx * 2);
+    int b1 = symbol_descrambled_bit(syms, start, sym_idx * 2 + 1);
+    int bit;
+
+    if (transform & 2)
+        bit = bsel ? b0 : b1; /* swap I1/I2 */
+    else
+        bit = bsel ? b1 : b0;
+    if (transform & 1)
+        bit ^= 1; /* invert */
+    return bit;
+}
+
+static int j_match_periodic_pattern_pct(const p3_symbol_t *syms,
+                                        int start,
+                                        int len_symbols,
+                                        const uint8_t pattern[16],
+                                        int phase,
+                                        int transform)
+{
+    int bit_count = len_symbols * 2;
+    int matches = 0;
+
+    if (!syms || len_symbols <= 0)
+        return 0;
+    for (int b = 0; b < bit_count; b++) {
+        int got = j_transformed_bit(syms, start, b, transform);
+        int exp = pattern[(phase + b) & 15];
+        if (got == exp)
+            matches++;
+    }
+    return (matches * 100 + bit_count / 2) / bit_count;
+}
+
+static int j_match_single_block_pct(const p3_symbol_t *syms,
+                                    int start,
+                                    const uint8_t pattern[16],
+                                    int phase,
+                                    int transform)
+{
+    int matches = 0;
+
+    if (!syms)
+        return 0;
+    for (int b = 0; b < 16; b++) {
+        int got = j_transformed_bit(syms, start, b, transform);
+        int exp = pattern[(phase + b) & 15];
+        if (got == exp)
+            matches++;
+    }
+    return (matches * 100 + 8) / 16;
+}
+
+static void classify_j_table18(const p3_symbol_t *syms,
+                               int start,
+                               int len_symbols,
+                               int *j_bits_out,
+                               int *phase_out,
+                               int *transform_out,
+                               int *match_pct_out)
+{
+    int best_bits = 0;
+    int best_phase = 0;
+    int best_xform = 0;
+    int best_pct = -1;
+    int best_pref = -1;
+
+    if (!j_bits_out || !phase_out || !transform_out || !match_pct_out)
+        return;
+    *j_bits_out = 0;
+    *phase_out = 0;
+    *transform_out = 0;
+    *match_pct_out = 0;
+    if (!syms || len_symbols < 32)
+        return;
+
+    for (int pat_idx = 0; pat_idx < 2; pat_idx++) {
+        const uint8_t *pat = (pat_idx == 0) ? j_table18_4pt_bits : j_table18_16pt_bits;
+        int pat_bits = (pat_idx == 0) ? 4 : 16;
+        for (int xform = 0; xform < 4; xform++) {
+            int pref = (xform == 0) ? 2 : (xform == 1 ? 1 : 0);
+            for (int phase = 0; phase < 16; phase++) {
+                int pct = j_match_periodic_pattern_pct(syms, start, len_symbols, pat, phase, xform);
+                if (pct > best_pct
+                    || (pct == best_pct && pref > best_pref)
+                    || (pct == best_pct && pref == best_pref && pat_bits == 16 && best_bits == 4)) {
+                    best_pct = pct;
+                    best_bits = pat_bits;
+                    best_phase = phase;
+                    best_xform = xform;
+                    best_pref = pref;
+                }
+            }
+        }
+    }
+
+    if (best_pct >= 70) {
+        *j_bits_out = best_bits;
+        *phase_out = best_phase;
+        *transform_out = best_xform;
+        *match_pct_out = best_pct;
+    } else {
+        *j_bits_out = 0;
+        *phase_out = best_phase;
+        *transform_out = best_xform;
+        *match_pct_out = (best_pct < 0) ? 0 : best_pct;
+    }
+}
+
+static bool detect_j_prime_after_j(const p3_symbol_t *syms,
+                                   int start,
+                                   int force_transform,
+                                   int *phase_out,
+                                   int *match_pct_out)
+{
+    int best_phase = 0;
+    int best_pct = -1;
+    int xform_start = 0;
+    int xform_end = 4;
+
+    if (!syms)
+        return false;
+    if (force_transform >= 0 && force_transform < 4) {
+        xform_start = force_transform;
+        xform_end = force_transform + 1;
+    }
+    for (int xform = xform_start; xform < xform_end; xform++) {
+        for (int phase = 0; phase < 16; phase++) {
+            int pct = j_match_single_block_pct(syms, start, j_table19_prime_bits, phase, xform);
+            if (pct > best_pct) {
+                best_pct = pct;
+                best_phase = phase;
+            }
+        }
+    }
+    if (phase_out)
+        *phase_out = best_phase;
+    if (match_pct_out)
+        *match_pct_out = (best_pct < 0) ? 0 : best_pct;
+    return best_pct >= 75;
+}
+
 /* Check for silence/very low energy */
 static bool is_silence(const p3_symbol_t *syms, int start, int len,
                        float threshold)
@@ -1009,6 +1160,14 @@ int p3_segment_symbols(p3_result_t *result)
         /* Check for J frame (16-bit repeating descrambled pattern) */
         if (remaining >= 48
             && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp)) {
+            int j_table_bits = 0;
+            int j_table_phase = 0;
+            int j_table_transform = 0;
+            int j_table_match_pct = 0;
+            int jprime_phase = 0;
+            int jprime_pct = 0;
+            bool have_jprime = false;
+
             /* Extend incrementally: verify new bits match the 16-bit pattern */
             seg_len = 48;
             while (pos + seg_len + 8 <= n) {
@@ -1032,9 +1191,37 @@ int p3_segment_symbols(p3_result_t *result)
                 seg = &result->segments[result->segment_count - 1];
                 seg->j_trn16 = j_trn16;
                 seg->j_hypothesis = j_hyp;
+                classify_j_table18(syms,
+                                   pos,
+                                   seg_len,
+                                   &j_table_bits,
+                                   &j_table_phase,
+                                   &j_table_transform,
+                                   &j_table_match_pct);
+                seg->j_table_bits = j_table_bits;
+                seg->j_table_phase = j_table_phase;
+                seg->j_table_transform = j_table_transform;
+                seg->j_table_match_pct = j_table_match_pct;
                 seg->confidence = 0.78f;
+
+                if (pos + seg_len + 8 <= n
+                    && detect_j_prime_after_j(syms,
+                                              pos + seg_len,
+                                              j_table_transform,
+                                              &jprime_phase,
+                                              &jprime_pct)) {
+                    p3_segment_t *jp;
+                    add_segment(result, P3_SIGNAL_J_PRIME, pos + seg_len, 8, syms);
+                    jp = &result->segments[result->segment_count - 1];
+                    jp->j_table_phase = jprime_phase;
+                    jp->j_table_transform = j_table_transform;
+                    jp->jprime_match_pct = jprime_pct;
+                    jp->confidence = (float) jprime_pct / 100.0f;
+                    have_jprime = true;
+                    seg->jprime_match_pct = jprime_pct;
+                }
             }
-            pos += seg_len;
+            pos += seg_len + (have_jprime ? 8 : 0);
             continue;
         }
 

@@ -7800,6 +7800,7 @@ static void p3_u16_to_bitstr(uint16_t value, char out[17])
 static void p3_print_data_signatures(const p3_result_t *detail)
 {
     const p3_segment_t *best_j = NULL;
+    const p3_segment_t *best_jprime = NULL;
     const p3_segment_t *best_pp = NULL;
     const p3_segment_t *best_trn = NULL;
     const p3_segment_t *best_ru = NULL;
@@ -7807,6 +7808,7 @@ static void p3_print_data_signatures(const p3_result_t *detail)
     int pp_symbols = 0;
     int trn_symbols = 0;
     int j_symbols = 0;
+    int jprime_symbols = 0;
     int ru_symbols = 0;
 
     if (!detail)
@@ -7834,6 +7836,11 @@ static void p3_print_data_signatures(const p3_result_t *detail)
             if (!best_j || seg->length > best_j->length)
                 best_j = seg;
             break;
+        case P3_SIGNAL_J_PRIME:
+            jprime_symbols += seg->length;
+            if (!best_jprime || seg->length > best_jprime->length)
+                best_jprime = seg;
+            break;
         case P3_SIGNAL_RU:
         case P3_SIGNAL_UR:
             ru_symbols += seg->length;
@@ -7845,8 +7852,8 @@ static void p3_print_data_signatures(const p3_result_t *detail)
         }
     }
 
-    printf("    Data signatures: S-like=%d sym, PP=%d sym, TRN=%d sym, J=%d sym, Ru/uR=%d sym\n",
-           s_like_symbols, pp_symbols, trn_symbols, j_symbols, ru_symbols);
+    printf("    Data signatures: S-like=%d sym, PP=%d sym, TRN=%d sym, J=%d sym, J'=%d sym, Ru/uR=%d sym\n",
+           s_like_symbols, pp_symbols, trn_symbols, j_symbols, jprime_symbols, ru_symbols);
 
     if (best_pp) {
         printf("      PP longest: %d sym (%d x 48T), phase=%d, corr=%.2f\n",
@@ -7859,15 +7866,36 @@ static void p3_print_data_signatures(const p3_result_t *detail)
     if (best_j) {
         char trn16_bits[17];
         char j_preview[65];
+        const char *j_table_label = "unknown";
 
         p3_u16_to_bitstr(best_j->j_trn16, trn16_bits);
         p3_segment_bit_preview(detail, best_j, true, 64, j_preview, sizeof(j_preview));
+        if (best_j->j_table_bits == 4)
+            j_table_label = "table18-4pt";
+        else if (best_j->j_table_bits == 16)
+            j_table_label = "table18-16pt";
         printf("      J longest: %d sym, trn16=0x%04X (%s), phase=%d, bits(desc)=%s\n",
                best_j->length,
                best_j->j_trn16,
                trn16_bits,
                best_j->j_hypothesis,
                j_preview);
+        printf("        J table18: %s match=%d%% phase=%d xform=%d",
+               j_table_label,
+               best_j->j_table_match_pct,
+               best_j->j_table_phase,
+               best_j->j_table_transform);
+        if (best_j->jprime_match_pct > 0)
+            printf(" j'after=%d%%", best_j->jprime_match_pct);
+        printf("\n");
+    }
+
+    if (best_jprime) {
+        printf("      J' longest: %d sym (one-shot) match=%d%% phase=%d xform=%d\n",
+               best_jprime->length,
+               best_jprime->jprime_match_pct,
+               best_jprime->j_table_phase,
+               best_jprime->j_table_transform);
     }
 
     if (best_trn) {
@@ -8106,8 +8134,20 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                         printf(" errors=%d", seg->trn_errors);
                     if (seg->type == P3_SIGNAL_PP)
                         printf(" blocks=%d phase=%d", seg->pp_blocks, seg->pp_phase);
-                    if (seg->type == P3_SIGNAL_J)
+                    if (seg->type == P3_SIGNAL_J) {
                         printf(" trn16=0x%04X", seg->j_trn16);
+                        if (seg->j_table_bits > 0)
+                            printf(" table18=%dpt(%d%%) phase=%d xform=%d",
+                                   seg->j_table_bits,
+                                   seg->j_table_match_pct,
+                                   seg->j_table_phase,
+                                   seg->j_table_transform);
+                    }
+                    if (seg->type == P3_SIGNAL_J_PRIME && seg->jprime_match_pct > 0)
+                        printf(" table19=%d%% phase=%d xform=%d",
+                               seg->jprime_match_pct,
+                               seg->j_table_phase,
+                               seg->j_table_transform);
                     if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
                         printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                     printf("\n");
@@ -8251,8 +8291,22 @@ static void p3_demod_scan_window(const int16_t *samples,
                        seg->confidence);
                 if (seg->type == P3_SIGNAL_TRN)
                     printf(" errors=%d", seg->trn_errors);
-                if (seg->type == P3_SIGNAL_J)
+                if (seg->type == P3_SIGNAL_PP)
+                    printf(" blocks=%d phase=%d", seg->pp_blocks, seg->pp_phase);
+                if (seg->type == P3_SIGNAL_J) {
                     printf(" trn16=0x%04X", seg->j_trn16);
+                    if (seg->j_table_bits > 0)
+                        printf(" table18=%dpt(%d%%) phase=%d xform=%d",
+                               seg->j_table_bits,
+                               seg->j_table_match_pct,
+                               seg->j_table_phase,
+                               seg->j_table_transform);
+                }
+                if (seg->type == P3_SIGNAL_J_PRIME && seg->jprime_match_pct > 0)
+                    printf(" table19=%d%% phase=%d xform=%d",
+                           seg->jprime_match_pct,
+                           seg->j_table_phase,
+                           seg->j_table_transform);
                 if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
                     printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                 printf("\n");
