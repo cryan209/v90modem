@@ -2171,6 +2171,73 @@ static bool parse_cm_jm_bytes(const uint8_t *data, int len,
     return (modulations != 0 || out->call_function != 0);
 }
 
+static bool p12_cm_jm_bytes_equal(const p12_cm_jm_hit_t *msg,
+                                  const uint8_t *bytes,
+                                  int byte_count)
+{
+    if (!msg || !bytes || byte_count < 0)
+        return false;
+    if (msg->byte_count != byte_count)
+        return false;
+    if (byte_count == 0)
+        return true;
+    return memcmp(msg->bytes, bytes, (size_t) byte_count) == 0;
+}
+
+static void p12_record_cm_jm_observation(p12_cm_jm_hit_t *dst,
+                                         const p12_cm_jm_hit_t *candidate)
+{
+    if (!dst || !candidate || !candidate->detected)
+        return;
+
+    if (!dst->detected) {
+        *dst = *candidate;
+        dst->observed_count = 1;
+        dst->differing_count = 0;
+        dst->saved_count = 1;
+        dst->saved_sample_offsets[0] = candidate->sample_offset;
+        dst->saved_byte_counts[0] = candidate->byte_count;
+        if (candidate->byte_count > 0) {
+            memcpy(dst->saved_bytes[0],
+                   candidate->bytes,
+                   (size_t) candidate->byte_count);
+        }
+        dst->last_sample_offset = candidate->sample_offset;
+        dst->last_duration_samples = candidate->duration_samples;
+        dst->complete = false;
+        return;
+    }
+
+    dst->observed_count++;
+    dst->last_sample_offset = candidate->sample_offset;
+    dst->last_duration_samples = candidate->duration_samples;
+
+    if (!p12_cm_jm_bytes_equal(dst, candidate->bytes, candidate->byte_count))
+        dst->differing_count++;
+
+    if (dst->saved_count < (int) (sizeof(dst->saved_sample_offsets) / sizeof(dst->saved_sample_offsets[0]))) {
+        int idx = dst->saved_count++;
+        dst->saved_sample_offsets[idx] = candidate->sample_offset;
+        dst->saved_byte_counts[idx] = candidate->byte_count;
+        if (candidate->byte_count > 0) {
+            memcpy(dst->saved_bytes[idx],
+                   candidate->bytes,
+                   (size_t) candidate->byte_count);
+        }
+    }
+
+    /* Keep the parsed fields from the most recent valid decode, while the
+       original bytes remain the reference message for repeat comparison. */
+    dst->sample_offset = candidate->sample_offset;
+    dst->duration_samples = candidate->duration_samples;
+    dst->call_function = candidate->call_function;
+    dst->modulations = candidate->modulations;
+    dst->protocols = candidate->protocols;
+    dst->pstn_access = candidate->pstn_access;
+    dst->pcm_modem_availability = candidate->pcm_modem_availability;
+    dst->complete = (dst->observed_count >= 2 && dst->differing_count == 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* Phase 1 V.8 message decode                                         */
 /* ------------------------------------------------------------------ */
@@ -2218,6 +2285,7 @@ static void decode_v8_fsk_channel(const int16_t *samples,
         /* Try both polarities */
         for (int inv = 0; inv < 2; inv++) {
             int message_end_bit = -1;
+            bool found_message_this_pass = false;
 
             v8_msg_decoder_init(&decoder);
 
@@ -2226,7 +2294,7 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                                 v8_msg_decoder_put_bit, &decoder);
 
             /* Try extracting CM/JM bytes from raw bits using async framing */
-            if (cm_jm_out && !cm_jm_out->detected && decoder.raw_bit_count >= 20) {
+            if (cm_jm_out && decoder.raw_bit_count >= 20) {
                 /* Scan raw bits for async-framed CM/JM messages */
                 for (int bit_pos = 0; bit_pos + 10 <= decoder.raw_bit_count; bit_pos++) {
                     uint8_t msg_bytes[64];
@@ -2272,12 +2340,13 @@ static void decode_v8_fsk_channel(const int16_t *samples,
 
                         if (parse_cm_jm_bytes(msg_bytes, msg_len, &candidate)) {
                             candidate.detected = true;
-                            candidate.complete = true;
+                            candidate.complete = false;
                             candidate.sample_offset = start;
                             candidate.duration_samples = len;
-                            *cm_jm_out = candidate;
+                            p12_record_cm_jm_observation(cm_jm_out, &candidate);
                             message_end_bit = scan_pos;
-                            break;
+                            found_message_this_pass = true;
+                            bit_pos = scan_pos - 1;
                         }
                     }
                 }
@@ -2319,9 +2388,13 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                 }
             }
 
-            if ((cm_jm_out && cm_jm_out->detected) || (cj_out && cj_out->detected))
-                break; /* found what we need */
+            if (cj_out && cj_out->detected)
+                break; /* CJ ends the repeating CM/JM phase */
+            if (found_message_this_pass)
+                continue; /* keep decoding repeats until CJ is found */
         }
+        if (cj_out && cj_out->detected)
+            break;
     }
 }
 

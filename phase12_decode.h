@@ -69,8 +69,16 @@ typedef struct {
     bool complete;             /* repeated / CRC-confirmed */
     int sample_offset;
     int duration_samples;
+    int last_sample_offset;
+    int last_duration_samples;
     int byte_count;
     uint8_t bytes[64];
+    int observed_count;
+    int differing_count;
+    int saved_count;
+    int saved_sample_offsets[8];
+    int saved_byte_counts[8];
+    uint8_t saved_bytes[8][64];
     /* Parsed capability fields */
     int call_function;
     int modulations;           /* bitmask, matches V8_MOD_* values */
