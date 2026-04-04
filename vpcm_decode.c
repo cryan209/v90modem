@@ -19,6 +19,7 @@
 #include "v92_short_phase2_decode.h"
 #include "v92_phase3_decode.h"
 #include "v92_ja_decode.h"
+#include "v34_phase2_decode.h"
 #include "p3_demod.h"
 
 #include <spandsp.h>
@@ -1081,126 +1082,6 @@ static void print_v8_capability_note(const v8_parms_t *r)
 }
 
 #define V8_EARLY_SEARCH_LIMIT_SAMPLES   ((8000 * 14) / 1)
-
-typedef struct {
-    bool info0_seen;
-    bool info0_is_d;
-    bool info1_seen;
-    bool info1_is_d;
-    bool info0_from_rescue;
-    bool info1_from_rescue;
-    bool phase3_seen;
-    bool phase4_ready_seen;
-    bool phase4_seen;
-    bool training_failed;
-    bool mp_seen;
-    bool mp_remote_ack_seen;
-    bool mp_from_rx_frame;
-    bool mp_from_rx_recovery;
-    bool mp_from_info_sequence;
-    bool mp_rates_valid;
-    bool mp_crc_valid;
-    bool mp_fill_valid;
-    bool mp_candidate_seen;
-    bool mp_candidate_crc_valid;
-    bool mp_candidate_fill_valid;
-    bool mp_aux_channel_supported;
-    bool mp_use_non_linear_encoder;
-    bool mp_expanded_shaping;
-    bool mp_asymmetric_rates_allowed;
-    bool mp_local_ack_bit;
-    bool u_info_from_info1a;
-    bool ja_bits_from_local_tx;
-    bool ja_bits_estimated;
-    bool info0_ok_event_seen;
-    bool info0_bad_event_seen;
-    bool info1_ok_event_seen;
-    bool info1_bad_event_seen;
-    int info0_sample;
-    int info1_sample;
-    int info0_ok_event_sample;
-    int info0_bad_event_sample;
-    int info1_ok_event_sample;
-    int info1_bad_event_sample;
-    int phase3_sample;
-    int tx_first_s_sample;
-    int tx_first_not_s_sample;
-    int tx_md_sample;
-    int tx_second_s_sample;
-    int tx_second_not_s_sample;
-    int tx_pp_sample;
-    int tx_pp_end_sample;
-    int rx_pp_detect_sample;
-    int rx_pp_complete_sample;
-    int rx_pp_phase;
-    int rx_pp_phase_score;
-    int rx_pp_acquire_hits;
-    bool rx_pp_started;
-    int tx_trn_sample;
-    int phase3_trn_lock_sample;
-    int phase3_trn_strong_sample;
-    int phase3_trn_lock_score;
-    int tx_ja_sample;
-    int tx_jdashed_sample;
-    bool ja_bits_known;
-    int ja_trn16;
-    int ja_detector_bits;
-    int ja_observed_bits;
-    char ja_bits[129];
-    int ja_aux_bit_len;
-    char ja_aux_bits[8193];
-    int ja_aux_hyp_bit_len[8];
-    char ja_aux_hyp_bits[8][8193];
-    int ja_aux_hyp_raw_bit_len[8];
-    char ja_aux_hyp_raw_bits[8][8193];
-    int rx_s_event_sample;
-    int rx_tone_a_sample;
-    int rx_tone_b_sample;
-    int rx_tone_a_reversal_sample;
-    int rx_tone_b_reversal_sample;
-    int tx_tone_a_sample;
-    int tx_tone_b_sample;
-    int tx_tone_a_reversal_sample;
-    int tx_tone_b_reversal_sample;
-    int tx_info1_sample;
-    int rx_phase4_s_sample;
-    int rx_phase4_sbar_sample;
-    int rx_phase4_trn_sample;
-    int ru_window_len;
-    uint8_t ru_window_symbols[32];
-    float ru_window_mags[32];
-    bool ru_window_captured;
-    int ru_window_score;
-    float trn1u_mag_mean;
-    int trn1u_mag_count;
-    int phase4_ready_sample;
-    int phase4_sample;
-    int failure_sample;
-    int final_rx_stage;
-    int final_tx_stage;
-    int final_rx_event;
-    int mp_type;
-    int mp_trellis_size;
-    int mp_signalling_rate_mask;
-    int mp_frame_bits_captured;
-    int mp_start_error_count;
-    int mp_candidate_type;
-    int mp_candidate_trellis_size;
-    int mp_candidate_signalling_rate_mask;
-    int mp_candidate_frame_bits_captured;
-    int mp_candidate_start_error_count;
-    int mp_candidate_votes;
-    int mp_candidate_rate_a_to_c_bps;
-    int mp_candidate_rate_c_to_a_bps;
-    int mp_rate_a_to_c_bps;
-    int mp_rate_c_to_a_bps;
-    int u_info;
-    v34_v90_info0a_t info0_raw;
-    v90_info0a_t info0a;
-    v34_v90_info1a_t info1a_raw;
-    v90_info1a_t info1a;
-    v34_v90_info1d_t info1d;
-} decode_v34_result_t;
 
 typedef struct {
     bool valid;
@@ -5673,7 +5554,7 @@ static void normalize_v34_result_to_spec_flow(decode_v34_result_t *result, bool 
         result->phase4_sample = max_non_negative(result->phase4_sample, result->rx_phase4_s_sample);
 }
 
-static int v34_result_spec_score(const decode_v34_result_t *result)
+int v34_phase2_result_spec_score(const decode_v34_result_t *result)
 {
     int score = 0;
 
@@ -9443,14 +9324,14 @@ static void merge_info1_from_rescue(decode_v34_result_t *dst, const decode_v34_r
     dst->info1_from_rescue = true;
 }
 
-static void decode_v34_pair_with_rescue(const int16_t *samples,
-                                        int total_samples,
-                                        v91_law_t law,
-                                        bool allow_info_rate_infer,
-                                        decode_v34_result_t *answerer,
-                                        bool *have_answerer,
-                                        decode_v34_result_t *caller,
-                                        bool *have_caller)
+void v34_phase2_decode_pair(const int16_t *samples,
+                            int total_samples,
+                            v91_law_t law,
+                            bool allow_info_rate_infer,
+                            decode_v34_result_t *answerer,
+                            bool *have_answerer,
+                            decode_v34_result_t *caller,
+                            bool *have_caller)
 {
     static const float rescue_cutoffs[] = { -60.0f, -68.0f };
 
@@ -9522,14 +9403,14 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
     }
 }
 
-static void decode_v34_pair_with_rescue_cached(const int16_t *samples,
-                                               int total_samples,
-                                               v91_law_t law,
-                                               bool allow_info_rate_infer,
-                                               decode_v34_result_t *answerer,
-                                               bool *have_answerer,
-                                               decode_v34_result_t *caller,
-                                               bool *have_caller)
+void v34_phase2_decode_pair_cached(const int16_t *samples,
+                                   int total_samples,
+                                   v91_law_t law,
+                                   bool allow_info_rate_infer,
+                                   decode_v34_result_t *answerer,
+                                   bool *have_answerer,
+                                   decode_v34_result_t *caller,
+                                   bool *have_caller)
 {
     v34_pair_cache_entry_t *slot;
 
@@ -9558,14 +9439,14 @@ static void decode_v34_pair_with_rescue_cached(const int16_t *samples,
         return;
     }
 
-    decode_v34_pair_with_rescue(samples,
-                                total_samples,
-                                law,
-                                allow_info_rate_infer,
-                                answerer,
-                                have_answerer,
-                                caller,
-                                have_caller);
+    v34_phase2_decode_pair(samples,
+                           total_samples,
+                           law,
+                           allow_info_rate_infer,
+                           answerer,
+                           have_answerer,
+                           caller,
+                           have_caller);
 
     slot = &g_v34_pair_cache[g_v34_pair_cache_next];
     g_v34_pair_cache_next = (g_v34_pair_cache_next + 1) % VPCM_PREPASS_CACHE_SLOTS;
@@ -9960,17 +9841,17 @@ static void collect_v34_events(call_log_t *log,
         } \
     } while (0)
 
-    decode_v34_pair_with_rescue(samples,
-                                total_samples,
-                                law,
-                                !suppress_v90_phase2,
-                                &answerer,
-                                &have_answerer,
-                                &caller,
-                                &have_caller);
+    v34_phase2_decode_pair(samples,
+                           total_samples,
+                           law,
+                           !suppress_v90_phase2,
+                           &answerer,
+                           &have_answerer,
+                           &caller,
+                           &have_caller);
 
     if (have_answerer && have_caller) {
-        if (v34_result_spec_score(&answerer) >= v34_result_spec_score(&caller)) {
+        if (v34_phase2_result_spec_score(&answerer) >= v34_phase2_result_spec_score(&caller)) {
             primary = &answerer;
             primary_role = "answerer";
             secondary = &caller;
@@ -10300,14 +10181,14 @@ static void collect_stream_call_log(call_log_t *log,
     suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
 
     if (do_v34 || do_v90) {
-        decode_v34_pair_with_rescue_cached(linear_samples,
-                                           total_samples,
-                                           law,
-                                           !suppress_v90_phase2,
-                                           &answerer,
-                                           &have_answerer,
-                                           &caller,
-                                           &have_caller);
+        v34_phase2_decode_pair_cached(linear_samples,
+                                      total_samples,
+                                      law,
+                                      !suppress_v90_phase2,
+                                      &answerer,
+                                      &have_answerer,
+                                      &caller,
+                                      &have_caller);
         if (have_answerer) {
             if (answerer.info0_seen)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
@@ -12174,14 +12055,14 @@ static void run_decode_suite(const char *label,
     }
 
     if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
-        decode_v34_pair_with_rescue_cached(linear_samples,
-                                           total_samples,
-                                           law,
-                                           !suppress_v90_phase2,
-                                           &answerer,
-                                           &have_answerer,
-                                           &caller,
-                                           &have_caller);
+        v34_phase2_decode_pair_cached(linear_samples,
+                                      total_samples,
+                                      law,
+                                      !suppress_v90_phase2,
+                                      &answerer,
+                                      &have_answerer,
+                                      &caller,
+                                      &have_caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {
