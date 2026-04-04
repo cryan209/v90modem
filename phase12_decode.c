@@ -1842,6 +1842,102 @@ typedef struct {
     uint16_t candidate_crc;
 } info_frame_decoder_t;
 
+static void p12_build_info_frame_from_payload(v34_info_frame_t *frame,
+                                              const uint8_t *payload,
+                                              int target_bits);
+
+static void p12_pack_lsb_bits(uint8_t *dst, int dst_len, const uint8_t *bits, int bit_count)
+{
+    if (!dst || dst_len <= 0)
+        return;
+    memset(dst, 0, (size_t) dst_len);
+    if (!bits || bit_count <= 0)
+        return;
+    for (int i = 0; i < bit_count; i++) {
+        if (bits[i] && (i >> 3) < dst_len)
+            dst[i >> 3] |= (uint8_t) (1U << (i & 7));
+    }
+}
+
+static bool p12_try_soft_bit_flips(v34_info_frame_t *frame_out,
+                                   const uint8_t *base_bits,
+                                   const double *confidences,
+                                   int target_bits,
+                                   int *flip_a_out,
+                                   int *flip_b_out)
+{
+    enum { P12_SOFT_FLIP_LIMIT = 10 };
+    uint8_t trial_bits[256];
+    uint8_t payload[V34_INFO_MAX_BUF_BYTES];
+    int low_idx[P12_SOFT_FLIP_LIMIT];
+    int low_count = 0;
+
+    if (!frame_out || !base_bits || !confidences || target_bits <= 0 || target_bits > 256)
+        return false;
+
+    for (int i = 0; i < target_bits; i++) {
+        double conf = confidences[i];
+        int insert_at = low_count;
+
+        if (insert_at < P12_SOFT_FLIP_LIMIT) {
+            low_idx[insert_at] = i;
+            low_count++;
+        } else if (conf >= confidences[low_idx[P12_SOFT_FLIP_LIMIT - 1]]) {
+            continue;
+        } else {
+            low_idx[P12_SOFT_FLIP_LIMIT - 1] = i;
+            insert_at = P12_SOFT_FLIP_LIMIT - 1;
+        }
+
+        while (insert_at > 0 && confidences[low_idx[insert_at - 1]] > confidences[low_idx[insert_at]]) {
+            int tmp = low_idx[insert_at - 1];
+            low_idx[insert_at - 1] = low_idx[insert_at];
+            low_idx[insert_at] = tmp;
+            insert_at--;
+        }
+    }
+
+    memcpy(trial_bits, base_bits, (size_t) target_bits);
+    for (int i = 0; i < low_count; i++) {
+        int a = low_idx[i];
+
+        memcpy(trial_bits, base_bits, (size_t) target_bits);
+        trial_bits[a] ^= 1U;
+        p12_pack_lsb_bits(payload, (int) sizeof(payload), trial_bits, target_bits);
+        if (v34_info_validate_frame_bytes(payload, target_bits)) {
+            p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+            if (flip_a_out)
+                *flip_a_out = a;
+            if (flip_b_out)
+                *flip_b_out = -1;
+            return true;
+        }
+    }
+
+    for (int i = 0; i < low_count; i++) {
+        int a = low_idx[i];
+
+        for (int j = i + 1; j < low_count; j++) {
+            int b = low_idx[j];
+
+            memcpy(trial_bits, base_bits, (size_t) target_bits);
+            trial_bits[a] ^= 1U;
+            trial_bits[b] ^= 1U;
+            p12_pack_lsb_bits(payload, (int) sizeof(payload), trial_bits, target_bits);
+            if (v34_info_validate_frame_bytes(payload, target_bits)) {
+                p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+                if (flip_a_out)
+                    *flip_a_out = a;
+                if (flip_b_out)
+                    *flip_b_out = b;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static double p12_v21_symbol_decision_value(const int16_t *samples,
                                             int total_samples,
                                             int sample_rate,
@@ -1991,16 +2087,11 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
         return false;
 
     {
-        v34_info_collector_t collector;
-        uint8_t replay[V34_INFO_MAX_BUF_BYTES];
-
-        v34_info_collector_init(&collector, target_bits);
-        memset(replay, 0, sizeof(replay));
-        for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
-            int sync_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
-
-            (void) v34_info_collector_push_bit(&collector, sync_bit, replay, (int) sizeof(replay));
-        }
+        uint8_t payload_bits[256];
+        double payload_conf[256];
+        uint8_t payload[V34_INFO_MAX_BUF_BYTES];
+        int flip_a = -1;
+        int flip_b = -1;
 
         for (int i = 0; i < target_bits; i++) {
             bool ok = false;
@@ -2018,13 +2109,34 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
             if (!ok)
                 return false;
             bit = (decision + best_bias >= 0.0) ? 1 : 0;
-            if (v34_info_collector_push_bit(&collector, bit, replay, (int) sizeof(replay))) {
-                if (!v34_info_frame_from_collector(frame_out, &collector))
-                    return false;
-                if (frame_sample_out)
-                    *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
-                return true;
+            payload_bits[i] = (uint8_t) bit;
+            payload_conf[i] = fabs(decision + best_bias);
+        }
+
+        p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
+        if (v34_info_validate_frame_bytes(payload, target_bits)) {
+            p12_build_info_frame_from_payload(frame_out, payload, target_bits);
+            if (frame_sample_out)
+                *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
+            return true;
+        }
+
+        if (p12_try_soft_bit_flips(frame_out,
+                                   payload_bits,
+                                   payload_conf,
+                                   target_bits,
+                                   &flip_a,
+                                   &flip_b)) {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO sync-soft recovery flip_a=%d flip_b=%d target=%d\n",
+                        flip_a,
+                        flip_b,
+                        target_bits);
             }
+            if (frame_sample_out)
+                *frame_sample_out = best_sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
+            return true;
         }
     }
 
