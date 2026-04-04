@@ -125,12 +125,20 @@ static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
 static const double FSK_BURST_THRESHOLD = 0.12;
 static int g_p12_debug_enabled = -1;
+static int g_p12_dump_v8_enabled = -1;
 
 static bool p12_debug_enabled(void)
 {
     if (g_p12_debug_enabled < 0)
         g_p12_debug_enabled = (getenv("VPCM_P12_DEBUG") != NULL) ? 1 : 0;
     return g_p12_debug_enabled != 0;
+}
+
+static bool p12_dump_v8_enabled(void)
+{
+    if (g_p12_dump_v8_enabled < 0)
+        g_p12_dump_v8_enabled = (getenv("VPCM_P12_DUMP_V8") != NULL) ? 1 : 0;
+    return g_p12_dump_v8_enabled != 0;
 }
 
 static int p12_answer_tone_post_hold_samples(const p12_tone_hit_t *tone,
@@ -2016,6 +2024,37 @@ static bool p12_find_cj_zero_octets(const uint8_t *bits,
     return false;
 }
 
+static void p12_debug_dump_v8_stream(const char *label,
+                                     const uint8_t *bits,
+                                     int bit_count,
+                                     int sample_rate,
+                                     int start_sample,
+                                     int inv)
+{
+    int group = 0;
+
+    if (!p12_dump_v8_enabled() || !bits || bit_count <= 0 || sample_rate <= 0)
+        return;
+
+    fprintf(stderr,
+            "[p12] V8 stream label=%s inv=%d start=%.1fms bits=%d raw=",
+            label ? label : "?",
+            inv,
+            (double) start_sample * 1000.0 / (double) sample_rate,
+            bit_count);
+    for (int i = 0; i < bit_count; i++)
+        fputc(bits[i] ? '1' : '0', stderr);
+    fputc('\n', stderr);
+
+    fprintf(stderr, "[p12] V8 framed label=%s", label ? label : "?");
+    for (int pos = 0; pos + 10 <= bit_count; pos += 10) {
+        fprintf(stderr, " g%d=", group++);
+        for (int j = 0; j < 10; j++)
+            fputc(bits[pos + j] ? '1' : '0', stderr);
+    }
+    fputc('\n', stderr);
+}
+
 static void v8_msg_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
     v8_msg_decoder_t *d = (v8_msg_decoder_t *)ctx;
@@ -2292,6 +2331,12 @@ static void decode_v8_fsk_channel(const int16_t *samples,
             v21_fsk_demod_block(samples + start, len, sample_rate,
                                 channel, (bool)inv,
                                 v8_msg_decoder_put_bit, &decoder);
+            p12_debug_dump_v8_stream(channel == V21_CH1 ? "CH1" : "CH2",
+                                     decoder.raw_bits,
+                                     decoder.raw_bit_count,
+                                     sample_rate,
+                                     start,
+                                     inv);
 
             /* Try extracting CM/JM bytes from raw bits using async framing */
             if (cm_jm_out && decoder.raw_bit_count >= 20) {
@@ -2344,6 +2389,17 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                             candidate.sample_offset = start;
                             candidate.duration_samples = len;
                             p12_record_cm_jm_observation(cm_jm_out, &candidate);
+                            if (p12_dump_v8_enabled()) {
+                                fprintf(stderr,
+                                        "[p12] V8 message label=%s inv=%d bit_pos=%d bits_end=%d bytes=",
+                                        channel == V21_CH1 ? "CH1" : "CH2",
+                                        inv,
+                                        bit_pos,
+                                        scan_pos);
+                                for (int k = 0; k < msg_len; k++)
+                                    fprintf(stderr, "%s%02X", k ? "_" : "", msg_bytes[k]);
+                                fputc('\n', stderr);
+                            }
                             message_end_bit = scan_pos;
                             found_message_this_pass = true;
                             bit_pos = scan_pos - 1;
