@@ -20,6 +20,7 @@
 #include "v92_phase3_decode.h"
 #include "v92_ja_decode.h"
 #include "v34_phase2_decode.h"
+#include "v34_info_decode.h"
 #include "p3_demod.h"
 
 #include <spandsp.h>
@@ -555,43 +556,6 @@ static void format_v34_info1d_table_summary(char *buf,
     appendf(buf, len, " crc16=unavailable");
     appendf(buf, len, " tail_bits=105:108");
     appendf(buf, len, " tail=0xF");
-}
-
-static bool map_v34_received_info0a(v90_info0a_t *dst, const v34_v90_info0a_t *src)
-{
-    if (!dst || !src)
-        return false;
-
-    memset(dst, 0, sizeof(*dst));
-    dst->support_2743 = src->support_2743;
-    dst->support_2800 = src->support_2800;
-    dst->support_3429 = src->support_3429;
-    dst->support_3000_low = src->support_3000_low;
-    dst->support_3000_high = src->support_3000_high;
-    dst->support_3200_low = src->support_3200_low;
-    dst->support_3200_high = src->support_3200_high;
-    dst->rate_3429_allowed = src->rate_3429_allowed;
-    dst->support_power_reduction = src->support_power_reduction;
-    dst->max_baud_rate_difference = src->max_baud_rate_difference;
-    dst->from_cme_modem = src->from_cme_modem;
-    dst->support_1664_point_constellation = src->support_1664_point_constellation;
-    dst->tx_clock_source = src->tx_clock_source;
-    dst->acknowledge_info0d = src->acknowledge_info0d;
-    return v90_info0a_validate(dst);
-}
-
-static bool map_v34_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src)
-{
-    if (!dst || !src)
-        return false;
-
-    memset(dst, 0, sizeof(*dst));
-    dst->md = (uint8_t) src->md;
-    dst->u_info = (uint8_t) src->u_info;
-    dst->upstream_symbol_rate_code = (uint8_t) src->upstream_symbol_rate_code;
-    dst->downstream_rate_code = (uint8_t) src->downstream_rate_code;
-    dst->freq_offset = (int16_t) src->freq_offset;
-    return v90_info1a_validate(dst);
 }
 
 static bool snapshot_v34_info0a_from_rx_state(v34_v90_info0a_t *dst, const v34_state_t *v34)
@@ -7718,7 +7682,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 && snapshot_v34_info0a_from_rx_state(&raw_info0a, v34)) {
                 have_info0 = 1;
             }
-            if (have_info0 > 0 && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
+            if (have_info0 > 0 && v34_map_received_info0a(&result->info0a, &raw_info0a)) {
                 result->info0_seen = true;
                 result->info0_is_d = calling_party;
                 result->info0_raw = raw_info0a;
@@ -7738,7 +7702,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 have_info1a = 1;
             }
             if (have_info1a > 0
-                && map_v34_received_info1a(&result->info1a, &raw_info1a)) {
+                && v34_map_received_info1a(&result->info1a, &raw_info1a)) {
                 result->info1_seen = true;
                 result->info1_is_d = false;
                 result->info1a_raw = raw_info1a;
@@ -7906,7 +7870,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         silence_stderr_end(&stderr_guard);
 
     result->final_rx_stage = v34_get_rx_stage(v34);
-    result->final_tx_stage = v34_get_tx_stage(v34);
+   result->final_tx_stage = v34_get_tx_stage(v34);
     result->final_rx_event = v34_get_rx_event(v34);
     if (!result->phase4_ready_seen && result->final_rx_event == 15) {
         result->phase4_ready_seen = true;
@@ -7919,6 +7883,11 @@ static bool decode_v34_pass_mode(const int16_t *samples,
     }
     if (!result->u_info)
         result->u_info = v34_get_v90_u_info(v34);
+    if (phase2_only) {
+        normalize_v34_result_to_spec_flow(result, calling_party);
+        v34_free(v34);
+        return true;
+    }
     result->mp_seen = (v34->rx.mp_seen >= 1);
     result->mp_remote_ack_seen = (v34->rx.mp_remote_ack_seen > 0);
     have_rx_mp = v34_parse_mp_from_frame_bits(v34->rx.mp_frame_bits,
