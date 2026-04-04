@@ -9677,7 +9677,8 @@ static void collect_v34_events(call_log_t *log,
                                const uint8_t *g711_codewords,
                                int total_codewords,
                                v91_law_t law,
-                               bool suppress_v90_phase2)
+                               bool suppress_v90_phase2,
+                               bool suppress_phase12_early_events)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -9748,13 +9749,13 @@ static void collect_v34_events(call_log_t *log,
         const char *phase3_proto__ = phase3_proto_global; \
         if (!res__) \
             break; \
-        if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && !(suppress_phase12_early_events) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
             format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d); \
             if (res__->info0_from_rescue) \
                 appendf(detail, sizeof(detail), " source=rescue_pass"); \
             call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
         } \
-        if (!(suppress_v90_phase2) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && !(suppress_phase12_early_events) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
             if (res__->info1_is_d) { \
                 format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
                 if (res__->info1_from_rescue) \
@@ -9767,7 +9768,7 @@ static void collect_v34_events(call_log_t *log,
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
             } \
         } \
-        if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+        if (!(suppress_v90_phase2) && !(suppress_phase12_early_events) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
             v92_short_phase2_observation_t sp2_obs__; \
             v92_short_phase2_result_t sp2_res__; \
             memset(&sp2_obs__, 0, sizeof(sp2_obs__)); \
@@ -10026,21 +10027,40 @@ static void collect_stream_call_log(call_log_t *log,
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
+    phase12_result_t phase12;
     v8_probe_result_t capability_probe;
     bool have_answerer = false;
     bool have_caller = false;
     bool have_capability_probe = false;
+    bool have_phase12 = false;
     bool suppress_v90_phase2 = false;
     int earliest_phase2_sample = -1;
 
     if (!log || !linear_samples || !g711_codewords)
         return;
 
+    phase12_result_init(&phase12);
+
     have_capability_probe = get_cached_v8_channel_probe(linear_samples,
                                                         total_samples,
                                                         total_samples,
                                                         &capability_probe);
     suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
+
+    if (do_v8 || do_v34 || do_v90) {
+        have_phase12 = phase12_decode(linear_samples,
+                                      total_samples,
+                                      8000,
+                                      0,
+                                      &phase12);
+        if (have_phase12) {
+            phase12_merge_to_call_log(&phase12, log, 8000);
+            if (phase12.info0.detected)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info0.sample_offset);
+            if (phase12.info1.detected)
+                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info1.sample_offset);
+        }
+    }
 
     if (do_v34 || do_v90) {
         v34_phase2_decode_pair_cached(&g_v34_phase2_engine,
@@ -10073,8 +10093,9 @@ static void collect_stream_call_log(call_log_t *log,
                            g711_codewords,
                            total_codewords,
                            law,
-                           suppress_v90_phase2);
-    if (do_v8) {
+                           suppress_v90_phase2,
+                           have_phase12);
+    if (do_v8 && !have_phase12) {
         v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
         v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
         collect_v8_event(log, linear_samples, g711_codewords, total_samples, earliest_phase2_sample, law);
@@ -10100,6 +10121,7 @@ static void collect_stream_call_log(call_log_t *log,
     call_log_sort(log);
     call_log_prune_v8_after_phase2(log);
     call_log_sort(log);
+    phase12_result_reset(&phase12);
 }
 
 static void call_log_merge_with_channel(call_log_t *dst,

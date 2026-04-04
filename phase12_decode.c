@@ -910,6 +910,24 @@ static void detect_phase2_info(const int16_t *samples,
                                phase12_result_t *result)
 {
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
+    int search_start = 0;
+    int phase2_cap = (sample_rate * PHASE2_MAX_SCAN_MS) / 1000;
+    int phase2_end_hint = -1;
+
+    if (result->answer_tone.detected)
+        search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
+    if (result->cj.detected && result->cj.sample_offset > search_start)
+        search_start = result->cj.sample_offset;
+    if (result->cm.detected
+        && result->cm.sample_offset + result->cm.duration_samples > search_start) {
+        search_start = result->cm.sample_offset + result->cm.duration_samples;
+    }
+    if (result->jm.detected
+        && result->jm.sample_offset + result->jm.duration_samples > search_start) {
+        search_start = result->jm.sample_offset + result->jm.duration_samples;
+    }
+    if (phase2_cap > 0 && search_start + phase2_cap < limit)
+        limit = search_start + phase2_cap;
 
     /* INFO0 is sent on V.21 CH2 (answerer → caller direction)
      * INFO1 is sent on V.21 CH1 (caller → answerer direction)
@@ -921,12 +939,12 @@ static void detect_phase2_info(const int16_t *samples,
     /* Refresh burst detection if not already done (in case phase1 was skipped) */
     if (result->ch2_burst_count == 0) {
         result->ch2_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
-                                                     0, limit, V21_CH2,
+                                                     search_start, limit, V21_CH2,
                                                      result->ch2_bursts, P12_MAX_FSK_BURSTS);
     }
     if (result->ch1_burst_count == 0) {
         result->ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
-                                                     0, limit, V21_CH1,
+                                                     search_start, limit, V21_CH1,
                                                      result->ch1_bursts, P12_MAX_FSK_BURSTS);
     }
 
@@ -960,6 +978,7 @@ static void detect_phase2_info(const int16_t *samples,
                     result->info0.is_info0d = (bool)try_info0d;
                     result->info0.raw = raw;
                     result->info0.parsed = mapped;
+                    phase2_end_hint = result->info0.sample_offset + result->info0.duration_samples;
                 }
             }
         }
@@ -995,6 +1014,8 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.duration_samples = result->ch1_bursts[b].duration_samples;
                         result->info1.is_info1d = true;
                         result->info1.info1d = info1d;
+                        if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
+                            phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
                     }
                 } else {
                     /* INFO1a */
@@ -1007,6 +1028,8 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.is_info1d = false;
                         result->info1.info1a_raw = raw;
                         result->info1.info1a_parsed = mapped;
+                        if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
+                            phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
                     }
                 }
             }
@@ -1015,15 +1038,17 @@ static void detect_phase2_info(const int16_t *samples,
 
     /* Detect line probing tones */
     {
-        /* Search for probing tones after Phase 1 signals end */
-        int search_start = 0;
-        if (result->answer_tone.detected)
-            search_start = result->answer_tone.start_sample + result->answer_tone.duration_samples;
-        if (result->cj.detected && result->cj.sample_offset > search_start)
-            search_start = result->cj.sample_offset;
+        int probe_search_end = limit;
+
+        if (phase2_end_hint >= 0) {
+            int post_info_tail = sample_rate * 2;
+
+            if (phase2_end_hint + post_info_tail < probe_search_end)
+                probe_search_end = phase2_end_hint + post_info_tail;
+        }
 
         detect_phase2_probing_tones(samples, total_samples, sample_rate,
-                                    search_start, limit, result);
+                                    search_start, probe_search_end, result);
     }
 }
 
