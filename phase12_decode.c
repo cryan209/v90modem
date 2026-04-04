@@ -77,6 +77,8 @@ enum {
     P12_PHASE2_REPEAT_GAP_MS = 500
 };
 
+#define P12_PHASE2_BURST_RELATIVE_SIGNAL_CUTOFF 0.35
+
 enum {
     P12_CJ_TO_INFO0_MS = 75,
     P12_CJ_TO_INFO0_TOL_MS = 10,
@@ -131,11 +133,12 @@ static void p12_debug_log_bursts(const char *label,
     fprintf(stderr, "[p12] %s bursts=%d\n", label ? label : "?", burst_count);
     for (int i = 0; i < burst_count; i++) {
         fprintf(stderr,
-                "[p12]   #%d start=%.1fms dur=%.1fms peak=%.3f\n",
+                "[p12]   #%d start=%.1fms dur=%.1fms peak=%.3f sig=%.0f\n",
                 i + 1,
                 (double) bursts[i].start_sample * 1000.0 / (double) sample_rate,
                 (double) bursts[i].duration_samples * 1000.0 / (double) sample_rate,
-                bursts[i].peak_energy);
+                bursts[i].peak_energy,
+                bursts[i].peak_signal_energy);
     }
 }
 
@@ -171,6 +174,8 @@ static int p12_merge_bursts_in_place(p12_fsk_burst_t *bursts,
                         new_end - bursts[write_idx - 1].start_sample;
                 if (bursts[i].peak_energy > bursts[write_idx - 1].peak_energy)
                     bursts[write_idx - 1].peak_energy = bursts[i].peak_energy;
+                if (bursts[i].peak_signal_energy > bursts[write_idx - 1].peak_signal_energy)
+                    bursts[write_idx - 1].peak_signal_energy = bursts[i].peak_signal_energy;
                 continue;
             }
         }
@@ -1351,6 +1356,7 @@ static int detect_fsk_bursts(const int16_t *samples,
     double f0, f1;
     int run_start = -1, run_windows = 0;
     double run_peak = 0.0;
+    double run_peak_signal = 0.0;
     int count = 0;
 
     if (!samples || !bursts || max_bursts <= 0)
@@ -1382,10 +1388,13 @@ static int detect_fsk_bursts(const int16_t *samples,
                 run_start = pos;
                 run_windows = 0;
                 run_peak = 0.0;
+                run_peak_signal = 0.0;
             }
             run_windows++;
             if (strength > run_peak)
                 run_peak = strength;
+            if (energy > run_peak_signal)
+                run_peak_signal = energy;
             continue;
         }
 
@@ -1396,6 +1405,7 @@ fsk_gap:
             candidate.start_sample = run_start;
             candidate.duration_samples = (run_windows - 1) * FSK_BURST_STEP + FSK_BURST_WINDOW;
             candidate.peak_energy = run_peak;
+            candidate.peak_signal_energy = run_peak_signal;
 
             /* Merge with previous if close */
             if (count > 0
@@ -1408,6 +1418,8 @@ fsk_gap:
                     bursts[count - 1].duration_samples = new_end - bursts[count - 1].start_sample;
                 if (candidate.peak_energy > bursts[count - 1].peak_energy)
                     bursts[count - 1].peak_energy = candidate.peak_energy;
+                if (candidate.peak_signal_energy > bursts[count - 1].peak_signal_energy)
+                    bursts[count - 1].peak_signal_energy = candidate.peak_signal_energy;
             } else if (count < max_bursts) {
                 bursts[count++] = candidate;
             }
@@ -1415,6 +1427,7 @@ fsk_gap:
         run_start = -1;
         run_windows = 0;
         run_peak = 0.0;
+        run_peak_signal = 0.0;
     }
 
     /* Flush trailing run */
@@ -1423,10 +1436,55 @@ fsk_gap:
         bursts[count].start_sample = run_start;
         bursts[count].duration_samples = (run_windows - 1) * FSK_BURST_STEP + FSK_BURST_WINDOW;
         bursts[count].peak_energy = run_peak;
+        bursts[count].peak_signal_energy = run_peak_signal;
         count++;
     }
 
     return count;
+}
+
+static int p12_prune_low_energy_bursts_in_place(p12_fsk_burst_t *bursts,
+                                                int burst_count,
+                                                double relative_cutoff,
+                                                const char *label,
+                                                int sample_rate)
+{
+    double strongest = 0.0;
+    int write_idx = 0;
+
+    if (!bursts || burst_count <= 1 || relative_cutoff <= 0.0)
+        return burst_count;
+
+    for (int i = 0; i < burst_count; i++) {
+        if (bursts[i].peak_signal_energy > strongest)
+            strongest = bursts[i].peak_signal_energy;
+    }
+    if (strongest <= 0.0)
+        return burst_count;
+
+    for (int i = 0; i < burst_count; i++) {
+        double rel = bursts[i].peak_signal_energy / strongest;
+
+        if (rel + 1e-12 < relative_cutoff) {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] pruned %s burst start=%.1fms dur=%.1fms rel_sig=%.3f cutoff=%.3f\n",
+                        label ? label : "?",
+                        (double) bursts[i].start_sample * 1000.0 / (double) sample_rate,
+                        (double) bursts[i].duration_samples * 1000.0 / (double) sample_rate,
+                        rel,
+                        relative_cutoff);
+            }
+            continue;
+        }
+        if (write_idx != i)
+            bursts[write_idx] = bursts[i];
+        write_idx++;
+    }
+
+    for (int i = write_idx; i < burst_count; i++)
+        memset(&bursts[i], 0, sizeof(*bursts));
+    return write_idx;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1994,6 +2052,8 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
     double best_sync_score = -1e300;
     double best_bias = 0.0;
     int best_sync_start = -1;
+    double top_scores[3] = { -1e300, -1e300, -1e300 };
+    int top_starts[3] = { -1, -1, -1 };
     int coarse_step;
     int fine_step;
 
@@ -2080,6 +2140,17 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                 best_sync_start = sync_start;
                 best_bias = 0.5 * (lower_bias + upper_bias);
             }
+            for (int rank = 0; rank < 3; rank++) {
+                if (sync_score > top_scores[rank]) {
+                    for (int move = 2; move > rank; move--) {
+                        top_scores[move] = top_scores[move - 1];
+                        top_starts[move] = top_starts[move - 1];
+                    }
+                    top_scores[rank] = sync_score;
+                    top_starts[rank] = sync_start;
+                    break;
+                }
+            }
         }
     }
 
@@ -2111,6 +2182,30 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
             bit = (decision + best_bias >= 0.0) ? 1 : 0;
             payload_bits[i] = (uint8_t) bit;
             payload_conf[i] = fabs(decision + best_bias);
+        }
+
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] INFO sync-scan target=%d best_sync=%.1fms bias=%.3f score=%.3f top=[%.1fms %.3f][%.1fms %.3f][%.1fms %.3f]\n",
+                    target_bits,
+                    (double) best_sync_start * 1000.0 / (double) sample_rate,
+                    best_bias,
+                    best_sync_score,
+                    top_starts[0] >= 0 ? (double) top_starts[0] * 1000.0 / (double) sample_rate : -1.0,
+                    top_scores[0],
+                    top_starts[1] >= 0 ? (double) top_starts[1] * 1000.0 / (double) sample_rate : -1.0,
+                    top_scores[1],
+                    top_starts[2] >= 0 ? (double) top_starts[2] * 1000.0 / (double) sample_rate : -1.0,
+                    top_scores[2]);
+            fprintf(stderr, "[p12] INFO payload-soft target=%d bits=", target_bits);
+            for (int i = 0; i < target_bits && i < 24; i++) {
+                fprintf(stderr, "%u", (unsigned) payload_bits[i]);
+            }
+            fprintf(stderr, " conf=");
+            for (int i = 0; i < target_bits && i < 8; i++) {
+                fprintf(stderr, "%s%.3f", (i == 0) ? "" : ",", payload_conf[i]);
+            }
+            fprintf(stderr, "\n");
         }
 
         p12_pack_lsb_bits(payload, (int) sizeof(payload), payload_bits, target_bits);
@@ -2655,6 +2750,16 @@ static void detect_phase2_info(const int16_t *samples,
     phase2_ch1_burst_count = p12_merge_bursts_in_place(phase2_ch1_bursts,
                                                        phase2_ch1_burst_count,
                                                        phase2_merge_gap);
+    phase2_ch2_burst_count = p12_prune_low_energy_bursts_in_place(phase2_ch2_bursts,
+                                                                  phase2_ch2_burst_count,
+                                                                  P12_PHASE2_BURST_RELATIVE_SIGNAL_CUTOFF,
+                                                                  "phase2 CH2",
+                                                                  sample_rate);
+    phase2_ch1_burst_count = p12_prune_low_energy_bursts_in_place(phase2_ch1_bursts,
+                                                                  phase2_ch1_burst_count,
+                                                                  P12_PHASE2_BURST_RELATIVE_SIGNAL_CUTOFF,
+                                                                  "phase2 CH1",
+                                                                  sample_rate);
     p12_fill_handoff_info0_hint(&handoff_info0_hint,
                                 phase2_role,
                                 search_start,
