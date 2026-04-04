@@ -12094,6 +12094,11 @@ static void run_decode_suite(const char *label,
                    p12.v92_capable ? "yes" : "no",
                    p12.short_phase2_requested ? "yes" : "no",
                    p12.digital_side_likely ? "yes" : "no");
+            if (p12.phase2_state.valid) {
+                printf("  Phase 2 state: role=%s next=%s\n",
+                       phase12_phase2_role_name(p12.phase2_state.role),
+                       phase12_phase2_step_name(p12.phase2_state.next_step));
+            }
             if (p12.info_path_known) {
                 printf("  INFO handoff: u_info=%d up_code=%d down_code=%d\n",
                        p12.inferred_u_info,

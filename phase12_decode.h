@@ -130,6 +130,52 @@ typedef struct {
     int reversal_sample;
 } p12_signal_tone_hit_t;
 
+typedef struct {
+    bool valid;
+    bool used_for_retry;
+    int anchor_sample;
+    int expected_sample;
+    int window_start_sample;
+    int window_end_sample;
+    int retry_count;
+} p12_timing_hint_t;
+
+typedef enum {
+    P12_PHASE2_ROLE_UNKNOWN = 0,
+    P12_PHASE2_ROLE_V34_CALLER,
+    P12_PHASE2_ROLE_V34_ANSWERER,
+    P12_PHASE2_ROLE_V90_ANALOG_CALLER,
+    P12_PHASE2_ROLE_V90_DIGITAL_ANSWERER
+} p12_phase2_role_t;
+
+typedef enum {
+    P12_PHASE2_STEP_UNKNOWN = 0,
+    P12_PHASE2_STEP_EXPECT_INFO0,
+    P12_PHASE2_STEP_EXPECT_TONE_REVERSAL,
+    P12_PHASE2_STEP_EXPECT_L1_L2,
+    P12_PHASE2_STEP_EXPECT_INFO1,
+    P12_PHASE2_STEP_COMPLETE
+} p12_phase2_step_t;
+
+typedef struct {
+    bool valid;
+    p12_phase2_role_t role;
+    p12_phase2_step_t next_step;
+    bool info0_seen;
+    bool info1_seen;
+    bool tone_a_seen;
+    bool tone_b_seen;
+    bool l1_l2_seen;
+    int handoff_sample;
+    int info0_sample;
+    int tone_a_sample;
+    int tone_b_sample;
+    int l1_l2_sample;
+    int info1_sample;
+    p12_timing_hint_t info0_hint;
+    p12_timing_hint_t info1_hint;
+} p12_phase2_state_t;
+
 /* ------------------------------------------------------------------ */
 /* Phase 2 V.21 FSK burst detection                                    */
 /* ------------------------------------------------------------------ */
@@ -192,6 +238,10 @@ typedef struct {
     p12_signal_tone_hit_t tone_a;
     p12_signal_tone_hit_t tone_b;
 
+    /* Phase 2 timing hints */
+    p12_timing_hint_t info0_from_cj_hint;
+    p12_phase2_state_t phase2_state;
+
     /* V.21 FSK bursts detected */
     int ch1_burst_count;
     p12_fsk_burst_t ch1_bursts[P12_MAX_FSK_BURSTS];
@@ -240,6 +290,9 @@ bool phase12_decode_phase1(const int16_t *samples,
                            int sample_rate,
                            int max_sample,
                            phase12_result_t *result);
+
+const char *phase12_phase2_role_name(p12_phase2_role_t role);
+const char *phase12_phase2_step_name(p12_phase2_step_t step);
 
 /*
  * Decode Phase 2 only (V.34 probing / INFO exchange).
