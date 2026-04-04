@@ -27,6 +27,32 @@ typedef struct {
 } v34_info_frame_t;
 
 typedef struct {
+    int power_reduction;
+    int additional_power_reduction;
+    int md;
+    int freq_offset;
+    bool use_high_carrier;
+    int preemphasis_filter;
+    int max_data_rate;
+    int baud_rate_a_to_c;
+    int baud_rate_c_to_a;
+} v34_info1a_generic_t;
+
+typedef struct {
+    bool use_high_carrier;
+    int pre_emphasis;
+    int max_bit_rate;
+} v34_info1c_baud_rate_parms_t;
+
+typedef struct {
+    int power_reduction;
+    int additional_power_reduction;
+    int md;
+    int freq_offset;
+    v34_info1c_baud_rate_parms_t rate_data[6];
+} v34_info1c_generic_t;
+
+typedef struct {
     uint16_t bitstream;
     uint16_t crc;
     int bit_count;
@@ -77,11 +103,21 @@ bool v34_map_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *src);
 bool v34_info_parse_info0a_v90(const uint8_t *buf,
                                v34_v90_info0a_t *raw_out,
                                v90_info0a_t *mapped_out);
+bool v34_info_parse_info0a_v34_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out);
+bool v34_info_parse_info0c_v34_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out);
 bool v34_info_parse_info1a_v90(const uint8_t *buf,
                                v34_v90_info1a_t *raw_out,
                                v90_info1a_t *mapped_out);
 bool v34_info_parse_info1d_v90(const uint8_t *buf,
                                v34_v90_info1d_t *raw_out);
+bool v34_info_parse_info1a_v34(const uint8_t *buf,
+                               v34_info1a_generic_t *out);
+bool v34_info_parse_info1c_v34(const uint8_t *buf,
+                               v34_info1c_generic_t *out);
 bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
                                      v34_v90_info0a_t *raw_out,
                                      v90_info0a_t *mapped_out);
@@ -90,5 +126,9 @@ bool v34_info_parse_info1a_v90_frame(const v34_info_frame_t *frame,
                                      v90_info1a_t *mapped_out);
 bool v34_info_parse_info1d_v90_frame(const v34_info_frame_t *frame,
                                      v34_v90_info1d_t *raw_out);
+bool v34_info_parse_info1a_v34_frame(const v34_info_frame_t *frame,
+                                     v34_info1a_generic_t *out);
+bool v34_info_parse_info1c_v34_frame(const v34_info_frame_t *frame,
+                                     v34_info1c_generic_t *out);
 
 #endif

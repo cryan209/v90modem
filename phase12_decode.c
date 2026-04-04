@@ -1842,6 +1842,143 @@ typedef struct {
     uint16_t candidate_crc;
 } info_frame_decoder_t;
 
+static double p12_v21_symbol_decision_value(const int16_t *samples,
+                                            int total_samples,
+                                            int sample_rate,
+                                            int channel,
+                                            int offset,
+                                            double symbol_samples,
+                                            bool invert,
+                                            bool *ok_out)
+{
+    double mark_hz = 980.0;
+    double space_hz = 1180.0;
+    int symbol_len;
+    goertzel_result_t mark_r;
+    goertzel_result_t space_r;
+    double decision;
+
+    if (ok_out)
+        *ok_out = false;
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || offset < 0)
+        return 0.0;
+
+    if (channel == V21_CH2) {
+        mark_hz = 1650.0;
+        space_hz = 1850.0;
+    }
+
+    symbol_len = (int) floor(symbol_samples + 0.5);
+    if (symbol_len <= 0 || offset + symbol_len > total_samples)
+        return 0.0;
+
+    mark_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, mark_hz);
+    space_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, space_hz);
+    decision = mark_r.energy - space_r.energy;
+    if (invert)
+        decision = -decision;
+    if (ok_out)
+        *ok_out = true;
+    return decision;
+}
+
+static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
+                                               int total_samples,
+                                               int sample_rate,
+                                               int channel,
+                                               int start,
+                                               int phase_offset,
+                                               int target_bits,
+                                               bool invert,
+                                               double symbol_samples,
+                                               int candidate_sample_offset,
+                                               v34_info_frame_t *frame_out,
+                                               int *frame_sample_out)
+{
+    double lower_bias = -1e300;
+    double upper_bias = 1e300;
+    double bias;
+    int sync_start;
+    v34_info_collector_t collector;
+    uint8_t replay[V34_INFO_MAX_BUF_BYTES];
+
+    if (!samples || !frame_out || target_bits <= 0 || symbol_samples <= 0.0)
+        return false;
+
+    sync_start = start + phase_offset + candidate_sample_offset
+                 - (int) floor((double) (target_bits - 1 + V34_INFO_SYNC_BITS) * symbol_samples + 0.5);
+    if (sync_start < 0)
+        return false;
+
+    for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
+        bool ok = false;
+        double decision;
+        int expected_bit;
+        double threshold;
+
+        decision = p12_v21_symbol_decision_value(samples,
+                                                 total_samples,
+                                                 sample_rate,
+                                                 channel,
+                                                 sync_start + (int) floor((double) i * symbol_samples + 0.5),
+                                                 symbol_samples,
+                                                 invert,
+                                                 &ok);
+        if (!ok)
+            return false;
+
+        expected_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
+        threshold = -decision;
+        if (expected_bit)
+            lower_bias = fmax(lower_bias, threshold);
+        else
+            upper_bias = fmin(upper_bias, threshold);
+    }
+
+    if (!(lower_bias < upper_bias)) {
+        if (lower_bias > 1e299 || upper_bias < -1e299)
+            return false;
+        bias = 0.5 * (lower_bias + upper_bias);
+    } else {
+        bias = 0.5 * (lower_bias + upper_bias);
+    }
+
+    v34_info_collector_init(&collector, target_bits);
+    memset(replay, 0, sizeof(replay));
+    for (int i = 0; i < V34_INFO_SYNC_BITS; i++) {
+        int sync_bit = (V34_INFO_SYNC_CODE >> (V34_INFO_SYNC_BITS - 1 - i)) & 1;
+
+        (void) v34_info_collector_push_bit(&collector, sync_bit, replay, (int) sizeof(replay));
+    }
+
+    for (int i = 0; i < target_bits; i++) {
+        bool ok = false;
+        double decision;
+        int bit;
+
+        decision = p12_v21_symbol_decision_value(samples,
+                                                 total_samples,
+                                                 sample_rate,
+                                                 channel,
+                                                 sync_start + (int) floor((double) (V34_INFO_SYNC_BITS + i) * symbol_samples + 0.5),
+                                                 symbol_samples,
+                                                 invert,
+                                                 &ok);
+        if (!ok)
+            return false;
+        bit = (decision + bias >= 0.0) ? 1 : 0;
+        if (v34_info_collector_push_bit(&collector, bit, replay, (int) sizeof(replay))) {
+            if (!v34_info_frame_from_collector(frame_out, &collector))
+                return false;
+            if (frame_sample_out)
+                *frame_sample_out = sync_start + (int) floor((double) V34_INFO_SYNC_BITS * symbol_samples + 0.5);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void p12_build_info_frame_from_payload(v34_info_frame_t *frame,
                                               const uint8_t *payload,
                                               int target_bits)
@@ -2151,6 +2288,28 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
                             }
                             if (frame_sample_out)
                                 *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
+                            return true;
+                        }
+                        if (p12_try_sync_trained_info_redecode(samples,
+                                                               total_samples,
+                                                               sample_rate,
+                                                               channel,
+                                                               start,
+                                                               phase_offset,
+                                                               target_bits,
+                                                               (bool) inv,
+                                                               symbol_samples,
+                                                               decoder.candidate_sample_offset,
+                                                               frame_out,
+                                                               frame_sample_out)) {
+                            if (p12_debug_enabled()) {
+                                fprintf(stderr,
+                                        "[p12] INFO sync-trained recovery target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
+                                        target_bits,
+                                        inv,
+                                        baud_variants[baud_idx],
+                                        phase);
+                            }
                             return true;
                         }
                     } else if (p12_debug_enabled()) {
@@ -2490,22 +2649,41 @@ static void detect_phase2_info(const int16_t *samples,
                                            target, &frame, &frame_sample)) {
                 v34_v90_info0a_t raw;
                 v90_info0a_t mapped;
+                bool parsed_ok = false;
+                p12_info0_kind_t kind = P12_INFO0_KIND_UNKNOWN;
 
-                if (v34_info_parse_info0a_v90_frame(&frame, &raw, &mapped)) {
+                if (!try_info0d) {
+                    if (result->role_detected && result->is_caller) {
+                        parsed_ok = v34_info_parse_info0a_v34_frame(&frame, &raw, &mapped);
+                        kind = P12_INFO0_KIND_SHARED_INFO0A;
+                    } else if (result->role_detected && !result->is_caller) {
+                        parsed_ok = v34_info_parse_info0c_v34_frame(&frame, &raw, &mapped);
+                        kind = P12_INFO0_KIND_V34_INFO0C;
+                    } else {
+                        parsed_ok = v34_info_parse_info0a_v34_frame(&frame, &raw, &mapped);
+                        kind = P12_INFO0_KIND_SHARED_INFO0A;
+                    }
+                } else {
+                    parsed_ok = v34_info_parse_info0a_v90_frame(&frame, &raw, &mapped);
+                    kind = p12_classify_info0_kind(result, true);
+                }
+
+                if (parsed_ok) {
                     result->info0.detected = true;
                     result->info0.sample_offset = frame_sample;
                     result->info0.duration_samples = phase2_ch2_bursts[b].duration_samples;
                     result->info0.is_info0d = (bool)try_info0d;
-                    result->info0.kind = p12_classify_info0_kind(result, (bool) try_info0d);
+                    result->info0.kind = kind;
                     result->info0.frame = frame;
                     result->info0.raw = raw;
                     result->info0.parsed = mapped;
                     phase2_end_hint = result->info0.sample_offset + result->info0.duration_samples;
                     if (p12_debug_enabled()) {
                         fprintf(stderr,
-                                "[p12] INFO0 hit target=%d sample=%.1fms is_d=%u\n",
+                                "[p12] INFO0 hit target=%d sample=%.1fms kind=%s is_d=%u\n",
                                 target,
                                 (double) result->info0.sample_offset * 1000.0 / (double) sample_rate,
+                                phase12_info0_kind_name(result->info0.kind),
                                 result->info0.is_info0d ? 1U : 0U);
                     }
                 } else if (p12_debug_enabled()) {
@@ -2542,7 +2720,25 @@ static void detect_phase2_info(const int16_t *samples,
                 if (try_1d) {
                     /* INFO1d */
                     v34_v90_info1d_t info1d;
-                    if (v34_info_parse_info1d_v90_frame(&frame, &info1d)) {
+                    v34_info1c_generic_t info1c;
+
+                    if (v34_info_parse_info1c_v34_frame(&frame, &info1c)) {
+                        result->info1.detected = true;
+                        result->info1.sample_offset = frame_sample;
+                        result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
+                        result->info1.is_info1d = false;
+                        result->info1.kind = P12_INFO1_KIND_V34_INFO1C;
+                        result->info1.frame = frame;
+                        result->info1.v34_info1c = info1c;
+                        if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
+                            phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
+                        if (p12_debug_enabled()) {
+                            fprintf(stderr,
+                                    "[p12] INFO1c hit target=%d sample=%.1fms\n",
+                                    target,
+                                    (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
+                        }
+                    } else if (v34_info_parse_info1d_v90_frame(&frame, &info1d)) {
                         result->info1.detected = true;
                         result->info1.sample_offset = frame_sample;
                         result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
@@ -2559,13 +2755,31 @@ static void detect_phase2_info(const int16_t *samples,
                                     (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
                         }
                     } else if (p12_debug_enabled()) {
-                        fprintf(stderr, "[p12] INFO1d frame candidate failed parse target=%d\n", target);
+                        fprintf(stderr, "[p12] INFO1c/INFO1d frame candidate failed parse target=%d\n", target);
                     }
                 } else {
                     /* INFO1a */
                     v34_v90_info1a_t raw;
                     v90_info1a_t mapped;
-                    if (v34_info_parse_info1a_v90_frame(&frame, &raw, &mapped)) {
+                    v34_info1a_generic_t info1a;
+
+                    if (v34_info_parse_info1a_v34_frame(&frame, &info1a)) {
+                        result->info1.detected = true;
+                        result->info1.sample_offset = frame_sample;
+                        result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
+                        result->info1.is_info1d = false;
+                        result->info1.kind = P12_INFO1_KIND_V34_INFO1A;
+                        result->info1.frame = frame;
+                        result->info1.v34_info1a = info1a;
+                        if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
+                            phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
+                        if (p12_debug_enabled()) {
+                            fprintf(stderr,
+                                    "[p12] INFO1a(V.34) hit target=%d sample=%.1fms\n",
+                                    target,
+                                    (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
+                        }
+                    } else if (v34_info_parse_info1a_v90_frame(&frame, &raw, &mapped)) {
                         result->info1.detected = true;
                         result->info1.sample_offset = frame_sample;
                         result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
@@ -2578,12 +2792,12 @@ static void detect_phase2_info(const int16_t *samples,
                             phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
                         if (p12_debug_enabled()) {
                             fprintf(stderr,
-                                    "[p12] INFO1a hit target=%d sample=%.1fms\n",
+                                    "[p12] INFO1a(V.90) hit target=%d sample=%.1fms\n",
                                     target,
                                     (double) result->info1.sample_offset * 1000.0 / (double) sample_rate);
                         }
                     } else if (p12_debug_enabled()) {
-                        fprintf(stderr, "[p12] INFO1a frame candidate failed parse target=%d\n", target);
+                        fprintf(stderr, "[p12] INFO1a(V.34/V.90) frame candidate failed parse target=%d\n", target);
                     }
                 }
             } else if (p12_debug_enabled()) {
@@ -2685,7 +2899,7 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
         result->digital_side_likely = result->info0.is_info0d;
         result->info_path_known = true;
     }
-    if (result->info1.detected && !result->info1.is_info1d) {
+    if (result->info1.detected && result->info1.kind == P12_INFO1_KIND_V90_INFO1A) {
         result->inferred_u_info = result->info1.info1a_parsed.u_info;
         result->inferred_upstream_symbol_rate_code = result->info1.info1a_parsed.upstream_symbol_rate_code;
         result->inferred_downstream_rate_code = result->info1.info1a_parsed.downstream_rate_code;
@@ -3116,12 +3330,14 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
 
         detail[0] = '\0';
         snprintf(summary, sizeof(summary), "%s decoded",
-                 result->info0.is_info0d ? "INFO0d" : "INFO0");
+                 result->info0.kind == P12_INFO0_KIND_V34_INFO0C ? "INFO0c"
+                 : (result->info0.kind == P12_INFO0_KIND_V90_INFO0D ? "INFO0d" : "INFO0a"));
         appendf(detail, sizeof(detail), "role=%s", role_name);
         appendf(detail, sizeof(detail), " kind=%s", phase12_info0_kind_name(result->info0.kind));
         appendf(detail, sizeof(detail), " profile=%s",
-                result->info0.is_info0d
-                    ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
+                result->info0.kind == P12_INFO0_KIND_V90_INFO0D ? "V90V92_INFO0d_T7_T15"
+                : (result->info0.kind == P12_INFO0_KIND_V34_INFO0C ? "V34_INFO0c"
+                   : "V34V90_SHARED_INFO0a"));
         appendf(detail, sizeof(detail), " total_bits=%d", result->info0.frame.total_bits);
         appendf(detail, sizeof(detail), " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
         appendf(detail, sizeof(detail), " b12_2743=%u",
@@ -3157,19 +3373,28 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                     result->info0.parsed.acknowledge_info0d ? 1U : 0U);
             appendf(detail, sizeof(detail), " crc16=unavailable tail=0xF");
         } else {
-            v90_info0a_diag_t diag;
-            bool have_crc = v90_info0a_build_diag(&result->info0.parsed, &diag);
-            appendf(detail, sizeof(detail), " b26_v92_cap=%u",
-                    (unsigned) (result->info0.raw.raw_26_27 & 0x01U));
-            appendf(detail, sizeof(detail), " b27_shortp2_req=%u",
-                    (unsigned) ((result->info0.raw.raw_26_27 >> 1) & 0x01U));
-            appendf(detail, sizeof(detail), " b28_ack_i0d=%u",
-                    result->info0.parsed.acknowledge_info0d ? 1U : 0U);
-            if (have_crc)
-                appendf(detail, sizeof(detail), " crc16=0x%04X", (unsigned) diag.crc_field);
-            else
-                appendf(detail, sizeof(detail), " crc16=n/a");
-            appendf(detail, sizeof(detail), " tail=0xF");
+            if (result->info0.kind == P12_INFO0_KIND_V34_INFO0C
+                || result->info0.kind == P12_INFO0_KIND_SHARED_INFO0A) {
+                appendf(detail, sizeof(detail), " b26_27_txclk=%u",
+                        (unsigned) (result->info0.raw.raw_26_27 & 0x03U));
+                appendf(detail, sizeof(detail), " b28_ack=%u",
+                        result->info0.parsed.acknowledge_info0d ? 1U : 0U);
+                appendf(detail, sizeof(detail), " crc16=frame_valid tail=0xF");
+            } else {
+                v90_info0a_diag_t diag;
+                bool have_crc = v90_info0a_build_diag(&result->info0.parsed, &diag);
+                appendf(detail, sizeof(detail), " b26_v92_cap=%u",
+                        (unsigned) (result->info0.raw.raw_26_27 & 0x01U));
+                appendf(detail, sizeof(detail), " b27_shortp2_req=%u",
+                        (unsigned) ((result->info0.raw.raw_26_27 >> 1) & 0x01U));
+                appendf(detail, sizeof(detail), " b28_ack_i0d=%u",
+                        result->info0.parsed.acknowledge_info0d ? 1U : 0U);
+                if (have_crc)
+                    appendf(detail, sizeof(detail), " crc16=0x%04X", (unsigned) diag.crc_field);
+                else
+                    appendf(detail, sizeof(detail), " crc16=n/a");
+                appendf(detail, sizeof(detail), " tail=0xF");
+            }
         }
         call_log_append(log, result->info0.sample_offset,
                         result->info0.duration_samples,
@@ -3187,7 +3412,40 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                  result->info1.is_info1d ? "INFO1d" : "INFO1");
         appendf(detail, sizeof(detail), " kind=%s", phase12_info1_kind_name(result->info1.kind));
         appendf(detail, sizeof(detail), " total_bits=%d", result->info1.frame.total_bits);
-        if (result->info1.is_info1d) {
+        if (result->info1.kind == P12_INFO1_KIND_V34_INFO1C) {
+            const v34_info1c_generic_t *i1c = &result->info1.v34_info1c;
+
+            appendf(detail, sizeof(detail), "role=%s", role_name);
+            appendf(detail, sizeof(detail), " table=V34_INFO1c");
+            appendf(detail, sizeof(detail), " pwr_red=%d", i1c->power_reduction);
+            appendf(detail, sizeof(detail), " addl_pwr_red=%d", i1c->additional_power_reduction);
+            appendf(detail, sizeof(detail), " md=%d", i1c->md);
+            for (int i = 0; i < 6; i++) {
+                appendf(detail, sizeof(detail),
+                        " row%d_hicar=%u row%d_preemp=%d row%d_maxrate=%d",
+                        i,
+                        i1c->rate_data[i].use_high_carrier ? 1U : 0U,
+                        i,
+                        i1c->rate_data[i].pre_emphasis,
+                        i,
+                        i1c->rate_data[i].max_bit_rate);
+            }
+            appendf(detail, sizeof(detail), " freq_offset=%d", i1c->freq_offset);
+        } else if (result->info1.kind == P12_INFO1_KIND_V34_INFO1A) {
+            const v34_info1a_generic_t *i1a = &result->info1.v34_info1a;
+
+            appendf(detail, sizeof(detail), "role=%s", role_name);
+            appendf(detail, sizeof(detail), " table=V34_INFO1a");
+            appendf(detail, sizeof(detail), " pwr_red=%d", i1a->power_reduction);
+            appendf(detail, sizeof(detail), " addl_pwr_red=%d", i1a->additional_power_reduction);
+            appendf(detail, sizeof(detail), " md=%d", i1a->md);
+            appendf(detail, sizeof(detail), " hi_carrier=%u", i1a->use_high_carrier ? 1U : 0U);
+            appendf(detail, sizeof(detail), " preemp=%d", i1a->preemphasis_filter);
+            appendf(detail, sizeof(detail), " max_data_rate=%d", i1a->max_data_rate);
+            appendf(detail, sizeof(detail), " baud_a_to_c=%d", i1a->baud_rate_a_to_c);
+            appendf(detail, sizeof(detail), " baud_c_to_a=%d", i1a->baud_rate_c_to_a);
+            appendf(detail, sizeof(detail), " freq_offset=%d", i1a->freq_offset);
+        } else if (result->info1.is_info1d) {
             const v34_v90_info1d_t *i1d = &result->info1.info1d;
             appendf(detail, sizeof(detail), "role=%s", role_name);
             appendf(detail, sizeof(detail), " table=V90_T9_or_V92_T17_INFO1d");

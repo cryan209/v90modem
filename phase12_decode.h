@@ -123,6 +123,8 @@ typedef struct {
     bool is_info1d;            /* true if INFO1d */
     p12_info1_kind_t kind;
     v34_info_frame_t frame;
+    v34_info1a_generic_t v34_info1a;
+    v34_info1c_generic_t v34_info1c;
     v34_v90_info1a_t info1a_raw;
     v90_info1a_t info1a_parsed;
     v34_v90_info1d_t info1d;

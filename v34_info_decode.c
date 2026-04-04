@@ -443,7 +443,8 @@ bool v34_info_parse_info0a_v90(const uint8_t *buf,
     parsed.from_cme_modem = bitstream_get(&bs, &t, 1);
     parsed.support_1664_point_constellation = bitstream_get(&bs, &t, 1);
     if (target_bits == (49 - (4 + 8 + 4))) {
-        parsed.tx_clock_source = (uint8_t) bitstream_get(&bs, &t, 2);
+        parsed.raw_26_27 = (uint8_t) bitstream_get(&bs, &t, 2);
+        parsed.tx_clock_source = parsed.raw_26_27;
         parsed.acknowledge_info0d = bitstream_get(&bs, &t, 1);
         parsed.info0d_extensions_valid = false;
     } else {
@@ -528,6 +529,66 @@ bool v34_info_parse_info1d_v90(const uint8_t *buf,
     return true;
 }
 
+bool v34_info_parse_info1a_v34(const uint8_t *buf,
+                               v34_info1a_generic_t *out)
+{
+    bitstream_state_t bs;
+    const uint8_t *t;
+    uint16_t raw_freq;
+    v34_info1a_generic_t parsed;
+
+    if (!buf || !out || !v34_info_validate_frame_bytes(buf, 70 - (4 + 8 + 4)))
+        return false;
+
+    memset(&parsed, 0, sizeof(parsed));
+    bitstream_init(&bs, true);
+    t = buf;
+    parsed.power_reduction = bitstream_get(&bs, &t, 3);
+    parsed.additional_power_reduction = bitstream_get(&bs, &t, 3);
+    parsed.md = bitstream_get(&bs, &t, 7);
+    parsed.use_high_carrier = bitstream_get(&bs, &t, 1);
+    parsed.preemphasis_filter = bitstream_get(&bs, &t, 4);
+    parsed.max_data_rate = bitstream_get(&bs, &t, 4);
+    parsed.baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
+    parsed.baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
+    raw_freq = (uint16_t) bitstream_get(&bs, &t, 10);
+    parsed.freq_offset = (int) raw_freq;
+    if ((parsed.freq_offset & 0x200) != 0)
+        parsed.freq_offset = -(parsed.freq_offset ^ 0x3FF) - 1;
+
+    *out = parsed;
+    return true;
+}
+
+bool v34_info_parse_info1c_v34(const uint8_t *buf,
+                               v34_info1c_generic_t *out)
+{
+    bitstream_state_t bs;
+    const uint8_t *t;
+    v34_info1c_generic_t parsed;
+
+    if (!buf || !out || !v34_info_validate_frame_bytes(buf, 109 - (4 + 8 + 4)))
+        return false;
+
+    memset(&parsed, 0, sizeof(parsed));
+    bitstream_init(&bs, true);
+    t = buf;
+    parsed.power_reduction = bitstream_get(&bs, &t, 3);
+    parsed.additional_power_reduction = bitstream_get(&bs, &t, 3);
+    parsed.md = bitstream_get(&bs, &t, 7);
+    for (int i = 0; i < 6; i++) {
+        parsed.rate_data[i].use_high_carrier = bitstream_get(&bs, &t, 1);
+        parsed.rate_data[i].pre_emphasis = bitstream_get(&bs, &t, 4);
+        parsed.rate_data[i].max_bit_rate = bitstream_get(&bs, &t, 4);
+    }
+    parsed.freq_offset = bitstream_get(&bs, &t, 10);
+    if ((parsed.freq_offset & 0x200) != 0)
+        parsed.freq_offset = -(parsed.freq_offset ^ 0x3FF) - 1;
+
+    *out = parsed;
+    return true;
+}
+
 bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
                                      v34_v90_info0a_t *raw_out,
                                      v90_info0a_t *mapped_out)
@@ -538,6 +599,24 @@ bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
         && frame->target_bits != (62 - (4 + 8 + 4))) {
         return false;
     }
+    return v34_info_parse_info0a_v90(frame->payload, raw_out, mapped_out);
+}
+
+bool v34_info_parse_info0a_v34_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (49 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info0a_v90(frame->payload, raw_out, mapped_out);
+}
+
+bool v34_info_parse_info0c_v34_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (49 - (4 + 8 + 4)))
+        return false;
     return v34_info_parse_info0a_v90(frame->payload, raw_out, mapped_out);
 }
 
@@ -556,4 +635,20 @@ bool v34_info_parse_info1d_v90_frame(const v34_info_frame_t *frame,
     if (!frame || !frame->valid || frame->target_bits != (109 - (4 + 8 + 4)))
         return false;
     return v34_info_parse_info1d_v90(frame->payload, raw_out);
+}
+
+bool v34_info_parse_info1a_v34_frame(const v34_info_frame_t *frame,
+                                     v34_info1a_generic_t *out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (70 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info1a_v34(frame->payload, out);
+}
+
+bool v34_info_parse_info1c_v34_frame(const v34_info_frame_t *frame,
+                                     v34_info1c_generic_t *out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (109 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info1c_v34(frame->payload, out);
 }
