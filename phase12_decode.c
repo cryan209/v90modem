@@ -89,7 +89,8 @@ enum {
     P12_INFO0_PRE_TONE_MAX_MS = 220,
     P12_INFO0_PRE_TONE_GUARD_MS = 25,
     P12_INFO0_RETRY_EARLY_MS = 80,
-    P12_INFO0_RETRY_LEADIN_MS = 40
+    P12_INFO0_RETRY_LEADIN_MS = 40,
+    P12_INFO0_DECODE_MAX_MS = 320
 };
 
 enum {
@@ -638,6 +639,46 @@ static void p12_focus_bursts_to_window(p12_fsk_burst_t *bursts,
             bursts[i].duration_samples = clipped_end - clipped_start;
         }
     }
+}
+
+static void p12_prepare_info0_decode_burst(p12_fsk_burst_t *dst,
+                                           const p12_fsk_burst_t *src,
+                                           const p12_timing_hint_t *hint,
+                                           int tone_anchor_sample,
+                                           int sample_rate)
+{
+    int decode_max;
+    int start;
+    int end;
+
+    if (!dst || !src) {
+        return;
+    }
+    *dst = *src;
+    if (!dst->seen)
+        return;
+
+    start = dst->start_sample;
+    end = p12_burst_end_sample(dst);
+    if (hint && hint->valid && hint->window_end_sample > hint->window_start_sample) {
+        if (start < hint->window_start_sample)
+            start = hint->window_start_sample;
+        if (end > hint->window_end_sample)
+            end = hint->window_end_sample;
+    }
+    if (tone_anchor_sample >= 0 && end > tone_anchor_sample)
+        end = tone_anchor_sample;
+    if (sample_rate > 0) {
+        decode_max = (sample_rate * P12_INFO0_DECODE_MAX_MS) / 1000;
+        if (decode_max > 0 && end > start + decode_max)
+            end = start + decode_max;
+    }
+    if (end <= start) {
+        dst->duration_samples = 0;
+        return;
+    }
+    dst->start_sample = start;
+    dst->duration_samples = end - start;
 }
 
 static bool p12_detect_phase2_cc_run(const int16_t *samples,
@@ -2200,6 +2241,7 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
 {
     double mark_hz = 980.0;
     double space_hz = 1180.0;
+    double total_energy;
     int symbol_len;
     goertzel_result_t mark_r;
     goertzel_result_t space_r;
@@ -2221,7 +2263,11 @@ static double p12_v21_symbol_decision_value(const int16_t *samples,
 
     mark_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, mark_hz);
     space_r = goertzel_analyze(samples + offset, symbol_len, sample_rate, space_hz);
-    decision = mark_r.energy - space_r.energy;
+    total_energy = mark_r.energy + space_r.energy;
+    if (total_energy <= 1e-12)
+        decision = 0.0;
+    else
+        decision = (mark_r.energy - space_r.energy) / total_energy;
     if (invert)
         decision = -decision;
     if (ok_out)
@@ -3130,8 +3176,47 @@ static void detect_phase2_info(const int16_t *samples,
     /* Try to decode INFO0 from CH2 sequence windows. */
     /* The collector wants payload bits, not the full framed bit count. */
     for (int b = 0; b < phase2_ch2_burst_count && !result->info0.detected; b++) {
+        p12_fsk_burst_t decode_burst;
         v34_info_frame_t frame;
         int frame_sample = 0;
+        int duplicate_of = -1;
+        bool duplicate = false;
+
+        p12_prepare_info0_decode_burst(&decode_burst,
+                                       &phase2_ch2_bursts[b],
+                                       handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                       tone_anchor_sample,
+                                       sample_rate);
+        if (!decode_burst.seen || decode_burst.duration_samples <= 0)
+            continue;
+        for (int prev = 0; prev < b; prev++) {
+            p12_fsk_burst_t prev_decode;
+
+            p12_prepare_info0_decode_burst(&prev_decode,
+                                           &phase2_ch2_bursts[prev],
+                                           handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint,
+                                           tone_anchor_sample,
+                                           sample_rate);
+            if (!prev_decode.seen || prev_decode.duration_samples <= 0)
+                continue;
+            if (prev_decode.start_sample == decode_burst.start_sample
+                && prev_decode.duration_samples == decode_burst.duration_samples) {
+                duplicate = true;
+                duplicate_of = prev + 1;
+                break;
+            }
+        }
+        if (duplicate) {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO0 skip duplicate window=%d same_as=%d start=%.1fms dur=%.1fms\n",
+                        b + 1,
+                        duplicate_of,
+                        (double) decode_burst.start_sample * 1000.0 / (double) sample_rate,
+                        (double) decode_burst.duration_samples * 1000.0 / (double) sample_rate);
+            }
+            continue;
+        }
 
         /* Try INFO0a first, then INFO0d. */
         for (int try_info0d = 0; try_info0d < 2 && !result->info0.detected; try_info0d++) {
@@ -3139,15 +3224,17 @@ static void detect_phase2_info(const int16_t *samples,
 
             if (p12_debug_enabled()) {
                 fprintf(stderr,
-                        "[p12] INFO0 try window=%d target=%d start=%.1fms dur=%.1fms\n",
+                        "[p12] INFO0 try window=%d target=%d start=%.1fms dur=%.1fms raw=%.1f-%.1fms\n",
                         b + 1,
                         target,
+                        (double) decode_burst.start_sample * 1000.0 / (double) sample_rate,
+                        (double) decode_burst.duration_samples * 1000.0 / (double) sample_rate,
                         (double) phase2_ch2_bursts[b].start_sample * 1000.0 / (double) sample_rate,
-                        (double) phase2_ch2_bursts[b].duration_samples * 1000.0 / (double) sample_rate);
+                        (double) p12_burst_end_sample(&phase2_ch2_bursts[b]) * 1000.0 / (double) sample_rate);
             }
 
             if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
-                                           V21_CH2, &phase2_ch2_bursts[b],
+                                           V21_CH2, &decode_burst,
                                            target, &frame, &frame_sample)) {
                 v34_v90_info0a_t raw;
                 v90_info0a_t mapped;
@@ -3173,7 +3260,7 @@ static void detect_phase2_info(const int16_t *samples,
                 if (parsed_ok) {
                     result->info0.detected = true;
                     result->info0.sample_offset = frame_sample;
-                    result->info0.duration_samples = phase2_ch2_bursts[b].duration_samples;
+                    result->info0.duration_samples = decode_burst.duration_samples;
                     result->info0.is_info0d = (bool)try_info0d;
                     result->info0.kind = kind;
                     result->info0.frame = frame;
