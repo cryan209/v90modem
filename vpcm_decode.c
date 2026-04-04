@@ -7797,7 +7797,88 @@ static void p3_u16_to_bitstr(uint16_t value, char out[17])
     out[16] = '\0';
 }
 
+typedef enum {
+    P3_FLOW_STANDARD_UNKNOWN = 0,
+    P3_FLOW_STANDARD_V34,
+    P3_FLOW_STANDARD_V90,
+    P3_FLOW_STANDARD_V92
+} p3_flow_standard_t;
+
+static const char *p3_flow_standard_name(p3_flow_standard_t standard)
+{
+    switch (standard) {
+    case P3_FLOW_STANDARD_V34: return "V.34";
+    case P3_FLOW_STANDARD_V90: return "V.90";
+    case P3_FLOW_STANDARD_V92: return "V.92";
+    default:                   return "unknown";
+    }
+}
+
+static const char *p3_flow_protocol_name(p3_flow_standard_t standard)
+{
+    switch (standard) {
+    case P3_FLOW_STANDARD_V90: return "V.90 Phase 3";
+    case P3_FLOW_STANDARD_V92: return "V.92 Phase 3";
+    case P3_FLOW_STANDARD_V34:
+    case P3_FLOW_STANDARD_UNKNOWN:
+    default:
+        return "V.34";
+    }
+}
+
+static bool p3_result_indicates_v92(const decode_v34_result_t *result)
+{
+    if (!result || !result->info0_seen)
+        return false;
+    return v92_short_phase2_v92_cap_from_info0_bits(result->info0_is_d,
+                                                     result->info0_raw.raw_26_27);
+}
+
+static bool p3_result_indicates_v90(const decode_v34_result_t *result)
+{
+    if (!result || !result->info1_seen || result->info1_is_d)
+        return false;
+    return (result->info1a.downstream_rate_code == 6
+            || result->info1a.upstream_symbol_rate_code == 6);
+}
+
+static bool p3_result_indicates_v34(const decode_v34_result_t *result)
+{
+    if (!result || !result->info1_seen || result->info1_is_d)
+        return false;
+    return (result->info1a.downstream_rate_code >= 0
+            && result->info1a.downstream_rate_code <= 5);
+}
+
+static p3_flow_standard_t p3_detect_flow_standard(const decode_v34_result_t *primary,
+                                                  const decode_v34_result_t *peer)
+{
+    const decode_v34_result_t *candidates[2] = { primary, peer };
+    bool has_v92 = false;
+    bool has_v90 = false;
+    bool has_v34 = false;
+
+    for (int i = 0; i < 2; i++) {
+        const decode_v34_result_t *res = candidates[i];
+
+        if (!res)
+            continue;
+        has_v92 = has_v92 || p3_result_indicates_v92(res);
+        has_v90 = has_v90 || p3_result_indicates_v90(res);
+        has_v34 = has_v34 || p3_result_indicates_v34(res);
+    }
+
+    if (has_v92)
+        return P3_FLOW_STANDARD_V92;
+    if (has_v90)
+        return P3_FLOW_STANDARD_V90;
+    if (has_v34)
+        return P3_FLOW_STANDARD_V34;
+    return P3_FLOW_STANDARD_UNKNOWN;
+}
+
 typedef struct {
+    p3_flow_standard_t standard;
     bool j_seen;
     int j_symbols;
     int j_table_bits;
@@ -7806,6 +7887,7 @@ typedef struct {
     int jprime_match_pct;
     bool trn_after_j_seen;
     bool silence_after_j_seen;
+    bool ru_seen;
     bool role_aligned;
     char notes[256];
 } p3_j_role_eval_t;
@@ -7830,6 +7912,7 @@ static void p3_j_role_eval_append(p3_j_role_eval_t *ev, const char *txt)
 
 static void p3_evaluate_j_role_flow(const p3_result_t *detail,
                                     bool calling_party,
+                                    p3_flow_standard_t standard,
                                     p3_j_role_eval_t *out)
 {
     int j_idx = -1;
@@ -7841,6 +7924,9 @@ static void p3_evaluate_j_role_flow(const p3_result_t *detail,
     memset(out, 0, sizeof(*out));
     if (!detail)
         return;
+    if (standard == P3_FLOW_STANDARD_UNKNOWN)
+        standard = P3_FLOW_STANDARD_V34;
+    out->standard = standard;
 
     for (int i = 0; i < detail->segment_count; i++) {
         const p3_segment_t *seg = &detail->segments[i];
@@ -7848,6 +7934,8 @@ static void p3_evaluate_j_role_flow(const p3_result_t *detail,
             j_seg = seg;
             j_idx = i;
         }
+        if (seg->type == P3_SIGNAL_RU || seg->type == P3_SIGNAL_UR)
+            out->ru_seen = true;
     }
     if (!j_seg)
         return;
@@ -7877,30 +7965,56 @@ static void p3_evaluate_j_role_flow(const p3_result_t *detail,
     else
         out->silence_after_j_seen = (detail->segments[next_non_sil].type == P3_SIGNAL_SILENCE);
 
-    if (calling_party) {
-        if (!out->jprime_seen)
-            p3_j_role_eval_append(out, "missing J'");
-        if (!out->trn_after_j_seen)
-            p3_j_role_eval_append(out, "no TRN seen after J/J' in this window");
-        out->role_aligned = out->jprime_seen && out->trn_after_j_seen;
-    } else {
-        if (out->jprime_seen)
-            p3_j_role_eval_append(out, "unexpected J' on answer modem path");
-        if (!out->silence_after_j_seen && !out->trn_after_j_seen)
-            p3_j_role_eval_append(out, "no trailing silence observed after J");
-        out->role_aligned = !out->jprime_seen
-                            && (out->silence_after_j_seen || !out->trn_after_j_seen);
+    if (standard == P3_FLOW_STANDARD_V34) {
+        if (calling_party) {
+            if (!out->jprime_seen)
+                p3_j_role_eval_append(out, "missing J'");
+            if (!out->trn_after_j_seen)
+                p3_j_role_eval_append(out, "no TRN seen after J/J' in this window");
+            out->role_aligned = out->jprime_seen && out->trn_after_j_seen;
+        } else {
+            if (out->jprime_seen)
+                p3_j_role_eval_append(out, "unexpected J' on answer modem path");
+            if (!out->silence_after_j_seen && !out->trn_after_j_seen)
+                p3_j_role_eval_append(out, "no trailing silence observed after J");
+            out->role_aligned = !out->jprime_seen
+                                && (out->silence_after_j_seen || !out->trn_after_j_seen);
+        }
+    } else if (standard == P3_FLOW_STANDARD_V90) {
+        if (calling_party) {
+            if (out->jprime_seen)
+                p3_j_role_eval_append(out, "unexpected J' on analogue-caller Ja path");
+            out->role_aligned = !out->jprime_seen;
+        } else {
+            if (!out->jprime_seen)
+                p3_j_role_eval_append(out, "missing J' on digital-answerer Jd path");
+            out->role_aligned = out->jprime_seen;
+        }
+    } else if (standard == P3_FLOW_STANDARD_V92) {
+        if (!out->ru_seen)
+            p3_j_role_eval_append(out, "missing Ru/uR signature in Phase 3 window");
+        if (calling_party) {
+            if (out->jprime_seen)
+                p3_j_role_eval_append(out, "unexpected J' on analogue-caller Ja/Jp path");
+            out->role_aligned = !out->jprime_seen && out->ru_seen;
+        } else {
+            if (!out->jprime_seen)
+                p3_j_role_eval_append(out, "missing Jp' termination on digital-answerer path");
+            out->role_aligned = out->jprime_seen && out->ru_seen;
+        }
     }
 }
 
 typedef struct {
     bool valid;
+    p3_flow_standard_t standard;
     int event_sample;
     int j_table_bits;
     int j_table_match_pct;
     bool jprime_seen;
     int jprime_match_pct;
     bool trn_after_j_seen;
+    bool ru_seen;
     bool role_aligned;
     char notes[256];
 } p3_j_log_summary_t;
@@ -7909,6 +8023,7 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
                                      int total_samples,
                                      const decode_v34_result_t *result,
                                      bool calling_party,
+                                     p3_flow_standard_t standard,
                                      p3_j_log_summary_t *out)
 {
     p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
@@ -7966,7 +8081,7 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
     if (!best_detail)
         return false;
 
-    p3_evaluate_j_role_flow(best_detail, calling_party, &eval);
+    p3_evaluate_j_role_flow(best_detail, calling_party, standard, &eval);
     if (!eval.j_seen) {
         p3_result_free(best_detail);
         return false;
@@ -7978,12 +8093,14 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
             best_j = seg;
     }
     out->valid = true;
+    out->standard = eval.standard;
     out->event_sample = best_j ? best_j->start_sample : result->tx_ja_sample;
     out->j_table_bits = eval.j_table_bits;
     out->j_table_match_pct = eval.j_table_match_pct;
     out->jprime_seen = eval.jprime_seen;
     out->jprime_match_pct = eval.jprime_match_pct;
     out->trn_after_j_seen = eval.trn_after_j_seen;
+    out->ru_seen = eval.ru_seen;
     out->role_aligned = eval.role_aligned;
     if (eval.notes[0])
         snprintf(out->notes, sizeof(out->notes), "%s", eval.notes);
@@ -8185,6 +8302,7 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
     int phase3_end = -1;
     int phase3_len;
     const char *role = calling_party ? "caller" : "answerer";
+    p3_flow_standard_t flow_standard;
 
     /* Determine Phase 3 sample range from V.34 decode results */
     if (!result)
@@ -8209,8 +8327,12 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
     phase3_len = phase3_end - phase3_start;
     if (phase3_len < 200)
         return;
+    flow_standard = p3_detect_flow_standard(result, NULL);
+    if (flow_standard == P3_FLOW_STANDARD_UNKNOWN)
+        flow_standard = P3_FLOW_STANDARD_V34;
 
     printf("\n  --- p3_demod Phase 3 analysis (%s) ---\n", role);
+    printf("  Flow target: %s\n", p3_flow_standard_name(flow_standard));
     printf("  Sample range: %d – %d (%.1f ms – %.1f ms, %.1f ms)\n",
            phase3_start, phase3_end,
            sample_to_ms(phase3_start, 8000),
@@ -8349,9 +8471,10 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                         printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                     printf("\n");
                 }
-                p3_evaluate_j_role_flow(detail, calling_party, &j_eval);
+                p3_evaluate_j_role_flow(detail, calling_party, flow_standard, &j_eval);
                 if (j_eval.j_seen) {
-                    printf("    J flow (%s): class=%s(%d%%) J'=%s",
+                    printf("    J flow (%s/%s): class=%s(%d%%) J'=%s",
+                           p3_flow_standard_name(flow_standard),
                            calling_party ? "caller" : "answerer",
                            j_eval.j_table_bits == 4 ? "4pt"
                            : (j_eval.j_table_bits == 16 ? "16pt" : "unknown"),
@@ -8359,8 +8482,9 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                            j_eval.jprime_seen ? "yes" : "no");
                     if (j_eval.jprime_seen && j_eval.jprime_match_pct > 0)
                         printf("(%d%%)", j_eval.jprime_match_pct);
-                    printf(" trn_after=%s status=%s\n",
+                    printf(" trn_after=%s ru=%s status=%s\n",
                            j_eval.trn_after_j_seen ? "yes" : "no",
+                           j_eval.ru_seen ? "yes" : "no",
                            j_eval.role_aligned ? "aligned" : "partial");
                     if (j_eval.notes[0])
                         printf("      notes: %s\n", j_eval.notes);
@@ -8526,7 +8650,7 @@ static void p3_demod_scan_window(const int16_t *samples,
                     printf(" %s-first", seg->ru_positive_first ? "+" : "-");
                 printf("\n");
             }
-            p3_evaluate_j_role_flow(detail, false, &j_eval);
+            p3_evaluate_j_role_flow(detail, false, P3_FLOW_STANDARD_UNKNOWN, &j_eval);
             if (j_eval.j_seen) {
                 printf("      J flow (answerer): class=%s(%d%%) J'=%s",
                        j_eval.j_table_bits == 4 ? "4pt"
@@ -8535,8 +8659,9 @@ static void p3_demod_scan_window(const int16_t *samples,
                        j_eval.jprime_seen ? "yes" : "no");
                 if (j_eval.jprime_seen && j_eval.jprime_match_pct > 0)
                     printf("(%d%%)", j_eval.jprime_match_pct);
-                printf(" trn_after=%s status=%s\n",
+                printf(" trn_after=%s ru=%s status=%s\n",
                        j_eval.trn_after_j_seen ? "yes" : "no",
+                       j_eval.ru_seen ? "yes" : "no",
                        j_eval.role_aligned ? "aligned" : "partial");
                 if (j_eval.notes[0])
                     printf("        notes: %s\n", j_eval.notes);
@@ -8641,11 +8766,17 @@ static void print_v34_result(const decode_v34_result_t *result,
                              bool suppress_v90_phase2)
 {
     v34_phase3_errorfree_eval_t ef_eval;
+    p3_flow_standard_t phase3_target;
 
     if (!result)
         return;
+    phase3_target = p3_detect_flow_standard(result, NULL);
 
     printf("  Role:            %s\n", calling_party ? "caller" : "answerer");
+    if (!suppress_v90_phase2) {
+        printf("  Phase 3 target:  %s\n",
+               phase3_target == P3_FLOW_STANDARD_UNKNOWN ? "unknown" : p3_flow_standard_name(phase3_target));
+    }
     printf("  Final RX stage:  %s (%d)\n",
            v34_rx_stage_to_str_local(result->final_rx_stage),
            result->final_rx_stage);
@@ -8998,14 +9129,17 @@ static void collect_v34_events(call_log_t *log,
     if (primary && primary->phase3_seen)
         secondary_phase2_cutoff = primary->phase3_sample;
 
+    p3_flow_standard_t phase3_standard_global = p3_detect_flow_standard(have_answerer ? &answerer : NULL,
+                                                                         have_caller ? &caller : NULL);
+    if (phase3_standard_global == P3_FLOW_STANDARD_UNKNOWN)
+        phase3_standard_global = suppress_v90_phase2 ? P3_FLOW_STANDARD_V34 : P3_FLOW_STANDARD_V90;
+    const char *phase3_proto_global = p3_flow_protocol_name(phase3_standard_global);
+
 #define APPEND_V34_RESULT_EVENTS(RES_PTR, ROLE_STR, ALLOW_PHASE3_PLUS, PHASE2_CUTOFF) \
     do { \
         const decode_v34_result_t *res__ = (RES_PTR); \
         const char *role_name = (ROLE_STR); \
-        const char *phase3_proto__ = (res__ && res__->info0_seen && \
-            v92_short_phase2_v92_cap_from_info0_bits(res__->info0_is_d, \
-                                                     res__->info0_raw.raw_26_27)) \
-            ? "V.92 Phase 3" : "V.90 Phase 3"; \
+        const char *phase3_proto__ = phase3_proto_global; \
         if (!res__) \
             break; \
         if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
@@ -9128,7 +9262,7 @@ static void collect_v34_events(call_log_t *log,
                      sample_to_ms(res__->tx_pp_sample, 8000), \
                      pp_end__ > res__->tx_pp_sample ? sample_to_ms(pp_end__, 8000) : sample_to_ms(res__->tx_pp_sample, 8000), \
                      samples_to_v34_symbols(pp_samples__)); \
-            call_log_append(log, res__->tx_pp_sample, pp_samples__, "V.90 Phase 3", "Phase 3 TX PP", detail); \
+            call_log_append(log, res__->tx_pp_sample, pp_samples__, phase3_proto__, "Phase 3 TX PP", detail); \
         } \
         if (res__->rx_pp_detect_sample >= 0) { \
             snprintf(detail, sizeof(detail), \
@@ -9138,11 +9272,11 @@ static void collect_v34_events(call_log_t *log,
                      res__->rx_pp_phase_score, \
                      res__->rx_pp_acquire_hits, \
                      res__->rx_pp_started ? "yes" : "no"); \
-            call_log_append(log, res__->rx_pp_detect_sample, 0, "V.90 Phase 3", "Phase 3 RX PP detect", detail); \
+            call_log_append(log, res__->rx_pp_detect_sample, 0, phase3_proto__, "Phase 3 RX PP detect", detail); \
         } \
         if (res__->rx_pp_complete_sample >= 0) { \
             snprintf(detail, sizeof(detail), "role=%s phase=%d score=%d", role_name, res__->rx_pp_phase, res__->rx_pp_phase_score); \
-            call_log_append(log, res__->rx_pp_complete_sample, 0, "V.90 Phase 3", "Phase 3 RX PP lock", detail); \
+            call_log_append(log, res__->rx_pp_complete_sample, 0, phase3_proto__, "Phase 3 RX PP lock", detail); \
         } \
         APPEND_V34_STAGE_EVENT(res__, tx_trn_sample, "Phase 3 TX TRN", "sequence=trn"); \
         if (res__->phase3_trn_lock_score >= 0) { \
@@ -9155,7 +9289,7 @@ static void collect_v34_events(call_log_t *log,
             call_log_append(log, \
                             res__->phase3_trn_lock_sample >= 0 ? res__->phase3_trn_lock_sample : res__->tx_trn_sample, \
                             0, \
-                            "V.90 Phase 3", \
+                            phase3_proto__, \
                             "Phase 3 TRN lock", \
                             detail); \
         } \
@@ -9177,30 +9311,37 @@ static void collect_v34_events(call_log_t *log,
             } else { \
                 snprintf(detail, sizeof(detail), "role=%s sequence=j", role_name); \
             } \
-            call_log_append(log, res__->tx_ja_sample, 0, "V.90 Phase 3", "Phase 3 TX J/Ja", detail); \
+            call_log_append(log, res__->tx_ja_sample, 0, phase3_proto__, "Phase 3 TX J/Ja", detail); \
         } \
         { \
             p3_j_log_summary_t jflow__; \
             bool calling_role__ = (strcmp(role_name, "caller") == 0); \
+            const char *flow_summary__ = (phase3_standard_global == P3_FLOW_STANDARD_V34) \
+                ? "Phase 3 J/J' flow" \
+                : ((phase3_standard_global == P3_FLOW_STANDARD_V92) \
+                    ? "Phase 3 Ru/Jp flow" \
+                    : "Phase 3 Ja/Jd flow"); \
             memset(&jflow__, 0, sizeof(jflow__)); \
-            if (p3_extract_j_log_summary(samples, total_samples, res__, calling_role__, &jflow__) \
+            if (p3_extract_j_log_summary(samples, total_samples, res__, calling_role__, phase3_standard_global, &jflow__) \
                 && jflow__.valid \
                 && should_emit_phase2_event(jflow__.event_sample, (PHASE2_CUTOFF))) { \
                 const char *j_class__ = (jflow__.j_table_bits == 4) ? "4pt" \
                                       : ((jflow__.j_table_bits == 16) ? "16pt" : "unknown"); \
                 snprintf(detail, sizeof(detail), \
-                         "role=%s class=%s match=%d%% jprime=%s trn_after=%s status=%s", \
+                         "role=%s standard=%s class=%s match=%d%% jprime=%s trn_after=%s ru=%s status=%s", \
                          role_name, \
+                         p3_flow_standard_name(jflow__.standard), \
                          j_class__, \
                          jflow__.j_table_match_pct, \
                          jflow__.jprime_seen ? "yes" : "no", \
                          jflow__.trn_after_j_seen ? "yes" : "no", \
+                         jflow__.ru_seen ? "yes" : "no", \
                          jflow__.role_aligned ? "aligned" : "partial"); \
                 if (jflow__.jprime_seen && jflow__.jprime_match_pct > 0) \
                     appendf(detail, sizeof(detail), " jprime_match=%d%%", jflow__.jprime_match_pct); \
                 if (jflow__.notes[0]) \
                     appendf(detail, sizeof(detail), " notes=%s", jflow__.notes); \
-                call_log_append(log, jflow__.event_sample, 0, phase3_proto__, "Phase 3 J/J' flow", detail); \
+                call_log_append(log, jflow__.event_sample, 0, phase3_proto__, flow_summary__, detail); \
             } \
         } \
         APPEND_V34_STAGE_EVENT(res__, tx_jdashed_sample, "Phase 3 TX J'", "sequence=j_dashed"); \
