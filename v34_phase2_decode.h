@@ -134,9 +134,44 @@ typedef struct {
     v34_v90_info1d_t info1d;
 } decode_v34_result_t;
 
+#define V34_PHASE2_CACHE_SLOTS 8
+
+typedef bool (*v34_phase2_pass_fn_t)(void *ctx,
+                                     const int16_t *samples,
+                                     int total_samples,
+                                     v91_law_t law,
+                                     bool calling_party,
+                                     float info_db_cutoff,
+                                     bool allow_info_rate_infer,
+                                     decode_v34_result_t *result);
+
+typedef struct {
+    bool valid;
+    const int16_t *samples;
+    int total_samples;
+    v91_law_t law;
+    bool allow_info_rate_infer;
+    decode_v34_result_t answerer;
+    decode_v34_result_t caller;
+    bool have_answerer;
+    bool have_caller;
+} v34_phase2_cache_entry_t;
+
+typedef struct {
+    v34_phase2_pass_fn_t decode_pass;
+    void *decode_pass_ctx;
+    v34_phase2_cache_entry_t cache[V34_PHASE2_CACHE_SLOTS];
+    int cache_next;
+} v34_phase2_engine_t;
+
+void v34_phase2_engine_init(v34_phase2_engine_t *engine,
+                            v34_phase2_pass_fn_t decode_pass,
+                            void *decode_pass_ctx);
+
 int v34_phase2_result_spec_score(const decode_v34_result_t *result);
 
-void v34_phase2_decode_pair(const int16_t *samples,
+void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
+                            const int16_t *samples,
                             int total_samples,
                             v91_law_t law,
                             bool allow_info_rate_infer,
@@ -145,7 +180,8 @@ void v34_phase2_decode_pair(const int16_t *samples,
                             decode_v34_result_t *caller,
                             bool *have_caller);
 
-void v34_phase2_decode_pair_cached(const int16_t *samples,
+void v34_phase2_decode_pair_cached(v34_phase2_engine_t *engine,
+                                   const int16_t *samples,
                                    int total_samples,
                                    v91_law_t law,
                                    bool allow_info_rate_infer,
