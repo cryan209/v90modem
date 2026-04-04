@@ -960,6 +960,7 @@ typedef struct {
     bool mp_seen;
     bool mp_remote_ack_seen;
     bool mp_from_rx_frame;
+    bool mp_from_info_sequence;
     bool mp_rates_valid;
     bool mp_aux_channel_supported;
     bool mp_use_non_linear_encoder;
@@ -1055,6 +1056,65 @@ static int v34_mp_rate_n_to_bps(int rate_n)
     if (rate_n < 1 || rate_n > 14)
         return -1;
     return rate_n * 2400;
+}
+
+static int v34_symbol_rate_code_to_baud(int code)
+{
+    static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+
+    if (code >= 0 && code < 6)
+        return baud_by_code[code];
+    if (code == 6)
+        return 8000; /* V.90 PCM downstream code */
+    return -1;
+}
+
+static int v34_symbol_rate_code_to_theoretical_max_bps(int code)
+{
+    static const int max_by_code[6] = {21600, 26400, 26400, 28800, 31200, 33600};
+
+    if (code < 0 || code >= 6)
+        return -1;
+    return max_by_code[code];
+}
+
+static bool v34_infer_mp_rates_from_info_sequences(const decode_v34_result_t *result,
+                                                   int *a_to_c_bps_out,
+                                                   int *c_to_a_bps_out)
+{
+    int a_to_c = -1;
+    int c_to_a = -1;
+
+    if (!result || !a_to_c_bps_out || !c_to_a_bps_out)
+        return false;
+
+    if (result->info1_seen && !result->info1_is_d) {
+        int up_code = result->info1a.upstream_symbol_rate_code;
+        int dn_code = result->info1a.downstream_rate_code;
+
+        a_to_c = v34_symbol_rate_code_to_theoretical_max_bps(up_code);
+        c_to_a = v34_symbol_rate_code_to_theoretical_max_bps(dn_code);
+        if (a_to_c > 0 && c_to_a < 0)
+            c_to_a = a_to_c;
+        if (c_to_a > 0 && a_to_c < 0)
+            a_to_c = c_to_a;
+    } else if (result->info1_seen && result->info1_is_d) {
+        int best_n = -1;
+
+        for (int i = 0; i < 6; i++) {
+            if (result->info1d.rate_data[i].max_bit_rate > best_n)
+                best_n = result->info1d.rate_data[i].max_bit_rate;
+        }
+        if (best_n > 0)
+            a_to_c = c_to_a = v34_mp_rate_n_to_bps(best_n);
+    }
+
+    if (a_to_c <= 0 || c_to_a <= 0)
+        return false;
+
+    *a_to_c_bps_out = a_to_c;
+    *c_to_a_bps_out = c_to_a;
+    return true;
 }
 
 static const char *v34_mp_trellis_name(int trellis_size)
@@ -1158,7 +1218,9 @@ static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const d
 
     appendf(detail, detail_len, " mp_seen=%u", result->mp_seen ? 1U : 0U);
     appendf(detail, detail_len, " mp_remote_ack=%u", result->mp_remote_ack_seen ? 1U : 0U);
-    appendf(detail, detail_len, " mp_source=%s", result->mp_from_rx_frame ? "rx_frame" : "tx_state");
+    appendf(detail, detail_len, " mp_source=%s",
+            result->mp_from_rx_frame ? "rx_frame"
+            : (result->mp_from_info_sequence ? "info_sequence" : "tx_state"));
     appendf(detail, detail_len, " mp_rate_a_to_c=%s", result->mp_rate_a_to_c_bps > 0 ? "" : "n/a");
     if (result->mp_rate_a_to_c_bps > 0)
         appendf(detail, detail_len, "%d", result->mp_rate_a_to_c_bps);
@@ -5243,6 +5305,120 @@ static int v34_result_spec_score(const decode_v34_result_t *result)
     return score;
 }
 
+typedef struct {
+    bool evaluated;
+    bool sequence_ok;
+    bool trn_min_ok;
+    bool handoff_ok;
+    bool pass;
+    int trn_t;
+    int s1_t;
+    int s2_t;
+    char notes[256];
+} v34_phase3_errorfree_eval_t;
+
+static int v34_samples_to_t_interval(int start_sample, int end_sample)
+{
+    if (start_sample < 0 || end_sample < 0 || end_sample <= start_sample)
+        return -1;
+    return samples_to_v34_symbols(end_sample - start_sample);
+}
+
+static void v34_phase3_eval_append_note(v34_phase3_errorfree_eval_t *out, const char *text)
+{
+    if (!out || !text || !text[0])
+        return;
+    if (out->notes[0])
+        appendf(out->notes, sizeof(out->notes), "; ");
+    appendf(out->notes, sizeof(out->notes), "%s", text);
+}
+
+static void v34_evaluate_errorfree_phase3(const decode_v34_result_t *result,
+                                          v34_phase3_errorfree_eval_t *out)
+{
+    bool sequence_ok = true;
+    bool handoff_ok = true;
+    bool trn_min_ok = false;
+    bool pp_observed_or_inferred;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->s1_t = -1;
+    out->s2_t = -1;
+    out->trn_t = -1;
+
+    if (!result)
+        return;
+    out->evaluated = true;
+
+    pp_observed_or_inferred = (result->tx_pp_sample >= 0
+                               || result->tx_second_not_s_sample >= 0
+                               || result->tx_trn_sample >= 0);
+    if (!pp_observed_or_inferred) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "missing PP");
+    } else if (result->tx_pp_sample < 0) {
+        v34_phase3_eval_append_note(out, "PP inferred from later stages");
+    }
+    if (result->tx_trn_sample < 0) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "missing TRN");
+    }
+    if (result->tx_ja_sample < 0)
+        v34_phase3_eval_append_note(out, "missing J/Ja");
+
+    if (result->tx_pp_sample >= 0 && result->tx_trn_sample >= 0
+        && result->tx_pp_sample > result->tx_trn_sample) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "PP->TRN order");
+    }
+    if (result->tx_trn_sample >= 0 && result->tx_ja_sample >= 0
+        && result->tx_trn_sample > result->tx_ja_sample) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "TRN->J order");
+    }
+    if (result->tx_first_s_sample >= 0 && result->tx_first_not_s_sample >= 0
+        && result->tx_first_s_sample > result->tx_first_not_s_sample) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "S->S' order");
+    }
+    if (result->tx_second_s_sample >= 0 && result->tx_second_not_s_sample >= 0
+        && result->tx_second_s_sample > result->tx_second_not_s_sample) {
+        sequence_ok = false;
+        v34_phase3_eval_append_note(out, "S2->S2' order");
+    }
+
+    out->s1_t = v34_samples_to_t_interval(result->tx_first_s_sample,
+                                          result->tx_first_not_s_sample);
+    out->s2_t = v34_samples_to_t_interval(result->tx_second_s_sample,
+                                          result->tx_second_not_s_sample);
+    out->trn_t = v34_samples_to_t_interval(result->tx_trn_sample,
+                                           result->tx_ja_sample);
+
+    if (out->trn_t >= 512) {
+        trn_min_ok = true;
+    } else if (out->trn_t >= 0) {
+        v34_phase3_eval_append_note(out, "TRN<512T");
+    } else if (result->tx_trn_sample >= 0 || result->tx_ja_sample >= 0) {
+        v34_phase3_eval_append_note(out, "TRN span unknown");
+    }
+
+    if (result->rx_s_event_sample < 0 && !result->phase4_seen && !result->phase4_ready_seen) {
+        handoff_ok = false;
+        v34_phase3_eval_append_note(out, "no far-end S/Phase4 handoff");
+    } else if (result->rx_s_event_sample >= 0 && result->tx_ja_sample >= 0
+               && result->rx_s_event_sample < result->tx_ja_sample) {
+        handoff_ok = false;
+        v34_phase3_eval_append_note(out, "far-end S before J/Ja");
+    }
+
+    out->sequence_ok = sequence_ok;
+    out->trn_min_ok = trn_min_ok;
+    out->handoff_ok = handoff_ok;
+    out->pass = sequence_ok && trn_min_ok && handoff_ok;
+}
+
 static bool should_emit_phase2_event(int sample, int latest_allowed_sample)
 {
     if (sample < 0)
@@ -6941,6 +7117,7 @@ static bool decode_v34_pass(const int16_t *samples,
                             v91_law_t law,
                             bool calling_party,
                             float initial_signal_cutoff_db,
+                            bool allow_info_rate_infer,
                             decode_v34_result_t *result)
 {
     v34_state_t *v34;
@@ -7015,6 +7192,7 @@ static bool decode_v34_pass(const int16_t *samples,
     result->phase4_sample = -1;
     result->failure_sample = -1;
     result->mp_from_rx_frame = false;
+    result->mp_from_info_sequence = false;
     result->mp_aux_channel_supported = false;
     result->mp_use_non_linear_encoder = false;
     result->mp_expanded_shaping = false;
@@ -7350,8 +7528,15 @@ static bool decode_v34_pass(const int16_t *samples,
         result->mp_signalling_rate_mask = rx_mp.signalling_rate_mask;
         result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
     } else {
-        result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_a_to_c);
-        result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_c_to_a);
+        if (allow_info_rate_infer
+            && v34_infer_mp_rates_from_info_sequences(result,
+                                                      &result->mp_rate_a_to_c_bps,
+                                                      &result->mp_rate_c_to_a_bps)) {
+            result->mp_from_info_sequence = true;
+        } else {
+            result->mp_rate_a_to_c_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_a_to_c);
+            result->mp_rate_c_to_a_bps = v34_mp_rate_n_to_bps(v34->tx.mp.bit_rate_c_to_a);
+        }
         result->mp_rates_valid = (result->mp_rate_a_to_c_bps > 0 && result->mp_rate_c_to_a_bps > 0);
     }
     if (v34->rx.phase3_trn_mag_count > 0) {
@@ -8093,6 +8278,7 @@ static void merge_info0_from_rescue(decode_v34_result_t *dst, const decode_v34_r
 static void decode_v34_pair_with_rescue(const int16_t *samples,
                                         int total_samples,
                                         v91_law_t law,
+                                        bool allow_info_rate_infer,
                                         decode_v34_result_t *answerer,
                                         bool *have_answerer,
                                         decode_v34_result_t *caller,
@@ -8105,19 +8291,43 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
     if (!samples || total_samples <= 0 || !answerer || !caller || !have_answerer || !have_caller)
         return;
 
-    *have_answerer = decode_v34_pass(samples, total_samples, law, false, -60.0f, answerer);
-    *have_caller = decode_v34_pass(samples, total_samples, law, true, -60.0f, caller);
+    *have_answerer = decode_v34_pass(samples,
+                                     total_samples,
+                                     law,
+                                     false,
+                                     -60.0f,
+                                     allow_info_rate_infer,
+                                     answerer);
+    *have_caller = decode_v34_pass(samples,
+                                   total_samples,
+                                   law,
+                                   true,
+                                   -60.0f,
+                                   allow_info_rate_infer,
+                                   caller);
 
     if (*have_answerer && !answerer->info0_seen && answerer->info1_seen) {
         decode_v34_result_t rescue;
 
-        if (decode_v34_pass(samples, total_samples, law, false, -52.0f, &rescue) && rescue.info0_seen)
+        if (decode_v34_pass(samples,
+                            total_samples,
+                            law,
+                            false,
+                            -52.0f,
+                            allow_info_rate_infer,
+                            &rescue) && rescue.info0_seen)
             merge_info0_from_rescue(answerer, &rescue);
     }
     if (*have_caller && !caller->info0_seen && caller->info1_seen) {
         decode_v34_result_t rescue;
 
-        if (decode_v34_pass(samples, total_samples, law, true, -52.0f, &rescue) && rescue.info0_seen)
+        if (decode_v34_pass(samples,
+                            total_samples,
+                            law,
+                            true,
+                            -52.0f,
+                            allow_info_rate_infer,
+                            &rescue) && rescue.info0_seen)
             merge_info0_from_rescue(caller, &rescue);
     }
 }
@@ -8128,6 +8338,8 @@ static void print_v34_result(const decode_v34_result_t *result,
                              int expected_rate_2,
                              bool suppress_v90_phase2)
 {
+    v34_phase3_errorfree_eval_t ef_eval;
+
     if (!result)
         return;
 
@@ -8294,11 +8506,85 @@ static void print_v34_result(const decode_v34_result_t *result,
         printf("  Phase 4 ready:   seen at %.1f ms\n", sample_to_ms(result->phase4_ready_sample, 8000));
     if (result->phase4_seen)
         printf("  Phase 4 / MP:    seen at %.1f ms\n", sample_to_ms(result->phase4_sample, 8000));
+
+    v34_evaluate_errorfree_phase3(result, &ef_eval);
+    if (ef_eval.evaluated) {
+        printf("  11.3.1 flow:     %s (%s side) seq=%s trn=%s handoff=%s",
+               ef_eval.pass ? "PASS" : "PARTIAL",
+               calling_party ? "call modem" : "answer modem",
+               ef_eval.sequence_ok ? "ok" : "issue",
+               ef_eval.trn_min_ok ? ">=512T" : "<512T/unknown",
+               ef_eval.handoff_ok ? "ok" : "issue");
+        if (ef_eval.trn_t >= 0)
+            printf(" trn=%dT", ef_eval.trn_t);
+        if (ef_eval.s1_t >= 0)
+            printf(" s1=%dT", ef_eval.s1_t);
+        if (ef_eval.s2_t >= 0)
+            printf(" s2=%dT", ef_eval.s2_t);
+        printf("\n");
+        if (ef_eval.notes[0])
+            printf("                   notes: %s\n", ef_eval.notes);
+    }
+
+    if (!suppress_v90_phase2 && result->info1_seen && !result->info1_is_d) {
+        int up_code = result->info1a.upstream_symbol_rate_code;
+        int dn_code = result->info1a.downstream_rate_code;
+        int up_baud = v34_symbol_rate_code_to_baud(up_code);
+        int dn_baud = v34_symbol_rate_code_to_baud(dn_code);
+        int up_max = v34_symbol_rate_code_to_theoretical_max_bps(up_code);
+        int dn_max = v34_symbol_rate_code_to_theoretical_max_bps(dn_code);
+
+        printf("  INFO params:     up_code=%d", up_code);
+        if (up_baud > 0)
+            printf(" (%d baud)", up_baud);
+        else
+            printf(" (unknown)");
+        printf(" down_code=%d", dn_code);
+        if (dn_baud == 8000)
+            printf(" (8000 pcm)");
+        else if (dn_baud > 0)
+            printf(" (%d baud)", dn_baud);
+        if (up_max > 0 || dn_max > 0) {
+            printf(" inferred_max A->C/C->A=");
+            if (up_max > 0)
+                printf("%d", up_max);
+            else
+                printf("n/a");
+            printf("/");
+            if (dn_max > 0)
+                printf("%d", dn_max);
+            else
+                printf("n/a");
+            printf(" bps");
+        }
+        printf("\n");
+    } else if (!suppress_v90_phase2 && result->info1_seen && result->info1_is_d) {
+        int best_idx = -1;
+        int best_n = -1;
+
+        for (int i = 0; i < 6; i++) {
+            if (result->info1d.rate_data[i].max_bit_rate > best_n) {
+                best_n = result->info1d.rate_data[i].max_bit_rate;
+                best_idx = i;
+            }
+        }
+        if (best_idx >= 0 && best_n > 0) {
+            static const int baud_list[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+            printf("  INFO params:     best_row=%d (%d baud) max_rate=%d bps carrier=%s preemph=%d\n",
+                   best_idx,
+                   baud_list[best_idx],
+                   best_n * 2400,
+                   result->info1d.rate_data[best_idx].use_high_carrier ? "high" : "low",
+                   result->info1d.rate_data[best_idx].pre_emphasis);
+        }
+    }
     if (result->mp_seen || result->mp_rates_valid) {
         printf("  MP exchange:     seen=%s remote_ack=%s",
                result->mp_seen ? "yes" : "no",
                result->mp_remote_ack_seen ? "yes" : "no");
-        printf(" source=%s", result->mp_from_rx_frame ? "rx_frame" : "tx_state");
+        printf(" source=%s",
+               result->mp_from_rx_frame ? "rx_frame"
+               : (result->mp_from_info_sequence ? "info_sequence" : "tx_state"));
         if (result->mp_rates_valid) {
             printf(" negotiated A->C/C->A=%d/%d bps",
                    result->mp_rate_a_to_c_bps,
@@ -8333,6 +8619,8 @@ static void print_v34_result(const decode_v34_result_t *result,
                    result->mp_expanded_shaping ? "expanded" : "min",
                    result->mp_asymmetric_rates_allowed ? "yes" : "no",
                    rate_mask);
+        } else if (result->mp_from_info_sequence) {
+            printf("  MP decode:       no accepted RX MP frame; negotiated rates inferred from INFO sequences\n");
         } else {
             printf("  MP decode:       no accepted RX MP frame decoded; using TX-state negotiated settings\n");
         }
@@ -8379,6 +8667,7 @@ static void collect_v34_events(call_log_t *log,
     decode_v34_pair_with_rescue(samples,
                                 total_samples,
                                 law,
+                                !suppress_v90_phase2,
                                 &answerer,
                                 &have_answerer,
                                 &caller,
@@ -8650,6 +8939,7 @@ static void collect_stream_call_log(call_log_t *log,
         decode_v34_pair_with_rescue(linear_samples,
                                     total_samples,
                                     law,
+                                    !suppress_v90_phase2,
                                     &answerer,
                                     &have_answerer,
                                     &caller,
@@ -10523,6 +10813,7 @@ static void run_decode_suite(const char *label,
         decode_v34_pair_with_rescue(linear_samples,
                                     total_samples,
                                     law,
+                                    !suppress_v90_phase2,
                                     &answerer,
                                     &have_answerer,
                                     &caller,
