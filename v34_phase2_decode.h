@@ -108,6 +108,13 @@ typedef struct {
     int phase4_ready_sample;
     int phase4_sample;
     int failure_sample;
+    int phase2_candidate_windows_seen;
+    int phase2_candidate_windows_tried;
+    int phase2_selected_window_index;
+    int phase2_selected_window_start_sample;
+    int phase2_selected_window_end_sample;
+    int phase2_selected_window_active_hits;
+    int phase2_selected_window_peak_db_tenths;
     int final_rx_stage;
     int final_tx_stage;
     int final_rx_event;

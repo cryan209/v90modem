@@ -9172,6 +9172,16 @@ static void print_v34_result(const decode_v34_result_t *result,
     printf("  Final RX event:  %s (%d)\n",
            v34_event_to_str_local(result->final_rx_event),
            result->final_rx_event);
+    if (result->phase2_selected_window_index >= 0) {
+        printf("  Phase 2 window:  #%d %.1f-%.1f ms tried=%d/%d active_hits=%d peak=%.1f dB\n",
+               result->phase2_selected_window_index + 1,
+               sample_to_ms(result->phase2_selected_window_start_sample, 8000),
+               sample_to_ms(result->phase2_selected_window_end_sample, 8000),
+               result->phase2_candidate_windows_tried,
+               result->phase2_candidate_windows_seen,
+               result->phase2_selected_window_active_hits,
+               (double) result->phase2_selected_window_peak_db_tenths / 10.0);
+    }
     if (suppress_v90_phase2) {
         printf("  INFO0a/INFO0d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
     } else if (result->info0_seen) {

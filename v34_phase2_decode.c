@@ -3,6 +3,17 @@
 #include <math.h>
 #include <string.h>
 
+typedef struct {
+    int start_sample;
+    int end_sample;
+    int active_hits;
+    double peak_db;
+} v34_phase2_candidate_window_t;
+
+enum {
+    V34_PHASE2_MAX_CANDIDATE_WINDOWS = 6
+};
+
 static double v34_phase2_rms_energy_db(const int16_t *samples, int len)
 {
     double sum = 0.0;
@@ -18,36 +29,88 @@ static double v34_phase2_rms_energy_db(const int16_t *samples, int len)
     return 20.0 * log10(rms / 32768.0);
 }
 
-static bool v34_phase2_find_activity_window(const int16_t *samples,
-                                            int total_samples,
-                                            int sample_rate,
-                                            int *start_out,
-                                            int *end_out)
+static int v34_phase2_candidate_rank(const v34_phase2_candidate_window_t *window)
+{
+    int duration_samples;
+    int peak_term;
+
+    if (!window)
+        return INT_MIN;
+    duration_samples = window->end_sample - window->start_sample;
+    if (duration_samples < 0)
+        duration_samples = 0;
+    peak_term = (int) ((window->peak_db + 100.0) * 10.0);
+    return duration_samples + (window->active_hits * 400) + peak_term;
+}
+
+static void v34_phase2_insert_candidate_window(v34_phase2_candidate_window_t *windows,
+                                               int *count,
+                                               int max_windows,
+                                               const v34_phase2_candidate_window_t *candidate)
+{
+    int insert_at;
+
+    if (!windows || !count || !candidate || max_windows <= 0)
+        return;
+
+    insert_at = *count;
+    if (insert_at > max_windows)
+        insert_at = max_windows;
+
+    while (insert_at > 0
+           && v34_phase2_candidate_rank(candidate) > v34_phase2_candidate_rank(&windows[insert_at - 1])) {
+        if (insert_at < max_windows)
+            windows[insert_at] = windows[insert_at - 1];
+        insert_at--;
+    }
+
+    if (insert_at >= max_windows)
+        return;
+
+    windows[insert_at] = *candidate;
+    if (*count < max_windows)
+        (*count)++;
+}
+
+static int v34_phase2_find_candidate_windows(const int16_t *samples,
+                                             int total_samples,
+                                             int sample_rate,
+                                             v34_phase2_candidate_window_t *windows,
+                                             int max_windows)
 {
     enum {
         WINDOW_MS = 100,
         STEP_MS = 50,
-        PAD_MS = 300
+        PAD_MS = 300,
+        GAP_MS = 200
     };
     const double activity_floor_db = -58.0;
     int window;
     int step;
     int pad;
+    int gap_limit;
     double max_db = -100.0;
-    int first_active = -1;
-    int last_active = -1;
+    bool in_region = false;
+    int region_start = -1;
+    int region_end = -1;
+    int region_last_active_end = -1;
+    int region_active_hits = 0;
+    double region_peak_db = -100.0;
+    int found = 0;
+    int scan_limit;
 
-    if (!samples || total_samples <= 0 || sample_rate <= 0 || !start_out || !end_out)
-        return false;
+    if (!windows || max_windows <= 0)
+        return 0;
+    memset(windows, 0, sizeof(*windows) * (size_t) max_windows);
+    if (!samples || total_samples <= 0 || sample_rate <= 0)
+        return 0;
 
     window = (sample_rate * WINDOW_MS) / 1000;
     step = (sample_rate * STEP_MS) / 1000;
     pad = (sample_rate * PAD_MS) / 1000;
-    if (window <= 0 || step <= 0) {
-        *start_out = 0;
-        *end_out = total_samples;
-        return false;
-    }
+    gap_limit = (sample_rate * GAP_MS) / 1000;
+    if (window <= 0 || step <= 0)
+        return 0;
 
     for (int start = 0; start < total_samples; start += step) {
         int len = total_samples - start;
@@ -60,39 +123,71 @@ static bool v34_phase2_find_activity_window(const int16_t *samples,
             max_db = db;
     }
 
-    if (max_db <= activity_floor_db) {
-        *start_out = 0;
-        *end_out = total_samples;
-        return false;
-    }
+    if (max_db <= activity_floor_db)
+        return 0;
 
-    for (int start = 0; start < total_samples; start += step) {
+    scan_limit = total_samples + gap_limit + step;
+    for (int start = 0; start < scan_limit; start += step) {
         int len = total_samples - start;
-        double db;
+        double db = -100.0;
+        bool active;
 
-        if (len > window)
-            len = window;
-        db = v34_phase2_rms_energy_db(samples + start, len);
-        if (db < activity_floor_db)
+        if (start < total_samples) {
+            if (len > window)
+                len = window;
+            db = v34_phase2_rms_energy_db(samples + start, len);
+        } else {
+            len = 0;
+        }
+        active = (db >= activity_floor_db);
+
+        if (active) {
+            if (!in_region) {
+                in_region = true;
+                region_start = start;
+                region_end = start + len;
+                region_last_active_end = start + len;
+                region_active_hits = 1;
+                region_peak_db = db;
+            } else {
+                region_end = start + len;
+                region_last_active_end = start + len;
+                region_active_hits++;
+                if (db > region_peak_db)
+                    region_peak_db = db;
+            }
             continue;
-        if (first_active < 0)
-            first_active = start;
-        last_active = start + len;
+        }
+
+        if (!in_region)
+            continue;
+        if (start < region_last_active_end + gap_limit)
+            continue;
+
+        if (region_end > region_start) {
+            v34_phase2_candidate_window_t candidate;
+
+            candidate.start_sample = region_start - pad;
+            candidate.end_sample = region_end + pad;
+            if (candidate.start_sample < 0)
+                candidate.start_sample = 0;
+            if (candidate.end_sample > total_samples)
+                candidate.end_sample = total_samples;
+            candidate.active_hits = region_active_hits;
+            candidate.peak_db = region_peak_db;
+            if (candidate.end_sample > candidate.start_sample)
+                v34_phase2_insert_candidate_window(windows, &found, max_windows, &candidate);
+        }
+
+        in_region = false;
+        region_start = -1;
+        region_end = -1;
+        region_last_active_end = -1;
+        region_active_hits = 0;
+        region_peak_db = -100.0;
     }
 
-    if (first_active < 0 || last_active <= first_active) {
-        *start_out = 0;
-        *end_out = total_samples;
-        return false;
-    }
-
-    *start_out = first_active - pad;
-    *end_out = last_active + pad;
-    if (*start_out < 0)
-        *start_out = 0;
-    if (*end_out > total_samples)
-        *end_out = total_samples;
-    return (*end_out - *start_out) < total_samples;
+    return found;
 }
 
 static void v34_phase2_offset_result_samples(decode_v34_result_t *result, int sample_offset)
@@ -219,6 +314,108 @@ static void merge_info1_from_rescue(decode_v34_result_t *dst, const decode_v34_r
     dst->info1_from_rescue = true;
 }
 
+static int v34_phase2_result_quality(const decode_v34_result_t *result, bool have_result)
+{
+    int score;
+
+    if (!have_result || !result)
+        return INT_MIN;
+
+    score = v34_phase2_result_spec_score(result);
+    if (result->info0_seen && result->info1_seen)
+        score += 500;
+    else if (result->info0_seen || result->info1_seen)
+        score += 120;
+    if (result->phase3_seen)
+        score += 300;
+    if (result->phase4_seen)
+        score += 500;
+    if (result->training_failed && !result->info0_seen && !result->info1_seen)
+        score -= 200;
+    if (result->info0_sample >= 0)
+        score -= result->info0_sample / 4000;
+    return score;
+}
+
+static bool v34_phase2_try_candidate_side(v34_phase2_engine_t *engine,
+                                          const int16_t *samples,
+                                          int total_samples,
+                                          const v34_phase2_candidate_window_t *window,
+                                          int candidate_index,
+                                          v91_law_t law,
+                                          bool calling_party,
+                                          bool allow_info_rate_infer,
+                                          decode_v34_result_t *best_result,
+                                          bool *have_best)
+{
+    static const float rescue_cutoffs[] = { -60.0f, -68.0f };
+    decode_v34_result_t candidate;
+    bool have_candidate;
+    int decode_start;
+    int decode_end;
+
+    if (!engine || !engine->decode_pass || !samples || !window || !best_result || !have_best)
+        return false;
+    decode_start = window->start_sample;
+    decode_end = window->end_sample;
+    if (decode_start < 0)
+        decode_start = 0;
+    if (decode_end > total_samples)
+        decode_end = total_samples;
+    if (decode_end <= decode_start)
+        return false;
+
+    have_candidate = engine->decode_pass(engine->decode_pass_ctx,
+                                         samples + decode_start,
+                                         decode_end - decode_start,
+                                         law,
+                                         calling_party,
+                                         -52.0f,
+                                         allow_info_rate_infer,
+                                         &candidate);
+    if (!have_candidate)
+        return false;
+    v34_phase2_offset_result_samples(&candidate, decode_start);
+
+    if (!candidate.info0_seen || !candidate.info1_seen) {
+        for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
+            decode_v34_result_t rescue;
+
+            if (!engine->decode_pass(engine->decode_pass_ctx,
+                                     samples + decode_start,
+                                     decode_end - decode_start,
+                                     law,
+                                     calling_party,
+                                     rescue_cutoffs[i],
+                                     allow_info_rate_infer,
+                                     &rescue)) {
+                continue;
+            }
+            v34_phase2_offset_result_samples(&rescue, decode_start);
+            merge_info_event_diagnostics_from_rescue(&candidate, &rescue);
+            if (!candidate.info0_seen && rescue.info0_seen)
+                merge_info0_from_rescue(&candidate, &rescue);
+            if (!candidate.info1_seen && rescue.info1_seen)
+                merge_info1_from_rescue(&candidate, &rescue);
+            if (candidate.info0_seen && candidate.info1_seen)
+                break;
+        }
+    }
+
+    candidate.phase2_selected_window_index = candidate_index;
+    candidate.phase2_selected_window_start_sample = decode_start;
+    candidate.phase2_selected_window_end_sample = decode_end;
+    candidate.phase2_selected_window_active_hits = window->active_hits;
+    candidate.phase2_selected_window_peak_db_tenths = (int) (window->peak_db * 10.0);
+
+    if (!*have_best
+        || v34_phase2_result_quality(&candidate, true) > v34_phase2_result_quality(best_result, true)) {
+        *best_result = candidate;
+        *have_best = true;
+    }
+    return true;
+}
+
 void v34_phase2_engine_init(v34_phase2_engine_t *engine,
                             v34_phase2_pass_fn_t decode_pass,
                             void *decode_pass_ctx)
@@ -271,11 +468,10 @@ void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
                             decode_v34_result_t *caller,
                             bool *have_caller)
 {
-    static const float rescue_cutoffs[] = { -60.0f, -68.0f };
-    int decode_start = 0;
-    int decode_end = total_samples;
-    const int16_t *decode_samples = samples;
-    int decode_sample_count = total_samples;
+    v34_phase2_candidate_window_t windows[V34_PHASE2_MAX_CANDIDATE_WINDOWS];
+    int window_count;
+    int answerer_windows_tried = 0;
+    int caller_windows_tried = 0;
 
     if (have_answerer)
         *have_answerer = false;
@@ -287,78 +483,60 @@ void v34_phase2_decode_pair(v34_phase2_engine_t *engine,
         return;
     }
 
-    v34_phase2_find_activity_window(samples, total_samples, 8000, &decode_start, &decode_end);
-    decode_samples = samples + decode_start;
-    decode_sample_count = decode_end - decode_start;
+    window_count = v34_phase2_find_candidate_windows(samples,
+                                                     total_samples,
+                                                     8000,
+                                                     windows,
+                                                     V34_PHASE2_MAX_CANDIDATE_WINDOWS);
+    if (window_count <= 0) {
+        windows[0].start_sample = 0;
+        windows[0].end_sample = total_samples;
+        windows[0].active_hits = 0;
+        windows[0].peak_db = -100.0;
+        window_count = 1;
+    }
 
-    *have_answerer = engine->decode_pass(engine->decode_pass_ctx,
-                                         decode_samples,
-                                         decode_sample_count,
-                                         law,
-                                         false,
-                                         -52.0f,
-                                         allow_info_rate_infer,
-                                         answerer);
-    if (*have_answerer)
-        v34_phase2_offset_result_samples(answerer, decode_start);
-    *have_caller = engine->decode_pass(engine->decode_pass_ctx,
-                                       decode_samples,
-                                       decode_sample_count,
-                                       law,
-                                       true,
-                                       -52.0f,
-                                       allow_info_rate_infer,
-                                       caller);
-    if (*have_caller)
-        v34_phase2_offset_result_samples(caller, decode_start);
+    for (int i = 0; i < window_count; i++) {
+        if (v34_phase2_try_candidate_side(engine,
+                                          samples,
+                                          total_samples,
+                                          &windows[i],
+                                          i,
+                                          law,
+                                          false,
+                                          allow_info_rate_infer,
+                                          answerer,
+                                          have_answerer)) {
+            answerer_windows_tried++;
+        }
+        if (v34_phase2_try_candidate_side(engine,
+                                          samples,
+                                          total_samples,
+                                          &windows[i],
+                                          i,
+                                          law,
+                                          true,
+                                          allow_info_rate_infer,
+                                          caller,
+                                          have_caller)) {
+            caller_windows_tried++;
+        }
 
-    if (*have_answerer && (!answerer->info0_seen || !answerer->info1_seen)) {
-        for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
-            decode_v34_result_t rescue;
-
-            if (!engine->decode_pass(engine->decode_pass_ctx,
-                                     decode_samples,
-                                     decode_sample_count,
-                                     law,
-                                     false,
-                                     rescue_cutoffs[i],
-                                     allow_info_rate_infer,
-                                     &rescue)) {
-                continue;
-            }
-            v34_phase2_offset_result_samples(&rescue, decode_start);
-            merge_info_event_diagnostics_from_rescue(answerer, &rescue);
-            if (!answerer->info0_seen && rescue.info0_seen)
-                merge_info0_from_rescue(answerer, &rescue);
-            if (!answerer->info1_seen && rescue.info1_seen)
-                merge_info1_from_rescue(answerer, &rescue);
-            if (answerer->info0_seen && answerer->info1_seen)
-                break;
+        if (*have_answerer && *have_caller
+            && answerer->info0_seen && answerer->info1_seen
+            && caller->info0_seen && caller->info1_seen
+            && (answerer->phase3_seen || caller->phase3_seen)) {
+            break;
         }
     }
-    if (*have_caller && (!caller->info0_seen || !caller->info1_seen)) {
-        for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
-            decode_v34_result_t rescue;
 
-            if (!engine->decode_pass(engine->decode_pass_ctx,
-                                     decode_samples,
-                                     decode_sample_count,
-                                     law,
-                                     true,
-                                     rescue_cutoffs[i],
-                                     allow_info_rate_infer,
-                                     &rescue)) {
-                continue;
-            }
-            v34_phase2_offset_result_samples(&rescue, decode_start);
-            merge_info_event_diagnostics_from_rescue(caller, &rescue);
-            if (!caller->info0_seen && rescue.info0_seen)
-                merge_info0_from_rescue(caller, &rescue);
-            if (!caller->info1_seen && rescue.info1_seen)
-                merge_info1_from_rescue(caller, &rescue);
-            if (caller->info0_seen && caller->info1_seen)
-                break;
-        }
+    if (*have_answerer) {
+        answerer->phase2_candidate_windows_seen = window_count;
+        answerer->phase2_candidate_windows_tried = answerer_windows_tried;
+    }
+    if (*have_caller) {
+        caller->phase2_candidate_windows_seen = window_count;
+        caller->phase2_candidate_windows_tried = caller_windows_tried;
     }
 }
 
