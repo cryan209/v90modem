@@ -331,6 +331,36 @@ static p12_phase2_role_t p12_phase2_role_from_observations(const phase12_result_
     return P12_PHASE2_ROLE_UNKNOWN;
 }
 
+static p12_info0_kind_t p12_classify_info0_kind(const phase12_result_t *result,
+                                                bool is_info0d)
+{
+    if (is_info0d)
+        return P12_INFO0_KIND_V90_INFO0D;
+    if (result && result->short_phase2_requested)
+        return P12_INFO0_KIND_V92_SHORT;
+    if (result && result->role_detected && result->is_caller)
+        return P12_INFO0_KIND_SHARED_INFO0A;
+    if (result && result->role_detected && !result->is_caller)
+        return P12_INFO0_KIND_V34_INFO0C;
+    return P12_INFO0_KIND_SHARED_INFO0A;
+}
+
+static p12_info1_kind_t p12_classify_info1_kind(const phase12_result_t *result,
+                                                bool is_info1d)
+{
+    if (is_info1d)
+        return P12_INFO1_KIND_V90_INFO1D;
+    if (result && result->short_phase2_requested)
+        return P12_INFO1_KIND_V92_SHORT;
+    if (result && result->v90_capable)
+        return P12_INFO1_KIND_V90_INFO1A;
+    if (result && result->role_detected && result->is_caller)
+        return P12_INFO1_KIND_V34_INFO1C;
+    if (result && result->role_detected && !result->is_caller)
+        return P12_INFO1_KIND_V34_INFO1A;
+    return P12_INFO1_KIND_UNKNOWN;
+}
+
 static bool p12_role_expects_info0_first(p12_phase2_role_t role)
 {
     switch (role) {
@@ -2466,6 +2496,8 @@ static void detect_phase2_info(const int16_t *samples,
                     result->info0.sample_offset = frame_sample;
                     result->info0.duration_samples = phase2_ch2_bursts[b].duration_samples;
                     result->info0.is_info0d = (bool)try_info0d;
+                    result->info0.kind = p12_classify_info0_kind(result, (bool) try_info0d);
+                    result->info0.frame = frame;
                     result->info0.raw = raw;
                     result->info0.parsed = mapped;
                     phase2_end_hint = result->info0.sample_offset + result->info0.duration_samples;
@@ -2515,6 +2547,8 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.sample_offset = frame_sample;
                         result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
                         result->info1.is_info1d = true;
+                        result->info1.kind = p12_classify_info1_kind(result, true);
+                        result->info1.frame = frame;
                         result->info1.info1d = info1d;
                         if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
                             phase2_end_hint = result->info1.sample_offset + result->info1.duration_samples;
@@ -2536,6 +2570,8 @@ static void detect_phase2_info(const int16_t *samples,
                         result->info1.sample_offset = frame_sample;
                         result->info1.duration_samples = phase2_ch1_bursts[b].duration_samples;
                         result->info1.is_info1d = false;
+                        result->info1.kind = p12_classify_info1_kind(result, false);
+                        result->info1.frame = frame;
                         result->info1.info1a_raw = raw;
                         result->info1.info1a_parsed = mapped;
                         if (result->info1.sample_offset + result->info1.duration_samples > phase2_end_hint)
@@ -2909,6 +2945,29 @@ const char *phase12_phase2_step_name(p12_phase2_step_t step)
     }
 }
 
+const char *phase12_info0_kind_name(p12_info0_kind_t kind)
+{
+    switch (kind) {
+    case P12_INFO0_KIND_SHARED_INFO0A: return "shared_info0a";
+    case P12_INFO0_KIND_V34_INFO0C: return "v34_info0c";
+    case P12_INFO0_KIND_V90_INFO0D: return "v90_info0d";
+    case P12_INFO0_KIND_V92_SHORT: return "v92_short";
+    default: return "unknown";
+    }
+}
+
+const char *phase12_info1_kind_name(p12_info1_kind_t kind)
+{
+    switch (kind) {
+    case P12_INFO1_KIND_V34_INFO1A: return "v34_info1a";
+    case P12_INFO1_KIND_V34_INFO1C: return "v34_info1c";
+    case P12_INFO1_KIND_V90_INFO1A: return "v90_info1a";
+    case P12_INFO1_KIND_V90_INFO1D: return "v90_info1d";
+    case P12_INFO1_KIND_V92_SHORT: return "v92_short";
+    default: return "unknown";
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -3056,12 +3115,14 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
             ? (result->is_caller ? "caller" : "answerer") : "unknown";
 
         detail[0] = '\0';
-        snprintf(summary, sizeof(summary), "INFO0%s decoded",
-                 result->info0.is_info0d ? "d" : "a");
+        snprintf(summary, sizeof(summary), "%s decoded",
+                 result->info0.is_info0d ? "INFO0d" : "INFO0");
         appendf(detail, sizeof(detail), "role=%s", role_name);
+        appendf(detail, sizeof(detail), " kind=%s", phase12_info0_kind_name(result->info0.kind));
         appendf(detail, sizeof(detail), " profile=%s",
                 result->info0.is_info0d
                     ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
+        appendf(detail, sizeof(detail), " total_bits=%d", result->info0.frame.total_bits);
         appendf(detail, sizeof(detail), " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
         appendf(detail, sizeof(detail), " b12_2743=%u",
                 result->info0.parsed.support_2743 ? 1U : 0U);
@@ -3122,8 +3183,10 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
             ? (result->is_caller ? "caller" : "answerer") : "unknown";
 
         detail[0] = '\0';
-        snprintf(summary, sizeof(summary), "INFO1%s decoded",
-                 result->info1.is_info1d ? "d" : "a");
+        snprintf(summary, sizeof(summary), "%s decoded",
+                 result->info1.is_info1d ? "INFO1d" : "INFO1");
+        appendf(detail, sizeof(detail), " kind=%s", phase12_info1_kind_name(result->info1.kind));
+        appendf(detail, sizeof(detail), " total_bits=%d", result->info1.frame.total_bits);
         if (result->info1.is_info1d) {
             const v34_v90_info1d_t *i1d = &result->info1.info1d;
             appendf(detail, sizeof(detail), "role=%s", role_name);

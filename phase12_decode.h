@@ -88,11 +88,30 @@ typedef struct {
 /* Phase 2 INFO results                                                */
 /* ------------------------------------------------------------------ */
 
+typedef enum {
+    P12_INFO0_KIND_UNKNOWN = 0,
+    P12_INFO0_KIND_SHARED_INFO0A,
+    P12_INFO0_KIND_V34_INFO0C,
+    P12_INFO0_KIND_V90_INFO0D,
+    P12_INFO0_KIND_V92_SHORT
+} p12_info0_kind_t;
+
+typedef enum {
+    P12_INFO1_KIND_UNKNOWN = 0,
+    P12_INFO1_KIND_V34_INFO1A,
+    P12_INFO1_KIND_V34_INFO1C,
+    P12_INFO1_KIND_V90_INFO1A,
+    P12_INFO1_KIND_V90_INFO1D,
+    P12_INFO1_KIND_V92_SHORT
+} p12_info1_kind_t;
+
 typedef struct {
     bool detected;
     int sample_offset;
     int duration_samples;
     bool is_info0d;            /* true if INFO0d (digital side) */
+    p12_info0_kind_t kind;
+    v34_info_frame_t frame;
     v34_v90_info0a_t raw;
     v90_info0a_t parsed;
 } p12_info0_hit_t;
@@ -102,6 +121,8 @@ typedef struct {
     int sample_offset;
     int duration_samples;
     bool is_info1d;            /* true if INFO1d */
+    p12_info1_kind_t kind;
+    v34_info_frame_t frame;
     v34_v90_info1a_t info1a_raw;
     v90_info1a_t info1a_parsed;
     v34_v90_info1d_t info1d;
@@ -311,6 +332,8 @@ bool phase12_decode_phase1(const int16_t *samples,
 
 const char *phase12_phase2_role_name(p12_phase2_role_t role);
 const char *phase12_phase2_step_name(p12_phase2_step_t step);
+const char *phase12_info0_kind_name(p12_info0_kind_t kind);
+const char *phase12_info1_kind_name(p12_info1_kind_t kind);
 
 /*
  * Decode Phase 2 only (V.34 probing / INFO exchange).

@@ -12080,15 +12080,17 @@ static void run_decode_suite(const char *label,
 
             /* Phase 2 INFO */
             if (p12.info0.detected)
-                printf("  INFO0%s at %.1f ms (%.0f ms)\n",
-                       p12.info0.is_info0d ? "d" : "a",
+                printf("  INFO0 at %.1f ms (%.0f ms, kind=%s, bits=%d)\n",
                        sample_to_ms(p12.info0.sample_offset, sample_rate),
-                       sample_to_ms(p12.info0.duration_samples, sample_rate));
+                       sample_to_ms(p12.info0.duration_samples, sample_rate),
+                       phase12_info0_kind_name(p12.info0.kind),
+                       p12.info0.frame.total_bits);
             if (p12.info1.detected)
-                printf("  INFO1%s at %.1f ms (%.0f ms)\n",
-                       p12.info1.is_info1d ? "d" : "a",
+                printf("  INFO1 at %.1f ms (%.0f ms, kind=%s, bits=%d)\n",
                        sample_to_ms(p12.info1.sample_offset, sample_rate),
-                       sample_to_ms(p12.info1.duration_samples, sample_rate));
+                       sample_to_ms(p12.info1.duration_samples, sample_rate),
+                       phase12_info1_kind_name(p12.info1.kind),
+                       p12.info1.frame.total_bits);
 
             /* Probing tones */
             for (int pt = 0; pt < p12.probe_tone_count; pt++)
