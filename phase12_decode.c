@@ -1974,6 +1974,48 @@ static void v8_msg_decoder_init(v8_msg_decoder_t *d)
     d->first_bit_sample = -1;
 }
 
+static bool p12_find_cj_zero_octets(const uint8_t *bits,
+                                    int bit_count,
+                                    int start_bit,
+                                    int *cj_start_bit_out,
+                                    int *cj_end_bit_out)
+{
+    if (!bits || bit_count < 30)
+        return false;
+    if (start_bit < 0)
+        start_bit = 0;
+
+    for (int pos = start_bit; pos + 30 <= bit_count; pos++) {
+        bool ok = true;
+
+        for (int octet = 0; octet < 3 && ok; octet++) {
+            int base = pos + octet * 10;
+
+            /* Async 0x00 octet: start=0, 8 zero data bits, stop=1 */
+            if (bits[base] != 0 || bits[base + 9] != 1) {
+                ok = false;
+                break;
+            }
+            for (int j = 1; j <= 8; j++) {
+                if (bits[base + j] != 0) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+
+        if (ok) {
+            if (cj_start_bit_out)
+                *cj_start_bit_out = pos;
+            if (cj_end_bit_out)
+                *cj_end_bit_out = pos + 30;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void v8_msg_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
     v8_msg_decoder_t *d = (v8_msg_decoder_t *)ctx;
@@ -2175,44 +2217,13 @@ static void decode_v8_fsk_channel(const int16_t *samples,
 
         /* Try both polarities */
         for (int inv = 0; inv < 2; inv++) {
+            int message_end_bit = -1;
+
             v8_msg_decoder_init(&decoder);
 
             v21_fsk_demod_block(samples + start, len, sample_rate,
                                 channel, (bool)inv,
                                 v8_msg_decoder_put_bit, &decoder);
-
-            /* Check for CJ: find the longest sustained all-marks run in the burst.
-             * CJ follows JM directly, so the JM+CJ burst will have a long mark
-             * run at the end.  The old 80%-of-all-bits test failed because JM
-             * bytes dilute the mark ratio.  Instead accept any run of at least
-             * CJ_MIN_MARK_BITS consecutive marks. */
-            if (cj_out && !cj_out->detected && decoder.raw_bit_count >= CJ_MIN_MARK_BITS) {
-                int mark_run = 0, best_run = 0, best_start = 0, cur_start = 0;
-                for (int i = 0; i < decoder.raw_bit_count; i++) {
-                    if (decoder.raw_bits[i]) {
-                        if (mark_run == 0) cur_start = i;
-                        mark_run++;
-                        if (mark_run > best_run) {
-                            best_run = mark_run;
-                            best_start = cur_start;
-                        }
-                    } else {
-                        mark_run = 0;
-                    }
-                }
-                if (best_run >= CJ_MIN_MARK_BITS) {
-                    int samp_per_bit = sample_rate / 300;
-                    int offset = start + best_start * samp_per_bit;
-                    int duration = best_run * samp_per_bit;
-
-                    cj_out->detected = true;
-                    if (offset < 0) offset = 0;
-                    if (duration < samp_per_bit)
-                        duration = samp_per_bit;
-                    cj_out->sample_offset = offset;
-                    cj_out->duration_samples = duration;
-                }
-            }
 
             /* Try extracting CM/JM bytes from raw bits using async framing */
             if (cm_jm_out && !cm_jm_out->detected && decoder.raw_bit_count >= 20) {
@@ -2265,8 +2276,45 @@ static void decode_v8_fsk_channel(const int16_t *samples,
                             candidate.sample_offset = start;
                             candidate.duration_samples = len;
                             *cm_jm_out = candidate;
+                            message_end_bit = scan_pos;
                             break;
                         }
+                    }
+                }
+            }
+
+            /* Check for CJ only after a valid CM/JM path exists.
+             * This prevents stray all-mark runs from being labeled as CJ
+             * before negotiation has actually been reconstructed. */
+            if (cj_out && !cj_out->detected
+                && cm_jm_out && cm_jm_out->detected
+                && decoder.raw_bit_count >= 30) {
+                int samp_per_bit = sample_rate / 300;
+                int search_bit = 0;
+                int cj_start_bit = -1;
+                int cj_end_bit = -1;
+
+                if (message_end_bit > 0)
+                    search_bit = message_end_bit;
+                if (p12_find_cj_zero_octets(decoder.raw_bits,
+                                            decoder.raw_bit_count,
+                                            search_bit,
+                                            &cj_start_bit,
+                                            &cj_end_bit)) {
+                    int offset = start + cj_start_bit * samp_per_bit;
+                    int duration = (cj_end_bit - cj_start_bit) * samp_per_bit;
+
+                    cj_out->detected = true;
+                    if (offset < 0) offset = 0;
+                    if (duration < samp_per_bit)
+                        duration = samp_per_bit;
+                    cj_out->sample_offset = offset;
+                    cj_out->duration_samples = duration;
+                    if (p12_debug_enabled()) {
+                        fprintf(stderr,
+                                "[p12] CJ zero-octet sequence start=%.1fms dur=%.1fms\n",
+                                (double) cj_out->sample_offset * 1000.0 / (double) sample_rate,
+                                (double) cj_out->duration_samples * 1000.0 / (double) sample_rate);
                     }
                 }
             }
