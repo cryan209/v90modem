@@ -22,6 +22,7 @@
 #include "v34_phase2_decode.h"
 #include "v34_info_decode.h"
 #include "p3_demod.h"
+#include "phase12_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/crc.h>
@@ -11856,6 +11857,7 @@ typedef struct {
     bool do_energy;
     bool do_stats;
     bool do_call_log;
+    bool do_phase12;
     bool raw_output_enabled;
 } decode_options_t;
 
@@ -11951,6 +11953,85 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v8) {
         printf("\n=== V.8 Decode ===\n");
         decode_v8_pass(linear_samples, g711_codewords, total_samples, law);
+    }
+
+    if (opts->raw_output_enabled && opts->do_phase12) {
+        phase12_result_t p12;
+
+        phase12_result_init(&p12);
+        printf("\n=== Standalone Phase 1/2 Decode (no spandsp) ===\n");
+        if (phase12_decode(linear_samples, total_samples, sample_rate, 0, &p12)) {
+            /* Phase 1 tones */
+            if (p12.cng.detected)
+                printf("  CNG tone at %.1f ms (%.0f ms, ratio %.3f)\n",
+                       sample_to_ms(p12.cng.start_sample, sample_rate),
+                       sample_to_ms(p12.cng.duration_samples, sample_rate),
+                       p12.cng.peak_ratio);
+            if (p12.ct.detected)
+                printf("  CT tone at %.1f ms (%.0f ms, ratio %.3f)\n",
+                       sample_to_ms(p12.ct.start_sample, sample_rate),
+                       sample_to_ms(p12.ct.duration_samples, sample_rate),
+                       p12.ct.peak_ratio);
+            if (p12.answer_tone.detected) {
+                const char *tone_names[] = { "?", "CNG", "CT", "ANS", "ANS/PR", "ANSam", "ANSam/PR" };
+                int ti = (int)p12.answer_tone.type;
+                printf("  %s at %.1f ms (%.0f ms, ratio %.3f)\n",
+                       (ti >= 0 && ti < 7) ? tone_names[ti] : "?",
+                       sample_to_ms(p12.answer_tone.start_sample, sample_rate),
+                       sample_to_ms(p12.answer_tone.duration_samples, sample_rate),
+                       p12.answer_tone.peak_ratio);
+            }
+
+            /* V.21 FSK bursts */
+            printf("  V.21 CH1 bursts: %d, CH2 bursts: %d\n",
+                   p12.ch1_burst_count, p12.ch2_burst_count);
+
+            /* V.8 messages */
+            if (p12.cm.detected) {
+                printf("  CM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes)\n",
+                       sample_to_ms(p12.cm.sample_offset, sample_rate),
+                       p12.cm.modulations, p12.cm.call_function,
+                       p12.cm.protocols, p12.cm.pcm_modem_availability,
+                       p12.cm.byte_count);
+            }
+            if (p12.jm.detected) {
+                printf("  JM at %.1f ms: modulations=0x%04X call_func=%d proto=%d pcm=%d (%d bytes)\n",
+                       sample_to_ms(p12.jm.sample_offset, sample_rate),
+                       p12.jm.modulations, p12.jm.call_function,
+                       p12.jm.protocols, p12.jm.pcm_modem_availability,
+                       p12.jm.byte_count);
+            }
+            if (p12.cj.detected)
+                printf("  CJ at %.1f ms\n",
+                       sample_to_ms(p12.cj.sample_offset, sample_rate));
+
+            /* Role */
+            if (p12.role_detected)
+                printf("  Detected role: %s\n", p12.is_caller ? "caller" : "answerer");
+
+            /* Phase 2 INFO */
+            if (p12.info0.detected)
+                printf("  INFO0%s at %.1f ms (%.0f ms)\n",
+                       p12.info0.is_info0d ? "d" : "a",
+                       sample_to_ms(p12.info0.sample_offset, sample_rate),
+                       sample_to_ms(p12.info0.duration_samples, sample_rate));
+            if (p12.info1.detected)
+                printf("  INFO1%s at %.1f ms (%.0f ms)\n",
+                       p12.info1.is_info1d ? "d" : "a",
+                       sample_to_ms(p12.info1.sample_offset, sample_rate),
+                       sample_to_ms(p12.info1.duration_samples, sample_rate));
+
+            /* Probing tones */
+            for (int pt = 0; pt < p12.probe_tone_count; pt++)
+                printf("  Probing tone %.0f Hz at %.1f ms (%.0f ms, ratio %.3f)\n",
+                       p12.probe_tones[pt].freq_hz,
+                       sample_to_ms(p12.probe_tones[pt].start_sample, sample_rate),
+                       sample_to_ms(p12.probe_tones[pt].duration_samples, sample_rate),
+                       p12.probe_tones[pt].peak_ratio);
+        } else {
+            printf("  No Phase 1/2 signals detected.\n");
+        }
+        phase12_result_reset(&p12);
     }
 
     if (opts->raw_output_enabled && opts->do_v91)
@@ -12069,6 +12150,7 @@ int main(int argc, char **argv)
     bool do_all = false;
     bool do_visualize_html = false;
     bool do_p3 = false;
+    bool do_phase12 = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--law") == 0 && i + 1 < argc) {
@@ -12116,6 +12198,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--visualize-html") == 0 && i + 1 < argc) {
             do_visualize_html = true;
             visualize_html_path = argv[++i];
+        } else if (strcmp(argv[i], "--phase12") == 0) {
+            do_phase12 = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--all") == 0) {
             do_all = true;
             explicit_decode_output = true;
@@ -12132,6 +12217,7 @@ int main(int argc, char **argv)
                    "  --v91              Decode V.91 signals (INFO, CP, DIL, Ez, etc.)\n"
                    "  --v90              Decode V.90 signals (Sd, CP, etc.)\n"
                    "  --p3               Lightweight Phase 3 demodulator scan\n"
+                   "  --phase12          Standalone Phase 1/2 decoder (no spandsp)\n"
                    "  --energy           Print RMS energy profile\n"
                    "  --stats            Print codeword histogram/statistics\n"
                    "  --call-log         Print a best-effort chronological call log\n"
@@ -12154,7 +12240,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_stats && !do_call_log && !do_visualize_html)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_stats && !do_call_log && !do_visualize_html && !do_phase12)
         do_all = true;
 
     if (do_all) {
@@ -12348,6 +12434,7 @@ int main(int argc, char **argv)
         opts.do_energy = do_energy;
         opts.do_stats = do_stats;
         opts.do_call_log = do_call_log;
+        opts.do_phase12 = do_phase12;
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
