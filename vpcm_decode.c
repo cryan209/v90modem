@@ -966,6 +966,9 @@ typedef struct {
     bool mp_rates_valid;
     bool mp_crc_valid;
     bool mp_fill_valid;
+    bool mp_candidate_seen;
+    bool mp_candidate_crc_valid;
+    bool mp_candidate_fill_valid;
     bool mp_aux_channel_supported;
     bool mp_use_non_linear_encoder;
     bool mp_expanded_shaping;
@@ -1038,6 +1041,14 @@ typedef struct {
     int mp_signalling_rate_mask;
     int mp_frame_bits_captured;
     int mp_start_error_count;
+    int mp_candidate_type;
+    int mp_candidate_trellis_size;
+    int mp_candidate_signalling_rate_mask;
+    int mp_candidate_frame_bits_captured;
+    int mp_candidate_start_error_count;
+    int mp_candidate_votes;
+    int mp_candidate_rate_a_to_c_bps;
+    int mp_candidate_rate_c_to_a_bps;
     int mp_rate_a_to_c_bps;
     int mp_rate_c_to_a_bps;
     int u_info;
@@ -1278,6 +1289,35 @@ static int v34_mp_start_error_count(const uint8_t bits[188], int type, int targe
     return errs;
 }
 
+static bool v34_mp_semantic_ok_strict(const mp_t *mp)
+{
+    int mask;
+    int a_bit;
+    int c_bit;
+
+    if (!mp)
+        return false;
+    if (mp->type != 0 && mp->type != 1)
+        return false;
+    if (mp->bit_rate_a_to_c < 1 || mp->bit_rate_a_to_c > 14)
+        return false;
+    if (mp->bit_rate_c_to_a < 1 || mp->bit_rate_c_to_a > 14)
+        return false;
+    if (mp->trellis_size < 0 || mp->trellis_size > 2)
+        return false;
+
+    mask = mp->signalling_rate_mask & 0x3FFF;
+    if (mask == 0)
+        return false;
+
+    a_bit = 1 << (mp->bit_rate_a_to_c - 1);
+    c_bit = 1 << (mp->bit_rate_c_to_a - 1);
+    if ((mask & a_bit) == 0 || (mask & c_bit) == 0)
+        return false;
+
+    return true;
+}
+
 static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const decode_v34_result_t *result)
 {
     if (!detail || detail_len == 0 || !result)
@@ -1312,6 +1352,19 @@ static void append_v34_mp_detail_fields(char *detail, size_t detail_len, const d
     appendf(detail, detail_len, " mp_fill=%u", result->mp_fill_valid ? 1U : 0U);
     appendf(detail, detail_len, " mp_start_err=%d", result->mp_start_error_count);
     appendf(detail, detail_len, " mp_rates_valid=%u", result->mp_rates_valid ? 1U : 0U);
+    appendf(detail, detail_len, " mp_candidate=%u", result->mp_candidate_seen ? 1U : 0U);
+    if (result->mp_candidate_seen) {
+        appendf(detail, detail_len, " mp_candidate_votes=%d", result->mp_candidate_votes);
+        appendf(detail, detail_len, " mp_candidate_crc=%u", result->mp_candidate_crc_valid ? 1U : 0U);
+        appendf(detail, detail_len, " mp_candidate_fill=%u", result->mp_candidate_fill_valid ? 1U : 0U);
+        appendf(detail, detail_len, " mp_candidate_start_err=%d", result->mp_candidate_start_error_count);
+        appendf(detail, detail_len, " mp_candidate_rate_a_to_c=%d", result->mp_candidate_rate_a_to_c_bps);
+        appendf(detail, detail_len, " mp_candidate_rate_c_to_a=%d", result->mp_candidate_rate_c_to_a_bps);
+        appendf(detail, detail_len, " mp_candidate_type=%d", result->mp_candidate_type);
+        appendf(detail, detail_len, " mp_candidate_trellis=%d", result->mp_candidate_trellis_size);
+        appendf(detail, detail_len, " mp_candidate_mask=0x%04X",
+                (unsigned) (result->mp_candidate_signalling_rate_mask & 0x7FFF));
+    }
 }
 
 typedef struct {
@@ -7245,6 +7298,7 @@ static bool decode_v34_pass(const int16_t *samples,
     bool recovered_mp_fill_ok = false;
     int heuristic_mp_bits = 0;
     int heuristic_mp_start_errs = INT_MAX;
+    bool heuristic_mp_crc_ok = false;
     bool heuristic_mp_fill_ok = false;
     int heuristic_mp_votes = 0;
     int mp_tuple_votes[2][15][15][3];
@@ -7312,6 +7366,9 @@ static bool decode_v34_pass(const int16_t *samples,
     result->mp_from_info_sequence = false;
     result->mp_crc_valid = false;
     result->mp_fill_valid = false;
+    result->mp_candidate_seen = false;
+    result->mp_candidate_crc_valid = false;
+    result->mp_candidate_fill_valid = false;
     result->mp_aux_channel_supported = false;
     result->mp_use_non_linear_encoder = false;
     result->mp_expanded_shaping = false;
@@ -7322,6 +7379,14 @@ static bool decode_v34_pass(const int16_t *samples,
     result->mp_signalling_rate_mask = 0;
     result->mp_frame_bits_captured = 0;
     result->mp_start_error_count = -1;
+    result->mp_candidate_type = -1;
+    result->mp_candidate_trellis_size = -1;
+    result->mp_candidate_signalling_rate_mask = 0;
+    result->mp_candidate_frame_bits_captured = 0;
+    result->mp_candidate_start_error_count = -1;
+    result->mp_candidate_votes = 0;
+    result->mp_candidate_rate_a_to_c_bps = -1;
+    result->mp_candidate_rate_c_to_a_bps = -1;
     result->mp_rate_a_to_c_bps = -1;
     result->mp_rate_c_to_a_bps = -1;
 
@@ -7632,6 +7697,7 @@ static bool decode_v34_pass(const int16_t *samples,
                             heuristic_mp = candidate_mp;
                             heuristic_mp_bits = candidate_bits;
                             heuristic_mp_start_errs = start_errs;
+                            heuristic_mp_crc_ok = crc_ok;
                             heuristic_mp_fill_ok = fill_ok;
                             heuristic_mp_votes = votes;
                             have_heuristic_mp = true;
@@ -7644,7 +7710,8 @@ static bool decode_v34_pass(const int16_t *samples,
                         && v34_parse_mp_from_raw_bits(v34->rx.mp_frame_bits,
                                                       target,
                                                       &candidate_mp,
-                                                      &candidate_bits)) {
+                                                      &candidate_bits)
+                        && v34_mp_semantic_ok_strict(&candidate_mp)) {
                         if (!have_recovered_mp || start_errs < recovered_mp_start_errs) {
                             recovered_mp = candidate_mp;
                             recovered_mp_bits = candidate_bits;
@@ -7694,23 +7761,14 @@ static bool decode_v34_pass(const int16_t *samples,
                                               v34->rx.mp_frame_target,
                                               &rx_mp,
                                               &result->mp_frame_bits_captured);
+    if (have_rx_mp && !v34_mp_semantic_ok_strict(&rx_mp))
+        have_rx_mp = false;
     if (!have_rx_mp && have_recovered_mp) {
         rx_mp = recovered_mp;
         result->mp_frame_bits_captured = recovered_mp_bits;
         result->mp_start_error_count = recovered_mp_start_errs;
         result->mp_crc_valid = recovered_mp_crc_ok;
         result->mp_fill_valid = recovered_mp_fill_ok;
-        have_rx_mp = true;
-        result->mp_from_rx_recovery = true;
-    }
-    if (!have_rx_mp
-        && have_heuristic_mp
-        && heuristic_mp_votes >= 2) {
-        rx_mp = heuristic_mp;
-        result->mp_frame_bits_captured = heuristic_mp_bits;
-        result->mp_start_error_count = heuristic_mp_start_errs;
-        result->mp_crc_valid = false;
-        result->mp_fill_valid = heuristic_mp_fill_ok;
         have_rx_mp = true;
         result->mp_from_rx_recovery = true;
     }
@@ -7734,7 +7792,8 @@ static bool decode_v34_pass(const int16_t *samples,
                 && v34_parse_mp_from_raw_bits(v34->rx.mp_frame_bits,
                                               target,
                                               &rx_mp,
-                                              &result->mp_frame_bits_captured)) {
+                                              &result->mp_frame_bits_captured)
+                && v34_mp_semantic_ok_strict(&rx_mp)) {
                 have_rx_mp = true;
                 result->mp_from_rx_recovery = true;
             }
@@ -7748,6 +7807,19 @@ static bool decode_v34_pass(const int16_t *samples,
         result->mp_crc_valid = v34_mp_crc_ok(v34->rx.mp_frame_bits, type);
         result->mp_fill_valid = v34_mp_fill_ok(v34->rx.mp_frame_bits, type);
         result->mp_start_error_count = v34_mp_start_error_count(v34->rx.mp_frame_bits, type, target);
+    }
+    if (!have_rx_mp && have_heuristic_mp) {
+        result->mp_candidate_seen = true;
+        result->mp_candidate_crc_valid = heuristic_mp_crc_ok;
+        result->mp_candidate_fill_valid = heuristic_mp_fill_ok;
+        result->mp_candidate_start_error_count = heuristic_mp_start_errs;
+        result->mp_candidate_votes = heuristic_mp_votes;
+        result->mp_candidate_type = heuristic_mp.type;
+        result->mp_candidate_trellis_size = heuristic_mp.trellis_size;
+        result->mp_candidate_signalling_rate_mask = heuristic_mp.signalling_rate_mask;
+        result->mp_candidate_frame_bits_captured = heuristic_mp_bits;
+        result->mp_candidate_rate_a_to_c_bps = v34_mp_rate_n_to_bps(heuristic_mp.bit_rate_a_to_c);
+        result->mp_candidate_rate_c_to_a_bps = v34_mp_rate_n_to_bps(heuristic_mp.bit_rate_c_to_a);
     }
     if (have_rx_mp) {
         result->mp_from_rx_frame = !result->mp_from_rx_recovery;
@@ -9301,10 +9373,27 @@ static void print_v34_result(const decode_v34_result_t *result,
                    result->mp_crc_valid ? "ok" : "no",
                    result->mp_fill_valid ? "ok" : "no",
                    result->mp_start_error_count);
-        } else if (result->mp_from_info_sequence) {
-            printf("  MP decode:       no accepted RX MP frame; negotiated rates inferred from INFO sequences\n");
         } else {
-            printf("  MP decode:       no accepted RX MP frame decoded; using TX-state negotiated settings\n");
+            if (result->mp_candidate_seen) {
+                char cand_rate_mask[160];
+
+                v34_mp_rate_mask_to_text(result->mp_candidate_signalling_rate_mask, cand_rate_mask, sizeof(cand_rate_mask));
+                printf("  MP candidate:    type=MP%d bits=%d votes=%d trellis=%s rates=%d/%d mask={%s} crc=%s fill=%s start_err=%d (not accepted)\n",
+                       result->mp_candidate_type,
+                       result->mp_candidate_frame_bits_captured,
+                       result->mp_candidate_votes,
+                       v34_mp_trellis_name(result->mp_candidate_trellis_size),
+                       result->mp_candidate_rate_a_to_c_bps,
+                       result->mp_candidate_rate_c_to_a_bps,
+                       cand_rate_mask,
+                       result->mp_candidate_crc_valid ? "ok" : "no",
+                       result->mp_candidate_fill_valid ? "ok" : "no",
+                       result->mp_candidate_start_error_count);
+            }
+            if (result->mp_from_info_sequence)
+                printf("  MP decode:       no accepted RX MP frame; negotiated rates inferred from INFO sequences\n");
+            else
+                printf("  MP decode:       no accepted RX MP frame decoded; using TX-state negotiated settings\n");
         }
     } else if (expected_rate_1 > 0 && expected_rate_2 > 0) {
         printf("  MP exchange:     seen=no remote_ack=no filename=%d/%d\n",
