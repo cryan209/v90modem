@@ -593,6 +593,62 @@ static bool map_v34_received_info1a(v90_info1a_t *dst, const v34_v90_info1a_t *s
     return v90_info1a_validate(dst);
 }
 
+static bool snapshot_v34_info0a_from_rx_state(v34_v90_info0a_t *dst, const v34_state_t *v34)
+{
+    enum {
+        V34_CAP_2743 = 1,
+        V34_CAP_2800 = 2,
+        V34_CAP_3000 = 3,
+        V34_CAP_3200 = 4,
+        V34_CAP_3429 = 5
+    };
+
+    if (!dst || !v34 || !v34->rx.v90_mode)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->support_2743 = v34->rx.far_capabilities.support_baud_rate_low_carrier[V34_CAP_2743];
+    dst->support_2800 = v34->rx.far_capabilities.support_baud_rate_low_carrier[V34_CAP_2800];
+    dst->support_3429 = v34->rx.far_capabilities.support_baud_rate_low_carrier[V34_CAP_3429];
+    dst->support_3000_low = v34->rx.far_capabilities.support_baud_rate_low_carrier[V34_CAP_3000];
+    dst->support_3000_high = v34->rx.far_capabilities.support_baud_rate_high_carrier[V34_CAP_3000];
+    dst->support_3200_low = v34->rx.far_capabilities.support_baud_rate_low_carrier[V34_CAP_3200];
+    dst->support_3200_high = v34->rx.far_capabilities.support_baud_rate_high_carrier[V34_CAP_3200];
+    dst->rate_3429_allowed = v34->rx.far_capabilities.rate_3429_allowed;
+    dst->support_power_reduction = v34->rx.far_capabilities.support_power_reduction;
+    dst->max_baud_rate_difference = v34->rx.far_capabilities.max_baud_rate_difference;
+    dst->from_cme_modem = v34->rx.far_capabilities.from_cme_modem;
+    dst->support_1664_point_constellation = v34->rx.far_capabilities.support_1664_point_constellation;
+    dst->tx_clock_source = v34->rx.far_capabilities.tx_clock_source;
+    dst->acknowledge_info0d = v34->rx.info0_acknowledgement;
+    dst->raw_26_27 = v34->rx.info0_raw_26_27;
+    dst->info0d_nominal_power_code = v34->rx.info0d_nominal_power_code;
+    dst->info0d_max_power_code = v34->rx.info0d_max_power_code;
+    dst->info0d_power_measured_at_codec_output = v34->rx.info0d_power_measured_at_codec_output;
+    dst->info0d_pcm_alaw = v34->rx.info0d_pcm_alaw;
+    dst->info0d_upstream_3429_support = v34->rx.info0d_upstream_3429_support;
+    dst->info0d_reserved_41 = v34->rx.info0d_reserved_41;
+    dst->info0d_extensions_valid = v34->rx.info0d_extensions_valid;
+    return true;
+}
+
+static bool snapshot_v34_info1a_from_rx_state(v34_v90_info1a_t *dst, const v34_state_t *v34)
+{
+    if (!dst || !v34 || !v34->rx.v90_mode)
+        return false;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->md = v34->rx.info1a.md;
+    dst->u_info = v34->rx.info1a.max_data_rate;
+    dst->upstream_symbol_rate_code = v34->rx.info1a.baud_rate_a_to_c;
+    dst->downstream_rate_code = v34->rx.info1a.baud_rate_c_to_a;
+    dst->freq_offset = v34->rx.info1a.freq_offset;
+    dst->raw_12_17 = v34->rx.info1a_raw_12_17;
+    dst->raw_32_33 = v34->rx.info1a_raw_32_33;
+    dst->raw_40_49 = v34->rx.info1a_raw_40_49;
+    return true;
+}
+
 static void format_cp_summary(char *buf, size_t len, const vpcm_cp_frame_t *cp)
 {
     if (!buf || len == 0 || !cp)
@@ -954,6 +1010,8 @@ typedef struct {
     bool info0_is_d;
     bool info1_seen;
     bool info1_is_d;
+    bool info0_from_rescue;
+    bool info1_from_rescue;
     bool phase3_seen;
     bool phase4_ready_seen;
     bool phase4_seen;
@@ -977,8 +1035,16 @@ typedef struct {
     bool u_info_from_info1a;
     bool ja_bits_from_local_tx;
     bool ja_bits_estimated;
+    bool info0_ok_event_seen;
+    bool info0_bad_event_seen;
+    bool info1_ok_event_seen;
+    bool info1_bad_event_seen;
     int info0_sample;
     int info1_sample;
+    int info0_ok_event_sample;
+    int info0_bad_event_sample;
+    int info1_ok_event_sample;
+    int info1_bad_event_sample;
     int phase3_sample;
     int tx_first_s_sample;
     int tx_first_not_s_sample;
@@ -7304,6 +7370,7 @@ static bool decode_v34_pass(const int16_t *samples,
     int mp_tuple_votes[2][15][15][3];
     bool flow_debug = false;
     bool info_cutoff_relaxed = false;
+    float post_info_signal_cutoff_db;
 
     if (!samples || total_samples <= 0 || !result)
         return false;
@@ -7312,6 +7379,10 @@ static bool decode_v34_pass(const int16_t *samples,
     memset(mp_tuple_votes, 0, sizeof(mp_tuple_votes));
     result->info0_sample = -1;
     result->info1_sample = -1;
+    result->info0_ok_event_sample = -1;
+    result->info0_bad_event_sample = -1;
+    result->info1_ok_event_sample = -1;
+    result->info1_bad_event_sample = -1;
     result->phase3_sample = -1;
     result->tx_first_s_sample = -1;
     result->tx_first_not_s_sample = -1;
@@ -7397,8 +7468,12 @@ static bool decode_v34_pass(const int16_t *samples,
         return false;
 
     v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
-    /* Start slightly stricter to preserve early INFO0a lock, then relax
-       after INFO0 to improve INFO1a acquisition in offline captures. */
+    /* Keep a stricter threshold for initial INFO0 lock, then relax after
+       INFO0. For already-permissive rescue passes, preserve that permissive
+       threshold so INFO1 can still be acquired. */
+    post_info_signal_cutoff_db = initial_signal_cutoff_db;
+    if (post_info_signal_cutoff_db > -60.0f)
+        post_info_signal_cutoff_db = -60.0f;
     v34_rx_set_signal_cutoff(v34, initial_signal_cutoff_db);
     memset(&aux_bits, 0, sizeof(aux_bits));
     aux_bits.capture_start_bit = -1;
@@ -7416,9 +7491,10 @@ static bool decode_v34_pass(const int16_t *samples,
         int rx_stage;
         int tx_stage;
         int rx_event;
+        int phase2_chunk = (!result->phase3_seen && (!result->info0_seen || !result->info1_seen)) ? 80 : 160;
 
-        if (chunk > 160)
-            chunk = 160;
+        if (chunk > phase2_chunk)
+            chunk = phase2_chunk;
 
         v34_rx(v34, samples + offset, chunk);
         v34_tx(v34, tx_buf, chunk);
@@ -7563,6 +7639,19 @@ static bool decode_v34_pass(const int16_t *samples,
         }
 
         if (rx_event != prev_rx_event) {
+            if (rx_event == V34_EVENT_INFO0_OK) {
+                result->info0_ok_event_seen = true;
+                note_first_sample(&result->info0_ok_event_sample, offset);
+            } else if (rx_event == V34_EVENT_INFO0_BAD) {
+                result->info0_bad_event_seen = true;
+                note_first_sample(&result->info0_bad_event_sample, offset);
+            } else if (rx_event == V34_EVENT_INFO1_OK) {
+                result->info1_ok_event_seen = true;
+                note_first_sample(&result->info1_ok_event_sample, offset);
+            } else if (rx_event == V34_EVENT_INFO1_BAD) {
+                result->info1_bad_event_seen = true;
+                note_first_sample(&result->info1_bad_event_sample, offset);
+            }
             if (rx_event == 1) {
                 if (rx_stage == 5)
                     note_first_sample(&result->rx_tone_a_sample, offset);
@@ -7579,20 +7668,32 @@ static bool decode_v34_pass(const int16_t *samples,
             prev_rx_event = rx_event;
         }
 
-        if (!result->info0_seen
-            && v34_get_v90_received_info0a(v34, &raw_info0a) > 0
-            && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
+        if (!result->info0_seen) {
+            int have_info0 = v34_get_v90_received_info0a(v34, &raw_info0a);
+
+            if (have_info0 <= 0 && rx_event == V34_EVENT_INFO0_OK
+                && snapshot_v34_info0a_from_rx_state(&raw_info0a, v34)) {
+                have_info0 = 1;
+            }
+            if (have_info0 > 0 && map_v34_received_info0a(&result->info0a, &raw_info0a)) {
             result->info0_seen = true;
             result->info0_is_d = calling_party;
             result->info0_raw = raw_info0a;
             result->info0_sample = offset;
             if (!info_cutoff_relaxed) {
-                v34_rx_set_signal_cutoff(v34, -60.0f);
+                v34_rx_set_signal_cutoff(v34, post_info_signal_cutoff_db);
                 info_cutoff_relaxed = true;
+            }
             }
         }
         if (!result->info1_seen) {
-            if (v34_get_v90_received_info1a(v34, &raw_info1a) > 0
+            int have_info1a = v34_get_v90_received_info1a(v34, &raw_info1a);
+
+            if (have_info1a <= 0 && rx_event == V34_EVENT_INFO1_OK
+                && snapshot_v34_info1a_from_rx_state(&raw_info1a, v34)) {
+                have_info1a = 1;
+            }
+            if (have_info1a > 0
                 && map_v34_received_info1a(&result->info1a, &raw_info1a)) {
                 result->info1_seen = true;
                 result->info1_is_d = false;
@@ -8998,6 +9099,14 @@ static void merge_info0_from_rescue(decode_v34_result_t *dst, const decode_v34_r
     dst->info0a = src->info0a;
     dst->info0_raw = src->info0_raw;
     dst->info0_sample = src->info0_sample;
+    if (!dst->info0_ok_event_seen && src->info0_ok_event_seen) {
+        dst->info0_ok_event_seen = true;
+        dst->info0_ok_event_sample = src->info0_ok_event_sample;
+    }
+    if (!dst->info0_bad_event_seen && src->info0_bad_event_seen) {
+        dst->info0_bad_event_seen = true;
+        dst->info0_bad_event_sample = src->info0_bad_event_sample;
+    }
     if (dst->rx_tone_a_sample < 0)
         dst->rx_tone_a_sample = src->rx_tone_a_sample;
     if (dst->rx_tone_b_sample < 0)
@@ -9014,6 +9123,58 @@ static void merge_info0_from_rescue(decode_v34_result_t *dst, const decode_v34_r
         dst->tx_tone_a_reversal_sample = src->tx_tone_a_reversal_sample;
     if (dst->tx_tone_b_reversal_sample < 0)
         dst->tx_tone_b_reversal_sample = src->tx_tone_b_reversal_sample;
+    dst->info0_from_rescue = true;
+}
+
+static void merge_info_event_diagnostics_from_rescue(decode_v34_result_t *dst, const decode_v34_result_t *src)
+{
+    if (!dst || !src)
+        return;
+
+    if (!dst->info0_ok_event_seen && src->info0_ok_event_seen) {
+        dst->info0_ok_event_seen = true;
+        dst->info0_ok_event_sample = src->info0_ok_event_sample;
+    }
+    if (!dst->info0_bad_event_seen && src->info0_bad_event_seen) {
+        dst->info0_bad_event_seen = true;
+        dst->info0_bad_event_sample = src->info0_bad_event_sample;
+    }
+    if (!dst->info1_ok_event_seen && src->info1_ok_event_seen) {
+        dst->info1_ok_event_seen = true;
+        dst->info1_ok_event_sample = src->info1_ok_event_sample;
+    }
+    if (!dst->info1_bad_event_seen && src->info1_bad_event_seen) {
+        dst->info1_bad_event_seen = true;
+        dst->info1_bad_event_sample = src->info1_bad_event_sample;
+    }
+}
+
+static void merge_info1_from_rescue(decode_v34_result_t *dst, const decode_v34_result_t *src)
+{
+    if (!dst || !src || !src->info1_seen)
+        return;
+
+    dst->info1_seen = true;
+    dst->info1_is_d = src->info1_is_d;
+    dst->info1_sample = src->info1_sample;
+    if (!dst->info1_ok_event_seen && src->info1_ok_event_seen) {
+        dst->info1_ok_event_seen = true;
+        dst->info1_ok_event_sample = src->info1_ok_event_sample;
+    }
+    if (!dst->info1_bad_event_seen && src->info1_bad_event_seen) {
+        dst->info1_bad_event_seen = true;
+        dst->info1_bad_event_sample = src->info1_bad_event_sample;
+    }
+    dst->u_info = src->u_info;
+    dst->u_info_from_info1a = src->u_info_from_info1a;
+    dst->tx_info1_sample = src->tx_info1_sample;
+    if (src->info1_is_d)
+        dst->info1d = src->info1d;
+    else {
+        dst->info1a = src->info1a;
+        dst->info1a_raw = src->info1a_raw;
+    }
+    dst->info1_from_rescue = true;
 }
 
 static void decode_v34_pair_with_rescue(const int16_t *samples,
@@ -9025,6 +9186,8 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
                                         decode_v34_result_t *caller,
                                         bool *have_caller)
 {
+    static const float rescue_cutoffs[] = { -60.0f, -68.0f };
+
     if (have_answerer)
         *have_answerer = false;
     if (have_caller)
@@ -9036,40 +9199,60 @@ static void decode_v34_pair_with_rescue(const int16_t *samples,
                                      total_samples,
                                      law,
                                      false,
-                                     -60.0f,
+                                     -52.0f,
                                      allow_info_rate_infer,
                                      answerer);
     *have_caller = decode_v34_pass(samples,
                                    total_samples,
                                    law,
                                    true,
-                                   -60.0f,
+                                   -52.0f,
                                    allow_info_rate_infer,
                                    caller);
 
-    if (*have_answerer && !answerer->info0_seen && answerer->info1_seen) {
-        decode_v34_result_t rescue;
+    if (*have_answerer && (!answerer->info0_seen || !answerer->info1_seen)) {
+        for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
+            decode_v34_result_t rescue;
 
-        if (decode_v34_pass(samples,
-                            total_samples,
-                            law,
-                            false,
-                            -52.0f,
-                            allow_info_rate_infer,
-                            &rescue) && rescue.info0_seen)
-            merge_info0_from_rescue(answerer, &rescue);
+            if (!decode_v34_pass(samples,
+                                 total_samples,
+                                 law,
+                                 false,
+                                 rescue_cutoffs[i],
+                                 allow_info_rate_infer,
+                                 &rescue)) {
+                continue;
+            }
+            merge_info_event_diagnostics_from_rescue(answerer, &rescue);
+            if (!answerer->info0_seen && rescue.info0_seen)
+                merge_info0_from_rescue(answerer, &rescue);
+            if (!answerer->info1_seen && rescue.info1_seen)
+                merge_info1_from_rescue(answerer, &rescue);
+            if (answerer->info0_seen && answerer->info1_seen)
+                break;
+        }
     }
-    if (*have_caller && !caller->info0_seen && caller->info1_seen) {
-        decode_v34_result_t rescue;
+    if (*have_caller && (!caller->info0_seen || !caller->info1_seen)) {
+        for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
+            decode_v34_result_t rescue;
 
-        if (decode_v34_pass(samples,
-                            total_samples,
-                            law,
-                            true,
-                            -52.0f,
-                            allow_info_rate_infer,
-                            &rescue) && rescue.info0_seen)
-            merge_info0_from_rescue(caller, &rescue);
+            if (!decode_v34_pass(samples,
+                                 total_samples,
+                                 law,
+                                 true,
+                                 rescue_cutoffs[i],
+                                 allow_info_rate_infer,
+                                 &rescue)) {
+                continue;
+            }
+            merge_info_event_diagnostics_from_rescue(caller, &rescue);
+            if (!caller->info0_seen && rescue.info0_seen)
+                merge_info0_from_rescue(caller, &rescue);
+            if (!caller->info1_seen && rescue.info1_seen)
+                merge_info1_from_rescue(caller, &rescue);
+            if (caller->info0_seen && caller->info1_seen)
+                break;
+        }
     }
 }
 
@@ -9110,6 +9293,8 @@ static void print_v34_result(const decode_v34_result_t *result,
         printf("  %-16sdecoded at %.1f ms\n",
                result->info0_is_d ? "INFO0d:" : "INFO0a:",
                sample_to_ms(result->info0_sample, 8000));
+        if (result->info0_from_rescue)
+            printf("                   source=rescue_pass\n");
         format_v34_info0_table_summary(info0_detail,
                                        sizeof(info0_detail),
                                        &result->info0a,
@@ -9118,7 +9303,12 @@ static void print_v34_result(const decode_v34_result_t *result,
                                        result->info0_is_d);
         printf("                   %s\n", info0_detail);
     } else {
-        printf("  INFO0a/INFO0d:   not decoded\n");
+        printf("  INFO0a/INFO0d:   not decoded");
+        if (result->info0_bad_event_seen)
+            printf(" (INFO0_BAD at %.1f ms)", sample_to_ms(result->info0_bad_event_sample, 8000));
+        else if (result->info0_ok_event_seen)
+            printf(" (INFO0_OK event seen at %.1f ms; frame payload unavailable)", sample_to_ms(result->info0_ok_event_sample, 8000));
+        printf("\n");
     }
     if (suppress_v90_phase2) {
         printf("  INFO1a/INFO1d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
@@ -9126,6 +9316,8 @@ static void print_v34_result(const decode_v34_result_t *result,
         char info1_detail[1024];
 
         printf("  INFO1a:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
+        if (result->info1_from_rescue)
+            printf("                   source=rescue_pass\n");
         format_v34_info1_table15_summary(info1_detail,
                                          sizeof(info1_detail),
                                          &result->info1a,
@@ -9136,13 +9328,22 @@ static void print_v34_result(const decode_v34_result_t *result,
         char info1_detail[512];
 
         printf("  INFO1d:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
+        if (result->info1_from_rescue)
+            printf("                   source=rescue_pass\n");
         format_v34_info1d_table_summary(info1_detail,
                                         sizeof(info1_detail),
                                         &result->info1d,
                                         "active_pass");
         printf("                   %s\n", info1_detail);
     } else {
-        printf("  INFO1a/INFO1d:   not decoded\n");
+        printf("  INFO1a/INFO1d:   not decoded");
+        if (result->info1_bad_event_seen)
+            printf(" (INFO1_BAD at %.1f ms)", sample_to_ms(result->info1_bad_event_sample, 8000));
+        else if (result->info1_ok_event_seen)
+            printf(" (INFO1_OK event seen at %.1f ms; frame payload unavailable)", sample_to_ms(result->info1_ok_event_sample, 8000));
+        else if (result->final_rx_stage == 4)
+            printf(" (stalled in INFO1A stage)");
+        printf("\n");
     }
     if (!suppress_v90_phase2 && result->u_info > 0) {
         printf("  U_INFO source:   %s (%d)\n",
@@ -9482,14 +9683,20 @@ static void collect_v34_events(call_log_t *log,
             break; \
         if (!(suppress_v90_phase2) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
             format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d); \
+            if (res__->info0_from_rescue) \
+                appendf(detail, sizeof(detail), " source=rescue_pass"); \
             call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
         } \
         if (!(suppress_v90_phase2) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
             if (res__->info1_is_d) { \
                 format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
+                if (res__->info1_from_rescue) \
+                    appendf(detail, sizeof(detail), " source=rescue_pass"); \
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1d decoded", detail); \
             } else { \
                 format_v34_info1_table15_summary(detail, sizeof(detail), &res__->info1a, &res__->info1a_raw, role_name); \
+                if (res__->info1_from_rescue) \
+                    appendf(detail, sizeof(detail), " source=rescue_pass"); \
                 call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1a decoded", detail); \
             } \
         } \
