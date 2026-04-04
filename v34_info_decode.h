@@ -16,6 +16,13 @@
 #define V34_INFO_MAX_BUF_BYTES 25
 
 typedef struct {
+    bool valid;
+    int target_bits;
+    int payload_bytes;
+    uint8_t payload[V34_INFO_MAX_BUF_BYTES];
+} v34_info_frame_t;
+
+typedef struct {
     uint16_t bitstream;
     uint16_t crc;
     int bit_count;
@@ -32,6 +39,8 @@ void v34_info_collector_load_snapshot(v34_info_collector_t *collector,
                                       int target_bits,
                                       const uint8_t *info_buf,
                                       int info_buf_len);
+bool v34_info_frame_from_collector(v34_info_frame_t *frame,
+                                   const v34_info_collector_t *collector);
 bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  int bit,
                                  uint8_t *frame_out,
@@ -49,5 +58,13 @@ bool v34_info_parse_info1a_v90(const uint8_t *buf,
                                v90_info1a_t *mapped_out);
 bool v34_info_parse_info1d_v90(const uint8_t *buf,
                                v34_v90_info1d_t *raw_out);
+bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out);
+bool v34_info_parse_info1a_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info1a_t *raw_out,
+                                     v90_info1a_t *mapped_out);
+bool v34_info_parse_info1d_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info1d_t *raw_out);
 
 #endif

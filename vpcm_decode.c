@@ -618,26 +618,32 @@ static bool parse_v34_info0_from_rx_buf(v34_v90_info0a_t *raw_out,
                                         v90_info0a_t *mapped_out,
                                         const v34_info_collector_t *collector)
 {
-    if (!collector)
+    v34_info_frame_t frame;
+
+    if (!collector || !v34_info_frame_from_collector(&frame, collector))
         return false;
-    return v34_info_parse_info0a_v90(collector->info_buf, raw_out, mapped_out);
+    return v34_info_parse_info0a_v90_frame(&frame, raw_out, mapped_out);
 }
 
 static bool parse_v34_info1a_from_rx_buf(v34_v90_info1a_t *raw_out,
                                          v90_info1a_t *mapped_out,
                                          const v34_info_collector_t *collector)
 {
-    if (!collector)
+    v34_info_frame_t frame;
+
+    if (!collector || !v34_info_frame_from_collector(&frame, collector))
         return false;
-    return v34_info_parse_info1a_v90(collector->info_buf, raw_out, mapped_out);
+    return v34_info_parse_info1a_v90_frame(&frame, raw_out, mapped_out);
 }
 
 static bool parse_v34_info1d_from_rx_buf(v34_v90_info1d_t *raw_out,
                                          const v34_info_collector_t *collector)
 {
-    if (!collector)
+    v34_info_frame_t frame;
+
+    if (!collector || !v34_info_frame_from_collector(&frame, collector))
         return false;
-    return v34_info_parse_info1d_v90(collector->info_buf, raw_out);
+    return v34_info_parse_info1d_v90_frame(&frame, raw_out);
 }
 
 static void sync_v34_info_collector_from_rx(v34_info_collector_t *collector,

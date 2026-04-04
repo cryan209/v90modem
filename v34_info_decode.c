@@ -44,6 +44,27 @@ void v34_info_collector_load_snapshot(v34_info_collector_t *collector,
     }
 }
 
+bool v34_info_frame_from_collector(v34_info_frame_t *frame,
+                                   const v34_info_collector_t *collector)
+{
+    int payload_bytes;
+
+    if (!frame)
+        return false;
+    memset(frame, 0, sizeof(*frame));
+    if (!collector || collector->target_bits <= 0)
+        return false;
+
+    payload_bytes = (collector->target_bits + 7) / 8;
+    if (payload_bytes > V34_INFO_MAX_BUF_BYTES)
+        payload_bytes = V34_INFO_MAX_BUF_BYTES;
+    frame->target_bits = collector->target_bits;
+    frame->payload_bytes = payload_bytes;
+    memcpy(frame->payload, collector->info_buf, (size_t) payload_bytes);
+    frame->valid = v34_info_validate_frame_bytes(frame->payload, frame->target_bits);
+    return frame->valid;
+}
+
 bool v34_info_collector_push_bit(v34_info_collector_t *collector,
                                  int bit,
                                  uint8_t *frame_out,
@@ -270,4 +291,30 @@ bool v34_info_parse_info1d_v90(const uint8_t *buf,
         parsed.freq_offset = -(parsed.freq_offset ^ 0x3FF) - 1;
     *raw_out = parsed;
     return true;
+}
+
+bool v34_info_parse_info0a_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info0a_t *raw_out,
+                                     v90_info0a_t *mapped_out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (62 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info0a_v90(frame->payload, raw_out, mapped_out);
+}
+
+bool v34_info_parse_info1a_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info1a_t *raw_out,
+                                     v90_info1a_t *mapped_out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (70 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info1a_v90(frame->payload, raw_out, mapped_out);
+}
+
+bool v34_info_parse_info1d_v90_frame(const v34_info_frame_t *frame,
+                                     v34_v90_info1d_t *raw_out)
+{
+    if (!frame || !frame->valid || frame->target_bits != (109 - (4 + 8 + 4)))
+        return false;
+    return v34_info_parse_info1d_v90(frame->payload, raw_out);
 }
