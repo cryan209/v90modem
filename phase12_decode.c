@@ -62,7 +62,8 @@ enum {
 enum {
     P12_INFO_PRE_PAD_MS = 120,
     P12_INFO_POST_PAD_MS = 160,
-    P12_INFO_STREAM_PHASES = 4
+    P12_INFO_STREAM_PHASES = 4,
+    P12_INFO_STREAM_BAUD_VARIANTS = 5
 };
 
 enum {
@@ -1928,88 +1929,103 @@ static bool decode_info_from_fsk_burst(const int16_t *samples,
         }
     }
 
-    /* Then try the timing-tracking streaming demod with a few phase offsets. */
-    for (int inv = 0; inv < 2; inv++) {
-        for (int phase = 0; phase < P12_INFO_STREAM_PHASES; phase++) {
-            v21_fsk_stream_t stream;
-            int phase_offset = (int) (((double) phase * ((double) sample_rate / 300.0))
-                                      / (double) P12_INFO_STREAM_PHASES);
+    /* Then try the timing-tracking streaming demod with a few phase and baud offsets. */
+    {
+        static const double baud_variants[P12_INFO_STREAM_BAUD_VARIANTS] = {
+            288.0, 294.0, 300.0, 306.0, 312.0
+        };
 
-            if (phase_offset >= len)
-                continue;
+        for (int inv = 0; inv < 2; inv++) {
+            for (int baud_idx = 0; baud_idx < P12_INFO_STREAM_BAUD_VARIANTS; baud_idx++) {
+                double symbol_samples = (double) sample_rate / baud_variants[baud_idx];
 
-            memset(&decoder, 0, sizeof(decoder));
-            v34_info_collector_init(&decoder.collector, target_bits);
-            v21_fsk_stream_init(&stream,
-                                channel,
-                                sample_rate,
-                                (bool) inv,
-                                info_decoder_put_bit,
-                                &decoder);
-            v21_fsk_stream_rx(&stream, samples + start + phase_offset, len - phase_offset);
+                for (int phase = 0; phase < P12_INFO_STREAM_PHASES; phase++) {
+                    v21_fsk_stream_t stream;
+                    int phase_offset = (int) (((double) phase * symbol_samples)
+                                              / (double) P12_INFO_STREAM_PHASES);
 
-            if (decoder.frame_complete) {
-                memcpy(frame_out, decoder.frame_bytes, V34_INFO_MAX_BUF_BYTES);
-                if (frame_sample_out)
-                    *frame_sample_out = start + phase_offset + decoder.frame_sample_offset;
-                return true;
-            }
-            if (decoder.frame_candidate_seen) {
-                int recovery_shift = 0;
-                int recovery_pivot = 0;
+                    if (phase_offset >= len)
+                        continue;
 
-                if (p12_debug_enabled()) {
-                    fprintf(stderr,
-                            "[p12] INFO candidate crc=0x%04x target=%d inv=%d mode=stream phase=%d sample=%.1fms\n",
-                            decoder.candidate_crc,
-                            target_bits,
-                            inv,
-                            phase,
-                            (double) (start + phase_offset + decoder.candidate_sample_offset) * 1000.0 / (double) sample_rate);
-                }
+                    memset(&decoder, 0, sizeof(decoder));
+                    v34_info_collector_init(&decoder.collector, target_bits);
+                    v21_fsk_stream_init(&stream,
+                                        channel,
+                                        sample_rate,
+                                        (bool) inv,
+                                        info_decoder_put_bit,
+                                        &decoder);
+                    stream.symbol_samples = symbol_samples;
+                    v21_fsk_stream_rx(&stream, samples + start + phase_offset, len - phase_offset);
 
-                if (v34_info_try_boundary_recovery(frame_out,
-                                                   decoder.candidate_bytes,
-                                                   target_bits,
-                                                   &recovery_shift)) {
-                    if (p12_debug_enabled()) {
+                    if (decoder.frame_complete) {
+                        memcpy(frame_out, decoder.frame_bytes, V34_INFO_MAX_BUF_BYTES);
+                        if (frame_sample_out)
+                            *frame_sample_out = start + phase_offset + decoder.frame_sample_offset;
+                        return true;
+                    }
+                    if (decoder.frame_candidate_seen) {
+                        int recovery_shift = 0;
+                        int recovery_pivot = 0;
+
+                        if (p12_debug_enabled()) {
+                            fprintf(stderr,
+                                    "[p12] INFO candidate crc=0x%04x target=%d inv=%d mode=stream baud=%.1f phase=%d sample=%.1fms\n",
+                                    decoder.candidate_crc,
+                                    target_bits,
+                                    inv,
+                                    baud_variants[baud_idx],
+                                    phase,
+                                    (double) (start + phase_offset + decoder.candidate_sample_offset) * 1000.0 / (double) sample_rate);
+                        }
+
+                        if (v34_info_try_boundary_recovery(frame_out,
+                                                           decoder.candidate_bytes,
+                                                           target_bits,
+                                                           &recovery_shift)) {
+                            if (p12_debug_enabled()) {
+                                fprintf(stderr,
+                                        "[p12] INFO boundary recovery shift=%d target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
+                                        recovery_shift,
+                                        target_bits,
+                                        inv,
+                                        baud_variants[baud_idx],
+                                        phase);
+                            }
+                            if (frame_sample_out)
+                                *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
+                            return true;
+                        }
+                        if (v34_info_try_local_slip_recovery(frame_out,
+                                                             decoder.candidate_bytes,
+                                                             target_bits,
+                                                             &recovery_pivot,
+                                                             &recovery_shift)) {
+                            if (p12_debug_enabled()) {
+                                fprintf(stderr,
+                                        "[p12] INFO local-slip recovery pivot=%d shift=%d target=%d inv=%d mode=stream baud=%.1f phase=%d\n",
+                                        recovery_pivot,
+                                        recovery_shift,
+                                        target_bits,
+                                        inv,
+                                        baud_variants[baud_idx],
+                                        phase);
+                            }
+                            if (frame_sample_out)
+                                *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
+                            return true;
+                        }
+                    } else if (p12_debug_enabled()) {
                         fprintf(stderr,
-                                "[p12] INFO boundary recovery shift=%d target=%d inv=%d mode=stream phase=%d\n",
-                                recovery_shift,
+                                "[p12] INFO no candidate target=%d inv=%d mode=stream baud=%.1f phase=%d window=%.1f-%.1fms\n",
                                 target_bits,
                                 inv,
-                                phase);
+                                baud_variants[baud_idx],
+                                phase,
+                                (double) (start + phase_offset) * 1000.0 / (double) sample_rate,
+                                (double) (start + len) * 1000.0 / (double) sample_rate);
                     }
-                    if (frame_sample_out)
-                        *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
-                    return true;
                 }
-                if (v34_info_try_local_slip_recovery(frame_out,
-                                                     decoder.candidate_bytes,
-                                                     target_bits,
-                                                     &recovery_pivot,
-                                                     &recovery_shift)) {
-                    if (p12_debug_enabled()) {
-                        fprintf(stderr,
-                                "[p12] INFO local-slip recovery pivot=%d shift=%d target=%d inv=%d mode=stream phase=%d\n",
-                                recovery_pivot,
-                                recovery_shift,
-                                target_bits,
-                                inv,
-                                phase);
-                    }
-                    if (frame_sample_out)
-                        *frame_sample_out = start + phase_offset + decoder.candidate_sample_offset;
-                    return true;
-                }
-            } else if (p12_debug_enabled()) {
-                fprintf(stderr,
-                        "[p12] INFO no candidate target=%d inv=%d mode=stream phase=%d window=%.1f-%.1fms\n",
-                        target_bits,
-                        inv,
-                        phase,
-                        (double) (start + phase_offset) * 1000.0 / (double) sample_rate,
-                        (double) (start + len) * 1000.0 / (double) sample_rate);
             }
         }
     }

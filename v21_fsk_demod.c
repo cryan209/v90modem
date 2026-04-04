@@ -122,8 +122,8 @@ int v21_fsk_demod_block(const int16_t *samples,
      * but is generalized as a reusable module.
      */
     enum {
-        BAUD_MIN_X10 = 2940,
-        BAUD_MAX_X10 = 3060,
+        BAUD_MIN_X10 = 2850,
+        BAUD_MAX_X10 = 3150,
         BAUD_STEP_X10 = 20,
         PHASE_STEPS = 8,
         MAX_BITS = 16384
