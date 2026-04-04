@@ -337,6 +337,18 @@ static p12_phase2_role_t p12_phase2_role_from_observations(const phase12_result_
     return P12_PHASE2_ROLE_UNKNOWN;
 }
 
+static p12_phase2_role_t p12_phase2_role_v90_swapped(p12_phase2_role_t role)
+{
+    switch (role) {
+    case P12_PHASE2_ROLE_V90_DIGITAL_ANSWERER:
+        return P12_PHASE2_ROLE_V90_ANALOG_CALLER;
+    case P12_PHASE2_ROLE_V90_ANALOG_CALLER:
+        return P12_PHASE2_ROLE_V90_DIGITAL_ANSWERER;
+    default:
+        return role;
+    }
+}
+
 static p12_info0_kind_t p12_classify_info0_kind(const phase12_result_t *result,
                                                 bool is_info0d)
 {
@@ -1180,6 +1192,8 @@ static bool detect_phase2_signal_tone_runs(const int16_t *samples,
                                            p12_signal_tone_hit_t *tone_b)
 {
     p12_tone_hit_t hit = {0};
+    p12_signal_tone_hit_t best_a = {0};
+    p12_signal_tone_hit_t best_b = {0};
     const double *freqs = NULL;
     const bool *is_tone_a = NULL;
     int freq_count = 0;
@@ -1228,33 +1242,74 @@ static bool detect_phase2_signal_tone_runs(const int16_t *samples,
             continue;
         }
         if (is_tone_a[i]) {
-            tone_a->detected = true;
-            tone_a->start_sample = search_start + hit.start_sample;
-            tone_a->duration_samples = hit.duration_samples;
-            tone_a->freq_hz = freqs[i];
-            tone_a->phase_reversal_seen = detect_phase_reversals_at_freq(samples + tone_a->start_sample,
-                                                                         tone_a->duration_samples,
-                                                                         sample_rate,
-                                                                         freqs[i],
-                                                                         NULL);
-            if (tone_a->phase_reversal_seen)
-                tone_a->reversal_sample = tone_a->start_sample + tone_a->duration_samples/2;
+            p12_signal_tone_hit_t candidate;
+
+            memset(&candidate, 0, sizeof(candidate));
+            candidate.detected = true;
+            candidate.start_sample = search_start + hit.start_sample;
+            candidate.duration_samples = hit.duration_samples;
+            candidate.freq_hz = freqs[i];
+            candidate.phase_reversal_seen = detect_phase_reversals_at_freq(samples + candidate.start_sample,
+                                                                           candidate.duration_samples,
+                                                                           sample_rate,
+                                                                           freqs[i],
+                                                                           NULL);
+            if (candidate.phase_reversal_seen)
+                candidate.reversal_sample = candidate.start_sample + candidate.duration_samples/2;
+            if (!best_a.detected
+                || candidate.start_sample < best_a.start_sample
+                || (candidate.start_sample == best_a.start_sample
+                    && candidate.duration_samples > best_a.duration_samples)) {
+                best_a = candidate;
+            }
         } else {
-            tone_b->detected = true;
-            tone_b->start_sample = search_start + hit.start_sample;
-            tone_b->duration_samples = hit.duration_samples;
-            tone_b->freq_hz = freqs[i];
-            tone_b->phase_reversal_seen = detect_phase_reversals_at_freq(samples + tone_b->start_sample,
-                                                                         tone_b->duration_samples,
-                                                                         sample_rate,
-                                                                         freqs[i],
-                                                                         NULL);
-            if (tone_b->phase_reversal_seen)
-                tone_b->reversal_sample = tone_b->start_sample + tone_b->duration_samples/2;
+            p12_signal_tone_hit_t candidate;
+
+            memset(&candidate, 0, sizeof(candidate));
+            candidate.detected = true;
+            candidate.start_sample = search_start + hit.start_sample;
+            candidate.duration_samples = hit.duration_samples;
+            candidate.freq_hz = freqs[i];
+            candidate.phase_reversal_seen = detect_phase_reversals_at_freq(samples + candidate.start_sample,
+                                                                           candidate.duration_samples,
+                                                                           sample_rate,
+                                                                           freqs[i],
+                                                                           NULL);
+            if (candidate.phase_reversal_seen)
+                candidate.reversal_sample = candidate.start_sample + candidate.duration_samples/2;
+            if (!best_b.detected
+                || candidate.start_sample < best_b.start_sample
+                || (candidate.start_sample == best_b.start_sample
+                    && candidate.duration_samples > best_b.duration_samples)) {
+                best_b = candidate;
+            }
         }
-        return true;
     }
-    return false;
+    *tone_a = best_a;
+    *tone_b = best_b;
+    return tone_a->detected || tone_b->detected;
+}
+
+static int p12_phase2_signal_tone_score(const p12_signal_tone_hit_t *tone_a,
+                                        const p12_signal_tone_hit_t *tone_b)
+{
+    int score = 0;
+
+    if (tone_a && tone_a->detected) {
+        score += 4;
+        if (tone_a->phase_reversal_seen)
+            score += 1;
+        if (tone_a->freq_hz == 2400.0 || tone_a->freq_hz == 1200.0)
+            score += 1;
+    }
+    if (tone_b && tone_b->detected) {
+        score += 4;
+        if (tone_b->phase_reversal_seen)
+            score += 1;
+        if (tone_b->freq_hz == 2400.0 || tone_b->freq_hz == 1200.0)
+            score += 1;
+    }
+    return score;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2151,6 +2206,45 @@ static void p12_pack_lsb_bits(uint8_t *dst, int dst_len, const uint8_t *bits, in
     }
 }
 
+static void p12_pack_msb_bits(uint8_t *dst, int dst_len, const uint8_t *bits, int bit_count)
+{
+    if (!dst || dst_len <= 0)
+        return;
+    memset(dst, 0, (size_t) dst_len);
+    if (!bits || bit_count <= 0)
+        return;
+    for (int i = 0; i < bit_count; i++) {
+        if (bits[i] && (i >> 3) < dst_len)
+            dst[i >> 3] |= (uint8_t) (1U << (7 - (i & 7)));
+    }
+}
+
+static void p12_debug_dump_payload_bytes(const char *label,
+                                         const uint8_t *bits,
+                                         int bit_count)
+{
+    uint8_t lsb[V34_INFO_MAX_BUF_BYTES];
+    uint8_t msb[V34_INFO_MAX_BUF_BYTES];
+    int byte_count;
+
+    if (!p12_debug_enabled() || !bits || bit_count <= 0)
+        return;
+
+    byte_count = (bit_count + 7) / 8;
+    if (byte_count > V34_INFO_MAX_BUF_BYTES)
+        byte_count = V34_INFO_MAX_BUF_BYTES;
+    p12_pack_lsb_bits(lsb, (int) sizeof(lsb), bits, bit_count);
+    p12_pack_msb_bits(msb, (int) sizeof(msb), bits, bit_count);
+
+    fprintf(stderr, "[p12] %s bytes-lsb=", label ? label : "payload");
+    for (int i = 0; i < byte_count; i++)
+        fprintf(stderr, "%s%02x", (i == 0) ? "" : " ", lsb[i]);
+    fprintf(stderr, " bytes-msb=");
+    for (int i = 0; i < byte_count; i++)
+        fprintf(stderr, "%s%02x", (i == 0) ? "" : " ", msb[i]);
+    fprintf(stderr, "\n");
+}
+
 static bool p12_try_soft_bit_flips(v34_info_frame_t *frame_out,
                                    const uint8_t *base_bits,
                                    const double *confidences,
@@ -2559,6 +2653,7 @@ static bool p12_try_sync_trained_info_redecode(const int16_t *samples,
                     fprintf(stderr, "%s%.3f", (i == 0) ? "" : ",", payload_conf[i]);
                 }
                 fprintf(stderr, "\n");
+                p12_debug_dump_payload_bytes("INFO payload", payload_bits, target_bits);
                 if (payload_shift == 0 && target_bits <= P12_INFO0D_PAYLOAD_BITS) {
                     p12_debug_dump_symbol_trace(samples,
                                                 total_samples,
@@ -3122,6 +3217,47 @@ static void detect_phase2_info(const int16_t *samples,
                                    phase2_role,
                                    &result->tone_a,
                                    &result->tone_b);
+    if (result->v90_capable) {
+        p12_phase2_role_t alt_role = p12_phase2_role_v90_swapped(phase2_role);
+
+        if (alt_role != phase2_role) {
+            p12_signal_tone_hit_t alt_tone_a;
+            p12_signal_tone_hit_t alt_tone_b;
+            int base_score;
+            int alt_score;
+
+            memset(&alt_tone_a, 0, sizeof(alt_tone_a));
+            memset(&alt_tone_b, 0, sizeof(alt_tone_b));
+            detect_phase2_signal_tone_runs(samples,
+                                           total_samples,
+                                           sample_rate,
+                                           search_start,
+                                           limit,
+                                           alt_role,
+                                           &alt_tone_a,
+                                           &alt_tone_b);
+            base_score = p12_phase2_signal_tone_score(&result->tone_a, &result->tone_b);
+            alt_score = p12_phase2_signal_tone_score(&alt_tone_a, &alt_tone_b);
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] v90 tone hypothesis primary=%s score=%d alt=%s score=%d\n",
+                        phase12_phase2_role_name(phase2_role),
+                        base_score,
+                        phase12_phase2_role_name(alt_role),
+                        alt_score);
+            }
+            if (alt_score > base_score) {
+                result->tone_a = alt_tone_a;
+                result->tone_b = alt_tone_b;
+                phase2_role = alt_role;
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] selected alternate v90 tone hypothesis role=%s\n",
+                            phase12_phase2_role_name(phase2_role));
+                }
+            }
+        }
+    }
     if (p12_debug_enabled()) {
         if (result->tone_b.detected) {
             fprintf(stderr,
