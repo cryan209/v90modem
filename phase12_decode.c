@@ -107,13 +107,35 @@ enum {
     P12_PHASE2_CC_STEP_SAMPLES = 40
 };
 
+/*
+ * Maximum plausible CM/JM payload byte count (excluding the 0xE0 start and
+ * 0x00 null terminator).  A full V.92 CM with all optional fields runs to
+ * about 12 bytes.  Beyond 16 bytes the decode is almost certainly runaway
+ * garbage caused by missing the null terminator.
+ */
+enum { P12_V8_CM_JM_MAX_BYTES = 16 };
+
+/*
+ * Minimum credibility score for using JM end-of-burst as the Phase 2 timing
+ * anchor.  A positive threshold rejects ghost/noise decodes (score < 0) and
+ * very weak single-byte fragments.  The credibility function awards 40 points
+ * for non-zero modulations, 30 for PCM capability, and smaller amounts for
+ * observed repetitions, byte count and call-function fields.
+ */
+enum { P12_JM_ANCHOR_MIN_CREDIBILITY = 40 };
+
 enum {
     P12_ANS_WINDOW_SAMPLES = 160,
     P12_ANS_STEP_SAMPLES = 80
 };
 
 enum {
-    P12_CALL_INIT_MAX_MS = 10000
+    P12_CALL_INIT_MAX_MS = 10000,
+    /* V.8 CM/JM/CJ exchange must complete within this many ms of ANS start.
+     * V.8 spec T400+T401+T402 = 3×2500ms = 7500ms worst case, but in
+     * practice < 4s.  Use 6000ms to exclude late-noise false positives
+     * while still covering slow endpoints. */
+    P12_V8_AFTER_ANS_MAX_MS = 6000
 };
 
 enum {
@@ -1772,7 +1794,8 @@ static void detect_phase1_tones(const int16_t *samples,
     if (detect_tone(samples, limit, sample_rate, CNG_FREQ_HZ,
                     cng_competitors, 3, MIN_CNG_RUN_MS, true, &result->cng)) {
         result->cng.type = P12_TONE_CNG;
-    } else if (early_probe.cng_sample >= 0) {
+    } else if (early_probe.cng_sample >= 0
+               && early_probe.cng_sample < (sample_rate * P12_CALL_INIT_MAX_MS) / 1000) {
         result->cng.detected = true;
         result->cng.type = P12_TONE_CNG;
         result->cng.start_sample = early_probe.cng_sample;
@@ -1782,7 +1805,10 @@ static void detect_phase1_tones(const int16_t *samples,
     if (detect_tone(samples, limit, sample_rate, CT_FREQ_HZ,
                     ct_competitors, 3, MIN_CT_RUN_MS, false, &result->ct)) {
         result->ct.type = P12_TONE_CT;
-    } else if (early_probe.ct_sample >= 0) {
+    } else if (early_probe.ct_sample >= 0
+               && early_probe.ct_sample < (sample_rate * P12_CALL_INIT_MAX_MS) / 1000) {
+        /* Only use early_probe as a CT fallback if it falls within the
+         * expected call-initiation window.  Late hits are noise. */
         result->ct.detected = true;
         result->ct.type = P12_TONE_CT;
         result->ct.start_sample = early_probe.ct_sample;
@@ -2157,6 +2183,8 @@ static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
     if (!bits || !confidence || !bytes || max_bytes <= 0 || start < 0)
         return 0;
 
+    if (max_bytes > P12_V8_CM_JM_MAX_BYTES)
+        max_bytes = P12_V8_CM_JM_MAX_BYTES;
     for (int bit_pos = start; bit_pos + 10 <= bit_count && byte_len < max_bytes; bit_pos += 10) {
         uint8_t byte = 0;
 
@@ -2166,9 +2194,15 @@ static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
             penalty += 20 + (int) lround(confidence[bit_pos + 9] * 80.0);
         for (int j = 0; j < 8; j++)
             byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
-        bytes[byte_len++] = byte;
-        if (byte == 0)
+        /* Stop at null terminator or at a new V.8 preamble byte (0xE0),
+         * which signals the start of a repeated CM/JM message frame. */
+        if (byte == 0) {
+            bytes[byte_len++] = byte;
             break;
+        }
+        if (byte == 0xE0 && byte_len > 0)
+            break;
+        bytes[byte_len++] = byte;
     }
 
     if (framing_penalty_out)
@@ -2783,6 +2817,16 @@ static void detect_phase1_v8(const int16_t *samples,
     if (limit > (sample_rate * P12_CALL_INIT_MAX_MS) / 1000)
         limit = (sample_rate * P12_CALL_INIT_MAX_MS) / 1000;
 
+    /* If the answer tone was detected, cap the V.8 FSK scan to ANS_start +
+     * P12_V8_AFTER_ANS_MAX_MS.  The full CM/JM/CJ exchange must complete
+     * within that window; anything after is noise. */
+    if (result->answer_tone.detected && result->answer_tone.start_sample > 0) {
+        int ans_limit = result->answer_tone.start_sample
+                        + (sample_rate * P12_V8_AFTER_ANS_MAX_MS) / 1000;
+        if (ans_limit < limit)
+            limit = ans_limit;
+    }
+
     /* Find V.21 FSK bursts on both channels */
     result->ch1_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
                                                  0, limit, V21_CH1,
@@ -2790,6 +2834,25 @@ static void detect_phase1_v8(const int16_t *samples,
     result->ch2_burst_count = detect_fsk_bursts(samples, total_samples, sample_rate,
                                                  0, limit, V21_CH2,
                                                  result->ch2_bursts, P12_MAX_FSK_BURSTS);
+
+    /* Remove CH1 FSK bursts that overlap the ANS tone window.
+     * ANS phase reversals at 2100 Hz can create false energy in the CH1
+     * (980/1180 Hz) detector.  The caller never sends CM during ANS. */
+    if (result->answer_tone.detected && result->answer_tone.start_sample >= 0
+        && result->answer_tone.duration_samples > 0) {
+        int ans_start = result->answer_tone.start_sample;
+        int ans_end   = ans_start + result->answer_tone.duration_samples;
+        int out = 0;
+        for (int i = 0; i < result->ch1_burst_count; i++) {
+            int bs = result->ch1_bursts[i].start_sample;
+            int be = bs + result->ch1_bursts[i].duration_samples;
+            /* Keep burst only if it is fully before ANS or fully after ANS */
+            bool overlaps = (bs < ans_end && be > ans_start);
+            if (!overlaps)
+                result->ch1_bursts[out++] = result->ch1_bursts[i];
+        }
+        result->ch1_burst_count = out;
+    }
 
     memcpy(phase1_ch1_windows, result->ch1_bursts, sizeof(phase1_ch1_windows));
     memcpy(phase1_ch2_windows, result->ch2_bursts, sizeof(phase1_ch2_windows));
@@ -2815,17 +2878,50 @@ static void detect_phase1_v8(const int16_t *samples,
                           V21_CH2, phase1_ch2_windows, phase1_ch2_window_count,
                           &result->jm, &result->cj);
 
-    /* Role detection based on what we found */
+    /* Discard a CM decode whose sample_offset falls within the ANS tone
+     * window.  p12_targeted_v21_decode_cm_jm extends its search backward by
+     * ~200ms + pre_pad, so a false decode from ANS phase-reversal energy can
+     * slip through the burst filter above.  CM (sent by the CALLER on CH1)
+     * cannot legitimately appear while the answerer's ANS is still transmitting.
+     * JM is NOT filtered here: the answerer sends JM on CH2 around the end of
+     * the ANS tone, so JM within or just after the ANS window is expected. */
+    if (result->answer_tone.detected && result->answer_tone.duration_samples > 0) {
+        int ans_start = result->answer_tone.start_sample;
+        int ans_end   = ans_start + result->answer_tone.duration_samples;
+        if (result->cm.detected
+            && result->cm.sample_offset >= ans_start
+            && result->cm.sample_offset < ans_end) {
+            memset(&result->cm, 0, sizeof(result->cm));
+        }
+    }
+
+    /* CT can appear on the answerer's channel as network-generated ringback
+     * before the call is answered.  Treat CT as ringback (not a V.8 calling
+     * tone for role-detection purposes) when it ends before ANS starts. */
+    bool ct_is_ringback = false;
+    if (result->answer_tone.detected && result->ct.detected
+        && result->ct.duration_samples > 0) {
+        int ct_end = result->ct.start_sample + result->ct.duration_samples;
+        ct_is_ringback = (ct_end < result->answer_tone.start_sample);
+    }
+
+    /* Role detection: FSK messages take priority (CH1 vs CH2 frequencies are
+     * well separated so crosstalk is rare).  Tones break ties. */
     if (result->cm.detected && !result->jm.detected) {
         result->role_detected = true;
         result->is_caller = true;
     } else if (result->jm.detected && !result->cm.detected) {
         result->role_detected = true;
         result->is_caller = false;
-    } else if (result->answer_tone.detected && !result->cng.detected && !result->ct.detected) {
+    } else if (result->answer_tone.detected
+               && !result->cng.detected
+               && (!result->ct.detected || ct_is_ringback)) {
+        /* ANS with no true calling-tone evidence → answerer */
         result->role_detected = true;
         result->is_caller = false;
-    } else if ((result->cng.detected || result->ct.detected) && !result->answer_tone.detected) {
+    } else if ((result->cng.detected || (result->ct.detected && !ct_is_ringback))
+               && !result->answer_tone.detected) {
+        /* Calling tone without ANS → caller */
         result->role_detected = true;
         result->is_caller = true;
     }
@@ -3868,6 +3964,9 @@ static void detect_phase2_info(const int16_t *samples,
     int phase2_end_hint = -1;
     int phase2_merge_gap = (sample_rate * P12_PHASE2_REPEAT_GAP_MS) / 1000;
     int tone_anchor_sample = -1;
+    int cm_score;
+    int jm_score;
+    bool use_jm_anchor;
     p12_phase2_role_t phase2_role = p12_phase2_role_from_observations(result);
     p12_phase2_role_t alt_phase2_role = P12_PHASE2_ROLE_UNKNOWN;
     p12_signal_tone_hit_t alt_tone_a;
@@ -3882,12 +3981,24 @@ static void detect_phase2_info(const int16_t *samples,
     memset(&alt_handoff_info0_hint, 0, sizeof(alt_handoff_info0_hint));
     memset(&alt_tone_a, 0, sizeof(alt_tone_a));
     memset(&alt_tone_b, 0, sizeof(alt_tone_b));
+    cm_score = p12_cm_jm_credibility_score(&result->cm);
+    jm_score = p12_cm_jm_credibility_score(&result->jm);
+    /*
+     * Use JM end-of-burst as the Phase 2 timing anchor only when the JM
+     * decode meets a minimum credibility threshold.  Low-score JM decodes
+     * are typically noise or single-bit fragments from cross-talk; using
+     * them as anchors pushes the INFO0 search window to the wrong place.
+     * When the JM is not credible, fall back to CJ-based timing.
+     */
+    use_jm_anchor = p12_cm_jm_has_phase1_capability(&result->jm)
+                    && result->jm.duration_samples > 0
+                    && jm_score >= P12_JM_ANCHOR_MIN_CREDIBILITY;
 
     if (result->answer_tone.detected)
         search_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate);
-    if (p12_cm_jm_has_phase1_capability(&result->jm) && result->jm.duration_samples > 0) {
+    if (use_jm_anchor) {
         int jm_info_start = result->jm.sample_offset
                           + result->jm.duration_samples
                           + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
@@ -3904,7 +4015,7 @@ static void detect_phase2_info(const int16_t *samples,
     }
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
-    if (p12_cm_jm_has_phase1_capability(&result->jm) && result->jm.duration_samples > 0)
+    if (use_jm_anchor)
         p12_fill_timing_hint_from_jm_end(&result->info0_from_cj_hint, &result->jm, sample_rate, limit);
     else
         p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
@@ -3914,6 +4025,11 @@ static void detect_phase2_info(const int16_t *samples,
                 (double) search_start * 1000.0 / (double) sample_rate,
                 (double) limit * 1000.0 / (double) sample_rate,
                 (double) phase2_cap * 1000.0 / (double) sample_rate);
+        fprintf(stderr,
+                "[p12] phase1 credibility cm=%d jm=%d use_jm_anchor=%s\n",
+                cm_score,
+                jm_score,
+                use_jm_anchor ? "yes" : "no");
         if (result->info0_from_cj_hint.valid) {
             fprintf(stderr,
                     "[p12] info0 timing hint anchor=%.1fms expected=%.1fms window=%.1f-%.1fms\n",
