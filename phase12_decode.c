@@ -3067,6 +3067,32 @@ static void detect_phase1_tones(const int16_t *samples,
         result->ct.start_sample = early_probe.ct_sample;
     }
 
+    /* Scan for additional CT bursts after the first (CT repeats every ~5 s while ringing).
+     * Each extra burst goes into phase1_events[] as source "tone-extra" so
+     * phase12_merge_to_call_log() can emit it independently. */
+    if (result->ct.detected) {
+        /* start scanning from after the first CT burst + 500 ms minimum gap */
+        int scan_from = result->ct.start_sample + result->ct.duration_samples
+                        + (sample_rate * 500) / 1000;
+        for (int pass = 0; pass < 8 && scan_from < limit; pass++) {
+            p12_tone_hit_t extra;
+            int remaining = limit - scan_from;
+            if (remaining < (sample_rate * MIN_CT_RUN_MS) / 1000)
+                break;
+            if (!detect_tone(samples + scan_from, remaining, sample_rate,
+                             CT_FREQ_HZ, ct_competitors, 3, MIN_CT_RUN_MS, false, &extra))
+                break;
+            extra.type = P12_TONE_CT;
+            extra.start_sample += scan_from;    /* convert relative → absolute */
+            char xdetail[64];
+            snprintf(xdetail, sizeof(xdetail), "ratio=%.3f", extra.peak_ratio);
+            p12_append_phase1_event(result, extra.start_sample, extra.duration_samples,
+                                    "tone-extra", "CT", xdetail);
+            scan_from = extra.start_sample + extra.duration_samples
+                        + (sample_rate * 500) / 1000;
+        }
+    }
+
     /* ANS/ANSam: 2100 Hz */
     if ((early_probe.ans_sample >= 0
          && detect_answer_tone_run_near(samples,
@@ -6763,6 +6789,26 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
     emit_tone_event(log, &result->ct, "V.8", result->is_caller);
     emit_tone_event(log, &result->answer_tone, "V.8", result->is_caller);
     emit_answer_tone_handoff_event(log, &result->answer_tone);
+
+    /* Emit additional CT/CNG repeats detected beyond the first instance.
+     * These are stored in phase1_events[] with source "tone-extra" by
+     * detect_phase1_tones(). */
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *pe = &result->phase1_events[i];
+        if (!pe->seen)
+            continue;
+        if (strcmp(pe->source, "tone-extra") != 0)
+            continue;
+        char extra_summary[160];
+        char extra_detail[256];
+        snprintf(extra_summary, sizeof(extra_summary), "%s tone detected", pe->label);
+        snprintf(extra_detail, sizeof(extra_detail),
+                 "role=%s tone=%s %s",
+                 result->is_caller ? "caller" : "answerer",
+                 pe->label, pe->detail);
+        call_log_append(log, pe->sample_offset, pe->duration_samples,
+                        "V.8", extra_summary, extra_detail);
+    }
     if (result->call_init.v8bis_signal_seen) {
         char summary[160];
         char detail[256];
@@ -7106,6 +7152,25 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                  phase12_phase2_step_name(result->phase2_state.next_step));
     }
     call_log_append(log, event_sample, 0, "V.34", "Phase 1/2 diagnostic", detail);
+    }
+
+    /* V.8bis FSK decoded message events (MS, CL, CLR, ACK, NAK, partial frames)
+     * These are stored in phase1_events[] but not yet emitted above. Only emit
+     * events whose detail begins with "fsk_ch=" to avoid duplicating the tone
+     * detection events already emitted via result->call_init above. */
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *pe = &result->phase1_events[i];
+
+        if (!pe->seen)
+            continue;
+        if ((strcmp(pe->source, "V.8bis") != 0 && strcmp(pe->source, "V.8bis?") != 0)
+            && strcmp(pe->source, "V.92") != 0)
+            continue;
+        if (strncmp(pe->detail, "fsk_ch=", 7) != 0
+            && strncmp(pe->detail, "source=V.8bis", 13) != 0)
+            continue;
+        call_log_append(log, pe->sample_offset, pe->duration_samples,
+                        pe->source, pe->label, pe->detail);
     }
 
     /* Phase 2 probing tones */

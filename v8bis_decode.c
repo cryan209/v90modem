@@ -342,11 +342,17 @@ static int v8bis_decode_info_field(const uint8_t *info, int info_len,
         { "Data", "SVD", "H.324", "V.18", NULL, "Analogue", "T.101" };
 
     /* S-field Par(2) NPar(2) tables, keyed by SPar(1) bit position (0-based) */
-    /* Table 6-3: Data NPar(2) — 3 octets × 6 data bits = 18 bits */
+    /* Table 6-3: Data NPar(2) — 3 octets × 6 data bits = 18 bits.
+     * Octet 1: transparent,V.42,V.42bis,V.14,T.120,NS
+     * Octet 2: T.84,T.434,V.80,Rsvd,V.34,V.32bis
+     * Octet 3: V.32,V.22bis,V.22,V.21,Rsvd,Rsvd
+     * Bits 9,16,17 (0-based) are "Reserved for allocation by the ITU-T"
+     * per V.8bis Table 6-3/V.8bis (1996). No ITU amendment has allocated
+     * V.44 or V.92 upstream to these reserved positions. */
     static const char * const data_npar2[] = {
         "transparent", "V.42", "V.42bis", "V.14", "T.120", "NS",
-        "T.84",        "T.434","V.80",    NULL,   "V.34",  "V.32bis",
-        "V.32",        "V.22bis","V.22",  "V.21", NULL,    NULL
+        "T.84",        "T.434","V.80",    "Rsvd", "V.34",  "V.32bis",
+        "V.32",        "V.22bis","V.22",  "V.21", "Rsvd",  "Rsvd"
     };
     /* Table 6-4: SVD NPar(2) — 3 octets */
     static const char * const svd_npar2[] = {
