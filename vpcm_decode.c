@@ -10014,12 +10014,30 @@ static void collect_v34_events(call_log_t *log,
 #undef APPEND_V34_STAGE_EVENT
 }
 
+typedef struct {
+    bool valid;
+    int left_expected_form;
+    int right_expected_form;
+    int left_digital_score;
+    int right_digital_score;
+    int left_analog_score;
+    int right_analog_score;
+    int left_pair_score;
+    int right_pair_score;
+} phase12_stereo_short_p1_hint_t;
+
+static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
+                                               const phase12_stereo_short_p1_hint_t *hint,
+                                               bool is_left);
+
 static void collect_stream_call_log(call_log_t *log,
                                     const int16_t *linear_samples,
                                     const uint8_t *g711_codewords,
                                     int total_samples,
                                     int total_codewords,
                                     v91_law_t law,
+                                    const phase12_stereo_short_p1_hint_t *stereo_hint,
+                                    bool is_left_channel,
                                     bool do_v34,
                                     bool do_v8,
                                     bool do_v91,
@@ -10041,6 +10059,7 @@ static void collect_stream_call_log(call_log_t *log,
         return;
 
     phase12_result_init(&phase12);
+    phase12_apply_stereo_short_p1_hint(&phase12, stereo_hint, is_left_channel);
 
     if (do_v8 || do_v34 || do_v90) {
         have_phase12 = phase12_decode_with_codewords(linear_samples,
@@ -12049,25 +12068,58 @@ static int phase12_analog_likeness_score(const phase12_result_t *p12)
     return score;
 }
 
-static void print_stereo_channel_tells(const int16_t *left_linear_samples,
-                                       const uint8_t *left_g711_codewords,
-                                       const int16_t *right_linear_samples,
-                                       const uint8_t *right_g711_codewords,
-                                       int total_samples,
-                                       int total_codewords,
-                                       int sample_rate,
-                                       v91_law_t law)
+static int phase12_short_p1_form_bonus(const phase12_result_t *p12, bool expect_digital)
+{
+    int score = 0;
+
+    if (!p12 || !p12->call_init.v92_short_p1_seen)
+        return 0;
+
+    if (p12->call_init.v92_short_p1_digital == expect_digital)
+        score += 14;
+    else
+        score -= 14;
+
+    if (expect_digital) {
+        if (p12->call_init.v92_short_p1_qca)
+            score += 4;
+        else
+            score -= 2;
+    } else {
+        if (!p12->call_init.v92_short_p1_qca)
+            score += 4;
+        else
+            score -= 2;
+        if (p12->call_init.v92_short_p1_uqts_ucode >= 0)
+            score += 4;
+    }
+
+    return score;
+}
+
+static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_samples,
+                                               const uint8_t *left_g711_codewords,
+                                               const int16_t *right_linear_samples,
+                                               const uint8_t *right_g711_codewords,
+                                               int total_samples,
+                                               int total_codewords,
+                                               int sample_rate,
+                                               v91_law_t law,
+                                               phase12_stereo_short_p1_hint_t *out)
 {
     phase12_result_t left_p12;
     phase12_result_t right_p12;
-    int left_digital;
-    int right_digital;
-    int left_analog;
-    int right_analog;
+    int left_pair_score;
+    int right_pair_score;
 
-    if (!left_linear_samples || !right_linear_samples
-        || !left_g711_codewords || !right_g711_codewords)
-        return;
+    if (!left_linear_samples || !left_g711_codewords
+        || !right_linear_samples || !right_g711_codewords || !out) {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->left_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
+    out->right_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
 
     phase12_result_init(&left_p12);
     phase12_result_init(&right_p12);
@@ -12089,31 +12141,104 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
                                   0,
                                   &right_p12);
 
-    left_digital = phase12_digital_likeness_score(&left_p12);
-    right_digital = phase12_digital_likeness_score(&right_p12);
-    left_analog = phase12_analog_likeness_score(&left_p12);
-    right_analog = phase12_analog_likeness_score(&right_p12);
+    out->left_digital_score = phase12_digital_likeness_score(&left_p12);
+    out->right_digital_score = phase12_digital_likeness_score(&right_p12);
+    out->left_analog_score = phase12_analog_likeness_score(&left_p12);
+    out->right_analog_score = phase12_analog_likeness_score(&right_p12);
 
-    printf("\n=== Stereo Channel Tells ===\n");
-    printf("  Left:  digital=%d analog=%d role=%s shortP1=%s\n",
-           left_digital,
-           left_analog,
-           left_p12.role_detected ? (left_p12.is_caller ? "caller" : "answerer") : "unknown",
-           left_p12.call_init.v92_short_p1_seen ? left_p12.call_init.v92_short_p1_name : "none");
-    printf("  Right: digital=%d analog=%d role=%s shortP1=%s\n",
-           right_digital,
-           right_analog,
-           right_p12.role_detected ? (right_p12.is_caller ? "caller" : "answerer") : "unknown",
-           right_p12.call_init.v92_short_p1_seen ? right_p12.call_init.v92_short_p1_name : "none");
-    printf("  Preferred digital side: %s\n",
-           (left_digital > right_digital) ? "Left" :
-           (right_digital > left_digital) ? "Right" : "tie");
-    printf("  Preferred analog side:  %s\n",
-           (left_analog > right_analog) ? "Left" :
-           (right_analog > left_analog) ? "Right" : "tie");
+    left_pair_score = out->left_digital_score
+                    + out->right_analog_score
+                    + phase12_short_p1_form_bonus(&left_p12, true)
+                    + phase12_short_p1_form_bonus(&right_p12, false);
+    right_pair_score = out->right_digital_score
+                     + out->left_analog_score
+                     + phase12_short_p1_form_bonus(&right_p12, true)
+                     + phase12_short_p1_form_bonus(&left_p12, false);
+
+    out->left_pair_score = left_pair_score;
+    out->right_pair_score = right_pair_score;
+
+    if (left_pair_score != right_pair_score) {
+        out->valid = true;
+        if (left_pair_score > right_pair_score) {
+            out->left_expected_form = P12_SHORT_P1_FORM_DIGITAL;
+            out->right_expected_form = P12_SHORT_P1_FORM_ANALOG;
+        } else {
+            out->left_expected_form = P12_SHORT_P1_FORM_ANALOG;
+            out->right_expected_form = P12_SHORT_P1_FORM_DIGITAL;
+        }
+    }
 
     phase12_result_reset(&left_p12);
     phase12_result_reset(&right_p12);
+    return out->valid;
+}
+
+static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
+                                               const phase12_stereo_short_p1_hint_t *hint,
+                                               bool is_left)
+{
+    int expected_form;
+
+    if (!p12)
+        return;
+
+    p12->stereo_short_p1_hint_valid = false;
+    p12->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
+    p12->stereo_short_p1_followup_allowed = true;
+
+    if (!hint || !hint->valid)
+        return;
+
+    expected_form = is_left ? hint->left_expected_form : hint->right_expected_form;
+    if (expected_form == P12_SHORT_P1_FORM_UNKNOWN)
+        return;
+
+    p12->stereo_short_p1_hint_valid = true;
+    p12->stereo_short_p1_expected_form = (p12_short_p1_form_t) expected_form;
+    p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL);
+}
+
+static void print_stereo_channel_tells(const int16_t *left_linear_samples,
+                                       const uint8_t *left_g711_codewords,
+                                       const int16_t *right_linear_samples,
+                                       const uint8_t *right_g711_codewords,
+                                       int total_samples,
+                                       int total_codewords,
+                                       int sample_rate,
+                                       v91_law_t law)
+{
+    phase12_stereo_short_p1_hint_t hint;
+
+    if (!left_linear_samples || !right_linear_samples
+        || !left_g711_codewords || !right_g711_codewords)
+        return;
+    phase12_build_stereo_short_p1_hint(left_linear_samples,
+                                       left_g711_codewords,
+                                       right_linear_samples,
+                                       right_g711_codewords,
+                                       total_samples,
+                                       total_codewords,
+                                       sample_rate,
+                                       law,
+                                       &hint);
+
+    printf("\n=== Stereo Channel Tells ===\n");
+    printf("  Left:  digital=%d analog=%d\n",
+           hint.left_digital_score,
+           hint.left_analog_score);
+    printf("  Right: digital=%d analog=%d\n",
+           hint.right_digital_score,
+           hint.right_analog_score);
+    printf("  Complementary pair score: Left=digital/Right=analog => %d, Right=digital/Left=analog => %d\n",
+           hint.left_pair_score,
+           hint.right_pair_score);
+    printf("  Preferred digital side: %s\n",
+           !hint.valid ? "tie" :
+           (hint.left_expected_form == P12_SHORT_P1_FORM_DIGITAL) ? "Left" : "Right");
+    printf("  Preferred analog side:  %s\n",
+           !hint.valid ? "tie" :
+           (hint.left_expected_form == P12_SHORT_P1_FORM_ANALOG) ? "Left" : "Right");
 }
 
 static void run_decode_suite(const char *label,
@@ -12123,6 +12248,8 @@ static void run_decode_suite(const char *label,
                              int total_codewords,
                              int sample_rate,
                              v91_law_t law,
+                             const phase12_stereo_short_p1_hint_t *stereo_hint,
+                             bool is_left_channel,
                              const decode_options_t *opts,
                              const codeword_stream_info_t *codeword_info,
                              int expected_rate_1,
@@ -12143,6 +12270,7 @@ static void run_decode_suite(const char *label,
         return;
 
     phase12_result_init(&p12);
+    phase12_apply_stereo_short_p1_hint(&p12, stereo_hint, is_left_channel);
 
     printf("\n--- Channel: %s ---\n", label);
     if (codeword_info && (opts->do_v90 || opts->do_v91 || opts->do_call_log)) {
@@ -12484,6 +12612,8 @@ static void run_decode_suite(const char *label,
                                 total_samples,
                                 total_codewords,
                                 law,
+                                stereo_hint,
+                                is_left_channel,
                                 opts->do_v34,
                                 opts->do_v8,
                                 opts->do_v91,
@@ -12795,7 +12925,9 @@ int main(int argc, char **argv)
     {
         int expected_rate_1 = -1;
         int expected_rate_2 = -1;
+        phase12_stereo_short_p1_hint_t stereo_hint;
 
+        memset(&stereo_hint, 0, sizeof(stereo_hint));
         printf("File: %s\n", input_path);
         printf("Duration: %.3f seconds (%d samples)\n\n",
                (double) total_samples / (double) sample_rate, total_samples);
@@ -12822,6 +12954,15 @@ int main(int argc, char **argv)
         opts.tone_probe_duration_ms = tone_probe_duration_ms;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
+            phase12_build_stereo_short_p1_hint(left_linear_samples,
+                                               left_g711_codewords,
+                                               right_linear_samples,
+                                               right_g711_codewords,
+                                               total_samples,
+                                               total_codewords,
+                                               sample_rate,
+                                               law,
+                                               &stereo_hint);
             if (opts.raw_output_enabled && (opts.do_phase12 || opts.do_v8 || opts.do_v90 || opts.do_v34)) {
                 print_stereo_channel_tells(left_linear_samples,
                                            left_g711_codewords,
@@ -12844,10 +12985,12 @@ int main(int argc, char **argv)
                 }
             }
             run_decode_suite("Left", left_linear_samples, left_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &left_codeword_info,
+                             total_samples, total_codewords, sample_rate, law,
+                             &stereo_hint, true, &opts, &left_codeword_info,
                              expected_rate_1, expected_rate_2);
             run_decode_suite("Right", right_linear_samples, right_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &right_codeword_info,
+                             total_samples, total_codewords, sample_rate, law,
+                             &stereo_hint, false, &opts, &right_codeword_info,
                              expected_rate_1, expected_rate_2);
             if (opts.do_call_log) {
                 call_log_t left_log;
@@ -12864,6 +13007,8 @@ int main(int argc, char **argv)
                                         total_samples,
                                         total_codewords,
                                         law,
+                                        &stereo_hint,
+                                        true,
                                         opts.do_v34,
                                         opts.do_v8,
                                         opts.do_v91,
@@ -12874,6 +13019,8 @@ int main(int argc, char **argv)
                                         total_samples,
                                         total_codewords,
                                         law,
+                                        &stereo_hint,
+                                        false,
                                         opts.do_v34,
                                         opts.do_v8,
                                         opts.do_v91,
@@ -12893,7 +13040,8 @@ int main(int argc, char **argv)
                              : channel == CH_RIGHT ? "Right"
                              : "Mono",
                              linear_samples, g711_codewords,
-                             total_samples, total_codewords, sample_rate, law, &opts, &codeword_info,
+                             total_samples, total_codewords, sample_rate, law,
+                             NULL, false, &opts, &codeword_info,
                              expected_rate_1, expected_rate_2);
         }
 
@@ -12919,6 +13067,8 @@ int main(int argc, char **argv)
                                         total_samples,
                                         total_codewords,
                                         law,
+                                        &stereo_hint,
+                                        true,
                                         opts.do_v34,
                                         opts.do_v8,
                                         opts.do_v91,
@@ -12929,6 +13079,8 @@ int main(int argc, char **argv)
                                         total_samples,
                                         total_codewords,
                                         law,
+                                        &stereo_hint,
+                                        false,
                                         opts.do_v34,
                                         opts.do_v8,
                                         opts.do_v91,
@@ -12953,6 +13105,8 @@ int main(int argc, char **argv)
                                         total_samples,
                                         total_codewords,
                                         law,
+                                        NULL,
+                                        false,
                                         opts.do_v34,
                                         opts.do_v8,
                                         opts.do_v91,

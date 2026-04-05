@@ -1565,6 +1565,23 @@ static void detect_v92_short_phase1(const int16_t *samples,
         return;
     }
 
+    if (result->stereo_short_p1_hint_valid
+        && result->stereo_short_p1_expected_form != P12_SHORT_P1_FORM_UNKNOWN
+        && ((candidate.digital_modem ? P12_SHORT_P1_FORM_DIGITAL
+                                     : P12_SHORT_P1_FORM_ANALOG)
+            != result->stereo_short_p1_expected_form)) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] reject V.92 short Phase 1 %s at %.1fms channel=%s due to stereo hint expected=%s\n",
+                    candidate.name ? candidate.name : "V92-shortP1",
+                    (double) sample * 1000.0 / (double) sample_rate,
+                    (channel == V21_CH2) ? "CH2" : "CH1",
+                    (result->stereo_short_p1_expected_form == P12_SHORT_P1_FORM_DIGITAL)
+                        ? "digital" : "analog");
+        }
+        return;
+    }
+
     result->call_init.v92_short_p1_seen = true;
     result->call_init.v92_short_p1_sample = sample;
     snprintf(result->call_init.v92_short_p1_name,
@@ -1609,6 +1626,13 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         return;
     if (!samples || total_samples <= 0 || sample_rate <= 0)
         return;
+    if (result->stereo_short_p1_hint_valid && !result->stereo_short_p1_followup_allowed) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] skip V.92 short Phase 1 follow-up on stereo-suppressed side\n");
+        }
+        return;
+    }
 
     if (codewords && total_codewords > 0 && result->call_init.v92_short_p1_uqts_ucode >= 0) {
         qts_search_start = result->call_init.v92_short_p1_sample + 400;
@@ -5451,6 +5475,8 @@ void phase12_result_init(phase12_result_t *r)
     if (!r)
         return;
     memset(r, 0, sizeof(*r));
+    r->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
+    r->stereo_short_p1_followup_allowed = true;
     r->log.events = NULL;
     r->log.count = 0;
     r->log.cap = 0;

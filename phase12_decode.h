@@ -240,6 +240,12 @@ typedef struct {
     int answer_tone_handoff_sample;
 } p12_call_init_t;
 
+typedef enum {
+    P12_SHORT_P1_FORM_UNKNOWN = -1,
+    P12_SHORT_P1_FORM_ANALOG = 0,
+    P12_SHORT_P1_FORM_DIGITAL = 1
+} p12_short_p1_form_t;
+
 /* ------------------------------------------------------------------ */
 /* Phase 2 V.21 FSK burst detection                                    */
 /* ------------------------------------------------------------------ */
@@ -310,6 +316,11 @@ typedef struct {
 
     /* Call initiation / pre-V.8 findings */
     p12_call_init_t call_init;
+
+    /* Optional stereo arbitration hints supplied by the caller. */
+    bool stereo_short_p1_hint_valid;
+    p12_short_p1_form_t stereo_short_p1_expected_form;
+    bool stereo_short_p1_followup_allowed;
 
     /* V.21 FSK bursts detected */
     int ch1_burst_count;
