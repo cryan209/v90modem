@@ -10025,6 +10025,10 @@ typedef struct {
     bool valid;
     int left_expected_form;
     int right_expected_form;
+    int left_partner_family;
+    int right_partner_family;
+    bool left_partner_qca;
+    bool right_partner_qca;
     int analog_uqts_ucode;
     int digital_lm_level;
     bool analog_ready;
@@ -12150,10 +12154,29 @@ static int phase12_short_p1_form_bonus(const phase12_result_t *p12, bool expect_
     return score;
 }
 
+static bool phase12_timeline_has_event_label(const phase12_result_t *p12,
+                                             const char *label)
+{
+    if (!p12 || !label)
+        return false;
+    for (int i = 0; i < p12->phase1_event_count; i++) {
+        const p12_phase1_event_t *ev = &p12->phase1_events[i];
+
+        if (ev->seen && strcmp(ev->label, label) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool phase12_analog_short_p1_ready(const phase12_result_t *p12)
 {
     if (!p12)
         return false;
+    if (phase12_timeline_has_event_label(p12, "QCA1a")
+        || phase12_timeline_has_event_label(p12, "QC2a")
+        || phase12_timeline_has_event_label(p12, "QCA2a")) {
+        return true;
+    }
     if (p12->call_init.v92_analog_chain_ready)
         return true;
     if (p12->call_init.v92_short_p1_seen
@@ -12336,6 +12359,10 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
         if (left_pair_score > right_pair_score) {
             out->left_expected_form = P12_SHORT_P1_FORM_DIGITAL;
             out->right_expected_form = P12_SHORT_P1_FORM_ANALOG;
+            out->left_partner_family = right_analog_sig.family;
+            out->right_partner_family = left_digital_sig.family;
+            out->left_partner_qca = right_analog_sig.qca;
+            out->right_partner_qca = left_digital_sig.qca;
             out->digital_lm_level = left_digital_sig.lm_level;
             out->analog_uqts_ucode = right_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&right_p12);
@@ -12347,6 +12374,10 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
         } else {
             out->left_expected_form = P12_SHORT_P1_FORM_ANALOG;
             out->right_expected_form = P12_SHORT_P1_FORM_DIGITAL;
+            out->left_partner_family = right_digital_sig.family;
+            out->right_partner_family = left_analog_sig.family;
+            out->left_partner_qca = right_digital_sig.qca;
+            out->right_partner_qca = left_analog_sig.qca;
             out->digital_lm_level = right_digital_sig.lm_level;
             out->analog_uqts_ucode = left_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&left_p12);
@@ -12383,6 +12414,8 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_hint_valid = false;
     p12->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     p12->stereo_short_p1_followup_allowed = true;
+    p12->stereo_short_p1_partner_family = 0;
+    p12->stereo_short_p1_partner_qca = false;
     p12->stereo_short_p1_partner_uqts_ucode = -1;
     p12->stereo_short_p1_partner_lm_level = -1;
 
@@ -12396,6 +12429,8 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_hint_valid = true;
     p12->stereo_short_p1_expected_form = (p12_short_p1_form_t) expected_form;
     p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL) && hint->analog_ready;
+    p12->stereo_short_p1_partner_family = is_left ? hint->left_partner_family : hint->right_partner_family;
+    p12->stereo_short_p1_partner_qca = is_left ? hint->left_partner_qca : hint->right_partner_qca;
     p12->stereo_short_p1_partner_uqts_ucode = hint->analog_uqts_ucode;
     p12->stereo_short_p1_partner_lm_level = hint->digital_lm_level;
 }

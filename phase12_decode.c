@@ -326,6 +326,16 @@ static const char *p12_tone_type_name(p12_tone_type_t type);
 static void p12_sort_phase1_events(phase12_result_t *result);
 static void p12_build_phase1_timeline(phase12_result_t *result,
                                       int sample_rate);
+static bool p12_phase1_event_is_label(const p12_phase1_event_t *ev,
+                                      const char *label);
+static bool p12_phase1_find_short_p1_event(const phase12_result_t *result,
+                                           bool want_digital,
+                                           const p12_phase1_event_t **event_out);
+static bool p12_phase1_find_event_after(const phase12_result_t *result,
+                                        const char *label,
+                                        int start_sample,
+                                        int max_delta_samples,
+                                        const p12_phase1_event_t **event_out);
 static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              int total_samples,
                                              int sample_rate,
@@ -1846,6 +1856,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                                              phase12_result_t *result)
 {
     static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
+    const p12_phase1_event_t *digital_event = NULL;
     v92_qts_hit_t qts_hit;
     v92_qts_hit_t alt_qts_hit;
     v92_anspcm_hit_t anspcm_hit;
@@ -1879,9 +1890,22 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         return;
     }
 
-    phase1_anchor_sample = result->call_init.v92_short_p1_seen
-                         ? result->call_init.v92_short_p1_sample
-                         : (result->call_init.v92_qc2_seen ? result->call_init.v92_qc2_sample : -1);
+    if (p12_phase1_find_short_p1_event(result, true, &digital_event)) {
+        phase1_anchor_sample = digital_event->sample_offset;
+        if (result->stereo_short_p1_hint_valid
+            && result->stereo_short_p1_partner_family > 0
+            && (p12_phase1_event_family(digital_event) != result->stereo_short_p1_partner_family
+                || p12_phase1_event_qca(digital_event) == result->stereo_short_p1_partner_qca)) {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] suppress V.92 digital follow-up: %s mismatches complementary stereo short-P1 pair\n",
+                        digital_event->label);
+            }
+            return;
+        }
+    } else {
+        phase1_anchor_sample = -1;
+    }
     if (phase1_anchor_sample < 0)
         return;
 
@@ -2066,34 +2090,30 @@ static void finalize_v92_analog_short_phase1(const phase12_result_t *src,
                                              phase12_result_t *result,
                                              int sample_rate)
 {
-    bool analog_qc1a = false;
-    bool analog_qc2a = false;
+    const p12_phase1_event_t *analog_event = NULL;
+    const p12_phase1_event_t *cm_event = NULL;
 
     if (!src || !result || sample_rate <= 0)
         return;
 
-    analog_qc1a = src->call_init.v92_short_p1_seen
-               && !src->call_init.v92_short_p1_digital;
-    analog_qc2a = src->call_init.v92_qc2_seen
-               && !src->call_init.v92_qc2_digital;
+    if (!p12_phase1_find_short_p1_event(src, false, &analog_event))
+        return;
 
-    if (analog_qc1a
-        && strcmp(src->call_init.v92_short_p1_name, "QC1a") == 0
-        && src->cm.detected
-        && src->cm.sample_offset >= src->call_init.v92_short_p1_sample
-        && src->cm.sample_offset <= src->call_init.v92_short_p1_sample + (sample_rate * 1200) / 1000) {
+    if (p12_phase1_event_is_label(analog_event, "QC1a")
+        && p12_phase1_find_event_after(src,
+                                       "CM",
+                                       analog_event->sample_offset,
+                                       (sample_rate * 1200) / 1000,
+                                       &cm_event)) {
         result->call_init.v92_cm_after_qc1a_valid = true;
     }
 
-    if (analog_qc1a) {
-        if (strcmp(src->call_init.v92_short_p1_name, "QCA1a") == 0
-            || result->call_init.v92_cm_after_qc1a_valid) {
-            result->call_init.v92_analog_chain_ready = true;
-        }
-    }
-
-    if (analog_qc2a)
+    if (p12_phase1_event_is_label(analog_event, "QCA1a")
+        || p12_phase1_event_is_label(analog_event, "QC2a")
+        || p12_phase1_event_is_label(analog_event, "QCA2a")
+        || result->call_init.v92_cm_after_qc1a_valid) {
         result->call_init.v92_analog_chain_ready = true;
+    }
 }
 
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
@@ -2515,6 +2535,110 @@ static void p12_sort_phase1_events(phase12_result_t *result)
           (size_t) result->phase1_event_count,
           sizeof(result->phase1_events[0]),
           p12_phase1_event_cmp);
+}
+
+static bool p12_phase1_event_is_label(const p12_phase1_event_t *ev,
+                                      const char *label)
+{
+    if (!ev || !ev->seen || !label)
+        return false;
+    return strcmp(ev->label, label) == 0;
+}
+
+static int p12_phase1_event_family(const p12_phase1_event_t *ev)
+{
+    if (!ev || !ev->seen)
+        return 0;
+    if (strstr(ev->label, "1") != NULL)
+        return 1;
+    if (strstr(ev->label, "2") != NULL)
+        return 2;
+    return 0;
+}
+
+static bool p12_phase1_event_qca(const p12_phase1_event_t *ev)
+{
+    if (!ev || !ev->seen)
+        return false;
+    return strstr(ev->label, "QCA") != NULL;
+}
+
+static bool p12_phase1_find_short_p1_event(const phase12_result_t *result,
+                                           bool want_digital,
+                                           const p12_phase1_event_t **event_out)
+{
+    if (event_out)
+        *event_out = NULL;
+    if (!result)
+        return false;
+
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *ev = &result->phase1_events[i];
+        const p12_phase1_event_t *cm_event = NULL;
+        bool is_digital;
+        bool needs_cm_after = false;
+
+        if (!ev->seen)
+            continue;
+        if (strcmp(ev->source, "V.92") != 0)
+            continue;
+        if (!(p12_phase1_event_is_label(ev, "QC1a")
+              || p12_phase1_event_is_label(ev, "QCA1a")
+              || p12_phase1_event_is_label(ev, "QC1d")
+              || p12_phase1_event_is_label(ev, "QCA1d")
+              || p12_phase1_event_is_label(ev, "QC2a")
+              || p12_phase1_event_is_label(ev, "QCA2a")
+              || p12_phase1_event_is_label(ev, "QC2d")
+              || p12_phase1_event_is_label(ev, "QCA2d"))) {
+            continue;
+        }
+
+        is_digital = (strchr(ev->label, 'd') != NULL);
+        if (is_digital != want_digital)
+            continue;
+        needs_cm_after = p12_phase1_event_is_label(ev, "QC1a")
+                      || p12_phase1_event_is_label(ev, "QC1d");
+        if (needs_cm_after
+            && !p12_phase1_find_event_after(result,
+                                            "CM",
+                                            ev->sample_offset,
+                                            -1,
+                                            &cm_event)) {
+            continue;
+        }
+
+        if (event_out)
+            *event_out = ev;
+        return true;
+    }
+    return false;
+}
+
+static bool p12_phase1_find_event_after(const phase12_result_t *result,
+                                        const char *label,
+                                        int start_sample,
+                                        int max_delta_samples,
+                                        const p12_phase1_event_t **event_out)
+{
+    if (event_out)
+        *event_out = NULL;
+    if (!result || !label || start_sample < 0)
+        return false;
+
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *ev = &result->phase1_events[i];
+
+        if (!ev->seen || strcmp(ev->label, label) != 0)
+            continue;
+        if (ev->sample_offset < start_sample)
+            continue;
+        if (max_delta_samples >= 0 && ev->sample_offset > start_sample + max_delta_samples)
+            continue;
+        if (event_out)
+            *event_out = ev;
+        return true;
+    }
+    return false;
 }
 
 static void p12_build_phase1_timeline(phase12_result_t *result,
