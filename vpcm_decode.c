@@ -12141,6 +12141,65 @@ static bool phase12_analog_short_p1_ready(const phase12_result_t *p12)
     return false;
 }
 
+typedef struct {
+    bool seen;
+    bool digital;
+    bool qca;
+    int family;
+    int uqts_ucode;
+    int lm_level;
+    const char *name;
+} phase12_short_p1_signal_t;
+
+static int phase12_short_p1_family_from_name(const char *name)
+{
+    if (!name)
+        return 0;
+    if (strstr(name, "1") != NULL)
+        return 1;
+    if (strstr(name, "2") != NULL)
+        return 2;
+    return 0;
+}
+
+static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
+                                            bool expect_digital,
+                                            phase12_short_p1_signal_t *out)
+{
+    if (!p12 || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->uqts_ucode = -1;
+    out->lm_level = -1;
+
+    if (p12->call_init.v92_short_p1_seen
+        && p12->call_init.v92_short_p1_digital == expect_digital) {
+        out->seen = true;
+        out->digital = p12->call_init.v92_short_p1_digital;
+        out->qca = p12->call_init.v92_short_p1_qca;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_name);
+        out->uqts_ucode = p12->call_init.v92_short_p1_uqts_ucode;
+        out->lm_level = p12->call_init.v92_short_p1_lm_level;
+        out->name = p12->call_init.v92_short_p1_name;
+        return out->family != 0;
+    }
+
+    if (p12->call_init.v92_qc2_seen
+        && p12->call_init.v92_qc2_digital == expect_digital) {
+        out->seen = true;
+        out->digital = p12->call_init.v92_qc2_digital;
+        out->qca = p12->call_init.v92_qc2_qca;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_qc2_name);
+        out->uqts_ucode = p12->call_init.v92_qc2_uqts_ucode;
+        out->lm_level = p12->call_init.v92_qc2_lm_level;
+        out->name = p12->call_init.v92_qc2_name;
+        return out->family != 0;
+    }
+
+    return false;
+}
+
 static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_samples,
                                                const uint8_t *left_g711_codewords,
                                                const int16_t *right_linear_samples,
@@ -12153,6 +12212,10 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
 {
     phase12_result_t left_p12;
     phase12_result_t right_p12;
+    phase12_short_p1_signal_t left_digital_sig;
+    phase12_short_p1_signal_t right_digital_sig;
+    phase12_short_p1_signal_t left_analog_sig;
+    phase12_short_p1_signal_t right_analog_sig;
     int left_pair_score;
     int right_pair_score;
 
@@ -12192,6 +12255,15 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
     out->left_analog_score = phase12_analog_likeness_score(&left_p12);
     out->right_analog_score = phase12_analog_likeness_score(&right_p12);
 
+    memset(&left_digital_sig, 0, sizeof(left_digital_sig));
+    memset(&right_digital_sig, 0, sizeof(right_digital_sig));
+    memset(&left_analog_sig, 0, sizeof(left_analog_sig));
+    memset(&right_analog_sig, 0, sizeof(right_analog_sig));
+    phase12_extract_short_p1_signal(&left_p12, true, &left_digital_sig);
+    phase12_extract_short_p1_signal(&right_p12, true, &right_digital_sig);
+    phase12_extract_short_p1_signal(&left_p12, false, &left_analog_sig);
+    phase12_extract_short_p1_signal(&right_p12, false, &right_analog_sig);
+
     left_pair_score = out->left_digital_score
                     + out->right_analog_score
                     + phase12_short_p1_form_bonus(&left_p12, true)
@@ -12209,31 +12281,34 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
         if (left_pair_score > right_pair_score) {
             out->left_expected_form = P12_SHORT_P1_FORM_DIGITAL;
             out->right_expected_form = P12_SHORT_P1_FORM_ANALOG;
-            if (left_p12.call_init.v92_short_p1_seen && left_p12.call_init.v92_short_p1_digital)
-                out->digital_lm_level = left_p12.call_init.v92_short_p1_lm_level;
-            else if (left_p12.call_init.v92_qc2_seen && left_p12.call_init.v92_qc2_digital)
-                out->digital_lm_level = left_p12.call_init.v92_qc2_lm_level;
-            if (right_p12.call_init.v92_short_p1_seen && !right_p12.call_init.v92_short_p1_digital)
-                out->analog_uqts_ucode = right_p12.call_init.v92_short_p1_uqts_ucode;
-            else if (right_p12.call_init.v92_qc2_seen && !right_p12.call_init.v92_qc2_digital)
-                out->analog_uqts_ucode = right_p12.call_init.v92_qc2_uqts_ucode;
+            out->digital_lm_level = left_digital_sig.lm_level;
+            out->analog_uqts_ucode = right_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&right_p12);
+            out->pair_family = left_digital_sig.family;
+            out->pair_qca_opposed = left_digital_sig.seen
+                                 && right_analog_sig.seen
+                                 && left_digital_sig.family == right_analog_sig.family
+                                 && left_digital_sig.qca != right_analog_sig.qca;
         } else {
             out->left_expected_form = P12_SHORT_P1_FORM_ANALOG;
             out->right_expected_form = P12_SHORT_P1_FORM_DIGITAL;
-            if (right_p12.call_init.v92_short_p1_seen && right_p12.call_init.v92_short_p1_digital)
-                out->digital_lm_level = right_p12.call_init.v92_short_p1_lm_level;
-            else if (right_p12.call_init.v92_qc2_seen && right_p12.call_init.v92_qc2_digital)
-                out->digital_lm_level = right_p12.call_init.v92_qc2_lm_level;
-            if (left_p12.call_init.v92_short_p1_seen && !left_p12.call_init.v92_short_p1_digital)
-                out->analog_uqts_ucode = left_p12.call_init.v92_short_p1_uqts_ucode;
-            else if (left_p12.call_init.v92_qc2_seen && !left_p12.call_init.v92_qc2_digital)
-                out->analog_uqts_ucode = left_p12.call_init.v92_qc2_uqts_ucode;
+            out->digital_lm_level = right_digital_sig.lm_level;
+            out->analog_uqts_ucode = left_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&left_p12);
+            out->pair_family = right_digital_sig.family;
+            out->pair_qca_opposed = right_digital_sig.seen
+                                 && left_analog_sig.seen
+                                 && right_digital_sig.family == left_analog_sig.family
+                                 && right_digital_sig.qca != left_analog_sig.qca;
         }
 
-        if (out->analog_uqts_ucode < 0 || out->digital_lm_level < 0 || !out->analog_ready)
+        if (out->analog_uqts_ucode < 0
+            || out->digital_lm_level < 0
+            || !out->analog_ready
+            || out->pair_family == 0
+            || !out->pair_qca_opposed) {
             out->valid = false;
+        }
     }
 
     phase12_result_reset(&left_p12);
@@ -12304,6 +12379,11 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
     printf("  Complementary pair score: Left=digital/Right=analog => %d, Right=digital/Left=analog => %d\n",
            hint.left_pair_score,
            hint.right_pair_score);
+    if (hint.valid) {
+        printf("  Short-P1 pair: family=%d qca_opposed=%s\n",
+               hint.pair_family,
+               hint.pair_qca_opposed ? "yes" : "no");
+    }
     printf("  Preferred digital side: %s\n",
            !hint.valid ? "tie" :
            (hint.left_expected_form == P12_SHORT_P1_FORM_DIGITAL) ? "Left" : "Right");
