@@ -159,6 +159,7 @@ Produce a spec audit table for all eight short-Phase-1 signals:
 - Step 2 completed on 2026-04-05.
 - Step 3 completed on 2026-04-05.
 - Step 4 completed on 2026-04-05.
+- Step 6 completed on 2026-04-05.
 - Completed work:
   - read clauses 8.2, 8.3, and 9.2 of `ITU Docs/T-REC-V.92-200011-I!!PDF-E.pdf`
   - verified the exact table structures for `QC1a`, `QCA1a`, `QC1d`, `QCA1d`, `QC2a`, `QCA2a`, `QC2d`, `QCA2d`
@@ -180,6 +181,12 @@ Produce a spec audit table for all eight short-Phase-1 signals:
     strict `QC1/QCA1` scanner
   - kept the strict whole-sequence accept rule unchanged while moving recovery logic further out
     of the startup acquisition path
+  - added a chronological internal Phase-1 event timeline in `phase12_decode`
+  - preserved pre-ANS `V.8bis`/`V.92` message events such as `CRe/CRd/QC2/QCA2` instead of
+    collapsing them immediately into one summary winner
+  - added timeline entries for tones, `CM/JM/CJ`, and strict V.92 short-Phase-1 detections
+  - sorted that timeline chronologically and exposed it in the raw `vpcm_decode --phase12`
+    output path
 
 ## Step 4 Outcome
 
@@ -205,12 +212,37 @@ event timeline to separate early tone, `CRe/CRd`, V.8/V.8bis, and short-Phase-1 
 
 ## Updated Next Step
 
-Proceed to Step 6:
+Proceed to Step 7:
 
-- build a clearer chronological per-channel Phase-1 event timeline
-- keep tone, `CRe/CRd`, V.8/V.8bis, and strict short-Phase-1 events separate before arbitration
-- use that timeline to understand why the QC files still appear mixed even after stricter
-  short-Phase-1 acquisition
+- rework the Phase12 short-Phase-1 procedure against clause 9.2 using the cleaner event timeline
+- stop deriving startup state from mixed summary flags when the ordered event story disagrees
+- make `QC1 -> CM`, `QC2 -> silence`, `QCA` response handling, and short-P1 follow-up transitions
+  operate on explicit timeline/state progression
+
+## Step 6 Outcome
+
+### What changed
+
+- `phase12_result_t` now carries a fixed-size chronological Phase-1 event list.
+- `detect_call_initiation_signals()` now preserves individual `V.8bis` and `V.92` message events
+  from the temporary call log instead of only keeping one best pre-ANS summary.
+- `phase12_decode_phase1_with_codewords()` now builds a sorted timeline covering:
+  - Phase-1 tones
+  - pre-ANS `V.8bis` / `V.92` message events
+  - `CM/JM/CJ`
+  - strict V.92 short-Phase-1 detections
+- `vpcm_decode --phase12` now prints that `Phase 1 timeline` section in raw output mode.
+
+### Why this matters
+
+This separates the actual observed startup chronology from later role/arbitration logic, which is
+the groundwork we need before rewriting the clause 9.2 procedure handling.
+
+### Verification
+
+- `make vpcm_decode` passes.
+- A full capture-based verification run is still pending; the Agere QC file takes long enough that
+  the bounded CLI run used here did not complete before timeout.
 
 ## Step 1 Audit
 

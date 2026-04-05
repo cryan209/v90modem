@@ -12638,6 +12638,22 @@ static void run_decode_suite(const char *label,
                        p12.call_init.v92_short_p1_digital ? "digital" : "analog",
                        p12.call_init.v92_short_p1_qca ? "QCA" : "QC");
             }
+            if (p12.phase1_event_count > 0) {
+                printf("  Phase 1 timeline:\n");
+                for (int i = 0; i < p12.phase1_event_count; i++) {
+                    const p12_phase1_event_t *ev = &p12.phase1_events[i];
+
+                    printf("    %.1f ms  %s/%s",
+                           sample_to_ms(ev->sample_offset, sample_rate),
+                           ev->source,
+                           ev->label);
+                    if (ev->duration_samples > 0)
+                        printf(" (%.0f ms)", sample_to_ms(ev->duration_samples, sample_rate));
+                    if (ev->detail[0])
+                        printf("  %s", ev->detail);
+                    printf("\n");
+                }
+            }
             if (p12.call_init.v92_qts_seen) {
                 printf("  V.92 QTS: %.1f ms (%d QTS reps, %d QTS\\\\ reps, align=%d, symbols=%d, score=%d)\n",
                        sample_to_ms(p12.call_init.v92_qts_sample, sample_rate),

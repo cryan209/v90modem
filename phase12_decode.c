@@ -316,6 +316,16 @@ static bool detect_phase_reversals(const int16_t *samples,
                                    int len,
                                    int sample_rate,
                                    int *reversal_count_out);
+static void p12_append_phase1_event(phase12_result_t *result,
+                                    int sample_offset,
+                                    int duration_samples,
+                                    const char *source,
+                                    const char *label,
+                                    const char *detail);
+static const char *p12_tone_type_name(p12_tone_type_t type);
+static void p12_sort_phase1_events(phase12_result_t *result);
+static void p12_build_phase1_timeline(phase12_result_t *result,
+                                      int sample_rate);
 static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              int total_samples,
                                              int sample_rate,
@@ -1545,6 +1555,16 @@ static void detect_call_initiation_signals(const int16_t *samples,
     v8bis_collect_msg_events(&tmp_log, samples, total_samples, limit);
     for (size_t i = 0; i < tmp_log.count; i++) {
         const call_log_event_t *ev = &tmp_log.events[i];
+
+        if (strcmp(ev->protocol, "V.8bis") == 0 || strcmp(ev->protocol, "V.92") == 0) {
+            p12_append_phase1_event(result,
+                                    ev->sample_offset,
+                                    ev->duration_samples,
+                                    ev->protocol,
+                                    ev->summary,
+                                    ev->detail);
+        }
+
         if (strcmp(ev->protocol, "V.92") != 0)
             continue;
         if (!(strcmp(ev->summary, "QC2a") == 0
@@ -2439,6 +2459,178 @@ static bool detect_phase_reversals(const int16_t *samples,
     /* ANS_PR has reversals every 450ms, so in a 3-second tone
        we expect ~6 reversals. Be lenient for partial captures. */
     return (reversals >= 2);
+}
+
+static void p12_append_phase1_event(phase12_result_t *result,
+                                    int sample_offset,
+                                    int duration_samples,
+                                    const char *source,
+                                    const char *label,
+                                    const char *detail)
+{
+    p12_phase1_event_t *ev;
+
+    if (!result || sample_offset < 0)
+        return;
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *cur = &result->phase1_events[i];
+
+        if (cur->sample_offset == sample_offset
+            && strcmp(cur->source, source ? source : "?") == 0
+            && strcmp(cur->label, label ? label : "?") == 0) {
+            return;
+        }
+    }
+    if (result->phase1_event_count >= P12_MAX_PHASE1_EVENTS)
+        return;
+
+    ev = &result->phase1_events[result->phase1_event_count++];
+    memset(ev, 0, sizeof(*ev));
+    ev->seen = true;
+    ev->sample_offset = sample_offset;
+    ev->duration_samples = duration_samples;
+    snprintf(ev->source, sizeof(ev->source), "%s", source ? source : "?");
+    snprintf(ev->label, sizeof(ev->label), "%s", label ? label : "?");
+    if (detail && detail[0])
+        snprintf(ev->detail, sizeof(ev->detail), "%s", detail);
+}
+
+static int p12_phase1_event_cmp(const void *a, const void *b)
+{
+    const p12_phase1_event_t *ea = (const p12_phase1_event_t *) a;
+    const p12_phase1_event_t *eb = (const p12_phase1_event_t *) b;
+
+    if (ea->sample_offset != eb->sample_offset)
+        return (ea->sample_offset < eb->sample_offset) ? -1 : 1;
+    if (ea->duration_samples != eb->duration_samples)
+        return (ea->duration_samples > eb->duration_samples) ? -1 : 1;
+    return strcmp(ea->label, eb->label);
+}
+
+static void p12_sort_phase1_events(phase12_result_t *result)
+{
+    if (!result || result->phase1_event_count <= 1)
+        return;
+    qsort(result->phase1_events,
+          (size_t) result->phase1_event_count,
+          sizeof(result->phase1_events[0]),
+          p12_phase1_event_cmp);
+}
+
+static void p12_build_phase1_timeline(phase12_result_t *result,
+                                      int sample_rate)
+{
+    char detail[96];
+
+    if (!result || sample_rate <= 0)
+        return;
+
+    if (result->cng.detected) {
+        snprintf(detail, sizeof(detail), "ratio=%.3f", result->cng.peak_ratio);
+        p12_append_phase1_event(result,
+                                result->cng.start_sample,
+                                result->cng.duration_samples,
+                                "tone",
+                                "CNG",
+                                detail);
+    }
+    if (result->ct.detected) {
+        snprintf(detail, sizeof(detail), "ratio=%.3f", result->ct.peak_ratio);
+        p12_append_phase1_event(result,
+                                result->ct.start_sample,
+                                result->ct.duration_samples,
+                                "tone",
+                                "CT",
+                                detail);
+    }
+    if (result->answer_tone.detected) {
+        snprintf(detail, sizeof(detail), "ratio=%.3f", result->answer_tone.peak_ratio);
+        p12_append_phase1_event(result,
+                                result->answer_tone.start_sample,
+                                result->answer_tone.duration_samples,
+                                "tone",
+                                p12_tone_type_name(result->answer_tone.type),
+                                detail);
+    }
+    if (result->cm.detected) {
+        snprintf(detail, sizeof(detail),
+                 "seen=%d drift=%d pcm=%d",
+                 result->cm.observed_count,
+                 result->cm.differing_count,
+                 result->cm.pcm_modem_availability);
+        p12_append_phase1_event(result,
+                                result->cm.sample_offset,
+                                result->cm.duration_samples,
+                                "V.8",
+                                "CM",
+                                detail);
+    }
+    if (result->jm.detected) {
+        snprintf(detail, sizeof(detail),
+                 "seen=%d drift=%d pcm=%d",
+                 result->jm.observed_count,
+                 result->jm.differing_count,
+                 result->jm.pcm_modem_availability);
+        p12_append_phase1_event(result,
+                                result->jm.sample_offset,
+                                result->jm.duration_samples,
+                                "V.8",
+                                "JM",
+                                detail);
+    }
+    if (result->cj.detected) {
+        p12_append_phase1_event(result,
+                                result->cj.sample_offset,
+                                result->cj.duration_samples,
+                                "V.8",
+                                "CJ",
+                                "");
+    }
+    if (result->call_init.v92_short_p1_seen) {
+        snprintf(detail, sizeof(detail),
+                 "%s %s",
+                 result->call_init.v92_short_p1_digital ? "digital" : "analog",
+                 result->call_init.v92_short_p1_qca ? "QCA" : "QC");
+        p12_append_phase1_event(result,
+                                result->call_init.v92_short_p1_sample,
+                                0,
+                                "V.92",
+                                result->call_init.v92_short_p1_name,
+                                detail);
+    }
+    if (result->call_init.v92_short_p1_strict_analog_seen) {
+        snprintf(detail, sizeof(detail), "strict analog %s",
+                 result->call_init.v92_short_p1_strict_analog_qca ? "QCA" : "QC");
+        p12_append_phase1_event(result,
+                                result->call_init.v92_short_p1_strict_analog_sample,
+                                0,
+                                "V.92",
+                                result->call_init.v92_short_p1_strict_analog_name,
+                                detail);
+    }
+    if (result->call_init.v92_short_p1_strict_digital_seen) {
+        snprintf(detail, sizeof(detail), "strict digital %s",
+                 result->call_init.v92_short_p1_strict_digital_qca ? "QCA" : "QC");
+        p12_append_phase1_event(result,
+                                result->call_init.v92_short_p1_strict_digital_sample,
+                                0,
+                                "V.92",
+                                result->call_init.v92_short_p1_strict_digital_name,
+                                detail);
+    }
+    if (result->call_init.v92_qc2_seen) {
+        snprintf(detail, sizeof(detail), "%s %s",
+                 result->call_init.v92_qc2_digital ? "digital" : "analog",
+                 result->call_init.v92_qc2_qca ? "QCA" : "QC");
+        p12_append_phase1_event(result,
+                                result->call_init.v92_qc2_sample,
+                                0,
+                                "V.92",
+                                result->call_init.v92_qc2_name,
+                                detail);
+    }
+
+    p12_sort_phase1_events(result);
 }
 
 static void detect_phase1_tones(const int16_t *samples,
@@ -6003,6 +6195,7 @@ bool phase12_decode_phase1_with_codewords(const int16_t *samples,
                      sample_rate,
                      max_sample,
                      result);
+    p12_build_phase1_timeline(result, sample_rate);
     phase12_finalize_diagnostics(result);
 
     return (result->cng.detected || result->ct.detected
@@ -6027,6 +6220,8 @@ bool phase12_decode_phase2(const int16_t *samples,
         memcpy(result->ch1_bursts, phase1_ctx->ch1_bursts, sizeof(result->ch1_bursts));
         result->ch2_burst_count = phase1_ctx->ch2_burst_count;
         memcpy(result->ch2_bursts, phase1_ctx->ch2_bursts, sizeof(result->ch2_bursts));
+        result->phase1_event_count = phase1_ctx->phase1_event_count;
+        memcpy(result->phase1_events, phase1_ctx->phase1_events, sizeof(result->phase1_events));
         result->answer_tone = phase1_ctx->answer_tone;
         result->cj = phase1_ctx->cj;
     }

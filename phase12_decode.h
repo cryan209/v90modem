@@ -95,6 +95,21 @@ typedef struct {
 } p12_cj_hit_t;
 
 /* ------------------------------------------------------------------ */
+/* Phase 1 event timeline                                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    bool seen;
+    int sample_offset;
+    int duration_samples;
+    char source[16];
+    char label[32];
+    char detail[96];
+} p12_phase1_event_t;
+
+#define P12_MAX_PHASE1_EVENTS 32
+
+/* ------------------------------------------------------------------ */
 /* Phase 2 INFO results                                                */
 /* ------------------------------------------------------------------ */
 
@@ -357,6 +372,10 @@ typedef struct {
 
     /* Call initiation / pre-V.8 findings */
     p12_call_init_t call_init;
+
+    /* Chronological Phase 1 event timeline */
+    int phase1_event_count;
+    p12_phase1_event_t phase1_events[P12_MAX_PHASE1_EVENTS];
 
     /* Optional stereo arbitration hints supplied by the caller. */
     bool stereo_short_p1_hint_valid;
