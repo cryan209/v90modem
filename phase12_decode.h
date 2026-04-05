@@ -104,7 +104,7 @@ typedef struct {
     int duration_samples;
     char source[16];
     char label[32];
-    char detail[96];
+    char detail[512];
 } p12_phase1_event_t;
 
 #define P12_MAX_PHASE1_EVENTS 32

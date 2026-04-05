@@ -204,7 +204,7 @@ const char *v8bis_msg_type_str(int type)
     }
 }
 
-/* V.8bis SPar(1) mode capabilities (§8.4, Table 6-2) */
+/* V.8bis SPar(1) mode capabilities (§8.4, Table 6-2) — public API kept for compatibility */
 const char *v8bis_spar1_mode_str(int spar1_bits)
 {
     if (spar1_bits & 0x01) return "Data";
@@ -215,6 +215,289 @@ const char *v8bis_spar1_mode_str(int spar1_bits)
     if (spar1_bits & 0x20) return "Analogue telephony";
     if (spar1_bits & 0x40) return "T.101 videotex";
     return "unknown";
+}
+
+/* ------------------------------------------------------------------ */
+/* Full V.8bis information field decoder (§8.1–§8.5)                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Read one level-1 parameter block delimited by bit 8 (§8.2.3).
+ * Collects bits 1–7 from successive octets until bit 8 = 1.
+ * Returns bytes consumed; sets *bits (up to 28) and *noctets consumed.
+ */
+static int v8bis_l1_block(const uint8_t *p, int len,
+                           uint32_t *bits, int *noctets)
+{
+    int i = 0, shift = 0;
+    *bits = 0;
+    *noctets = 0;
+    while (i < len) {
+        uint8_t b = p[i++];
+        if (shift < 28)
+            *bits |= (uint32_t)(b & 0x7F) << shift;
+        shift += 7;
+        if (b & 0x80) break;  /* bit 8 = 1: last octet in block */
+    }
+    *noctets = i;
+    return i;
+}
+
+/*
+ * Read one NPar(2) sub-block within a Par(2) group (§8.2.3).
+ * Bits 1–6 carry data; bit 7 terminates the NPar(2) sub-block;
+ * bit 8 terminates the entire Par(2) group.
+ * Returns bytes consumed; *bits gets data bits (up to 30);
+ * *end_par2 is set when bit 8 is seen.
+ */
+static int v8bis_npar2_sub(const uint8_t *p, int len,
+                            uint32_t *bits, bool *end_par2)
+{
+    int i = 0, shift = 0;
+    *bits = 0;
+    *end_par2 = false;
+    while (i < len) {
+        uint8_t b = p[i++];
+        if (shift < 30)
+            *bits |= (uint32_t)(b & 0x3F) << shift;
+        shift += 6;
+        if (b & 0x80) { *end_par2 = true; break; }  /* last Par(2) octet */
+        if (b & 0x40) break;                          /* last NPar(2) octet */
+    }
+    return i;
+}
+
+/*
+ * Skip remaining octets of a Par(2) group after NPar(2) is read
+ * but end_par2 was not set (i.e. SPar(2)/NPar(3) follow).
+ * Reads until bit 8 = 1.
+ */
+static int v8bis_skip_par2_tail(const uint8_t *p, int len)
+{
+    for (int i = 0; i < len; i++)
+        if (p[i] & 0x80)
+            return i + 1;
+    return len;
+}
+
+/*
+ * Append the names of all set bits in 'bits' to buf.
+ * names[] maps 0-based bit positions → strings (NULL = unnamed/skip).
+ * Returns updated pos. Writes "(none)" if no named bits are set.
+ */
+static int v8bis_append_bits(char *buf, int sz, int pos,
+                              uint32_t bits, int nbits,
+                              const char * const *names, int nnames)
+{
+    bool found = false;
+    for (int i = 0; i < nbits && i < nnames; i++) {
+        if (((bits >> i) & 1) && names[i]) {
+            pos += snprintf(buf + pos, sz - pos, "%s%s", found ? "+" : "", names[i]);
+            found = true;
+        }
+    }
+    if (!found)
+        pos += snprintf(buf + pos, sz - pos, "none");
+    return pos;
+}
+
+/*
+ * Decode the full V.8bis information field into buf.
+ *
+ * info[] holds all bytes AFTER the [revision:4|type:4] header octet.
+ * Layout (V.8bis §8.1–§8.5):
+ *
+ *   I-field:
+ *     NPar(1)  — Table 5-1: V.8, ShortV8, addl-info, ACK1, NS-field
+ *     SPar(1)  — Table 5-2: Network type
+ *     Par(2)_n — one per set SPar(1) bit; NPar(2) from Table 5-3
+ *
+ *   S-field:
+ *     NPar(1)  — Table 6-1: NS capabilities
+ *     SPar(1)  — Table 6-2: Data, SVD, H.324, V.18, Rsvd, Analogue, T.101
+ *     Par(2)_n — one per set SPar(1) bit; NPar(2) from Tables 6-3 to 6-8
+ *
+ *   NS field (if I NPar(1) bit 7 set):
+ *     One or more NS blocks: [len][T.35 country code][provider code len][provider code][data]
+ *
+ * Returns number of characters written (excluding NUL).
+ */
+static int v8bis_decode_info_field(const uint8_t *info, int info_len,
+                                    char *buf, int buf_sz)
+{
+    /* ── Name tables (0-based bit indexing within each block) ───────── */
+
+    /* I-field NPar(1) — Table 5-1 */
+    static const char * const inpar1_names[] =
+        { "V8", "ShortV8", "addl", "ack1", NULL, NULL, "NS" };
+
+    /* I-field SPar(1) — Table 5-2 (bit 1 only; rest reserved) */
+    /* I-field Par(2) for network type — Table 5-3 */
+    static const char * const net_npar2_names[] =
+        { "Cellular", "ISDN", NULL, NULL, NULL, "NS-net" };
+
+    /* S-field NPar(1) — Table 6-1 (bit 7 = non-standard capabilities) */
+    /* S-field SPar(1) — Table 6-2 */
+    static const char * const sspar1_names[] =
+        { "Data", "SVD", "H.324", "V.18", NULL, "Analogue", "T.101" };
+
+    /* S-field Par(2) NPar(2) tables, keyed by SPar(1) bit position (0-based) */
+    /* Table 6-3: Data NPar(2) — 3 octets × 6 data bits = 18 bits */
+    static const char * const data_npar2[] = {
+        "transparent", "V.42", "V.42bis", "V.14", "T.120", "NS",
+        "T.84",        "T.434","V.80",    NULL,   "V.34",  "V.32bis",
+        "V.32",        "V.22bis","V.22",  "V.21", NULL,    NULL
+    };
+    /* Table 6-4: SVD NPar(2) — 3 octets */
+    static const char * const svd_npar2[] = {
+        "V.70", "V.61", NULL, "V.34", "V.32bis", "NS",
+        "transparent", "V.42", "V.42bis", "V.14", "T.120", "V.80",
+        "T.84", "T.434", NULL, NULL, NULL, NULL
+    };
+    /* Table 6-5: H.324 NPar(2) — 1 octet */
+    static const char * const h324_npar2[] =
+        { "Video", "Audio", "Encrypt", NULL, NULL, "NS" };
+    /* Table 6-6: V.18 NPar(2) — 1 octet */
+    static const char * const v18_npar2[] =
+        { "V.21", "V.61", NULL, NULL, NULL, "NS" };
+    /* Table 6-7: Analogue telephony NPar(2) — 1 octet */
+    static const char * const at_npar2[] =
+        { "Voice", "AudioRec", "VoiceBridge", NULL, NULL, "NS" };
+    /* Table 6-8: T.101 videotex NPar(2) — 1 octet */
+    static const char * const t101_npar2[] =
+        { "Duplex", "V.29short", "V.27ter", NULL, NULL, "NS" };
+
+    /* Dispatch table: pointer and max named bits per S SPar(1) bit position */
+    static const char * const * const mode_tables[] = {
+        data_npar2, svd_npar2, h324_npar2, v18_npar2, NULL, at_npar2, t101_npar2
+    };
+    static const int mode_nbits[] = { 18, 18, 6, 6, 0, 6, 6 };
+    static const char * const mode_labels[] = {
+        "Data", "SVD", "H.324", "V.18", NULL, "Analogue", "T.101"
+    };
+
+    int p = 0;   /* current read position in info[] */
+    int pos = 0; /* current write position in buf */
+    uint32_t bits;
+    bool end_par2;
+    int noctets;
+    int n;
+
+    /* ── I-field NPar(1) (Table 5-1) ───────────────────────────────── */
+    uint32_t inpar1 = 0;
+    n = v8bis_l1_block(info + p, info_len - p, &inpar1, &noctets);
+    p += n;
+    pos += snprintf(buf + pos, buf_sz - pos, "I:[");
+    pos  = v8bis_append_bits(buf, buf_sz, pos, inpar1, 7, inpar1_names, 7);
+    pos += snprintf(buf + pos, buf_sz - pos, "]");
+
+    /* ── I-field SPar(1) (Table 5-2) + Par(2) blocks ───────────────── */
+    uint32_t ispar1 = 0;
+    if (p < info_len) {
+        n = v8bis_l1_block(info + p, info_len - p, &ispar1, &noctets);
+        p += n;
+    }
+    for (int mode = 0; mode < 7 && p < info_len; mode++) {
+        if (!((ispar1 >> mode) & 1)) continue;
+        n = v8bis_npar2_sub(info + p, info_len - p, &bits, &end_par2);
+        p += n;
+        if (!end_par2 && p < info_len)
+            p += v8bis_skip_par2_tail(info + p, info_len - p);
+        if (mode == 0 && bits) {
+            /* Network type NPar(2), Table 5-3 */
+            pos += snprintf(buf + pos, buf_sz - pos, " net=[");
+            pos  = v8bis_append_bits(buf, buf_sz, pos, bits, 6, net_npar2_names, 6);
+            pos += snprintf(buf + pos, buf_sz - pos, "]");
+        }
+    }
+
+    /* ── S-field NPar(1) (Table 6-1) ───────────────────────────────── */
+    uint32_t snpar1 = 0;
+    if (p < info_len) {
+        n = v8bis_l1_block(info + p, info_len - p, &snpar1, &noctets);
+        p += n;
+    }
+
+    /* ── S-field SPar(1) (Table 6-2) ───────────────────────────────── */
+    uint32_t sspar1 = 0;
+    if (p < info_len) {
+        n = v8bis_l1_block(info + p, info_len - p, &sspar1, &noctets);
+        p += n;
+    }
+    pos += snprintf(buf + pos, buf_sz - pos, " S:[");
+    pos  = v8bis_append_bits(buf, buf_sz, pos, sspar1, 7, sspar1_names, 7);
+    pos += snprintf(buf + pos, buf_sz - pos, "]");
+    if (snpar1 & 0x40)
+        pos += snprintf(buf + pos, buf_sz - pos, " S-NS");
+
+    /* ── S-field Par(2) groups — one per set SPar(1) bit ───────────── */
+    for (int mode = 0; mode < 7 && p < info_len; mode++) {
+        if (!((sspar1 >> mode) & 1)) continue;
+        n = v8bis_npar2_sub(info + p, info_len - p, &bits, &end_par2);
+        p += n;
+        if (!end_par2 && p < info_len)
+            p += v8bis_skip_par2_tail(info + p, info_len - p);
+        if (!mode_tables[mode] || !mode_labels[mode] || bits == 0) continue;
+        pos += snprintf(buf + pos, buf_sz - pos, " %s:[", mode_labels[mode]);
+        pos  = v8bis_append_bits(buf, buf_sz, pos, bits,
+                                  mode_nbits[mode],
+                                  mode_tables[mode], mode_nbits[mode]);
+        pos += snprintf(buf + pos, buf_sz - pos, "]");
+    }
+
+    /* ── NS field (§8.5) ─────────────────────────────────────────────
+     * Present when I NPar(1) bit 7 (0x40) is set.
+     * Each NS block: [total-len][T.35-cc K octets][pcode-len][pcode L octets][data M octets] */
+    if ((inpar1 & 0x40) && p < info_len) {
+        bool ns_first = true;
+        pos += snprintf(buf + pos, buf_sz - pos, " NS:[");
+        while (p < info_len) {
+            int blk_remaining = info[p++];          /* total length of rest of block */
+            int blk_end = p + blk_remaining;
+            if (blk_end > info_len) blk_end = info_len;
+            if (!ns_first) pos += snprintf(buf + pos, buf_sz - pos, "|");
+            ns_first = false;
+            /* T.35 country code: 0xFF = escape (2-octet code), else 1 octet */
+            if (p < blk_end) {
+                uint8_t cc1 = info[p++];
+                if (cc1 == 0xFF && p < blk_end) {
+                    uint8_t cc2 = info[p++];
+                    pos += snprintf(buf + pos, buf_sz - pos, "T35=0xFF%02X", cc2);
+                } else {
+                    pos += snprintf(buf + pos, buf_sz - pos, "T35=0x%02X", cc1);
+                }
+            }
+            /* Provider code: 1-byte length + L bytes */
+            if (p < blk_end) {
+                int pc_len = info[p++];
+                if (pc_len > 0 && p + pc_len <= blk_end) {
+                    pos += snprintf(buf + pos, buf_sz - pos, " pcode=");
+                    for (int i = 0; i < pc_len && pos < buf_sz - 3; i++)
+                        pos += snprintf(buf + pos, buf_sz - pos, "%02X", info[p++]);
+                }
+            }
+            /* Non-standard data remainder */
+            int ns_data = blk_end - p;
+            if (ns_data > 0) {
+                pos += snprintf(buf + pos, buf_sz - pos, " nsdata=%d", ns_data);
+                p = blk_end;
+            }
+        }
+        pos += snprintf(buf + pos, buf_sz - pos, "]");
+    }
+
+    /* Raw hex of full info[] for cross-checking */
+    if (info_len > 0) {
+        int hlen = (info_len < 16) ? info_len : 16;
+        pos += snprintf(buf + pos, buf_sz - pos, " raw=[");
+        for (int i = 0; i < hlen && pos < buf_sz - 5; i++)
+            pos += snprintf(buf + pos, buf_sz - pos, "%s%02X", i == 0 ? "" : "-", info[i]);
+        if (info_len > 16)
+            pos += snprintf(buf + pos, buf_sz - pos, "...");
+        pos += snprintf(buf + pos, buf_sz - pos, "]");
+    }
+
+    return pos;
 }
 
 /* HDLC receiver state for one V.21 channel */
@@ -609,7 +892,7 @@ void v8bis_collect_msg_events(call_log_t *log,
     int all_partial_count;
     int limit;
     char summary[160];
-    char detail[320];
+    char detail[1024];
     int last_partial_sample[16];
     uint8_t last_partial_type[16];
     int partial_emitted_count = 0;
@@ -786,26 +1069,26 @@ void v8bis_collect_msg_events(call_log_t *log,
 
         snprintf(summary, sizeof(summary), "%s", type_str);
 
-        if (msg->info_len > 0) {
-            /* Show capability byte summary for MS/CL/CLR */
-            char hex[100];
-            int hlen = (msg->info_len < 12) ? msg->info_len : 12;
-            int pos = 0;
-            for (int j = 0; j < hlen; j++)
-                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", msg->info[j]);
-            /* SPar(1) is at info[0] if present — decode mode per §8.4 */
-            if (msg->info_len >= 1 && (msg->msg_type == 0x1 || msg->msg_type == 0x2 || msg->msg_type == 0x3)) {
-                int spar1 = msg->info[0] & 0x7F;
-                snprintf(detail, sizeof(detail),
-                         "fsk_ch=%s rev=%d mode=%s info=[%s]",
-                         ch_str, msg->revision,
-                         v8bis_spar1_mode_str(spar1), hex);
-            } else {
-                snprintf(detail, sizeof(detail),
-                         "fsk_ch=%s rev=%d info=[%s]", ch_str, msg->revision, hex);
+        {
+            /* Build detail string: header + decoded I/S/NS fields (MS/CL/CLR)
+             * or raw hex (ACK/NAK and any other type with payload). */
+            int dpos = 0;
+            dpos += snprintf(detail + dpos, sizeof(detail) - dpos,
+                             "fsk_ch=%s rev=%d", ch_str, msg->revision);
+            if (msg->info_len > 0 &&
+                (msg->msg_type == 0x1 || msg->msg_type == 0x2 || msg->msg_type == 0x3)) {
+                dpos += snprintf(detail + dpos, sizeof(detail) - dpos, " ");
+                dpos += v8bis_decode_info_field(msg->info, msg->info_len,
+                                                 detail + dpos,
+                                                 (int)sizeof(detail) - dpos);
+            } else if (msg->info_len > 0) {
+                int hlen = (msg->info_len < 16) ? msg->info_len : 16;
+                dpos += snprintf(detail + dpos, sizeof(detail) - dpos, " raw=[");
+                for (int j = 0; j < hlen; j++)
+                    dpos += snprintf(detail + dpos, sizeof(detail) - dpos,
+                                     "%s%02X", j == 0 ? "" : "-", msg->info[j]);
+                dpos += snprintf(detail + dpos, sizeof(detail) - dpos, "]");
             }
-        } else {
-            snprintf(detail, sizeof(detail), "fsk_ch=%s rev=%d", ch_str, msg->revision);
         }
 
         call_log_append(log, msg->sample_offset, 0, "V.8bis", summary, detail);
