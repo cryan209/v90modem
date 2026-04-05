@@ -1623,17 +1623,30 @@ static void detect_call_initiation_signals(const int16_t *samples,
               || strcmp(ev->summary, "QCA2d") == 0)) {
             continue;
         }
-        result->call_init.v92_qc2_seen = true;
-        result->call_init.v92_qc2_sample = ev->sample_offset;
-        snprintf(result->call_init.v92_qc2_name,
-                 sizeof(result->call_init.v92_qc2_name),
-                 "%.15s",
-                 ev->summary);
-        result->call_init.v92_qc2_digital = (strstr(ev->summary, "d") != NULL);
-        result->call_init.v92_qc2_qca = (strstr(ev->summary, "QCA") != NULL);
-        result->call_init.v92_qc2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
-        result->call_init.v92_qc2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
-        break;
+        if (strncmp(ev->summary, "QCA", 3) == 0) {
+            /* QCA2a or QCA2d — the initiating-station identification */
+            result->call_init.v92_qca2_seen = true;
+            result->call_init.v92_qca2_sample = ev->sample_offset;
+            snprintf(result->call_init.v92_qca2_name,
+                     sizeof(result->call_init.v92_qca2_name),
+                     "%.15s",
+                     ev->summary);
+            result->call_init.v92_qca2_digital = (strstr(ev->summary, "d") != NULL);
+            result->call_init.v92_qca2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
+            result->call_init.v92_qca2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
+        } else {
+            /* QC2a or QC2d — the responding-station identification */
+            result->call_init.v92_qc2_seen = true;
+            result->call_init.v92_qc2_sample = ev->sample_offset;
+            snprintf(result->call_init.v92_qc2_name,
+                     sizeof(result->call_init.v92_qc2_name),
+                     "%.15s",
+                     ev->summary);
+            result->call_init.v92_qc2_digital = (strstr(ev->summary, "d") != NULL);
+            result->call_init.v92_qc2_qca = false;
+            result->call_init.v92_qc2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
+            result->call_init.v92_qc2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
+        }
     }
     free(tmp_log.events);
     tmp_log.events = NULL;
@@ -2993,14 +3006,23 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 detail);
     }
     if (result->call_init.v92_qc2_seen) {
-        snprintf(detail, sizeof(detail), "%s %s",
-                 result->call_init.v92_qc2_digital ? "digital" : "analog",
-                 result->call_init.v92_qc2_qca ? "QCA" : "QC");
+        snprintf(detail, sizeof(detail), "%s QC",
+                 result->call_init.v92_qc2_digital ? "digital" : "analog");
         p12_append_phase1_event(result,
                                 result->call_init.v92_qc2_sample,
                                 0,
                                 "V.92",
                                 result->call_init.v92_qc2_name,
+                                detail);
+    }
+    if (result->call_init.v92_qca2_seen) {
+        snprintf(detail, sizeof(detail), "%s QCA",
+                 result->call_init.v92_qca2_digital ? "digital" : "analog");
+        p12_append_phase1_event(result,
+                                result->call_init.v92_qca2_sample,
+                                0,
+                                "V.92",
+                                result->call_init.v92_qca2_name,
                                 detail);
     }
 
@@ -6545,6 +6567,8 @@ void phase12_result_init(phase12_result_t *r)
     r->stereo_short_p1_partner_lm_level = -1;
     r->call_init.v92_qc2_uqts_ucode = -1;
     r->call_init.v92_qc2_lm_level = -1;
+    r->call_init.v92_qca2_uqts_ucode = -1;
+    r->call_init.v92_qca2_lm_level = -1;
     r->call_init.v92_short_p1_lm_level = -1;
     r->call_init.v92_phase2_handoff_sample = -1;
     r->log.events = NULL;
@@ -6731,6 +6755,27 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                         "V.92",
                         result->call_init.v92_qc2_name,
                         qc2_detail);
+    }
+    if (result->call_init.v92_qca2_seen) {
+        char qca2_detail[128];
+
+        if (result->call_init.v92_qca2_uqts_ucode >= 0) {
+            snprintf(qca2_detail, sizeof(qca2_detail),
+                     "source=call_initiation uqts_ucode=%d",
+                     result->call_init.v92_qca2_uqts_ucode);
+        } else if (result->call_init.v92_qca2_lm_level >= 0) {
+            snprintf(qca2_detail, sizeof(qca2_detail),
+                     "source=call_initiation lm=%d",
+                     result->call_init.v92_qca2_lm_level);
+        } else {
+            snprintf(qca2_detail, sizeof(qca2_detail), "source=call_initiation");
+        }
+        call_log_append(log,
+                        result->call_init.v92_qca2_sample,
+                        0,
+                        "V.92",
+                        result->call_init.v92_qca2_name,
+                        qca2_detail);
     }
 
     /* Phase 1 V.8 messages */
@@ -6984,6 +7029,13 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                      " qc=%s@%.1fms",
                      result->call_init.v92_qc2_name,
                      (double) result->call_init.v92_qc2_sample * 1000.0 / (double) sample_rate);
+        }
+        if (result->call_init.v92_qca2_seen) {
+            size_t dlen = strlen(detail);
+            snprintf(detail + dlen, sizeof(detail) - dlen,
+                     " qca=%s@%.1fms",
+                     result->call_init.v92_qca2_name,
+                     (double) result->call_init.v92_qca2_sample * 1000.0 / (double) sample_rate);
         }
         if (result->info_path_known) {
             size_t dlen = strlen(detail);

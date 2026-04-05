@@ -222,7 +222,9 @@ typedef enum {
     V8BIS_PARTIAL_SHORT_FRAME = 0,
     V8BIS_PARTIAL_NON_BYTE_ALIGNED,
     V8BIS_PARTIAL_BAD_CRC,
-    V8BIS_PARTIAL_ABORT_SEQUENCE
+    V8BIS_PARTIAL_ABORT_SEQUENCE,
+    V8BIS_PARTIAL_SHORT_PREAMBLE,   /* < 24 marking bits before first flag (Defect 4) */
+    V8BIS_PARTIAL_SINGLE_FLAG       /* < 2 opening flags before info field (Defect 5) */
 } v8bis_partial_reason_t;
 
 typedef struct {
@@ -247,6 +249,10 @@ typedef struct {
     uint8_t byte_val;
     int frame_start_bit;
     int bit_count;
+    /* Preamble and flag validation (Defects 4 & 5) */
+    int preamble_ones;          /* consecutive marking bits before first opening flag */
+    int frame_preamble_ones;    /* preamble_ones snapshot when the first flag fired */
+    int opening_flag_count;     /* consecutive flags before any data bytes */
     /* Sample position tracking */
     int current_chunk_sample;
     int carrier_on_sample;
@@ -269,6 +275,9 @@ typedef struct {
     int uqts_ucode;             /* analogue forms */
     int lm;                     /* digital forms */
     uint8_t id_octet;           /* bits 8..15 */
+    bool reserved_bits_set;     /* non-zero reserved bits (log only, not fatal) */
+    bool channel_mismatch;      /* arrived on unexpected V.21 channel */
+    int expected_channel;       /* 0=CH1(QCA2x), 1=CH2(QC2x) */
 } v92_qc2_id_t;
 
 static int v92_uqts_from_wxyz(int wxyz)
@@ -326,21 +335,27 @@ static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
     if (digital_modem) {
         int lm = (int) (b & 0x03U);         /* bits 8..9 */
 
-        /* bits 10..12 reserved=000 for QC2d/QCA2d */
-        if ((b & 0x1CU) != 0)
-            return false;
+        /* bits 10..12 should be 000 per V.92 Tables 12 and 14; log if set
+         * but do not reject — real hardware sometimes sets reserved bits */
+        out->reserved_bits_set = ((b & 0x1CU) != 0);
         out->lm = lm;
+        /* QCA2x on CH1 (initiating), QC2x on CH2 (responding) */
         out->name = qca ? "QCA2d" : "QC2d";
+        out->expected_channel = qca ? 0 : 1;
+        out->channel_mismatch = (msg->channel != out->expected_channel);
         out->ok = true;
         return true;
     }
 
     out->wxyz = (int) (b & 0x0FU);          /* bits 8..11 */
-    /* bit 12 reserved=0 for QC2a/QCA2a */
-    if ((b & 0x10U) != 0)
-        return false;
+    /* bit 12 should be 0 per V.92 Tables 3 and 5; log if set but do not
+     * reject — V.8bis compatibility says receivers ignore unknown bits */
+    out->reserved_bits_set = ((b & 0x10U) != 0);
     out->uqts_ucode = v92_uqts_from_wxyz(out->wxyz);
+    /* QCA2x on CH1 (initiating), QC2x on CH2 (responding) */
     out->name = qca ? "QCA2a" : "QC2a";
+    out->expected_channel = qca ? 0 : 1;
+    out->channel_mismatch = (msg->channel != out->expected_channel);
     out->ok = true;
     return true;
 }
@@ -411,6 +426,10 @@ static const char *v8bis_partial_reason_str(v8bis_partial_reason_t reason)
         return "bad_crc";
     case V8BIS_PARTIAL_ABORT_SEQUENCE:
         return "abort_sequence";
+    case V8BIS_PARTIAL_SHORT_PREAMBLE:
+        return "short_preamble";
+    case V8BIS_PARTIAL_SINGLE_FLAG:
+        return "single_flag";
     default:
         return "unknown";
     }
@@ -461,6 +480,16 @@ static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
                                                            : V8BIS_PARTIAL_NON_BYTE_ALIGNED);
         return;
     }
+    /* Defect 4: require ≥24 marking bits preamble (80% of spec's 30 bits, accommodating ±2% timing) */
+    if (rx->frame_preamble_ones < 24) {
+        v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_SHORT_PREAMBLE);
+        return;
+    }
+    /* Defect 5: require ≥2 opening flags per V.8bis §7.2.5 */
+    if (rx->opening_flag_count < 2) {
+        v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_SINGLE_FLAG);
+        return;
+    }
     if (rx->msg_count >= V8BIS_MSG_MAX)
         return;
 
@@ -493,7 +522,7 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
     if (bit < 0) {
         /* SIG_STATUS_CARRIER_UP = -2: record sample position */
         if (bit == -2)
-            rx->carrier_on_sample = rx->current_chunk_sample;
+            rx->carrier_on_sample = rx->current_chunk_sample + 80; /* midpoint of 160-sample chunk */
         return;
     }
 
@@ -501,6 +530,8 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
 
     if (bit == 1) {
         rx->ones_run++;
+        if (!rx->in_frame)
+            rx->preamble_ones++;  /* count marking bits before the first flag */
         if (rx->ones_run >= 7) {
             /* Abort sequence (7+ consecutive ones) */
             if (rx->in_frame)
@@ -515,6 +546,8 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
         /* Fall through: real data bit */
     } else {
         /* bit == 0 */
+        if (!rx->in_frame)
+            rx->preamble_ones = 0;  /* a 0 bit outside a frame resets preamble run */
         if (rx->ones_run == 5) {
             /* Stuffed zero — discard per §7.2.8 */
             rx->ones_run = 0;
@@ -522,13 +555,29 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
         }
         if (rx->ones_run == 6) {
             /* Flag byte (0x7E): 6 ones + 0 */
-            if (rx->in_frame)
+            if (!rx->in_frame) {
+                /* First opening flag: snapshot preamble, enter frame context */
+                rx->frame_preamble_ones = rx->preamble_ones;
+                rx->in_frame = true;
+                rx->flag_seen = true;
+                rx->frame_byte_count = 0;
+                rx->byte_bits = 0;
+                rx->byte_val = 0;
+                rx->opening_flag_count = 1;
+            } else if (rx->frame_byte_count == 0 && rx->byte_bits == 0) {
+                /* Additional opening flag (no data bytes received yet) */
+                rx->opening_flag_count++;
+            } else {
+                /* Closing flag: data was present, commit the frame */
                 v8bis_hdlc_commit_frame(rx);
-            rx->in_frame = true;
-            rx->flag_seen = true;
-            rx->frame_byte_count = 0;
-            rx->byte_bits = 0;
-            rx->byte_val = 0;
+                rx->in_frame = true;
+                rx->flag_seen = true;
+                rx->frame_byte_count = 0;
+                rx->byte_bits = 0;
+                rx->byte_val = 0;
+                rx->opening_flag_count = 1;
+                rx->frame_preamble_ones = 30; /* subsequent frames share same carrier burst */
+            }
             rx->ones_run = 0;
             rx->frame_start_bit = rx->bit_count;
             return;
@@ -631,10 +680,14 @@ void v8bis_collect_msg_events(call_log_t *log,
         }
     }
 
-    /* Dedup: skip a message if an identical type was already emitted within 400ms
-     * (crosstalk causes both stereo channels to decode the same FSK frame) */
+    /* Dedup: skip a message if an identical (type, channel) pair was already
+     * emitted within 400ms.  Crosstalk causes both stereo channels to decode
+     * the same FSK frame, so same-type same-channel within 400ms is a dup.
+     * QC2 and QCA2 both use msg_type 0xB but arrive on different V.21 channels
+     * (QC2x on CH2, QCA2x on CH1) — they must NOT be deduped against each
+     * other, so the dedup key includes the channel. */
     int last_emitted_sample[16];
-    uint8_t last_emitted_type[16];
+    uint8_t last_emitted_key[16];   /* msg_type | (channel << 4) */
     int emitted_count = 0;
     memset(last_emitted_sample, -1, sizeof(last_emitted_sample));
     memset(last_partial_sample, -1, sizeof(last_partial_sample));
@@ -643,16 +696,17 @@ void v8bis_collect_msg_events(call_log_t *log,
         const v8bis_decoded_msg_t *msg = all_msgs[i];
         const char *type_str = v8bis_msg_type_str(msg->msg_type);
         const char *ch_str = (msg->channel == 0) ? "initiating/CH1" : "responding/CH2";
+        uint8_t dedup_key = msg->msg_type | (uint8_t)(msg->channel << 4);
         v92_qc2_id_t v92_qc2;
 
         /* Skip frames with unknown/undefined type */
         if (msg->msg_type == 0 || strcmp(type_str, "unknown") == 0)
             continue;
 
-        /* Dedup: skip if same type decoded within ~400ms (3200 samples) */
+        /* Dedup: skip if same (type, channel) key seen within ~400ms (3200 samples) */
         bool is_dup = false;
         for (int k = 0; k < emitted_count; k++) {
-            if (last_emitted_type[k] == msg->msg_type
+            if (last_emitted_key[k] == dedup_key
                 && abs(msg->sample_offset - last_emitted_sample[k]) < 3200) {
                 is_dup = true;
                 break;
@@ -661,7 +715,7 @@ void v8bis_collect_msg_events(call_log_t *log,
         if (is_dup)
             continue;
         if (emitted_count < 16) {
-            last_emitted_type[emitted_count] = msg->msg_type;
+            last_emitted_key[emitted_count] = dedup_key;
             last_emitted_sample[emitted_count] = msg->sample_offset;
             emitted_count++;
         }
@@ -697,22 +751,26 @@ void v8bis_collect_msg_events(call_log_t *log,
             snprintf(summary, sizeof(summary), "%s", v92_qc2.name);
             if (v92_qc2.digital_modem) {
                 snprintf(detail, sizeof(detail),
-                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s lm=%d anspcm_level=%s id_octet=%02X",
+                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s lm=%d anspcm_level=%s id_octet=%02X%s%s",
                          v92_qc2.revision,
                          ch_str,
                          v92_qc2.lapm ? "yes" : "no",
                          v92_qc2.lm,
                          v92_anspcm_level_to_str(v92_qc2.lm),
-                         v92_qc2.id_octet);
+                         v92_qc2.id_octet,
+                         v92_qc2.reserved_bits_set ? " reserved_bits=set" : "",
+                         v92_qc2.channel_mismatch  ? " channel_mismatch=yes" : "");
             } else {
                 snprintf(detail, sizeof(detail),
-                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s uqts_index=0x%X uqts_ucode=%d id_octet=%02X",
+                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s uqts_index=0x%X uqts_ucode=%d id_octet=%02X%s%s",
                          v92_qc2.revision,
                          ch_str,
                          v92_qc2.lapm ? "yes" : "no",
                          v92_qc2.wxyz,
                          v92_qc2.uqts_ucode,
-                         v92_qc2.id_octet);
+                         v92_qc2.id_octet,
+                         v92_qc2.reserved_bits_set ? " reserved_bits=set" : "",
+                         v92_qc2.channel_mismatch  ? " channel_mismatch=yes" : "");
             }
             call_log_append(log, msg->sample_offset, 0, "V.92", summary, detail);
         }
@@ -743,19 +801,21 @@ void v8bis_collect_msg_events(call_log_t *log,
             for (int j = 0; j < hex_len; j++)
                 pos += snprintf(hex + pos, sizeof(hex) - (size_t) pos, "%s%02X", j == 0 ? "" : " ", partial->frame_buf[j]);
 
-            for (int k = 0; k < partial_emitted_count; k++) {
-                if (last_partial_type[k] == (partial->first_octet & 0x0F)
-                    && abs(partial->sample_offset - last_partial_sample[k]) < 3200) {
-                    is_dup = true;
-                    break;
+            {
+                uint8_t partial_key = (partial->first_octet & 0x0F)
+                                    | (uint8_t)(partial->channel << 4);
+                for (int k = 0; k < partial_emitted_count; k++) {
+                    if (last_partial_type[k] == partial_key
+                        && abs(partial->sample_offset - last_partial_sample[k]) < 3200) {
+                        is_dup = true;
+                        break;
+                    }
                 }
-            }
-            if (is_dup)
-                continue;
-            if (partial_emitted_count < 16) {
-                last_partial_type[partial_emitted_count] = (uint8_t) (partial->first_octet & 0x0F);
-                last_partial_sample[partial_emitted_count] = partial->sample_offset;
-                partial_emitted_count++;
+                if (!is_dup && partial_emitted_count < 16) {
+                    last_partial_type[partial_emitted_count] = partial_key;
+                    last_partial_sample[partial_emitted_count] = partial->sample_offset;
+                    partial_emitted_count++;
+                }
             }
 
             snprintf(summary, sizeof(summary), "Partial %s frame", type_str);

@@ -239,6 +239,13 @@ typedef struct {
     int v92_qc2_uqts_ucode;
     int v92_qc2_lm_level;
 
+    bool v92_qca2_seen;
+    int v92_qca2_sample;
+    char v92_qca2_name[16];
+    bool v92_qca2_digital;
+    int v92_qca2_uqts_ucode;
+    int v92_qca2_lm_level;
+
     bool v92_short_p1_seen;
     int v92_short_p1_sample;
     char v92_short_p1_name[16];
