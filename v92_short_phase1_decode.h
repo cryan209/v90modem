@@ -33,7 +33,19 @@ typedef struct {
     int start_sample;
     int qts_reps;
     int qts_bar_reps;
+    int alignment_phase;
+    int symbol_count;
+    int score;
 } v92_qts_hit_t;
+
+typedef struct {
+    bool seen;
+    int start_sample;
+    int duration_symbols;
+    int level;
+    int score;
+    int avg_abs_error;
+} v92_anspcm_hit_t;
 
 typedef int (*v92_codeword_to_ucode_fn)(v91_law_t law, uint8_t codeword);
 
@@ -52,5 +64,14 @@ bool v92_detect_qts_sequence(const uint8_t *codewords,
                              int search_end,
                              v92_codeword_to_ucode_fn codeword_to_ucode,
                              v92_qts_hit_t *out);
+
+bool v92_detect_anspcm_sequence(const uint8_t *codewords,
+                                int total,
+                                v91_law_t law,
+                                int lm_level,
+                                int alignment_phase,
+                                int search_start,
+                                int search_end,
+                                v92_anspcm_hit_t *out);
 
 #endif /* V92_SHORT_PHASE1_DECODE_H */

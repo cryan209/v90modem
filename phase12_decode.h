@@ -226,11 +226,22 @@ typedef struct {
     bool v92_short_p1_digital;
     bool v92_short_p1_qca;
     int v92_short_p1_uqts_ucode;
+    int v92_short_p1_lm_level;
 
     bool v92_qts_seen;
     int v92_qts_sample;
     int v92_qts_reps;
     int v92_qts_bar_reps;
+    int v92_qts_alignment_phase;
+    int v92_qts_symbol_count;
+    int v92_qts_score;
+
+    bool v92_anspcm_seen;
+    int v92_anspcm_sample;
+    int v92_anspcm_duration_symbols;
+    int v92_anspcm_level;
+    int v92_anspcm_score;
+    int v92_anspcm_avg_abs_error;
 
     bool v92_toneq_seen;
     int v92_toneq_sample;
@@ -321,6 +332,8 @@ typedef struct {
     bool stereo_short_p1_hint_valid;
     p12_short_p1_form_t stereo_short_p1_expected_form;
     bool stereo_short_p1_followup_allowed;
+    int stereo_short_p1_partner_uqts_ucode;
+    int stereo_short_p1_partner_lm_level;
 
     /* V.21 FSK bursts detected */
     int ch1_burst_count;

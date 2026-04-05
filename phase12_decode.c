@@ -1591,6 +1591,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
     result->call_init.v92_short_p1_digital = candidate.digital_modem;
     result->call_init.v92_short_p1_qca = candidate.qca;
     result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
+    result->call_init.v92_short_p1_lm_level = candidate.digital_modem ? candidate.aux_value : -1;
     result->v92_capable = true;
 
     if (p12_debug_enabled()) {
@@ -1615,10 +1616,17 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
     static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
     v92_qts_hit_t qts_hit;
     v92_qts_hit_t alt_qts_hit;
+    v92_anspcm_hit_t anspcm_hit;
+    v92_anspcm_hit_t alt_anspcm_hit;
     p12_tone_hit_t toneq_hit;
-    v91_law_t qts_law;
+    v91_law_t qts_law = law;
+    v91_law_t anspcm_law = law;
+    int effective_uqts_ucode;
+    int effective_lm_level;
     int qts_search_start;
     int qts_search_end;
+    int anspcm_search_start;
+    int anspcm_search_end;
     int toneq_search_start;
     int toneq_search_end;
 
@@ -1634,7 +1642,14 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         return;
     }
 
-    if (codewords && total_codewords > 0 && result->call_init.v92_short_p1_uqts_ucode >= 0) {
+    effective_uqts_ucode = (result->call_init.v92_short_p1_uqts_ucode >= 0)
+                         ? result->call_init.v92_short_p1_uqts_ucode
+                         : result->stereo_short_p1_partner_uqts_ucode;
+    effective_lm_level = (result->call_init.v92_short_p1_lm_level >= 0)
+                       ? result->call_init.v92_short_p1_lm_level
+                       : result->stereo_short_p1_partner_lm_level;
+
+    if (codewords && total_codewords > 0 && effective_uqts_ucode >= 0) {
         qts_search_start = result->call_init.v92_short_p1_sample + 400;
         qts_search_end = result->call_init.v92_short_p1_sample + 4000;
         if (qts_search_start < 0)
@@ -1647,7 +1662,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         if (v92_detect_qts_sequence(codewords,
                                     total_codewords,
                                     law,
-                                    result->call_init.v92_short_p1_uqts_ucode,
+                                    effective_uqts_ucode,
                                     qts_search_start,
                                     qts_search_end,
                                     v91_codeword_to_ucode,
@@ -1657,7 +1672,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         if (v92_detect_qts_sequence(codewords,
                                     total_codewords,
                                     (law == V91_LAW_ULAW) ? V91_LAW_ALAW : V91_LAW_ULAW,
-                                    result->call_init.v92_short_p1_uqts_ucode,
+                                    effective_uqts_ucode,
                                     qts_search_start,
                                     qts_search_end,
                                     v91_codeword_to_ucode,
@@ -1675,23 +1690,86 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
             result->call_init.v92_qts_sample = qts_hit.start_sample;
             result->call_init.v92_qts_reps = qts_hit.qts_reps;
             result->call_init.v92_qts_bar_reps = qts_hit.qts_bar_reps;
+            result->call_init.v92_qts_alignment_phase = qts_hit.alignment_phase;
+            result->call_init.v92_qts_symbol_count = qts_hit.symbol_count;
+            result->call_init.v92_qts_score = qts_hit.score;
             if (p12_debug_enabled()) {
                 fprintf(stderr,
-                        "[p12] V.92 QTS at %.1fms reps=%d qts_bar=%d law=%s\n",
+                        "[p12] V.92 QTS at %.1fms reps=%d qts_bar=%d align=%d syms=%d score=%d law=%s\n",
                         (double) qts_hit.start_sample * 1000.0 / (double) sample_rate,
                         qts_hit.qts_reps,
                         qts_hit.qts_bar_reps,
+                        qts_hit.alignment_phase,
+                        qts_hit.symbol_count,
+                        qts_hit.score,
                         (qts_law == V91_LAW_ALAW) ? "alaw" : "ulaw");
             }
         }
     }
 
-    toneq_search_start = result->call_init.v92_qts_seen
-                       ? (result->call_init.v92_qts_sample + 200)
-                       : (result->call_init.v92_short_p1_sample + 200);
-    toneq_search_end = result->call_init.v92_qts_seen
-                     ? (result->call_init.v92_qts_sample + 4000)
-                     : (result->call_init.v92_short_p1_sample + 5000);
+    if (codewords && total_codewords > 0
+        && effective_lm_level >= 0
+        && result->call_init.v92_qts_seen) {
+        anspcm_search_start = result->call_init.v92_qts_sample
+                            + result->call_init.v92_qts_symbol_count;
+        anspcm_search_end = anspcm_search_start + 6000;
+        if (anspcm_search_start < 0)
+            anspcm_search_start = 0;
+        if (anspcm_search_end > total_codewords)
+            anspcm_search_end = total_codewords;
+        memset(&anspcm_hit, 0, sizeof(anspcm_hit));
+        memset(&alt_anspcm_hit, 0, sizeof(alt_anspcm_hit));
+        anspcm_law = qts_law;
+        if (v92_detect_anspcm_sequence(codewords,
+                                       total_codewords,
+                                       qts_law,
+                                       effective_lm_level,
+                                       result->call_init.v92_qts_alignment_phase,
+                                       anspcm_search_start,
+                                       anspcm_search_end,
+                                       &anspcm_hit)) {
+            anspcm_law = qts_law;
+        }
+        if (v92_detect_anspcm_sequence(codewords,
+                                       total_codewords,
+                                       (qts_law == V91_LAW_ULAW) ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                       effective_lm_level,
+                                       result->call_init.v92_qts_alignment_phase,
+                                       anspcm_search_start,
+                                       anspcm_search_end,
+                                       &alt_anspcm_hit)) {
+            if (!anspcm_hit.seen || alt_anspcm_hit.score > anspcm_hit.score) {
+                anspcm_hit = alt_anspcm_hit;
+                anspcm_law = (qts_law == V91_LAW_ULAW) ? V91_LAW_ALAW : V91_LAW_ULAW;
+            }
+        }
+        if (anspcm_hit.seen) {
+            result->call_init.v92_anspcm_seen = true;
+            result->call_init.v92_anspcm_sample = anspcm_hit.start_sample;
+            result->call_init.v92_anspcm_duration_symbols = anspcm_hit.duration_symbols;
+            result->call_init.v92_anspcm_level = anspcm_hit.level;
+            result->call_init.v92_anspcm_score = anspcm_hit.score;
+            result->call_init.v92_anspcm_avg_abs_error = anspcm_hit.avg_abs_error;
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 ANSpcm at %.1fms dur=%.1fms level=%s score=%d avgerr=%d law=%s\n",
+                        (double) anspcm_hit.start_sample * 1000.0 / (double) sample_rate,
+                        (double) anspcm_hit.duration_symbols * 1000.0 / (double) sample_rate,
+                        v92_anspcm_level_to_str(anspcm_hit.level),
+                        anspcm_hit.score,
+                        anspcm_hit.avg_abs_error,
+                        (anspcm_law == V91_LAW_ALAW) ? "alaw" : "ulaw");
+            }
+        }
+    }
+
+    if (!result->call_init.v92_anspcm_seen)
+        return;
+
+    toneq_search_start = result->call_init.v92_anspcm_sample;
+    toneq_search_end = result->call_init.v92_anspcm_sample
+                     + result->call_init.v92_anspcm_duration_symbols
+                     + 2000;
     if (toneq_search_start < 0)
         toneq_search_start = 0;
     if (toneq_search_end > total_samples)
@@ -5477,6 +5555,9 @@ void phase12_result_init(phase12_result_t *r)
     memset(r, 0, sizeof(*r));
     r->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     r->stereo_short_p1_followup_allowed = true;
+    r->stereo_short_p1_partner_uqts_ucode = -1;
+    r->stereo_short_p1_partner_lm_level = -1;
+    r->call_init.v92_short_p1_lm_level = -1;
     r->log.events = NULL;
     r->log.count = 0;
     r->log.cap = 0;

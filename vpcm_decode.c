@@ -6933,6 +6933,10 @@ static void decode_v8_pass(const int16_t *samples,
                                            sample_to_ms(qts_hit.start_sample, 8000),
                                            qts_hit.qts_reps,
                                            qts_hit.qts_bar_reps);
+                                    printf("  QTS detail:      align=%d symbols=%d score=%d\n",
+                                           qts_hit.alignment_phase,
+                                           qts_hit.symbol_count,
+                                           qts_hit.score);
                                 }
                             }
                             if (v92c.repeat_seen) {
@@ -7290,10 +7294,13 @@ static void collect_v8_event(call_log_t *log,
                                                    codeword_to_ucode,
                                                    &qts_hit)) {
                         snprintf(qtsbuf, sizeof(qtsbuf),
-                                 " qts=%.1fms/%dreps qts_bar=%dreps",
+                                 " qts=%.1fms/%dreps qts_bar=%dreps qts_align=%d qts_syms=%d qts_score=%d",
                                  sample_to_ms(qts_hit.start_sample, 8000),
                                  qts_hit.qts_reps,
-                                 qts_hit.qts_bar_reps);
+                                 qts_hit.qts_bar_reps,
+                                 qts_hit.alignment_phase,
+                                 qts_hit.symbol_count,
+                                 qts_hit.score);
                     }
                     snprintf(summary, sizeof(summary),
                              "%s (%s) candidate",
@@ -10018,6 +10025,8 @@ typedef struct {
     bool valid;
     int left_expected_form;
     int right_expected_form;
+    int analog_uqts_ucode;
+    int digital_lm_level;
     int left_digital_score;
     int right_digital_score;
     int left_analog_score;
@@ -12120,6 +12129,8 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
     memset(out, 0, sizeof(*out));
     out->left_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     out->right_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
+    out->analog_uqts_ucode = -1;
+    out->digital_lm_level = -1;
 
     phase12_result_init(&left_p12);
     phase12_result_init(&right_p12);
@@ -12163,9 +12174,17 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
         if (left_pair_score > right_pair_score) {
             out->left_expected_form = P12_SHORT_P1_FORM_DIGITAL;
             out->right_expected_form = P12_SHORT_P1_FORM_ANALOG;
+            if (left_p12.call_init.v92_short_p1_seen && left_p12.call_init.v92_short_p1_digital)
+                out->digital_lm_level = left_p12.call_init.v92_short_p1_lm_level;
+            if (right_p12.call_init.v92_short_p1_seen && !right_p12.call_init.v92_short_p1_digital)
+                out->analog_uqts_ucode = right_p12.call_init.v92_short_p1_uqts_ucode;
         } else {
             out->left_expected_form = P12_SHORT_P1_FORM_ANALOG;
             out->right_expected_form = P12_SHORT_P1_FORM_DIGITAL;
+            if (right_p12.call_init.v92_short_p1_seen && right_p12.call_init.v92_short_p1_digital)
+                out->digital_lm_level = right_p12.call_init.v92_short_p1_lm_level;
+            if (left_p12.call_init.v92_short_p1_seen && !left_p12.call_init.v92_short_p1_digital)
+                out->analog_uqts_ucode = left_p12.call_init.v92_short_p1_uqts_ucode;
         }
     }
 
@@ -12186,6 +12205,8 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_hint_valid = false;
     p12->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     p12->stereo_short_p1_followup_allowed = true;
+    p12->stereo_short_p1_partner_uqts_ucode = -1;
+    p12->stereo_short_p1_partner_lm_level = -1;
 
     if (!hint || !hint->valid)
         return;
@@ -12197,6 +12218,8 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_hint_valid = true;
     p12->stereo_short_p1_expected_form = (p12_short_p1_form_t) expected_form;
     p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL);
+    p12->stereo_short_p1_partner_uqts_ucode = hint->analog_uqts_ucode;
+    p12->stereo_short_p1_partner_lm_level = hint->digital_lm_level;
 }
 
 static void print_stereo_channel_tells(const int16_t *left_linear_samples,
@@ -12428,10 +12451,21 @@ static void run_decode_suite(const char *label,
                        p12.call_init.v92_short_p1_qca ? "QCA" : "QC");
             }
             if (p12.call_init.v92_qts_seen) {
-                printf("  V.92 QTS: %.1f ms (%d QTS reps, %d QTS\\\\ reps)\n",
+                printf("  V.92 QTS: %.1f ms (%d QTS reps, %d QTS\\\\ reps, align=%d, symbols=%d, score=%d)\n",
                        sample_to_ms(p12.call_init.v92_qts_sample, sample_rate),
                        p12.call_init.v92_qts_reps,
-                       p12.call_init.v92_qts_bar_reps);
+                       p12.call_init.v92_qts_bar_reps,
+                       p12.call_init.v92_qts_alignment_phase,
+                       p12.call_init.v92_qts_symbol_count,
+                       p12.call_init.v92_qts_score);
+            }
+            if (p12.call_init.v92_anspcm_seen) {
+                printf("  V.92 ANSpcm: %.1f ms (dur=%.1f ms, level=%s, score=%d, avgerr=%d)\n",
+                       sample_to_ms(p12.call_init.v92_anspcm_sample, sample_rate),
+                       sample_to_ms(p12.call_init.v92_anspcm_duration_symbols, sample_rate),
+                       v92_anspcm_level_to_str(p12.call_init.v92_anspcm_level),
+                       p12.call_init.v92_anspcm_score,
+                       p12.call_init.v92_anspcm_avg_abs_error);
             }
             if (p12.call_init.v92_toneq_seen) {
                 printf("  V.92 TONEq: %.1f ms (%.0f ms)\n",
