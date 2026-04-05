@@ -12193,6 +12193,7 @@ static bool phase12_analog_short_p1_ready(const phase12_result_t *p12)
 
 typedef struct {
     bool seen;
+    int sample;
     bool digital;
     bool qca;
     int family;
@@ -12220,12 +12221,14 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
         return false;
 
     memset(out, 0, sizeof(*out));
+    out->sample = -1;
     out->uqts_ucode = -1;
     out->lm_level = -1;
 
     if (expect_digital && p12->call_init.v92_short_p1_strict_digital_seen) {
         out->seen = true;
         out->digital = true;
+        out->sample = p12->call_init.v92_short_p1_strict_digital_sample;
         out->qca = p12->call_init.v92_short_p1_strict_digital_qca;
         out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_strict_digital_name);
         out->uqts_ucode = p12->call_init.v92_short_p1_strict_digital_uqts_ucode;
@@ -12238,6 +12241,7 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     if (!expect_digital && p12->call_init.v92_short_p1_strict_analog_seen) {
         out->seen = true;
         out->digital = false;
+        out->sample = p12->call_init.v92_short_p1_strict_analog_sample;
         out->qca = p12->call_init.v92_short_p1_strict_analog_qca;
         out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_strict_analog_name);
         out->uqts_ucode = p12->call_init.v92_short_p1_strict_analog_uqts_ucode;
@@ -12250,6 +12254,7 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     if (p12->call_init.v92_short_p1_seen
         && p12->call_init.v92_short_p1_digital == expect_digital) {
         out->seen = true;
+        out->sample = p12->call_init.v92_short_p1_sample;
         out->digital = p12->call_init.v92_short_p1_digital;
         out->qca = p12->call_init.v92_short_p1_qca;
         out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_name);
@@ -12262,6 +12267,7 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     if (p12->call_init.v92_qc2_seen
         && p12->call_init.v92_qc2_digital == expect_digital) {
         out->seen = true;
+        out->sample = p12->call_init.v92_qc2_sample;
         out->digital = p12->call_init.v92_qc2_digital;
         out->qca = p12->call_init.v92_qc2_qca;
         out->family = phase12_short_p1_family_from_name(p12->call_init.v92_qc2_name);
@@ -12365,12 +12371,8 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->right_partner_family = left_digital_sig.family;
             out->left_partner_qca = right_analog_sig.qca;
             out->right_partner_qca = left_digital_sig.qca;
-            out->left_partner_sample = right_p12.call_init.v92_short_p1_strict_analog_seen
-                                     ? right_p12.call_init.v92_short_p1_strict_analog_sample
-                                     : right_p12.call_init.v92_qc2_sample;
-            out->right_partner_sample = left_p12.call_init.v92_short_p1_strict_digital_seen
-                                      ? left_p12.call_init.v92_short_p1_strict_digital_sample
-                                      : left_p12.call_init.v92_qc2_sample;
+            out->left_partner_sample = right_analog_sig.sample;
+            out->right_partner_sample = left_digital_sig.sample;
             out->digital_lm_level = left_digital_sig.lm_level;
             out->analog_uqts_ucode = right_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&right_p12);
@@ -12386,12 +12388,8 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->right_partner_family = left_analog_sig.family;
             out->left_partner_qca = right_digital_sig.qca;
             out->right_partner_qca = left_analog_sig.qca;
-            out->left_partner_sample = right_p12.call_init.v92_short_p1_strict_digital_seen
-                                     ? right_p12.call_init.v92_short_p1_strict_digital_sample
-                                     : right_p12.call_init.v92_qc2_sample;
-            out->right_partner_sample = left_p12.call_init.v92_short_p1_strict_analog_seen
-                                      ? left_p12.call_init.v92_short_p1_strict_analog_sample
-                                      : left_p12.call_init.v92_qc2_sample;
+            out->left_partner_sample = right_digital_sig.sample;
+            out->right_partner_sample = left_analog_sig.sample;
             out->digital_lm_level = right_digital_sig.lm_level;
             out->analog_uqts_ucode = left_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&left_p12);
