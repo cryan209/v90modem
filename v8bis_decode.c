@@ -368,6 +368,26 @@ static bool v92_decode_qc2_id_partial(const v8bis_partial_frame_t *partial,
     return v92_decode_qc2_id(&msg, out);
 }
 
+static int v8bis_partial_first_octet_valid_bits(const v8bis_partial_frame_t *partial)
+{
+    if (!partial)
+        return 0;
+    if (partial->frame_byte_count > 0)
+        return 8;
+    if (partial->byte_bits > 0)
+        return partial->byte_bits;
+    return 0;
+}
+
+static const char *v8bis_partial_type_str(const v8bis_partial_frame_t *partial)
+{
+    if (!partial)
+        return "unknown";
+    if (v8bis_partial_first_octet_valid_bits(partial) < 4)
+        return "unknown";
+    return v8bis_msg_type_str(partial->first_octet & 0x0F);
+}
+
 /* CRC-16/CCITT (x^16 + x^12 + x^5 + 1) per ISO/IEC 3309 / V.8bis §7.2.7 */
 static uint16_t v8bis_crc16(const uint8_t *data, int len)
 {
@@ -704,15 +724,21 @@ void v8bis_collect_msg_events(call_log_t *log,
         for (int i = 0; i < rx->partial_count; i++) {
             const v8bis_partial_frame_t *partial = &rx->partials[i];
             const char *ch_str = partial->channel == 0 ? "CH1/initiating" : "CH2/responding";
-            const char *type_str = v8bis_msg_type_str(partial->first_octet & 0x0F);
+            const char *type_str = v8bis_partial_type_str(partial);
             char hex[80];
+            char rev_buf[8];
             int hex_len = partial->frame_byte_count;
             int pos = 0;
             bool is_dup = false;
             v92_qc2_id_t v92_qc2;
+            int first_octet_bits = v8bis_partial_first_octet_valid_bits(partial);
 
             if (hex_len > 6)
                 hex_len = 6;
+            if (first_octet_bits >= 8)
+                snprintf(rev_buf, sizeof(rev_buf), "%d", (partial->first_octet >> 4) & 0x0F);
+            else
+                snprintf(rev_buf, sizeof(rev_buf), "?");
             hex[0] = '\0';
             for (int j = 0; j < hex_len; j++)
                 pos += snprintf(hex + pos, sizeof(hex) - (size_t) pos, "%s%02X", j == 0 ? "" : " ", partial->frame_buf[j]);
@@ -734,9 +760,10 @@ void v8bis_collect_msg_events(call_log_t *log,
 
             snprintf(summary, sizeof(summary), "Partial %s frame", type_str);
             snprintf(detail, sizeof(detail),
-                     "fsk_ch=%s rev=%d bytes=%d trailing_bits=%d crc=%s reason=%s raw=%s",
+                     "fsk_ch=%s first_octet_bits=%d rev=%s bytes=%d trailing_bits=%d crc=%s reason=%s raw=%s",
                      ch_str,
-                     (partial->first_octet >> 4) & 0x0F,
+                     first_octet_bits,
+                     rev_buf,
                      partial->frame_byte_count,
                      partial->byte_bits,
                      partial->crc_ok ? "ok" : "failed",
