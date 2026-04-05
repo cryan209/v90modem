@@ -12055,6 +12055,31 @@ static int phase12_digital_likeness_score(const phase12_result_t *p12)
     return score;
 }
 
+static int phase12_default_dil_presence_score(const uint8_t *codewords,
+                                              int total_codewords,
+                                              v91_law_t law)
+{
+    uint8_t expected_dil[V91_DEFAULT_DIL_SYMBOLS];
+    v91_dil_desc_t desc;
+    v91_state_t dil_state;
+    int dil_len;
+
+    if (!codewords || total_codewords <= 0)
+        return 0;
+
+    v91_default_dil_init(&desc);
+    v91_init(&dil_state, law, V91_MODE_TRANSPARENT);
+    dil_len = v91_tx_default_dil_codewords(&dil_state, expected_dil, V91_DEFAULT_DIL_SYMBOLS);
+    if (dil_len <= 0 || total_codewords < dil_len)
+        return 0;
+
+    for (int offset = 0; offset + dil_len <= total_codewords; offset++) {
+        if (memcmp(codewords + offset, expected_dil, (size_t) dil_len) == 0)
+            return 48;
+    }
+    return 0;
+}
+
 static int phase12_analog_likeness_score(const phase12_result_t *p12)
 {
     int score = 0;
@@ -12173,6 +12198,18 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     out->uqts_ucode = -1;
     out->lm_level = -1;
 
+    if (expect_digital && p12->call_init.v92_short_p1_alt_digital_seen) {
+        out->seen = true;
+        out->digital = true;
+        out->qca = p12->call_init.v92_short_p1_alt_digital_qca;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_alt_digital_name);
+        out->uqts_ucode = p12->call_init.v92_short_p1_alt_digital_uqts_ucode;
+        out->lm_level = p12->call_init.v92_short_p1_alt_digital_lm_level;
+        out->name = p12->call_init.v92_short_p1_alt_digital_name;
+        if (out->family != 0)
+            return true;
+    }
+
     if (p12->call_init.v92_short_p1_seen
         && p12->call_init.v92_short_p1_digital == expect_digital) {
         out->seen = true;
@@ -12254,6 +12291,12 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
     out->right_digital_score = phase12_digital_likeness_score(&right_p12);
     out->left_analog_score = phase12_analog_likeness_score(&left_p12);
     out->right_analog_score = phase12_analog_likeness_score(&right_p12);
+    out->left_digital_score += phase12_default_dil_presence_score(left_g711_codewords,
+                                                                  total_codewords,
+                                                                  law);
+    out->right_digital_score += phase12_default_dil_presence_score(right_g711_codewords,
+                                                                   total_codewords,
+                                                                   law);
 
     memset(&left_digital_sig, 0, sizeof(left_digital_sig));
     memset(&right_digital_sig, 0, sizeof(right_digital_sig));

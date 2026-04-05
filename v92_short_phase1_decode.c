@@ -98,6 +98,113 @@ static bool v92_same_decoded_payload(const v92_short_phase1_candidate_t *a,
         && a->aux_value == b->aux_value;
 }
 
+static uint16_t v92_build_frame_bits(bool digital_modem,
+                                     bool qca,
+                                     bool lapm,
+                                     int aux_value)
+{
+    uint16_t frame_bits = 0;
+
+    frame_bits |= (uint16_t) (digital_modem ? 1U : 0U) << 1;
+    frame_bits |= (uint16_t) (qca ? 1U : 0U) << 2;
+    frame_bits |= (uint16_t) (lapm ? 1U : 0U) << 3;
+    if (digital_modem) {
+        frame_bits |= (uint16_t) (aux_value & 0x3U) << 7;
+    } else {
+        frame_bits |= (uint16_t) ((aux_value >> 3) & 0x1U) << 4;
+        frame_bits |= (uint16_t) ((aux_value >> 2) & 0x1U) << 6;
+        frame_bits |= (uint16_t) ((aux_value >> 1) & 0x1U) << 7;
+        frame_bits |= (uint16_t) (aux_value & 0x1U) << 8;
+    }
+    frame_bits |= 1U << 9;
+    return frame_bits;
+}
+
+static bool v92_decode_frame_bits_soft(uint16_t observed_bits,
+                                       const double *confidence,
+                                       bool use_ch2,
+                                       v92_short_phase1_candidate_t *out)
+{
+    v92_short_phase1_candidate_t best = {0};
+    int best_score = -1000000;
+    int best_errors = 1000;
+
+    if (!out)
+        return false;
+
+    for (int digital_modem = 0; digital_modem <= 1; digital_modem++) {
+        for (int qca = 0; qca <= 1; qca++) {
+            for (int lapm = 0; lapm <= 1; lapm++) {
+                int aux_limit = digital_modem ? 4 : 16;
+
+                for (int aux_value = 0; aux_value < aux_limit; aux_value++) {
+                    uint16_t frame_bits = v92_build_frame_bits(digital_modem != 0,
+                                                               qca != 0,
+                                                               lapm != 0,
+                                                               aux_value);
+                    int score = 0;
+                    int errors = 0;
+
+                    for (int bit = 0; bit < 10; bit++) {
+                        int observed = (observed_bits >> bit) & 1U;
+                        int expected = (frame_bits >> bit) & 1U;
+                        int weight = 8;
+
+                        if (confidence) {
+                            double c = confidence[bit];
+
+                            if (c > 0.75)
+                                weight += 8;
+                            else if (c > 0.40)
+                                weight += 4;
+                            else if (c > 0.15)
+                                weight += 2;
+                        }
+
+                        if (observed == expected) {
+                            score += weight;
+                        } else {
+                            score -= weight + 6;
+                            errors++;
+                        }
+                    }
+
+                    if (qca == (use_ch2 ? 1 : 0))
+                        score += 8;
+                    else
+                        score -= 4;
+
+                    if (score > best_score
+                        || (score == best_score && errors < best_errors)) {
+                        memset(&best, 0, sizeof(best));
+                        if (!v92_unpack_frame_bits(frame_bits, &best))
+                            continue;
+                        best.soft_match = (errors != 0);
+                        best.bit_error_count = errors;
+                        best.soft_score = score;
+                        best.frame1_bits = observed_bits;
+                        best.decoded_frame_bits = frame_bits;
+                        best.decoded_frame_index = 0;
+                        best.ok = true;
+                        best_score = score;
+                        best_errors = errors;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!best.ok)
+        return false;
+    if (best.bit_error_count > 3)
+        return false;
+    if (best.soft_score < 52)
+        return false;
+
+    *out = best;
+    return true;
+}
+
 bool v92_decode_short_phase1_candidate(const uint8_t *bits,
                                        int bit_len,
                                        bool use_ch2,
@@ -162,8 +269,74 @@ bool v92_decode_short_phase1_candidate(const uint8_t *bits,
 
     out->decoded_frame_index = chosen_index;
     out->decoded_frame_bits = (chosen_index > 0) ? out->frame2_bits : out->frame1_bits;
+    out->soft_match = false;
+    out->bit_error_count = 0;
+    out->soft_score = 0;
     out->ok = true;
     return true;
+}
+
+bool v92_decode_short_phase1_candidate_soft(const uint8_t *bits,
+                                            const double *confidence,
+                                            int bit_len,
+                                            bool use_ch2,
+                                            v92_short_phase1_candidate_t *out)
+{
+    v92_short_phase1_candidate_t strict = {0};
+    v92_short_phase1_candidate_t first = {0};
+    v92_short_phase1_candidate_t repeat = {0};
+    bool first_ok;
+    bool repeat_ok = false;
+
+    if (!bits || bit_len < 30 || !out)
+        return false;
+    if (v92_decode_short_phase1_candidate(bits, bit_len, use_ch2, out))
+        return true;
+
+    memset(out, 0, sizeof(*out));
+    memset(&strict, 0, sizeof(strict));
+    first_ok = v92_decode_frame_bits_soft(pack_lsb_bits(bits, 20, 10),
+                                          confidence ? (confidence + 20) : NULL,
+                                          use_ch2,
+                                          &first);
+    if (bit_len >= 60) {
+        repeat_ok = v92_decode_frame_bits_soft(pack_lsb_bits(bits, 50, 10),
+                                               confidence ? (confidence + 50) : NULL,
+                                               use_ch2,
+                                               &repeat);
+    }
+
+    if (repeat_ok
+        && (!first_ok
+            || repeat.soft_score > first.soft_score
+            || (repeat.soft_score == first.soft_score
+                && repeat.bit_error_count < first.bit_error_count))) {
+        *out = repeat;
+        out->decoded_frame_index = 1;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+        out->decoded_frame_bits = repeat.decoded_frame_bits;
+        out->repeat_seen = bit_len >= 60;
+        out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        out->ok = true;
+        return true;
+    }
+
+    if (first_ok) {
+        *out = first;
+        out->decoded_frame_index = 0;
+        out->frame1_bits = pack_lsb_bits(bits, 20, 10);
+        if (bit_len >= 60) {
+            out->frame2_bits = pack_lsb_bits(bits, 50, 10);
+            out->repeat_seen = true;
+            out->repeat_match = first_ok && repeat_ok && v92_same_decoded_payload(&first, &repeat);
+        }
+        out->decoded_frame_bits = first.decoded_frame_bits;
+        out->ok = true;
+        return true;
+    }
+
+    return false;
 }
 
 const char *v92_anspcm_level_to_str(int level)

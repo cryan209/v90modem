@@ -26,6 +26,9 @@ typedef struct {
     int decoded_frame_index;
     bool repeat_seen;
     bool repeat_match;
+    bool soft_match;
+    int bit_error_count;
+    int soft_score;
 } v92_short_phase1_candidate_t;
 
 typedef struct {
@@ -53,6 +56,12 @@ bool v92_decode_short_phase1_candidate(const uint8_t *bits,
                                        int bit_len,
                                        bool use_ch2,
                                        v92_short_phase1_candidate_t *out);
+
+bool v92_decode_short_phase1_candidate_soft(const uint8_t *bits,
+                                            const double *confidence,
+                                            int bit_len,
+                                            bool use_ch2,
+                                            v92_short_phase1_candidate_t *out);
 
 const char *v92_anspcm_level_to_str(int level);
 

@@ -231,6 +231,14 @@ typedef struct {
     bool v92_short_p1_qca;
     int v92_short_p1_uqts_ucode;
     int v92_short_p1_lm_level;
+    bool v92_short_p1_alt_digital_seen;
+    int v92_short_p1_alt_digital_sample;
+    char v92_short_p1_alt_digital_name[16];
+    bool v92_short_p1_alt_digital_qca;
+    int v92_short_p1_alt_digital_uqts_ucode;
+    int v92_short_p1_alt_digital_lm_level;
+    int v92_short_p1_alt_digital_score;
+    int v92_short_p1_alt_digital_bit_errors;
 
     bool v92_qts_seen;
     int v92_qts_sample;
