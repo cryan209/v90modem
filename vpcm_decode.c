@@ -2110,6 +2110,84 @@ static void append_v34_mp_html_section(char *out,
     }
 }
 
+/* Extract the content of a "Tag:[content]" section from a V.8bis detail string.
+ * Searches for " Tag:[" (with leading space) and returns the content up to the
+ * matching "]". Returns chars written (not including NUL), or 0 if not found. */
+static int v8bis_extract_bracket_section(const char *detail, const char *tag,
+                                          char *out, int out_sz)
+{
+    char needle[64];
+    const char *p;
+    const char *end;
+    int len;
+
+    if (!detail || !tag || !out || out_sz <= 0)
+        return 0;
+    snprintf(needle, sizeof(needle), " %s:[", tag);
+    p = strstr(detail, needle);
+    if (!p) {
+        /* Also try at start of string (no leading space) */
+        snprintf(needle, sizeof(needle), "%s:[", tag);
+        if (strncmp(detail, needle, strlen(needle)) != 0)
+            return 0;
+        p = detail;
+    } else {
+        p++;  /* skip the leading space */
+    }
+    p += strlen(tag) + 2;  /* skip "Tag:[" */
+    end = strchr(p, ']');
+    if (!end)
+        return 0;
+    len = (int)(end - p);
+    if (len >= out_sz)
+        len = out_sz - 1;
+    memcpy(out, p, (size_t) len);
+    out[len] = '\0';
+    return len;
+}
+
+/* Convert V.8bis flag string "A+B+C" to "A + B + C" for display.
+ * Also replaces internal underscores with spaces. */
+static void v8bis_flags_pretty(const char *src, char *dst, int dst_sz)
+{
+    int di = 0;
+    if (!src || !dst || dst_sz <= 0) return;
+    for (int si = 0; src[si] && di < dst_sz - 1; si++) {
+        char c = src[si];
+        if (c == '+') {
+            if (di + 3 < dst_sz) {
+                dst[di++] = ' ';
+                dst[di++] = '+';
+                dst[di++] = ' ';
+            }
+        } else {
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
+}
+
+/* Map a T.35 country code (hex string like "0xB5") to a country name. */
+static const char *t35_country_name(const char *hex_str)
+{
+    unsigned int code = 0;
+    if (!hex_str) return NULL;
+    if (sscanf(hex_str, "0x%X", &code) != 1 &&
+        sscanf(hex_str, "%X", &code) != 1)
+        return NULL;
+    switch (code) {
+    case 0xB5: return "United States";
+    case 0x61: return "Australia";
+    case 0x78: return "United Kingdom";
+    case 0x26: return "Germany";
+    case 0xA0: return "Japan";
+    case 0x51: return "France";
+    case 0x46: return "Canada";
+    case 0x3D: return "Sweden";
+    default:   return NULL;
+    }
+}
+
 static void build_visual_event_detail_html(const call_log_event_t *event, char *out, size_t out_len)
 {
     detail_kv_t pairs[128];
@@ -2532,6 +2610,154 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
         append_html_label_value(out, out_len, "Protocol", detail_value(pairs, pair_count, "protocol"));
         append_html_label_value(out, out_len, "PCM modem", detail_value(pairs, pair_count, "pcm"));
         append_html_label_value(out, out_len, "PSTN access", detail_value(pairs, pair_count, "pstn"));
+        appendf(out, out_len, "</div>");
+        return;
+    }
+
+    /* V.8bis FSK message events (MS, CL, CLR, ACK, NAK family) */
+    if (strcmp(event->protocol, "V.8bis") == 0
+        && detail_value(pairs, pair_count, "fsk_ch") != NULL) {
+        const char *fsk_ch = detail_value(pairs, pair_count, "fsk_ch");
+        const char *rev    = detail_value(pairs, pair_count, "rev");
+        char section[512];
+        char pretty[512];
+        bool has_params = false;
+
+        const char *ch_display;
+        if (fsk_ch && strstr(fsk_ch, "CH1") != NULL)
+            ch_display = "CH1 \xe2\x80\x94 Initiating (V.21 Low, 1080/1180 Hz)";
+        else if (fsk_ch && strstr(fsk_ch, "CH2") != NULL)
+            ch_display = "CH2 \xe2\x80\x94 Responding (V.21 High, 1750/1850 Hz)";
+        else
+            ch_display = fsk_ch ? fsk_ch : "unknown";
+
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        append_html_label_value(out, out_len, "FSK channel", ch_display);
+        append_html_label_value(out, out_len, "Revision", rev ? rev : "0");
+
+        if (v8bis_extract_bracket_section(event->detail, "I", section, sizeof(section)) > 0) {
+            v8bis_flags_pretty(section, pretty, sizeof(pretty));
+            append_html_label_value(out, out_len, "I-field capabilities (NPar 1)", pretty);
+            has_params = true;
+        }
+
+        if (v8bis_extract_bracket_section(event->detail, "S", section, sizeof(section)) > 0) {
+            v8bis_flags_pretty(section, pretty, sizeof(pretty));
+            append_html_label_value(out, out_len, "S-field mode (SPar 1)", pretty);
+            has_params = true;
+        }
+
+        {
+            static const char * const mode_tags[] = {
+                "Data", "SVD", "H.324", "V.18", "Analogue", "T.101", NULL
+            };
+            static const char * const mode_labels[] = {
+                "Data capabilities (NPar 2)",
+                "SVD capabilities (NPar 2)",
+                "H.324 capabilities (NPar 2)",
+                "V.18 capabilities (NPar 2)",
+                "Analogue capabilities (NPar 2)",
+                "T.101 capabilities (NPar 2)",
+                NULL
+            };
+            for (int m = 0; mode_tags[m] != NULL; m++) {
+                if (v8bis_extract_bracket_section(event->detail, mode_tags[m],
+                                                   section, sizeof(section)) > 0) {
+                    v8bis_flags_pretty(section, pretty, sizeof(pretty));
+                    append_html_label_value(out, out_len, mode_labels[m], pretty);
+                    has_params = true;
+                }
+            }
+        }
+
+        if (strstr(event->detail, " S-NS") != NULL) {
+            append_html_label_value(out, out_len, "NS-capabilities (S-field)", "yes");
+            has_params = true;
+        }
+
+        if (v8bis_extract_bracket_section(event->detail, "NS", section, sizeof(section)) > 0) {
+            char ns_copy[512];
+            snprintf(ns_copy, sizeof(ns_copy), "%s", section);
+            char *blk = ns_copy;
+            int ns_idx = 0;
+            while (blk && *blk) {
+                char *pipe = strchr(blk, '|');
+                if (pipe) *pipe = '\0';
+
+                char t35_val[32]    = "";
+                char pcode_val[32]  = "";
+                char nsdata_val[32] = "";
+                const char *t35p  = strstr(blk, "T35=");
+                const char *pcp   = strstr(blk, "pcode=");
+                const char *nsdp  = strstr(blk, "nsdata=");
+                if (t35p)  sscanf(t35p  + 4, "%31s", t35_val);
+                if (pcp)   sscanf(pcp   + 6, "%31s", pcode_val);
+                if (nsdp)  sscanf(nsdp  + 7, "%31s", nsdata_val);
+
+                if (t35_val[0]) {
+                    char t35_label[64];
+                    snprintf(t35_label, sizeof(t35_label),
+                             ns_idx == 0 ? "NS block \xe2\x80\x94 T.35 country"
+                                         : "NS block %d \xe2\x80\x94 T.35 country", ns_idx + 1);
+                    const char *country = t35_country_name(t35_val);
+                    if (country) {
+                        char combined[80];
+                        snprintf(combined, sizeof(combined), "%s (%s)", t35_val, country);
+                        append_html_label_value(out, out_len, t35_label, combined);
+                    } else {
+                        append_html_label_value(out, out_len, t35_label, t35_val);
+                    }
+                }
+                if (pcode_val[0]) {
+                    char pcode_label[64];
+                    snprintf(pcode_label, sizeof(pcode_label),
+                             ns_idx == 0 ? "NS block \xe2\x80\x94 provider code"
+                                         : "NS block %d \xe2\x80\x94 provider code", ns_idx + 1);
+                    const char *pcode_note = NULL;
+                    if (strcmp(pcode_val, "0094") == 0 || strcmp(pcode_val, "94") == 0)
+                        pcode_note = "Rockwell / Agere / Conexant";
+                    else if (strcmp(pcode_val, "0080") == 0 || strcmp(pcode_val, "80") == 0)
+                        pcode_note = "Smartlink";
+                    if (pcode_note) {
+                        char annotated[80];
+                        snprintf(annotated, sizeof(annotated), "%s (%s)", pcode_val, pcode_note);
+                        append_html_label_value(out, out_len, pcode_label, annotated);
+                    } else {
+                        append_html_label_value(out, out_len, pcode_label, pcode_val);
+                    }
+                }
+                if (nsdata_val[0]) {
+                    char nsdata_label[64];
+                    snprintf(nsdata_label, sizeof(nsdata_label),
+                             ns_idx == 0 ? "NS block \xe2\x80\x94 non-standard data bytes"
+                                         : "NS block %d \xe2\x80\x94 non-standard data bytes", ns_idx + 1);
+                    append_html_label_value(out, out_len, nsdata_label, nsdata_val);
+                }
+                has_params = true;
+                ns_idx++;
+                blk = pipe ? pipe + 1 : NULL;
+            }
+        }
+
+        {
+            const char *rp = strstr(event->detail, " raw=[");
+            if (!rp) rp = strstr(event->detail, "raw=[");
+            if (rp) {
+                rp += (rp[0] == ' ') ? 6 : 5;
+                const char *re = strchr(rp, ']');
+                if (re) {
+                    int rlen = (int)(re - rp);
+                    if (rlen >= (int)sizeof(section)) rlen = (int)sizeof(section) - 1;
+                    memcpy(section, rp, (size_t) rlen);
+                    section[rlen] = '\0';
+                    append_html_label_value(out, out_len, "Raw I-field bytes", section);
+                }
+            }
+        }
+
+        if (!has_params)
+            append_html_label_value(out, out_len, "Parameters", "(none / ACK-NAK)");
+
         appendf(out, out_len, "</div>");
         return;
     }
