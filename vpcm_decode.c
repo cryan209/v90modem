@@ -10029,6 +10029,8 @@ typedef struct {
     int right_partner_family;
     bool left_partner_qca;
     bool right_partner_qca;
+    int left_partner_sample;
+    int right_partner_sample;
     int analog_uqts_ucode;
     int digital_lm_level;
     bool analog_ready;
@@ -12363,6 +12365,12 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->right_partner_family = left_digital_sig.family;
             out->left_partner_qca = right_analog_sig.qca;
             out->right_partner_qca = left_digital_sig.qca;
+            out->left_partner_sample = right_p12.call_init.v92_short_p1_strict_analog_seen
+                                     ? right_p12.call_init.v92_short_p1_strict_analog_sample
+                                     : right_p12.call_init.v92_qc2_sample;
+            out->right_partner_sample = left_p12.call_init.v92_short_p1_strict_digital_seen
+                                      ? left_p12.call_init.v92_short_p1_strict_digital_sample
+                                      : left_p12.call_init.v92_qc2_sample;
             out->digital_lm_level = left_digital_sig.lm_level;
             out->analog_uqts_ucode = right_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&right_p12);
@@ -12378,6 +12386,12 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->right_partner_family = left_analog_sig.family;
             out->left_partner_qca = right_digital_sig.qca;
             out->right_partner_qca = left_analog_sig.qca;
+            out->left_partner_sample = right_p12.call_init.v92_short_p1_strict_digital_seen
+                                     ? right_p12.call_init.v92_short_p1_strict_digital_sample
+                                     : right_p12.call_init.v92_qc2_sample;
+            out->right_partner_sample = left_p12.call_init.v92_short_p1_strict_analog_seen
+                                      ? left_p12.call_init.v92_short_p1_strict_analog_sample
+                                      : left_p12.call_init.v92_qc2_sample;
             out->digital_lm_level = right_digital_sig.lm_level;
             out->analog_uqts_ucode = left_analog_sig.uqts_ucode;
             out->analog_ready = phase12_analog_short_p1_ready(&left_p12);
@@ -12416,6 +12430,7 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_followup_allowed = true;
     p12->stereo_short_p1_partner_family = 0;
     p12->stereo_short_p1_partner_qca = false;
+    p12->stereo_short_p1_partner_sample = -1;
     p12->stereo_short_p1_partner_uqts_ucode = -1;
     p12->stereo_short_p1_partner_lm_level = -1;
 
@@ -12431,6 +12446,7 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL) && hint->analog_ready;
     p12->stereo_short_p1_partner_family = is_left ? hint->left_partner_family : hint->right_partner_family;
     p12->stereo_short_p1_partner_qca = is_left ? hint->left_partner_qca : hint->right_partner_qca;
+    p12->stereo_short_p1_partner_sample = is_left ? hint->left_partner_sample : hint->right_partner_sample;
     p12->stereo_short_p1_partner_uqts_ucode = hint->analog_uqts_ucode;
     p12->stereo_short_p1_partner_lm_level = hint->digital_lm_level;
 }

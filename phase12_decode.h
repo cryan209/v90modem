@@ -383,6 +383,7 @@ typedef struct {
     bool stereo_short_p1_followup_allowed;
     int stereo_short_p1_partner_family;
     bool stereo_short_p1_partner_qca;
+    int stereo_short_p1_partner_sample;
     int stereo_short_p1_partner_uqts_ucode;
     int stereo_short_p1_partner_lm_level;
 

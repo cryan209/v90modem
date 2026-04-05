@@ -328,6 +328,8 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                       int sample_rate);
 static bool p12_phase1_event_is_label(const p12_phase1_event_t *ev,
                                       const char *label);
+static int p12_phase1_event_family(const p12_phase1_event_t *ev);
+static bool p12_phase1_event_qca(const p12_phase1_event_t *ev);
 static bool p12_phase1_find_short_p1_event(const phase12_result_t *result,
                                            bool want_digital,
                                            const p12_phase1_event_t **event_out);
@@ -1873,6 +1875,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
     int silence_max_samples;
     int qts_search_start;
     int qts_search_end;
+    int qts_sequence_start;
     int anspcm_search_start;
     int anspcm_search_end;
     int toneq_search_start;
@@ -1920,9 +1923,27 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                           ? result->call_init.v92_qc2_lm_level
                           : result->stereo_short_p1_partner_lm_level);
 
+    qts_sequence_start = phase1_anchor_sample;
+    if (digital_event) {
+        if (p12_phase1_event_qca(digital_event)) {
+            qts_sequence_start = digital_event->sample_offset
+                               + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+        } else if (result->stereo_short_p1_partner_sample >= 0) {
+            qts_sequence_start = result->stereo_short_p1_partner_sample
+                               + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+        } else {
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] suppress V.92 digital follow-up: %s has no complementary partner timing\n",
+                        digital_event->label);
+            }
+            return;
+        }
+    }
+
     if (codewords && total_codewords > 0 && effective_uqts_ucode >= 0) {
-        qts_search_start = phase1_anchor_sample + 400;
-        qts_search_end = phase1_anchor_sample + 4000;
+        qts_search_start = qts_sequence_start;
+        qts_search_end = qts_sequence_start + 3600;
         if (qts_search_start < 0)
             qts_search_start = 0;
         if (qts_search_end > total_codewords)
