@@ -158,6 +158,7 @@ Produce a spec audit table for all eight short-Phase-1 signals:
 - Step 1 completed on 2026-04-05.
 - Step 2 completed on 2026-04-05.
 - Step 3 completed on 2026-04-05.
+- Step 4 completed on 2026-04-05.
 - Completed work:
   - read clauses 8.2, 8.3, and 9.2 of `ITU Docs/T-REC-V.92-200011-I!!PDF-E.pdf`
   - verified the exact table structures for `QC1a`, `QCA1a`, `QC1d`, `QCA1d`, `QC2a`, `QCA2a`, `QC2d`, `QCA2d`
@@ -173,6 +174,43 @@ Produce a spec audit table for all eight short-Phase-1 signals:
   - preserved separate strict analogue and strict digital `QC1/QCA1` candidate sets in Phase12
   - switched stereo arbitration to extract from those strict candidate sets instead of a single
     collapsed short-P1 winner
+  - changed strict short-Phase-1 acquisition to search inside detected Phase-1 V.21 burst
+    windows first, instead of sweeping the whole post-ANS span
+  - merged and pruned short-Phase-1 burst windows by relative signal energy before running the
+    strict `QC1/QCA1` scanner
+  - kept the strict whole-sequence accept rule unchanged while moving recovery logic further out
+    of the startup acquisition path
+
+## Step 4 Outcome
+
+### What changed
+
+- `detect_v92_short_phase1()` now takes the per-channel Phase-1 V.21 burst windows and searches
+  those windows first for strict `QC1/QCA1` sequences.
+- Short-Phase-1 windows are merged with the existing Phase-1 repeat gap and pruned with a
+  relative signal-energy cutoff before the strict scanner runs.
+- Full-span scanning is now only the fallback when there are no usable Phase-1 burst windows.
+
+### Why this matters
+
+This keeps startup classification aligned with real observed Phase-1 FSK energy and reduces the
+chance of locking a strict sequence onto mixed or empty post-ANS regions.
+
+### Current observation
+
+On `Agere-SV92-QC.wav`, the debug run now shows the strict search staying inside actual Phase-1
+burst windows instead of sweeping the whole post-ANS interval. That improves acquisition hygiene,
+but it also confirms the next remaining problem: we still need a cleaner chronological Phase-1
+event timeline to separate early tone, `CRe/CRd`, V.8/V.8bis, and short-Phase-1 events.
+
+## Updated Next Step
+
+Proceed to Step 6:
+
+- build a clearer chronological per-channel Phase-1 event timeline
+- keep tone, `CRe/CRd`, V.8/V.8bis, and strict short-Phase-1 events separate before arbitration
+- use that timeline to understand why the QC files still appear mixed even after stricter
+  short-Phase-1 acquisition
 
 ## Step 1 Audit
 

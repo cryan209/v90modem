@@ -79,6 +79,7 @@ enum {
 };
 
 #define P12_PHASE2_BURST_RELATIVE_SIGNAL_CUTOFF 0.35
+#define P12_PHASE1_SHORT_P1_BURST_RELATIVE_SIGNAL_CUTOFF 0.35
 
 enum {
     P12_CJ_TO_INFO0_MS = 75,
@@ -322,11 +323,19 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              int search_end,
                                              int channel,
                                              v92_short_phase1_candidate_t *candidate_out,
+                                             int *candidate_score_out,
                                              v92_short_phase1_candidate_t *digital_alt_out,
+                                             int *digital_alt_score_out,
                                              int *digital_alt_sample_out,
                                              v92_short_phase1_candidate_t *analog_alt_out,
+                                             int *analog_alt_score_out,
                                              int *analog_alt_sample_out,
                                              int *sample_out);
+static int p12_prune_low_energy_bursts_in_place(p12_fsk_burst_t *bursts,
+                                                int burst_count,
+                                                double relative_cutoff,
+                                                const char *label,
+                                                int sample_rate);
 static void detect_v92_short_phase1_followup(const int16_t *samples,
                                              const uint8_t *codewords,
                                              int total_samples,
@@ -1573,17 +1582,32 @@ static void detect_v92_short_phase1(const int16_t *samples,
                                     int sample_rate,
                                     int max_sample,
                                     int channel,
+                                    const p12_fsk_burst_t *bursts,
+                                    int burst_count,
                                     phase12_result_t *result)
 {
+    p12_fsk_burst_t short_p1_windows[P12_MAX_FSK_BURSTS];
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
     int search_start = -1;
     int search_end = -1;
+    int merge_gap;
+    int short_p1_window_count = 0;
     v92_short_phase1_candidate_t candidate;
     v92_short_phase1_candidate_t digital_alt;
     v92_short_phase1_candidate_t analog_alt;
+    v92_short_phase1_candidate_t best_candidate;
+    v92_short_phase1_candidate_t best_digital_alt;
+    v92_short_phase1_candidate_t best_analog_alt;
     int sample = -1;
     int digital_alt_sample = -1;
     int analog_alt_sample = -1;
+    int best_score = -1000000;
+    int best_digital_score = -1000000;
+    int best_analog_score = -1000000;
+    int best_sample = -1;
+    int best_digital_alt_sample = -1;
+    int best_analog_alt_sample = -1;
+    bool found = false;
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !result)
         return;
@@ -1607,23 +1631,104 @@ static void detect_v92_short_phase1(const int16_t *samples,
     if (search_end - search_start < 160)
         return;
 
+    memset(short_p1_windows, 0, sizeof(short_p1_windows));
     memset(&candidate, 0, sizeof(candidate));
     memset(&digital_alt, 0, sizeof(digital_alt));
     memset(&analog_alt, 0, sizeof(analog_alt));
-    if (!p12_scan_v92_short_phase1_window(samples,
-                                          total_samples,
-                                          sample_rate,
-                                          search_start,
-                                          search_end,
-                                          channel,
-                                          &candidate,
-                                          &digital_alt,
-                                          &digital_alt_sample,
-                                          &analog_alt,
-                                          &analog_alt_sample,
-                                          &sample)) {
-        return;
+    memset(&best_candidate, 0, sizeof(best_candidate));
+    memset(&best_digital_alt, 0, sizeof(best_digital_alt));
+    memset(&best_analog_alt, 0, sizeof(best_analog_alt));
+
+    if (bursts && burst_count > 0) {
+        for (int i = 0; i < burst_count && short_p1_window_count < P12_MAX_FSK_BURSTS; i++) {
+            int burst_start = bursts[i].start_sample;
+            int burst_end = burst_start + bursts[i].duration_samples;
+
+            if (burst_end <= search_start || burst_start >= search_end)
+                continue;
+            short_p1_windows[short_p1_window_count++] = bursts[i];
+        }
     }
+
+    merge_gap = (sample_rate * P12_PHASE1_REPEAT_GAP_MS) / 1000;
+    short_p1_window_count = p12_merge_bursts_in_place(short_p1_windows,
+                                                      short_p1_window_count,
+                                                      merge_gap);
+    short_p1_window_count = p12_prune_low_energy_bursts_in_place(short_p1_windows,
+                                                                 short_p1_window_count,
+                                                                 P12_PHASE1_SHORT_P1_BURST_RELATIVE_SIGNAL_CUTOFF,
+                                                                 "short-P1",
+                                                                 sample_rate);
+
+    if (p12_debug_enabled() && short_p1_window_count > 0)
+        p12_debug_log_bursts("short-P1 windows", short_p1_windows, short_p1_window_count, sample_rate);
+
+    for (int pass = 0; pass < ((short_p1_window_count > 0) ? short_p1_window_count : 1); pass++) {
+        int window_start = search_start;
+        int window_end = search_end;
+        int candidate_score = -1000000;
+        int digital_score = -1000000;
+        int analog_score = -1000000;
+
+        if (short_p1_window_count > 0) {
+            window_start = short_p1_windows[pass].start_sample
+                         - (sample_rate * P12_PHASE1_PRE_PAD_MS) / 1000;
+            window_end = short_p1_windows[pass].start_sample
+                       + short_p1_windows[pass].duration_samples
+                       + (sample_rate * P12_PHASE1_POST_PAD_MS) / 1000;
+            if (window_start < search_start)
+                window_start = search_start;
+            if (window_end > search_end)
+                window_end = search_end;
+        }
+        if (window_end - window_start < 160)
+            continue;
+
+        if (!p12_scan_v92_short_phase1_window(samples,
+                                              total_samples,
+                                              sample_rate,
+                                              window_start,
+                                              window_end,
+                                              channel,
+                                              &candidate,
+                                              &candidate_score,
+                                              &digital_alt,
+                                              &digital_score,
+                                              &digital_alt_sample,
+                                              &analog_alt,
+                                              &analog_score,
+                                              &analog_alt_sample,
+                                              &sample)) {
+            continue;
+        }
+
+        found = true;
+        if (candidate_score > best_score) {
+            best_score = candidate_score;
+            best_candidate = candidate;
+            best_sample = sample;
+        }
+        if (digital_alt.ok && digital_alt.digital_modem && digital_score > best_digital_score) {
+            best_digital_score = digital_score;
+            best_digital_alt = digital_alt;
+            best_digital_alt_sample = digital_alt_sample;
+        }
+        if (analog_alt.ok && !analog_alt.digital_modem && analog_score > best_analog_score) {
+            best_analog_score = analog_score;
+            best_analog_alt = analog_alt;
+            best_analog_alt_sample = analog_alt_sample;
+        }
+    }
+
+    if (!found)
+        return;
+
+    candidate = best_candidate;
+    sample = best_sample;
+    digital_alt = best_digital_alt;
+    digital_alt_sample = best_digital_alt_sample;
+    analog_alt = best_analog_alt;
+    analog_alt_sample = best_analog_alt_sample;
 
     if (result->stereo_short_p1_hint_valid
         && result->stereo_short_p1_expected_form != P12_SHORT_P1_FORM_UNKNOWN
@@ -2826,9 +2931,12 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              int search_end,
                                              int channel,
                                              v92_short_phase1_candidate_t *candidate_out,
+                                             int *candidate_score_out,
                                              v92_short_phase1_candidate_t *digital_alt_out,
+                                             int *digital_alt_score_out,
                                              int *digital_alt_sample_out,
                                              v92_short_phase1_candidate_t *analog_alt_out,
+                                             int *analog_alt_score_out,
                                              int *analog_alt_sample_out,
                                              int *sample_out)
 {
@@ -2984,12 +3092,18 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
     }
 
     *candidate_out = best_candidate;
+    if (candidate_score_out)
+        *candidate_score_out = best_score;
     if (digital_alt_out)
         *digital_alt_out = best_digital_candidate;
+    if (digital_alt_score_out)
+        *digital_alt_score_out = best_digital_score;
     if (digital_alt_sample_out)
         *digital_alt_sample_out = best_digital_sample;
     if (analog_alt_out)
         *analog_alt_out = best_analog_candidate;
+    if (analog_alt_score_out)
+        *analog_alt_score_out = best_analog_score;
     if (analog_alt_sample_out)
         *analog_alt_sample_out = best_analog_sample;
     *sample_out = best_sample;
@@ -3669,9 +3783,11 @@ static void detect_phase1_v8(const int16_t *samples,
 
     /* Probe for V.92 short Phase 1 control after the answer tone and before
      * the main CM/JM exchange completes. */
-    detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH1, result);
+    detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
+                            V21_CH1, phase1_ch1_windows, phase1_ch1_window_count, result);
     if (!result->call_init.v92_short_p1_seen)
-        detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH2, result);
+        detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
+                                V21_CH2, phase1_ch2_windows, phase1_ch2_window_count, result);
     finalize_v92_analog_short_phase1(result, result, sample_rate);
     detect_v92_short_phase1_followup(samples,
                                      codewords,
