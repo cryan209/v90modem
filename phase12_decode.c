@@ -13,6 +13,7 @@
 #include "v21_fsk_demod.h"
 #include "v34_info_decode.h"
 #include "v90.h"
+#include "v92_short_phase1_decode.h"
 #include "v92_short_phase2_decode.h"
 
 #include <math.h>
@@ -142,6 +143,21 @@ enum {
     P12_ANSAM_END_GRACE_MS = 30
 };
 
+enum {
+    P12_V92_SHORT_P1_START_AFTER_ANS_MS = 12,
+    P12_V92_SHORT_P1_MAX_SPAN_MS = 1400
+};
+
+enum {
+    P12_V92_SHORT_P1_TO_PHASE2_MS = 75,
+    P12_V92_SHORT_P1_TO_PHASE2_TOL_MS = 5
+};
+
+enum {
+    P12_V92_TONEQ_FREQ_HZ = 980,
+    P12_V92_TONEQ_MIN_MS = 40
+};
+
 /* Tone detection thresholds */
 static const double TONE_RATIO_THRESHOLD = 0.15;
 static const double TONE_COMPETITOR_MAX = 0.08;
@@ -257,6 +273,21 @@ static bool detect_phase_reversals(const int16_t *samples,
                                    int len,
                                    int sample_rate,
                                    int *reversal_count_out);
+static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
+                                             int total_samples,
+                                             int sample_rate,
+                                             int search_start,
+                                             int search_end,
+                                             int channel,
+                                             v92_short_phase1_candidate_t *candidate_out,
+                                             int *sample_out);
+static void detect_v92_short_phase1_followup(const int16_t *samples,
+                                             const uint8_t *codewords,
+                                             int total_samples,
+                                             int total_codewords,
+                                             v91_law_t law,
+                                             int sample_rate,
+                                             phase12_result_t *result);
 
 static void p12_fill_timing_hint_from_cj(p12_timing_hint_t *hint,
                                          const p12_cj_hit_t *cj,
@@ -324,6 +355,82 @@ static void p12_fill_timing_hint_from_jm_end(p12_timing_hint_t *hint,
         hint->window_end_sample = limit;
     if (hint->window_end_sample < hint->window_start_sample)
         hint->window_end_sample = hint->window_start_sample;
+}
+
+static void p12_fill_timing_hint_from_sample(p12_timing_hint_t *hint,
+                                             int anchor_sample,
+                                             int sample_rate,
+                                             int delay_ms,
+                                             int tol_ms,
+                                             int limit)
+{
+    int expected;
+    int tol;
+    int retry_len;
+
+    if (!hint)
+        return;
+    memset(hint, 0, sizeof(*hint));
+    if (anchor_sample < 0 || sample_rate <= 0)
+        return;
+
+    expected = anchor_sample + (sample_rate * delay_ms) / 1000;
+    tol = (sample_rate * tol_ms) / 1000;
+    retry_len = (sample_rate * P12_INFO_RETRY_WINDOW_MS) / 1000;
+
+    hint->valid = true;
+    hint->anchor_sample = anchor_sample;
+    hint->expected_sample = expected;
+    hint->window_start_sample = expected - tol;
+    hint->window_end_sample = hint->window_start_sample + retry_len;
+    if (hint->window_start_sample < 0)
+        hint->window_start_sample = 0;
+    if (limit > 0 && hint->window_end_sample > limit)
+        hint->window_end_sample = limit;
+    if (hint->window_end_sample < hint->window_start_sample)
+        hint->window_end_sample = hint->window_start_sample;
+}
+
+static bool p12_detect_tone_in_window(const int16_t *samples,
+                                      int total_samples,
+                                      int sample_rate,
+                                      int search_start,
+                                      int search_end,
+                                      double freq_hz,
+                                      const double *competitor_freqs,
+                                      int n_competitors,
+                                      int min_run_ms,
+                                      p12_tone_hit_t *out)
+{
+    p12_tone_hit_t local;
+    int window_len;
+
+    if (!samples || !out || total_samples <= 0)
+        return false;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= search_start || search_end > total_samples)
+        search_end = total_samples;
+    window_len = search_end - search_start;
+    if (window_len <= 0)
+        return false;
+
+    if (!detect_tone(samples + search_start,
+                     window_len,
+                     sample_rate,
+                     freq_hz,
+                     competitor_freqs,
+                     n_competitors,
+                     min_run_ms,
+                     false,
+                     &local)) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+
+    *out = local;
+    out->start_sample += search_start;
+    return true;
 }
 
 static bool p12_cm_jm_has_phase1_capability(const p12_cm_jm_hit_t *msg)
@@ -1411,6 +1518,157 @@ static void detect_call_initiation_signals(const int16_t *samples,
     }
 }
 
+static void detect_v92_short_phase1(const int16_t *samples,
+                                    int total_samples,
+                                    int sample_rate,
+                                    int max_sample,
+                                    int channel,
+                                    phase12_result_t *result)
+{
+    int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
+    int search_start = -1;
+    int search_end = -1;
+    v92_short_phase1_candidate_t candidate;
+    int sample = -1;
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !result)
+        return;
+    if (!result->answer_tone.detected)
+        return;
+
+    search_start = result->answer_tone.start_sample
+                 + (sample_rate * P12_V92_SHORT_P1_START_AFTER_ANS_MS) / 1000;
+    if (search_start < 0)
+        search_start = 0;
+
+    if (result->cm.detected && result->cm.sample_offset > search_start)
+        search_end = result->cm.sample_offset;
+    else if (result->jm.detected && result->jm.sample_offset > search_start)
+        search_end = result->jm.sample_offset;
+    else
+        search_end = search_start + (sample_rate * P12_V92_SHORT_P1_MAX_SPAN_MS) / 1000;
+
+    if (search_end > limit)
+        search_end = limit;
+    if (search_end - search_start < 160)
+        return;
+
+    memset(&candidate, 0, sizeof(candidate));
+    if (!p12_scan_v92_short_phase1_window(samples,
+                                          total_samples,
+                                          sample_rate,
+                                          search_start,
+                                          search_end,
+                                          channel,
+                                          &candidate,
+                                          &sample)) {
+        return;
+    }
+
+    result->call_init.v92_short_p1_seen = true;
+    result->call_init.v92_short_p1_sample = sample;
+    snprintf(result->call_init.v92_short_p1_name,
+             sizeof(result->call_init.v92_short_p1_name),
+             "%s",
+             candidate.name ? candidate.name : "V92-shortP1");
+    result->call_init.v92_short_p1_digital = candidate.digital_modem;
+    result->call_init.v92_short_p1_qca = candidate.qca;
+    result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
+    result->v92_capable = true;
+
+    if (p12_debug_enabled()) {
+        fprintf(stderr,
+                "[p12] V.92 short Phase 1 %s at %.1fms channel=%s digital=%s qca=%s\n",
+                result->call_init.v92_short_p1_name,
+                (double) sample * 1000.0 / (double) sample_rate,
+                (channel == V21_CH2) ? "CH2" : "CH1",
+                candidate.digital_modem ? "yes" : "no",
+                candidate.qca ? "yes" : "no");
+    }
+}
+
+static void detect_v92_short_phase1_followup(const int16_t *samples,
+                                             const uint8_t *codewords,
+                                             int total_samples,
+                                             int total_codewords,
+                                             v91_law_t law,
+                                             int sample_rate,
+                                             phase12_result_t *result)
+{
+    static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
+    v92_qts_hit_t qts_hit;
+    p12_tone_hit_t toneq_hit;
+    int qts_search_start;
+    int qts_search_end;
+    int toneq_search_start;
+    int toneq_search_end;
+
+    if (!result || !result->call_init.v92_short_p1_seen)
+        return;
+    if (!samples || total_samples <= 0 || sample_rate <= 0)
+        return;
+
+    if (codewords && total_codewords > 0 && result->call_init.v92_short_p1_uqts_ucode >= 0) {
+        qts_search_start = result->call_init.v92_short_p1_sample + 400;
+        qts_search_end = result->call_init.v92_short_p1_sample + 4000;
+        if (qts_search_start < 0)
+            qts_search_start = 0;
+        if (qts_search_end > total_codewords)
+            qts_search_end = total_codewords;
+        if (v92_detect_qts_sequence(codewords,
+                                    total_codewords,
+                                    law,
+                                    result->call_init.v92_short_p1_uqts_ucode,
+                                    qts_search_start,
+                                    qts_search_end,
+                                    v91_codeword_to_ucode,
+                                    &qts_hit)) {
+            result->call_init.v92_qts_seen = true;
+            result->call_init.v92_qts_sample = qts_hit.start_sample;
+            result->call_init.v92_qts_reps = qts_hit.qts_reps;
+            result->call_init.v92_qts_bar_reps = qts_hit.qts_bar_reps;
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 QTS at %.1fms reps=%d qts_bar=%d\n",
+                        (double) qts_hit.start_sample * 1000.0 / (double) sample_rate,
+                        qts_hit.qts_reps,
+                        qts_hit.qts_bar_reps);
+            }
+        }
+    }
+
+    toneq_search_start = result->call_init.v92_qts_seen
+                       ? (result->call_init.v92_qts_sample + 200)
+                       : (result->call_init.v92_short_p1_sample + 200);
+    toneq_search_end = result->call_init.v92_qts_seen
+                     ? (result->call_init.v92_qts_sample + 4000)
+                     : (result->call_init.v92_short_p1_sample + 5000);
+    if (toneq_search_start < 0)
+        toneq_search_start = 0;
+    if (toneq_search_end > total_samples)
+        toneq_search_end = total_samples;
+    if (p12_detect_tone_in_window(samples,
+                                  total_samples,
+                                  sample_rate,
+                                  toneq_search_start,
+                                  toneq_search_end,
+                                  (double) P12_V92_TONEQ_FREQ_HZ,
+                                  toneq_competitors,
+                                  4,
+                                  P12_V92_TONEQ_MIN_MS,
+                                  &toneq_hit)) {
+        result->call_init.v92_toneq_seen = true;
+        result->call_init.v92_toneq_sample = toneq_hit.start_sample;
+        result->call_init.v92_toneq_duration_samples = toneq_hit.duration_samples;
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] V.92 TONEq at %.1fms dur=%.1fms\n",
+                    (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
+                    (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
+        }
+    }
+}
+
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
                                            int total_samples,
                                            int sample_rate,
@@ -2210,6 +2468,116 @@ static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
     return byte_len;
 }
 
+static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
+                                             int total_samples,
+                                             int sample_rate,
+                                             int search_start,
+                                             int search_end,
+                                             int channel,
+                                             v92_short_phase1_candidate_t *candidate_out,
+                                             int *sample_out)
+{
+    const double mark_hz = (channel == V21_CH2) ? 1650.0 : 980.0;
+    const double space_hz = (channel == V21_CH2) ? 1850.0 : 1180.0;
+    int best_score = -1000000;
+    v92_short_phase1_candidate_t best_candidate;
+    int best_sample = -1;
+    bool use_ch2 = (channel == V21_CH2);
+
+    if (!samples || total_samples <= 0 || sample_rate <= 0 || !candidate_out || !sample_out)
+        return false;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < 160)
+        return false;
+
+    memset(&best_candidate, 0, sizeof(best_candidate));
+
+    for (int invert = 0; invert <= 1; invert++) {
+        for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
+            double symbol_samples = (double) sample_rate / (double) bit_rate;
+            int phase_count = (int) floor(symbol_samples * 4.0);
+
+            if (phase_count < 1)
+                phase_count = 1;
+            for (int phase_q = 0; phase_q < phase_count; phase_q++) {
+                double phase = (double) phase_q / 4.0;
+                uint8_t bits[512];
+                double confidence[512];
+                int bit_count = 0;
+
+                for (int k = 0; ; k++) {
+                    int a = search_start + (int) lround(phase + (double) k * symbol_samples);
+                    int b = search_start + (int) lround(phase + (double) (k + 1) * symbol_samples);
+                    double e;
+                    double pm;
+                    double ps;
+                    int bit;
+
+                    if (b <= a || b > search_end || bit_count >= (int) sizeof(bits))
+                        break;
+                    e = window_energy(samples + a, b - a);
+                    if (e <= 0.0)
+                        break;
+                    pm = tone_energy_ratio(samples + a, b - a, sample_rate, mark_hz, e);
+                    ps = tone_energy_ratio(samples + a, b - a, sample_rate, space_hz, e);
+                    bit = (pm >= ps) ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    bits[bit_count] = (uint8_t) bit;
+                    confidence[bit_count] = fabs(pm - ps);
+                    bit_count++;
+                }
+
+                for (int i = 0; i + 30 <= bit_count; i++) {
+                    int ones_score;
+                    int sync_score;
+                    int score;
+                    v92_short_phase1_candidate_t candidate;
+
+                    ones_score = p12_v8_ones_lock_score(bits, confidence, bit_count, i);
+                    if (ones_score < 32)
+                        continue;
+                    /* V.92 short Phase 1 uses 10 ones + 0101010101 sync */
+                    {
+                        static const uint8_t v92_sync_pattern[10] = { 0,1,0,1,0,1,0,1,0,1 };
+                        sync_score = p12_v8_sync_score(bits, confidence, bit_count, i + 10, v92_sync_pattern);
+                    }
+                    if (sync_score < 32)
+                        continue;
+                    if (!v92_decode_short_phase1_candidate(bits + i, bit_count - i, use_ch2, &candidate))
+                        continue;
+
+                    score = ones_score + sync_score;
+                    if (candidate.repeat_seen)
+                        score += candidate.repeat_match ? 30 : 8;
+                    if ((int) candidate.qca == (use_ch2 ? 1 : 0))
+                        score += 10;
+                    score += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
+                    score -= i / 2;
+                    if (invert)
+                        score -= 2;
+
+                    if (score > best_score) {
+                        best_score = score;
+                        best_candidate = candidate;
+                        best_sample = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                    }
+                }
+            }
+        }
+    }
+
+    if (best_score < 0 || !best_candidate.ok || best_sample < 0)
+        return false;
+
+    *candidate_out = best_candidate;
+    *sample_out = best_sample;
+    return true;
+}
+
 static void v8_msg_decoder_put_bit(void *ctx, int bit, int sample_offset)
 {
     v8_msg_decoder_t *d = (v8_msg_decoder_t *)ctx;
@@ -2802,7 +3170,10 @@ static void decode_v8_fsk_channel(const int16_t *samples,
 }
 
 static void detect_phase1_v8(const int16_t *samples,
+                             const uint8_t *codewords,
                              int total_samples,
+                             int total_codewords,
+                             v91_law_t law,
                              int sample_rate,
                              int max_sample,
                              phase12_result_t *result)
@@ -2877,6 +3248,19 @@ static void detect_phase1_v8(const int16_t *samples,
     decode_v8_fsk_channel(samples, total_samples, sample_rate,
                           V21_CH2, phase1_ch2_windows, phase1_ch2_window_count,
                           &result->jm, &result->cj);
+
+    /* Probe for V.92 short Phase 1 control after the answer tone and before
+     * the main CM/JM exchange completes. */
+    detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH1, result);
+    if (!result->call_init.v92_short_p1_seen)
+        detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH2, result);
+    detect_v92_short_phase1_followup(samples,
+                                     codewords,
+                                     total_samples,
+                                     total_codewords,
+                                     law,
+                                     sample_rate,
+                                     result);
 
     /* Discard a CM decode whose sample_offset falls within the ANS tone
      * window.  p12_targeted_v21_decode_cm_jm extends its search backward by
@@ -3967,6 +4351,7 @@ static void detect_phase2_info(const int16_t *samples,
     int cm_score;
     int jm_score;
     bool use_jm_anchor;
+    bool short_phase1_anchor;
     p12_phase2_role_t phase2_role = p12_phase2_role_from_observations(result);
     p12_phase2_role_t alt_phase2_role = P12_PHASE2_ROLE_UNKNOWN;
     p12_signal_tone_hit_t alt_tone_a;
@@ -3993,12 +4378,26 @@ static void detect_phase2_info(const int16_t *samples,
     use_jm_anchor = p12_cm_jm_has_phase1_capability(&result->jm)
                     && result->jm.duration_samples > 0
                     && jm_score >= P12_JM_ANCHOR_MIN_CREDIBILITY;
+    short_phase1_anchor = result->call_init.v92_short_p1_seen
+                          && (result->call_init.v92_toneq_seen || result->answer_tone.detected);
 
     if (result->answer_tone.detected)
         search_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate);
-    if (use_jm_anchor) {
+    if (short_phase1_anchor) {
+        int phase1_end_anchor = result->call_init.v92_toneq_seen
+                              ? (result->call_init.v92_toneq_sample
+                                 + result->call_init.v92_toneq_duration_samples)
+                              : (result->answer_tone.start_sample
+                                 + result->answer_tone.duration_samples
+                                 + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate));
+        int short_p1_phase2_start = phase1_end_anchor
+                                  + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+
+        if (short_p1_phase2_start > search_start)
+            search_start = short_p1_phase2_start;
+    } else if (use_jm_anchor) {
         int jm_info_start = result->jm.sample_offset
                           + result->jm.duration_samples
                           + (sample_rate * P12_CJ_TO_INFO0_MS) / 1000;
@@ -4015,10 +4414,25 @@ static void detect_phase2_info(const int16_t *samples,
     }
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
-    if (use_jm_anchor)
+    if (short_phase1_anchor) {
+        int phase1_end_anchor = result->call_init.v92_toneq_seen
+                              ? (result->call_init.v92_toneq_sample
+                                 + result->call_init.v92_toneq_duration_samples)
+                              : (result->answer_tone.start_sample
+                                 + result->answer_tone.duration_samples
+                                 + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate));
+
+        p12_fill_timing_hint_from_sample(&result->info0_from_cj_hint,
+                                         phase1_end_anchor,
+                                         sample_rate,
+                                         P12_V92_SHORT_P1_TO_PHASE2_MS,
+                                         P12_V92_SHORT_P1_TO_PHASE2_TOL_MS,
+                                         limit);
+    } else if (use_jm_anchor) {
         p12_fill_timing_hint_from_jm_end(&result->info0_from_cj_hint, &result->jm, sample_rate, limit);
-    else
+    } else {
         p12_fill_timing_hint_from_cj(&result->info0_from_cj_hint, &result->cj, sample_rate, limit);
+    }
     if (p12_debug_enabled()) {
         fprintf(stderr,
                 "[p12] phase2 search start=%.1fms limit=%.1fms cap=%.1fms\n",
@@ -4026,10 +4440,11 @@ static void detect_phase2_info(const int16_t *samples,
                 (double) limit * 1000.0 / (double) sample_rate,
                 (double) phase2_cap * 1000.0 / (double) sample_rate);
         fprintf(stderr,
-                "[p12] phase1 credibility cm=%d jm=%d use_jm_anchor=%s\n",
+                "[p12] phase1 credibility cm=%d jm=%d use_jm_anchor=%s short_p1_anchor=%s\n",
                 cm_score,
                 jm_score,
-                use_jm_anchor ? "yes" : "no");
+                use_jm_anchor ? "yes" : "no",
+                short_phase1_anchor ? "yes" : "no");
         if (result->info0_from_cj_hint.valid) {
             fprintf(stderr,
                     "[p12] info0 timing hint anchor=%.1fms expected=%.1fms window=%.1f-%.1fms\n",
@@ -4625,20 +5040,28 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
 {
     int phase2_start = -1;
     int phase2_end = -1;
+    bool short_phase1_mode;
 
     if (!result)
         return;
+
+    short_phase1_mode = result->call_init.v92_short_p1_seen;
 
     if (result->answer_tone.detected)
         phase2_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, 8000);
-    if (result->cj.detected)
+    if (short_phase1_mode && result->call_init.v92_toneq_seen) {
+        phase2_start = result->call_init.v92_toneq_sample
+                     + result->call_init.v92_toneq_duration_samples
+                     + (8000 * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+    }
+    if (!short_phase1_mode && result->cj.detected)
         phase2_start = p12_first_non_negative(phase2_start, result->cj.sample_offset);
-    if (result->cm.detected)
+    if (!short_phase1_mode && result->cm.detected)
         phase2_start = p12_first_non_negative(phase2_start,
                                               result->cm.sample_offset + result->cm.duration_samples);
-    if (result->jm.detected)
+    if (!short_phase1_mode && result->jm.detected)
         phase2_start = p12_first_non_negative(phase2_start,
                                               result->jm.sample_offset + result->jm.duration_samples);
 
@@ -4676,11 +5099,15 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
         result->phase2_end_sample = (phase2_end >= phase2_start) ? phase2_end : phase2_start;
     }
 
+    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen)
+        result->v92_capable = true;
+
     if (result->cm.detected) {
-        result->pcm_modem_capable = (result->cm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
+        result->pcm_modem_capable = result->pcm_modem_capable
+                                    || (result->cm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
                                     || result->cm.pcm_modem_availability > 0;
-        result->v90_capable = (result->cm.modulations & P12_MOD_V90) != 0;
-        result->v92_capable = (result->cm.modulations & P12_MOD_V92) != 0;
+        result->v90_capable = result->v90_capable || ((result->cm.modulations & P12_MOD_V90) != 0);
+        result->v92_capable = result->v92_capable || ((result->cm.modulations & P12_MOD_V92) != 0);
     }
     if (result->jm.detected) {
         result->pcm_modem_capable = result->pcm_modem_capable
@@ -4790,6 +5217,11 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
         result->phase2_state.info1_hint.window_start_sample = result->phase2_state.info1_hint.anchor_sample;
         result->phase2_state.info1_hint.window_end_sample = result->phase2_state.info1_hint.anchor_sample + 8000/3;
     }
+
+    /* Keep call-init V.92 evidence authoritative even if later CM/JM/INFO
+     * parsing is partial or inconsistent. */
+    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen)
+        result->v92_capable = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -5015,12 +5447,38 @@ bool phase12_decode_phase1(const int16_t *samples,
                            int max_sample,
                            phase12_result_t *result)
 {
+    return phase12_decode_phase1_with_codewords(samples,
+                                                NULL,
+                                                total_samples,
+                                                0,
+                                                V91_LAW_ULAW,
+                                                sample_rate,
+                                                max_sample,
+                                                result);
+}
+
+bool phase12_decode_phase1_with_codewords(const int16_t *samples,
+                                          const uint8_t *codewords,
+                                          int total_samples,
+                                          int total_codewords,
+                                          v91_law_t law,
+                                          int sample_rate,
+                                          int max_sample,
+                                          phase12_result_t *result)
+{
     if (!samples || total_samples <= 0 || !result)
         return false;
 
     detect_phase1_tones(samples, total_samples, sample_rate, max_sample, result);
     detect_call_initiation_signals(samples, total_samples, sample_rate, max_sample, result);
-    detect_phase1_v8(samples, total_samples, sample_rate, max_sample, result);
+    detect_phase1_v8(samples,
+                     codewords,
+                     total_samples,
+                     total_codewords,
+                     law,
+                     sample_rate,
+                     max_sample,
+                     result);
     phase12_finalize_diagnostics(result);
 
     return (result->cng.detected || result->ct.detected
@@ -5062,12 +5520,38 @@ bool phase12_decode(const int16_t *samples,
                     int max_sample,
                     phase12_result_t *result)
 {
+    return phase12_decode_with_codewords(samples,
+                                         NULL,
+                                         total_samples,
+                                         0,
+                                         V91_LAW_ULAW,
+                                         sample_rate,
+                                         max_sample,
+                                         result);
+}
+
+bool phase12_decode_with_codewords(const int16_t *samples,
+                                   const uint8_t *codewords,
+                                   int total_samples,
+                                   int total_codewords,
+                                   v91_law_t law,
+                                   int sample_rate,
+                                   int max_sample,
+                                   phase12_result_t *result)
+{
     bool p1, p2;
 
     if (!samples || total_samples <= 0 || !result)
         return false;
 
-    p1 = phase12_decode_phase1(samples, total_samples, sample_rate, max_sample, result);
+    p1 = phase12_decode_phase1_with_codewords(samples,
+                                              codewords,
+                                              total_samples,
+                                              total_codewords,
+                                              law,
+                                              sample_rate,
+                                              max_sample,
+                                              result);
     p2 = phase12_decode_phase2(samples, total_samples, sample_rate, max_sample,
                                 result, result);
     return p1 || p2;

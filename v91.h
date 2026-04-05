@@ -143,6 +143,7 @@ uint8_t v91_idle_codeword(v91_law_t law);
 int16_t v91_codeword_to_linear(v91_law_t law, uint8_t codeword);
 uint8_t v91_linear_to_codeword(v91_law_t law, int16_t sample);
 uint8_t v91_ucode_to_codeword(v91_law_t law, int ucode, bool positive);
+int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword);
 
 int v91_tx_phase1_silence_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
 int v91_tx_eu_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);

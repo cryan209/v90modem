@@ -27,6 +27,7 @@
 #include "v8bis_decode.h"   /* call_log_t, call_log_event_t */
 #include "v90.h"            /* v90_info0a_t, v90_info1a_t, v34_v90_info* */
 #include "v34_info_decode.h"
+#include "v91.h"
 #include "v92_short_phase2_decode.h"
 
 #include <stdbool.h>
@@ -219,6 +220,22 @@ typedef struct {
     int v92_qc2_sample;
     char v92_qc2_name[16];
 
+    bool v92_short_p1_seen;
+    int v92_short_p1_sample;
+    char v92_short_p1_name[16];
+    bool v92_short_p1_digital;
+    bool v92_short_p1_qca;
+    int v92_short_p1_uqts_ucode;
+
+    bool v92_qts_seen;
+    int v92_qts_sample;
+    int v92_qts_reps;
+    int v92_qts_bar_reps;
+
+    bool v92_toneq_seen;
+    int v92_toneq_sample;
+    int v92_toneq_duration_samples;
+
     bool answer_tone_handoff_known;
     int answer_tone_handoff_sample;
 } p12_call_init_t;
@@ -334,6 +351,15 @@ bool phase12_decode(const int16_t *samples,
                     int max_sample,
                     phase12_result_t *result);
 
+bool phase12_decode_with_codewords(const int16_t *samples,
+                                   const uint8_t *codewords,
+                                   int total_samples,
+                                   int total_codewords,
+                                   v91_law_t law,
+                                   int sample_rate,
+                                   int max_sample,
+                                   phase12_result_t *result);
+
 /*
  * Decode Phase 1 only (V.8 negotiation).
  */
@@ -342,6 +368,15 @@ bool phase12_decode_phase1(const int16_t *samples,
                            int sample_rate,
                            int max_sample,
                            phase12_result_t *result);
+
+bool phase12_decode_phase1_with_codewords(const int16_t *samples,
+                                          const uint8_t *codewords,
+                                          int total_samples,
+                                          int total_codewords,
+                                          v91_law_t law,
+                                          int sample_rate,
+                                          int max_sample,
+                                          phase12_result_t *result);
 
 const char *phase12_phase2_role_name(p12_phase2_role_t role);
 const char *phase12_phase2_step_name(p12_phase2_step_t step);

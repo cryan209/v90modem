@@ -10043,11 +10043,14 @@ static void collect_stream_call_log(call_log_t *log,
     phase12_result_init(&phase12);
 
     if (do_v8 || do_v34 || do_v90) {
-        have_phase12 = phase12_decode(linear_samples,
-                                      total_samples,
-                                      8000,
-                                      0,
-                                      &phase12);
+        have_phase12 = phase12_decode_with_codewords(linear_samples,
+                                                     g711_codewords,
+                                                     total_samples,
+                                                     total_codewords,
+                                                     law,
+                                                     8000,
+                                                     0,
+                                                     &phase12);
         if (have_phase12) {
             phase12_merge_to_call_log(&phase12, log, 8000);
             have_phase12_capability = phase12.cm.detected || phase12.jm.detected
@@ -12027,7 +12030,14 @@ static void run_decode_suite(const char *label,
     }
 
     if (opts->do_phase12 || opts->do_v34 || opts->do_v90 || opts->do_v8) {
-        have_phase12 = phase12_decode(linear_samples, total_samples, sample_rate, 0, &p12);
+        have_phase12 = phase12_decode_with_codewords(linear_samples,
+                                                     g711_codewords,
+                                                     total_samples,
+                                                     total_codewords,
+                                                     law,
+                                                     sample_rate,
+                                                     0,
+                                                     &p12);
         if (have_phase12)
             have_phase12_capability = p12.cm.detected || p12.jm.detected
                                       || p12.info0.detected || p12.info1.detected;
@@ -12137,6 +12147,24 @@ static void run_decode_suite(const char *label,
                 printf("  Call-init QC: %s at %.1f ms\n",
                        p12.call_init.v92_qc2_name,
                        sample_to_ms(p12.call_init.v92_qc2_sample, sample_rate));
+            }
+            if (p12.call_init.v92_short_p1_seen) {
+                printf("  V.92 short P1: %s at %.1f ms (%s/%s)\n",
+                       p12.call_init.v92_short_p1_name,
+                       sample_to_ms(p12.call_init.v92_short_p1_sample, sample_rate),
+                       p12.call_init.v92_short_p1_digital ? "digital" : "analog",
+                       p12.call_init.v92_short_p1_qca ? "QCA" : "QC");
+            }
+            if (p12.call_init.v92_qts_seen) {
+                printf("  V.92 QTS: %.1f ms (%d QTS reps, %d QTS\\\\ reps)\n",
+                       sample_to_ms(p12.call_init.v92_qts_sample, sample_rate),
+                       p12.call_init.v92_qts_reps,
+                       p12.call_init.v92_qts_bar_reps);
+            }
+            if (p12.call_init.v92_toneq_seen) {
+                printf("  V.92 TONEq: %.1f ms (%.0f ms)\n",
+                       sample_to_ms(p12.call_init.v92_toneq_sample, sample_rate),
+                       sample_to_ms(p12.call_init.v92_toneq_duration_samples, sample_rate));
             }
 
             /* V.21 FSK bursts */

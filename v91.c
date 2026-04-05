@@ -593,7 +593,7 @@ uint8_t v91_ucode_to_codeword(v91_law_t law, int ucode, bool positive)
     return (uint8_t) (mag7 | (positive ? 0x80 : 0x00));
 }
 
-static int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword)
+int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword)
 {
     int ucode;
 
