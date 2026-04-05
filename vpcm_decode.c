@@ -4305,6 +4305,43 @@ static bool v8_scan_v92_window_candidate(const int16_t *samples,
     if (search_end - search_start < 160)
         return false;
 
+    /* Energy pre-filter: scan in 40ms steps for V.21 channel frequency
+     * energy before running the expensive triple-nested demodulation loop. */
+    {
+        enum { ESCAN_STEP = 320, ESCAN_WIN = 320 }; /* 40ms at 8000 Hz */
+        int active_start = -1;
+        int active_end   = -1;
+        bool any_active  = false;
+
+        for (int pos = search_start; pos + ESCAN_WIN <= search_end; pos += ESCAN_STEP) {
+            double e = window_energy(samples + pos, ESCAN_WIN);
+            bool active = false;
+
+            if (e > 0.0) {
+                double r0 = tone_energy_ratio(samples + pos, ESCAN_WIN, sample_rate, mark_hz, e);
+                double r1 = tone_energy_ratio(samples + pos, ESCAN_WIN, sample_rate, space_hz, e);
+                active = (r0 + r1 >= 0.08);
+            }
+            if (active) {
+                if (active_start < 0)
+                    active_start = pos;
+                active_end = pos + ESCAN_WIN;
+                any_active = true;
+            }
+        }
+        if (!any_active)
+            return false;
+        {
+            int pad = (sample_rate * 200) / 1000;
+            int new_start = active_start - pad;
+            int new_end   = active_end   + pad;
+            if (new_start > search_start)
+                search_start = new_start;
+            if (new_end   < search_end)
+                search_end   = new_end;
+        }
+    }
+
     for (int invert = 0; invert <= 1; invert++) {
         for (int bit_rate = 296; bit_rate <= 304; bit_rate++) {
             double symbol_samples = (double) sample_rate / (double) bit_rate;

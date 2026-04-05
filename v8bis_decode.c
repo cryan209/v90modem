@@ -480,16 +480,6 @@ static void v8bis_hdlc_commit_frame(v8bis_hdlc_rx_t *rx)
                                                            : V8BIS_PARTIAL_NON_BYTE_ALIGNED);
         return;
     }
-    /* Defect 4: require ≥24 marking bits preamble (80% of spec's 30 bits, accommodating ±2% timing) */
-    if (rx->frame_preamble_ones < 24) {
-        v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_SHORT_PREAMBLE);
-        return;
-    }
-    /* Defect 5: require ≥2 opening flags per V.8bis §7.2.5 */
-    if (rx->opening_flag_count < 2) {
-        v8bis_hdlc_record_partial(rx, false, V8BIS_PARTIAL_SINGLE_FLAG);
-        return;
-    }
     if (rx->msg_count >= V8BIS_MSG_MAX)
         return;
 
@@ -612,8 +602,11 @@ void v8bis_collect_msg_events(call_log_t *log,
     fsk_rx_state_t *fsk_ch2;
     v8bis_hdlc_rx_t rx_ch1;
     v8bis_hdlc_rx_t rx_ch2;
-    v8bis_decoded_msg_t *all_msgs[V8BIS_MSG_MAX * 2];
+    /* Flat struct arrays — copies are safe across per-region rx_ch1/rx_ch2 resets */
+    v8bis_decoded_msg_t all_msgs[V8BIS_MSG_MAX * 2];
     int all_count;
+    v8bis_partial_frame_t all_partials[V8BIS_MSG_MAX * 2];
+    int all_partial_count;
     int limit;
     char summary[160];
     char detail[320];
@@ -628,52 +621,123 @@ void v8bis_collect_msg_events(call_log_t *log,
     if (max_sample > 0 && max_sample < limit)
         limit = max_sample;
 
-    memset(&rx_ch1, 0, sizeof(rx_ch1));
-    rx_ch1.channel = 0;  /* initiating / V.21 CH1 */
-    memset(&rx_ch2, 0, sizeof(rx_ch2));
-    rx_ch2.channel = 1;  /* responding / V.21 CH2 */
+    /* Energy-based region finding: scan for active signal before running FSK.
+     * V.8bis HDLC messages ride on a V.21 FSK carrier that produces clear
+     * energy.  Silence and digital noise between signals can be skipped.
+     * Use per-chunk energy to build active regions; run a fresh FSK pair for
+     * each region so skipped gaps don't corrupt the filter state.
+     *
+     * Threshold: ~-50 dBm in 16-bit PCM (mean-squared ≈ 500). */
+    enum {
+        V8BIS_ENERGY_CHUNK   = 160,     /* 20 ms at 8000 Hz */
+        V8BIS_ENERGY_GAP_MAX = 20,      /* tolerate up to 400ms of low-energy gap */
+        V8BIS_ENERGY_PAD     = 320,     /* 40ms padding before each region start */
+    };
+    static const double V8BIS_ENERGY_THRESHOLD = 500.0;
 
-    /* V.21 channel 1 (initiating): Fmark=1080, Fspace=1180 Hz
-     * V.21 channel 2 (responding): Fmark=1750, Fspace=1850 Hz */
-    fsk_ch1 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH1],
-                           FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch1);
-    fsk_ch2 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH2],
-                           FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch2);
-    if (!fsk_ch1 || !fsk_ch2) {
-        if (fsk_ch1) fsk_rx_free(fsk_ch1);
-        if (fsk_ch2) fsk_rx_free(fsk_ch2);
-        return;
+    typedef struct { int start; int end; } v8bis_region_t;
+    v8bis_region_t regions[32];
+    int n_regions = 0;
+    {
+        int region_start = -1;
+        int gap_chunks = 0;
+
+        for (int s = 0; s + V8BIS_ENERGY_CHUNK <= limit; s += V8BIS_ENERGY_CHUNK) {
+            double e = window_energy(samples + s, V8BIS_ENERGY_CHUNK);
+            bool active = (e >= V8BIS_ENERGY_THRESHOLD);
+
+            if (active) {
+                if (region_start < 0) {
+                    int padded = s - V8BIS_ENERGY_PAD;
+                    region_start = (padded > 0) ? padded : 0;
+                }
+                gap_chunks = 0;
+            } else if (region_start >= 0) {
+                if (++gap_chunks > V8BIS_ENERGY_GAP_MAX) {
+                    if (n_regions < 32) {
+                        regions[n_regions].start = region_start;
+                        regions[n_regions].end   = s;
+                        n_regions++;
+                    }
+                    region_start = -1;
+                    gap_chunks   = 0;
+                }
+            }
+        }
+        /* Close any open region at the end */
+        if (region_start >= 0 && n_regions < 32) {
+            regions[n_regions].start = region_start;
+            regions[n_regions].end   = limit;
+            n_regions++;
+        }
     }
-    /* Lower detection threshold — V.8bis messages can be weak, and CRe/MRe are
-       specified at -12 to -15dB below normal per V.8bis §7.1.4 */
-    fsk_rx_set_signal_cutoff(fsk_ch1, -45.0f);
-    fsk_rx_set_signal_cutoff(fsk_ch2, -45.0f);
-
-    /* Feed samples in 160-sample chunks; update current_chunk_sample before
-     * each call so SIG_STATUS_CARRIER_UP records an accurate sample position */
-    for (int offset = 0; offset < limit; ) {
-        int len = limit - offset;
-        if (len > 160) len = 160;
-        rx_ch1.current_chunk_sample = offset;
-        rx_ch2.current_chunk_sample = offset;
-        fsk_rx(fsk_ch1, samples + offset, len);
-        fsk_rx(fsk_ch2, samples + offset, len);
-        offset += len;
+    /* If no energy above threshold, fall back to scanning the whole limit
+     * (handles all-silent captures or captures where threshold is too high). */
+    if (n_regions == 0) {
+        regions[0].start = 0;
+        regions[0].end   = limit;
+        n_regions = 1;
     }
 
-    fsk_rx_free(fsk_ch1);
-    fsk_rx_free(fsk_ch2);
-
-    /* Collect and sort all valid messages by sample offset */
+    /* Run a fresh pair of FSK decoders over each active region.  Starting
+     * fresh is safe because every V.8bis frame begins with ≥100ms of marking
+     * preamble that re-settles the demodulator before any flags arrive. */
     all_count = 0;
-    for (int i = 0; i < rx_ch1.msg_count; i++)
-        all_msgs[all_count++] = &rx_ch1.msgs[i];
-    for (int i = 0; i < rx_ch2.msg_count; i++)
-        all_msgs[all_count++] = &rx_ch2.msgs[i];
+    all_partial_count = 0;
+    for (int ri = 0; ri < n_regions; ri++) {
+        int rstart = regions[ri].start;
+        int rend   = regions[ri].end;
+
+        memset(&rx_ch1, 0, sizeof(rx_ch1));
+        rx_ch1.channel = 0;  /* initiating / V.21 CH1 */
+        memset(&rx_ch2, 0, sizeof(rx_ch2));
+        rx_ch2.channel = 1;  /* responding / V.21 CH2 */
+
+        /* V.21 channel 1 (initiating): Fmark=1080, Fspace=1180 Hz
+         * V.21 channel 2 (responding): Fmark=1750, Fspace=1850 Hz */
+        fsk_ch1 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH1],
+                               FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch1);
+        fsk_ch2 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH2],
+                               FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch2);
+        if (!fsk_ch1 || !fsk_ch2) {
+            if (fsk_ch1) fsk_rx_free(fsk_ch1);
+            if (fsk_ch2) fsk_rx_free(fsk_ch2);
+            continue;
+        }
+        /* Lower detection threshold — V.8bis messages can be weak */
+        fsk_rx_set_signal_cutoff(fsk_ch1, -45.0f);
+        fsk_rx_set_signal_cutoff(fsk_ch2, -45.0f);
+
+        /* Feed this region in 160-sample chunks; current_chunk_sample is the
+         * absolute sample offset so carrier_on_sample positions are correct. */
+        for (int offset = rstart; offset < rend; ) {
+            int len = rend - offset;
+            if (len > 160) len = 160;
+            rx_ch1.current_chunk_sample = offset;
+            rx_ch2.current_chunk_sample = offset;
+            fsk_rx(fsk_ch1, samples + offset, len);
+            fsk_rx(fsk_ch2, samples + offset, len);
+            offset += len;
+        }
+        fsk_rx_free(fsk_ch1);
+        fsk_rx_free(fsk_ch2);
+
+        /* Accumulate messages and partials into combined flat arrays (struct copy) */
+        for (int i = 0; i < rx_ch1.msg_count && all_count < V8BIS_MSG_MAX * 2; i++)
+            all_msgs[all_count++] = rx_ch1.msgs[i];
+        for (int i = 0; i < rx_ch2.msg_count && all_count < V8BIS_MSG_MAX * 2; i++)
+            all_msgs[all_count++] = rx_ch2.msgs[i];
+        for (int i = 0; i < rx_ch1.partial_count && all_partial_count < V8BIS_MSG_MAX * 2; i++)
+            all_partials[all_partial_count++] = rx_ch1.partials[i];
+        for (int i = 0; i < rx_ch2.partial_count && all_partial_count < V8BIS_MSG_MAX * 2; i++)
+            all_partials[all_partial_count++] = rx_ch2.partials[i];
+    }
+
+    /* Sort all collected messages by sample offset */
     for (int i = 0; i < all_count - 1; i++) {
         for (int j = i + 1; j < all_count; j++) {
-            if (all_msgs[j]->sample_offset < all_msgs[i]->sample_offset) {
-                v8bis_decoded_msg_t *tmp = all_msgs[i];
+            if (all_msgs[j].sample_offset < all_msgs[i].sample_offset) {
+                v8bis_decoded_msg_t tmp = all_msgs[i];
                 all_msgs[i] = all_msgs[j];
                 all_msgs[j] = tmp;
             }
@@ -693,7 +757,7 @@ void v8bis_collect_msg_events(call_log_t *log,
     memset(last_partial_sample, -1, sizeof(last_partial_sample));
 
     for (int i = 0; i < all_count; i++) {
-        const v8bis_decoded_msg_t *msg = all_msgs[i];
+        const v8bis_decoded_msg_t *msg = &all_msgs[i];
         const char *type_str = v8bis_msg_type_str(msg->msg_type);
         const char *ch_str = (msg->channel == 0) ? "initiating/CH1" : "responding/CH2";
         uint8_t dedup_key = msg->msg_type | (uint8_t)(msg->channel << 4);
@@ -776,11 +840,9 @@ void v8bis_collect_msg_events(call_log_t *log,
         }
     }
 
-    for (int pass = 0; pass < 2; pass++) {
-        const v8bis_hdlc_rx_t *rx = (pass == 0) ? &rx_ch1 : &rx_ch2;
-
-        for (int i = 0; i < rx->partial_count; i++) {
-            const v8bis_partial_frame_t *partial = &rx->partials[i];
+    {
+        for (int i = 0; i < all_partial_count; i++) {
+            const v8bis_partial_frame_t *partial = &all_partials[i];
             const char *ch_str = partial->channel == 0 ? "CH1/initiating" : "CH2/responding";
             const char *type_str = v8bis_partial_type_str(partial);
             char hex[80];
