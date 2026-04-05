@@ -338,6 +338,27 @@ static bool p12_phase1_find_event_after(const phase12_result_t *result,
                                         int start_sample,
                                         int max_delta_samples,
                                         const p12_phase1_event_t **event_out);
+typedef struct {
+    bool valid;
+    bool digital;
+    bool qca;
+    int family;
+    int event_sample;
+    int partner_sample;
+    bool cm_required;
+    bool cm_seen;
+    bool partner_required;
+    bool partner_seen;
+    bool partner_complementary;
+    bool procedure_ready;
+    int qts_sequence_start;
+    const p12_phase1_event_t *event;
+    const p12_phase1_event_t *cm_event;
+} p12_v92_short_p1_branch_t;
+static bool p12_select_v92_short_p1_branch(const phase12_result_t *result,
+                                           bool want_digital,
+                                           int sample_rate,
+                                           p12_v92_short_p1_branch_t *branch_out);
 static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              int total_samples,
                                              int sample_rate,
@@ -1589,7 +1610,7 @@ static void detect_call_initiation_signals(const int16_t *samples,
         result->call_init.v92_qc2_sample = ev->sample_offset;
         snprintf(result->call_init.v92_qc2_name,
                  sizeof(result->call_init.v92_qc2_name),
-                 "%s",
+                 "%.15s",
                  ev->summary);
         result->call_init.v92_qc2_digital = (strstr(ev->summary, "d") != NULL);
         result->call_init.v92_qc2_qca = (strstr(ev->summary, "QCA") != NULL);
@@ -1858,7 +1879,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                                              phase12_result_t *result)
 {
     static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
-    const p12_phase1_event_t *digital_event = NULL;
+    p12_v92_short_p1_branch_t branch;
     v92_qts_hit_t qts_hit;
     v92_qts_hit_t alt_qts_hit;
     v92_anspcm_hit_t anspcm_hit;
@@ -1866,7 +1887,6 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
     p12_tone_hit_t toneq_hit;
     v91_law_t qts_law = law;
     v91_law_t anspcm_law = law;
-    int phase1_anchor_sample;
     int effective_uqts_ucode;
     int effective_lm_level;
     double toneq_energy = 0.0;
@@ -1892,25 +1912,37 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         }
         return;
     }
-
-    if (p12_phase1_find_short_p1_event(result, true, &digital_event)) {
-        phase1_anchor_sample = digital_event->sample_offset;
-        if (result->stereo_short_p1_hint_valid
-            && result->stereo_short_p1_partner_family > 0
-            && (p12_phase1_event_family(digital_event) != result->stereo_short_p1_partner_family
-                || p12_phase1_event_qca(digital_event) == result->stereo_short_p1_partner_qca)) {
-            if (p12_debug_enabled()) {
-                fprintf(stderr,
-                        "[p12] suppress V.92 digital follow-up: %s mismatches complementary stereo short-P1 pair\n",
-                        digital_event->label);
-            }
-            return;
-        }
-    } else {
-        phase1_anchor_sample = -1;
-    }
-    if (phase1_anchor_sample < 0)
+    memset(&branch, 0, sizeof(branch));
+    if (!p12_select_v92_short_p1_branch(result, true, sample_rate, &branch))
         return;
+    result->call_init.v92_digital_branch_seen = branch.valid;
+    result->call_init.v92_digital_branch_sample = branch.event_sample;
+    result->call_init.v92_digital_branch_partner_required = branch.partner_required;
+    result->call_init.v92_digital_branch_partner_seen = branch.partner_seen;
+    result->call_init.v92_digital_branch_cm_required = branch.cm_required;
+    result->call_init.v92_digital_branch_cm_seen = branch.cm_seen;
+    snprintf(result->call_init.v92_digital_branch_name,
+             sizeof(result->call_init.v92_digital_branch_name),
+             "%.15s",
+             branch.event ? branch.event->label : "");
+    if (result->stereo_short_p1_hint_valid
+        && result->stereo_short_p1_partner_family > 0
+        && !branch.partner_complementary) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] suppress V.92 digital follow-up: %s mismatches complementary stereo short-P1 pair\n",
+                    branch.event ? branch.event->label : "short-P1");
+        }
+        return;
+    }
+    if (!branch.procedure_ready || branch.qts_sequence_start < 0) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] suppress V.92 digital follow-up: %s branch not procedurally ready\n",
+                    branch.event ? branch.event->label : "short-P1");
+        }
+        return;
+    }
 
     effective_uqts_ucode = (result->call_init.v92_short_p1_uqts_ucode >= 0)
                          ? result->call_init.v92_short_p1_uqts_ucode
@@ -1922,24 +1954,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                        : (result->call_init.v92_qc2_lm_level >= 0
                           ? result->call_init.v92_qc2_lm_level
                           : result->stereo_short_p1_partner_lm_level);
-
-    qts_sequence_start = phase1_anchor_sample;
-    if (digital_event) {
-        if (p12_phase1_event_qca(digital_event)) {
-            qts_sequence_start = digital_event->sample_offset
-                               + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
-        } else if (result->stereo_short_p1_partner_sample >= 0) {
-            qts_sequence_start = result->stereo_short_p1_partner_sample
-                               + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
-        } else {
-            if (p12_debug_enabled()) {
-                fprintf(stderr,
-                        "[p12] suppress V.92 digital follow-up: %s has no complementary partner timing\n",
-                        digital_event->label);
-            }
-            return;
-        }
-    }
+    qts_sequence_start = branch.qts_sequence_start;
 
     if (codewords && total_codewords > 0 && effective_uqts_ucode >= 0) {
         qts_search_start = qts_sequence_start;
@@ -2111,30 +2126,29 @@ static void finalize_v92_analog_short_phase1(const phase12_result_t *src,
                                              phase12_result_t *result,
                                              int sample_rate)
 {
-    const p12_phase1_event_t *analog_event = NULL;
-    const p12_phase1_event_t *cm_event = NULL;
+    p12_v92_short_p1_branch_t branch;
 
     if (!src || !result || sample_rate <= 0)
         return;
-
-    if (!p12_phase1_find_short_p1_event(src, false, &analog_event))
+    memset(&branch, 0, sizeof(branch));
+    if (!p12_select_v92_short_p1_branch(src, false, sample_rate, &branch))
         return;
+    result->call_init.v92_analog_branch_seen = branch.valid;
+    result->call_init.v92_analog_branch_sample = branch.event_sample;
+    result->call_init.v92_analog_branch_partner_required = branch.partner_required;
+    result->call_init.v92_analog_branch_partner_seen = branch.partner_seen;
+    result->call_init.v92_analog_branch_cm_required = branch.cm_required;
+    result->call_init.v92_analog_branch_cm_seen = branch.cm_seen;
+    snprintf(result->call_init.v92_analog_branch_name,
+             sizeof(result->call_init.v92_analog_branch_name),
+             "%.15s",
+             branch.event ? branch.event->label : "");
 
-    if (p12_phase1_event_is_label(analog_event, "QC1a")
-        && p12_phase1_find_event_after(src,
-                                       "CM",
-                                       analog_event->sample_offset,
-                                       (sample_rate * 1200) / 1000,
-                                       &cm_event)) {
+    if (branch.cm_seen)
         result->call_init.v92_cm_after_qc1a_valid = true;
-    }
 
-    if (p12_phase1_event_is_label(analog_event, "QCA1a")
-        || p12_phase1_event_is_label(analog_event, "QC2a")
-        || p12_phase1_event_is_label(analog_event, "QCA2a")
-        || result->call_init.v92_cm_after_qc1a_valid) {
+    if (branch.procedure_ready)
         result->call_init.v92_analog_chain_ready = true;
-    }
 }
 
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
@@ -2633,6 +2647,76 @@ static bool p12_phase1_find_short_p1_event(const phase12_result_t *result,
         return true;
     }
     return false;
+}
+
+static bool p12_select_v92_short_p1_branch(const phase12_result_t *result,
+                                           bool want_digital,
+                                           int sample_rate,
+                                           p12_v92_short_p1_branch_t *branch_out)
+{
+    const p12_phase1_event_t *event = NULL;
+    p12_v92_short_p1_branch_t branch;
+
+    if (branch_out)
+        memset(branch_out, 0, sizeof(*branch_out));
+    if (!result || sample_rate <= 0 || !branch_out)
+        return false;
+    if (!p12_phase1_find_short_p1_event(result, want_digital, &event))
+        return false;
+
+    memset(&branch, 0, sizeof(branch));
+    branch.valid = true;
+    branch.digital = want_digital;
+    branch.event = event;
+    branch.family = p12_phase1_event_family(event);
+    branch.qca = p12_phase1_event_qca(event);
+    branch.event_sample = event->sample_offset;
+    branch.partner_sample = -1;
+    branch.qts_sequence_start = -1;
+
+    if (branch.family == 1 && !branch.qca) {
+        branch.cm_required = true;
+        if (p12_phase1_find_event_after(result,
+                                        "CM",
+                                        event->sample_offset,
+                                        (sample_rate * 1200) / 1000,
+                                        &branch.cm_event)) {
+            branch.cm_seen = true;
+        }
+    }
+
+    if (result->stereo_short_p1_hint_valid
+        && result->stereo_short_p1_partner_sample >= 0) {
+        branch.partner_seen = true;
+        branch.partner_sample = result->stereo_short_p1_partner_sample;
+        branch.partner_complementary =
+            result->stereo_short_p1_partner_family == branch.family
+            && result->stereo_short_p1_partner_qca != branch.qca;
+    }
+
+    if (want_digital) {
+        branch.partner_required = !branch.qca;
+        if (branch.qca) {
+            branch.procedure_ready = true;
+            branch.qts_sequence_start = branch.event_sample
+                                      + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+        } else if (branch.partner_seen && branch.partner_complementary) {
+            branch.procedure_ready = true;
+            branch.qts_sequence_start = branch.partner_sample
+                                      + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+        }
+    } else {
+        if (branch.family == 1) {
+            branch.procedure_ready = branch.qca || branch.cm_seen;
+        } else if (branch.family == 2) {
+            branch.partner_required = !branch.qca;
+            branch.procedure_ready = branch.qca
+                                  || (branch.partner_seen && branch.partner_complementary);
+        }
+    }
+
+    *branch_out = branch;
+    return true;
 }
 
 static bool p12_phase1_find_event_after(const phase12_result_t *result,
@@ -5896,9 +5980,16 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
     int phase2_start = -1;
     int phase2_end = -1;
     bool short_phase1_mode;
+    p12_v92_short_p1_branch_t analog_branch;
+    p12_v92_short_p1_branch_t digital_branch;
 
     if (!result)
         return;
+
+    memset(&analog_branch, 0, sizeof(analog_branch));
+    memset(&digital_branch, 0, sizeof(digital_branch));
+    (void) p12_select_v92_short_p1_branch(result, false, 8000, &analog_branch);
+    (void) p12_select_v92_short_p1_branch(result, true, 8000, &digital_branch);
 
     short_phase1_mode = result->call_init.v92_phase2_handoff_known;
 
@@ -5952,7 +6043,8 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
         result->phase2_end_sample = (phase2_end >= phase2_start) ? phase2_end : phase2_start;
     }
 
-    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen)
+    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen
+        || analog_branch.valid || digital_branch.valid)
         result->v92_capable = true;
 
     if (result->cm.detected) {
@@ -6073,7 +6165,8 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
 
     /* Keep call-init V.92 evidence authoritative even if later CM/JM/INFO
      * parsing is partial or inconsistent. */
-    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen)
+    if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen
+        || analog_branch.valid || digital_branch.valid)
         result->v92_capable = true;
 }
 

@@ -291,6 +291,20 @@ typedef struct {
     bool v92_cm_after_qc1a_valid;
     bool v92_phase2_handoff_known;
     int v92_phase2_handoff_sample;
+    bool v92_analog_branch_seen;
+    int v92_analog_branch_sample;
+    char v92_analog_branch_name[16];
+    bool v92_analog_branch_partner_required;
+    bool v92_analog_branch_partner_seen;
+    bool v92_analog_branch_cm_required;
+    bool v92_analog_branch_cm_seen;
+    bool v92_digital_branch_seen;
+    int v92_digital_branch_sample;
+    char v92_digital_branch_name[16];
+    bool v92_digital_branch_partner_required;
+    bool v92_digital_branch_partner_seen;
+    bool v92_digital_branch_cm_required;
+    bool v92_digital_branch_cm_seen;
 
     bool answer_tone_handoff_known;
     int answer_tone_handoff_sample;

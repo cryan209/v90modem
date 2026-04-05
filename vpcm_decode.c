@@ -12156,37 +12156,13 @@ static int phase12_short_p1_form_bonus(const phase12_result_t *p12, bool expect_
     return score;
 }
 
-static bool phase12_timeline_has_event_label(const phase12_result_t *p12,
-                                             const char *label)
-{
-    if (!p12 || !label)
-        return false;
-    for (int i = 0; i < p12->phase1_event_count; i++) {
-        const p12_phase1_event_t *ev = &p12->phase1_events[i];
-
-        if (ev->seen && strcmp(ev->label, label) == 0)
-            return true;
-    }
-    return false;
-}
-
 static bool phase12_analog_short_p1_ready(const phase12_result_t *p12)
 {
     if (!p12)
         return false;
-    if (phase12_timeline_has_event_label(p12, "QCA1a")
-        || phase12_timeline_has_event_label(p12, "QC2a")
-        || phase12_timeline_has_event_label(p12, "QCA2a")) {
-        return true;
-    }
     if (p12->call_init.v92_analog_chain_ready)
         return true;
-    if (p12->call_init.v92_short_p1_seen
-        && !p12->call_init.v92_short_p1_digital
-        && strcmp(p12->call_init.v92_short_p1_name, "QCA1a") == 0) {
-        return true;
-    }
-    if (p12->call_init.v92_qc2_seen && !p12->call_init.v92_qc2_digital)
+    if (p12->call_init.v92_cm_after_qc1a_valid)
         return true;
     return false;
 }
@@ -12729,6 +12705,25 @@ static void run_decode_suite(const char *label,
                 printf("  V.92 short-P1 handoff: %.1f ms (%s)\n",
                        sample_to_ms(p12.call_init.v92_phase2_handoff_sample, sample_rate),
                        p12.call_init.v92_digital_chain_valid ? "validated digital chain" : "unvalidated");
+            }
+            if (p12.call_init.v92_analog_branch_seen) {
+                printf("  V.92 analog branch: %s at %.1f ms (partner=%s/%s cm=%s/%s ready=%s)\n",
+                       p12.call_init.v92_analog_branch_name,
+                       sample_to_ms(p12.call_init.v92_analog_branch_sample, sample_rate),
+                       p12.call_init.v92_analog_branch_partner_required ? "required" : "not-required",
+                       p12.call_init.v92_analog_branch_partner_seen ? "seen" : "not-seen",
+                       p12.call_init.v92_analog_branch_cm_required ? "required" : "not-required",
+                       p12.call_init.v92_analog_branch_cm_seen ? "seen" : "not-seen",
+                       p12.call_init.v92_analog_chain_ready ? "yes" : "no");
+            }
+            if (p12.call_init.v92_digital_branch_seen) {
+                printf("  V.92 digital branch: %s at %.1f ms (partner=%s/%s cm=%s/%s)\n",
+                       p12.call_init.v92_digital_branch_name,
+                       sample_to_ms(p12.call_init.v92_digital_branch_sample, sample_rate),
+                       p12.call_init.v92_digital_branch_partner_required ? "required" : "not-required",
+                       p12.call_init.v92_digital_branch_partner_seen ? "seen" : "not-seen",
+                       p12.call_init.v92_digital_branch_cm_required ? "required" : "not-required",
+                       p12.call_init.v92_digital_branch_cm_seen ? "seen" : "not-seen");
             }
             if (p12.call_init.v92_analog_chain_ready || p12.call_init.v92_cm_after_qc1a_valid) {
                 printf("  V.92 analog chain: ready=%s cm_after_qc1a=%s\n",
