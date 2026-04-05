@@ -11262,9 +11262,7 @@ static void build_g711_codewords_from_linear(const int16_t *samples,
             scaled = -32768;
         else if (scaled > 32767)
             scaled = 32767;
-        out[i] = (law == V91_LAW_ULAW)
-            ? linear_to_ulaw((int16_t) scaled)
-            : linear_to_alaw((int16_t) scaled);
+        out[i] = v91_linear_to_codeword(law, (int16_t) scaled);
     }
 }
 
@@ -11313,10 +11311,14 @@ static void adaptive_reslice_codewords(const int16_t *samples,
     info->bias = best_bias;
     info->adaptive_used = (best_score > direct_score && (best_gain != 1.0 || best_bias != 0));
 
-    if (info->adaptive_used) {
+    /* Keep the direct-companded codeword stream unchanged for protocol
+     * scanners that rely on literal G.711 reconstruction from the WAV.
+     * The adaptive search remains diagnostic only until a consumer
+     * explicitly opts into the alternate stream. */
+    memcpy(work_codewords, direct_codewords, (size_t) total_samples);
+    if (info->adaptive_used)
         build_g711_codewords_from_linear(samples, total_samples, law,
-                                         best_gain, best_bias, direct_codewords);
-    }
+                                         best_gain, best_bias, work_codewords);
 }
 
 static int offline_v90_descramble_reg_bit(uint32_t *reg, int in_bit)
@@ -11970,6 +11972,148 @@ static void print_tone_probe(const char *label,
         printf("  1800 vs 1200: %.2f dB\n",
                10.0 * log10(ratios[1] / ratios[0]));
     }
+}
+
+static int phase12_digital_likeness_score(const phase12_result_t *p12)
+{
+    int score = 0;
+
+    if (!p12)
+        return -1000;
+
+    if (p12->role_detected && !p12->is_caller)
+        score += 18;
+    if (p12->role_detected && p12->is_caller)
+        score -= 12;
+
+    if (p12->jm.detected)
+        score += 10 + p12->jm.byte_count + (p12->jm.observed_count * 4) - (p12->jm.differing_count * 3);
+    if (p12->cm.detected)
+        score -= 2;
+
+    if (p12->pcm_modem_capable)
+        score += 12;
+    if (p12->v90_capable)
+        score += 10;
+    if (p12->v92_capable)
+        score += 10;
+
+    if (p12->call_init.v92_short_p1_seen) {
+        if (strstr(p12->call_init.v92_short_p1_name, "QCA") != NULL)
+            score += 8;
+        if (strstr(p12->call_init.v92_short_p1_name, "QC") != NULL
+            && strstr(p12->call_init.v92_short_p1_name, "QCA") == NULL)
+            score -= 4;
+    }
+
+    if (p12->info0.detected && p12->info0.is_info0d)
+        score += 18;
+    if (p12->info1.detected && p12->info1.is_info1d)
+        score += 14;
+    if (p12->info1.detected && p12->info1.kind == P12_INFO1_KIND_V90_INFO1A)
+        score += 10;
+
+    return score;
+}
+
+static int phase12_analog_likeness_score(const phase12_result_t *p12)
+{
+    int score = 0;
+
+    if (!p12)
+        return -1000;
+
+    if (p12->role_detected && p12->is_caller)
+        score += 18;
+    if (p12->role_detected && !p12->is_caller)
+        score -= 10;
+
+    if (p12->cm.detected)
+        score += 10 + p12->cm.byte_count + (p12->cm.observed_count * 4) - (p12->cm.differing_count * 3);
+    if (p12->jm.detected)
+        score -= 2;
+
+    if (p12->call_init.v92_short_p1_seen) {
+        if (strstr(p12->call_init.v92_short_p1_name, "QC") != NULL
+            && strstr(p12->call_init.v92_short_p1_name, "QCA") == NULL)
+            score += 8;
+        if (strstr(p12->call_init.v92_short_p1_name, "QCA") != NULL)
+            score -= 4;
+    }
+
+    if (p12->info0.detected && !p12->info0.is_info0d)
+        score += 14;
+    if (p12->info1.detected && !p12->info1.is_info1d)
+        score += 10;
+
+    return score;
+}
+
+static void print_stereo_channel_tells(const int16_t *left_linear_samples,
+                                       const uint8_t *left_g711_codewords,
+                                       const int16_t *right_linear_samples,
+                                       const uint8_t *right_g711_codewords,
+                                       int total_samples,
+                                       int total_codewords,
+                                       int sample_rate,
+                                       v91_law_t law)
+{
+    phase12_result_t left_p12;
+    phase12_result_t right_p12;
+    int left_digital;
+    int right_digital;
+    int left_analog;
+    int right_analog;
+
+    if (!left_linear_samples || !right_linear_samples
+        || !left_g711_codewords || !right_g711_codewords)
+        return;
+
+    phase12_result_init(&left_p12);
+    phase12_result_init(&right_p12);
+
+    phase12_decode_with_codewords(left_linear_samples,
+                                  left_g711_codewords,
+                                  total_samples,
+                                  total_codewords,
+                                  law,
+                                  sample_rate,
+                                  0,
+                                  &left_p12);
+    phase12_decode_with_codewords(right_linear_samples,
+                                  right_g711_codewords,
+                                  total_samples,
+                                  total_codewords,
+                                  law,
+                                  sample_rate,
+                                  0,
+                                  &right_p12);
+
+    left_digital = phase12_digital_likeness_score(&left_p12);
+    right_digital = phase12_digital_likeness_score(&right_p12);
+    left_analog = phase12_analog_likeness_score(&left_p12);
+    right_analog = phase12_analog_likeness_score(&right_p12);
+
+    printf("\n=== Stereo Channel Tells ===\n");
+    printf("  Left:  digital=%d analog=%d role=%s shortP1=%s\n",
+           left_digital,
+           left_analog,
+           left_p12.role_detected ? (left_p12.is_caller ? "caller" : "answerer") : "unknown",
+           left_p12.call_init.v92_short_p1_seen ? left_p12.call_init.v92_short_p1_name : "none");
+    printf("  Right: digital=%d analog=%d role=%s shortP1=%s\n",
+           right_digital,
+           right_analog,
+           right_p12.role_detected ? (right_p12.is_caller ? "caller" : "answerer") : "unknown",
+           right_p12.call_init.v92_short_p1_seen ? right_p12.call_init.v92_short_p1_name : "none");
+    printf("  Preferred digital side: %s\n",
+           (left_digital > right_digital) ? "Left" :
+           (right_digital > left_digital) ? "Right" : "tie");
+    printf("  Preferred analog side:  %s\n",
+           (left_analog > right_analog) ? "Left" :
+           (right_analog > left_analog) ? "Right" : "tie");
+
+    phase12_result_reset(&left_p12);
+    phase12_result_reset(&right_p12);
 }
 
 static void run_decode_suite(const char *label,
@@ -12678,6 +12822,16 @@ int main(int argc, char **argv)
         opts.tone_probe_duration_ms = tone_probe_duration_ms;
 
         if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
+            if (opts.raw_output_enabled && (opts.do_phase12 || opts.do_v8 || opts.do_v90 || opts.do_v34)) {
+                print_stereo_channel_tells(left_linear_samples,
+                                           left_g711_codewords,
+                                           right_linear_samples,
+                                           right_g711_codewords,
+                                           total_samples,
+                                           total_codewords,
+                                           sample_rate,
+                                           law);
+            }
             if (opts.raw_output_enabled && opts.do_v8) {
                 v8_stereo_pair_result_t stereo_pair;
 

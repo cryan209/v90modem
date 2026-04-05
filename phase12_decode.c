@@ -1597,7 +1597,9 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
 {
     static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
     v92_qts_hit_t qts_hit;
+    v92_qts_hit_t alt_qts_hit;
     p12_tone_hit_t toneq_hit;
+    v91_law_t qts_law;
     int qts_search_start;
     int qts_search_end;
     int toneq_search_start;
@@ -1615,6 +1617,9 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
             qts_search_start = 0;
         if (qts_search_end > total_codewords)
             qts_search_end = total_codewords;
+        memset(&qts_hit, 0, sizeof(qts_hit));
+        memset(&alt_qts_hit, 0, sizeof(alt_qts_hit));
+        qts_law = law;
         if (v92_detect_qts_sequence(codewords,
                                     total_codewords,
                                     law,
@@ -1623,16 +1628,36 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                                     qts_search_end,
                                     v91_codeword_to_ucode,
                                     &qts_hit)) {
+            qts_law = law;
+        }
+        if (v92_detect_qts_sequence(codewords,
+                                    total_codewords,
+                                    (law == V91_LAW_ULAW) ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                    result->call_init.v92_short_p1_uqts_ucode,
+                                    qts_search_start,
+                                    qts_search_end,
+                                    v91_codeword_to_ucode,
+                                    &alt_qts_hit)) {
+            int alt_score = alt_qts_hit.qts_reps * 100 + alt_qts_hit.qts_bar_reps;
+            int base_score = qts_hit.qts_reps * 100 + qts_hit.qts_bar_reps;
+
+            if (!qts_hit.seen || alt_score > base_score) {
+                qts_hit = alt_qts_hit;
+                qts_law = (law == V91_LAW_ULAW) ? V91_LAW_ALAW : V91_LAW_ULAW;
+            }
+        }
+        if (qts_hit.seen) {
             result->call_init.v92_qts_seen = true;
             result->call_init.v92_qts_sample = qts_hit.start_sample;
             result->call_init.v92_qts_reps = qts_hit.qts_reps;
             result->call_init.v92_qts_bar_reps = qts_hit.qts_bar_reps;
             if (p12_debug_enabled()) {
                 fprintf(stderr,
-                        "[p12] V.92 QTS at %.1fms reps=%d qts_bar=%d\n",
+                        "[p12] V.92 QTS at %.1fms reps=%d qts_bar=%d law=%s\n",
                         (double) qts_hit.start_sample * 1000.0 / (double) sample_rate,
                         qts_hit.qts_reps,
-                        qts_hit.qts_bar_reps);
+                        qts_hit.qts_bar_reps,
+                        (qts_law == V91_LAW_ALAW) ? "alaw" : "ulaw");
             }
         }
     }

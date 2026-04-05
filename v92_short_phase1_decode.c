@@ -194,7 +194,10 @@ static bool v92_matches_pcm_symbol(v91_law_t law,
     sign_positive = (codeword & 0x80) != 0;
     if (sign_positive != positive)
         return false;
-    tolerance = (target_ucode == 0) ? 1 : 2;
+    /* Reconstructed G.711 from analog captures is often coarsened by
+     * padding, compander-law ambiguity, and effective level collapse.
+     * Be noticeably more tolerant than exact-codeword matching. */
+    tolerance = (target_ucode == 0) ? 3 : 6;
     return abs(ucode - target_ucode) <= tolerance;
 }
 
