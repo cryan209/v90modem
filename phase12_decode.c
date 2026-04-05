@@ -1575,6 +1575,12 @@ static void detect_call_initiation_signals(const int16_t *samples,
                      sizeof(result->call_init.v8bis_signal_name),
                      "%s",
                      g_v8bis_signal_defs[best_idx].name);
+            p12_append_phase1_event(result,
+                                    strong.hits[best_idx].sample_offset,
+                                    strong.hits[best_idx].duration_samples,
+                                    "V.8bis",
+                                    g_v8bis_signal_defs[best_idx].name,
+                                    result->call_init.v8bis_signal_weak ? "weak=yes" : "weak=no");
         }
     } else if (v8bis_scan_weak_candidate(samples, total_samples, limit, &weak)) {
         result->call_init.v8bis_signal_seen = true;
@@ -1585,6 +1591,12 @@ static void detect_call_initiation_signals(const int16_t *samples,
                  sizeof(result->call_init.v8bis_signal_name),
                  "%s",
                  g_v8bis_signal_defs[weak.signal_index].name);
+        p12_append_phase1_event(result,
+                                weak.sample_offset,
+                                weak.duration_samples,
+                                "V.8bis?",
+                                g_v8bis_signal_defs[weak.signal_index].name,
+                                "weak=yes");
     }
 
     memset(&tmp_log, 0, sizeof(tmp_log));
@@ -1592,7 +1604,9 @@ static void detect_call_initiation_signals(const int16_t *samples,
     for (size_t i = 0; i < tmp_log.count; i++) {
         const call_log_event_t *ev = &tmp_log.events[i];
 
-        if (strcmp(ev->protocol, "V.8bis") == 0 || strcmp(ev->protocol, "V.92") == 0) {
+        if (strcmp(ev->protocol, "V.8bis") == 0
+            || strcmp(ev->protocol, "V.8bis?") == 0
+            || strcmp(ev->protocol, "V.92") == 0) {
             p12_append_phase1_event(result,
                                     ev->sample_offset,
                                     ev->duration_samples,

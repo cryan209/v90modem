@@ -345,6 +345,29 @@ static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
     return true;
 }
 
+static bool v92_decode_qc2_id_partial(const v8bis_partial_frame_t *partial,
+                                      v92_qc2_id_t *out)
+{
+    v8bis_decoded_msg_t msg;
+
+    if (!partial || !out)
+        return false;
+    if (partial->frame_byte_count < 2)
+        return false;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = partial->frame_buf[0] & 0x0F;
+    msg.revision = (partial->frame_buf[0] >> 4) & 0x0F;
+    msg.info_len = partial->frame_byte_count - 1;
+    if (msg.info_len > (int) sizeof(msg.info))
+        msg.info_len = (int) sizeof(msg.info);
+    if (msg.info_len > 0)
+        memcpy(msg.info, partial->frame_buf + 1, (size_t) msg.info_len);
+    msg.sample_offset = partial->sample_offset;
+    msg.channel = partial->channel;
+    return v92_decode_qc2_id(&msg, out);
+}
+
 /* CRC-16/CCITT (x^16 + x^12 + x^5 + 1) per ISO/IEC 3309 / V.8bis §7.2.7 */
 static uint16_t v8bis_crc16(const uint8_t *data, int len)
 {
@@ -686,6 +709,7 @@ void v8bis_collect_msg_events(call_log_t *log,
             int hex_len = partial->frame_byte_count;
             int pos = 0;
             bool is_dup = false;
+            v92_qc2_id_t v92_qc2;
 
             if (hex_len > 6)
                 hex_len = 6;
@@ -719,6 +743,34 @@ void v8bis_collect_msg_events(call_log_t *log,
                      v8bis_partial_reason_str(partial->reason),
                      hex[0] != '\0' ? hex : "n/a");
             call_log_append(log, partial->sample_offset, 0, "V.8bis?", summary, detail);
+
+            if (v92_decode_qc2_id_partial(partial, &v92_qc2)) {
+                snprintf(summary, sizeof(summary), "Partial %s", v92_qc2.name);
+                if (v92_qc2.digital_modem) {
+                    snprintf(detail, sizeof(detail),
+                             "source=V.8bis partial_id_field rev=%d fsk_ch=%s lapm=%s lm=%d anspcm_level=%s id_octet=%02X crc=%s reason=%s",
+                             v92_qc2.revision,
+                             ch_str,
+                             v92_qc2.lapm ? "yes" : "no",
+                             v92_qc2.lm,
+                             v92_anspcm_level_to_str(v92_qc2.lm),
+                             v92_qc2.id_octet,
+                             partial->crc_ok ? "ok" : "failed",
+                             v8bis_partial_reason_str(partial->reason));
+                } else {
+                    snprintf(detail, sizeof(detail),
+                             "source=V.8bis partial_id_field rev=%d fsk_ch=%s lapm=%s uqts_index=0x%X uqts_ucode=%d id_octet=%02X crc=%s reason=%s",
+                             v92_qc2.revision,
+                             ch_str,
+                             v92_qc2.lapm ? "yes" : "no",
+                             v92_qc2.wxyz,
+                             v92_qc2.uqts_ucode,
+                             v92_qc2.id_octet,
+                             partial->crc_ok ? "ok" : "failed",
+                             v8bis_partial_reason_str(partial->reason));
+                }
+                call_log_append(log, partial->sample_offset, 0, "V.92?", summary, detail);
+            }
         }
     }
 }
