@@ -10027,6 +10027,9 @@ typedef struct {
     int right_expected_form;
     int analog_uqts_ucode;
     int digital_lm_level;
+    bool analog_ready;
+    int pair_family;
+    bool pair_qca_opposed;
     int left_digital_score;
     int right_digital_score;
     int left_analog_score;
@@ -12033,6 +12036,14 @@ static int phase12_digital_likeness_score(const phase12_result_t *p12)
             && strstr(p12->call_init.v92_short_p1_name, "QCA") == NULL)
             score -= 4;
     }
+    if (p12->call_init.v92_qc2_seen) {
+        if (p12->call_init.v92_qc2_digital)
+            score += 8;
+        else
+            score -= 4;
+        if (p12->call_init.v92_qc2_qca)
+            score += 3;
+    }
 
     if (p12->info0.detected && p12->info0.is_info0d)
         score += 18;
@@ -12067,6 +12078,14 @@ static int phase12_analog_likeness_score(const phase12_result_t *p12)
             score += 8;
         if (strstr(p12->call_init.v92_short_p1_name, "QCA") != NULL)
             score -= 4;
+    }
+    if (p12->call_init.v92_qc2_seen) {
+        if (!p12->call_init.v92_qc2_digital)
+            score += 8;
+        else
+            score -= 4;
+        if (!p12->call_init.v92_qc2_qca)
+            score += 3;
     }
 
     if (p12->info0.detected && !p12->info0.is_info0d)
@@ -12104,6 +12123,22 @@ static int phase12_short_p1_form_bonus(const phase12_result_t *p12, bool expect_
     }
 
     return score;
+}
+
+static bool phase12_analog_short_p1_ready(const phase12_result_t *p12)
+{
+    if (!p12)
+        return false;
+    if (p12->call_init.v92_analog_chain_ready)
+        return true;
+    if (p12->call_init.v92_short_p1_seen
+        && !p12->call_init.v92_short_p1_digital
+        && strcmp(p12->call_init.v92_short_p1_name, "QCA1a") == 0) {
+        return true;
+    }
+    if (p12->call_init.v92_qc2_seen && !p12->call_init.v92_qc2_digital)
+        return true;
+    return false;
 }
 
 static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_samples,
@@ -12176,16 +12211,29 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->right_expected_form = P12_SHORT_P1_FORM_ANALOG;
             if (left_p12.call_init.v92_short_p1_seen && left_p12.call_init.v92_short_p1_digital)
                 out->digital_lm_level = left_p12.call_init.v92_short_p1_lm_level;
+            else if (left_p12.call_init.v92_qc2_seen && left_p12.call_init.v92_qc2_digital)
+                out->digital_lm_level = left_p12.call_init.v92_qc2_lm_level;
             if (right_p12.call_init.v92_short_p1_seen && !right_p12.call_init.v92_short_p1_digital)
                 out->analog_uqts_ucode = right_p12.call_init.v92_short_p1_uqts_ucode;
+            else if (right_p12.call_init.v92_qc2_seen && !right_p12.call_init.v92_qc2_digital)
+                out->analog_uqts_ucode = right_p12.call_init.v92_qc2_uqts_ucode;
+            out->analog_ready = phase12_analog_short_p1_ready(&right_p12);
         } else {
             out->left_expected_form = P12_SHORT_P1_FORM_ANALOG;
             out->right_expected_form = P12_SHORT_P1_FORM_DIGITAL;
             if (right_p12.call_init.v92_short_p1_seen && right_p12.call_init.v92_short_p1_digital)
                 out->digital_lm_level = right_p12.call_init.v92_short_p1_lm_level;
+            else if (right_p12.call_init.v92_qc2_seen && right_p12.call_init.v92_qc2_digital)
+                out->digital_lm_level = right_p12.call_init.v92_qc2_lm_level;
             if (left_p12.call_init.v92_short_p1_seen && !left_p12.call_init.v92_short_p1_digital)
                 out->analog_uqts_ucode = left_p12.call_init.v92_short_p1_uqts_ucode;
+            else if (left_p12.call_init.v92_qc2_seen && !left_p12.call_init.v92_qc2_digital)
+                out->analog_uqts_ucode = left_p12.call_init.v92_qc2_uqts_ucode;
+            out->analog_ready = phase12_analog_short_p1_ready(&left_p12);
         }
+
+        if (out->analog_uqts_ucode < 0 || out->digital_lm_level < 0 || !out->analog_ready)
+            out->valid = false;
     }
 
     phase12_result_reset(&left_p12);
@@ -12217,7 +12265,7 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
 
     p12->stereo_short_p1_hint_valid = true;
     p12->stereo_short_p1_expected_form = (p12_short_p1_form_t) expected_form;
-    p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL);
+    p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL) && hint->analog_ready;
     p12->stereo_short_p1_partner_uqts_ucode = hint->analog_uqts_ucode;
     p12->stereo_short_p1_partner_lm_level = hint->digital_lm_level;
 }
@@ -12439,9 +12487,14 @@ static void run_decode_suite(const char *label,
                        sample_to_ms(p12.call_init.v8bis_signal_duration, sample_rate));
             }
             if (p12.call_init.v92_qc2_seen) {
-                printf("  Call-init QC: %s at %.1f ms\n",
+                printf("  Call-init QC: %s at %.1f ms",
                        p12.call_init.v92_qc2_name,
                        sample_to_ms(p12.call_init.v92_qc2_sample, sample_rate));
+                if (p12.call_init.v92_qc2_uqts_ucode >= 0)
+                    printf(" (UQTS=%d)", p12.call_init.v92_qc2_uqts_ucode);
+                else if (p12.call_init.v92_qc2_lm_level >= 0)
+                    printf(" (LM=%s)", v92_anspcm_level_to_str(p12.call_init.v92_qc2_lm_level));
+                printf("\n");
             }
             if (p12.call_init.v92_short_p1_seen) {
                 printf("  V.92 short P1: %s at %.1f ms (%s/%s)\n",
@@ -12471,6 +12524,16 @@ static void run_decode_suite(const char *label,
                 printf("  V.92 TONEq: %.1f ms (%.0f ms)\n",
                        sample_to_ms(p12.call_init.v92_toneq_sample, sample_rate),
                        sample_to_ms(p12.call_init.v92_toneq_duration_samples, sample_rate));
+            }
+            if (p12.call_init.v92_phase2_handoff_known) {
+                printf("  V.92 short-P1 handoff: %.1f ms (%s)\n",
+                       sample_to_ms(p12.call_init.v92_phase2_handoff_sample, sample_rate),
+                       p12.call_init.v92_digital_chain_valid ? "validated digital chain" : "unvalidated");
+            }
+            if (p12.call_init.v92_analog_chain_ready || p12.call_init.v92_cm_after_qc1a_valid) {
+                printf("  V.92 analog chain: ready=%s cm_after_qc1a=%s\n",
+                       p12.call_init.v92_analog_chain_ready ? "yes" : "no",
+                       p12.call_init.v92_cm_after_qc1a_valid ? "yes" : "no");
             }
 
             /* V.21 FSK bursts */

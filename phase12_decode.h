@@ -219,6 +219,10 @@ typedef struct {
     bool v92_qc2_seen;
     int v92_qc2_sample;
     char v92_qc2_name[16];
+    bool v92_qc2_digital;
+    bool v92_qc2_qca;
+    int v92_qc2_uqts_ucode;
+    int v92_qc2_lm_level;
 
     bool v92_short_p1_seen;
     int v92_short_p1_sample;
@@ -246,6 +250,12 @@ typedef struct {
     bool v92_toneq_seen;
     int v92_toneq_sample;
     int v92_toneq_duration_samples;
+
+    bool v92_digital_chain_valid;
+    bool v92_analog_chain_ready;
+    bool v92_cm_after_qc1a_valid;
+    bool v92_phase2_handoff_known;
+    int v92_phase2_handoff_sample;
 
     bool answer_tone_handoff_known;
     int answer_tone_handoff_sample;

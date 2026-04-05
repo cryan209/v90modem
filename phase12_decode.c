@@ -155,7 +155,12 @@ enum {
 
 enum {
     P12_V92_TONEQ_FREQ_HZ = 980,
-    P12_V92_TONEQ_MIN_MS = 40
+    P12_V92_TONEQ_MIN_MS = 50
+};
+
+enum {
+    P12_V92_TONEQ_POST_SILENCE_MIN_MS = 70,
+    P12_V92_TONEQ_POST_SILENCE_MAX_MS = 80
 };
 
 /* Tone detection thresholds */
@@ -170,6 +175,43 @@ static bool p12_debug_enabled(void)
     if (g_p12_debug_enabled < 0)
         g_p12_debug_enabled = (getenv("VPCM_P12_DEBUG") != NULL) ? 1 : 0;
     return g_p12_debug_enabled != 0;
+}
+
+static bool p12_window_is_quiet_relative(const int16_t *samples,
+                                         int total_samples,
+                                         int start_sample,
+                                         int duration_samples,
+                                         double reference_energy)
+{
+    double silence_energy;
+    double ref_per_sample;
+    double silence_per_sample;
+
+    if (!samples || total_samples <= 0 || duration_samples <= 0 || reference_energy <= 0.0)
+        return false;
+    if (start_sample < 0 || start_sample + duration_samples > total_samples)
+        return false;
+
+    silence_energy = window_energy(samples + start_sample, duration_samples);
+    if (silence_energy < 0.0)
+        return false;
+
+    ref_per_sample = reference_energy;
+    silence_per_sample = silence_energy / (double) duration_samples;
+    return silence_per_sample <= (ref_per_sample * 0.12);
+}
+
+static int p12_parse_detail_int(const char *detail, const char *key, int fallback)
+{
+    const char *p;
+
+    if (!detail || !key)
+        return fallback;
+    p = strstr(detail, key);
+    if (!p)
+        return fallback;
+    p += strlen(key);
+    return (int) strtol(p, NULL, 0);
 }
 
 static bool p12_dump_v8_enabled(void)
@@ -1504,6 +1546,10 @@ static void detect_call_initiation_signals(const int16_t *samples,
                  sizeof(result->call_init.v92_qc2_name),
                  "%s",
                  ev->summary);
+        result->call_init.v92_qc2_digital = (strstr(ev->summary, "d") != NULL);
+        result->call_init.v92_qc2_qca = (strstr(ev->summary, "QCA") != NULL);
+        result->call_init.v92_qc2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
+        result->call_init.v92_qc2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
         break;
     }
     free(tmp_log.events);
@@ -1621,8 +1667,13 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
     p12_tone_hit_t toneq_hit;
     v91_law_t qts_law = law;
     v91_law_t anspcm_law = law;
+    int phase1_anchor_sample;
     int effective_uqts_ucode;
     int effective_lm_level;
+    double toneq_energy = 0.0;
+    int silence_start;
+    int silence_min_samples;
+    int silence_max_samples;
     int qts_search_start;
     int qts_search_end;
     int anspcm_search_start;
@@ -1630,7 +1681,7 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
     int toneq_search_start;
     int toneq_search_end;
 
-    if (!result || !result->call_init.v92_short_p1_seen)
+    if (!result)
         return;
     if (!samples || total_samples <= 0 || sample_rate <= 0)
         return;
@@ -1642,16 +1693,26 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         return;
     }
 
+    phase1_anchor_sample = result->call_init.v92_short_p1_seen
+                         ? result->call_init.v92_short_p1_sample
+                         : (result->call_init.v92_qc2_seen ? result->call_init.v92_qc2_sample : -1);
+    if (phase1_anchor_sample < 0)
+        return;
+
     effective_uqts_ucode = (result->call_init.v92_short_p1_uqts_ucode >= 0)
                          ? result->call_init.v92_short_p1_uqts_ucode
-                         : result->stereo_short_p1_partner_uqts_ucode;
+                         : (result->call_init.v92_qc2_uqts_ucode >= 0
+                            ? result->call_init.v92_qc2_uqts_ucode
+                            : result->stereo_short_p1_partner_uqts_ucode);
     effective_lm_level = (result->call_init.v92_short_p1_lm_level >= 0)
                        ? result->call_init.v92_short_p1_lm_level
-                       : result->stereo_short_p1_partner_lm_level;
+                       : (result->call_init.v92_qc2_lm_level >= 0
+                          ? result->call_init.v92_qc2_lm_level
+                          : result->stereo_short_p1_partner_lm_level);
 
     if (codewords && total_codewords > 0 && effective_uqts_ucode >= 0) {
-        qts_search_start = result->call_init.v92_short_p1_sample + 400;
-        qts_search_end = result->call_init.v92_short_p1_sample + 4000;
+        qts_search_start = phase1_anchor_sample + 400;
+        qts_search_end = phase1_anchor_sample + 4000;
         if (qts_search_start < 0)
             qts_search_start = 0;
         if (qts_search_end > total_codewords)
@@ -1787,13 +1848,66 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         result->call_init.v92_toneq_seen = true;
         result->call_init.v92_toneq_sample = toneq_hit.start_sample;
         result->call_init.v92_toneq_duration_samples = toneq_hit.duration_samples;
+        toneq_energy = window_energy(samples + toneq_hit.start_sample,
+                                     toneq_hit.duration_samples > 0 ? toneq_hit.duration_samples : 0);
+        silence_start = toneq_hit.start_sample + toneq_hit.duration_samples;
+        silence_min_samples = (sample_rate * P12_V92_TONEQ_POST_SILENCE_MIN_MS) / 1000;
+        silence_max_samples = (sample_rate * P12_V92_TONEQ_POST_SILENCE_MAX_MS) / 1000;
+        if (toneq_energy > 0.0
+            && silence_start >= 0
+            && silence_start + silence_max_samples <= total_samples
+            && p12_window_is_quiet_relative(samples,
+                                            total_samples,
+                                            silence_start,
+                                            silence_min_samples,
+                                            toneq_energy)) {
+            result->call_init.v92_digital_chain_valid = true;
+            result->call_init.v92_phase2_handoff_known = true;
+            result->call_init.v92_phase2_handoff_sample =
+                silence_start + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+        }
         if (p12_debug_enabled()) {
             fprintf(stderr,
-                    "[p12] V.92 TONEq at %.1fms dur=%.1fms\n",
+                    "[p12] V.92 TONEq at %.1fms dur=%.1fms chain_valid=%s\n",
                     (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
-                    (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
+                    (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate,
+                    result->call_init.v92_digital_chain_valid ? "yes" : "no");
         }
     }
+}
+
+static void finalize_v92_analog_short_phase1(const phase12_result_t *src,
+                                             phase12_result_t *result,
+                                             int sample_rate)
+{
+    bool analog_qc1a = false;
+    bool analog_qc2a = false;
+
+    if (!src || !result || sample_rate <= 0)
+        return;
+
+    analog_qc1a = src->call_init.v92_short_p1_seen
+               && !src->call_init.v92_short_p1_digital;
+    analog_qc2a = src->call_init.v92_qc2_seen
+               && !src->call_init.v92_qc2_digital;
+
+    if (analog_qc1a
+        && strcmp(src->call_init.v92_short_p1_name, "QC1a") == 0
+        && src->cm.detected
+        && src->cm.sample_offset >= src->call_init.v92_short_p1_sample
+        && src->cm.sample_offset <= src->call_init.v92_short_p1_sample + (sample_rate * 1200) / 1000) {
+        result->call_init.v92_cm_after_qc1a_valid = true;
+    }
+
+    if (analog_qc1a) {
+        if (strcmp(src->call_init.v92_short_p1_name, "QCA1a") == 0
+            || result->call_init.v92_cm_after_qc1a_valid) {
+            result->call_init.v92_analog_chain_ready = true;
+        }
+    }
+
+    if (analog_qc2a)
+        result->call_init.v92_analog_chain_ready = true;
 }
 
 static bool detect_phase2_signal_tone_runs(const int16_t *samples,
@@ -3381,6 +3495,7 @@ static void detect_phase1_v8(const int16_t *samples,
     detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH1, result);
     if (!result->call_init.v92_short_p1_seen)
         detect_v92_short_phase1(samples, total_samples, sample_rate, limit, V21_CH2, result);
+    finalize_v92_analog_short_phase1(result, result, sample_rate);
     detect_v92_short_phase1_followup(samples,
                                      codewords,
                                      total_samples,
@@ -4505,25 +4620,15 @@ static void detect_phase2_info(const int16_t *samples,
     use_jm_anchor = p12_cm_jm_has_phase1_capability(&result->jm)
                     && result->jm.duration_samples > 0
                     && jm_score >= P12_JM_ANCHOR_MIN_CREDIBILITY;
-    short_phase1_anchor = result->call_init.v92_short_p1_seen
-                          && (result->call_init.v92_toneq_seen || result->answer_tone.detected);
+    short_phase1_anchor = result->call_init.v92_phase2_handoff_known;
 
     if (result->answer_tone.detected)
         search_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate);
     if (short_phase1_anchor) {
-        int phase1_end_anchor = result->call_init.v92_toneq_seen
-                              ? (result->call_init.v92_toneq_sample
-                                 + result->call_init.v92_toneq_duration_samples)
-                              : (result->answer_tone.start_sample
-                                 + result->answer_tone.duration_samples
-                                 + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate));
-        int short_p1_phase2_start = phase1_end_anchor
-                                  + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
-
-        if (short_p1_phase2_start > search_start)
-            search_start = short_p1_phase2_start;
+        if (result->call_init.v92_phase2_handoff_sample > search_start)
+            search_start = result->call_init.v92_phase2_handoff_sample;
     } else if (use_jm_anchor) {
         int jm_info_start = result->jm.sample_offset
                           + result->jm.duration_samples
@@ -4542,17 +4647,10 @@ static void detect_phase2_info(const int16_t *samples,
     if (phase2_cap > 0 && search_start + phase2_cap < limit)
         limit = search_start + phase2_cap;
     if (short_phase1_anchor) {
-        int phase1_end_anchor = result->call_init.v92_toneq_seen
-                              ? (result->call_init.v92_toneq_sample
-                                 + result->call_init.v92_toneq_duration_samples)
-                              : (result->answer_tone.start_sample
-                                 + result->answer_tone.duration_samples
-                                 + p12_answer_tone_post_hold_samples(&result->answer_tone, sample_rate));
-
         p12_fill_timing_hint_from_sample(&result->info0_from_cj_hint,
-                                         phase1_end_anchor,
+                                         result->call_init.v92_phase2_handoff_sample,
                                          sample_rate,
-                                         P12_V92_SHORT_P1_TO_PHASE2_MS,
+                                         0,
                                          P12_V92_SHORT_P1_TO_PHASE2_TOL_MS,
                                          limit);
     } else if (use_jm_anchor) {
@@ -5172,16 +5270,14 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
     if (!result)
         return;
 
-    short_phase1_mode = result->call_init.v92_short_p1_seen;
+    short_phase1_mode = result->call_init.v92_phase2_handoff_known;
 
     if (result->answer_tone.detected)
         phase2_start = result->answer_tone.start_sample
                      + result->answer_tone.duration_samples
                      + p12_answer_tone_post_hold_samples(&result->answer_tone, 8000);
-    if (short_phase1_mode && result->call_init.v92_toneq_seen) {
-        phase2_start = result->call_init.v92_toneq_sample
-                     + result->call_init.v92_toneq_duration_samples
-                     + (8000 * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+    if (short_phase1_mode && result->call_init.v92_phase2_handoff_known) {
+        phase2_start = result->call_init.v92_phase2_handoff_sample;
     }
     if (!short_phase1_mode && result->cj.detected)
         phase2_start = p12_first_non_negative(phase2_start, result->cj.sample_offset);
@@ -5557,7 +5653,10 @@ void phase12_result_init(phase12_result_t *r)
     r->stereo_short_p1_followup_allowed = true;
     r->stereo_short_p1_partner_uqts_ucode = -1;
     r->stereo_short_p1_partner_lm_level = -1;
+    r->call_init.v92_qc2_uqts_ucode = -1;
+    r->call_init.v92_qc2_lm_level = -1;
     r->call_init.v92_short_p1_lm_level = -1;
+    r->call_init.v92_phase2_handoff_sample = -1;
     r->log.events = NULL;
     r->log.count = 0;
     r->log.cap = 0;
@@ -5720,12 +5819,25 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                         detail);
     }
     if (result->call_init.v92_qc2_seen) {
+        char qc2_detail[128];
+
+        if (result->call_init.v92_qc2_uqts_ucode >= 0) {
+            snprintf(qc2_detail, sizeof(qc2_detail),
+                     "source=call_initiation uqts_ucode=%d",
+                     result->call_init.v92_qc2_uqts_ucode);
+        } else if (result->call_init.v92_qc2_lm_level >= 0) {
+            snprintf(qc2_detail, sizeof(qc2_detail),
+                     "source=call_initiation lm=%d",
+                     result->call_init.v92_qc2_lm_level);
+        } else {
+            snprintf(qc2_detail, sizeof(qc2_detail), "source=call_initiation");
+        }
         call_log_append(log,
                         result->call_init.v92_qc2_sample,
                         0,
                         "V.92",
                         result->call_init.v92_qc2_name,
-                        "source=call_initiation");
+                        qc2_detail);
     }
 
     /* Phase 1 V.8 messages */

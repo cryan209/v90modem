@@ -654,10 +654,11 @@ void v8bis_collect_msg_events(call_log_t *log,
             snprintf(summary, sizeof(summary), "%s", v92_qc2.name);
             if (v92_qc2.digital_modem) {
                 snprintf(detail, sizeof(detail),
-                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s anspcm_level=%s id_octet=%02X",
+                         "source=V.8bis id_field rev=%d fsk_ch=%s lapm=%s lm=%d anspcm_level=%s id_octet=%02X",
                          v92_qc2.revision,
                          ch_str,
                          v92_qc2.lapm ? "yes" : "no",
+                         v92_qc2.lm,
                          v92_anspcm_level_to_str(v92_qc2.lm),
                          v92_qc2.id_octet);
             } else {
