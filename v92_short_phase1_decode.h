@@ -29,6 +29,7 @@ typedef struct {
     bool soft_match;
     int bit_error_count;
     int soft_score;
+    int strict_sequence_bits;
 } v92_short_phase1_candidate_t;
 
 typedef struct {
@@ -56,6 +57,11 @@ bool v92_decode_short_phase1_candidate(const uint8_t *bits,
                                        int bit_len,
                                        bool use_ch2,
                                        v92_short_phase1_candidate_t *out);
+
+bool v92_decode_short_phase1_sequence_strict(const uint8_t *bits,
+                                             int bit_len,
+                                             bool use_ch2,
+                                             v92_short_phase1_candidate_t *out);
 
 bool v92_decode_short_phase1_candidate_soft(const uint8_t *bits,
                                             const double *confidence,

@@ -324,6 +324,8 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              v92_short_phase1_candidate_t *candidate_out,
                                              v92_short_phase1_candidate_t *digital_alt_out,
                                              int *digital_alt_sample_out,
+                                             v92_short_phase1_candidate_t *analog_alt_out,
+                                             int *analog_alt_sample_out,
                                              int *sample_out);
 static void detect_v92_short_phase1_followup(const int16_t *samples,
                                              const uint8_t *codewords,
@@ -1578,8 +1580,10 @@ static void detect_v92_short_phase1(const int16_t *samples,
     int search_end = -1;
     v92_short_phase1_candidate_t candidate;
     v92_short_phase1_candidate_t digital_alt;
+    v92_short_phase1_candidate_t analog_alt;
     int sample = -1;
     int digital_alt_sample = -1;
+    int analog_alt_sample = -1;
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !result)
         return;
@@ -1605,6 +1609,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
 
     memset(&candidate, 0, sizeof(candidate));
     memset(&digital_alt, 0, sizeof(digital_alt));
+    memset(&analog_alt, 0, sizeof(analog_alt));
     if (!p12_scan_v92_short_phase1_window(samples,
                                           total_samples,
                                           sample_rate,
@@ -1614,25 +1619,10 @@ static void detect_v92_short_phase1(const int16_t *samples,
                                           &candidate,
                                           &digital_alt,
                                           &digital_alt_sample,
+                                          &analog_alt,
+                                          &analog_alt_sample,
                                           &sample)) {
         return;
-    }
-
-    if (result->stereo_short_p1_hint_valid
-        && result->stereo_short_p1_expected_form == P12_SHORT_P1_FORM_DIGITAL
-        && !candidate.digital_modem
-        && digital_alt.ok
-        && digital_alt.digital_modem
-        && digital_alt_sample >= 0) {
-        if (p12_debug_enabled()) {
-            fprintf(stderr,
-                    "[p12] promote V.92 short Phase 1 alt-digital %s at %.1fms over %s due to stereo hint\n",
-                    digital_alt.name ? digital_alt.name : "V92-shortP1",
-                    (double) digital_alt_sample * 1000.0 / (double) sample_rate,
-                    candidate.name ? candidate.name : "V92-shortP1");
-        }
-        candidate = digital_alt;
-        sample = digital_alt_sample;
     }
 
     if (result->stereo_short_p1_hint_valid
@@ -1662,6 +1652,30 @@ static void detect_v92_short_phase1(const int16_t *samples,
     result->call_init.v92_short_p1_qca = candidate.qca;
     result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
     result->call_init.v92_short_p1_lm_level = candidate.digital_modem ? candidate.aux_value : -1;
+    result->call_init.v92_short_p1_strict_analog_seen = false;
+    result->call_init.v92_short_p1_strict_digital_seen = false;
+    if (analog_alt.ok && !analog_alt.digital_modem && analog_alt_sample >= 0) {
+        result->call_init.v92_short_p1_strict_analog_seen = true;
+        result->call_init.v92_short_p1_strict_analog_sample = analog_alt_sample;
+        snprintf(result->call_init.v92_short_p1_strict_analog_name,
+                 sizeof(result->call_init.v92_short_p1_strict_analog_name),
+                 "%s",
+                 analog_alt.name ? analog_alt.name : "V92-shortP1");
+        result->call_init.v92_short_p1_strict_analog_qca = analog_alt.qca;
+        result->call_init.v92_short_p1_strict_analog_uqts_ucode = analog_alt.uqts_ucode;
+        result->call_init.v92_short_p1_strict_analog_lm_level = analog_alt.digital_modem ? analog_alt.aux_value : -1;
+    }
+    if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0) {
+        result->call_init.v92_short_p1_strict_digital_seen = true;
+        result->call_init.v92_short_p1_strict_digital_sample = digital_alt_sample;
+        snprintf(result->call_init.v92_short_p1_strict_digital_name,
+                 sizeof(result->call_init.v92_short_p1_strict_digital_name),
+                 "%s",
+                 digital_alt.name ? digital_alt.name : "V92-shortP1");
+        result->call_init.v92_short_p1_strict_digital_qca = digital_alt.qca;
+        result->call_init.v92_short_p1_strict_digital_uqts_ucode = digital_alt.uqts_ucode;
+        result->call_init.v92_short_p1_strict_digital_lm_level = digital_alt.digital_modem ? digital_alt.aux_value : -1;
+    }
     result->call_init.v92_short_p1_alt_digital_seen = false;
     if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0) {
         result->call_init.v92_short_p1_alt_digital_seen = true;
@@ -2715,6 +2729,55 @@ static int p12_v8_cm_jm_sync_lock_score(const uint8_t *bits,
     return p12_v8_sync_score(bits, confidence, bit_count, start, cm_jm_sync_pattern);
 }
 
+static bool p12_eval_v92_short_p1_candidate(const uint8_t *bits,
+                                            const double *confidence,
+                                            int bit_count,
+                                            int start,
+                                            bool use_ch2,
+                                            int bit_rate,
+                                            int invert,
+                                            v92_short_phase1_candidate_t *candidate_out,
+                                            int *score_out)
+{
+    static const uint8_t v92_sync_pattern[10] = { 0,1,0,1,0,1,0,1,0,1 };
+    v92_short_phase1_candidate_t candidate;
+    int ones_score;
+    int sync_score;
+    int score;
+
+    if (!bits || !confidence || start < 0 || start + 30 > bit_count)
+        return false;
+
+    ones_score = p12_v8_ones_lock_score(bits, confidence, bit_count, start);
+    if (ones_score < 32)
+        return false;
+    sync_score = p12_v8_sync_score(bits, confidence, bit_count, start + 10, v92_sync_pattern);
+    if (sync_score < 32)
+        return false;
+    if (!v92_decode_short_phase1_sequence_strict(bits + start,
+                                                 bit_count - start,
+                                                 use_ch2,
+                                                 &candidate)) {
+        return false;
+    }
+
+    score = ones_score + sync_score;
+    if (candidate.repeat_seen)
+        score += candidate.repeat_match ? 30 : 8;
+    if ((int) candidate.qca == (use_ch2 ? 1 : 0))
+        score += 10;
+    score += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
+    score -= start / 2;
+    if (invert)
+        score -= 2;
+
+    if (candidate_out)
+        *candidate_out = candidate;
+    if (score_out)
+        *score_out = score;
+    return true;
+}
+
 static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
                                           const double *confidence,
                                           int bit_count,
@@ -2765,6 +2828,8 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              v92_short_phase1_candidate_t *candidate_out,
                                              v92_short_phase1_candidate_t *digital_alt_out,
                                              int *digital_alt_sample_out,
+                                             v92_short_phase1_candidate_t *analog_alt_out,
+                                             int *analog_alt_sample_out,
                                              int *sample_out)
 {
     const double mark_hz = (channel == V21_CH2) ? 1650.0 : 980.0;
@@ -2830,57 +2895,47 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                 }
 
                 for (int i = 0; i + 30 <= bit_count; i++) {
-                    int ones_score;
-                    int sync_score;
                     int score;
                     v92_short_phase1_candidate_t candidate;
+                    v92_short_phase1_candidate_t soft_candidate;
+                    int sample_pos;
 
-                    ones_score = p12_v8_ones_lock_score(bits, confidence, bit_count, i);
-                    if (ones_score < 32)
+                    sample_pos = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                    memset(&candidate, 0, sizeof(candidate));
+                    memset(&soft_candidate, 0, sizeof(soft_candidate));
+                    if (!p12_eval_v92_short_p1_candidate(bits,
+                                                         confidence,
+                                                         bit_count,
+                                                         i,
+                                                         use_ch2,
+                                                         bit_rate,
+                                                         invert,
+                                                         &candidate,
+                                                         &score)) {
+                        (void) v92_decode_short_phase1_candidate_soft(bits + i,
+                                                                      confidence + i,
+                                                                      bit_count - i,
+                                                                      use_ch2,
+                                                                      &soft_candidate);
                         continue;
-                    /* V.92 short Phase 1 uses 10 ones + 0101010101 sync */
-                    {
-                        static const uint8_t v92_sync_pattern[10] = { 0,1,0,1,0,1,0,1,0,1 };
-                        sync_score = p12_v8_sync_score(bits, confidence, bit_count, i + 10, v92_sync_pattern);
                     }
-                    if (sync_score < 32)
-                        continue;
-                    if (!v92_decode_short_phase1_candidate_soft(bits + i,
-                                                                confidence + i,
-                                                                bit_count - i,
-                                                                use_ch2,
-                                                                &candidate))
-                        continue;
-
-                    score = ones_score + sync_score;
-                    if (candidate.repeat_seen)
-                        score += candidate.repeat_match ? 30 : 8;
-                    if ((int) candidate.qca == (use_ch2 ? 1 : 0))
-                        score += 10;
-                    score += (bit_rate == 300) ? 8 : (6 - abs(bit_rate - 300));
-                    score -= i / 2;
-                    if (invert)
-                        score -= 2;
-                    if (candidate.soft_match)
-                        score += candidate.soft_score / 4;
-                    score -= candidate.bit_error_count * 6;
 
                     if (score > best_score) {
                         best_score = score;
                         best_candidate = candidate;
-                        best_sample = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                        best_sample = sample_pos;
                     }
                     if (candidate.digital_modem) {
                         if (score > best_digital_score) {
                             best_digital_score = score;
                             best_digital_candidate = candidate;
-                            best_digital_sample = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                            best_digital_sample = sample_pos;
                         }
                     } else {
                         if (score > best_analog_score) {
                             best_analog_score = score;
                             best_analog_candidate = candidate;
-                            best_analog_sample = search_start + (int) lround(phase + ((double) i * symbol_samples));
+                            best_analog_sample = sample_pos;
                         }
                     }
                 }
@@ -2933,6 +2988,10 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
         *digital_alt_out = best_digital_candidate;
     if (digital_alt_sample_out)
         *digital_alt_sample_out = best_digital_sample;
+    if (analog_alt_out)
+        *analog_alt_out = best_analog_candidate;
+    if (analog_alt_sample_out)
+        *analog_alt_sample_out = best_analog_sample;
     *sample_out = best_sample;
     return true;
 }

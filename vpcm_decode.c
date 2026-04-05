@@ -12198,14 +12198,26 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     out->uqts_ucode = -1;
     out->lm_level = -1;
 
-    if (expect_digital && p12->call_init.v92_short_p1_alt_digital_seen) {
+    if (expect_digital && p12->call_init.v92_short_p1_strict_digital_seen) {
         out->seen = true;
         out->digital = true;
-        out->qca = p12->call_init.v92_short_p1_alt_digital_qca;
-        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_alt_digital_name);
-        out->uqts_ucode = p12->call_init.v92_short_p1_alt_digital_uqts_ucode;
-        out->lm_level = p12->call_init.v92_short_p1_alt_digital_lm_level;
-        out->name = p12->call_init.v92_short_p1_alt_digital_name;
+        out->qca = p12->call_init.v92_short_p1_strict_digital_qca;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_strict_digital_name);
+        out->uqts_ucode = p12->call_init.v92_short_p1_strict_digital_uqts_ucode;
+        out->lm_level = p12->call_init.v92_short_p1_strict_digital_lm_level;
+        out->name = p12->call_init.v92_short_p1_strict_digital_name;
+        if (out->family != 0)
+            return true;
+    }
+
+    if (!expect_digital && p12->call_init.v92_short_p1_strict_analog_seen) {
+        out->seen = true;
+        out->digital = false;
+        out->qca = p12->call_init.v92_short_p1_strict_analog_qca;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_short_p1_strict_analog_name);
+        out->uqts_ucode = p12->call_init.v92_short_p1_strict_analog_uqts_ucode;
+        out->lm_level = p12->call_init.v92_short_p1_strict_analog_lm_level;
+        out->name = p12->call_init.v92_short_p1_strict_analog_name;
         if (out->family != 0)
             return true;
     }

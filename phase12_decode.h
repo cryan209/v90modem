@@ -239,6 +239,18 @@ typedef struct {
     int v92_short_p1_alt_digital_lm_level;
     int v92_short_p1_alt_digital_score;
     int v92_short_p1_alt_digital_bit_errors;
+    bool v92_short_p1_strict_analog_seen;
+    int v92_short_p1_strict_analog_sample;
+    char v92_short_p1_strict_analog_name[16];
+    bool v92_short_p1_strict_analog_qca;
+    int v92_short_p1_strict_analog_uqts_ucode;
+    int v92_short_p1_strict_analog_lm_level;
+    bool v92_short_p1_strict_digital_seen;
+    int v92_short_p1_strict_digital_sample;
+    char v92_short_p1_strict_digital_name[16];
+    bool v92_short_p1_strict_digital_qca;
+    int v92_short_p1_strict_digital_uqts_ucode;
+    int v92_short_p1_strict_digital_lm_level;
 
     bool v92_qts_seen;
     int v92_qts_sample;

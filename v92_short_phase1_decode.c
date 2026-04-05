@@ -98,6 +98,31 @@ static bool v92_same_decoded_payload(const v92_short_phase1_candidate_t *a,
         && a->aux_value == b->aux_value;
 }
 
+static bool v92_bits_are_ones(const uint8_t *bits, int start, int count)
+{
+    if (!bits || start < 0 || count <= 0)
+        return false;
+    for (int i = 0; i < count; i++) {
+        if ((bits[start + i] & 1U) == 0)
+            return false;
+    }
+    return true;
+}
+
+static bool v92_bits_match_pattern(const uint8_t *bits,
+                                   int start,
+                                   const uint8_t *pattern,
+                                   int count)
+{
+    if (!bits || !pattern || start < 0 || count <= 0)
+        return false;
+    for (int i = 0; i < count; i++) {
+        if ((bits[start + i] & 1U) != (pattern[i] & 1U))
+            return false;
+    }
+    return true;
+}
+
 static uint16_t v92_build_frame_bits(bool digital_modem,
                                      bool qca,
                                      bool lapm,
@@ -272,6 +297,64 @@ bool v92_decode_short_phase1_candidate(const uint8_t *bits,
     out->soft_match = false;
     out->bit_error_count = 0;
     out->soft_score = 0;
+    out->strict_sequence_bits = 0;
+    out->ok = true;
+    return true;
+}
+
+bool v92_decode_short_phase1_sequence_strict(const uint8_t *bits,
+                                             int bit_len,
+                                             bool use_ch2,
+                                             v92_short_phase1_candidate_t *out)
+{
+    static const uint8_t sync_pattern[10] = { 0,1,0,1,0,1,0,1,0,1 };
+    v92_short_phase1_candidate_t first = {0};
+    v92_short_phase1_candidate_t repeat = {0};
+    uint16_t frame1_bits;
+    uint16_t frame2_bits;
+    int required_bits;
+
+    if (!bits || bit_len < 60 || !out)
+        return false;
+    if (!v92_bits_are_ones(bits, 0, 10))
+        return false;
+    if (!v92_bits_match_pattern(bits, 10, sync_pattern, 10))
+        return false;
+    if (!v92_bits_are_ones(bits, 30, 10))
+        return false;
+    if (!v92_bits_match_pattern(bits, 40, sync_pattern, 10))
+        return false;
+
+    frame1_bits = pack_lsb_bits(bits, 20, 10);
+    frame2_bits = pack_lsb_bits(bits, 50, 10);
+    if (!v92_unpack_frame_bits(frame1_bits, &first))
+        return false;
+    if (!v92_unpack_frame_bits(frame2_bits, &repeat))
+        return false;
+    if (!v92_frame_matches_channel_bits(frame1_bits, use_ch2))
+        return false;
+    if (!v92_frame_matches_channel_bits(frame2_bits, use_ch2))
+        return false;
+    if (!v92_same_decoded_payload(&first, &repeat))
+        return false;
+
+    required_bits = first.qca ? 70 : 60;
+    if (bit_len < required_bits)
+        return false;
+    if (first.qca && !v92_bits_are_ones(bits, 60, 10))
+        return false;
+
+    *out = first;
+    out->frame1_bits = frame1_bits;
+    out->frame2_bits = frame2_bits;
+    out->decoded_frame_bits = frame1_bits;
+    out->decoded_frame_index = 0;
+    out->repeat_seen = true;
+    out->repeat_match = true;
+    out->soft_match = false;
+    out->bit_error_count = 0;
+    out->soft_score = 0;
+    out->strict_sequence_bits = required_bits;
     out->ok = true;
     return true;
 }
