@@ -1471,7 +1471,9 @@ static void collect_v91_events(call_log_t *log,
 static void collect_v90_events(call_log_t *log,
                                const uint8_t *codewords,
                                int total,
-                               v91_law_t law);
+                               v91_law_t law,
+                               int anspcm_start,
+                               int anspcm_end);
 static void collect_post_phase3_stage_events(call_log_t *log,
                                              const uint8_t *codewords,
                                              int total_codewords,
@@ -10559,8 +10561,14 @@ static void collect_stream_call_log(call_log_t *log,
     }
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
-    if (do_v90 && !suppress_v90_phase2)
-        collect_v90_events(log, g711_codewords, total_codewords, law);
+    if (do_v90 && !suppress_v90_phase2) {
+        int anspcm_start = (have_phase12 && phase12.call_init.v92_anspcm_seen)
+                           ? phase12.call_init.v92_anspcm_sample : -1;
+        int anspcm_end   = (anspcm_start >= 0)
+                           ? anspcm_start + phase12.call_init.v92_anspcm_duration_symbols : -1;
+        collect_v90_events(log, g711_codewords, total_codewords, law,
+                           anspcm_start, anspcm_end);
+    }
 
     /*
      * Post-Phase 3 stage events (Jd/Ja frames, DIL descriptor) are relevant
@@ -11053,7 +11061,8 @@ static int codeword_to_ucode(v91_law_t law, uint8_t codeword)
 }
 
 static void decode_v90_signals(const uint8_t *codewords, int total,
-                               v91_law_t law, int known_u_info)
+                               v91_law_t law, int known_u_info,
+                               int anspcm_start, int anspcm_end)
 {
     bool found_sequence = false;
 
@@ -11106,6 +11115,18 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
             }
             if (!match)
                 continue;
+
+            /* Suppress false Sd match in the ANSpcm region (V.92 calls).
+             * ANSpcm is a 2099 Hz cosine tone (V.92 Annex I) whose G.711
+             * codewords can coincidentally satisfy the Sd 6-pattern for
+             * certain u_info values. */
+            if (anspcm_end > anspcm_start
+                && offset >= anspcm_start && offset < anspcm_end) {
+                printf("  [%7.1f ms] V.92 ANSpcm region: suppressed false Sd match"
+                       " (W_UCODE=%d U_INFO=%d)\n",
+                       sample_to_ms(offset, 8000), w_ucode, u_info);
+                goto next_u_info;
+            }
 
             /* Count total Sd repetitions */
             int sd_reps = 0;
@@ -11498,6 +11519,16 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                 continue;
             }
 
+            /* Suppress false match in the ANSpcm region */
+            if (anspcm_end > anspcm_start
+                && run_start >= anspcm_start && run_start < anspcm_end) {
+                printf("  [%7.1f ms] V.92 ANSpcm region: suppressed false Sd"
+                       " sign-pattern match (%d reps)\n",
+                       sample_to_ms(run_start, 8000), total_reps);
+                offset = pos - 6;
+                continue;
+            }
+
             /* Report Sd/S̄d */
             if (first_is_sd) {
                 printf("  [%7.1f ms] V.90 Sd (sign-pattern): %d reps (%d symbols, %.1f ms)\n",
@@ -11705,7 +11736,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
            "        They require V.34 demodulation and are not visible as raw G.711 codewords.\n");
 }
 
-static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int total, v91_law_t law)
+static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int total, v91_law_t law,
+                               int anspcm_start, int anspcm_end)
 {
     uint8_t idle;
     uint8_t pos_zero;
@@ -11760,6 +11792,14 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
                 sd_reps++;
             }
             if (sd_reps < 4)
+                continue;
+
+            /* Suppress false Sd match in the ANSpcm region (V.92 calls).
+             * ANSpcm is a 2099 Hz cosine tone whose G.711 codewords can
+             * coincidentally satisfy the Sd 6-pattern for some u_info values.
+             * The ANSpcm region is already logged by the phase12 decoder. */
+            if (anspcm_end > anspcm_start
+                && offset >= anspcm_start && offset < anspcm_end)
                 continue;
 
             while (offset + (sd_reps + 1) * 6 <= total) {
@@ -12028,6 +12068,11 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
                 sd_reps++;
             }
             if (sd_reps < 16)
+                continue;
+
+            /* Suppress false match in the ANSpcm region */
+            if (anspcm_end > anspcm_start
+                && offset >= anspcm_start && offset < anspcm_end)
                 continue;
 
             snprintf(detail, sizeof(detail), "sign_pattern reps=%d", sd_reps);
@@ -13879,7 +13924,16 @@ static void run_decode_stage_b(const char *label,
         decode_v91_signals(g711_codewords, total_codewords, law);
 
     if (opts->raw_output_enabled && opts->do_v90) {
-        decode_v90_signals(g711_codewords, total_codewords, law, effective_u_info);
+        {
+            int anspcm_start = (have_phase12 && p12_ptr
+                                && p12_ptr->call_init.v92_anspcm_seen)
+                               ? p12_ptr->call_init.v92_anspcm_sample : -1;
+            int anspcm_end   = (anspcm_start >= 0)
+                               ? anspcm_start
+                                 + p12_ptr->call_init.v92_anspcm_duration_symbols : -1;
+            decode_v90_signals(g711_codewords, total_codewords, law,
+                               effective_u_info, anspcm_start, anspcm_end);
+        }
 
         if (!suppress_v90_phase2) {
             jd_stage_decode_t jd_stage;
