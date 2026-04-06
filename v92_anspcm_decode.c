@@ -210,6 +210,7 @@ static int full_score(const uint8_t *codewords, int total,
         }
 
         int sym_score;
+        int consec_mismatch_since_good = (last_good >= 0) ? (i - last_good - 1) : i;
         if (actual == expected) {
             sym_score = SCORE_EXACT;
             exact++;
@@ -224,10 +225,14 @@ static int full_score(const uint8_t *codewords, int total,
         }
         score += sym_score;
 
-        /* Early termination: if the per-symbol average drops below a
-         * threshold, this is probably not ANSpcm any more. */
+        /* Stop once we've seen a long run of consecutive mismatches — we're
+         * almost certainly past the end of the ANSpcm section. */
+        if (consec_mismatch_since_good > V92_ANSPCM_PERIOD / 3)
+            break;
+
+        /* Periodic check: abort if per-symbol average is too low. */
         if (i >= V92_ANSPCM_PERIOD - 1 && i % V92_ANSPCM_PERIOD == (V92_ANSPCM_PERIOD - 1)) {
-            int period_score = score;    /* accumulated so far */
+            int period_score = score;
             int threshold    = i * 2;   /* expect at least 2 pts/symbol average */
             if (period_score < threshold)
                 break;
@@ -329,10 +334,15 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
                 if (duration < min_symbols)
                     continue;
 
-                /* Penalise heavy mismatch rate */
-                int total_scored = exact + robbed + mismatch;
-                if (total_scored > 0) {
-                    int miss_pct = mismatch * 100 / total_scored;
+                /* Penalise heavy mismatch rate — compute over duration only.
+                 * exact+robbed are all within the duration window; mismatches
+                 * beyond last_good are excluded since the consec-miss break
+                 * stopped evaluation shortly after the signal ended. */
+                int good = exact + robbed;
+                if (duration > 0) {
+                    int miss_in_dur = duration - good;
+                    if (miss_in_dur < 0) miss_in_dur = 0;
+                    int miss_pct = miss_in_dur * 100 / duration;
                     if (miss_pct > 40)
                         continue;
                 }
