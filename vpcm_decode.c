@@ -19,6 +19,7 @@
 #include "v92_short_phase2_decode.h"
 #include "v92_phase3_decode.h"
 #include "v92_ja_decode.h"
+#include "v92_anspcm_decode.h"
 #include "v34_phase2_decode.h"
 #include "v34_info_decode.h"
 #include "p3_demod.h"
@@ -11068,6 +11069,25 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
 
     printf("\n=== V.90 Signal Scan ===\n");
 
+    /* Table-based ANSpcm detector (V.92 §8.3.1) */
+    {
+        v92_anspcm_table_hit_t ah;
+        if (v92_anspcm_table_decode(codewords, total, law, 0, 0, &ah)) {
+            printf("  [%7.1f ms] V.92 ANSpcm (table): law=%s%s level=%s"
+                   " phase=%d duration=%d sym (%.1f ms)"
+                   " exact=%d robbed=%d mismatch=%d reversals=%d score=%d\n",
+                   sample_to_ms(ah.start_sample, 8000),
+                   ah.law == V91_LAW_ULAW ? "µ-law" : "A-law",
+                   ah.wrong_law ? " [WRONG LAW]" : "",
+                   v92_anspcm_table_level_str(ah.level),
+                   ah.period_phase,
+                   ah.duration_symbols,
+                   sample_to_ms(ah.duration_symbols, 8000),
+                   ah.exact_matches, ah.robbed_bit_count, ah.mismatches,
+                   ah.phase_reversals, ah.score);
+        }
+    }
+
     uint8_t idle = v91_idle_codeword(law);
 
     /*
@@ -11750,6 +11770,24 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
     idle = v91_idle_codeword(law);
     pos_zero = v91_ucode_to_codeword(law, 0, true);
     neg_zero = v91_ucode_to_codeword(law, 0, false);
+
+    /* Table-based ANSpcm detector (V.92 §8.3.1) */
+    {
+        v92_anspcm_table_hit_t ah;
+        if (v92_anspcm_table_decode(codewords, total, law, 0, 0, &ah)) {
+            char detail[128];
+            snprintf(detail, sizeof(detail),
+                     "law=%s%s level=%s phase=%d exact=%d robbed=%d mismatch=%d score=%d",
+                     ah.law == V91_LAW_ULAW ? "ulaw" : "alaw",
+                     ah.wrong_law ? "(wrong)" : "",
+                     v92_anspcm_table_level_str(ah.level),
+                     ah.period_phase,
+                     ah.exact_matches, ah.robbed_bit_count, ah.mismatches,
+                     ah.score);
+            call_log_append(log, ah.start_sample, ah.duration_symbols,
+                            "V.92", "ANSpcm (table)", detail);
+        }
+    }
 
     for (int u_info = 10; u_info <= 127 && !found_sequence; u_info++) {
         int w_ucode = 16 + u_info;
