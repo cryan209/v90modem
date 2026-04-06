@@ -10908,7 +10908,7 @@ static int codeword_to_ucode(v91_law_t law, uint8_t codeword)
 }
 
 static void decode_v90_signals(const uint8_t *codewords, int total,
-                               v91_law_t law)
+                               v91_law_t law, int known_u_info)
 {
     bool found_sequence = false;
 
@@ -10921,16 +10921,21 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
      * Sd pattern: {+W, +0, +W, -W, -0, -W} where W = Ucode(16 + U_INFO),
      *             0 = Ucode 0 (which is the idle codeword with sign).
      *
-     * Strategy: scan for the Sd 6-symbol pattern at every 6-sample boundary,
-     * trying all plausible W_UCODE values (26..143, i.e. U_INFO 10..127).
-     * Once Sd is found, follow the stream sequentially for S̄d, TRN1d, etc.
+     * When known_u_info >= 0 (decoded from INFO1a), use it directly.
+     * Otherwise scan all plausible U_INFO values (10..127).
      */
 
     /* Pre-compute positive-zero and negative-zero codewords */
     uint8_t pos_zero = v91_ucode_to_codeword(law, 0, true);
     uint8_t neg_zero = v91_ucode_to_codeword(law, 0, false);
 
-    for (int u_info = 10; u_info <= 127; u_info++) {
+    int u_info_lo = (known_u_info >= 0) ? known_u_info : 10;
+    int u_info_hi = (known_u_info >= 0) ? known_u_info : 127;
+
+    if (known_u_info >= 0)
+        printf("  Using U_INFO=%d from INFO1a decode\n", known_u_info);
+
+    for (int u_info = u_info_lo; u_info <= u_info_hi; u_info++) {
         int w_ucode = 16 + u_info;
         if (w_ucode > 127) w_ucode = 127;
 
@@ -13643,7 +13648,8 @@ static void run_decode_suite(const char *label,
         /* Always run the V.90 signal scan — the sign-pattern scanner
          * works on digital-side channels even when V.8 negotiation
          * was captured on the opposite stereo channel. */
-        decode_v90_signals(g711_codewords, total_codewords, law);
+        decode_v90_signals(g711_codewords, total_codewords, law,
+                           (have_phase12 && p12.info_path_known) ? p12.inferred_u_info : -1);
 
         if (!suppress_v90_phase2) {
             jd_stage_decode_t jd_stage;
