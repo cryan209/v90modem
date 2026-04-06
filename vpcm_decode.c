@@ -1448,6 +1448,8 @@ typedef struct {
 #define OFFLINE_V90_JD_PRIME_BITS   12
 #define OFFLINE_V90_SCRAMBLER_HISTORY 23
 
+static int offline_v90_descramble_reg_bit(uint32_t *reg, int in_bit);
+
 static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_result_t *answerer,
                                                           const decode_v34_result_t *caller,
                                                           bool *calling_party_out);
@@ -11076,37 +11078,139 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                 }
             }
 
-            /* TRN2d: scrambled ones at U_INFO magnitude again */
+            /* TRN2d + CP: both at U_INFO magnitude; descramble sign bits
+             * to find the boundary and decode the CP frame.
+             *
+             * TRN2d is scrambled all-1s.  The CP frame starts with 17 sync
+             * bits (all 1s) then a 0 start bit — so the first descrambled 0
+             * after the training run marks the CP start-bit at offset +17
+             * into the frame.  We collect the whole U_INFO-magnitude region,
+             * then descramble to split TRN2d from CP.
+             */
             {
-                int trn2d_start = pos;
-                int trn2d_len = 0;
+                int region_start = pos;
+                int region_len = 0;
                 while (pos < total) {
                     int u = codeword_to_ucode(law, codewords[pos]);
                     if (u != u_info) break;
-                    trn2d_len++;
+                    region_len++;
                     pos++;
                 }
-                if (trn2d_len > 0) {
-                    printf("  [%7.1f ms] V.90 TRN2d: %d symbols (%.1f ms) at U_INFO=%d\n",
-                           sample_to_ms(trn2d_start, 8000), trn2d_len,
-                           sample_to_ms(trn2d_len, 8000), u_info);
-                }
-            }
 
-            /* CP: also at U_INFO magnitude with sign-encoded bits */
-            {
-                int cp_start = pos;
-                int cp_len = 0;
-                while (pos < total) {
-                    int u = codeword_to_ucode(law, codewords[pos]);
-                    if (u != u_info) break;
-                    cp_len++;
-                    pos++;
-                }
-                if (cp_len > 0) {
-                    printf("  [%7.1f ms] V.90 CP: %d symbols (%.1f ms), %d bits\n",
-                           sample_to_ms(cp_start, 8000), cp_len,
-                           sample_to_ms(cp_len, 8000), cp_len);
+                if (region_len > 0) {
+                    /* Descramble the sign bits using differential coding.
+                     * Seed the scrambler from preceding codewords. */
+                    int hist = OFFLINE_V90_SCRAMBLER_HISTORY;
+                    int seed_start = region_start - hist - 1;
+                    if (seed_start < 0) seed_start = 0;
+
+                    uint32_t descramble_reg = 0;
+                    int prev_sign = (codewords[seed_start] & 0x80) ? 1 : 0;
+
+                    /* Prime the descrambler with history bits */
+                    for (int i = seed_start + 1; i < region_start; i++) {
+                        int sign = (codewords[i] & 0x80) ? 1 : 0;
+                        int scrambled = sign ^ prev_sign;
+                        prev_sign = sign;
+                        (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+                    }
+
+                    /* Descramble the region */
+                    uint8_t *plain_bits = malloc((size_t) region_len);
+                    if (plain_bits) {
+                        for (int i = 0; i < region_len; i++) {
+                            int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
+                            int scrambled = sign ^ prev_sign;
+                            prev_sign = sign;
+                            plain_bits[i] = (uint8_t) offline_v90_descramble_reg_bit(
+                                &descramble_reg, scrambled);
+                        }
+
+                        /* Find the TRN2d→CP boundary: scan for the first
+                         * descrambled 0 bit, which is the CP start bit at
+                         * position 17 in the frame (after 17 sync 1s). */
+                        int first_zero = -1;
+                        for (int i = 0; i < region_len; i++) {
+                            if (plain_bits[i] == 0) {
+                                first_zero = i;
+                                break;
+                            }
+                        }
+
+                        int trn2d_len;
+                        int cp_frame_start;
+                        if (first_zero >= 17) {
+                            /* The 17 sync 1-bits precede this zero */
+                            cp_frame_start = first_zero - 17;
+                            trn2d_len = cp_frame_start;
+                        } else {
+                            /* No CP boundary found — entire region is TRN2d */
+                            trn2d_len = region_len;
+                            cp_frame_start = -1;
+                        }
+
+                        if (trn2d_len > 0) {
+                            printf("  [%7.1f ms] V.90 TRN2d: %d symbols (%.1f ms) at U_INFO=%d\n",
+                                   sample_to_ms(region_start, 8000), trn2d_len,
+                                   sample_to_ms(trn2d_len, 8000), u_info);
+                        }
+
+                        if (cp_frame_start >= 0) {
+                            int cp_bits_avail = region_len - cp_frame_start;
+                            uint8_t *cp_bits = plain_bits + cp_frame_start;
+
+                            printf("  [%7.1f ms] V.90 CP: %d bits (%.1f ms)\n",
+                                   sample_to_ms(region_start + cp_frame_start, 8000),
+                                   cp_bits_avail,
+                                   sample_to_ms(cp_bits_avail, 8000));
+
+                            /* Try to decode with multiple candidate lengths.
+                             * The CP frame length depends on constellation_count
+                             * which we don't know yet, so try plausible lengths
+                             * (1..6 constellations → 290..1098 bits, rounded up
+                             * to multiples of 6). */
+                            bool cp_decoded = false;
+                            for (int nc = 1; nc <= VPCM_CP_MAX_CONSTELLATIONS && !cp_decoded; nc++) {
+                                vpcm_cp_frame_t trial;
+                                vpcm_cp_init(&trial);
+                                trial.constellation_count = (uint8_t) nc;
+                                int try_len = vpcm_cp_bit_length(&trial);
+                                if (try_len <= 0 || try_len > cp_bits_avail)
+                                    continue;
+
+                                vpcm_cp_diag_t diag;
+                                if (vpcm_cp_decode_diag(cp_bits, try_len, &diag)) {
+                                    cp_decoded = true;
+                                    printf("    CP decode OK (CRC valid)\n");
+                                    print_cp_frame(&diag.frame);
+                                } else {
+                                    /* Try with inverted sign polarity */
+                                    uint8_t *inv_bits = malloc((size_t) try_len);
+                                    if (inv_bits) {
+                                        for (int b = 0; b < try_len; b++)
+                                            inv_bits[b] = cp_bits[b] ^ 1;
+                                        if (vpcm_cp_decode_diag(inv_bits, try_len, &diag)) {
+                                            cp_decoded = true;
+                                            printf("    CP decode OK (CRC valid, inverted sign)\n");
+                                            print_cp_frame(&diag.frame);
+                                        }
+                                        free(inv_bits);
+                                    }
+                                }
+                            }
+                            if (!cp_decoded) {
+                                printf("    CP decode: no valid CRC found (tried 1-%d constellations)\n",
+                                       VPCM_CP_MAX_CONSTELLATIONS);
+                                /* Print first 40 descrambled bits for debugging */
+                                printf("    First bits: ");
+                                for (int b = 0; b < 40 && b < cp_bits_avail; b++)
+                                    putchar(cp_bits[b] ? '1' : '0');
+                                printf("\n");
+                            }
+                        }
+
+                        free(plain_bits);
+                    }
                 }
             }
 
@@ -11142,11 +11246,298 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
         next_u_info:;
     }
 
+    /*
+     * Sign-pattern-based Sd scanner.
+     *
+     * On real VoIP-captured digital channels, the V.90 Phase 3 Sd signal
+     * is superimposed on V.34 QAM training: the sign bit of each G.711
+     * codeword carries the V.90 Sd pattern {+,+,+,-,-,-} while the
+     * magnitude is determined by the V.34 training signal.  The exact-
+     * codeword scanner above misses these because the magnitudes vary.
+     *
+     * This scanner matches the Sd sign pattern regardless of magnitude
+     * and reports all occurrences (V.90 Phase 3 may repeat after retrain).
+     */
     if (!found_sequence) {
-        printf("  No raw PCM-side V.90 sequence matched.\n");
-        printf("  This scanner expects exact downstream G.711/PCM codewords after INFO1a.\n");
-        printf("  These successful-call WAVs appear to be analog line audio, so later V.90/V.92\n");
-        printf("  startup is better inferred from the V.34 state machine than from raw codeword matching.\n");
+        int sd_sign[6] = { 1, 1, 1, 0, 0, 0 };
+        int sbar_sign[6] = { 0, 0, 0, 1, 1, 1 };
+        for (int offset = 0; offset + 24 <= total; offset++) {
+            /* Quick check: first codeword sign must be positive */
+            if (!(codewords[offset] & 0x80))
+                continue;
+
+            /* Count consecutive Sd sign-pattern repetitions */
+            int sd_reps = 0;
+            while (offset + (sd_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6 && ok; j++) {
+                    int sign = (codewords[offset + sd_reps * 6 + j] & 0x80) ? 1 : 0;
+                    if (sign != sd_sign[j])
+                        ok = false;
+                }
+                if (!ok) break;
+                sd_reps++;
+            }
+
+            /* Require at least 16 reps (96 symbols = 12ms) to avoid
+             * false positives from answer tones and other periodic signals */
+            if (sd_reps < 16)
+                continue;
+
+            int pos = offset + sd_reps * 6;
+
+            /* Check for S̄d immediately following */
+            int sbar_reps = 0;
+            while (pos + (sbar_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6 && ok; j++) {
+                    int sign = (codewords[pos + sbar_reps * 6 + j] & 0x80) ? 1 : 0;
+                    if (sign != sbar_sign[j])
+                        ok = false;
+                }
+                if (!ok) break;
+                sbar_reps++;
+            }
+
+            printf("  [%7.1f ms] V.90 Sd (sign-pattern): %d reps (%d symbols, %.1f ms)\n",
+                   sample_to_ms(offset, 8000), sd_reps, sd_reps * 6,
+                   sample_to_ms(sd_reps * 6, 8000));
+
+            if (sbar_reps > 0) {
+                printf("  [%7.1f ms] V.90 S̄d (sign-pattern): %d reps (%d symbols, %.1f ms)\n",
+                       sample_to_ms(pos, 8000), sbar_reps, sbar_reps * 6,
+                       sample_to_ms(sbar_reps * 6, 8000));
+                pos += sbar_reps * 6;
+            }
+
+            /* Descramble sign bits in the post-Sd/S̄d region to find
+             * TRN1d, Jd, TRN2d, and CP.
+             *
+             * V.90 Phase 3 sequence after S̄d:
+             *   TRN1d  — scrambled all-1s → descrambles to all-1s
+             *   Jd     — 72-bit frames (12 symbols × 6 repeated)
+             *   TRN2d  — scrambled all-1s again
+             *   CP     — 17 sync 1s, 0 start bit, payload, CRC-16
+             *   B1d    — idle (Phase 4)
+             *
+             * Since magnitudes belong to V.34 QAM, we only use sign bits.
+             */
+            if (pos < total) {
+                int region_start = pos;
+                int region_len = total - pos;
+
+                /* Limit to a reasonable Phase 3 duration (10 seconds) */
+                if (region_len > 80000)
+                    region_len = 80000;
+
+                /* Seed the descrambler from codewords preceding the region */
+                int hist = OFFLINE_V90_SCRAMBLER_HISTORY;
+                int seed_start = region_start - hist - 1;
+                if (seed_start < 0) seed_start = 0;
+
+                uint32_t descramble_reg = 0;
+                int prev_sign = (codewords[seed_start] & 0x80) ? 1 : 0;
+
+                for (int i = seed_start + 1; i < region_start; i++) {
+                    int sign = (codewords[i] & 0x80) ? 1 : 0;
+                    int scrambled = sign ^ prev_sign;
+                    prev_sign = sign;
+                    (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+                }
+
+                /* Descramble the region */
+                uint8_t *plain_bits = malloc((size_t) region_len);
+                if (plain_bits) {
+                    for (int i = 0; i < region_len; i++) {
+                        int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
+                        int scrambled = sign ^ prev_sign;
+                        prev_sign = sign;
+                        plain_bits[i] = (uint8_t) offline_v90_descramble_reg_bit(
+                            &descramble_reg, scrambled);
+                    }
+
+                    /* Debug: dump raw sign bits around Sd/Sbar boundary */
+                    {
+                        int dump_before = 24; /* last 24 of Sd/Sbar */
+                        int dump_after = 48;
+                        int start_before = region_start - dump_before;
+                        if (start_before < 0) start_before = 0;
+                        printf("  [debug] sign bits around Sd/Sbar→post boundary:\n    ");
+                        for (int b = start_before; b < region_start + dump_after && b < total; b++) {
+                            if (b == region_start) printf("| ");
+                            putchar((codewords[b] & 0x80) ? '+' : '-');
+                            if ((b - start_before + 1) % 6 == 0) putchar(' ');
+                        }
+                        printf("\n");
+                    }
+
+                    /* Debug: check sign-pattern periodicity in the post-Sd region */
+                    {
+                        int check_len = 72;
+                        if (check_len > region_len) check_len = region_len;
+                        printf("  [debug] sign period-6 check (post-Sd, %d symbols):\n", check_len);
+                        for (int phase = 0; phase < 6; phase++) {
+                            int ones = 0, zeros = 0;
+                            for (int i = phase; i < check_len; i += 6) {
+                                if (codewords[region_start + i] & 0x80) ones++;
+                                else zeros++;
+                            }
+                            printf("    phase %d: +=%d -=%d\n", phase, ones, zeros);
+                        }
+                    }
+
+                    /* Debug: dump first 120 descrambled bits */
+                    printf("  [debug] first 120 descrambled bits after Sd/Sbar:\n    ");
+                    for (int b = 0; b < 120 && b < region_len; b++) {
+                        putchar(plain_bits[b] ? '1' : '0');
+                        if ((b + 1) % 72 == 0) printf("\n    ");
+                        else if ((b + 1) % 6 == 0) putchar(' ');
+                    }
+                    printf("\n");
+
+                    /* TRN1d: run of all-1 descrambled bits */
+                    int trn1d_len = 0;
+                    while (trn1d_len < region_len && plain_bits[trn1d_len] == 1)
+                        trn1d_len++;
+
+                    if (trn1d_len > 0) {
+                        printf("  [%7.1f ms] V.90 TRN1d (sign): %d symbols (%.1f ms)\n",
+                               sample_to_ms(region_start, 8000), trn1d_len,
+                               sample_to_ms(trn1d_len, 8000));
+                    }
+
+                    /* After TRN1d: look for Jd frames or a second all-1s
+                     * run (TRN2d).  Jd is 72 bits per frame, and contains
+                     * at least one 0 bit per frame.  Scan forward for the
+                     * next long all-1s run which signals TRN2d. */
+                    int jd_start = trn1d_len;
+                    int trn2d_start = -1;
+
+                    /* Find TRN2d: a run of ≥ 48 consecutive 1s after a
+                     * region containing 0s (the Jd/DIL zone). */
+                    for (int i = jd_start; i < region_len; i++) {
+                        if (plain_bits[i] != 1)
+                            continue;
+                        int run = 0;
+                        while (i + run < region_len && plain_bits[i + run] == 1)
+                            run++;
+                        if (run >= 48) {
+                            trn2d_start = i;
+                            break;
+                        }
+                        i += run - 1;
+                    }
+
+                    /* Report Jd zone (between TRN1d and TRN2d) */
+                    int jd_end = (trn2d_start >= 0) ? trn2d_start : region_len;
+                    int jd_len = jd_end - jd_start;
+                    if (jd_len > 0) {
+                        int jd_frames = jd_len / 72;
+                        int jd_rem = jd_len % 72;
+                        printf("  [%7.1f ms] V.90 Jd zone (sign): %d bits (%.1f ms)",
+                               sample_to_ms(region_start + jd_start, 8000),
+                               jd_len, sample_to_ms(jd_len, 8000));
+                        if (jd_frames > 0)
+                            printf(", ~%d Jd frame reps", jd_frames);
+                        if (jd_rem > 0)
+                            printf(", %d remainder bits", jd_rem);
+                        printf("\n");
+                    }
+
+                    /* TRN2d + CP decode */
+                    if (trn2d_start >= 0) {
+                        /* Find the TRN2d→CP boundary: first 0 after the
+                         * TRN2d all-1s run, which is the CP start bit
+                         * at frame offset +17 (after 17 sync 1-bits). */
+                        int first_zero = -1;
+                        for (int i = trn2d_start; i < region_len; i++) {
+                            if (plain_bits[i] == 0) {
+                                first_zero = i;
+                                break;
+                            }
+                        }
+
+                        int trn2d_len;
+                        int cp_frame_start;
+                        if (first_zero >= 0 && first_zero - trn2d_start >= 17) {
+                            cp_frame_start = first_zero - 17;
+                            trn2d_len = cp_frame_start - trn2d_start;
+                        } else {
+                            trn2d_len = region_len - trn2d_start;
+                            cp_frame_start = -1;
+                        }
+
+                        if (trn2d_len > 0) {
+                            printf("  [%7.1f ms] V.90 TRN2d (sign): %d symbols (%.1f ms)\n",
+                                   sample_to_ms(region_start + trn2d_start, 8000),
+                                   trn2d_len, sample_to_ms(trn2d_len, 8000));
+                        }
+
+                        if (cp_frame_start >= 0) {
+                            int cp_bits_avail = region_len - cp_frame_start;
+                            uint8_t *cp_bits = plain_bits + cp_frame_start;
+
+                            printf("  [%7.1f ms] V.90 CP (sign): %d bits (%.1f ms)\n",
+                                   sample_to_ms(region_start + cp_frame_start, 8000),
+                                   cp_bits_avail,
+                                   sample_to_ms(cp_bits_avail, 8000));
+
+                            bool cp_decoded = false;
+                            for (int nc = 1; nc <= VPCM_CP_MAX_CONSTELLATIONS && !cp_decoded; nc++) {
+                                vpcm_cp_frame_t trial;
+                                vpcm_cp_init(&trial);
+                                trial.constellation_count = (uint8_t) nc;
+                                int try_len = vpcm_cp_bit_length(&trial);
+                                if (try_len <= 0 || try_len > cp_bits_avail)
+                                    continue;
+
+                                vpcm_cp_diag_t diag;
+                                if (vpcm_cp_decode_diag(cp_bits, try_len, &diag)) {
+                                    cp_decoded = true;
+                                    printf("    CP decode OK (CRC valid, sign-only)\n");
+                                    print_cp_frame(&diag.frame);
+                                } else {
+                                    uint8_t *inv_bits = malloc((size_t) try_len);
+                                    if (inv_bits) {
+                                        for (int b = 0; b < try_len; b++)
+                                            inv_bits[b] = cp_bits[b] ^ 1;
+                                        if (vpcm_cp_decode_diag(inv_bits, try_len, &diag)) {
+                                            cp_decoded = true;
+                                            printf("    CP decode OK (CRC valid, inverted sign)\n");
+                                            print_cp_frame(&diag.frame);
+                                        }
+                                        free(inv_bits);
+                                    }
+                                }
+                            }
+                            if (!cp_decoded) {
+                                printf("    CP decode: no valid CRC (tried 1-%d constellations)\n",
+                                       VPCM_CP_MAX_CONSTELLATIONS);
+                                printf("    First 40 bits: ");
+                                for (int b = 0; b < 40 && b < cp_bits_avail; b++)
+                                    putchar(cp_bits[b] ? '1' : '0');
+                                printf("\n");
+                            }
+                        }
+                    } else if (jd_len == 0 && trn1d_len < region_len) {
+                        printf("  [%7.1f ms] V.90 post-Sd region: %d symbols (%.1f ms), no TRN2d found\n",
+                               sample_to_ms(region_start, 8000), region_len,
+                               sample_to_ms(region_len, 8000));
+                    }
+
+                    free(plain_bits);
+                }
+            }
+
+            found_sequence = true;
+
+            /* Skip past this match to find the next Sd occurrence */
+            offset = pos - 1;
+        }
+    }
+
+    if (!found_sequence) {
+        printf("  No V.90 Sd sequence detected (tried exact codeword and sign-pattern modes).\n");
     }
 
     printf("  Note: V.90 INFO0a/INFO1a are V.34 Phase 2 DPSK modulated signals.\n"
@@ -11326,20 +11717,121 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
                     call_log_append(log, start, len, "V.90", "Ri/B1 idle run", "");
             }
 
+            /* TRN2d + CP: descramble sign bits to find boundary and decode CP */
             {
-                int start = pos;
-                int len = 0;
+                int region_start = pos;
+                int region_len = 0;
 
                 while (pos < total) {
                     int u = codeword_to_ucode(law, codewords[pos]);
                     if (u != u_info)
                         break;
-                    len++;
+                    region_len++;
                     pos++;
                 }
-                if (len > 0) {
-                    snprintf(detail, sizeof(detail), "u_info=%d", u_info);
-                    call_log_append(log, start, len, "V.90", "TRN2d/CP/data-magnitude run", detail);
+
+                if (region_len > 0) {
+                    int hist = OFFLINE_V90_SCRAMBLER_HISTORY;
+                    int seed_start = region_start - hist - 1;
+                    if (seed_start < 0) seed_start = 0;
+
+                    uint32_t descramble_reg = 0;
+                    int prev_sign = (codewords[seed_start] & 0x80) ? 1 : 0;
+
+                    for (int i = seed_start + 1; i < region_start; i++) {
+                        int sign = (codewords[i] & 0x80) ? 1 : 0;
+                        int scrambled = sign ^ prev_sign;
+                        prev_sign = sign;
+                        (void) offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+                    }
+
+                    uint8_t *plain_bits = malloc((size_t) region_len);
+                    if (plain_bits) {
+                        for (int i = 0; i < region_len; i++) {
+                            int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
+                            int scrambled = sign ^ prev_sign;
+                            prev_sign = sign;
+                            plain_bits[i] = (uint8_t) offline_v90_descramble_reg_bit(
+                                &descramble_reg, scrambled);
+                        }
+
+                        int first_zero = -1;
+                        for (int i = 0; i < region_len; i++) {
+                            if (plain_bits[i] == 0) {
+                                first_zero = i;
+                                break;
+                            }
+                        }
+
+                        int trn2d_len;
+                        int cp_frame_start;
+                        if (first_zero >= 17) {
+                            cp_frame_start = first_zero - 17;
+                            trn2d_len = cp_frame_start;
+                        } else {
+                            trn2d_len = region_len;
+                            cp_frame_start = -1;
+                        }
+
+                        if (trn2d_len > 0) {
+                            snprintf(detail, sizeof(detail), "u_info=%d symbols=%d", u_info, trn2d_len);
+                            call_log_append(log, region_start, trn2d_len, "V.90", "TRN2d", detail);
+                        }
+
+                        if (cp_frame_start >= 0) {
+                            int cp_bits_avail = region_len - cp_frame_start;
+                            uint8_t *cp_bits = plain_bits + cp_frame_start;
+                            bool cp_decoded = false;
+
+                            for (int nc = 1; nc <= VPCM_CP_MAX_CONSTELLATIONS && !cp_decoded; nc++) {
+                                vpcm_cp_frame_t trial;
+                                vpcm_cp_init(&trial);
+                                trial.constellation_count = (uint8_t) nc;
+                                int try_len = vpcm_cp_bit_length(&trial);
+                                if (try_len <= 0 || try_len > cp_bits_avail)
+                                    continue;
+
+                                vpcm_cp_diag_t diag;
+                                if (vpcm_cp_decode_diag(cp_bits, try_len, &diag)) {
+                                    cp_decoded = true;
+                                    snprintf(detail, sizeof(detail),
+                                             "drn=%u rate=%.0f_bps constellations=%u ack=%s crc=ok",
+                                             (unsigned) diag.frame.drn,
+                                             vpcm_cp_drn_to_bps(diag.frame.drn),
+                                             (unsigned) diag.frame.constellation_count,
+                                             diag.frame.acknowledge ? "yes" : "no");
+                                    call_log_append(log, region_start + cp_frame_start,
+                                                    cp_bits_avail, "V.90", "CP decoded", detail);
+                                } else {
+                                    /* Try inverted sign polarity */
+                                    uint8_t *inv_bits = malloc((size_t) try_len);
+                                    if (inv_bits) {
+                                        for (int b = 0; b < try_len; b++)
+                                            inv_bits[b] = cp_bits[b] ^ 1;
+                                        if (vpcm_cp_decode_diag(inv_bits, try_len, &diag)) {
+                                            cp_decoded = true;
+                                            snprintf(detail, sizeof(detail),
+                                                     "drn=%u rate=%.0f_bps constellations=%u ack=%s crc=ok inv_sign",
+                                                     (unsigned) diag.frame.drn,
+                                                     vpcm_cp_drn_to_bps(diag.frame.drn),
+                                                     (unsigned) diag.frame.constellation_count,
+                                                     diag.frame.acknowledge ? "yes" : "no");
+                                            call_log_append(log, region_start + cp_frame_start,
+                                                            cp_bits_avail, "V.90", "CP decoded", detail);
+                                        }
+                                        free(inv_bits);
+                                    }
+                                }
+                            }
+                            if (!cp_decoded) {
+                                snprintf(detail, sizeof(detail), "bits=%d no_valid_crc", cp_bits_avail);
+                                call_log_append(log, region_start + cp_frame_start,
+                                                cp_bits_avail, "V.90", "CP (no CRC match)", detail);
+                            }
+                        }
+
+                        free(plain_bits);
+                    }
                 }
             }
 
@@ -11353,6 +11845,61 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
         }
     }
 
+    /* Sign-pattern-based Sd scan for VoIP-captured digital channels */
+    if (!found_sequence) {
+        int sd_sign[6] = { 1, 1, 1, 0, 0, 0 };
+        int sbar_sign[6] = { 0, 0, 0, 1, 1, 1 };
+        char detail[192];
+
+        for (int offset = 0; offset + 24 <= total && !found_sequence; offset++) {
+            if (!(codewords[offset] & 0x80))
+                continue;
+
+            int sd_reps = 0;
+            while (offset + (sd_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6 && ok; j++) {
+                    int sign = (codewords[offset + sd_reps * 6 + j] & 0x80) ? 1 : 0;
+                    if (sign != sd_sign[j])
+                        ok = false;
+                }
+                if (!ok) break;
+                sd_reps++;
+            }
+            if (sd_reps < 16)
+                continue;
+
+            snprintf(detail, sizeof(detail), "sign_pattern reps=%d", sd_reps);
+            call_log_append(log, offset, sd_reps * 6, "V.90", "Sd (sign-pattern)", detail);
+
+            int pos = offset + sd_reps * 6;
+
+            int sbar_reps = 0;
+            while (pos + (sbar_reps + 1) * 6 <= total) {
+                bool ok = true;
+                for (int j = 0; j < 6 && ok; j++) {
+                    int sign = (codewords[pos + sbar_reps * 6 + j] & 0x80) ? 1 : 0;
+                    if (sign != sbar_sign[j])
+                        ok = false;
+                }
+                if (!ok) break;
+                sbar_reps++;
+            }
+            if (sbar_reps > 0) {
+                snprintf(detail, sizeof(detail), "sign_pattern reps=%d", sbar_reps);
+                call_log_append(log, pos, sbar_reps * 6, "V.90", "S-bar (sign-pattern)", detail);
+                pos += sbar_reps * 6;
+            }
+
+            if (pos < total) {
+                int remaining = total - pos;
+                snprintf(detail, sizeof(detail), "post_sd_symbols=%d", remaining);
+                call_log_append(log, pos, remaining, "V.90", "Post-Sd region", detail);
+            }
+
+            found_sequence = true;
+        }
+    }
 }
 
 static void collect_post_phase3_stage_events(call_log_t *log,
@@ -13082,34 +13629,37 @@ static void run_decode_suite(const char *label,
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
-    if (opts->raw_output_enabled && opts->do_v90 && !suppress_v90_phase2) {
-        jd_stage_decode_t jd_stage;
-        ja_dil_decode_t ja_dil;
-        post_phase3_decode_t post_phase3;
-
+    if (opts->raw_output_enabled && opts->do_v90) {
+        /* Always run the V.90 signal scan — the sign-pattern scanner
+         * works on digital-side channels even when V.8 negotiation
+         * was captured on the opposite stereo channel. */
         decode_v90_signals(g711_codewords, total_codewords, law);
-        if (decode_jd_stage(g711_codewords, total_codewords,
-                            have_answerer ? &answerer : NULL,
-                            have_caller ? &caller : NULL,
-                            &jd_stage)) {
-            print_jd_stage_decode(&jd_stage);
-        }
-        if (decode_ja_dil_stage(g711_codewords, total_codewords,
+
+        if (!suppress_v90_phase2) {
+            jd_stage_decode_t jd_stage;
+            ja_dil_decode_t ja_dil;
+            post_phase3_decode_t post_phase3;
+
+            if (decode_jd_stage(g711_codewords, total_codewords,
                                 have_answerer ? &answerer : NULL,
                                 have_caller ? &caller : NULL,
-                                &jd_stage,
-                                &ja_dil)) {
-            print_ja_dil_decode(&ja_dil);
+                                &jd_stage)) {
+                print_jd_stage_decode(&jd_stage);
+            }
+            if (decode_ja_dil_stage(g711_codewords, total_codewords,
+                                    have_answerer ? &answerer : NULL,
+                                    have_caller ? &caller : NULL,
+                                    &jd_stage,
+                                    &ja_dil)) {
+                print_ja_dil_decode(&ja_dil);
+            }
+            if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
+                                             have_answerer ? &answerer : NULL,
+                                             have_caller ? &caller : NULL,
+                                             &post_phase3)) {
+                print_post_phase3_decode(&post_phase3);
+            }
         }
-        if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
-                                         have_answerer ? &answerer : NULL,
-                                         have_caller ? &caller : NULL,
-                                         &post_phase3)) {
-            print_post_phase3_decode(&post_phase3);
-        }
-    } else if (opts->raw_output_enabled && opts->do_v90 && suppress_v90_phase2) {
-        printf("\n=== V.90/V.92 PCM Decode ===\n");
-        printf("  Suppressed by V.8 gate: decoded CM/JM does not advertise V.90/V.92 digital PCM capability.\n");
     }
 
     if (opts->raw_output_enabled && opts->do_p3) {
