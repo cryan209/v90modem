@@ -11262,8 +11262,20 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
      * matches the opposite phase.
      */
     if (!found_sequence) {
-        for (int offset = 0; offset + 24 <= total; offset += 6) {
-            /* Check if this 6-sample block matches Sd or S̄d */
+        /* Scan every sample offset for long period-6 sign runs.
+         * At each candidate offset, count contiguous reps of
+         * Sd {+,+,+,-,-,-} or S̄d {-,-,-,+,+,+} on 6-sample
+         * boundaries from that offset.  Try all 6 phase offsets
+         * to find the correct data frame alignment. */
+        for (int offset = 0; offset + 96 <= total; offset++) {
+            /* Quick check: need 3 consecutive same-sign samples */
+            int s0 = (codewords[offset] & 0x80) ? 1 : 0;
+            if (((codewords[offset + 1] & 0x80) ? 1 : 0) != s0)
+                continue;
+            if (((codewords[offset + 2] & 0x80) ? 1 : 0) != s0)
+                continue;
+
+            /* Check if this is the start of Sd or S̄d */
             int signs[6];
             for (int j = 0; j < 6; j++)
                 signs[j] = (codewords[offset + j] & 0x80) ? 1 : 0;
@@ -11529,9 +11541,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
 
             found_sequence = true;
 
-            /* Skip past this match to find the next Sd occurrence.
-             * offset will be incremented by 6 at loop top. */
-            offset = pos - 6;
+            /* Skip past this match to find the next Sd occurrence. */
+            offset = pos - 1;
         }
     }
 
