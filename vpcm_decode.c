@@ -10309,6 +10309,151 @@ typedef struct {
     int right_pair_score;
 } phase12_stereo_short_p1_hint_t;
 
+/* ------------------------------------------------------------------ */
+/* Stereo cross-channel decode context                                 */
+/*                                                                     */
+/* In a V.90 call, the analog modem (caller) sends INFO1a with U_INFO  */
+/* on one stereo channel, while the digital modem sends Phase 3         */
+/* signals (Sd, TRN1d, etc.) on the other.  This context allows the    */
+/* Phase 3 decoder to use U_INFO from the partner channel.             */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    /* Phase 1/2 results for both channels */
+    phase12_result_t    left_p12;
+    phase12_result_t    right_p12;
+    bool                left_p12_valid;
+    bool                right_p12_valid;
+
+    /* V.34 decode results for both channels */
+    decode_v34_result_t left_answerer;
+    decode_v34_result_t left_caller;
+    decode_v34_result_t right_answerer;
+    decode_v34_result_t right_caller;
+    bool                left_answerer_valid;
+    bool                left_caller_valid;
+    bool                right_answerer_valid;
+    bool                right_caller_valid;
+
+    /* V.8/Phase 1/2 gating per channel */
+    bool                left_suppress_v90_phase2;
+    bool                right_suppress_v90_phase2;
+
+    /* Cross-channel resolved U_INFO */
+    int                 cross_u_info;       /* -1 = unknown */
+    bool                cross_u_info_valid;
+    int                 cross_u_info_source; /* 0=left, 1=right */
+
+    /* Role assignment: which channel is analog, which is digital */
+    bool                roles_assigned;
+    int                 analog_channel;     /* 0=left, 1=right, -1=unknown */
+    int                 digital_channel;
+} stereo_decode_context_t;
+
+static void stereo_decode_context_init(stereo_decode_context_t *ctx)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    phase12_result_init(&ctx->left_p12);
+    phase12_result_init(&ctx->right_p12);
+    ctx->cross_u_info = -1;
+    ctx->analog_channel = -1;
+    ctx->digital_channel = -1;
+}
+
+/* Resolve cross-channel dependencies after both Stage A passes complete. */
+static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
+{
+    if (!ctx)
+        return;
+
+    /* Determine roles from V.8 CM/JM and Phase 1/2 results.
+     * The analog modem sends CM (caller), the digital modem sends JM (answerer).
+     * V.90 §8.3.2: INFO1a is sent by the analog modem and contains U_INFO. */
+    int left_analog_score = 0, right_analog_score = 0;
+
+    if (ctx->left_p12_valid) {
+        if (ctx->left_p12.cm.detected)
+            left_analog_score += 10;  /* CM = caller = typically analog */
+        if (ctx->left_p12.jm.detected)
+            left_analog_score -= 10;  /* JM = answerer = typically digital */
+        if (ctx->left_p12.digital_side_likely)
+            left_analog_score -= 5;
+    }
+    if (ctx->right_p12_valid) {
+        if (ctx->right_p12.cm.detected)
+            right_analog_score += 10;
+        if (ctx->right_p12.jm.detected)
+            right_analog_score -= 10;
+        if (ctx->right_p12.digital_side_likely)
+            right_analog_score -= 5;
+    }
+
+    if (left_analog_score > right_analog_score) {
+        ctx->analog_channel = 0;
+        ctx->digital_channel = 1;
+        ctx->roles_assigned = true;
+    } else if (right_analog_score > left_analog_score) {
+        ctx->analog_channel = 1;
+        ctx->digital_channel = 0;
+        ctx->roles_assigned = true;
+    }
+
+    /* Extract U_INFO: prefer Phase 1/2 INFO1a decode, fall back to V.34 decode */
+    int best_u_info = -1;
+    int best_source = -1;
+
+    /* Check left channel Phase 1/2 */
+    if (ctx->left_p12_valid && ctx->left_p12.info_path_known
+        && ctx->left_p12.inferred_u_info > 66) {
+        best_u_info = ctx->left_p12.inferred_u_info;
+        best_source = 0;
+    }
+    /* Check right channel Phase 1/2 */
+    if (ctx->right_p12_valid && ctx->right_p12.info_path_known
+        && ctx->right_p12.inferred_u_info > 66) {
+        /* Prefer the analog modem's channel if roles are known */
+        if (best_u_info < 0 || (ctx->roles_assigned && ctx->analog_channel == 1)) {
+            best_u_info = ctx->right_p12.inferred_u_info;
+            best_source = 1;
+        }
+    }
+
+    /* Fall back to V.34 decode u_info */
+    if (best_u_info < 0) {
+        decode_v34_result_t *v34_candidates[] = {
+            ctx->left_answerer_valid  ? &ctx->left_answerer  : NULL,
+            ctx->left_caller_valid    ? &ctx->left_caller    : NULL,
+            ctx->right_answerer_valid ? &ctx->right_answerer : NULL,
+            ctx->right_caller_valid   ? &ctx->right_caller   : NULL
+        };
+        int v34_sources[] = { 0, 0, 1, 1 };
+        for (int i = 0; i < 4; i++) {
+            if (v34_candidates[i] && v34_candidates[i]->u_info > 66) {
+                best_u_info = v34_candidates[i]->u_info;
+                best_source = v34_sources[i];
+                break;
+            }
+        }
+    }
+
+    if (best_u_info > 66 && best_u_info <= 127) {
+        ctx->cross_u_info = best_u_info;
+        ctx->cross_u_info_valid = true;
+        ctx->cross_u_info_source = best_source;
+    }
+
+    if (ctx->cross_u_info_valid || ctx->roles_assigned) {
+        printf("\n=== Stereo Cross-Channel Resolution ===\n");
+        if (ctx->roles_assigned)
+            printf("  Roles: %s=analog(caller) %s=digital(answerer)\n",
+                   ctx->analog_channel == 0 ? "Left" : "Right",
+                   ctx->digital_channel == 0 ? "Left" : "Right");
+        if (ctx->cross_u_info_valid)
+            printf("  U_INFO=%d (from %s channel)\n",
+                   ctx->cross_u_info,
+                   ctx->cross_u_info_source == 0 ? "Left" : "Right");
+    }
+}
+
 static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
                                                const phase12_stereo_short_p1_hint_t *hint,
                                                bool is_left);
@@ -10929,7 +11074,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
     uint8_t pos_zero = v91_ucode_to_codeword(law, 0, true);
     uint8_t neg_zero = v91_ucode_to_codeword(law, 0, false);
 
-    int u_info_lo = (known_u_info >= 0) ? known_u_info : 10;
+    /* V.90 §8.3.2: "UINFO shall be greater than 66" */
+    int u_info_lo = (known_u_info >= 0) ? known_u_info : 67;
     int u_info_hi = (known_u_info >= 0) ? known_u_info : 127;
 
     if (known_u_info >= 0)
@@ -13297,19 +13443,22 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
            (hint.left_expected_form == P12_SHORT_P1_FORM_ANALOG) ? "Left" : "Right");
 }
 
-static void run_decode_suite(const char *label,
-                             const int16_t *linear_samples,
-                             const uint8_t *g711_codewords,
-                             int total_samples,
-                             int total_codewords,
-                             int sample_rate,
-                             v91_law_t law,
-                             const phase12_stereo_short_p1_hint_t *stereo_hint,
-                             bool is_left_channel,
-                             const decode_options_t *opts,
-                             const codeword_stream_info_t *codeword_info,
-                             int expected_rate_1,
-                             int expected_rate_2)
+/* Stage A: Phase 1/2, V.34, V.8 decode — produces cross-channel info.
+ * When ctx is non-NULL, stores results in the stereo context. */
+static void run_decode_stage_a(const char *label,
+                               const int16_t *linear_samples,
+                               const uint8_t *g711_codewords,
+                               int total_samples,
+                               int total_codewords,
+                               int sample_rate,
+                               v91_law_t law,
+                               const phase12_stereo_short_p1_hint_t *stereo_hint,
+                               bool is_left_channel,
+                               const decode_options_t *opts,
+                               const codeword_stream_info_t *codeword_info,
+                               int expected_rate_1,
+                               int expected_rate_2,
+                               stereo_decode_context_t *ctx)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -13641,15 +13790,96 @@ static void run_decode_suite(const char *label,
         }
     }
 
+    /* Store results into stereo context for cross-channel use */
+    if (ctx) {
+        if (is_left_channel) {
+            if (have_phase12) {
+                /* Copy p12 into context (it will be reset at end of stage_b) */
+                ctx->left_p12 = p12;
+                ctx->left_p12_valid = true;
+                /* Re-init local p12 so reset won't double-free;
+                 * context now owns the dynamic fields. */
+                phase12_result_init(&p12);
+            }
+            if (have_answerer) { ctx->left_answerer = answerer; ctx->left_answerer_valid = true; }
+            if (have_caller)   { ctx->left_caller = caller;     ctx->left_caller_valid = true; }
+            ctx->left_suppress_v90_phase2 = suppress_v90_phase2;
+        } else {
+            if (have_phase12) {
+                ctx->right_p12 = p12;
+                ctx->right_p12_valid = true;
+                phase12_result_init(&p12);
+            }
+            if (have_answerer) { ctx->right_answerer = answerer; ctx->right_answerer_valid = true; }
+            if (have_caller)   { ctx->right_caller = caller;     ctx->right_caller_valid = true; }
+            ctx->right_suppress_v90_phase2 = suppress_v90_phase2;
+        }
+    }
+
+    phase12_result_reset(&p12);
+}
+
+/* Stage B: V.91, V.90, Phase 3 demod, call log — uses cross-channel info. */
+static void run_decode_stage_b(const char *label,
+                               const int16_t *linear_samples,
+                               const uint8_t *g711_codewords,
+                               int total_samples,
+                               int total_codewords,
+                               int sample_rate,
+                               v91_law_t law,
+                               const phase12_stereo_short_p1_hint_t *stereo_hint,
+                               bool is_left_channel,
+                               const decode_options_t *opts,
+                               const stereo_decode_context_t *ctx)
+{
+    if (!linear_samples || !g711_codewords || !opts)
+        return;
+
+    /* Recover this channel's Phase 1/2 and V.34 results from context */
+    const phase12_result_t *p12_ptr = NULL;
+    bool have_phase12 = false;
+    bool suppress_v90_phase2 = false;
+    const decode_v34_result_t *answerer_ptr = NULL;
+    const decode_v34_result_t *caller_ptr = NULL;
+
+    if (ctx) {
+        if (is_left_channel) {
+            if (ctx->left_p12_valid) { p12_ptr = &ctx->left_p12; have_phase12 = true; }
+            suppress_v90_phase2 = ctx->left_suppress_v90_phase2;
+            if (ctx->left_answerer_valid) answerer_ptr = &ctx->left_answerer;
+            if (ctx->left_caller_valid)   caller_ptr = &ctx->left_caller;
+        } else {
+            if (ctx->right_p12_valid) { p12_ptr = &ctx->right_p12; have_phase12 = true; }
+            suppress_v90_phase2 = ctx->right_suppress_v90_phase2;
+            if (ctx->right_answerer_valid) answerer_ptr = &ctx->right_answerer;
+            if (ctx->right_caller_valid)   caller_ptr = &ctx->right_caller;
+        }
+
+        /* If this channel lacks V.34 results, try the cross-channel results */
+        if (!answerer_ptr && !caller_ptr) {
+            if (is_left_channel) {
+                if (ctx->right_answerer_valid) answerer_ptr = &ctx->right_answerer;
+                if (ctx->right_caller_valid)   caller_ptr = &ctx->right_caller;
+            } else {
+                if (ctx->left_answerer_valid) answerer_ptr = &ctx->left_answerer;
+                if (ctx->left_caller_valid)   caller_ptr = &ctx->left_caller;
+            }
+        }
+    }
+
+    /* Determine effective U_INFO: own channel's Phase 1/2, or cross-channel */
+    int effective_u_info = -1;
+    if (have_phase12 && p12_ptr && p12_ptr->info_path_known
+        && p12_ptr->inferred_u_info > 66)
+        effective_u_info = p12_ptr->inferred_u_info;
+    if (effective_u_info < 0 && ctx && ctx->cross_u_info_valid)
+        effective_u_info = ctx->cross_u_info;
+
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
     if (opts->raw_output_enabled && opts->do_v90) {
-        /* Always run the V.90 signal scan — the sign-pattern scanner
-         * works on digital-side channels even when V.8 negotiation
-         * was captured on the opposite stereo channel. */
-        decode_v90_signals(g711_codewords, total_codewords, law,
-                           (have_phase12 && p12.info_path_known) ? p12.inferred_u_info : -1);
+        decode_v90_signals(g711_codewords, total_codewords, law, effective_u_info);
 
         if (!suppress_v90_phase2) {
             jd_stage_decode_t jd_stage;
@@ -13657,21 +13887,18 @@ static void run_decode_suite(const char *label,
             post_phase3_decode_t post_phase3;
 
             if (decode_jd_stage(g711_codewords, total_codewords,
-                                have_answerer ? &answerer : NULL,
-                                have_caller ? &caller : NULL,
+                                answerer_ptr, caller_ptr,
                                 &jd_stage)) {
                 print_jd_stage_decode(&jd_stage);
             }
             if (decode_ja_dil_stage(g711_codewords, total_codewords,
-                                    have_answerer ? &answerer : NULL,
-                                    have_caller ? &caller : NULL,
+                                    answerer_ptr, caller_ptr,
                                     &jd_stage,
                                     &ja_dil)) {
                 print_ja_dil_decode(&ja_dil);
             }
             if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
-                                             have_answerer ? &answerer : NULL,
-                                             have_caller ? &caller : NULL,
+                                             answerer_ptr, caller_ptr,
                                              &post_phase3)) {
                 print_post_phase3_decode(&post_phase3);
             }
@@ -13687,8 +13914,8 @@ static void run_decode_suite(const char *label,
 
         printf("\n=== Phase 3 Lightweight Demodulator Scan ===\n");
 
-        if (have_answerer
-            && p3_demod_get_phase3_window(&answerer, total_samples, &phase3_start, &phase3_end)) {
+        if (answerer_ptr
+            && p3_demod_get_phase3_window(answerer_ptr, total_samples, &phase3_start, &phase3_end)) {
             p3_demod_scan_window(linear_samples + phase3_start,
                                  phase3_end - phase3_start,
                                  phase3_start,
@@ -13699,8 +13926,8 @@ static void run_decode_suite(const char *label,
             last_phase3_end = phase3_end;
         }
 
-        if (have_caller
-            && p3_demod_get_phase3_window(&caller, total_samples, &phase3_start, &phase3_end)) {
+        if (caller_ptr
+            && p3_demod_get_phase3_window(caller_ptr, total_samples, &phase3_start, &phase3_end)) {
             if (!scanned_targeted_window
                 || phase3_start != last_phase3_start
                 || phase3_end != last_phase3_end) {
@@ -13742,8 +13969,36 @@ static void run_decode_suite(const char *label,
         print_call_log(label, &log, total_samples, sample_rate);
         call_log_reset(&log);
     }
+}
 
-    phase12_result_reset(&p12);
+/* Combined single-pass wrapper for mono/single-channel decode. */
+static void run_decode_suite(const char *label,
+                             const int16_t *linear_samples,
+                             const uint8_t *g711_codewords,
+                             int total_samples,
+                             int total_codewords,
+                             int sample_rate,
+                             v91_law_t law,
+                             const phase12_stereo_short_p1_hint_t *stereo_hint,
+                             bool is_left_channel,
+                             const decode_options_t *opts,
+                             const codeword_stream_info_t *codeword_info,
+                             int expected_rate_1,
+                             int expected_rate_2)
+{
+    stereo_decode_context_t ctx;
+    stereo_decode_context_init(&ctx);
+    run_decode_stage_a(label, linear_samples, g711_codewords,
+                       total_samples, total_codewords, sample_rate, law,
+                       stereo_hint, is_left_channel, opts, codeword_info,
+                       expected_rate_1, expected_rate_2, &ctx);
+    stereo_resolve_cross_channel(&ctx);
+    run_decode_stage_b(label, linear_samples, g711_codewords,
+                       total_samples, total_codewords, sample_rate, law,
+                       stereo_hint, is_left_channel, opts, &ctx);
+    /* Clean up context-owned Phase 1/2 results */
+    if (ctx.left_p12_valid) phase12_result_reset(&ctx.left_p12);
+    if (ctx.right_p12_valid) phase12_result_reset(&ctx.right_p12);
 }
 
 int main(int argc, char **argv)
@@ -14113,14 +14368,40 @@ int main(int argc, char **argv)
                     print_v8_stereo_pair_summary(&stereo_pair);
                 }
             }
-            run_decode_suite("Left", left_linear_samples, left_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law,
-                             &stereo_hint, true, &opts, &left_codeword_info,
-                             expected_rate_1, expected_rate_2);
-            run_decode_suite("Right", right_linear_samples, right_g711_codewords,
-                             total_samples, total_codewords, sample_rate, law,
-                             &stereo_hint, false, &opts, &right_codeword_info,
-                             expected_rate_1, expected_rate_2);
+            /* Two-pass stereo lockstep decode:
+             * Stage A runs Phase 1/2 + V.34 on both channels.
+             * Cross-channel resolution extracts U_INFO from whichever
+             * channel decoded the analog modem's INFO1a.
+             * Stage B runs V.90/V.91/Phase 3 with cross-channel info. */
+            {
+                stereo_decode_context_t stereo_ctx;
+                stereo_decode_context_init(&stereo_ctx);
+
+                /* Stage A: Phase 1/2 + V.34 for both channels */
+                run_decode_stage_a("Left", left_linear_samples, left_g711_codewords,
+                                   total_samples, total_codewords, sample_rate, law,
+                                   &stereo_hint, true, &opts, &left_codeword_info,
+                                   expected_rate_1, expected_rate_2, &stereo_ctx);
+                run_decode_stage_a("Right", right_linear_samples, right_g711_codewords,
+                                   total_samples, total_codewords, sample_rate, law,
+                                   &stereo_hint, false, &opts, &right_codeword_info,
+                                   expected_rate_1, expected_rate_2, &stereo_ctx);
+
+                /* Resolve cross-channel dependencies */
+                stereo_resolve_cross_channel(&stereo_ctx);
+
+                /* Stage B: V.90 decode using cross-channel info */
+                run_decode_stage_b("Left", left_linear_samples, left_g711_codewords,
+                                   total_samples, total_codewords, sample_rate, law,
+                                   &stereo_hint, true, &opts, &stereo_ctx);
+                run_decode_stage_b("Right", right_linear_samples, right_g711_codewords,
+                                   total_samples, total_codewords, sample_rate, law,
+                                   &stereo_hint, false, &opts, &stereo_ctx);
+
+                /* Clean up context-owned Phase 1/2 results */
+                if (stereo_ctx.left_p12_valid) phase12_result_reset(&stereo_ctx.left_p12);
+                if (stereo_ctx.right_p12_valid) phase12_result_reset(&stereo_ctx.right_p12);
+            }
             if (opts.do_call_log) {
                 call_log_t left_log;
                 call_log_t right_log;
