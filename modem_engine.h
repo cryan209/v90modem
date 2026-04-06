@@ -97,6 +97,11 @@ void me_on_sip_connected(void);
 void me_set_law(me_law_t law);
 me_law_t me_get_law(void);
 
+/* Enable/disable verbose [ME]/[TRACE] debug output to stderr.
+ * Also controllable via VPCM_ME_VERBOSE env var.
+ * Pass --verbose on the sip_v90_modem command line to activate. */
+void me_set_verbose(int v);  /* 0 = quiet, non-zero = verbose */
+
 /* Notify the engine that a SIP call has been disconnected. */
 void me_on_sip_disconnected(void);
 

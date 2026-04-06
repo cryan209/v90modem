@@ -499,4 +499,10 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                                call_log_t *log,
                                int sample_rate);
 
+/* Debug output control — override VPCM_P12_DEBUG / VPCM_P12_DUMP_V8 env vars.
+ * Call p12_set_debug(0) and p12_set_dump_v8(0) at startup to suppress all
+ * [p12] stderr output by default; pass 1 to enable. */
+void p12_set_debug(int enabled);
+void p12_set_dump_v8(int enabled);
+
 #endif /* PHASE12_DECODE_H */

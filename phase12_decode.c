@@ -171,6 +171,12 @@ static const double FSK_BURST_THRESHOLD = 0.12;
 static int g_p12_debug_enabled = -1;
 static int g_p12_dump_v8_enabled = -1;
 
+/* Called by the host tool (vpcm_decode, sip_v90_modem) to override the
+ * VPCM_P12_DEBUG / VPCM_P12_DUMP_V8 env vars.  Pass 0 to suppress all
+ * [p12] debug output regardless of env; pass 1 to force it on. */
+void p12_set_debug(int enabled)    { g_p12_debug_enabled   = enabled ? 1 : 0; }
+void p12_set_dump_v8(int enabled)  { g_p12_dump_v8_enabled = enabled ? 1 : 0; }
+
 static bool p12_debug_enabled(void)
 {
     if (g_p12_debug_enabled < 0)

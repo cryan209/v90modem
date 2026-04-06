@@ -373,6 +373,20 @@ static void v8_result_handler(void *user_data, v8_parms_t *result);
 /* ------------------------------------------------------------------ */
 
 static uint64_t g_trace_start_ms = 0;
+static int      g_me_verbose = -1;  /* -1 = unset; 0 = quiet; 1 = verbose */
+
+static bool me_verbose_enabled(void)
+{
+    if (g_me_verbose < 0)
+        g_me_verbose = (getenv("VPCM_ME_VERBOSE") != NULL) ? 1 : 0;
+    return g_me_verbose != 0;
+}
+
+/* Call from sip_modem.c after argument parsing to force verbose on */
+void me_set_verbose(int v) { g_me_verbose = v ? 1 : 0; }
+
+#define ME_LOG(fmt, ...) \
+    do { if (me_verbose_enabled()) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 
 static uint64_t trace_now_ms(void)
 {
@@ -418,6 +432,9 @@ static void trace_phase(const char *fmt, ...)
     uint64_t now = trace_now_ms();
     if (g_trace_start_ms == 0)
         g_trace_start_ms = now;
+
+    if (!me_verbose_enabled())
+        return;
 
     fprintf(stderr, "[TRACE +%llums] ", (unsigned long long)(now - g_trace_start_ms));
 
@@ -595,7 +612,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
         if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED)
             on_training_complete(ME_MOD_V22BIS, 2400, "V.22bis");
         else if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
-            fprintf(stderr, "[ME] V.22bis fallback failed (%s), hanging up\n",
+            ME_LOG("[ME] V.22bis fallback failed (%s), hanging up\n",
                     signal_status_to_str(bit));
             trace_phase("V22BIS training failed (%s) -> hangup",
                         signal_status_to_str(bit));
@@ -836,7 +853,7 @@ static bool me_retry_v8_with_alternate_tone_locked(const char *reason, int statu
                 reason, status, modem_connect_tone_to_str(retry_tone));
 
     if (me_start_or_restart_v8_locked(retry_tone) != 0) {
-        fprintf(stderr, "[ME] V.8 retry restart failed\n");
+        ME_LOG("[ME] V.8 retry restart failed\n");
         trace_phase("V8 retry restart failed");
         return false;
     }
@@ -886,7 +903,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
         g_state = ME_DATA;
         g_phase_start_ms = 0;
         pthread_mutex_unlock(&g_state_mtx);
-        fprintf(stderr, "[ME] %s training complete (%d bps)\n", name, rate);
+        ME_LOG("[ME] %s training complete (%d bps)\n", name, rate);
         trace_phase("%s training complete: rate=%d mod=%s", name, rate, me_mod_to_str(mod));
         di_on_connected(rate);
         return;
@@ -989,7 +1006,7 @@ static bool v90_dil_capture_try_parse_at(int start)
     g_v90_pending_dil_valid = true;
     if (g_v90)
         v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
-    fprintf(stderr, "[ME] V.90: parsed Ja DIL descriptor (N=%u LSP=%u LTP=%u)\n",
+    ME_LOG("[ME] V.90: parsed Ja DIL descriptor (N=%u LSP=%u LTP=%u)\n",
             desc.n, desc.lsp, desc.ltp);
     trace_phase("V90 parsed Ja DIL descriptor: N=%u LSP=%u LTP=%u",
                 desc.n, desc.lsp, desc.ltp);
@@ -1030,7 +1047,7 @@ static void v34_put_aux_bit_cb(void *user_data, int bit)
     g_v90_dil_capture_bits++;
 
     if (g_v90_dil_capture_bits <= 16 || (g_v90_dil_capture_bits % 256) == 0) {
-        fprintf(stderr, "[ME] V.90 Ja capture: buffered %d bits%s\n",
+        ME_LOG("[ME] V.90 Ja capture: buffered %d bits%s\n",
                 g_v90_dil_capture_bits,
                 g_v90_pending_dil_valid ? " (descriptor already parsed)" : "");
     }
@@ -1061,21 +1078,21 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     if (g_v90 && (v90_training_complete(g_v90) || v90_using_internal_v34_tx(g_v90))) {
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
-                        fprintf(stderr, "[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
+                        ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
                                 rate, V90_RATE_BPS);
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
                         /* Re-init V.90 encoder for clean data mode start */
                         v90_enc_init(&g_v90_enc);
                         di_on_connected(V90_RATE_BPS);
                     } else if (!g_v90_completion_deferred_logged) {
-                        fprintf(stderr, "[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
+                        ME_LOG("[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
                         trace_phase("V90 deferred DATA entry: V34 success before V90 startup complete");
                         g_v90_completion_deferred_logged = true;
                     }
                 } else {
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
-                    fprintf(stderr, "[ME] V.34 training complete (%d bps)\n", rate);
+                    ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
                     di_on_connected(rate);
                 }
@@ -1084,7 +1101,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
         }
         if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
             if (g_state == ME_TRAINING && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {
-                fprintf(stderr, "[ME] V.34 training failed (%s), falling back to V.22bis\n",
+                ME_LOG("[ME] V.34 training failed (%s), falling back to V.22bis\n",
                         signal_status_to_str(bit));
                 trace_phase("V34 training failed (%s) -> fallback V22BIS",
                             signal_status_to_str(bit));
@@ -1097,7 +1114,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 return;
             }
         }
-        fprintf(stderr, "[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
+        ME_LOG("[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
         return;
     }
     /* Normal data bit — accumulate into bytes, write to upstream ring */
@@ -1135,7 +1152,7 @@ static void start_v22bis_training(void)
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)
-        fprintf(stderr, "[ME] v22bis_init failed\n");
+        ME_LOG("[ME] v22bis_init failed\n");
 }
 
 /* Start V.34 training — used when V.8 negotiates V.34 */
@@ -1178,7 +1195,7 @@ static void start_v34_training(void)
                      v34_get_bit_cb, NULL,
                      v34_put_bit_cb, NULL);
     if (!g_v34) {
-        fprintf(stderr, "[ME] v34_init failed, falling back to V.22bis\n");
+        ME_LOG("[ME] v34_init failed, falling back to V.22bis\n");
         start_v22bis_training();
         return;
     }
@@ -1203,7 +1220,7 @@ static void start_v34_training(void)
         g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
         if (g_echo_can) {
             modem_echo_can_adaption_mode(g_echo_can, 1);
-            fprintf(stderr, "[ME] Echo canceller enabled for V.90 (%d taps = %dms)\n",
+            ME_LOG("[ME] Echo canceller enabled for V.90 (%d taps = %dms)\n",
                     ECHO_CAN_TAPS, ECHO_CAN_TAPS * 1000 / 8000);
         }
         g_tx_buf_wr = 0;
@@ -1285,18 +1302,18 @@ static void start_v34_training(void)
             /* Carriers too close — notch would attenuate RX signal.
                SpanDSP V.34 has its own internal echo management. */
             g_notch.active = false;
-            fprintf(stderr, "[ME] Notch filter DISABLED: TX=%.1f Hz, RX=%.1f Hz, "
+            ME_LOG("[ME] Notch filter DISABLED: TX=%.1f Hz, RX=%.1f Hz, "
                     "separation=%.1f Hz too narrow for %d baud\n",
                     our_tx_carrier, rx_carrier, separation, g_v34_start_baud);
         } else {
             notch_filter_init(&g_notch, our_tx_carrier, 30.0f, 8000.0f);
-            fprintf(stderr, "[ME] Notch filter at %.1f Hz (Q=30) for %d baud, "
+            ME_LOG("[ME] Notch filter at %.1f Hz (Q=30) for %d baud, "
                     "RX carrier=%.1f Hz (sep=%.1f Hz)\n",
                     our_tx_carrier, g_v34_start_baud, rx_carrier, separation);
         }
     }
 
-    fprintf(stderr, "[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
+    ME_LOG("[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
             g_calling_party ? "caller" : "answerer", g_v34_start_baud, bps);
 }
 
@@ -1306,7 +1323,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     char mod_str[96];
     v8_mod_mask_to_str(result->jm_cm.modulations, mod_str, sizeof(mod_str));
 
-    fprintf(stderr, "[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
+    ME_LOG("[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
             result->status, result->jm_cm.modulations, result->jm_cm.pstn_access);
     trace_phase("V8 result: status=%s (%d) mods=%s (0x%X) protocol=0x%X pstn=0x%X pcm=0x%X",
                 v8_status_to_str(result->status), result->status,
@@ -1317,7 +1334,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
     if (result->status == V8_STATUS_IN_PROGRESS ||
         result->status == V8_STATUS_V8_OFFERED) {
-        fprintf(stderr, "[ME] V.8 in progress (status=%d)\n", result->status);
+        ME_LOG("[ME] V.8 in progress (status=%d)\n", result->status);
         return;
     }
 
@@ -1326,7 +1343,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
          * Remote end doesn't support V.8 (e.g. plain V.22bis modem or
          * ATA auto-answer with no V.8).  Fall back to V.22bis directly.
          */
-        fprintf(stderr, "[ME] Non-V.8 call detected, falling back to V.22bis\n");
+        ME_LOG("[ME] Non-V.8 call detected, falling back to V.22bis\n");
         pthread_mutex_lock(&g_state_mtx);
         start_v22bis_training();
         pthread_mutex_unlock(&g_state_mtx);
@@ -1337,12 +1354,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         pthread_mutex_lock(&g_state_mtx);
         if (me_retry_v8_with_alternate_tone_locked("result failure", result->status)) {
             pthread_mutex_unlock(&g_state_mtx);
-            fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+            ME_LOG("[ME] V.8 answer tone in use: %s\n",
                     modem_connect_tone_to_str(g_v8_active_answer_tone));
             return;
         }
         pthread_mutex_unlock(&g_state_mtx);
-        fprintf(stderr, "[ME] V.8 failed (status=%d), hanging up\n", result->status);
+        ME_LOG("[ME] V.8 failed (status=%d), hanging up\n", result->status);
         me_hangup();
         return;
     }
@@ -1357,7 +1374,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
          * upstream = V.34 modulation.  Training uses V.34 Phases 2-4; after
          * training completes, TX switches from V.34 to direct PCM injection.
          */
-        fprintf(stderr, "[ME] V.8 negotiated V.90 (PCM downstream + V.34 upstream)\n");
+        ME_LOG("[ME] V.8 negotiated V.90 (PCM downstream + V.34 upstream)\n");
         trace_phase("V8 selected V90");
         g_mod = ME_MOD_V90;
         /* V.90 §6.2: analog modem only supports 3200 baud (mandatory) */
@@ -1380,20 +1397,20 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
            disabled the notch — but we need it for Phase 2 CC echo removal. */
         notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
-        fprintf(stderr, "[ME] V.90 notch filter at 1200 Hz (our CC TX), RX CC at 2400 Hz\n");
+        ME_LOG("[ME] V.90 notch filter at 1200 Hz (our CC TX), RX CC at 2400 Hz\n");
 
     } else if (result->jm_cm.modulations & V8_MOD_V34) {
-        fprintf(stderr, "[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
+        ME_LOG("[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");
         trace_phase("V8 selected V34");
         start_v34_training();
 
     } else if (result->jm_cm.modulations & V8_MOD_V22) {
-        fprintf(stderr, "[ME] V.8 negotiated V.22bis fallback\n");
+        ME_LOG("[ME] V.8 negotiated V.22bis fallback\n");
         trace_phase("V8 selected V22BIS");
         start_v22bis_training();
 
     } else {
-        fprintf(stderr, "[ME] V.8 no usable modulation (0x%X), hanging up\n",
+        ME_LOG("[ME] V.8 no usable modulation (0x%X), hanging up\n",
                 result->jm_cm.modulations);
         trace_phase("V8 selected no usable modulation -> hangup");
         pthread_mutex_unlock(&g_state_mtx);
@@ -1420,11 +1437,11 @@ void me_init(void)
         g_invert_v34_role = (inv && (inv[0] == '1' || inv[0] == 'y' || inv[0] == 'Y' ||
                                      inv[0] == 't' || inv[0] == 'T'));
         if (g_invert_v34_role)
-            fprintf(stderr, "[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
+            ME_LOG("[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
     }
     g_v8_answer_tone = parse_v8_answer_tone_env("ME_V8_ANSWER_TONE",
                                                 MODEM_CONNECT_TONES_ANSAM);
-    fprintf(stderr, "[ME] V.8 answer tone: %s\n",
+    ME_LOG("[ME] V.8 answer tone: %s\n",
             modem_connect_tone_to_str(g_v8_answer_tone));
     {
         int env_baud = parse_env_int("ME_V34_BAUD", g_v34_start_baud);
@@ -1434,7 +1451,7 @@ void me_init(void)
         if (env_bps > 0 && valid_v34_bps(env_bps))
             g_v34_start_bps = env_bps;
         int effective_bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
-        fprintf(stderr, "[ME] V.34 start profile: %d baud / %d bps\n",
+        ME_LOG("[ME] V.34 start profile: %d baud / %d bps\n",
                 g_v34_start_baud, effective_bps);
     }
     g_state = ME_IDLE;
@@ -1505,17 +1522,17 @@ void me_on_sip_connected(void)
         g_v8 = NULL;
     }
     if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
-        fprintf(stderr, "[ME] v8_init failed\n");
+        ME_LOG("[ME] v8_init failed\n");
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
     trace_phase("enter V8: advertised mods=%s", g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
-    fprintf(stderr, "[ME] SIP connected as %s, starting V.8 handshake\n",
+    ME_LOG("[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");
     if (!g_calling_party) {
-        fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+        ME_LOG("[ME] V.8 answer tone in use: %s\n",
                 modem_connect_tone_to_str(g_v8_answer_tone));
     }
 }
@@ -1557,13 +1574,13 @@ void me_rx_audio(const int16_t *amp, int len)
     if (g_phase_start_ms > 0) {
         uint64_t elapsed = trace_now_ms() - g_phase_start_ms;
         if (state == ME_V8 && elapsed > V8_TIMEOUT_MS) {
-            fprintf(stderr, "[ME] V.8 negotiation timed out after %llu ms\n",
+            ME_LOG("[ME] V.8 negotiation timed out after %llu ms\n",
                     (unsigned long long)elapsed);
             trace_phase("V8 timeout after %llums", (unsigned long long)elapsed);
             pthread_mutex_lock(&g_state_mtx);
             if (me_retry_v8_with_alternate_tone_locked("timeout", V8_STATUS_FAILED)) {
                 pthread_mutex_unlock(&g_state_mtx);
-                fprintf(stderr, "[ME] V.8 answer tone in use: %s\n",
+                ME_LOG("[ME] V.8 answer tone in use: %s\n",
                         modem_connect_tone_to_str(g_v8_active_answer_tone));
                 return;
             }
@@ -1573,14 +1590,14 @@ void me_rx_audio(const int16_t *amp, int len)
             return;
         }
         if (state == ME_TRAINING && elapsed > TRAINING_TIMEOUT_MS) {
-            fprintf(stderr, "[ME] Training timed out after %llu ms (mod=%s)\n",
+            ME_LOG("[ME] Training timed out after %llu ms (mod=%s)\n",
                     (unsigned long long)elapsed, me_mod_to_str(g_mod));
             trace_phase("TRAINING timeout after %llums mod=%s",
                         (unsigned long long)elapsed, me_mod_to_str(g_mod));
             g_phase_start_ms = 0;
             if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
                 /* V.34/V.90 training failed — fall back to V.22bis */
-                fprintf(stderr, "[ME] %s training timeout, falling back to V.22bis\n",
+                ME_LOG("[ME] %s training timeout, falling back to V.22bis\n",
                         g_mod == ME_MOD_V90 ? "V.90" : "V.34");
                 trace_phase("%s timeout -> fallback V22BIS",
                             g_mod == ME_MOD_V90 ? "V90" : "V34");
@@ -1604,7 +1621,7 @@ void me_rx_audio(const int16_t *amp, int len)
         g_v8_rx_count += len;
         if (g_v8_rx_count >= 8000) {
             double rms = sqrt((double)g_v8_rx_energy / g_v8_rx_count);
-            fprintf(stderr, "[ME] V.8 rx: RMS=%.1f (%d samples) — %s\n",
+            ME_LOG("[ME] V.8 rx: RMS=%.1f (%d samples) — %s\n",
                     rms, g_v8_rx_count,
                     rms < 10.0 ? "WARNING: near-silence, check conference bridge" : "audio OK");
             g_v8_rx_energy = 0;
@@ -1626,7 +1643,7 @@ void me_rx_audio(const int16_t *amp, int len)
                 double rms = sqrt((double)g_training_rx_energy / g_training_rx_count);
                 /* Keep this diagnostic for abnormal levels only. */
                 if (rms < 20.0 || rms > 2000.0) {
-                    fprintf(stderr, "[ME] Training rx: RMS=%.1f (%d samples)\n",
+                    ME_LOG("[ME] Training rx: RMS=%.1f (%d samples)\n",
                             rms, g_training_rx_count);
                 }
                 g_training_rx_energy = 0;
@@ -1746,7 +1763,7 @@ void me_rx_audio(const int16_t *amp, int len)
                             }
                             pre_rms = sqrt(pre_rms / len);
                             post_rms = sqrt(post_rms / len);
-                            fprintf(stderr, "[ME] Echo cancel: samples=%d pre_rms=%.0f post_rms=%.0f (%.1f dB)\n",
+                            ME_LOG("[ME] Echo cancel: samples=%d pre_rms=%.0f post_rms=%.0f (%.1f dB)\n",
                                     ec_samples, pre_rms, post_rms,
                                     (pre_rms > 1.0 && post_rms > 1.0) ? 20.0*log10(pre_rms/post_rms) : 0.0);
                         }
@@ -1806,7 +1823,7 @@ void me_rx_audio(const int16_t *amp, int len)
                     if (!rx_dump) {
                         rx_dump = fopen("/tmp/v34_rx.raw", "wb");
                         if (rx_dump)
-                            fprintf(stderr, "[ME] RX PCM dump: /tmp/v34_rx.raw (s16le 8000Hz mono)\n");
+                            ME_LOG("[ME] RX PCM dump: /tmp/v34_rx.raw (s16le 8000Hz mono)\n");
                     }
                     if (rx_dump) {
                         fwrite(filtered, sizeof(int16_t), len, rx_dump);
@@ -1855,7 +1872,7 @@ void me_tx_audio(int16_t *amp, int len)
         g_v8_tx_count += len;
         if (g_v8_tx_count >= 8000) {
             double rms = sqrt((double)g_v8_tx_energy / g_v8_tx_count);
-            fprintf(stderr, "[ME] V.8 tx: RMS=%.1f (%d samples)\n",
+            ME_LOG("[ME] V.8 tx: RMS=%.1f (%d samples)\n",
                     rms, g_v8_tx_count);
             g_v8_tx_energy = 0;
             g_v8_tx_count  = 0;
@@ -1881,7 +1898,7 @@ void me_tx_audio(int16_t *amp, int len)
                     int tx_stage = v34_get_tx_stage(g_v34);
                     int u_info = v34_get_v90_u_info(g_v34);
                     if (tx_stage >= V34_TX_STAGE_FIRST_S && u_info > 0) {
-                        fprintf(stderr, "[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
+                        ME_LOG("[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
                                 tx_stage, u_info);
                         /* Create V.90 state wrapping existing V.34 */
                         if (!g_v90) {
@@ -1900,7 +1917,7 @@ void me_tx_audio(int16_t *amp, int len)
                            Send silence (idle PCM) while waiting. */
                         static bool logged_wait = false;
                         if (!logged_wait) {
-                            fprintf(stderr, "[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
+                            ME_LOG("[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
                             logged_wait = true;
                         }
                     }
@@ -1943,7 +1960,7 @@ void me_tx_audio(int16_t *amp, int len)
                 if (!tx_dump) {
                     tx_dump = fopen("/tmp/v34_tx.raw", "wb");
                     if (tx_dump)
-                        fprintf(stderr, "[ME] TX PCM dump: /tmp/v34_tx.raw (s16le 8000Hz mono)\n");
+                        ME_LOG("[ME] TX PCM dump: /tmp/v34_tx.raw (s16le 8000Hz mono)\n");
                 }
                 if (tx_dump)
                     fwrite(amp, sizeof(int16_t), len, tx_dump);
@@ -1952,7 +1969,7 @@ void me_tx_audio(int16_t *amp, int len)
                 tx_count += len;
                 if (tx_count >= 8000) {
                     double rms = sqrt((double)tx_energy / tx_count);
-                    fprintf(stderr, "[ME] Training TX: RMS=%.1f (%d samples)\n",
+                    ME_LOG("[ME] Training TX: RMS=%.1f (%d samples)\n",
                             rms, tx_count);
                     if (tx_dump) fflush(tx_dump);
                     tx_energy = 0;
@@ -2061,7 +2078,7 @@ void me_set_law(me_law_t law)
     pthread_mutex_lock(&g_state_mtx);
     g_law = law;
     pthread_mutex_unlock(&g_state_mtx);
-    fprintf(stderr, "[ME] PCM law set to %s\n",
+    ME_LOG("[ME] PCM law set to %s\n",
             law == ME_LAW_ALAW ? "A-law (PCMA)" : "u-law (PCMU)");
 }
 

@@ -13182,6 +13182,10 @@ static void run_decode_suite(const char *label,
 
 int main(int argc, char **argv)
 {
+    /* Suppress all [p12] debug output by default; --verbose re-enables */
+    p12_set_debug(0);
+    p12_set_dump_v8(0);
+
     const char *input_path = NULL;
     const char *visualize_html_path = NULL;
     v91_law_t law = V91_LAW_ULAW;
@@ -13269,6 +13273,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--all") == 0) {
             do_all = true;
             explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            p12_set_debug(1);
+            p12_set_dump_v8(1);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options] <file.wav|file.g711>\n\n"
                    "Options:\n"
@@ -13289,6 +13296,7 @@ int main(int argc, char **argv)
                    "  --call-log         Print a best-effort chronological call log\n"
                    "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
                    "  --all              Enable all decoders (default)\n"
+                   "  --verbose / -v     Enable [p12] debug output to stderr\n"
                    "\nWAV files should be 8000 Hz, 16-bit (mono or stereo).\n"
                    "G.711 files are raw codeword bytes at 8000 Hz.\n",
                    argv[0]);

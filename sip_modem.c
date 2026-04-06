@@ -436,10 +436,12 @@ int main(int argc, char *argv[])
             pty_link = argv[++i];
         else if (!strcmp(argv[i], "--local-port") && i+1 < argc)
             local_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
+            me_set_verbose(1);
         else if (!strcmp(argv[i], "--help")) {
             fprintf(stderr,
                 "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-                "          [--pty-link path] [--local-port port]\n", argv[0]);
+                "          [--pty-link path] [--local-port port] [--verbose]\n", argv[0]);
             return 0;
         }
     }
