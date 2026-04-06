@@ -50,6 +50,8 @@ typedef struct {
     int       exact_matches;      /* symbols matching the reference table exactly */
     int       robbed_bit_count;   /* symbols matching only with LSB toggled */
     int       mismatches;         /* symbols not matching even with LSB tolerance */
+    int       bit_matches;        /* loose bit-match count vs. expected codewords */
+    int       total_bits;         /* total bits compared over duration_symbols */
     int       phase_reversals;    /* number of 3612-symbol reversal blocks detected */
 
     int       score;              /* composite match quality (higher = better) */

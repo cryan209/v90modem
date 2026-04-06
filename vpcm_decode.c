@@ -11073,8 +11073,12 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
     {
         v92_anspcm_table_hit_t ah;
         if (v92_anspcm_table_decode(codewords, total, law, 0, 0, &ah)) {
+            double bit_pct = (ah.total_bits > 0)
+                             ? (100.0 * (double) ah.bit_matches / (double) ah.total_bits)
+                             : 0.0;
             printf("  [%7.1f ms] V.92 ANSpcm (table): law=%s%s level=%s"
                    " phase=%d duration=%d sym (%.1f ms)"
+                   " match=%.1f%% (%d/%d bits)"
                    " exact=%d robbed=%d mismatch=%d reversals=%d score=%d\n",
                    sample_to_ms(ah.start_sample, 8000),
                    ah.law == V91_LAW_ULAW ? "µ-law" : "A-law",
@@ -11083,6 +11087,7 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                    ah.period_phase,
                    ah.duration_symbols,
                    sample_to_ms(ah.duration_symbols, 8000),
+                   bit_pct, ah.bit_matches, ah.total_bits,
                    ah.exact_matches, ah.robbed_bit_count, ah.mismatches,
                    ah.phase_reversals, ah.score);
         }
@@ -11776,12 +11781,16 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
         v92_anspcm_table_hit_t ah;
         if (v92_anspcm_table_decode(codewords, total, law, 0, 0, &ah)) {
             char detail[128];
+            double bit_pct = (ah.total_bits > 0)
+                             ? (100.0 * (double) ah.bit_matches / (double) ah.total_bits)
+                             : 0.0;
             snprintf(detail, sizeof(detail),
-                     "law=%s%s level=%s phase=%d exact=%d robbed=%d mismatch=%d score=%d",
+                     "law=%s%s level=%s phase=%d match=%.1f%%(%d/%db) exact=%d robbed=%d mismatch=%d score=%d",
                      ah.law == V91_LAW_ULAW ? "ulaw" : "alaw",
                      ah.wrong_law ? "(wrong)" : "",
                      v92_anspcm_table_level_str(ah.level),
                      ah.period_phase,
+                     bit_pct, ah.bit_matches, ah.total_bits,
                      ah.exact_matches, ah.robbed_bit_count, ah.mismatches,
                      ah.score);
             call_log_append(log, ah.start_sample, ah.duration_symbols,

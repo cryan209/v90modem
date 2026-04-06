@@ -83,12 +83,13 @@ static void anspcm_build_ref(void)
                 int    scl = anspcm_scl[lv][law];
                 double x   = (double)scl * M_SQRT2 * cos(angle);
                 int    lin = (int)floor(x + 0.5);
+                int    pcm = lin << (law == 0 ? 2 : 3);
 
                 /* Clamp to 16-bit signed range */
-                if (lin >  32767) lin =  32767;
-                if (lin < -32768) lin = -32768;
+                if (pcm >  32767) pcm =  32767;
+                if (pcm < -32768) pcm = -32768;
 
-                uint8_t cw = v91_linear_to_codeword((v91_law_t)law, (int16_t)lin);
+                uint8_t cw = v91_linear_to_codeword((v91_law_t)law, (int16_t)pcm);
                 ref_table[law][lv][k] = cw;
 
                 /* Insert into inverted index for exact match */
@@ -179,13 +180,16 @@ static int full_score(const uint8_t *codewords, int total,
                       int reversal_offset,
                       int eval_len,
                       int *exact_out, int *robbed_out, int *mismatch_out,
-                      int *duration_out, int *reversals_out)
+                      int *duration_out, int *reversals_out,
+                      int *bit_matches_out)
 {
     const uint8_t *ref = ref_table[law][level];
     int score    = 0;
     int exact    = 0;
     int robbed   = 0;
     int mismatch = 0;
+    int bit_matches = 0;
+    int bit_matches_through_last_good = 0;
     int rev_count = 0;
     int last_good = -1;
 
@@ -202,6 +206,7 @@ static int full_score(const uint8_t *codewords, int total,
         uint8_t expected = ref[k];
         if (reversal_block & 1)
             expected ^= 0x80;
+        bit_matches += 8 - __builtin_popcount((unsigned int)(actual ^ expected));
 
         if (reversal_block != prev_reversal_block) {
             if (prev_reversal_block >= 0)
@@ -215,10 +220,12 @@ static int full_score(const uint8_t *codewords, int total,
             sym_score = SCORE_EXACT;
             exact++;
             last_good = i;
+            bit_matches_through_last_good = bit_matches;
         } else if ((actual ^ 1) == expected || actual == (expected ^ 1)) {
             sym_score = SCORE_ROBBED;
             robbed++;
             last_good = i;
+            bit_matches_through_last_good = bit_matches;
         } else {
             sym_score = SCORE_MISMATCH;
             mismatch++;
@@ -244,6 +251,10 @@ static int full_score(const uint8_t *codewords, int total,
     if (mismatch_out)  *mismatch_out  = mismatch;
     if (duration_out)  *duration_out  = (last_good >= 0) ? last_good + 1 : 0;
     if (reversals_out) *reversals_out = rev_count;
+    if (bit_matches_out) {
+        int duration = (last_good >= 0) ? last_good + 1 : 0;
+        *bit_matches_out = (duration > 0) ? bit_matches_through_last_good : 0;
+    }
     return score;
 }
 
@@ -269,7 +280,7 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
         search_end = total;
 
     int min_symbols = V92_ANSPCM_PERIOD * 2;   /* need 2+ full periods */
-    int eval_len    = V92_ANSPCM_PERIOD * 6;   /* score up to 6 periods */
+    int eval_len    = V92_ANSPCM_PERIOD * 30;  /* score up to ~1.13 s of ANSpcm */
 
     if (search_end - search_start < min_symbols)
         return false;
@@ -325,11 +336,11 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
                     continue;
 
                 /* Full evaluation */
-                int exact, robbed, mismatch, duration, reversals;
+                int exact, robbed, mismatch, duration, reversals, bit_matches;
                 int sc = full_score(codewords, total, start, pp,
                                     law, level, rev_off, eval_len,
                                     &exact, &robbed, &mismatch,
-                                    &duration, &reversals);
+                                    &duration, &reversals, &bit_matches);
 
                 if (duration < min_symbols)
                     continue;
@@ -359,6 +370,8 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
                     best.exact_matches     = exact;
                     best.robbed_bit_count  = robbed;
                     best.mismatches        = mismatch;
+                    best.bit_matches       = bit_matches;
+                    best.total_bits        = duration * 8;
                     best.phase_reversals   = reversals;
                     best.score             = sc;
                 }
