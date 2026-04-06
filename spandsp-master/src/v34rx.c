@@ -3251,6 +3251,15 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         s->crc = crc_itu16_bits(bit, 1, s->crc);
         if (s->bit_count++ == s->target_bits)
         {
+            /* Flush any remaining bits in the last partial byte into info_buf.
+               The byte-write at line 3248 only fires when bit_count is a multiple
+               of 8, so the tail bits (target_bits % 8 != 0) are lost. Write the
+               partial byte now so info_buf and CRC are consistent. */
+            {
+                int tail = s->target_bits & 0x07;
+                if (tail != 0)
+                    s->info_buf[(s->target_bits >> 3)] = bit_reverse8(s->bitstream & 0xFF);
+            }
             span_log(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x (target_bits=%d)\n", s->crc, s->target_bits);
             {
                 int nbytes = (s->target_bits + 7) / 8;
@@ -3433,6 +3442,54 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     s->received_event = V34_EVENT_INFO0_OK;
                     s->bit_count = 0;
                     return;
+                }
+                /*endif*/
+                /* INFO0 single-bit-error recovery: if the CRC failed with only
+                   1 bit wrong, try flipping each bit and recomputing.  This is
+                   cheap (max 46 iterations for INFO0d) and dramatically improves
+                   INFO0 decode success on recordings with minor DPSK bit errors. */
+                if (s->stage == V34_RX_STAGE_INFO0
+                    && !v90_info1a_search
+                    && !s->info0_received)
+                {
+                    int nb = s->target_bits;
+                    int nbytes_r = (nb + 7) / 8;
+                    int recovered_info0 = 0;
+
+                    for (int flip = 0;  flip < nb;  flip++)
+                    {
+                        uint16_t test_crc = 0xFFFF;
+                        int byte_idx = flip >> 3;
+                        int bit_idx = flip & 0x07;
+                        uint8_t saved = s->info_buf[byte_idx];
+
+                        s->info_buf[byte_idx] ^= (1 << bit_idx);
+                        for (int bi = 0;  bi < nbytes_r;  bi++)
+                        {
+                            int bits_left = nb - bi * 8;
+                            if (bits_left > 8)
+                                bits_left = 8;
+                            test_crc = crc_itu16_bits(s->info_buf[bi], bits_left, test_crc);
+                        }
+                        if (test_crc == 0)
+                        {
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - INFO0 single-bit recovery: flipped bit %d, CRC now 0\n",
+                                     flip);
+                            process_rx_info0(s, s->info_buf);
+                            if (!s->info0_received)
+                                s->received_event = V34_EVENT_INFO0_OK;
+                            s->info0_received = true;
+                            recovered_info0 = 1;
+                            break;
+                        }
+                        s->info_buf[byte_idx] = saved;
+                    }
+                    if (recovered_info0)
+                    {
+                        s->bit_count = 0;
+                        return;
+                    }
                 }
                 /*endif*/
                 switch (s->stage)
