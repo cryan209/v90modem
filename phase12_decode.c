@@ -4485,6 +4485,45 @@ static void detect_phase1_v8(const int16_t *samples,
                                      sample_rate,
                                      result);
 
+    /* Fallback TONEq detection: if the short-Phase-1 chain (QTS→ANSpcm→TONEq)
+     * did not fire but an answer tone is present, search for the 980 Hz TONEq
+     * signal in a window centred on the answer-tone end.  V.92 digital modems
+     * append TONEq immediately after ANSpcm / at the end of ANS during a first
+     * call to signal V.92 capability for the next quick-connect attempt. */
+    if (!result->call_init.v92_toneq_seen && result->answer_tone.detected
+        && result->answer_tone.duration_samples > 0) {
+        static const double toneq_competitors[] = { 1100.0, 1180.0, 1300.0, 2100.0 };
+        p12_tone_hit_t toneq_hit;
+        int ans_end = result->answer_tone.start_sample
+                    + result->answer_tone.duration_samples;
+        int search_start = ans_end - (400 * sample_rate) / 1000;
+        int search_end   = ans_end + (600 * sample_rate) / 1000;
+        if (search_start < 0)
+            search_start = 0;
+        if (search_end > total_samples)
+            search_end = total_samples;
+        if (p12_detect_tone_in_window(samples,
+                                      total_samples,
+                                      sample_rate,
+                                      search_start,
+                                      search_end,
+                                      (double) P12_V92_TONEQ_FREQ_HZ,
+                                      toneq_competitors,
+                                      4,
+                                      P12_V92_TONEQ_MIN_MS,
+                                      &toneq_hit)) {
+            result->call_init.v92_toneq_seen = true;
+            result->call_init.v92_toneq_sample = toneq_hit.start_sample;
+            result->call_init.v92_toneq_duration_samples = toneq_hit.duration_samples;
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 TONEq (ans-end fallback) at %.1fms dur=%.1fms\n",
+                        (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
+                        (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
+            }
+        }
+    }
+
     /* Discard a CM decode whose sample_offset falls within the ANS tone
      * window.  p12_targeted_v21_decode_cm_jm extends its search backward by
      * ~200ms + pre_pad, so a false decode from ANS phase-reversal energy can
@@ -6874,6 +6913,20 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                         "V.92",
                         result->call_init.v92_qca2_name,
                         qca2_detail);
+    }
+
+    if (result->call_init.v92_toneq_seen) {
+        char toneq_detail[64];
+        snprintf(toneq_detail, sizeof(toneq_detail),
+                 "duration=%.0fms",
+                 (double) result->call_init.v92_toneq_duration_samples * 1000.0
+                 / (double) sample_rate);
+        call_log_append(log,
+                        result->call_init.v92_toneq_sample,
+                        result->call_init.v92_toneq_duration_samples,
+                        "V.92",
+                        "TONEq (980 Hz)",
+                        toneq_detail);
     }
 
     /* Phase 1 V.8 messages */
