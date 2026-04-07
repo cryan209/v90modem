@@ -100,6 +100,82 @@ enum vpcm_v90_v34_events_e {
     VPCM_V90_V34_EVENT_TRAINING_FAILED = 16
 };
 
+static void vpcm_v90_update_v92_focus_report(vpcm_v90_startup_contract_report_t *report,
+                                             int caller_tx_stage,
+                                             bool training_failed)
+{
+    v92_phase3_observation_t phase3_obs;
+    v92_phase4_observation_t phase4_obs;
+
+    if (!report)
+        return;
+
+    memset(&phase3_obs, 0, sizeof(phase3_obs));
+    memset(&phase4_obs, 0, sizeof(phase4_obs));
+
+    phase3_obs.info0_seen = true;
+    phase3_obs.info0_is_d = true;
+    phase3_obs.short_phase2_requested = true;
+    phase3_obs.v92_capable = true;
+    phase3_obs.training_failed = training_failed;
+    phase3_obs.phase3_seen = report->phase3_native_analogue_started
+                              || caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S;
+    phase3_obs.phase4_seen = report->phase4_native_analogue_started
+                              || caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_S;
+    phase3_obs.phase3_sample = phase3_obs.phase3_seen ? 0 : -1;
+    phase3_obs.phase4_sample = phase3_obs.phase4_seen ? 0 : -1;
+    phase3_obs.tx_first_s_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S) ? 0 : -1;
+    phase3_obs.tx_md_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_MD) ? 0 : -1;
+    phase3_obs.tx_second_s_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_SECOND_S) ? 0 : -1;
+    phase3_obs.tx_trn_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_TRN) ? 0 : -1;
+    phase3_obs.tx_ja_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_J) ? 0 : -1;
+    phase3_obs.tx_jdashed_sample = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_J_DASHED) ? 0 : -1;
+    phase3_obs.ja_dil_seen = report->phase3_digital_dil_valid;
+    phase3_obs.ja_dil_sample = (phase3_obs.ja_dil_seen && phase3_obs.tx_ja_sample >= 0) ? 0 : -1;
+    phase3_obs.ja_dil_bits = report->phase3_digital_dil_valid
+                             ? v90_dil_descriptor_bit_len(&report->phase3_digital_dil)
+                             : 0;
+    phase3_obs.ja_dil_n = report->phase3_digital_dil_valid ? report->phase3_digital_dil.n : 0;
+    phase3_obs.ja_dil_lsp = report->phase3_digital_dil_valid ? report->phase3_digital_dil.lsp : 0;
+    phase3_obs.ja_dil_ltp = report->phase3_digital_dil_valid ? report->phase3_digital_dil.ltp : 0;
+    phase3_obs.ja_dil_unique_train_u = report->phase3_digital_dil_analysis_valid
+                                       ? report->phase3_digital_dil_analysis.unique_train_u
+                                       : 0;
+    phase3_obs.ja_dil_uchords = report->phase3_digital_dil_analysis_valid
+                                ? report->phase3_digital_dil_analysis.used_uchords
+                                : 0;
+    phase3_obs.ja_dil_impairment = report->phase3_digital_dil_analysis_valid
+                                   ? report->phase3_digital_dil_analysis.impairment_score
+                                   : 0;
+
+    report->v92_phase3_analysis_valid = v92_phase3_analyze(&phase3_obs,
+                                                            &report->v92_phase3_analysis);
+
+    phase4_obs.phase4_seen = report->phase4_native_analogue_started
+                             || caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_S;
+    phase4_obs.training_failed = training_failed;
+    phase4_obs.phase4_sample = phase4_obs.phase4_seen ? 0 : -1;
+    report->v92_phase4_analysis_valid = v92_phase4_analyze(&phase4_obs,
+                                                            &report->v92_phase4_analysis);
+
+    report->v92_focus_ru_seen = report->v92_phase3_analysis_valid
+                                ? report->v92_phase3_analysis.ru_seen
+                                : phase3_obs.phase3_seen;
+    report->v92_focus_trn1u_seen = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_TRN);
+    report->v92_focus_ja_seen = report->v92_phase3_analysis_valid
+                                ? report->v92_phase3_analysis.ja_seen
+                                : (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_J);
+    report->v92_focus_su_seen = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_S);
+    report->v92_focus_cpt_seen = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_MP);
+    report->v92_focus_e1u_seen = report->phase4_native_caller_tx_data_mode;
+    report->v92_focus_phase3_chain_complete = report->v92_focus_ru_seen
+                                              && report->v92_focus_trn1u_seen
+                                              && report->v92_focus_ja_seen
+                                              && report->v92_focus_su_seen;
+    report->v92_focus_phase4_chain_complete = report->v92_focus_cpt_seen
+                                              && report->v92_focus_e1u_seen;
+}
+
 /* Bit feeder: drives V.34 caller TX with a real upstream data buffer. */
 typedef struct {
     const uint8_t *data;
@@ -537,8 +613,8 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     uint8_t upstream_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
     int total_samples;
     int caller_tx_stage;
-    int caller_event;
-    int answerer_event;
+    int caller_event = VPCM_V90_V34_EVENT_NONE;
+    int answerer_event = VPCM_V90_V34_EVENT_NONE;
     v90_tx_phase_t tx_phase;
     bool jd_notified;
     bool dil_notified;
@@ -686,6 +762,10 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
         report->phase4_native_answerer_tx_stage  = v34_get_tx_stage(answerer);
         report->phase4_native_answerer_rx_stage  = v34_get_rx_stage(answerer);
         report->phase4_native_answerer_rx_event  = v34_get_rx_event(answerer);
+        vpcm_v90_update_v92_focus_report(report,
+                                         caller_tx_stage,
+                                         !ok || caller_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
+                                             || answerer_event == VPCM_V90_V34_EVENT_TRAINING_FAILED);
     }
 
     v90_free(digital);
@@ -952,6 +1032,9 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         report->phase4_native_answerer_tx_stage = final_answerer_tx_stage;
         report->phase4_native_answerer_rx_stage = final_answerer_rx_stage;
         report->phase4_native_answerer_rx_event = VPCM_V90_V34_EVENT_NONE;
+        vpcm_v90_update_v92_focus_report(report,
+                                         final_caller_tx_stage,
+                                         true);
     }
 
     if (!phase2_ok) {

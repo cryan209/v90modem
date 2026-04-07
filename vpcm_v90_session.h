@@ -3,6 +3,8 @@
 
 #include "v90.h"
 #include "v91.h"
+#include "v92_phase3_decode.h"
+#include "v92_phase4_decode.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -96,6 +98,18 @@ typedef struct {
     int phase4_native_answerer_tx_stage;
     int phase4_native_answerer_rx_stage;
     int phase4_native_answerer_rx_event;
+    bool v92_phase3_analysis_valid;
+    v92_phase3_result_t v92_phase3_analysis;
+    bool v92_phase4_analysis_valid;
+    v92_phase4_result_t v92_phase4_analysis;
+    bool v92_focus_ru_seen;
+    bool v92_focus_trn1u_seen;
+    bool v92_focus_ja_seen;
+    bool v92_focus_su_seen;
+    bool v92_focus_cpt_seen;
+    bool v92_focus_e1u_seen;
+    bool v92_focus_phase3_chain_complete;
+    bool v92_focus_phase4_chain_complete;
     bool digital_dil_analysis_valid;
     v91_dil_analysis_t digital_dil_analysis;
     vpcm_cp_frame_t cp_down_offer;

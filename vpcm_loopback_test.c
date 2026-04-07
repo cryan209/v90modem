@@ -3094,6 +3094,30 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
                  vpcm_v34_rx_stage_to_str(report.phase4_native_answerer_rx_stage),
                  vpcm_v34_event_to_str(report.phase4_native_answerer_rx_event),
                  report.phase4_native_answerer_tx_data_mode ? "yes" : "no");
+        vpcm_log("V.92 focus milestones: Ru=%s TRN1u=%s Ja=%s Su=%s CPt=%s E1u=%s phase3_chain=%s phase4_chain=%s",
+                 report.v92_focus_ru_seen ? "yes" : "no",
+                 report.v92_focus_trn1u_seen ? "yes" : "no",
+                 report.v92_focus_ja_seen ? "yes" : "no",
+                 report.v92_focus_su_seen ? "yes" : "no",
+                 report.v92_focus_cpt_seen ? "yes" : "no",
+                 report.v92_focus_e1u_seen ? "yes" : "no",
+                 report.v92_focus_phase3_chain_complete ? "yes" : "no",
+                 report.v92_focus_phase4_chain_complete ? "yes" : "no");
+        if (report.v92_phase3_analysis_valid) {
+            vpcm_log("V.92 phase 3 analysis: status=%s ru_source=%s ru_seen=%s ja_seen=%s phase4_started=%s ja_status=%s phase4_status=%s",
+                     report.v92_phase3_analysis.status ? report.v92_phase3_analysis.status : "unknown",
+                     v92_phase3_ru_source_id(report.v92_phase3_analysis.ru_source),
+                     report.v92_phase3_analysis.ru_seen ? "yes" : "no",
+                     report.v92_phase3_analysis.ja_seen ? "yes" : "no",
+                     report.v92_phase3_analysis.phase4_started ? "yes" : "no",
+                     report.v92_phase3_analysis.ja_status ? report.v92_phase3_analysis.ja_status : "unknown",
+                     report.v92_phase3_analysis.phase4_status ? report.v92_phase3_analysis.phase4_status : "unknown");
+        }
+        if (report.v92_phase4_analysis_valid) {
+            vpcm_log("V.92 phase 4 analysis: started=%s status=%s",
+                     report.v92_phase4_analysis.started ? "yes" : "no",
+                     report.v92_phase4_analysis.status ? report.v92_phase4_analysis.status : "unknown");
+        }
         if (report.phase3_digital_dil_analysis_valid) {
             vpcm_log("Native V.90 DIL analysis: N=%u LSP=%u LTP=%u unique=%u uchords=%u refs=%u h!=1=%u default125x12=%s echo_limited=%s",
                      report.phase3_digital_dil_analysis.n,
