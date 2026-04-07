@@ -1481,6 +1481,11 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                              const decode_v34_result_t *answerer,
                                              const decode_v34_result_t *caller);
 static int codeword_to_ucode(v91_law_t law, uint8_t codeword);
+static void emit_phase12_side_evidence(call_log_t *log,
+                                       const phase12_result_t *p12);
+static void emit_v34_side_candidate_evidence(call_log_t *log,
+                                             const char *label,
+                                             const decode_v34_result_t *res);
 
 static decode_v8_result_t g_v8_result;
 
@@ -8749,6 +8754,78 @@ static p3_flow_standard_t p3_detect_flow_standard(const decode_v34_result_t *pri
     return P3_FLOW_STANDARD_UNKNOWN;
 }
 
+static void emit_phase12_side_evidence(call_log_t *log,
+                                       const phase12_result_t *p12)
+{
+    char detail[1024];
+    int sample;
+
+    if (!log || !p12)
+        return;
+
+    sample = first_non_negative(p12->info0.detected ? p12->info0.sample_offset : -1,
+                                p12->info1.detected ? p12->info1.sample_offset : -1);
+    if (sample < 0)
+        sample = first_non_negative(p12->phase2_start_sample,
+                                    p12->answer_tone.detected ? p12->answer_tone.start_sample : -1);
+    if (sample < 0)
+        sample = 0;
+
+    snprintf(detail, sizeof(detail),
+             "source=phase12 role_detected=%u is_caller=%u role_confident=%u pcm=%u v90=%u v92=%u short_p2=%u digital_side=%u info0=%u info0d=%u info1=%u info1d=%u inferred_u_info=%d",
+             p12->role_detected ? 1U : 0U,
+             p12->is_caller ? 1U : 0U,
+             p12->role_confident ? 1U : 0U,
+             p12->pcm_modem_capable ? 1U : 0U,
+             p12->v90_capable ? 1U : 0U,
+             p12->v92_capable ? 1U : 0U,
+             p12->short_phase2_requested ? 1U : 0U,
+             p12->digital_side_likely ? 1U : 0U,
+             p12->info0.detected ? 1U : 0U,
+             (p12->info0.detected && p12->info0.is_info0d) ? 1U : 0U,
+             p12->info1.detected ? 1U : 0U,
+             (p12->info1.detected && p12->info1.is_info1d) ? 1U : 0U,
+             p12->inferred_u_info);
+    call_log_append(log, sample, 0, "Diagnostic", "Side evidence (Phase 1/2)", detail);
+}
+
+static void emit_v34_side_candidate_evidence(call_log_t *log,
+                                             const char *label,
+                                             const decode_v34_result_t *res)
+{
+    char detail[1024];
+    int sample;
+
+    if (!log || !label || !res)
+        return;
+
+    sample = first_non_negative(res->info0_seen ? res->info0_sample : -1,
+                                res->phase3_seen ? res->phase3_sample : -1);
+    if (sample < 0)
+        sample = 0;
+
+    snprintf(detail, sizeof(detail),
+             "source=v34_pair label=%s info0=%u info0d=%u info1=%u info1d=%u phase3=%u phase4=%u failed=%u u_info=%d u_info_src=%s tx_pp=%s tx_trn=%s tx_ja=%s rx_s=%s ru_window=%u ru_score=%d trn1u_mag_count=%d",
+             label,
+             res->info0_seen ? 1U : 0U,
+             res->info0_is_d ? 1U : 0U,
+             res->info1_seen ? 1U : 0U,
+             res->info1_is_d ? 1U : 0U,
+             res->phase3_seen ? 1U : 0U,
+             res->phase4_seen ? 1U : 0U,
+             res->training_failed ? 1U : 0U,
+             res->u_info,
+             res->u_info_from_info1a ? "info1a" : "fallback",
+             res->tx_pp_sample >= 0 ? "yes" : "no",
+             res->tx_trn_sample >= 0 ? "yes" : "no",
+             res->tx_ja_sample >= 0 ? "yes" : "no",
+             res->rx_s_event_sample >= 0 ? "yes" : "no",
+             res->ru_window_captured ? 1U : 0U,
+             res->ru_window_score,
+             res->trn1u_mag_count);
+    call_log_append(log, sample, 0, "Diagnostic", "Side evidence (V.34 candidate)", detail);
+}
+
 typedef struct {
     p3_flow_standard_t standard;
     bool j_seen;
@@ -10514,6 +10591,9 @@ static void collect_stream_call_log(call_log_t *log,
         }
     }
 
+    if (have_phase12)
+        emit_phase12_side_evidence(log, &phase12);
+
     if (!have_phase12_capability) {
         have_capability_probe = get_cached_v8_channel_probe(linear_samples,
                                                             total_samples,
@@ -10532,6 +10612,10 @@ static void collect_stream_call_log(call_log_t *log,
                                       &have_answerer,
                                       &caller,
                                       &have_caller);
+        if (have_answerer)
+            emit_v34_side_candidate_evidence(log, "answerer", &answerer);
+        if (have_caller)
+            emit_v34_side_candidate_evidence(log, "caller", &caller);
         if (have_answerer) {
             if (answerer.info0_seen)
                 earliest_phase2_sample = first_non_negative(earliest_phase2_sample, answerer.info0_sample);
