@@ -1,0 +1,4 @@
+carrier_est_hz=1800.8
+analysis_carrier_hz=1800.0
+trn1u_candidate_ms=5105.0 run_windows=31 mag=11857.8
+ja_candidate_ms=5725.0
