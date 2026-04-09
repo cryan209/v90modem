@@ -1,0 +1,52 @@
+file=tools/dumps/bits_off_7.625_norm.txt
+total_bits=747 fsync12_hits=[4, 36, 473]
+table16_full_49bit_matches=2
+
+=== Strict Table16 Full-Frame Matches (49 bits) ===
+
+frame_start=4 abs[4:52]
+  frame49=1111011100101111111110000111110011110111001011111
+  fsync12=111101110010 payload33=111111111000011111001111011100101 tail4=1111
+  table16: b26_v92_cap=1 b27_short_p2_req=1 b28_ack=1 crc_field=0xA779 crc_calc=0x7CFF crc_match=0
+
+frame_start=36 abs[36:84]
+  frame49=1111011100101111111110000111011101111000111111111
+  fsync12=111101110010 payload33=111111111000011101110111100011111 tail4=1111
+  table16: b26_v92_cap=1 b27_short_p2_req=1 b28_ack=0 crc_field=0xF8F7 crc_calc=0xF8F7 crc_match=1
+
+=== Sequence decode (Table 16 first, then INFO1a/Table 18 or 19) ===
+
+info0a sync@bit 4 slip=+0 payload_start=16 abs[16:48]
+  fsync12_abs[4:15]=111101110010
+  payload33=111111111000011111001111011100101
+  frame45=111101110010111111111000011111001111011100101
+  table16: b26_v92_cap=1 b27_short_p2_req=1 b28_ack=1 crc_field=0xA779 crc_calc=0x7CFF crc_match=0
+  -> info1a sync@bit 36 slip=+0 payload_start=48 abs[48:101] classify=unknown_or_misaligned table18_allowed_after_table16=0
+     fsync12_abs[36:47]=111101110010
+     payload54=111111111000011101110111100011111111100000000000000000
+     frame66=111101110010111111111000011101110111100011111111100000000000000000
+     fields: up_code=7 down_code=0 uinfo=119 b32_33=10 b40_49=0111111111 crc_field=0x0000 crc_calc=0xFFCF crc_match=0
+  -> info1a sync@bit 473 slip=+0 payload_start=485 abs[485:538] classify=table19_v34_upstream table18_allowed_after_table16=0
+     fsync12_abs[473:484]=111101110010
+     payload54=000000000000001110010010101100000000000010000010100001
+     frame66=111101110010000000000000001110010010101100000000000010000010100001
+     fields: up_code=5 down_code=6 uinfo=78 b32_33=00 b40_49=0000000000 crc_field=0x8504 crc_calc=0x8504 crc_match=1
+
+info0a sync@bit 36 slip=+0 payload_start=48 abs[48:80]
+  fsync12_abs[36:47]=111101110010
+  payload33=111111111000011101110111100011111
+  frame45=111101110010111111111000011101110111100011111
+  table16: b26_v92_cap=1 b27_short_p2_req=1 b28_ack=0 crc_field=0xF8F7 crc_calc=0xF8F7 crc_match=1
+  -> info1a sync@bit 473 slip=+0 payload_start=485 abs[485:538] classify=table19_v34_upstream table18_allowed_after_table16=0
+     fsync12_abs[473:484]=111101110010
+     payload54=000000000000001110010010101100000000000010000010100001
+     frame66=111101110010000000000000001110010010101100000000000010000010100001
+     fields: up_code=5 down_code=6 uinfo=78 b32_33=00 b40_49=0000000000 crc_field=0x8504 crc_calc=0x8504 crc_match=1
+
+info0a sync@bit 473 slip=+0 payload_start=485 abs[485:517]
+  fsync12_abs[473:484]=111101110010
+  payload33=000000000000001110010010101100000
+  frame45=111101110010000000000000001110010010101100000
+  table16: b26_v92_cap=1 b27_short_p2_req=1 b28_ack=1 crc_field=0x06A4 crc_calc=0x9F52 crc_match=0
+  -> no later sync hit available for INFO1a candidate in this dump
+

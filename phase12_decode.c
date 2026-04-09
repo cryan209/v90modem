@@ -5939,16 +5939,24 @@ static void detect_phase2_info(const int16_t *samples,
     p12_debug_log_bursts("phase2 CH2 windows", phase2_ch2_bursts, phase2_ch2_burst_count, sample_rate);
     p12_debug_log_bursts("phase2 CH1 windows", phase2_ch1_bursts, phase2_ch1_burst_count, sample_rate);
 
-    if (phase2_ch2_burst_count == 0 && result->info0_from_cj_hint.valid) {
+    if (phase2_ch2_burst_count == 0
+        && (handoff_info0_hint.valid || result->info0_from_cj_hint.valid)) {
+        const p12_timing_hint_t *retry_hint =
+            handoff_info0_hint.valid ? &handoff_info0_hint : &result->info0_from_cj_hint;
+
         p12_append_retry_window(phase2_ch2_bursts,
                                 &phase2_ch2_burst_count,
                                 P12_MAX_FSK_BURSTS,
-                                &result->info0_from_cj_hint);
-        result->info0_from_cj_hint.used_for_retry = (phase2_ch2_burst_count > 0);
+                                retry_hint);
+        if (retry_hint == &result->info0_from_cj_hint)
+            result->info0_from_cj_hint.used_for_retry = (phase2_ch2_burst_count > 0);
         if (phase2_ch2_burst_count > 0) {
-            result->info0_from_cj_hint.retry_count++;
+            if (retry_hint == &result->info0_from_cj_hint)
+                result->info0_from_cj_hint.retry_count++;
             if (p12_debug_enabled())
-                fprintf(stderr, "[p12] appended INFO0 retry window from CJ timing hint\n");
+                fprintf(stderr,
+                        "[p12] appended INFO0 retry window from %s timing hint\n",
+                        retry_hint == &handoff_info0_hint ? "handoff" : "CJ");
         }
     }
     /* Also try the retry bank if all detected CH2 bursts fall after the
@@ -6197,6 +6205,74 @@ static void detect_phase2_info(const int16_t *samples,
                 }
             } else if (p12_debug_enabled()) {
                 fprintf(stderr, "[p12] INFO0 no frame target=%d\n", target);
+            }
+        }
+    }
+
+    /* Caller-view or mono captures can carry the analog caller's outbound
+     * INFO0a in the burst we would otherwise only treat as CH1/INFO1. When
+     * the normal CH2 INFO0 path found nothing, try the same INFO0 decoders
+     * against CH1 bursts before giving up on post-handoff INFO0 recovery. */
+    for (int b = 0;
+         b < phase2_ch1_burst_count && !result->info0.detected
+         && result->role_detected && result->is_caller;
+         b++) {
+        v34_info_frame_t frame;
+        int frame_sample = 0;
+
+        for (int try_info0d = 0; try_info0d < 2 && !result->info0.detected; try_info0d++) {
+            int target = try_info0d ? P12_INFO0D_PAYLOAD_BITS : P12_INFO0A_PAYLOAD_BITS;
+
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] INFO0 fallback(CH1) try window=%d target=%d start=%.1fms dur=%.1fms\n",
+                        b + 1,
+                        target,
+                        (double) phase2_ch1_bursts[b].start_sample * 1000.0 / (double) sample_rate,
+                        (double) phase2_ch1_bursts[b].duration_samples * 1000.0 / (double) sample_rate);
+            }
+
+            if (decode_info_from_fsk_burst(samples, total_samples, sample_rate,
+                                           V21_CH1, &phase2_ch1_bursts[b],
+                                           target, &frame, &frame_sample)) {
+                v34_v90_info0a_t raw;
+                v90_info0a_t mapped;
+                bool parsed_ok = false;
+                p12_info0_kind_t kind = P12_INFO0_KIND_UNKNOWN;
+
+                if (!try_info0d) {
+                    parsed_ok = v34_info_parse_info0a_v34_frame(&frame, &raw, &mapped);
+                    kind = P12_INFO0_KIND_SHARED_INFO0A;
+                } else {
+                    parsed_ok = v34_info_parse_info0a_v90_frame(&frame, &raw, &mapped);
+                    kind = p12_classify_info0_kind(result, true);
+                }
+
+                if (parsed_ok) {
+                    result->info0.detected = true;
+                    result->info0.sample_offset = frame_sample;
+                    result->info0.duration_samples = phase2_ch1_bursts[b].duration_samples;
+                    result->info0.is_info0d = (bool) try_info0d;
+                    result->info0.kind = kind;
+                    result->info0.frame = frame;
+                    result->info0.raw = raw;
+                    result->info0.parsed = mapped;
+                    phase2_end_hint = result->info0.sample_offset + result->info0.duration_samples;
+                    if (p12_debug_enabled()) {
+                        fprintf(stderr,
+                                "[p12] INFO0 fallback(CH1) hit target=%d sample=%.1fms kind=%s is_d=%u\n",
+                                target,
+                                (double) result->info0.sample_offset * 1000.0 / (double) sample_rate,
+                                phase12_info0_kind_name(result->info0.kind),
+                                result->info0.is_info0d ? 1U : 0U);
+                    }
+                } else if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] INFO0 fallback(CH1) frame candidate failed parse target=%d\n",
+                            target);
+                }
+            } else if (p12_debug_enabled()) {
+                fprintf(stderr, "[p12] INFO0 fallback(CH1) no frame target=%d\n", target);
             }
         }
     }
