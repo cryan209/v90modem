@@ -579,6 +579,35 @@ static int p12_cm_jm_credibility_score(const p12_cm_jm_hit_t *msg)
     return score;
 }
 
+static bool p12_cm_jm_is_strong_role_evidence(const p12_cm_jm_hit_t *msg)
+{
+    if (!p12_cm_jm_has_phase1_capability(msg))
+        return false;
+    if (msg->complete)
+        return true;
+    if (msg->observed_count >= 2 && msg->differing_count == 0)
+        return true;
+    return p12_cm_jm_credibility_score(msg) >= 70;
+}
+
+static bool p12_cm_jm_is_strong_capability_evidence(const p12_cm_jm_hit_t *msg)
+{
+    if (!p12_cm_jm_has_phase1_capability(msg))
+        return false;
+    if (msg->complete)
+        return true;
+    if (msg->observed_count >= 2 && msg->differing_count == 0)
+        return true;
+    return p12_cm_jm_credibility_score(msg) >= 60;
+}
+
+static bool p12_has_cre_v8bis_signal(const phase12_result_t *result)
+{
+    return result
+        && result->call_init.v8bis_signal_seen
+        && strcmp(result->call_init.v8bis_signal_name, "CRe") == 0;
+}
+
 static void p12_append_retry_window(p12_fsk_burst_t *bursts,
                                     int *burst_count,
                                     int max_bursts,
@@ -4561,12 +4590,22 @@ static void detect_phase1_v8(const int16_t *samples,
 
     /* Role detection: FSK messages take priority (CH1 vs CH2 frequencies are
      * well separated so crosstalk is rare).  Tones break ties. */
-    if (result->cm.detected && !result->jm.detected) {
+    if (p12_cm_jm_is_strong_role_evidence(&result->cm)
+        && !p12_cm_jm_is_strong_role_evidence(&result->jm)) {
         result->role_detected = true;
         result->is_caller = true;
-    } else if (result->jm.detected && !result->cm.detected) {
+    } else if (p12_cm_jm_is_strong_role_evidence(&result->jm)
+               && !p12_cm_jm_is_strong_role_evidence(&result->cm)) {
         result->role_detected = true;
         result->is_caller = false;
+    } else if (result->call_init.v92_toneq_seen
+               && result->answer_tone.detected
+               && !p12_cm_jm_is_strong_role_evidence(&result->jm)) {
+        /* TONEq is transmitted by the far-end answerer after ANSpcm/ANS.
+         * When we hear that chain locally, we are usually observing the
+         * analog caller side rather than the digital answerer transmitter. */
+        result->role_detected = true;
+        result->is_caller = true;
     } else if (result->answer_tone.detected
                && !result->cng.detected
                && (!result->ct.detected || ct_is_ringback)) {
@@ -6358,17 +6397,20 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
     }
 
     if (result->call_init.v92_qc2_seen || result->call_init.v92_short_p1_seen
+        || result->call_init.v92_toneq_seen || p12_has_cre_v8bis_signal(result)
         || analog_branch.valid || digital_branch.valid)
         result->v92_capable = true;
+    if (result->v92_capable)
+        result->pcm_modem_capable = true;
 
-    if (result->cm.detected) {
+    if (p12_cm_jm_is_strong_capability_evidence(&result->cm)) {
         result->pcm_modem_capable = result->pcm_modem_capable
                                     || (result->cm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
                                     || result->cm.pcm_modem_availability > 0;
         result->v90_capable = result->v90_capable || ((result->cm.modulations & P12_MOD_V90) != 0);
         result->v92_capable = result->v92_capable || ((result->cm.modulations & P12_MOD_V92) != 0);
     }
-    if (result->jm.detected) {
+    if (p12_cm_jm_is_strong_capability_evidence(&result->jm)) {
         result->pcm_modem_capable = result->pcm_modem_capable
                                     || (result->jm.modulations & (P12_MOD_V90 | P12_MOD_V92)) != 0
                                     || result->jm.pcm_modem_availability > 0;
@@ -6424,6 +6466,23 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
     result->phase2_state.tone_b_sample = result->tone_b.detected ? result->tone_b.start_sample : -1;
     result->phase2_state.l1_l2_sample = (result->probe_tone_count > 0) ? result->probe_tones[0].start_sample : -1;
     result->phase2_state.info1_sample = result->info1.detected ? result->info1.sample_offset : -1;
+    if ((result->v90_capable
+         || (result->v92_capable && result->role_detected && result->is_caller)
+         || (result->pcm_modem_capable && result->role_detected && result->is_caller))
+        && !result->is_caller) {
+        result->phase2_state.role = P12_PHASE2_ROLE_V90_DIGITAL_ANSWERER;
+    } else if ((result->v90_capable
+                || (result->v92_capable && result->role_detected && result->is_caller)
+                || (result->pcm_modem_capable && result->role_detected && result->is_caller))
+               && result->is_caller) {
+        result->phase2_state.role = P12_PHASE2_ROLE_V90_ANALOG_CALLER;
+    } else if (result->role_detected && result->is_caller) {
+        result->phase2_state.role = P12_PHASE2_ROLE_V34_CALLER;
+    } else if (result->role_detected && !result->is_caller) {
+        result->phase2_state.role = P12_PHASE2_ROLE_V34_ANSWERER;
+    } else {
+        result->phase2_state.role = P12_PHASE2_ROLE_UNKNOWN;
+    }
     result->phase2_state.info0_hint = result->info0_from_cj_hint;
     if (!result->phase2_state.info0_hint.valid
         && phase2_start >= 0
@@ -6435,18 +6494,6 @@ static void phase12_finalize_diagnostics(phase12_result_t *result)
                                     NULL,
                                     0,
                                     8000);
-    }
-
-    if (result->v90_capable && !result->is_caller) {
-        result->phase2_state.role = P12_PHASE2_ROLE_V90_DIGITAL_ANSWERER;
-    } else if (result->v90_capable && result->is_caller) {
-        result->phase2_state.role = P12_PHASE2_ROLE_V90_ANALOG_CALLER;
-    } else if (result->role_detected && result->is_caller) {
-        result->phase2_state.role = P12_PHASE2_ROLE_V34_CALLER;
-    } else if (result->role_detected && !result->is_caller) {
-        result->phase2_state.role = P12_PHASE2_ROLE_V34_ANSWERER;
-    } else {
-        result->phase2_state.role = P12_PHASE2_ROLE_UNKNOWN;
     }
 
     if (!result->phase2_state.info0_seen) {
