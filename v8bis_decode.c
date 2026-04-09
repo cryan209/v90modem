@@ -843,9 +843,16 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
                 rx->byte_bits = 0;
                 rx->byte_val = 0;
                 rx->opening_flag_count = 1;
-            } else if (rx->frame_byte_count == 0 && rx->byte_bits == 0) {
-                /* Additional opening flag (no data bytes received yet) */
+            } else if (rx->frame_byte_count == 0
+                       && (rx->byte_bits == 0
+                           || (rx->byte_bits == 7 && rx->byte_val == 0x7E))) {
+                /* Additional opening flag per §7.2.5 (2–5 required before data).
+                 * byte_bits==7 && byte_val==0x7E: the second and subsequent flags
+                 * accumulate their own 7-bit prefix (0,1,1,1,1,1,1) into byte_val
+                 * before the terminal 0 fires flag detection — treat as opening flag. */
                 rx->opening_flag_count++;
+                rx->byte_bits = 0;
+                rx->byte_val = 0;
             } else {
                 /* Closing flag: data was present, commit the frame */
                 v8bis_hdlc_commit_frame(rx);
@@ -978,12 +985,14 @@ void v8bis_collect_msg_events(call_log_t *log,
         int rend   = regions[ri].end;
 
         memset(&rx_ch1, 0, sizeof(rx_ch1));
-        rx_ch1.channel = 0;  /* initiating / V.21 CH1 */
+        rx_ch1.channel = 0;  /* V.21(L): QC1a/QCA2d/QCA2a from calling/analog side */
         memset(&rx_ch2, 0, sizeof(rx_ch2));
-        rx_ch2.channel = 1;  /* responding / V.21 CH2 */
+        rx_ch2.channel = 1;  /* V.21(H): V.8bis MS/CL and QC2a/QC2d from answering/digital side */
 
-        /* V.21 channel 1 (initiating): Fmark=1080, Fspace=1180 Hz
-         * V.21 channel 2 (responding): Fmark=1750, Fspace=1850 Hz */
+        /* V.21(L) = V.21 CH1: Fmark=980 Hz, Fspace=1180 Hz (SpanDSP FSK_V21CH1)
+         * V.21(H) = V.21 CH2: Fmark=1650 Hz, Fspace=1850 Hz (SpanDSP FSK_V21CH2)
+         * Per V.8bis §3.6 and V.92 §8.2/8.3:
+         *   QC2a/QC2d use V.21(H); QCA2a/QCA2d use V.21(L) */
         fsk_ch1 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH1],
                                FSK_FRAME_MODE_ASYNC, v8bis_hdlc_put_bit, &rx_ch1);
         fsk_ch2 = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH2],
@@ -1170,16 +1179,24 @@ void v8bis_collect_msg_events(call_log_t *log,
             }
 
             snprintf(summary, sizeof(summary), "Partial %s frame", type_str);
-            snprintf(detail, sizeof(detail),
-                     "fsk_ch=%s first_octet_bits=%d rev=%s bytes=%d trailing_bits=%d crc=%s reason=%s raw=%s",
-                     ch_str,
-                     first_octet_bits,
-                     rev_buf,
-                     partial->frame_byte_count,
-                     partial->byte_bits,
-                     partial->crc_ok ? "ok" : "failed",
-                     v8bis_partial_reason_str(partial->reason),
-                     hex[0] != '\0' ? hex : "n/a");
+            {
+                char first_octet_buf[8];
+                if (first_octet_bits > 0)
+                    snprintf(first_octet_buf, sizeof(first_octet_buf), "%02X", partial->first_octet);
+                else
+                    snprintf(first_octet_buf, sizeof(first_octet_buf), "n/a");
+                snprintf(detail, sizeof(detail),
+                         "fsk_ch=%s first_octet=%s/%dbits rev=%s bytes=%d trailing_bits=%d crc=%s reason=%s raw=%s",
+                         ch_str,
+                         first_octet_buf,
+                         first_octet_bits,
+                         rev_buf,
+                         partial->frame_byte_count,
+                         partial->byte_bits,
+                         partial->crc_ok ? "ok" : "failed",
+                         v8bis_partial_reason_str(partial->reason),
+                         hex[0] != '\0' ? hex : "n/a");
+            }
             call_log_append(log, partial->sample_offset, 0, "V.8bis?", summary, detail);
 
             if (v92_decode_qc2_id_partial(partial, &v92_qc2)) {

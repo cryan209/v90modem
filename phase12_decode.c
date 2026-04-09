@@ -1849,12 +1849,18 @@ static void detect_v92_short_phase1(const int16_t *samples,
                 bool clipped = false;
 
                 for (int w = 0; w < procedure_window_count; w++) {
+                    /* Allow a post-procedure slack: the answerer (QCA) or caller
+                     * (QC) may send short Phase 1 slightly after the V.8 exchange
+                     * ends (JM/CM boundary).  300 ms covers observed QCA1d latency
+                     * where the answerer transmits just after the last JM repeat. */
+                    int proc_end_slack = procedure_windows[w].end
+                                      + (sample_rate * 300) / 1000;
                     if (window_end > procedure_windows[w].start
-                        && window_start < procedure_windows[w].end) {
+                        && window_start < proc_end_slack) {
                         if (window_start < procedure_windows[w].start)
                             window_start = procedure_windows[w].start;
-                        if (window_end > procedure_windows[w].end)
-                            window_end = procedure_windows[w].end;
+                        if (window_end > proc_end_slack)
+                            window_end = proc_end_slack;
                         clipped = true;
                         break;
                     }
@@ -3529,12 +3535,14 @@ static int p12_v8_decode_soft_async_bytes(const uint8_t *bits,
         for (int j = 0; j < 8; j++)
             byte |= (uint8_t) (bits[bit_pos + 1 + j] & 1) << j;
         /* Stop at null terminator or at a new V.8 preamble byte (0xE0),
-         * which signals the start of a repeated CM/JM message frame. */
+         * which signals the start of a repeated CM/JM message frame.
+         * Also stop on 0x7E (HDLC flag) — this is the V.8bis opening flag that
+         * immediately follows CM in V.92 Short Phase 1 (Figures 3/5). */
         if (byte == 0) {
             bytes[byte_len++] = byte;
             break;
         }
-        if (byte == 0xE0 && byte_len > 0)
+        if ((byte == 0xE0 || byte == 0x7E) && byte_len > 0)
             break;
         bytes[byte_len++] = byte;
     }
