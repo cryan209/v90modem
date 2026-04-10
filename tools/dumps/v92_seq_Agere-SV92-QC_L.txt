@@ -1,0 +1,47 @@
+G.711: 161866 codewords (20233.2 ms), Law: µ-law
+File: gough-lui-v90-v92-modem-sounds/FF_U/Agere-SV92-QC_L.g711
+Duration: 20.233 seconds (161866 samples)
+
+
+--- Channel: Mono ---
+Codewords: direct companding retained (adaptive re-slice found no stronger V.90 candidate; score 0)
+
+=== Stereo Cross-Channel Resolution ===
+  Roles: Right=analog(caller) Left=digital(answerer)
+
+=== Call Log: Mono ===
+  Duration: 20.233 seconds
+  Recognized events: 15
+  Approximate covered time: 17733.6 ms (87.6%)
+  [    0.0 ms] Diagnostic Side evidence (V.34 candidate)
+             source=v34_pair label=answerer info0=0 info0d=0 info1=0 info1d=0 phase3=0 phase4=0 failed=0 u_info=0 u_info_src=fallback tx_pp=no tx_trn=no tx_ja=no rx_s=no ru_window=0 ru_score=-1 trn1u_mag_count=0
+  [    0.0 ms] Diagnostic Side evidence (V.34 candidate)
+             source=v34_pair label=caller info0=0 info0d=0 info1=0 info1d=0 phase3=0 phase4=0 failed=0 u_info=0 u_info_src=fallback tx_pp=no tx_trn=no tx_ja=no rx_s=no ru_window=0 ru_score=-1 trn1u_mag_count=0
+  [    0.0 ms] GAP: no implemented decoder matched for 1140.0 ms
+  [ 1140.0 ms] V.8bis CRe detected before ANS (500.0 ms)
+             duration=500.0ms weak=no
+  [ 1640.0 ms] GAP: no implemented decoder matched for 1359.6 ms
+  [ 2999.6 ms] V.90  Sd (sign-pattern) (93.8 ms)
+             sign_pattern reps=125
+  [ 3093.4 ms] V.90  S-bar (sign-pattern) (6.0 ms)
+             sign_pattern reps=8
+  [ 3099.4 ms] V.90  Post-Sd region (17133.9 ms)
+             post_sd_symbols=137071
+  [ 3100.6 ms] V.92  ANSpcm (table) (263.1 ms)
+             law=ulaw level=-9.5 dBm0 phase=284 match=87.8%(14787/16840b) exact=1009 robbed=424 mismatch=774 score=14284
+  [ 3423.2 ms] V.8bis? Partial NAK(3) frame
+             fsk_ch=CH2/responding first_octet=DA/8bits rev=13 bytes=1 trailing_bits=7 crc=failed reason=short_frame raw=DA
+  [ 3630.0 ms] V.8bis? Partial unknown frame
+             fsk_ch=CH1/initiating first_octet=1E/8bits rev=1 bytes=5 trailing_bits=2 crc=failed reason=abort_sequence raw=1E 00 00 00 F0
+  [ 4000.0 ms] Diagnostic Side evidence (Phase 1/2)
+             source=phase12 role_detected=1 is_caller=0 role_confident=1 pcm=1 v90=1 v92=1 short_p2=0 digital_side=0 info0=0 info0d=0 info1=0 info1d=0 inferred_u_info=0
+  [ 4000.0 ms] V.8   ANS/PR tone detected (770.0 ms)
+             role=answerer tone=ANS/PR peak_ratio=0.500 duration=770.0ms
+  [ 4770.0 ms] V.34  Phase 1/2 diagnostic
+             role=answerer pcm_modem=1 v90=1 v92=1 short_p2_req=0 digital_side=0 phase2_start=4770.0ms phase2_end=5550.0ms ans=ANS/PR ans_start=4000.0ms ans_end=4770.0ms ans_dur=770.0ms pre_v8bis=CRe@1140.0ms phase2_role=v90_digital_answerer next=expect_info0
+  [ 4770.0 ms] V.8   Answer-tone handoff
+             tone=ANS/PR start=4000.0ms end=4770.0ms duration=770.0ms
+  [ 4841.1 ms] V.8   CM decoded (134.6 ms)
+             role=answerer msg=CM confidence=candidate_fragment call_fn=0 modulations=V.90 protocol=0 pcm=0 pstn=0 seen=2 drift=1 raw=08_E5_F9_FE_FF_3F_00
+  [ 4940.0 ms] V.34  Tone B detected (610.0 ms)
+             freq=1200 reversal=no

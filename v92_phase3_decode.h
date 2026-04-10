@@ -48,6 +48,7 @@ typedef struct {
     int tx_trn_sample;
     int tx_ja_sample;
     int tx_jdashed_sample;
+    int u_info;
     int rx_s_event_sample;
     bool ja_dil_seen;
     int ja_dil_sample;
@@ -113,6 +114,16 @@ typedef struct {
     int trnlu_to_ja_t;
     int trnlu_first_2040_t;
     bool trnlu_2040_t_ready_for_ja;
+    bool trn_required_by_info;
+    bool seq_ru_seen;
+    bool seq_ur1_seen;
+    bool seq_ru2_seen;
+    bool seq_ur2_seen;
+    bool seq_trn1u_seen;
+    bool seq_ja_seen;
+    bool seq_order_ok;
+    bool seq_strict_pass;
+    const char *seq_status;
     int ja_sample;
     bool ja_seen;
     bool ja_dil_seen;

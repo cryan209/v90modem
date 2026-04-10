@@ -215,6 +215,80 @@ static void analyze_ja_sequence(v92_phase3_result_t *out,
         out->ja_status = "ja_complete";
 }
 
+static bool sample_order_ok(int a, int b)
+{
+    return (a < 0 || b < 0 || b >= a);
+}
+
+static void analyze_strict_ru_trn1u_ja_sequence(v92_phase3_result_t *out,
+                                                 const v92_phase3_observation_t *obs)
+{
+    int ru0 = -1;
+    int ur1 = obs ? obs->tx_first_not_s_sample : -1;
+    int ru2 = obs ? obs->tx_second_s_sample : -1;
+    int ur2 = obs ? obs->tx_second_not_s_sample : -1;
+    int trn = obs ? obs->tx_trn_sample : -1;
+    int ja  = obs ? obs->tx_ja_sample : -1;
+    bool order_ok;
+    bool complete;
+
+    if (!out || !obs)
+        return;
+
+    ru0 = (obs->tx_first_s_sample >= 0) ? obs->tx_first_s_sample : out->ru_sample;
+    out->trn_required_by_info = (obs->u_info != 0);
+    out->seq_ru_seen = (ru0 >= 0);
+    out->seq_ur1_seen = (ur1 >= 0);
+    out->seq_ru2_seen = (ru2 >= 0);
+    out->seq_ur2_seen = (ur2 >= 0);
+    out->seq_trn1u_seen = (trn >= 0);
+    out->seq_ja_seen = (ja >= 0);
+
+    order_ok = true;
+    if (!sample_order_ok(ru0, ur1))
+        order_ok = false;
+    if (!sample_order_ok(ur1, ru2))
+        order_ok = false;
+    if (!sample_order_ok(ru2, ur2))
+        order_ok = false;
+    if (out->trn_required_by_info) {
+        if (!sample_order_ok(ur2, trn))
+            order_ok = false;
+        if (!sample_order_ok(trn, ja))
+            order_ok = false;
+    } else {
+        if (!sample_order_ok(ur2, ja))
+            order_ok = false;
+    }
+
+    out->seq_order_ok = order_ok;
+    complete = out->seq_ru_seen
+               && out->seq_ur1_seen
+               && out->seq_ru2_seen
+               && out->seq_ur2_seen
+               && out->seq_ja_seen
+               && (!out->trn_required_by_info || out->seq_trn1u_seen)
+               && order_ok;
+    out->seq_strict_pass = complete;
+
+    if (!out->seq_ru_seen)
+        out->seq_status = "waiting_ru1";
+    else if (!out->seq_ur1_seen)
+        out->seq_status = "waiting_ur1";
+    else if (!out->seq_ru2_seen)
+        out->seq_status = "waiting_ru2";
+    else if (!out->seq_ur2_seen)
+        out->seq_status = "waiting_ur2";
+    else if (out->trn_required_by_info && !out->seq_trn1u_seen)
+        out->seq_status = "waiting_trn1u";
+    else if (!out->seq_ja_seen)
+        out->seq_status = "waiting_ja";
+    else if (!order_ok)
+        out->seq_status = "order_mismatch";
+    else
+        out->seq_status = "strict_ok";
+}
+
 const char *v92_phase3_role_id(v92_phase3_role_t role)
 {
     switch (role) {
@@ -239,15 +313,28 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
 {
     v92_phase4_observation_t p4_obs;
     v92_phase4_result_t p4;
+    bool has_phase3_evidence;
 
     if (!obs || !out)
         return false;
 
     memset(out, 0, sizeof(*out));
-    if (!obs->info0_seen)
+    has_phase3_evidence = (obs->phase3_seen
+                           || obs->phase3_sample >= 0
+                           || obs->tx_first_s_sample >= 0
+                           || obs->tx_first_not_s_sample >= 0
+                           || obs->tx_second_s_sample >= 0
+                           || obs->tx_second_not_s_sample >= 0
+                           || obs->tx_trn_sample >= 0
+                           || obs->tx_ja_sample >= 0
+                           || obs->ru_window_len > 0
+                           || obs->rx_s_event_sample >= 0);
+    if (!obs->info0_seen && !has_phase3_evidence)
         return false;
 
-    out->local_role = obs->info0_is_d ? V92_PHASE3_ROLE_ANALOGUE : V92_PHASE3_ROLE_DIGITAL;
+    out->local_role = obs->info0_seen
+        ? (obs->info0_is_d ? V92_PHASE3_ROLE_ANALOGUE : V92_PHASE3_ROLE_DIGITAL)
+        : V92_PHASE3_ROLE_UNKNOWN;
     out->short_phase2_requested = obs->short_phase2_requested;
     out->v92_capable = obs->v92_capable;
     out->ru_sample = v92_phase3_find_ru_sample(obs, &out->ru_source);
@@ -275,6 +362,7 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
     decode_ru_window(out, obs);
     evaluate_lu_trn1u_consistency(out, obs);
     analyze_ja_sequence(out, obs);
+    analyze_strict_ru_trn1u_ja_sequence(out, obs);
 
     memset(&p4_obs, 0, sizeof(p4_obs));
     p4_obs.phase4_seen = obs->phase4_seen;
@@ -301,6 +389,8 @@ bool v92_phase3_analyze(const v92_phase3_observation_t *obs,
 
     if (!out->ru_seen)
         out->status = "waiting_ru";
+    else if (!out->seq_strict_pass)
+        out->status = out->seq_status ? out->seq_status : "sequence_partial";
     else if (out->sequence_complete)
         out->status = "complete";
     else if (obs->training_failed)

@@ -6416,10 +6416,28 @@ static void collect_v92_phase3_event(call_log_t *log,
     const char *ja_dil_source = "none";
     char ja_dil_source_buf[32];
     char detail[8192];
+    bool has_phase3_evidence;
+    int gate_sample;
 
-    if (!log || !res || !res->info0_seen)
+    if (!log || !res)
         return;
-    if (!should_emit_phase2_event(res->info0_sample, latest_allowed_sample))
+    has_phase3_evidence = (res->phase3_seen
+                           || res->phase3_sample >= 0
+                           || res->tx_first_s_sample >= 0
+                           || res->tx_first_not_s_sample >= 0
+                           || res->tx_second_s_sample >= 0
+                           || res->tx_second_not_s_sample >= 0
+                           || res->tx_trn_sample >= 0
+                           || res->tx_ja_sample >= 0
+                           || res->ru_window_len > 0
+                           || res->rx_s_event_sample >= 0);
+    if (!res->info0_seen && !has_phase3_evidence)
+        return;
+    gate_sample = (res->info0_sample >= 0) ? res->info0_sample
+                : ((res->phase3_sample >= 0) ? res->phase3_sample
+                   : ((res->tx_trn_sample >= 0) ? res->tx_trn_sample
+                      : ((res->tx_ja_sample >= 0) ? res->tx_ja_sample : 0)));
+    if (!should_emit_phase2_event(gate_sample, latest_allowed_sample))
         return;
 
     raw_26_27 = res->info0_raw.raw_26_27;
@@ -6449,6 +6467,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.tx_trn_sample = res->tx_trn_sample;
     obs.tx_ja_sample = res->tx_ja_sample;
     obs.tx_jdashed_sample = res->tx_jdashed_sample;
+    obs.u_info = res->u_info;
     if (analogue_side) {
         if (obs.tx_trn_sample < 0 && analogue_side->tx_trn_sample >= 0) {
             obs.tx_trn_sample = analogue_side->tx_trn_sample;
@@ -6752,6 +6771,18 @@ static void collect_v92_phase3_event(call_log_t *log,
             phase3.ru_lu_ratio > 0.0f ? "" : "n/a");
     if (phase3.ru_lu_ratio > 0.0f)
         appendf(detail, sizeof(detail), "%.3f", phase3.ru_lu_ratio);
+    appendf(detail, sizeof(detail), " trn_required_by_info=%u",
+            phase3.trn_required_by_info ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_ru1=%u", phase3.seq_ru_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_ur1=%u", phase3.seq_ur1_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_ru2=%u", phase3.seq_ru2_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_ur2=%u", phase3.seq_ur2_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_trn1u=%u", phase3.seq_trn1u_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_ja=%u", phase3.seq_ja_seen ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_order_ok=%u", phase3.seq_order_ok ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_strict_pass=%u", phase3.seq_strict_pass ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_status=%s",
+            phase3.seq_status ? phase3.seq_status : "unknown");
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
                     0,
@@ -6825,6 +6856,44 @@ static void v34_effective_ja_preview(const decode_v34_result_t *result, char *ou
         return;
     }
     v34_phase3_repeat_ja_preview(result->ja_trn16, out, out_len);
+}
+
+static void v34_print_full_bitstream(const char *label,
+                                     const char *bits,
+                                     int bit_len,
+                                     int chunk_bits)
+{
+    int n;
+
+    if (!label)
+        label = "bits";
+    if (!bits || bits[0] == '\0' || bit_len == 0) {
+        printf("    %s: <none>\n", label);
+        return;
+    }
+
+    n = bit_len;
+    if (n < 0)
+        n = (int) strlen(bits);
+    if (n > (int) strlen(bits))
+        n = (int) strlen(bits);
+    if (n <= 0) {
+        printf("    %s: <none>\n", label);
+        return;
+    }
+
+    if (chunk_bits <= 0)
+        chunk_bits = 64;
+    printf("    %s (%d bits):\n", label, n);
+    for (int i = 0; i < n; i += chunk_bits) {
+        int rem = n - i;
+        int take = rem < chunk_bits ? rem : chunk_bits;
+        printf("      [%4d:%4d] %.*s\n",
+               i,
+               i + take - 1,
+               take,
+               bits + i);
+    }
 }
 
 static const char *v34_rx_stage_to_str_local(int stage)
@@ -9156,6 +9225,40 @@ static void p3_print_data_signatures(const p3_result_t *detail)
         if (best_j->jprime_match_pct > 0)
             printf(" j'after=%d%%", best_j->jprime_match_pct);
         printf("\n");
+
+        if (getenv("VPCM_P3_J_BITS")) {
+            int j_bits = best_j->length * 2;
+            char *j_desc = NULL;
+            char *j_scr = NULL;
+
+            if (j_bits > 0) {
+                j_desc = (char *) malloc((size_t) j_bits + 1U);
+                j_scr = (char *) malloc((size_t) j_bits + 1U);
+            }
+            if (j_desc && j_scr) {
+                for (int b = 0; b < j_bits; b++) {
+                    int bit_d = p3_segment_descrambled_bit(detail, best_j, b);
+                    int bit_s = p3_symbol_scrambled_bit(detail, best_j->start_symbol, b);
+                    j_desc[b] = bit_d ? '1' : '0';
+                    j_scr[b] = bit_s ? '1' : '0';
+                }
+                j_desc[j_bits] = '\0';
+                j_scr[j_bits] = '\0';
+
+                printf("        J full bits(desc) (%d):\n", j_bits);
+                for (int i = 0; i < j_bits; i += 64) {
+                    int take = (j_bits - i < 64) ? (j_bits - i) : 64;
+                    printf("          [%4d:%4d] %.*s\n", i, i + take - 1, take, j_desc + i);
+                }
+                printf("        J full bits(scr) (%d):\n", j_bits);
+                for (int i = 0; i < j_bits; i += 64) {
+                    int take = (j_bits - i < 64) ? (j_bits - i) : 64;
+                    printf("          [%4d:%4d] %.*s\n", i, i + take - 1, take, j_scr + i);
+                }
+            }
+            free(j_desc);
+            free(j_scr);
+        }
     }
 
     if (best_jprime) {
@@ -9182,6 +9285,40 @@ static void p3_print_data_signatures(const p3_result_t *detail)
                100.0f * one_rate);
         printf("        bits(scr)=%s\n", trn_scr);
         printf("        bits(desc)=%s\n", trn_desc);
+
+        if (getenv("VPCM_P3_TRN_BITS")) {
+            int trn_bits = best_trn->length * 2;
+            char *full_scr = NULL;
+            char *full_desc = NULL;
+
+            if (trn_bits > 0) {
+                full_scr = (char *) malloc((size_t) trn_bits + 1U);
+                full_desc = (char *) malloc((size_t) trn_bits + 1U);
+            }
+            if (full_scr && full_desc) {
+                for (int b = 0; b < trn_bits; b++) {
+                    int bit_s = p3_symbol_scrambled_bit(detail, best_trn->start_symbol, b);
+                    int bit_d = p3_segment_descrambled_bit(detail, best_trn, b);
+                    full_scr[b] = bit_s ? '1' : '0';
+                    full_desc[b] = bit_d ? '1' : '0';
+                }
+                full_scr[trn_bits] = '\0';
+                full_desc[trn_bits] = '\0';
+
+                printf("        TRN full bits(scr) (%d):\n", trn_bits);
+                for (int i = 0; i < trn_bits; i += 64) {
+                    int take = (trn_bits - i < 64) ? (trn_bits - i) : 64;
+                    printf("          [%4d:%4d] %.*s\n", i, i + take - 1, take, full_scr + i);
+                }
+                printf("        TRN full bits(desc) (%d):\n", trn_bits);
+                for (int i = 0; i < trn_bits; i += 64) {
+                    int take = (trn_bits - i < 64) ? (trn_bits - i) : 64;
+                    printf("          [%4d:%4d] %.*s\n", i, i + take - 1, take, full_desc + i);
+                }
+            }
+            free(full_scr);
+            free(full_desc);
+        }
     }
 
     if (best_ru) {
@@ -9853,6 +9990,49 @@ static void print_v34_result(const decode_v34_result_t *result,
                result->ja_trn16 > 0 ? "16" : "4",
                result->ja_detector_bits,
                ja_source);
+
+        if (getenv("VPCM_P3_JA_BITS")) {
+            char descr4[8193];
+            char descr17[8193];
+
+            printf("  Ja full-bit dump:\n");
+            v34_print_full_bitstream("ja_bits_preview", result->ja_bits, -1, 64);
+            v34_print_full_bitstream("ja_aux_primary_raw", result->ja_aux_bits, result->ja_aux_bit_len, 64);
+
+            if (result->ja_aux_bit_len > 0 && result->ja_aux_bits[0] != '\0') {
+                v34_descramble_bits(result->ja_aux_bits,
+                                    result->ja_aux_bit_len,
+                                    4,
+                                    descr4,
+                                    (int) sizeof(descr4));
+                v34_descramble_bits(result->ja_aux_bits,
+                                    result->ja_aux_bit_len,
+                                    17,
+                                    descr17,
+                                    (int) sizeof(descr17));
+                v34_print_full_bitstream("ja_aux_primary_descr_tap4", descr4, result->ja_aux_bit_len, 64);
+                v34_print_full_bitstream("ja_aux_primary_descr_tap17", descr17, result->ja_aux_bit_len, 64);
+            }
+
+            for (int h = 0; h < 8; h++) {
+                char lbl[64];
+
+                if (result->ja_aux_hyp_bit_len[h] > 0) {
+                    snprintf(lbl, sizeof(lbl), "ja_aux_hyp[%d]", h);
+                    v34_print_full_bitstream(lbl,
+                                             result->ja_aux_hyp_bits[h],
+                                             result->ja_aux_hyp_bit_len[h],
+                                             64);
+                }
+                if (result->ja_aux_hyp_raw_bit_len[h] > 0) {
+                    snprintf(lbl, sizeof(lbl), "ja_aux_hyp_raw[%d]", h);
+                    v34_print_full_bitstream(lbl,
+                                             result->ja_aux_hyp_raw_bits[h],
+                                             result->ja_aux_hyp_raw_bit_len[h],
+                                             64);
+                }
+            }
+        }
     }
     if (result->rx_s_event_sample >= 0) {
         printf("  Far-end S:       seen at %.1f ms\n",
