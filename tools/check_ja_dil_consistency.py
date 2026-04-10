@@ -55,6 +55,11 @@ def copy_framed_pattern(bits: str, start_pos: int, out_len: int) -> tuple[list[i
         for i in range(chunk):
             out.append(bit_at(bits, pos + i))
         pos += chunk
+        pad = 16 - chunk
+        if pad > 0:
+            if not expect_zero(bits, pos, pad):
+                return None
+            pos += pad
     return out, pos
 
 
@@ -96,6 +101,17 @@ def crc16_bits(bits: str, bit_count: int) -> int:
         if fb:
             crc ^= 0x8005
     return crc & 0xFFFF
+
+
+def descramble_bits(bits: str, tap: int = 4) -> str:
+    reg = 0
+    out = []
+    for ch in bits:
+        b = 1 if ch == "1" else 0
+        o = (b ^ ((reg >> tap) & 1) ^ ((reg >> 22) & 1)) & 1
+        reg = ((reg << 1) | b) & ((1 << 23) - 1)
+        out.append("1" if o else "0")
+    return "".join(out)
 
 
 @dataclass
@@ -297,9 +313,15 @@ def main() -> int:
     ap.add_argument("--prefix-ones", type=int, default=24)
     ap.add_argument("--descriptor-len", type=int, default=276)
     ap.add_argument("--consensus-blocks", type=int, default=64)
+    ap.add_argument("--stream-mode", choices=("raw", "descr4", "descr17"), default="descr4")
     args = ap.parse_args()
 
     bits = extract_label_bits(args.bitdump, args.label)
+    if args.stream_mode == "descr4":
+        bits = descramble_bits(bits, 4)
+    elif args.stream_mode == "descr17":
+        bits = descramble_bits(bits, 17)
+
     anchor = find = bits.find("1" * args.prefix_ones)
     if find < 0:
         print("ja_anchor=not_found")
@@ -313,7 +335,7 @@ def main() -> int:
             d = parse_dil_descriptor(cons)
             if d is not None:
                 mode = f"consensus_{b}blocks"
-    print(f"ja_anchor_bit={anchor} descriptor_start_bit={ds}")
+    print(f"ja_anchor_bit={anchor} descriptor_start_bit={ds} stream={args.stream_mode}")
     if d is None:
         print("descriptor_parse=failed")
         tops = best_repeat_lengths(bits, ds, 206, 500, 16, 8)

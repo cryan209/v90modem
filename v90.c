@@ -752,6 +752,7 @@ static bool v90_copy_framed_pattern(uint8_t *out,
 
     while (copied < out_len) {
         int chunk = out_len - copied;
+        int pad;
         if (chunk > 16)
             chunk = 16;
         if (!v90_expect_zero_bit(bits, bit_len, pos))
@@ -762,6 +763,12 @@ static bool v90_copy_framed_pattern(uint8_t *out,
         for (int i = 0; i < chunk; i++)
             out[copied + i] = (uint8_t)v90_get_packed_bit(bits, pos + i);
         pos += chunk;
+        pad = 16 - chunk;
+        if (pad > 0) {
+            if (!v90_expect_zero_range(bits, bit_len, pos, pad))
+                return false;
+            pos += pad;
+        }
         copied += chunk;
     }
     return true;

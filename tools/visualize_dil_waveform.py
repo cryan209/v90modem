@@ -51,6 +51,11 @@ def copy_framed_pattern(bits: str, start_pos: int, out_len: int) -> tuple[list[i
         for i in range(chunk):
             out.append(bit_at(bits, pos + i))
         pos += chunk
+        pad = 16 - chunk
+        if pad > 0:
+            if not expect_zero(bits, pos, pad):
+                return None
+            pos += pad
     return out, pos
 
 

@@ -43,6 +43,11 @@ def copy_framed_pattern(bits: str, start_pos: int, out_len: int) -> tuple[list[i
         for i in range(chunk):
             out.append(bit_at(bits, pos + i))
         pos += chunk
+        pad = 16 - chunk
+        if pad > 0:
+            if not expect_zero(bits, pos, pad):
+                return None
+            pos += pad
     return out, pos
 
 
@@ -84,6 +89,17 @@ def crc16_bits(bits: str, bit_count: int) -> int:
         if fb:
             crc ^= 0x8005
     return crc & 0xFFFF
+
+
+def descramble_bits(bits: str, tap: int = 4) -> str:
+    reg = 0
+    out = []
+    for ch in bits:
+        b = 1 if ch == "1" else 0
+        o = (b ^ ((reg >> tap) & 1) ^ ((reg >> 22) & 1)) & 1
+        reg = ((reg << 1) | b) & ((1 << 23) - 1)
+        out.append("1" if o else "0")
+    return "".join(out)
 
 
 @dataclass
@@ -240,46 +256,58 @@ def main() -> int:
     ap.add_argument("--min-blocks", type=int, default=3)
     ap.add_argument("--max-blocks", type=int, default=20)
     ap.add_argument("--top", type=int, default=20)
+    ap.add_argument("--stream-mode", choices=("raw", "descr4", "descr17", "auto"), default="auto")
     args = ap.parse_args()
 
     bits = extract_label_bits(args.bitdump, args.label)
-    anchors = []
-    patt = "1" * args.prefix_ones
-    i = bits.find(patt)
-    while i >= 0:
-        if args.anchor_min <= i <= args.anchor_max:
-            anchors.append(i)
-        i = bits.find(patt, i + 1)
-
-    if not anchors:
-        print("no_anchor_found")
-        return 1
+    streams = []
+    if args.stream_mode == "raw":
+        streams = [("raw", bits)]
+    elif args.stream_mode == "descr4":
+        streams = [("descr4", descramble_bits(bits, 4))]
+    elif args.stream_mode == "descr17":
+        streams = [("descr17", descramble_bits(bits, 17))]
+    else:
+        streams = [
+            ("raw", bits),
+            ("descr4", descramble_bits(bits, 4)),
+            ("descr17", descramble_bits(bits, 17)),
+        ]
 
     candidates = []
-    for a in anchors:
-        ds = a + args.prefix_ones
-        for L in range(args.len_min, args.len_max + 1, args.len_step):
-            avail = len(bits) - ds
-            maxb = min(args.max_blocks, avail // L)
-            if maxb < args.min_blocks:
-                continue
-            bmatch = block_match(bits, ds, L, maxb)
-            # Prefer lengths with stronger repeat.
-            score = bmatch * 1000.0 - abs(L - 276) * 0.03
-            cons = consensus_block(bits, ds, L, maxb)
-            d = parse_dil_descriptor(cons)
-            if d is not None:
-                score += 1000.0
-            candidates.append((score, a, L, maxb, bmatch, d))
+    for sname, sbits in streams:
+        anchors = []
+        patt = "1" * args.prefix_ones
+        i = sbits.find(patt)
+        while i >= 0:
+            if args.anchor_min <= i <= args.anchor_max:
+                anchors.append(i)
+            i = sbits.find(patt, i + 1)
+
+        for a in anchors:
+            ds = a + args.prefix_ones
+            for L in range(args.len_min, args.len_max + 1, args.len_step):
+                avail = len(sbits) - ds
+                maxb = min(args.max_blocks, avail // L)
+                if maxb < args.min_blocks:
+                    continue
+                bmatch = block_match(sbits, ds, L, maxb)
+                # Prefer lengths with stronger repeat.
+                score = bmatch * 1000.0 - abs(L - 276) * 0.03
+                cons = consensus_block(sbits, ds, L, maxb)
+                d = parse_dil_descriptor(cons)
+                if d is not None:
+                    score += 1000.0
+                candidates.append((score, sname, a, L, maxb, bmatch, d))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     top = candidates[: args.top]
-    print("rank\tscore\tanchor\tL\tblocks\tmatch\tparse\tvar\tN\tLSP\tLTP\tbit_len")
-    for i, (s, a, L, b, m, d) in enumerate(top, start=1):
+    print("rank\tscore\tstream\tanchor\tL\tblocks\tmatch\tparse\tvar\tN\tLSP\tLTP\tbit_len")
+    for i, (s, sname, a, L, b, m, d) in enumerate(top, start=1):
         if d is None:
-            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-\t-")
+            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-\t-")
         else:
-            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.variant}\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}")
+            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.variant}\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}")
     if not top:
         print("no_candidates")
     return 0
