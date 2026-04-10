@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+
+def ulaw_to_lin(u: int) -> int:
+    u = (~u) & 0xFF
+    sign = u & 0x80
+    exp = (u >> 4) & 7
+    man = u & 0x0F
+    x = ((man << 3) + 0x84) << exp
+    x -= 0x84
+    return -x if sign else x
+
+
+def extract_label_bits(path: Path, label: str) -> str:
+    txt = path.read_text(encoding="ascii", errors="ignore")
+    m = re.search(rf"{re.escape(label)}\(\d+\):\n([01\s]+)", txt)
+    if not m:
+        raise ValueError(f"label {label!r} not found in {path}")
+    return "".join(m.group(1).split())
+
+
+def bit_at(bits: str, i: int) -> int:
+    return 1 if bits[i] == "1" else 0
+
+
+def bits_le(bits: str, pos: int, n: int) -> int:
+    v = 0
+    for i in range(n):
+        v |= bit_at(bits, pos + i) << i
+    return v
+
+
+def expect_zero(bits: str, pos: int, n: int = 1) -> bool:
+    return pos + n <= len(bits) and all(ch == "0" for ch in bits[pos:pos + n])
+
+
+def copy_framed_pattern(bits: str, start_pos: int, out_len: int) -> tuple[list[int], int] | None:
+    pos = start_pos
+    out: list[int] = []
+    while len(out) < out_len:
+        chunk = min(16, out_len - len(out))
+        if not expect_zero(bits, pos, 1):
+            return None
+        pos += 1
+        if pos + chunk > len(bits):
+            return None
+        for i in range(chunk):
+            out.append(bit_at(bits, pos + i))
+        pos += chunk
+    return out, pos
+
+
+def parse_byte_pairs(bits: str, start_pos: int, out_count: int) -> tuple[list[int], int] | None:
+    pos = start_pos
+    out: list[int] = []
+    while len(out) < out_count:
+        if not expect_zero(bits, pos, 1):
+            return None
+        pos += 1
+        if pos + 8 > len(bits):
+            return None
+        out.append(bits_le(bits, pos, 7))
+        pos += 7
+        if len(out) < out_count:
+            if not expect_zero(bits, pos, 1):
+                return None
+            pos += 1
+            if pos + 8 > len(bits):
+                return None
+            out.append(bits_le(bits, pos, 7))
+            pos += 7
+            if not expect_zero(bits, pos, 1):
+                return None
+            pos += 1
+        else:
+            if not expect_zero(bits, pos, 9):
+                return None
+            pos += 9
+    return out, pos
+
+
+def crc16_bits(bits: str, bit_count: int) -> int:
+    crc = 0xFFFF
+    for i in range(bit_count):
+        b = bit_at(bits, i)
+        fb = ((crc >> 15) ^ b) & 1
+        crc = ((crc << 1) & 0xFFFF)
+        if fb:
+            crc ^= 0x8005
+    return crc & 0xFFFF
+
+
+@dataclass
+class DilDesc:
+    n: int
+    lsp: int
+    ltp: int
+    sp: list[int]
+    tp: list[int]
+    h: list[int]
+    ref: list[int]
+    train_u: list[int]
+    bit_len: int
+
+
+def parse_dil_descriptor(bits: str) -> DilDesc | None:
+    if len(bits) < 206:
+        return None
+    if any(ch != "1" for ch in bits[:17]) or not expect_zero(bits, 17, 1):
+        return None
+    n = bits_le(bits, 18, 8)
+    if not expect_zero(bits, 26, 8) or not expect_zero(bits, 34, 1):
+        return None
+    lsp = bits_le(bits, 35, 7) + 1
+    if not expect_zero(bits, 42, 1):
+        return None
+    ltp = bits_le(bits, 43, 7) + 1
+    if not expect_zero(bits, 50, 1):
+        return None
+    if n == 0 and (lsp != 1 or ltp != 1):
+        return None
+
+    alpha = ((lsp + 15) // 16) * 17
+    beta = alpha + ((ltp + 15) // 16) * 17
+    training_start = 187 + beta
+    training_bits = ((n + 1) // 2) * 17
+    crc_start = training_start + training_bits
+    descriptor_bits = crc_start + 18
+    if len(bits) < descriptor_bits:
+        return None
+
+    sp_res = copy_framed_pattern(bits, 51, lsp)
+    tp_res = copy_framed_pattern(bits, 51 + alpha, ltp)
+    h_res = parse_byte_pairs(bits, 51 + beta, 8)
+    ref_res = parse_byte_pairs(bits, 119 + beta, 8)
+    if not sp_res or not tp_res or not h_res or not ref_res:
+        return None
+    sp, _ = sp_res
+    tp, _ = tp_res
+    h, _ = h_res
+    ref, _ = ref_res
+
+    train_u: list[int] = []
+    pos = training_start
+    while len(train_u) < n:
+        if not expect_zero(bits, pos, 1):
+            return None
+        pos += 1
+        if pos + 8 > len(bits):
+            return None
+        train_u.append(bits_le(bits, pos, 7))
+        pos += 7
+        if len(train_u) < n:
+            if not expect_zero(bits, pos, 1):
+                return None
+            pos += 1
+            if pos + 8 > len(bits):
+                return None
+            train_u.append(bits_le(bits, pos, 7))
+            pos += 7
+            if not expect_zero(bits, pos, 1):
+                return None
+            pos += 1
+        else:
+            if not expect_zero(bits, pos, 9):
+                return None
+            pos += 9
+    if not expect_zero(bits, pos, 1):
+        return None
+    pos += 1
+    if pos + 16 > len(bits):
+        return None
+    crc_field = bits_le(bits, pos, 16)
+    if crc_field != crc16_bits(bits, crc_start):
+        return None
+    pos += 16
+    if not expect_zero(bits, pos, 1):
+        return None
+    return DilDesc(n=n, lsp=lsp, ltp=ltp, sp=sp, tp=tp, h=h, ref=ref, train_u=train_u, bit_len=descriptor_bits)
+
+
+def consensus_block(bits: str, start: int, block_len: int, max_blocks: int) -> tuple[str, int]:
+    available = len(bits) - start
+    blocks = min(max_blocks, available // block_len)
+    if blocks <= 0:
+        return "", 0
+    out = []
+    for i in range(block_len):
+        ones = 0
+        for b in range(blocks):
+            if bits[start + b * block_len + i] == "1":
+                ones += 1
+        out.append("1" if ones * 2 >= blocks else "0")
+    return "".join(out), blocks
+
+
+def uchord_idx(training_ucode: int) -> int:
+    idx = training_ucode >> 4
+    if idx < 0:
+        return 0
+    if idx > 7:
+        return 7
+    return idx
+
+
+def dil_cycle_len(desc: DilDesc) -> int:
+    if desc.n <= 0:
+        return 0
+    total = 0
+    for i in range(desc.n):
+        ui = uchord_idx(desc.train_u[i] & 0x7F)
+        total += (int(desc.h[ui] & 0x7F) + 1) * 6
+    return total
+
+
+def norm_corr(x: np.ndarray, lag: int) -> float:
+    if lag <= 0 or lag >= len(x) - 8:
+        return 0.0
+    a = x[:-lag]
+    b = x[lag:]
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Check Ja descriptor vs observed DIL window consistency")
+    ap.add_argument("--bitdump", type=Path, required=True)
+    ap.add_argument("--label", default="dbpsk_bits_inverted")
+    ap.add_argument("--g711", type=Path, required=True)
+    ap.add_argument("--dil-start-ms", type=float, required=True)
+    ap.add_argument("--dil-end-ms", type=float, required=True)
+    ap.add_argument("--prefix-ones", type=int, default=24)
+    ap.add_argument("--descriptor-len", type=int, default=276)
+    ap.add_argument("--consensus-blocks", type=int, default=64)
+    args = ap.parse_args()
+
+    bits = extract_label_bits(args.bitdump, args.label)
+    anchor = find = bits.find("1" * args.prefix_ones)
+    if find < 0:
+        print("ja_anchor=not_found")
+        return 1
+    ds = anchor + args.prefix_ones
+    d = parse_dil_descriptor(bits[ds:])
+    mode = "direct"
+    if d is None:
+        cons, b = consensus_block(bits, ds, args.descriptor_len, args.consensus_blocks)
+        if cons:
+            d = parse_dil_descriptor(cons)
+            if d is not None:
+                mode = f"consensus_{b}blocks"
+    print(f"ja_anchor_bit={anchor} descriptor_start_bit={ds}")
+    if d is None:
+        print("descriptor_parse=failed")
+        return 2
+    print(f"descriptor_parse=ok mode={mode} bit_len={d.bit_len}")
+    print(f"N={d.n} LSP={d.lsp} LTP={d.ltp}")
+    cyc = dil_cycle_len(d)
+    print(f"predicted_dil_cycle_symbols={cyc}")
+
+    raw = np.frombuffer(args.g711.read_bytes(), dtype=np.uint8)
+    fs = 8000
+    s0 = int(args.dil_start_ms * fs / 1000.0)
+    s1 = int(args.dil_end_ms * fs / 1000.0)
+    if s0 < 0:
+        s0 = 0
+    if s1 > len(raw):
+        s1 = len(raw)
+    w = raw[s0:s1]
+    x = np.array([ulaw_to_lin(int(v)) for v in w], dtype=np.float64)
+    print(f"dil_window_samples={len(w)} duration_ms={len(w)/fs*1000:.1f}")
+
+    if cyc > 8 and cyc < len(x) - 8:
+        r = norm_corr(x, cyc)
+        print(f"corr_at_predicted_cycle({cyc})={r:+.4f} abs={abs(r):.4f}")
+    else:
+        print("corr_at_predicted_cycle=n/a")
+
+    # Default-v90 sanity comparison
+    r1500 = norm_corr(x, 1500) if len(x) > 1520 else 0.0
+    print(f"corr_at_1500={r1500:+.4f} abs={abs(r1500):.4f}")
+    print("consistency_hint=good" if (abs(r1500) > 0.45 or (cyc > 8 and abs(norm_corr(x, cyc)) > 0.45)) else "consistency_hint=weak")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
