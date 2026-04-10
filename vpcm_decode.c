@@ -5979,6 +5979,117 @@ static int ru_window_two_point_score(const uint8_t *symbols, int len)
     }
 }
 
+static bool detect_trn1u_waveform_segment(const int16_t *samples,
+                                          int total_samples,
+                                          int search_start,
+                                          int search_end,
+                                          int *start_out,
+                                          int *end_out,
+                                          float *mean_abs_out,
+                                          int *sample_count_out)
+{
+    enum {
+        WIN = 160,   /* 20 ms @ 8 kHz */
+        STEP = 80,   /* 10 ms */
+        MIN_RUN_WINDOWS = 30 /* 300 ms */
+    };
+    int run_start = -1;
+    int run_len = 0;
+    int best_start = -1;
+    int best_len = 0;
+    double best_abs_sum = 0.0;
+    int best_abs_count = 0;
+    double run_abs_sum = 0.0;
+    int run_abs_count = 0;
+
+    if (!samples || total_samples <= 0 || !start_out || !end_out
+        || !mean_abs_out || !sample_count_out)
+        return false;
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end > total_samples)
+        search_end = total_samples;
+    if (search_end - search_start < WIN)
+        return false;
+
+    for (int pos = search_start; pos + WIN <= search_end; pos += STEP) {
+        double abs_sum = 0.0;
+        double sq_sum = 0.0;
+        int pos_count = 0;
+        int neg_count = 0;
+        int active = 0;
+        double mean_abs;
+        double var_abs;
+        double std_abs;
+        double cv_abs;
+        double sign_balance;
+        bool good = false;
+
+        for (int i = 0; i < WIN; i++) {
+            int s = samples[pos + i];
+            double a = fabs((double) s);
+            abs_sum += a;
+            sq_sum += a * a;
+            if (a > 240.0) {
+                active++;
+                if (s >= 0) pos_count++;
+                else neg_count++;
+            }
+        }
+        mean_abs = abs_sum / (double) WIN;
+        var_abs = sq_sum / (double) WIN - mean_abs * mean_abs;
+        if (var_abs < 0.0)
+            var_abs = 0.0;
+        std_abs = sqrt(var_abs);
+        cv_abs = (mean_abs > 1e-6) ? (std_abs / mean_abs) : 99.0;
+        sign_balance = (active > 0) ? fabs((double) (pos_count - neg_count)) / (double) active : 1.0;
+
+        /* TRN1u (2-point) tends to be energetic, sign-balanced and with limited |x| spread. */
+        if (mean_abs >= 900.0 && sign_balance <= 0.45 && cv_abs <= 1.10)
+            good = true;
+
+        if (good) {
+            if (run_start < 0) {
+                run_start = pos;
+                run_len = 0;
+                run_abs_sum = 0.0;
+                run_abs_count = 0;
+            }
+            run_len++;
+            run_abs_sum += abs_sum;
+            run_abs_count += WIN;
+        } else {
+            if (run_start >= 0 && run_len >= MIN_RUN_WINDOWS && run_len > best_len) {
+                best_len = run_len;
+                best_start = run_start;
+                best_abs_sum = run_abs_sum;
+                best_abs_count = run_abs_count;
+            }
+            run_start = -1;
+            run_len = 0;
+            run_abs_sum = 0.0;
+            run_abs_count = 0;
+        }
+    }
+    if (run_start >= 0 && run_len >= MIN_RUN_WINDOWS && run_len > best_len) {
+        best_len = run_len;
+        best_start = run_start;
+        best_abs_sum = run_abs_sum;
+        best_abs_count = run_abs_count;
+    }
+    if (best_start < 0 || best_len <= 0)
+        return false;
+
+    *start_out = best_start;
+    *end_out = best_start + (best_len - 1) * STEP + WIN;
+    if (*end_out > search_end)
+        *end_out = search_end;
+    *sample_count_out = best_abs_count;
+    *mean_abs_out = (best_abs_count > 0) ? (float) (best_abs_sum / (double) best_abs_count) : 0.0f;
+    return true;
+}
+
 static int v92_ru_flow_min_score(const decode_v34_result_t *result)
 {
     int min_score = 40;
@@ -6396,6 +6507,8 @@ static void collect_v92_phase3_event(call_log_t *log,
                                      const decode_v34_result_t *res,
                                      const char *role_name,
                                      int latest_allowed_sample,
+                                     const int16_t *samples,
+                                     int total_samples,
                                      const uint8_t *codewords,
                                      int total_codewords,
                                      v91_law_t law,
@@ -6416,6 +6529,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     int event_sample;
     const char *ja_anchor_source = "local";
     const char *ja_dil_source = "none";
+    const char *trn_source = "marker";
     char ja_dil_source_buf[32];
     char detail[8192];
     bool has_phase3_evidence;
@@ -6508,6 +6622,41 @@ static void collect_v92_phase3_event(call_log_t *log,
     }
     if (obs.tx_ja_sample < 0)
         ja_anchor_source = "none";
+
+    if (obs.tx_trn_sample < 0 && samples && total_samples > 0 && obs.phase3_sample >= 0) {
+        int trn_search_start = obs.phase3_sample - 1600;
+        int trn_search_end = trn_search_start + 12000;
+        int trn_start = -1;
+        int trn_end = -1;
+        float trn_mag_mean = 0.0f;
+        int trn_mag_count = 0;
+
+        if (toneq_sample >= 0) {
+            int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
+            int from_toneq = toneq_end + 320; /* ~40 ms guard after TONEq */
+            if (trn_search_start < from_toneq)
+                trn_search_start = from_toneq;
+        }
+        if (trn_search_start < 0)
+            trn_search_start = 0;
+        if (trn_search_end > total_samples)
+            trn_search_end = total_samples;
+        if (detect_trn1u_waveform_segment(samples,
+                                          total_samples,
+                                          trn_search_start,
+                                          trn_search_end,
+                                          &trn_start,
+                                          &trn_end,
+                                          &trn_mag_mean,
+                                          &trn_mag_count)) {
+            obs.tx_trn_sample = trn_start;
+            if (obs.trn1u_mag_count <= 0) {
+                obs.trn1u_mag_count = trn_mag_count;
+                obs.trn1u_mag_mean = trn_mag_mean;
+            }
+            trn_source = "waveform";
+        }
+    }
     obs.rx_s_event_sample = res->rx_s_event_sample;
     obs.ru_window_len = res->ru_window_len;
     obs.ru_window_score = res->ru_window_score;
@@ -6670,6 +6819,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     if (toneq_sample >= 0)
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(toneq_sample, 8000));
     appendf(detail, sizeof(detail), " ja_anchor_source=%s", ja_anchor_source);
+    appendf(detail, sizeof(detail), " trn_source=%s", trn_source);
     appendf(detail, sizeof(detail), " ja_aux_bits_local=%d", res->ja_aux_bit_len);
     appendf(detail, sizeof(detail), " ja_aux_bits_peer=%d", peer ? peer->ja_aux_bit_len : 0);
     appendf(detail, sizeof(detail), " trn_to_ja_t=%s",
@@ -10408,6 +10558,8 @@ static void collect_v34_events(call_log_t *log,
                                      res__, \
                                      role_name, \
                                      -1, \
+                                     samples, \
+                                     total_samples, \
                                      g711_codewords, \
                                      total_codewords, \
                                      law, \

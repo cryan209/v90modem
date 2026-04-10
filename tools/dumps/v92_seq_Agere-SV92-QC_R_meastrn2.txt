@@ -1,0 +1,69 @@
+G.711: 161866 codewords (20233.2 ms), Law: µ-law
+File: gough-lui-v90-v92-modem-sounds/FF_U/Agere-SV92-QC_R.g711
+Duration: 20.233 seconds (161866 samples)
+
+
+--- Channel: Mono ---
+Codewords: direct companding retained (adaptive re-slice found no stronger V.90 candidate; score 0)
+
+=== V.34/V.90 Phase 2 Decode (as answerer) ===
+  Role:            answerer
+  Phase 3 target:  V.90
+  Final RX stage:  INFO0 (1)
+  Final TX stage:  INITIAL_PREAMBLE (1)
+  Final RX event:  INFO0_BAD (6)
+  Phase 2 window:  #1 2400.0-10000.0 ms tried=1/6 active_hits=139 peak=-16.5 dB
+  INFO0a/INFO0d:   not decoded (INFO0_BAD at 5090.0 ms)
+  INFO1a/INFO1d:   not decoded
+  11.3.1 flow:     PARTIAL (answer modem side) seq=issue trn=<512T/unknown handoff=issue
+                   notes: missing PP; missing TRN; missing J/Ja; no far-end S/Phase4 handoff
+
+=== V.34/V.90 Phase 2 Decode (as caller) ===
+  Role:            caller
+  Phase 3 target:  V.90
+  Final RX stage:  INFO0 (1)
+  Final TX stage:  INITIAL_PREAMBLE (1)
+  Final RX event:  INFO0_BAD (6)
+  Phase 2 window:  #1 2400.0-10000.0 ms tried=1/6 active_hits=139 peak=-16.5 dB
+  INFO0a/INFO0d:   not decoded (INFO0_BAD at 5040.0 ms)
+  INFO1a/INFO1d:   not decoded
+  11.3.1 flow:     PARTIAL (call modem side) seq=issue trn=<512T/unknown handoff=issue
+                   notes: missing PP; missing TRN; missing J/Ja; no far-end S/Phase4 handoff
+
+=== Call Log: Mono ===
+  Duration: 20.233 seconds
+  Recognized events: 13
+  Approximate covered time: 3354.6 ms (16.6%)
+  [    0.0 ms] Diagnostic Side evidence (V.34 candidate)
+             source=v34_pair label=answerer info0=0 info0d=0 info1=0 info1d=0 phase3=0 phase4=0 failed=0 u_info=0 u_info_src=fallback tx_pp=no tx_trn=no tx_ja=no rx_s=no ru_window=0 ru_score=-1 trn1u_mag_count=0
+  [    0.0 ms] Diagnostic Side evidence (V.34 candidate)
+             source=v34_pair label=caller info0=0 info0d=0 info1=0 info1d=0 phase3=0 phase4=0 failed=0 u_info=0 u_info_src=fallback tx_pp=no tx_trn=no tx_ja=no rx_s=no ru_window=0 ru_score=-1 trn1u_mag_count=0
+  [    0.0 ms] GAP: no implemented decoder matched for 190.0 ms
+  [  190.0 ms] V.8   CT tone detected (610.0 ms)
+             role=caller tone=CT peak_ratio=0.500 duration=610.0ms
+  [  800.0 ms] GAP: no implemented decoder matched for 460.0 ms
+  [ 1260.0 ms] V.8bis CRe detected before ANS (500.0 ms)
+             duration=500.0ms weak=no
+  [ 1760.0 ms] GAP: no implemented decoder matched for 276.0 ms
+  [ 2036.0 ms] V.8   JM decoded (334.5 ms)
+             role=caller msg=JM confidence=candidate_fragment call_fn=0 modulations=V.34 protocol=0 pcm=0 pstn=0 seen=1 drift=0 raw=18_16_23_C5_7C_23_23_B1
+  [ 2370.5 ms] Diagnostic Side evidence (Phase 1/2)
+             source=phase12 role_detected=1 is_caller=1 role_confident=1 pcm=1 v90=0 v92=1 short_p2=0 digital_side=0 info0=0 info0d=0 info1=0 info1d=0 inferred_u_info=0
+  [ 2370.5 ms] V.34  Phase 1/2 diagnostic
+             role=caller pcm_modem=1 v90=0 v92=1 short_p2_req=0 digital_side=0 phase2_start=2370.5ms phase2_end=2370.5ms ans=ANS/PR ans_start=3220.0ms ans_end=4360.0ms ans_dur=1140.0ms pre_v8bis=CRe@1260.0ms phase2_role=v90_analog_caller next=expect_info0
+  [ 2370.5 ms] GAP: no implemented decoder matched for 481.5 ms
+  [ 2852.0 ms] V.8   CM decoded (170.1 ms)
+             role=caller msg=CM confidence=candidate_fragment call_fn=0 modulations=V.34,V.90 protocol=0 pcm=0 pstn=0 seen=1 drift=0 raw=08_E5_F9
+  [ 3022.1 ms] GAP: no implemented decoder matched for 197.9 ms
+  [ 3220.0 ms] V.8   ANS/PR tone detected (1140.0 ms)
+             role=caller tone=ANS/PR peak_ratio=0.499 duration=1140.0ms
+  [ 4290.0 ms] V.92  TONEq (980 Hz) (670.0 ms)
+             duration=670ms
+  [ 4360.0 ms] V.8   Answer-tone handoff
+             tone=ANS/PR start=3220.0ms end=4360.0ms duration=1140.0ms
+  [ 4960.0 ms] GAP: no implemented decoder matched for 600.0 ms
+  [ 5560.0 ms] V.92 Phase 3 Phase 3 sequence from Ru
+             role=answerer spec=V92_tables15_19 local_modem=unknown shortp2_req=0 v92_cap=1 ru_source=phase3_gate status=waiting_ja ru_ms=5560.0 phase3_ms=5560.0 phase4_ms=n/a phase4_status=waiting_phase4 toneq_ms=4290.0 ja_anchor_source=none trn_source=waveform ja_aux_bits_local=0 ja_aux_bits_peer=0 trn_to_ja_t=n/a trn_first_2040t=2040 trn_2040t_ready=0 ja_ms=n/a ja_dil_seen=0 ja_dil_source=none ja_dil_ms=n/a ja_dil_bits=n/a ja_dil_end_ms=n/a ja_n=n/a ja_lsp=n/a ja_ltp=n/a ja_unique_u=n/a ja_uchords=n/a ja_impairment=n/a sd_ms=n/a sd_t=n/a sd_reps=n/a ds_ms=n/a ds_t=n/a ds_reps=n/a sd_wait_ms=n/a sd_wait_le_500ms=0 sd_384t_ok=0 ds_48t_ok=0 ja_status=waiting_ja ru_pattern_primary=+LU,+LU,+LU,-LU,-LU,-LU ru_pattern_complement=-LU,-LU,-LU,+LU,+LU,+LU ru_precoder_bypass=1 ru_prefilter_bypass=1 ru_trn1u_structure=1 ru_tx_modem=analogue digital_quiet_pre_sd=1 first_digital_signal_sd_ja=1 ru_t=384 ur_t=24 ru_ur_cycle_t=408 repeats_after_md_expected=1 repeats_after_md_status=unknown ru_window_symbols=0 ru_window_score=n/a trn1u_mag_mean=n/a trn1u_mag_count=0 ru_decoded=0 ru_match=0 ru_match_pct=n/a ru_symbols=n/a lu_definition=trn1u_power_calibrated lu_absolute_level=derived_from_trn1u lu_reference=V92_3.8 ru_lu_consistency=inconclusive ru_lu_ratio=n/a trn_required_by_info=1 seq_ru1=1 seq_ur1=1 seq_ru2=1 seq_ur2=1 seq_trn1u=1 seq_ja=0 seq_order_ok=1 seq_strict_pass=0 seq_source=soft_inferred_from_ru_timing seq_status=waiting_ja
+  [ 5560.0 ms] V.92 Phase 3 Phase 3 sequence from Ru
+             role=caller spec=V92_tables15_19 local_modem=unknown shortp2_req=0 v92_cap=1 ru_source=phase3_gate status=waiting_ja ru_ms=5560.0 phase3_ms=5560.0 phase4_ms=n/a phase4_status=waiting_phase4 toneq_ms=4290.0 ja_anchor_source=none trn_source=waveform ja_aux_bits_local=0 ja_aux_bits_peer=0 trn_to_ja_t=n/a trn_first_2040t=2040 trn_2040t_ready=0 ja_ms=n/a ja_dil_seen=0 ja_dil_source=none ja_dil_ms=n/a ja_dil_bits=n/a ja_dil_end_ms=n/a ja_n=n/a ja_lsp=n/a ja_ltp=n/a ja_unique_u=n/a ja_uchords=n/a ja_impairment=n/a sd_ms=n/a sd_t=n/a sd_reps=n/a ds_ms=n/a ds_t=n/a ds_reps=n/a sd_wait_ms=n/a sd_wait_le_500ms=0 sd_384t_ok=0 ds_48t_ok=0 ja_status=waiting_ja ru_pattern_primary=+LU,+LU,+LU,-LU,-LU,-LU ru_pattern_complement=-LU,-LU,-LU,+LU,+LU,+LU ru_precoder_bypass=1 ru_prefilter_bypass=1 ru_trn1u_structure=1 ru_tx_modem=analogue digital_quiet_pre_sd=1 first_digital_signal_sd_ja=1 ru_t=384 ur_t=24 ru_ur_cycle_t=408 repeats_after_md_expected=1 repeats_after_md_status=unknown ru_window_symbols=0 ru_window_score=n/a trn1u_mag_mean=n/a trn1u_mag_count=0 ru_decoded=0 ru_match=0 ru_match_pct=n/a ru_symbols=n/a lu_definition=trn1u_power_calibrated lu_absolute_level=derived_from_trn1u lu_reference=V92_3.8 ru_lu_consistency=inconclusive ru_lu_ratio=n/a trn_required_by_info=1 seq_ru1=1 seq_ur1=1 seq_ru2=1 seq_ur2=1 seq_trn1u=1 seq_ja=0 seq_order_ok=1 seq_strict_pass=0 seq_source=soft_inferred_from_ru_timing seq_status=waiting_ja
+  [ 5560.0 ms] GAP: trailing undecoded span of 14673.2 ms
