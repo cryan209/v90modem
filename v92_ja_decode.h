@@ -67,6 +67,8 @@ typedef struct {
 typedef struct {
     /* True when a plausible DIL descriptor was found. */
     bool ok;
+    /* True when no full descriptor parsed, but best near-lock is available. */
+    bool soft_lock;
 
     bool calling_party;
 
@@ -84,6 +86,11 @@ typedef struct {
      * the raw codeword sign bits.
      */
     bool invert_sign;
+    int  soft_score;
+    int  soft_sync_hd;
+    int  soft_frame17_viol;
+    int  soft_zero_viol;
+    int  soft_crc_hd;
 
     /* Parsed descriptor and quality analysis. */
     v90_dil_desc_t     desc;
@@ -107,10 +114,14 @@ typedef struct {
  *   + 50 × used_uchords     (number of distinct U-chords actually used)
  *   - 10 × impairment_score (penalty for out-of-spec entries)
  *   -  5 × non_default_h   (penalty for non-default H vector)
+ *   -  3 × frame17_violations (expected 17-bit framing start-zero rhythm)
+ *   -  8 × sync_hamming18     (distance from 17 ones + start-zero sync)
+ *   + 20 when 12-bit FS pattern is present
  *   -  distance / 8         (penalty for distance from tx_ja_sample anchor)
  *
- * Returns true and fills *out on success; returns false when no candidate
- * passes the parse/analysis checks.
+ * Returns true and fills *out on hard success (ok=true) or on soft near-lock
+ * (ok=false, soft_lock=true). Returns false only when no viable candidate
+ * exists in the window.
  */
 bool v92_ja_dil_search(const uint8_t *codewords,
                        int total_codewords,

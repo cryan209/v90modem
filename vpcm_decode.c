@@ -13203,13 +13203,26 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
 
 static void print_ja_dil_decode(const ja_dil_decode_t *result)
 {
-    if (!result || !result->ok)
+    if (!result)
+        return;
+    if (!result->ok && !result->soft_lock)
         return;
 
     printf("\n=== Ja/DIL Decode ===\n");
     printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
     printf("  Start time:       %.1f ms\n", sample_to_ms(result->start_sample, 8000));
     printf("  U_INFO:           %d\n", result->u_info);
+    if (!result->ok && result->soft_lock) {
+        printf("  Soft lock:        yes (descriptor not fully parsed)\n");
+        printf("  Soft metrics:     score=%d sync_hd=%d frame17_viol=%d zero_viol=%d crc_hd=%d invert=%s\n",
+               result->soft_score,
+               result->soft_sync_hd,
+               result->soft_frame17_viol,
+               result->soft_zero_viol,
+               result->soft_crc_hd,
+               result->invert_sign ? "yes" : "no");
+        return;
+    }
     printf("  Descriptor:       n=%u lsp=%u ltp=%u\n",
            (unsigned) result->desc.n,
            (unsigned) result->desc.lsp,
