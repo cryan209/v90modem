@@ -6400,7 +6400,9 @@ static void collect_v92_phase3_event(call_log_t *log,
                                      int total_codewords,
                                      v91_law_t law,
                                      const decode_v34_result_t *answerer,
-                                     const decode_v34_result_t *caller)
+                                     const decode_v34_result_t *caller,
+                                     int toneq_sample,
+                                     int toneq_duration_samples)
 {
     v92_phase3_observation_t obs;
     v92_phase3_result_t phase3;
@@ -6430,7 +6432,8 @@ static void collect_v92_phase3_event(call_log_t *log,
                            || res->tx_trn_sample >= 0
                            || res->tx_ja_sample >= 0
                            || res->ru_window_len > 0
-                           || res->rx_s_event_sample >= 0);
+                           || res->rx_s_event_sample >= 0
+                           || toneq_sample >= 0);
     if (!res->info0_seen && !has_phase3_evidence)
         return;
     gate_sample = (res->info0_sample >= 0) ? res->info0_sample
@@ -6450,8 +6453,13 @@ static void collect_v92_phase3_event(call_log_t *log,
     ja_dil_source_buf[0] = '\0';
     obs.info0_seen = res->info0_seen;
     obs.info0_is_d = res->info0_is_d;
-    obs.short_phase2_requested = v92_short_phase2_req_from_info0_bits(res->info0_is_d, raw_26_27);
-    obs.v92_capable = v92_short_phase2_v92_cap_from_info0_bits(res->info0_is_d, raw_26_27);
+    if (res->info0_seen) {
+        obs.short_phase2_requested = v92_short_phase2_req_from_info0_bits(res->info0_is_d, raw_26_27);
+        obs.v92_capable = v92_short_phase2_v92_cap_from_info0_bits(res->info0_is_d, raw_26_27);
+    } else {
+        obs.short_phase2_requested = false;
+        obs.v92_capable = has_phase3_evidence;
+    }
     obs.phase3_seen = res->phase3_seen;
     obs.phase4_seen = res->phase4_seen;
     obs.training_failed = res->training_failed;
@@ -6468,6 +6476,12 @@ static void collect_v92_phase3_event(call_log_t *log,
     obs.tx_ja_sample = res->tx_ja_sample;
     obs.tx_jdashed_sample = res->tx_jdashed_sample;
     obs.u_info = res->u_info;
+    if (obs.phase3_sample < 0 && toneq_sample >= 0) {
+        int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
+        /* Coarse fallback: short-Phase-2 handoff after TONEq into INFO exchanges. */
+        obs.phase3_sample = toneq_end + (int) lround(0.60 * 8000.0);
+        obs.phase3_seen = true;
+    }
     if (analogue_side) {
         if (obs.tx_trn_sample < 0 && analogue_side->tx_trn_sample >= 0) {
             obs.tx_trn_sample = analogue_side->tx_trn_sample;
@@ -6626,6 +6640,10 @@ static void collect_v92_phase3_event(call_log_t *log,
     event_sample = phase3.ru_sample;
     if (event_sample < 0)
         event_sample = res->phase3_sample;
+    if (event_sample < 0)
+        event_sample = obs.phase3_sample;
+    if (event_sample < 0)
+        event_sample = gate_sample;
     if (!should_emit_phase2_event(event_sample, latest_allowed_sample))
         return;
 
@@ -6648,6 +6666,9 @@ static void collect_v92_phase3_event(call_log_t *log,
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.phase4_sample, 8000));
     appendf(detail, sizeof(detail), " phase4_status=%s",
             phase3.phase4_status ? phase3.phase4_status : "unknown");
+    appendf(detail, sizeof(detail), " toneq_ms=%s", toneq_sample >= 0 ? "" : "n/a");
+    if (toneq_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(toneq_sample, 8000));
     appendf(detail, sizeof(detail), " ja_anchor_source=%s", ja_anchor_source);
     appendf(detail, sizeof(detail), " ja_aux_bits_local=%d", res->ja_aux_bit_len);
     appendf(detail, sizeof(detail), " ja_aux_bits_peer=%d", peer ? peer->ja_aux_bit_len : 0);
@@ -10210,7 +10231,9 @@ static void collect_v34_events(call_log_t *log,
                                int total_codewords,
                                v91_law_t law,
                                bool suppress_v90_phase2,
-                               bool suppress_phase12_early_events)
+                               bool suppress_phase12_early_events,
+                               int toneq_sample,
+                               int toneq_duration_samples)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -10370,7 +10393,15 @@ static void collect_v34_events(call_log_t *log,
                                 detail); \
             } \
         } \
-        if (phase3_standard_global == P3_FLOW_STANDARD_V92 || p3_result_indicates_v92(res__)) { \
+        if (phase3_standard_global == P3_FLOW_STANDARD_V92 \
+            || p3_result_indicates_v92(res__) \
+            || (!res__->info0_seen \
+                && (res__->phase3_seen \
+                    || res__->phase3_sample >= 0 \
+                    || res__->tx_trn_sample >= 0 \
+                    || res__->tx_ja_sample >= 0 \
+                    || res__->ru_window_len > 0 \
+                    || toneq_sample >= 0))) { \
             collect_v92_phase3_event(log, \
                                      res__, \
                                      role_name, \
@@ -10379,7 +10410,9 @@ static void collect_v34_events(call_log_t *log,
                                      total_codewords, \
                                      law, \
                                      have_answerer ? &answerer : NULL, \
-                                     have_caller ? &caller : NULL); \
+                                     have_caller ? &caller : NULL, \
+                                     toneq_sample, \
+                                     toneq_duration_samples); \
         } \
         if (!(ALLOW_PHASE3_PLUS)) \
             break; \
@@ -10818,7 +10851,11 @@ static void collect_stream_call_log(call_log_t *log,
                            total_codewords,
                            law,
                            suppress_v90_phase2,
-                           have_phase12);
+                           have_phase12,
+                           (have_phase12 && phase12.call_init.v92_toneq_seen)
+                               ? phase12.call_init.v92_toneq_sample : -1,
+                           (have_phase12 && phase12.call_init.v92_toneq_seen)
+                               ? phase12.call_init.v92_toneq_duration_samples : 0);
     if (do_v8 && !have_phase12) {
         v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
         v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
