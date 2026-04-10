@@ -1105,8 +1105,11 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
 
     if (!v90_expect_zero_bit(bits, bit_len, crc_start + 17))
         return false;
-    if ((crc_start + 18) < bit_len && v90_get_packed_bit(bits, crc_start + 18) != 0)
-        return false;
+    /*
+     * V.90 Table 12 ends after this fill bit, but V.92 Table 20 extends the
+     * DIL descriptor with additional capability fields after the base V.90
+     * descriptor. Do not require the next bit to be zero here.
+     */
 
     return true;
 }

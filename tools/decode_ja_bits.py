@@ -26,6 +26,15 @@ def interp(xs: np.ndarray, t: float) -> float:
     return float(xs[i] * (1.0 - f) + xs[i + 1] * f)
 
 
+def sample_carrier_symbol(xs: np.ndarray, t_center: float, carrier_hz: float, fs: int) -> complex:
+    acc = 0j
+    for k in range(-2, 3):
+        t = t_center + k
+        s = interp(xs, t)
+        acc += s * np.exp(-1j * 2.0 * math.pi * carrier_hz * (t / fs))
+    return acc
+
+
 def chunk(s: str, n: int) -> str:
     return " ".join(s[i:i + n] for i in range(0, len(s), n))
 
@@ -41,6 +50,10 @@ def main() -> int:
     ap.add_argument("--symbols", type=int, default=0, help="Number of symbols to decode in carrier-qpsk mode (0=all)")
     ap.add_argument("--bits", type=int, default=0, help="Number of bits to decode in sign-diff mode (0=all)")
     ap.add_argument("--offset-samples", type=float, default=0.0, help="Extra symbol timing offset in samples")
+    ap.add_argument("--timing-loop", action="store_true", help="Enable simple early/late timing recovery for carrier modes")
+    ap.add_argument("--timing-gain", type=float, default=0.02, help="Timing loop gain (carrier modes)")
+    ap.add_argument("--timing-rate-gain", type=float, default=0.0005, help="Timing loop rate gain (carrier modes)")
+    ap.add_argument("--timing-max", type=float, default=2.0, help="Clamp timing correction to +/- this many samples")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -61,16 +74,46 @@ def main() -> int:
         n_syms = max_syms if args.symbols <= 0 else min(args.symbols, max_syms)
 
         syms = np.zeros(n_syms, dtype=np.complex128)
+        tau = float(args.offset_samples)
+        t_cur = start + tau
+        rate_corr = 0.0
+        tau_hist = np.zeros(n_syms, dtype=np.float64)
+        rate_hist = np.zeros(n_syms, dtype=np.float64)
         for n in range(n_syms):
-            c = start + n * step
-            acc = 0j
-            for k in range(-2, 3):
-                t = c + k
-                s = interp(x, t)
-                acc += s * np.exp(-1j * 2.0 * math.pi * args.carrier_hz * (t / args.fs))
-            syms[n] = acc
+            c = t_cur
+            y = sample_carrier_symbol(x, c, args.carrier_hz, args.fs)
+            syms[n] = y
+            tau_hist[n] = tau
+            rate_hist[n] = rate_corr
+            if args.timing_loop:
+                # Early/late energy detector: drive |early|-|late| toward zero.
+                y_early = sample_carrier_symbol(x, c - 1.0, args.carrier_hz, args.fs)
+                y_late = sample_carrier_symbol(x, c + 1.0, args.carrier_hz, args.fs)
+                err = (abs(y_late) - abs(y_early))
+                scale = abs(y) + 1e-6
+                tau += args.timing_gain * (err / scale)
+                if tau > args.timing_max:
+                    tau = args.timing_max
+                elif tau < -args.timing_max:
+                    tau = -args.timing_max
+                rate_corr += args.timing_rate_gain * (err / scale)
+                max_rate_corr = 0.05 * step
+                if rate_corr > max_rate_corr:
+                    rate_corr = max_rate_corr
+                elif rate_corr < -max_rate_corr:
+                    rate_corr = -max_rate_corr
+            t_cur += step + rate_corr
 
         out.append(f"symbols={n_syms}")
+        if args.timing_loop and n_syms > 0:
+            out.append(
+                f"timing_loop=on gain={args.timing_gain:.4f} tau_min={float(np.min(tau_hist)):.4f} "
+                f"tau_max={float(np.max(tau_hist)):.4f} tau_end={float(tau_hist[-1]):.4f} "
+                f"rate_corr_min={float(np.min(rate_hist)):.5f} rate_corr_max={float(np.max(rate_hist)):.5f} "
+                f"rate_corr_end={float(rate_hist[-1]):.5f}"
+            )
+        else:
+            out.append("timing_loop=off")
         if args.mode == "carrier-qpsk":
             # Quantize to 4-phase states (QPSK-like). This is a raw symbol view.
             phases = np.angle(syms)

@@ -233,6 +233,25 @@ def norm_corr(x: np.ndarray, lag: int) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+def best_repeat_lengths(bits: str, start: int, lmin: int, lmax: int, blocks: int, top: int = 8) -> list[tuple[float, int, int]]:
+    out: list[tuple[float, int, int]] = []
+    for L in range(lmin, lmax + 1):
+        avail = len(bits) - start
+        b = min(blocks, avail // L)
+        if b < 2:
+            continue
+        base = bits[start:start + L]
+        acc = 0.0
+        for i in range(1, b):
+            cur = bits[start + i * L:start + (i + 1) * L]
+            eq = sum(1 for x, y in zip(base, cur) if x == y)
+            acc += eq / L
+        score = acc / (b - 1)
+        out.append((score, L, b))
+    out.sort(reverse=True)
+    return out[:top]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Check Ja descriptor vs observed DIL window consistency")
     ap.add_argument("--bitdump", type=Path, required=True)
@@ -262,6 +281,10 @@ def main() -> int:
     print(f"ja_anchor_bit={anchor} descriptor_start_bit={ds}")
     if d is None:
         print("descriptor_parse=failed")
+        tops = best_repeat_lengths(bits, ds, 206, 500, 16, 8)
+        print("top_repeat_lengths(score,len,blocks):")
+        for s, L, b in tops:
+            print(f"  {s:.4f} {L} {b}")
         return 2
     print(f"descriptor_parse=ok mode={mode} bit_len={d.bit_len}")
     print(f"N={d.n} LSP={d.lsp} LTP={d.ltp}")
