@@ -6529,11 +6529,19 @@ static void collect_v92_phase3_event(call_log_t *log,
     int event_sample;
     const char *ja_anchor_source = "local";
     const char *ja_dil_source = "none";
+    const char *ja_soft_source = "none";
     const char *trn_source = "marker";
     char ja_dil_source_buf[32];
     char detail[8192];
     bool has_phase3_evidence;
     int gate_sample;
+    int ja_soft_sample = -1;
+    int ja_soft_score = 0;
+    int ja_soft_sync_hd = -1;
+    int ja_soft_frame17_viol = -1;
+    int ja_soft_zero_viol = -1;
+    int ja_soft_crc_hd = -1;
+    bool ja_soft_invert = false;
 
     if (!log || !res)
         return;
@@ -6671,6 +6679,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     if (codewords && total_codewords > 0) {
         jd_stage_decode_t jd_stage;
         ja_dil_decode_t ja_dil;
+        bool ja_search_done = false;
         memset(&jd_stage, 0, sizeof(jd_stage));
         memset(&ja_dil, 0, sizeof(ja_dil));
 
@@ -6683,21 +6692,86 @@ static void collect_v92_phase3_event(call_log_t *log,
         if (!obs.v92_capable)
             decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage);
 
-        if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)
-            && ja_dil.ok) {
-            int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
+        if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)) {
+            ja_search_done = true;
+            if (ja_dil.ok) {
+                int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
 
-            if (bit_len > 0) {
-                obs.ja_dil_seen = true;
-                obs.ja_dil_sample = ja_dil.start_sample;
-                obs.ja_dil_bits = bit_len;
-                obs.ja_dil_n = ja_dil.desc.n;
-                obs.ja_dil_lsp = ja_dil.desc.lsp;
-                obs.ja_dil_ltp = ja_dil.desc.ltp;
-                obs.ja_dil_unique_train_u = ja_dil.analysis.unique_train_u;
-                obs.ja_dil_uchords = ja_dil.analysis.used_uchords;
-                obs.ja_dil_impairment = ja_dil.analysis.impairment_score;
-                ja_dil_source = "pcm";
+                if (bit_len > 0) {
+                    obs.ja_dil_seen = true;
+                    obs.ja_dil_sample = ja_dil.start_sample;
+                    obs.ja_dil_bits = bit_len;
+                    obs.ja_dil_n = ja_dil.desc.n;
+                    obs.ja_dil_lsp = ja_dil.desc.lsp;
+                    obs.ja_dil_ltp = ja_dil.desc.ltp;
+                    obs.ja_dil_unique_train_u = ja_dil.analysis.unique_train_u;
+                    obs.ja_dil_uchords = ja_dil.analysis.used_uchords;
+                    obs.ja_dil_impairment = ja_dil.analysis.impairment_score;
+                    ja_dil_source = "pcm";
+                }
+            } else if (ja_dil.soft_lock) {
+                ja_soft_source = "pcm_soft";
+                ja_soft_sample = ja_dil.start_sample;
+                ja_soft_score = ja_dil.soft_score;
+                ja_soft_sync_hd = ja_dil.soft_sync_hd;
+                ja_soft_frame17_viol = ja_dil.soft_frame17_viol;
+                ja_soft_zero_viol = ja_dil.soft_zero_viol;
+                ja_soft_crc_hd = ja_dil.soft_crc_hd;
+                ja_soft_invert = ja_dil.invert_sign;
+            }
+        }
+        if (!ja_search_done) {
+            ja_dil_search_params_t fb;
+            int start = obs.phase3_sample;
+            int end;
+
+            if (start < 0)
+                start = gate_sample;
+            if (toneq_sample >= 0) {
+                int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
+                int after_toneq = toneq_end + 320;
+                if (start < after_toneq)
+                    start = after_toneq;
+            }
+            if (start < 0)
+                start = 0;
+            end = start + 5000;
+            if (end > total_codewords - 206)
+                end = total_codewords - 206;
+            if (end >= start) {
+                memset(&fb, 0, sizeof(fb));
+                fb.search_start = start;
+                fb.search_end = end;
+                fb.tx_ja_sample = obs.tx_ja_sample;
+                fb.u_info = res->u_info;
+                fb.calling_party = (role_name && strcmp(role_name, "caller") == 0);
+                if (v92_ja_dil_search(codewords, total_codewords, &fb, &ja_dil)) {
+                    if (ja_dil.ok) {
+                        int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
+
+                        if (bit_len > 0) {
+                            obs.ja_dil_seen = true;
+                            obs.ja_dil_sample = ja_dil.start_sample;
+                            obs.ja_dil_bits = bit_len;
+                            obs.ja_dil_n = ja_dil.desc.n;
+                            obs.ja_dil_lsp = ja_dil.desc.lsp;
+                            obs.ja_dil_ltp = ja_dil.desc.ltp;
+                            obs.ja_dil_unique_train_u = ja_dil.analysis.unique_train_u;
+                            obs.ja_dil_uchords = ja_dil.analysis.used_uchords;
+                            obs.ja_dil_impairment = ja_dil.analysis.impairment_score;
+                            ja_dil_source = "pcm_fb";
+                        }
+                    } else if (ja_dil.soft_lock) {
+                        ja_soft_source = "pcm_soft_fb";
+                        ja_soft_sample = ja_dil.start_sample;
+                        ja_soft_score = ja_dil.soft_score;
+                        ja_soft_sync_hd = ja_dil.soft_sync_hd;
+                        ja_soft_frame17_viol = ja_dil.soft_frame17_viol;
+                        ja_soft_zero_viol = ja_dil.soft_zero_viol;
+                        ja_soft_crc_hd = ja_dil.soft_crc_hd;
+                        ja_soft_invert = ja_dil.invert_sign;
+                    }
+                }
             }
         }
 
@@ -6834,6 +6908,28 @@ static void collect_v92_phase3_event(call_log_t *log,
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_sample, 8000));
     appendf(detail, sizeof(detail), " ja_dil_seen=%u", phase3.ja_dil_seen ? 1U : 0U);
     appendf(detail, sizeof(detail), " ja_dil_source=%s", ja_dil_source);
+    appendf(detail, sizeof(detail), " ja_soft_source=%s", ja_soft_source);
+    appendf(detail, sizeof(detail), " ja_soft_ms=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(ja_soft_sample, 8000));
+    appendf(detail, sizeof(detail), " ja_soft_score=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%d", ja_soft_score);
+    appendf(detail, sizeof(detail), " ja_soft_sync_hd=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%d", ja_soft_sync_hd);
+    appendf(detail, sizeof(detail), " ja_soft_frame17=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%d", ja_soft_frame17_viol);
+    appendf(detail, sizeof(detail), " ja_soft_zero_viol=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%d", ja_soft_zero_viol);
+    appendf(detail, sizeof(detail), " ja_soft_crc_hd=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%d", ja_soft_crc_hd);
+    appendf(detail, sizeof(detail), " ja_soft_invert=%s", ja_soft_sample >= 0 ? "" : "n/a");
+    if (ja_soft_sample >= 0)
+        appendf(detail, sizeof(detail), "%u", ja_soft_invert ? 1U : 0U);
     appendf(detail, sizeof(detail), " ja_dil_ms=%s", phase3.ja_dil_sample >= 0 ? "" : "n/a");
     if (phase3.ja_dil_sample >= 0)
         appendf(detail, sizeof(detail), "%.1f", sample_to_ms(phase3.ja_dil_sample, 8000));
@@ -6962,6 +7058,29 @@ static void collect_v92_phase3_event(call_log_t *log,
                     "V.92 Phase 3",
                     "Phase 3 sequence from Ru",
                     detail);
+
+    if (!obs.ja_dil_seen && ja_soft_sample >= 0) {
+        char soft_detail[512];
+
+        snprintf(soft_detail,
+                 sizeof(soft_detail),
+                 "role=%s source=%s soft_ms=%.1f score=%d sync_hd=%d frame17_viol=%d zero_viol=%d crc_hd=%d invert=%u",
+                 role_name ? role_name : "unknown",
+                 ja_soft_source,
+                 sample_to_ms(ja_soft_sample, 8000),
+                 ja_soft_score,
+                 ja_soft_sync_hd,
+                 ja_soft_frame17_viol,
+                 ja_soft_zero_viol,
+                 ja_soft_crc_hd,
+                 ja_soft_invert ? 1U : 0U);
+        call_log_append(log,
+                        ja_soft_sample,
+                        0,
+                        "V.92 Ja soft-lock",
+                        "Best near-lock candidate",
+                        soft_detail);
+    }
 }
 
 static const decode_v34_result_t *pick_analogue_phase2_side(const decode_v34_result_t *answerer,
@@ -13240,6 +13359,9 @@ static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_resul
                                                           const decode_v34_result_t *caller,
                                                           bool *calling_party_out)
 {
+    int score_a = -1;
+    int score_c = -1;
+
     if (answerer && answerer->u_info_from_info1a && answerer->u_info > 0) {
         if (calling_party_out)
             *calling_party_out = false;
@@ -13270,7 +13392,34 @@ static const decode_v34_result_t *pick_post_phase3_source(const decode_v34_resul
             *calling_party_out = true;
         return caller;
     }
-    return NULL;
+    /*
+     * Soft fallback: when INFO1/U_INFO is missing, still pick the side with
+     * strongest post-Phase-2 evidence so Ja soft-lock search can run.
+     */
+    if (answerer) {
+        score_a = 0;
+        if (answerer->tx_ja_sample >= 0) score_a += 8;
+        if (answerer->tx_trn_sample >= 0) score_a += 6;
+        if (answerer->phase3_seen || answerer->phase3_sample >= 0) score_a += 4;
+        if (answerer->info1_seen) score_a += 2;
+    }
+    if (caller) {
+        score_c = 0;
+        if (caller->tx_ja_sample >= 0) score_c += 8;
+        if (caller->tx_trn_sample >= 0) score_c += 6;
+        if (caller->phase3_seen || caller->phase3_sample >= 0) score_c += 4;
+        if (caller->info1_seen) score_c += 2;
+    }
+    if (score_a <= 0 && score_c <= 0)
+        return NULL;
+    if (score_c > score_a) {
+        if (calling_party_out)
+            *calling_party_out = true;
+        return caller;
+    }
+    if (calling_party_out)
+        *calling_party_out = false;
+    return answerer;
 }
 
 static bool decode_post_phase3_codewords(const uint8_t *codewords,

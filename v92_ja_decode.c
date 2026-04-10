@@ -8,6 +8,8 @@
 
 #include "v92_ja_decode.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -189,6 +191,13 @@ static int ja_soft_score(const uint8_t *bits, int bit_count)
     return score;
 }
 
+static int ja_debug_enabled(void)
+{
+    const char *v = getenv("VPCM_JA_DEBUG");
+
+    return (v && *v && *v != '0');
+}
+
 /* -------------------------------------------------------------------------
  * Static bit-extraction helpers
  * ------------------------------------------------------------------------- */
@@ -307,6 +316,11 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     int search_start;
     int search_end;
     int candidate;
+    int considered = 0;
+    int decode_ok = 0;
+    int parse_ok = 0;
+    int analyse_ok = 0;
+    int debug = ja_debug_enabled();
 
     if (!codewords || total_codewords <= 0 || !params || !out)
         return false;
@@ -339,6 +353,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             int packed_len;
             int score;
             int soft_score;
+            considered++;
 
             if (bit_count > (int) sizeof(packed_bits) * 8)
                 bit_count = (int) sizeof(packed_bits) * 8;
@@ -349,6 +364,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                                        packed_bits, packed_len)) {
                 continue;
             }
+            decode_ok++;
             soft_score = ja_soft_score(packed_bits, bit_count);
             if (soft_score > best_soft_score) {
                 best_soft_score = soft_score;
@@ -361,8 +377,10 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             }
             if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count))
                 continue;
+            parse_ok++;
             if (!v90_analyse_dil_descriptor(&desc, &analysis))
                 continue;
+            analyse_ok++;
 
             /*
              * Score this candidate.  Higher unique_train_u and used_uchords
@@ -398,6 +416,22 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     }
 
     if (best_score < 0) {
+        if (debug) {
+            fprintf(stderr,
+                    "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d analyse_ok=%d hard=none soft_start=%d soft_score=%d sync_hd=%d frame17=%d zviol=%d crc_hd=%d\n",
+                    search_start,
+                    search_end,
+                    considered,
+                    decode_ok,
+                    parse_ok,
+                    analyse_ok,
+                    best_soft_start,
+                    best_soft_score,
+                    best_soft_sync_hd,
+                    best_soft_frame17,
+                    best_soft_zviol,
+                    best_soft_crc_hd);
+        }
         if (best_soft_start < 0)
             return false;
         out->ok = false;
@@ -412,6 +446,20 @@ bool v92_ja_dil_search(const uint8_t *codewords,
         out->soft_zero_viol = best_soft_zviol;
         out->soft_crc_hd = best_soft_crc_hd;
         return true;
+    }
+    if (debug) {
+        fprintf(stderr,
+                "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d analyse_ok=%d hard_start=%d hard_score=%d soft_start=%d soft_score=%d\n",
+                search_start,
+                search_end,
+                considered,
+                decode_ok,
+                parse_ok,
+                analyse_ok,
+                best_start,
+                best_score,
+                best_soft_start,
+                best_soft_score);
     }
 
     out->ok           = true;
