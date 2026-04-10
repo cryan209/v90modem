@@ -21,7 +21,7 @@
 
 /* Minimum bits of lookahead needed to hold the smallest valid DIL descriptor. */
 #define JA_MIN_DESCRIPTOR_BITS 206
-#define JA_FRAME17_CHECK_BITS  40
+#define JA_FRAME17_CHECK_BITS  96
 
 static int ja_get_packed_bit(const uint8_t *bits, int pos)
 {
@@ -89,13 +89,37 @@ static int ja_frame17_zero_violations(const uint8_t *bits, int bit_count)
     return viol;
 }
 
-static bool ja_has_fs12_pattern(const uint8_t *bits, int bit_count)
+static int ja_frame17_best_zero_run(const uint8_t *bits, int bit_count)
+{
+    int k;
+    int best = 0;
+    int run = 0;
+
+    if (!bits || bit_count <= 51)
+        return 0;
+    for (k = 0; k < JA_FRAME17_CHECK_BITS; k++) {
+        int p = 51 + 17 * k;
+
+        if (p >= bit_count)
+            break;
+        if (ja_get_packed_bit(bits, p) == 0) {
+            run++;
+            if (run > best)
+                best = run;
+        } else {
+            run = 0;
+        }
+    }
+    return best;
+}
+
+static int ja_fs12_position(const uint8_t *bits, int bit_count)
 {
     static const int fs12[12] = {1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0};
     int i;
 
     if (!bits || bit_count < 12)
-        return false;
+        return -1;
     for (i = 0; i <= bit_count - 12; i++) {
         int j;
         bool ok = true;
@@ -107,9 +131,9 @@ static bool ja_has_fs12_pattern(const uint8_t *bits, int bit_count)
             }
         }
         if (ok)
-            return true;
+            return i;
     }
-    return false;
+    return -1;
 }
 
 static int ja_reserved_zero_violations(const uint8_t *bits, int bit_count)
@@ -178,16 +202,28 @@ static int ja_soft_score(const uint8_t *bits, int bit_count)
 {
     int sync_hd = ja_sync_hamming18(bits, bit_count);
     int frame17 = ja_frame17_zero_violations(bits, bit_count);
+    int frame17_run = ja_frame17_best_zero_run(bits, bit_count);
     int zviol = ja_reserved_zero_violations(bits, bit_count);
     int crc_hd = ja_crc_nearness_hd(bits, bit_count);
+    int fspos = ja_fs12_position(bits, bit_count);
     int score = 500;
 
-    score -= sync_hd * 20;
-    score -= frame17 * 8;
+    score -= sync_hd * 24;
+    score -= frame17 * 10;
+    score += frame17_run * 5;
     score -= zviol * 10;
-    score -= crc_hd * 6;
-    if (ja_has_fs12_pattern(bits, bit_count))
-        score += 20;
+    score -= crc_hd * 8;
+    if (fspos >= 0) {
+        int fs_err = fspos - 4;
+        if (fs_err < 0)
+            fs_err = -fs_err;
+        score += 40;
+        score -= fs_err * 2;
+        if (fspos <= 8)
+            score += 20;
+    } else {
+        score -= 25;
+    }
     return score;
 }
 
@@ -300,12 +336,26 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                        const ja_dil_search_params_t *params,
                        ja_dil_decode_t *out)
 {
+    enum { JA_TOP_SOFT = 8 };
+    struct {
+        int start;
+        bool invert;
+        int score;
+        int sync_hd;
+        int frame17;
+        int frame17_run;
+        int zviol;
+        int crc_hd;
+        int fspos;
+    } top_soft[JA_TOP_SOFT];
     int best_score = -1;
     int best_soft_score = -1000000;
     int best_soft_sync_hd = 18;
     int best_soft_frame17 = JA_FRAME17_CHECK_BITS;
+    int best_soft_frame17_run = 0;
     int best_soft_zviol = 12;
     int best_soft_crc_hd = 16;
+    int best_soft_fspos = -1;
     bool best_invert = false;
     bool best_soft_invert = false;
     int best_start = -1;
@@ -321,6 +371,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     int parse_ok = 0;
     int analyse_ok = 0;
     int debug = ja_debug_enabled();
+    int i;
 
     if (!codewords || total_codewords <= 0 || !params || !out)
         return false;
@@ -328,6 +379,17 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     memset(out, 0, sizeof(*out));
     memset(&best_desc, 0, sizeof(best_desc));
     memset(&best_analysis, 0, sizeof(best_analysis));
+    for (i = 0; i < JA_TOP_SOFT; i++) {
+        top_soft[i].start = -1;
+        top_soft[i].invert = false;
+        top_soft[i].score = -1000000;
+        top_soft[i].sync_hd = 18;
+        top_soft[i].frame17 = JA_FRAME17_CHECK_BITS;
+        top_soft[i].frame17_run = 0;
+        top_soft[i].zviol = 12;
+        top_soft[i].crc_hd = 16;
+        top_soft[i].fspos = -1;
+    }
 
     search_start = params->search_start;
     search_end   = params->search_end;
@@ -353,6 +415,12 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             int packed_len;
             int score;
             int soft_score;
+            int sync_hd;
+            int frame17;
+            int frame17_run;
+            int zviol;
+            int crc_hd;
+            int fspos;
             considered++;
 
             if (bit_count > (int) sizeof(packed_bits) * 8)
@@ -365,15 +433,53 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                 continue;
             }
             decode_ok++;
+            sync_hd = ja_sync_hamming18(packed_bits, bit_count);
+            frame17 = ja_frame17_zero_violations(packed_bits, bit_count);
+            frame17_run = ja_frame17_best_zero_run(packed_bits, bit_count);
+            zviol = ja_reserved_zero_violations(packed_bits, bit_count);
+            crc_hd = ja_crc_nearness_hd(packed_bits, bit_count);
+            fspos = ja_fs12_position(packed_bits, bit_count);
+
             soft_score = ja_soft_score(packed_bits, bit_count);
+            if (params->tx_ja_sample >= 0) {
+                int sdist = candidate - params->tx_ja_sample;
+
+                if (sdist < 0)
+                    sdist = -sdist;
+                soft_score -= sdist / 16;
+            }
             if (soft_score > best_soft_score) {
                 best_soft_score = soft_score;
                 best_soft_start = candidate;
                 best_soft_invert = (invert != 0);
-                best_soft_sync_hd = ja_sync_hamming18(packed_bits, bit_count);
-                best_soft_frame17 = ja_frame17_zero_violations(packed_bits, bit_count);
-                best_soft_zviol = ja_reserved_zero_violations(packed_bits, bit_count);
-                best_soft_crc_hd = ja_crc_nearness_hd(packed_bits, bit_count);
+                best_soft_sync_hd = sync_hd;
+                best_soft_frame17 = frame17;
+                best_soft_frame17_run = frame17_run;
+                best_soft_zviol = zviol;
+                best_soft_crc_hd = crc_hd;
+                best_soft_fspos = fspos;
+            }
+            if (debug) {
+                int pos;
+
+                for (pos = 0; pos < JA_TOP_SOFT; pos++) {
+                    if (soft_score > top_soft[pos].score) {
+                        int j;
+
+                        for (j = JA_TOP_SOFT - 1; j > pos; j--)
+                            top_soft[j] = top_soft[j - 1];
+                        top_soft[pos].start = candidate;
+                        top_soft[pos].invert = (invert != 0);
+                        top_soft[pos].score = soft_score;
+                        top_soft[pos].sync_hd = sync_hd;
+                        top_soft[pos].frame17 = frame17;
+                        top_soft[pos].frame17_run = frame17_run;
+                        top_soft[pos].zviol = zviol;
+                        top_soft[pos].crc_hd = crc_hd;
+                        top_soft[pos].fspos = fspos;
+                        break;
+                    }
+                }
             }
             if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count))
                 continue;
@@ -393,11 +499,21 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                   - analysis.impairment_score * 10
                   - analysis.non_default_h * 5;
             /* Prefer candidates that keep the expected 17-bit framing rhythm. */
-            score -= ja_frame17_zero_violations(packed_bits, bit_count) * 3;
+            score -= frame17 * 6;
+            score += frame17_run * 4;
             /* Lightweight sync sanity (should already be zero for valid parses). */
-            score -= ja_sync_hamming18(packed_bits, bit_count) * 8;
-            if (ja_has_fs12_pattern(packed_bits, bit_count))
-                score += 20;
+            score -= sync_hd * 12;
+            if (fspos >= 0) {
+                int fs_err = fspos - 4;
+                if (fs_err < 0)
+                    fs_err = -fs_err;
+                score += 30;
+                score -= fs_err * 2;
+            } else {
+                score -= 15;
+            }
+            score -= zviol * 5;
+            score -= crc_hd * 4;
             if (params->tx_ja_sample >= 0) {
                 int dist = candidate - params->tx_ja_sample;
                 if (dist < 0)
@@ -431,6 +547,31 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                     best_soft_frame17,
                     best_soft_zviol,
                     best_soft_crc_hd);
+            if (best_soft_start >= 0) {
+                fprintf(stderr,
+                        "[JA] soft_detail start=%d invert=%d frame17_run=%d fs12_pos=%d\n",
+                        best_soft_start,
+                        best_soft_invert ? 1 : 0,
+                        best_soft_frame17_run,
+                        best_soft_fspos);
+            }
+            if (top_soft[0].start >= 0) {
+                int r;
+                for (r = 0; r < JA_TOP_SOFT && top_soft[r].start >= 0; r++) {
+                    fprintf(stderr,
+                            "[JA] top_soft[%d] start=%d invert=%d score=%d sync_hd=%d frame17=%d frame17_run=%d zviol=%d crc_hd=%d fs12_pos=%d\n",
+                            r,
+                            top_soft[r].start,
+                            top_soft[r].invert ? 1 : 0,
+                            top_soft[r].score,
+                            top_soft[r].sync_hd,
+                            top_soft[r].frame17,
+                            top_soft[r].frame17_run,
+                            top_soft[r].zviol,
+                            top_soft[r].crc_hd,
+                            top_soft[r].fspos);
+                }
+            }
         }
         if (best_soft_start < 0)
             return false;

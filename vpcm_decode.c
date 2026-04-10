@@ -6234,6 +6234,227 @@ static int v90_aux_dil_hit_score(const v90_aux_dil_hit_t *hit)
          - (hit->invert_bits ? 4 : 0);
 }
 
+typedef struct {
+    bool found;
+    int bit_offset;
+    bool invert_bits;
+    int score;
+    int sync_hd;
+    int frame17_viol;
+    int zero_viol;
+    int crc_hd;
+} v90_aux_soft_hit_t;
+
+static int aux_get_packed_bit(const uint8_t *bits, int pos)
+{
+    return (int) ((bits[pos / 8] >> (pos % 8)) & 1U);
+}
+
+static int aux_get_packed_bits(const uint8_t *bits, int pos, int n)
+{
+    int i;
+    int v = 0;
+
+    for (i = 0; i < n; i++)
+        v |= aux_get_packed_bit(bits, pos + i) << i;
+    return v;
+}
+
+static uint16_t aux_crc16_bits(const uint8_t *bits, int bit_count)
+{
+    uint16_t crc = 0xFFFFu;
+    int i;
+
+    for (i = 0; i < bit_count; i++) {
+        int b = aux_get_packed_bit(bits, i);
+        int fb = ((int) (crc >> 15) ^ b) & 1;
+
+        crc = (uint16_t) (crc << 1);
+        if (fb)
+            crc ^= 0x8005u;
+    }
+    return crc;
+}
+
+static int aux_sync_hamming18(const uint8_t *bits, int bit_count)
+{
+    int hd = 0;
+    int i;
+
+    if (!bits || bit_count < 18)
+        return 18;
+    for (i = 0; i < 17; i++) {
+        if (aux_get_packed_bit(bits, i) == 0)
+            hd++;
+    }
+    if (aux_get_packed_bit(bits, 17) != 0)
+        hd++;
+    return hd;
+}
+
+static int aux_frame17_zero_viol(const uint8_t *bits, int bit_count)
+{
+    int k;
+    int viol = 0;
+
+    if (!bits || bit_count <= 51)
+        return 40;
+    for (k = 0; k < 40; k++) {
+        int p = 51 + 17 * k;
+
+        if (p >= bit_count)
+            break;
+        if (aux_get_packed_bit(bits, p) != 0)
+            viol++;
+    }
+    return viol;
+}
+
+static int aux_reserved_zero_viol(const uint8_t *bits, int bit_count)
+{
+    static const int fixed_pos[] = {17, 34, 42, 50};
+    int v = 0;
+    int i;
+
+    if (!bits || bit_count <= 0)
+        return 12;
+    for (i = 0; i < 8; i++) {
+        int p = 26 + i;
+        if (p < bit_count && aux_get_packed_bit(bits, p) != 0)
+            v++;
+    }
+    for (i = 0; i < (int) (sizeof(fixed_pos) / sizeof(fixed_pos[0])); i++) {
+        int p = fixed_pos[i];
+        if (p < bit_count && aux_get_packed_bit(bits, p) != 0)
+            v++;
+    }
+    return v;
+}
+
+static int aux_crc_hd(const uint8_t *bits, int bit_count)
+{
+    int n, lsp, ltp;
+    int alpha, beta;
+    int training_start, training_bits;
+    int crc_start;
+    uint16_t exp_crc;
+    uint16_t calc_crc;
+    uint16_t d;
+    int hd = 0;
+
+    if (!bits || bit_count < 64)
+        return 16;
+    n = aux_get_packed_bits(bits, 18, 8);
+    lsp = aux_get_packed_bits(bits, 35, 7) + 1;
+    ltp = aux_get_packed_bits(bits, 43, 7) + 1;
+    if (lsp < 1) lsp = 1;
+    if (ltp < 1) ltp = 1;
+    if (lsp > 128) lsp = 128;
+    if (ltp > 128) ltp = 128;
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+
+    alpha = ((int) lsp + 15) / 16 * 17;
+    beta = alpha + (((int) ltp + 15) / 16) * 17;
+    training_start = 187 + beta;
+    training_bits = (((int) n + 1) / 2) * 17;
+    crc_start = training_start + training_bits;
+    if (crc_start + 17 > bit_count)
+        return 16;
+    exp_crc = (uint16_t) aux_get_packed_bits(bits, crc_start + 1, 16);
+    calc_crc = aux_crc16_bits(bits, crc_start);
+    d = (uint16_t) (exp_crc ^ calc_crc);
+    while (d) {
+        d &= (uint16_t) (d - 1U);
+        hd++;
+    }
+    return hd;
+}
+
+static bool find_v90_soft_lock_in_aux_str(const char *bit_str, int bit_len, v90_aux_soft_hit_t *out)
+{
+    v90_aux_soft_hit_t best;
+    int best_score = INT_MIN;
+    uint8_t packed[512];
+    int max_offset;
+
+    if (!bit_str || !out || bit_len < 206)
+        return false;
+    memset(&best, 0, sizeof(best));
+    max_offset = bit_len - 206;
+    if (max_offset > 3072)
+        max_offset = 3072;
+
+    for (int swap_pairs = 0; swap_pairs <= 1; swap_pairs++) {
+        for (int invert = 0; invert <= 1; invert++) {
+            for (int offset = 0; offset <= max_offset; offset++) {
+                int candidate_bits = bit_len - offset;
+                int packed_len;
+                bool valid = true;
+                int score;
+                int sync_hd;
+                int frame17;
+                int zviol;
+                int crchd;
+
+                if (candidate_bits > (int) sizeof(packed) * 8)
+                    candidate_bits = (int) sizeof(packed) * 8;
+                if (candidate_bits < 206)
+                    continue;
+                packed_len = (candidate_bits + 7) / 8;
+                memset(packed, 0, sizeof(packed));
+                for (int i = 0; i < candidate_bits; i++) {
+                    int src_i = offset + i;
+                    char c;
+                    int bit;
+
+                    if (swap_pairs)
+                        src_i = offset + (i & ~1) + (1 - (i & 1));
+                    c = bit_str[src_i];
+                    if (c != '0' && c != '1') {
+                        valid = false;
+                        break;
+                    }
+                    bit = (c == '1') ? 1 : 0;
+                    if (invert)
+                        bit ^= 1;
+                    if (bit)
+                        packed[i / 8] |= (uint8_t) (1U << (i % 8));
+                }
+                if (!valid)
+                    continue;
+                sync_hd = aux_sync_hamming18(packed, candidate_bits);
+                frame17 = aux_frame17_zero_viol(packed, candidate_bits);
+                zviol = aux_reserved_zero_viol(packed, candidate_bits);
+                crchd = aux_crc_hd(packed, candidate_bits);
+                score = 500
+                      - sync_hd * 20
+                      - frame17 * 8
+                      - zviol * 10
+                      - crchd * 6
+                      - offset / 16
+                      - (swap_pairs ? 3 : 0)
+                      - (invert ? 1 : 0);
+                if (score > best_score) {
+                    best_score = score;
+                    best.found = true;
+                    best.bit_offset = offset;
+                    best.invert_bits = (invert != 0);
+                    best.score = score;
+                    best.sync_hd = sync_hd;
+                    best.frame17_viol = frame17;
+                    best.zero_viol = zviol;
+                    best.crc_hd = crchd;
+                }
+            }
+        }
+    }
+    if (!best.found)
+        return false;
+    *out = best;
+    return true;
+}
+
 static void v34_descramble_bits(const char *src_bits,
                                 int bit_len,
                                 int scrambler_tap,
@@ -6358,6 +6579,104 @@ static bool find_v90_dil_in_aux_any(const decode_v34_result_t *src,
             score = v90_aux_dil_hit_score(&hit) + 2;
             if (score > best_score) {
                 best_score = score;
+                best_hit = hit;
+                best_hyp = h;
+                best_tap = taps[ti];
+                best_raw = true;
+            }
+        }
+    }
+    if (best_score == INT_MIN)
+        return false;
+    *out = best_hit;
+    if (hyp_idx_out)
+        *hyp_idx_out = best_hyp;
+    if (tap_out)
+        *tap_out = best_tap;
+    if (raw_out)
+        *raw_out = best_raw;
+    return true;
+}
+
+static bool find_v90_soft_lock_in_aux_any(const decode_v34_result_t *src,
+                                          v90_aux_soft_hit_t *out,
+                                          int *hyp_idx_out,
+                                          int *tap_out,
+                                          bool *raw_out)
+{
+    int best_score = INT_MIN;
+    v90_aux_soft_hit_t best_hit;
+    int best_hyp = -1;
+    int best_tap = -1;
+    bool best_raw = false;
+
+    if (!src || !out)
+        return false;
+    memset(&best_hit, 0, sizeof(best_hit));
+
+    if (find_v90_soft_lock_in_aux_str(src->ja_aux_bits, src->ja_aux_bit_len, out)) {
+        best_score = out->score;
+        best_hit = *out;
+        best_hyp = -1;
+        best_tap = -1;
+        best_raw = false;
+    }
+    {
+        static const int taps[2] = {4, 17};
+        char descrambled[8193];
+
+        for (int ti = 0; ti < 2; ti++) {
+            v90_aux_soft_hit_t hit;
+
+            if (src->ja_aux_bit_len < 206 || src->ja_aux_bits[0] == '\0')
+                break;
+            memset(&hit, 0, sizeof(hit));
+            v34_descramble_bits(src->ja_aux_bits, src->ja_aux_bit_len,
+                                taps[ti], descrambled, (int) sizeof(descrambled));
+            if (!find_v90_soft_lock_in_aux_str(descrambled, src->ja_aux_bit_len, &hit))
+                continue;
+            if (hit.score + 1 > best_score) {
+                best_score = hit.score + 1;
+                best_hit = hit;
+                best_hyp = -1;
+                best_tap = taps[ti];
+                best_raw = true;
+            }
+        }
+    }
+    for (int h = 0; h < 8; h++) {
+        v90_aux_soft_hit_t hit;
+
+        memset(&hit, 0, sizeof(hit));
+        if (!find_v90_soft_lock_in_aux_str(src->ja_aux_hyp_bits[h], src->ja_aux_hyp_bit_len[h], &hit))
+            continue;
+        if (hit.score > best_score) {
+            best_score = hit.score;
+            best_hit = hit;
+            best_hyp = h;
+            best_tap = -1;
+            best_raw = false;
+        }
+    }
+    for (int h = 0; h < 8; h++) {
+        static const int taps[2] = {17, 4};
+
+        for (int ti = 0; ti < 2; ti++) {
+            char descrambled[8193];
+            v90_aux_soft_hit_t hit;
+
+            memset(&hit, 0, sizeof(hit));
+            if (src->ja_aux_hyp_raw_bit_len[h] < 206 || src->ja_aux_hyp_raw_bits[h][0] == '\0')
+                continue;
+            v34_descramble_bits(src->ja_aux_hyp_raw_bits[h],
+                                src->ja_aux_hyp_raw_bit_len[h],
+                                taps[ti],
+                                descrambled,
+                                (int) sizeof(descrambled));
+            if (!find_v90_soft_lock_in_aux_str(descrambled, src->ja_aux_hyp_raw_bit_len[h], &hit))
+                continue;
+            if (hit.score + 2 > best_score) {
+                best_score = hit.score + 2;
                 best_hit = hit;
                 best_hyp = h;
                 best_tap = taps[ti];
@@ -6532,6 +6851,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     const char *ja_soft_source = "none";
     const char *trn_source = "marker";
     char ja_dil_source_buf[32];
+    char ja_soft_source_buf[48];
     char detail[8192];
     bool has_phase3_evidence;
     int gate_sample;
@@ -6573,6 +6893,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     analogue_side = pick_analogue_phase2_side(answerer, caller);
     memset(&obs, 0, sizeof(obs));
     ja_dil_source_buf[0] = '\0';
+    ja_soft_source_buf[0] = '\0';
     obs.info0_seen = res->info0_seen;
     obs.info0_is_d = res->info0_is_d;
     if (res->info0_seen) {
@@ -6724,6 +7045,7 @@ static void collect_v92_phase3_event(call_log_t *log,
             ja_dil_search_params_t fb;
             int start = obs.phase3_sample;
             int end;
+            int ja_anchor = obs.tx_ja_sample;
 
             if (start < 0)
                 start = gate_sample;
@@ -6735,14 +7057,42 @@ static void collect_v92_phase3_event(call_log_t *log,
             }
             if (start < 0)
                 start = 0;
-            end = start + 5000;
+
+            if (ja_anchor < 0 && obs.tx_trn_sample >= 0) {
+                /* V.92 nominal: first Ja appears after at least 2040 T of TRN1u. */
+                ja_anchor = obs.tx_trn_sample + ((2040 * 8000 + 1600) / 3200);
+            }
+            if (ja_anchor < 0 && obs.phase3_sample >= 0) {
+                /*
+                 * Weak timing fallback when TRN onset is unavailable:
+                 * Phase 3 starts with Ru/uR/Ru/uR (816 T total), then
+                 * minimum TRN1u (2040 T), then Ja.
+                 */
+                ja_anchor = obs.phase3_sample + (((816 + 2040) * 8000 + 1600) / 3200);
+            }
+
+            if (ja_anchor >= 0) {
+                int ws = ja_anchor - 1200;
+                int we = ja_anchor + 1800;
+
+                if (ws < 0)
+                    ws = 0;
+                if (we < ws + 600)
+                    we = ws + 600;
+                if (start < ws)
+                    start = ws;
+                end = we;
+            } else {
+                end = start + 12000;
+            }
+
             if (end > total_codewords - 206)
                 end = total_codewords - 206;
             if (end >= start) {
                 memset(&fb, 0, sizeof(fb));
                 fb.search_start = start;
                 fb.search_end = end;
-                fb.tx_ja_sample = obs.tx_ja_sample;
+                fb.tx_ja_sample = ja_anchor;
                 fb.u_info = res->u_info;
                 fb.calling_party = (role_name && strcmp(role_name, "caller") == 0);
                 if (v92_ja_dil_search(codewords, total_codewords, &fb, &ja_dil)) {
@@ -6807,10 +7157,15 @@ static void collect_v92_phase3_event(call_log_t *log,
     }
     if (!obs.ja_dil_seen) {
         v90_aux_dil_hit_t aux_hit;
+        v90_aux_soft_hit_t aux_soft_hit;
         const decode_v34_result_t *primary_aux = NULL;
         const decode_v34_result_t *secondary_aux = NULL;
+        int soft_hyp = -2;
+        int soft_tap = -1;
+        bool soft_raw = false;
 
         memset(&aux_hit, 0, sizeof(aux_hit));
+        memset(&aux_soft_hit, 0, sizeof(aux_soft_hit));
         primary_aux = analogue_side ? analogue_side : res;
         if (primary_aux == res)
             secondary_aux = peer;
@@ -6853,6 +7208,67 @@ static void collect_v92_phase3_event(call_log_t *log,
                 obs.ja_dil_unique_train_u = aux_hit.analysis.unique_train_u;
                 obs.ja_dil_uchords = aux_hit.analysis.used_uchords;
                 obs.ja_dil_impairment = aux_hit.analysis.impairment_score;
+            }
+        }
+
+        if (primary_aux && find_v90_soft_lock_in_aux_any(primary_aux, &aux_soft_hit, &soft_hyp, &soft_tap, &soft_raw)) {
+            int base_sample = (primary_aux->tx_ja_sample >= 0)
+                              ? primary_aux->tx_ja_sample
+                              : (obs.tx_ja_sample >= 0 ? obs.tx_ja_sample : res->info1_sample);
+            int bit_to_sample = (aux_soft_hit.bit_offset * 5 + 2) / 4;
+            int cand_sample = (base_sample >= 0) ? (base_sample + bit_to_sample) : -1;
+
+            if (cand_sample >= 0
+                && (!obs.ja_dil_seen)
+                && (ja_soft_sample < 0 || aux_soft_hit.score > ja_soft_score)) {
+                ja_soft_sample = cand_sample;
+                ja_soft_score = aux_soft_hit.score;
+                ja_soft_sync_hd = aux_soft_hit.sync_hd;
+                ja_soft_frame17_viol = aux_soft_hit.frame17_viol;
+                ja_soft_zero_viol = aux_soft_hit.zero_viol;
+                ja_soft_crc_hd = aux_soft_hit.crc_hd;
+                ja_soft_invert = aux_soft_hit.invert_bits;
+                if (soft_hyp >= 0) {
+                    snprintf(ja_soft_source_buf,
+                             sizeof(ja_soft_source_buf),
+                             "%s_h%d%s",
+                             (primary_aux == res) ? "ja_aux_soft_local" : "ja_aux_soft_peer",
+                             soft_hyp,
+                             soft_raw ? (soft_tap == 4 ? "_rawtap4" : "_rawtap17") : "");
+                    ja_soft_source = ja_soft_source_buf;
+                } else {
+                    ja_soft_source = (primary_aux == res) ? "ja_aux_soft_local" : "ja_aux_soft_peer";
+                }
+            }
+        }
+        if (secondary_aux && find_v90_soft_lock_in_aux_any(secondary_aux, &aux_soft_hit, &soft_hyp, &soft_tap, &soft_raw)) {
+            int base_sample = (secondary_aux->tx_ja_sample >= 0)
+                              ? secondary_aux->tx_ja_sample
+                              : (obs.tx_ja_sample >= 0 ? obs.tx_ja_sample : res->info1_sample);
+            int bit_to_sample = (aux_soft_hit.bit_offset * 5 + 2) / 4;
+            int cand_sample = (base_sample >= 0) ? (base_sample + bit_to_sample) : -1;
+
+            if (cand_sample >= 0
+                && (!obs.ja_dil_seen)
+                && (ja_soft_sample < 0 || aux_soft_hit.score > ja_soft_score)) {
+                ja_soft_sample = cand_sample;
+                ja_soft_score = aux_soft_hit.score;
+                ja_soft_sync_hd = aux_soft_hit.sync_hd;
+                ja_soft_frame17_viol = aux_soft_hit.frame17_viol;
+                ja_soft_zero_viol = aux_soft_hit.zero_viol;
+                ja_soft_crc_hd = aux_soft_hit.crc_hd;
+                ja_soft_invert = aux_soft_hit.invert_bits;
+                if (soft_hyp >= 0) {
+                    snprintf(ja_soft_source_buf,
+                             sizeof(ja_soft_source_buf),
+                             "%s_h%d%s",
+                             (secondary_aux == res) ? "ja_aux_soft_local" : "ja_aux_soft_peer",
+                             soft_hyp,
+                             soft_raw ? (soft_tap == 4 ? "_rawtap4" : "_rawtap17") : "");
+                    ja_soft_source = ja_soft_source_buf;
+                } else {
+                    ja_soft_source = (secondary_aux == res) ? "ja_aux_soft_local" : "ja_aux_soft_peer";
+                }
             }
         }
     }

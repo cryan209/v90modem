@@ -114,9 +114,13 @@ typedef struct {
  *   + 50 × used_uchords     (number of distinct U-chords actually used)
  *   - 10 × impairment_score (penalty for out-of-spec entries)
  *   -  5 × non_default_h   (penalty for non-default H vector)
- *   -  3 × frame17_violations (expected 17-bit framing start-zero rhythm)
- *   -  8 × sync_hamming18     (distance from 17 ones + start-zero sync)
- *   + 20 when 12-bit FS pattern is present
+ *   -  6 × frame17_violations (expected 17-bit framing start-zero rhythm)
+ *   +  4 × frame17_best_run   (longest contiguous start-zero run)
+ *   - 12 × sync_hamming18     (distance from 17 ones + start-zero sync)
+ *   + 30 - 2*|fs12_pos-4| when 12-bit FS appears near expected placement
+ *   - 15 when no FS12 pattern is found
+ *   -  5 × reserved_zero_violations
+ *   -  4 × crc_nearness_hd
  *   -  distance / 8         (penalty for distance from tx_ja_sample anchor)
  *
  * Returns true and fills *out on hard success (ok=true) or on soft near-lock
