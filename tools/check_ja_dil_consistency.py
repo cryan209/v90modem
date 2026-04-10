@@ -100,6 +100,7 @@ def crc16_bits(bits: str, bit_count: int) -> int:
 
 @dataclass
 class DilDesc:
+    variant: str
     n: int
     lsp: int
     ltp: int
@@ -173,18 +174,52 @@ def parse_dil_descriptor(bits: str) -> DilDesc | None:
             if not expect_zero(bits, pos, 9):
                 return None
             pos += 9
-    if not expect_zero(bits, pos, 1):
+    # Try legacy V.90 tail: start, CRC16, fill
+    if expect_zero(bits, pos, 1) and (pos + 17) <= len(bits):
+        p = pos + 1
+        if p + 16 <= len(bits):
+            crc_field = bits_le(bits, p, 16)
+            if crc_field == crc16_bits(bits, crc_start):
+                p += 16
+                if expect_zero(bits, p, 1):
+                    return DilDesc(variant="v90", n=n, lsp=lsp, ltp=ltp, sp=sp, tp=tp, h=h, ref=ref, train_u=train_u, bit_len=descriptor_bits)
+
+    # Try V.92 Table 20 tail:
+    # start(0), 16-bit DS-rate mask low, start(0), 16-bit DS-rate mask high,
+    # start(0), CRC16, fill(0), then zero fill to /12.
+    p = pos
+    if not expect_zero(bits, p, 1):
         return None
-    pos += 1
-    if pos + 16 > len(bits):
+    p += 1
+    if p + 16 > len(bits):
         return None
-    crc_field = bits_le(bits, pos, 16)
-    if crc_field != crc16_bits(bits, crc_start):
+    _ds_low = bits_le(bits, p, 16)
+    p += 16
+    if not expect_zero(bits, p, 1):
         return None
-    pos += 16
-    if not expect_zero(bits, pos, 1):
+    p += 1
+    if p + 16 > len(bits):
         return None
-    return DilDesc(n=n, lsp=lsp, ltp=ltp, sp=sp, tp=tp, h=h, ref=ref, train_u=train_u, bit_len=descriptor_bits)
+    _ds_high = bits_le(bits, p, 16)
+    p += 16
+    crc_start_v92 = p
+    if not expect_zero(bits, p, 1):
+        return None
+    p += 1
+    if p + 16 > len(bits):
+        return None
+    crc_field = bits_le(bits, p, 16)
+    if crc_field != crc16_bits(bits, crc_start_v92):
+        return None
+    p += 16
+    if not expect_zero(bits, p, 1):
+        return None
+    p += 1
+    while (p % 12) != 0:
+        if not expect_zero(bits, p, 1):
+            return None
+        p += 1
+    return DilDesc(variant="v92", n=n, lsp=lsp, ltp=ltp, sp=sp, tp=tp, h=h, ref=ref, train_u=train_u, bit_len=p)
 
 
 def consensus_block(bits: str, start: int, block_len: int, max_blocks: int) -> tuple[str, int]:
@@ -286,7 +321,7 @@ def main() -> int:
         for s, L, b in tops:
             print(f"  {s:.4f} {L} {b}")
         return 2
-    print(f"descriptor_parse=ok mode={mode} bit_len={d.bit_len}")
+    print(f"descriptor_parse=ok mode={mode} variant={d.variant} bit_len={d.bit_len}")
     print(f"N={d.n} LSP={d.lsp} LTP={d.ltp}")
     cyc = dil_cycle_len(d)
     print(f"predicted_dil_cycle_symbols={cyc}")

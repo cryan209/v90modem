@@ -88,6 +88,7 @@ def crc16_bits(bits: str, bit_count: int) -> int:
 
 @dataclass
 class DilDesc:
+    variant: str
     n: int
     lsp: int
     ltp: int
@@ -157,18 +158,50 @@ def parse_dil_descriptor(bits: str) -> DilDesc | None:
             if not expect_zero(bits, pos, 9):
                 return None
             pos += 9
-    if not expect_zero(bits, pos, 1):
+    # Legacy V.90 tail
+    if expect_zero(bits, pos, 1) and (pos + 17) <= len(bits):
+        p = pos + 1
+        if p + 16 <= len(bits):
+            crc_field = bits_le(bits, p, 16)
+            if crc_field == crc16_bits(bits, crc_start):
+                p += 16
+                if expect_zero(bits, p, 1):
+                    return DilDesc(variant="v90", n=n, lsp=lsp, ltp=ltp, h=h, ref=ref, train_u=train_u, bit_len=descriptor_bits)
+
+    # V.92 Table 20 tail
+    p = pos
+    if not expect_zero(bits, p, 1):
         return None
-    pos += 1
-    if pos + 16 > len(bits):
+    p += 1
+    if p + 16 > len(bits):
         return None
-    crc_field = bits_le(bits, pos, 16)
-    if crc_field != crc16_bits(bits, crc_start):
+    _ds_low = bits_le(bits, p, 16)
+    p += 16
+    if not expect_zero(bits, p, 1):
         return None
-    pos += 16
-    if not expect_zero(bits, pos, 1):
+    p += 1
+    if p + 16 > len(bits):
         return None
-    return DilDesc(n=n, lsp=lsp, ltp=ltp, h=h, ref=ref, train_u=train_u, bit_len=descriptor_bits)
+    _ds_high = bits_le(bits, p, 16)
+    p += 16
+    crc_start_v92 = p
+    if not expect_zero(bits, p, 1):
+        return None
+    p += 1
+    if p + 16 > len(bits):
+        return None
+    crc_field = bits_le(bits, p, 16)
+    if crc_field != crc16_bits(bits, crc_start_v92):
+        return None
+    p += 16
+    if not expect_zero(bits, p, 1):
+        return None
+    p += 1
+    while (p % 12) != 0:
+        if not expect_zero(bits, p, 1):
+            return None
+        p += 1
+    return DilDesc(variant="v92", n=n, lsp=lsp, ltp=ltp, h=h, ref=ref, train_u=train_u, bit_len=p)
 
 
 def consensus_block(bits: str, start: int, block_len: int, blocks: int) -> str:
@@ -241,12 +274,12 @@ def main() -> int:
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     top = candidates[: args.top]
-    print("rank\tscore\tanchor\tL\tblocks\tmatch\tparse\tN\tLSP\tLTP\tbit_len")
+    print("rank\tscore\tanchor\tL\tblocks\tmatch\tparse\tvar\tN\tLSP\tLTP\tbit_len")
     for i, (s, a, L, b, m, d) in enumerate(top, start=1):
         if d is None:
-            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-")
+            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-\t-")
         else:
-            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}")
+            print(f"{i}\t{s:.2f}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.variant}\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}")
     if not top:
         print("no_candidates")
     return 0
