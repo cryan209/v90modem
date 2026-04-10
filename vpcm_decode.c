@@ -6696,6 +6696,16 @@ static bool find_v90_soft_lock_in_aux_any(const decode_v34_result_t *src,
     return true;
 }
 
+static bool p3_extract_ja_aux_bits(const int16_t *samples,
+                                   int total_samples,
+                                   const decode_v34_result_t *result,
+                                   bool calling_party,
+                                   int standard,
+                                   char *bits_out,
+                                   int bits_out_len,
+                                   int *start_sample_out,
+                                   int *bit_len_out);
+
 static bool find_v90_sd_ds_after(const uint8_t *codewords,
                                  int total_codewords,
                                  v91_law_t law,
@@ -7268,6 +7278,149 @@ static void collect_v92_phase3_event(call_log_t *log,
                     ja_soft_source = ja_soft_source_buf;
                 } else {
                     ja_soft_source = (secondary_aux == res) ? "ja_aux_soft_local" : "ja_aux_soft_peer";
+                }
+            }
+        }
+
+        if (!obs.ja_dil_seen && samples && total_samples > 0) {
+            char p3_bits[8193];
+            int p3_start_sample = -1;
+            int p3_bit_len = 0;
+            bool calling_role = (role_name && strcmp(role_name, "caller") == 0);
+            int ja_dbg = (getenv("VPCM_JA_DEBUG") && getenv("VPCM_JA_DEBUG")[0] && getenv("VPCM_JA_DEBUG")[0] != '0');
+            bool p3_ok;
+            decode_v34_result_t p3_seed;
+
+            memset(&p3_seed, 0, sizeof(p3_seed));
+            if (res)
+                p3_seed = *res;
+            if (p3_seed.phase3_sample < 0) {
+                if (obs.phase3_sample >= 0)
+                    p3_seed.phase3_sample = obs.phase3_sample;
+                else if (gate_sample >= 0)
+                    p3_seed.phase3_sample = gate_sample;
+                else if (toneq_sample >= 0) {
+                    int toneq_end = toneq_sample + ((toneq_duration_samples > 0) ? toneq_duration_samples : 0);
+                    p3_seed.phase3_sample = toneq_end + 320;
+                }
+            }
+            if (p3_seed.phase4_sample < 0 && obs.phase4_sample >= 0)
+                p3_seed.phase4_sample = obs.phase4_sample;
+            if (p3_seed.tx_trn_sample < 0 && obs.tx_trn_sample >= 0)
+                p3_seed.tx_trn_sample = obs.tx_trn_sample;
+            if (p3_seed.tx_ja_sample < 0 && obs.tx_ja_sample >= 0)
+                p3_seed.tx_ja_sample = obs.tx_ja_sample;
+            if (p3_seed.failure_sample < 0)
+                p3_seed.failure_sample = total_samples;
+
+            p3_bits[0] = '\0';
+            p3_ok = p3_extract_ja_aux_bits(samples,
+                                           total_samples,
+                                           &p3_seed,
+                                           calling_role,
+                                           0,
+                                           p3_bits,
+                                           (int) sizeof(p3_bits),
+                                           &p3_start_sample,
+                                           &p3_bit_len);
+            if (ja_dbg) {
+                fprintf(stderr,
+                        "[JA-P3] role=%s ok=%d bits=%d start=%d\n",
+                        role_name ? role_name : "unknown",
+                        p3_ok ? 1 : 0,
+                        p3_bit_len,
+                        p3_start_sample);
+            }
+            if (p3_ok && p3_bit_len >= 206) {
+                v90_aux_dil_hit_t p3_hit;
+                v90_aux_soft_hit_t p3_soft;
+                v90_aux_dil_hit_t best_p3_hit;
+                v90_aux_soft_hit_t best_p3_soft;
+                char p3_bits_tap4[8193];
+                char p3_bits_tap17[8193];
+                const char *cand_bits[3];
+                int cand_count = 1;
+                bool have_p3_hard = false;
+                bool have_p3_soft = false;
+                int best_hard_score = INT_MIN;
+                int best_soft_score = INT_MIN;
+
+                memset(&p3_hit, 0, sizeof(p3_hit));
+                memset(&p3_soft, 0, sizeof(p3_soft));
+                memset(&best_p3_hit, 0, sizeof(best_p3_hit));
+                memset(&best_p3_soft, 0, sizeof(best_p3_soft));
+                p3_bits_tap4[0] = '\0';
+                p3_bits_tap17[0] = '\0';
+                cand_bits[0] = p3_bits;
+                if (p3_bit_len >= 206) {
+                    v34_descramble_bits(p3_bits, p3_bit_len, 4, p3_bits_tap4, (int) sizeof(p3_bits_tap4));
+                    v34_descramble_bits(p3_bits, p3_bit_len, 17, p3_bits_tap17, (int) sizeof(p3_bits_tap17));
+                    cand_bits[cand_count++] = p3_bits_tap4;
+                    cand_bits[cand_count++] = p3_bits_tap17;
+                }
+
+                for (int ci = 0; ci < cand_count; ci++) {
+                    if (find_v90_dil_in_aux_str(cand_bits[ci], p3_bit_len, &p3_hit)) {
+                        int hscore = p3_hit.analysis.unique_train_u * 100
+                                   + p3_hit.analysis.used_uchords * 40
+                                   - p3_hit.analysis.impairment_score * 20;
+                        if (!have_p3_hard || hscore > best_hard_score) {
+                            best_hard_score = hscore;
+                            best_p3_hit = p3_hit;
+                            have_p3_hard = true;
+                        }
+                    }
+                }
+                if (have_p3_hard) {
+                    int bit_len = v90_dil_descriptor_bit_len(&best_p3_hit.desc);
+                    int bit_to_sample = (best_p3_hit.bit_offset * 5 + 2) / 4;
+                    int base_sample = (p3_start_sample >= 0)
+                                      ? p3_start_sample
+                                      : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
+
+                    if (bit_len > 0 && base_sample >= 0) {
+                        obs.ja_dil_seen = true;
+                        ja_dil_source = "p3_aux";
+                        obs.ja_dil_sample = base_sample + bit_to_sample;
+                        obs.ja_dil_bits = bit_len;
+                        obs.ja_dil_n = best_p3_hit.desc.n;
+                        obs.ja_dil_lsp = best_p3_hit.desc.lsp;
+                        obs.ja_dil_ltp = best_p3_hit.desc.ltp;
+                        obs.ja_dil_unique_train_u = best_p3_hit.analysis.unique_train_u;
+                        obs.ja_dil_uchords = best_p3_hit.analysis.used_uchords;
+                        obs.ja_dil_impairment = best_p3_hit.analysis.impairment_score;
+                    }
+                }
+
+                if (!obs.ja_dil_seen) {
+                    for (int ci = 0; ci < cand_count; ci++) {
+                        if (find_v90_soft_lock_in_aux_str(cand_bits[ci], p3_bit_len, &p3_soft)) {
+                            if (!have_p3_soft || p3_soft.score > best_soft_score) {
+                                best_soft_score = p3_soft.score;
+                                best_p3_soft = p3_soft;
+                                have_p3_soft = true;
+                            }
+                        }
+                    }
+                    if (have_p3_soft) {
+                        int bit_to_sample = (best_p3_soft.bit_offset * 5 + 2) / 4;
+                        int base_sample = (p3_start_sample >= 0)
+                                          ? p3_start_sample
+                                          : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
+                        int cand_sample = (base_sample >= 0) ? (base_sample + bit_to_sample) : -1;
+
+                        if (cand_sample >= 0
+                            && (ja_soft_sample < 0 || best_p3_soft.score > ja_soft_score)) {
+                            ja_soft_sample = cand_sample;
+                            ja_soft_score = best_p3_soft.score;
+                            ja_soft_sync_hd = best_p3_soft.sync_hd;
+                            ja_soft_frame17_viol = best_p3_soft.frame17_viol;
+                            ja_soft_zero_viol = best_p3_soft.zero_viol;
+                            ja_soft_crc_hd = best_p3_soft.crc_hd;
+                            ja_soft_invert = best_p3_soft.invert_bits;
+                            ja_soft_source = "p3_aux_soft";
+                        }
+                    }
                 }
             }
         }
@@ -8928,6 +9081,8 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             && (rx_stage >= 11 || v34_get_primary_channel_active(v34))) {
             result->phase3_seen = true;
             result->phase3_sample = offset;
+            if (aux_bits.capture_start_bit < 0)
+                aux_bits.capture_start_bit = aux_bits.total_bits;
             last_progress_sample = offset;
         }
         {
@@ -9202,11 +9357,19 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         result->ja_aux_hyp_raw_bits[h][raw_n] = '\0';
     }
 
-    if (ja_aux_start_bit >= 0
-        && aux_bits.capture_start_bit >= 0
-        && aux_bits.total_bits > ja_aux_start_bit
-        && aux_bits.capture_len > 0) {
-        int available = aux_bits.total_bits - ja_aux_start_bit;
+    {
+        int aux_start_bit = -1;
+
+        if (ja_aux_start_bit >= 0)
+            aux_start_bit = ja_aux_start_bit;
+        else if (result->ja_aux_bit_len <= 0 && aux_bits.capture_start_bit >= 0)
+            aux_start_bit = aux_bits.capture_start_bit;
+
+        if (aux_start_bit >= 0
+            && aux_bits.capture_start_bit >= 0
+            && aux_bits.total_bits > aux_start_bit
+            && aux_bits.capture_len > 0) {
+        int available = aux_bits.total_bits - aux_start_bit;
         int copy_aux_len = aux_bits.capture_len;
         int copy_preview_len = aux_bits.capture_len;
 
@@ -9225,6 +9388,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         if (result->ja_observed_bits > copy_aux_len)
             result->ja_observed_bits = copy_aux_len;
         result->ja_bits_known = true;
+        }
     }
     if (result->tx_ja_sample >= 0 && result->ja_observed_bits == 0) {
         int ja_end_sample = -1;
@@ -9837,6 +10001,161 @@ static bool p3_extract_j_log_summary(const int16_t *samples,
     out->role_aligned = eval.role_aligned;
     if (eval.notes[0])
         snprintf(out->notes, sizeof(out->notes), "%s", eval.notes);
+
+    p3_result_free(best_detail);
+    return true;
+}
+
+static bool p3_extract_ja_aux_bits(const int16_t *samples,
+                                   int total_samples,
+                                   const decode_v34_result_t *result,
+                                   bool calling_party,
+                                   int standard,
+                                   char *bits_out,
+                                   int bits_out_len,
+                                   int *start_sample_out,
+                                   int *bit_len_out)
+{
+    p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+    p3_result_t *best_detail = NULL;
+    const p3_segment_t *best_j = NULL;
+    int phase3_start = -1;
+    int phase3_end = -1;
+    int count;
+    float best_total = -1.0e30f;
+    int ja_dbg = (getenv("VPCM_JA_DEBUG") && getenv("VPCM_JA_DEBUG")[0] && getenv("VPCM_JA_DEBUG")[0] != '0');
+
+    if (!samples || total_samples <= 0 || !result || !bits_out || bits_out_len < 2)
+        return false;
+    bits_out[0] = '\0';
+    if (start_sample_out)
+        *start_sample_out = -1;
+    if (bit_len_out)
+        *bit_len_out = 0;
+
+    if (!p3_demod_get_phase3_window(result, total_samples, &phase3_start, &phase3_end)) {
+        if (ja_dbg)
+            fprintf(stderr, "[JA-P3] window_fail phase3_sample=%d tx_s=%d phase4=%d ready=%d failure=%d total=%d\n",
+                    result->phase3_sample,
+                    result->tx_first_s_sample,
+                    result->phase4_sample,
+                    result->phase4_ready_sample,
+                    result->failure_sample,
+                    total_samples);
+        return false;
+    }
+    if (ja_dbg)
+        fprintf(stderr, "[JA-P3] window_ok start=%d end=%d\n", phase3_start, phase3_end);
+    if (phase3_end <= phase3_start) {
+        if (ja_dbg)
+            fprintf(stderr, "[JA-P3] window_invalid start=%d end=%d\n", phase3_start, phase3_end);
+        return false;
+    }
+
+    count = p3_scan_all_hypotheses(samples + phase3_start,
+                                   phase3_end - phase3_start,
+                                   phase3_start,
+                                   8000,
+                                   hypotheses,
+                                   P3_BAUD_COUNT * 2);
+    if (count <= 0) {
+        if (ja_dbg)
+            fprintf(stderr, "[JA-P3] scan_fail start=%d end=%d\n", phase3_start, phase3_end);
+        return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+        const p3_hypothesis_t *h = &hypotheses[i];
+        p3_result_t *candidate = p3_demod_run(samples + phase3_start,
+                                              phase3_end - phase3_start,
+                                              phase3_start,
+                                              h->baud_code,
+                                              h->carrier_sel,
+                                              8000);
+        float seq_score;
+        float total_score;
+
+        if (!candidate)
+            continue;
+        seq_score = p3_sequence_guided_score(candidate, result, phase3_start, phase3_end);
+        total_score = h->score + seq_score;
+        if (!best_detail || total_score > best_total) {
+            if (best_detail)
+                p3_result_free(best_detail);
+            best_detail = candidate;
+            best_total = total_score;
+        } else {
+            p3_result_free(candidate);
+        }
+    }
+    if (!best_detail) {
+        if (ja_dbg)
+            fprintf(stderr, "[JA-P3] demod_fail start=%d end=%d count=%d\n", phase3_start, phase3_end, count);
+        return false;
+    }
+
+    (void) calling_party;
+    (void) standard;
+
+    for (int i = 0; i < best_detail->segment_count; i++) {
+        const p3_segment_t *seg = &best_detail->segments[i];
+        if (seg->type == P3_SIGNAL_J && (!best_j || seg->length > best_j->length))
+            best_j = seg;
+    }
+    if (best_j) {
+        int bit_count = best_j->length * 2;
+
+        if (bit_count > bits_out_len - 1)
+            bit_count = bits_out_len - 1;
+        for (int b = 0; b < bit_count; b++)
+            bits_out[b] = p3_segment_descrambled_bit(best_detail, best_j, b) ? '1' : '0';
+        bits_out[bit_count] = '\0';
+        if (start_sample_out)
+            *start_sample_out = best_j->start_sample;
+        if (bit_len_out)
+            *bit_len_out = bit_count;
+    } else {
+        int preferred_sample = result->tx_ja_sample;
+        int sym_start;
+        int avail_bits;
+        int bit_count;
+
+        if (preferred_sample < 0 && result->tx_trn_sample >= 0) {
+            preferred_sample = result->tx_trn_sample + ((2040 * 8000 + 1600) / 3200);
+        } else if (preferred_sample < 0 && result->phase3_sample >= 0) {
+            preferred_sample = result->phase3_sample + (((816 + 2040) * 8000 + 1600) / 3200);
+        } else if (preferred_sample < 0) {
+            preferred_sample = result->phase3_sample;
+        }
+        sym_start = p3_find_symbol_index_at_or_after(best_detail, preferred_sample);
+        if (sym_start < 0)
+            sym_start = 0;
+        if (sym_start >= best_detail->symbol_count) {
+            if (ja_dbg)
+                fprintf(stderr, "[JA-P3] no_symbols preferred=%d symbol_count=%d\n",
+                        preferred_sample, best_detail->symbol_count);
+            p3_result_free(best_detail);
+            return false;
+        }
+        avail_bits = (best_detail->symbol_count - sym_start) * 2;
+        if (avail_bits < 206) {
+            p3_result_free(best_detail);
+            return false;
+        }
+        bit_count = avail_bits;
+        if (bit_count > bits_out_len - 1)
+            bit_count = bits_out_len - 1;
+        for (int b = 0; b < bit_count; b++) {
+            int sym_idx = sym_start + (b / 2);
+            int bit = (b & 1) ? best_detail->symbols[sym_idx].bit1 : best_detail->symbols[sym_idx].bit0;
+            bits_out[b] = bit ? '1' : '0';
+        }
+        bits_out[bit_count] = '\0';
+        if (start_sample_out)
+            *start_sample_out = best_detail->symbols[sym_start].sample_index;
+        if (bit_len_out)
+            *bit_len_out = bit_count;
+    }
 
     p3_result_free(best_detail);
     return true;
