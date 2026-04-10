@@ -6802,6 +6802,8 @@ static void collect_v92_phase3_event(call_log_t *log,
     appendf(detail, sizeof(detail), " seq_ja=%u", phase3.seq_ja_seen ? 1U : 0U);
     appendf(detail, sizeof(detail), " seq_order_ok=%u", phase3.seq_order_ok ? 1U : 0U);
     appendf(detail, sizeof(detail), " seq_strict_pass=%u", phase3.seq_strict_pass ? 1U : 0U);
+    appendf(detail, sizeof(detail), " seq_source=%s",
+            phase3.seq_source ? phase3.seq_source : "unknown");
     appendf(detail, sizeof(detail), " seq_status=%s",
             phase3.seq_status ? phase3.seq_status : "unknown");
     call_log_append(log,

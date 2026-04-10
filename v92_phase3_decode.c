@@ -220,6 +220,13 @@ static bool sample_order_ok(int a, int b)
     return (a < 0 || b < 0 || b >= a);
 }
 
+static int t_to_samples(int t)
+{
+    if (t <= 0)
+        return 0;
+    return (t * 8000 + 1600) / 3200;
+}
+
 static void analyze_strict_ru_trn1u_ja_sequence(v92_phase3_result_t *out,
                                                  const v92_phase3_observation_t *obs)
 {
@@ -231,12 +238,25 @@ static void analyze_strict_ru_trn1u_ja_sequence(v92_phase3_result_t *out,
     int ja  = obs ? obs->tx_ja_sample : -1;
     bool order_ok;
     bool complete;
+    bool inferred = false;
+    bool can_infer_ru_chain = false;
 
     if (!out || !obs)
         return;
 
     ru0 = (obs->tx_first_s_sample >= 0) ? obs->tx_first_s_sample : out->ru_sample;
-    out->trn_required_by_info = (obs->u_info != 0);
+    can_infer_ru_chain = (ru0 >= 0
+                          && obs->tx_first_not_s_sample < 0
+                          && obs->tx_second_s_sample < 0
+                          && obs->tx_second_not_s_sample < 0);
+    if (can_infer_ru_chain) {
+        /* Soft fallback from V.92 9.5.2.1.1 nominal timings: Ru(384T), uR(24T), Ru(384T), uR(24T). */
+        ur1 = ru0 + t_to_samples(384);
+        ru2 = ur1 + t_to_samples(24);
+        ur2 = ru2 + t_to_samples(384);
+        inferred = true;
+    }
+    out->trn_required_by_info = (obs->u_info != 0) || !obs->info0_seen;
     out->seq_ru_seen = (ru0 >= 0);
     out->seq_ur1_seen = (ur1 >= 0);
     out->seq_ru2_seen = (ru2 >= 0);
@@ -270,6 +290,7 @@ static void analyze_strict_ru_trn1u_ja_sequence(v92_phase3_result_t *out,
                && (!out->trn_required_by_info || out->seq_trn1u_seen)
                && order_ok;
     out->seq_strict_pass = complete;
+    out->seq_source = inferred ? "soft_inferred_from_ru_timing" : "measured_markers";
 
     if (!out->seq_ru_seen)
         out->seq_status = "waiting_ru1";

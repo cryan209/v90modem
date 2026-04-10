@@ -123,6 +123,7 @@ typedef struct {
     bool seq_ja_seen;
     bool seq_order_ok;
     bool seq_strict_pass;
+    const char *seq_source;
     const char *seq_status;
     int ja_sample;
     bool ja_seen;
