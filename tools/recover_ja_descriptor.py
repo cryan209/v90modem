@@ -91,6 +91,78 @@ def crc16_bits(bits: str, bit_count: int) -> int:
     return crc & 0xFFFF
 
 
+def popcount16(x: int) -> int:
+    x &= 0xFFFF
+    c = 0
+    while x:
+        x &= x - 1
+        c += 1
+    return c
+
+
+def bit_hamming(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    d = 0
+    for i in range(n):
+        if a[i] != b[i]:
+            d += 1
+    d += abs(len(a) - len(b))
+    return d
+
+
+def descriptor_nearness(bits: str) -> tuple[int, int, int, int, int] | None:
+    # Returns:
+    # (sync_hd, fixed_zero_viol, crc_hd_v90, crc_hd_v92, fs12_pos)
+    if len(bits) < 64:
+        return None
+
+    sync_ref = ("1" * 17) + "0"
+    sync_hd = bit_hamming(bits[:18], sync_ref)
+
+    fixed_zero_viol = 0
+    fixed_zero_positions = [17, 34, 42, 50]
+    for p in range(26, 34):
+        fixed_zero_positions.append(p)
+    for p in fixed_zero_positions:
+        if p < len(bits) and bits[p] != "0":
+            fixed_zero_viol += 1
+
+    fs12_pos = bits.find("111101110010")
+
+    n = bits_le(bits, 18, 8) if len(bits) >= 26 else 0
+    lsp = (bits_le(bits, 35, 7) + 1) if len(bits) >= 42 else 1
+    ltp = (bits_le(bits, 43, 7) + 1) if len(bits) >= 50 else 1
+    if lsp < 1 or lsp > 128:
+        lsp = 1
+    if ltp < 1 or ltp > 128:
+        ltp = 1
+    if n < 0 or n > 255:
+        n = 0
+
+    alpha = ((lsp + 15) // 16) * 17
+    beta = alpha + ((ltp + 15) // 16) * 17
+    training_start = 187 + beta
+    training_bits = ((n + 1) // 2) * 17
+    crc_start = training_start + training_bits
+
+    crc_hd_v90 = 16
+    if crc_start + 17 <= len(bits):
+        crc_field = bits_le(bits, crc_start + 1, 16)
+        crc_calc = crc16_bits(bits, crc_start)
+        crc_hd_v90 = popcount16(crc_field ^ crc_calc)
+
+    # V.92 tail: ... start + 16 + start + 16 + start + crc16 + fill ...
+    crc_hd_v92 = 16
+    p = training_start + training_bits
+    p += 1 + 16 + 1 + 16 + 1
+    if p + 16 <= len(bits):
+        crc_field = bits_le(bits, p, 16)
+        crc_calc = crc16_bits(bits, p - 1)
+        crc_hd_v92 = popcount16(crc_field ^ crc_calc)
+
+    return (sync_hd, fixed_zero_viol, crc_hd_v90, crc_hd_v92, fs12_pos)
+
+
 def descramble_bits(bits: str, tap: int = 4) -> str:
     reg = 0
     out = []
@@ -250,6 +322,10 @@ def main() -> int:
     ap.add_argument("--prefix-ones", type=int, default=24)
     ap.add_argument("--anchor-min", type=int, default=0)
     ap.add_argument("--anchor-max", type=int, default=4096)
+    ap.add_argument("--descriptor-start-min", type=int, default=-1,
+                    help="Optional direct descriptor-start scan min bit index (bypasses 24-one anchor)")
+    ap.add_argument("--descriptor-start-max", type=int, default=-1,
+                    help="Optional direct descriptor-start scan max bit index (bypasses 24-one anchor)")
     ap.add_argument("--len-min", type=int, default=206)
     ap.add_argument("--len-max", type=int, default=1200)
     ap.add_argument("--len-step", type=int, default=1)
@@ -277,12 +353,21 @@ def main() -> int:
     candidates = []
     for sname, sbits in streams:
         anchors = []
-        patt = "1" * args.prefix_ones
-        i = sbits.find(patt)
-        while i >= 0:
-            if args.anchor_min <= i <= args.anchor_max:
-                anchors.append(i)
-            i = sbits.find(patt, i + 1)
+        direct_ds_mode = (args.descriptor_start_min >= 0 and args.descriptor_start_max >= args.descriptor_start_min)
+        if direct_ds_mode:
+            ds_min = max(0, args.descriptor_start_min)
+            ds_max = min(len(sbits) - args.len_min, args.descriptor_start_max)
+            if ds_max >= ds_min:
+                anchors.append(ds_min - args.prefix_ones)
+                for ds in range(ds_min + 1, ds_max + 1):
+                    anchors.append(ds - args.prefix_ones)
+        else:
+            patt = "1" * args.prefix_ones
+            i = sbits.find(patt)
+            while i >= 0:
+                if args.anchor_min <= i <= args.anchor_max:
+                    anchors.append(i)
+                i = sbits.find(patt, i + 1)
 
         for a in anchors:
             ds = a + args.prefix_ones
@@ -298,16 +383,25 @@ def main() -> int:
                 d = parse_dil_descriptor(cons)
                 if d is not None:
                     score += 1000.0
-                candidates.append((score, sname, a, L, maxb, bmatch, d))
+                near = descriptor_nearness(cons)
+                candidates.append((score, sname, a, L, maxb, bmatch, d, near))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     top = candidates[: args.top]
-    print("rank\tscore\tstream\tanchor\tL\tblocks\tmatch\tparse\tvar\tN\tLSP\tLTP\tbit_len")
-    for i, (s, sname, a, L, b, m, d) in enumerate(top, start=1):
-        if d is None:
-            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-\t-")
+    print("rank\tscore\tstream\tanchor\tL\tblocks\tmatch\tparse\tvar\tN\tLSP\tLTP\tbit_len\tsync_hd\tzviol\tcrc90_hd\tcrc92_hd\tfs12_pos")
+    for i, (s, sname, a, L, b, m, d, near) in enumerate(top, start=1):
+        if near is None:
+            sync_hd = -1
+            zviol = -1
+            crc90_hd = -1
+            crc92_hd = -1
+            fs12_pos = -1
         else:
-            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.variant}\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}")
+            sync_hd, zviol, crc90_hd, crc92_hd, fs12_pos = near
+        if d is None:
+            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t0\t-\t-\t-\t-\t-\t{sync_hd}\t{zviol}\t{crc90_hd}\t{crc92_hd}\t{fs12_pos}")
+        else:
+            print(f"{i}\t{s:.2f}\t{sname}\t{a}\t{L}\t{b}\t{m:.4f}\t1\t{d.variant}\t{d.n}\t{d.lsp}\t{d.ltp}\t{d.bit_len}\t{sync_hd}\t{zviol}\t{crc90_hd}\t{crc92_hd}\t{fs12_pos}")
     if not top:
         print("no_candidates")
     return 0
