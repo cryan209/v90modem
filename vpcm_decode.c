@@ -12294,6 +12294,11 @@ static float p3_sequence_guided_score(const p3_result_t *detail,
     return 28.0f*s_score + 28.0f*sbar_score + 44.0f*trn_score;
 }
 
+static bool p3_try_extract_ja_dil(const p3_result_t *detail,
+                                   const char *prefix,
+                                   v90_dil_desc_t *desc_out,
+                                   v90_dil_analysis_t *analysis_out);
+
 static void p3_demod_analyse_phase3(const int16_t *samples,
                                     int total_samples,
                                     const decode_v34_result_t *result,
@@ -12490,6 +12495,8 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                     if (j_eval.notes[0])
                         printf("      notes: %s\n", j_eval.notes);
                 }
+                /* Attempt DIL descriptor extraction from demodulated symbols after J/J' */
+                p3_try_extract_ja_dil(detail, "  ", NULL, NULL);
                 p3_print_data_signatures(detail);
                 p3_result_free(detail);
             }
@@ -12568,6 +12575,366 @@ static bool get_cached_v8_channel_probe(const int16_t *samples,
     slot->max_sample = max_sample;
     slot->probe = *out;
     return true;
+}
+
+/*
+ * p3_extract_j_bits() — extract descrambled bits from a J segment using a
+ * given transform (matching p3_demod.c's j_transformed_bit convention).
+ *
+ * transform: 0=none, 1=invert, 2=swap I1/I2, 3=swap+invert
+ * Returns the number of bits written to packed[].
+ */
+static int p3_extract_j_bits(const p3_result_t *detail,
+                              int start_sym, int num_syms,
+                              int transform,
+                              uint8_t *packed, int packed_max_bits)
+{
+    int total_bits = num_syms * 2;
+    if (total_bits > packed_max_bits)
+        total_bits = packed_max_bits;
+
+    memset(packed, 0, (total_bits + 7) / 8);
+
+    for (int b = 0; b < total_bits; b++) {
+        int sym_idx = start_sym + (b / 2);
+        int bsel = b & 1;
+        int b0, b1, bit;
+
+        if (sym_idx >= detail->symbol_count)
+            break;
+        b0 = detail->symbols[sym_idx].bit0;
+        b1 = detail->symbols[sym_idx].bit1;
+
+        if (transform & 2)
+            bit = bsel ? b0 : b1;  /* swap I1/I2 */
+        else
+            bit = bsel ? b1 : b0;
+        if (transform & 1)
+            bit ^= 1;  /* invert */
+
+        if (bit)
+            packed[b / 8] |= (uint8_t)(1U << (b % 8));
+    }
+    return total_bits;
+}
+
+/*
+ * p3_find_sync17() — search a packed bit array for 17 consecutive ones
+ * followed by a zero (the DIL/CP frame sync word).
+ * Returns the bit offset of the first sync bit, or -1 if not found.
+ */
+static int p3_find_sync17(const uint8_t *packed, int total_bits)
+{
+    int run = 0;
+
+    for (int b = 0; b < total_bits; b++) {
+        int bit = (packed[b / 8] >> (b % 8)) & 1;
+        if (bit) {
+            run++;
+            if (run >= 17 && b + 1 < total_bits) {
+                int next = (packed[(b + 1) / 8] >> ((b + 1) % 8)) & 1;
+                if (!next)
+                    return b - 16;  /* start of the 17-ones run */
+            }
+        } else {
+            run = 0;
+        }
+    }
+    return -1;
+}
+
+/*
+ * p3_try_extract_ja_dil() — attempt to extract and parse a DIL descriptor
+ * from the demodulated P3 result.
+ *
+ * Per ITU-T V.90 §8.3.1: "Sequence Ja consists of repetitions of the DIL
+ * descriptor."  The DIL descriptor IS the content of the J segment — the
+ * 16-bit repeating pattern the P3 demod detects is the frame sync (17 ones)
+ * wrapping around at the descriptor repetition boundary.
+ *
+ * This function extracts bits from WITHIN the J segment (applying the same
+ * transform used for Table 18 matching), finds the 17-ones sync word, and
+ * parses the DIL descriptor from that alignment.
+ *
+ * It also attempts CP frame parsing from bits after J' (Phase 4).
+ *
+ * Returns true if a DIL descriptor was successfully parsed.
+ */
+static bool p3_try_extract_ja_dil(const p3_result_t *detail,
+                                   const char *prefix,
+                                   v90_dil_desc_t *desc_out,
+                                   v90_dil_analysis_t *analysis_out)
+{
+    const p3_segment_t *best_j = NULL;
+    const p3_segment_t *jprime = NULL;
+    uint8_t packed[1024];
+    v90_dil_desc_t desc;
+    v90_dil_analysis_t analysis;
+    int bit_len;
+
+    if (!detail || detail->segment_count <= 0 || !detail->symbols)
+        return false;
+
+    /* Find the longest J segment and any following J' */
+    for (int i = 0; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+        if (seg->type == P3_SIGNAL_J && (!best_j || seg->length > best_j->length))
+            best_j = seg;
+    }
+    if (!best_j)
+        return false;
+
+    /* Look for J' after the J segment */
+    for (int i = 0; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+        if (seg->type == P3_SIGNAL_J_PRIME
+            && seg->start_symbol >= best_j->start_symbol + best_j->length) {
+            jprime = seg;
+            break;
+        }
+    }
+
+    printf("%s  Ja DIL search: J_sym=%d J_len=%d xform=%d table18=%dpt(%d%%)"
+           " J'=%s\n",
+           prefix,
+           best_j->start_symbol,
+           best_j->length,
+           best_j->j_table_transform,
+           best_j->j_table_bits,
+           best_j->j_table_match_pct,
+           jprime ? "yes" : "no");
+
+    /*
+     * Strategy: extract bits from the J segment for all 4 transforms.
+     * For each, search for the 17-ones sync word and attempt DIL parse.
+     * The Table 18 transform is tried first as it's most likely correct.
+     */
+    {
+        int try_order[4];
+        int best_xform = best_j->j_table_transform;
+        try_order[0] = best_xform;
+        int idx = 1;
+        for (int x = 0; x < 4; x++) {
+            if (x != best_xform)
+                try_order[idx++] = x;
+        }
+
+        for (int ti = 0; ti < 4; ti++) {
+            int xform = try_order[ti];
+            int total_bits = p3_extract_j_bits(detail,
+                                                best_j->start_symbol,
+                                                best_j->length,
+                                                xform,
+                                                packed,
+                                                (int)sizeof(packed) * 8);
+
+            if (total_bits < 206)
+                continue;
+
+            /* Debug: show first 64 bits for this transform */
+            {
+                char dbg[65];
+                int show = total_bits < 64 ? total_bits : 64;
+                for (int b = 0; b < show; b++)
+                    dbg[b] = ((packed[b / 8] >> (b % 8)) & 1) ? '1' : '0';
+                dbg[show] = '\0';
+                printf("%s    xform=%d first 64: %s\n", prefix, xform, dbg);
+            }
+
+            /* Search for all sync positions and try each */
+            int search_from = 0;
+            while (search_from < total_bits - 206) {
+                /* Find next 17-ones sync */
+                int sync_pos = -1;
+                {
+                    int run = 0;
+                    for (int b = search_from; b < total_bits; b++) {
+                        int bit = (packed[b / 8] >> (b % 8)) & 1;
+                        if (bit) {
+                            run++;
+                            if (run >= 17 && b + 1 < total_bits) {
+                                int next = (packed[(b + 1) / 8] >> ((b + 1) % 8)) & 1;
+                                if (!next) {
+                                    sync_pos = b - 16;
+                                    break;
+                                }
+                            }
+                        } else {
+                            run = 0;
+                        }
+                    }
+                }
+                if (sync_pos < 0)
+                    break;
+
+                int remaining = total_bits - sync_pos;
+                if (remaining < 206) {
+                    search_from = sync_pos + 18;
+                    continue;
+                }
+
+                /* Repack bits from sync_pos onwards */
+                uint8_t aligned[1024];
+                memset(aligned, 0, sizeof(aligned));
+                for (int b = 0; b < remaining && b < (int)sizeof(aligned) * 8; b++) {
+                    int src = sync_pos + b;
+                    int bit = (packed[src / 8] >> (src % 8)) & 1;
+                    if (bit)
+                        aligned[b / 8] |= (uint8_t)(1U << (b % 8));
+                }
+
+                if (v90_parse_dil_descriptor(&desc, aligned, remaining)) {
+                    if (v90_analyse_dil_descriptor(&desc, &analysis)) {
+                        bit_len = v90_dil_descriptor_bit_len(&desc);
+                        printf("%s  Ja DIL FOUND (xform=%d sync@bit%d):"
+                               " n=%u lsp=%u ltp=%u"
+                               " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                               prefix,
+                               xform, sync_pos,
+                               (unsigned)desc.n,
+                               (unsigned)desc.lsp,
+                               (unsigned)desc.ltp,
+                               bit_len,
+                               (unsigned)analysis.unique_train_u,
+                               (unsigned)analysis.used_uchords,
+                               (unsigned)analysis.impairment_score);
+                        if (analysis.looks_default_125x12)
+                            printf("%s    profile: default 125x12\n", prefix);
+                        else if (analysis.robbed_bit_limited)
+                            printf("%s    profile: robbed-bit limited\n", prefix);
+
+                        if (desc_out)
+                            *desc_out = desc;
+                        if (analysis_out)
+                            *analysis_out = analysis;
+                        return true;
+                    }
+                }
+
+                search_from = sync_pos + 18;
+            }
+        }
+    }
+
+    /*
+     * Extended search: extract bits from ALL post-TRN segments and search
+     * for 17-ones sync.  The Ja signal follows TRN (§9.3.2.4) and the DIL
+     * descriptor repeats within it.  The P3 demod's J detection may not
+     * perfectly bracket the Ja signal, so search a wider window.
+     */
+    {
+        /* Find the last TRN segment before J, or start from J - 200 syms */
+        int wide_start = best_j->start_symbol > 200
+                         ? best_j->start_symbol - 200 : 0;
+        int wide_end = detail->symbol_count;
+        int wide_syms = wide_end - wide_start;
+
+        if (wide_syms >= 103) {
+            for (int xform = 0; xform < 4; xform++) {
+                int total_bits = p3_extract_j_bits(detail,
+                                                    wide_start, wide_syms,
+                                                    xform,
+                                                    packed,
+                                                    (int)sizeof(packed) * 8);
+                /* Find all sync positions and show longest runs */
+                int best_run = 0;
+                int best_run_pos = -1;
+                int run = 0;
+                for (int b = 0; b < total_bits; b++) {
+                    int bit = (packed[b / 8] >> (b % 8)) & 1;
+                    if (bit) {
+                        run++;
+                        if (run > best_run) {
+                            best_run = run;
+                            best_run_pos = b - run + 1;
+                        }
+                    } else {
+                        run = 0;
+                    }
+                }
+                if (best_run >= 10) {
+                    printf("%s    wide xform=%d: longest 1-run=%d @bit%d"
+                           " (sym%d) total=%d bits\n",
+                           prefix, xform, best_run, best_run_pos,
+                           wide_start + best_run_pos / 2,
+                           total_bits);
+                }
+
+                /* Try all sync17 positions in this wide window */
+                int search_from = 0;
+                while (search_from < total_bits - 206) {
+                    int sync_pos = -1;
+                    int sr = 0;
+                    for (int b = search_from; b < total_bits; b++) {
+                        int bit = (packed[b / 8] >> (b % 8)) & 1;
+                        if (bit) {
+                            sr++;
+                            if (sr >= 17 && b + 1 < total_bits) {
+                                int next = (packed[(b + 1) / 8] >> ((b + 1) % 8)) & 1;
+                                if (!next) {
+                                    sync_pos = b - 16;
+                                    break;
+                                }
+                            }
+                        } else {
+                            sr = 0;
+                        }
+                    }
+                    if (sync_pos < 0)
+                        break;
+
+                    int remaining = total_bits - sync_pos;
+                    if (remaining >= 206) {
+                        uint8_t aligned[1024];
+                        memset(aligned, 0, sizeof(aligned));
+                        for (int b = 0; b < remaining && b < (int)sizeof(aligned) * 8; b++) {
+                            int src = sync_pos + b;
+                            int bit = (packed[src / 8] >> (src % 8)) & 1;
+                            if (bit)
+                                aligned[b / 8] |= (uint8_t)(1U << (b % 8));
+                        }
+
+                        printf("%s    wide xform=%d sync@bit%d (sym%d):"
+                               " trying DIL parse (%d bits remain)\n",
+                               prefix, xform, sync_pos,
+                               wide_start + sync_pos / 2, remaining);
+
+                        if (v90_parse_dil_descriptor(&desc, aligned, remaining)) {
+                            if (v90_analyse_dil_descriptor(&desc, &analysis)) {
+                                bit_len = v90_dil_descriptor_bit_len(&desc);
+                                printf("%s  Ja DIL FOUND (wide xform=%d sync@bit%d):"
+                                       " n=%u lsp=%u ltp=%u"
+                                       " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                                       prefix,
+                                       xform, sync_pos,
+                                       (unsigned)desc.n,
+                                       (unsigned)desc.lsp,
+                                       (unsigned)desc.ltp,
+                                       bit_len,
+                                       (unsigned)analysis.unique_train_u,
+                                       (unsigned)analysis.used_uchords,
+                                       (unsigned)analysis.impairment_score);
+                                if (analysis.looks_default_125x12)
+                                    printf("%s    profile: default 125x12\n", prefix);
+                                else if (analysis.robbed_bit_limited)
+                                    printf("%s    profile: robbed-bit limited\n", prefix);
+
+                                if (desc_out)
+                                    *desc_out = desc;
+                                if (analysis_out)
+                                    *analysis_out = analysis;
+                                return true;
+                            }
+                        }
+                    }
+                    search_from = sync_pos + 18;
+                }
+            }
+        }
+    }
+
+    printf("%s  Ja DIL: no valid descriptor found\n", prefix);
+    return false;
 }
 
 static void p3_demod_scan_window(const int16_t *samples,
@@ -12701,6 +13068,8 @@ static void p3_demod_scan_window(const int16_t *samples,
                 if (j_eval.notes[0])
                     printf("        notes: %s\n", j_eval.notes);
             }
+            /* Attempt DIL descriptor extraction from demodulated symbols after J/J' */
+            p3_try_extract_ja_dil(detail, "    ", NULL, NULL);
             p3_print_data_signatures(detail);
             p3_result_free(detail);
         }
