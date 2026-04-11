@@ -8,28 +8,42 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* -------------------------------------------------------------------------
  * Internal constants
  * ------------------------------------------------------------------------- */
 
-/* Tolerance: max errors per 12-symbol window during period-6 phases. */
-#define P6_ERR_MAX      2
+/* Minimum run before promoting a period-6 lock to Ru. */
+#define P6_LOCK_MIN    320
 
-/* Minimum run to declare period-6 lock (2 complete cycles). */
-#define P6_LOCK_MIN    12
+/* Acceptance window for Ru burst length. */
+#define RU_ACCEPT_MIN  (V92_P3_RX_RU_T - 24)
+#define RU_ACCEPT_MAX  (V92_P3_RX_RU_T + 36)
+/* Hard cap to avoid latching forever on unrelated long period-6 regions. */
+#define RU_MAX_T       (V92_P3_RX_RU_T * 8)
 
-/* Minimum symbols of Ru before we accept it and look for uR. */
-#define RU_MIN_T       (V92_P3_RX_RU_T - 20)
-
-/* Minimum symbols of uR before we accept it and advance. */
-#define UR_MIN_T       (V92_P3_RX_UR_T - 4)
+/* Acceptance window for uR burst length. */
+#define UR_ACCEPT_MIN  (V92_P3_RX_UR_T - 8)
+#define UR_ACCEPT_MAX  (V92_P3_RX_UR_T * 2 + 8)
+/* Hard cap for uR; true uR should be short. */
+#define UR_MAX_T       (V92_P3_RX_UR_T * 6)
 
 /* -------------------------------------------------------------------------
  * Sign bit helpers
  * ------------------------------------------------------------------------- */
 
 static inline int sign_bit(uint8_t cw)  { return (cw >> 7) & 1; }
+
+static int p3rx_debug_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("V92_P3_RX_DEBUG");
+        cached = (v && *v && *v != '0') ? 1 : 0;
+    }
+    return cached;
+}
 
 /*
  * p6_expected() — expected G.711 MSB at period-6 phase p.
@@ -43,19 +57,54 @@ static inline int p6_exp(int phase, bool ru_pol)
 }
 
 /* -------------------------------------------------------------------------
- * Period-6 tracker — embedded in the RX context via p6_* fields.
- * -------------------------------------------------------------------------
- *
- * We track the period-6 pattern with three parallel counters — one for each
- * possible starting alignment (we reset them all and pick the winner):
- *
- *   p6_phase       : current expected phase (0-5) within the Ru cycle
- *   p6_run         : consecutive on-pattern symbols (errors eat into this)
- *   p6_err_window  : rolling error count over last 12 symbols
- *   p6_err_wpos    : position counter for the 12-symbol window reset
- *   p6_ru_polarity : true = Ru {+,+,+,-,-,-}, false = uR {-,-,-,+,+,+}
- *   p6_locked      : true once p6_run >= P6_LOCK_MIN
- */
+ * Period-6 tracker — 12 hypotheses (6 phases x 2 polarities)
+ * ------------------------------------------------------------------------- */
+
+static inline bool p6_hyp_pol(int h)
+{
+    return (h / 6) == 0;
+}
+
+static inline int p6_hyp_phase0(int h)
+{
+    return h % 6;
+}
+
+static inline int p6_hyp_index(bool ru_pol, int phase0)
+{
+    return (ru_pol ? 0 : 6) + (phase0 % 6);
+}
+
+static void p6_update_hyp_runs(v92_p3_rx_t *rx, int msb, int sample_index)
+{
+    for (int h = 0; h < 12; h++) {
+        bool pol = p6_hyp_pol(h);
+        int phase = (sample_index + p6_hyp_phase0(h)) % 6;
+        int expected = p6_exp(phase, pol);
+
+        if (msb == expected)
+            rx->p6_hyp_run[h]++;
+        else
+            rx->p6_hyp_run[h] = 0;
+    }
+}
+
+static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run)
+{
+    int best_h = -1;
+    int best_r = min_run - 1;
+    int base = ru_pol ? 0 : 6;
+
+    for (int p = 0; p < 6; p++) {
+        int h = base + p;
+        int r = rx->p6_hyp_run[h];
+        if (r > best_r) {
+            best_r = r;
+            best_h = h;
+        }
+    }
+    return best_h;
+}
 
 static void p6_reset(v92_p3_rx_t *rx)
 {
@@ -65,43 +114,9 @@ static void p6_reset(v92_p3_rx_t *rx)
     rx->p6_err_window = 0;
     rx->p6_err_wpos   = 0;
     rx->p6_ru_polarity = true;
-}
-
-/*
- * p6_check() — test whether msb matches the current period-6 expectation,
- * update internal counters, and return:
- *
- *   > 0  pattern still live (on-pattern or tolerated error)
- *     0  pattern broken — caller should handle transition or re-hunt
- */
-static int p6_check(v92_p3_rx_t *rx, int msb)
-{
-    int expected = p6_exp(rx->p6_phase, rx->p6_ru_polarity);
-    int match    = (msb == expected);
-
-    /* Advance phase regardless of match (keeps us frame-aligned). */
-    rx->p6_phase = (rx->p6_phase + 1) % 6;
-
-    /* Roll the 12-symbol error window. */
-    rx->p6_err_wpos++;
-    if (rx->p6_err_wpos >= 12) {
-        rx->p6_err_wpos   = 0;
-        rx->p6_err_window = 0;
-    }
-
-    if (!match)
-        rx->p6_err_window++;
-
-    if (rx->p6_err_window > P6_ERR_MAX) {
-        p6_reset(rx);
-        return 0;
-    }
-
-    rx->p6_run++;
-    if (!rx->p6_locked && rx->p6_run >= P6_LOCK_MIN)
-        rx->p6_locked = true;
-
-    return 1;
+    memset(rx->p6_hyp_run, 0, sizeof(rx->p6_hyp_run));
+    rx->ru_hyp = -1;
+    rx->ur_hyp = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -199,6 +214,13 @@ static bool run_ja_search(v92_p3_rx_t *rx)
     return found && (rx->ja_result.ok || rx->ja_result.soft_lock);
 }
 
+static void p6_rehunt_from_current(v92_p3_rx_t *rx, int msb, int sample_index)
+{
+    p6_reset(rx);
+    p6_update_hyp_runs(rx, msb, sample_index);
+    rx->state = V92_P3_RX_RU1_HUNT;
+}
+
 /* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
@@ -227,6 +249,15 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     v92_p3_rx_state_t prev = rx->state;
     int msb = sign_bit(codeword);
 
+    if (rx->state == V92_P3_RX_RU1_HUNT
+        || rx->state == V92_P3_RX_RU1
+        || rx->state == V92_P3_RX_UR1
+        || rx->state == V92_P3_RX_MD_WAIT
+        || rx->state == V92_P3_RX_RU2
+        || rx->state == V92_P3_RX_UR2) {
+        p6_update_hyp_runs(rx, msb, sample_index);
+    }
+
     switch (rx->state) {
 
     /* ------------------------------------------------------------------ */
@@ -235,66 +266,50 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU1_HUNT: {
-        /*
-         * Try to lock onto the period-6 pattern.
-         * At each sample, check if msb matches the current (phase, polarity).
-         * If not, also try the opposite polarity at the same phase-1 position
-         * (since we just advanced phase in p6_check, check both polarities
-         * for next cycle start).
-         */
-        if (!p6_check(rx, msb)) {
-            /* p6_check reset rx — try matching from phase 0, both polarities */
-            if (msb == p6_exp(0, true)) {
-                rx->p6_ru_polarity = true;
-            } else if (msb == p6_exp(0, false)) {
-                rx->p6_ru_polarity = false;
-            }
-            /* phase is already 0 after p6_reset; advance it for this bit */
-            rx->p6_phase = 1;
-            rx->p6_run   = 1;
-            break;
+        int h_ru = p6_best_hyp_run(rx, true, P6_LOCK_MIN);
+        int h_ur = p6_best_hyp_run(rx, false, P6_LOCK_MIN);
+        int best_h = -1;
+
+        if (h_ru >= 0)
+            best_h = h_ru;
+        if (h_ur >= 0
+            && (best_h < 0 || rx->p6_hyp_run[h_ur] > rx->p6_hyp_run[best_h])) {
+            best_h = h_ur;
         }
 
-        /* Check if the current match could also be the OTHER polarity
-         * starting fresh — prefer Ru polarity over uR. */
-        if (!rx->p6_locked && rx->p6_run == 1) {
-            /* First matched bit: confirm polarity against MSB value. */
-            int ru_phase0_exp = p6_exp(0, true);
-            if (msb == ru_phase0_exp)
-                rx->p6_ru_polarity = true;
-        }
-
-        if (rx->p6_locked) {
+        if (best_h >= 0) {
+            rx->ru_hyp = best_h;
+            rx->ur_hyp = p6_hyp_index(!p6_hyp_pol(best_h), p6_hyp_phase0(best_h));
+            rx->p6_ru_polarity = p6_hyp_pol(best_h);
+            rx->p6_run = rx->p6_hyp_run[best_h];
+            rx->p6_locked = true;
             rx->ru1_start = sample_index - rx->p6_run + 1;
-            rx->state     = V92_P3_RX_RU1;
+            rx->state = V92_P3_RX_RU1;
         }
         break;
     }
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU1: {
-        /*
-         * Accumulate Ru1 (expect V92_P3_RX_RU_T symbols of the current
-         * period-6 polarity).  The run ends when:
-         *   (a) the pattern breaks (transition to uR or noise), or
-         *   (b) we've seen enough and the next 6-symbol half begins with
-         *       the opposite polarity.
-         */
-        bool alive = (p6_check(rx, msb) != 0);
+        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : 0;
 
-        if (!alive || rx->p6_run >= V92_P3_RX_RU_T + 12) {
-            /* Pattern ended or we've well exceeded 384T. */
-            if (rx->p6_run >= RU_MIN_T) {
-                rx->ru1_end      = sample_index;
-                rx->ur1_start    = sample_index;
-                /* Flip polarity for the upcoming uR. */
-                bool ur_pol      = !rx->p6_ru_polarity;
-                p6_reset(rx);
-                rx->p6_ru_polarity = ur_pol;
-                rx->state          = V92_P3_RX_UR1;
+        if (run > 0) {
+            rx->p6_run = run;
+            if (run > RU_MAX_T)
+                p6_rehunt_from_current(rx, msb, sample_index);
+        } else {
+            int run_effective = rx->p6_run;
+
+            if (run_effective >= RU_ACCEPT_MIN
+                && run_effective <= RU_ACCEPT_MAX
+                && rx->ur_hyp >= 0
+                && rx->p6_hyp_run[rx->ur_hyp] > 0) {
+                rx->ru1_end = sample_index - 1;
+                rx->ur1_start = sample_index;
+                rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
+                rx->state = V92_P3_RX_UR1;
             } else {
-                p6_reset(rx);
-                rx->state = V92_P3_RX_RU1_HUNT;
+                p6_rehunt_from_current(rx, msb, sample_index);
             }
         }
         break;
@@ -302,17 +317,20 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_UR1: {
-        bool alive = (p6_check(rx, msb) != 0);
+        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
 
-        if (!alive || rx->p6_run >= V92_P3_RX_UR_T + 12) {
-            if (rx->p6_run >= UR_MIN_T) {
-                rx->ur1_end = sample_index;
-                p6_reset(rx);
+        if (run > 0) {
+            rx->p6_run = run;
+            if (run > UR_MAX_T)
+                p6_rehunt_from_current(rx, msb, sample_index);
+        } else {
+            int run_effective = rx->p6_run;
+            if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
+                rx->ur1_end = sample_index - 1;
+                rx->p6_run = 0;
                 rx->state = V92_P3_RX_MD_WAIT;
             } else {
-                /* uR too short — back to hunting */
-                p6_reset(rx);
-                rx->state = V92_P3_RX_RU1_HUNT;
+                p6_rehunt_from_current(rx, msb, sample_index);
             }
         }
         break;
@@ -320,55 +338,49 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_MD_WAIT: {
-        /*
-         * After uR1, wait for Ru2.  Allow up to V92_P3_RX_MD_MAX_T samples
-         * for the optional MD phase.
-         */
         int elapsed = sample_index - rx->ur1_end;
         if (elapsed > V92_P3_RX_MD_MAX_T) {
-            rx->state = V92_P3_RX_FAILED;
+            p6_rehunt_from_current(rx, msb, sample_index);
             break;
         }
 
-        /* Try both polarities for Ru2 onset. */
-        bool try_pol = (msb == p6_exp(0, true)) ? true
-                     : (msb == p6_exp(0, false)) ? false
-                     : rx->p6_ru_polarity;
+        if (rx->ru_hyp < 0) {
+            p6_rehunt_from_current(rx, msb, sample_index);
+            break;
+        }
 
-        if (msb == p6_exp(rx->p6_phase, rx->p6_ru_polarity)
-            || msb == p6_exp(0, try_pol)) {
-
-            if (msb != p6_exp(rx->p6_phase, rx->p6_ru_polarity)) {
-                p6_reset(rx);
-                rx->p6_ru_polarity = try_pol;
+        {
+            int run = rx->p6_hyp_run[rx->ru_hyp];
+            if (run >= P6_LOCK_MIN) {
+                rx->p6_run = run;
+                rx->ru2_start = sample_index - run + 1;
+                rx->state = V92_P3_RX_RU2;
             }
-
-            p6_check(rx, msb);
-
-            if (rx->p6_locked) {
-                rx->ru2_start = sample_index - rx->p6_run + 1;
-                rx->state     = V92_P3_RX_RU2;
-            }
-        } else {
-            p6_reset(rx);
         }
         break;
     }
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU2: {
-        bool alive = (p6_check(rx, msb) != 0);
+        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : 0;
 
-        if (!alive || rx->p6_run >= V92_P3_RX_RU_T + 12) {
-            if (rx->p6_run >= RU_MIN_T) {
-                rx->ru2_end      = sample_index;
-                rx->ur2_start    = sample_index;
-                bool ur_pol      = !rx->p6_ru_polarity;
-                p6_reset(rx);
-                rx->p6_ru_polarity = ur_pol;
-                rx->state          = V92_P3_RX_UR2;
+        if (run > 0) {
+            rx->p6_run = run;
+            if (run > RU_MAX_T)
+                p6_rehunt_from_current(rx, msb, sample_index);
+        } else {
+            int run_effective = rx->p6_run;
+
+            if (run_effective >= RU_ACCEPT_MIN
+                && run_effective <= RU_ACCEPT_MAX
+                && rx->ur_hyp >= 0
+                && rx->p6_hyp_run[rx->ur_hyp] > 0) {
+                rx->ru2_end = sample_index - 1;
+                rx->ur2_start = sample_index;
+                rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
+                rx->state = V92_P3_RX_UR2;
             } else {
-                rx->state = V92_P3_RX_FAILED;
+                p6_rehunt_from_current(rx, msb, sample_index);
             }
         }
         break;
@@ -376,12 +388,17 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_UR2: {
-        bool alive = (p6_check(rx, msb) != 0);
+        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
 
-        if (!alive || rx->p6_run >= V92_P3_RX_UR_T + 12) {
-            if (rx->p6_run >= UR_MIN_T) {
-                rx->ur2_end      = sample_index;
-                rx->trn1u_start  = sample_index + 1;
+        if (run > 0) {
+            rx->p6_run = run;
+            if (run > UR_MAX_T)
+                p6_rehunt_from_current(rx, msb, sample_index);
+        } else {
+            int run_effective = rx->p6_run;
+            if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
+                rx->ur2_end = sample_index - 1;
+                rx->trn1u_start = sample_index;
                 /* Set up Ja buffer to start 23 samples before TRN1u
                  * so v92_ja_dil_search has its seed window. */
                 rx->ja_buf_base  = rx->trn1u_start - 23;
@@ -393,7 +410,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 p6_reset(rx);
                 rx->state = V92_P3_RX_TRN1U;
             } else {
-                rx->state = V92_P3_RX_FAILED;
+                p6_rehunt_from_current(rx, msb, sample_index);
             }
         }
         break;
@@ -446,6 +463,20 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         break;
     }
 
+    if (rx->state != prev && p3rx_debug_enabled()) {
+        int ru_run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : -1;
+        int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : -1;
+        fprintf(stderr,
+                "[P3RX] sample=%d %s->%s p6_run=%d ru_run=%d ur_run=%d ru_hyp=%d ur_hyp=%d\n",
+                sample_index,
+                v92_p3_rx_state_name(prev),
+                v92_p3_rx_state_name(rx->state),
+                rx->p6_run,
+                ru_run,
+                ur_run,
+                rx->ru_hyp,
+                rx->ur_hyp);
+    }
     return (rx->state != prev);
 }
 

@@ -89,6 +89,10 @@ typedef struct {
     int      p6_err_window;  /* errors in last 12-symbol window */
     int      p6_err_wpos;    /* position counter for window reset */
     bool     p6_ru_polarity; /* true = Ru {+,+,+,-,-,-}, false = uR */
+    /* 12-hypothesis run tracker: 6 phases x 2 polarities. */
+    int      p6_hyp_run[12];
+    int      ru_hyp;         /* active Ru hypothesis index, or -1 */
+    int      ur_hyp;         /* active uR hypothesis index, or -1 */
 
     /* ------- phase 3 sample anchors ------- */
     int      ru1_start;
