@@ -6596,6 +6596,25 @@ static bool parse_v92_table20_at_offset(const char *bit_str,
     return true;
 }
 
+static int v92_desc_raw_bits(int n, int lsp, int ltp)
+{
+    int alpha;
+    int beta;
+    int training_bits;
+
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+    if (lsp < 1) lsp = 1;
+    if (lsp > 128) lsp = 128;
+    if (ltp < 1) ltp = 1;
+    if (ltp > 128) ltp = 128;
+
+    alpha = ((int) lsp + 15) / 16 * 17;
+    beta = alpha + (((int) ltp + 15) / 16) * 17;
+    training_bits = (((int) n + 1) / 2) * 17;
+    return 239 + beta + training_bits; /* through Table-20 fill bit */
+}
+
 static int v90_aux_dil_hit_score(const v90_aux_dil_hit_t *hit)
 {
     if (!hit || !hit->found)
@@ -7805,6 +7824,9 @@ static void collect_v92_phase3_event(call_log_t *log,
     int ja_v92_idx_rate_hi_msb = -1;
     int ja_v92_idx_crc_lsb = -1;
     int ja_v92_idx_crc_msb = -1;
+    int ja_v92_desc_raw_len = 0;
+    int ja_v92_desc_len = 0;
+    char ja_v92_desc_bits[8193];
 
     if (!log || !res)
         return;
@@ -7837,6 +7859,7 @@ static void collect_v92_phase3_event(call_log_t *log,
     memset(&obs, 0, sizeof(obs));
     ja_dil_source_buf[0] = '\0';
     ja_soft_source_buf[0] = '\0';
+    ja_v92_desc_bits[0] = '\0';
     obs.info0_seen = res->info0_seen;
     obs.info0_is_d = res->info0_is_d;
     if (res->info0_seen) {
@@ -8665,10 +8688,28 @@ static void collect_v92_phase3_event(call_log_t *log,
                                                             int crc_start_i = 187 + beta_i + trn_i;
                                                             ja_v92_idx_rate_lo_lsb = crc_start_i + 1;
                                                             ja_v92_idx_rate_lo_msb = crc_start_i + 16;
-                                                            ja_v92_idx_rate_hi_lsb = crc_start_i + 18;
-                                                            ja_v92_idx_rate_hi_msb = crc_start_i + 33;
-                                                            ja_v92_idx_crc_lsb = crc_start_i + 35;
-                                                            ja_v92_idx_crc_msb = crc_start_i + 50;
+                                                        ja_v92_idx_rate_hi_lsb = crc_start_i + 18;
+                                                        ja_v92_idx_rate_hi_msb = crc_start_i + 33;
+                                                        ja_v92_idx_crc_lsb = crc_start_i + 35;
+                                                        ja_v92_idx_crc_msb = crc_start_i + 50;
+                                                        }
+                                                        if (v92_bits > 0) {
+                                                            int raw_bits_i = v92_desc_raw_bits((int) v92_desc.n,
+                                                                                               (int) v92_desc.lsp,
+                                                                                               (int) v92_desc.ltp);
+                                                            int copy_len = v92_bits;
+                                                            if (copy_len > (int) sizeof(ja_v92_desc_bits) - 1)
+                                                                copy_len = (int) sizeof(ja_v92_desc_bits) - 1;
+                                                            for (int b = 0; b < copy_len; b++) {
+                                                                int src_i = so + b;
+                                                                if (b < raw_bits_i && src_i >= 0 && src_i < max_copy)
+                                                                    ja_v92_desc_bits[b] = working_bits[src_i];
+                                                                else
+                                                                    ja_v92_desc_bits[b] = '0';
+                                                            }
+                                                            ja_v92_desc_bits[copy_len] = '\0';
+                                                            ja_v92_desc_raw_len = (raw_bits_i < copy_len) ? raw_bits_i : copy_len;
+                                                            ja_v92_desc_len = copy_len;
                                                         }
                                                         if (ja_dbg) {
                                                             fprintf(stderr,
@@ -8788,6 +8829,24 @@ static void collect_v92_phase3_event(call_log_t *log,
                                                             ja_v92_idx_rate_hi_msb = crc_start_i + 33;
                                                             ja_v92_idx_crc_lsb = crc_start_i + 35;
                                                             ja_v92_idx_crc_msb = crc_start_i + 50;
+                                                        }
+                                                        if (best_bits > 0) {
+                                                            int raw_bits_i = v92_desc_raw_bits((int) best_desc.n,
+                                                                                               (int) best_desc.lsp,
+                                                                                               (int) best_desc.ltp);
+                                                            int copy_len = best_bits;
+                                                            if (copy_len > (int) sizeof(ja_v92_desc_bits) - 1)
+                                                                copy_len = (int) sizeof(ja_v92_desc_bits) - 1;
+                                                            for (int b = 0; b < copy_len; b++) {
+                                                                int src_i = best_so + b;
+                                                                if (b < raw_bits_i && src_i >= 0 && src_i < max_copy)
+                                                                    ja_v92_desc_bits[b] = working_bits[src_i];
+                                                                else
+                                                                    ja_v92_desc_bits[b] = '0';
+                                                            }
+                                                            ja_v92_desc_bits[copy_len] = '\0';
+                                                            ja_v92_desc_raw_len = (raw_bits_i < copy_len) ? raw_bits_i : copy_len;
+                                                            ja_v92_desc_len = copy_len;
                                                         }
                                                         if (ja_dbg) {
                                                             fprintf(stderr,
@@ -9323,6 +9382,22 @@ ja_solved_done:;
             (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
     if (phase3.ja_dil_seen && ja_v92_table20_seen)
         appendf(detail, sizeof(detail), "%d:%d", ja_v92_idx_crc_lsb, ja_v92_idx_crc_msb);
+    appendf(detail, sizeof(detail), " ja_v92_desc_len=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0)
+        appendf(detail, sizeof(detail), "%d", ja_v92_desc_len);
+    appendf(detail, sizeof(detail), " ja_v92_desc_raw_len=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0)
+        appendf(detail, sizeof(detail), "%d", ja_v92_desc_raw_len);
+    appendf(detail, sizeof(detail), " ja_v92_desc_mod12=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0)
+        appendf(detail, sizeof(detail), "%d", ja_v92_desc_len % 12);
+    appendf(detail, sizeof(detail), " ja_v92_desc_bits=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen && ja_v92_desc_len > 0)
+        appendf(detail, sizeof(detail), "%s", ja_v92_desc_bits);
     appendf(detail, sizeof(detail), " ja_unique_u=%s", phase3.ja_dil_seen ? "" : "n/a");
     if (phase3.ja_dil_seen)
         appendf(detail, sizeof(detail), "%d", phase3.ja_dil_unique_train_u);
