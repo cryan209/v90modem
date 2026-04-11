@@ -884,7 +884,7 @@ static int prehist_copy_tail(const v92_p3_rx_t *rx,
 /* -------------------------------------------------------------------------
  * Ja search — called once the buffer has enough data
  * ------------------------------------------------------------------------- */
-static bool run_ja_search(v92_p3_rx_t *rx)
+static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
 {
     ja_dil_search_params_t params;
     int buf_trn_off;
@@ -892,8 +892,12 @@ static bool run_ja_search(v92_p3_rx_t *rx)
     int ja_lead_t;
 
     memset(&params, 0, sizeof(params));
-    trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
-    ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
+    trn_min_t = (force_hard_min
+                 ? V92_P3_RX_TRN1U_MIN_T
+                 : (rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T));
+    ja_lead_t = (force_hard_min
+                 ? V92_P3_RX_JA_LEAD_T
+                 : (rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T));
 
     /* Offset of trn1u_start within ja_buf. */
     buf_trn_off = rx->trn1u_start - rx->ja_buf_base;
@@ -948,7 +952,6 @@ static bool run_ja_search(v92_p3_rx_t *rx)
                         rx->ja_result.descriptor_bits);
         return true;
     }
-
     p3rx_set_reject(rx,
                     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
                     rx->trn1u_start + rx->trn1u_count,
@@ -1400,9 +1403,10 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_JA_SEARCH:
     {
-        int trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
-        int ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
-        int ready_min = 24 + trn_min_t + ja_lead_t + 207;
+        int trn_soft_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
+        int ja_soft_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
+        int ready_soft = 24 + trn_soft_t + ja_soft_t + 207;
+        int ready_hard = 24 + V92_P3_RX_TRN1U_MIN_T + V92_P3_RX_JA_LEAD_T + 207;
         ja_buf_push(rx, codeword, sample_index);
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
@@ -1415,9 +1419,34 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             break;
         }
 
-        /* Run the search once we have enough buffered. */
-        if (rx->ja_buf_fill >= ready_min) {
-            if (run_ja_search(rx)) {
+        /*
+         * Soft mode: run one early probe and, if only soft-lock is found,
+         * run one hard-gated probe at TRN1u>=2040T before finalising.
+         */
+        if (rx->ja_buf_fill == ready_soft) {
+            bool force_hard = !rx->p6_soft_mode;
+            bool found = run_ja_search(rx, force_hard);
+
+            if (found && (rx->ja_result.ok || !rx->p6_soft_mode)) {
+                if (rx->ja_result.ok) {
+                    rx->last_reject = V92_P3_RX_REJECT_NONE;
+                    rx->last_reject_sample = -1;
+                    rx->last_reject_metric0 = 0;
+                    rx->last_reject_metric1 = 0;
+                }
+                rx->ja_found = true;
+                rx->state    = V92_P3_RX_DONE;
+            }
+        } else if (rx->p6_soft_mode && rx->ja_buf_fill == ready_hard) {
+            bool found = run_ja_search(rx, true);
+
+            if (found) {
+                if (rx->ja_result.ok) {
+                    rx->last_reject = V92_P3_RX_REJECT_NONE;
+                    rx->last_reject_sample = -1;
+                    rx->last_reject_metric0 = 0;
+                    rx->last_reject_metric1 = 0;
+                }
                 rx->ja_found = true;
                 rx->state    = V92_P3_RX_DONE;
             } else {

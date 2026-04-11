@@ -25,6 +25,14 @@
 #define JA_MIN_DESCRIPTOR_BITS 206
 #define JA_FRAME17_CHECK_BITS  96
 
+static bool ja_decode_bits_packed(const uint8_t *codewords,
+                                  int total_codewords,
+                                  int start_sample,
+                                  int bit_count,
+                                  bool invert_sign,
+                                  uint8_t *packed_out,
+                                  int packed_len);
+
 static int ja_get_packed_bit(const uint8_t *bits, int pos)
 {
     return (int) ((bits[pos / 8] >> (pos % 8)) & 1U);
@@ -39,6 +47,29 @@ static int ja_get_packed_bits(const uint8_t *bits, int pos, int n)
         v |= ja_get_packed_bit(bits, pos + i) << i;
     }
     return v;
+}
+
+static void ja_set_packed_bit(uint8_t *bits, int pos, int bit)
+{
+    uint8_t mask;
+
+    if (!bits || pos < 0)
+        return;
+    mask = (uint8_t) (1U << (pos % 8));
+    if (bit)
+        bits[pos / 8] |= mask;
+    else
+        bits[pos / 8] &= (uint8_t) ~mask;
+}
+
+static void ja_set_packed_bits_le(uint8_t *bits, int pos, int n, uint32_t value)
+{
+    int i;
+
+    if (!bits || pos < 0 || n <= 0)
+        return;
+    for (i = 0; i < n; i++)
+        ja_set_packed_bit(bits, pos + i, (int) ((value >> i) & 1U));
 }
 
 static uint16_t ja_crc16_bits(const uint8_t *bits, int bit_count)
@@ -363,6 +394,387 @@ static bool v92_parse_table20_descriptor_strict(const uint8_t *bits,
         *rate_mask_lo_out = rate_lo;
     if (rate_mask_hi_out)
         *rate_mask_hi_out = rate_hi;
+    return true;
+}
+
+static bool ja_compute_layout_from_header(const uint8_t *bits,
+                                          int bit_count,
+                                          int *training_start_out,
+                                          int *training_bits_out,
+                                          int *crc_start_out)
+{
+    int n, lsp, ltp;
+    int alpha, beta;
+    int training_start;
+    int training_bits;
+    int crc_start;
+
+    if (!bits || bit_count < JA_MIN_DESCRIPTOR_BITS)
+        return false;
+
+    n = ja_get_packed_bits(bits, 18, 8);
+    lsp = ja_get_packed_bits(bits, 35, 7) + 1;
+    ltp = ja_get_packed_bits(bits, 43, 7) + 1;
+    if (lsp < 1) lsp = 1;
+    if (ltp < 1) ltp = 1;
+    if (lsp > 128) lsp = 128;
+    if (ltp > 128) ltp = 128;
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+
+    alpha = ((int) lsp + 15) / 16 * 17;
+    beta = alpha + (((int) ltp + 15) / 16) * 17;
+    training_start = 187 + beta;
+    training_bits = (((int) n + 1) / 2) * 17;
+    crc_start = training_start + training_bits;
+
+    if (crc_start + 52 >= bit_count)
+        return false;
+
+    if (training_start_out)
+        *training_start_out = training_start;
+    if (training_bits_out)
+        *training_bits_out = training_bits;
+    if (crc_start_out)
+        *crc_start_out = crc_start;
+    return true;
+}
+
+static void ja_force_framed_pattern_zeros(uint8_t *bits,
+                                          int bit_count,
+                                          int start_bit_pos,
+                                          int out_len)
+{
+    int pos = start_bit_pos;
+    int copied = 0;
+
+    while (copied < out_len && pos < bit_count) {
+        int chunk = out_len - copied;
+        int pad;
+
+        if (chunk > 16)
+            chunk = 16;
+        ja_set_packed_bit(bits, pos, 0);
+        pos++;
+        pos += chunk;
+        pad = 16 - chunk;
+        for (int i = 0; i < pad && pos < bit_count; i++, pos++)
+            ja_set_packed_bit(bits, pos, 0);
+        copied += chunk;
+    }
+}
+
+static void ja_force_table12_bytepair_zeros(uint8_t *bits,
+                                            int bit_count,
+                                            int start_bit_pos,
+                                            int out_count)
+{
+    int pos = start_bit_pos;
+    int index = 0;
+
+    while (index < out_count && pos < bit_count) {
+        ja_set_packed_bit(bits, pos, 0);
+        pos += 1 + 7;
+        index++;
+        if (index < out_count) {
+            ja_set_packed_bit(bits, pos, 0);
+            pos += 1 + 7;
+            index++;
+            ja_set_packed_bit(bits, pos, 0);
+            pos++;
+        } else {
+            for (int i = 0; i < 9 && pos < bit_count; i++, pos++)
+                ja_set_packed_bit(bits, pos, 0);
+        }
+    }
+}
+
+static void ja_force_training_framing_zeros(uint8_t *bits,
+                                            int bit_count,
+                                            int start_bit_pos,
+                                            int n)
+{
+    int pos = start_bit_pos;
+    int index = 0;
+
+    while (index < n && pos < bit_count) {
+        ja_set_packed_bit(bits, pos, 0);
+        pos += 1 + 7;
+        index++;
+        if (index < n) {
+            ja_set_packed_bit(bits, pos, 0);
+            pos += 1 + 7;
+            index++;
+            ja_set_packed_bit(bits, pos, 0);
+            pos++;
+        } else {
+            for (int i = 0; i < 9 && pos < bit_count; i++, pos++)
+                ja_set_packed_bit(bits, pos, 0);
+        }
+    }
+    if (pos < bit_count)
+        ja_set_packed_bit(bits, pos, 0);
+}
+
+static int ja_score_strict_candidate(const v90_dil_analysis_t *analysis,
+                                     const v92_ja_parse_meta_t *meta,
+                                     const uint8_t *bits,
+                                     int bit_count,
+                                     const ja_dil_search_params_t *params,
+                                     int candidate)
+{
+    int score;
+    int sync_hd;
+    int frame17;
+    int frame17_run;
+    int zviol;
+    int crc_hd;
+    int fspos;
+
+    if (!analysis || !meta || !bits)
+        return -1000000;
+
+    sync_hd = ja_sync_hamming18(bits, bit_count);
+    frame17 = ja_frame17_zero_violations(bits, bit_count);
+    frame17_run = ja_frame17_best_zero_run(bits, bit_count);
+    zviol = ja_reserved_zero_violations(bits, bit_count);
+    crc_hd = ja_crc_nearness_hd(bits, bit_count);
+    fspos = ja_fs12_position(bits, bit_count);
+
+    score = analysis->unique_train_u * 100
+          + analysis->used_uchords * 50
+          - analysis->impairment_score * 10
+          - analysis->non_default_h * 5;
+    score -= frame17 * 6;
+    score += frame17_run * 4;
+    score -= sync_hd * 12;
+    if (fspos >= 0) {
+        int fs_err = fspos - 4;
+        if (fs_err < 0)
+            fs_err = -fs_err;
+        score += 30;
+        score -= fs_err * 2;
+    } else {
+        score -= 15;
+    }
+    score -= zviol * 5;
+    score -= crc_hd * 4;
+    if (meta->is_v92) {
+        int enabled_rates = 0;
+
+        for (int rb = 0; rb < 16; rb++)
+            enabled_rates += (meta->rate_mask_lo >> rb) & 1;
+        for (int rb = 0; rb < 3; rb++)
+            enabled_rates += (meta->rate_mask_hi >> rb) & 1;
+        score += 24;
+        score += enabled_rates * 2;
+    }
+    if (params && params->tx_ja_sample >= 0) {
+        int dist = candidate - params->tx_ja_sample;
+        if (dist < 0)
+            dist = -dist;
+        score -= dist / 8;
+    }
+    return score;
+}
+
+static bool ja_try_strict_repair_near_soft(const uint8_t *codewords,
+                                           int total_codewords,
+                                           const ja_dil_search_params_t *params,
+                                           int center_start,
+                                           bool center_invert,
+                                           int *best_start_out,
+                                           bool *best_invert_out,
+                                           v90_dil_desc_t *best_desc_out,
+                                           v90_dil_analysis_t *best_analysis_out,
+                                           v92_ja_parse_meta_t *best_meta_out,
+                                           int *best_score_out)
+{
+    uint8_t raw_bits[512];
+    uint8_t work_bits[512];
+    int best_score = -1000000;
+    bool found = false;
+    int debug = ja_debug_enabled();
+    int tried = 0;
+    int decoded = 0;
+    int layout_ok_count = 0;
+    int strict_ok_count = 0;
+
+    if (!codewords || total_codewords <= 0 || !params
+        || !best_start_out || !best_invert_out || !best_desc_out
+        || !best_analysis_out || !best_meta_out || !best_score_out)
+        return false;
+
+    for (int off = -8; off <= 8; off++) {
+        int candidate = center_start + off;
+
+        if (candidate < params->search_start || candidate > params->search_end)
+            continue;
+        for (int pass = 0; pass < 2; pass++) {
+            bool invert = (pass == 0) ? center_invert : !center_invert;
+            int bit_count = total_codewords - candidate;
+            int packed_len;
+            int training_start;
+            int training_bits;
+            int crc_start;
+            int n;
+            int lsp;
+            int ltp;
+            int alpha;
+            int beta;
+
+            v90_dil_desc_t desc;
+            v90_dil_analysis_t analysis;
+            v92_ja_parse_meta_t meta;
+            int score;
+
+            if (bit_count > (int) sizeof(raw_bits) * 8)
+                bit_count = (int) sizeof(raw_bits) * 8;
+            tried++;
+            packed_len = (bit_count + 7) / 8;
+            if (!ja_decode_bits_packed(codewords, total_codewords,
+                                       candidate, bit_count,
+                                       invert,
+                                       raw_bits, packed_len))
+                continue;
+            decoded++;
+
+            memcpy(work_bits, raw_bits, (size_t) packed_len);
+
+            /* Strongly-constrained bits from Ja framing/header. */
+            for (int i = 0; i < 17; i++)
+                ja_set_packed_bit(work_bits, i, 1);
+            ja_set_packed_bit(work_bits, 17, 0);
+            for (int p = 26; p <= 33 && p < bit_count; p++)
+                ja_set_packed_bit(work_bits, p, 0);
+            if (34 < bit_count) ja_set_packed_bit(work_bits, 34, 0);
+            if (42 < bit_count) ja_set_packed_bit(work_bits, 42, 0);
+            if (50 < bit_count) ja_set_packed_bit(work_bits, 50, 0);
+
+            if (!ja_compute_layout_from_header(work_bits,
+                                               bit_count,
+                                               &training_start,
+                                               &training_bits,
+                                               &crc_start))
+                continue;
+            layout_ok_count++;
+
+            n = ja_get_packed_bits(work_bits, 18, 8);
+            lsp = ja_get_packed_bits(work_bits, 35, 7) + 1;
+            ltp = ja_get_packed_bits(work_bits, 43, 7) + 1;
+            if (lsp < 1) lsp = 1;
+            if (ltp < 1) ltp = 1;
+            if (lsp > 128) lsp = 128;
+            if (ltp > 128) ltp = 128;
+            if (n < 0) n = 0;
+            if (n > 255) n = 255;
+            alpha = ((int) lsp + 15) / 16 * 17;
+            beta = alpha + (((int) ltp + 15) / 16) * 17;
+
+            for (int p = 17; p <= crc_start + 17 && p < bit_count; p += 17)
+                ja_set_packed_bit(work_bits, p, 0);
+            ja_force_framed_pattern_zeros(work_bits, bit_count, 51, lsp);
+            ja_force_framed_pattern_zeros(work_bits, bit_count, 51 + alpha, ltp);
+            ja_force_table12_bytepair_zeros(work_bits, bit_count, 51 + beta, 8);
+            ja_force_table12_bytepair_zeros(work_bits, bit_count, 119 + beta, 8);
+            ja_force_training_framing_zeros(work_bits, bit_count, training_start, n);
+
+            /* Attempt V.90-style CRC repair first. */
+            ja_set_packed_bits_le(work_bits, crc_start + 1, 16, (uint32_t) ja_crc16_bits(work_bits, crc_start));
+            memset(&meta, 0, sizeof(meta));
+            if (v92_parse_ja_descriptor_strict(&desc, work_bits, bit_count, &meta)
+                && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                strict_ok_count++;
+                score = ja_score_strict_candidate(&analysis, &meta, work_bits, bit_count, params, candidate);
+                if (!found || score > best_score) {
+                    best_score = score;
+                    *best_start_out = candidate;
+                    *best_invert_out = invert;
+                    *best_desc_out = desc;
+                    *best_analysis_out = analysis;
+                    *best_meta_out = meta;
+                    found = true;
+                }
+            }
+
+            /* Then V.92 Table-20 CRC repair path. */
+            {
+                uint8_t v92_bits[512];
+                int v92_start2 = crc_start + 17;
+                int v92_start3 = crc_start + 34;
+                int v92_crc_pos = crc_start + 35;
+                int v92_fill_pos = crc_start + 51;
+
+                memcpy(v92_bits, work_bits, (size_t) packed_len);
+                if (v92_fill_pos >= bit_count)
+                    continue;
+                ja_set_packed_bit(v92_bits, crc_start, 0);
+                ja_set_packed_bit(v92_bits, v92_start2, 0);
+                ja_set_packed_bit(v92_bits, v92_start3, 0);
+                ja_set_packed_bit(v92_bits, v92_fill_pos, 0);
+                for (int rb = 3; rb < 16; rb++) {
+                    int p = crc_start + 18 + rb;
+                    if (p < bit_count)
+                        ja_set_packed_bit(v92_bits, p, 0);
+                }
+                ja_set_packed_bits_le(v92_bits,
+                                      v92_crc_pos,
+                                      16,
+                                      (uint32_t) ja_crc16_bits(v92_bits, v92_start3));
+                {
+                    int p = v92_fill_pos + 1;
+                    while (p < bit_count && (p % 12) != 0) {
+                        ja_set_packed_bit(v92_bits, p, 0);
+                        p++;
+                    }
+                }
+                memset(&meta, 0, sizeof(meta));
+                if (v92_parse_ja_descriptor_strict(&desc, v92_bits, bit_count, &meta)
+                    && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                    strict_ok_count++;
+                    score = ja_score_strict_candidate(&analysis, &meta, v92_bits, bit_count, params, candidate);
+                    if (!found || score > best_score) {
+                        best_score = score;
+                        *best_start_out = candidate;
+                        *best_invert_out = invert;
+                        *best_desc_out = desc;
+                        *best_analysis_out = analysis;
+                        *best_meta_out = meta;
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!found)
+    {
+        if (debug) {
+            fprintf(stderr,
+                    "[JA] strict_repair_fail center=%d invert=%d tried=%d decoded=%d layout_ok=%d strict_ok=%d\n",
+                    center_start,
+                    center_invert ? 1 : 0,
+                    tried,
+                    decoded,
+                    layout_ok_count,
+                    strict_ok_count);
+        }
+        return false;
+    }
+    if (debug) {
+        fprintf(stderr,
+                "[JA] strict_repair_ok center=%d invert=%d best_start=%d best_invert=%d score=%d tried=%d decoded=%d layout_ok=%d strict_ok=%d\n",
+                center_start,
+                center_invert ? 1 : 0,
+                *best_start_out,
+                *best_invert_out ? 1 : 0,
+                best_score,
+                tried,
+                decoded,
+                layout_ok_count,
+                strict_ok_count);
+    }
+    *best_score_out = best_score;
     return true;
 }
 
@@ -732,6 +1144,41 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                 best_desc     = desc;
                 best_analysis = analysis;
                 best_meta     = parse_meta;
+            }
+        }
+    }
+
+    if (best_score < 0) {
+        int recovered_score = -1000000;
+
+        if (debug) {
+            fprintf(stderr,
+                    "[JA] strict_repair_try soft_start=%d soft_invert=%d soft_score=%d\n",
+                    best_soft_start,
+                    best_soft_invert ? 1 : 0,
+                    best_soft_score);
+        }
+        if (best_soft_start >= 0
+            && ja_try_strict_repair_near_soft(codewords,
+                                              total_codewords,
+                                              params,
+                                              best_soft_start,
+                                              best_soft_invert,
+                                              &best_start,
+                                              &best_invert,
+                                              &best_desc,
+                                              &best_analysis,
+                                              &best_meta,
+                                              &recovered_score)) {
+            best_score = recovered_score;
+            if (debug) {
+                fprintf(stderr,
+                        "[JA] strict_repair start=%d invert=%d score=%d from_soft_start=%d soft_score=%d\n",
+                        best_start,
+                        best_invert ? 1 : 0,
+                        best_score,
+                        best_soft_start,
+                        best_soft_score);
             }
         }
     }
