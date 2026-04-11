@@ -9,7 +9,7 @@
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "Usage: %s <input.g711> [--start <sample_index>] [--max <samples>]\n",
+            "Usage: %s <input.g711> [--start <sample_index>] [--arm <sample_index>] [--max <samples>]\n",
             argv0);
 }
 
@@ -17,12 +17,14 @@ int main(int argc, char **argv)
 {
     const char *path = NULL;
     int start_sample = 0;
+    int arm_sample = -1;
     int max_samples = -1;
     FILE *fp = NULL;
     v92_p3_rx_t rx;
     int c;
     int i = 0;
     v92_p3_rx_state_t last_state;
+    int last_reject_count = 0;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -35,6 +37,10 @@ int main(int argc, char **argv)
             start_sample = atoi(argv[++a]);
             continue;
         }
+        if (strcmp(argv[a], "--arm") == 0 && (a + 1) < argc) {
+            arm_sample = atoi(argv[++a]);
+            continue;
+        }
         if (strcmp(argv[a], "--max") == 0 && (a + 1) < argc) {
             max_samples = atoi(argv[++a]);
             continue;
@@ -42,6 +48,8 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
+    if (arm_sample < 0)
+        arm_sample = start_sample;
 
     fp = fopen(path, "rb");
     if (!fp) {
@@ -64,15 +72,31 @@ int main(int argc, char **argv)
     }
 
     v92_p3_rx_init(&rx);
-    v92_p3_rx_start(&rx, start_sample);
+    v92_p3_rx_start(&rx, arm_sample);
     last_state = v92_p3_rx_get_state(&rx);
-    printf("start_sample=%d state=%s\n",
+    printf("start_sample=%d arm_sample=%d state=%s\n",
            start_sample,
+           arm_sample,
            v92_p3_rx_state_name(last_state));
 
     while ((c = fgetc(fp)) != EOF) {
         int sample_index = start_sample + i;
         bool changed = v92_p3_rx_feed(&rx, (uint8_t) c, sample_index);
+
+        if (rx.reject_count != last_reject_count) {
+            int rej_sample = -1;
+            int m0 = 0;
+            int m1 = 0;
+            v92_p3_rx_reject_t rej = v92_p3_rx_last_reject(&rx, &rej_sample, &m0, &m1);
+            printf("sample=%d reject=%s at=%d m0=%d m1=%d total=%d\n",
+                   sample_index,
+                   v92_p3_rx_reject_name(rej),
+                   rej_sample,
+                   m0,
+                   m1,
+                   rx.reject_count);
+            last_reject_count = rx.reject_count;
+        }
 
         if (changed) {
             v92_p3_rx_state_t s = v92_p3_rx_get_state(&rx);
@@ -106,6 +130,18 @@ int main(int argc, char **argv)
                    ja->parsed_v92 ? 1 : 0);
         } else {
             printf("ja_ok=0\n");
+        }
+        {
+            int rej_sample = -1;
+            int m0 = 0;
+            int m1 = 0;
+            v92_p3_rx_reject_t rej = v92_p3_rx_last_reject(&rx, &rej_sample, &m0, &m1);
+            printf("reject_count=%d last_reject=%s sample=%d m0=%d m1=%d\n",
+                   rx.reject_count,
+                   v92_p3_rx_reject_name(rej),
+                   rej_sample,
+                   m0,
+                   m1);
         }
     }
 

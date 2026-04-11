@@ -68,6 +68,18 @@ typedef enum {
     V92_P3_RX_FAILED,      /* could not decode */
 } v92_p3_rx_state_t;
 
+typedef enum {
+    V92_P3_RX_REJECT_NONE = 0,
+    V92_P3_RX_REJECT_PRE_ARM,
+    V92_P3_RX_REJECT_RU_MISMATCH,
+    V92_P3_RX_REJECT_UR_MISMATCH,
+    V92_P3_RX_REJECT_MD_TIMEOUT,
+    V92_P3_RX_REJECT_TRN1U_ONES_LOW,
+    V92_P3_RX_REJECT_JA_BUFFER_FULL,
+    V92_P3_RX_REJECT_JA_SEARCH_FAIL,
+    V92_P3_RX_REJECT_JA_SOFT_ONLY,
+} v92_p3_rx_reject_t;
+
 /* -------------------------------------------------------------------------
  * Receiver context (caller allocates, typically on the heap)
  * ------------------------------------------------------------------------- */
@@ -110,6 +122,7 @@ typedef struct {
     int      ur2_start;
     int      ur2_end;
     int      trn1u_start;
+    int      arm_sample_min; /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */
     int      trn1u_count;    /* symbols accumulated */
@@ -137,6 +150,11 @@ typedef struct {
     /* ------- result ------- */
     bool           ja_found;
     ja_dil_decode_t ja_result;
+    int              reject_count;
+    v92_p3_rx_reject_t last_reject;
+    int              last_reject_sample;
+    int              last_reject_metric0;
+    int              last_reject_metric1;
 } v92_p3_rx_t;
 
 /* -------------------------------------------------------------------------
@@ -194,6 +212,11 @@ const ja_dil_decode_t *v92_p3_rx_get_ja(const v92_p3_rx_t *rx);
  * Human-readable state name (for logging).
  */
 const char *v92_p3_rx_state_name(v92_p3_rx_state_t s);
+const char *v92_p3_rx_reject_name(v92_p3_rx_reject_t r);
+v92_p3_rx_reject_t v92_p3_rx_last_reject(const v92_p3_rx_t *rx,
+                                         int *sample_out,
+                                         int *metric0_out,
+                                         int *metric1_out);
 
 #ifdef __cplusplus
 }

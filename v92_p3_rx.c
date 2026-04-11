@@ -46,6 +46,7 @@
 #define TRN1U_ONES_MIN_PCT 75
 #define TRN1U_EARLY_CHECK_T 256
 #define TRN1U_DEMOD_MAX_HYP 12
+#define JA_DEMOD_MAX_BITS   4096
 
 /* -------------------------------------------------------------------------
  * Sign bit helpers
@@ -62,6 +63,30 @@ static int p3rx_debug_enabled(void)
         cached = (v && *v && *v != '0') ? 1 : 0;
     }
     return cached;
+}
+
+static void p3rx_set_reject(v92_p3_rx_t *rx,
+                            v92_p3_rx_reject_t reason,
+                            int sample_index,
+                            int metric0,
+                            int metric1)
+{
+    if (!rx || reason == V92_P3_RX_REJECT_NONE)
+        return;
+    rx->reject_count++;
+    rx->last_reject = reason;
+    rx->last_reject_sample = sample_index;
+    rx->last_reject_metric0 = metric0;
+    rx->last_reject_metric1 = metric1;
+    if (p3rx_debug_enabled()) {
+        fprintf(stderr,
+                "[P3RX] sample=%d reject=%s m0=%d m1=%d total=%d\n",
+                sample_index,
+                v92_p3_rx_reject_name(reason),
+                metric0,
+                metric1,
+                rx->reject_count);
+    }
 }
 
 /*
@@ -340,6 +365,15 @@ static int trn1u_demod_best_ones_pct(const v92_p3_rx_t *rx, int trn_symbols)
                                        8000,
                                        hyps,
                                        TRN1U_DEMOD_MAX_HYP);
+        if (p3rx_debug_enabled()) {
+            fprintf(stderr,
+                    "[P3RX] demod_ja_search law=%s eval_total=%d hyps=%d base=%d trn_start=%d\n",
+                    law ? "alaw" : "ulaw",
+                    eval_total,
+                    count,
+                    rx->ja_buf_base,
+                    rx->trn1u_start);
+        }
         for (int hi = 0; hi < count; hi++) {
             p3_result_t *r = p3_demod_run(lin,
                                           eval_total,
@@ -360,6 +394,330 @@ static int trn1u_demod_best_ones_pct(const v92_p3_rx_t *rx, int trn_symbols)
     }
 
     return best_pct;
+}
+
+static int unpacked_ones_pct(const uint8_t *bits, int count)
+{
+    int ones = 0;
+    if (!bits || count <= 0)
+        return 0;
+    for (int i = 0; i < count; i++)
+        ones += bits[i] ? 1 : 0;
+    return (ones * 100 + count / 2) / count;
+}
+
+static int demod_build_gpa_bits(const p3_result_t *r,
+                                int trn_start_sample,
+                                int map,
+                                int inv,
+                                uint8_t *out_bits,
+                                int out_cap,
+                                int *first_sample_out)
+{
+    int start_sym = -1;
+    int available;
+    int out_n;
+    uint32_t reg = 0;
+
+    if (!r || !r->symbols || r->symbol_count <= 0 || !out_bits || out_cap <= 0)
+        return 0;
+
+    for (int i = 0; i < r->symbol_count; i++) {
+        if (r->symbols[i].sample_index >= trn_start_sample) {
+            start_sym = i;
+            break;
+        }
+    }
+    if (start_sym < 0)
+        return 0;
+
+    available = r->symbol_count - start_sym;
+    if (available <= 23)
+        return 0;
+
+    out_n = available - 23;
+    if (out_n > out_cap)
+        out_n = out_cap;
+
+    for (int i = 0; i < 23; i++) {
+        int d = r->symbols[start_sym + i].dibit & 3;
+        int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
+        raw ^= inv;
+        (void) gpa_descramble_t17_bit(&reg, raw);
+    }
+
+    for (int i = 0; i < out_n; i++) {
+        int d = r->symbols[start_sym + 23 + i].dibit & 3;
+        int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
+        raw ^= inv;
+        out_bits[i] = (uint8_t) gpa_descramble_t17_bit(&reg, raw);
+    }
+
+    if (first_sample_out)
+        *first_sample_out = r->symbols[start_sym + 23].sample_index;
+    return out_n;
+}
+
+static int unpacked_slice_pack(const uint8_t *src_bits,
+                               int src_count,
+                               int off,
+                               uint8_t *packed_out,
+                               int packed_cap_bytes)
+{
+    int nbits;
+    int nbytes;
+
+    if (!src_bits || !packed_out || packed_cap_bytes <= 0 || off < 0 || off >= src_count)
+        return 0;
+    nbits = src_count - off;
+    nbytes = (nbits + 7) / 8;
+    if (nbytes > packed_cap_bytes)
+        nbytes = packed_cap_bytes;
+    memset(packed_out, 0, (size_t) nbytes);
+
+    for (int i = 0; i < nbytes * 8 && (off + i) < src_count; i++) {
+        if (src_bits[off + i])
+            packed_out[i / 8] |= (uint8_t) (1U << (i % 8));
+    }
+    return nbytes * 8;
+}
+
+static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
+{
+    int eval_total;
+    p3_hypothesis_t hyps[TRN1U_DEMOD_MAX_HYP];
+    bool found = false;
+    ja_dil_decode_t best;
+    int best_score = -1000000;
+    int considered = 0;
+    int strict_hits = 0;
+
+    if (!rx || !out)
+        return false;
+    if (rx->ja_buf_fill < 24 + V92_P3_RX_TRN1U_MIN_T + 206)
+        return false;
+
+    memset(&best, 0, sizeof(best));
+    eval_total = rx->ja_buf_fill;
+
+    for (int law = 0; law < 2; law++) {
+        int16_t *lin = (int16_t *) malloc((size_t) eval_total * sizeof(int16_t));
+        int count;
+
+        if (!lin)
+            break;
+        for (int i = 0; i < eval_total; i++) {
+            uint8_t cw = rx->ja_buf[i];
+            lin[i] = (int16_t) (law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
+        }
+
+        count = p3_scan_all_hypotheses(lin,
+                                       eval_total,
+                                       rx->ja_buf_base,
+                                       8000,
+                                       hyps,
+                                       TRN1U_DEMOD_MAX_HYP);
+
+        for (int hi = 0; hi < count; hi++) {
+            p3_result_t *r = p3_demod_run(lin,
+                                          eval_total,
+                                          rx->ja_buf_base,
+                                          hyps[hi].baud_code,
+                                          hyps[hi].carrier_sel,
+                                          8000);
+            if (!r)
+                continue;
+
+            for (int map = 0; map < 2; map++) {
+                for (int inv = 0; inv < 2; inv++) {
+                    uint8_t bits[JA_DEMOD_MAX_BITS];
+                    uint8_t packed[512];
+                    int bit_count;
+                    int bit_base_sample = -1;
+                    int trn_eval_bits;
+                    int trn_pct;
+                    int anchor_start;
+                    int anchor_end;
+                    int variant_hits = 0;
+                    double sym_ratio;
+                    int expected_trn_bits;
+                    int lead_bits;
+
+                    bit_count = demod_build_gpa_bits(r,
+                                                     rx->trn1u_start,
+                                                     map,
+                                                     inv,
+                                                     bits,
+                                                     JA_DEMOD_MAX_BITS,
+                                                     &bit_base_sample);
+                    sym_ratio = (eval_total > 0)
+                        ? ((double) r->symbol_count / (double) eval_total)
+                        : 0.40;
+                    if (sym_ratio < 0.20)
+                        sym_ratio = 0.20;
+                    if (sym_ratio > 0.60)
+                        sym_ratio = 0.60;
+                    expected_trn_bits = (int) lround((double) (V92_P3_RX_TRN1U_MIN_T - 23) * sym_ratio);
+                    lead_bits = (int) lround((double) V92_P3_RX_JA_LEAD_T * sym_ratio);
+                    if (expected_trn_bits > bit_count - (24 + 206))
+                        expected_trn_bits = bit_count - (24 + 206);
+                    if (expected_trn_bits < 128)
+                        expected_trn_bits = 128;
+
+                    if (p3rx_debug_enabled() && hi == 0 && map == 0 && inv == 0) {
+                        int s0 = (r->symbol_count > 0) ? r->symbols[0].sample_index : -1;
+                        int s1 = (r->symbol_count > 0) ? r->symbols[r->symbol_count - 1].sample_index : -1;
+                        fprintf(stderr,
+                                "[P3RX] demod_ja hyp0 sym_count=%d span=%d..%d bit_count=%d exp_trn=%d lead=%d base_bit_sample=%d\n",
+                                r->symbol_count, s0, s1, bit_count,
+                                expected_trn_bits, lead_bits, bit_base_sample);
+                    }
+
+                    if (bit_count < (128 + 24 + 206))
+                        continue;
+                    considered++;
+
+                    trn_eval_bits = expected_trn_bits;
+                    if (trn_eval_bits > bit_count)
+                        trn_eval_bits = bit_count;
+                    trn_pct = unpacked_ones_pct(bits, trn_eval_bits);
+                    if (trn_pct < TRN1U_ONES_MIN_PCT)
+                        continue;
+
+                    anchor_start = expected_trn_bits - 64;
+                    if (anchor_start < 0)
+                        anchor_start = 0;
+                    anchor_end = expected_trn_bits + lead_bits + 128;
+                    if (anchor_end > bit_count - 24 - 206)
+                        anchor_end = bit_count - 24 - 206;
+
+                    for (int anchor = anchor_start; anchor <= anchor_end; anchor++) {
+                        v90_dil_desc_t desc;
+                        v90_dil_analysis_t analysis;
+                        v92_ja_parse_meta_t meta;
+                        int desc_off = anchor + 24;
+                        int packed_bits;
+                        int score = 0;
+                        bool preamble_ok = true;
+
+                        for (int i = 0; i < 24; i++) {
+                            if (!bits[anchor + i]) {
+                                preamble_ok = false;
+                                break;
+                            }
+                        }
+                        if (!preamble_ok)
+                            continue;
+
+                        packed_bits = unpacked_slice_pack(bits,
+                                                          bit_count,
+                                                          desc_off,
+                                                          packed,
+                                                          (int) sizeof(packed));
+                        if (packed_bits < 206)
+                            continue;
+
+                        memset(&meta, 0, sizeof(meta));
+                        if (!v92_parse_ja_descriptor_strict(&desc,
+                                                            packed,
+                                                            packed_bits,
+                                                            &meta))
+                            continue;
+                        variant_hits++;
+                        strict_hits++;
+                        if (!v90_analyse_dil_descriptor(&desc, &analysis))
+                            continue;
+
+                        score = (meta.is_v92 ? 2000 : 1000)
+                                + (int) analysis.unique_train_u * 100
+                                + (int) analysis.used_uchords * 20
+                                - (int) analysis.impairment_score * 5;
+                        if (score > best_score) {
+                            memset(&best, 0, sizeof(best));
+                            best.ok = true;
+                            best.soft_lock = false;
+                            best.calling_party = true;
+                            best.u_info = 0;
+                            best.start_sample = bit_base_sample + desc_off;
+                            best.invert_sign = inv ? true : false;
+                            best.parsed_v92 = meta.is_v92;
+                            best.descriptor_bits = meta.bit_len;
+                            best.desc = desc;
+                            best.analysis = analysis;
+                            best_score = score;
+                            found = true;
+                        }
+                    }
+
+                    if (variant_hits == 0) {
+                        int desc_start = expected_trn_bits - 64;
+                        int desc_end = expected_trn_bits + lead_bits + 128;
+                        if (desc_start < 0)
+                            desc_start = 0;
+                        if (desc_end > bit_count - 206)
+                            desc_end = bit_count - 206;
+                        for (int desc_off = desc_start; desc_off <= desc_end; desc_off++) {
+                            v90_dil_desc_t desc;
+                            v90_dil_analysis_t analysis;
+                            v92_ja_parse_meta_t meta;
+                            int packed_bits;
+                            int score;
+
+                            packed_bits = unpacked_slice_pack(bits,
+                                                              bit_count,
+                                                              desc_off,
+                                                              packed,
+                                                              (int) sizeof(packed));
+                            if (packed_bits < 206)
+                                continue;
+                            memset(&meta, 0, sizeof(meta));
+                            if (!v92_parse_ja_descriptor_strict(&desc,
+                                                                packed,
+                                                                packed_bits,
+                                                                &meta))
+                                continue;
+                            variant_hits++;
+                            strict_hits++;
+                            if (!v90_analyse_dil_descriptor(&desc, &analysis))
+                                continue;
+                            score = (meta.is_v92 ? 2000 : 1000)
+                                    + (int) analysis.unique_train_u * 100
+                                    + (int) analysis.used_uchords * 20
+                                    - (int) analysis.impairment_score * 5;
+                            if (score > best_score) {
+                                memset(&best, 0, sizeof(best));
+                                best.ok = true;
+                                best.soft_lock = false;
+                                best.calling_party = true;
+                                best.u_info = 0;
+                                best.start_sample = bit_base_sample + desc_off;
+                                best.invert_sign = inv ? true : false;
+                                best.parsed_v92 = meta.is_v92;
+                                best.descriptor_bits = meta.bit_len;
+                                best.desc = desc;
+                                best.analysis = analysis;
+                                best_score = score;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            p3_result_free(r);
+        }
+        free(lin);
+    }
+
+    if (p3rx_debug_enabled()) {
+        fprintf(stderr,
+                "[P3RX] demod_ja_search considered=%d strict_hits=%d found=%d best_score=%d\n",
+                considered, strict_hits, found ? 1 : 0, best_score);
+    }
+
+    if (found)
+        *out = best;
+    return found;
 }
 
 /* -------------------------------------------------------------------------
@@ -451,17 +809,50 @@ static bool run_ja_search(v92_p3_rx_t *rx)
     if (params.search_end > max_end)
         params.search_end = max_end;
 
-    if (params.search_end <= params.search_start)
+    if (params.search_end <= params.search_start) {
+        p3rx_set_reject(rx,
+                        V92_P3_RX_REJECT_JA_SEARCH_FAIL,
+                        rx->trn1u_start + rx->trn1u_count,
+                        params.search_start,
+                        params.search_end);
         return false;
+    }
 
     memset(&rx->ja_result, 0, sizeof(rx->ja_result));
     bool found = v92_ja_dil_search(rx->ja_buf, rx->ja_buf_fill,
                                    &params, &rx->ja_result);
-    return found && (rx->ja_result.ok || rx->ja_result.soft_lock);
+    if (found && rx->ja_result.ok)
+        return true;
+
+    /* Try to upgrade soft-lock to strict parse via symbol-domain demod path. */
+    if (demod_ja_search(rx, &rx->ja_result))
+        return true;
+
+    if (found && rx->ja_result.soft_lock) {
+        p3rx_set_reject(rx,
+                        V92_P3_RX_REJECT_JA_SOFT_ONLY,
+                        rx->ja_result.start_sample,
+                        rx->ja_result.soft_score,
+                        rx->ja_result.descriptor_bits);
+        return true;
+    }
+
+    p3rx_set_reject(rx,
+                    V92_P3_RX_REJECT_JA_SEARCH_FAIL,
+                    rx->trn1u_start + rx->trn1u_count,
+                    rx->ja_buf_fill,
+                    0);
+    return false;
 }
 
-static void p6_rehunt_from_current(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
+static void p6_rehunt_from_current(v92_p3_rx_t *rx,
+                                   uint8_t cw,
+                                   int sample_index,
+                                   v92_p3_rx_reject_t reason,
+                                   int metric0,
+                                   int metric1)
 {
+    p3rx_set_reject(rx, reason, sample_index, metric0, metric1);
     p6_reset(rx);
     p6_update_hyp_runs(rx, cw, sample_index);
     rx->state = V92_P3_RX_RU1_HUNT;
@@ -480,19 +871,36 @@ void v92_p3_rx_init(v92_p3_rx_t *rx)
     rx->ru2_start   = -1;  rx->ru2_end   = -1;
     rx->ur2_start   = -1;  rx->ur2_end   = -1;
     rx->trn1u_start = -1;
+    rx->arm_sample_min = 0;
+    rx->last_reject = V92_P3_RX_REJECT_NONE;
+    rx->last_reject_sample = -1;
+    rx->last_reject_metric0 = 0;
+    rx->last_reject_metric1 = 0;
     p6_reset(rx);
 }
 
 void v92_p3_rx_start(v92_p3_rx_t *rx, int first_sample_index)
 {
     v92_p3_rx_init(rx);
-    (void)first_sample_index;
+    rx->arm_sample_min = (first_sample_index >= 0) ? first_sample_index : 0;
     rx->state = V92_P3_RX_RU1_HUNT;
 }
 
 bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 {
     v92_p3_rx_state_t prev = rx->state;
+
+    if (rx->state != V92_P3_RX_IDLE && sample_index < rx->arm_sample_min) {
+        if (rx->last_reject != V92_P3_RX_REJECT_PRE_ARM) {
+            p3rx_set_reject(rx,
+                            V92_P3_RX_REJECT_PRE_ARM,
+                            sample_index,
+                            rx->arm_sample_min,
+                            0);
+        }
+        prehist_push(rx, codeword, sample_index);
+        return false;
+    }
 
     if (rx->state == V92_P3_RX_RU1_HUNT
         || rx->state == V92_P3_RX_RU1
@@ -541,7 +949,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > RU_MAX_T)
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_RU_MISMATCH,
+                                       run, RU_MAX_T);
         } else {
             int run_effective = rx->p6_run;
             int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
@@ -577,10 +987,14 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                     rx->p6_run = ur_run;
                     rx->state = V92_P3_RX_UR2;
                 } else {
-                    p6_rehunt_from_current(rx, codeword, sample_index);
+                    p6_rehunt_from_current(rx, codeword, sample_index,
+                                           V92_P3_RX_REJECT_RU_MISMATCH,
+                                           run_effective, delta);
                 }
             } else {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_RU_MISMATCH,
+                                       run_effective, ur_run);
             }
         }
         break;
@@ -593,7 +1007,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > UR_MAX_T)
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_UR_MISMATCH,
+                                       run, UR_MAX_T);
         } else {
             int run_effective = rx->p6_run;
             int elapsed = sample_index - rx->ur1_start;
@@ -604,7 +1020,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->p6_run = 0;
                 rx->state = V92_P3_RX_MD_WAIT;
             } else {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_UR_MISMATCH,
+                                       run_effective, elapsed);
             }
         }
         break;
@@ -614,12 +1032,16 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     case V92_P3_RX_MD_WAIT: {
         int elapsed = sample_index - rx->ur1_end;
         if (elapsed > V92_P3_RX_MD_MAX_T) {
-            p6_rehunt_from_current(rx, codeword, sample_index);
+            p6_rehunt_from_current(rx, codeword, sample_index,
+                                   V92_P3_RX_REJECT_MD_TIMEOUT,
+                                   elapsed, V92_P3_RX_MD_MAX_T);
             break;
         }
 
         if (rx->ru_hyp < 0) {
-            p6_rehunt_from_current(rx, codeword, sample_index);
+            p6_rehunt_from_current(rx, codeword, sample_index,
+                                   V92_P3_RX_REJECT_RU_MISMATCH,
+                                   -1, elapsed);
             break;
         }
 
@@ -641,7 +1063,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > RU_MAX_T)
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_RU_MISMATCH,
+                                       run, RU_MAX_T);
         } else {
             int run_effective = rx->p6_run;
 
@@ -654,7 +1078,10 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
                 rx->state = V92_P3_RX_UR2;
             } else {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_RU_MISMATCH,
+                                       run_effective,
+                                       (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : -1);
             }
         }
         break;
@@ -667,7 +1094,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > UR_MAX_T)
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_UR_MISMATCH,
+                                       run, UR_MAX_T);
         } else {
             int run_effective = rx->p6_run;
             int elapsed = sample_index - rx->ur2_start;
@@ -693,7 +1122,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                     ja_buf_push(rx, codeword, sample_index);
                 (void) trn1u_process(rx, codeword);
             } else {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_UR_MISMATCH,
+                                       run_effective, elapsed);
             }
         }
         break;
@@ -724,7 +1155,12 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                         sample_index, raw_pct, eq_pct);
             }
             if (eq_pct < TRN1U_ONES_MIN_PCT) {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                int raw_pct = (rx->trn1u_count > 0)
+                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
+                    : 0;
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_TRN1U_ONES_LOW,
+                                       raw_pct, eq_pct);
                 break;
             }
         }
@@ -740,12 +1176,22 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                         sample_index, raw_pct, eq_pct);
             }
             if (eq_pct < TRN1U_ONES_MIN_PCT) {
-                p6_rehunt_from_current(rx, codeword, sample_index);
+                int raw_pct = (rx->trn1u_count > 0)
+                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
+                    : 0;
+                p6_rehunt_from_current(rx, codeword, sample_index,
+                                       V92_P3_RX_REJECT_TRN1U_ONES_LOW,
+                                       raw_pct, eq_pct);
                 break;
             }
         }
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
+            p3rx_set_reject(rx,
+                            V92_P3_RX_REJECT_JA_BUFFER_FULL,
+                            sample_index,
+                            rx->ja_buf_fill,
+                            V92_P3_RX_JA_BUF);
             rx->state = V92_P3_RX_FAILED;
             break;
         }
@@ -762,6 +1208,11 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         ja_buf_push(rx, codeword, sample_index);
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
+            p3rx_set_reject(rx,
+                            V92_P3_RX_REJECT_JA_BUFFER_FULL,
+                            sample_index,
+                            rx->ja_buf_fill,
+                            V92_P3_RX_JA_BUF);
             rx->state = V92_P3_RX_FAILED;
             break;
         }
@@ -773,6 +1224,11 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->ja_found = true;
                 rx->state    = V92_P3_RX_DONE;
             } else {
+                p3rx_set_reject(rx,
+                                V92_P3_RX_REJECT_JA_SEARCH_FAIL,
+                                sample_index,
+                                rx->ja_buf_fill,
+                                0);
                 rx->state = V92_P3_RX_FAILED;
             }
         }
@@ -842,4 +1298,34 @@ const char *v92_p3_rx_state_name(v92_p3_rx_state_t s)
     case V92_P3_RX_FAILED:     return "failed";
     default:                   return "unknown";
     }
+}
+
+const char *v92_p3_rx_reject_name(v92_p3_rx_reject_t r)
+{
+    switch (r) {
+    case V92_P3_RX_REJECT_NONE:          return "none";
+    case V92_P3_RX_REJECT_PRE_ARM:       return "pre_arm";
+    case V92_P3_RX_REJECT_RU_MISMATCH:   return "ru_mismatch";
+    case V92_P3_RX_REJECT_UR_MISMATCH:   return "ur_mismatch";
+    case V92_P3_RX_REJECT_MD_TIMEOUT:    return "md_timeout";
+    case V92_P3_RX_REJECT_TRN1U_ONES_LOW:return "trn1u_ones_low";
+    case V92_P3_RX_REJECT_JA_BUFFER_FULL:return "ja_buffer_full";
+    case V92_P3_RX_REJECT_JA_SEARCH_FAIL:return "ja_search_fail";
+    case V92_P3_RX_REJECT_JA_SOFT_ONLY:  return "ja_soft_only";
+    default:                             return "unknown";
+    }
+}
+
+v92_p3_rx_reject_t v92_p3_rx_last_reject(const v92_p3_rx_t *rx,
+                                         int *sample_out,
+                                         int *metric0_out,
+                                         int *metric1_out)
+{
+    if (sample_out)
+        *sample_out = rx ? rx->last_reject_sample : -1;
+    if (metric0_out)
+        *metric0_out = rx ? rx->last_reject_metric0 : 0;
+    if (metric1_out)
+        *metric1_out = rx ? rx->last_reject_metric1 : 0;
+    return rx ? rx->last_reject : V92_P3_RX_REJECT_NONE;
 }
