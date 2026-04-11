@@ -65,6 +65,18 @@ typedef struct {
  * offline-decode internals.
  */
 typedef struct {
+    /* True when a strict parse succeeded. */
+    bool ok;
+    /* True when the strict parse matched V.92 Table 20 instead of V.90 Table 12. */
+    bool is_v92;
+    /* Exact parsed descriptor length in bits from the descriptor start. */
+    int bit_len;
+    /* V.92 downstream rate-capability masks. Zero for V.90 parses. */
+    uint16_t rate_mask_lo;
+    uint16_t rate_mask_hi;
+} v92_ja_parse_meta_t;
+
+typedef struct {
     /* True when a plausible DIL descriptor was found. */
     bool ok;
     /* True when no full descriptor parsed, but best near-lock is available. */
@@ -86,6 +98,8 @@ typedef struct {
      * the raw codeword sign bits.
      */
     bool invert_sign;
+    bool parsed_v92;
+    int  descriptor_bits;
     int  soft_score;
     int  soft_sync_hd;
     int  soft_frame17_viol;
@@ -98,6 +112,22 @@ typedef struct {
 } ja_dil_decode_t;
 
 /*
+ * v92_parse_ja_descriptor_strict() — strictly parse a Ja DIL descriptor that
+ * begins at bit 0 of a packed bitstream.
+ *
+ * The function accepts:
+ *   - V.90 Table 12 descriptors with exact CRC
+ *   - V.92 Table 20 descriptors with exact CRC and zero-fill to the next
+ *     multiple of 12 bits
+ *
+ * It does not perform search, polarity selection, or soft recovery scoring.
+ */
+bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
+                                    const uint8_t *bits,
+                                    int bit_count,
+                                    v92_ja_parse_meta_t *meta);
+
+/*
  * v92_ja_dil_search() — search a V.90 PCM codeword stream for the Ja DIL
  * descriptor.
  *
@@ -105,7 +135,7 @@ typedef struct {
  * params->search_end] and for both sign polarities, the function:
  *   1. Extracts bits from the codeword stream using the V.90 differential
  *      sign decoder and the x^23+x^5+1 descrambler.
- *   2. Attempts to parse a DIL descriptor (v90_parse_dil_descriptor).
+ *   2. Attempts to parse a DIL descriptor with strict V.90/V.92 rules.
  *   3. Analyses descriptor quality (v90_analyse_dil_descriptor).
  *   4. Scores the candidate; keeps the best.
  *

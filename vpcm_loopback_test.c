@@ -19,6 +19,7 @@
 #include "vpcm_link.h"
 #include "vpcm_v90_session.h"
 #include "vpcm_v91_loopback.h"
+#include "v92_ja_decode.h"
 
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
@@ -367,6 +368,111 @@ static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int le
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
+
+static void vpcm_test_put_bit(uint8_t *buf, int pos, int bit)
+{
+    uint8_t mask = (uint8_t) (1U << (pos % 8));
+
+    if (bit)
+        buf[pos / 8] |= mask;
+    else
+        buf[pos / 8] &= (uint8_t) ~mask;
+}
+
+static int vpcm_test_get_bit(const uint8_t *buf, int pos)
+{
+    return (int) ((buf[pos / 8] >> (pos % 8)) & 1U);
+}
+
+static void vpcm_test_put_bits_le(uint8_t *buf, int *bit_pos, uint32_t value, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++)
+        vpcm_test_put_bit(buf, (*bit_pos)++, (int) ((value >> i) & 1U));
+}
+
+static uint16_t vpcm_test_crc16_bits(const uint8_t *bits, int bit_count)
+{
+    uint16_t crc = 0xFFFFu;
+    int i;
+
+    for (i = 0; i < bit_count; i++) {
+        int b = vpcm_test_get_bit(bits, i);
+        int fb = ((int) (crc >> 15) ^ b) & 1;
+
+        crc = (uint16_t) (crc << 1);
+        if (fb)
+            crc ^= 0x8005u;
+    }
+    return crc;
+}
+
+static bool vpcm_build_v92_table20_bits(const v90_dil_desc_t *desc,
+                                        uint16_t rate_mask_lo,
+                                        uint16_t rate_mask_hi,
+                                        uint8_t *buf,
+                                        int buf_len,
+                                        int *bit_len_out)
+{
+    uint8_t v90_bits[512];
+    int v90_bit_len;
+    int bit_pos;
+    uint16_t crc;
+
+    if (!desc || !buf || buf_len <= 0)
+        return false;
+    if (!v90_build_dil_descriptor_bits(v90_bits, (int) sizeof(v90_bits), &v90_bit_len, desc))
+        return false;
+
+    memset(buf, 0, (size_t) buf_len);
+    bit_pos = v90_bit_len - 17; /* copy through the V.90 CRC start bit */
+    if (((bit_pos + 52 + 11) + 7) / 8 > buf_len)
+        return false;
+    memcpy(buf, v90_bits, (size_t) ((bit_pos + 7) / 8));
+    vpcm_test_put_bits_le(buf, &bit_pos, rate_mask_lo, 16);
+    vpcm_test_put_bits_le(buf, &bit_pos, 0, 1);
+    vpcm_test_put_bits_le(buf, &bit_pos, rate_mask_hi & 0x0007u, 16);
+    crc = vpcm_test_crc16_bits(buf, bit_pos);
+    vpcm_test_put_bits_le(buf, &bit_pos, 0, 1);
+    vpcm_test_put_bits_le(buf, &bit_pos, crc, 16);
+    vpcm_test_put_bits_le(buf, &bit_pos, 0, 1);
+    while ((bit_pos % 12) != 0)
+        vpcm_test_put_bits_le(buf, &bit_pos, 0, 1);
+    if (bit_len_out)
+        *bit_len_out = bit_pos;
+    return true;
+}
+
+static void vpcm_test_init_default_ja_profile(v90_dil_desc_t *desc)
+{
+    static const uint8_t clean_training_offsets[8] = {2, 4, 6, 8, 10, 12, 14, 15};
+    static const uint16_t clean_sp_bits = 0x0A6DU;
+    static const uint16_t clean_tp_bits = 0x0DB7U;
+    int i;
+
+    if (!desc)
+        return;
+
+    memset(desc, 0, sizeof(*desc));
+    desc->n = 125;
+    desc->lsp = 12;
+    desc->ltp = 12;
+    for (i = 0; i < 12; i++) {
+        desc->sp[i] = (uint8_t) ((clean_sp_bits >> i) & 1U);
+        desc->tp[i] = (uint8_t) ((clean_tp_bits >> i) & 1U);
+    }
+    for (i = 0; i < 8; i++) {
+        desc->h[i] = 1;
+        desc->ref[i] = (uint8_t) ((i << 4) | 1);
+    }
+    for (i = 0; i < desc->n; i++) {
+        int uchord = i % 8;
+        int variant = (i / 8) % 8;
+
+        desc->train_u[i] = (uint8_t) ((uchord << 4) | clean_training_offsets[variant]);
+    }
+}
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
 static int run_v92_e2e_mode(v91_law_t law, int data_seconds);
@@ -4589,6 +4695,94 @@ static bool test_v92_dil_rate_adaptation(void)
     return true;
 }
 
+static bool test_v92_ja_strict_descriptor_parsing(void)
+{
+    v90_dil_desc_t profile;
+    v90_dil_desc_t parsed;
+    v92_ja_parse_meta_t meta;
+    uint8_t v90_bits[512];
+    uint8_t v92_bits[512];
+    int v90_bit_len;
+    int v92_bit_len;
+
+    vpcm_log("Test: strict V.90/V.92 Ja descriptor parsing");
+
+    vpcm_test_init_default_ja_profile(&profile);
+    if (!v90_build_dil_descriptor_bits(v90_bits, (int) sizeof(v90_bits), &v90_bit_len, &profile)) {
+        fprintf(stderr, "strict Ja parse test could not build V.90 descriptor bits\n");
+        return false;
+    }
+    memset(&parsed, 0, sizeof(parsed));
+    memset(&meta, 0, sizeof(meta));
+    if (!v92_parse_ja_descriptor_strict(&parsed, v90_bits, v90_bit_len, &meta)) {
+        fprintf(stderr, "strict Ja parser rejected valid V.90 descriptor\n");
+        return false;
+    }
+    if (!meta.ok || meta.is_v92 || meta.bit_len != v90_bit_len || memcmp(&parsed, &profile, sizeof(parsed)) != 0) {
+        fprintf(stderr, "strict Ja parser misreported valid V.90 descriptor (ok=%d v92=%d bit_len=%d expected=%d)\n",
+                meta.ok ? 1 : 0,
+                meta.is_v92 ? 1 : 0,
+                meta.bit_len,
+                v90_bit_len);
+        return false;
+    }
+
+    if (!vpcm_build_v92_table20_bits(&profile, 0xFFFFu, 0x0007u, v92_bits, (int) sizeof(v92_bits), &v92_bit_len)) {
+        fprintf(stderr, "strict Ja parse test could not build V.92 descriptor bits\n");
+        return false;
+    }
+    memset(&parsed, 0, sizeof(parsed));
+    memset(&meta, 0, sizeof(meta));
+    if (!v92_parse_ja_descriptor_strict(&parsed, v92_bits, v92_bit_len, &meta)) {
+        fprintf(stderr, "strict Ja parser rejected valid V.92 Table 20 descriptor\n");
+        return false;
+    }
+    if (!meta.ok || !meta.is_v92 || meta.bit_len != v92_bit_len
+        || meta.rate_mask_lo != 0xFFFFu || meta.rate_mask_hi != 0x0007u
+        || memcmp(&parsed, &profile, sizeof(parsed)) != 0) {
+        fprintf(stderr, "strict Ja parser misreported valid V.92 descriptor (ok=%d v92=%d bit_len=%d expected=%d masks=0x%04X/0x%04X)\n",
+                meta.ok ? 1 : 0,
+                meta.is_v92 ? 1 : 0,
+                meta.bit_len,
+                v92_bit_len,
+                meta.rate_mask_lo,
+                meta.rate_mask_hi);
+        return false;
+    }
+
+    /* Exact CRC is required for strict V.92 parsing. */
+    {
+        uint8_t bad_crc[512];
+        int crc_field_pos = v90_bit_len + 17;
+
+        memcpy(bad_crc, v92_bits, sizeof(bad_crc));
+        vpcm_test_put_bit(bad_crc, crc_field_pos, vpcm_test_get_bit(bad_crc, crc_field_pos) ^ 1);
+        if (v92_parse_ja_descriptor_strict(&parsed, bad_crc, v92_bit_len, &meta)) {
+            fprintf(stderr, "strict Ja parser accepted V.92 descriptor with corrupted CRC\n");
+            return false;
+        }
+    }
+
+    /* Modulo-12 zero fill is required for strict V.92 parsing. */
+    {
+        uint8_t bad_fill[512];
+        int mandatory_fill_pos = (v90_bit_len - 17) + 16 + 1 + 16 + 1 + 16;
+        int bad_fill_pos = (mandatory_fill_pos + 1 < v92_bit_len)
+            ? (mandatory_fill_pos + 1)
+            : mandatory_fill_pos;
+
+        memcpy(bad_fill, v92_bits, sizeof(bad_fill));
+        vpcm_test_put_bit(bad_fill, bad_fill_pos, 1);
+        if (v92_parse_ja_descriptor_strict(&parsed, bad_fill, v92_bit_len, &meta)) {
+            fprintf(stderr, "strict Ja parser accepted V.92 descriptor with bad modulo-12 fill\n");
+            return false;
+        }
+    }
+
+    vpcm_log("PASS: strict V.90/V.92 Ja descriptor parsing");
+    return true;
+}
+
 static bool test_v90_v92_startup_contract_path(v91_law_t law)
 {
     v8_parms_t caller_parms;
@@ -4969,6 +5163,7 @@ static bool run_vpcm_session_suite(void)
 static bool run_vpcm_primitive_suite(void)
 {
     return test_vpcm_cp_robbed_bit_safe_profile()
+        && test_v92_ja_strict_descriptor_parsing()
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)

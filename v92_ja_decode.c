@@ -234,13 +234,12 @@ static int ja_debug_enabled(void)
     return (v && *v && *v != '0');
 }
 
-static bool v92_parse_table20_descriptor(const uint8_t *bits,
-                                         int bit_count,
-                                         v90_dil_desc_t *out_desc,
-                                         int *rate_mask_lo_out,
-                                         int *rate_mask_hi_out,
-                                         int *crc_hd_out,
-                                         int *reserved_viol_out)
+static bool v92_parse_table20_descriptor_strict(const uint8_t *bits,
+                                                int bit_count,
+                                                v90_dil_desc_t *out_desc,
+                                                int *rate_mask_lo_out,
+                                                int *rate_mask_hi_out,
+                                                int *bit_len_out)
 {
     int n, lsp, ltp;
     int alpha, beta;
@@ -250,9 +249,7 @@ static bool v92_parse_table20_descriptor(const uint8_t *bits,
     int v92_start3;
     int v92_crc_pos;
     int v92_fill_pos;
-    uint16_t exp_crc, calc_crc, d;
-    int crc_hd = 0;
-    int reserved_viol = 0;
+    uint16_t exp_crc, calc_crc;
     int rate_lo;
     int rate_hi;
     uint8_t patched[512];
@@ -315,18 +312,25 @@ static bool v92_parse_table20_descriptor(const uint8_t *bits,
     rate_hi = ja_get_packed_bits(bits, crc_start + 18, 16);
     for (int b = 3; b < 16; b++) {
         if (((rate_hi >> b) & 1) != 0)
-            reserved_viol++;
+            return false;
     }
 
     exp_crc = (uint16_t) ja_get_packed_bits(bits, v92_crc_pos, 16);
     calc_crc = ja_crc16_bits(bits, v92_start3);
-    d = (uint16_t) (exp_crc ^ calc_crc);
-    while (d) {
-        d &= (uint16_t) (d - 1U);
-        crc_hd++;
-    }
-    if (crc_hd > 2)
+    if (exp_crc != calc_crc)
         return false;
+
+    {
+        int p = v92_fill_pos + 1;
+
+        while ((p % 12) != 0) {
+            if (p >= bit_count || ja_get_packed_bit(bits, p) != 0)
+                return false;
+            p++;
+        }
+        if (bit_len_out)
+            *bit_len_out = p;
+    }
 
     patched_len = (bit_count + 7) / 8;
     if (patched_len <= 0 || patched_len > (int) sizeof(patched))
@@ -357,10 +361,52 @@ static bool v92_parse_table20_descriptor(const uint8_t *bits,
         *rate_mask_lo_out = rate_lo;
     if (rate_mask_hi_out)
         *rate_mask_hi_out = rate_hi;
-    if (crc_hd_out)
-        *crc_hd_out = crc_hd;
-    if (reserved_viol_out)
-        *reserved_viol_out = reserved_viol;
+    return true;
+}
+
+bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
+                                    const uint8_t *bits,
+                                    int bit_count,
+                                    v92_ja_parse_meta_t *meta)
+{
+    v90_dil_desc_t desc;
+    v92_ja_parse_meta_t local_meta;
+    int rate_lo = 0;
+    int rate_hi = 0;
+    int bit_len = 0;
+
+    if (!out_desc || !bits || bit_count < JA_MIN_DESCRIPTOR_BITS)
+        return false;
+
+    memset(&desc, 0, sizeof(desc));
+    memset(&local_meta, 0, sizeof(local_meta));
+
+    if (v90_parse_dil_descriptor(&desc, bits, bit_count)) {
+        local_meta.ok = true;
+        local_meta.is_v92 = false;
+        local_meta.bit_len = v90_dil_descriptor_bit_len(&desc);
+        *out_desc = desc;
+        if (meta)
+            *meta = local_meta;
+        return true;
+    }
+
+    if (!v92_parse_table20_descriptor_strict(bits,
+                                             bit_count,
+                                             &desc,
+                                             &rate_lo,
+                                             &rate_hi,
+                                             &bit_len))
+        return false;
+
+    local_meta.ok = true;
+    local_meta.is_v92 = true;
+    local_meta.bit_len = bit_len;
+    local_meta.rate_mask_lo = (uint16_t) rate_lo;
+    local_meta.rate_mask_hi = (uint16_t) rate_hi;
+    *out_desc = desc;
+    if (meta)
+        *meta = local_meta;
     return true;
 }
 
@@ -492,6 +538,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     int best_soft_start = -1;
     v90_dil_desc_t best_desc;
     v90_dil_analysis_t best_analysis;
+    v92_ja_parse_meta_t best_meta;
     uint8_t packed_bits[512];
     int search_start;
     int search_end;
@@ -510,6 +557,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     memset(out, 0, sizeof(*out));
     memset(&best_desc, 0, sizeof(best_desc));
     memset(&best_analysis, 0, sizeof(best_analysis));
+    memset(&best_meta, 0, sizeof(best_meta));
     for (i = 0; i < JA_TOP_SOFT; i++) {
         top_soft[i].start = -1;
         top_soft[i].invert = false;
@@ -542,11 +590,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
         for (invert = 0; invert <= 1; invert++) {
             v90_dil_desc_t desc;
             v90_dil_analysis_t analysis;
-            bool parsed_v92 = false;
-            int v92_rate_lo = 0;
-            int v92_rate_hi = 0;
-            int v92_crc_hd = 16;
-            int v92_reserved_viol = 16;
+            v92_ja_parse_meta_t parse_meta;
             int bit_count = total_codewords - candidate;
             int packed_len;
             int score;
@@ -568,6 +612,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                                        packed_bits, packed_len)) {
                 continue;
             }
+            memset(&parse_meta, 0, sizeof(parse_meta));
             decode_ok++;
             sync_hd = ja_sync_hamming18(packed_bits, bit_count);
             frame17 = ja_frame17_zero_violations(packed_bits, bit_count);
@@ -617,19 +662,10 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                     }
                 }
             }
-            if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count)) {
-                if (!v92_parse_table20_descriptor(packed_bits,
-                                                  bit_count,
-                                                  &desc,
-                                                  &v92_rate_lo,
-                                                  &v92_rate_hi,
-                                                  &v92_crc_hd,
-                                                  &v92_reserved_viol)) {
-                    continue;
-                }
-                parsed_v92 = true;
+            if (!v92_parse_ja_descriptor_strict(&desc, packed_bits, bit_count, &parse_meta))
+                continue;
+            if (parse_meta.is_v92)
                 parse_v92_ok++;
-            }
             parse_ok++;
             if (!v90_analyse_dil_descriptor(&desc, &analysis))
                 continue;
@@ -661,17 +697,15 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             }
             score -= zviol * 5;
             score -= crc_hd * 4;
-            if (parsed_v92) {
+            if (parse_meta.is_v92) {
                 int enabled_rates = 0;
 
                 for (int rb = 0; rb < 16; rb++)
-                    enabled_rates += (v92_rate_lo >> rb) & 1;
+                    enabled_rates += (parse_meta.rate_mask_lo >> rb) & 1;
                 for (int rb = 0; rb < 3; rb++)
-                    enabled_rates += (v92_rate_hi >> rb) & 1;
+                    enabled_rates += (parse_meta.rate_mask_hi >> rb) & 1;
                 score += 24;
                 score += enabled_rates * 2;
-                score -= v92_reserved_viol * 4;
-                score -= v92_crc_hd * 6;
             }
             if (params->tx_ja_sample >= 0) {
                 int dist = candidate - params->tx_ja_sample;
@@ -686,6 +720,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                 best_start    = candidate;
                 best_desc     = desc;
                 best_analysis = analysis;
+                best_meta     = parse_meta;
             }
         }
     }
@@ -770,6 +805,8 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     out->u_info        = params->u_info;
     out->start_sample  = best_start;
     out->invert_sign   = best_invert;
+    out->parsed_v92    = best_meta.is_v92;
+    out->descriptor_bits = best_meta.bit_len;
     out->soft_score = best_score;
     out->soft_sync_hd = 0;
     out->soft_frame17_viol = 0;
