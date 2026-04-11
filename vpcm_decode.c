@@ -6403,23 +6403,12 @@ static bool parse_v92_table20_at_offset(const char *bit_str,
                                         int *fail_code_out)
 {
     uint8_t packed[1024];
-    uint8_t patched[1024];
     int candidate_bits;
-    int n, lsp, ltp;
-    int sync17_hd = 0;
-    int fs12_hd = 0;
-    int alpha, beta;
-    int training_start, training_bits;
-    int crc_start;
-    int v92_start2, v92_start3, v92_crc_pos, v92_fill_pos;
-    uint16_t crc_field, crc_calc, d;
     int crc_hd = 0;
     int reserved_viol = 0;
-    int rate_lo, rate_hi;
-    uint16_t synthetic_v90_crc;
-    int desc_bits;
     v90_dil_desc_t desc;
     v90_dil_analysis_t analysis;
+    v92_ja_parse_meta_t meta;
 
     if (fail_code_out)
         *fail_code_out = 0;
@@ -6439,158 +6428,36 @@ static bool parse_v92_table20_at_offset(const char *bit_str,
         return false;
     }
 
-    for (int i = 0; i < 17; i++) {
-        if (aux_get_packed_bit(packed, i) == 0)
-            sync17_hd++;
-    }
-    {
-        static const int fs12[12] = {1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0};
-        for (int i = 0; i < 12; i++) {
-            if (aux_get_packed_bit(packed, i) != fs12[i])
-                fs12_hd++;
-        }
-    }
-    if (sync17_hd > 2 && fs12_hd > 2) {
-        if (fail_code_out)
-            *fail_code_out = 3;
-        return false;
-    }
-    if (aux_get_packed_bit(packed, 17) != 0) {
-        if (fail_code_out)
-            *fail_code_out = 4;
-        return false;
-    }
-
-    n = aux_get_packed_bits(packed, 18, 8);
-    lsp = aux_get_packed_bits(packed, 35, 7) + 1;
-    ltp = aux_get_packed_bits(packed, 43, 7) + 1;
-    if (n < 0) n = 0;
-    if (n > 255) n = 255;
-    if (lsp < 1) lsp = 1;
-    if (lsp > 128) lsp = 128;
-    if (ltp < 1) ltp = 1;
-    if (ltp > 128) ltp = 128;
-
-    alpha = ((int) lsp + 15) / 16 * 17;
-    beta = alpha + (((int) ltp + 15) / 16) * 17;
-    training_start = 187 + beta;
-    training_bits = (((int) n + 1) / 2) * 17;
-    crc_start = training_start + training_bits;
-
-    v92_start2 = crc_start + 17;
-    v92_start3 = crc_start + 34;
-    v92_crc_pos = crc_start + 35;
-    v92_fill_pos = crc_start + 51;
-    if (v92_fill_pos >= candidate_bits) {
-        if (fail_code_out)
-            *fail_code_out = 5;
-        return false;
-    }
-
-    if (aux_get_packed_bit(packed, crc_start) != 0) {
-        if (fail_code_out)
-            *fail_code_out = 6;
-        return false;
-    }
-    if (aux_get_packed_bit(packed, v92_start2) != 0) {
-        if (fail_code_out)
-            *fail_code_out = 6;
-        return false;
-    }
-    if (aux_get_packed_bit(packed, v92_start3) != 0) {
-        if (fail_code_out)
-            *fail_code_out = 6;
-        return false;
-    }
-    if (aux_get_packed_bit(packed, v92_fill_pos) != 0) {
-        if (fail_code_out)
-            *fail_code_out = 6;
-        return false;
-    }
-
-    rate_lo = aux_get_packed_bits(packed, crc_start + 1, 16);
-    rate_hi = aux_get_packed_bits(packed, crc_start + 18, 16);
-    for (int b = 3; b < 16; b++) {
-        if ((rate_hi >> b) & 1)
-            reserved_viol++;
-    }
-
-    crc_field = (uint16_t) aux_get_packed_bits(packed, v92_crc_pos, 16);
-    crc_calc = aux_crc16_bits(packed, v92_start3);
-    d = (uint16_t) (crc_field ^ crc_calc);
-    while (d) {
-        d &= (uint16_t) (d - 1U);
-        crc_hd++;
-    }
-    if (crc_hd > 16) {
-        if (crc_hd_out)
-            *crc_hd_out = crc_hd;
-        if (reserved_viol_out)
-            *reserved_viol_out = reserved_viol;
-        if (fail_code_out)
-            *fail_code_out = 8;
-        return false;
-    }
-
-    memcpy(patched, packed, (size_t) ((candidate_bits + 7) / 8));
-    /* Normalize V.90 framing bits in the synthetic stream used by v90_parse_dil_descriptor(). */
-    for (int i = 0; i < 17; i++) {
-        int p = i;
-        patched[p / 8] |= (uint8_t) (1U << (p % 8));
-    }
-    patched[17 / 8] &= (uint8_t) ~(1U << (17 % 8));
-    for (int p = 26; p <= 33; p++)
-        patched[p / 8] &= (uint8_t) ~(1U << (p % 8));
-    patched[34 / 8] &= (uint8_t) ~(1U << (34 % 8));
-    patched[42 / 8] &= (uint8_t) ~(1U << (42 % 8));
-    patched[50 / 8] &= (uint8_t) ~(1U << (50 % 8));
-
-    synthetic_v90_crc = aux_crc16_bits(packed, crc_start);
-    for (int i = 0; i < 16; i++) {
-        int p = crc_start + 1 + i;
-        uint8_t m = (uint8_t) (1U << (p % 8));
-        if ((synthetic_v90_crc >> i) & 1U)
-            patched[p / 8] |= m;
-        else
-            patched[p / 8] &= (uint8_t) ~m;
-    }
-    patched[(crc_start + 17) / 8] &= (uint8_t) ~(1U << ((crc_start + 17) % 8));
-
     memset(&desc, 0, sizeof(desc));
     memset(&analysis, 0, sizeof(analysis));
-    if (!v90_parse_dil_descriptor(&desc, patched, candidate_bits)) {
-        /* Table-20 structure validated; retain core descriptor fields even when
-         * the full V.90 body parse is noisy in this capture. */
-        desc.n = (uint8_t) n;
-        desc.lsp = (uint8_t) lsp;
-        desc.ltp = (uint8_t) ltp;
-        memset(&analysis, 0, sizeof(analysis));
-        analysis.n = desc.n;
-        analysis.lsp = desc.lsp;
-        analysis.ltp = desc.ltp;
-    } else if (!v90_analyse_dil_descriptor(&desc, &analysis)) {
+    memset(&meta, 0, sizeof(meta));
+    if (!v92_parse_ja_descriptor_strict(&desc, packed, candidate_bits, &meta) || !meta.is_v92) {
+        if (fail_code_out)
+            *fail_code_out = 9;
+        return false;
+    }
+    if (!v90_analyse_dil_descriptor(&desc, &analysis)) {
         if (fail_code_out)
             *fail_code_out = 10;
         return false;
     }
 
-    desc_bits = v92_fill_pos + 1;
-    if (desc_bits % 12) {
-        desc_bits += 12 - (desc_bits % 12);
-    }
+    /* Strict parser guarantees exact V.92 CRC and reserved-zero handling. */
+    crc_hd = 0;
+    reserved_viol = 0;
 
     *desc_out = desc;
     *analysis_out = analysis;
     if (rate_mask_lo_out)
-        *rate_mask_lo_out = rate_lo;
+        *rate_mask_lo_out = (int) meta.rate_mask_lo;
     if (rate_mask_hi_out)
-        *rate_mask_hi_out = rate_hi;
+        *rate_mask_hi_out = (int) meta.rate_mask_hi;
     if (crc_hd_out)
         *crc_hd_out = crc_hd;
     if (reserved_viol_out)
         *reserved_viol_out = reserved_viol;
     if (bit_len_out)
-        *bit_len_out = desc_bits;
+        *bit_len_out = meta.bit_len;
     if (fail_code_out)
         *fail_code_out = 0;
     return true;
