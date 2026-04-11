@@ -1,9 +1,11 @@
 /*
  * v92_ja_decode.c — V.92 Phase 3 Ja / DIL descriptor decoder
  *
- * Core implementation of v92_ja_dil_search().  The bit-extraction helpers
- * (V.90 differential sign + x^23+x^5+1 descrambler) live here as statics so
- * this module has no dependency on vpcm_decode internals.
+ * Core implementation of v92_ja_dil_search().  The bit-extraction helpers use
+ * the V.92 analogue modem upstream conventions (V.92 §6.3, §8.5.4, §8.5.7):
+ *   - GPA scrambler polynomial: x^23 + x^18 + 1  (tap = 17, NOT GPC tap = 4)
+ *   - Sign convention: PCM MSB=1 (positive, +L_U) → bit 0; MSB=0 → bit 1
+ * These are different from the V.90 downstream channel (GPC, positive→1).
  */
 
 #include "v92_ja_decode.h"
@@ -13,7 +15,7 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------
- * V.90 scrambler constants (ITU-T V.90 §5.4.4)
+ * GPA scrambler constants (V.92 §6.3 / V.34 eq. 7-2: x^23 + x^18 + 1)
  * ------------------------------------------------------------------------- */
 
 /* Length of the scrambler shift register (polynomial degree). */
@@ -415,8 +417,14 @@ bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
  * ------------------------------------------------------------------------- */
 
 /*
- * ja_descramble_reg_bit() — advance the V.90 x^23+x^5+1 descrambler by one
+ * ja_descramble_reg_bit() — advance the GPA descrambler (x^23+x^18+1) by one
  * bit.
+ *
+ * V.92 §6.3 specifies GPA (V.34 equation 7-2) for the analogue modem upstream
+ * (caller TX).  GPA taps are at positions 22 and 17 of the 23-bit shift
+ * register (poly x^23 + x^18 + 1, where degree-18 maps to reg bit 17).
+ * Note: GPC (x^23+x^5+1, tap=4) is the digital-modem downstream polynomial
+ * and must NOT be used here.
  *
  * @reg     Shift register state (caller-maintained across consecutive calls).
  * @in_bit  Next scrambled input bit (0 or 1).
@@ -424,25 +432,27 @@ bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
  */
 static int ja_descramble_reg_bit(uint32_t *reg, int in_bit)
 {
-    int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
+    int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 17)) & 1;
     *reg = (*reg << 1) | (uint32_t) in_bit;
     return out_bit;
 }
 
 /*
  * ja_decode_bits_packed() — extract and descramble a block of bits from the
- * V.90 PCM codeword stream into a packed byte array.
+ * V.92 PCM codeword stream into a packed byte array.
  *
- * The V.90 downstream channel uses differential sign coding followed by the
- * x^23+x^5+1 self-synchronising scrambler (V.90 §5.4.4).  This function
- * seeds the descrambler from the JA_SCRAMBLER_HISTORY samples that precede
- * @start_sample, then extracts @bit_count descrambled bits.
+ * V.92 §8.5.4 (Ja) and §8.5.7 (TRN1u): the analogue modem upstream channel
+ * uses GPA (x^23+x^18+1) scrambling followed by differential sign coding.
+ * Sign convention (§8.5.7): scrambler output 0 → +L_U (positive, PCM MSB=1),
+ * scrambler output 1 → −L_U (negative, PCM MSB=0).  Therefore the received
+ * sign bit maps as: MSB=1 → bit 0, MSB=0 → bit 1 (inverted from V.90 DS).
  *
  * @codewords       Raw μ-law (or A-law) PCM bytes; MSB is the sign bit.
  * @total_codewords Number of valid entries in @codewords.
  * @start_sample    Index of the first codeword to decode.
  * @bit_count       Number of bits to produce.
- * @invert_sign     When true, flip every sign bit before differential decode.
+ * @invert_sign     When true, flip every sign bit before differential decode
+ *                  (use for debugging / polarity ambiguity fallback).
  * @packed_out      Output buffer; bit i written to byte i/8, bit i%8.
  * @packed_len      Byte length of @packed_out (must be ≥ ⌈bit_count/8⌉).
  *
@@ -470,13 +480,14 @@ static bool ja_decode_bits_packed(const uint8_t *codewords,
     memset(packed_out, 0, (size_t) packed_len);
     descramble_reg = 0;
 
-    prev_sign = ((codewords[start_sample - JA_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
+    /* V.92 §8.5.7: PCM MSB=1 (positive) → bit 0, MSB=0 (negative) → bit 1. */
+    prev_sign = ((codewords[start_sample - JA_SCRAMBLER_HISTORY - 1] & 0x80) ? 0 : 1);
     if (invert_sign)
         prev_sign ^= 1;
 
     /* Seed the descrambler with the history window. */
     for (i = start_sample - JA_SCRAMBLER_HISTORY; i < start_sample; i++) {
-        int sign = (codewords[i] & 0x80) ? 1 : 0;
+        int sign = (codewords[i] & 0x80) ? 0 : 1;   /* V.92: positive=0 */
         int scrambled;
         if (invert_sign)
             sign ^= 1;
@@ -487,7 +498,7 @@ static bool ja_decode_bits_packed(const uint8_t *codewords,
 
     /* Extract and descramble the payload bits. */
     for (i = 0; i < bit_count; i++) {
-        int sign = (codewords[start_sample + i] & 0x80) ? 1 : 0;
+        int sign = (codewords[start_sample + i] & 0x80) ? 0 : 1;   /* V.92: positive=0 */
         int scrambled;
         int plain;
 
