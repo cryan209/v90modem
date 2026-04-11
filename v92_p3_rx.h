@@ -48,6 +48,8 @@ extern "C" {
 
 /* Codeword buffer for the Ja search (seed + TRN1u + Ja descriptor). */
 #define V92_P3_RX_JA_BUF       6144   /* ≥ 23 + TRN1u_MIN + DIL + slack */
+/* Rolling prehistory so TRN1u/Ja decoding gets true pre-seed symbols. */
+#define V92_P3_RX_PRE_HIST       64
 
 /* -------------------------------------------------------------------------
  * Receiver state
@@ -91,6 +93,10 @@ typedef struct {
     bool     p6_ru_polarity; /* true = Ru {+,+,+,-,-,-}, false = uR */
     /* 12-hypothesis run tracker: 6 phases x 2 polarities. */
     int      p6_hyp_run[12];
+    uint32_t p6_hyp_sum[12];
+    uint32_t p6_hyp_sumsq[12];
+    uint8_t  p6_hyp_min[12];
+    uint8_t  p6_hyp_max[12];
     int      ru_hyp;         /* active Ru hypothesis index, or -1 */
     int      ur_hyp;         /* active uR hypothesis index, or -1 */
 
@@ -112,10 +118,17 @@ typedef struct {
     int      diff_prev;      /* previous sign bit for differential decode */
     bool     diff_valid;     /* true once diff_prev is initialised */
 
+    /* ------- rolling prehistory ------- */
+    uint8_t  prehist_cw[V92_P3_RX_PRE_HIST];
+    int      prehist_sample[V92_P3_RX_PRE_HIST];
+    int      prehist_head;    /* next write index */
+    int      prehist_fill;    /* number of valid entries */
+
     /* ------- Ja codeword buffer ------- */
     /*
-     * Filled starting at (trn1u_start − 23) so that v92_ja_dil_search has
-     * the full GPA seed window before the search region.
+     * Filled with rolling prehistory first (up to 23 symbols before TRN1u),
+     * then with live TRN1u/Ja codewords so v92_ja_dil_search has a proper
+     * GPA seed window before the search region.
      */
     uint8_t  ja_buf[V92_P3_RX_JA_BUF];
     int      ja_buf_base;    /* sample index corresponding to ja_buf[0] */

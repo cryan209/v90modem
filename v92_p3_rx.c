@@ -5,10 +5,13 @@
  */
 
 #include "v92_p3_rx.h"
+#include "p3_demod.h"
 
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <spandsp.h>
 
 /* -------------------------------------------------------------------------
  * Internal constants
@@ -16,24 +19,40 @@
 
 /* Minimum run before promoting a period-6 lock to Ru. */
 #define P6_LOCK_MIN    320
+/* LU-quality gates to reject sign-only false locks. */
+#define P6_LU_MEAN_MIN   64.0
+#define P6_LU_RANGE_MAX  16
+#define P6_LU_STD_MAX     6.0
 
 /* Acceptance window for Ru burst length. */
 #define RU_ACCEPT_MIN  (V92_P3_RX_RU_T - 24)
-#define RU_ACCEPT_MAX  (V92_P3_RX_RU_T + 36)
+#define RU_ACCEPT_MAX  (V92_P3_RX_RU_T + 72)
 /* Hard cap to avoid latching forever on unrelated long period-6 regions. */
 #define RU_MAX_T       (V92_P3_RX_RU_T * 8)
+/* Folded-lock fallback: Ru/uR/Ru can appear as one long contiguous run. */
+#define RU_FOLDED_EXPECT_T       (V92_P3_RX_RU_T + V92_P3_RX_UR_T + V92_P3_RX_RU_T)
+#define RU_FOLDED_MIN_T          (RU_FOLDED_EXPECT_T - 96)
+#define RU_FOLDED_MAX_T          (RU_FOLDED_EXPECT_T + 96)
+#define RU_FOLDED_UR2_ANCHOR_TOL 96
 
 /* Acceptance window for uR burst length. */
 #define UR_ACCEPT_MIN  (V92_P3_RX_UR_T - 8)
 #define UR_ACCEPT_MAX  (V92_P3_RX_UR_T * 2 + 8)
 /* Hard cap for uR; true uR should be short. */
 #define UR_MAX_T       (V92_P3_RX_UR_T * 6)
+/* Allow brief entry glitches before rejecting uR lock. */
+#define UR_RELOCK_GRACE 6
+/* TRN1u sanity: descrambled stream should be heavily biased to ones. */
+#define TRN1U_ONES_MIN_PCT 75
+#define TRN1U_EARLY_CHECK_T 256
+#define TRN1U_DEMOD_MAX_HYP 12
 
 /* -------------------------------------------------------------------------
  * Sign bit helpers
  * ------------------------------------------------------------------------- */
 
 static inline int sign_bit(uint8_t cw)  { return (cw >> 7) & 1; }
+static inline int amp7(uint8_t cw)      { return cw & 0x7F; }
 
 static int p3rx_debug_enabled(void)
 {
@@ -75,21 +94,66 @@ static inline int p6_hyp_index(bool ru_pol, int phase0)
     return (ru_pol ? 0 : 6) + (phase0 % 6);
 }
 
-static void p6_update_hyp_runs(v92_p3_rx_t *rx, int msb, int sample_index)
+static void p6_update_hyp_runs(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
 {
+    int msb = sign_bit(cw);
+    int a7 = amp7(cw);
     for (int h = 0; h < 12; h++) {
         bool pol = p6_hyp_pol(h);
         int phase = (sample_index + p6_hyp_phase0(h)) % 6;
         int expected = p6_exp(phase, pol);
 
-        if (msb == expected)
+        if (msb == expected) {
+            if (rx->p6_hyp_run[h] == 0) {
+                rx->p6_hyp_sum[h] = 0;
+                rx->p6_hyp_sumsq[h] = 0;
+                rx->p6_hyp_min[h] = (uint8_t) a7;
+                rx->p6_hyp_max[h] = (uint8_t) a7;
+            }
             rx->p6_hyp_run[h]++;
-        else
+            rx->p6_hyp_sum[h] += (uint32_t) a7;
+            rx->p6_hyp_sumsq[h] += (uint32_t) (a7 * a7);
+            if (a7 < rx->p6_hyp_min[h])
+                rx->p6_hyp_min[h] = (uint8_t) a7;
+            if (a7 > rx->p6_hyp_max[h])
+                rx->p6_hyp_max[h] = (uint8_t) a7;
+        } else {
             rx->p6_hyp_run[h] = 0;
+            rx->p6_hyp_sum[h] = 0;
+            rx->p6_hyp_sumsq[h] = 0;
+            rx->p6_hyp_min[h] = 0x7F;
+            rx->p6_hyp_max[h] = 0;
+        }
     }
 }
 
-static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run)
+static bool p6_hyp_lu_ok(const v92_p3_rx_t *rx, int h)
+{
+    int run;
+    double mean;
+    int range;
+    double var;
+    double stddev;
+
+    if (!rx || h < 0 || h >= 12)
+        return false;
+    run = rx->p6_hyp_run[h];
+    if (run <= 0)
+        return false;
+
+    mean = (double) rx->p6_hyp_sum[h] / (double) run;
+    range = (int) rx->p6_hyp_max[h] - (int) rx->p6_hyp_min[h];
+    var = (double) rx->p6_hyp_sumsq[h] / (double) run - mean * mean;
+    if (var < 0.0)
+        var = 0.0;
+    stddev = sqrt(var);
+
+    return (mean >= P6_LU_MEAN_MIN
+            && range <= P6_LU_RANGE_MAX
+            && stddev <= P6_LU_STD_MAX);
+}
+
+static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run, bool require_lu)
 {
     int best_h = -1;
     int best_r = min_run - 1;
@@ -98,6 +162,8 @@ static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run)
     for (int p = 0; p < 6; p++) {
         int h = base + p;
         int r = rx->p6_hyp_run[h];
+        if (require_lu && !p6_hyp_lu_ok(rx, h))
+            continue;
         if (r > best_r) {
             best_r = r;
             best_h = h;
@@ -115,6 +181,12 @@ static void p6_reset(v92_p3_rx_t *rx)
     rx->p6_err_wpos   = 0;
     rx->p6_ru_polarity = true;
     memset(rx->p6_hyp_run, 0, sizeof(rx->p6_hyp_run));
+    memset(rx->p6_hyp_sum, 0, sizeof(rx->p6_hyp_sum));
+    memset(rx->p6_hyp_sumsq, 0, sizeof(rx->p6_hyp_sumsq));
+    for (int h = 0; h < 12; h++) {
+        rx->p6_hyp_min[h] = 0x7F;
+        rx->p6_hyp_max[h] = 0;
+    }
     rx->ru_hyp = -1;
     rx->ur_hyp = -1;
 }
@@ -161,6 +233,135 @@ static int trn1u_process(v92_p3_rx_t *rx, uint8_t cw)
     return out;
 }
 
+static bool trn1u_ones_ok_at_count(const v92_p3_rx_t *rx, int count)
+{
+    if (!rx || count <= 0 || rx->trn1u_count < count)
+        return false;
+    return (rx->trn1u_ones * 100 >= count * TRN1U_ONES_MIN_PCT);
+}
+
+static inline int gpa_descramble_t17_bit(uint32_t *reg, int in_bit)
+{
+    int out = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 17)) & 1;
+    *reg = ((*reg << 1) | (uint32_t) (in_bit & 1)) & 0x7FFFFFU;
+    return out;
+}
+
+static int trn1u_ones_pct_from_result(const p3_result_t *r,
+                                      int trn_start_sample,
+                                      int payload_symbols)
+{
+    int start_sym = -1;
+    int best_pct = -1;
+
+    if (!r || !r->symbols || r->symbol_count <= 0 || payload_symbols <= 0)
+        return -1;
+
+    for (int i = 0; i < r->symbol_count; i++) {
+        if (r->symbols[i].sample_index >= trn_start_sample) {
+            start_sym = i;
+            break;
+        }
+    }
+    if (start_sym < 0)
+        return -1;
+
+    {
+        int available = r->symbol_count - start_sym;
+        int history = 23;
+        if (available <= history)
+            return -1;
+        if (payload_symbols > available - history)
+            payload_symbols = available - history;
+    }
+
+    /*
+     * Evaluate both differential-bit mappings from dibit and both polarity
+     * inversions. Pick the strongest one-rate.
+     */
+    for (int map = 0; map < 2; map++) {
+        for (int inv = 0; inv < 2; inv++) {
+            uint32_t reg = 0;
+            int ones = 0;
+            int total = payload_symbols;
+
+            for (int i = 0; i < 23; i++) {
+                int d = r->symbols[start_sym + i].dibit & 3;
+                int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
+                raw ^= inv;
+                (void) gpa_descramble_t17_bit(&reg, raw);
+            }
+            for (int i = 0; i < payload_symbols; i++) {
+                int d = r->symbols[start_sym + 23 + i].dibit & 3;
+                int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
+                raw ^= inv;
+                ones += gpa_descramble_t17_bit(&reg, raw);
+            }
+
+            {
+                int pct = (ones * 100 + total / 2) / total;
+                if (pct > best_pct)
+                    best_pct = pct;
+            }
+        }
+    }
+
+    return best_pct;
+}
+
+static int trn1u_demod_best_ones_pct(const v92_p3_rx_t *rx, int trn_symbols)
+{
+    int eval_total;
+    int best_pct = -1;
+    p3_hypothesis_t hyps[TRN1U_DEMOD_MAX_HYP];
+
+    if (!rx || trn_symbols <= 64)
+        return -1;
+    if (rx->ja_buf_fill < 24 + trn_symbols)
+        return -1;
+
+    eval_total = 23 + trn_symbols;
+
+    for (int law = 0; law < 2; law++) {
+        int16_t *lin = (int16_t *) malloc((size_t) eval_total * sizeof(int16_t));
+        int count;
+
+        if (!lin)
+            return best_pct;
+
+        for (int i = 0; i < eval_total; i++) {
+            uint8_t cw = rx->ja_buf[i];
+            lin[i] = (int16_t) (law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
+        }
+
+        count = p3_scan_all_hypotheses(lin,
+                                       eval_total,
+                                       rx->ja_buf_base,
+                                       8000,
+                                       hyps,
+                                       TRN1U_DEMOD_MAX_HYP);
+        for (int hi = 0; hi < count; hi++) {
+            p3_result_t *r = p3_demod_run(lin,
+                                          eval_total,
+                                          rx->ja_buf_base,
+                                          hyps[hi].baud_code,
+                                          hyps[hi].carrier_sel,
+                                          8000);
+            int pct;
+            if (!r)
+                continue;
+            pct = trn1u_ones_pct_from_result(r, rx->trn1u_start, trn_symbols);
+            if (pct > best_pct)
+                best_pct = pct;
+            p3_result_free(r);
+        }
+
+        free(lin);
+    }
+
+    return best_pct;
+}
+
 /* -------------------------------------------------------------------------
  * Ja codeword buffer
  * ------------------------------------------------------------------------- */
@@ -170,6 +371,51 @@ static void ja_buf_push(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
         rx->ja_buf_base = sample_index;
     if (rx->ja_buf_fill < V92_P3_RX_JA_BUF)
         rx->ja_buf[rx->ja_buf_fill++] = cw;
+}
+
+static void prehist_push(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
+{
+    int pos;
+
+    if (!rx)
+        return;
+    pos = rx->prehist_head;
+    rx->prehist_cw[pos] = cw;
+    rx->prehist_sample[pos] = sample_index;
+    rx->prehist_head = (pos + 1) % V92_P3_RX_PRE_HIST;
+    if (rx->prehist_fill < V92_P3_RX_PRE_HIST)
+        rx->prehist_fill++;
+}
+
+static int prehist_copy_tail(const v92_p3_rx_t *rx,
+                             int max_count,
+                             uint8_t *dst,
+                             int *first_sample_out)
+{
+    int count;
+    int start;
+
+    if (!rx || !dst || max_count <= 0)
+        return 0;
+    count = rx->prehist_fill;
+    if (count > max_count)
+        count = max_count;
+    if (count <= 0)
+        return 0;
+
+    start = rx->prehist_head - count;
+    while (start < 0)
+        start += V92_P3_RX_PRE_HIST;
+
+    for (int i = 0; i < count; i++) {
+        int pos = (start + i) % V92_P3_RX_PRE_HIST;
+        dst[i] = rx->prehist_cw[pos];
+    }
+    if (first_sample_out) {
+        int pos = start % V92_P3_RX_PRE_HIST;
+        *first_sample_out = rx->prehist_sample[pos];
+    }
+    return count;
 }
 
 /* -------------------------------------------------------------------------
@@ -214,10 +460,10 @@ static bool run_ja_search(v92_p3_rx_t *rx)
     return found && (rx->ja_result.ok || rx->ja_result.soft_lock);
 }
 
-static void p6_rehunt_from_current(v92_p3_rx_t *rx, int msb, int sample_index)
+static void p6_rehunt_from_current(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
 {
     p6_reset(rx);
-    p6_update_hyp_runs(rx, msb, sample_index);
+    p6_update_hyp_runs(rx, cw, sample_index);
     rx->state = V92_P3_RX_RU1_HUNT;
 }
 
@@ -247,7 +493,6 @@ void v92_p3_rx_start(v92_p3_rx_t *rx, int first_sample_index)
 bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 {
     v92_p3_rx_state_t prev = rx->state;
-    int msb = sign_bit(codeword);
 
     if (rx->state == V92_P3_RX_RU1_HUNT
         || rx->state == V92_P3_RX_RU1
@@ -255,7 +500,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         || rx->state == V92_P3_RX_MD_WAIT
         || rx->state == V92_P3_RX_RU2
         || rx->state == V92_P3_RX_UR2) {
-        p6_update_hyp_runs(rx, msb, sample_index);
+        p6_update_hyp_runs(rx, codeword, sample_index);
     }
 
     switch (rx->state) {
@@ -266,8 +511,8 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU1_HUNT: {
-        int h_ru = p6_best_hyp_run(rx, true, P6_LOCK_MIN);
-        int h_ur = p6_best_hyp_run(rx, false, P6_LOCK_MIN);
+        int h_ru = p6_best_hyp_run(rx, true, P6_LOCK_MIN, true);
+        int h_ur = p6_best_hyp_run(rx, false, P6_LOCK_MIN, true);
         int best_h = -1;
 
         if (h_ru >= 0)
@@ -296,20 +541,46 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > RU_MAX_T)
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
         } else {
             int run_effective = rx->p6_run;
+            int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
 
             if (run_effective >= RU_ACCEPT_MIN
                 && run_effective <= RU_ACCEPT_MAX
                 && rx->ur_hyp >= 0
-                && rx->p6_hyp_run[rx->ur_hyp] > 0) {
+                && ur_run > 0) {
                 rx->ru1_end = sample_index - 1;
                 rx->ur1_start = sample_index;
-                rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
+                rx->p6_run = ur_run;
                 rx->state = V92_P3_RX_UR1;
+            } else if (run_effective >= RU_FOLDED_MIN_T
+                       && run_effective <= RU_FOLDED_MAX_T
+                       && rx->ru1_start >= 0
+                       && rx->ur_hyp >= 0
+                       && ur_run > 0) {
+                int inferred_ur2_start = rx->ru1_start + RU_FOLDED_EXPECT_T;
+                int delta = sample_index - inferred_ur2_start;
+
+                /*
+                 * Some captures merge Ru1/uR1/Ru2 into one apparent 6-symbol
+                 * run under a strong hypothesis. Keep strict lock as primary,
+                 * but accept this bounded fallback and continue at UR2.
+                 */
+                if (abs(delta) <= RU_FOLDED_UR2_ANCHOR_TOL) {
+                    rx->ru1_end = rx->ru1_start + V92_P3_RX_RU_T - 1;
+                    rx->ur1_start = rx->ru1_end + 1;
+                    rx->ur1_end = rx->ur1_start + V92_P3_RX_UR_T - 1;
+                    rx->ru2_start = rx->ur1_end + 1;
+                    rx->ru2_end = rx->ru2_start + V92_P3_RX_RU_T - 1;
+                    rx->ur2_start = sample_index;
+                    rx->p6_run = ur_run;
+                    rx->state = V92_P3_RX_UR2;
+                } else {
+                    p6_rehunt_from_current(rx, codeword, sample_index);
+                }
             } else {
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
             }
         }
         break;
@@ -322,15 +593,18 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > UR_MAX_T)
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
         } else {
             int run_effective = rx->p6_run;
+            int elapsed = sample_index - rx->ur1_start;
+            if (elapsed < UR_RELOCK_GRACE)
+                break;
             if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
                 rx->ur1_end = sample_index - 1;
                 rx->p6_run = 0;
                 rx->state = V92_P3_RX_MD_WAIT;
             } else {
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
             }
         }
         break;
@@ -340,12 +614,12 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     case V92_P3_RX_MD_WAIT: {
         int elapsed = sample_index - rx->ur1_end;
         if (elapsed > V92_P3_RX_MD_MAX_T) {
-            p6_rehunt_from_current(rx, msb, sample_index);
+            p6_rehunt_from_current(rx, codeword, sample_index);
             break;
         }
 
         if (rx->ru_hyp < 0) {
-            p6_rehunt_from_current(rx, msb, sample_index);
+            p6_rehunt_from_current(rx, codeword, sample_index);
             break;
         }
 
@@ -367,7 +641,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > RU_MAX_T)
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
         } else {
             int run_effective = rx->p6_run;
 
@@ -380,7 +654,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
                 rx->state = V92_P3_RX_UR2;
             } else {
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
             }
         }
         break;
@@ -393,24 +667,33 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (run > 0) {
             rx->p6_run = run;
             if (run > UR_MAX_T)
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
         } else {
             int run_effective = rx->p6_run;
+            int elapsed = sample_index - rx->ur2_start;
+            if (elapsed < UR_RELOCK_GRACE)
+                break;
             if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
+                int copied;
+                int base_sample = sample_index;
                 rx->ur2_end = sample_index - 1;
                 rx->trn1u_start = sample_index;
-                /* Set up Ja buffer to start 23 samples before TRN1u
-                 * so v92_ja_dil_search has its seed window. */
-                rx->ja_buf_base  = rx->trn1u_start - 23;
-                rx->ja_buf_fill  = 0;
+                /* Seed Ja buffer with true codeword prehistory for GPA sync. */
+                copied = prehist_copy_tail(rx, 23, rx->ja_buf, &base_sample);
+                rx->ja_buf_base = (copied > 0) ? base_sample : rx->trn1u_start;
+                rx->ja_buf_fill = copied;
                 rx->gpa_reg      = 0;
                 rx->diff_valid   = false;
                 rx->trn1u_count  = 0;
                 rx->trn1u_ones   = 0;
                 p6_reset(rx);
                 rx->state = V92_P3_RX_TRN1U;
+                /* Consume the transition sample as first TRN1u symbol. */
+                if (sample_index >= rx->ja_buf_base)
+                    ja_buf_push(rx, codeword, sample_index);
+                (void) trn1u_process(rx, codeword);
             } else {
-                p6_rehunt_from_current(rx, msb, sample_index);
+                p6_rehunt_from_current(rx, codeword, sample_index);
             }
         }
         break;
@@ -423,6 +706,44 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             ja_buf_push(rx, codeword, sample_index);
 
         trn1u_process(rx, codeword);
+
+        /*
+         * TRN1u (V.92 §8.5.7) is an all-ones training source through the GPA
+         * scrambler/differential path. If descrambled bits are not strongly
+         * one-biased, this lock is likely wrong.
+         */
+        if (rx->trn1u_count == TRN1U_EARLY_CHECK_T
+            && !trn1u_ones_ok_at_count(rx, TRN1U_EARLY_CHECK_T)) {
+            int eq_pct = trn1u_demod_best_ones_pct(rx, TRN1U_EARLY_CHECK_T);
+            if (p3rx_debug_enabled()) {
+                int raw_pct = (rx->trn1u_count > 0)
+                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
+                    : 0;
+                fprintf(stderr,
+                        "[P3RX] sample=%d trn1u early check raw=%d%% eq=%d%%\n",
+                        sample_index, raw_pct, eq_pct);
+            }
+            if (eq_pct < TRN1U_ONES_MIN_PCT) {
+                p6_rehunt_from_current(rx, codeword, sample_index);
+                break;
+            }
+        }
+        if (rx->trn1u_count == V92_P3_RX_TRN1U_MIN_T
+            && !trn1u_ones_ok_at_count(rx, V92_P3_RX_TRN1U_MIN_T)) {
+            int eq_pct = trn1u_demod_best_ones_pct(rx, V92_P3_RX_TRN1U_MIN_T);
+            if (p3rx_debug_enabled()) {
+                int raw_pct = (rx->trn1u_count > 0)
+                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
+                    : 0;
+                fprintf(stderr,
+                        "[P3RX] sample=%d trn1u min check raw=%d%% eq=%d%%\n",
+                        sample_index, raw_pct, eq_pct);
+            }
+            if (eq_pct < TRN1U_ONES_MIN_PCT) {
+                p6_rehunt_from_current(rx, codeword, sample_index);
+                break;
+            }
+        }
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
             rx->state = V92_P3_RX_FAILED;
@@ -477,6 +798,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->ru_hyp,
                 rx->ur_hyp);
     }
+    prehist_push(rx, codeword, sample_index);
     return (rx->state != prev);
 }
 
