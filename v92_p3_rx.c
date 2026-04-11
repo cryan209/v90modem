@@ -19,6 +19,12 @@
 
 /* Minimum run before promoting a period-6 lock to Ru. */
 #define P6_LOCK_MIN    320
+/* Soft-run lock candidate threshold when noise breaks strict runs. */
+#define P6_LOCK_MIN_SOFT 128
+/* After this many symbols, allow brief mismatch streaks without reset. */
+#define P6_SOFT_GLITCH_FLOOR 12
+/* Maximum consecutive mismatches tolerated by soft-run tracker. */
+#define P6_SOFT_GLITCH_MAX 4
 /* LU-quality gates to reject sign-only false locks. */
 #define P6_LU_MEAN_MIN   64.0
 #define P6_LU_RANGE_MAX  16
@@ -38,13 +44,22 @@
 /* Acceptance window for uR burst length. */
 #define UR_ACCEPT_MIN  (V92_P3_RX_UR_T - 8)
 #define UR_ACCEPT_MAX  (V92_P3_RX_UR_T * 2 + 8)
+/* Relaxed bounds used only when lock entered via soft run tracking. */
+#define UR_ACCEPT_MIN_SOFT 3
+#define UR_ACCEPT_MAX_SOFT 64
 /* Hard cap for uR; true uR should be short. */
 #define UR_MAX_T       (V92_P3_RX_UR_T * 6)
 /* Allow brief entry glitches before rejecting uR lock. */
 #define UR_RELOCK_GRACE 6
+/* Relaxed Ru bounds/lock for the second Ru in soft mode. */
+#define RU_ACCEPT_MIN_SOFT 96
+#define RU2_LOCK_MIN_SOFT  96
 /* TRN1u sanity: descrambled stream should be heavily biased to ones. */
 #define TRN1U_ONES_MIN_PCT 75
+#define TRN1U_ONES_MIN_PCT_SOFT 60
 #define TRN1U_EARLY_CHECK_T 256
+#define TRN1U_MIN_SOFT_T 256
+#define JA_LEAD_SOFT_T 24
 #define TRN1U_DEMOD_MAX_HYP 12
 #define JA_DEMOD_MAX_BITS   4096
 
@@ -142,12 +157,22 @@ static void p6_update_hyp_runs(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
                 rx->p6_hyp_min[h] = (uint8_t) a7;
             if (a7 > rx->p6_hyp_max[h])
                 rx->p6_hyp_max[h] = (uint8_t) a7;
+            rx->p6_hyp_soft_run[h]++;
+            rx->p6_hyp_soft_bad[h] = 0;
         } else {
             rx->p6_hyp_run[h] = 0;
             rx->p6_hyp_sum[h] = 0;
             rx->p6_hyp_sumsq[h] = 0;
             rx->p6_hyp_min[h] = 0x7F;
             rx->p6_hyp_max[h] = 0;
+            if (rx->p6_hyp_soft_run[h] >= P6_SOFT_GLITCH_FLOOR
+                && rx->p6_hyp_soft_bad[h] < P6_SOFT_GLITCH_MAX) {
+                rx->p6_hyp_soft_bad[h]++;
+                rx->p6_hyp_soft_run[h]++;
+            } else {
+                rx->p6_hyp_soft_run[h] = 0;
+                rx->p6_hyp_soft_bad[h] = 0;
+            }
         }
     }
 }
@@ -238,6 +263,23 @@ static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run, bool
     return best_h;
 }
 
+static int p6_best_hyp_soft_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run)
+{
+    int best_h = -1;
+    int best_r = min_run - 1;
+    int base = ru_pol ? 0 : 6;
+
+    for (int p = 0; p < 6; p++) {
+        int h = base + p;
+        int r = rx->p6_hyp_soft_run[h];
+        if (r > best_r) {
+            best_r = r;
+            best_h = h;
+        }
+    }
+    return best_h;
+}
+
 static void p6_reset(v92_p3_rx_t *rx)
 {
     rx->p6_phase      = 0;
@@ -247,14 +289,17 @@ static void p6_reset(v92_p3_rx_t *rx)
     rx->p6_err_wpos   = 0;
     rx->p6_ru_polarity = true;
     memset(rx->p6_hyp_run, 0, sizeof(rx->p6_hyp_run));
+    memset(rx->p6_hyp_soft_run, 0, sizeof(rx->p6_hyp_soft_run));
     memset(rx->p6_hyp_sum, 0, sizeof(rx->p6_hyp_sum));
     memset(rx->p6_hyp_sumsq, 0, sizeof(rx->p6_hyp_sumsq));
+    memset(rx->p6_hyp_soft_bad, 0, sizeof(rx->p6_hyp_soft_bad));
     for (int h = 0; h < 12; h++) {
         rx->p6_hyp_min[h] = 0x7F;
         rx->p6_hyp_max[h] = 0;
     }
     rx->ru_hyp = -1;
     rx->ur_hyp = -1;
+    rx->p6_soft_mode = false;
     rx->hunt_best_run = 0;
     rx->hunt_best_hyp = -1;
     rx->hunt_best_start = -1;
@@ -768,6 +813,18 @@ static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
     return found;
 }
 
+static void ja_result_normalize_sample(const v92_p3_rx_t *rx, ja_dil_decode_t *res)
+{
+    if (!rx || !res || res->start_sample < 0)
+        return;
+    /*
+     * v92_ja_dil_search may report a start index relative to ja_buf[0].
+     * Promote such values to the absolute sample timeline.
+     */
+    if (res->start_sample < rx->ja_buf_fill)
+        res->start_sample += rx->ja_buf_base;
+}
+
 /* -------------------------------------------------------------------------
  * Ja codeword buffer
  * ------------------------------------------------------------------------- */
@@ -831,8 +888,12 @@ static bool run_ja_search(v92_p3_rx_t *rx)
 {
     ja_dil_search_params_t params;
     int buf_trn_off;
+    int trn_min_t;
+    int ja_lead_t;
 
     memset(&params, 0, sizeof(params));
+    trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
+    ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
 
     /* Offset of trn1u_start within ja_buf. */
     buf_trn_off = rx->trn1u_start - rx->ja_buf_base;
@@ -840,12 +901,11 @@ static bool run_ja_search(v92_p3_rx_t *rx)
         buf_trn_off = 24;   /* need at least 23 seed samples before search */
 
     /*
-     * Ja is expected to appear right after 2040T of TRN1u.
-     * Open a ±50 sample window around that point, plus JA_LEAD_T for slack.
+     * Ja is expected to appear right after TRN1u minimum.
+     * Open a ±50 sample window around that point, plus JA lead slack.
      */
-    params.search_start  = buf_trn_off + V92_P3_RX_TRN1U_MIN_T - 50;
-    params.search_end    = buf_trn_off + V92_P3_RX_TRN1U_MIN_T
-                           + V92_P3_RX_JA_LEAD_T;
+    params.search_start  = buf_trn_off + trn_min_t - 50;
+    params.search_end    = buf_trn_off + trn_min_t + ja_lead_t;
     params.tx_ja_sample  = -1;
     params.u_info        = 0;
     params.calling_party = true;
@@ -869,12 +929,16 @@ static bool run_ja_search(v92_p3_rx_t *rx)
     memset(&rx->ja_result, 0, sizeof(rx->ja_result));
     bool found = v92_ja_dil_search(rx->ja_buf, rx->ja_buf_fill,
                                    &params, &rx->ja_result);
+    if (found)
+        ja_result_normalize_sample(rx, &rx->ja_result);
     if (found && rx->ja_result.ok)
         return true;
 
     /* Try to upgrade soft-lock to strict parse via symbol-domain demod path. */
-    if (demod_ja_search(rx, &rx->ja_result))
+    if (demod_ja_search(rx, &rx->ja_result)) {
+        ja_result_normalize_sample(rx, &rx->ja_result);
         return true;
+    }
 
     if (found && rx->ja_result.soft_lock) {
         p3rx_set_reject(rx,
@@ -972,9 +1036,15 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         int best_h = -1;
         int best_any_h = -1;
         int best_any_run = 0;
+        bool soft_fallback = false;
+
+        if (h_ru < 0)
+            h_ru = p6_best_hyp_soft_run(rx, true, P6_LOCK_MIN_SOFT);
+        if (h_ur < 0)
+            h_ur = p6_best_hyp_soft_run(rx, false, P6_LOCK_MIN_SOFT);
         for (int h = 0; h < 12; h++) {
-            if (rx->p6_hyp_run[h] > best_any_run) {
-                best_any_run = rx->p6_hyp_run[h];
+            if (rx->p6_hyp_soft_run[h] > best_any_run) {
+                best_any_run = rx->p6_hyp_soft_run[h];
                 best_any_h = h;
             }
         }
@@ -996,17 +1066,29 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         if (h_ru >= 0)
             best_h = h_ru;
         if (h_ur >= 0
-            && (best_h < 0 || rx->p6_hyp_run[h_ur] > rx->p6_hyp_run[best_h])) {
+            && (best_h < 0 || rx->p6_hyp_soft_run[h_ur] > rx->p6_hyp_soft_run[best_h])) {
             best_h = h_ur;
         }
 
         if (best_h >= 0) {
+            int run_soft = rx->p6_hyp_soft_run[best_h];
+            int run_hard = rx->p6_hyp_run[best_h];
+
+            if (run_soft < P6_LOCK_MIN_SOFT)
+                break;
+            soft_fallback = (run_soft < P6_LOCK_MIN);
             rx->ru_hyp = best_h;
             rx->ur_hyp = p6_hyp_index(!p6_hyp_pol(best_h), p6_hyp_phase0(best_h));
             rx->p6_ru_polarity = p6_hyp_pol(best_h);
-            rx->p6_run = rx->p6_hyp_run[best_h];
+            rx->p6_run = run_soft;
             rx->p6_locked = true;
+            rx->p6_soft_mode = soft_fallback || (run_hard < (P6_LOCK_MIN / 4));
             rx->ru1_start = sample_index - rx->p6_run + 1;
+            if (soft_fallback && p3rx_debug_enabled()) {
+                fprintf(stderr,
+                        "[P3RX] sample=%d soft-lock hyp=%d run_soft=%d run_hard=%d soft_mode=%d\n",
+                        sample_index, best_h, run_soft, run_hard, rx->p6_soft_mode ? 1 : 0);
+            }
             rx->state = V92_P3_RX_RU1;
         }
         break;
@@ -1014,7 +1096,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU1: {
-        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : 0;
+        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ru_hyp] : 0;
 
         if (run > 0) {
             rx->p6_run = run;
@@ -1024,12 +1106,20 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                                        run, RU_MAX_T);
         } else {
             int run_effective = rx->p6_run;
-            int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
+            int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ur_hyp] : 0;
+            bool ru1_len_ok_strict = (run_effective >= RU_ACCEPT_MIN
+                                      && run_effective <= RU_ACCEPT_MAX);
+            bool ru1_len_ok_soft = (run_effective >= P6_LOCK_MIN_SOFT
+                                    && run_effective <= RU_ACCEPT_MAX);
 
-            if (run_effective >= RU_ACCEPT_MIN
-                && run_effective <= RU_ACCEPT_MAX
+            if (ru1_len_ok_soft
                 && rx->ur_hyp >= 0
                 && ur_run > 0) {
+                if (!ru1_len_ok_strict && p3rx_debug_enabled()) {
+                    fprintf(stderr,
+                            "[P3RX] sample=%d ru1 truncated soft-accept run=%d ur_run=%d\n",
+                            sample_index, run_effective, ur_run);
+                }
                 rx->ru1_end = sample_index - 1;
                 rx->ur1_start = sample_index;
                 rx->p6_run = ur_run;
@@ -1072,7 +1162,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_UR1: {
-        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
+        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ur_hyp] : 0;
 
         if (run > 0) {
             rx->p6_run = run;
@@ -1083,9 +1173,32 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         } else {
             int run_effective = rx->p6_run;
             int elapsed = sample_index - rx->ur1_start;
+            int ur_min = rx->p6_soft_mode ? UR_ACCEPT_MIN_SOFT : UR_ACCEPT_MIN;
+            int ur_max = rx->p6_soft_mode ? UR_ACCEPT_MAX_SOFT : UR_ACCEPT_MAX;
+            if (p3rx_debug_enabled()) {
+                fprintf(stderr,
+                        "[P3RX] sample=%d ur1 eval run=%d elapsed=%d soft_mode=%d ur_min=%d ur_max=%d\n",
+                        sample_index,
+                        run_effective,
+                        elapsed,
+                        rx->p6_soft_mode ? 1 : 0,
+                        ur_min,
+                        ur_max);
+            }
             if (elapsed < UR_RELOCK_GRACE)
                 break;
-            if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
+            if (run_effective >= ur_min && run_effective <= ur_max) {
+                rx->ur1_end = sample_index - 1;
+                rx->p6_run = 0;
+                rx->state = V92_P3_RX_MD_WAIT;
+            } else if (rx->p6_soft_mode
+                       && run_effective > 0
+                       && elapsed <= UR_ACCEPT_MAX_SOFT) {
+                if (p3rx_debug_enabled()) {
+                    fprintf(stderr,
+                            "[P3RX] sample=%d ur1 inferred soft-accept run=%d elapsed=%d\n",
+                            sample_index, run_effective, elapsed);
+                }
                 rx->ur1_end = sample_index - 1;
                 rx->p6_run = 0;
                 rx->state = V92_P3_RX_MD_WAIT;
@@ -1116,8 +1229,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         }
 
         {
-            int run = rx->p6_hyp_run[rx->ru_hyp];
-            if (run >= P6_LOCK_MIN) {
+            int run = rx->p6_hyp_soft_run[rx->ru_hyp];
+            int min_run = rx->p6_soft_mode ? RU2_LOCK_MIN_SOFT : P6_LOCK_MIN_SOFT;
+            if (run >= min_run) {
                 rx->p6_run = run;
                 rx->ru2_start = sample_index - run + 1;
                 rx->state = V92_P3_RX_RU2;
@@ -1128,7 +1242,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU2: {
-        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : 0;
+        int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ru_hyp] : 0;
 
         if (run > 0) {
             rx->p6_run = run;
@@ -1138,20 +1252,21 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                                        run, RU_MAX_T);
         } else {
             int run_effective = rx->p6_run;
+            int ru_min = rx->p6_soft_mode ? RU_ACCEPT_MIN_SOFT : RU_ACCEPT_MIN;
 
-            if (run_effective >= RU_ACCEPT_MIN
+            if (run_effective >= ru_min
                 && run_effective <= RU_ACCEPT_MAX
                 && rx->ur_hyp >= 0
-                && rx->p6_hyp_run[rx->ur_hyp] > 0) {
+                && rx->p6_hyp_soft_run[rx->ur_hyp] > 0) {
                 rx->ru2_end = sample_index - 1;
                 rx->ur2_start = sample_index;
-                rx->p6_run = rx->p6_hyp_run[rx->ur_hyp];
+                rx->p6_run = rx->p6_hyp_soft_run[rx->ur_hyp];
                 rx->state = V92_P3_RX_UR2;
             } else {
                 p6_rehunt_from_current(rx, codeword, sample_index,
                                        V92_P3_RX_REJECT_RU_MISMATCH,
                                        run_effective,
-                                       (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : -1);
+                                       (rx->ur_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ur_hyp] : -1);
             }
         }
         break;
@@ -1159,7 +1274,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_UR2: {
-        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : 0;
+        int run = (rx->ur_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ur_hyp] : 0;
 
         if (run > 0) {
             rx->p6_run = run;
@@ -1170,11 +1285,14 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         } else {
             int run_effective = rx->p6_run;
             int elapsed = sample_index - rx->ur2_start;
+            int ur_min = rx->p6_soft_mode ? UR_ACCEPT_MIN_SOFT : UR_ACCEPT_MIN;
+            int ur_max = rx->p6_soft_mode ? UR_ACCEPT_MAX_SOFT : UR_ACCEPT_MAX;
             if (elapsed < UR_RELOCK_GRACE)
                 break;
-            if (run_effective >= UR_ACCEPT_MIN && run_effective <= UR_ACCEPT_MAX) {
+            if (run_effective >= ur_min && run_effective <= ur_max) {
                 int copied;
                 int base_sample = sample_index;
+                bool soft_path = rx->p6_soft_mode;
                 rx->ur2_end = sample_index - 1;
                 rx->trn1u_start = sample_index;
                 /* Seed Ja buffer with true codeword prehistory for GPA sync. */
@@ -1186,6 +1304,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 rx->trn1u_count  = 0;
                 rx->trn1u_ones   = 0;
                 p6_reset(rx);
+                rx->p6_soft_mode = soft_path;
                 rx->state = V92_P3_RX_TRN1U;
                 /* Consume the transition sample as first TRN1u symbol. */
                 if (sample_index >= rx->ja_buf_base)
@@ -1202,6 +1321,10 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_TRN1U:
+    {
+        int trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
+        int trn_ones_min_pct = rx->p6_soft_mode ? TRN1U_ONES_MIN_PCT_SOFT : TRN1U_ONES_MIN_PCT;
+        int ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
         /* Buffer every codeword from trn1u_start − 23 onwards. */
         if (sample_index >= rx->ja_buf_base)
             ja_buf_push(rx, codeword, sample_index);
@@ -1221,10 +1344,10 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                     ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
                     : 0;
                 fprintf(stderr,
-                        "[P3RX] sample=%d trn1u early check raw=%d%% eq=%d%%\n",
-                        sample_index, raw_pct, eq_pct);
+                        "[P3RX] sample=%d trn1u early check raw=%d%% eq=%d%% min=%d%% soft=%d\n",
+                        sample_index, raw_pct, eq_pct, trn_ones_min_pct, rx->p6_soft_mode ? 1 : 0);
             }
-            if (eq_pct < TRN1U_ONES_MIN_PCT) {
+            if (eq_pct < trn_ones_min_pct) {
                 int raw_pct = (rx->trn1u_count > 0)
                     ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
                     : 0;
@@ -1234,18 +1357,18 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 break;
             }
         }
-        if (rx->trn1u_count == V92_P3_RX_TRN1U_MIN_T
-            && !trn1u_ones_ok_at_count(rx, V92_P3_RX_TRN1U_MIN_T)) {
-            int eq_pct = trn1u_demod_best_ones_pct(rx, V92_P3_RX_TRN1U_MIN_T);
+        if (rx->trn1u_count == trn_min_t
+            && !trn1u_ones_ok_at_count(rx, trn_min_t)) {
+            int eq_pct = trn1u_demod_best_ones_pct(rx, trn_min_t);
             if (p3rx_debug_enabled()) {
                 int raw_pct = (rx->trn1u_count > 0)
                     ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
                     : 0;
                 fprintf(stderr,
-                        "[P3RX] sample=%d trn1u min check raw=%d%% eq=%d%%\n",
-                        sample_index, raw_pct, eq_pct);
+                        "[P3RX] sample=%d trn1u min check raw=%d%% eq=%d%% min=%d%% soft=%d\n",
+                        sample_index, raw_pct, eq_pct, trn_ones_min_pct, rx->p6_soft_mode ? 1 : 0);
             }
-            if (eq_pct < TRN1U_ONES_MIN_PCT) {
+            if (eq_pct < trn_ones_min_pct) {
                 int raw_pct = (rx->trn1u_count > 0)
                     ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
                     : 0;
@@ -1266,15 +1389,20 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             break;
         }
 
-        /* Once ≥ TRN1U_MIN_T + JA_LEAD_T codewords buffered after
+        /* Once ≥ TRN1U_MIN + JA_LEAD_T codewords buffered after
          * trn1u_start, we should have enough for the Ja search. */
-        if (rx->trn1u_count >= V92_P3_RX_TRN1U_MIN_T + V92_P3_RX_JA_LEAD_T)
+        if (rx->trn1u_count >= trn_min_t + ja_lead_t)
             rx->state = V92_P3_RX_JA_SEARCH;
 
         break;
+    }
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_JA_SEARCH:
+    {
+        int trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
+        int ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
+        int ready_min = 24 + trn_min_t + ja_lead_t + 207;
         ja_buf_push(rx, codeword, sample_index);
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
@@ -1288,8 +1416,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         }
 
         /* Run the search once we have enough buffered. */
-        if (rx->ja_buf_fill >= 24 + V92_P3_RX_TRN1U_MIN_T
-                                  + V92_P3_RX_JA_LEAD_T + 207) {
+        if (rx->ja_buf_fill >= ready_min) {
             if (run_ja_search(rx)) {
                 rx->ja_found = true;
                 rx->state    = V92_P3_RX_DONE;
@@ -1303,6 +1430,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             }
         }
         break;
+    }
 
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_DONE:
@@ -1311,10 +1439,10 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     }
 
     if (rx->state != prev && p3rx_debug_enabled()) {
-        int ru_run = (rx->ru_hyp >= 0) ? rx->p6_hyp_run[rx->ru_hyp] : -1;
-        int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_run[rx->ur_hyp] : -1;
+        int ru_run = (rx->ru_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ru_hyp] : -1;
+        int ur_run = (rx->ur_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ur_hyp] : -1;
         fprintf(stderr,
-                "[P3RX] sample=%d %s->%s p6_run=%d ru_run=%d ur_run=%d ru_hyp=%d ur_hyp=%d\n",
+                "[P3RX] sample=%d %s->%s p6_run=%d ru_run=%d ur_run=%d ru_hyp=%d ur_hyp=%d soft=%d\n",
                 sample_index,
                 v92_p3_rx_state_name(prev),
                 v92_p3_rx_state_name(rx->state),
@@ -1322,7 +1450,8 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 ru_run,
                 ur_run,
                 rx->ru_hyp,
-                rx->ur_hyp);
+                rx->ur_hyp,
+                rx->p6_soft_mode ? 1 : 0);
     }
     prehist_push(rx, codeword, sample_index);
     return (rx->state != prev);

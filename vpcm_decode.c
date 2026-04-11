@@ -5980,6 +5980,122 @@ static int ru_window_two_point_score(const uint8_t *symbols, int len)
     }
 }
 
+static int ru_window_pattern_match_pct(const uint8_t *symbols, int len)
+{
+    int counts[4] = {0, 0, 0, 0};
+    int top0 = -1;
+    int top1 = -1;
+    int best_pct = -1;
+
+    if (!symbols || len <= 0)
+        return -1;
+    for (int i = 0; i < len; i++) {
+        int s = symbols[i] & 0x3;
+        counts[s]++;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (top0 < 0 || counts[i] > counts[top0]) {
+            top1 = top0;
+            top0 = i;
+        } else if (top1 < 0 || counts[i] > counts[top1]) {
+            top1 = i;
+        }
+    }
+    if (top0 < 0 || top1 < 0 || counts[top0] <= 0 || counts[top1] <= 0)
+        return -1;
+
+    for (int offset = 0; offset < 6; offset++) {
+        for (int pol = 0; pol < 2; pol++) {
+            int a = (pol == 0) ? top0 : top1;
+            int b = (pol == 0) ? top1 : top0;
+            int valid = 0;
+            int match = 0;
+            int pct;
+
+            for (int i = 0; i < len; i++) {
+                int s = symbols[i] & 0x3;
+                int expect = (((i + offset) % 6) < 3) ? a : b;
+                if (s != a && s != b)
+                    continue;
+                valid++;
+                if (s == expect)
+                    match++;
+            }
+            if (valid < 8)
+                continue;
+            pct = (100 * match + valid / 2) / valid;
+            if (pct > best_pct)
+                best_pct = pct;
+        }
+    }
+    return best_pct;
+}
+
+static bool p3_extract_ru_window_from_detail(const p3_result_t *detail,
+                                             int max_symbols,
+                                             uint8_t *symbols_out,
+                                             float *mags_out,
+                                             int *len_out,
+                                             int *score_out,
+                                             int *match_pct_out)
+{
+    enum { RU_WIN = 32 };
+    int limit;
+    int win;
+    int best_start = -1;
+    int best_score = -1;
+    int best_match = -1;
+    int best_combo = -1;
+
+    if (!detail || !detail->symbols || detail->symbol_count <= 0
+        || !symbols_out || !mags_out || !len_out || !score_out || !match_pct_out)
+        return false;
+
+    limit = detail->symbol_count;
+    if (max_symbols > 0 && max_symbols < limit)
+        limit = max_symbols;
+    if (limit < 12)
+        return false;
+    win = (limit < RU_WIN) ? limit : RU_WIN;
+    if (win < 12)
+        return false;
+
+    for (int start = 0; start + win <= limit; start++) {
+        uint8_t tmp[RU_WIN];
+        int two_point;
+        int match_pct;
+        int combo;
+
+        for (int i = 0; i < win; i++)
+            tmp[i] = (uint8_t) (detail->symbols[start + i].dibit & 0x3);
+        two_point = ru_window_two_point_score(tmp, win);
+        if (two_point < 50)
+            continue;
+        match_pct = ru_window_pattern_match_pct(tmp, win);
+        if (match_pct < 0)
+            continue;
+        combo = match_pct * 2 + two_point;
+        if (combo > best_combo) {
+            best_combo = combo;
+            best_start = start;
+            best_score = two_point;
+            best_match = match_pct;
+        }
+    }
+
+    if (best_start < 0 || best_match < 65)
+        return false;
+
+    for (int i = 0; i < win; i++) {
+        symbols_out[i] = (uint8_t) (detail->symbols[best_start + i].dibit & 0x3);
+        mags_out[i] = detail->symbols[best_start + i].magnitude;
+    }
+    *len_out = win;
+    *score_out = best_score;
+    *match_pct_out = best_match;
+    return true;
+}
+
 static bool detect_trn1u_waveform_segment(const int16_t *samples,
                                           int total_samples,
                                           int search_start,
@@ -7797,6 +7913,14 @@ static void collect_v92_phase3_event(call_log_t *log,
     int p3rx_hunt_best_mean_x10 = 0;
     int p3rx_hunt_best_range = 0;
     int p3rx_hunt_best_std_x10 = 0;
+    bool p3ru_scan_done = false;
+    bool p3ru_has_ru = false;
+    float p3ru_best_score = 0.0f;
+    int p3ru_best_baud = -1;
+    int p3ru_best_carrier = -1;
+    int p3ru_best_symbols = 0;
+    int p3ru_scan_start = -1;
+    int p3ru_scan_end = -1;
 
     if (!log || !res)
         return;
@@ -8096,6 +8220,7 @@ static void collect_v92_phase3_event(call_log_t *log,
         v92_p3_rx_reject_t p3rx_reject;
         const ja_dil_decode_t *p3rx_ja = NULL;
         int arm = -1;
+        int p3rx_scan_end = -1;
 
         if (toneq_sample >= 0) {
             int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
@@ -8110,13 +8235,28 @@ static void collect_v92_phase3_event(call_log_t *log,
         if (arm > total_codewords - 1)
             arm = total_codewords - 1;
 
+        if (obs.phase4_sample > arm)
+            p3rx_scan_end = obs.phase4_sample;
+        if (p3rx_scan_end <= arm)
+            p3rx_scan_end = arm + 48000; /* Focus on expected V.92 P3 window (~6 s). */
+        if (p3rx_scan_end > total_codewords)
+            p3rx_scan_end = total_codewords;
+        if (getenv("V92_P3_RX_DEBUG") && getenv("V92_P3_RX_DEBUG")[0] && getenv("V92_P3_RX_DEBUG")[0] != '0') {
+            fprintf(stderr,
+                    "[P3RXCFG] arm=%d scan_end=%d phase4=%d total=%d\n",
+                    arm,
+                    p3rx_scan_end,
+                    obs.phase4_sample,
+                    total_codewords);
+        }
+
         v92_p3_rx_init(&p3rx);
         v92_p3_rx_start(&p3rx, arm);
         p3rx_ran = true;
         p3rx_arm_sample = arm;
-        p3rx_stop_sample = total_codewords - 1;
+        p3rx_stop_sample = p3rx_scan_end - 1;
 
-        for (int si = arm; si < total_codewords; si++) {
+        for (int si = arm; si < p3rx_scan_end; si++) {
             v92_p3_rx_feed(&p3rx, codewords[si], si);
             if (p3rx.state == V92_P3_RX_DONE || p3rx.state == V92_P3_RX_FAILED) {
                 p3rx_stop_sample = si;
@@ -8181,6 +8321,104 @@ static void collect_v92_phase3_event(call_log_t *log,
                     ja_soft_zero_viol = p3rx_ja->soft_zero_viol;
                     ja_soft_crc_hd = p3rx_ja->soft_crc_hd;
                     ja_soft_invert = p3rx_ja->invert_sign;
+                }
+            }
+        }
+    }
+    if (samples && total_samples > 0 && obs.v92_capable) {
+        int scan_start = -1;
+        int scan_end = -1;
+        p3_hypothesis_t hyps[P3_BAUD_COUNT * 2];
+        int hyp_count;
+
+        if (toneq_sample >= 0) {
+            int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
+            scan_start = toneq_end + 320;
+        }
+        if (scan_start < 0 && obs.phase3_sample >= 0)
+            scan_start = obs.phase3_sample;
+        if (scan_start < 0)
+            scan_start = gate_sample;
+        if (scan_start < 0)
+            scan_start = 0;
+        if (scan_start > total_samples - 1)
+            scan_start = total_samples - 1;
+
+        if (obs.phase4_sample > scan_start)
+            scan_end = obs.phase4_sample;
+        if (scan_end <= scan_start)
+            scan_end = scan_start + 16000;
+        if (scan_end > total_samples)
+            scan_end = total_samples;
+
+        p3ru_scan_start = scan_start;
+        p3ru_scan_end = scan_end;
+        if (scan_end - scan_start >= 800) {
+            int best_ru_match = -1;
+            int best_ru_score = -1;
+            hyp_count = p3_scan_all_hypotheses(samples + scan_start,
+                                               scan_end - scan_start,
+                                               scan_start,
+                                               8000,
+                                               hyps,
+                                               (int) (sizeof(hyps) / sizeof(hyps[0])));
+            p3ru_scan_done = true;
+            for (int hi = 0; hi < hyp_count; hi++) {
+                if (hyps[hi].has_ru
+                    && (!p3ru_has_ru || hyps[hi].score > p3ru_best_score)) {
+                    p3ru_has_ru = true;
+                    p3ru_best_score = hyps[hi].score;
+                    p3ru_best_baud = hyps[hi].baud_code;
+                    p3ru_best_carrier = hyps[hi].carrier_sel;
+                    p3ru_best_symbols = hyps[hi].symbol_count;
+                }
+            }
+            {
+                int detail_runs = hyp_count;
+                if (detail_runs > 8)
+                    detail_runs = 8;
+                for (int hi = 0; hi < detail_runs; hi++) {
+                    p3_result_t *detail = p3_demod_run(samples + scan_start,
+                                                       scan_end - scan_start,
+                                                       scan_start,
+                                                       hyps[hi].baud_code,
+                                                       hyps[hi].carrier_sel,
+                                                       8000);
+                    if (!detail)
+                        continue;
+                    {
+                        uint8_t ru_syms[32];
+                        float ru_mags[32];
+                        int ru_len = 0;
+                        int ru_score = -1;
+                        int ru_match = -1;
+                        int max_syms = detail->symbol_count;
+                        if (max_syms > 2400)
+                            max_syms = 2400;
+                        if (p3_extract_ru_window_from_detail(detail,
+                                                             max_syms,
+                                                             ru_syms,
+                                                             ru_mags,
+                                                             &ru_len,
+                                                             &ru_score,
+                                                             &ru_match)
+                            && ru_len > 0
+                            && (ru_match > best_ru_match
+                                || (ru_match == best_ru_match && ru_score > best_ru_score))) {
+                            best_ru_match = ru_match;
+                            best_ru_score = ru_score;
+                            obs.ru_window_len = ru_len;
+                            obs.ru_window_score = ru_score;
+                            memcpy(obs.ru_window_symbols, ru_syms, (size_t) ru_len);
+                            memcpy(obs.ru_window_mags, ru_mags, (size_t) ru_len * sizeof(float));
+                            p3ru_has_ru = true;
+                            p3ru_best_score = (float) ru_match;
+                            p3ru_best_baud = hyps[hi].baud_code;
+                            p3ru_best_carrier = hyps[hi].carrier_sel;
+                            p3ru_best_symbols = hyps[hi].symbol_count;
+                        }
+                    }
+                    p3_result_free(detail);
                 }
             }
         }
@@ -9613,6 +9851,25 @@ ja_solved_done:;
     appendf(detail, sizeof(detail), " p3rx_hunt_std=%s", p3rx_hunt_best_run > 0 ? "" : "n/a");
     if (p3rx_hunt_best_run > 0)
         appendf(detail, sizeof(detail), "%.1f", (double) p3rx_hunt_best_std_x10 / 10.0);
+    appendf(detail, sizeof(detail), " p3ru_scan=%u", p3ru_scan_done ? 1U : 0U);
+    appendf(detail, sizeof(detail), " p3ru_has_ru=%u", p3ru_has_ru ? 1U : 0U);
+    appendf(detail, sizeof(detail), " p3ru_scan_ms=%s", (p3ru_scan_start >= 0 && p3ru_scan_end > p3ru_scan_start) ? "" : "n/a");
+    if (p3ru_scan_start >= 0 && p3ru_scan_end > p3ru_scan_start)
+        appendf(detail, sizeof(detail), "%.1f:%.1f",
+                sample_to_ms(p3ru_scan_start, 8000),
+                sample_to_ms(p3ru_scan_end, 8000));
+    appendf(detail, sizeof(detail), " p3ru_score=%s", p3ru_has_ru ? "" : "n/a");
+    if (p3ru_has_ru)
+        appendf(detail, sizeof(detail), "%.3f", p3ru_best_score);
+    appendf(detail, sizeof(detail), " p3ru_baud=%s", p3ru_has_ru ? "" : "n/a");
+    if (p3ru_has_ru)
+        appendf(detail, sizeof(detail), "%d", p3ru_best_baud);
+    appendf(detail, sizeof(detail), " p3ru_carrier=%s", p3ru_has_ru ? "" : "n/a");
+    if (p3ru_has_ru)
+        appendf(detail, sizeof(detail), "%d", p3ru_best_carrier);
+    appendf(detail, sizeof(detail), " p3ru_symbols=%s", p3ru_has_ru ? "" : "n/a");
+    if (p3ru_has_ru)
+        appendf(detail, sizeof(detail), "%d", p3ru_best_symbols);
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
                     0,

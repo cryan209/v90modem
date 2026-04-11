@@ -105,12 +105,15 @@ typedef struct {
     bool     p6_ru_polarity; /* true = Ru {+,+,+,-,-,-}, false = uR */
     /* 12-hypothesis run tracker: 6 phases x 2 polarities. */
     int      p6_hyp_run[12];
+    int      p6_hyp_soft_run[12];
     uint32_t p6_hyp_sum[12];
     uint32_t p6_hyp_sumsq[12];
     uint8_t  p6_hyp_min[12];
     uint8_t  p6_hyp_max[12];
+    uint8_t  p6_hyp_soft_bad[12];
     int      ru_hyp;         /* active Ru hypothesis index, or -1 */
     int      ur_hyp;         /* active uR hypothesis index, or -1 */
+    bool     p6_soft_mode;   /* true when lock was acquired via soft tracker */
     /* RU1 hunt diagnostics (best candidate seen before lock). */
     int      hunt_best_run;
     int      hunt_best_hyp;
