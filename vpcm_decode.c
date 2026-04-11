@@ -19,6 +19,7 @@
 #include "v92_short_phase2_decode.h"
 #include "v92_phase3_decode.h"
 #include "v92_ja_decode.h"
+#include "v92_p3_rx.h"
 #include "v92_anspcm_decode.h"
 #include "v34_phase2_decode.h"
 #include "v34_info_decode.h"
@@ -6707,6 +6708,8 @@ static void ja_dump_bitstream_with_frame17(const char *label,
                                            int start_off)
 {
     int rel = 0;
+    int line_rel_start = 0;
+    int line_abs_start = start_off;
     int col = 0;
 
     if (!label || !bits || bit_len <= 0)
@@ -6717,19 +6720,100 @@ static void ja_dump_bitstream_with_frame17(const char *label,
         return;
 
     fprintf(stderr, "[JA-BITS] %s start_off=%d len=%d\n", label, start_off, bit_len - start_off);
-    fprintf(stderr, "[JA-BITS] legend: '|' marks 17-bit frame boundary start-bit positions\n");
-    fprintf(stderr, "[JA-BITS] bits: ");
+    fprintf(stderr, "[JA-BITS] legend: '|'=17-bit start positions, indexes are rel/abs\n");
+    fprintf(stderr, "[JA-BITS] rel=%d.. abs=%d..: ", line_rel_start, line_abs_start);
     for (int i = start_off; i < bit_len; i++, rel++) {
         if ((rel % 17) == 0)
             fputc('|', stderr);
         fputc((bits[i] == '1') ? '1' : '0', stderr);
         col++;
         if (col >= 170) {
-            fprintf(stderr, "\n[JA-BITS] bits: ");
+            int line_rel_end = rel;
+            int line_abs_end = i;
+            line_rel_start = rel + 1;
+            line_abs_start = i + 1;
+            fprintf(stderr,
+                    "  [rel=%d..%d abs=%d..%d]\n",
+                    line_rel_start - 170,
+                    line_rel_end,
+                    line_abs_start - 170,
+                    line_abs_end);
+            fprintf(stderr, "[JA-BITS] rel=%d.. abs=%d..: ", line_rel_start, line_abs_start);
             col = 0;
         }
     }
+    if (col > 0) {
+        int last_abs = bit_len - 1;
+        fprintf(stderr,
+                "  [rel=%d..%d abs=%d..%d]\n",
+                line_rel_start,
+                line_rel_start + col - 1,
+                line_abs_start,
+                last_abs);
+    }
     fputc('\n', stderr);
+}
+
+static void ja_dump_table16_offsets(const char *label,
+                                    const char *bits,
+                                    int bit_len,
+                                    int start_off)
+{
+    uint8_t packed[512];
+    int candidate_bits;
+    int n, lsp, ltp;
+    int alpha, beta;
+    int training_start, training_bits;
+    int crc_start;
+
+    if (!label || !bits || bit_len <= 0 || start_off < 0 || start_off >= bit_len)
+        return;
+
+    candidate_bits = bit_len - start_off;
+    if (candidate_bits > (int) sizeof(packed) * 8)
+        candidate_bits = (int) sizeof(packed) * 8;
+    if (candidate_bits < 64)
+        return;
+    if (!chars_to_packed_bits(bits + start_off, candidate_bits, packed, (int) sizeof(packed)))
+        return;
+
+    n = aux_get_packed_bits(packed, 18, 8);
+    lsp = aux_get_packed_bits(packed, 35, 7) + 1;
+    ltp = aux_get_packed_bits(packed, 43, 7) + 1;
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+    if (lsp < 1) lsp = 1;
+    if (lsp > 128) lsp = 128;
+    if (ltp < 1) ltp = 1;
+    if (ltp > 128) ltp = 128;
+
+    alpha = ((int) lsp + 15) / 16 * 17;
+    beta = alpha + (((int) ltp + 15) / 16) * 17;
+    training_start = 187 + beta;
+    training_bits = (((int) n + 1) / 2) * 17;
+    crc_start = training_start + training_bits;
+
+    fprintf(stderr,
+            "[JA-MAP] %s off=%d candidate_bits=%d n=%d lsp=%d ltp=%d\n",
+            label, start_off, candidate_bits, n, lsp, ltp);
+    fprintf(stderr,
+            "[JA-MAP] rel idx: fs17=0:16 n=18:25 reserved=26:33 lsp=35:41 ltp=43:49 frame17_start0=51\n");
+    fprintf(stderr,
+            "[JA-MAP] abs idx: fs17=%d:%d n=%d:%d reserved=%d:%d lsp=%d:%d ltp=%d:%d frame17_start0=%d\n",
+            start_off + 0, start_off + 16,
+            start_off + 18, start_off + 25,
+            start_off + 26, start_off + 33,
+            start_off + 35, start_off + 41,
+            start_off + 43, start_off + 49,
+            start_off + 51);
+    fprintf(stderr,
+            "[JA-MAP] alpha=%d beta=%d training_start=%d training_bits=%d crc_start=%d crc_bits=%d:%d\n",
+            alpha, beta, training_start, training_bits, crc_start, crc_start + 1, crc_start + 16);
+    fprintf(stderr,
+            "[JA-MAP] abs crc_bits=%d:%d frame-start bits repeat every 17 from abs=%d\n",
+            start_off + crc_start + 1,
+            start_off + crc_start + 16,
+            start_off + 51);
 }
 
 typedef struct {
@@ -7694,6 +7778,18 @@ static void collect_v92_phase3_event(call_log_t *log,
     int ja_v92_desc_raw_len = 0;
     int ja_v92_desc_len = 0;
     char ja_v92_desc_bits[8193];
+    bool p3rx_ran = false;
+    int p3rx_arm_sample = -1;
+    int p3rx_stop_sample = -1;
+    int p3rx_reject_count = 0;
+    int p3rx_reject_sample = -1;
+    int p3rx_reject_m0 = 0;
+    int p3rx_reject_m1 = 0;
+    const char *p3rx_state_str = "n/a";
+    const char *p3rx_reject_str = "none";
+    bool p3rx_ja_soft = false;
+    int p3rx_ja_bits = 0;
+    int p3rx_ja_sample = -1;
 
     if (!log || !res)
         return;
@@ -7985,6 +8081,93 @@ static void collect_v92_phase3_event(call_log_t *log,
                 obs.ds_sample = sd_ds.ds_sample;
                 obs.ds_t = sd_ds.ds_t;
                 obs.ds_reps = sd_ds.ds_reps;
+            }
+        }
+    }
+    if (codewords && total_codewords > 0 && obs.v92_capable) {
+        v92_p3_rx_t p3rx;
+        v92_p3_rx_reject_t p3rx_reject;
+        const ja_dil_decode_t *p3rx_ja = NULL;
+        int arm = -1;
+
+        if (toneq_sample >= 0) {
+            int toneq_end = toneq_sample + (toneq_duration_samples > 0 ? toneq_duration_samples : 0);
+            arm = toneq_end + 320; /* ~40 ms guard after TONEq */
+        }
+        if (arm < 0 && obs.phase3_sample >= 0)
+            arm = obs.phase3_sample;
+        if (arm < 0)
+            arm = gate_sample;
+        if (arm < 0)
+            arm = 0;
+        if (arm > total_codewords - 1)
+            arm = total_codewords - 1;
+
+        v92_p3_rx_init(&p3rx);
+        v92_p3_rx_start(&p3rx, arm);
+        p3rx_ran = true;
+        p3rx_arm_sample = arm;
+        p3rx_stop_sample = total_codewords - 1;
+
+        for (int si = arm; si < total_codewords; si++) {
+            v92_p3_rx_feed(&p3rx, codewords[si], si);
+            if (p3rx.state == V92_P3_RX_DONE || p3rx.state == V92_P3_RX_FAILED) {
+                p3rx_stop_sample = si;
+                break;
+            }
+        }
+
+        p3rx_state_str = v92_p3_rx_state_name(v92_p3_rx_get_state(&p3rx));
+        p3rx_reject_count = p3rx.reject_count;
+        p3rx_reject = v92_p3_rx_last_reject(&p3rx,
+                                            &p3rx_reject_sample,
+                                            &p3rx_reject_m0,
+                                            &p3rx_reject_m1);
+        p3rx_reject_str = v92_p3_rx_reject_name(p3rx_reject);
+
+        if (v92_p3_rx_ja_ok(&p3rx))
+            p3rx_ja = v92_p3_rx_get_ja(&p3rx);
+        if (p3rx_ja) {
+            p3rx_ja_soft = p3rx_ja->soft_lock && !p3rx_ja->ok;
+            p3rx_ja_sample = p3rx_ja->start_sample;
+            p3rx_ja_bits = p3rx_ja->descriptor_bits > 0
+                         ? p3rx_ja->descriptor_bits
+                         : v90_dil_descriptor_bit_len(&p3rx_ja->desc);
+            if (p3rx_ja->ok) {
+                bool replace = false;
+                if (!obs.ja_dil_seen) {
+                    replace = true;
+                } else if (strstr(ja_dil_source, "soft") != NULL
+                           || strstr(ja_dil_source, "model") != NULL) {
+                    replace = true;
+                }
+                if (replace && p3rx_ja_bits > 0) {
+                    obs.ja_dil_seen = true;
+                    obs.ja_dil_sample = p3rx_ja->start_sample;
+                    obs.ja_dil_bits = p3rx_ja_bits;
+                    obs.ja_dil_n = p3rx_ja->desc.n;
+                    obs.ja_dil_lsp = p3rx_ja->desc.lsp;
+                    obs.ja_dil_ltp = p3rx_ja->desc.ltp;
+                    obs.ja_dil_unique_train_u = p3rx_ja->analysis.unique_train_u;
+                    obs.ja_dil_uchords = p3rx_ja->analysis.used_uchords;
+                    obs.ja_dil_impairment = p3rx_ja->analysis.impairment_score;
+                    ja_dil_source = "p3rx_strict";
+                    if (p3rx_ja->parsed_v92) {
+                        ja_v92_table20_seen = true;
+                        ja_v92_desc_len = p3rx_ja_bits;
+                    }
+                }
+            } else if (p3rx_ja->soft_lock && !obs.ja_dil_seen) {
+                if (ja_soft_sample < 0 || p3rx_ja->soft_score > ja_soft_score) {
+                    ja_soft_source = "p3rx_soft";
+                    ja_soft_sample = p3rx_ja->start_sample;
+                    ja_soft_score = p3rx_ja->soft_score;
+                    ja_soft_sync_hd = p3rx_ja->soft_sync_hd;
+                    ja_soft_frame17_viol = p3rx_ja->soft_frame17_viol;
+                    ja_soft_zero_viol = p3rx_ja->soft_zero_viol;
+                    ja_soft_crc_hd = p3rx_ja->soft_crc_hd;
+                    ja_soft_invert = p3rx_ja->invert_sign;
+                }
             }
         }
     }
@@ -9038,10 +9221,18 @@ ja_solved_done:;
                         if (ja_bits_all && best_soft_ci >= 0 && best_soft_ci < cand_count) {
                             char label[64];
                             snprintf(label, sizeof(label), "p3_candidate[%d]", best_soft_ci);
+                            ja_dump_bitstream_with_frame17("p3_candidate_full",
+                                                           cand_bits[best_soft_ci],
+                                                           p3_bit_len,
+                                                           0);
                             ja_dump_bitstream_with_frame17(label,
                                                            cand_bits[best_soft_ci],
                                                            p3_bit_len,
                                                            best_p3_soft.bit_offset);
+                            ja_dump_table16_offsets(label,
+                                                    cand_bits[best_soft_ci],
+                                                    p3_bit_len,
+                                                    best_p3_soft.bit_offset);
                         }
                         int bit_to_sample = (best_p3_soft.bit_offset * 5 + 2) / 4;
                         int base_sample = (p3_start_sample >= 0)
@@ -9369,6 +9560,28 @@ ja_solved_done:;
             phase3.seq_source ? phase3.seq_source : "unknown");
     appendf(detail, sizeof(detail), " seq_status=%s",
             phase3.seq_status ? phase3.seq_status : "unknown");
+    appendf(detail, sizeof(detail), " p3rx_run=%u", p3rx_ran ? 1U : 0U);
+    appendf(detail, sizeof(detail), " p3rx_state=%s", p3rx_state_str ? p3rx_state_str : "n/a");
+    appendf(detail, sizeof(detail), " p3rx_arm_ms=%s", p3rx_arm_sample >= 0 ? "" : "n/a");
+    if (p3rx_arm_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(p3rx_arm_sample, 8000));
+    appendf(detail, sizeof(detail), " p3rx_stop_ms=%s", p3rx_stop_sample >= 0 ? "" : "n/a");
+    if (p3rx_stop_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(p3rx_stop_sample, 8000));
+    appendf(detail, sizeof(detail), " p3rx_reject_count=%d", p3rx_reject_count);
+    appendf(detail, sizeof(detail), " p3rx_last_reject=%s", p3rx_reject_str ? p3rx_reject_str : "none");
+    appendf(detail, sizeof(detail), " p3rx_last_reject_ms=%s", p3rx_reject_sample >= 0 ? "" : "n/a");
+    if (p3rx_reject_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(p3rx_reject_sample, 8000));
+    appendf(detail, sizeof(detail), " p3rx_reject_m0=%d", p3rx_reject_m0);
+    appendf(detail, sizeof(detail), " p3rx_reject_m1=%d", p3rx_reject_m1);
+    appendf(detail, sizeof(detail), " p3rx_ja_soft=%u", p3rx_ja_soft ? 1U : 0U);
+    appendf(detail, sizeof(detail), " p3rx_ja_ms=%s", p3rx_ja_sample >= 0 ? "" : "n/a");
+    if (p3rx_ja_sample >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(p3rx_ja_sample, 8000));
+    appendf(detail, sizeof(detail), " p3rx_ja_bits=%s", p3rx_ja_bits > 0 ? "" : "n/a");
+    if (p3rx_ja_bits > 0)
+        appendf(detail, sizeof(detail), "%d", p3rx_ja_bits);
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
                     0,
