@@ -234,6 +234,136 @@ static int ja_debug_enabled(void)
     return (v && *v && *v != '0');
 }
 
+static bool v92_parse_table20_descriptor(const uint8_t *bits,
+                                         int bit_count,
+                                         v90_dil_desc_t *out_desc,
+                                         int *rate_mask_lo_out,
+                                         int *rate_mask_hi_out,
+                                         int *crc_hd_out,
+                                         int *reserved_viol_out)
+{
+    int n, lsp, ltp;
+    int alpha, beta;
+    int training_start, training_bits;
+    int crc_start;
+    int v92_start2;
+    int v92_start3;
+    int v92_crc_pos;
+    int v92_fill_pos;
+    uint16_t exp_crc, calc_crc, d;
+    int crc_hd = 0;
+    int reserved_viol = 0;
+    int rate_lo;
+    int rate_hi;
+    uint8_t patched[512];
+    int patched_len;
+    uint16_t synthetic_v90_crc;
+    v90_dil_desc_t desc;
+
+    if (!bits || !out_desc || bit_count < JA_MIN_DESCRIPTOR_BITS)
+        return false;
+
+    for (int i = 0; i < 17; i++) {
+        if (ja_get_packed_bit(bits, i) == 0)
+            return false;
+    }
+    if (ja_get_packed_bit(bits, 17) != 0)
+        return false;
+
+    n = ja_get_packed_bits(bits, 18, 8);
+    lsp = ja_get_packed_bits(bits, 35, 7) + 1;
+    ltp = ja_get_packed_bits(bits, 43, 7) + 1;
+    if (lsp < 1) lsp = 1;
+    if (ltp < 1) ltp = 1;
+    if (lsp > 128) lsp = 128;
+    if (ltp > 128) ltp = 128;
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+
+    alpha = ((int) lsp + 15) / 16 * 17;
+    beta = alpha + (((int) ltp + 15) / 16) * 17;
+    training_start = 187 + beta;
+    training_bits = (((int) n + 1) / 2) * 17;
+    crc_start = training_start + training_bits;    /* V.90 CRC start-bit position */
+
+    /*
+     * Table 20 / V.92:
+     *   [crc_start+1 .. +16]   : rate mask (24k..44k)
+     *   [crc_start+17]         : start bit (0)
+     *   [crc_start+18 .. +33]  : rate mask continuation (45.3k/46.6k/48k + reserved)
+     *   [crc_start+34]         : start bit (0)
+     *   [crc_start+35 .. +50]  : CRC
+     *   [crc_start+51]         : fill bit (0)
+     */
+    v92_start2 = crc_start + 17;
+    v92_start3 = crc_start + 34;
+    v92_crc_pos = crc_start + 35;
+    v92_fill_pos = crc_start + 51;
+    if (v92_fill_pos >= bit_count)
+        return false;
+
+    if (ja_get_packed_bit(bits, crc_start) != 0)
+        return false;
+    if (ja_get_packed_bit(bits, v92_start2) != 0)
+        return false;
+    if (ja_get_packed_bit(bits, v92_start3) != 0)
+        return false;
+    if (ja_get_packed_bit(bits, v92_fill_pos) != 0)
+        return false;
+
+    rate_lo = ja_get_packed_bits(bits, crc_start + 1, 16);
+    rate_hi = ja_get_packed_bits(bits, crc_start + 18, 16);
+    for (int b = 3; b < 16; b++) {
+        if (((rate_hi >> b) & 1) != 0)
+            reserved_viol++;
+    }
+
+    exp_crc = (uint16_t) ja_get_packed_bits(bits, v92_crc_pos, 16);
+    calc_crc = ja_crc16_bits(bits, v92_start3);
+    d = (uint16_t) (exp_crc ^ calc_crc);
+    while (d) {
+        d &= (uint16_t) (d - 1U);
+        crc_hd++;
+    }
+    if (crc_hd > 2)
+        return false;
+
+    patched_len = (bit_count + 7) / 8;
+    if (patched_len <= 0 || patched_len > (int) sizeof(patched))
+        return false;
+    memcpy(patched, bits, (size_t) patched_len);
+
+    /* Build synthetic V.90 CRC so we can reuse v90_parse_dil_descriptor. */
+    synthetic_v90_crc = ja_crc16_bits(bits, crc_start);
+    for (int i = 0; i < 16; i++) {
+        int p = crc_start + 1 + i;
+        uint8_t mask = (uint8_t) (1U << (p % 8));
+        if ((synthetic_v90_crc >> i) & 1U)
+            patched[p / 8] |= mask;
+        else
+            patched[p / 8] &= (uint8_t) ~mask;
+    }
+    {
+        int p = crc_start + 17;
+        patched[p / 8] &= (uint8_t) ~(1U << (p % 8));
+    }
+
+    memset(&desc, 0, sizeof(desc));
+    if (!v90_parse_dil_descriptor(&desc, patched, bit_count))
+        return false;
+
+    *out_desc = desc;
+    if (rate_mask_lo_out)
+        *rate_mask_lo_out = rate_lo;
+    if (rate_mask_hi_out)
+        *rate_mask_hi_out = rate_hi;
+    if (crc_hd_out)
+        *crc_hd_out = crc_hd;
+    if (reserved_viol_out)
+        *reserved_viol_out = reserved_viol;
+    return true;
+}
+
 /* -------------------------------------------------------------------------
  * Static bit-extraction helpers
  * ------------------------------------------------------------------------- */
@@ -369,6 +499,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     int considered = 0;
     int decode_ok = 0;
     int parse_ok = 0;
+    int parse_v92_ok = 0;
     int analyse_ok = 0;
     int debug = ja_debug_enabled();
     int i;
@@ -411,6 +542,11 @@ bool v92_ja_dil_search(const uint8_t *codewords,
         for (invert = 0; invert <= 1; invert++) {
             v90_dil_desc_t desc;
             v90_dil_analysis_t analysis;
+            bool parsed_v92 = false;
+            int v92_rate_lo = 0;
+            int v92_rate_hi = 0;
+            int v92_crc_hd = 16;
+            int v92_reserved_viol = 16;
             int bit_count = total_codewords - candidate;
             int packed_len;
             int score;
@@ -481,8 +617,19 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                     }
                 }
             }
-            if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count))
-                continue;
+            if (!v90_parse_dil_descriptor(&desc, packed_bits, bit_count)) {
+                if (!v92_parse_table20_descriptor(packed_bits,
+                                                  bit_count,
+                                                  &desc,
+                                                  &v92_rate_lo,
+                                                  &v92_rate_hi,
+                                                  &v92_crc_hd,
+                                                  &v92_reserved_viol)) {
+                    continue;
+                }
+                parsed_v92 = true;
+                parse_v92_ok++;
+            }
             parse_ok++;
             if (!v90_analyse_dil_descriptor(&desc, &analysis))
                 continue;
@@ -514,6 +661,18 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             }
             score -= zviol * 5;
             score -= crc_hd * 4;
+            if (parsed_v92) {
+                int enabled_rates = 0;
+
+                for (int rb = 0; rb < 16; rb++)
+                    enabled_rates += (v92_rate_lo >> rb) & 1;
+                for (int rb = 0; rb < 3; rb++)
+                    enabled_rates += (v92_rate_hi >> rb) & 1;
+                score += 24;
+                score += enabled_rates * 2;
+                score -= v92_reserved_viol * 4;
+                score -= v92_crc_hd * 6;
+            }
             if (params->tx_ja_sample >= 0) {
                 int dist = candidate - params->tx_ja_sample;
                 if (dist < 0)
@@ -534,12 +693,13 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     if (best_score < 0) {
         if (debug) {
             fprintf(stderr,
-                    "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d analyse_ok=%d hard=none soft_start=%d soft_score=%d sync_hd=%d frame17=%d zviol=%d crc_hd=%d\n",
+                    "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d parse_v92_ok=%d analyse_ok=%d hard=none soft_start=%d soft_score=%d sync_hd=%d frame17=%d zviol=%d crc_hd=%d\n",
                     search_start,
                     search_end,
                     considered,
                     decode_ok,
                     parse_ok,
+                    parse_v92_ok,
                     analyse_ok,
                     best_soft_start,
                     best_soft_score,
@@ -590,12 +750,13 @@ bool v92_ja_dil_search(const uint8_t *codewords,
     }
     if (debug) {
         fprintf(stderr,
-                "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d analyse_ok=%d hard_start=%d hard_score=%d soft_start=%d soft_score=%d\n",
+                "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d parse_v92_ok=%d analyse_ok=%d hard_start=%d hard_score=%d soft_start=%d soft_score=%d\n",
                 search_start,
                 search_end,
                 considered,
                 decode_ok,
                 parse_ok,
+                parse_v92_ok,
                 analyse_ok,
                 best_start,
                 best_score,
