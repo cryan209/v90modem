@@ -7793,6 +7793,18 @@ static void collect_v92_phase3_event(call_log_t *log,
     uint16_t ja_soft_crc_calc = 0;
     bool ja_soft_candidate_seen = false;
     bool ja_soft_invert = false;
+    bool ja_v92_table20_seen = false;
+    int ja_v92_rate_mask_lo = -1;
+    int ja_v92_rate_mask_hi = -1;
+    int ja_v92_crc_hd = -1;
+    int ja_v92_reserved_viol = -1;
+    int ja_v92_bit_off = -1;
+    int ja_v92_idx_rate_lo_lsb = -1;
+    int ja_v92_idx_rate_lo_msb = -1;
+    int ja_v92_idx_rate_hi_lsb = -1;
+    int ja_v92_idx_rate_hi_msb = -1;
+    int ja_v92_idx_crc_lsb = -1;
+    int ja_v92_idx_crc_msb = -1;
 
     if (!log || !res)
         return;
@@ -8640,6 +8652,24 @@ static void collect_v92_phase3_event(call_log_t *log,
                                                         obs.ja_dil_unique_train_u = v92_analysis.unique_train_u;
                                                         obs.ja_dil_uchords = v92_analysis.used_uchords;
                                                         obs.ja_dil_impairment = v92_analysis.impairment_score;
+                                                        ja_v92_table20_seen = true;
+                                                        ja_v92_rate_mask_lo = rate_lo;
+                                                        ja_v92_rate_mask_hi = rate_hi;
+                                                        ja_v92_crc_hd = crc_hd_v92;
+                                                        ja_v92_reserved_viol = reserved_viol_v92;
+                                                        ja_v92_bit_off = so;
+                                                        {
+                                                            int alpha_i = ((int) v92_desc.lsp + 15) / 16 * 17;
+                                                            int beta_i = alpha_i + (((int) v92_desc.ltp + 15) / 16) * 17;
+                                                            int trn_i = (((int) v92_desc.n + 1) / 2) * 17;
+                                                            int crc_start_i = 187 + beta_i + trn_i;
+                                                            ja_v92_idx_rate_lo_lsb = crc_start_i + 1;
+                                                            ja_v92_idx_rate_lo_msb = crc_start_i + 16;
+                                                            ja_v92_idx_rate_hi_lsb = crc_start_i + 18;
+                                                            ja_v92_idx_rate_hi_msb = crc_start_i + 33;
+                                                            ja_v92_idx_crc_lsb = crc_start_i + 35;
+                                                            ja_v92_idx_crc_msb = crc_start_i + 50;
+                                                        }
                                                         if (ja_dbg) {
                                                             fprintf(stderr,
                                                                     "[JA-P3-V92] hard_lock off=%d bits=%d n=%d lsp=%d ltp=%d crc_hd=%d reserved_viol=%d rate_lo=%04X rate_hi=%04X\n",
@@ -8741,6 +8771,24 @@ static void collect_v92_phase3_event(call_log_t *log,
                                                         obs.ja_dil_unique_train_u = best_analysis.unique_train_u;
                                                         obs.ja_dil_uchords = best_analysis.used_uchords;
                                                         obs.ja_dil_impairment = best_analysis.impairment_score;
+                                                        ja_v92_table20_seen = true;
+                                                        ja_v92_rate_mask_lo = best_rate_lo;
+                                                        ja_v92_rate_mask_hi = best_rate_hi;
+                                                        ja_v92_crc_hd = best_crc_hd;
+                                                        ja_v92_reserved_viol = best_reserved;
+                                                        ja_v92_bit_off = best_so;
+                                                        {
+                                                            int alpha_i = ((int) best_desc.lsp + 15) / 16 * 17;
+                                                            int beta_i = alpha_i + (((int) best_desc.ltp + 15) / 16) * 17;
+                                                            int trn_i = (((int) best_desc.n + 1) / 2) * 17;
+                                                            int crc_start_i = 187 + beta_i + trn_i;
+                                                            ja_v92_idx_rate_lo_lsb = crc_start_i + 1;
+                                                            ja_v92_idx_rate_lo_msb = crc_start_i + 16;
+                                                            ja_v92_idx_rate_hi_lsb = crc_start_i + 18;
+                                                            ja_v92_idx_rate_hi_msb = crc_start_i + 33;
+                                                            ja_v92_idx_crc_lsb = crc_start_i + 35;
+                                                            ja_v92_idx_crc_msb = crc_start_i + 50;
+                                                        }
                                                         if (ja_dbg) {
                                                             fprintf(stderr,
                                                                     "[JA-P3-V92] hard_lock_scan off=%d bits=%d n=%d lsp=%d ltp=%d crc_hd=%d reserved_viol=%d dist=%d rate_lo=%04X rate_hi=%04X\n",
@@ -9241,6 +9289,40 @@ ja_solved_done:;
     appendf(detail, sizeof(detail), " ja_ltp=%s", phase3.ja_dil_seen ? "" : "n/a");
     if (phase3.ja_dil_seen)
         appendf(detail, sizeof(detail), "%d", phase3.ja_dil_ltp);
+    appendf(detail, sizeof(detail), " ja_v92_table20=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "1" : "0");
+    appendf(detail, sizeof(detail), " ja_v92_rate_lo=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%04X", (unsigned) ja_v92_rate_mask_lo);
+    appendf(detail, sizeof(detail), " ja_v92_rate_hi=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%04X", (unsigned) ja_v92_rate_mask_hi);
+    appendf(detail, sizeof(detail), " ja_v92_crc_hd=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d", ja_v92_crc_hd);
+    appendf(detail, sizeof(detail), " ja_v92_reserved_viol=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d", ja_v92_reserved_viol);
+    appendf(detail, sizeof(detail), " ja_v92_bit_off=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d", ja_v92_bit_off);
+    appendf(detail, sizeof(detail), " ja_v92_idx_rate_lo=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d:%d", ja_v92_idx_rate_lo_lsb, ja_v92_idx_rate_lo_msb);
+    appendf(detail, sizeof(detail), " ja_v92_idx_rate_hi=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d:%d", ja_v92_idx_rate_hi_lsb, ja_v92_idx_rate_hi_msb);
+    appendf(detail, sizeof(detail), " ja_v92_idx_crc=%s",
+            (phase3.ja_dil_seen && ja_v92_table20_seen) ? "" : "n/a");
+    if (phase3.ja_dil_seen && ja_v92_table20_seen)
+        appendf(detail, sizeof(detail), "%d:%d", ja_v92_idx_crc_lsb, ja_v92_idx_crc_msb);
     appendf(detail, sizeof(detail), " ja_unique_u=%s", phase3.ja_dil_seen ? "" : "n/a");
     if (phase3.ja_dil_seen)
         appendf(detail, sizeof(detail), "%d", phase3.ja_dil_unique_train_u);
