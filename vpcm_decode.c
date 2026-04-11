@@ -12485,6 +12485,82 @@ static int p3_extract_j_bits(const p3_result_t *detail,
     return total_bits;
 }
 
+static int p3_descramble_single_bit(uint32_t *sr, int in_bit)
+{
+    int fb = (int)((*sr >> 22) ^ (*sr >> 4)) & 1;
+    int out = (in_bit & 1) ^ fb;
+    *sr = ((*sr << 1) | (uint32_t)(in_bit & 1)) & 0x7FFFFF;
+    return out;
+}
+
+/*
+ * V.92 Ja/CPt use the same 2-point modulation as TRN1u.
+ * That is a one-bit-per-symbol path, unlike the two-bit V.34 J extractor.
+ *
+ * We derive one raw differential bit from each symbol transition:
+ *   dibit 0 -> 0 (same sign)
+ *   dibit 2 -> 1 (opposite sign)
+ * Noisy 1/3 quadrants are coerced via the high dibit bit.
+ *
+ * When descramble=true, run the x^23 + x^5 + 1 self-synchronizing descrambler
+ * across a preroll region first, then emit bits starting at start_sym.
+ */
+static int p3_extract_v92_trn1u_bits(const p3_result_t *detail,
+                                     int start_sym,
+                                     int num_syms,
+                                     bool descramble,
+                                     uint8_t *packed,
+                                     int packed_max_bits)
+{
+    int preroll_syms = 64;
+    int feed_start;
+    int feed_syms;
+    int out_bits;
+    uint32_t descr_sr = 0;
+
+    if (!detail || !detail->symbols || !packed || packed_max_bits <= 0 || num_syms <= 0)
+        return 0;
+
+    if (start_sym < 0)
+        start_sym = 0;
+    if (start_sym >= detail->symbol_count)
+        return 0;
+    if (start_sym + num_syms > detail->symbol_count)
+        num_syms = detail->symbol_count - start_sym;
+
+    out_bits = num_syms;
+    if (out_bits > packed_max_bits)
+        out_bits = packed_max_bits;
+    memset(packed, 0, (out_bits + 7) / 8);
+
+    feed_start = start_sym - preroll_syms;
+    if (feed_start < 0)
+        feed_start = 0;
+    feed_syms = (start_sym - feed_start) + out_bits;
+
+    for (int i = 0; i < feed_syms; i++) {
+        int sym_idx = feed_start + i;
+        int d;
+        int raw_bit;
+        int bit;
+
+        if (sym_idx >= detail->symbol_count)
+            break;
+        d = detail->symbols[sym_idx].dibit & 3;
+        raw_bit = (d >> 1) & 1;
+        bit = descramble ? p3_descramble_single_bit(&descr_sr, raw_bit) : raw_bit;
+
+        if (sym_idx < start_sym)
+            continue;
+        if (sym_idx - start_sym >= out_bits)
+            break;
+        if (bit)
+            packed[(sym_idx - start_sym) / 8] |= (uint8_t)(1U << ((sym_idx - start_sym) % 8));
+    }
+
+    return out_bits;
+}
+
 /*
  * p3_find_sync17() — search a packed bit array for 17 consecutive ones
  * followed by a zero (the DIL/CP frame sync word).
@@ -12508,6 +12584,182 @@ static int p3_find_sync17(const uint8_t *packed, int total_bits)
         }
     }
     return -1;
+}
+
+typedef struct {
+    bool valid;
+    int start_symbol;
+    int end_symbol;
+    int span_symbols;
+    int trn_symbols;
+    float avg_magnitude;
+} p3_trn_cluster_t;
+
+static p3_trn_cluster_t p3_find_best_post_trn_cluster(const p3_result_t *detail)
+{
+    static const int max_gap_symbols = 24;
+    static const int min_cluster_trn_symbols = 256;
+    p3_trn_cluster_t best = {0};
+    p3_trn_cluster_t current = {0};
+    float current_mag_weight = 0.0f;
+
+    if (!detail || !detail->segments || detail->segment_count <= 0)
+        return best;
+
+    for (int i = 0; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+        int seg_start;
+        int seg_end;
+
+        if (seg->type != P3_SIGNAL_TRN)
+            continue;
+
+        seg_start = seg->start_symbol;
+        seg_end = seg->start_symbol + seg->length;
+
+        if (!current.valid
+            || seg_start - current.end_symbol > max_gap_symbols) {
+            if (current.valid
+                && current.trn_symbols >= min_cluster_trn_symbols
+                && (!best.valid || current.end_symbol > best.end_symbol)) {
+                best = current;
+                best.avg_magnitude = (current_mag_weight > 0.0f)
+                                     ? (best.avg_magnitude / current_mag_weight)
+                                     : 0.0f;
+            }
+
+            memset(&current, 0, sizeof(current));
+            current.valid = true;
+            current.start_symbol = seg_start;
+            current.end_symbol = seg_end;
+            current.trn_symbols = seg->length;
+            current.span_symbols = seg->length;
+            current.avg_magnitude = seg->avg_magnitude * (float) seg->length;
+            current_mag_weight = (float) seg->length;
+            continue;
+        }
+
+        current.end_symbol = seg_end;
+        current.span_symbols = current.end_symbol - current.start_symbol;
+        current.trn_symbols += seg->length;
+        current.avg_magnitude += seg->avg_magnitude * (float) seg->length;
+        current_mag_weight += (float) seg->length;
+    }
+
+    if (current.valid
+        && current.trn_symbols >= min_cluster_trn_symbols
+        && (!best.valid || current.end_symbol > best.end_symbol)) {
+        best = current;
+        best.avg_magnitude = (current_mag_weight > 0.0f)
+                             ? (best.avg_magnitude / current_mag_weight)
+                             : 0.0f;
+    }
+
+    return best;
+}
+
+typedef struct {
+    bool valid;
+    p3_trn_cluster_t cluster;
+    int best_xform;
+    int best_offset;
+    int best_run;
+    int best_run_pos;
+} p3_post_trn_eval_t;
+
+static void p3_evaluate_post_trn_candidate(const p3_result_t *detail,
+                                           p3_post_trn_eval_t *out)
+{
+    static const int boundary_offsets[] = { -32, -16, -8, 0, 8, 16, 32, 48, 64 };
+    uint8_t packed[1024];
+    p3_trn_cluster_t cluster;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+
+    cluster = p3_find_best_post_trn_cluster(detail);
+    if (!cluster.valid || cluster.trn_symbols < 512)
+        return;
+
+    out->valid = true;
+    out->cluster = cluster;
+    out->best_xform = 2;
+
+    for (size_t oi = 0; oi < sizeof(boundary_offsets)/sizeof(boundary_offsets[0]); oi++) {
+        int search_sym = cluster.end_symbol + boundary_offsets[oi];
+        int search_syms;
+
+        if (search_sym < 0 || search_sym >= detail->symbol_count)
+            continue;
+        search_syms = detail->symbol_count - search_sym;
+        if (search_syms <= 0)
+            continue;
+
+        for (int xform = 0; xform <= 2; xform += 2) {
+            int total_bits;
+            int best_run = 0;
+            int best_run_pos = -1;
+            int run = 0;
+
+            if (xform != 0 && xform != 2)
+                continue;
+            total_bits = p3_extract_v92_trn1u_bits(detail,
+                                                   search_sym,
+                                                   search_syms,
+                                                   xform == 2,
+                                                   packed,
+                                                   (int)sizeof(packed) * 8);
+            for (int b = 0; b < total_bits; b++) {
+                int bit = (packed[b / 8] >> (b % 8)) & 1;
+                if (bit) {
+                    run++;
+                    if (run > best_run) {
+                        best_run = run;
+                        best_run_pos = b - run + 1;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+
+            if (!out->best_run
+                || best_run > out->best_run
+                || (best_run == out->best_run && xform == 2 && out->best_xform != 2)
+                || (best_run == out->best_run
+                    && xform == out->best_xform
+                    && abs(boundary_offsets[oi]) < abs(out->best_offset))) {
+                out->best_run = best_run;
+                out->best_run_pos = best_run_pos;
+                out->best_xform = xform;
+                out->best_offset = boundary_offsets[oi];
+            }
+        }
+    }
+}
+
+static void p3_format_packed_bits(const uint8_t *packed,
+                                  int start_bit,
+                                  int count,
+                                  char *out,
+                                  size_t out_size)
+{
+    int take;
+
+    if (!out || out_size == 0)
+        return;
+    out[0] = '\0';
+    if (!packed || start_bit < 0 || count <= 0)
+        return;
+
+    take = count;
+    if (take > (int) out_size - 1)
+        take = (int) out_size - 1;
+    for (int i = 0; i < take; i++) {
+        int bit = (packed[(start_bit + i) / 8] >> ((start_bit + i) % 8)) & 1;
+        out[i] = bit ? '1' : '0';
+    }
+    out[take] = '\0';
 }
 
 /*
@@ -12534,10 +12786,16 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
 {
     const p3_segment_t *best_j = NULL;
     const p3_segment_t *jprime = NULL;
+    const p3_segment_t *best_trn = NULL;
+    p3_trn_cluster_t trn_cluster;
     uint8_t packed[1024];
     v90_dil_desc_t desc;
     v90_dil_analysis_t analysis;
+    v92_ja_parse_meta_t parse_meta;
     int bit_len;
+    int post_trn_dbg = (getenv("VPCM_P3_POST_TRN_BITS")
+                        && getenv("VPCM_P3_POST_TRN_BITS")[0]
+                        && getenv("VPCM_P3_POST_TRN_BITS")[0] != '0');
 
     if (!detail || detail->segment_count <= 0 || !detail->symbols)
         return false;
@@ -12547,36 +12805,213 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
         const p3_segment_t *seg = &detail->segments[i];
         if (seg->type == P3_SIGNAL_J && (!best_j || seg->length > best_j->length))
             best_j = seg;
+        if (seg->type == P3_SIGNAL_TRN && (!best_trn || seg->length > best_trn->length))
+            best_trn = seg;
     }
-    if (!best_j)
+    if (!best_j && !best_trn)
         return false;
 
     /* Look for J' after the J segment */
-    for (int i = 0; i < detail->segment_count; i++) {
-        const p3_segment_t *seg = &detail->segments[i];
-        if (seg->type == P3_SIGNAL_J_PRIME
-            && seg->start_symbol >= best_j->start_symbol + best_j->length) {
-            jprime = seg;
-            break;
+    if (best_j) {
+        for (int i = 0; i < detail->segment_count; i++) {
+            const p3_segment_t *seg = &detail->segments[i];
+            if (seg->type == P3_SIGNAL_J_PRIME
+                && seg->start_symbol >= best_j->start_symbol + best_j->length) {
+                jprime = seg;
+                break;
+            }
         }
     }
 
-    printf("%s  Ja DIL search: J_sym=%d J_len=%d xform=%d table18=%dpt(%d%%)"
-           " J'=%s\n",
-           prefix,
-           best_j->start_symbol,
-           best_j->length,
-           best_j->j_table_transform,
-           best_j->j_table_bits,
-           best_j->j_table_match_pct,
-           jprime ? "yes" : "no");
+    if (best_j) {
+        printf("%s  Ja DIL search: J_sym=%d J_len=%d xform=%d table18=%dpt(%d%%)"
+               " J'=%s\n",
+               prefix,
+               best_j->start_symbol,
+               best_j->length,
+               best_j->j_table_transform,
+               best_j->j_table_bits,
+               best_j->j_table_match_pct,
+               jprime ? "yes" : "no");
+    } else {
+        printf("%s  Ja DIL search: no J segment, using longest TRN only\n", prefix);
+    }
+
+    trn_cluster = p3_find_best_post_trn_cluster(detail);
+    if (trn_cluster.valid) {
+        printf("%s    TRN cluster candidate: sym=%d..%d span=%d trn=%d avg_mag=%.3f\n",
+               prefix,
+               trn_cluster.start_symbol,
+               trn_cluster.end_symbol,
+               trn_cluster.span_symbols,
+               trn_cluster.trn_symbols,
+               trn_cluster.avg_magnitude);
+    }
+
+    /*
+     * V.92-specific front-end: Ja follows TRN1u and uses the same modulation
+     * and differential state. The P3 demod output already carries continuous
+     * differential-decoded, descrambled bits, so search the post-TRN stream
+     * directly instead of relying on the clipped V.34 J detector.
+     */
+    if ((trn_cluster.valid && trn_cluster.trn_symbols >= 512)
+        || (best_trn && best_trn->length >= 512)) {
+        int trn_start_sym;
+        int trn_len_sym;
+        int trn_end_sym;
+        static const int boundary_offsets[] = { -32, -16, -8, 0, 8, 16, 32, 48, 64 };
+
+        if (trn_cluster.valid && trn_cluster.trn_symbols >= 512) {
+            trn_start_sym = trn_cluster.start_symbol;
+            trn_end_sym = trn_cluster.end_symbol;
+            trn_len_sym = trn_cluster.trn_symbols;
+        } else {
+            trn_start_sym = best_trn->start_symbol;
+            trn_len_sym = best_trn->length;
+            trn_end_sym = best_trn->start_symbol + best_trn->length;
+        }
+
+        printf("%s    V.92 post-TRN search: TRN_sym=%d len=%d trn_end=%d\n",
+               prefix,
+               trn_start_sym,
+               trn_len_sym,
+               trn_end_sym);
+        for (size_t oi = 0; oi < sizeof(boundary_offsets)/sizeof(boundary_offsets[0]); oi++) {
+            int search_sym = trn_end_sym + boundary_offsets[oi];
+            int search_syms;
+
+            if (search_sym < 0)
+                continue;
+            if (search_sym >= detail->symbol_count)
+                continue;
+            search_syms = detail->symbol_count - search_sym;
+            if (search_syms <= 0)
+                continue;
+            for (int xform = 0; xform < 4; xform++) {
+                int total_bits;
+                int best_run = 0;
+                int best_run_pos = -1;
+                int run = 0;
+
+                if (xform != 0 && xform != 2)
+                    continue;
+                total_bits = p3_extract_v92_trn1u_bits(detail,
+                                                       search_sym,
+                                                       search_syms,
+                                                       xform == 2,
+                                                       packed,
+                                                       (int)sizeof(packed) * 8);
+                for (int b = 0; b < total_bits; b++) {
+                    int bit = (packed[b / 8] >> (b % 8)) & 1;
+                    if (bit) {
+                        run++;
+                        if (run > best_run) {
+                            best_run = run;
+                            best_run_pos = b - run + 1;
+                        }
+                    } else {
+                        run = 0;
+                    }
+                }
+                if (best_run >= 16) {
+                    if (post_trn_dbg && (xform == 0 || xform == 2)) {
+                        char first_bits[129];
+                        char run_bits[129];
+                        int run_dump_start = best_run_pos >= 32 ? best_run_pos - 32 : 0;
+
+                        p3_format_packed_bits(packed, 0, 128, first_bits, sizeof(first_bits));
+                        p3_format_packed_bits(packed,
+                                              run_dump_start,
+                                              128,
+                                              run_bits,
+                                              sizeof(run_bits));
+                        printf("%s        post-TRN bits off=%d xform=%d first128=%s\n",
+                               prefix,
+                               boundary_offsets[oi],
+                               xform,
+                               first_bits);
+                        printf("%s        post-TRN bits off=%d xform=%d around_run[%d]=%s\n",
+                               prefix,
+                               boundary_offsets[oi],
+                               xform,
+                               run_dump_start,
+                               run_bits);
+                    }
+                    printf("%s      post-TRN off=%d xform=%d: longest 1-run=%d @bit%d (sym%d) total=%d bits\n",
+                           prefix,
+                           boundary_offsets[oi],
+                           xform,
+                           best_run,
+                           best_run_pos,
+                           search_sym + best_run_pos / 2,
+                           total_bits);
+                }
+
+                for (int anchor = 0; anchor + 24 + 206 <= total_bits; anchor++) {
+                    int desc_start;
+                    int remaining;
+                    uint8_t aligned[1024];
+                    bool prefix24 = true;
+
+                    for (int b = 0; b < 24; b++) {
+                        int bit = (packed[(anchor + b) / 8] >> ((anchor + b) % 8)) & 1;
+                        if (!bit) {
+                            prefix24 = false;
+                            break;
+                        }
+                    }
+                    if (!prefix24)
+                        continue;
+
+                    desc_start = anchor + 24;
+                    remaining = total_bits - desc_start;
+                    memset(aligned, 0, sizeof(aligned));
+                    for (int b = 0; b < remaining && b < (int)sizeof(aligned) * 8; b++) {
+                        int src = desc_start + b;
+                        int bit = (packed[src / 8] >> (src % 8)) & 1;
+                        if (bit)
+                            aligned[b / 8] |= (uint8_t)(1U << (b % 8));
+                    }
+
+                    memset(&parse_meta, 0, sizeof(parse_meta));
+                        if (v92_parse_ja_descriptor_strict(&desc, aligned, remaining, &parse_meta)
+                            && parse_meta.is_v92
+                            && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                        bit_len = parse_meta.bit_len > 0
+                                  ? parse_meta.bit_len
+                                  : v90_dil_descriptor_bit_len(&desc);
+                        printf("%s  Ja DIL FOUND (post-TRN off=%d xform=%d 24ones@bit%d -> desc@bit%d):"
+                               " variant=v92 n=%u lsp=%u ltp=%u"
+                               " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                               prefix,
+                               boundary_offsets[oi],
+                               xform,
+                               anchor,
+                               desc_start,
+                               (unsigned) desc.n,
+                               (unsigned) desc.lsp,
+                               (unsigned) desc.ltp,
+                               bit_len,
+                               (unsigned) analysis.unique_train_u,
+                               (unsigned) analysis.used_uchords,
+                               (unsigned) analysis.impairment_score);
+                        if (desc_out)
+                            *desc_out = desc;
+                        if (analysis_out)
+                            *analysis_out = analysis;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
 
     /*
      * Strategy: extract bits from the J segment for all 4 transforms.
      * For each, search for the 17-ones sync word and attempt DIL parse.
      * The Table 18 transform is tried first as it's most likely correct.
      */
-    {
+    if (best_j) {
         int try_order[4];
         int best_xform = best_j->j_table_transform;
         try_order[0] = best_xform;
@@ -12650,32 +13085,35 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
                         aligned[b / 8] |= (uint8_t)(1U << (b % 8));
                 }
 
-                if (v90_parse_dil_descriptor(&desc, aligned, remaining)) {
-                    if (v90_analyse_dil_descriptor(&desc, &analysis)) {
-                        bit_len = v90_dil_descriptor_bit_len(&desc);
-                        printf("%s  Ja DIL FOUND (xform=%d sync@bit%d):"
-                               " n=%u lsp=%u ltp=%u"
-                               " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
-                               prefix,
-                               xform, sync_pos,
-                               (unsigned)desc.n,
-                               (unsigned)desc.lsp,
-                               (unsigned)desc.ltp,
-                               bit_len,
-                               (unsigned)analysis.unique_train_u,
-                               (unsigned)analysis.used_uchords,
-                               (unsigned)analysis.impairment_score);
-                        if (analysis.looks_default_125x12)
-                            printf("%s    profile: default 125x12\n", prefix);
-                        else if (analysis.robbed_bit_limited)
-                            printf("%s    profile: robbed-bit limited\n", prefix);
+                memset(&parse_meta, 0, sizeof(parse_meta));
+                if (v92_parse_ja_descriptor_strict(&desc, aligned, remaining, &parse_meta)
+                    && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                    bit_len = parse_meta.bit_len > 0
+                              ? parse_meta.bit_len
+                              : v90_dil_descriptor_bit_len(&desc);
+                    printf("%s  Ja DIL FOUND (xform=%d sync@bit%d):"
+                           " variant=%s n=%u lsp=%u ltp=%u"
+                           " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                           prefix,
+                           xform, sync_pos,
+                           parse_meta.is_v92 ? "v92" : "v90",
+                           (unsigned)desc.n,
+                           (unsigned)desc.lsp,
+                           (unsigned)desc.ltp,
+                           bit_len,
+                           (unsigned)analysis.unique_train_u,
+                           (unsigned)analysis.used_uchords,
+                           (unsigned)analysis.impairment_score);
+                    if (analysis.looks_default_125x12)
+                        printf("%s    profile: default 125x12\n", prefix);
+                    else if (analysis.robbed_bit_limited)
+                        printf("%s    profile: robbed-bit limited\n", prefix);
 
-                        if (desc_out)
-                            *desc_out = desc;
-                        if (analysis_out)
-                            *analysis_out = analysis;
-                        return true;
-                    }
+                    if (desc_out)
+                        *desc_out = desc;
+                    if (analysis_out)
+                        *analysis_out = analysis;
+                    return true;
                 }
 
                 search_from = sync_pos + 18;
@@ -12727,6 +13165,72 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
                            total_bits);
                 }
 
+                /*
+                 * V.92-specific probe: Ja may begin with 24 binary ones before
+                 * the Table 20 descriptor.  Try candidate descriptor starts at
+                 * 24-one anchors before falling back to plain sync17 search.
+                 */
+                for (int anchor = 0; anchor + 24 + 206 <= total_bits; anchor++) {
+                    int remaining;
+                    int desc_start;
+                    uint8_t aligned[1024];
+                    bool prefix24 = true;
+
+                    for (int b = 0; b < 24; b++) {
+                        int bit = (packed[(anchor + b) / 8] >> ((anchor + b) % 8)) & 1;
+                        if (!bit) {
+                            prefix24 = false;
+                            break;
+                        }
+                    }
+                    if (!prefix24)
+                        continue;
+
+                    desc_start = anchor + 24;
+                    remaining = total_bits - desc_start;
+                    if (remaining < 206)
+                        continue;
+
+                    memset(aligned, 0, sizeof(aligned));
+                    for (int b = 0; b < remaining && b < (int)sizeof(aligned) * 8; b++) {
+                        int src = desc_start + b;
+                        int bit = (packed[src / 8] >> (src % 8)) & 1;
+                        if (bit)
+                            aligned[b / 8] |= (uint8_t)(1U << (b % 8));
+                    }
+
+                    memset(&parse_meta, 0, sizeof(parse_meta));
+                    if (v92_parse_ja_descriptor_strict(&desc, aligned, remaining, &parse_meta)
+                        && parse_meta.is_v92
+                        && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                        bit_len = parse_meta.bit_len > 0
+                                  ? parse_meta.bit_len
+                                  : v90_dil_descriptor_bit_len(&desc);
+                        printf("%s  Ja DIL FOUND (wide xform=%d 24ones@bit%d -> desc@bit%d):"
+                               " variant=v92 n=%u lsp=%u ltp=%u"
+                               " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                               prefix,
+                               xform, anchor, desc_start,
+                               (unsigned)desc.n,
+                               (unsigned)desc.lsp,
+                               (unsigned)desc.ltp,
+                               bit_len,
+                               (unsigned)analysis.unique_train_u,
+                               (unsigned)analysis.used_uchords,
+                               (unsigned)analysis.impairment_score);
+                        if (analysis.looks_default_125x12)
+                            printf("%s    profile: default 125x12\n", prefix);
+                        else if (analysis.robbed_bit_limited)
+                            printf("%s    profile: robbed-bit limited\n", prefix);
+
+                        if (desc_out)
+                            *desc_out = desc;
+                        if (analysis_out)
+                            *analysis_out = analysis;
+                        return true;
+                    }
+                }
+
                 /* Try all sync17 positions in this wide window */
                 int search_from = 0;
                 while (search_from < total_bits - 206) {
@@ -12766,32 +13270,35 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
                                prefix, xform, sync_pos,
                                wide_start + sync_pos / 2, remaining);
 
-                        if (v90_parse_dil_descriptor(&desc, aligned, remaining)) {
-                            if (v90_analyse_dil_descriptor(&desc, &analysis)) {
-                                bit_len = v90_dil_descriptor_bit_len(&desc);
-                                printf("%s  Ja DIL FOUND (wide xform=%d sync@bit%d):"
-                                       " n=%u lsp=%u ltp=%u"
-                                       " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
-                                       prefix,
-                                       xform, sync_pos,
-                                       (unsigned)desc.n,
-                                       (unsigned)desc.lsp,
-                                       (unsigned)desc.ltp,
-                                       bit_len,
-                                       (unsigned)analysis.unique_train_u,
-                                       (unsigned)analysis.used_uchords,
-                                       (unsigned)analysis.impairment_score);
-                                if (analysis.looks_default_125x12)
-                                    printf("%s    profile: default 125x12\n", prefix);
-                                else if (analysis.robbed_bit_limited)
-                                    printf("%s    profile: robbed-bit limited\n", prefix);
+                        memset(&parse_meta, 0, sizeof(parse_meta));
+                        if (v92_parse_ja_descriptor_strict(&desc, aligned, remaining, &parse_meta)
+                            && v90_analyse_dil_descriptor(&desc, &analysis)) {
+                            bit_len = parse_meta.bit_len > 0
+                                      ? parse_meta.bit_len
+                                      : v90_dil_descriptor_bit_len(&desc);
+                            printf("%s  Ja DIL FOUND (wide xform=%d sync@bit%d):"
+                                   " variant=%s n=%u lsp=%u ltp=%u"
+                                   " bits=%d uniq_u=%u uchords=%u impairment=%u\n",
+                                   prefix,
+                                   xform, sync_pos,
+                                   parse_meta.is_v92 ? "v92" : "v90",
+                                   (unsigned)desc.n,
+                                   (unsigned)desc.lsp,
+                                   (unsigned)desc.ltp,
+                                   bit_len,
+                                   (unsigned)analysis.unique_train_u,
+                                   (unsigned)analysis.used_uchords,
+                                   (unsigned)analysis.impairment_score);
+                            if (analysis.looks_default_125x12)
+                                printf("%s    profile: default 125x12\n", prefix);
+                            else if (analysis.robbed_bit_limited)
+                                printf("%s    profile: robbed-bit limited\n", prefix);
 
-                                if (desc_out)
-                                    *desc_out = desc;
-                                if (analysis_out)
-                                    *analysis_out = analysis;
-                                return true;
-                            }
+                            if (desc_out)
+                                *desc_out = desc;
+                            if (analysis_out)
+                                *analysis_out = analysis;
+                            return true;
                         }
                     }
                     search_from = sync_pos + 18;
@@ -12814,6 +13321,9 @@ static void p3_demod_scan_window(const int16_t *samples,
     int count;
     int best_idx = -1;
     float best_score = -1.0f;
+    int best_ja_idx = -1;
+    int best_ja_run = 0;
+    int best_ja_xform = 2;
 
     if (!samples || sample_count <= 0)
         return;
@@ -12824,10 +13334,11 @@ static void p3_demod_scan_window(const int16_t *samples,
            sample_to_ms(sample_offset + sample_count, sample_rate),
            sample_to_ms(sample_count, sample_rate));
 
-    /* p3_scan_all_hypotheses internally caps/narrows the scan range;
-     * cap the detail run similarly to avoid huge demod on full streams. */
+    /* p3_scan_all_hypotheses internally caps/narrows the scan range.
+     * Keep a generous detail cap so late V.92 TRN1u/Ja regions are not
+     * truncated out of the offline analysis window. */
     {
-        int detail_cap = 5 * sample_rate;
+        int detail_cap = 12 * sample_rate;
         if (sample_count > detail_cap)
             sample_count = detail_cap;
     }
@@ -12843,11 +13354,36 @@ static void p3_demod_scan_window(const int16_t *samples,
 
     for (int i = 0; i < count; i++) {
         const p3_hypothesis_t *h = &hypotheses[i];
+        p3_result_t *detail = NULL;
+        p3_post_trn_eval_t post_trn = {0};
+
         if (h->score > best_score) {
             best_score = h->score;
             best_idx = i;
         }
-        printf("    [%d] %d baud %s (%.0f Hz): %d sym, %d seg, score=%.1f%s%s%s%s\n",
+        if (h->has_trn) {
+            detail = p3_demod_run(samples,
+                                  sample_count,
+                                  sample_offset,
+                                  h->baud_code,
+                                  h->carrier_sel,
+                                  sample_rate);
+            if (detail)
+                p3_evaluate_post_trn_candidate(detail, &post_trn);
+        }
+        if (post_trn.valid
+            && (post_trn.best_run > best_ja_run
+                || (post_trn.best_run == best_ja_run
+                    && post_trn.best_xform == 2
+                    && best_ja_xform != 2)
+                || (post_trn.best_run == best_ja_run
+                    && post_trn.best_xform == best_ja_xform
+                    && h->score > ((best_ja_idx >= 0) ? hypotheses[best_ja_idx].score : -1.0f)))) {
+            best_ja_idx = i;
+            best_ja_run = post_trn.best_run;
+            best_ja_xform = post_trn.best_xform;
+        }
+        printf("    [%d] %d baud %s (%.0f Hz): %d sym, %d seg, score=%.1f%s%s%s%s",
                i,
                (int) h->baud_rate,
                h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
@@ -12859,11 +13395,34 @@ static void p3_demod_scan_window(const int16_t *samples,
                h->has_trn ? " [TRN]" : "",
                h->has_j ? " [J]" : "",
                h->has_ru ? " [Ru]" : "");
+        if (post_trn.valid) {
+            printf(" ja_run=%d xform=%d off=%d cluster=%d..%d",
+                   post_trn.best_run,
+                   post_trn.best_xform,
+                   post_trn.best_offset,
+                   post_trn.cluster.start_symbol,
+                   post_trn.cluster.end_symbol);
+        }
+        printf("\n");
+        if (detail)
+            p3_result_free(detail);
     }
 
     if (best_idx >= 0 && best_score > 0.0f) {
         const p3_hypothesis_t *best = &hypotheses[best_idx];
         p3_result_t *detail;
+        bool ja_found = false;
+
+        if (best_ja_idx >= 0 && best_ja_idx != best_idx) {
+            const p3_hypothesis_t *best_ja = &hypotheses[best_ja_idx];
+
+            printf("    Ja-focused candidate: [%d] %d baud %s (%.0f Hz), ja_run=%d\n",
+                   best_ja_idx,
+                   (int) best_ja->baud_rate,
+                   best_ja->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                   best_ja->carrier_hz,
+                   best_ja_run);
+        }
 
         printf("    Best: %d baud %s (%.0f Hz), score=%.1f\n",
                (int) best->baud_rate,
@@ -12936,9 +13495,26 @@ static void p3_demod_scan_window(const int16_t *samples,
                     printf("        notes: %s\n", j_eval.notes);
             }
             /* Attempt DIL descriptor extraction from demodulated symbols after J/J' */
-            p3_try_extract_ja_dil(detail, "    ", NULL, NULL);
+            ja_found = p3_try_extract_ja_dil(detail, "    ", NULL, NULL);
             p3_print_data_signatures(detail);
             p3_result_free(detail);
+
+            if (!ja_found && best_ja_idx >= 0 && best_ja_idx != best_idx) {
+                const p3_hypothesis_t *best_ja = &hypotheses[best_ja_idx];
+                p3_result_t *ja_detail = p3_demod_run(samples,
+                                                      sample_count,
+                                                      sample_offset,
+                                                      best_ja->baud_code,
+                                                      best_ja->carrier_sel,
+                                                      sample_rate);
+
+                if (ja_detail) {
+                    printf("    Re-trying Ja extraction on Ja-focused candidate [%d]...\n",
+                           best_ja_idx);
+                    p3_try_extract_ja_dil(ja_detail, "      ", NULL, NULL);
+                    p3_result_free(ja_detail);
+                }
+            }
         }
     } else {
         printf("    No recognizable Phase 3 signals found\n");
@@ -16115,6 +16691,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     ja_dil_search_params_t params;
     int search_start;
     int search_end;
+    int search_slack_before = 0;
+    int search_slack_after = 0;
 
     if (!codewords || total_codewords <= 0 || !out)
         return false;
@@ -16131,7 +16709,14 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
      * wrong region.
      */
     if (src->tx_ja_sample >= 0) {
-        search_start = src->tx_ja_sample;
+        /*
+         * The locally inferred J/Ja transition is only an onset hint.
+         * Real mixed-line captures can place the first strict descriptor
+         * hundreds of milliseconds later, so keep margin on both sides.
+         */
+        search_slack_before = 512;
+        search_slack_after = 12288;
+        search_start = src->tx_ja_sample - search_slack_before;
     } else if (jd_stage && jd_stage->ok) {
         if (jd_stage->jd_prime_seen)
             search_start = jd_stage->jd_prime_sample + OFFLINE_V90_JD_PRIME_BITS;
@@ -16154,14 +16739,20 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     else
         search_end = search_start + 4096;
 
-    /*
-     * When the Ja onset is known (tx_ja_sample), the DIL descriptor starts
-     * within a few hundred symbols of it.  The maximum descriptor bit-length
-     * is bounded by the Ja protocol timing (n≤128 U-chords ≈ 2000 bits).
-     * Clamp search_end to avoid scanning megabytes of training audio.
-     */
-    if (src->tx_ja_sample >= 0 && search_end > src->tx_ja_sample + 4096)
-        search_end = src->tx_ja_sample + 4096;
+    if (src->tx_ja_sample >= 0) {
+        int anchored_end = src->tx_ja_sample + search_slack_after;
+
+        if (search_start < 0)
+            search_start = 0;
+        if (search_end > anchored_end)
+            search_end = anchored_end;
+    }
+    if (search_end > total_codewords - 206)
+        search_end = total_codewords - 206;
+    if (search_start < 0)
+        search_start = 0;
+    if (search_start > search_end)
+        return false;
 
     params.search_start  = search_start;
     params.search_end    = search_end;
