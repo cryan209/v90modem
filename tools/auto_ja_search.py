@@ -89,7 +89,7 @@ def score_bits(bits: str, dil_len: int, prefix_ones: int) -> tuple[float, int, i
     p = bits.find("1" * prefix_ones)
     rep_match = 0
     rep_total = 0
-    if p >= 0:
+    if p >= 0 and dil_len > 0:
         rem = bits[p + prefix_ones:]
         if len(rem) >= 2 * dil_len:
             b0 = rem[:dil_len]
@@ -130,7 +130,8 @@ def main() -> int:
     ap.add_argument("--offset-step", type=float, default=0.5)
     ap.add_argument("--bits", type=int, default=4096)
     ap.add_argument("--prefix-ones", type=int, default=24)
-    ap.add_argument("--dil-len", type=int, default=276)
+    ap.add_argument("--dil-len", type=int, default=0,
+                    help="Optional repeated-descriptor hypothesis length; 276 only applies to V.92 when N=0")
     ap.add_argument("--top", type=int, default=20)
     args = ap.parse_args()
 

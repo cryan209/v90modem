@@ -52,6 +52,7 @@ Per V.92 `8.5.4`, Ja:
 
 - consists of 24 binary ones followed by repetitions of the DIL descriptor in
   Table 20
+- has a descriptor length of 276 bits only when `N = 0`
 - uses the same modulation as `TRN1u`
 - is scrambled and differentially encoded
 - initializes the differential encoder memory with the final symbol of the
@@ -66,6 +67,11 @@ Table 20 extends the base V.90 descriptor with:
 - another start bit
 - CRC
 - fill bits to the next multiple of 12 bits
+
+The Table 20 descriptor is still variable length because bits `0:187 + β +
+ceil(N/2) * 17` are inherited from V.90 Table 12. The descriptor reduces to
+276 bits only in the special case `N = 0`, where V.90 also requires
+`LSP = LTP = 1`.
 
 ## Current Implementations
 
@@ -356,6 +362,53 @@ For each corpus item, record:
 - analyzer/recovery expected result
 - whether runtime should accept or reject it
 
+### F. Real recorded-call checks
+
+Use real mixed-line recordings as a separate validation bucket from synthetic
+bit fixtures.
+
+Current reference capture:
+
+- `gough-lui-v90-v92-modem-sounds/FF_U/Agere-SV92-QC_R.g711`
+
+Observed behavior on 2026-04-11:
+
+- the Ja-bearing side is `R`
+- the legacy lightweight J/J' scan only finds a short `J=160 sym` fragment,
+  which is not the whole Ja interval
+- the V.92 Phase 3 sequence logic sees a much larger Ja candidate window and
+  reports `ja_dil_bits=1740`
+- existing full-sequence DPSK dumps for this capture contain thousands of bits,
+  for example:
+  - `tools/dumps/ja_fullbits_Agere-SV92-QC_R_dbpsk1860_3429_5705.txt`
+    with `dbpsk_bits_inverted(49815)`
+  - `tools/dumps/ja_fullbits_Agere-SV92-QC_R_dbpsk1860_3429_5705_pll2.txt`
+    with `dbpsk_bits_inverted(6999)`
+- `validate_ja_sequence.py` finds a 24-one prefix at bit `0` on the inverted
+  DPSK streams for this capture
+- those same full-sequence dumps do not currently validate as clean strict V.92
+  Ja because:
+  - total captured length is not a multiple of `12`
+  - under a 276-bit `N = 0` descriptor hypothesis, repetition quality is only
+    moderate, about `0.68` to `0.79` match against block 0
+
+Interpretation:
+
+- the real recording contains a plausible V.92-style Ja interval on side `R`
+- the short `J=160` result is only a clipped front-edge heuristic and should
+  not be treated as the full Ja sequence
+- strict failure on this recording does not yet prove the call is non-V.92;
+  it may instead reflect windowing, timing, polarity, or mixed-line
+  impairments in the extracted full-bit dumps
+
+Recommended corpus expectation for this capture today:
+
+- runtime strict acceptance: `reject`
+- offline strict parse: `reject`
+- offline recovery/analyzer: `soft candidate expected`
+- manual review note: `real-call V.92-like Ja on R side; needs better
+  anchoring/extraction before it can be promoted to a strict fixture`
+
 ## Implementation Order
 
 1. Add the document-backed strict/recovery split.
@@ -385,10 +438,35 @@ Expected result:
 - a clean strict parser to move into the live path next
 - the beginning of a test corpus that locks in the spec behavior
 
+## Next Work After The Strict Parser
+
+The next development slice should focus on real-call validation, not just
+synthetic descriptors.
+
+1. Add a corpus manifest for the checked-in `Agere-SV92-QC_R` artifacts.
+2. Record expected outcomes separately for:
+   - strict parser
+   - recovery/analyzer
+   - runtime acceptance
+3. Improve Ja extraction/anchoring for long V.92 captures so the strict parser
+   can be fed a cleaner candidate window.
+4. Only promote a real capture to a strict regression fixture once:
+   - the 24-one prefix is stable
+   - descriptor repetition is stable
+   - modulo-12 framing is stable
+   - Python and C strict parsers agree
+5. Keep noisy real captures in a recovery-only bucket so they still protect the
+   analyzer path without weakening strict conformance tests.
+
 ## Status
 
 - Reviewed on 2026-04-11.
-- No code changes have been made yet from this plan.
+- Strict V.90/V.92 Ja descriptor parsing has now been added in C.
+- Primitive tests now cover:
+  - valid strict V.90 descriptor parse
+  - valid strict V.92 Table 20 descriptor parse
+  - bad V.92 CRC rejection
+  - bad V.92 modulo-12 fill rejection
 - Current conclusion:
   - V.90 base descriptor parsing is mostly sound
   - V.92 strict Ja handling is currently strongest in Python tooling

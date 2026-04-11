@@ -334,7 +334,8 @@ def main() -> int:
     ap.add_argument("path", type=Path, help="bit dump text file")
     ap.add_argument("--label", default="dbpsk_bits_inverted")
     ap.add_argument("--prefix-ones", type=int, default=24)
-    ap.add_argument("--dil-len", type=int, default=276, help="Fallback length when descriptor parse fails")
+    ap.add_argument("--dil-len", type=int, default=276,
+                    help="Fallback length when descriptor parse fails; 276 only applies to V.92 when N=0")
     ap.add_argument("--view-bits", type=int, default=180)
     ap.add_argument("--group", type=int, default=12)
     ap.add_argument("--sps", type=int, default=16, help="samples per symbol for synthesized waveform")

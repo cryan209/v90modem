@@ -331,6 +331,8 @@ def main() -> int:
     ap.add_argument("--len-step", type=int, default=1)
     ap.add_argument("--min-blocks", type=int, default=3)
     ap.add_argument("--max-blocks", type=int, default=20)
+    ap.add_argument("--target-len", type=int, default=0,
+                    help="Optional preferred descriptor length for scoring only; 276 only applies to V.92 when N=0")
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--stream-mode", choices=("raw", "descr4", "descr17", "auto"), default="auto")
     args = ap.parse_args()
@@ -378,7 +380,9 @@ def main() -> int:
                     continue
                 bmatch = block_match(sbits, ds, L, maxb)
                 # Prefer lengths with stronger repeat.
-                score = bmatch * 1000.0 - abs(L - 276) * 0.03
+                score = bmatch * 1000.0
+                if args.target_len > 0:
+                    score -= abs(L - args.target_len) * 0.03
                 cons = consensus_block(sbits, ds, L, maxb)
                 d = parse_dil_descriptor(cons)
                 if d is not None:

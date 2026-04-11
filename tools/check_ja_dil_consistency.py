@@ -311,7 +311,8 @@ def main() -> int:
     ap.add_argument("--dil-start-ms", type=float, required=True)
     ap.add_argument("--dil-end-ms", type=float, required=True)
     ap.add_argument("--prefix-ones", type=int, default=24)
-    ap.add_argument("--descriptor-len", type=int, default=276)
+    ap.add_argument("--descriptor-len", type=int, default=0,
+                    help="Optional fixed descriptor-length hypothesis for consensus fallback; 276 only applies to V.92 when N=0")
     ap.add_argument("--consensus-blocks", type=int, default=64)
     ap.add_argument("--stream-mode", choices=("raw", "descr4", "descr17"), default="descr4")
     args = ap.parse_args()
@@ -329,7 +330,7 @@ def main() -> int:
     ds = anchor + args.prefix_ones
     d = parse_dil_descriptor(bits[ds:])
     mode = "direct"
-    if d is None:
+    if d is None and args.descriptor_len > 0:
         cons, b = consensus_block(bits, ds, args.descriptor_len, args.consensus_blocks)
         if cons:
             d = parse_dil_descriptor(cons)

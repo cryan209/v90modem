@@ -28,7 +28,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Validate Ja bitstream structure")
     ap.add_argument("path", type=Path)
     ap.add_argument("--label", type=str, default="nat_bits", help="bit label inside file")
-    ap.add_argument("--dil-len", type=int, default=276)
+    ap.add_argument("--dil-len", type=int, default=0,
+                    help="Optional repeated-descriptor hypothesis length; 276 only applies to V.92 when N=0")
     ap.add_argument("--scan-slip", type=int, default=0, help="Try slip offsets 0..N and report best alignment")
     args = ap.parse_args()
 
@@ -48,17 +49,18 @@ def main() -> int:
         print("prefix_24_ones_found=0")
     else:
         print(f"prefix_24_ones_found=1 at={anchor}")
-        rem = bits[anchor + 24 :]
-        n = len(rem) // args.dil_len
-        print(f"complete_{args.dil_len}b_blocks_after_prefix={n}")
-        if n >= 2:
-            b0 = rem[: args.dil_len]
-            for i in range(1, n):
-                bi = rem[i * args.dil_len : (i + 1) * args.dil_len]
-                eq = sum(1 for a, b in zip(b0, bi) if a == b)
-                print(f"block0_vs_block{i}_match={eq}/{args.dil_len} ({eq/args.dil_len:.3f})")
+        if args.dil_len > 0:
+            rem = bits[anchor + 24 :]
+            n = len(rem) // args.dil_len
+            print(f"complete_{args.dil_len}b_blocks_after_prefix={n}")
+            if n >= 2:
+                b0 = rem[: args.dil_len]
+                for i in range(1, n):
+                    bi = rem[i * args.dil_len : (i + 1) * args.dil_len]
+                    eq = sum(1 for a, b in zip(b0, bi) if a == b)
+                    print(f"block0_vs_block{i}_match={eq}/{args.dil_len} ({eq/args.dil_len:.3f})")
 
-    if args.scan_slip > 0:
+    if args.scan_slip > 0 and args.dil_len > 0:
         best_slip = -1
         best_anchor = -1
         best_eq = -1
@@ -84,6 +86,8 @@ def main() -> int:
             print(f"best_slip={best_slip} anchor_at={best_anchor} block0_vs_block1_match={best_eq}/{args.dil_len} ({best_eq/args.dil_len:.3f})")
         else:
             print("best_slip=not_found")
+    elif args.scan_slip > 0:
+        print("best_slip=skipped (set --dil-len to test a fixed descriptor-length hypothesis)")
     return 0
 
 
