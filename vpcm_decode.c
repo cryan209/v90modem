@@ -6139,6 +6139,10 @@ typedef struct {
     v90_dil_analysis_t analysis;
 } v90_aux_dil_hit_t;
 
+/* Forward declarations for local packed-bit helpers used by fixed-offset solve. */
+static int aux_get_packed_bits(const uint8_t *bits, int pos, int n);
+static uint16_t aux_crc16_bits(const uint8_t *bits, int bit_count);
+
 static bool find_v90_dil_in_aux_str(const char *bit_str,
                                     int bit_len,
                                     v90_aux_dil_hit_t *out)
@@ -6218,6 +6222,169 @@ static bool find_v90_dil_in_aux_str(const char *bit_str,
 
     if (!best.found)
         return false;
+    *out = best;
+    return true;
+}
+
+static void set_bits_le_chars(char *bits, int bit_len, int pos, int count, uint32_t value)
+{
+    if (!bits || bit_len <= 0 || pos < 0 || count <= 0)
+        return;
+    for (int i = 0; i < count; i++) {
+        int bpos = pos + i;
+        if (bpos < 0 || bpos >= bit_len)
+            break;
+        bits[bpos] = ((value >> i) & 1U) ? '1' : '0';
+    }
+}
+
+static bool chars_to_packed_bits(const char *bits, int bit_len, uint8_t *packed, int packed_cap)
+{
+    int packed_len;
+
+    if (!bits || !packed || bit_len <= 0 || packed_cap <= 0)
+        return false;
+    packed_len = (bit_len + 7) / 8;
+    if (packed_len <= 0 || packed_len > packed_cap)
+        return false;
+    memset(packed, 0, (size_t) packed_len);
+    for (int i = 0; i < bit_len; i++) {
+        char c = bits[i];
+        if (c != '0' && c != '1')
+            return false;
+        if (c == '1')
+            packed[i / 8] |= (uint8_t) (1U << (i % 8));
+    }
+    return true;
+}
+
+static bool solve_v90_dil_at_offset(const char *bit_str,
+                                    int bit_len,
+                                    int offset,
+                                    v90_aux_dil_hit_t *out,
+                                    int *edits_out)
+{
+    uint8_t packed[1024];
+    char base[8193];
+    char work[8193];
+    v90_aux_dil_hit_t best;
+    int best_edits = INT_MAX;
+    bool found = false;
+    int seed_n, seed_lsp, seed_ltp;
+    int n_cand[3], lsp_cand[3], ltp_cand[3];
+    int avail_bits;
+
+    if (!bit_str || !out || bit_len < 206 || offset < 0 || offset >= bit_len)
+        return false;
+    avail_bits = bit_len - offset;
+    if (avail_bits > 8192)
+        avail_bits = 8192;
+    if (avail_bits < 206)
+        return false;
+
+    memcpy(base, bit_str + offset, (size_t) avail_bits);
+    base[avail_bits] = '\0';
+
+    seed_n = 0;
+    seed_lsp = 1;
+    seed_ltp = 1;
+    if (avail_bits >= 51) {
+        if (chars_to_packed_bits(base, avail_bits, packed, (int) sizeof(packed))) {
+            seed_n = (int) aux_get_packed_bits(packed, 18, 8);
+            seed_lsp = (int) aux_get_packed_bits(packed, 35, 7) + 1;
+            seed_ltp = (int) aux_get_packed_bits(packed, 43, 7) + 1;
+        }
+    }
+    if (seed_lsp < 1) seed_lsp = 1;
+    if (seed_lsp > 128) seed_lsp = 128;
+    if (seed_ltp < 1) seed_ltp = 1;
+    if (seed_ltp > 128) seed_ltp = 128;
+    if (seed_n < 0) seed_n = 0;
+    if (seed_n > 255) seed_n = 255;
+
+    n_cand[0] = seed_n; n_cand[1] = (seed_n > 0) ? seed_n - 1 : seed_n; n_cand[2] = (seed_n < 255) ? seed_n + 1 : seed_n;
+    lsp_cand[0] = seed_lsp; lsp_cand[1] = (seed_lsp > 1) ? seed_lsp - 1 : seed_lsp; lsp_cand[2] = (seed_lsp < 128) ? seed_lsp + 1 : seed_lsp;
+    ltp_cand[0] = seed_ltp; ltp_cand[1] = (seed_ltp > 1) ? seed_ltp - 1 : seed_ltp; ltp_cand[2] = (seed_ltp < 128) ? seed_ltp + 1 : seed_ltp;
+
+    memset(&best, 0, sizeof(best));
+
+    for (int ni = 0; ni < 3; ni++) {
+        for (int li = 0; li < 3; li++) {
+            for (int ti = 0; ti < 3; ti++) {
+                int n = n_cand[ni];
+                int lsp = lsp_cand[li];
+                int ltp = ltp_cand[ti];
+                int alpha = ((int) lsp + 15) / 16 * 17;
+                int beta = alpha + (((int) ltp + 15) / 16) * 17;
+                int training_start = 187 + beta;
+                int training_bits = (((int) n + 1) / 2) * 17;
+                int crc_start = training_start + training_bits;
+                int need_bits = crc_start + 18;
+                int edits = 0;
+                v90_dil_desc_t desc;
+                v90_dil_analysis_t analysis;
+
+                if (need_bits > avail_bits || need_bits < 206)
+                    continue;
+
+                memcpy(work, base, (size_t) avail_bits + 1U);
+
+                for (int b = 0; b < 17 && b < avail_bits; b++) {
+                    if (work[b] != '1') edits++;
+                    work[b] = '1';
+                }
+                if (17 < avail_bits) { if (work[17] != '0') edits++; work[17] = '0'; }
+                for (int b = 26; b <= 33 && b < avail_bits; b++) { if (work[b] != '0') edits++; work[b] = '0'; }
+                if (34 < avail_bits) { if (work[34] != '0') edits++; work[34] = '0'; }
+                if (42 < avail_bits) { if (work[42] != '0') edits++; work[42] = '0'; }
+                if (50 < avail_bits) { if (work[50] != '0') edits++; work[50] = '0'; }
+
+                for (int b = 17; b <= crc_start + 17 && b < avail_bits; b += 17) {
+                    if (work[b] != '0') edits++;
+                    work[b] = '0';
+                }
+
+                set_bits_le_chars(work, avail_bits, 18, 8, (uint32_t) n);
+                set_bits_le_chars(work, avail_bits, 35, 7, (uint32_t) (lsp - 1));
+                set_bits_le_chars(work, avail_bits, 43, 7, (uint32_t) (ltp - 1));
+
+                if (!chars_to_packed_bits(work, avail_bits, packed, (int) sizeof(packed)))
+                    continue;
+                {
+                    uint16_t crc = aux_crc16_bits(packed, crc_start);
+                    set_bits_le_chars(work, avail_bits, crc_start + 1, 16, crc);
+                    if (crc_start + 17 < avail_bits) {
+                        if (work[crc_start + 17] != '0') edits++;
+                        work[crc_start + 17] = '0';
+                    }
+                }
+
+                if (!chars_to_packed_bits(work, avail_bits, packed, (int) sizeof(packed)))
+                    continue;
+                if (!v90_parse_dil_descriptor(&desc, packed, avail_bits))
+                    continue;
+                if (!v90_analyse_dil_descriptor(&desc, &analysis))
+                    continue;
+
+                if (!found
+                    || edits < best_edits
+                    || (edits == best_edits && analysis.impairment_score < best.analysis.impairment_score)) {
+                    found = true;
+                    best.found = true;
+                    best.bit_offset = offset;
+                    best.invert_bits = false;
+                    best.desc = desc;
+                    best.analysis = analysis;
+                    best_edits = edits;
+                }
+            }
+        }
+    }
+
+    if (!found)
+        return false;
+    if (edits_out)
+        *edits_out = best_edits;
     *out = best;
     return true;
 }
@@ -8146,57 +8313,227 @@ static void collect_v92_phase3_event(call_log_t *log,
                                         ja_soft_candidate_seen = true;
 
                                         if (!obs.ja_dil_seen && final_m.crc_hd <= 2) {
-                                            int try_end = best_p3_soft.bit_offset + 512;
-                                            if (try_end > max_copy)
-                                                try_end = max_copy;
-                                            for (int p = best_p3_soft.bit_offset + 1; p < try_end; p++) {
-                                                int rel = p - best_p3_soft.bit_offset;
-                                                char old = working_bits[p];
+                                            int soft_off = best_p3_soft.bit_offset;
+                                            int solve_edits = -1;
+                                            v90_aux_dil_hit_t solved_hit;
+                                            int n = final_m.n;
+                                            int lsp = final_m.lsp;
+                                            int ltp = final_m.ltp;
+                                            int alpha;
+                                            int beta;
+                                            int training_start;
+                                            int training_bits;
+                                            int crc_start;
+                                            int positions[32];
+                                            int pos_count = 0;
+                                            int pair_count = 0;
 
-                                                if (old != '0' && old != '1')
-                                                    continue;
-                                                if ((rel % 17) == 0)
-                                                    continue;
-                                                working_bits[p] = (old == '1') ? '0' : '1';
-                                                memset(&repaired_hit, 0, sizeof(repaired_hit));
-                                                if (find_v90_dil_in_aux_str(working_bits, max_copy, &repaired_hit)) {
-                                                    int hscore = repaired_hit.analysis.unique_train_u * 100
-                                                               + repaired_hit.analysis.used_uchords * 40
-                                                               - repaired_hit.analysis.impairment_score * 20;
-                                                    int bit_len = v90_dil_descriptor_bit_len(&repaired_hit.desc);
-                                                    int bit_to_sample = (repaired_hit.bit_offset * 5 + 2) / 4;
-                                                    int base_sample = (p3_start_sample >= 0)
-                                                                      ? p3_start_sample
-                                                                      : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
+                                            memset(&solved_hit, 0, sizeof(solved_hit));
+                                            if (solve_v90_dil_at_offset(working_bits,
+                                                                        max_copy,
+                                                                        soft_off,
+                                                                        &solved_hit,
+                                                                        &solve_edits)) {
+                                                int bit_len = v90_dil_descriptor_bit_len(&solved_hit.desc);
+                                                int bit_to_sample = (solved_hit.bit_offset * 5 + 2) / 4;
+                                                int base_sample = (p3_start_sample >= 0)
+                                                                  ? p3_start_sample
+                                                                  : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
 
-                                                    if (bit_len > 0 && base_sample >= 0) {
-                                                        obs.ja_dil_seen = true;
-                                                        ja_dil_source = "p3_aux_crc1";
-                                                        obs.ja_dil_sample = base_sample + bit_to_sample;
-                                                        obs.ja_dil_bits = bit_len;
-                                                        obs.ja_dil_n = repaired_hit.desc.n;
-                                                        obs.ja_dil_lsp = repaired_hit.desc.lsp;
-                                                        obs.ja_dil_ltp = repaired_hit.desc.ltp;
-                                                        obs.ja_dil_unique_train_u = repaired_hit.analysis.unique_train_u;
-                                                        obs.ja_dil_uchords = repaired_hit.analysis.used_uchords;
-                                                        obs.ja_dil_impairment = repaired_hit.analysis.impairment_score;
-                                                        if (ja_dbg) {
-                                                            fprintf(stderr,
-                                                                    "[JA-P3-CRC] hard_lock_1bit score=%d flip_rel=%d hit_off=%d n=%d lsp=%d ltp=%d\n",
-                                                                    hscore,
-                                                                    rel,
-                                                                    repaired_hit.bit_offset,
-                                                                    repaired_hit.desc.n,
-                                                                    repaired_hit.desc.lsp,
-                                                                    repaired_hit.desc.ltp);
+                                                if (bit_len > 0 && base_sample >= 0) {
+                                                    obs.ja_dil_seen = true;
+                                                    ja_dil_source = "p3_aux_solve";
+                                                    obs.ja_dil_sample = base_sample + bit_to_sample;
+                                                    obs.ja_dil_bits = bit_len;
+                                                    obs.ja_dil_n = solved_hit.desc.n;
+                                                    obs.ja_dil_lsp = solved_hit.desc.lsp;
+                                                    obs.ja_dil_ltp = solved_hit.desc.ltp;
+                                                    obs.ja_dil_unique_train_u = solved_hit.analysis.unique_train_u;
+                                                    obs.ja_dil_uchords = solved_hit.analysis.used_uchords;
+                                                    obs.ja_dil_impairment = solved_hit.analysis.impairment_score;
+                                                    if (ja_dbg) {
+                                                        fprintf(stderr,
+                                                                "[JA-P3-SOLVE] hard_lock edits=%d off=%d n=%d lsp=%d ltp=%d crc_hd=%d\n",
+                                                                solve_edits,
+                                                                soft_off,
+                                                                solved_hit.desc.n,
+                                                                solved_hit.desc.lsp,
+                                                                solved_hit.desc.ltp,
+                                                                final_m.crc_hd);
+                                                    }
+                                                }
+                                            }
+
+                                            if (obs.ja_dil_seen)
+                                                goto ja_solved_done;
+
+                                            if (lsp < 1) lsp = 1;
+                                            if (ltp < 1) ltp = 1;
+                                            if (lsp > 128) lsp = 128;
+                                            if (ltp > 128) ltp = 128;
+                                            if (n < 0) n = 0;
+                                            if (n > 255) n = 255;
+                                            alpha = ((int) lsp + 15) / 16 * 17;
+                                            beta = alpha + (((int) ltp + 15) / 16) * 17;
+                                            training_start = 187 + beta;
+                                            training_bits = (((int) n + 1) / 2) * 17;
+                                            crc_start = training_start + training_bits;
+
+                                            /* Build a focused flip set:
+                                             * 1) CRC field bits
+                                             * 2) bits immediately before CRC field
+                                             * 3) key descriptor/control window
+                                             */
+                                            for (int p = soft_off + crc_start + 1;
+                                                 p <= soft_off + crc_start + 16 && p < max_copy;
+                                                 p++) {
+                                                int rel = p - soft_off;
+                                                if (rel < 0 || (rel % 17) == 0)
+                                                    continue;
+                                                if (pos_count < (int) (sizeof(positions) / sizeof(positions[0])))
+                                                    positions[pos_count++] = p;
+                                            }
+                                            for (int p = soft_off + crc_start - 16;
+                                                 p < soft_off + crc_start && p < max_copy;
+                                                 p++) {
+                                                int rel = p - soft_off;
+                                                bool dup = false;
+                                                if (p <= soft_off || rel < 0 || (rel % 17) == 0)
+                                                    continue;
+                                                for (int i = 0; i < pos_count; i++) {
+                                                    if (positions[i] == p) {
+                                                        dup = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if (!dup && pos_count < (int) (sizeof(positions) / sizeof(positions[0])))
+                                                    positions[pos_count++] = p;
+                                            }
+                                            for (int p = soft_off + 24; p < soft_off + 41 && p < max_copy; p++) {
+                                                int rel = p - soft_off;
+                                                bool dup = false;
+                                                if (rel < 0 || (rel % 17) == 0)
+                                                    continue;
+                                                for (int i = 0; i < pos_count; i++) {
+                                                    if (positions[i] == p) {
+                                                        dup = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if (!dup && pos_count < (int) (sizeof(positions) / sizeof(positions[0])))
+                                                    positions[pos_count++] = p;
+                                            }
+                                            pair_count = pos_count;
+                                            if (pair_count > 24)
+                                                pair_count = 24;
+
+                                            if (getenv("VPCM_JA_DEEP_HARD")
+                                                && getenv("VPCM_JA_DEEP_HARD")[0]
+                                                && getenv("VPCM_JA_DEEP_HARD")[0] != '0') {
+                                                /* First try single-bit flips on focused set. */
+                                                for (int i = 0; i < pos_count && !obs.ja_dil_seen; i++) {
+                                                    int p = positions[i];
+                                                    int rel = p - soft_off;
+                                                    char old = working_bits[p];
+
+                                                    if (old != '0' && old != '1')
+                                                        continue;
+                                                    working_bits[p] = (old == '1') ? '0' : '1';
+                                                    memset(&repaired_hit, 0, sizeof(repaired_hit));
+                                                    if (find_v90_dil_in_aux_str(working_bits, max_copy, &repaired_hit)) {
+                                                        int hscore = repaired_hit.analysis.unique_train_u * 100
+                                                                   + repaired_hit.analysis.used_uchords * 40
+                                                                   - repaired_hit.analysis.impairment_score * 20;
+                                                        int bit_len = v90_dil_descriptor_bit_len(&repaired_hit.desc);
+                                                        int bit_to_sample = (repaired_hit.bit_offset * 5 + 2) / 4;
+                                                        int base_sample = (p3_start_sample >= 0)
+                                                                          ? p3_start_sample
+                                                                          : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
+
+                                                        if (bit_len > 0 && base_sample >= 0) {
+                                                            obs.ja_dil_seen = true;
+                                                            ja_dil_source = "p3_aux_crc1";
+                                                            obs.ja_dil_sample = base_sample + bit_to_sample;
+                                                            obs.ja_dil_bits = bit_len;
+                                                            obs.ja_dil_n = repaired_hit.desc.n;
+                                                            obs.ja_dil_lsp = repaired_hit.desc.lsp;
+                                                            obs.ja_dil_ltp = repaired_hit.desc.ltp;
+                                                            obs.ja_dil_unique_train_u = repaired_hit.analysis.unique_train_u;
+                                                            obs.ja_dil_uchords = repaired_hit.analysis.used_uchords;
+                                                            obs.ja_dil_impairment = repaired_hit.analysis.impairment_score;
+                                                            if (ja_dbg) {
+                                                                fprintf(stderr,
+                                                                        "[JA-P3-CRC] hard_lock_1bit score=%d flip_rel=%d hit_off=%d n=%d lsp=%d ltp=%d\n",
+                                                                        hscore,
+                                                                        rel,
+                                                                        repaired_hit.bit_offset,
+                                                                        repaired_hit.desc.n,
+                                                                        repaired_hit.desc.lsp,
+                                                                        repaired_hit.desc.ltp);
+                                                            }
+                                                        }
+                                                    }
+                                                    working_bits[p] = old;
+                                                }
+
+                                                /* Then try 2-bit combinations in the same focused set. */
+                                                if (final_m.crc_hd <= 1) {
+                                                    for (int i = 0; i < pair_count && !obs.ja_dil_seen; i++) {
+                                                        for (int j = i + 1; j < pair_count && !obs.ja_dil_seen; j++) {
+                                                            int p1 = positions[i];
+                                                            int p2 = positions[j];
+                                                            int rel1 = p1 - soft_off;
+                                                            int rel2 = p2 - soft_off;
+                                                            char o1 = working_bits[p1];
+                                                            char o2 = working_bits[p2];
+
+                                                            if ((o1 != '0' && o1 != '1') || (o2 != '0' && o2 != '1'))
+                                                                continue;
+                                                            working_bits[p1] = (o1 == '1') ? '0' : '1';
+                                                            working_bits[p2] = (o2 == '1') ? '0' : '1';
+                                                            memset(&repaired_hit, 0, sizeof(repaired_hit));
+                                                            if (find_v90_dil_in_aux_str(working_bits, max_copy, &repaired_hit)) {
+                                                                int hscore = repaired_hit.analysis.unique_train_u * 100
+                                                                           + repaired_hit.analysis.used_uchords * 40
+                                                                           - repaired_hit.analysis.impairment_score * 20;
+                                                                int bit_len = v90_dil_descriptor_bit_len(&repaired_hit.desc);
+                                                                int bit_to_sample = (repaired_hit.bit_offset * 5 + 2) / 4;
+                                                                int base_sample = (p3_start_sample >= 0)
+                                                                                  ? p3_start_sample
+                                                                                  : ((obs.tx_ja_sample >= 0) ? obs.tx_ja_sample : res->info1_sample);
+
+                                                                if (bit_len > 0 && base_sample >= 0) {
+                                                                    obs.ja_dil_seen = true;
+                                                                    ja_dil_source = "p3_aux_crc2";
+                                                                    obs.ja_dil_sample = base_sample + bit_to_sample;
+                                                                    obs.ja_dil_bits = bit_len;
+                                                                    obs.ja_dil_n = repaired_hit.desc.n;
+                                                                    obs.ja_dil_lsp = repaired_hit.desc.lsp;
+                                                                    obs.ja_dil_ltp = repaired_hit.desc.ltp;
+                                                                    obs.ja_dil_unique_train_u = repaired_hit.analysis.unique_train_u;
+                                                                    obs.ja_dil_uchords = repaired_hit.analysis.used_uchords;
+                                                                    obs.ja_dil_impairment = repaired_hit.analysis.impairment_score;
+                                                                    if (ja_dbg) {
+                                                                        fprintf(stderr,
+                                                                                "[JA-P3-CRC] hard_lock_2bit score=%d flip_rel=(%d,%d) hit_off=%d n=%d lsp=%d ltp=%d\n",
+                                                                                hscore,
+                                                                                rel1,
+                                                                                rel2,
+                                                                                repaired_hit.bit_offset,
+                                                                                repaired_hit.desc.n,
+                                                                                repaired_hit.desc.lsp,
+                                                                                repaired_hit.desc.ltp);
+                                                                    }
+                                                                }
+                                                            }
+                                                            working_bits[p1] = o1;
+                                                            working_bits[p2] = o2;
                                                         }
                                                     }
                                                 }
-                                                working_bits[p] = old;
-                                                if (obs.ja_dil_seen)
-                                                    break;
                                             }
                                         }
+ja_solved_done:;
                                     }
                                 }
                             }
