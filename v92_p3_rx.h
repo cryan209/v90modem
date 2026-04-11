@@ -111,6 +111,14 @@ typedef struct {
     uint8_t  p6_hyp_max[12];
     int      ru_hyp;         /* active Ru hypothesis index, or -1 */
     int      ur_hyp;         /* active uR hypothesis index, or -1 */
+    /* RU1 hunt diagnostics (best candidate seen before lock). */
+    int      hunt_best_run;
+    int      hunt_best_hyp;
+    int      hunt_best_start;
+    int      hunt_best_lu_ok;
+    int      hunt_best_mean_x10;
+    int      hunt_best_range;
+    int      hunt_best_std_x10;
 
     /* ------- phase 3 sample anchors ------- */
     int      ru1_start;

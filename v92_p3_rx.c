@@ -178,6 +178,47 @@ static bool p6_hyp_lu_ok(const v92_p3_rx_t *rx, int h)
             && stddev <= P6_LU_STD_MAX);
 }
 
+static bool p6_hyp_lu_stats(const v92_p3_rx_t *rx,
+                            int h,
+                            double *mean_out,
+                            int *range_out,
+                            double *std_out,
+                            bool *ok_out)
+{
+    int run;
+    double mean;
+    int range;
+    double var;
+    double stddev;
+    bool ok;
+
+    if (!rx || h < 0 || h >= 12)
+        return false;
+    run = rx->p6_hyp_run[h];
+    if (run <= 0)
+        return false;
+
+    mean = (double) rx->p6_hyp_sum[h] / (double) run;
+    range = (int) rx->p6_hyp_max[h] - (int) rx->p6_hyp_min[h];
+    var = (double) rx->p6_hyp_sumsq[h] / (double) run - mean * mean;
+    if (var < 0.0)
+        var = 0.0;
+    stddev = sqrt(var);
+    ok = (mean >= P6_LU_MEAN_MIN
+          && range <= P6_LU_RANGE_MAX
+          && stddev <= P6_LU_STD_MAX);
+
+    if (mean_out)
+        *mean_out = mean;
+    if (range_out)
+        *range_out = range;
+    if (std_out)
+        *std_out = stddev;
+    if (ok_out)
+        *ok_out = ok;
+    return true;
+}
+
 static int p6_best_hyp_run(const v92_p3_rx_t *rx, bool ru_pol, int min_run, bool require_lu)
 {
     int best_h = -1;
@@ -214,6 +255,13 @@ static void p6_reset(v92_p3_rx_t *rx)
     }
     rx->ru_hyp = -1;
     rx->ur_hyp = -1;
+    rx->hunt_best_run = 0;
+    rx->hunt_best_hyp = -1;
+    rx->hunt_best_start = -1;
+    rx->hunt_best_lu_ok = 0;
+    rx->hunt_best_mean_x10 = 0;
+    rx->hunt_best_range = 0;
+    rx->hunt_best_std_x10 = 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -922,6 +970,28 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         int h_ru = p6_best_hyp_run(rx, true, P6_LOCK_MIN, true);
         int h_ur = p6_best_hyp_run(rx, false, P6_LOCK_MIN, true);
         int best_h = -1;
+        int best_any_h = -1;
+        int best_any_run = 0;
+        for (int h = 0; h < 12; h++) {
+            if (rx->p6_hyp_run[h] > best_any_run) {
+                best_any_run = rx->p6_hyp_run[h];
+                best_any_h = h;
+            }
+        }
+        if (best_any_h >= 0 && best_any_run > rx->hunt_best_run) {
+            double mean = 0.0;
+            double stdv = 0.0;
+            int range = 0;
+            bool lu_ok = false;
+            (void) p6_hyp_lu_stats(rx, best_any_h, &mean, &range, &stdv, &lu_ok);
+            rx->hunt_best_run = best_any_run;
+            rx->hunt_best_hyp = best_any_h;
+            rx->hunt_best_start = sample_index - best_any_run + 1;
+            rx->hunt_best_lu_ok = lu_ok ? 1 : 0;
+            rx->hunt_best_mean_x10 = (int) lround(mean * 10.0);
+            rx->hunt_best_range = range;
+            rx->hunt_best_std_x10 = (int) lround(stdv * 10.0);
+        }
 
         if (h_ru >= 0)
             best_h = h_ru;

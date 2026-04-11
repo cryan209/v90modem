@@ -7790,6 +7790,13 @@ static void collect_v92_phase3_event(call_log_t *log,
     bool p3rx_ja_soft = false;
     int p3rx_ja_bits = 0;
     int p3rx_ja_sample = -1;
+    int p3rx_hunt_best_run = 0;
+    int p3rx_hunt_best_hyp = -1;
+    int p3rx_hunt_best_start = -1;
+    int p3rx_hunt_best_lu_ok = 0;
+    int p3rx_hunt_best_mean_x10 = 0;
+    int p3rx_hunt_best_range = 0;
+    int p3rx_hunt_best_std_x10 = 0;
 
     if (!log || !res)
         return;
@@ -8124,6 +8131,13 @@ static void collect_v92_phase3_event(call_log_t *log,
                                             &p3rx_reject_m0,
                                             &p3rx_reject_m1);
         p3rx_reject_str = v92_p3_rx_reject_name(p3rx_reject);
+        p3rx_hunt_best_run = p3rx.hunt_best_run;
+        p3rx_hunt_best_hyp = p3rx.hunt_best_hyp;
+        p3rx_hunt_best_start = p3rx.hunt_best_start;
+        p3rx_hunt_best_lu_ok = p3rx.hunt_best_lu_ok;
+        p3rx_hunt_best_mean_x10 = p3rx.hunt_best_mean_x10;
+        p3rx_hunt_best_range = p3rx.hunt_best_range;
+        p3rx_hunt_best_std_x10 = p3rx.hunt_best_std_x10;
 
         if (v92_p3_rx_ja_ok(&p3rx))
             p3rx_ja = v92_p3_rx_get_ja(&p3rx);
@@ -9582,6 +9596,23 @@ ja_solved_done:;
     appendf(detail, sizeof(detail), " p3rx_ja_bits=%s", p3rx_ja_bits > 0 ? "" : "n/a");
     if (p3rx_ja_bits > 0)
         appendf(detail, sizeof(detail), "%d", p3rx_ja_bits);
+    appendf(detail, sizeof(detail), " p3rx_hunt_best_run=%d", p3rx_hunt_best_run);
+    appendf(detail, sizeof(detail), " p3rx_hunt_best_hyp=%s", p3rx_hunt_best_hyp >= 0 ? "" : "n/a");
+    if (p3rx_hunt_best_hyp >= 0)
+        appendf(detail, sizeof(detail), "%d", p3rx_hunt_best_hyp);
+    appendf(detail, sizeof(detail), " p3rx_hunt_best_ms=%s", p3rx_hunt_best_start >= 0 ? "" : "n/a");
+    if (p3rx_hunt_best_start >= 0)
+        appendf(detail, sizeof(detail), "%.1f", sample_to_ms(p3rx_hunt_best_start, 8000));
+    appendf(detail, sizeof(detail), " p3rx_hunt_lu_ok=%u", p3rx_hunt_best_lu_ok ? 1U : 0U);
+    appendf(detail, sizeof(detail), " p3rx_hunt_mean=%s", p3rx_hunt_best_run > 0 ? "" : "n/a");
+    if (p3rx_hunt_best_run > 0)
+        appendf(detail, sizeof(detail), "%.1f", (double) p3rx_hunt_best_mean_x10 / 10.0);
+    appendf(detail, sizeof(detail), " p3rx_hunt_range=%s", p3rx_hunt_best_run > 0 ? "" : "n/a");
+    if (p3rx_hunt_best_run > 0)
+        appendf(detail, sizeof(detail), "%d", p3rx_hunt_best_range);
+    appendf(detail, sizeof(detail), " p3rx_hunt_std=%s", p3rx_hunt_best_run > 0 ? "" : "n/a");
+    if (p3rx_hunt_best_run > 0)
+        appendf(detail, sizeof(detail), "%.1f", (double) p3rx_hunt_best_std_x10 / 10.0);
     call_log_append(log,
                     event_sample >= 0 ? event_sample : res->info0_sample,
                     0,
