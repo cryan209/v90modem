@@ -15096,6 +15096,82 @@ static void collect_stream_call_log(call_log_t *log,
                                          total_samples);
     }
 
+    /*
+     * Fallback Ja search when Phase 1 detected V.90/V.92 capability but
+     * SpanDSP V.34 Phase 2 decode failed (no answerer/caller results).
+     * Use phase2_end_sample as a rough anchor and scan a wide window.
+     */
+    /* Check whether V.34 decode produced usable Phase 3 timing.
+     * have_answerer/have_caller may be true even when V.34 found only
+     * the carrier tone but decoded no INFO frames or Phase 3 markers. */
+    {
+        bool v34_has_phase3 = false;
+        if (have_answerer && (answerer.info0_seen || answerer.phase3_seen))
+            v34_has_phase3 = true;
+        if (have_caller && (caller.info0_seen || caller.phase3_seen))
+            v34_has_phase3 = true;
+
+    if (!suppress_v90_phase2 && !v34_has_phase3
+        && have_phase12 && (phase12.v92_capable || phase12.v90_capable)) {
+        ja_dil_decode_t ja_dil;
+        ja_dil_search_params_t fb;
+        int search_start = phase12.phase2_window_known && phase12.phase2_end_sample > 0
+                         ? phase12.phase2_end_sample
+                         : (earliest_phase2_sample > 0 ? earliest_phase2_sample : 0);
+        int search_end = total_codewords - 206;
+
+        if (search_end > search_start + 80000)
+            search_end = search_start + 80000;   /* cap at 10 s past phase2 */
+        fprintf(stderr, "[ja-fallback] entered: start=%d end=%d total_cw=%d v92=%d v90=%d\n",
+                search_start, search_end, total_codewords,
+                phase12.v92_capable, phase12.v90_capable);
+        if (search_end > search_start) {
+            memset(&fb, 0, sizeof(fb));
+            fb.search_start = search_start;
+            fb.search_end = search_end;
+            fb.tx_ja_sample = -1;
+            fb.u_info = phase12.inferred_u_info;
+            fb.calling_party = false;
+            fb.linear_samples = linear_samples;
+            fb.linear_sample_count = total_samples;
+            bool found = v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_dil);
+            fprintf(stderr, "[ja-fallback] search result: found=%d ok=%d soft=%d score=%d start=%d\n",
+                    found, ja_dil.ok, ja_dil.soft_lock, ja_dil.soft_score, ja_dil.start_sample);
+            if (found && ja_dil.ok) {
+                char detail[256];
+
+                snprintf(detail, sizeof(detail),
+                         "role=fallback n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u source=p12_fallback",
+                         (unsigned) ja_dil.desc.n,
+                         (unsigned) ja_dil.desc.lsp,
+                         (unsigned) ja_dil.desc.ltp,
+                         (unsigned) ja_dil.analysis.unique_train_u,
+                         (unsigned) ja_dil.analysis.used_uchords,
+                         (unsigned) ja_dil.analysis.impairment_score);
+                call_log_append(log,
+                                ja_dil.start_sample,
+                                0,
+                                phase12.v92_capable ? "V.92 Phase 3" : "V.90",
+                                "Ja/DIL descriptor decoded",
+                                detail);
+            } else if (found && ja_dil.soft_lock) {
+                char detail[256];
+                snprintf(detail, sizeof(detail),
+                         "role=fallback soft_lock score=%d start=%d invert=%d sync_hd=%d f17_viol=%d zero_viol=%d crc_hd=%d source=p12_fallback",
+                         ja_dil.soft_score, ja_dil.start_sample, ja_dil.invert_sign,
+                         ja_dil.soft_sync_hd, ja_dil.soft_frame17_viol,
+                         ja_dil.soft_zero_viol, ja_dil.soft_crc_hd);
+                call_log_append(log,
+                                ja_dil.start_sample,
+                                0,
+                                phase12.v92_capable ? "V.92 Phase 3" : "V.90",
+                                "Ja/DIL soft-lock (fallback)",
+                                detail);
+            }
+        }
+    }
+    } /* end v34_has_phase3 check block */
+
     call_log_sort(log);
     call_log_prune_v8_after_phase2(log);
     call_log_sort(log);
@@ -18580,6 +18656,48 @@ static void run_decode_stage_b(const char *label,
                                              answerer_ptr, caller_ptr,
                                              &post_phase3)) {
                 print_post_phase3_decode(&post_phase3);
+            }
+        }
+
+        /*
+         * Fallback: Phase 1 says V.90/V.92 but V.34 decode produced no
+         * usable Phase 3 timing.  Scan a wide window from phase2_end.
+         */
+        {
+            bool v34_has_p3 = false;
+            if (answerer_ptr && (answerer_ptr->info0_seen || answerer_ptr->phase3_seen))
+                v34_has_p3 = true;
+            if (caller_ptr && (caller_ptr->info0_seen || caller_ptr->phase3_seen))
+                v34_has_p3 = true;
+
+            if (!v34_has_p3
+                && have_phase12 && p12_ptr
+                && (p12_ptr->v92_capable || p12_ptr->v90_capable)) {
+                ja_dil_decode_t ja_fb;
+                ja_dil_search_params_t fb;
+                int fb_start = p12_ptr->phase2_window_known && p12_ptr->phase2_end_sample > 0
+                             ? p12_ptr->phase2_end_sample
+                             : (p12_ptr->info0.detected ? p12_ptr->info0.sample_offset
+                                : (p12_ptr->info1.detected ? p12_ptr->info1.sample_offset : 0));
+                int fb_end = total_codewords - 206;
+
+                if (fb_end > fb_start + 80000)
+                    fb_end = fb_start + 80000;
+                if (fb_end > fb_start) {
+                    memset(&fb, 0, sizeof(fb));
+                    fb.search_start = fb_start;
+                    fb.search_end = fb_end;
+                    fb.tx_ja_sample = -1;
+                    fb.u_info = p12_ptr->inferred_u_info;
+                    fb.calling_party = false;
+                    fb.linear_samples = linear_samples;
+                    fb.linear_sample_count = total_samples;
+                    if (v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_fb)
+                        && ja_fb.ok) {
+                        printf("\n=== Ja/DIL (Phase 1 fallback) ===\n");
+                        print_ja_dil_decode(&ja_fb);
+                    }
+                }
             }
         }
     }
