@@ -1126,6 +1126,8 @@ bool v92_ja_dil_search(const uint8_t *codewords,
             }
             if (!v92_parse_ja_descriptor_strict(&desc, packed_bits, bit_count, &parse_meta))
                 continue;
+            if (params->require_v92 && !parse_meta.is_v92)
+                continue;
             if (parse_meta.is_v92)
                 parse_v92_ok++;
             parse_ok++;

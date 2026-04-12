@@ -66,6 +66,13 @@ typedef struct {
      */
     const int16_t *linear_samples;
     int linear_sample_count;
+
+    /*
+     * When true, accept only strict V.92 Table 20 parses as hard hits.
+     * This is useful when surrounding Phase 1/2 evidence already says the
+     * call is using V.92 and a V.90-shaped fallback would be misleading.
+     */
+    bool require_v92;
 } ja_dil_search_params_t;
 
 /*

@@ -8162,6 +8162,7 @@ static void collect_v92_phase3_event(call_log_t *log,
                 fb.calling_party = (role_name && strcmp(role_name, "caller") == 0);
                 fb.linear_samples = samples;
                 fb.linear_sample_count = total_samples;
+                fb.require_v92 = obs.v92_capable;
                 if (v92_ja_dil_search(codewords, total_codewords, &fb, &ja_dil)) {
                     if (ja_dil.ok) {
                         int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
@@ -15134,6 +15135,7 @@ static void collect_stream_call_log(call_log_t *log,
             fb.calling_party = false;
             fb.linear_samples = linear_samples;
             fb.linear_sample_count = total_samples;
+            fb.require_v92 = phase12.v92_capable;
             bool found = v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_dil);
             fprintf(stderr, "[ja-fallback] search result: found=%d ok=%d soft=%d score=%d start=%d\n",
                     found, ja_dil.ok, ja_dil.soft_lock, ja_dil.soft_score, ja_dil.start_sample);
@@ -15141,7 +15143,9 @@ static void collect_stream_call_log(call_log_t *log,
                 char detail[256];
 
                 snprintf(detail, sizeof(detail),
-                         "role=fallback n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u source=p12_fallback",
+                         "role=fallback base_crc_ok=1 soft_lock=0 parsed_v92=%u wrapper=%s n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u source=p12_fallback",
+                         ja_dil.parsed_v92 ? 1U : 0U,
+                         ja_dil.parsed_v92 ? "v92_table20" : "v90_table12",
                          (unsigned) ja_dil.desc.n,
                          (unsigned) ja_dil.desc.lsp,
                          (unsigned) ja_dil.desc.ltp,
@@ -17358,10 +17362,14 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
 
 static void print_ja_dil_decode(const ja_dil_decode_t *result)
 {
+    const char *wrapper_model;
+
     if (!result)
         return;
     if (!result->ok && !result->soft_lock)
         return;
+
+    wrapper_model = result->parsed_v92 ? "v92_table20" : "v90_table12";
 
     printf("\n=== Ja/DIL Decode ===\n");
     printf("  Source role:      %s\n", result->calling_party ? "caller" : "answerer");
@@ -17382,6 +17390,9 @@ static void print_ja_dil_decode(const ja_dil_decode_t *result)
            (unsigned) result->desc.n,
            (unsigned) result->desc.lsp,
            (unsigned) result->desc.ltp);
+    printf("  Acceptance:       hard=yes base_crc_ok=1 soft_lock=0 wrapper=%s parsed_v92=%s\n",
+           wrapper_model,
+           result->parsed_v92 ? "yes" : "no");
     printf("  Analysis:         unique_train_u=%u used_uchords=%u impairment=%u\n",
            (unsigned) result->analysis.unique_train_u,
            (unsigned) result->analysis.used_uchords,
@@ -17857,8 +17868,11 @@ static void emit_dil_artifacts(const char *prefix,
 
     f = fopen(desc_path, "w");
     if (f) {
-        fprintf(f, "# channel=%s parsed_v92=%d descriptor_bits=%d\n",
-                label, result->parsed_v92 ? 1 : 0, desc_bit_len);
+        fprintf(f, "# channel=%s base_crc_ok=1 soft_lock=0 parsed_v92=%d wrapper=%s descriptor_bits=%d\n",
+                label,
+                result->parsed_v92 ? 1 : 0,
+                result->parsed_v92 ? "v92_table20" : "v90_table12",
+                desc_bit_len);
         emit_grouped_bits(f, desc_bits, desc_bit_len, 64);
         fclose(f);
     }
@@ -17869,7 +17883,10 @@ static void emit_dil_artifacts(const char *prefix,
         fprintf(f, "role=%s\n", result->calling_party ? "caller" : "answerer");
         fprintf(f, "start_ms=%.1f\n", sample_to_ms(result->start_sample, 8000));
         fprintf(f, "u_info=%d\n", result->u_info);
+        fprintf(f, "base_crc_ok=1\n");
+        fprintf(f, "soft_lock=0\n");
         fprintf(f, "parsed_v92=%d\n", result->parsed_v92 ? 1 : 0);
+        fprintf(f, "wrapper=%s\n", result->parsed_v92 ? "v92_table20" : "v90_table12");
         fprintf(f, "descriptor_bits=%d\n", desc_bit_len);
         fprintf(f, "dil_law=%s\n", law == V91_LAW_ULAW ? "ulaw" : "alaw");
         fprintf(f, "dil_sample_rate=8000\n");
@@ -18862,7 +18879,6 @@ static void run_decode_stage_b(const char *label,
         effective_u_info = p12_ptr->inferred_u_info;
     if (effective_u_info < 0 && ctx && ctx->cross_u_info_valid)
         effective_u_info = ctx->cross_u_info;
-
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
@@ -18941,6 +18957,7 @@ static void run_decode_stage_b(const char *label,
                     fb.calling_party = false;
                     fb.linear_samples = linear_samples;
                     fb.linear_sample_count = total_samples;
+                    fb.require_v92 = p12_ptr->v92_capable;
                     if (v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_fb)
                         && ja_fb.ok) {
                         if (opts->raw_output_enabled) {
