@@ -366,6 +366,7 @@ static void vpcm_log_data_sample_named(const char *h1,
 static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int len);
 static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
+static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -472,6 +473,140 @@ static void vpcm_test_init_default_ja_profile(v90_dil_desc_t *desc)
 
         desc->train_u[i] = (uint8_t) ((uchord << 4) | clean_training_offsets[variant]);
     }
+}
+
+static int vpcm_test_dil_uchord_index(int training_ucode)
+{
+    int idx = training_ucode >> 4;
+
+    if (idx < 0)
+        idx = 0;
+    if (idx > 7)
+        idx = 7;
+    return idx;
+}
+
+static int vpcm_test_dil_cycle_len(const v90_dil_desc_t *desc)
+{
+    int total = 0;
+
+    if (!desc)
+        return 0;
+    for (int seg = 0; seg < desc->n; seg++) {
+        int training_ucode = desc->train_u[seg] & 0x7F;
+        int uchord_idx = vpcm_test_dil_uchord_index(training_ucode);
+        total += ((int) (desc->h[uchord_idx] & 0x7F) + 1) * 6;
+    }
+    return total;
+}
+
+static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
+{
+    v90_dil_desc_t profile;
+    v90_state_t *tx = NULL;
+    int cycle_len;
+    int16_t *expected = NULL;
+    int16_t *actual = NULL;
+    int pos = 0;
+    int phase_spin = 0;
+    int post_s_spin = 0;
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    int16_t throwaway;
+
+    vpcm_log("Test: V.90 DIL generation matches 8.4.1 (%s)", law_name);
+
+    vpcm_test_init_default_ja_profile(&profile);
+    cycle_len = vpcm_test_dil_cycle_len(&profile);
+    if (cycle_len <= 0) {
+        fprintf(stderr, "8.4.1 DIL test computed invalid cycle length %d\n", cycle_len);
+        return false;
+    }
+
+    expected = (int16_t *) calloc((size_t) cycle_len, sizeof(*expected));
+    actual = (int16_t *) calloc((size_t) cycle_len, sizeof(*actual));
+    tx = v90_init_data_pump(v90_law);
+    if (!expected || !actual || !tx) {
+        fprintf(stderr, "8.4.1 DIL test allocation/init failed\n");
+        free(expected);
+        free(actual);
+        if (tx)
+            v90_free(tx);
+        return false;
+    }
+
+    for (int seg = 0; seg < profile.n; seg++) {
+        int training_ucode = profile.train_u[seg] & 0x7F;
+        int uchord_idx = vpcm_test_dil_uchord_index(training_ucode);
+        int ref_u = profile.ref[uchord_idx] & 0x7F;
+        int seg_len = ((int) (profile.h[uchord_idx] & 0x7F) + 1) * 6;
+
+        for (int sym = 0; sym < seg_len; sym++) {
+            int sp_bit = profile.sp[sym % profile.lsp] ? 1 : 0;
+            int tp_bit = profile.tp[sym % profile.ltp] ? 1 : 0;
+            int ucode = tp_bit ? training_ucode : ref_u;
+            uint8_t codeword = v91_ucode_to_codeword(law, ucode, sp_bit != 0);
+
+            expected[pos++] = v91_codeword_to_linear(law, codeword);
+        }
+    }
+    if (pos != cycle_len) {
+        fprintf(stderr, "8.4.1 DIL test generated %d expected samples, wanted %d\n", pos, cycle_len);
+        free(expected);
+        free(actual);
+        v90_free(tx);
+        return false;
+    }
+
+    v90_start_phase3(tx, 66);
+    v90_set_dil_descriptor(tx, &profile);
+
+    while (v90_get_tx_phase(tx) != V90_TX_JD && phase_spin < 10000) {
+        v90_phase3_tx(tx, &throwaway, 1);
+        phase_spin++;
+    }
+    if (v90_get_tx_phase(tx) != V90_TX_JD) {
+        fprintf(stderr, "8.4.1 DIL test never reached Jd phase (phase=%d after %d samples)\n",
+                (int) v90_get_tx_phase(tx), phase_spin);
+        free(expected);
+        free(actual);
+        v90_free(tx);
+        return false;
+    }
+
+    v90_notify_s_detected(tx);
+    while (v90_get_tx_phase(tx) != V90_TX_DIL && post_s_spin < 2048) {
+        v90_phase3_tx(tx, &throwaway, 1);
+        post_s_spin++;
+    }
+    if (v90_get_tx_phase(tx) != V90_TX_DIL) {
+        fprintf(stderr, "8.4.1 DIL test never reached DIL phase (phase=%d after S and %d samples)\n",
+                (int) v90_get_tx_phase(tx), post_s_spin);
+        free(expected);
+        free(actual);
+        v90_free(tx);
+        return false;
+    }
+
+    v90_phase3_tx(tx, actual, cycle_len);
+    for (int i = 0; i < cycle_len; i++) {
+        if (actual[i] != expected[i]) {
+            fprintf(stderr,
+                    "8.4.1 DIL mismatch at sample %d: expected=%d actual=%d\n",
+                    i, expected[i], actual[i]);
+            free(expected);
+            free(actual);
+            v90_free(tx);
+            return false;
+        }
+    }
+
+    vpcm_log("PASS: V.90 DIL generation matches 8.4.1 (%s, cycle=%d samples)",
+             law_name, cycle_len);
+    free(expected);
+    free(actual);
+    v90_free(tx);
+    return true;
 }
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
@@ -5164,6 +5299,8 @@ static bool run_vpcm_primitive_suite(void)
 {
     return test_vpcm_cp_robbed_bit_safe_profile()
         && test_v92_ja_strict_descriptor_parsing()
+        && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
+        && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)
