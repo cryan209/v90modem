@@ -15112,20 +15112,41 @@ static void collect_stream_call_log(call_log_t *log,
         if (have_caller && (caller.info0_seen || caller.phase3_seen))
             v34_has_phase3 = true;
 
-    if (!suppress_v90_phase2 && !v34_has_phase3
-        && have_phase12 && (phase12.v92_capable || phase12.v90_capable)) {
+    /* Allow fallback when this channel's Phase 1/2 detected V.90/V.92, OR
+     * when the stereo hint says the peer channel detected a V.90/V.92 pair.
+     * In stereo captures, the analog modem's Ja signal may be on either
+     * channel, and that channel's own Phase 1/2 may show v34-only (e.g.
+     * ANS/PR instead of ANSam/PR) even though V.90/V.92 is in progress. */
+    bool ja_fb_eligible = have_phase12 && (phase12.v92_capable || phase12.v90_capable);
+    bool ja_fb_suppress = suppress_v90_phase2;
+    if (!ja_fb_eligible && stereo_hint) {
+        /* In stereo mode, the Ja signal is from the analog modem and may be
+         * on either channel.  This channel's Phase 1/2 may show v34-only
+         * (it sees different tones than the peer), so allow the fallback
+         * whenever stereo context is present. */
+        ja_fb_eligible = true;
+        ja_fb_suppress = false;
+    }
+
+    if (!ja_fb_suppress && !v34_has_phase3 && ja_fb_eligible) {
         ja_dil_decode_t ja_dil;
         ja_dil_search_params_t fb;
-        int search_start = phase12.phase2_window_known && phase12.phase2_end_sample > 0
-                         ? phase12.phase2_end_sample
-                         : (earliest_phase2_sample > 0 ? earliest_phase2_sample : 0);
+        int search_start = 0;
+        if (phase12.phase2_window_known && phase12.phase2_end_sample > 0)
+            search_start = phase12.phase2_end_sample;
+        else if (earliest_phase2_sample > 0)
+            search_start = earliest_phase2_sample;
+        else if (stereo_hint) {
+            /* Use partner sample from stereo hint as rough anchor. */
+            int anchor = is_left_channel ? stereo_hint->left_partner_sample
+                                         : stereo_hint->right_partner_sample;
+            if (anchor > 0)
+                search_start = anchor;
+        }
         int search_end = total_codewords - 206;
 
         if (search_end > search_start + 80000)
             search_end = search_start + 80000;   /* cap at 10 s past phase2 */
-        fprintf(stderr, "[ja-fallback] entered: start=%d end=%d total_cw=%d v92=%d v90=%d\n",
-                search_start, search_end, total_codewords,
-                phase12.v92_capable, phase12.v90_capable);
         if (search_end > search_start) {
             memset(&fb, 0, sizeof(fb));
             fb.search_start = search_start;
@@ -15137,8 +15158,10 @@ static void collect_stream_call_log(call_log_t *log,
             fb.linear_sample_count = total_samples;
             fb.require_v92 = phase12.v92_capable;
             bool found = v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_dil);
-            fprintf(stderr, "[ja-fallback] search result: found=%d ok=%d soft=%d score=%d start=%d\n",
-                    found, ja_dil.ok, ja_dil.soft_lock, ja_dil.soft_score, ja_dil.start_sample);
+            /* Reject degenerate descriptors (all-zero training data is a false
+             * CRC match on silence/tone regions, not a real DIL). */
+            if (found && ja_dil.ok && ja_dil.analysis.unique_train_u <= 1)
+                found = false;
             if (found && ja_dil.ok) {
                 char detail[256];
 
@@ -19021,7 +19044,7 @@ static void run_decode_stage_b(const char *label,
                     fb.linear_sample_count = total_samples;
                     fb.require_v92 = p12_ptr->v92_capable;
                     if (v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_fb)
-                        && ja_fb.ok) {
+                        && ja_fb.ok && ja_fb.analysis.unique_train_u > 1) {
                         if (opts->raw_output_enabled) {
                             printf("\n=== Ja/DIL (Phase 1 fallback) ===\n");
                             print_ja_dil_decode(&ja_fb);
