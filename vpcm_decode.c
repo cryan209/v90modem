@@ -17845,11 +17845,65 @@ static void emit_dil_artifacts(const char *prefix,
     uint8_t desc_bits[512];
     int desc_bit_len = 0;
     FILE *f = NULL;
+    int preview_sample_count = 0;
+    int preview_nonzero_ucode_symbols = 0;
+    int preview_unique_selected_ucodes = 0;
+    int preview_unique_codewords = 0;
+    int preview_unique_pcm = 0;
+    double preview_rms = 0.0;
+    uint8_t seen_selected_ucode[128];
+    uint8_t seen_codeword[256];
+    uint8_t seen_pcm[65536 / 8];
+    double sumsq = 0.0;
 
     if (!prefix || !prefix[0] || !label || !result || !result->ok)
         return;
     if (!v90_build_dil_descriptor_bits(desc_bits, (int) sizeof(desc_bits), &desc_bit_len, &result->desc))
         return;
+
+    memset(seen_selected_ucode, 0, sizeof(seen_selected_ucode));
+    memset(seen_codeword, 0, sizeof(seen_codeword));
+    memset(seen_pcm, 0, sizeof(seen_pcm));
+
+    for (int seg = 0; seg < result->desc.n; seg++) {
+        int training_ucode = result->desc.train_u[seg] & 0x7F;
+        int uchord_idx = emit_dil_uchord_index(training_ucode);
+        int ref_u = result->desc.ref[uchord_idx] & 0x7F;
+        int h = result->desc.h[uchord_idx] & 0x7F;
+        int seg_len = (h + 1) * 6;
+        int lsp = result->desc.lsp > 0 ? result->desc.lsp : 1;
+        int ltp = result->desc.ltp > 0 ? result->desc.ltp : 1;
+
+        for (int pos = 0; pos < seg_len; pos++) {
+            int sp_bit = result->desc.sp[pos % lsp] ? 1 : 0;
+            int tp_bit = result->desc.tp[pos % ltp] ? 1 : 0;
+            int selected_ucode = tp_bit ? training_ucode : ref_u;
+            uint8_t codeword = v91_ucode_to_codeword(law, selected_ucode, sp_bit != 0);
+            int16_t sample = (law == V91_LAW_ULAW)
+                           ? ulaw_to_linear(codeword)
+                           : alaw_to_linear(codeword);
+            uint16_t sample_u = (uint16_t) sample;
+
+            preview_sample_count++;
+            if (selected_ucode != 0)
+                preview_nonzero_ucode_symbols++;
+            if (!seen_selected_ucode[selected_ucode]) {
+                seen_selected_ucode[selected_ucode] = 1;
+                preview_unique_selected_ucodes++;
+            }
+            if (!seen_codeword[codeword]) {
+                seen_codeword[codeword] = 1;
+                preview_unique_codewords++;
+            }
+            if (!(seen_pcm[sample_u >> 3] & (uint8_t) (1U << (sample_u & 7)))) {
+                seen_pcm[sample_u >> 3] |= (uint8_t) (1U << (sample_u & 7));
+                preview_unique_pcm++;
+            }
+            sumsq += (double) sample * (double) sample;
+        }
+    }
+    if (preview_sample_count > 0)
+        preview_rms = sqrt(sumsq / (double) preview_sample_count);
 
     memset(safe_label, 0, sizeof(safe_label));
     for (size_t i = 0; i < sizeof(safe_label) - 1 && label[i]; i++) {
@@ -17890,6 +17944,14 @@ static void emit_dil_artifacts(const char *prefix,
         fprintf(f, "descriptor_bits=%d\n", desc_bit_len);
         fprintf(f, "dil_law=%s\n", law == V91_LAW_ULAW ? "ulaw" : "alaw");
         fprintf(f, "dil_sample_rate=8000\n");
+        fprintf(f, "dil_preview_samples=%d\n", preview_sample_count);
+        fprintf(f, "dil_preview_nonzero_ucode_symbols=%d\n", preview_nonzero_ucode_symbols);
+        fprintf(f, "dil_preview_unique_selected_ucodes=%d\n", preview_unique_selected_ucodes);
+        fprintf(f, "dil_preview_unique_codewords=%d\n", preview_unique_codewords);
+        fprintf(f, "dil_preview_unique_pcm=%d\n", preview_unique_pcm);
+        fprintf(f, "dil_preview_rms=%.1f\n", preview_rms);
+        fprintf(f, "dil_preview_silent=%s\n",
+                (preview_unique_pcm <= 1 || preview_rms < 1.0) ? "yes" : "no");
         fprintf(f, "n=%u\n", (unsigned) result->desc.n);
         fprintf(f, "lsp=%u\n", (unsigned) result->desc.lsp);
         fprintf(f, "ltp=%u\n", (unsigned) result->desc.ltp);
