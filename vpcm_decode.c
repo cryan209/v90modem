@@ -17647,6 +17647,7 @@ typedef struct {
     bool do_call_log;
     bool do_phase12;
     bool raw_output_enabled;
+    const char *emit_dil_prefix;
     double tone_probe_start_ms;
     double tone_probe_duration_ms;
 } decode_options_t;
@@ -17725,6 +17726,150 @@ static void print_tone_probe(const char *label,
         printf("  1800 vs 1200: %.2f dB\n",
                10.0 * log10(ratios[1] / ratios[0]));
     }
+}
+
+static int emit_dil_uchord_index(int training_ucode)
+{
+    int idx = training_ucode >> 4;
+
+    if (idx < 0)
+        idx = 0;
+    if (idx > 7)
+        idx = 7;
+    return idx;
+}
+
+static void emit_grouped_bits(FILE *f, const uint8_t *bits, int bit_len, int group)
+{
+    if (!f || !bits || bit_len <= 0)
+        return;
+    if (group <= 0)
+        group = 64;
+
+    for (int i = 0; i < bit_len; i++) {
+        fputc((bits[i / 8] >> (i % 8)) & 1 ? '1' : '0', f);
+        if ((i + 1) % group == 0 || i + 1 == bit_len)
+            fputc('\n', f);
+    }
+}
+
+static void emit_u8_list(FILE *f, const char *name, const uint8_t *vals, int count)
+{
+    if (!f || !name || !vals || count < 0)
+        return;
+    fprintf(f, "%s=", name);
+    for (int i = 0; i < count; i++) {
+        if (i)
+            fputc(',', f);
+        fprintf(f, "%u", (unsigned) vals[i]);
+    }
+    fputc('\n', f);
+}
+
+static void emit_dil_artifacts(const char *prefix,
+                               const char *label,
+                               const ja_dil_decode_t *result)
+{
+    char safe_label[32];
+    char desc_path[1024];
+    char summary_path[1024];
+    char csv_path[1024];
+    uint8_t desc_bits[512];
+    int desc_bit_len = 0;
+    FILE *f = NULL;
+
+    if (!prefix || !prefix[0] || !label || !result || !result->ok)
+        return;
+    if (!v90_build_dil_descriptor_bits(desc_bits, (int) sizeof(desc_bits), &desc_bit_len, &result->desc))
+        return;
+
+    memset(safe_label, 0, sizeof(safe_label));
+    for (size_t i = 0; i < sizeof(safe_label) - 1 && label[i]; i++) {
+        char c = label[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char) (c - 'A' + 'a');
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+            c = '_';
+        safe_label[i] = c;
+    }
+
+    snprintf(desc_path, sizeof(desc_path), "%s_%s_descriptor_bits.txt", prefix, safe_label);
+    snprintf(summary_path, sizeof(summary_path), "%s_%s_dil_summary.txt", prefix, safe_label);
+    snprintf(csv_path, sizeof(csv_path), "%s_%s_dil_symbols.csv", prefix, safe_label);
+
+    f = fopen(desc_path, "w");
+    if (f) {
+        fprintf(f, "# channel=%s parsed_v92=%d descriptor_bits=%d\n",
+                label, result->parsed_v92 ? 1 : 0, desc_bit_len);
+        emit_grouped_bits(f, desc_bits, desc_bit_len, 64);
+        fclose(f);
+    }
+
+    f = fopen(summary_path, "w");
+    if (f) {
+        fprintf(f, "channel=%s\n", label);
+        fprintf(f, "role=%s\n", result->calling_party ? "caller" : "answerer");
+        fprintf(f, "start_ms=%.1f\n", sample_to_ms(result->start_sample, 8000));
+        fprintf(f, "u_info=%d\n", result->u_info);
+        fprintf(f, "parsed_v92=%d\n", result->parsed_v92 ? 1 : 0);
+        fprintf(f, "descriptor_bits=%d\n", desc_bit_len);
+        fprintf(f, "n=%u\n", (unsigned) result->desc.n);
+        fprintf(f, "lsp=%u\n", (unsigned) result->desc.lsp);
+        fprintf(f, "ltp=%u\n", (unsigned) result->desc.ltp);
+        fprintf(f, "unique_train_u=%u\n", (unsigned) result->analysis.unique_train_u);
+        fprintf(f, "used_uchords=%u\n", (unsigned) result->analysis.used_uchords);
+        fprintf(f, "impairment=%u\n", (unsigned) result->analysis.impairment_score);
+        fprintf(f, "down_drn=%u\n", (unsigned) result->analysis.recommended_downstream_drn);
+        fprintf(f, "up_drn=%u\n", (unsigned) result->analysis.recommended_upstream_drn);
+        emit_u8_list(f, "sp", result->desc.sp, result->desc.lsp);
+        emit_u8_list(f, "tp", result->desc.tp, result->desc.ltp);
+        emit_u8_list(f, "h", result->desc.h, 8);
+        emit_u8_list(f, "ref", result->desc.ref, 8);
+        emit_u8_list(f, "train_u", result->desc.train_u, result->desc.n);
+        fclose(f);
+    }
+
+    f = fopen(csv_path, "w");
+    if (f) {
+        int n = result->desc.n;
+        int lsp = result->desc.lsp > 0 ? result->desc.lsp : 1;
+        int ltp = result->desc.ltp > 0 ? result->desc.ltp : 1;
+        int symbol_index = 0;
+
+        fprintf(f, "symbol_index,segment_index,pos_in_segment,uchord_index,train_u,ref_u,h,seg_len,sp_bit,tp_bit,selected_ucode,signed_ucode\n");
+        for (int seg = 0; seg < n; seg++) {
+            int training_ucode = result->desc.train_u[seg] & 0x7F;
+            int uchord_idx = emit_dil_uchord_index(training_ucode);
+            int ref_u = result->desc.ref[uchord_idx] & 0x7F;
+            int h = result->desc.h[uchord_idx] & 0x7F;
+            int seg_len = (h + 1) * 6;
+
+            for (int pos = 0; pos < seg_len; pos++) {
+                int sp_bit = result->desc.sp[pos % lsp] ? 1 : 0;
+                int tp_bit = result->desc.tp[pos % ltp] ? 1 : 0;
+                int selected_ucode = tp_bit ? training_ucode : ref_u;
+                int signed_ucode = sp_bit ? selected_ucode : -selected_ucode;
+
+                fprintf(f, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                        symbol_index,
+                        seg,
+                        pos,
+                        uchord_idx + 1,
+                        training_ucode,
+                        ref_u,
+                        h,
+                        seg_len,
+                        sp_bit,
+                        tp_bit,
+                        selected_ucode,
+                        signed_ucode);
+                symbol_index++;
+            }
+        }
+        fclose(f);
+    }
+
+    printf("  DIL artifacts:    %s, %s, %s\n", desc_path, summary_path, csv_path);
 }
 
 static int phase12_digital_likeness_score(const phase12_result_t *p12)
@@ -18623,7 +18768,7 @@ static void run_decode_stage_b(const char *label,
     if (opts->raw_output_enabled && opts->do_v91)
         decode_v91_signals(g711_codewords, total_codewords, law);
 
-    if (opts->raw_output_enabled && opts->do_v90) {
+    if ((opts->raw_output_enabled || opts->emit_dil_prefix) && opts->do_v90) {
         {
             int anspcm_start = (have_phase12 && p12_ptr
                                 && p12_ptr->call_init.v92_anspcm_seen)
@@ -18631,8 +18776,10 @@ static void run_decode_stage_b(const char *label,
             int anspcm_end   = (anspcm_start >= 0)
                                ? anspcm_start
                                  + p12_ptr->call_init.v92_anspcm_duration_symbols : -1;
-            decode_v90_signals(g711_codewords, total_codewords, law,
-                               effective_u_info, anspcm_start, anspcm_end);
+            if (opts->raw_output_enabled) {
+                decode_v90_signals(g711_codewords, total_codewords, law,
+                                   effective_u_info, anspcm_start, anspcm_end);
+            }
         }
 
         if (!suppress_v90_phase2) {
@@ -18643,18 +18790,22 @@ static void run_decode_stage_b(const char *label,
             if (decode_jd_stage(g711_codewords, total_codewords,
                                 answerer_ptr, caller_ptr,
                                 &jd_stage)) {
-                print_jd_stage_decode(&jd_stage);
+                if (opts->raw_output_enabled)
+                    print_jd_stage_decode(&jd_stage);
             }
             if (decode_ja_dil_stage(g711_codewords, total_codewords,
                                     answerer_ptr, caller_ptr,
                                     &jd_stage,
                                     linear_samples, total_samples,
                                     &ja_dil)) {
-                print_ja_dil_decode(&ja_dil);
+                if (opts->raw_output_enabled)
+                    print_ja_dil_decode(&ja_dil);
+                emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_dil);
             }
-            if (decode_post_phase3_codewords(g711_codewords, total_codewords, law,
-                                             answerer_ptr, caller_ptr,
-                                             &post_phase3)) {
+            if (opts->raw_output_enabled
+                && decode_post_phase3_codewords(g711_codewords, total_codewords, law,
+                                                answerer_ptr, caller_ptr,
+                                                &post_phase3)) {
                 print_post_phase3_decode(&post_phase3);
             }
         }
@@ -18694,8 +18845,11 @@ static void run_decode_stage_b(const char *label,
                     fb.linear_sample_count = total_samples;
                     if (v92_ja_dil_search(g711_codewords, total_codewords, &fb, &ja_fb)
                         && ja_fb.ok) {
-                        printf("\n=== Ja/DIL (Phase 1 fallback) ===\n");
-                        print_ja_dil_decode(&ja_fb);
+                        if (opts->raw_output_enabled) {
+                            printf("\n=== Ja/DIL (Phase 1 fallback) ===\n");
+                            print_ja_dil_decode(&ja_fb);
+                        }
+                        emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_fb);
                     }
                 }
             }
@@ -18806,6 +18960,7 @@ int main(int argc, char **argv)
 
     const char *input_path = NULL;
     const char *visualize_html_path = NULL;
+    const char *emit_dil_prefix = NULL;
     v91_law_t law = V91_LAW_ULAW;
     input_format_t fmt = FMT_AUTO;
     channel_select_t channel = CH_MONO;
@@ -18882,6 +19037,8 @@ int main(int argc, char **argv)
             explicit_decode_output = true;
         } else if (strcmp(argv[i], "--call-log") == 0) {
             do_call_log = true;
+        } else if (strcmp(argv[i], "--emit-dil") == 0 && i + 1 < argc) {
+            emit_dil_prefix = argv[++i];
         } else if (strcmp(argv[i], "--visualize-html") == 0 && i + 1 < argc) {
             do_visualize_html = true;
             visualize_html_path = argv[++i];
@@ -18912,6 +19069,7 @@ int main(int argc, char **argv)
                    "  --tone-probe a b   Print tone ratios in window a..a+b ms\n"
                    "  --stats            Print codeword histogram/statistics\n"
                    "  --call-log         Print a best-effort chronological call log\n"
+                   "  --emit-dil PREFIX  Write descriptor bits, summary, and generated DIL CSV\n"
                    "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
                    "  --all              Enable all decoders (default)\n"
                    "  --verbose / -v     Enable [p12] debug output to stderr\n"
@@ -19131,6 +19289,7 @@ int main(int argc, char **argv)
         opts.do_call_log = do_call_log;
         opts.do_phase12 = do_phase12;
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
+        opts.emit_dil_prefix = emit_dil_prefix;
         opts.tone_probe_start_ms = tone_probe_start_ms;
         opts.tone_probe_duration_ms = tone_probe_duration_ms;
 

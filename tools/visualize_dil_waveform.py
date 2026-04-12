@@ -238,13 +238,19 @@ def uchord_idx(training_ucode: int) -> int:
     return idx
 
 
-def build_dil_symbols(desc: DilDesc, max_segments: int) -> tuple[list[float], list[tuple[int, int, int, int, int]], list[int], list[int]]:
+def signed_ucode(ucode: int, sp_bit: int) -> int:
+    mag = ucode & 0x7F
+    return mag if sp_bit else -mag
+
+
+def build_dil_symbols(desc: DilDesc, max_segments: int) -> tuple[list[float], list[tuple[int, int, int, int, int]], list[int], list[int], list[int]]:
     symbols: list[float] = []
     seg_rows: list[tuple[int, int, int, int, int]] = []
     sp_bits: list[int] = []
     tp_bits: list[int] = []
+    signed_ucodes: list[int] = []
     if desc.n <= 0:
-        return symbols, seg_rows, sp_bits, tp_bits
+        return symbols, seg_rows, sp_bits, tp_bits, signed_ucodes
 
     seg_count = min(desc.n, max_segments)
     lsp = max(1, min(128, desc.lsp))
@@ -260,12 +266,12 @@ def build_dil_symbols(desc: DilDesc, max_segments: int) -> tuple[list[float], li
             sp = 1 if desc.sp[pos % lsp] else 0
             tp = 1 if desc.tp[pos % ltp] else 0
             u = tu if tp else r
-            mag = u / 127.0
-            amp = mag if sp else -mag
-            symbols.append(amp)
+            su = signed_ucode(u, sp)
+            symbols.append(su / 127.0)
             sp_bits.append(sp)
             tp_bits.append(tp)
-    return symbols, seg_rows, sp_bits, tp_bits
+            signed_ucodes.append(su)
+    return symbols, seg_rows, sp_bits, tp_bits, signed_ucodes
 
 
 def fallback_symbols_from_bits(bits: str) -> tuple[list[float], list[int]]:
@@ -417,7 +423,7 @@ def main() -> int:
     else:
         print("train_u_first=n/a (N=0)")
 
-    symbols, seg_rows, sp_bits, tp_bits = build_dil_symbols(desc, args.max_segments)
+    symbols, seg_rows, sp_bits, tp_bits, signed_ucodes = build_dil_symbols(desc, args.max_segments)
     print("")
     print(f"Synthesized DIL preview: segments={len(seg_rows)} symbols={len(symbols)}")
     print("seg uchord train_u ref_u Lc")
@@ -446,6 +452,10 @@ def main() -> int:
     print("")
     print("TP bits (0=REF,1=TRAIN):")
     print(grouped(view_tp, args.group))
+    print("")
+    print("Signed Ucodes (spec DIL output, first symbols):")
+    show_ucodes = signed_ucodes[:view_syms]
+    print(" ".join(f"{v:+03d}" for v in show_ucodes))
     if view_match:
         print("")
         print("Descriptor repeat match (| match, x mismatch):")
