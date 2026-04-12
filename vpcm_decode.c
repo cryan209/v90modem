@@ -13779,6 +13779,22 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
                                prefix, xform, sync_pos,
                                wide_start + sync_pos / 2, remaining);
 
+                        /* Dump first 64 bytes of aligned bits for debug */
+                        {
+                            int dump_bytes = (remaining + 7) / 8;
+                            if (dump_bytes > 64)
+                                dump_bytes = 64;
+                            printf("%s      aligned_hex(%d bytes):", prefix, dump_bytes);
+                            for (int db = 0; db < dump_bytes; db++)
+                                printf(" %02x", aligned[db]);
+                            printf("\n");
+                            /* Also show as bit string, first 200 bits */
+                            printf("%s      aligned_bits:", prefix);
+                            for (int db = 0; db < remaining && db < 200; db++)
+                                printf("%d", (aligned[db/8] >> (db%8)) & 1);
+                            printf("\n");
+                        }
+
                         memset(&parse_meta, 0, sizeof(parse_meta));
                         if (v92_parse_ja_descriptor_strict(&desc, aligned, remaining, &parse_meta)
                             && v90_analyse_dil_descriptor(&desc, &analysis)) {
