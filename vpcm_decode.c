@@ -17766,14 +17766,71 @@ static void emit_u8_list(FILE *f, const char *name, const uint8_t *vals, int cou
     fputc('\n', f);
 }
 
+static void emit_write_le16(FILE *f, uint16_t value)
+{
+    uint8_t bytes[2];
+
+    if (!f)
+        return;
+    bytes[0] = (uint8_t) (value & 0xFFU);
+    bytes[1] = (uint8_t) ((value >> 8) & 0xFFU);
+    (void) fwrite(bytes, 1, sizeof(bytes), f);
+}
+
+static void emit_write_le32(FILE *f, uint32_t value)
+{
+    uint8_t bytes[4];
+
+    if (!f)
+        return;
+    bytes[0] = (uint8_t) (value & 0xFFU);
+    bytes[1] = (uint8_t) ((value >> 8) & 0xFFU);
+    bytes[2] = (uint8_t) ((value >> 16) & 0xFFU);
+    bytes[3] = (uint8_t) ((value >> 24) & 0xFFU);
+    (void) fwrite(bytes, 1, sizeof(bytes), f);
+}
+
+static void emit_write_pcm16_wav_header(FILE *f, int sample_rate, int channels, int sample_count)
+{
+    uint32_t bits_per_sample = 16U;
+    uint32_t block_align;
+    uint32_t byte_rate;
+    uint32_t data_bytes;
+    uint32_t riff_size;
+
+    if (!f || sample_rate <= 0 || channels <= 0 || sample_count < 0)
+        return;
+
+    block_align = (uint32_t) channels * (bits_per_sample / 8U);
+    byte_rate = (uint32_t) sample_rate * block_align;
+    data_bytes = (uint32_t) sample_count * block_align;
+    riff_size = 36U + data_bytes;
+
+    (void) fwrite("RIFF", 1, 4, f);
+    emit_write_le32(f, riff_size);
+    (void) fwrite("WAVE", 1, 4, f);
+    (void) fwrite("fmt ", 1, 4, f);
+    emit_write_le32(f, 16U);
+    emit_write_le16(f, 1U);
+    emit_write_le16(f, (uint16_t) channels);
+    emit_write_le32(f, (uint32_t) sample_rate);
+    emit_write_le32(f, byte_rate);
+    emit_write_le16(f, (uint16_t) block_align);
+    emit_write_le16(f, (uint16_t) bits_per_sample);
+    (void) fwrite("data", 1, 4, f);
+    emit_write_le32(f, data_bytes);
+}
+
 static void emit_dil_artifacts(const char *prefix,
                                const char *label,
-                               const ja_dil_decode_t *result)
+                               const ja_dil_decode_t *result,
+                               v91_law_t law)
 {
     char safe_label[32];
     char desc_path[1024];
     char summary_path[1024];
     char csv_path[1024];
+    char wav_path[1024];
     uint8_t desc_bits[512];
     int desc_bit_len = 0;
     FILE *f = NULL;
@@ -17796,6 +17853,7 @@ static void emit_dil_artifacts(const char *prefix,
     snprintf(desc_path, sizeof(desc_path), "%s_%s_descriptor_bits.txt", prefix, safe_label);
     snprintf(summary_path, sizeof(summary_path), "%s_%s_dil_summary.txt", prefix, safe_label);
     snprintf(csv_path, sizeof(csv_path), "%s_%s_dil_symbols.csv", prefix, safe_label);
+    snprintf(wav_path, sizeof(wav_path), "%s_%s_dil.wav", prefix, safe_label);
 
     f = fopen(desc_path, "w");
     if (f) {
@@ -17813,6 +17871,8 @@ static void emit_dil_artifacts(const char *prefix,
         fprintf(f, "u_info=%d\n", result->u_info);
         fprintf(f, "parsed_v92=%d\n", result->parsed_v92 ? 1 : 0);
         fprintf(f, "descriptor_bits=%d\n", desc_bit_len);
+        fprintf(f, "dil_law=%s\n", law == V91_LAW_ULAW ? "ulaw" : "alaw");
+        fprintf(f, "dil_sample_rate=8000\n");
         fprintf(f, "n=%u\n", (unsigned) result->desc.n);
         fprintf(f, "lsp=%u\n", (unsigned) result->desc.lsp);
         fprintf(f, "ltp=%u\n", (unsigned) result->desc.ltp);
@@ -17869,7 +17929,45 @@ static void emit_dil_artifacts(const char *prefix,
         fclose(f);
     }
 
-    printf("  DIL artifacts:    %s, %s, %s\n", desc_path, summary_path, csv_path);
+    f = fopen(wav_path, "wb");
+    if (f) {
+        int n = result->desc.n;
+        int lsp = result->desc.lsp > 0 ? result->desc.lsp : 1;
+        int ltp = result->desc.ltp > 0 ? result->desc.ltp : 1;
+        int sample_count = 0;
+
+        for (int seg = 0; seg < n; seg++) {
+            int training_ucode = result->desc.train_u[seg] & 0x7F;
+            int uchord_idx = emit_dil_uchord_index(training_ucode);
+            int h = result->desc.h[uchord_idx] & 0x7F;
+            sample_count += (h + 1) * 6;
+        }
+
+        emit_write_pcm16_wav_header(f, 8000, 1, sample_count);
+        for (int seg = 0; seg < n; seg++) {
+            int training_ucode = result->desc.train_u[seg] & 0x7F;
+            int uchord_idx = emit_dil_uchord_index(training_ucode);
+            int ref_u = result->desc.ref[uchord_idx] & 0x7F;
+            int h = result->desc.h[uchord_idx] & 0x7F;
+            int seg_len = (h + 1) * 6;
+
+            for (int pos = 0; pos < seg_len; pos++) {
+                int sp_bit = result->desc.sp[pos % lsp] ? 1 : 0;
+                int tp_bit = result->desc.tp[pos % ltp] ? 1 : 0;
+                int selected_ucode = tp_bit ? training_ucode : ref_u;
+                uint8_t codeword = v91_ucode_to_codeword(law, selected_ucode, sp_bit != 0);
+                int16_t sample = (law == V91_LAW_ULAW)
+                               ? ulaw_to_linear(codeword)
+                               : alaw_to_linear(codeword);
+
+                emit_write_le16(f, (uint16_t) sample);
+            }
+        }
+        fclose(f);
+    }
+
+    printf("  DIL artifacts:    %s, %s, %s, %s\n",
+           desc_path, summary_path, csv_path, wav_path);
 }
 
 static int phase12_digital_likeness_score(const phase12_result_t *p12)
@@ -18800,7 +18898,7 @@ static void run_decode_stage_b(const char *label,
                                     &ja_dil)) {
                 if (opts->raw_output_enabled)
                     print_ja_dil_decode(&ja_dil);
-                emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_dil);
+                emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_dil, law);
             }
             if (opts->raw_output_enabled
                 && decode_post_phase3_codewords(g711_codewords, total_codewords, law,
@@ -18849,7 +18947,7 @@ static void run_decode_stage_b(const char *label,
                             printf("\n=== Ja/DIL (Phase 1 fallback) ===\n");
                             print_ja_dil_decode(&ja_fb);
                         }
-                        emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_fb);
+                        emit_dil_artifacts(opts->emit_dil_prefix, label, &ja_fb, law);
                     }
                 }
             }
