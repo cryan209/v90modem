@@ -30,6 +30,8 @@ static bool ja_decode_bits_packed(const uint8_t *codewords,
                                   int start_sample,
                                   int bit_count,
                                   bool invert_sign,
+                                  const int16_t *linear_samples,
+                                  int linear_sample_count,
                                   uint8_t *packed_out,
                                   int packed_len);
 
@@ -635,6 +637,8 @@ static bool ja_try_strict_repair_near_soft(const uint8_t *codewords,
             if (!ja_decode_bits_packed(codewords, total_codewords,
                                        candidate, bit_count,
                                        invert,
+                                       params->linear_samples,
+                                       params->linear_sample_count,
                                        raw_bits, packed_len))
                 continue;
             decoded++;
@@ -870,36 +874,68 @@ static int ja_descramble_reg_bit(uint32_t *reg, int in_bit)
  *
  * Returns true on success, false when parameters are out of range.
  */
+/*
+ * ja_sign_from_sample() — extract the V.92 sign bit from either a raw G.711
+ * codeword or a 16-bit linear PCM sample.
+ *
+ * When linear_samples is non-NULL, the sign is taken from the linear sample
+ * polarity (>= 0 → positive → bit 0).  This avoids the lossy round-trip
+ * through linear→G.711 re-encoding that can flip sign bits near zero.
+ *
+ * When linear_samples is NULL, falls back to the G.711 MSB convention.
+ */
+static int ja_sign_from_sample(const uint8_t *codewords,
+                               const int16_t *linear_samples,
+                               int idx)
+{
+    if (linear_samples)
+        return (linear_samples[idx] >= 0) ? 0 : 1;   /* positive=0 */
+    return (codewords[idx] & 0x80) ? 0 : 1;           /* MSB=1 → positive=0 */
+}
+
 static bool ja_decode_bits_packed(const uint8_t *codewords,
                                   int total_codewords,
                                   int start_sample,
                                   int bit_count,
                                   bool invert_sign,
+                                  const int16_t *linear_samples,
+                                  int linear_sample_count,
                                   uint8_t *packed_out,
                                   int packed_len)
 {
     uint32_t descramble_reg;
     int prev_sign;
     int i;
+    int sample_limit;
 
-    if (!codewords || !packed_out || packed_len <= 0 || bit_count <= 0
+    if (!packed_out || packed_len <= 0 || bit_count <= 0
         || start_sample < (JA_SCRAMBLER_HISTORY + 1)
         || start_sample + bit_count > total_codewords
         || packed_len < ((bit_count + 7) / 8)) {
         return false;
     }
 
+    /* Need either codewords or linear samples. */
+    if (!codewords && !linear_samples)
+        return false;
+
+    /* When using linear samples, check bounds. */
+    sample_limit = linear_samples ? linear_sample_count : total_codewords;
+    if (start_sample + bit_count > sample_limit)
+        return false;
+
     memset(packed_out, 0, (size_t) packed_len);
     descramble_reg = 0;
 
     /* V.92 §8.5.7: PCM MSB=1 (positive) → bit 0, MSB=0 (negative) → bit 1. */
-    prev_sign = ((codewords[start_sample - JA_SCRAMBLER_HISTORY - 1] & 0x80) ? 0 : 1);
+    prev_sign = ja_sign_from_sample(codewords, linear_samples,
+                                    start_sample - JA_SCRAMBLER_HISTORY - 1);
     if (invert_sign)
         prev_sign ^= 1;
 
     /* Seed the descrambler with the history window. */
     for (i = start_sample - JA_SCRAMBLER_HISTORY; i < start_sample; i++) {
-        int sign = (codewords[i] & 0x80) ? 0 : 1;   /* V.92: positive=0 */
+        int sign = ja_sign_from_sample(codewords, linear_samples, i);
         int scrambled;
         if (invert_sign)
             sign ^= 1;
@@ -910,7 +946,8 @@ static bool ja_decode_bits_packed(const uint8_t *codewords,
 
     /* Extract and descramble the payload bits. */
     for (i = 0; i < bit_count; i++) {
-        int sign = (codewords[start_sample + i] & 0x80) ? 0 : 1;   /* V.92: positive=0 */
+        int sign = ja_sign_from_sample(codewords, linear_samples,
+                                       start_sample + i);
         int scrambled;
         int plain;
 
@@ -1032,6 +1069,8 @@ bool v92_ja_dil_search(const uint8_t *codewords,
 
             if (!ja_decode_bits_packed(codewords, total_codewords,
                                        candidate, bit_count, invert != 0,
+                                       params->linear_samples,
+                                       params->linear_sample_count,
                                        packed_bits, packed_len)) {
                 continue;
             }

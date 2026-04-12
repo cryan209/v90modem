@@ -55,6 +55,17 @@ typedef struct {
 
     /* Which side of the connection we are decoding. */
     bool calling_party;
+
+    /*
+     * Optional 16-bit linear PCM samples (same index space as codewords).
+     * When non-NULL, sign bits are extracted from linear sample polarity
+     * (sample >= 0 → positive) instead of G.711 MSB.  This avoids the
+     * lossy linear→G.711 re-encoding round-trip when decoding from WAV
+     * files that were originally captured as G.711 RTP.
+     * Set to NULL when feeding raw G.711 codewords directly (e.g. live RTP).
+     */
+    const int16_t *linear_samples;
+    int linear_sample_count;
 } ja_dil_search_params_t;
 
 /*

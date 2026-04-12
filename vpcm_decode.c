@@ -1465,6 +1465,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
                                 const decode_v34_result_t *answerer,
                                 const decode_v34_result_t *caller,
                                 const jd_stage_decode_t *jd_stage,
+                                const int16_t *linear_samples,
+                                int linear_sample_count,
                                 ja_dil_decode_t *out);
 static void collect_v91_events(call_log_t *log,
                                const uint8_t *codewords,
@@ -1480,7 +1482,9 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                              const uint8_t *codewords,
                                              int total_codewords,
                                              const decode_v34_result_t *answerer,
-                                             const decode_v34_result_t *caller);
+                                             const decode_v34_result_t *caller,
+                                             const int16_t *linear_samples,
+                                             int linear_sample_count);
 static int codeword_to_ucode(v91_law_t law, uint8_t codeword);
 static void emit_phase12_side_evidence(call_log_t *log,
                                        const phase12_result_t *p12);
@@ -8073,7 +8077,8 @@ static void collect_v92_phase3_event(call_log_t *log,
         if (!obs.v92_capable)
             decode_jd_stage(codewords, total_codewords, answerer, caller, &jd_stage);
 
-        if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)) {
+        if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage,
+                               samples, total_samples, &ja_dil)) {
             ja_search_done = true;
             if (ja_dil.ok) {
                 int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
@@ -8155,6 +8160,8 @@ static void collect_v92_phase3_event(call_log_t *log,
                 fb.tx_ja_sample = ja_anchor;
                 fb.u_info = res->u_info;
                 fb.calling_party = (role_name && strcmp(role_name, "caller") == 0);
+                fb.linear_samples = samples;
+                fb.linear_sample_count = total_samples;
                 if (v92_ja_dil_search(codewords, total_codewords, &fb, &ja_dil)) {
                     if (ja_dil.ok) {
                         int bit_len = v90_dil_descriptor_bit_len(&ja_dil.desc);
@@ -15084,7 +15091,9 @@ static void collect_stream_call_log(call_log_t *log,
                                          g711_codewords,
                                          total_codewords,
                                          have_answerer ? &answerer : NULL,
-                                         have_caller ? &caller : NULL);
+                                         have_caller ? &caller : NULL,
+                                         linear_samples,
+                                         total_samples);
     }
 
     call_log_sort(log);
@@ -16662,7 +16671,9 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                              const uint8_t *codewords,
                                              int total_codewords,
                                              const decode_v34_result_t *answerer,
-                                             const decode_v34_result_t *caller)
+                                             const decode_v34_result_t *caller,
+                                             const int16_t *linear_samples,
+                                             int linear_sample_count)
 {
     jd_stage_decode_t jd_stage;
     ja_dil_decode_t ja_dil;
@@ -16725,7 +16736,8 @@ static void collect_post_phase3_stage_events(call_log_t *log,
      * For V.90 the jd_stage result above provides the timing anchor.
      * For V.92 decode_ja_dil_stage() falls back to tx_ja_sample.
      */
-    if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage, &ja_dil)) {
+    if (decode_ja_dil_stage(codewords, total_codewords, answerer, caller, &jd_stage,
+                           linear_samples, linear_sample_count, &ja_dil)) {
         snprintf(detail, sizeof(detail),
                  "role=%s n=%u lsp=%u ltp=%u uniq_u=%u uchords=%u impairment=%u",
                  ja_dil.calling_party ? "caller" : "answerer",
@@ -17185,6 +17197,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
                                 const decode_v34_result_t *answerer,
                                 const decode_v34_result_t *caller,
                                 const jd_stage_decode_t *jd_stage,
+                                const int16_t *linear_samples,
+                                int linear_sample_count,
                                 ja_dil_decode_t *out)
 {
     const decode_v34_result_t *src;
@@ -17260,6 +17274,8 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
     params.tx_ja_sample  = src->tx_ja_sample;
     params.u_info        = src->u_info;
     params.calling_party = calling_party;
+    params.linear_samples      = linear_samples;
+    params.linear_sample_count = linear_sample_count;
 
     return v92_ja_dil_search(codewords, total_codewords, &params, out);
 }
@@ -18556,6 +18572,7 @@ static void run_decode_stage_b(const char *label,
             if (decode_ja_dil_stage(g711_codewords, total_codewords,
                                     answerer_ptr, caller_ptr,
                                     &jd_stage,
+                                    linear_samples, total_samples,
                                     &ja_dil)) {
                 print_ja_dil_decode(&ja_dil);
             }
