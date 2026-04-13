@@ -75,6 +75,9 @@ V90_CARRIERS: list[tuple[int, int]] = [
     (3429, 1959),
 ]
 
+# V.92 upstream reuses the V.34 baud/carrier table for Phase 3.
+V92_CARRIERS: list[tuple[int, int]] = list(V34_CARRIERS)
+
 # Scrambler tap pairs for the ones-check  (V.34 §7)
 # Delays are expressed as recurrence taps on the serial bit stream.
 GPC_TAPS = (5,  23)   # digital modem TX
@@ -108,6 +111,8 @@ def load_wav_channel(path: Path, channel: int,
 def carrier_candidates(protocol: str) -> list[tuple[int, int]]:
     if protocol == 'v90':
         return V90_CARRIERS
+    if protocol == 'v92':
+        return V92_CARRIERS
     return V34_CARRIERS
 
 
@@ -154,6 +159,631 @@ def phase_occupancy(symbols: np.ndarray, window: int = 128,
 
 def chunk_bits(bits: str, width: int = 128) -> str:
     return "\n".join(bits[i:i + width] for i in range(0, len(bits), width))
+
+
+# ---------------------------------------------------------------------------
+# G.711 helpers for PCM-domain V.92 Phase 3
+# ---------------------------------------------------------------------------
+def linear_to_ulaw(sample: int) -> int:
+    sample = max(-32635, min(32635, int(sample)))
+    sign = 0x80 if sample < 0 else 0x00
+    if sample < 0:
+        sample = -sample
+    sample += 0x84
+    exponent = 7
+    mask = 0x4000
+    while exponent > 0 and (sample & mask) == 0:
+        exponent -= 1
+        mask >>= 1
+    mantissa = (sample >> (exponent + 3)) & 0x0F
+    return (~(sign | (exponent << 4) | mantissa)) & 0xFF
+
+
+def linear_to_alaw(sample: int) -> int:
+    sample = max(-32635, min(32635, int(sample)))
+    if sample >= 0:
+        mask = 0xD5
+    else:
+        mask = 0x55
+        sample = -sample - 1
+    if sample < 256:
+        comp = sample >> 4
+    else:
+        exponent = 7
+        exp_mask = 0x4000
+        while exponent > 0 and (sample & exp_mask) == 0:
+            exponent -= 1
+            exp_mask >>= 1
+        mantissa = (sample >> (exponent + 3)) & 0x0F
+        comp = (exponent << 4) | mantissa
+    return comp ^ mask
+
+
+def wav_to_g711_codewords(sig: np.ndarray, fs: int, law: str) -> tuple[np.ndarray, int]:
+    """
+    Convert a linear PCM WAV channel to per-timeslot G.711 codewords.
+
+    For PCM-domain V.92 we want one codeword every 125 us, so we resample to
+    8 kHz if needed and then re-encode to the selected law.
+    """
+    if fs != 8000:
+        g = np.gcd(fs, 8000)
+        sig = sp.resample_poly(sig, 8000 // g, fs // g)
+        fs = 8000
+    ints = np.clip(np.rint(sig), -32768, 32767).astype(np.int16)
+    enc = linear_to_alaw if law == 'alaw' else linear_to_ulaw
+    codewords = np.fromiter((enc(int(v)) for v in ints), dtype=np.uint8, count=len(ints))
+    return codewords, fs
+
+
+def moving_average(x: np.ndarray, window: int) -> np.ndarray:
+    if len(x) == 0:
+        return np.zeros(0, dtype=np.float64)
+    window = max(1, min(int(window), len(x)))
+    kernel = np.ones(window, dtype=np.float64) / float(window)
+    return np.convolve(x.astype(np.float64), kernel, mode='same')
+
+
+def resample_to_8k(sig: np.ndarray, fs: int) -> tuple[np.ndarray, int]:
+    """Resample a signal to the 8 kHz V.92 timeslot rate if needed."""
+    if fs == 8000:
+        return sig.astype(np.float64, copy=False), fs
+    g = np.gcd(fs, 8000)
+    sig8 = sp.resample_poly(sig, 8000 // g, fs // g)
+    return sig8.astype(np.float64, copy=False), 8000
+
+
+def resample_to_v92_oversampled(sig: np.ndarray,
+                                fs: int,
+                                sps: int = 6) -> tuple[np.ndarray, int]:
+    """Resample to an integer multiple of the 8 ksymbol/s V.92 clock."""
+    target_fs = 8000 * sps
+    if fs == target_fs:
+        return sig.astype(np.float64, copy=False), fs
+    g = np.gcd(fs, target_fs)
+    sig_os = sp.resample_poly(sig, target_fs // g, fs // g)
+    return sig_os.astype(np.float64, copy=False), target_fs
+
+
+def schmitt_sign_slice(samples: np.ndarray,
+                       env: np.ndarray,
+                       hi: float = 0.22,
+                       lo: float = 0.08) -> np.ndarray:
+    """
+    Slice analogue samples to a stable binary sign stream with hysteresis.
+
+    `hi` and `lo` are relative to the local envelope. Values between the two
+    thresholds hold the previous decision, reducing chatter around zero.
+    """
+    n = len(samples)
+    out = np.zeros(n, dtype=np.uint8)
+    if n == 0:
+        return out
+    cur = 1 if samples[0] >= 0.0 else 0
+    for i in range(n):
+        thr_hi = hi * env[i]
+        thr_lo = lo * env[i]
+        s = samples[i]
+        if s >= thr_hi:
+            cur = 1
+        elif s <= -thr_hi:
+            cur = 0
+        elif abs(s) <= thr_lo:
+            cur = cur
+        else:
+            cur = 1 if s >= 0.0 else 0
+        out[i] = cur
+    return out
+
+
+def v92_period6_profile(sign: np.ndarray, window: int = 48) -> np.ndarray:
+    """Per-sample best period-6 match score across Ru/uR hypotheses."""
+    n = len(sign)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    idx = np.arange(n, dtype=np.int32)
+    base = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+    best = np.zeros(n, dtype=np.float64)
+    for phase in range(6):
+        expected_ru = base[(idx - phase) % 6]
+        for positive_first in (True, False):
+            expected = expected_ru if positive_first else (1 - expected_ru)
+            match = (sign == expected).astype(np.float64)
+            best = np.maximum(best, moving_average(match, window))
+    return best
+
+
+def v92_period6_candidates(sign: np.ndarray,
+                           amp: np.ndarray,
+                           min_len: int = 8,
+                           min_match: float = 0.75,
+                           min_amp: float = 8.0,
+                           max_gap: int = 2) -> list[dict]:
+    """
+    Find Ru/uR-like period-6 sign runs from a 1-bit sign stream and amplitude.
+    """
+    n = len(sign)
+    if n == 0:
+        return []
+    idx = np.arange(n, dtype=np.int32)
+    base = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+    out: list[dict] = []
+
+    for phase in range(6):
+        expected_ru = base[(idx - phase) % 6]
+        for positive_first in (True, False):
+            expected = expected_ru if positive_first else (1 - expected_ru)
+            match = (sign == expected)
+            bridged = bridge_short_false_gaps(match, max_gap=max_gap)
+            for start, end in boolean_runs(bridged):
+                length = end - start
+                if length < min_len:
+                    continue
+                mean_match = float(np.mean(match[start:end]))
+                mean_amp = float(np.mean(amp[start:end]))
+                std_amp = float(np.std(amp[start:end]))
+                if mean_match < min_match or mean_amp < min_amp:
+                    continue
+                out.append({
+                    'start': start,
+                    'end': end,
+                    'length': length,
+                    'phase': phase,
+                    'positive_first': positive_first,
+                    'mean_match': mean_match,
+                    'mean_amp': mean_amp,
+                    'std_amp': std_amp,
+                    'score': 8.0 * length + 120.0 * mean_match + 2.0 * mean_amp - 6.0 * std_amp,
+                })
+
+    out.sort(key=lambda c: (c['start'], -c['length'], -c['score']))
+    dedup: list[dict] = []
+    for cand in out:
+        if dedup and cand['start'] == dedup[-1]['start'] and cand['end'] == dedup[-1]['end']:
+            if cand['score'] > dedup[-1]['score']:
+                dedup[-1] = cand
+            continue
+        dedup.append(cand)
+    return dedup
+
+
+def v92_pcm_period6_profile(codewords: np.ndarray, window: int = 48) -> np.ndarray:
+    sign = ((codewords >> 7) & 1).astype(np.uint8)
+    return v92_period6_profile(sign, window)
+
+
+def v92_pcm_period6_candidates(codewords: np.ndarray) -> list[dict]:
+    sign = ((codewords >> 7) & 1).astype(np.uint8)
+    amp7 = (codewords & 0x7F).astype(np.float64)
+    return v92_period6_candidates(sign, amp7)
+
+
+def choose_v92_pcm_sequence(candidates: list[dict]) -> dict:
+    """
+    Choose an Ru/uR/Ru/uR sequence if present, otherwise the earliest strong Ru.
+    """
+    long_min = 96
+    short_min = 8
+    short_max = 96
+    md_gap_max = 8000
+
+    long_runs = [c for c in candidates if c['length'] >= long_min]
+    short_runs = [c for c in candidates if short_min <= c['length'] <= short_max]
+    if not long_runs:
+        return {'ru1': None, 'ur1': None, 'ru2': None, 'ur2': None}
+
+    def first_match(pool: list[dict],
+                    start_min: int,
+                    start_max: int,
+                    positive_first: bool,
+                    min_len: int = 0) -> dict | None:
+        for cand in pool:
+            if cand['start'] < start_min or cand['start'] > start_max:
+                continue
+            if cand['positive_first'] != positive_first:
+                continue
+            if cand['length'] < min_len:
+                continue
+            return cand
+        return None
+
+    best = None
+    for ru1 in long_runs:
+        ur1 = first_match(short_runs,
+                          max(0, ru1['end'] - 12),
+                          ru1['end'] + short_max,
+                          not ru1['positive_first'])
+        seq_after = ur1['end'] if ur1 is not None else ru1['end']
+        ru2 = first_match(long_runs,
+                          max(0, seq_after - 12),
+                          seq_after + md_gap_max,
+                          ru1['positive_first'],
+                          long_min)
+        ur2 = None
+        if ru2 is not None:
+            ur2 = first_match(short_runs,
+                              max(0, ru2['end'] - 12),
+                              ru2['end'] + short_max,
+                              not ru1['positive_first'])
+        score = (
+            5.0 * ru1['length']
+            + (3.0 * ur1['length'] if ur1 is not None else 0.0)
+            + (5.0 * ru2['length'] if ru2 is not None else 0.0)
+            + (3.0 * ur2['length'] if ur2 is not None else 0.0)
+        )
+        cand = {'ru1': ru1, 'ur1': ur1, 'ru2': ru2, 'ur2': ur2, 'score': score}
+        if best is None or cand['score'] > best['score'] or (
+                cand['score'] == best['score'] and ru1['start'] < best['ru1']['start']):
+            best = cand
+    assert best is not None
+    return best
+
+
+def v92_trn1u_recurrence(bits: np.ndarray, window: int = 256) -> np.ndarray:
+    """
+    Rolling GPA all-ones recurrence score on PCM-domain sign bits.
+    """
+    n = len(bits)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    rec = np.zeros(n, dtype=np.float64)
+    if n > 23:
+        rec[23:] = ((bits[23:] ^ bits[5:n - 18] ^ bits[:n - 23]) == 1).astype(np.float64)
+    return moving_average(rec, window)
+
+
+def detect_v92_pcm_regions(sig: np.ndarray, fs: int, law: str = 'auto') -> dict:
+    """
+    Detect V.92 analogue-modem Phase 3 directly in PCM/G.711 domain.
+    """
+    laws = ['ulaw', 'alaw'] if law == 'auto' else [law]
+    best = None
+    for cand_law in laws:
+        codewords, fs_pcm = wav_to_g711_codewords(sig, fs, cand_law)
+        sign = ((codewords >> 7) & 1).astype(np.uint8)
+        bits = (1 - sign).astype(np.uint8)   # positive -> 0, negative -> 1
+        amp7 = (codewords & 0x7F).astype(np.float64)
+        period6_score = v92_pcm_period6_profile(codewords)
+        candidates = v92_pcm_period6_candidates(codewords)
+        seq = choose_v92_pcm_sequence(candidates)
+
+        ru1 = seq['ru1']
+        ur1 = seq['ur1']
+        ru2 = seq['ru2']
+        ur2 = seq['ur2']
+        phase3_start = ru1['start'] if ru1 is not None else None
+        phase3_source = 'ru1' if ru1 is not None else 'none'
+        trn_search_start = 0
+        if ur2 is not None:
+            trn_search_start = ur2['end']
+        elif ru2 is not None:
+            trn_search_start = ru2['end']
+        elif ur1 is not None:
+            trn_search_start = ur1['end']
+        elif ru1 is not None:
+            trn_search_start = ru1['end']
+
+        trn_score = v92_trn1u_recurrence(bits)
+        trn_mask = np.zeros(len(codewords), dtype=bool)
+        if len(trn_mask) > trn_search_start:
+            trn_mask[trn_search_start:] = trn_score[trn_search_start:] >= 0.72
+        trn_mask = bridge_short_false_gaps(trn_mask, max_gap=8)
+        trn_runs = [r for r in boolean_runs(trn_mask) if (r[1] - r[0]) >= 128]
+        trn1u_run = None
+        if trn_runs:
+            preferred = [r for r in trn_runs if r[0] <= trn_search_start + 96]
+            run0, run1 = (preferred[0] if preferred else trn_runs[0])
+            trn1u_run = (run0, run1)
+        elif trn_search_start < len(codewords):
+            late = trn_search_start + 256
+            if late < len(codewords) and float(np.mean(trn_score[trn_search_start:late])) >= 0.68:
+                trn1u_run = (trn_search_start, len(codewords))
+
+        ja_start = None
+        if trn1u_run is not None:
+            trn0, trn1 = trn1u_run
+            ja_search_start = trn0 + 2040
+            if ja_search_start < min(trn1, len(codewords)):
+                ja_mask = np.zeros(len(codewords), dtype=bool)
+                ja_mask[ja_search_start:] = trn_score[ja_search_start:] <= 0.62
+                ja_mask = bridge_short_false_gaps(ja_mask, max_gap=8)
+                ja_runs = [r for r in boolean_runs(ja_mask) if (r[1] - r[0]) >= 64]
+                if ja_runs:
+                    ja_start = ja_runs[0][0]
+
+        ru_lengths = sum(c['length'] for c in (ru1, ur1, ru2, ur2) if c is not None)
+        trn_len = (trn1u_run[1] - trn1u_run[0]) if trn1u_run is not None else 0
+        trn_head_score = (
+            float(np.mean(trn_score[trn_search_start:min(len(trn_score), trn_search_start + 256)]))
+            if trn_search_start < len(trn_score) else 0.0
+        )
+        max_period6_len = max((c['length'] for c in candidates), default=0)
+        max_period6_score = float(np.max(period6_score)) if len(period6_score) else 0.0
+        max_trn_score = float(np.max(trn_score)) if len(trn_score) else 0.0
+        score = (
+            4.0 * ru_lengths
+            + 2.0 * trn_len
+            + (800.0 if phase3_start is not None else 0.0)
+            + (800.0 if trn1u_run is not None else 0.0)
+            + (1200.0 if ja_start is not None else 0.0)
+            + 400.0 * trn_head_score
+        )
+
+        report = {
+            'law': cand_law,
+            'fs': fs_pcm,
+            'codewords': codewords,
+            'sign': sign,
+            'bits': bits,
+            'amp7': amp7,
+            'period6_candidates': candidates,
+            'period6_score': period6_score,
+            'ru1_run': (ru1['start'], ru1['end']) if ru1 is not None else None,
+            'ur1_run': (ur1['start'], ur1['end']) if ur1 is not None else None,
+            'ru2_run': (ru2['start'], ru2['end']) if ru2 is not None else None,
+            'ur2_run': (ur2['start'], ur2['end']) if ur2 is not None else None,
+            'phase3_start': phase3_start,
+            'phase3_source': phase3_source,
+            'trn1u_run': trn1u_run,
+            'ja_start': ja_start,
+            'trn_score': trn_score,
+            'max_period6_len': max_period6_len,
+            'max_period6_score': max_period6_score,
+            'max_trn_score': max_trn_score,
+            'score': score,
+        }
+        if best is None or report['score'] > best['score']:
+            best = report
+    assert best is not None
+    return best
+
+
+def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
+    """
+    Detect V.92 analogue-modem Phase 3 from analogue audio WAV samples.
+
+    Unlike the PCM-domain path, this does not expect exact G.711 codewords.
+    It works directly on 8 kHz sample signs/levels, which is the right model
+    for the modem-sound WAV corpus.
+    """
+    sps = 6
+    sig_os, fs_os = resample_to_v92_oversampled(sig, fs, sps=sps)
+    best = None
+
+    for phase in range(sps):
+        sliced = sig_os[phase::sps]
+        if len(sliced) == 0:
+            continue
+
+        # Remove slow baseline motion, then lightly smooth before slicing.
+        dc = moving_average(sliced, 96)
+        x = moving_average(sliced - dc, 3)
+        amp = moving_average(np.abs(x), 5)
+        amp_ref = float(np.percentile(amp, 95)) if len(amp) else 1.0
+        amp_ref = max(amp_ref, 1e-6)
+        amp_norm = np.clip(amp / amp_ref, 0.0, 2.0)
+
+        sign = schmitt_sign_slice(x, np.maximum(amp, amp_ref * 0.02), hi=0.22, lo=0.08)
+        bits = (1 - sign).astype(np.uint8)
+        candidates = v92_period6_candidates(sign,
+                                            amp_norm,
+                                            min_len=8,
+                                            min_match=0.72,
+                                            min_amp=0.08,
+                                            max_gap=3)
+        seq = choose_v92_pcm_sequence(candidates)
+        period6_score = v92_period6_profile(sign, window=48)
+
+        ru1 = seq['ru1']
+        ur1 = seq['ur1']
+        ru2 = seq['ru2']
+        ur2 = seq['ur2']
+        phase3_start = ru1['start'] if ru1 is not None else None
+        phase3_source = 'ru1_audio' if ru1 is not None else 'none'
+        trn_search_start = 0
+        if ur2 is not None:
+            trn_search_start = ur2['end']
+        elif ru2 is not None:
+            trn_search_start = ru2['end']
+        elif ur1 is not None:
+            trn_search_start = ur1['end']
+        elif ru1 is not None:
+            trn_search_start = ru1['end']
+
+        trn_score = v92_trn1u_recurrence(bits, window=384)
+        amp_gate = np.clip(moving_average((amp_norm >= 0.08).astype(np.float64), 48), 0.0, 1.0)
+        trn_score = trn_score * amp_gate
+        trn_mask = np.zeros(len(sign), dtype=bool)
+        if len(trn_mask) > trn_search_start:
+            trn_mask[trn_search_start:] = trn_score[trn_search_start:] >= 0.64
+        trn_mask = bridge_short_false_gaps(trn_mask, max_gap=12)
+        trn_runs = [r for r in boolean_runs(trn_mask) if (r[1] - r[0]) >= 256]
+        trn1u_run = None
+        if trn_runs:
+            preferred = [r for r in trn_runs if r[0] <= trn_search_start + 128]
+            run0, run1 = (preferred[0] if preferred else trn_runs[0])
+            trn1u_run = (run0, run1)
+
+        ja_start = None
+        if trn1u_run is not None:
+            trn0, trn1 = trn1u_run
+            ja_search_start = trn0 + 2040
+            if ja_search_start < min(trn1, len(sign)):
+                ja_mask = np.zeros(len(sign), dtype=bool)
+                ja_mask[ja_search_start:] = trn_score[ja_search_start:] <= 0.58
+                ja_mask = bridge_short_false_gaps(ja_mask, max_gap=12)
+                ja_runs = [r for r in boolean_runs(ja_mask) if (r[1] - r[0]) >= 96]
+                if ja_runs:
+                    ja_start = ja_runs[0][0]
+
+        ru_lengths = sum(c['length'] for c in (ru1, ur1, ru2, ur2) if c is not None)
+        trn_len = (trn1u_run[1] - trn1u_run[0]) if trn1u_run is not None else 0
+        trn_head_score = (
+            float(np.mean(trn_score[trn_search_start:min(len(trn_score), trn_search_start + 256)]))
+            if trn_search_start < len(trn_score) else 0.0
+        )
+        max_period6_len = max((c['length'] for c in candidates), default=0)
+        max_period6_score = float(np.max(period6_score)) if len(period6_score) else 0.0
+        max_trn_score = float(np.max(trn_score)) if len(trn_score) else 0.0
+        score = (
+            4.0 * ru_lengths
+            + 2.0 * trn_len
+            + (800.0 if phase3_start is not None else 0.0)
+            + (800.0 if trn1u_run is not None else 0.0)
+            + (1200.0 if ja_start is not None else 0.0)
+            + 400.0 * trn_head_score
+            + 40.0 * max_period6_score
+            + 20.0 * max_trn_score
+        )
+
+        report = {
+            'mode': 'audio',
+            'fs': 8000,
+            'phase': phase,
+            'oversample_fs': fs_os,
+            'samples': x,
+            'sign': sign,
+            'bits': bits,
+            'amp': amp_norm,
+            'period6_candidates': candidates,
+            'period6_score': period6_score,
+            'ru1_run': (ru1['start'], ru1['end']) if ru1 is not None else None,
+            'ur1_run': (ur1['start'], ur1['end']) if ur1 is not None else None,
+            'ru2_run': (ru2['start'], ru2['end']) if ru2 is not None else None,
+            'ur2_run': (ur2['start'], ur2['end']) if ur2 is not None else None,
+            'phase3_start': phase3_start,
+            'phase3_source': phase3_source,
+            'trn1u_run': trn1u_run,
+            'ja_start': ja_start,
+            'trn_score': trn_score,
+            'max_period6_len': max_period6_len,
+            'max_period6_score': max_period6_score,
+            'max_trn_score': max_trn_score,
+            'score': score,
+        }
+        if best is None or report['score'] > best['score']:
+            best = report
+
+    if best is not None:
+        return best
+    return {
+        'mode': 'audio',
+        'fs': 8000,
+        'phase': 0,
+        'oversample_fs': fs_os,
+        'samples': np.zeros(0, dtype=np.float64),
+        'sign': np.zeros(0, dtype=np.uint8),
+        'bits': np.zeros(0, dtype=np.uint8),
+        'amp': np.zeros(0, dtype=np.float64),
+        'period6_candidates': [],
+        'period6_score': np.zeros(0, dtype=np.float64),
+        'ru1_run': None,
+        'ur1_run': None,
+        'ru2_run': None,
+        'ur2_run': None,
+        'phase3_start': None,
+        'phase3_source': 'none',
+        'trn1u_run': None,
+        'ja_start': None,
+        'trn_score': np.zeros(0, dtype=np.float64),
+        'max_period6_len': 0,
+        'max_period6_score': 0.0,
+        'max_trn_score': 0.0,
+        'score': 0.0,
+    }
+
+
+def print_v92_symbol_report(report: dict) -> None:
+    T_ms = 1000.0 / float(report['fs'])
+    heading = "V.92 PCM-Domain Phase 3 Report" if report.get('mode') == 'pcm' else "V.92 Audio-Domain Phase 3 Report"
+    print(f"\n=== {heading} ===")
+    if report.get('mode') == 'pcm':
+        print(f"  Law:                {report['law']}")
+    print(f"  Timeslot rate:      {report['fs']} symbol/s")
+    if report.get('mode') == 'audio':
+        print(f"  Symbol phase:       {report.get('phase', 0)}/6")
+    if report['phase3_start'] is not None:
+        print(f"  Phase 3 start:      sample {report['phase3_start']}  "
+              f"({report['phase3_start'] * T_ms:.1f} ms)  source={report['phase3_source']}")
+    else:
+        print("  Phase 3 start:      not found")
+    for key, label in (
+        ('ru1_run', 'Ru1'),
+        ('ur1_run', 'uR1'),
+        ('ru2_run', 'Ru2'),
+        ('ur2_run', 'uR2'),
+    ):
+        run = report[key]
+        if run is None:
+            print(f"  {label:18s} not found")
+        else:
+            r0, r1 = run
+            print(f"  {label:18s} {r0}–{r1}  ({(r1 - r0) * T_ms:.1f} ms)")
+    if report['trn1u_run'] is not None:
+        t0, t1 = report['trn1u_run']
+        print(f"  TRN1u-like run:     {t0}–{t1}  ({(t1 - t0) * T_ms:.1f} ms)")
+    else:
+        print("  TRN1u-like run:     not found")
+    if report['ja_start'] is not None:
+        print(f"  Ja-like transition: sample {report['ja_start']}  "
+              f"({report['ja_start'] * T_ms:.1f} ms)")
+    else:
+        print("  Ja-like transition: not found")
+    print(f"  Max period-6 score: {report['max_period6_score']:.3f}  "
+          f"longest run: {report['max_period6_len']}T")
+    print(f"  Max TRN score:      {report['max_trn_score']:.3f}")
+    if report['ru1_run'] is None and report['max_period6_len'] < 96:
+        note = ("this window does not behave like sustained raw G.711 V.92 Phase 3."
+                if report.get('mode') == 'pcm'
+                else "this window does not show a sustained 8 ksymbol/s V.92 Ru/TRN1u pattern.")
+        print(f"  Note: {note}")
+
+
+def v92_symbol_bitdump_text(report: dict,
+                            wav: Path,
+                            t0: float,
+                            t1: float) -> str:
+    fs = int(report['fs'])
+    proto = 'v92_pcm' if report.get('mode') == 'pcm' else 'v92_audio'
+    lines = [
+        f"file={wav}",
+        f"window_s={t0:.6f}-{t1:.6f} protocol={proto} timeslot_rate={fs}",
+    ]
+    if report.get('mode') == 'pcm':
+        lines.append(f"law={report['law']}")
+        lines.append(f"codewords={len(report['codewords'])}")
+    else:
+        lines.append(f"samples={len(report['samples'])}")
+        lines.append(f"symbol_phase={report.get('phase', 0)}/6")
+    if report['phase3_start'] is not None:
+        lines.append(
+            f"phase3_start_sym={report['phase3_start']} "
+            f"phase3_start_ms={(1000.0 * report['phase3_start'] / fs):.3f} "
+            f"phase3_start_abs_ms={(t0 * 1000.0) + (1000.0 * report['phase3_start'] / fs):.3f} "
+            f"phase3_start_source={report['phase3_source']}"
+        )
+    if report['trn1u_run'] is not None:
+        trn0, trn1 = report['trn1u_run']
+        lines.append(
+            f"trn1u_run_start_sym={trn0} trn1u_run_end_sym={trn1} "
+            f"trn1u_run_start_ms={(1000.0 * trn0 / fs):.3f} "
+            f"trn1u_run_end_ms={(1000.0 * trn1 / fs):.3f}"
+        )
+    if report['ja_start'] is not None:
+        lines.append(
+            f"ja_candidate_sym={report['ja_start']} "
+            f"ja_candidate_ms={(1000.0 * report['ja_start'] / fs):.3f}"
+        )
+    lines.append(f"max_period6_score={report['max_period6_score']:.6f}")
+    lines.append(f"max_period6_len={report['max_period6_len']}")
+    lines.append(f"max_trn_score={report['max_trn_score']:.6f}")
+    sign_bits = ''.join(str(int(v)) for v in report['sign'])
+    data_bits = ''.join(str(int(v)) for v in report['bits'])
+    lines.append(f"sign_bits({len(sign_bits)}):")
+    lines.append(chunk_bits(sign_bits, 64))
+    lines.append(f"data_bits({len(data_bits)}):")
+    lines.append(chunk_bits(data_bits, 64))
+    return '\n'.join(lines) + '\n'
 
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1839,138 @@ def detect_v92_regions(symbols: np.ndarray, sym_rate: int) -> dict:
     return out
 
 
+def evaluate_v92_timing_offset(iq: np.ndarray,
+                               n_sps: int,
+                               sym_rate: int,
+                               offset: int) -> dict:
+    """
+    Score one timing phase for V.92-like 2-point Phase 3.
+
+    We care more about sustained 2-point structure than QPSK EVM, so the score
+    is driven by occupancy and Ru/TRN1u/Ja evidence.
+    """
+    raw = iq[offset::n_sps]
+    raw = normalize_power(raw)
+    syms = recover_carrier_phase(raw, loop_bw=0.01)
+    syms = normalize_power(syms)
+    occ_idx, occ = phase_occupancy(syms)
+    occ_median = float(np.median(occ)) if len(occ) else 8.0
+    report = detect_v92_regions(syms, sym_rate)
+
+    ru_len = 0
+    if report['ru_run'] is not None:
+        ru0, ru1 = report['ru_run']
+        ru_len = max(0, ru1 - ru0 + 1)
+
+    two_point_len = 0
+    if report['two_point_run'] is not None:
+        t0, t1 = report['two_point_run']
+        two_point_len = max(0, t1 - t0 + 1)
+
+    trn_len = 0
+    if report['trn1u_run'] is not None:
+        t0, t1 = report['trn1u_run']
+        trn_len = max(0, t1 - t0 + 1)
+
+    ja_bonus = 250.0 if report['ja_start'] is not None else 0.0
+    phase3_bonus = 250.0 if report['phase3_start'] is not None else 0.0
+    score = (
+        2.0 * two_point_len
+        + 3.0 * trn_len
+        + 40.0 * ru_len
+        + ja_bonus
+        + phase3_bonus
+        - 180.0 * occ_median
+    )
+
+    return {
+        'symbols': syms,
+        'offset': offset,
+        'occ_idx': occ_idx,
+        'occ': occ,
+        'occ_median': occ_median,
+        'ru_len': ru_len,
+        'two_point_len': two_point_len,
+        'trn_len': trn_len,
+        'report': report,
+        'score': score,
+    }
+
+
+def find_best_v92_timing_offset(iq: np.ndarray,
+                                n_sps: int,
+                                sym_rate: int) -> dict:
+    """Try all timing phases and keep the strongest V.92-structured result."""
+    best = None
+    for offset in range(n_sps):
+        cand = evaluate_v92_timing_offset(iq, n_sps, sym_rate, offset)
+        if best is None or cand['score'] > best['score']:
+            best = cand
+    assert best is not None
+    return best
+
+
+def evaluate_v92_hypothesis(sig: np.ndarray,
+                            fs: int,
+                            sym_rate: int,
+                            fc: float,
+                            n_sps: int = 8) -> dict:
+    """Run one V.92 baud/carrier hypothesis through demod + 2-point scoring."""
+    iq_r = demodulate_to_baseband(sig, fs, sym_rate, fc, n_sps)
+    fs_bb = sym_rate * n_sps
+    sos_hp = sp.butter(4, 150.0, btype='high', fs=fs_bb, output='sos')
+    iq_r = sp.sosfiltfilt(sos_hp, iq_r)
+    best = find_best_v92_timing_offset(iq_r, n_sps, sym_rate)
+    best['iq'] = iq_r
+    best['sym_rate'] = sym_rate
+    best['fc'] = float(fc)
+    best['symbol_count'] = len(best['symbols'])
+    return best
+
+
+def select_best_v92_hypothesis(sig: np.ndarray,
+                               fs: int,
+                               n_sps: int = 8) -> tuple[dict, list[dict]]:
+    """
+    Sweep all V.92 baud/carrier candidates and rank by 2-point evidence.
+    """
+    results: list[dict] = []
+    for sym_rate, fc in carrier_candidates('v92'):
+        try:
+            cand = evaluate_v92_hypothesis(sig, fs, sym_rate, float(fc), n_sps)
+            results.append(cand)
+        except Exception as exc:
+            results.append({
+                'sym_rate': sym_rate,
+                'fc': float(fc),
+                'score': -1e12,
+                'error': str(exc),
+            })
+    ranked = sorted(results, key=lambda x: x['score'], reverse=True)
+    return ranked[0], ranked
+
+
+def print_v92_hypothesis_table(ranked: list[dict], top_n: int = 8) -> None:
+    """Print the strongest V.92 candidates so bad auto-picks are obvious."""
+    print("\n── V.92 Hypothesis Sweep ──")
+    print(f"  {'rank':>4}  {'sym_rate':>8}  {'fc_hz':>6}  {'offset':>6}  "
+          f"{'occ_med':>7}  {'ru':>5}  {'2pt':>6}  {'trn1u':>7}  {'ja':>3}  {'score':>8}")
+    print('  ' + '-' * 80)
+    shown = 0
+    for cand in ranked:
+        if 'error' in cand:
+            continue
+        shown += 1
+        report = cand['report']
+        has_ja = 'yes' if report['ja_start'] is not None else 'no'
+        print(f"  {shown:4d}  {cand['sym_rate']:8d}  {int(cand['fc']):6d}  "
+              f"{cand['offset']:6d}  {cand['occ_median']:7.2f}  "
+              f"{cand['ru_len']:5d}  {cand['two_point_len']:6d}  "
+              f"{cand['trn_len']:7d}  {has_ja:>3}  {cand['score']:8.1f}")
+        if shown >= top_n:
+            break
+
+
 def print_timeline(sym_rate: int, runs: list[tuple[str, int]]) -> None:
     T_ms = 1000.0 / sym_rate
     print(f"\n{'Offset':>10}  {'Segment':<14}  {'Symbols':>7}  {'Duration':>10}")
@@ -1406,6 +2168,12 @@ def main(argv=None) -> int:
         help='Skip STFT-based sub-sequence detection (faster)')
     ap.add_argument('--force-qpsk', action='store_true',
         help='Run the legacy QPSK/LMS/Ja path even when the capture looks V.92-like')
+    ap.add_argument('--v92-mode', choices=('audio', 'pcm'),
+        default='audio',
+        help='V.92 detector mode for WAV input (default: audio)')
+    ap.add_argument('--g711-law', choices=('auto', 'ulaw', 'alaw'),
+        default='auto',
+        help='G.711 law for PCM-domain V.92 detection (default: auto)')
     ap.add_argument('--out-dir', type=Path, default=Path('tools/dumps'),
         help='Output directory for IQ/timeline text files')
     ap.add_argument('--s-thresh',  type=float, default=0.80,
@@ -1416,6 +2184,7 @@ def main(argv=None) -> int:
     wav_name_upper = args.wav.name.upper()
     hinted_protocol = 'v92' if 'V92' in wav_name_upper else None
     display_protocol = args.protocol if args.protocol != 'auto' else (hinted_protocol or 'v90')
+    preselected_v92: dict | None = None
 
     # ── Load signal ─────────────────────────────────────────────────────────
     print(f"Loading  {args.wav}  ch={args.ch}  "
@@ -1424,14 +2193,73 @@ def main(argv=None) -> int:
     print(f"  {len(sig)} samples @ {fs} Hz  ({len(sig)/fs:.3f} s)  "
           f"RMS = {np.sqrt(np.mean(sig**2)):.1f}")
 
+    prefer_native_v92 = ((args.protocol == 'v92') or
+                         (args.protocol == 'auto' and hinted_protocol == 'v92')) and not args.force_qpsk
+    if prefer_native_v92:
+        if args.v92_mode == 'pcm':
+            report_v92 = detect_v92_pcm_regions(sig, fs, args.g711_law)
+        else:
+            report_v92 = detect_v92_audio_regions(sig, fs)
+        print_expected_durations(report_v92['fs'], 'v92')
+        print_v92_symbol_report(report_v92)
+
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        stem_base = args.wav.stem.replace(' ', '_')
+        if report_v92.get('mode') == 'pcm':
+            stem = f"p3pcm_{stem_base}_{report_v92['law']}_{report_v92['fs']}Hz"
+        else:
+            stem = f"p3audio_{stem_base}_{report_v92['fs']}Hz"
+        pcm_path = args.out_dir / f"{stem}.pcm.txt"
+        bit_path = args.out_dir / f"{stem}.bits.txt"
+        T_ms_pcm = 1000.0 / float(report_v92['fs'])
+        with open(pcm_path, 'w') as fh:
+            if report_v92.get('mode') == 'pcm':
+                fh.write("# V.92 PCM-domain Phase 3 codewords\n")
+                fh.write(f"# law={report_v92['law']} fs={report_v92['fs']} t0={args.t0} t1={args.t1}\n")
+                fh.write("# columns: idx time_ms codeword_hex sign_bit data_bit amp p6_score trn_score\n")
+                for i, cw in enumerate(report_v92['codewords']):
+                    p6 = report_v92['period6_score'][i] if i < len(report_v92['period6_score']) else 0.0
+                    trn = report_v92['trn_score'][i] if i < len(report_v92['trn_score']) else 0.0
+                    fh.write(f"{i:6d} {i*T_ms_pcm:9.3f} 0x{int(cw):02x} "
+                             f"{int(report_v92['sign'][i])} {int(report_v92['bits'][i])} "
+                             f"{int(report_v92['amp7'][i]):3d} {p6:.3f} {trn:.3f}\n")
+            else:
+                fh.write("# V.92 audio-domain Phase 3 sliced symbols\n")
+                fh.write(f"# fs={report_v92['fs']} t0={args.t0} t1={args.t1}\n")
+                fh.write("# columns: idx time_ms sample sign_bit data_bit amp p6_score trn_score\n")
+                for i, sample in enumerate(report_v92['samples']):
+                    p6 = report_v92['period6_score'][i] if i < len(report_v92['period6_score']) else 0.0
+                    trn = report_v92['trn_score'][i] if i < len(report_v92['trn_score']) else 0.0
+                    fh.write(f"{i:6d} {i*T_ms_pcm:9.3f} {sample:+.3f} "
+                             f"{int(report_v92['sign'][i])} {int(report_v92['bits'][i])} "
+                             f"{report_v92['amp'][i]:.3f} {p6:.3f} {trn:.3f}\n")
+        bit_path.write_text(
+            v92_symbol_bitdump_text(report_v92, args.wav, args.t0, args.t1),
+            encoding="ascii",
+        )
+        print("\nOutput:")
+        if report_v92.get('mode') == 'pcm':
+            print(f"  PCM dump    → {pcm_path}  ({len(report_v92['codewords'])} codewords)")
+        else:
+            print(f"  Audio dump  → {pcm_path}  ({len(report_v92['samples'])} symbols)")
+        print(f"  Bit dump    → {bit_path}")
+        return 0
+
     # ── Parameter selection ──────────────────────────────────────────────────
     if args.sym_rate and args.carrier:
         sym_rate = args.sym_rate
         fc       = float(args.carrier)
         print(f"  Parameters forced: sym_rate={sym_rate}  fc={fc:.0f} Hz")
     else:
-        est_protocol = 'v90' if args.protocol == 'v90' else 'auto'
-        sym_rate, fc = estimate_best_carrier(sig, fs, est_protocol)
+        prefer_v92 = (args.protocol == 'v92') or (args.protocol == 'auto' and hinted_protocol == 'v92')
+        if prefer_v92:
+            preselected_v92, ranked_v92 = select_best_v92_hypothesis(sig, fs)
+            print_v92_hypothesis_table(ranked_v92)
+            sym_rate = int(preselected_v92['sym_rate'])
+            fc = float(preselected_v92['fc'])
+        else:
+            est_protocol = 'v90' if args.protocol == 'v90' else 'auto'
+            sym_rate, fc = estimate_best_carrier(sig, fs, est_protocol)
         if args.sym_rate: sym_rate = args.sym_rate
         if args.carrier:  fc       = float(args.carrier)
         print(f"  Auto-detected:     sym_rate={sym_rate}  fc={fc:.0f} Hz")
@@ -1510,22 +2338,34 @@ def main(argv=None) -> int:
     N_SPS = 8
     print(f"\nDemodulating: sym_rate={sym_rate} baud  fc={fc:.0f} Hz  "
           f"{N_SPS} sps  (raw → 48kHz upsample)")
-    iq_r = demodulate_to_baseband(sig, fs, sym_rate, fc, N_SPS)
+    if (preselected_v92 is not None and
+            int(preselected_v92['sym_rate']) == sym_rate and
+            abs(float(preselected_v92['fc']) - fc) < 0.5):
+        iq_r = preselected_v92['iq']
+        syms = preselected_v92['symbols'].copy()
+        best_offset = int(preselected_v92['offset'])
+        report = preselected_v92['report']
+        occ = preselected_v92['occ']
+        occ_median = float(preselected_v92['occ_median'])
+        evm = qpsk_evm(syms)
+    else:
+        iq_r = demodulate_to_baseband(sig, fs, sym_rate, fc, N_SPS)
 
-    # HP-filter to remove carrier leakage (4.8× power in DC bin otherwise)
-    fs_bb  = sym_rate * N_SPS
-    sos_hp = sp.butter(4, 150.0, btype='high', fs=fs_bb, output='sos')
-    iq_r   = sp.sosfiltfilt(sos_hp, iq_r)
+        # HP-filter to remove carrier leakage (4.8× power in DC bin otherwise)
+        fs_bb  = sym_rate * N_SPS
+        sos_hp = sp.butter(4, 150.0, btype='high', fs=fs_bb, output='sos')
+        iq_r   = sp.sosfiltfilt(sos_hp, iq_r)
 
-    syms, best_offset, evm = find_best_timing_offset(iq_r, N_SPS)
+        syms, best_offset, evm = find_best_timing_offset(iq_r, N_SPS)
+        report = None
+        occ_idx, occ = phase_occupancy(syms)
+        occ_median = float(np.median(occ)) if len(occ) else 8.0
     raw_syms = syms.copy()
     dur_sym = len(syms) * 1000.0 / sym_rate
     T_ms    = 1000.0 / sym_rate
-    print(f"  Symbols: {len(syms)}  best_offset={best_offset:.2f}/{N_SPS}")
+    print(f"  Symbols: {len(syms)}  best_offset={best_offset}/{N_SPS}")
     print(f"  QPSK EVM (no equalizer): {evm:.4f}  ({evm*100:.1f}%)")
 
-    occ_idx, occ = phase_occupancy(syms)
-    occ_median = float(np.median(occ)) if len(occ) else 8.0
     likely_v92 = (occ_median <= 3.5)
     effective_protocol = args.protocol
     if effective_protocol == 'auto':
@@ -1537,7 +2377,8 @@ def main(argv=None) -> int:
           f"(auto protocol → {effective_protocol})")
 
     if effective_protocol == 'v92' and not args.force_qpsk:
-        report = detect_v92_regions(syms, sym_rate)
+        if report is None:
+            report = detect_v92_regions(syms, sym_rate)
         print_v92_report(sym_rate, report)
 
         args.out_dir.mkdir(parents=True, exist_ok=True)
