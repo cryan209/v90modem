@@ -419,6 +419,223 @@ def choose_v92_pcm_sequence(candidates: list[dict]) -> dict:
     return best
 
 
+def pick_v92_audio_anchor(candidates: list[dict]) -> tuple[dict | None, dict | None, float]:
+    """
+    Pick the best long Ru-like anchor in noisy audio-domain detections.
+
+    WAV captures often fragment the ideal 384T Ru run. This chooses a long,
+    early candidate whose length is reasonably close to the spec, then looks
+    for a short opposite-polarity uR-like run immediately after it.
+    """
+    long_candidates = [c for c in candidates if c['length'] >= 192]
+    if not long_candidates:
+        return None, None, 0.0
+
+    def anchor_score(c: dict) -> float:
+        len_score = min(c['length'], 384)
+        closeness = max(0.0, 1.0 - abs(c['length'] - 384) / 384.0)
+        early = max(0.0, 12000.0 - float(c['start'])) / 40.0
+        return (
+            3.0 * len_score
+            + 300.0 * closeness
+            + 80.0 * float(c['mean_match'])
+            + 20.0 * float(c['mean_amp'])
+            + early
+        )
+
+    best = max(long_candidates, key=anchor_score)
+    best_score = anchor_score(best)
+    close = [c for c in long_candidates if anchor_score(c) >= best_score - 60.0]
+    anchor = min(close, key=lambda c: (c['start'], -c['length']))
+
+    follow = None
+    for cand in candidates:
+        if cand['positive_first'] == anchor['positive_first']:
+            continue
+        if not (8 <= cand['length'] <= 96):
+            continue
+        if cand['start'] < max(0, anchor['end'] - 12):
+            continue
+        if cand['start'] > anchor['end'] + 96:
+            continue
+        if follow is None or (
+                cand['mean_match'], cand['length'], -cand['start']) > (
+                follow['mean_match'], follow['length'], -follow['start']):
+            follow = cand
+    return anchor, follow, anchor_score(anchor)
+
+
+def refine_v92_audio_anchor_bounds(sign: np.ndarray,
+                                   amp: np.ndarray,
+                                   anchor: dict,
+                                   search: int = 96) -> tuple[dict, dict | None, float, float]:
+    """
+    Refine an audio-domain Ru/uR anchor to spec-aligned symbol boundaries.
+
+    The raw Ru candidate often starts slightly late because the audio run finder
+    wants a sustained period-6 region. Here we scan around that start and choose
+    the offset with the best 384T Ru match plus immediate 24T inverted follow-up.
+    """
+    n = len(sign)
+    base = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+    idx = np.arange(n, dtype=np.int32)
+    expected_ru = base[(idx - int(anchor['phase'])) % 6]
+    if not anchor['positive_first']:
+        expected_ru = 1 - expected_ru
+    expected_ur = 1 - expected_ru
+    match_ru = (sign == expected_ru).astype(np.float64)
+    match_ur = (sign == expected_ur).astype(np.float64)
+
+    lo = max(0, int(anchor['start']) - search)
+    hi = min(n - 408, int(anchor['start']) + search)
+    if hi < lo:
+        hi = lo
+
+    best = None
+    for start in range(lo, hi + 1):
+        ru0 = start
+        ru1 = min(n, start + 384)
+        ur0 = ru1
+        ur1 = min(n, ur0 + 24)
+        if ru1 - ru0 < 288 or ur1 - ur0 < 12:
+            continue
+        ru_score = float(np.mean(match_ru[ru0:ru1] * amp[ru0:ru1]))
+        ur_score = float(np.mean(match_ur[ur0:ur1] * amp[ur0:ur1]))
+        score = (
+            1000.0 * ru_score
+            + 300.0 * ur_score
+            - 0.5 * abs(start - int(anchor['start']))
+        )
+        item = (score, start, ru_score, ur_score)
+        if best is None or item > best:
+            best = item
+
+    if best is None:
+        ru = {
+            'start': int(anchor['start']),
+            'end': int(anchor['end']),
+            'length': int(anchor['end']) - int(anchor['start']),
+            'phase': int(anchor['phase']),
+            'positive_first': bool(anchor['positive_first']),
+        }
+        return ru, None, 0.0, 0.0
+
+    _, start, ru_score, ur_score = best
+    ru = {
+        'start': start,
+        'end': min(n, start + 384),
+        'length': min(n, start + 384) - start,
+        'phase': int(anchor['phase']),
+        'positive_first': bool(anchor['positive_first']),
+    }
+    ur = None
+    if ur_score >= 0.40:
+        ur = {
+            'start': ru['end'],
+            'end': min(n, ru['end'] + 24),
+            'length': min(n, ru['end'] + 24) - ru['end'],
+            'phase': int(anchor['phase']),
+            'positive_first': not bool(anchor['positive_first']),
+        }
+    return ru, ur, ru_score, ur_score
+
+
+def find_v92_audio_ru_followup(sign: np.ndarray,
+                               amp: np.ndarray,
+                               ur1: dict,
+                               ru_phase: int,
+                               ru_positive_first: bool,
+                               ref_ru_score: float,
+                               ref_ur_score: float) -> tuple[dict | None, dict | None, float, float, str]:
+    """
+    Search for Ru2/uR2 after a refined Ru1/uR1 pair.
+
+    The practical default is "no MD", so we try an immediate post-uR1 Ru2
+    first. Only if that fails do we open a broader MD-style search window.
+    """
+    n = len(sign)
+    if n == 0:
+        return None, None, 0.0, 0.0, 'none'
+
+    base = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+    idx = np.arange(n, dtype=np.int32)
+    expected_ru = base[(idx - int(ru_phase)) % 6]
+    if not ru_positive_first:
+        expected_ru = 1 - expected_ru
+    expected_ur = 1 - expected_ru
+    match_ru = (sign == expected_ru).astype(np.float64)
+    match_ur = (sign == expected_ur).astype(np.float64)
+
+    def best_in_window(start_min: int,
+                       start_max: int,
+                       gap_weight: float) -> tuple[dict | None, dict | None, float, float, float]:
+        lo = max(0, start_min)
+        hi = min(n - 408, start_max)
+        if hi < lo:
+            return None, None, 0.0, 0.0, 0.0
+        best = None
+        for start in range(lo, hi + 1):
+            ru0 = start
+            ru1 = min(n, start + 384)
+            ur0 = ru1
+            ur1_end = min(n, ur0 + 24)
+            if ru1 - ru0 < 288 or ur1_end - ur0 < 12:
+                continue
+            ru_score = float(np.mean(match_ru[ru0:ru1] * amp[ru0:ru1]))
+            ur_score = float(np.mean(match_ur[ur0:ur1_end] * amp[ur0:ur1_end]))
+            gap = max(0, start - int(ur1['end']))
+            score = 1000.0 * ru_score + 320.0 * ur_score - gap_weight * gap
+            item = (score, start, ru_score, ur_score)
+            if best is None or item > best:
+                best = item
+        if best is None:
+            return None, None, 0.0, 0.0, 0.0
+        score, start, ru_score, ur_score = best
+        ru = {
+            'start': start,
+            'end': min(n, start + 384),
+            'length': min(n, start + 384) - start,
+            'phase': int(ru_phase),
+            'positive_first': bool(ru_positive_first),
+        }
+        ur = {
+            'start': ru['end'],
+            'end': min(n, ru['end'] + 24),
+            'length': min(n, ru['end'] + 24) - ru['end'],
+            'phase': int(ru_phase),
+            'positive_first': not bool(ru_positive_first),
+        }
+        return ru, ur, ru_score, ur_score, score
+
+    imm_ru, imm_ur, imm_ru_score, imm_ur_score, _ = best_in_window(
+        int(ur1['end']) - 12,
+        int(ur1['end']) + 96,
+        gap_weight=1.0,
+    )
+    imm_ok = (
+        imm_ru is not None
+        and imm_ru_score >= max(0.28, 0.85 * ref_ru_score)
+        and imm_ur_score >= max(0.40, 0.70 * ref_ur_score)
+    )
+    if imm_ok:
+        return imm_ru, imm_ur, imm_ru_score, imm_ur_score, 'immediate'
+
+    md_ru, md_ur, md_ru_score, md_ur_score, _ = best_in_window(
+        int(ur1['end']) + 24,
+        int(ur1['end']) + 800,
+        gap_weight=0.35,
+    )
+    md_ok = (
+        md_ru is not None
+        and md_ru_score >= max(0.30, 0.90 * ref_ru_score)
+        and md_ur_score >= max(0.44, 0.75 * ref_ur_score)
+    )
+    if md_ok:
+        return md_ru, md_ur, md_ru_score, md_ur_score, 'md'
+
+    return None, None, 0.0, 0.0, 'none'
+
+
 def v92_trn1u_recurrence(bits: np.ndarray, window: int = 256) -> np.ndarray:
     """
     Rolling GPA all-ones recurrence score on PCM-domain sign bits.
@@ -549,11 +766,15 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
     sps = 6
     sig_os, fs_os = resample_to_v92_oversampled(sig, fs, sps=sps)
     best = None
+    symbol_kernel = np.array([0.0, 1.0, 1.0, 1.0, 0.0, 0.0], dtype=np.float64)
+    symbol_kernel /= float(np.sum(symbol_kernel))
 
     for phase in range(sps):
-        sliced = sig_os[phase::sps]
-        if len(sliced) == 0:
+        n_syms = (len(sig_os) - phase) // sps
+        if n_syms <= 0:
             continue
+        blocks = sig_os[phase:phase + n_syms * sps].reshape(n_syms, sps)
+        sliced = blocks @ symbol_kernel
 
         # Remove slow baseline motion, then lightly smooth before slicing.
         dc = moving_average(sliced, 96)
@@ -568,27 +789,72 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
         candidates = v92_period6_candidates(sign,
                                             amp_norm,
                                             min_len=8,
-                                            min_match=0.72,
+                                            min_match=0.60,
                                             min_amp=0.08,
-                                            max_gap=3)
+                                            max_gap=6)
         seq = choose_v92_pcm_sequence(candidates)
+        anchor, anchor_follow, anchor_score = pick_v92_audio_anchor(candidates)
         period6_score = v92_period6_profile(sign, window=48)
 
         ru1 = seq['ru1']
         ur1 = seq['ur1']
         ru2 = seq['ru2']
         ur2 = seq['ur2']
-        phase3_start = ru1['start'] if ru1 is not None else None
-        phase3_source = 'ru1_audio' if ru1 is not None else 'none'
-        trn_search_start = 0
-        if ur2 is not None:
-            trn_search_start = ur2['end']
-        elif ru2 is not None:
-            trn_search_start = ru2['end']
-        elif ur1 is not None:
-            trn_search_start = ur1['end']
+        refined_anchor = None
+        refined_follow = None
+        refined_ru_score = 0.0
+        refined_ur_score = 0.0
+        searched_ru2 = None
+        searched_ur2 = None
+        searched_ru2_score = 0.0
+        searched_ur2_score = 0.0
+        searched_ru2_source = 'none'
+        if anchor is not None:
+            refined_anchor, refined_follow, refined_ru_score, refined_ur_score = (
+                refine_v92_audio_anchor_bounds(sign, amp_norm, anchor)
+            )
+
+        use_anchor = (
+            anchor is not None and (
+                ru1 is None
+                or anchor['length'] >= ru1['length'] + 96
+                or anchor['start'] + 192 < ru1['start']
+            )
+        )
+        disp_ru1 = refined_anchor if use_anchor and refined_anchor is not None else anchor if use_anchor else ru1
+        disp_ur1 = refined_follow if use_anchor and refined_follow is not None else anchor_follow if use_anchor else ur1
+        disp_ru2 = None if use_anchor else ru2
+        disp_ur2 = None if use_anchor else ur2
+        if disp_ru1 is not None and disp_ur1 is not None:
+            searched_ru2, searched_ur2, searched_ru2_score, searched_ur2_score, searched_ru2_source = (
+                find_v92_audio_ru_followup(sign,
+                                           amp_norm,
+                                           disp_ur1,
+                                           int(disp_ru1['phase']),
+                                           bool(disp_ru1['positive_first']),
+                                           refined_ru_score if use_anchor else 0.30,
+                                           refined_ur_score if use_anchor else 0.45)
+            )
+            if searched_ru2 is not None:
+                disp_ru2 = searched_ru2
+                disp_ur2 = searched_ur2
+
+        phase3_start = disp_ru1['start'] if disp_ru1 is not None else None
+        if use_anchor:
+            phase3_source = 'ru_audio_refined' if refined_anchor is not None else 'ru_audio_anchor'
         elif ru1 is not None:
-            trn_search_start = ru1['end']
+            phase3_source = 'ru1_audio'
+        else:
+            phase3_source = 'none'
+        trn_search_start = 0
+        if disp_ur2 is not None:
+            trn_search_start = disp_ur2['end']
+        elif disp_ru2 is not None:
+            trn_search_start = disp_ru2['end']
+        elif disp_ur1 is not None:
+            trn_search_start = disp_ur1['end']
+        elif disp_ru1 is not None:
+            trn_search_start = disp_ru1['end']
 
         trn_score = v92_trn1u_recurrence(bits, window=384)
         amp_gate = np.clip(moving_average((amp_norm >= 0.08).astype(np.float64), 48), 0.0, 1.0)
@@ -616,7 +882,7 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
                 if ja_runs:
                     ja_start = ja_runs[0][0]
 
-        ru_lengths = sum(c['length'] for c in (ru1, ur1, ru2, ur2) if c is not None)
+        ru_lengths = sum(c['length'] for c in (disp_ru1, disp_ur1, disp_ru2, disp_ur2) if c is not None)
         trn_len = (trn1u_run[1] - trn1u_run[0]) if trn1u_run is not None else 0
         trn_head_score = (
             float(np.mean(trn_score[trn_search_start:min(len(trn_score), trn_search_start + 256)]))
@@ -631,6 +897,13 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
             + (800.0 if phase3_start is not None else 0.0)
             + (800.0 if trn1u_run is not None else 0.0)
             + (1200.0 if ja_start is not None else 0.0)
+            + 0.5 * anchor_score
+            + 300.0 * refined_ru_score
+            + 120.0 * refined_ur_score
+            + 260.0 * searched_ru2_score
+            + 100.0 * searched_ur2_score
+            + (500.0 if searched_ru2 is not None else 0.0)
+            + (150.0 if searched_ru2_source == 'immediate' else 0.0)
             + 400.0 * trn_head_score
             + 40.0 * max_period6_score
             + 20.0 * max_trn_score
@@ -647,10 +920,11 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
             'amp': amp_norm,
             'period6_candidates': candidates,
             'period6_score': period6_score,
-            'ru1_run': (ru1['start'], ru1['end']) if ru1 is not None else None,
-            'ur1_run': (ur1['start'], ur1['end']) if ur1 is not None else None,
-            'ru2_run': (ru2['start'], ru2['end']) if ru2 is not None else None,
-            'ur2_run': (ur2['start'], ur2['end']) if ur2 is not None else None,
+            'ru1_run': (disp_ru1['start'], disp_ru1['end']) if disp_ru1 is not None else None,
+            'ur1_run': (disp_ur1['start'], disp_ur1['end']) if disp_ur1 is not None else None,
+            'ru2_run': (disp_ru2['start'], disp_ru2['end']) if disp_ru2 is not None else None,
+            'ur2_run': (disp_ur2['start'], disp_ur2['end']) if disp_ur2 is not None else None,
+            'ru2_source': searched_ru2_source,
             'phase3_start': phase3_start,
             'phase3_source': phase3_source,
             'trn1u_run': trn1u_run,
