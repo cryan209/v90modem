@@ -638,7 +638,8 @@ def find_v92_audio_ru_followup(sign: np.ndarray,
 
 def find_v92_audio_trn1u_run(trn_score: np.ndarray,
                              trn_search_start: int,
-                             bits: np.ndarray | None = None) -> tuple[tuple[int, int] | None, str, dict | None]:
+                             bits: np.ndarray | None = None,
+                             raw_expect: np.ndarray | None = None) -> tuple[tuple[int, int] | None, str, dict | None]:
     """
     Find a TRN1u-like run after the detected Ru/uR preamble.
 
@@ -662,12 +663,12 @@ def find_v92_audio_trn1u_run(trn_score: np.ndarray,
 
     decode_metrics = None
     if bits is not None and len(bits) > trn_search_start + 256:
-        decode_metrics = v92_audio_trn1u_decode_metrics(bits, trn_search_start)
+        decode_metrics = v92_audio_trn1u_decode_metrics(bits, raw_expect, trn_search_start)
         if decode_metrics is not None:
             plain = decode_metrics['plain_bits']
-            if (decode_metrics['ones_256'] >= 0.58
-                    and decode_metrics['ones_512'] >= 0.555
-                    and decode_metrics['ones_2040'] >= 0.55):
+            if (decode_metrics['soft_256'] >= 0.58
+                    and decode_metrics['soft_512'] >= 0.565
+                    and decode_metrics['soft_2040'] >= 0.555):
                 rolling = moving_average(plain.astype(np.float64), 512)
                 mask = rolling >= max(0.53, decode_metrics['ones_2040'] - 0.03)
                 mask = bridge_short_false_gaps(mask, max_gap=192)
@@ -711,6 +712,7 @@ def find_v92_audio_trn1u_run(trn_score: np.ndarray,
 
 
 def v92_audio_trn1u_decode_metrics(bits: np.ndarray,
+                                   raw_expect: np.ndarray | None,
                                    trn_search_start: int,
                                    search_slop: int = 12) -> dict | None:
     """
@@ -728,44 +730,70 @@ def v92_audio_trn1u_decode_metrics(bits: np.ndarray,
     if n <= trn_search_start + 24 + 256:
         return None
 
-    def decode_plain(start: int, mode: str) -> np.ndarray | None:
+    def decode_plain(start: int, mode: str) -> tuple[np.ndarray | None, np.ndarray | None]:
         out: list[int] = []
+        soft_out: list[float] = []
         reg = 0
+        reg_soft = np.ones(23, dtype=np.float64)
 
         if mode in ('raw', 'raw_inv'):
             lo = start - 23
             hi = min(n, lo + 23 + 4096)
             if lo < 0 or hi - lo < 23 + 256:
-                return None
+                return None, None
             seq = bits[lo:hi]
+            seq_soft = None if raw_expect is None else raw_expect[lo:hi]
             invert = (mode == 'raw_inv')
             for i in range(len(seq)):
                 raw = int(seq[i])
+                soft_raw = 1.0 if raw == 0 else -1.0
+                if seq_soft is not None:
+                    soft_raw = float(seq_soft[i])
                 if invert:
                     raw = 1 - raw
+                    soft_raw = -soft_raw
                 plain = (raw + ((reg >> 22) & 1) + ((reg >> 17) & 1)) & 1
                 reg = ((reg << 1) | raw) & 0x7FFFFF
+                soft_plain = soft_raw * reg_soft[22] * reg_soft[17]
+                reg_soft = np.roll(reg_soft, 1)
+                reg_soft[0] = soft_raw
                 if i >= 23:
                     out.append(plain)
-            return np.array(out, dtype=np.uint8)
+                    soft_out.append((1.0 - soft_plain) * 0.5)
+            return np.array(out, dtype=np.uint8), np.array(soft_out, dtype=np.float64)
 
         lo = start - 24
         hi = min(n, lo + 24 + 4096)
         if lo < 0 or hi - lo < 24 + 256:
-            return None
+            return None, None
         seq = bits[lo:hi]
+        seq_soft = None if raw_expect is None else raw_expect[lo:hi]
         prev = int(seq[0])
+        prev_soft = 1.0 if prev == 0 else -1.0
+        if seq_soft is not None:
+            prev_soft = float(seq_soft[0])
         count = 0
         for i in range(1, len(seq)):
             base = (int(seq[i]) + prev) & 1
+            cur_soft = 1.0 if int(seq[i]) == 0 else -1.0
+            if seq_soft is not None:
+                cur_soft = float(seq_soft[i])
             diff = base if mode == 'xor' else (1 - base)
+            soft_diff = prev_soft * cur_soft
+            if mode == 'xnor':
+                soft_diff = -soft_diff
             prev = int(seq[i])
+            prev_soft = cur_soft
             plain = (diff + ((reg >> 22) & 1) + ((reg >> 17) & 1)) & 1
             reg = ((reg << 1) | diff) & 0x7FFFFF
+            soft_plain = soft_diff * reg_soft[22] * reg_soft[17]
+            reg_soft = np.roll(reg_soft, 1)
+            reg_soft[0] = soft_diff
             if count >= 23:
                 out.append(plain)
+                soft_out.append((1.0 - soft_plain) * 0.5)
             count += 1
-        return np.array(out, dtype=np.uint8)
+        return np.array(out, dtype=np.uint8), np.array(soft_out, dtype=np.float64)
 
     best = None
     for off in range(-search_slop, search_slop + 1):
@@ -774,18 +802,26 @@ def v92_audio_trn1u_decode_metrics(bits: np.ndarray,
             continue
         frame_phase = (start - trn_search_start) % 12
         for mode in ('raw', 'raw_inv', 'xor', 'xnor'):
-            plain = decode_plain(start, mode)
+            plain, soft_plain = decode_plain(start, mode)
             if plain is None or len(plain) < 2040:
                 continue
             ones_256 = float(np.mean(plain[:256]))
             ones_512 = float(np.mean(plain[:512]))
             ones_1024 = float(np.mean(plain[:1024]))
             ones_2040 = float(np.mean(plain[:2040]))
+            soft_256 = ones_256 if soft_plain is None else float(np.mean(soft_plain[:256]))
+            soft_512 = ones_512 if soft_plain is None else float(np.mean(soft_plain[:512]))
+            soft_1024 = ones_1024 if soft_plain is None else float(np.mean(soft_plain[:1024]))
+            soft_2040 = ones_2040 if soft_plain is None else float(np.mean(soft_plain[:2040]))
             score = (
-                700.0 * ones_256
-                + 900.0 * ones_512
-                + 1200.0 * ones_1024
-                + 1800.0 * ones_2040
+                350.0 * ones_256
+                + 450.0 * ones_512
+                + 600.0 * ones_1024
+                + 900.0 * ones_2040
+                + 700.0 * soft_256
+                + 900.0 * soft_512
+                + 1200.0 * soft_1024
+                + 1800.0 * soft_2040
                 - 2.0 * abs(off)
                 - 0.25 * float(frame_phase)
             )
@@ -799,6 +835,10 @@ def v92_audio_trn1u_decode_metrics(bits: np.ndarray,
                 'ones_512': ones_512,
                 'ones_1024': ones_1024,
                 'ones_2040': ones_2040,
+                'soft_256': soft_256,
+                'soft_512': soft_512,
+                'soft_1024': soft_1024,
+                'soft_2040': soft_2040,
                 'score': score,
             }
             if best is None or cand['score'] > best['score']:
@@ -953,6 +993,8 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
         amp_ref = float(np.percentile(amp, 95)) if len(amp) else 1.0
         amp_ref = max(amp_ref, 1e-6)
         amp_norm = np.clip(amp / amp_ref, 0.0, 2.0)
+        env = np.maximum(amp, amp_ref * 0.05)
+        raw_expect = np.tanh(1.6 * x / env)
 
         sign = schmitt_sign_slice(x, np.maximum(amp, amp_ref * 0.02), hi=0.22, lo=0.08)
         bits = (1 - sign).astype(np.uint8)
@@ -1029,7 +1071,10 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
         trn_score = v92_trn1u_recurrence(bits, window=384)
         amp_gate = np.clip(moving_average((amp_norm >= 0.08).astype(np.float64), 48), 0.0, 1.0)
         trn_score = trn_score * amp_gate
-        trn1u_run, trn_source, trn_decode = find_v92_audio_trn1u_run(trn_score, trn_search_start, bits)
+        trn1u_run, trn_source, trn_decode = find_v92_audio_trn1u_run(trn_score,
+                                                                     trn_search_start,
+                                                                     bits,
+                                                                     raw_expect)
 
         ja_start = None
         if trn1u_run is not None:
@@ -1182,7 +1227,9 @@ def print_v92_symbol_report(report: dict) -> None:
               f"frame_phase={trn_decode.get('frame_phase', 0)}/12  "
               f"ones256={trn_decode['ones_256']:.3f}  "
               f"ones512={trn_decode['ones_512']:.3f}  "
-              f"ones2040={trn_decode['ones_2040']:.3f}")
+              f"ones2040={trn_decode['ones_2040']:.3f}  "
+              f"soft512={trn_decode.get('soft_512', trn_decode['ones_512']):.3f}  "
+              f"soft2040={trn_decode.get('soft_2040', trn_decode['ones_2040']):.3f}")
     if report['ja_start'] is not None:
         print(f"  Ja-like transition: sample {report['ja_start']}  "
               f"({report['ja_start'] * T_ms:.1f} ms)")
@@ -1238,7 +1285,11 @@ def v92_symbol_bitdump_text(report: dict,
             f"trn_decode_ones256={trn_decode['ones_256']:.6f} "
             f"trn_decode_ones512={trn_decode['ones_512']:.6f} "
             f"trn_decode_ones1024={trn_decode['ones_1024']:.6f} "
-            f"trn_decode_ones2040={trn_decode['ones_2040']:.6f}"
+            f"trn_decode_ones2040={trn_decode['ones_2040']:.6f} "
+            f"trn_decode_soft256={trn_decode.get('soft_256', trn_decode['ones_256']):.6f} "
+            f"trn_decode_soft512={trn_decode.get('soft_512', trn_decode['ones_512']):.6f} "
+            f"trn_decode_soft1024={trn_decode.get('soft_1024', trn_decode['ones_1024']):.6f} "
+            f"trn_decode_soft2040={trn_decode.get('soft_2040', trn_decode['ones_2040']):.6f}"
         )
     if report['ja_start'] is not None:
         lines.append(
