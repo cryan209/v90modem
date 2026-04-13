@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from search_v90_ja import load_iq_dump, parse_bitdump_anchor
+from search_v90_ja import load_iq_dump, parse_bitdump_anchor, recover_qpsk_window
 
 
 QPSK_REFS = np.asarray(
@@ -126,8 +126,14 @@ def candidate_metrics(iq_symbols: np.ndarray,
                       sym_rate: float,
                       t0_ms: float,
                       slip: int) -> Candidate:
-    syms = iq_symbols[start_sym:start_sym + n_symbols]
+    raw_syms = iq_symbols[start_sym:start_sym + n_symbols]
     prev_symbol = complex(iq_symbols[start_sym - 1])
+    full = np.empty(len(raw_syms) + 1, dtype=np.complex128)
+    full[0] = prev_symbol
+    full[1:] = raw_syms
+    full = recover_qpsk_window(full)
+    prev_symbol = complex(full[0])
+    syms = full[1:]
     dsyms = diff_symbols(syms, prev_symbol)
 
     syms_n = rms_normalize(syms)
@@ -241,8 +247,14 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for idx, cand in enumerate(top[:3], 1):
-        syms = iq_symbols[cand.start_sym:cand.start_sym + cand.n_symbols]
+        raw_syms = iq_symbols[cand.start_sym:cand.start_sym + cand.n_symbols]
         prev = complex(iq_symbols[cand.start_sym - 1])
+        full = np.empty(len(raw_syms) + 1, dtype=np.complex128)
+        full[0] = prev
+        full[1:] = raw_syms
+        full = recover_qpsk_window(full)
+        prev = complex(full[0])
+        syms = full[1:]
         dsyms = diff_symbols(syms, prev)
         stem = (
             f"v90_demod_rank{idx}_{int(round(cand.start_ms))}ms"

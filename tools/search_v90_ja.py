@@ -29,6 +29,16 @@ V90_CARRIERS: list[tuple[float, float]] = [
     (3429.0, 1959.0),
 ]
 
+QPSK_REFS = np.asarray(
+    [
+        (1.0 + 1.0j) / math.sqrt(2.0),
+        (1.0 - 1.0j) / math.sqrt(2.0),
+        (-1.0 + 1.0j) / math.sqrt(2.0),
+        (-1.0 - 1.0j) / math.sqrt(2.0),
+    ],
+    dtype=np.complex128,
+)
+
 
 def ulaw_byte_to_linear(u: int) -> int:
     u = (~u) & 0xFF
@@ -119,6 +129,111 @@ def bit_streams_from_diffs(diffs: np.ndarray) -> dict[str, str]:
     return out
 
 
+def rms_normalize(symbols: np.ndarray) -> np.ndarray:
+    rms = float(np.sqrt(np.mean(np.abs(symbols) ** 2)))
+    if rms <= 1e-12:
+        return symbols.copy()
+    return symbols / rms
+
+
+def nearest_qpsk_evm(symbols: np.ndarray) -> float:
+    if len(symbols) == 0:
+        return 99.0
+    s = rms_normalize(symbols)
+    d2 = np.abs(s[:, None] - QPSK_REFS[None, :]) ** 2
+    return float(np.sqrt(np.mean(np.min(d2, axis=1))))
+
+
+def nearest_qpsk_refs(symbols: np.ndarray) -> np.ndarray:
+    if len(symbols) == 0:
+        return np.zeros(0, dtype=np.complex128)
+    d2 = np.abs(symbols[:, None] - QPSK_REFS[None, :]) ** 2
+    idx = np.argmin(d2, axis=1)
+    return QPSK_REFS[idx]
+
+
+def smooth_mag_envelope(symbols: np.ndarray, span: int = 19) -> np.ndarray:
+    if len(symbols) == 0:
+        return np.zeros(0, dtype=np.float64)
+    span = max(3, min(int(span), len(symbols)))
+    if (span & 1) == 0:
+        span -= 1
+    kernel = np.ones(span, dtype=np.float64) / float(span)
+    env = np.convolve(np.abs(symbols), kernel, mode="same")
+    floor = max(1e-3, 0.20 * float(np.median(env)))
+    return np.maximum(env, floor)
+
+
+def qpsk_phase_track(symbols: np.ndarray,
+                     alpha: float = 0.16,
+                     beta: float = 0.0035) -> np.ndarray:
+    """
+    Decision-directed QPSK phase tracker.
+
+    Returns one complex rotator per symbol so callers can apply the phase track
+    to the original symbols without altering the magnitude envelope.
+    """
+    rot = np.empty(len(symbols), dtype=np.complex128)
+    phase = 0.0
+    freq = 0.0
+    for i, s in enumerate(symbols):
+        rot_i = np.exp(-1j * phase)
+        y = s * rot_i
+        dec = complex(
+            (1.0 if y.real >= 0.0 else -1.0) / math.sqrt(2.0),
+            (1.0 if y.imag >= 0.0 else -1.0) / math.sqrt(2.0),
+        )
+        err = math.atan2((y * np.conj(dec)).imag, (y * np.conj(dec)).real)
+        # De-emphasize weak symbols so the loop is driven mostly by the better ones.
+        weight = min(1.0, max(0.15, float(abs(y))))
+        phase += freq + alpha * weight * err
+        freq += beta * weight * err
+        rot[i] = rot_i
+    return rot
+
+
+def recover_qpsk_window(symbols: np.ndarray) -> np.ndarray:
+    """
+    Apply a lightweight local QPSK carrier/phase cleanup.
+
+    Fourth-power removes ideal QPSK data modulation, so a linear fit to the
+    unwrapped phase of s^4 estimates residual phase drift across the window.
+    """
+    if len(symbols) < 8:
+        return symbols.copy()
+
+    env = smooth_mag_envelope(symbols)
+    work = symbols / env
+
+    z = work ** 4
+    ang = np.unwrap(np.angle(z))
+    idx = np.arange(len(work), dtype=np.float64)
+    weights = np.maximum(np.abs(work), 1e-3)
+    try:
+        slope, intercept = np.polyfit(idx, ang, 1, w=weights)
+    except Exception:
+        return symbols.copy()
+
+    corr = np.exp(-0.25j * (slope * idx + intercept))
+    corrected_work = work * corr
+    corrected = symbols * corr
+
+    # Follow the remaining residual phase wander with a light decision-directed loop.
+    dd_rot = qpsk_phase_track(corrected_work)
+    corrected = corrected * dd_rot
+
+    # A small residual common rotation can remain; choose the cleanest of 4.
+    best = corrected
+    best_evm = nearest_qpsk_evm(corrected)
+    for rot in range(1, 4):
+        cand = corrected * np.exp(-0.5j * math.pi * rot)
+        evm = nearest_qpsk_evm(cand)
+        if evm < best_evm:
+            best = cand
+            best_evm = evm
+    return best
+
+
 V90_STREAM_GROUPS: dict[str, list[str]] = {
     "basic": ["gray", "gray_inv", "nat", "nat_inv"],
     "rev": ["gray_rev", "gray_rev_inv", "nat_rev", "nat_rev_inv"],
@@ -164,7 +279,8 @@ def qpsk_bit_streams(xs: np.ndarray,
                      offset_samples: float,
                      carrier_hz: float,
                      sym_rate: float,
-                     symbols: int) -> dict[str, str]:
+                     symbols: int,
+                     local_recover: bool = True) -> dict[str, str]:
     step = fs / sym_rate
     start = start_ms * fs / 1000.0 + offset_samples
     syms = np.zeros(symbols, dtype=np.complex128)
@@ -172,19 +288,26 @@ def qpsk_bit_streams(xs: np.ndarray,
     for n in range(symbols):
         syms[n] = sample_carrier_symbol(xs, start + n * step, carrier_hz, fs)
 
+    if local_recover:
+        syms = recover_qpsk_window(syms)
+
     states = (((np.angle(syms) + math.pi) / (math.pi / 2.0)).astype(int)) & 3
     diffs = (states[1:] - states[:-1]) & 3
     return bit_streams_from_diffs(diffs)
 
 
 def qpsk_bit_streams_from_symbols(symbols: np.ndarray,
-                                  prev_symbol: complex | None = None) -> dict[str, str]:
+                                  prev_symbol: complex | None = None,
+                                  local_recover: bool = True) -> dict[str, str]:
     if prev_symbol is not None:
         full = np.empty(len(symbols) + 1, dtype=np.complex128)
         full[0] = prev_symbol
         full[1:] = symbols
     else:
         full = symbols
+
+    if local_recover:
+        full = recover_qpsk_window(full)
 
     states = (((np.angle(full) + math.pi) / (math.pi / 2.0)).astype(int)) & 3
     diffs = (states[1:] - states[:-1]) & 3
@@ -439,6 +562,8 @@ def main() -> int:
                     help="Additional integer symbol slips to test around each IQ start")
     ap.add_argument("--symbol-slip-max", type=int, default=0,
                     help="Additional integer symbol slips to test around each IQ start")
+    ap.add_argument("--no-local-qpsk-recover", action="store_true",
+                    help="Disable local fourth-power QPSK phase cleanup on each candidate window")
     ap.add_argument("--symbols", type=int, default=1536)
     ap.add_argument("--descriptor-start-min", type=int, default=0)
     ap.add_argument("--descriptor-start-max", type=int, default=64)
@@ -500,6 +625,7 @@ def main() -> int:
 
     offsets = frange(args.offset_min, args.offset_max, args.offset_step)
     symbol_slips = list(range(args.symbol_slip_min, args.symbol_slip_max + 1))
+    local_recover = not args.no_local_qpsk_recover
 
     candidates: list[Candidate] = []
 
@@ -521,7 +647,11 @@ def main() -> int:
                     continue
                 syms = iq_symbols[start_sym:stop_sym]
                 prev_symbol = complex(iq_symbols[start_sym - 1])
-                bit_streams = qpsk_bit_streams_from_symbols(syms, prev_symbol=prev_symbol)
+                bit_streams = qpsk_bit_streams_from_symbols(
+                    syms,
+                    prev_symbol=prev_symbol,
+                    local_recover=local_recover,
+                )
                 actual_start_ms = iq_t0_ms + (1000.0 * start_sym / iq_sym_rate)
                 for stream_name in streams:
                     bits = bit_streams[stream_name]
@@ -561,7 +691,16 @@ def main() -> int:
         for start_ms in starts:
             for sym_rate, carrier_hz in pairs:
                 for off in offsets:
-                    bit_streams = qpsk_bit_streams(xs, fs, start_ms, off, carrier_hz, sym_rate, args.symbols)
+                    bit_streams = qpsk_bit_streams(
+                        xs,
+                        fs,
+                        start_ms,
+                        off,
+                        carrier_hz,
+                        sym_rate,
+                        args.symbols,
+                        local_recover=local_recover,
+                    )
                     for stream_name in streams:
                         bits = bit_streams[stream_name]
                         for ds in range(args.descriptor_start_min, args.descriptor_start_max + 1):
@@ -621,11 +760,23 @@ def main() -> int:
             start_sym = int(round((best.start_ms - iq_t0_ms) * best.sym_rate / 1000.0))
             syms = iq_symbols[start_sym:start_sym + args.symbols]
             prev_symbol = complex(iq_symbols[start_sym - 1]) if start_sym > 0 else None
-            streams_for_best = qpsk_bit_streams_from_symbols(syms, prev_symbol=prev_symbol)
+            streams_for_best = qpsk_bit_streams_from_symbols(
+                syms,
+                prev_symbol=prev_symbol,
+                local_recover=local_recover,
+            )
         else:
             assert xs is not None and fs is not None
-            streams_for_best = qpsk_bit_streams(xs, fs, best.start_ms, best.offset_samples,
-                                                best.carrier_hz, best.sym_rate, args.symbols)
+            streams_for_best = qpsk_bit_streams(
+                xs,
+                fs,
+                best.start_ms,
+                best.offset_samples,
+                best.carrier_hz,
+                best.sym_rate,
+                args.symbols,
+                local_recover=local_recover,
+            )
         args.save_best.parent.mkdir(parents=True, exist_ok=True)
         args.save_best.write_text(
             bitdump_text(args.path, best.start_ms, best.offset_samples,

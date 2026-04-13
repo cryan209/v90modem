@@ -242,18 +242,35 @@ def demodulate_to_baseband(sig: np.ndarray, fs: int,
     return iq
 
 
+def sample_symbols_at_offset(iq: np.ndarray, n_sps: int, offset: float) -> np.ndarray:
+    """Sample oversampled IQ at a fractional timing phase."""
+    if len(iq) < 2:
+        return np.zeros(0, dtype=np.complex128)
+    n_out = int(np.floor((len(iq) - 2 - offset) / n_sps)) + 1
+    if n_out <= 0:
+        return np.zeros(0, dtype=np.complex128)
+    t = offset + np.arange(n_out, dtype=np.float64) * float(n_sps)
+    i = np.floor(t).astype(np.int64)
+    f = t - i
+    return iq[i] * (1.0 - f) + iq[i + 1] * f
+
+
 def find_best_timing_offset(iq: np.ndarray, n_sps: int,
-                            cpr_bw: float = 0.01
-                            ) -> tuple[np.ndarray, int, float]:
+                            cpr_bw: float = 0.01,
+                            timing_step: float = 0.25
+                            ) -> tuple[np.ndarray, float, float]:
     """
-    Try all n_sps sampling phases; return (best_symbols, best_offset, best_evm).
+    Try fractional sampling phases; return (best_symbols, best_offset, best_evm).
     """
     best_evm    = float('inf')
     best_syms   = None
-    best_offset = 0
+    best_offset = 0.0
 
-    for offset in range(n_sps):
-        raw  = iq[offset::n_sps]
+    offset_grid = np.arange(0.0, float(n_sps), max(0.05, float(timing_step)))
+    for offset in offset_grid:
+        raw  = sample_symbols_at_offset(iq, n_sps, float(offset))
+        if len(raw) < 8:
+            continue
         raw  = normalize_power(raw)
         syms = recover_carrier_phase(raw, loop_bw=cpr_bw)
         syms = normalize_power(syms)
@@ -307,6 +324,104 @@ def qpsk_evm(symbols: np.ndarray) -> float:
     errs = [np.abs(s - ref[int(np.argmin(np.abs(ref - s)))]) ** 2
             for s in symbols]
     return float(np.sqrt(np.mean(errs)))
+
+
+def demod_quality_metrics(symbols: np.ndarray,
+                          trn_start_sym: int,
+                          trn_eval_syms: int = 768) -> dict:
+    """
+    Score a demod candidate using constellation tightness and direct TRN match.
+    """
+    out = {
+        "evm_full": qpsk_evm(symbols) if len(symbols) else 99.0,
+        "evm_trn": 99.0,
+        "trn_score": 0.0,
+        "trn_scrambler": "?",
+        "trn_method": "none",
+        "score": -1e9,
+    }
+    trn0 = max(0, min(int(trn_start_sym), len(symbols)))
+    trn1 = min(len(symbols), trn0 + int(trn_eval_syms))
+    if trn1 - trn0 < 48:
+        out["score"] = -60.0 * out["evm_full"]
+        return out
+    trn_syms = symbols[trn0:trn1]
+    out["evm_trn"] = qpsk_evm(trn_syms)
+    chk = check_trn_region(trn_syms)
+    out["trn_score"] = float(chk["score"])
+    out["trn_scrambler"] = str(chk["scrambler"])
+    out["trn_method"] = str(chk["method"])
+    out["score"] = (
+        260.0 * out["trn_score"]
+        - 90.0 * out["evm_trn"]
+        - 25.0 * out["evm_full"]
+    )
+    return out
+
+
+def estimate_trn_training_start(symbols: np.ndarray,
+                                sym_rate: int,
+                                min_start_ms: float = 120.0,
+                                avg_window_syms: int = 768) -> tuple[int, float]:
+    """
+    Estimate the start of the strongest TRN-like window directly from symbols.
+
+    STFT labels can mark most of the capture as generic T. For LMS training we
+    want the earliest strong TRN window in the symbol-domain scrambler score.
+    """
+    if len(symbols) < 128:
+        return 0, 0.0
+    sc = trn_signal_score(symbols)
+    win = max(128, min(int(avg_window_syms), len(sc)))
+    avg = np.convolve(sc, np.ones(win, dtype=np.float64) / float(win), mode="valid")
+    if len(avg) == 0:
+        return 0, 0.0
+    min_start_sym = max(0, min(int(round(min_start_ms * sym_rate / 1000.0)), len(avg) - 1))
+    search = avg[min_start_sym:]
+    if len(search) == 0:
+        return 0, 0.0
+    best_rel = int(np.argmax(search))
+    best_idx = min_start_sym + best_rel
+    best_val = float(avg[best_idx])
+    near_mask = avg[min_start_sym:best_idx + 1] >= max(0.70, 0.98 * best_val)
+    if np.any(near_mask):
+        first_rel = int(np.argmax(near_mask))
+        return min_start_sym + first_rel, best_val
+    return best_idx, best_val
+
+
+def estimate_strong_trn_run(symbols: np.ndarray,
+                            sym_rate: int,
+                            min_start_ms: float = 120.0,
+                            threshold: float = 0.90,
+                            min_run_syms: int = 128) -> tuple[int, int, float] | None:
+    """
+    Find the strongest contiguous high-confidence TRN run from symbol-domain score.
+    """
+    if len(symbols) < min_run_syms:
+        return None
+    sc = trn_signal_score(symbols)
+    min_start_sym = int(round(min_start_ms * sym_rate / 1000.0))
+    mask = sc >= threshold
+    best = None
+    i = max(0, min_start_sym)
+    while i < len(mask):
+        if not mask[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(mask) and mask[j]:
+            j += 1
+        if j - i >= min_run_syms:
+            mean_sc = float(np.mean(sc[i:j]))
+            score = (j - i) * mean_sc
+            if best is None or score > best[0]:
+                best = (score, i, j, mean_sc)
+        i = j
+    if best is None:
+        return None
+    _, i, j, mean_sc = best
+    return i, j, mean_sc
 
 
 # ---------------------------------------------------------------------------
@@ -1403,9 +1518,10 @@ def main(argv=None) -> int:
     iq_r   = sp.sosfiltfilt(sos_hp, iq_r)
 
     syms, best_offset, evm = find_best_timing_offset(iq_r, N_SPS)
+    raw_syms = syms.copy()
     dur_sym = len(syms) * 1000.0 / sym_rate
     T_ms    = 1000.0 / sym_rate
-    print(f"  Symbols: {len(syms)}  best_offset={best_offset}/{N_SPS}")
+    print(f"  Symbols: {len(syms)}  best_offset={best_offset:.2f}/{N_SPS}")
     print(f"  QPSK EVM (no equalizer): {evm:.4f}  ({evm*100:.1f}%)")
 
     occ_idx, occ = phase_occupancy(syms)
@@ -1459,40 +1575,80 @@ def main(argv=None) -> int:
         return 0
 
     # ── LMS equalizer trained on known GPA TRN (V.90 §8.3.6) ────────────────
-    # Use STFT timeline to locate TRN start.  Fall back to 135 ms if STFT
-    # was skipped or TRN wasn't found.
+    # Prefer a direct symbol-domain TRN search over the broad STFT T labels.
     trn_start_ms = 135.0    # default: after S(128T) + S̄(16T) + PP(288T)
-    if not args.no_stft:
-        # Find the first T (TRN) run that is ≥ 512 symbols from STFT result
+    trn_start_sym = int(round(trn_start_ms / 1000.0 * sym_rate))
+    trn_est_sym, trn_est_score = estimate_trn_training_start(raw_syms, sym_rate)
+    if trn_est_score >= 0.60:
+        trn_start_sym = trn_est_sym
+        trn_start_ms = 1000.0 * trn_start_sym / sym_rate
+        print(f"  TRN training anchor from symbol-domain search: "
+              f"sym {trn_start_sym}  ({trn_start_ms:.1f} ms, avg score {trn_est_score:.3f})")
+    elif not args.no_stft:
         for lbl, t0r, t1r in runs:
             if lbl == 'T' and (t1r - t0r) * sym_rate >= 512:
                 trn_start_ms = t0r * 1000.0
+                trn_start_sym = int(round(trn_start_ms / 1000.0 * sym_rate))
+                print(f"  TRN training anchor from STFT run: "
+                      f"sym {trn_start_sym}  ({trn_start_ms:.1f} ms)")
                 break
 
-    trn_start_sym = int(round(trn_start_ms / 1000.0 * sym_rate))
     # Use up to 2000 TRN symbols for training (≈625 ms); avoids J_a boundary
     n_trn_train   = min(2000, len(syms) - trn_start_sym - 100)
 
     print(f"\n── LMS Equalizer (trained on GPA TRN, V.90 §8.3.6) ──")
     print(f"  TRN starts at symbol {trn_start_sym}  ({trn_start_ms:.0f} ms)")
     print(f"  Training on {n_trn_train} TRN symbols  ({n_trn_train*T_ms:.0f} ms)")
-    print(f"  Equalizer: 31 taps, fractionally-spaced @ {N_SPS} sps/sym, μ=0.005")
+    print(f"  Equalizer: 31 taps, fractionally-spaced @ {N_SPS} sps/sym, μ∈{{0.001,0.002,0.003,0.005}}")
 
-    eq_syms, lms_rot, lms_off = lms_equalizer_trn(
-        iq_r,
-        n_sps           = N_SPS,
-        trn_start_sym   = trn_start_sym,
-        n_trn_syms      = n_trn_train,
-        n_taps          = 31,
-        mu              = 0.005,
-    )
+    raw_metrics = demod_quality_metrics(raw_syms, trn_start_sym)
+    candidates = [("raw", raw_syms, {
+        "mu": None,
+        "rot": None,
+        "off": best_offset,
+        **raw_metrics,
+    })]
 
-    evm_eq = qpsk_evm(eq_syms)
-    print(f"  QPSK EVM after LMS: {evm_eq:.4f}  ({evm_eq*100:.1f}%)")
-    print(f"  Best rotation: {lms_rot}×90°   timing offset: {lms_off}/{N_SPS}")
+    print(f"  Raw demod score: {raw_metrics['score']:.2f}  "
+          f"TRN={raw_metrics['trn_score']:.4f}  "
+          f"TRN-EVM={raw_metrics['evm_trn']:.4f}  "
+          f"full-EVM={raw_metrics['evm_full']:.4f}")
 
-    # Use equalized symbols for all downstream analysis
-    syms = eq_syms
+    for mu in (0.001, 0.002, 0.003, 0.005):
+        eq_syms, lms_rot, lms_off = lms_equalizer_trn(
+            iq_r,
+            n_sps           = N_SPS,
+            trn_start_sym   = trn_start_sym,
+            n_trn_syms      = n_trn_train,
+            n_taps          = 31,
+            mu              = mu,
+        )
+        m = demod_quality_metrics(eq_syms, trn_start_sym)
+        candidates.append((f"lms(mu={mu:.3f})", eq_syms, {
+            "mu": mu,
+            "rot": lms_rot,
+            "off": lms_off,
+            **m,
+        }))
+        print(f"  LMS μ={mu:.3f}: score={m['score']:.2f}  "
+              f"TRN={m['trn_score']:.4f}  TRN-EVM={m['evm_trn']:.4f}  "
+              f"full-EVM={m['evm_full']:.4f}  rot={lms_rot}  off={lms_off}")
+
+    best_name, best_syms, best_meta = max(candidates, key=lambda item: item[2]["score"])
+    syms = best_syms
+    print(f"  Selected demod path: {best_name}  "
+          f"(score={best_meta['score']:.2f}, TRN={best_meta['trn_score']:.4f}, "
+          f"TRN-EVM={best_meta['evm_trn']:.4f}, full-EVM={best_meta['evm_full']:.4f})")
+    if best_name != "raw":
+        print(f"  Selected LMS params: rotation={best_meta['rot']}×90°  timing offset={best_meta['off']}/{N_SPS}")
+
+    trn_dump_run = estimate_strong_trn_run(raw_syms, sym_rate)
+    if trn_dump_run is not None:
+        trn_dump_start, trn_dump_end, trn_dump_mean = trn_dump_run
+        print(f"  Strong TRN run estimate: symbols {trn_dump_start}–{trn_dump_end}  "
+              f"({trn_dump_mean:.3f} mean score)")
+    else:
+        trn_dump_start = trn_dump_end = None
 
     # ── Phase 3 sub-sequence detection ──────────────────────────────────────
     print(f"\nDetecting Phase 3 sub-sequences (dibit-based) …")
@@ -1529,7 +1685,7 @@ def main(argv=None) -> int:
         print(f"  TRN scrambler score in largest T run: {trn_peak:.4f}"
               f"  (≈1.0 = confirmed TRN, ≈0.5 = random)")
 
-    print(f"\n=== V.90 Phase 3 Sub-Sequence Timeline (LMS-equalized) ===")
+    print(f"\n=== V.90 Phase 3 Sub-Sequence Timeline ({best_name}) ===")
     print(f"    sym_rate={sym_rate} baud   T={T_ms:.3f} ms   carrier={fc:.0f} Hz")
     print_timeline(sym_rate, runs_sym)
 
@@ -1583,6 +1739,10 @@ def main(argv=None) -> int:
         fh.write(f"# V.34 Phase 3 baseband IQ symbols\n")
         fh.write(f"# sym_rate={sym_rate}  fc={int(fc)}  "
                  f"t0={args.t0}  t1={args.t1}\n")
+        fh.write(f"# demod_path={best_name}  score={best_meta['score']:.3f}  "
+                 f"trn_score={best_meta['trn_score']:.4f}  "
+                 f"trn_evm={best_meta['evm_trn']:.4f}  "
+                 f"full_evm={best_meta['evm_full']:.4f}\n")
         fh.write(f"# columns: sym_idx  time_ms  I  Q  s_score  pp_score  trn_score  label\n")
         dibits_out = differential_dibits(syms) if len(syms) >= 2 else np.array([], dtype=np.int32)
         for i, s in enumerate(syms):
@@ -1601,7 +1761,8 @@ def main(argv=None) -> int:
             sym_rate,
             fc,
             "v90",
-            trn_run=best_run if best_run[1] > best_run[0] else None,
+            trn_run=((trn_dump_start, trn_dump_end) if trn_dump_start is not None and trn_dump_end is not None
+                     else (best_run if best_run[1] > best_run[0] else None)),
         ),
         encoding="ascii",
     )
