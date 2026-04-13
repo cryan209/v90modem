@@ -940,6 +940,47 @@ def runs_from_labels(labels: list[str]) -> list[tuple[str, int]]:
     return runs
 
 
+def boolean_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return contiguous True runs as half-open index pairs [start, end)."""
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < len(mask):
+        if not bool(mask[i]):
+            i += 1
+            continue
+        j = i + 1
+        while j < len(mask) and bool(mask[j]):
+            j += 1
+        runs.append((i, j))
+        i = j
+    return runs
+
+
+def bridge_short_false_gaps(mask: np.ndarray, max_gap: int = 1) -> np.ndarray:
+    """
+    Fill short False gaps between True regions.
+
+    This stabilizes occupancy/run detection when a single weak analysis window
+    momentarily breaks an otherwise continuous Phase 3 region.
+    """
+    if len(mask) == 0 or max_gap <= 0:
+        return mask.copy()
+
+    out = mask.astype(bool).copy()
+    i = 0
+    while i < len(out):
+        if out[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(out) and not out[j]:
+            j += 1
+        if i > 0 and j < len(out) and out[i - 1] and out[j] and (j - i) <= max_gap:
+            out[i:j] = True
+        i = j
+    return out
+
+
 def v92_ru_score(symbols: np.ndarray, window: int = 18) -> np.ndarray:
     """
     Score the V.92 Ru/uR 6-symbol two-point pattern.
@@ -977,6 +1018,7 @@ def detect_v92_regions(symbols: np.ndarray, sym_rate: int) -> dict:
       occupied bins <= 3  -> 2-point Ru/TRN1u-like
       occupied bins >= 6  -> Ja-like transition away from pure 2-point TRN1u
     """
+    occ_window = 128
     occ_idx, occ = phase_occupancy(symbols)
     ru_sc = v92_ru_score(symbols)
     out = {
@@ -984,41 +1026,71 @@ def detect_v92_regions(symbols: np.ndarray, sym_rate: int) -> dict:
         'occ': occ,
         'ru_score': ru_sc,
         'ru_run': None,
+        'phase3_start': None,
+        'phase3_source': 'none',
+        'two_point_run': None,
         'trn1u_run': None,
         'ja_start': None,
     }
     if len(occ) == 0:
         return out
 
-    low = occ <= 3
-    best_i0 = -1
-    best_i1 = -1
-    i = 0
-    while i < len(low):
-        if not low[i]:
-            i += 1
-            continue
-        j = i + 1
-        while j < len(low) and low[j]:
-            j += 1
-        if (j - i) > (best_i1 - best_i0):
-            best_i0, best_i1 = i, j
-        i = j
-    if best_i0 >= 0:
-        out['trn1u_run'] = (int(occ_idx[best_i0]), int(occ_idx[best_i1 - 1]))
-        for k in range(best_i1, len(occ)):
-            if occ[k] >= 6:
-                out['ja_start'] = int(occ_idx[k])
-                break
-
     thr = 0.75
-    mask = ru_sc >= thr
+    mask = bridge_short_false_gaps(ru_sc >= thr, max_gap=6)
     if np.any(mask):
         s0 = int(np.argmax(mask))
         s1 = s0
         while s1 + 1 < len(mask) and mask[s1 + 1]:
             s1 += 1
         out['ru_run'] = (s0, s1)
+
+    low = bridge_short_false_gaps(occ <= 3, max_gap=1)
+    low_runs = boolean_runs(low)
+    min_low_windows = 6
+    chosen_low: tuple[int, int] | None = None
+
+    if out['ru_run'] is not None:
+        ru0, ru1 = out['ru_run']
+        for run0, run1 in low_runs:
+            if (run1 - run0) < min_low_windows:
+                continue
+            low0 = int(occ_idx[run0] - occ_window // 2)
+            low1 = int(occ_idx[run1 - 1] + occ_window // 2)
+            if low1 >= ru0 and low0 <= ru1 + occ_window:
+                chosen_low = (run0, run1)
+                break
+
+    if chosen_low is None:
+        for run0, run1 in low_runs:
+            if (run1 - run0) >= min_low_windows:
+                chosen_low = (run0, run1)
+                break
+
+    if chosen_low is None and low_runs:
+        chosen_low = max(low_runs, key=lambda run: run[1] - run[0])
+
+    if chosen_low is not None:
+        run0, run1 = chosen_low
+        two_point_start = max(0, int(occ_idx[run0] - occ_window // 2))
+        two_point_end = min(len(symbols) - 1, int(occ_idx[run1 - 1] + occ_window // 2))
+        out['two_point_run'] = (two_point_start, two_point_end)
+        out['trn1u_run'] = (two_point_start, two_point_end)
+        if out['ru_run'] is not None:
+            ru0, ru1 = out['ru_run']
+            out['phase3_start'] = ru0
+            out['phase3_source'] = 'ru_run'
+            trn_start = max(two_point_start, ru1 + 1)
+            if trn_start <= two_point_end:
+                out['trn1u_run'] = (trn_start, two_point_end)
+        else:
+            out['phase3_start'] = two_point_start
+            out['phase3_source'] = 'two_point_run'
+
+        for k in range(run1, len(occ)):
+            if occ[k] >= 6:
+                out['ja_start'] = int(occ_idx[k])
+                break
+
     return out
 
 
@@ -1076,15 +1148,27 @@ def print_expected_durations(sym_rate: int, protocol: str = 'v90') -> None:
 def print_v92_report(sym_rate: int, report: dict) -> None:
     T_ms = 1000.0 / sym_rate
     print(f"\n=== V.92 Phase 3 Heuristic Report ===")
+    if report['phase3_start'] is not None:
+        print(f"  Phase 3 start:      symbol {report['phase3_start']}  "
+              f"({report['phase3_start'] * T_ms:.1f} ms)  "
+              f"source={report['phase3_source']}")
+    else:
+        print("  Phase 3 start:      not found")
     if report['ru_run'] is not None:
         ru0, ru1 = report['ru_run']
         print(f"  Ru/uR candidate: symbols {ru0}–{ru1}  "
               f"({(ru1 - ru0 + 1) * T_ms:.1f} ms)")
     else:
         print("  Ru/uR candidate: not found")
+    if report['two_point_run'] is not None:
+        t0, t1 = report['two_point_run']
+        print(f"  2-point run:      symbols {t0}–{t1}  "
+              f"({(t1 - t0) * T_ms:.1f} ms)")
+    else:
+        print("  2-point run:      not found")
     if report['trn1u_run'] is not None:
         t0, t1 = report['trn1u_run']
-        print(f"  TRN1u-like run:  symbols {t0}–{t1}  "
+        print(f"  TRN1u-like run:   symbols {t0}–{t1}  "
               f"({(t1 - t0) * T_ms:.1f} ms)")
     else:
         print("  TRN1u-like run:  not found")
@@ -1102,6 +1186,8 @@ def bitdump_text(symbols: np.ndarray,
                  sym_rate: int,
                  fc: float,
                  protocol: str,
+                 phase3_start_sym: int | None = None,
+                 phase3_start_source: str | None = None,
                  ja_candidate_sym: int | None = None,
                  trn_run: tuple[int, int] | None = None) -> str:
     """
@@ -1115,6 +1201,13 @@ def bitdump_text(symbols: np.ndarray,
         f"carrier_hz={fc:.3f} sym_rate={sym_rate:.3f}"
     )
     lines.append(f"symbols={len(symbols)}")
+    if phase3_start_sym is not None:
+        lines.append(
+            f"phase3_start_sym={phase3_start_sym} "
+            f"phase3_start_ms={(1000.0 * phase3_start_sym / sym_rate):.3f} "
+            f"phase3_start_abs_ms={(t0 * 1000.0) + (1000.0 * phase3_start_sym / sym_rate):.3f} "
+            f"phase3_start_source={phase3_start_source or 'unknown'}"
+        )
     if ja_candidate_sym is not None:
         lines.append(
             f"ja_candidate_sym={ja_candidate_sym} "
@@ -1353,7 +1446,9 @@ def main(argv=None) -> int:
                 sym_rate,
                 fc,
                 "v92",
-                report['ja_start'],
+                phase3_start_sym=report['phase3_start'],
+                phase3_start_source=report['phase3_source'],
+                ja_candidate_sym=report['ja_start'],
             ),
             encoding="ascii",
         )

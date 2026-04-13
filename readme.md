@@ -123,6 +123,23 @@ make v34-tone-matrix
   and falls back to `gough-lui-v90-v92-modem-sounds/`. You can still pass a directory
   explicitly.
 
+## Python Analysis Tools
+
+- The offline demod / Ja-analysis scripts under `tools/` use a small Python stack.
+- Install or refresh the repo-local virtualenv with:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements-tools.txt
+```
+
+- Run the Phase 3 demod tool with the virtualenv interpreter so it picks up
+  `numpy` and `scipy`:
+
+```bash
+./.venv/bin/python tools/v34_phase3_demod.py --help
+```
+
 ## Usage
 
 Once running, connect to the PTY with minicom or any serial terminal:
