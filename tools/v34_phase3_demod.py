@@ -49,6 +49,7 @@ Usage:
 """
 from __future__ import annotations
 import argparse
+import functools
 import sys
 import wave
 from pathlib import Path
@@ -1440,27 +1441,88 @@ def sample_symbols(iq: np.ndarray, n_sps: int) -> np.ndarray:
     return iq[n_sps // 2 :: n_sps]
 
 
+def _estimate_freq_offset(symbols: np.ndarray) -> float:
+    """
+    Estimate residual carrier frequency offset in radians/symbol using the
+    4th-power spectral line method.
+
+    Raising QPSK symbols to the 4th power removes the data modulation and
+    yields a tone at 4× the carrier offset.  The FFT peak location gives a
+    coarse but unambiguous initial frequency estimate before the Costas loop
+    opens.
+
+    Returns the estimated frequency offset in radians/symbol.
+    """
+    n = len(symbols)
+    if n < 16:
+        return 0.0
+    z4 = symbols ** 4
+    nfft = max(256, int(2 ** np.ceil(np.log2(n))))
+    spec = np.fft.fft(z4, n=nfft)
+    mag  = np.abs(spec)
+    # Search only the range |f| < π/4 (avoids wrap-around ambiguity)
+    half = nfft // 8          # quarter of the half-spectrum → ±π/4
+    half = max(half, 4)
+    search = np.concatenate([mag[:half], mag[nfft - half:]])
+    pk = int(np.argmax(search))
+    if pk >= half:
+        pk = pk - 2 * half    # map back to negative frequencies
+    # Convert FFT bin to rad/symbol, divide by 4 to undo the 4th-power
+    return 2.0 * np.pi * pk / (nfft * 4.0)
+
+
 def recover_carrier_phase(symbols: np.ndarray,
-                          loop_bw: float = 0.01) -> np.ndarray:
+                          loop_bw: float = 0.01,
+                          acq_bw: float | None = None,
+                          acq_len: int = 128) -> np.ndarray:
     """
-    Decision-directed QPSK Costas loop.
-    Removes residual carrier phase offset / slow drift.
+    Two-stage QPSK Costas loop with 4th-power frequency pre-estimation.
 
-    loop_bw=0.01 tracks up to ~10 Hz residual offset at typical symbol rates
-    without overcorrecting on TRN.
+    Stage 1 — acquisition (first ``acq_len`` symbols):
+        Uses a wider bandwidth ``acq_bw`` (default 4× ``loop_bw``) so the
+        loop can pull in a larger initial frequency error quickly.
+
+    Stage 2 — tracking (remaining symbols):
+        Narrows to ``loop_bw`` for low-noise steady-state tracking.
+
+    A 4th-power FFT frequency estimate seeds the initial ``freq`` accumulator
+    before the loop opens, giving fast lock even when the residual offset is
+    several percent of the symbol rate.
+
+    Phase error is normalised by the received symbol magnitude so that
+    amplitude fluctuations do not disturb the phase discriminator.
     """
-    phase = freq = 0.0
-    alpha = loop_bw
-    beta  = alpha ** 2 / 4.0
-    out   = np.zeros(len(symbols), dtype=complex)
+    if acq_bw is None:
+        acq_bw = min(loop_bw * 4.0, 0.1)
 
-    for n, s in enumerate(symbols):
-        c        = s * np.exp(-1j * phase)
-        out[n]   = c
-        decided  = (np.sign(c.real) + 1j * np.sign(c.imag)) * (1 / np.sqrt(2))
-        err      = float((c * np.conj(decided)).imag)
-        freq    += beta * err
-        phase   += freq + alpha * err
+    freq = _estimate_freq_offset(symbols)
+
+    n    = len(symbols)
+    out  = np.zeros(n, dtype=complex)
+    phase = 0.0
+
+    for i in range(n):
+        bw    = acq_bw if i < acq_len else loop_bw
+        alpha = bw
+        beta  = alpha ** 2 / 4.0
+
+        s   = symbols[i]
+        c   = s * np.exp(-1j * phase)
+        out[i] = c
+
+        # Normalise the error by |c| so amplitude variations don't bias the PLL.
+        # Hard decision on the normalised sample; error is the quadrature
+        # component of (c/|c|) × conj(decided).
+        mag = abs(c)
+        if mag > 1e-12:
+            c_n     = c / mag
+            decided = (np.sign(c_n.real) + 1j * np.sign(c_n.imag)) * (1.0 / np.sqrt(2))
+            err     = float((c_n * np.conj(decided)).imag)
+        else:
+            err = 0.0
+
+        freq  += beta * err
+        phase += freq + alpha * err
 
     return out
 
@@ -1472,10 +1534,113 @@ def normalize_power(syms: np.ndarray) -> np.ndarray:
 
 def qpsk_evm(symbols: np.ndarray) -> float:
     """RMS EVM vs nearest of the 4 QPSK reference points (normalised)."""
+    if len(symbols) == 0:
+        return 0.0
     ref  = np.array([1+1j, -1+1j, -1-1j, 1-1j], dtype=complex) / np.sqrt(2)
-    errs = [np.abs(s - ref[int(np.argmin(np.abs(ref - s)))]) ** 2
-            for s in symbols]
-    return float(np.sqrt(np.mean(errs)))
+    # Vectorised: (N,1) vs (1,4) → (N,4) distance matrix; pick column minimum
+    dists = np.abs(symbols[:, np.newaxis] - ref[np.newaxis, :]) ** 2
+    return float(np.sqrt(np.mean(np.min(dists, axis=1))))
+
+
+# ---------------------------------------------------------------------------
+# V.34 §9.1 — 1664-point superconstellation
+# ---------------------------------------------------------------------------
+# Figure 5/V.34 shows one quarter (416 points).  Grid coordinates are of the
+# form 4k+1 for k ∈ {−11 … 11} giving I,Q ∈ {−43,−39,…,−3,1,5,…,41,45}.
+# Labels 0–415 are assigned by sorting candidate points ascending by magnitude
+# |I+jQ|, with ties broken by greatest imaginary component Q (§9.1 rule).
+# The full 1664-point set is the union of 0°, 90°, 180°, 270° rotations of
+# the quarter (multiplication by 1, j, −1, −j respectively).
+# ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=None)
+def _v34_quarter_points() -> np.ndarray:
+    """Return the 416-point quarter-superconstellation as a complex64 array.
+
+    Index i holds the complex coordinate of label i (0–415).
+
+    Derived purely from the §9.1 labelling rule; verified against Figure 5.
+    """
+    coords: list[int] = [4 * k + 1 for k in range(-11, 12)]   # 23 values
+    candidates = np.array(
+        [(float(i), float(q)) for i in coords for q in coords],
+        dtype=np.float64,
+    )                                                           # (529, 2)
+    # Sort key: (magnitude², −Q) so that for equal magnitude the point with
+    # the largest Q value (imaginary component) comes first → gets lower label.
+    mag2 = candidates[:, 0] ** 2 + candidates[:, 1] ** 2
+    order = np.lexsort((-candidates[:, 1], mag2))               # stable
+    quarter = candidates[order[:416]]                           # 416 points
+    return (quarter[:, 0] + 1j * quarter[:, 1]).astype(np.complex128)
+
+
+@functools.lru_cache(maxsize=None)
+def v34_constellation(L: int) -> np.ndarray:
+    """Return the L-point V.34 2D signal constellation (§9.1).
+
+    L must be a multiple of 4.  The L-point constellation consists of the
+    L/4 quarter-constellation points with labels 0 … L/4−1, plus their 90°,
+    180°, and 270° rotations.  Valid L values from Table 10 range from 4 to
+    1664 in steps that are multiples of 4.
+
+    Returns a 1-D complex array of length L.
+    """
+    if L <= 0 or L > 1664 or L % 4:
+        raise ValueError(f"L must be a positive multiple of 4, ≤ 1664; got {L}")
+    quarter = _v34_quarter_points()
+    q_pts = quarter[: L // 4]          # first L/4 labels
+    # Rotate by 0°, 90°, 180°, 270° (multiply by 1, j, −1, −j)
+    pts = np.concatenate([
+        q_pts,
+        q_pts * 1j,
+        q_pts * (-1),
+        q_pts * (-1j),
+    ])
+    return pts
+
+
+def v34_hard_decision(symbols: np.ndarray, L: int) -> np.ndarray:
+    """Nearest-point hard decision into the L-point V.34 constellation.
+
+    Returns an array of constellation point indices (0 … L−1) parallel to
+    ``symbols``.  The index encodes the label and rotation together:
+      • 0 … L/4−1             → quarter-constellation labels 0 … L/4−1
+      • L/4 … L/2−1           → those labels rotated 90°
+      • L/2 … 3L/4−1          → rotated 180°
+      • 3L/4 … L−1            → rotated 270°
+    """
+    pts = v34_constellation(L)          # (L,) complex
+    # Chunk to avoid N*L distance matrix blowing up memory for large N
+    chunk = 4096
+    indices = np.empty(len(symbols), dtype=np.int32)
+    for start in range(0, len(symbols), chunk):
+        s = symbols[start: start + chunk]
+        d = np.abs(s[:, np.newaxis] - pts[np.newaxis, :]) ** 2
+        indices[start: start + len(s)] = np.argmin(d, axis=1)
+    return indices
+
+
+def v34_evm(symbols: np.ndarray, L: int = 16) -> float:
+    """RMS EVM of ``symbols`` relative to the L-point V.34 constellation.
+
+    Input symbols should be power-normalised before calling.  EVM is returned
+    as a fraction of the RMS constellation radius (not in dB).
+    """
+    if len(symbols) == 0:
+        return 0.0
+    pts = v34_constellation(L)
+    # Normalise constellation so its RMS power matches input
+    pts_rms = float(np.sqrt(np.mean(np.abs(pts) ** 2)))
+    sym_rms  = float(np.sqrt(np.mean(np.abs(symbols) ** 2)))
+    scale = sym_rms / (pts_rms + 1e-12)
+    pts_s = pts * scale
+    chunk = 4096
+    sq_errs: list[float] = []
+    for start in range(0, len(symbols), chunk):
+        s = symbols[start: start + chunk]
+        d = np.abs(s[:, np.newaxis] - pts_s[np.newaxis, :]) ** 2
+        sq_errs.append(float(np.sum(np.min(d, axis=1))))
+    return float(np.sqrt(sum(sq_errs) / len(symbols)))
 
 
 def demod_quality_metrics(symbols: np.ndarray,
@@ -1816,11 +1981,20 @@ def scrambler_recurrence_score(bits: np.ndarray,
 
     Works directly on the scrambled (received) bitstream — no descrambler
     initialisation needed.
+
+    Returns 0.5 for constant-bit streams (all-zeros or all-ones), which both
+    trivially satisfy or fail the recurrence and do not represent real TRN.
     """
     t1, t2 = taps
     n0 = max(t1, t2)
     if len(bits) <= n0:
         return 0.0
+    # Reject constant streams — they give trivial scores (0.0 or 1.0) that
+    # are false positives / false negatives for Phase 4 S (constant-rotation
+    # signal) and similar constant-dibit sequences.
+    mean_val = float(np.mean(bits.astype(np.float64)))
+    if mean_val < 0.03 or mean_val > 0.97:
+        return 0.5
     b = bits[n0:]
     s = bits[n0 - t1: len(bits) - t1]
     t = bits[n0 - t2: len(bits) - t2]
@@ -2848,7 +3022,7 @@ def main(argv=None) -> int:
                 marker = (' ← best' if sweep_results and
                           evm == min(r[0] for r in sweep_results) else '')
                 print(f"  {sr:9d}  {f:6d}  {len(syms):6d}  "
-                      f"{offset:6d}  {evm:9.4f}{marker}")
+                      f"{offset:6.2f}  {evm:9.4f}{marker}")
             except Exception as e:
                 print(f"  {sr:9d}  {f:6d}  error: {e}")
         if sweep_results:

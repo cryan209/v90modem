@@ -8,7 +8,7 @@ trn_decode_mode=xnor trn_decode_frame_phase=0 trn_decode_offset=0 trn_decode_one
 ja_candidate_sym=6273 ja_candidate_ms=784.125
 max_period6_score=1.000000
 max_period6_len=381
-max_trn_score=0.585937
+max_trn_score=0.585938
 sign_bits(30431):
 0000111111111111001100110011100110011100110011000100011001100111
 0011001100011001100010001100111011101110011000110011000100011001
