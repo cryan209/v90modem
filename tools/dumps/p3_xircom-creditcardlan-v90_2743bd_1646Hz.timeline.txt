@@ -1,0 +1,12 @@
+# V.34 Phase 3 segment timeline
+# sym_rate=2743  fc=1646
+# columns: offset_ms  segment  n_symbols  duration_ms
+     0.000  TRN/J_a/SCR         138      50.310
+    50.310  PP (6×48T)          120      43.748
+    94.058  TRN/J_a/SCR         768     279.985
+   374.043  PP (6×48T)           12       4.375
+   378.418  TRN/J_a/SCR         816     297.485
+   675.902  PP (6×48T)           12       4.375
+   680.277  TRN/J_a/SCR        1812     660.591
+  1340.868  PP (6×48T)          180      65.622
+  1406.489  TRN/J_a/SCR         256      93.328

@@ -159,14 +159,53 @@ def chunk_bits(bits: str, width: int = 128) -> str:
 # ---------------------------------------------------------------------------
 # Demodulation pipeline (with upsampling for timing accuracy)
 # ---------------------------------------------------------------------------
+def refine_carrier_frequency(sig: np.ndarray, fs: int,
+                              fc_approx: float,
+                              search_hz: float = 50.0) -> float:
+    """
+    Refine carrier frequency estimate using zero-padded FFT peak interpolation.
+
+    Looks within ±search_hz of fc_approx for the exact spectral peak.
+    Uses parabolic interpolation on the log-magnitude spectrum for sub-bin
+    accuracy.
+    """
+    nfft = max(65536, 2 ** int(np.ceil(np.log2(len(sig) * 8))))
+    win = np.blackman(len(sig))
+    spec = np.abs(np.fft.rfft(sig * win, n=nfft))
+    freqs = np.fft.rfftfreq(nfft, 1.0 / fs)
+
+    mask = (freqs >= fc_approx - search_hz) & (freqs <= fc_approx + search_hz)
+    if not mask.any():
+        return fc_approx
+
+    masked_spec = spec[mask]
+    masked_freqs = freqs[mask]
+    pk_idx = int(np.argmax(masked_spec))
+
+    # Parabolic interpolation on log-magnitude for sub-bin accuracy
+    if 0 < pk_idx < len(masked_spec) - 1:
+        a = float(np.log(masked_spec[pk_idx - 1] + 1e-30))
+        b = float(np.log(masked_spec[pk_idx] + 1e-30))
+        c = float(np.log(masked_spec[pk_idx + 1] + 1e-30))
+        delta = 0.5 * (a - c) / (a - 2 * b + c + 1e-30)
+        df = float(masked_freqs[1] - masked_freqs[0])
+        return float(masked_freqs[pk_idx]) + delta * df
+
+    return float(masked_freqs[pk_idx])
+
+
 def demodulate_to_baseband(sig: np.ndarray, fs: int,
                            sym_rate: int, fc: float,
                            n_sps: int = 8) -> np.ndarray:
     """
-    Upsample → bandpass → mix to baseband → lowpass → resample to n_sps/sym.
+    Upsample → bandpass → refine carrier → mix to baseband → lowpass → resample.
 
     Upsampling to 48 kHz first gives ~15 sps at 3200 baud vs the native
     2.5 sps at 8 kHz, yielding much better timing and phase recovery.
+
+    The carrier frequency is refined using FFT peak interpolation on the
+    upsampled signal before downconversion, to avoid residual frequency
+    offset that causes constellation rotation.
 
     Returns complex IQ at sym_rate × n_sps samples/s.
     """
@@ -179,21 +218,24 @@ def demodulate_to_baseband(sig: np.ndarray, fs: int,
         sig_up  = sig
         fs_work = fs
 
-    # 2. Bandpass centred on the carrier
+    # 2. Bandpass centred on the carrier (zero-phase to avoid group delay)
     lo  = max(100.0,          fc - sym_rate * 0.55)
     hi  = min(fs_work / 2 - 100, fc + sym_rate * 0.55)
     sos = sp.butter(6, [lo, hi], btype='band', fs=fs_work, output='sos')
-    bp  = sp.sosfilt(sos, sig_up)
+    bp  = sp.sosfiltfilt(sos, sig_up)
 
-    # 3. Mix to baseband (complex downconversion)
+    # 3. Refine carrier frequency using the bandpassed signal
+    fc_refined = refine_carrier_frequency(bp, fs_work, fc, search_hz=80.0)
+
+    # 4. Mix to baseband (complex downconversion) using refined carrier
     t   = np.arange(len(bp)) / fs_work
-    iq  = bp * np.exp(-1j * 2 * np.pi * fc * t)
+    iq  = bp * np.exp(-1j * 2 * np.pi * fc_refined * t)
 
-    # 4. Low-pass to ≈ sym_rate / 2
+    # 5. Low-pass to ≈ sym_rate / 2 (zero-phase)
     sos2 = sp.butter(8, sym_rate * 0.52, btype='low', fs=fs_work, output='sos')
     iq   = sp.sosfiltfilt(sos2, iq)
 
-    # 5. Resample to exactly n_sps samples per symbol
+    # 6. Resample to exactly n_sps samples per symbol
     target_fs = sym_rate * n_sps
     g         = np.gcd(target_fs, fs_work)
     iq        = sp.resample_poly(iq, target_fs // g, fs_work // g)
@@ -201,7 +243,7 @@ def demodulate_to_baseband(sig: np.ndarray, fs: int,
 
 
 def find_best_timing_offset(iq: np.ndarray, n_sps: int,
-                            cpr_bw: float = 0.003
+                            cpr_bw: float = 0.01
                             ) -> tuple[np.ndarray, int, float]:
     """
     Try all n_sps sampling phases; return (best_symbols, best_offset, best_evm).
@@ -230,11 +272,13 @@ def sample_symbols(iq: np.ndarray, n_sps: int) -> np.ndarray:
 
 
 def recover_carrier_phase(symbols: np.ndarray,
-                          loop_bw: float = 0.003) -> np.ndarray:
+                          loop_bw: float = 0.01) -> np.ndarray:
     """
     Decision-directed QPSK Costas loop.
     Removes residual carrier phase offset / slow drift.
-    Uses a narrow loop for slow drift only (avoid overcorrecting TRN).
+
+    loop_bw=0.01 tracks up to ~10 Hz residual offset at typical symbol rates
+    without overcorrecting on TRN.
     """
     phase = freq = 0.0
     alpha = loop_bw
@@ -455,28 +499,96 @@ def stft_timeline(result: dict, sym_rate: int,
 
 
 # ---------------------------------------------------------------------------
+# Differential dibit extraction (V.34 §9.4)
+# ---------------------------------------------------------------------------
+def differential_dibits(symbols: np.ndarray) -> np.ndarray:
+    """
+    Extract differential dibits from complex symbol stream.
+
+    Computes z[n] * conj(z[n-1]), maps the phase difference to quadrant:
+        dibit 0:   0° ± 45°   (no phase change)
+        dibit 1:  90° ± 45°   (CCW quarter turn)
+        dibit 2: 180° ± 45°   (half turn)
+        dibit 3: 270° ± 45°   (CW quarter turn)
+
+    Returns array of length len(symbols)-1 with values in {0,1,2,3}.
+    """
+    conj_prod = symbols[1:] * np.conj(symbols[:-1])
+    angles = np.angle(conj_prod)  # in (-π, π]
+    # Map to [0, 2π)
+    angles = angles % (2 * np.pi)
+    # Quadrant boundaries at 45°, 135°, 225°, 315°
+    dibits = np.zeros(len(angles), dtype=np.int32)
+    dibits[(angles >= np.pi / 4) & (angles < 3 * np.pi / 4)] = 1
+    dibits[(angles >= 3 * np.pi / 4) & (angles < 5 * np.pi / 4)] = 2
+    dibits[(angles >= 5 * np.pi / 4) & (angles < 7 * np.pi / 4)] = 3
+    return dibits
+
+
+def dibits_to_serial_bits(dibits: np.ndarray) -> np.ndarray:
+    """
+    Serialise dibit stream to bit pairs: dibit d → (d & 1, (d >> 1) & 1).
+    Returns array of length 2 * len(dibits).
+    """
+    bits = np.empty(len(dibits) * 2, dtype=np.uint8)
+    bits[0::2] = dibits & 1
+    bits[1::2] = (dibits >> 1) & 1
+    return bits
+
+
+# ---------------------------------------------------------------------------
+# Scrambler recurrence check on serial bit stream
+# ---------------------------------------------------------------------------
+def scrambler_recurrence_score(bits: np.ndarray,
+                               taps: tuple[int, int]) -> float:
+    """
+    Check the scrambler self-synchronising recurrence on a serial bit stream.
+
+    For GPA (taps=(18,23)): b[n] XOR b[n-18] XOR b[n-23] should == 1
+    for TRN (scrambled all-ones).
+
+    Works directly on the scrambled (received) bitstream — no descrambler
+    initialisation needed.
+    """
+    t1, t2 = taps
+    n0 = max(t1, t2)
+    if len(bits) <= n0:
+        return 0.0
+    b = bits[n0:]
+    s = bits[n0 - t1: len(bits) - t1]
+    t = bits[n0 - t2: len(bits) - t2]
+    return float(np.mean((b ^ s ^ t) == 1))
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 sub-sequence detectors (symbol domain)
 # ---------------------------------------------------------------------------
 def s_signal_score(symbols: np.ndarray, window: int = 64) -> np.ndarray:
     """
     Per-symbol score for S / S̄ (V.34 §10.1.3.7).
 
-    S  alternates between point 0 and point 0 rotated CCW 90° each T.
-    Both produce a constant ±90° differential angle in the symbol stream.
+    Phase 3 S is a CONSTANT carrier — the same constellation point repeated
+    every baud (differential dibit = 0 for every symbol).  S̄ is the same
+    constant carrier phase-shifted 180° from S.  The S→S̄ boundary is a
+    single dibit-2 transition, then dibit-0 again for 16T.
 
-    Score ≈ fraction of ±90° steps in a ±window/2 neighbourhood.
+    Phase 4 S is different (180° reversals, dibit=2 per baud).
+
+    Score ≈ fraction of dibit-0 (no phase change) in a sliding window.
+    A high score means constant carrier → S or S̄.
     """
-    n     = len(symbols)
-    diffs = np.diff(np.angle(symbols))
-    diffs = (diffs + np.pi) % (2 * np.pi) - np.pi   # wrap to (−π, π]
+    n = len(symbols)
     scores = np.zeros(n)
-    hw     = window // 2
+    if n < 3:
+        return scores
+
+    dibits = differential_dibits(symbols)
+    is_zero = (dibits == 0).astype(np.float64)
+    hw = window // 2
 
     for i in range(hw, n - hw - 1):
-        seg        = diffs[i - hw : i + hw]
-        on_p90     = float(np.mean(np.abs(seg -  np.pi / 2) < 0.45))
-        on_m90     = float(np.mean(np.abs(seg +  np.pi / 2) < 0.45))
-        scores[i]  = max(on_p90, on_m90)
+        seg = is_zero[max(0, i - hw): min(len(is_zero), i + hw)]
+        scores[i] = float(np.mean(seg))
 
     return scores
 
@@ -508,6 +620,46 @@ def pp_signal_score(symbols: np.ndarray, window: int = 288) -> np.ndarray:
         score   = float(acf[centre + 48] / acf[centre]) if centre + 48 < len(acf) else 0.0
         i0, i1  = max(0, i - hop // 2), min(n, i + hop // 2)
         scores[i0:i1] = max(0.0, score)
+
+    return scores
+
+
+def trn_signal_score(symbols: np.ndarray, window: int = 128,
+                     hop: int = 16) -> np.ndarray:
+    """
+    Per-symbol score for TRN using scrambler recurrence on differential dibits.
+
+    TRN = GPA-scrambled all-ones.  The self-synchronising recurrence
+    b[n] XOR b[n-18] XOR b[n-23] == 1 holds on the serial bit stream
+    derived from differential dibits.  Score ≈ 1.0 for TRN, ≈ 0.5 for random.
+    """
+    n = len(symbols)
+    scores = np.zeros(n)
+    if n < 3:
+        return scores
+
+    dibits = differential_dibits(symbols)
+    # Try both bit orderings and take the best
+    serial_a = dibits_to_serial_bits(dibits)
+    serial_b = np.empty_like(serial_a)
+    serial_b[0::2] = (dibits >> 1) & 1
+    serial_b[1::2] = dibits & 1
+
+    hw = window // 2
+    for i in range(hw, n - hw, hop):
+        d_start = max(0, i - hw)
+        d_end = min(len(dibits), i + hw)
+        seg_a = serial_a[d_start * 2: d_end * 2]
+        seg_b = serial_b[d_start * 2: d_end * 2]
+        sc_a = scrambler_recurrence_score(seg_a, GPA_TAPS)
+        sc_b = scrambler_recurrence_score(seg_b, GPA_TAPS)
+        sc = max(sc_a, sc_b)
+        # Also check GPC
+        sc_a2 = scrambler_recurrence_score(seg_a, GPC_TAPS)
+        sc_b2 = scrambler_recurrence_score(seg_b, GPC_TAPS)
+        sc = max(sc, sc_a2, sc_b2)
+        i0, i1 = max(0, i - hop // 2), min(n, i + hop // 2)
+        scores[i0:i1] = sc
 
     return scores
 
@@ -692,11 +844,46 @@ def gpc_ones_score(bits: np.ndarray, taps: tuple[int, int]) -> float:
 
 def check_trn_region(symbols: np.ndarray) -> dict:
     """
-    Try all 4 QPSK rotational ambiguities and both bit polarities vs GPC / GPA.
+    Check a symbol region for TRN using differential dibit extraction.
+
+    Tries all 4 QPSK rotational ambiguities, both bit polarities,
+    and both GPC/GPA scramblers.  Uses differential dibits (phase change
+    between consecutive symbols) rather than absolute quadrant, which is
+    the correct V.34 encoding.
+
+    Also falls back to absolute-quadrant extraction for comparison.
     Returns dict with best score and matched parameters.
     """
     best: dict = {'score': 0.0, 'rotation': 0,
-                  'inverted': False, 'scrambler': '?'}
+                  'inverted': False, 'scrambler': '?',
+                  'method': 'none'}
+
+    # Method 1: Differential dibit extraction (correct for V.34)
+    if len(symbols) >= 2:
+        dibits = differential_dibits(symbols)
+        serial_bits = dibits_to_serial_bits(dibits)
+        for inv in (False, True):
+            b = (1 - serial_bits) if inv else serial_bits
+            for name, taps in (('GPC', GPC_TAPS), ('GPA', GPA_TAPS)):
+                sc = scrambler_recurrence_score(b, taps)
+                if sc > best['score']:
+                    best = {'score': sc, 'rotation': 0,
+                            'inverted': inv, 'scrambler': name,
+                            'method': 'differential'}
+            # Also try swapped bit order: (d>>1)&1 first, then d&1
+            b_swap = np.empty_like(serial_bits)
+            b_swap[0::2] = (dibits >> 1) & 1
+            b_swap[1::2] = dibits & 1
+            if inv:
+                b_swap = 1 - b_swap
+            for name, taps in (('GPC', GPC_TAPS), ('GPA', GPA_TAPS)):
+                sc = scrambler_recurrence_score(b_swap, taps)
+                if sc > best['score']:
+                    best = {'score': sc, 'rotation': 0,
+                            'inverted': inv, 'scrambler': name,
+                            'method': 'differential-swap'}
+
+    # Method 2: Absolute quadrant with rotation (legacy fallback)
     for rot in range(4):
         s    = symbols * np.exp(1j * np.pi / 2 * rot)
         bits = syms_to_bits(s)
@@ -706,7 +893,8 @@ def check_trn_region(symbols: np.ndarray) -> dict:
                 sc = gpc_ones_score(b, taps)
                 if sc > best['score']:
                     best = {'score': sc, 'rotation': rot,
-                            'inverted': inv, 'scrambler': name}
+                            'inverted': inv, 'scrambler': name,
+                            'method': 'absolute'}
     return best
 
 
@@ -718,8 +906,14 @@ LABEL_NAME = {'S': 'S / S̄',       'P': 'PP (6×48T)',
 
 
 def classify_symbols(s_sc: np.ndarray, pp_sc: np.ndarray,
-                     s_thresh: float = 0.65,
+                     s_thresh: float = 0.80,
                      pp_thresh: float = 0.12) -> list[str]:
+    """
+    Classify each symbol as S (constant carrier), P (probing), or T (TRN/data).
+
+    s_thresh: fraction of dibit-0 in window to qualify as S.  Default 0.80
+              (Phase 3 S is constant carrier → nearly all dibit-0).
+    """
     labels = []
     for i in range(len(s_sc)):
         if s_sc[i] >= s_thresh:
@@ -937,6 +1131,21 @@ def bitdump_text(symbols: np.ndarray,
         )
 
     if len(symbols) >= 2:
+        # Differential dibit extraction (V.34 §9.4)
+        dibits = differential_dibits(symbols)
+        serial_bits = dibits_to_serial_bits(dibits)
+
+        lines.append(f"diff_dibits({len(dibits)}): {''.join(str(int(v)) for v in dibits)}")
+        lines.append(f"serial_bits({len(serial_bits)}):")
+        lines.append(chunk_bits("".join(str(int(v)) for v in serial_bits), 64))
+
+        # Scrambler recurrence check on the serial bit stream
+        gpa_sc = scrambler_recurrence_score(serial_bits, GPA_TAPS)
+        gpc_sc = scrambler_recurrence_score(serial_bits, GPC_TAPS)
+        lines.append(f"gpa_recurrence_score={gpa_sc:.4f}")
+        lines.append(f"gpc_recurrence_score={gpc_sc:.4f}")
+
+        # Legacy absolute-quadrant representations (for comparison)
         states = (((np.angle(symbols) + np.pi) / (np.pi / 2.0)).astype(int)) & 3
         d = (states[1:] - states[:-1]) & 3
         nat_bits = "".join(f"{int(v):02b}" for v in d)
@@ -948,17 +1157,6 @@ def bitdump_text(symbols: np.ndarray,
         lines.append(chunk_bits(nat_bits, 64))
         lines.append(f"gray_bits({len(gray_bits)}):")
         lines.append(chunk_bits(gray_bits, 64))
-
-        dph = symbols[1:] * np.conj(symbols[:-1])
-        dbpsk_bits = "".join("1" if float(np.real(v)) < 0.0 else "0" for v in dph)
-        dbpsk_bits_inverted = "".join("0" if b == "1" else "1" for b in dbpsk_bits)
-        dbpsk_quadrant = "".join("1" if float(np.imag(v)) >= 0.0 else "0" for v in dph)
-        lines.append(f"dbpsk_bits({len(dbpsk_bits)}):")
-        lines.append(chunk_bits(dbpsk_bits, 128))
-        lines.append(f"dbpsk_bits_inverted({len(dbpsk_bits_inverted)}):")
-        lines.append(chunk_bits(dbpsk_bits_inverted, 128))
-        lines.append(f"dbpsk_quadrant_imag_sign({len(dbpsk_quadrant)}):")
-        lines.append(chunk_bits(dbpsk_quadrant, 128))
 
     return "\n".join(lines) + "\n"
 
@@ -1002,8 +1200,8 @@ def main(argv=None) -> int:
         help='Run the legacy QPSK/LMS/Ja path even when the capture looks V.92-like')
     ap.add_argument('--out-dir', type=Path, default=Path('tools/dumps'),
         help='Output directory for IQ/timeline text files')
-    ap.add_argument('--s-thresh',  type=float, default=0.65,
-        help='S/S̄ detection threshold (default 0.65)')
+    ap.add_argument('--s-thresh',  type=float, default=0.80,
+        help='S/S̄ detection threshold (default 0.80, fraction of dibit-0 in window)')
     ap.add_argument('--pp-thresh', type=float, default=0.12,
         help='PP detection threshold (default 0.12)')
     args = ap.parse_args(argv)
@@ -1202,9 +1400,10 @@ def main(argv=None) -> int:
     syms = eq_syms
 
     # ── Phase 3 sub-sequence detection ──────────────────────────────────────
-    print(f"\nDetecting Phase 3 sub-sequences …")
-    s_sc  = s_signal_score(syms)
-    pp_sc = pp_signal_score(syms)
+    print(f"\nDetecting Phase 3 sub-sequences (dibit-based) …")
+    s_sc   = s_signal_score(syms)
+    pp_sc  = pp_signal_score(syms)
+    trn_sc = trn_signal_score(syms)
 
     labels   = classify_symbols(s_sc, pp_sc, args.s_thresh, args.pp_thresh)
     runs_sym = runs_from_labels(labels)
@@ -1216,6 +1415,25 @@ def main(argv=None) -> int:
     print(f"  PP   symbols: {pp_count:5d}  ({pp_count * T_ms:7.1f} ms)")
     print(f"  TRN  symbols: {t_count:5d}  ({t_count  * T_ms:7.1f} ms)")
 
+    # Report TRN scrambler score for the largest T run
+    t_run_start, t_run_end = 0, 0
+    in_t, ts = False, 0
+    for i, lbl in enumerate(labels):
+        if lbl == 'T' and not in_t:
+            ts, in_t = i, True
+        elif lbl != 'T' and in_t:
+            if i - ts > t_run_end - t_run_start:
+                t_run_start, t_run_end = ts, i
+            in_t = False
+    if in_t and len(labels) - ts > t_run_end - t_run_start:
+        t_run_start, t_run_end = ts, len(labels)
+    t_run_len = t_run_end - t_run_start
+    if t_run_len >= 48:
+        mid = (t_run_start + t_run_end) // 2
+        trn_peak = trn_sc[mid] if mid < len(trn_sc) else 0.0
+        print(f"  TRN scrambler score in largest T run: {trn_peak:.4f}"
+              f"  (≈1.0 = confirmed TRN, ≈0.5 = random)")
+
     print(f"\n=== V.90 Phase 3 Sub-Sequence Timeline (LMS-equalized) ===")
     print(f"    sym_rate={sym_rate} baud   T={T_ms:.3f} ms   carrier={fc:.0f} Hz")
     print_timeline(sym_rate, runs_sym)
@@ -1223,20 +1441,8 @@ def main(argv=None) -> int:
     print_expected_durations(sym_rate, effective_protocol)
 
     # ── TRN descrambler check on LMS-equalized symbols ───────────────────────
-    is_trn  = np.array([c == 'T' for c in labels])
-    best_run = (0, 0)
-    in_r, rs = False, 0
-    for i, v in enumerate(is_trn):
-        if v and not in_r:
-            rs, in_r = i, True
-        elif not v and in_r:
-            if i - rs > best_run[1] - best_run[0]:
-                best_run = (rs, i)
-            in_r = False
-    if in_r and len(is_trn) - rs > best_run[1] - best_run[0]:
-        best_run = (rs, len(is_trn))
-
-    trn_len = best_run[1] - best_run[0]
+    best_run = (t_run_start, t_run_end)
+    trn_len = t_run_len
     print(f"\n=== TRN Descrambler Check (V.90 §8.3.6 / V.34 §7) ===")
     print(f"  Analogue modem TRN uses GPA (1+x^-18+x^-23) per V.90 §8.3 / §6.5")
     print(f"  Largest TRN run: symbols {best_run[0]}–{best_run[1]}"
@@ -1246,8 +1452,8 @@ def main(argv=None) -> int:
         trn_syms = syms[best_run[0] : best_run[1]]
         r = check_trn_region(trn_syms)
         sc = r['score']
-        print(f"  Best:  {r['scrambler']:<3}  rotation={r['rotation']}×90°"
-              f"  inverted={r['inverted']}")
+        print(f"  Best:  {r['scrambler']:<3}  method={r['method']}"
+              f"  rotation={r['rotation']}×90°  inverted={r['inverted']}")
         print(f"  Score: {sc:.4f}   "
               f"(random ≈ 0.500 | perfect TRN ≈ 0.950)")
         if sc >= 0.80:
@@ -1268,7 +1474,7 @@ def main(argv=None) -> int:
     if n_trn_train >= 48:
         trn_direct = syms[trn_start_sym : trn_start_sym + n_trn_train]
         rd = check_trn_region(trn_direct)
-        print(f"  {rd['scrambler']:<3}  rot={rd['rotation']}×90°"
+        print(f"  {rd['scrambler']:<3}  method={rd['method']}  rot={rd['rotation']}×90°"
               f"  inv={rd['inverted']}  score={rd['score']:.4f}")
 
     # ── Write output files ───────────────────────────────────────────────────
@@ -1282,12 +1488,15 @@ def main(argv=None) -> int:
         fh.write(f"# V.34 Phase 3 baseband IQ symbols\n")
         fh.write(f"# sym_rate={sym_rate}  fc={int(fc)}  "
                  f"t0={args.t0}  t1={args.t1}\n")
-        fh.write(f"# columns: sym_idx  time_ms  I  Q  s_score  pp_score  label\n")
+        fh.write(f"# columns: sym_idx  time_ms  I  Q  s_score  pp_score  trn_score  label\n")
+        dibits_out = differential_dibits(syms) if len(syms) >= 2 else np.array([], dtype=np.int32)
         for i, s in enumerate(syms):
             lbl = labels[i]
+            dibit_str = str(int(dibits_out[i])) if i < len(dibits_out) else '-'
             fh.write(f"{i:6d}  {i*T_ms:9.3f}  "
                      f"{s.real:+.6f}  {s.imag:+.6f}  "
-                     f"{s_sc[i]:.3f}  {pp_sc[i]:.3f}  {lbl}\n")
+                     f"{s_sc[i]:.3f}  {pp_sc[i]:.3f}  {trn_sc[i]:.3f}  "
+                     f"{lbl}  d{dibit_str}\n")
     bit_path.write_text(
         bitdump_text(
             syms,
