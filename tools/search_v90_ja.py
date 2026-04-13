@@ -14,6 +14,7 @@ from recover_ja_descriptor import (
     DilDesc,
     block_match,
     consensus_block,
+    descramble_bits,
     descriptor_nearness,
     parse_dil_descriptor,
 )
@@ -110,6 +111,11 @@ def bit_streams_from_diffs(diffs: np.ndarray) -> dict[str, str]:
         out[f"{name}_swap"] = swap_dibit_order(bits)
         out[f"{name}_swap_inv"] = invert_bits(out[f"{name}_swap"])
 
+    raw_items = list(out.items())
+    for name, bits in raw_items:
+        out[f"{name}_d4"] = descramble_bits(bits, 4)
+        out[f"{name}_d17"] = descramble_bits(bits, 17)
+
     return out
 
 
@@ -123,11 +129,31 @@ V90_STREAM_GROUPS: dict[str, list[str]] = {
         "nat_rev_swap",
         "nat_rev_swap_inv",
     ],
+    "descr": [
+        "gray_d4", "gray_d17", "gray_inv_d4", "gray_inv_d17",
+        "nat_d4", "nat_d17", "nat_inv_d4", "nat_inv_d17",
+    ],
     "all_v90": [
         "gray", "gray_inv", "nat", "nat_inv",
         "gray_rev", "gray_rev_inv", "nat_rev", "nat_rev_inv",
         "gray_swap", "gray_swap_inv", "nat_swap", "nat_swap_inv",
         "gray_rev_swap", "gray_rev_swap_inv", "nat_rev_swap", "nat_rev_swap_inv",
+    ],
+    "all_v90_descr": [
+        "gray", "gray_inv", "nat", "nat_inv",
+        "gray_rev", "gray_rev_inv", "nat_rev", "nat_rev_inv",
+        "gray_swap", "gray_swap_inv", "nat_swap", "nat_swap_inv",
+        "gray_rev_swap", "gray_rev_swap_inv", "nat_rev_swap", "nat_rev_swap_inv",
+        "gray_d4", "gray_d17", "gray_inv_d4", "gray_inv_d17",
+        "nat_d4", "nat_d17", "nat_inv_d4", "nat_inv_d17",
+        "gray_rev_d4", "gray_rev_d17", "gray_rev_inv_d4", "gray_rev_inv_d17",
+        "nat_rev_d4", "nat_rev_d17", "nat_rev_inv_d4", "nat_rev_inv_d17",
+        "gray_swap_d4", "gray_swap_d17", "gray_swap_inv_d4", "gray_swap_inv_d17",
+        "nat_swap_d4", "nat_swap_d17", "nat_swap_inv_d4", "nat_swap_inv_d17",
+        "gray_rev_swap_d4", "gray_rev_swap_d17",
+        "gray_rev_swap_inv_d4", "gray_rev_swap_inv_d17",
+        "nat_rev_swap_d4", "nat_rev_swap_d17",
+        "nat_rev_swap_inv_d4", "nat_rev_swap_inv_d17",
     ],
 }
 
@@ -151,8 +177,16 @@ def qpsk_bit_streams(xs: np.ndarray,
     return bit_streams_from_diffs(diffs)
 
 
-def qpsk_bit_streams_from_symbols(symbols: np.ndarray) -> dict[str, str]:
-    states = (((np.angle(symbols) + math.pi) / (math.pi / 2.0)).astype(int)) & 3
+def qpsk_bit_streams_from_symbols(symbols: np.ndarray,
+                                  prev_symbol: complex | None = None) -> dict[str, str]:
+    if prev_symbol is not None:
+        full = np.empty(len(symbols) + 1, dtype=np.complex128)
+        full[0] = prev_symbol
+        full[1:] = symbols
+    else:
+        full = symbols
+
+    states = (((np.angle(full) + math.pi) / (math.pi / 2.0)).astype(int)) & 3
     diffs = (states[1:] - states[:-1]) & 3
     return bit_streams_from_diffs(diffs)
 
@@ -183,6 +217,14 @@ def bitdump_text(wav: Path,
         "nat_rev", "gray_rev", "nat_rev_inv", "gray_rev_inv",
         "nat_swap", "gray_swap", "nat_swap_inv", "gray_swap_inv",
         "nat_rev_swap", "gray_rev_swap", "nat_rev_swap_inv", "gray_rev_swap_inv",
+        "nat_d4", "gray_d4", "nat_inv_d4", "gray_inv_d4",
+        "nat_d17", "gray_d17", "nat_inv_d17", "gray_inv_d17",
+        "nat_rev_d4", "gray_rev_d4", "nat_rev_inv_d4", "gray_rev_inv_d4",
+        "nat_rev_d17", "gray_rev_d17", "nat_rev_inv_d17", "gray_rev_inv_d17",
+        "nat_swap_d4", "gray_swap_d4", "nat_swap_inv_d4", "gray_swap_inv_d4",
+        "nat_swap_d17", "gray_swap_d17", "nat_swap_inv_d17", "gray_swap_inv_d17",
+        "nat_rev_swap_d4", "gray_rev_swap_d4", "nat_rev_swap_inv_d4", "gray_rev_swap_inv_d4",
+        "nat_rev_swap_d17", "gray_rev_swap_d17", "nat_rev_swap_inv_d17", "gray_rev_swap_inv_d17",
     ]
     written: set[str] = set()
     for key in preferred:
@@ -207,6 +249,7 @@ class Candidate:
     score: float
     start_ms: float
     offset_samples: float
+    slip_symbols: int
     carrier_hz: float
     sym_rate: float
     stream: str
@@ -392,6 +435,10 @@ def main() -> int:
     ap.add_argument("--offset-min", type=float, default=0.0)
     ap.add_argument("--offset-max", type=float, default=1.0)
     ap.add_argument("--offset-step", type=float, default=0.25)
+    ap.add_argument("--symbol-slip-min", type=int, default=0,
+                    help="Additional integer symbol slips to test around each IQ start")
+    ap.add_argument("--symbol-slip-max", type=int, default=0,
+                    help="Additional integer symbol slips to test around each IQ start")
     ap.add_argument("--symbols", type=int, default=1536)
     ap.add_argument("--descriptor-start-min", type=int, default=0)
     ap.add_argument("--descriptor-start-max", type=int, default=64)
@@ -400,7 +447,7 @@ def main() -> int:
     ap.add_argument("--min-blocks", type=int, default=3)
     ap.add_argument("--max-blocks", type=int, default=4)
     ap.add_argument("--streams", type=str, default="basic",
-                    help="Comma-separated stream names or groups: basic, rev, swap, rev_swap, all_v90")
+                    help="Comma-separated stream names or groups: basic, rev, swap, rev_swap, descr, all_v90, all_v90_descr")
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--save-best", type=Path, default=None)
     args = ap.parse_args()
@@ -452,6 +499,7 @@ def main() -> int:
                         args.start_step_ms)
 
     offsets = frange(args.offset_min, args.offset_max, args.offset_step)
+    symbol_slips = list(range(args.symbol_slip_min, args.symbol_slip_max + 1))
 
     candidates: list[Candidate] = []
 
@@ -463,46 +511,51 @@ def main() -> int:
         iq_carrier = float(iq_meta.get("carrier_hz", pairs[0][1]))
 
         for start_ms in starts:
-            start_sym = int(round((start_ms - iq_t0_ms) * iq_sym_rate / 1000.0))
-            if start_sym < 0:
-                continue
-            stop_sym = start_sym + args.symbols
-            if stop_sym > len(iq_symbols):
-                continue
-            syms = iq_symbols[start_sym:stop_sym]
-            bit_streams = qpsk_bit_streams_from_symbols(syms)
-            for stream_name in streams:
-                bits = bit_streams[stream_name]
-                for ds in range(args.descriptor_start_min, args.descriptor_start_max + 1):
-                    avail = len(bits) - ds
-                    for block_len in range(args.len_min, args.len_max + 1):
-                        blocks = min(args.max_blocks, avail // block_len)
-                        if blocks < args.min_blocks:
-                            continue
-                        score, rep, parsed, sync_hd, zero_viol, frame17_viol, crc90_hd, crc92_hd, fs12_pos = (
-                            score_candidate(bits, ds, block_len, blocks)
-                        )
-                        candidates.append(
-                            Candidate(
-                                score=score,
-                                start_ms=start_ms,
-                                offset_samples=0.0,
-                                carrier_hz=iq_carrier,
-                                sym_rate=iq_sym_rate,
-                                stream=stream_name,
-                                descriptor_start=ds,
-                                block_len=block_len,
-                                blocks=blocks,
-                                rep=rep,
-                                sync_hd=sync_hd,
-                                zero_viol=zero_viol,
-                                frame17_viol=frame17_viol,
-                                crc90_hd=crc90_hd,
-                                crc92_hd=crc92_hd,
-                                fs12_pos=fs12_pos,
-                                parsed=parsed,
+            base_start_sym = int(round((start_ms - iq_t0_ms) * iq_sym_rate / 1000.0))
+            for slip in symbol_slips:
+                start_sym = base_start_sym + slip
+                if start_sym <= 0:
+                    continue
+                stop_sym = start_sym + args.symbols
+                if stop_sym > len(iq_symbols):
+                    continue
+                syms = iq_symbols[start_sym:stop_sym]
+                prev_symbol = complex(iq_symbols[start_sym - 1])
+                bit_streams = qpsk_bit_streams_from_symbols(syms, prev_symbol=prev_symbol)
+                actual_start_ms = iq_t0_ms + (1000.0 * start_sym / iq_sym_rate)
+                for stream_name in streams:
+                    bits = bit_streams[stream_name]
+                    for ds in range(args.descriptor_start_min, args.descriptor_start_max + 1):
+                        avail = len(bits) - ds
+                        for block_len in range(args.len_min, args.len_max + 1):
+                            blocks = min(args.max_blocks, avail // block_len)
+                            if blocks < args.min_blocks:
+                                continue
+                            score, rep, parsed, sync_hd, zero_viol, frame17_viol, crc90_hd, crc92_hd, fs12_pos = (
+                                score_candidate(bits, ds, block_len, blocks)
                             )
-                        )
+                            candidates.append(
+                                Candidate(
+                                    score=score,
+                                    start_ms=actual_start_ms,
+                                    offset_samples=0.0,
+                                    slip_symbols=slip,
+                                    carrier_hz=iq_carrier,
+                                    sym_rate=iq_sym_rate,
+                                    stream=stream_name,
+                                    descriptor_start=ds,
+                                    block_len=block_len,
+                                    blocks=blocks,
+                                    rep=rep,
+                                    sync_hd=sync_hd,
+                                    zero_viol=zero_viol,
+                                    frame17_viol=frame17_viol,
+                                    crc90_hd=crc90_hd,
+                                    crc92_hd=crc92_hd,
+                                    fs12_pos=fs12_pos,
+                                    parsed=parsed,
+                                )
+                            )
     else:
         assert xs is not None and fs is not None
         for start_ms in starts:
@@ -525,6 +578,7 @@ def main() -> int:
                                         score=score,
                                         start_ms=start_ms,
                                         offset_samples=off,
+                                        slip_symbols=0,
                                         carrier_hz=carrier_hz,
                                         sym_rate=sym_rate,
                                         stream=stream_name,
@@ -545,17 +599,17 @@ def main() -> int:
     candidates.sort(key=lambda c: c.score, reverse=True)
     top = candidates[: max(1, args.top)]
 
-    print("rank\tscore\tstart_ms\toffset\trate\tcarrier\tstream\tds\tL\tblocks\trep\tparse\tvar\tsync_hd\tzviol\tf17\tcrc90\tcrc92\tfs12")
+    print("rank\tscore\tstart_ms\toffset\tslip\trate\tcarrier\tstream\tds\tL\tblocks\trep\tparse\tvar\tsync_hd\tzviol\tf17\tcrc90\tcrc92\tfs12")
     for i, c in enumerate(top, 1):
         if c.parsed is None:
             print(
-                f"{i}\t{c.score:.1f}\t{c.start_ms:.2f}\t{c.offset_samples:.2f}\t{c.sym_rate:.0f}\t{c.carrier_hz:.0f}\t"
+                f"{i}\t{c.score:.1f}\t{c.start_ms:.2f}\t{c.offset_samples:.2f}\t{c.slip_symbols:+d}\t{c.sym_rate:.0f}\t{c.carrier_hz:.0f}\t"
                 f"{c.stream}\t{c.descriptor_start}\t{c.block_len}\t{c.blocks}\t{c.rep:.4f}\t0\t-\t"
                 f"{c.sync_hd}\t{c.zero_viol}\t{c.frame17_viol}\t{c.crc90_hd}\t{c.crc92_hd}\t{c.fs12_pos}"
             )
         else:
             print(
-                f"{i}\t{c.score:.1f}\t{c.start_ms:.2f}\t{c.offset_samples:.2f}\t{c.sym_rate:.0f}\t{c.carrier_hz:.0f}\t"
+                f"{i}\t{c.score:.1f}\t{c.start_ms:.2f}\t{c.offset_samples:.2f}\t{c.slip_symbols:+d}\t{c.sym_rate:.0f}\t{c.carrier_hz:.0f}\t"
                 f"{c.stream}\t{c.descriptor_start}\t{c.block_len}\t{c.blocks}\t{c.rep:.4f}\t1\t{c.parsed.variant}\t"
                 f"{c.sync_hd}\t{c.zero_viol}\t{c.frame17_viol}\t{c.crc90_hd}\t{c.crc92_hd}\t{c.fs12_pos}"
             )
@@ -566,7 +620,8 @@ def main() -> int:
             iq_t0_ms = float(iq_meta["window_t0_s"]) * 1000.0
             start_sym = int(round((best.start_ms - iq_t0_ms) * best.sym_rate / 1000.0))
             syms = iq_symbols[start_sym:start_sym + args.symbols]
-            streams_for_best = qpsk_bit_streams_from_symbols(syms)
+            prev_symbol = complex(iq_symbols[start_sym - 1]) if start_sym > 0 else None
+            streams_for_best = qpsk_bit_streams_from_symbols(syms, prev_symbol=prev_symbol)
         else:
             assert xs is not None and fs is not None
             streams_for_best = qpsk_bit_streams(xs, fs, best.start_ms, best.offset_samples,
