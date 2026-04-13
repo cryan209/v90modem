@@ -1,10 +1,6 @@
 # V.34 Phase 3 segment timeline
 # sym_rate=2400  fc=1800
 # columns: offset_ms  segment  n_symbols  duration_ms
-     0.000  TRN / other        1542     642.500
-   642.500  PP (48-sym)          12       5.000
-   647.500  TRN / other        2148     895.000
-  1542.500  PP (48-sym)         132      55.000
-  1597.500  TRN / other        1344     560.000
-  2157.500  PP (48-sym)          96      40.000
-  2197.500  TRN / other        3856    1606.667
+     0.000  TRN/J_a/SCR         138      57.500
+    57.500  PP (6×48T)           48      20.000
+    77.500  TRN/J_a/SCR        1550     645.833

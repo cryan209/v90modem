@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-V.90 / V.34 Phase 3 upstream demodulator (analogue modem TX).
+V.90 / V.34 / V.92 Phase 3 upstream demodulator (analogue modem TX).
 
 The analogue (call) modem transmits this Phase 3 sequence on the upstream
 channel (V.90 §9.3.2, Figure 5/V.90; waveform definitions in V.90 §8.3):
@@ -21,8 +21,19 @@ each say "As defined in 10.1.3.x/V.34").  J_a and SCR are V.90 additions.
 
 In V.34-only calls the sequence ends at J/J' (§11.3.1.1/V.34) instead.
 
-GPC scrambler (digital modem TX, V.34 §7): 1 + x^{-18} + x^{-23}
-GPA scrambler (analogue modem TX, V.34 §7): 1 + x^{-5}  + x^{-23}
+GPC scrambler (digital modem TX, V.34 §7): 1 + x^{-5}  + x^{-23}
+GPA scrambler (analogue modem TX, V.34 §7): 1 + x^{-18} + x^{-23}
+
+For V.92 upstream Phase 3, the analogue modem transmits:
+
+    Ru / uR             — 2-point pattern (§9.5.2.1.1 / §8.5.5)
+    [MD]                — optional marker
+    TRN1u (≥2040T)      — GPA-scrambled ±L_U (§8.5.7)
+    J_a (variable)      — 24 ones + DIL descriptors (§8.5.4)
+
+V.92 Ja does NOT use the V.34/V.90 4-point J modulation.  It uses the same
+2-point modulation as TRN1u, is GPA-scrambled, and is differentially encoded
+from the final symbol of the preceding TRN1u (§8.5.4/V.92).
 
 V.90 symbol-rate constraints (§6.2/V.90):
   Mandatory: 3200 baud.  Optional: 3000, 3429.
@@ -57,9 +68,17 @@ V34_CARRIERS: list[tuple[int, int]] = [
     (3429, 1959),
 ]
 
+# V.90 upstream uses only the higher symbol-rate subset (§6.2/V.90).
+V90_CARRIERS: list[tuple[int, int]] = [
+    (3000, 1800), (3000, 2000),
+    (3200, 1829), (3200, 1920),
+    (3429, 1959),
+]
+
 # Scrambler tap pairs for the ones-check  (V.34 §7)
-GPC_TAPS = (18, 23)   # call modem  → answer modem
-GPA_TAPS = (5,  23)   # answer modem → call modem
+# Delays are expressed as recurrence taps on the serial bit stream.
+GPC_TAPS = (5,  23)   # digital modem TX
+GPA_TAPS = (18, 23)   # analogue modem TX
 
 # Upsample target rate before demodulation — gives ~15 sps at 3200 baud
 _UPSAMPLE_FS = 48000
@@ -86,7 +105,14 @@ def load_wav_channel(path: Path, channel: int,
 # ---------------------------------------------------------------------------
 # Carrier / symbol-rate estimation
 # ---------------------------------------------------------------------------
-def estimate_best_carrier(sig: np.ndarray, fs: int) -> tuple[int, int]:
+def carrier_candidates(protocol: str) -> list[tuple[int, int]]:
+    if protocol == 'v90':
+        return V90_CARRIERS
+    return V34_CARRIERS
+
+
+def estimate_best_carrier(sig: np.ndarray, fs: int,
+                          protocol: str = 'auto') -> tuple[int, int]:
     """
     Score each V.34 (sym_rate, carrier) pair by mean PSD energy in the
     band [carrier ± 0.45 × sym_rate].  Returns the best pair.
@@ -96,8 +122,9 @@ def estimate_best_carrier(sig: np.ndarray, fs: int) -> tuple[int, int]:
     spec  = np.abs(np.fft.rfft(sig[:nfft] * win, n=nfft)) ** 2
     freqs = np.fft.rfftfreq(nfft, 1.0 / fs)
 
-    best_score, best = -1.0, (3429, 1959)
-    for sym_rate, fc in V34_CARRIERS:
+    candidates = carrier_candidates(protocol)
+    best_score, best = -1.0, candidates[-1]
+    for sym_rate, fc in candidates:
         bw   = sym_rate * 0.9
         mask = (freqs >= fc - bw / 2) & (freqs <= fc + bw / 2)
         if not mask.any():
@@ -106,6 +133,27 @@ def estimate_best_carrier(sig: np.ndarray, fs: int) -> tuple[int, int]:
         if score > best_score:
             best_score, best = score, (sym_rate, fc)
     return best
+
+
+def phase_occupancy(symbols: np.ndarray, window: int = 128,
+                    hop: int = 16) -> tuple[np.ndarray, np.ndarray]:
+    times = []
+    occ = []
+    if len(symbols) < window:
+        return np.asarray(times), np.asarray(occ)
+    for i in range(0, len(symbols) - window + 1, hop):
+        wsy = symbols[i:i + window]
+        ph = np.angle(wsy)
+        bins = ((ph + np.pi) * (8.0 / (2.0 * np.pi))).astype(int) % 8
+        h = np.bincount(bins, minlength=8)
+        occ_bins = int(np.sum(h >= max(3, int(0.04 * window))))
+        times.append(i + window // 2)
+        occ.append(occ_bins)
+    return np.asarray(times), np.asarray(occ)
+
+
+def chunk_bits(bits: str, width: int = 128) -> str:
+    return "\n".join(bits[i:i + width] for i in range(0, len(bits), width))
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +585,9 @@ def lms_equalizer_trn(iq_sps: np.ndarray,
     delay = n_taps // 2   # filter group delay in samples
 
     best_mse  = float('inf')
-    best_out  = None
     best_rot  = 0
     best_off  = 0
+    best_w    = None
 
     rot_range = range(4) if n_rot is None else [n_rot]
 
@@ -567,12 +615,12 @@ def lms_equalizer_trn(iq_sps: np.ndarray,
                 if i0 < 0 or i1 > len(iq_r):
                     continue
                 x   = iq_r[i0:i1]
-                y   = float(np.dot(w.conj(), x))   # equalizer output (real part first)
                 y   = np.dot(w.conj(), x)
                 d   = ideal_trn[k]                  # desired symbol
                 e   = d - y
-                w  += mu * e.conj() * x
-                mse_acc += abs(e) ** 2
+                step = mu / (1e-6 + float(np.vdot(x, x).real))
+                w  += step * e.conj() * x
+                mse_acc += float(abs(e) ** 2)
                 n_mse   += 1
 
             mse = mse_acc / max(n_mse, 1)
@@ -583,6 +631,9 @@ def lms_equalizer_trn(iq_sps: np.ndarray,
                 best_off = off
                 # Save best taps
                 best_w = w.copy()
+
+    if best_w is None:
+        raise RuntimeError("TRN equalizer failed to converge on any timing/rotation hypothesis")
 
     # Apply equalizer to entire signal with best params
     iq_best = iq_work * np.exp(1j * np.pi / 2 * best_rot) if n_rot is None else iq_work
@@ -695,6 +746,88 @@ def runs_from_labels(labels: list[str]) -> list[tuple[str, int]]:
     return runs
 
 
+def v92_ru_score(symbols: np.ndarray, window: int = 18) -> np.ndarray:
+    """
+    Score the V.92 Ru/uR 6-symbol two-point pattern.
+
+    Ru  = {same,same,same,flip,flip,flip} differentially
+    uR  = complement of Ru.
+    """
+    n = len(symbols)
+    scores = np.zeros(n)
+    if n < window + 1:
+        return scores
+
+    diffs = np.angle(symbols[1:] * np.conj(symbols[:-1]))
+    same = (np.cos(diffs) >= 0.0).astype(np.uint8)
+    period = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+    comp = 1 - period
+    hw = window // 2
+
+    for i in range(hw, len(same) - hw):
+        seg = same[i - hw:i + hw]
+        if len(seg) != window:
+            continue
+        idx = np.arange(window) % 6
+        m0 = float(np.mean(seg == period[idx]))
+        m1 = float(np.mean(seg == comp[idx]))
+        scores[i] = max(m0, m1)
+    return scores
+
+
+def detect_v92_regions(symbols: np.ndarray, sym_rate: int) -> dict:
+    """
+    Heuristic V.92 Phase 3 region finder.
+
+    Uses phase occupancy as a robust discriminator:
+      occupied bins <= 3  -> 2-point Ru/TRN1u-like
+      occupied bins >= 6  -> Ja-like transition away from pure 2-point TRN1u
+    """
+    occ_idx, occ = phase_occupancy(symbols)
+    ru_sc = v92_ru_score(symbols)
+    out = {
+        'occ_idx': occ_idx,
+        'occ': occ,
+        'ru_score': ru_sc,
+        'ru_run': None,
+        'trn1u_run': None,
+        'ja_start': None,
+    }
+    if len(occ) == 0:
+        return out
+
+    low = occ <= 3
+    best_i0 = -1
+    best_i1 = -1
+    i = 0
+    while i < len(low):
+        if not low[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(low) and low[j]:
+            j += 1
+        if (j - i) > (best_i1 - best_i0):
+            best_i0, best_i1 = i, j
+        i = j
+    if best_i0 >= 0:
+        out['trn1u_run'] = (int(occ_idx[best_i0]), int(occ_idx[best_i1 - 1]))
+        for k in range(best_i1, len(occ)):
+            if occ[k] >= 6:
+                out['ja_start'] = int(occ_idx[k])
+                break
+
+    thr = 0.75
+    mask = ru_sc >= thr
+    if np.any(mask):
+        s0 = int(np.argmax(mask))
+        s1 = s0
+        while s1 + 1 < len(mask) and mask[s1 + 1]:
+            s1 += 1
+        out['ru_run'] = (s0, s1)
+    return out
+
+
 def print_timeline(sym_rate: int, runs: list[tuple[str, int]]) -> None:
     T_ms = 1000.0 / sym_rate
     print(f"\n{'Offset':>10}  {'Segment':<14}  {'Symbols':>7}  {'Duration':>10}")
@@ -710,21 +843,33 @@ def print_timeline(sym_rate: int, runs: list[tuple[str, int]]) -> None:
 # ---------------------------------------------------------------------------
 # Expected V.34 Phase 3 durations (for comparison)
 # ---------------------------------------------------------------------------
-def print_expected_durations(sym_rate: int) -> None:
+def print_expected_durations(sym_rate: int, protocol: str = 'v90') -> None:
     T_ms  = 1000.0 / sym_rate
-    print(f"\n  V.90 §9.3.2 / V.90 §8.3  analogue-modem Phase 3 expected segments"
-          f"  (T = {T_ms:.3f} ms @ {sym_rate} baud):")
-    for label, t_count, note in [
-        ('S',      128,        'V.90 §8.3.4 = §10.1.3.7/V.34'),
-        ('S̄',      16,         'V.90 §8.3.4 = §10.1.3.7/V.34, inverted polarity'),
-        ('[MD]',   'variable', 'optional; length from INFO₁a bits 18:24 × 35 ms  (V.90 §8.3.2)'),
-        ('S',      128,        'repeat'),
-        ('S̄',      16,         'repeat'),
-        ('PP',     288,        '6 × 48T  (V.90 §8.3.3 = §10.1.3.6/V.34)'),
-        ('TRN',   '≥512',      'GPA-scrambled, 4-point  (V.90 §8.3.6 = §10.1.3.8/V.34)'),
-        ('J_a',   'variable',  'DIL descriptor repetitions, V.90-specific  (V.90 §8.3.1)'),
-        ('SCR',   'variable',  'binary ones via GPA, no re-init  (V.90 §8.3.5)'),
-    ]:
+    if protocol == 'v92':
+        print(f"\n  V.92 §9.5.2.1 / V.92 §8.5  analogue-modem Phase 3 expected segments"
+              f"  (T = {T_ms:.3f} ms @ {sym_rate} baud):")
+        rows = [
+            ('Ru',     384,        'V.92 §8.5.5, 2-point'),
+            ('uR',      24,        'V.92 §8.5.5, inverted'),
+            ('[MD]',   'variable', 'optional marker'),
+            ('TRN1u', '≥2040',     'GPA-scrambled ±L_U  (V.92 §8.5.7)'),
+            ('J_a',   'variable',  '24 ones + DIL descriptors  (V.92 §8.5.4)'),
+        ]
+    else:
+        print(f"\n  V.90 §9.3.2 / V.90 §8.3  analogue-modem Phase 3 expected segments"
+              f"  (T = {T_ms:.3f} ms @ {sym_rate} baud):")
+        rows = [
+            ('S',      128,        'V.90 §8.3.4 = §10.1.3.7/V.34'),
+            ('S̄',      16,         'V.90 §8.3.4 = §10.1.3.7/V.34, inverted polarity'),
+            ('[MD]',   'variable', 'optional; length from INFO₁a bits 18:24 × 35 ms  (V.90 §8.3.2)'),
+            ('S',      128,        'repeat'),
+            ('S̄',      16,         'repeat'),
+            ('PP',     288,        '6 × 48T  (V.90 §8.3.3 = §10.1.3.6/V.34)'),
+            ('TRN',   '≥512',      'GPA-scrambled, 4-point  (V.90 §8.3.6 = §10.1.3.8/V.34)'),
+            ('J_a',   'variable',  'DIL descriptor repetitions, V.90-specific  (V.90 §8.3.1)'),
+            ('SCR',   'variable',  'binary ones via GPA, no re-init  (V.90 §8.3.5)'),
+        ]
+    for label, t_count, note in rows:
         if isinstance(t_count, int):
             dur = f"{t_count * T_ms:.1f} ms"
             sym = f"{t_count}T"
@@ -732,6 +877,95 @@ def print_expected_durations(sym_rate: int) -> None:
             dur = ''
             sym = t_count
         print(f"    {label:6s}  {sym:>8}  ({dur:>10})  {note}")
+
+
+def print_v92_report(sym_rate: int, report: dict) -> None:
+    T_ms = 1000.0 / sym_rate
+    print(f"\n=== V.92 Phase 3 Heuristic Report ===")
+    if report['ru_run'] is not None:
+        ru0, ru1 = report['ru_run']
+        print(f"  Ru/uR candidate: symbols {ru0}–{ru1}  "
+              f"({(ru1 - ru0 + 1) * T_ms:.1f} ms)")
+    else:
+        print("  Ru/uR candidate: not found")
+    if report['trn1u_run'] is not None:
+        t0, t1 = report['trn1u_run']
+        print(f"  TRN1u-like run:  symbols {t0}–{t1}  "
+              f"({(t1 - t0) * T_ms:.1f} ms)")
+    else:
+        print("  TRN1u-like run:  not found")
+    if report['ja_start'] is not None:
+        print(f"  Ja-like transition begins near symbol {report['ja_start']}  "
+              f"({report['ja_start'] * T_ms:.1f} ms)")
+    else:
+        print("  Ja-like transition: not found")
+
+
+def bitdump_text(symbols: np.ndarray,
+                 wav: Path,
+                 t0: float,
+                 t1: float,
+                 sym_rate: int,
+                 fc: float,
+                 protocol: str,
+                 ja_candidate_sym: int | None = None,
+                 trn_run: tuple[int, int] | None = None) -> str:
+    """
+    Emit a validator-friendly text dump with the same label style used by the
+    existing Ja tools.
+    """
+    lines: list[str] = []
+    lines.append(f"file={wav}")
+    lines.append(
+        f"window_s={t0:.6f}-{t1:.6f} protocol={protocol} "
+        f"carrier_hz={fc:.3f} sym_rate={sym_rate:.3f}"
+    )
+    lines.append(f"symbols={len(symbols)}")
+    if ja_candidate_sym is not None:
+        lines.append(
+            f"ja_candidate_sym={ja_candidate_sym} "
+            f"ja_candidate_ms={(1000.0 * ja_candidate_sym / sym_rate):.3f}"
+        )
+    if trn_run is not None:
+        trn0, trn1 = trn_run
+        lines.append(
+            f"trn_run_start_sym={trn0} trn_run_end_sym={trn1} "
+            f"trn_run_start_ms={(1000.0 * trn0 / sym_rate):.3f} "
+            f"trn_run_end_ms={(1000.0 * trn1 / sym_rate):.3f} "
+            f"trn_run_start_abs_ms={(t0 * 1000.0) + (1000.0 * trn0 / sym_rate):.3f} "
+            f"trn_run_end_abs_ms={(t0 * 1000.0) + (1000.0 * trn1 / sym_rate):.3f}"
+        )
+
+    if len(symbols) >= 2:
+        states = (((np.angle(symbols) + np.pi) / (np.pi / 2.0)).astype(int)) & 3
+        d = (states[1:] - states[:-1]) & 3
+        nat_bits = "".join(f"{int(v):02b}" for v in d)
+        gray_map = {0: "00", 1: "01", 2: "11", 3: "10"}
+        gray_bits = "".join(gray_map[int(v)] for v in d)
+        lines.append(f"state_symbols({len(states)}): {''.join(str(int(v)) for v in states)}")
+        lines.append(f"diff_symbols({len(d)}): {''.join(str(int(v)) for v in d)}")
+        lines.append(f"nat_bits({len(nat_bits)}):")
+        lines.append(chunk_bits(nat_bits, 64))
+        lines.append(f"gray_bits({len(gray_bits)}):")
+        lines.append(chunk_bits(gray_bits, 64))
+
+        dph = symbols[1:] * np.conj(symbols[:-1])
+        dbpsk_bits = "".join("1" if float(np.real(v)) < 0.0 else "0" for v in dph)
+        dbpsk_bits_inverted = "".join("0" if b == "1" else "1" for b in dbpsk_bits)
+        dbpsk_quadrant = "".join("1" if float(np.imag(v)) >= 0.0 else "0" for v in dph)
+        lines.append(f"dbpsk_bits({len(dbpsk_bits)}):")
+        lines.append(chunk_bits(dbpsk_bits, 128))
+        lines.append(f"dbpsk_bits_inverted({len(dbpsk_bits_inverted)}):")
+        lines.append(chunk_bits(dbpsk_bits_inverted, 128))
+        lines.append(f"dbpsk_quadrant_imag_sign({len(dbpsk_quadrant)}):")
+        lines.append(chunk_bits(dbpsk_quadrant, 128))
+
+    return "\n".join(lines) + "\n"
+
+
+def output_stem(wav: Path, sym_rate: int, fc: float) -> str:
+    name = wav.stem.replace(" ", "_")
+    return f"p3_{name}_{sym_rate}bd_{int(fc)}Hz"
 
 
 # ---------------------------------------------------------------------------
@@ -757,10 +991,15 @@ def main(argv=None) -> int:
         help='Force V.34 symbol rate (skip auto-detect)')
     ap.add_argument('--carrier',  type=float, default=None, metavar='HZ',
         help='Force carrier frequency in Hz (skip auto-detect)')
+    ap.add_argument('--protocol', choices=('auto', 'v34', 'v90', 'v92'),
+        default='auto',
+        help='Interpretation mode for later analysis stages (default: auto)')
     ap.add_argument('--sweep', action='store_true',
         help='Try every V.34 (sym_rate, carrier) pair and print EVM table')
     ap.add_argument('--no-stft', action='store_true',
         help='Skip STFT-based sub-sequence detection (faster)')
+    ap.add_argument('--force-qpsk', action='store_true',
+        help='Run the legacy QPSK/LMS/Ja path even when the capture looks V.92-like')
     ap.add_argument('--out-dir', type=Path, default=Path('tools/dumps'),
         help='Output directory for IQ/timeline text files')
     ap.add_argument('--s-thresh',  type=float, default=0.65,
@@ -768,6 +1007,9 @@ def main(argv=None) -> int:
     ap.add_argument('--pp-thresh', type=float, default=0.12,
         help='PP detection threshold (default 0.12)')
     args = ap.parse_args(argv)
+    wav_name_upper = args.wav.name.upper()
+    hinted_protocol = 'v92' if 'V92' in wav_name_upper else None
+    display_protocol = args.protocol if args.protocol != 'auto' else (hinted_protocol or 'v90')
 
     # ── Load signal ─────────────────────────────────────────────────────────
     print(f"Loading  {args.wav}  ch={args.ch}  "
@@ -782,7 +1024,8 @@ def main(argv=None) -> int:
         fc       = float(args.carrier)
         print(f"  Parameters forced: sym_rate={sym_rate}  fc={fc:.0f} Hz")
     else:
-        sym_rate, fc = estimate_best_carrier(sig, fs)
+        est_protocol = 'v90' if args.protocol == 'v90' else 'auto'
+        sym_rate, fc = estimate_best_carrier(sig, fs, est_protocol)
         if args.sym_rate: sym_rate = args.sym_rate
         if args.carrier:  fc       = float(args.carrier)
         print(f"  Auto-detected:     sym_rate={sym_rate}  fc={fc:.0f} Hz")
@@ -816,11 +1059,11 @@ def main(argv=None) -> int:
                   f"{dur*1000:8.1f} ms  "
                   f"{LABEL_NAME.get(lbl, lbl)}  (~{n_sym} symbols)")
 
-        print_expected_durations(sym_rate)
+        print_expected_durations(sym_rate, display_protocol)
 
         # Save STFT result
         args.out_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"v34_p3_USR-V92QC_R_{sym_rate}bd_{int(fc)}Hz"
+        stem = output_stem(args.wav, sym_rate, fc)
         stft_path = args.out_dir / f"{stem}.stft.txt"
         with open(stft_path, 'w') as fh:
             fh.write(f"# V.34 Phase 3 STFT sub-sequence scores\n")
@@ -841,7 +1084,7 @@ def main(argv=None) -> int:
               f"{'offset':>6}  {'QPSK EVM':>9}")
         print('  ' + '-' * 42)
         sweep_results = []
-        for sr, f in V34_CARRIERS:
+        for sr, f in carrier_candidates('v90' if args.protocol == 'v90' else 'auto'):
             try:
                 iq_r  = demodulate_to_baseband(sig, fs, sr, float(f))
                 syms, offset, evm = find_best_timing_offset(iq_r, 8)
@@ -873,6 +1116,54 @@ def main(argv=None) -> int:
     T_ms    = 1000.0 / sym_rate
     print(f"  Symbols: {len(syms)}  best_offset={best_offset}/{N_SPS}")
     print(f"  QPSK EVM (no equalizer): {evm:.4f}  ({evm*100:.1f}%)")
+
+    occ_idx, occ = phase_occupancy(syms)
+    occ_median = float(np.median(occ)) if len(occ) else 8.0
+    likely_v92 = (occ_median <= 3.5)
+    effective_protocol = args.protocol
+    if effective_protocol == 'auto':
+        if hinted_protocol is not None:
+            effective_protocol = hinted_protocol
+        else:
+            effective_protocol = 'v92' if likely_v92 else 'v90'
+    print(f"  Phase-occupancy median: {occ_median:.1f} bins  "
+          f"(auto protocol → {effective_protocol})")
+
+    if effective_protocol == 'v92' and not args.force_qpsk:
+        report = detect_v92_regions(syms, sym_rate)
+        print_v92_report(sym_rate, report)
+
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        stem = output_stem(args.wav, sym_rate, fc)
+        iq_path = args.out_dir / f"{stem}.iq.txt"
+        bit_path = args.out_dir / f"{stem}.bits.txt"
+        with open(iq_path, 'w') as fh:
+            fh.write("# Phase 3 baseband IQ symbols\n")
+            fh.write(f"# protocol=v92-ish sym_rate={sym_rate} fc={int(fc)} "
+                     f"t0={args.t0} t1={args.t1}\n")
+            fh.write("# columns: sym_idx time_ms I Q ru_score\n")
+            ru_sc = report['ru_score']
+            for i, s in enumerate(syms):
+                score = ru_sc[i] if i < len(ru_sc) else 0.0
+                fh.write(f"{i:6d} {i*T_ms:9.3f} {s.real:+.6f} {s.imag:+.6f} {score:.3f}\n")
+        bit_path.write_text(
+            bitdump_text(
+                syms,
+                args.wav,
+                args.t0,
+                args.t1,
+                sym_rate,
+                fc,
+                "v92",
+                report['ja_start'],
+            ),
+            encoding="ascii",
+        )
+        print(f"\nOutput:")
+        print(f"  IQ symbols  → {iq_path}  ({len(syms)} symbols)")
+        print(f"  Bit dump    → {bit_path}  "
+              f"(labels: dbpsk_bits_inverted, dbpsk_bits, nat_bits, gray_bits)")
+        return 0
 
     # ── LMS equalizer trained on known GPA TRN (V.90 §8.3.6) ────────────────
     # Use STFT timeline to locate TRN start.  Fall back to 135 ms if STFT
@@ -929,7 +1220,7 @@ def main(argv=None) -> int:
     print(f"    sym_rate={sym_rate} baud   T={T_ms:.3f} ms   carrier={fc:.0f} Hz")
     print_timeline(sym_rate, runs_sym)
 
-    print_expected_durations(sym_rate)
+    print_expected_durations(sym_rate, effective_protocol)
 
     # ── TRN descrambler check on LMS-equalized symbols ───────────────────────
     is_trn  = np.array([c == 'T' for c in labels])
@@ -947,7 +1238,7 @@ def main(argv=None) -> int:
 
     trn_len = best_run[1] - best_run[0]
     print(f"\n=== TRN Descrambler Check (V.90 §8.3.6 / V.34 §7) ===")
-    print(f"  Analogue modem TRN uses GPA (1+x^-5+x^-23) per V.90 §8.3 / §6.5")
+    print(f"  Analogue modem TRN uses GPA (1+x^-18+x^-23) per V.90 §8.3 / §6.5")
     print(f"  Largest TRN run: symbols {best_run[0]}–{best_run[1]}"
           f"  ({trn_len} symbols = {trn_len * T_ms:.1f} ms)")
 
@@ -982,10 +1273,11 @@ def main(argv=None) -> int:
 
     # ── Write output files ───────────────────────────────────────────────────
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    stem = (f"v34_p3_USR-V92QC_R_{sym_rate}bd_{int(fc)}Hz")
+    stem = output_stem(args.wav, sym_rate, fc)
 
     # IQ symbol dump  (gnuplot-friendly)
     iq_path = args.out_dir / f"{stem}.iq.txt"
+    bit_path = args.out_dir / f"{stem}.bits.txt"
     with open(iq_path, 'w') as fh:
         fh.write(f"# V.34 Phase 3 baseband IQ symbols\n")
         fh.write(f"# sym_rate={sym_rate}  fc={int(fc)}  "
@@ -996,8 +1288,23 @@ def main(argv=None) -> int:
             fh.write(f"{i:6d}  {i*T_ms:9.3f}  "
                      f"{s.real:+.6f}  {s.imag:+.6f}  "
                      f"{s_sc[i]:.3f}  {pp_sc[i]:.3f}  {lbl}\n")
+    bit_path.write_text(
+        bitdump_text(
+            syms,
+            args.wav,
+            args.t0,
+            args.t1,
+            sym_rate,
+            fc,
+            "v90",
+            trn_run=best_run if best_run[1] > best_run[0] else None,
+        ),
+        encoding="ascii",
+    )
     print(f"\nOutput:")
     print(f"  IQ symbols  → {iq_path}  ({len(syms)} symbols)")
+    print(f"  Bit dump    → {bit_path}  "
+          f"(labels: dbpsk_bits_inverted, dbpsk_bits, nat_bits, gray_bits)")
 
     # Segment timeline dump
     tl_path = args.out_dir / f"{stem}.timeline.txt"
@@ -1006,7 +1313,7 @@ def main(argv=None) -> int:
         fh.write(f"# sym_rate={sym_rate}  fc={int(fc)}\n")
         fh.write(f"# columns: offset_ms  segment  n_symbols  duration_ms\n")
         t_ms = 0.0
-        for ch, cnt in runs:
+        for ch, cnt in runs_sym:
             dur = cnt * T_ms
             fh.write(f"{t_ms:10.3f}  {LABEL_NAME.get(ch, ch):<14}  "
                      f"{cnt:7d}  {dur:10.3f}\n")
