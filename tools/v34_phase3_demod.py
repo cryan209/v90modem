@@ -636,6 +636,176 @@ def find_v92_audio_ru_followup(sign: np.ndarray,
     return None, None, 0.0, 0.0, 'none'
 
 
+def find_v92_audio_trn1u_run(trn_score: np.ndarray,
+                             trn_search_start: int,
+                             bits: np.ndarray | None = None) -> tuple[tuple[int, int] | None, str, dict | None]:
+    """
+    Find a TRN1u-like run after the detected Ru/uR preamble.
+
+    Prefer a strong high-threshold lock first. If that fails, use a focused
+    weak detector anchored at the expected post-uR2 start. When sign bits are
+    available, also try a GPA descrambler decode using both differential
+    conventions and prefer the hypothesis whose payload is most one-biased.
+    """
+    n = len(trn_score)
+    if n == 0 or trn_search_start >= n:
+        return None, 'none', None
+
+    strong_mask = np.zeros(n, dtype=bool)
+    strong_mask[trn_search_start:] = trn_score[trn_search_start:] >= 0.64
+    strong_mask = bridge_short_false_gaps(strong_mask, max_gap=12)
+    strong_runs = [r for r in boolean_runs(strong_mask) if (r[1] - r[0]) >= 256]
+    if strong_runs:
+        preferred = [r for r in strong_runs if r[0] <= trn_search_start + 128]
+        run0, run1 = (preferred[0] if preferred else strong_runs[0])
+        return (run0, run1), 'strong', None
+
+    decode_metrics = None
+    if bits is not None and len(bits) > trn_search_start + 256:
+        decode_metrics = v92_audio_trn1u_decode_metrics(bits, trn_search_start)
+        if decode_metrics is not None:
+            plain = decode_metrics['plain_bits']
+            if (decode_metrics['ones_256'] >= 0.58
+                    and decode_metrics['ones_512'] >= 0.555
+                    and decode_metrics['ones_2040'] >= 0.55):
+                rolling = moving_average(plain.astype(np.float64), 512)
+                mask = rolling >= max(0.53, decode_metrics['ones_2040'] - 0.03)
+                mask = bridge_short_false_gaps(mask, max_gap=192)
+                runs = [r for r in boolean_runs(mask) if (r[1] - r[0]) >= 512]
+                if runs:
+                    run0, run1 = runs[0]
+                    run0 += decode_metrics['start']
+                    run1 += decode_metrics['start']
+                    if run0 <= trn_search_start + 48 and run1 - decode_metrics['start'] >= 2040:
+                        return (decode_metrics['start'], run1), f"decode_{decode_metrics['mode']}", decode_metrics
+                return (decode_metrics['start'], decode_metrics['start'] + 2040), f"decode_{decode_metrics['mode']}", decode_metrics
+
+    head = trn_score[trn_search_start:min(n, trn_search_start + 1024)]
+    body = trn_score[trn_search_start:min(n, trn_search_start + 2040)]
+    if len(head) == 0 or len(body) == 0:
+        return None, 'none', decode_metrics
+    head_mean = float(np.mean(head))
+    body_peak = float(np.max(body))
+    if head_mean < 0.47 or body_peak < 0.54:
+        return None, 'none', decode_metrics
+
+    weak_mask = np.zeros(n, dtype=bool)
+    weak_mask[trn_search_start:] = trn_score[trn_search_start:] >= 0.47
+    weak_mask = bridge_short_false_gaps(weak_mask, max_gap=96)
+    weak_runs = [r for r in boolean_runs(weak_mask) if (r[1] - r[0]) >= 128]
+    weak_runs = [r for r in weak_runs if r[0] <= trn_search_start + 1024]
+    if not weak_runs:
+        return None, 'none', decode_metrics
+
+    merged0, merged1 = weak_runs[0]
+    if merged0 > trn_search_start + 48:
+        return None, 'none', decode_metrics
+    for nxt0, nxt1 in weak_runs[1:]:
+        if nxt0 - merged1 <= 384:
+            merged1 = nxt1
+        else:
+            break
+    if merged1 - trn_search_start >= 2040:
+        return (trn_search_start, merged1), 'focused_weak', decode_metrics
+    return None, 'none', decode_metrics
+
+
+def v92_audio_trn1u_decode_metrics(bits: np.ndarray,
+                                   trn_search_start: int,
+                                   search_slop: int = 12) -> dict | None:
+    """
+    Decode candidate TRN1u sign bits through GPA descrambler hypotheses.
+
+    We test both likely families:
+    - scramble-only GPA decoding (`raw`, `raw_inv`)
+    - differential decode followed by GPA (`xor`, `xnor`)
+
+    The analogue-audio slicer may invert practical sign sense, and the spec
+    wording for TRN1u is weaker about differential coding than it is for Ja/CPt,
+    so we let the data decide which hypothesis is most one-biased.
+    """
+    n = len(bits)
+    if n <= trn_search_start + 24 + 256:
+        return None
+
+    def decode_plain(start: int, mode: str) -> np.ndarray | None:
+        out: list[int] = []
+        reg = 0
+
+        if mode in ('raw', 'raw_inv'):
+            lo = start - 23
+            hi = min(n, lo + 23 + 4096)
+            if lo < 0 or hi - lo < 23 + 256:
+                return None
+            seq = bits[lo:hi]
+            invert = (mode == 'raw_inv')
+            for i in range(len(seq)):
+                raw = int(seq[i])
+                if invert:
+                    raw = 1 - raw
+                plain = (raw + ((reg >> 22) & 1) + ((reg >> 17) & 1)) & 1
+                reg = ((reg << 1) | raw) & 0x7FFFFF
+                if i >= 23:
+                    out.append(plain)
+            return np.array(out, dtype=np.uint8)
+
+        lo = start - 24
+        hi = min(n, lo + 24 + 4096)
+        if lo < 0 or hi - lo < 24 + 256:
+            return None
+        seq = bits[lo:hi]
+        prev = int(seq[0])
+        count = 0
+        for i in range(1, len(seq)):
+            base = (int(seq[i]) + prev) & 1
+            diff = base if mode == 'xor' else (1 - base)
+            prev = int(seq[i])
+            plain = (diff + ((reg >> 22) & 1) + ((reg >> 17) & 1)) & 1
+            reg = ((reg << 1) | diff) & 0x7FFFFF
+            if count >= 23:
+                out.append(plain)
+            count += 1
+        return np.array(out, dtype=np.uint8)
+
+    best = None
+    for off in range(-search_slop, search_slop + 1):
+        start = trn_search_start + off
+        if start < 24 or start + 256 >= n:
+            continue
+        frame_phase = (start - trn_search_start) % 12
+        for mode in ('raw', 'raw_inv', 'xor', 'xnor'):
+            plain = decode_plain(start, mode)
+            if plain is None or len(plain) < 2040:
+                continue
+            ones_256 = float(np.mean(plain[:256]))
+            ones_512 = float(np.mean(plain[:512]))
+            ones_1024 = float(np.mean(plain[:1024]))
+            ones_2040 = float(np.mean(plain[:2040]))
+            score = (
+                700.0 * ones_256
+                + 900.0 * ones_512
+                + 1200.0 * ones_1024
+                + 1800.0 * ones_2040
+                - 2.0 * abs(off)
+                - 0.25 * float(frame_phase)
+            )
+            cand = {
+                'start': start,
+                'offset': off,
+                'frame_phase': frame_phase,
+                'mode': mode,
+                'plain_bits': plain,
+                'ones_256': ones_256,
+                'ones_512': ones_512,
+                'ones_1024': ones_1024,
+                'ones_2040': ones_2040,
+                'score': score,
+            }
+            if best is None or cand['score'] > best['score']:
+                best = cand
+    return best
+
+
 def v92_trn1u_recurrence(bits: np.ndarray, window: int = 256) -> np.ndarray:
     """
     Rolling GPA all-ones recurrence score on PCM-domain sign bits.
@@ -859,16 +1029,7 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
         trn_score = v92_trn1u_recurrence(bits, window=384)
         amp_gate = np.clip(moving_average((amp_norm >= 0.08).astype(np.float64), 48), 0.0, 1.0)
         trn_score = trn_score * amp_gate
-        trn_mask = np.zeros(len(sign), dtype=bool)
-        if len(trn_mask) > trn_search_start:
-            trn_mask[trn_search_start:] = trn_score[trn_search_start:] >= 0.64
-        trn_mask = bridge_short_false_gaps(trn_mask, max_gap=12)
-        trn_runs = [r for r in boolean_runs(trn_mask) if (r[1] - r[0]) >= 256]
-        trn1u_run = None
-        if trn_runs:
-            preferred = [r for r in trn_runs if r[0] <= trn_search_start + 128]
-            run0, run1 = (preferred[0] if preferred else trn_runs[0])
-            trn1u_run = (run0, run1)
+        trn1u_run, trn_source, trn_decode = find_v92_audio_trn1u_run(trn_score, trn_search_start, bits)
 
         ja_start = None
         if trn1u_run is not None:
@@ -884,6 +1045,18 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
 
         ru_lengths = sum(c['length'] for c in (disp_ru1, disp_ur1, disp_ru2, disp_ur2) if c is not None)
         trn_len = (trn1u_run[1] - trn1u_run[0]) if trn1u_run is not None else 0
+        trn_len_score = min(trn_len, 2040)
+        trn_presence_bonus = 0.0
+        if trn1u_run is not None:
+            trn_presence_bonus = 800.0 if trn_source == 'strong' else 400.0
+        trn_decode_bonus = 0.0
+        if trn_decode is not None:
+            trn_decode_bonus = 1200.0 * max(0.0, trn_decode['ones_2040'] - 0.50)
+        ru2_source_bonus = 0.0
+        if searched_ru2_source == 'immediate':
+            ru2_source_bonus = 450.0
+        elif searched_ru2_source == 'md':
+            ru2_source_bonus = -150.0
         trn_head_score = (
             float(np.mean(trn_score[trn_search_start:min(len(trn_score), trn_search_start + 256)]))
             if trn_search_start < len(trn_score) else 0.0
@@ -893,9 +1066,9 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
         max_trn_score = float(np.max(trn_score)) if len(trn_score) else 0.0
         score = (
             4.0 * ru_lengths
-            + 2.0 * trn_len
+            + 2.0 * trn_len_score
             + (800.0 if phase3_start is not None else 0.0)
-            + (800.0 if trn1u_run is not None else 0.0)
+            + trn_presence_bonus
             + (1200.0 if ja_start is not None else 0.0)
             + 0.5 * anchor_score
             + 300.0 * refined_ru_score
@@ -903,7 +1076,8 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
             + 260.0 * searched_ru2_score
             + 100.0 * searched_ur2_score
             + (500.0 if searched_ru2 is not None else 0.0)
-            + (150.0 if searched_ru2_source == 'immediate' else 0.0)
+            + ru2_source_bonus
+            + trn_decode_bonus
             + 400.0 * trn_head_score
             + 40.0 * max_period6_score
             + 20.0 * max_trn_score
@@ -928,6 +1102,8 @@ def detect_v92_audio_regions(sig: np.ndarray, fs: int) -> dict:
             'phase3_start': phase3_start,
             'phase3_source': phase3_source,
             'trn1u_run': trn1u_run,
+            'trn_source': trn_source,
+            'trn_decode': trn_decode,
             'ja_start': ja_start,
             'trn_score': trn_score,
             'max_period6_len': max_period6_len,
@@ -995,9 +1171,18 @@ def print_v92_symbol_report(report: dict) -> None:
             print(f"  {label:18s} {r0}–{r1}  ({(r1 - r0) * T_ms:.1f} ms)")
     if report['trn1u_run'] is not None:
         t0, t1 = report['trn1u_run']
-        print(f"  TRN1u-like run:     {t0}–{t1}  ({(t1 - t0) * T_ms:.1f} ms)")
+        source = report.get('trn_source')
+        suffix = f"  source={source}" if source else ""
+        print(f"  TRN1u-like run:     {t0}–{t1}  ({(t1 - t0) * T_ms:.1f} ms){suffix}")
     else:
         print("  TRN1u-like run:     not found")
+    trn_decode = report.get('trn_decode')
+    if trn_decode is not None:
+        print(f"  TRN decode:         mode={trn_decode['mode']}  "
+              f"frame_phase={trn_decode.get('frame_phase', 0)}/12  "
+              f"ones256={trn_decode['ones_256']:.3f}  "
+              f"ones512={trn_decode['ones_512']:.3f}  "
+              f"ones2040={trn_decode['ones_2040']:.3f}")
     if report['ja_start'] is not None:
         print(f"  Ja-like transition: sample {report['ja_start']}  "
               f"({report['ja_start'] * T_ms:.1f} ms)")
@@ -1041,7 +1226,19 @@ def v92_symbol_bitdump_text(report: dict,
         lines.append(
             f"trn1u_run_start_sym={trn0} trn1u_run_end_sym={trn1} "
             f"trn1u_run_start_ms={(1000.0 * trn0 / fs):.3f} "
-            f"trn1u_run_end_ms={(1000.0 * trn1 / fs):.3f}"
+            f"trn1u_run_end_ms={(1000.0 * trn1 / fs):.3f} "
+            f"trn1u_source={report.get('trn_source', 'unknown')}"
+        )
+    trn_decode = report.get('trn_decode')
+    if trn_decode is not None:
+        lines.append(
+            f"trn_decode_mode={trn_decode['mode']} "
+            f"trn_decode_frame_phase={trn_decode.get('frame_phase', 0)} "
+            f"trn_decode_offset={trn_decode.get('offset', 0)} "
+            f"trn_decode_ones256={trn_decode['ones_256']:.6f} "
+            f"trn_decode_ones512={trn_decode['ones_512']:.6f} "
+            f"trn_decode_ones1024={trn_decode['ones_1024']:.6f} "
+            f"trn_decode_ones2040={trn_decode['ones_2040']:.6f}"
         )
     if report['ja_start'] is not None:
         lines.append(

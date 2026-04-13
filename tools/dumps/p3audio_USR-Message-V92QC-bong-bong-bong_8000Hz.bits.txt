@@ -3,6 +3,9 @@ window_s=9.476000-13.280000 protocol=v92_audio timeslot_rate=8000
 samples=30431
 symbol_phase=5/6
 phase3_start_sym=3359 phase3_start_ms=419.875 phase3_start_abs_ms=9895.875 phase3_start_source=ru_audio_refined
+trn1u_run_start_sym=4233 trn1u_run_end_sym=6418 trn1u_run_start_ms=529.125 trn1u_run_end_ms=802.250 trn1u_source=focused_weak
+trn_decode_mode=xnor trn_decode_frame_phase=9 trn_decode_offset=-3 trn_decode_ones256=0.578125 trn_decode_ones512=0.576172 trn_decode_ones1024=0.560547 trn_decode_ones2040=0.560294
+ja_candidate_sym=6273 ja_candidate_ms=784.125
 max_period6_score=1.000000
 max_period6_len=381
 max_trn_score=0.585937
