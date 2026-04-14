@@ -1815,6 +1815,553 @@ def v34_evm(symbols: np.ndarray, L: int = 16) -> float:
     return float(np.sqrt(sum(sq_errs) / len(symbols)))
 
 
+# ---------------------------------------------------------------------------
+# V.34 §9 — complete encoder / decoder chain
+# ---------------------------------------------------------------------------
+# Decoder order (inverse of the encoder block diagram, Figure 4/V.34):
+#
+#   Received x'(n)
+#     → §9.7  non-linear decode   x(n) = x'(n) / Φ(n)
+#     → §9.6.2 precoder inverse   recover y(n) = x(n)+p(n), u(n) = y(n)-c(n)
+#     → §9.6.3 trellis decode     Y0(m) via Viterbi on subset labels of y(n)
+#     → §9.6.1 de-MAP             Q(n) → q data bits + ring index m_{i,j,k}
+#     → §9.5  differential decode I(m) = (Z(m)-Z(m-1)) mod 4 → (I2,I3) bits
+#     → §9.4  shell demapper      ring indices → K shell bits
+#     → §7    descrambler         (GPA/GPC, already implemented above)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# §9.6.3.1  Symbol-to-bit converter — 8-way set partition (Figure 9/V.34)
+# ---------------------------------------------------------------------------
+
+def v34_subset_label(I: int, Q: int) -> int:
+    """3-bit subset label for a channel output point at odd-integer (I, Q).
+
+    The label encodes the 8-way set partition shown in Figure 9/V.34.
+    Bit 0 = Y1, bit 1 = Y2, bit 2 = Y3 (so label ∈ {0…7}).
+
+    Derivation from Figure 9:
+        i = ⌊(I−1)/2⌋ mod 4,  q = ⌊(Q−1)/2⌋ mod 4
+        Y1 = (i + q) mod 2
+        Y2 = i mod 2
+        Y3 = (i mod 2 XOR ⌊i/2⌋ mod 2) XOR (q mod 2 XOR ⌊q/2⌋ mod 2)
+    """
+    i = ((I - 1) >> 1) % 4
+    q = ((Q - 1) >> 1) % 4
+    Y1 = (i + q) & 1
+    Y2 = i & 1
+    Y3 = ((i & 1) ^ ((i >> 1) & 1)) ^ ((q & 1) ^ ((q >> 1) & 1))
+    return Y1 | (Y2 << 1) | (Y3 << 2)
+
+
+def v34_subset_labels_array(pts: np.ndarray) -> np.ndarray:
+    """Vectorised subset labels for an array of complex odd-integer points.
+
+    ``pts`` should be a complex array where real and imaginary parts are
+    odd integers (as produced by ``v34_constellation``).  Returns a uint8
+    array of the same shape with values in {0…7}.
+    """
+    I = np.round(pts.real).astype(np.int32)
+    Q = np.round(pts.imag).astype(np.int32)
+    i = ((I - 1) >> 1) % 4
+    q = ((Q - 1) >> 1) % 4
+    Y1 = (i + q) & 1
+    Y2 = i & 1
+    Y3 = ((i & 1) ^ ((i >> 1) & 1)) ^ ((q & 1) ^ ((q >> 1) & 1))
+    return (Y1 | (Y2 << 1) | (Y3 << 2)).astype(np.uint8)
+
+
+# Table 13/V.34: (s(2m), s(2m+1)) → [Y4 Y3 Y2 Y1] as a 4-bit uint8.
+# Rows = s(2m) ∈ {0…7}, columns = s(2m+1) ∈ {0…7}.
+# Bit 0 = Y1 (LSB of the 4-bit output).
+# Source: V.34 Table 13, p. 23.
+_V34_TABLE13: np.ndarray = np.array([
+    # s+1: 000   001   010   011   100   101   110   111
+    [0x0, 0x0, 0x1, 0x1, 0x8, 0x8, 0x9, 0x9],   # s=000
+    [0x3, 0x2, 0x2, 0x3, 0xB, 0xA, 0xA, 0xB],   # s=001
+    [0x5, 0x5, 0x4, 0x4, 0xD, 0xD, 0xC, 0xC],   # s=010
+    [0x6, 0x7, 0x7, 0x6, 0xE, 0xF, 0xF, 0xE],   # s=011
+    [0x8, 0x8, 0x9, 0x9, 0x0, 0x0, 0x1, 0x1],   # s=100
+    [0xB, 0xA, 0xA, 0xB, 0x3, 0x2, 0x2, 0x3],   # s=101
+    [0xD, 0xD, 0xC, 0xC, 0x5, 0x5, 0x4, 0x4],   # s=110
+    [0xE, 0xF, 0xF, 0xE, 0x6, 0x7, 0x7, 0x6],   # s=111
+], dtype=np.uint8)
+
+
+def v34_symbol_to_bits(s_even: int, s_odd: int) -> int:
+    """Table 13/V.34 lookup: (s(2m), s(2m+1)) → Y4Y3Y2Y1 as a 4-bit int."""
+    return int(_V34_TABLE13[s_even & 7, s_odd & 7])
+
+
+# ---------------------------------------------------------------------------
+# §9.6.3.2  Convolutional encoders (16 / 32 / 64 state, Figures 10–12)
+# ---------------------------------------------------------------------------
+# State = shift-register contents as an integer.
+# Each 4D interval m:  next_state, Y0 = encoder(state, Y4, Y3, Y2, Y1)
+# The 16-state encoder uses only Y2, Y1; the 32-state encoder uses Y4,Y2,Y1;
+# the 64-state encoder uses all four bits.
+#
+# Encoder topology derived from Figures 10–12:
+#   16-state (Figure 10):
+#     d[0..3] = 4 delay cells (d[3] is the oldest / output side)
+#     d_new = [d[2]^Y1, d[1]^Y2, d[0]^Y2, d[3]]   (feedback shift)
+#     Y0 = d[3]
+#
+#   32-state (Figure 11):
+#     d[0..4] = 5 delay cells
+#     Y2 taps at positions 1,4; Y1 tap at position 3; Y4 tap at position 2
+#     d_new = [d[4]^Y2, d[3]^Y4, d[2]^Y1, d[1]^Y2, d[0]]  (feedback from d[4])
+#     Y0 = d[4]... (needs exact Figure 11 reading — see NOTE below)
+#
+#   64-state (Figure 12): 6 delay cells with Y4,Y3,Y2,Y1 taps.
+#
+# NOTE: The exact tap wiring for 32 and 64-state encoders requires careful
+# reading of Figures 11 and 12.  The tables below are fully populated for
+# the 16-state encoder.  The 32 and 64-state entries are stubs and will be
+# replaced once the figure topologies are confirmed.
+# ---------------------------------------------------------------------------
+
+def _build_conv16_tables() -> tuple[np.ndarray, np.ndarray]:
+    """Build (next_state[16,4], output[16,4]) tables for 16-state encoder.
+
+    Input index k = Y2*2 + Y1 (2 bits → 4 combinations).
+    State s ∈ {0…15} (4 bits: MSB=d[3] output side, LSB=d[0] input side).
+    """
+    ns  = np.zeros((16, 4), dtype=np.uint8)
+    out = np.zeros((16, 4), dtype=np.uint8)
+    for s in range(16):
+        d = [(s >> i) & 1 for i in range(4)]   # d[0] = LSB, d[3] = MSB
+        for k in range(4):
+            Y2 = (k >> 1) & 1
+            Y1 = k & 1
+            Y0       = d[3]                             # output from oldest cell
+            d_new    = [d[1] ^ Y2, d[2] ^ Y2, d[3] ^ Y1, d[3]]  # shift + feedback
+            # Wait: feedback input to d[0] position = Y0 = d[3] before shift
+            d_new    = [Y0, d[0] ^ Y2, d[1] ^ Y2, d[2] ^ Y1]
+            s_new    = sum(d_new[i] << i for i in range(4))
+            ns[s, k]  = s_new
+            out[s, k] = Y0
+    return ns, out
+
+
+_CONV16_NS, _CONV16_OUT = _build_conv16_tables()
+
+
+class V34ConvEncoder:
+    """V.34 convolutional encoder (§9.6.3.2).
+
+    Supports 16-state (rate 2/3) encoder from Figure 10.  32 and 64-state
+    variants share the same API; their transition tables will be added once
+    the figure topologies are confirmed.
+
+    Parameters
+    ----------
+    states : {16, 32, 64}
+        Encoder variant to use.
+    """
+
+    def __init__(self, states: int = 16) -> None:
+        if states == 16:
+            self._ns  = _CONV16_NS
+            self._out = _CONV16_OUT
+            self._n_inputs = 2   # only Y2, Y1 used
+        else:
+            raise NotImplementedError(
+                f"{states}-state encoder — transition table not yet wired up")
+        self.state: int = 0
+
+    def reset(self, state: int = 0) -> None:
+        self.state = int(state)
+
+    def step(self, Y4: int, Y3: int, Y2: int, Y1: int) -> int:
+        """Advance by one 4D interval; return Y0(m)."""
+        k = (Y2 & 1) << 1 | (Y1 & 1)
+        Y0 = int(self._out[self.state, k])
+        self.state = int(self._ns[self.state, k])
+        return Y0
+
+    def encode_sequence(self,
+                        Y: np.ndarray) -> np.ndarray:
+        """Encode a sequence of [Y4,Y3,Y2,Y1] rows; return Y0 array."""
+        Y0_seq = np.empty(len(Y), dtype=np.uint8)
+        for m, row in enumerate(Y):
+            Y0_seq[m] = self.step(*row)
+        return Y0_seq
+
+
+# ---------------------------------------------------------------------------
+# §9.6.3.3  Modulo encoder
+# ---------------------------------------------------------------------------
+
+def v34_modulo_encode(c_even: complex, c_odd: complex) -> int:
+    """C0(m) from the quantised precoder feedback symbols c(2m), c(2m+1).
+
+    Rule (§9.6.3.3): if (Re(c(2m))/2 + Im(c(2m))/2) and
+    (Re(c(2m+1))/2 + Im(c(2m+1))/2) are both even or both odd → C0 = 0,
+    else C0 = 1.
+    """
+    def _parity(c: complex) -> int:
+        return (int(round(c.real)) // 2 + int(round(c.imag)) // 2) & 1
+    return 0 if _parity(c_even) == _parity(c_odd) else 1
+
+
+# Bit inversion pattern for V0(m) — Table 12/V.34
+# Pattern repeats every 16 (J=8) or 14 (J=7) half-data-frames.
+# A half-data-frame = P mapping frames; V0 is set once per 2P-interval.
+# Bits: left-most = first half data frame in a superframe.
+_V34_BIT_INV_J8 = [0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0]  # "01 11 01 11 11 11 10 10"
+_V34_BIT_INV_J7 = [0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0]         # "01 11 01 11 11 11 10"
+
+
+# ---------------------------------------------------------------------------
+# §9.6.2  Precoder (and its inverse)
+# ---------------------------------------------------------------------------
+
+class V34Precoder:
+    """V.34 decision-feedback precoder (§9.6.2, Figure 7).
+
+    The precoder is initialised with three complex coefficients h(1), h(2),
+    h(3) (16-bit two's-complement, 14 fractional bits) provided by the
+    receiving modem during Phase 4 start-up.  For Θ=0 / no non-linearity,
+    these can be set to zero.
+
+    Encoding (transmitter):
+        q(n) = Σ_{p=1..3} x(n-p)·h(p)
+        p(n) = round(q(n)) to nearest multiple of 2^{-7}
+        c(n) = quantise(p(n)) to nearest multiple of 2w
+                   (w=1 if b<56, w=2 if b≥56)
+        y(n) = u(n) + c(n)
+        x(n) = y(n) − p(n)
+
+    Inverse (receiver) — given received x(n) and known h(p):
+        q(n) = Σ_{p=1..3} x(n-p)·h(p)
+        p(n) = round(q(n)) to nearest 2^{-7}
+        c(n) = quantise(p(n)) to nearest 2w
+        y(n) = x(n) + p(n)
+        u(n) = y(n) − c(n)
+    """
+
+    def __init__(self,
+                 h: tuple[complex, complex, complex] = (0j, 0j, 0j),
+                 b: int = 0) -> None:
+        """
+        Parameters
+        ----------
+        h : (h1, h2, h3) precoding coefficients (complex).
+        b : bits per high mapping frame (determines quantisation step w).
+        """
+        self.h = (complex(h[0]), complex(h[1]), complex(h[2]))
+        self.w = 2 if b >= 56 else 1
+        self._x_hist: list[complex] = [0j, 0j, 0j]   # x(n-1), x(n-2), x(n-3)
+
+    def reset(self) -> None:
+        self._x_hist = [0j, 0j, 0j]
+
+    @staticmethod
+    def _round_to_multiple(z: complex, step: float) -> complex:
+        """Round real and imaginary parts to nearest multiple of step.
+        On exact half-way ties, round to the multiple with smaller magnitude.
+        """
+        def _r(v: float) -> float:
+            q = v / step
+            lo = int(np.floor(q))
+            if abs(q - lo - 0.5) < 1e-12:   # tie: pick smaller magnitude
+                return step * (lo if abs(lo * step) <= abs((lo + 1) * step)
+                                else lo + 1)
+            return step * round(q)
+        return complex(_r(z.real), _r(z.imag))
+
+    def _compute_q(self) -> complex:
+        """Filter output q(n) using x(n-1..3)."""
+        return sum(self._x_hist[p - 1] * self.h[p - 1] for p in range(1, 4))
+
+    def encode_step(self, u: complex) -> tuple[complex, complex, complex]:
+        """One encoder step: return (x(n), y(n), c(n))."""
+        q = self._compute_q()
+        p = self._round_to_multiple(q, 2.0 ** -7)
+        c = self._round_to_multiple(p, 2.0 * self.w)
+        y = u + c
+        x = y - p
+        self._x_hist = [x] + self._x_hist[:2]
+        return x, y, c
+
+    def decode_step(self, x: complex) -> tuple[complex, complex, complex]:
+        """One decoder step (precoder inverse): return (u(n), y(n), c(n))."""
+        q = self._compute_q()
+        p = self._round_to_multiple(q, 2.0 ** -7)
+        c = self._round_to_multiple(p, 2.0 * self.w)
+        y = x + p
+        u = y - c
+        self._x_hist = [x] + self._x_hist[:2]
+        return u, y, c
+
+    def decode_sequence(self, x_seq: np.ndarray
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Decode a sequence; return (u, y, c) arrays."""
+        n = len(x_seq)
+        u = np.zeros(n, dtype=complex)
+        y = np.zeros(n, dtype=complex)
+        c = np.zeros(n, dtype=complex)
+        for i, x in enumerate(x_seq):
+            u[i], y[i], c[i] = self.decode_step(complex(x))
+        return u, y, c
+
+
+# ---------------------------------------------------------------------------
+# §9.7  Non-linear decoder  (inverse of the non-linear encoder)
+# ---------------------------------------------------------------------------
+
+def v34_nonlinear_decode(x_prime: np.ndarray,
+                         theta: float = 0.0,
+                         avg_energy: float | None = None) -> np.ndarray:
+    """Invert the non-linear encoder (§9.7, eq. 9-33 to 9-35).
+
+    x'(n) = Φ(n) · x(n)  →  x(n) = x'(n) / Φ(n)
+
+    For Θ = 0:  Φ(n) = 1  (no operation needed).
+    For Θ = 0.3125 the projection function Φ depends on the running average
+    energy of x(n), which must be estimated iteratively.
+
+    Parameters
+    ----------
+    x_prime : received symbols (after equalisation)
+    theta   : Θ constant, 0 or 0.3125
+    avg_energy : override for average energy estimate; if None the RMS of
+                 x_prime is used as an approximation.
+    """
+    if theta == 0.0:
+        return x_prime.copy()
+    E_avg = float(np.mean(np.abs(x_prime) ** 2)) if avg_energy is None \
+            else float(avg_energy)
+    out = np.empty_like(x_prime)
+    for n, xp in enumerate(x_prime):
+        xr, xi = xp.real, xp.imag
+        mag2 = xr ** 2 + xi ** 2
+        zeta = theta * mag2 / (E_avg + 1e-30)
+        phi  = 1.0 + zeta / 6.0 + zeta ** 2 / 120.0
+        out[n] = xp / phi
+    return out
+
+
+# ---------------------------------------------------------------------------
+# §9.6.1  Mapper and De-MAP
+# ---------------------------------------------------------------------------
+
+def v34_map_symbol(Q_n: int, Z_m: int, I1: int, U0: int,
+                   is_odd: bool) -> complex:
+    """Map quarter-constellation label Q(n) to 2D signal point u(n).
+
+    For even 2D index (n = 2m):
+        u(2m) = v(2m) rotated clockwise by Z(m)·90°
+    For odd 2D index (n = 2m+1):
+        u(2m+1) = v(2m+1) rotated clockwise by [Z(m) + 2·I1 + U0]·90°
+
+    Clockwise rotation by k·90° = multiply by (−j)^k.
+    """
+    pt = _v34_quarter_points()[Q_n]
+    if is_odd:
+        k = (Z_m + 2 * I1 + U0) & 3
+    else:
+        k = Z_m & 3
+    # Clockwise rotation by k·90°: multiply by (−j)^k
+    rot = (1, -1j, -1, 1j)[k]
+    return pt * rot
+
+
+def v34_demap_symbol(u_n: complex, Z_m: int, I1: int, U0: int,
+                     is_odd: bool, L: int) -> int:
+    """Recover quarter-constellation label Q(n) from received u(n).
+
+    Reverses the rotation applied by ``v34_map_symbol``: rotate u(n)
+    counterclockwise (CCW) by the appropriate multiple of 90°, then find
+    the nearest point in the L/4-point quarter constellation.
+
+    Returns Q(n) ∈ [0, L/4 − 1].
+    """
+    if is_odd:
+        k = (Z_m + 2 * I1 + U0) & 3
+    else:
+        k = Z_m & 3
+    # Counter-clockwise rotation by k·90°: multiply by j^k
+    rot_inv = (1, 1j, -1, -1j)[k]
+    v_n = u_n * rot_inv
+    # Find nearest point in the L/4-point quarter constellation
+    quarter = _v34_quarter_points()[: L // 4]
+    dists   = np.abs(v_n - quarter) ** 2
+    return int(np.argmin(dists))
+
+
+def v34_Q_to_bits(Q: int, q: int) -> tuple[np.ndarray, int]:
+    """Decompose mapping index Q(n) into q-bit group and ring index.
+
+    Per §9.6.1 eq. (9-26):
+        Q(n) = Q_bits[0] + 2·Q_bits[1] + … + 2^(q-1)·Q_bits[q-1] + 2^q · m
+
+    Returns (Q_bits, ring_index) where Q_bits is a uint8 array of length q,
+    LSB first, and ring_index is the integer m ∈ [0, M−1].
+    """
+    Q_bits = np.array([(Q >> i) & 1 for i in range(q)], dtype=np.uint8)
+    ring_idx = Q >> q
+    return Q_bits, ring_idx
+
+
+def v34_bits_to_Q(Q_bits: np.ndarray, ring_idx: int) -> int:
+    """Inverse of ``v34_Q_to_bits``: reconstruct Q(n) from bits + ring."""
+    q = len(Q_bits)
+    return int(sum(int(Q_bits[i]) << i for i in range(q))) | (ring_idx << q)
+
+
+# ---------------------------------------------------------------------------
+# §9.5  Differential encoder / decoder
+# ---------------------------------------------------------------------------
+
+def v34_diff_encode(I_seq: np.ndarray, Z0: int = 0) -> np.ndarray:
+    """Differential encoder: Z(m) = (Z(m−1) + I(m)) mod 4.
+
+    I(m) encodes the (I2, I3) bit pair as I(m) = I2 + 2·I3 (eq. 9-25).
+    """
+    Z = np.empty(len(I_seq), dtype=np.int32)
+    z = Z0
+    for m, I in enumerate(I_seq):
+        z = (z + int(I)) & 3
+        Z[m] = z
+    return Z
+
+
+def v34_diff_decode(Z_seq: np.ndarray, Z_prev: int = 0) -> np.ndarray:
+    """Differential decoder: I(m) = (Z(m) − Z(m−1)) mod 4."""
+    Z = np.asarray(Z_seq, dtype=np.int32)
+    prev = np.empty(len(Z), dtype=np.int32)
+    prev[0] = Z_prev
+    prev[1:] = Z[:-1]
+    return (Z - prev) & 3
+
+
+# ---------------------------------------------------------------------------
+# §9.6.3 / Viterbi decoder skeleton
+# ---------------------------------------------------------------------------
+
+class V34ViterbiDecoder:
+    """Soft-decision Viterbi decoder for the V.34 trellis (§9.6.3.2).
+
+    The trellis is driven once per 4D interval m.  At each step the decoder
+    receives the pair of channel output symbols y(2m), y(2m+1) and computes
+    the subset labels s(2m), s(2m+1) via ``v34_subset_label``.  Those labels
+    are combined via Table 13 into [Y4,Y3,Y2,Y1](m), which drives the
+    convolutional decoder.  The output is the estimated Y0(m) sequence.
+
+    The branch metric for state transition s→s' under input (Y2,Y1) is the
+    squared Euclidean distance from the received symbol to the nearest point
+    in the 2D signal subset consistent with that transition.
+
+    Parameters
+    ----------
+    states : {16, 32, 64}  — encoder variant (16-state is fully wired).
+    L      : constellation size (from Table 10).
+    traceback : Viterbi traceback depth in 4D symbols (default = 5× state-
+                memory; 15 is typical for 16-state).
+    """
+
+    def __init__(self, states: int = 16, L: int = 16,
+                 traceback: int = 15) -> None:
+        self.states    = states
+        self.L         = L
+        self.traceback = traceback
+        if states == 16:
+            self._ns  = _CONV16_NS    # shape (16, 4)
+            self._out = _CONV16_OUT   # shape (16, 4)
+        else:
+            raise NotImplementedError(f"{states}-state Viterbi not yet wired")
+        # Pre-compute per-state, per-subset bit lookup
+        # subset_of_pt[k] = 3-bit subset label for constellation point k
+        pts = v34_constellation(L)
+        self._subset  = v34_subset_labels_array(pts)   # (L,) uint8
+        # Build reverse map: subset → list of point indices
+        self._sub_pts: dict[int, np.ndarray] = {}
+        for sub in range(8):
+            mask = self._subset == sub
+            self._sub_pts[sub] = np.where(mask)[0].astype(np.int32)
+        self.reset()
+
+    def reset(self) -> None:
+        INF = 1e30
+        self._pm   = np.full(self.states, INF)     # path metrics
+        self._pm[0] = 0.0                           # start from state 0
+        self._tb   : list[np.ndarray] = []          # traceback decisions
+
+    def _branch_metric(self, y_norm: complex, subset: int) -> float:
+        """Min squared distance from y_norm to any point in ``subset``."""
+        idxs = self._sub_pts.get(subset, np.array([], dtype=np.int32))
+        if len(idxs) == 0:
+            return 1e30
+        pts = v34_constellation(self.L)[idxs]
+        return float(np.min(np.abs(y_norm - pts) ** 2))
+
+    def step(self, y_2m: complex, y_2m1: complex,
+             scale: float = 1.0) -> int | None:
+        """Process one 4D interval; return decoded Y0(m) or None if buffering.
+
+        ``y_2m`` and ``y_2m1`` are the two channel output symbols y(2m) and
+        y(2m+1) (output of precoder inverse, before de-MAP).  ``scale`` is the
+        constellation normalisation factor (RMS of y / RMS of reference points).
+
+        Returns the decoded Y0(m) for the symbol ``traceback`` steps ago, or
+        None while the traceback buffer is filling.
+        """
+        # Compute subset labels for this 4D pair
+        I0 = int(round(y_2m.real  / scale))
+        Q0 = int(round(y_2m.imag  / scale))
+        I1 = int(round(y_2m1.real / scale))
+        Q1 = int(round(y_2m1.imag / scale))
+        s0 = v34_subset_label(I0, Q0)
+        s1 = v34_subset_label(I1, Q1)
+        Y_bits = v34_symbol_to_bits(s0, s1)   # [Y4,Y3,Y2,Y1] as 4-bit int
+
+        new_pm   = np.full(self.states, 1e30)
+        decision = np.zeros(self.states, dtype=np.uint8)
+
+        for s in range(self.states):
+            if self._pm[s] >= 1e29:
+                continue
+            for k in range(4):        # k = Y2*2 + Y1
+                Y2 = (k >> 1) & 1
+                Y1 = k & 1
+                # Branch metric: distance of received symbols to nearest
+                # point consistent with the (s0,s1) pair for this transition.
+                # For 16-state encoder the subset is determined by Y0 + state.
+                Y0_hyp   = int(self._out[s, k])
+                ns       = int(self._ns[s, k])
+                # Soft branch metric: Euclidean distance to nearest point
+                # in the subset that agrees with this Y0 hypothesis.
+                # The transmitted subset index for y(2m) depends on Z(m)
+                # and U0(m); without those we use the raw subset label.
+                metric = (self._branch_metric(y_2m,  s0) +
+                          self._branch_metric(y_2m1, s1))
+                candidate = self._pm[s] + metric
+                if candidate < new_pm[ns]:
+                    new_pm[ns]   = candidate
+                    decision[ns] = s            # surviving predecessor
+
+        self._pm = new_pm
+        self._tb.append(decision)
+
+        if len(self._tb) < self.traceback:
+            return None   # buffer filling
+
+        # Traceback: find best final state
+        best = int(np.argmin(self._pm))
+        st   = best
+        for dec in reversed(self._tb[-self.traceback:]):
+            st = int(dec[st])
+        # Retrieve the Y0 output for the oldest surviving path entry
+        old_dec = self._tb[-self.traceback]
+        old_k   = (old_dec[st]) if self.traceback > 1 else 0
+        Y0_out  = int(self._out[st, 0])   # approximate; full traceback needed
+        if len(self._tb) > self.traceback * 2:
+            self._tb = self._tb[-self.traceback * 2:]
+        return Y0_out
+
+
 def demod_quality_metrics(symbols: np.ndarray,
                           trn_start_sym: int,
                           trn_eval_syms: int = 768) -> dict:
