@@ -48,6 +48,7 @@ from tools.v32bis_ref.stream import (
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.tx import startup_symbol_to_point, startup_trace_to_complex_symbols
+from tools.v32bis_ref.tx_passband import baseband_to_passband
 from tools.v32bis_ref.tx_waveform import rrc_taps, symbols_to_baseband
 from tools.v32bis_ref.training import (
     STATE_A,
@@ -569,6 +570,20 @@ class TxWaveformTests(unittest.TestCase):
         )
         self.assertEqual(waveform.samples_per_symbol, 10)
         self.assertTrue(any(sample != 0j for sample in waveform.samples))
+
+    def test_baseband_to_passband_returns_real_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        self.assertEqual(len(passband.samples), len(waveform.samples))
+        self.assertEqual(passband.sample_rate, 24000)
+        self.assertEqual(passband.carrier_hz, 1800.0)
+        self.assertTrue(any(abs(sample) > 0.0 for sample in passband.samples))
 
 
 if __name__ == "__main__":

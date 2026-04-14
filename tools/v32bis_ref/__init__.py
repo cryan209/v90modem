@@ -46,6 +46,7 @@ from .stream import (
 from .startup import generate_answer_startup_trace, generate_call_startup_trace
 from .simulator import simulate_startup
 from .tx import TransmittedSymbol, startup_symbol_to_point, startup_trace_to_complex_symbols
+from .tx_passband import PassbandWaveform, baseband_to_passband
 from .tx_waveform import BasebandWaveform, rrc_taps, symbols_to_baseband
 from .training import (
     STATE_A,
@@ -112,7 +113,9 @@ __all__ = [
     "startup_symbol_to_point",
     "startup_trace_to_complex_symbols",
     "BasebandWaveform",
+    "PassbandWaveform",
     "rrc_taps",
     "symbols_to_baseband",
+    "baseband_to_passband",
     "simulate_startup",
 ]
