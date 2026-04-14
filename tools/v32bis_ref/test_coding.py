@@ -48,6 +48,7 @@ from tools.v32bis_ref.stream import (
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.tx import startup_symbol_to_point, startup_trace_to_complex_symbols
+from tools.v32bis_ref.tx_waveform import rrc_taps, symbols_to_baseband
 from tools.v32bis_ref.training import (
     STATE_A,
     STATE_B,
@@ -540,6 +541,34 @@ class TxSymbolTests(unittest.TestCase):
         self.assertEqual(transmitted[0].source_name, "conditioning")
         self.assertEqual(transmitted[0].symbol, "A")
         self.assertEqual(transmitted[0].point, complex(-6.0, -2.0))
+
+
+class TxWaveformTests(unittest.TestCase):
+    def test_rrc_taps_are_symmetric(self) -> None:
+        taps = rrc_taps(0.5, 10, 8)
+        self.assertEqual(len(taps), 81)
+        for left, right in zip(taps, reversed(taps)):
+            self.assertAlmostEqual(left, right, places=12)
+
+    def test_rrc_taps_have_unit_energy(self) -> None:
+        taps = rrc_taps(0.5, 10, 8)
+        energy = sum(tap * tap for tap in taps)
+        self.assertAlmostEqual(energy, 1.0, places=12)
+
+    def test_symbols_to_baseband_returns_expected_length(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        self.assertEqual(
+            len(waveform.samples),
+            len(symbols) * 10 + len(waveform.taps) - 1,
+        )
+        self.assertEqual(waveform.samples_per_symbol, 10)
+        self.assertTrue(any(sample != 0j for sample in waveform.samples))
 
 
 if __name__ == "__main__":
