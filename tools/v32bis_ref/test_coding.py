@@ -37,6 +37,7 @@ from tools.v32bis_ref.negotiation import (
 )
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
+from tools.v32bis_ref.stream import flatten_startup_trace
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.training import (
@@ -257,7 +258,7 @@ class ReceiverTests(unittest.TestCase):
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
         )
-        events = receiver.detect(trace[0])
+        events = receiver.ingest_all(flatten_startup_trace([trace[0]]))
         self.assertEqual([event.name for event in events], ["S"])
 
     def test_receiver_detects_rate_and_e_segments(self) -> None:
@@ -267,12 +268,22 @@ class ReceiverTests(unittest.TestCase):
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
         )
-        r1_events = receiver.detect(trace[1])
-        e_events = receiver.detect(trace[4])
+        r1_events = receiver.ingest_all(flatten_startup_trace([trace[1]]))
+        e_events = receiver.ingest_all(flatten_startup_trace([trace[4]]))
         self.assertEqual(r1_events[0].name, "R1")
         self.assertEqual(r1_events[0].rate_mask, RATE_4800 | RATE_7200 | RATE_9600)
         self.assertEqual(e_events[0].name, "E")
         self.assertEqual(e_events[0].selected_rate, 9600)
+
+    def test_receiver_detects_events_from_continuous_stream(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        events = receiver.ingest_all(flatten_startup_trace(trace))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
 
 
 class NegotiationTests(unittest.TestCase):

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .negotiation import negotiate_startup_rate
 from .receiver import V32bisLogicalReceiver
 from .startup import generate_answer_startup_trace, generate_call_startup_trace
+from .stream import flatten_startup_trace
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,7 @@ def simulate_startup(
         ),
     )
 
-    answer_events = []
-    for segment in answer_trace:
-        answer_events.extend(answer_receiver.detect(segment))
+    answer_events = answer_receiver.ingest_all(flatten_startup_trace(answer_trace))
 
     r1_event = next(event for event in answer_events if event.name == "R1")
     r1_mask = r1_event.rate_mask or 0
@@ -72,9 +71,7 @@ def simulate_startup(
         r2_mask=r2_mask,
         r3_selected_rate=selected_rate,
     )
-    call_events = []
-    for segment in call_trace:
-        call_events.extend(call_receiver.detect(segment))
+    call_events = call_receiver.ingest_all(flatten_startup_trace(call_trace))
 
     r2_event = next(event for event in call_events if event.name == "R2")
     decoded_r2_mask = r2_event.rate_mask or 0
@@ -98,9 +95,8 @@ def simulate_startup(
         r2_mask=answer_selected_mask,
         r3_selected_rate=selected_rate,
     )
-    answer_events = []
-    for segment in answer_trace:
-        answer_events.extend(answer_receiver.detect(segment))
+    answer_receiver = V32bisLogicalReceiver()
+    answer_events = answer_receiver.ingest_all(flatten_startup_trace(answer_trace))
 
     r3_event = next(event for event in answer_events if event.name == "R3")
     answer_e_event = next(event for event in answer_events if event.name == "E")
