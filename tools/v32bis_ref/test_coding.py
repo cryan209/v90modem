@@ -37,7 +37,7 @@ from tools.v32bis_ref.negotiation import (
 )
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
-from tools.v32bis_ref.stream import flatten_startup_trace
+from tools.v32bis_ref.stream import flatten_startup_trace, impair_stream
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.training import (
@@ -284,6 +284,48 @@ class ReceiverTests(unittest.TestCase):
         )
         events = receiver.ingest_all(flatten_startup_trace(trace))
         self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_receiver_loses_e_when_e_word_is_corrupted(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        stream = flatten_startup_trace(trace)
+        e_start = next(i for i, obs in enumerate(stream) if obs.source_name == "E")
+        impaired = impair_stream(stream, replacements={e_start: "X"})
+        events = receiver.ingest_all(impaired)
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "B1"])
+
+    def test_receiver_loses_r1_when_first_rate_word_is_corrupted(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        stream = flatten_startup_trace(trace)
+        r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
+        impaired = impair_stream(stream, replacements={r1_start: "Q9"})
+        events = receiver.ingest_all(impaired)
+        self.assertNotIn("R1", [event.name for event in events])
+        self.assertIn("R3", [event.name for event in events])
+
+    def test_receiver_still_detects_b1_with_one_dropped_symbol(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        stream = flatten_startup_trace(trace)
+        b1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "B1")
+        impaired = impair_stream(stream, drops={b1_start})
+        events = receiver.ingest_all(impaired)
+        b1_events = [event for event in events if event.name == "B1"]
+        self.assertEqual(len(b1_events), 1)
+        self.assertGreaterEqual(b1_events[0].repetitions or 0, 24)
 
 
 class NegotiationTests(unittest.TestCase):

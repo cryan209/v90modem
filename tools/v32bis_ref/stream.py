@@ -13,7 +13,6 @@ class ObservableSymbol:
 
     symbol: str
     source_name: str
-    source_kind: str
     source_instance: int
     tx_calling_party: bool
     selected_rate: int | None = None
@@ -30,7 +29,6 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                     ObservableSymbol(
                         symbol=symbol,
                         source_name=segment.name,
-                        source_kind=segment.kind,
                         source_instance=source_instance,
                         tx_calling_party=segment.tx_calling_party,
                     )
@@ -43,7 +41,6 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                     ObservableSymbol(
                         symbol=symbol,
                         source_name=segment.name,
-                        source_kind="q_run",
                         source_instance=source_instance,
                         tx_calling_party=segment.tx_calling_party,
                         selected_rate=segment.bit_rate,
@@ -57,10 +54,43 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                     ObservableSymbol(
                         symbol="B1",
                         source_name=segment.name,
-                        source_kind=segment.kind,
                         source_instance=source_instance,
                         tx_calling_party=segment.tx_calling_party,
                         selected_rate=segment.bit_rate,
                     )
                 )
     return stream
+
+
+def impair_stream(
+    stream: list[ObservableSymbol],
+    *,
+    replacements: dict[int, str] | None = None,
+    drops: set[int] | None = None,
+) -> list[ObservableSymbol]:
+    """Apply simple symbol-level impairments to an observable stream.
+
+    `replacements` maps absolute symbol indexes to replacement symbol strings.
+    `drops` removes absolute symbol indexes from the stream.
+    """
+
+    replacements = replacements or {}
+    drops = drops or set()
+
+    impaired: list[ObservableSymbol] = []
+    for index, observable in enumerate(stream):
+        if index in drops:
+            continue
+        if index in replacements:
+            impaired.append(
+                ObservableSymbol(
+                    symbol=replacements[index],
+                    source_name=observable.source_name,
+                    source_instance=observable.source_instance,
+                    tx_calling_party=observable.tx_calling_party,
+                    selected_rate=observable.selected_rate,
+                )
+            )
+        else:
+            impaired.append(observable)
+    return impaired

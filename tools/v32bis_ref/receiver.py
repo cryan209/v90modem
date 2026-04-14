@@ -16,6 +16,7 @@ from .rate_signal import (
     is_rate_signal_bits,
 )
 from .stream import ObservableSymbol
+from .training import STATE_A, STATE_B
 
 
 @dataclass(frozen=True)
@@ -33,13 +34,18 @@ class V32bisLogicalReceiver:
         self._recent_symbols: deque[str] = deque(maxlen=256)
         self._q_run_symbols: dict[int, list[str]] = {}
         self._rate_sequences: dict[int, list[list[int]]] = {}
-        self._emitted_instances: set[tuple[str, str, int]] = set()
+        self._b1_run_lengths: dict[int, int] = {}
+        self._emitted_instances: set[tuple[str, int]] = set()
 
     def ingest(self, observable: ObservableSymbol) -> list[DetectedEvent]:
         events: list[DetectedEvent] = []
-        instance_key = (observable.source_name, observable.source_kind, observable.source_instance)
+        instance_key = (observable.source_name, observable.source_instance)
 
-        if observable.source_kind in {"conditioning", "s_hold"}:
+        if observable.symbol not in {STATE_A, STATE_B, "B1"} and not observable.symbol.startswith("Q"):
+            self._q_run_symbols.pop(observable.source_instance, None)
+            return events
+
+        if observable.symbol in {STATE_A, STATE_B}:
             self._recent_symbols.append(observable.symbol)
             if (
                 instance_key not in self._emitted_instances
@@ -50,16 +56,20 @@ class V32bisLogicalReceiver:
                 events.append(DetectedEvent(name="S"))
             return events
 
-        if observable.source_kind == "q_run":
+        if observable.symbol.startswith("Q"):
             run_key = observable.source_instance
             symbol_run = self._q_run_symbols.setdefault(run_key, [])
             symbol_run.append(observable.symbol)
             if len(symbol_run) == 8:
-                decoded_bits = decode_rate_sequence_symbols(
-                    symbol_run,
-                    calling_party=observable.tx_calling_party,
-                    initial_diff_state=1,
-                )
+                try:
+                    decoded_bits = decode_rate_sequence_symbols(
+                        symbol_run,
+                        calling_party=observable.tx_calling_party,
+                        initial_diff_state=1,
+                    )
+                except ValueError:
+                    self._q_run_symbols[run_key] = []
+                    return events
                 self._q_run_symbols[run_key] = []
                 if is_e_sequence_bits(decoded_bits) and instance_key not in self._emitted_instances:
                     self._emitted_instances.add(instance_key)
@@ -85,14 +95,18 @@ class V32bisLogicalReceiver:
                             )
             return events
 
-        if observable.source_kind == "scrambled_ones" and instance_key not in self._emitted_instances:
-            self._emitted_instances.add(instance_key)
-            events.append(
-                DetectedEvent(
-                    name="B1",
-                    selected_rate=observable.selected_rate,
+        if observable.symbol == "B1":
+            run_key = observable.source_instance
+            self._b1_run_lengths[run_key] = self._b1_run_lengths.get(run_key, 0) + 1
+            if self._b1_run_lengths[run_key] >= 24 and instance_key not in self._emitted_instances:
+                self._emitted_instances.add(instance_key)
+                events.append(
+                    DetectedEvent(
+                        name="B1",
+                        selected_rate=observable.selected_rate,
+                        repetitions=self._b1_run_lengths[run_key],
+                    )
                 )
-            )
         return events
 
     def ingest_all(self, stream: list[ObservableSymbol]) -> list[DetectedEvent]:

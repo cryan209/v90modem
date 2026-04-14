@@ -34,7 +34,7 @@ from .negotiation import (
     validate_rate_signal_bits,
 )
 from .receiver import DetectedEvent, V32bisLogicalReceiver
-from .stream import ObservableSymbol, flatten_startup_trace
+from .stream import ObservableSymbol, flatten_startup_trace, impair_stream
 from .startup import generate_answer_startup_trace, generate_call_startup_trace
 from .simulator import simulate_startup
 from .training import (
@@ -79,6 +79,7 @@ __all__ = [
     "V32bisLogicalReceiver",
     "ObservableSymbol",
     "flatten_startup_trace",
+    "impair_stream",
     "Scrambler",
     "Descrambler",
     "scrambler_tap",
