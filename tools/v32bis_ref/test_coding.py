@@ -291,6 +291,9 @@ class ReceiverTests(unittest.TestCase):
         )
         events = receiver.ingest_all(flatten_startup_trace(trace))
         self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+        stats = receiver.stats()
+        self.assertGreaterEqual(stats.q_valid_words, 5)
+        self.assertEqual(stats.e_words_detected, 1)
 
     def test_receiver_loses_e_when_e_word_is_corrupted(self) -> None:
         receiver = V32bisLogicalReceiver()
@@ -304,6 +307,7 @@ class ReceiverTests(unittest.TestCase):
         impaired = impair_stream(stream, replacements={e_start: "X"})
         events = receiver.ingest_all(impaired)
         self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "B1"])
+        self.assertEqual(receiver.stats().e_words_detected, 0)
 
     def test_receiver_loses_r1_when_first_rate_word_is_corrupted(self) -> None:
         receiver = V32bisLogicalReceiver()
@@ -396,31 +400,39 @@ class ReceiverTests(unittest.TestCase):
         self.assertIn("S", event_names)
         self.assertIn("B1", event_names)
 
-    def test_q_insertion_can_break_word_alignment_for_r1(self) -> None:
+    def test_q_insertion_can_break_initial_r1_but_allow_later_reacquisition(self) -> None:
         receiver = V32bisLogicalReceiver()
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
+            r1_repetitions=3,
         )
         stream = flatten_startup_trace(trace)
         r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
         impaired = impair_stream_insert(stream, index=r1_start + 3, symbol="Q1")
         events = receiver.ingest_all(impaired)
-        self.assertNotIn("R1", [event.name for event in events])
+        r1_events = [event for event in events if event.name == "R1"]
+        self.assertEqual(len(r1_events), 1)
+        self.assertEqual(r1_events[0].rate_mask, RATE_4800 | RATE_7200 | RATE_9600)
+        self.assertGreater(receiver.stats().q_resync_shifts, 0)
 
-    def test_q_deletion_can_break_word_alignment_for_r1(self) -> None:
+    def test_q_deletion_can_break_initial_r1_but_allow_later_reacquisition(self) -> None:
         receiver = V32bisLogicalReceiver()
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
+            r1_repetitions=3,
         )
         stream = flatten_startup_trace(trace)
         r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
         impaired = impair_stream(stream, drops={r1_start + 3})
         events = receiver.ingest_all(impaired)
-        self.assertNotIn("R1", [event.name for event in events])
+        r1_events = [event for event in events if event.name == "R1"]
+        self.assertEqual(len(r1_events), 1)
+        self.assertEqual(r1_events[0].rate_mask, RATE_4800 | RATE_7200 | RATE_9600)
+        self.assertGreater(receiver.stats().q_resync_shifts, 0)
 
 
 class NegotiationTests(unittest.TestCase):

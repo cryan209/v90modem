@@ -33,7 +33,7 @@ from .negotiation import (
     validate_e_sequence_bits,
     validate_rate_signal_bits,
 )
-from .receiver import DetectedEvent, V32bisLogicalReceiver
+from .receiver import DetectedEvent, ReceiverStats, V32bisLogicalReceiver
 from .stream import (
     ObservableSymbol,
     flatten_startup_trace,
@@ -84,6 +84,7 @@ __all__ = [
     "negotiate_startup_rate",
     "negotiate_renegotiation_rate",
     "DetectedEvent",
+    "ReceiverStats",
     "V32bisLogicalReceiver",
     "ObservableSymbol",
     "flatten_startup_trace",

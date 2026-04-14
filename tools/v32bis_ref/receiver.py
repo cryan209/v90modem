@@ -27,15 +27,31 @@ class DetectedEvent:
     repetitions: int | None = None
 
 
+@dataclass(frozen=True)
+class ReceiverStats:
+    q_candidates_tested: int
+    q_invalid_candidates: int
+    q_resync_shifts: int
+    q_valid_words: int
+    r_words_detected: int
+    e_words_detected: int
+
+
 class V32bisLogicalReceiver:
     """Consume a continuous symbol stream and emit logical protocol events."""
 
     def __init__(self) -> None:
         self._recent_symbols: deque[str] = deque(maxlen=256)
-        self._q_run_symbols: dict[int, list[str]] = {}
+        self._q_run_symbols: dict[int, deque[str]] = {}
         self._rate_sequences: dict[int, list[list[int]]] = {}
         self._b1_run_lengths: dict[int, int] = {}
         self._emitted_instances: set[tuple[str, int]] = set()
+        self._q_candidates_tested = 0
+        self._q_invalid_candidates = 0
+        self._q_resync_shifts = 0
+        self._q_valid_words = 0
+        self._r_words_detected = 0
+        self._e_words_detected = 0
 
     def ingest(self, observable: ObservableSymbol) -> list[DetectedEvent]:
         events: list[DetectedEvent] = []
@@ -58,20 +74,27 @@ class V32bisLogicalReceiver:
 
         if observable.symbol.startswith("Q"):
             run_key = observable.source_instance
-            symbol_run = self._q_run_symbols.setdefault(run_key, [])
+            symbol_run = self._q_run_symbols.setdefault(run_key, deque())
             symbol_run.append(observable.symbol)
-            if len(symbol_run) == 8:
+            while len(symbol_run) >= 8:
+                candidate = list(symbol_run)[:8]
+                self._q_candidates_tested += 1
                 try:
                     decoded_bits = decode_rate_sequence_symbols(
-                        symbol_run,
+                        candidate,
                         calling_party=observable.tx_calling_party,
                         initial_diff_state=1,
                     )
                 except ValueError:
-                    self._q_run_symbols[run_key] = []
-                    return events
-                self._q_run_symbols[run_key] = []
+                    self._q_invalid_candidates += 1
+                    self._q_resync_shifts += 1
+                    symbol_run.popleft()
+                    continue
                 if is_e_sequence_bits(decoded_bits) and instance_key not in self._emitted_instances:
+                    self._q_valid_words += 1
+                    self._e_words_detected += 1
+                    for _ in range(8):
+                        symbol_run.popleft()
                     self._emitted_instances.add(instance_key)
                     events.append(
                         DetectedEvent(
@@ -79,9 +102,14 @@ class V32bisLogicalReceiver:
                             selected_rate=decode_e_rate(decoded_bits),
                         )
                     )
-                elif is_rate_signal_bits(decoded_bits):
+                    break
+                if is_rate_signal_bits(decoded_bits):
+                    self._q_valid_words += 1
+                    for _ in range(8):
+                        symbol_run.popleft()
                     sequences = self._rate_sequences.setdefault(run_key, [])
                     sequences.append(decoded_bits)
+                    self._r_words_detected += 1
                     if len(sequences) >= 2:
                         rate_mask = detect_repeated_rate_signal(sequences[-2:])
                         if rate_mask is not None and instance_key not in self._emitted_instances:
@@ -93,6 +121,10 @@ class V32bisLogicalReceiver:
                                     repetitions=2,
                                 )
                             )
+                    continue
+                self._q_invalid_candidates += 1
+                self._q_resync_shifts += 1
+                symbol_run.popleft()
             return events
 
         if observable.symbol == "B1":
@@ -114,3 +146,13 @@ class V32bisLogicalReceiver:
         for observable in stream:
             events.extend(self.ingest(observable))
         return events
+
+    def stats(self) -> ReceiverStats:
+        return ReceiverStats(
+            q_candidates_tested=self._q_candidates_tested,
+            q_invalid_candidates=self._q_invalid_candidates,
+            q_resync_shifts=self._q_resync_shifts,
+            q_valid_words=self._q_valid_words,
+            r_words_detected=self._r_words_detected,
+            e_words_detected=self._e_words_detected,
+        )
