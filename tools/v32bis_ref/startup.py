@@ -20,6 +20,7 @@ from .training import ConditioningSignal, generate_conditioning_signal
 class StartupSegment:
     name: str
     kind: str
+    tx_calling_party: bool
     symbols: list[str] | None = None
     bits: list[int] | None = None
     repetitions: int | None = None
@@ -40,6 +41,7 @@ def _conditioning_segment(calling_party: bool, trn_length: int) -> StartupSegmen
     return StartupSegment(
         name="conditioning",
         kind="conditioning",
+        tx_calling_party=calling_party,
         symbols=conditioning.symbols,
     )
 
@@ -50,6 +52,7 @@ def _rate_segment(name: str, rate_mask: int, *, calling_party: bool, initial_dif
     return StartupSegment(
         name=name,
         kind="rate_signal",
+        tx_calling_party=calling_party,
         bits=bits,
         symbols=one_sequence * repetitions,
         repetitions=repetitions,
@@ -61,16 +64,18 @@ def _e_segment(selected_rate: int, *, calling_party: bool, initial_diff_state: i
     return StartupSegment(
         name="E",
         kind="sequence_e",
+        tx_calling_party=calling_party,
         bit_rate=selected_rate,
         bits=bits,
         symbols=_encode_states_as_labels(bits, calling_party, initial_diff_state),
     )
 
 
-def _b1_segment(bit_rate: int, symbols: int) -> StartupSegment:
+def _b1_segment(bit_rate: int, symbols: int, *, calling_party: bool) -> StartupSegment:
     return StartupSegment(
         name="B1",
         kind="scrambled_ones",
+        tx_calling_party=calling_party,
         bit_rate=bit_rate,
         repetitions=symbols,
     )
@@ -88,11 +93,11 @@ def generate_call_startup_trace(
     """Generate the caller's transmitter-side start-up trace after detecting R1."""
 
     return [
-        StartupSegment(name="S_NT", kind="s_hold"),
+        StartupSegment(name="S_NT", kind="s_hold", tx_calling_party=True),
         _conditioning_segment(calling_party=True, trn_length=trn_length),
         _rate_segment("R2", r2_mask & r1_mask, calling_party=True, initial_diff_state=1, repetitions=r2_repetitions),
         _e_segment(r3_selected_rate, calling_party=True, initial_diff_state=1),
-        _b1_segment(r3_selected_rate, b1_symbols),
+        _b1_segment(r3_selected_rate, b1_symbols, calling_party=True),
     ]
 
 
@@ -114,5 +119,5 @@ def generate_answer_startup_trace(
         _conditioning_segment(calling_party=False, trn_length=trn_length),
         _rate_segment("R3", r2_mask, calling_party=False, initial_diff_state=1, repetitions=r3_repetitions),
         _e_segment(r3_selected_rate, calling_party=False, initial_diff_state=1),
-        _b1_segment(r3_selected_rate, b1_symbols),
+        _b1_segment(r3_selected_rate, b1_symbols, calling_party=False),
     ]

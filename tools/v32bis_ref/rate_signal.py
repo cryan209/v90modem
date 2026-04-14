@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .coding import EncoderState, differential_encode
-from .scrambler import Scrambler, scrambler_tap
+from .coding import EncoderState, differential_decode, differential_encode
+from .scrambler import Descrambler, Scrambler, scrambler_tap
 
 
 RATE_14400 = 0x1000
@@ -124,6 +124,31 @@ class RateSignalEncoding:
     output_dibits: list[int]
     differential_states: list[int]
     final_state: int
+
+
+def decode_rate_sequence_symbols(
+    symbols: list[str],
+    *,
+    calling_party: bool,
+    initial_diff_state: int,
+) -> list[int]:
+    """Recover a 16-bit R or E word from eight observed 4800 startup symbols."""
+
+    if len(symbols) != 8:
+        raise ValueError("rate sequence symbol run must contain exactly 8 symbols")
+
+    descrambler = Descrambler(scrambler_tap(calling_party, transmit=True))
+    diff_state = initial_diff_state
+    bits: list[int] = []
+    for symbol in symbols:
+        if not symbol.startswith("Q"):
+            raise ValueError(f"unexpected startup symbol label: {symbol}")
+        output_state = int(symbol[1:])
+        dibit = differential_decode(diff_state, output_state, 4800)
+        diff_state = output_state
+        scrambled_bits = [dibit & 0x01, (dibit >> 1) & 0x01]
+        bits.extend(descrambler.process_bits(scrambled_bits))
+    return bits
 
 
 def encode_rate_sequence_bits(

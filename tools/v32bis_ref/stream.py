@@ -15,8 +15,7 @@ class ObservableSymbol:
     source_name: str
     source_kind: str
     source_instance: int
-    word_bits: tuple[int, ...] | None = None
-    word_index: int | None = None
+    tx_calling_party: bool
     selected_rate: int | None = None
 
 
@@ -33,6 +32,7 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                         source_name=segment.name,
                         source_kind=segment.kind,
                         source_instance=source_instance,
+                        tx_calling_party=segment.tx_calling_party,
                     )
                 )
             continue
@@ -51,8 +51,7 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                             source_name=segment.name,
                             source_kind=segment.kind,
                             source_instance=source_instance,
-                            word_bits=word_bits,
-                            word_index=repetition,
+                            tx_calling_party=segment.tx_calling_party,
                             selected_rate=segment.bit_rate,
                         )
                     )
@@ -66,6 +65,7 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                         source_name=segment.name,
                         source_kind=segment.kind,
                         source_instance=source_instance,
+                        tx_calling_party=segment.tx_calling_party,
                         selected_rate=segment.bit_rate,
                     )
                 )

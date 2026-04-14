@@ -45,6 +45,11 @@ TRELLIS_CONVOLUTIONAL_ENCODER = (
     (5, 6, 4, 7),
 )
 
+V32BIS_4800_DIFFERENTIAL_DECODER = tuple(
+    tuple(row.index(output_state) for output_state in range(4))
+    for row in V32BIS_4800_DIFFERENTIAL_ENCODER
+)
+
 
 def bits_per_symbol(bit_rate: int) -> int:
     """Return the number of payload bits per 2400-symbol baud."""
@@ -70,6 +75,19 @@ def differential_encode(previous_state: int, dibit: int, bit_rate: int) -> int:
     if bit_rate == 4800:
         return V32BIS_4800_DIFFERENTIAL_ENCODER[previous_state][dibit]
     return TRELLIS_DIFFERENTIAL_ENCODER[previous_state][dibit]
+
+
+def differential_decode(previous_state: int, output_state: int, bit_rate: int) -> int:
+    """Invert the differential encoder for one dibit/state transition."""
+
+    if not 0 <= previous_state <= 3:
+        raise ValueError("previous_state must be in range 0..3")
+    if not 0 <= output_state <= 3:
+        raise ValueError("output_state must be in range 0..3")
+
+    if bit_rate == 4800:
+        return V32BIS_4800_DIFFERENTIAL_DECODER[previous_state][output_state]
+    return TRELLIS_DIFFERENTIAL_ENCODER[previous_state].index(output_state)
 
 
 def convolution_encode(previous_state: int, diff_state: int) -> int:

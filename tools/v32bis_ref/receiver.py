@@ -10,6 +10,7 @@ from .negotiation import (
     detect_repeated_rate_signal,
     detect_s_sequence,
 )
+from .rate_signal import decode_rate_sequence_symbols
 from .stream import ObservableSymbol
 
 
@@ -26,6 +27,7 @@ class V32bisLogicalReceiver:
 
     def __init__(self) -> None:
         self._recent_symbols: deque[str] = deque(maxlen=256)
+        self._rate_word_symbols: dict[str, list[str]] = {}
         self._rate_sequences: dict[str, list[list[int]]] = {}
         self._emitted_instances: set[tuple[str, int]] = set()
 
@@ -44,32 +46,50 @@ class V32bisLogicalReceiver:
                 events.append(DetectedEvent(name="S"))
             return events
 
-        if observable.source_kind == "rate_signal" and observable.word_bits is not None and observable.word_index is not None:
+        if observable.source_kind == "rate_signal":
             rate_key = f"{observable.source_name}:{observable.source_instance}"
-            sequences = self._rate_sequences.setdefault(rate_key, [])
-            while len(sequences) <= observable.word_index:
-                sequences.append(list(observable.word_bits))
-            if observable.word_index >= 1:
-                rate_mask = detect_repeated_rate_signal(sequences[: observable.word_index + 1])
-                if rate_mask is not None and instance_key not in self._emitted_instances and observable.word_index == 1:
-                    self._emitted_instances.add(instance_key)
-                    events.append(
-                        DetectedEvent(
-                            name=observable.source_name,
-                            rate_mask=rate_mask,
-                            repetitions=observable.word_index + 1,
+            symbol_run = self._rate_word_symbols.setdefault(rate_key, [])
+            symbol_run.append(observable.symbol)
+            if len(symbol_run) == 8:
+                sequences = self._rate_sequences.setdefault(rate_key, [])
+                decoded_bits = decode_rate_sequence_symbols(
+                    symbol_run,
+                    calling_party=observable.tx_calling_party,
+                    initial_diff_state=1,
+                )
+                sequences.append(decoded_bits)
+                self._rate_word_symbols[rate_key] = []
+                if len(sequences) >= 2:
+                    rate_mask = detect_repeated_rate_signal(sequences[:2])
+                    if rate_mask is not None and instance_key not in self._emitted_instances:
+                        self._emitted_instances.add(instance_key)
+                        events.append(
+                            DetectedEvent(
+                                name=observable.source_name,
+                                rate_mask=rate_mask,
+                                repetitions=2,
+                            )
                         )
-                    )
             return events
 
-        if observable.source_kind == "sequence_e" and observable.word_bits is not None and instance_key not in self._emitted_instances:
-            self._emitted_instances.add(instance_key)
-            events.append(
-                DetectedEvent(
-                    name="E",
-                    selected_rate=decode_e_rate(list(observable.word_bits)),
+        if observable.source_kind == "sequence_e" and instance_key not in self._emitted_instances:
+            rate_key = f"{observable.source_name}:{observable.source_instance}"
+            symbol_run = self._rate_word_symbols.setdefault(rate_key, [])
+            symbol_run.append(observable.symbol)
+            if len(symbol_run) == 8:
+                decoded_bits = decode_rate_sequence_symbols(
+                    symbol_run,
+                    calling_party=observable.tx_calling_party,
+                    initial_diff_state=1,
                 )
-            )
+                self._rate_word_symbols[rate_key] = []
+                self._emitted_instances.add(instance_key)
+                events.append(
+                    DetectedEvent(
+                        name="E",
+                        selected_rate=decode_e_rate(decoded_bits),
+                    )
+                )
             return events
 
         if observable.source_kind == "scrambled_ones" and instance_key not in self._emitted_instances:
