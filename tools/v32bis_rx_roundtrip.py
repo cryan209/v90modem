@@ -14,9 +14,13 @@ if REPO_ROOT not in sys.path:
 from tools.v32bis_ref.rate_signal import rate_mask_from_list
 from tools.v32bis_ref.rx_frontend import (
     recover_symbols_ideal,
+    recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
+    recover_symbols_with_timing_tracking,
     recover_symbols_with_timing_offset,
+    recover_symbols_with_tracking,
     search_carrier_frequency,
+    search_timing_and_carrier,
     search_symbol_timing,
 )
 from tools.v32bis_ref.startup import generate_answer_startup_trace
@@ -41,10 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--carrier-hz", type=float, default=1800.0)
     parser.add_argument("--rx-carrier-hz", type=float)
     parser.add_argument("--search-carrier", action="store_true")
+    parser.add_argument("--search-both", action="store_true")
+    parser.add_argument("--track-carrier", action="store_true")
+    parser.add_argument("--track-timing", action="store_true")
+    parser.add_argument("--track-both", action="store_true")
     parser.add_argument("--carrier-search-span", type=float, default=10.0)
     parser.add_argument("--carrier-search-step", type=float, default=5.0)
+    parser.add_argument("--carrier-phase-gain", type=float, default=0.2)
     parser.add_argument("--timing-offset", type=int, default=0)
     parser.add_argument("--search-timing", action="store_true")
+    parser.add_argument("--timing-step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=20)
     return parser
 
@@ -61,7 +71,44 @@ def main(argv: list[str]) -> int:
     transmitted = startup_trace_to_complex_symbols(trace)
     baseband = symbols_to_baseband(transmitted, samples_per_symbol=args.samples_per_symbol)
     passband = baseband_to_passband(baseband, sample_rate=args.sample_rate, carrier_hz=args.carrier_hz)
-    if args.search_carrier:
+    if args.search_both:
+        center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
+        candidates = []
+        current = center - args.carrier_search_span
+        while current <= center + args.carrier_search_span + 1e-9:
+            candidates.append(round(current, 6))
+            current += args.carrier_search_step
+        search = search_timing_and_carrier(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=args.samples_per_symbol,
+            carrier_candidates_hz=candidates,
+        )
+        print(
+            f"# best_carrier_hz={search.carrier_hz:.6f} "
+            f"best_offset={search.timing_offset} "
+            f"metric={search.metric:.6f}"
+        )
+        recovered = search.recovered
+    elif args.track_both:
+        tracking = recover_symbols_with_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=args.samples_per_symbol,
+            timing_offset=args.timing_offset,
+            carrier_hz=args.rx_carrier_hz,
+            phase_gain=args.carrier_phase_gain,
+            timing_step=args.timing_step,
+        )
+        print(
+            f"# final_phase_rad={tracking.final_phase_rad:.6f} "
+            f"final_offset={tracking.final_offset} "
+            f"metric={tracking.metric:.6f}"
+        )
+        recovered = tracking.recovered
+    elif args.search_carrier:
         center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
         candidates = []
         current = center - args.carrier_search_span
@@ -78,6 +125,21 @@ def main(argv: list[str]) -> int:
         )
         print(f"# best_carrier_hz={search.carrier_hz:.6f} metric={search.metric:.6f}")
         recovered = search.recovered
+    elif args.track_carrier:
+        tracking = recover_symbols_with_carrier_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=args.samples_per_symbol,
+            timing_offset=args.timing_offset,
+            carrier_hz=args.rx_carrier_hz,
+            phase_gain=args.carrier_phase_gain,
+        )
+        print(
+            f"# final_phase_rad={tracking.final_phase_rad:.6f} "
+            f"metric={tracking.metric:.6f}"
+        )
+        recovered = tracking.recovered
     elif args.search_timing:
         search = search_symbol_timing(
             passband,
@@ -87,6 +149,18 @@ def main(argv: list[str]) -> int:
         )
         print(f"# best_offset={search.offset} metric={search.metric:.6f}")
         recovered = search.recovered
+    elif args.track_timing:
+        tracking = recover_symbols_with_timing_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=args.samples_per_symbol,
+            timing_offset=args.timing_offset,
+            carrier_hz=args.rx_carrier_hz,
+            timing_step=args.timing_step,
+        )
+        print(f"# final_offset={tracking.final_offset} metric={tracking.metric:.6f}")
+        recovered = tracking.recovered
     elif args.timing_offset != 0:
         recovered = recover_symbols_with_timing_offset(
             passband,

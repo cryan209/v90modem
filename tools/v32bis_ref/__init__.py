@@ -36,6 +36,7 @@ from .negotiation import (
 from .receiver import DetectedEvent, ReceiverStats, V32bisLogicalReceiver
 from .rx_frontend import (
     CarrierSearchResult,
+    JointSearchResult,
     RecoveredSymbol,
     TimingSearchResult,
     ideal_symbol_samples,
@@ -46,6 +47,7 @@ from .rx_frontend import (
     recover_symbols_ideal,
     recover_symbols_with_timing_offset,
     search_carrier_frequency,
+    search_timing_and_carrier,
     search_symbol_timing,
     symbol_error_metric,
 )
@@ -107,6 +109,7 @@ __all__ = [
     "RecoveredSymbol",
     "TimingSearchResult",
     "CarrierSearchResult",
+    "JointSearchResult",
     "passband_to_baseband",
     "matched_filter",
     "ideal_symbol_samples",
@@ -115,6 +118,7 @@ __all__ = [
     "recover_symbols_ideal",
     "recover_symbols_with_timing_offset",
     "search_carrier_frequency",
+    "search_timing_and_carrier",
     "search_symbol_timing",
     "symbol_error_metric",
     "ObservableSymbol",
