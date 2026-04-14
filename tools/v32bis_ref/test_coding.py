@@ -37,7 +37,12 @@ from tools.v32bis_ref.negotiation import (
 )
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
-from tools.v32bis_ref.stream import flatten_startup_trace, impair_stream
+from tools.v32bis_ref.stream import (
+    flatten_startup_trace,
+    impair_stream,
+    impair_stream_burst,
+    impair_stream_random,
+)
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.training import (
@@ -326,6 +331,52 @@ class ReceiverTests(unittest.TestCase):
         b1_events = [event for event in events if event.name == "B1"]
         self.assertEqual(len(b1_events), 1)
         self.assertGreaterEqual(b1_events[0].repetitions or 0, 24)
+
+    def test_receiver_loses_r1_when_entire_first_word_is_burst_corrupted(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+            r1_repetitions=2,
+        )
+        stream = flatten_startup_trace(trace)
+        r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
+        impaired = impair_stream_burst(stream, start=r1_start, length=8, replacement="X")
+        events = receiver.ingest_all(impaired)
+        self.assertNotIn("R1", [event.name for event in events])
+
+    def test_receiver_can_recover_r1_when_later_pair_is_clean(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+            r1_repetitions=3,
+        )
+        stream = flatten_startup_trace(trace)
+        r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
+        impaired = impair_stream_burst(stream, start=r1_start, length=8, replacement="X")
+        events = receiver.ingest_all(impaired)
+        r1_events = [event for event in events if event.name == "R1"]
+        self.assertEqual(len(r1_events), 1)
+        self.assertEqual(r1_events[0].rate_mask, RATE_4800 | RATE_7200 | RATE_9600)
+
+    def test_random_light_corruption_still_leaves_some_protocol_events(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+            r1_repetitions=3,
+            r3_repetitions=3,
+        )
+        stream = flatten_startup_trace(trace)
+        impaired = impair_stream_random(stream, flip_probability=0.002, seed=7)
+        events = receiver.ingest_all(impaired)
+        event_names = [event.name for event in events]
+        self.assertIn("S", event_names)
+        self.assertIn("B1", event_names)
 
 
 class NegotiationTests(unittest.TestCase):

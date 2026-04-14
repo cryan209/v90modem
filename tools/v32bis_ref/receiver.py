@@ -83,7 +83,7 @@ class V32bisLogicalReceiver:
                     sequences = self._rate_sequences.setdefault(run_key, [])
                     sequences.append(decoded_bits)
                     if len(sequences) >= 2:
-                        rate_mask = detect_repeated_rate_signal(sequences[:2])
+                        rate_mask = detect_repeated_rate_signal(sequences[-2:])
                         if rate_mask is not None and instance_key not in self._emitted_instances:
                             self._emitted_instances.add(instance_key)
                             events.append(

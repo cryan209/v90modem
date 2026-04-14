@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 
 from .startup import StartupSegment
 
@@ -94,3 +95,37 @@ def impair_stream(
         else:
             impaired.append(observable)
     return impaired
+
+
+def impair_stream_burst(
+    stream: list[ObservableSymbol],
+    *,
+    start: int,
+    length: int,
+    replacement: str = "X",
+) -> list[ObservableSymbol]:
+    """Replace a contiguous burst of symbols with a fixed invalid symbol."""
+
+    if length < 0:
+        raise ValueError("length must be non-negative")
+    replacements = {index: replacement for index in range(start, start + length)}
+    return impair_stream(stream, replacements=replacements)
+
+
+def impair_stream_random(
+    stream: list[ObservableSymbol],
+    *,
+    replacement_choices: tuple[str, ...] = ("X", "Q9"),
+    flip_probability: float,
+    seed: int,
+) -> list[ObservableSymbol]:
+    """Apply deterministic random symbol substitutions across a stream."""
+
+    if not 0.0 <= flip_probability <= 1.0:
+        raise ValueError("flip_probability must be in range 0..1")
+    rng = random.Random(seed)
+    replacements: dict[int, str] = {}
+    for index, _observable in enumerate(stream):
+        if rng.random() < flip_probability:
+            replacements[index] = replacement_choices[rng.randrange(len(replacement_choices))]
+    return impair_stream(stream, replacements=replacements)
