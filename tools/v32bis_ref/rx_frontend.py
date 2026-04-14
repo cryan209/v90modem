@@ -59,6 +59,13 @@ class TimingTrackingResult:
 
 
 @dataclass(frozen=True)
+class TimingLoopResult:
+    final_offset: float
+    metric: float
+    recovered: list[RecoveredSymbol]
+
+
+@dataclass(frozen=True)
 class FrontendTrackingResult:
     final_phase_rad: float
     final_offset: int
@@ -182,6 +189,17 @@ def _offset_lookahead_metric(
         )
         metric += candidate_metric
     return metric
+
+
+def _interpolated_sample(filtered: list[complex], sample_index: float) -> complex:
+    if sample_index < 0.0 or sample_index > len(filtered) - 1:
+        raise ValueError("sample_index out of range")
+    left_index = int(math.floor(sample_index))
+    right_index = min(left_index + 1, len(filtered) - 1)
+    fraction = sample_index - left_index
+    left = filtered[left_index]
+    right = filtered[right_index]
+    return left + (right - left) * fraction
 
 
 def _acquire_timing_offset(
@@ -660,6 +678,62 @@ def recover_symbols_with_tracking(
 
     return FrontendTrackingResult(
         final_phase_rad=phase_estimate,
+        final_offset=phase_offset,
+        metric=symbol_error_metric(recovered),
+        recovered=recovered,
+    )
+
+
+def recover_symbols_with_timing_loop(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+    timing_offset: float = 0.0,
+    carrier_hz: float | None = None,
+    timing_gain: float = 0.01,
+    early_late_spacing: float = 0.5,
+) -> TimingLoopResult:
+    """Recover symbols with a simple early/late timing error detector loop."""
+
+    if not 0.0 <= timing_offset < samples_per_symbol:
+        raise ValueError("timing_offset must be within one symbol period")
+    if timing_gain <= 0.0:
+        raise ValueError("timing_gain must be positive")
+    if early_late_spacing <= 0.0:
+        raise ValueError("early_late_spacing must be positive")
+
+    baseband = passband_to_baseband(passband, carrier_hz=carrier_hz)
+    filtered = matched_filter(baseband, taps)
+
+    phase_offset = timing_offset
+    start = len(taps) - 1
+    recovered: list[RecoveredSymbol] = []
+    for index, transmitted in enumerate(transmitted_symbols):
+        nominal = start + index * samples_per_symbol + phase_offset
+        point = _interpolated_sample(filtered, nominal)
+        early = _interpolated_sample(filtered, nominal - early_late_spacing)
+        late = _interpolated_sample(filtered, nominal + early_late_spacing)
+
+        decided = nearest_symbol_label(point, transmitted.symbol)
+        target = startup_symbol_to_point(transmitted.symbol)
+        early_metric = _symbol_metric(early, target)
+        late_metric = _symbol_metric(late, target)
+        phase_offset += timing_gain * (early_metric - late_metric)
+        phase_offset %= samples_per_symbol
+
+        recovered.append(
+            RecoveredSymbol(
+                point=point,
+                decided_symbol=decided,
+                source_name=transmitted.source_name,
+                source_instance=transmitted.source_instance,
+                expected_symbol=transmitted.symbol,
+            )
+        )
+
+    return TimingLoopResult(
         final_offset=phase_offset,
         metric=symbol_error_metric(recovered),
         recovered=recovered,

@@ -16,6 +16,7 @@ from tools.v32bis_ref.rx_frontend import (
     recover_symbols_ideal,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
+    recover_symbols_with_timing_loop,
     recover_symbols_with_timing_tracking,
     recover_symbols_with_timing_offset,
     recover_symbols_with_tracking,
@@ -49,12 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-carrier", action="store_true")
     parser.add_argument("--track-timing", action="store_true")
     parser.add_argument("--track-both", action="store_true")
+    parser.add_argument("--timing-loop", action="store_true")
     parser.add_argument("--carrier-search-span", type=float, default=10.0)
     parser.add_argument("--carrier-search-step", type=float, default=5.0)
     parser.add_argument("--carrier-phase-gain", type=float, default=0.2)
     parser.add_argument("--timing-offset", type=int, default=0)
     parser.add_argument("--search-timing", action="store_true")
     parser.add_argument("--timing-step", type=int, default=1)
+    parser.add_argument("--timing-gain", type=float, default=0.02)
+    parser.add_argument("--early-late-spacing", type=float, default=0.5)
     parser.add_argument("--limit", type=int, default=20)
     return parser
 
@@ -149,6 +153,19 @@ def main(argv: list[str]) -> int:
         )
         print(f"# best_offset={search.offset} metric={search.metric:.6f}")
         recovered = search.recovered
+    elif args.timing_loop:
+        tracking = recover_symbols_with_timing_loop(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=args.samples_per_symbol,
+            timing_offset=float(args.timing_offset),
+            carrier_hz=args.rx_carrier_hz,
+            timing_gain=args.timing_gain,
+            early_late_spacing=args.early_late_spacing,
+        )
+        print(f"# final_offset={tracking.final_offset:.6f} metric={tracking.metric:.6f}")
+        recovered = tracking.recovered
     elif args.track_timing:
         tracking = recover_symbols_with_timing_tracking(
             passband,

@@ -42,6 +42,7 @@ from tools.v32bis_ref.rx_frontend import (
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
     recover_symbols_ideal,
+    recover_symbols_with_timing_loop,
     recover_symbols_with_timing_tracking,
     recover_symbols_with_timing_offset,
     recover_symbols_with_tracking,
@@ -824,6 +825,34 @@ class RxFrontendTests(unittest.TestCase):
             timing_step=1,
         )
         self.assertLess(tracked.metric, symbol_error_metric(fixed))
+
+    def test_timing_loop_improves_bad_initial_offset_without_search(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        fixed = recover_symbols_with_timing_offset(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            offset=5,
+        )
+        loop = recover_symbols_with_timing_loop(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=5.0,
+            timing_gain=0.02,
+            early_late_spacing=0.5,
+        )
+        self.assertLess(loop.metric, symbol_error_metric(fixed))
+        self.assertTrue(0.0 <= loop.final_offset < 10.0)
 
 
 if __name__ == "__main__":
