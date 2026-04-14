@@ -819,12 +819,14 @@ class RxFrontendTests(unittest.TestCase):
             transmitted_symbols=transmitted,
             taps=baseband.taps,
             samples_per_symbol=10,
-            timing_offset=5,
+            timing_offset=5.0,
             carrier_hz=1810.0,
             phase_gain=0.3,
-            timing_step=1,
+            timing_gain=0.02,
+            early_late_spacing=0.5,
         )
         self.assertLess(tracked.metric, symbol_error_metric(fixed))
+        self.assertTrue(0.0 <= tracked.final_offset < 10.0)
 
     def test_timing_loop_improves_bad_initial_offset_without_search(self) -> None:
         trace = generate_answer_startup_trace(

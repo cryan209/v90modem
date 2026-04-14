@@ -592,88 +592,54 @@ def recover_symbols_with_tracking(
     transmitted_symbols: list[TransmittedSymbol],
     taps: list[float],
     samples_per_symbol: int,
-    timing_offset: int = 0,
+    timing_offset: float = 0.0,
     carrier_hz: float | None = None,
     phase_gain: float = 0.2,
-    timing_step: int = 1,
-    lookahead_symbols: int = 8,
-    acquisition_symbols: int = 32,
+    timing_gain: float = 0.02,
+    early_late_spacing: float = 0.5,
 ) -> FrontendTrackingResult:
-    """Recover symbols with simple joint timing and carrier tracking."""
+    """Recover symbols with simple joint timing-loop and carrier tracking."""
 
-    if timing_step < 1:
-        raise ValueError("timing_step must be positive")
-    if lookahead_symbols < 1:
-        raise ValueError("lookahead_symbols must be positive")
-    if acquisition_symbols < 1:
-        raise ValueError("acquisition_symbols must be positive")
+    if not 0.0 <= timing_offset < samples_per_symbol:
+        raise ValueError("timing_offset must be within one symbol period")
+    if timing_gain <= 0.0:
+        raise ValueError("timing_gain must be positive")
+    if early_late_spacing <= 0.0:
+        raise ValueError("early_late_spacing must be positive")
 
     baseband = passband_to_baseband(passband, carrier_hz=carrier_hz)
     filtered = matched_filter(baseband, taps)
 
-    phase_estimate = 0.0
     start = len(taps) - 1
-    phase_offset = _acquire_timing_offset(
-        filtered,
-        transmitted_symbols[:acquisition_symbols],
-        start_index=start,
-        samples_per_symbol=samples_per_symbol,
-        lookahead_symbols=min(lookahead_symbols, acquisition_symbols),
-    )
+    phase_offset = timing_offset
+    phase_estimate = 0.0
     recovered: list[RecoveredSymbol] = []
     for index, transmitted in enumerate(transmitted_symbols):
-        nominal = start + index * samples_per_symbol
-        best_offset = phase_offset
-        best_corrected = _rotate(filtered[nominal + phase_offset], -phase_estimate)
-        best_decided, _best_target, best_phase_error, _best_symbol_metric = _decide_rotated_symbol(
-            best_corrected,
-            transmitted.symbol,
-        )
-        best_metric = _offset_lookahead_metric(
-            filtered,
-            transmitted_symbols[index:],
-            start_index=nominal,
-            samples_per_symbol=samples_per_symbol,
-            phase_offset=phase_offset,
-            lookahead_symbols=lookahead_symbols,
-            phase_estimate=phase_estimate,
-        )
+        nominal = start + index * samples_per_symbol + phase_offset
+        point = _interpolated_sample(filtered, nominal)
+        early = _interpolated_sample(filtered, nominal - early_late_spacing)
+        late = _interpolated_sample(filtered, nominal + early_late_spacing)
 
-        for delta in range(-timing_step, timing_step + 1):
-            candidate_offset = phase_offset + delta
-            if not 0 <= candidate_offset < samples_per_symbol:
-                continue
-            candidate_corrected = _rotate(filtered[nominal + candidate_offset], -phase_estimate)
-            candidate_decided, _target, candidate_phase_error, _candidate_symbol_metric = _decide_rotated_symbol(
-                candidate_corrected,
-                transmitted.symbol,
-            )
-            candidate_metric = _offset_lookahead_metric(
-                filtered,
-                transmitted_symbols[index:],
-                start_index=nominal,
-                samples_per_symbol=samples_per_symbol,
-                phase_offset=candidate_offset,
-                lookahead_symbols=lookahead_symbols,
-                phase_estimate=phase_estimate,
-            )
-            if candidate_metric < best_metric:
-                best_offset = candidate_offset
-                best_corrected = candidate_corrected
-                best_decided = candidate_decided
-                best_phase_error = candidate_phase_error
-                best_metric = candidate_metric
-
-        phase_offset = best_offset
+        corrected = _rotate(point, -phase_estimate)
+        corrected_early = _rotate(early, -phase_estimate)
+        corrected_late = _rotate(late, -phase_estimate)
+        best_decided = nearest_symbol_label(corrected, transmitted.symbol)
+        target = startup_symbol_to_point(transmitted.symbol)
+        best_phase_error = _phase_error(corrected, target)
+        _best_metric = _symbol_metric(corrected, target)
         recovered.append(
             RecoveredSymbol(
-                point=best_corrected,
+                point=corrected,
                 decided_symbol=best_decided,
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
             )
         )
+        early_metric = _symbol_metric(corrected_early, target)
+        late_metric = _symbol_metric(corrected_late, target)
+        phase_offset += timing_gain * (early_metric - late_metric)
+        phase_offset %= samples_per_symbol
         phase_estimate += phase_gain * best_phase_error
 
     return FrontendTrackingResult(

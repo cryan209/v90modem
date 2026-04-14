@@ -101,10 +101,11 @@ def main(argv: list[str]) -> int:
             transmitted_symbols=transmitted,
             taps=baseband.taps,
             samples_per_symbol=args.samples_per_symbol,
-            timing_offset=args.timing_offset,
+            timing_offset=float(args.timing_offset),
             carrier_hz=args.rx_carrier_hz,
             phase_gain=args.carrier_phase_gain,
-            timing_step=args.timing_step,
+            timing_gain=args.timing_gain,
+            early_late_spacing=args.early_late_spacing,
         )
         print(
             f"# final_phase_rad={tracking.final_phase_rad:.6f} "
