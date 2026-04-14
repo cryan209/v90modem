@@ -37,24 +37,18 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                 )
             continue
 
-        if segment.kind in {"rate_signal", "sequence_e"} and segment.symbols:
-            word_len = len(segment.symbols) if segment.kind == "sequence_e" else len(segment.symbols) // (segment.repetitions or 1)
-            repetitions = 1 if segment.kind == "sequence_e" else (segment.repetitions or 1)
-            word_bits = tuple(segment.bits or [])
-            for repetition in range(repetitions):
-                start = repetition * word_len
-                end = start + word_len
-                for symbol in segment.symbols[start:end]:
-                    stream.append(
-                        ObservableSymbol(
-                            symbol=symbol,
-                            source_name=segment.name,
-                            source_kind=segment.kind,
-                            source_instance=source_instance,
-                            tx_calling_party=segment.tx_calling_party,
-                            selected_rate=segment.bit_rate,
-                        )
+        if segment.symbols and segment.kind in {"rate_signal", "sequence_e"}:
+            for symbol in segment.symbols:
+                stream.append(
+                    ObservableSymbol(
+                        symbol=symbol,
+                        source_name=segment.name,
+                        source_kind="q_run",
+                        source_instance=source_instance,
+                        tx_calling_party=segment.tx_calling_party,
+                        selected_rate=segment.bit_rate,
                     )
+                )
             continue
 
         if segment.kind == "scrambled_ones":

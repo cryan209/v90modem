@@ -151,6 +151,18 @@ def decode_rate_sequence_symbols(
     return bits
 
 
+def is_rate_signal_bits(bits: list[int]) -> bool:
+    """Return True if the decoded 16-bit word matches Table 5 sync bits."""
+
+    return len(bits) == 16 and all(bits[index] == value for index, value in SYNC_BITS.items())
+
+
+def is_e_sequence_bits(bits: list[int]) -> bool:
+    """Return True if the decoded 16-bit word matches Table 6 sync bits."""
+
+    return len(bits) == 16 and all(bits[index] == value for index, value in E_PREFIX_BITS.items())
+
+
 def encode_rate_sequence_bits(
     bits: list[int],
     *,
