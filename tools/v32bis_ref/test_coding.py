@@ -40,6 +40,9 @@ from tools.v32bis_ref.rx_frontend import (
     nearest_symbol_label,
     passband_to_baseband,
     recover_symbols_ideal,
+    recover_symbols_with_timing_offset,
+    search_symbol_timing,
+    symbol_error_metric,
 )
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
 from tools.v32bis_ref.stream import (
@@ -626,6 +629,49 @@ class RxFrontendTests(unittest.TestCase):
         )
         self.assertEqual(len(recovered), len(transmitted))
         self.assertEqual([symbol.decided_symbol for symbol in recovered[:16]], [symbol.symbol for symbol in transmitted[:16]])
+
+    def test_timing_offset_changes_error_metric(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered_0 = recover_symbols_with_timing_offset(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            offset=0,
+        )
+        recovered_5 = recover_symbols_with_timing_offset(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            offset=5,
+        )
+        self.assertLess(symbol_error_metric(recovered_0), symbol_error_metric(recovered_5))
+
+    def test_timing_search_finds_best_offset(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        search = search_symbol_timing(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        self.assertEqual(search.offset, 0)
+        self.assertEqual(len(search.recovered), len(transmitted))
 
 
 if __name__ == "__main__":

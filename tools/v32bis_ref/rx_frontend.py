@@ -22,6 +22,13 @@ class RecoveredSymbol:
     expected_symbol: str
 
 
+@dataclass(frozen=True)
+class TimingSearchResult:
+    offset: int
+    metric: float
+    recovered: list[RecoveredSymbol]
+
+
 def passband_to_baseband(
     waveform: PassbandWaveform,
     *,
@@ -56,10 +63,14 @@ def ideal_symbol_samples(
     symbol_count: int,
     samples_per_symbol: int,
     filter_len: int,
+    offset: int = 0,
 ) -> list[complex]:
     """Sample matched-filter output at ideal symbol instants."""
 
-    start = filter_len - 1
+    if not 0 <= offset < samples_per_symbol:
+        raise ValueError("offset must be within one symbol period")
+
+    start = filter_len - 1 + offset
     recovered: list[complex] = []
     for index in range(symbol_count):
         recovered.append(filtered_samples[start + index * samples_per_symbol])
@@ -122,3 +133,81 @@ def recover_symbols_ideal(
             )
         )
     return recovered
+
+
+def symbol_error_metric(recovered: list[RecoveredSymbol]) -> float:
+    """Compute squared-distance metric against expected startup points."""
+
+    metric = 0.0
+    for symbol in recovered:
+        target = startup_symbol_to_point(symbol.expected_symbol)
+        metric += (symbol.point.real - target.real) ** 2 + (symbol.point.imag - target.imag) ** 2
+    return metric
+
+
+def recover_symbols_with_timing_offset(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+    offset: int,
+) -> list[RecoveredSymbol]:
+    """Recover symbols using a specified timing offset within the symbol period."""
+
+    baseband = passband_to_baseband(passband)
+    filtered = matched_filter(baseband, taps)
+    sampled = ideal_symbol_samples(
+        filtered,
+        symbol_count=len(transmitted_symbols),
+        samples_per_symbol=samples_per_symbol,
+        filter_len=len(taps),
+        offset=offset,
+    )
+
+    recovered: list[RecoveredSymbol] = []
+    for point, transmitted in zip(sampled, transmitted_symbols):
+        decided = nearest_symbol_label(point, transmitted.symbol)
+        recovered.append(
+            RecoveredSymbol(
+                point=point,
+                decided_symbol=decided,
+                source_name=transmitted.source_name,
+                source_instance=transmitted.source_instance,
+                expected_symbol=transmitted.symbol,
+            )
+        )
+    return recovered
+
+
+def search_symbol_timing(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+) -> TimingSearchResult:
+    """Search over symbol-phase offsets and return the best one."""
+
+    best_offset = 0
+    best_metric = float("inf")
+    best_recovered: list[RecoveredSymbol] = []
+    for offset in range(samples_per_symbol):
+        recovered = recover_symbols_with_timing_offset(
+            passband,
+            transmitted_symbols=transmitted_symbols,
+            taps=taps,
+            samples_per_symbol=samples_per_symbol,
+            offset=offset,
+        )
+        metric = symbol_error_metric(recovered)
+        if metric < best_metric:
+            best_metric = metric
+            best_offset = offset
+            best_recovered = recovered
+
+    return TimingSearchResult(
+        offset=best_offset,
+        metric=best_metric,
+        recovered=best_recovered,
+    )
