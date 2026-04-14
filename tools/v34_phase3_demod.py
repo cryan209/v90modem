@@ -2244,22 +2244,33 @@ def v34_diff_decode(Z_seq: np.ndarray, Z_prev: int = 0) -> np.ndarray:
 class V34ViterbiDecoder:
     """Soft-decision Viterbi decoder for the V.34 trellis (§9.6.3.2).
 
-    The trellis is driven once per 4D interval m.  At each step the decoder
-    receives the pair of channel output symbols y(2m), y(2m+1) and computes
-    the subset labels s(2m), s(2m+1) via ``v34_subset_label``.  Those labels
-    are combined via Table 13 into [Y4,Y3,Y2,Y1](m), which drives the
-    convolutional decoder.  The output is the estimated Y0(m) sequence.
+    Branch metric derivation (resolving the loop dependency)
+    ---------------------------------------------------------
+    Table 13 maps (s_even, s_odd) 3-bit subset labels → [Y4,Y3,Y2,Y1] 4-bit value.
+    For the 16-state encoder the trellis input is k = Y2·2 + Y1 (bits 1..0).
 
-    The branch metric for state transition s→s' under input (Y2,Y1) is the
-    squared Euclidean distance from the received symbol to the nearest point
-    in the 2D signal subset consistent with that transition.
+    Y2_out = Y1_e = bit-0 of s_even (separable).
+    Y1_out is a JOINT function of both s_even and s_odd (see actual Table 13 entries).
+    The formula Y1_out = Y2_o is only correct for s_e ∈ {000, 100}; it is wrong
+    for the other 6 row values, leading to ~50% BM errors.
 
-    Parameters
-    ----------
-    states : {16, 32, 64}  — encoder variant (16-state is fully wired).
-    L      : constellation size (from Table 10).
-    traceback : Viterbi traceback depth in 4D symbols (default = 5× state-
-                memory; 15 is typical for 16-state).
+    Correct branch metric for hypothesis k = Y2_h*2 + Y1_h:
+      1. For each symbol: compute d_e[s] = min |y(2m) − p|² over pts with label s
+                                  d_o[s] = min |y(2m+1) − p|² over pts with label s
+      2. BM(k) = min over all (s_e, s_o) s.t. Table13[s_e,s_o] gives Y2=Y2_h, Y1=Y1_h
+                 of (d_e[s_e] + d_o[s_o])
+
+    This depends only on constellation labels — NOT on Z(m), I1, or U0(m).
+    Those are recovered *after* the Viterbi outputs Y0(m) → U0(m) = Y0⊕C0⊕V0.
+
+    Post-Viterbi symbol recovery (v34_recover_Z_I1_Q):
+      1. Find Z(m): try all 4 rotations of y(2m); pick the one giving nearest
+         quarter-constellation match.
+      2. I(m) = (Z(m) − Z(m−1)) mod 4  →  (I2, I3) data bits.
+      3. De-rotate y(2m) by Z(m) → Q(2m) (nearest quarter label).
+      4. Find I1: try I1∈{0,1}; de-rotate y(2m+1) by (Z+2I1+U0)%4 → pick smaller
+         distance to nearest quarter point.
+      5. Q(2m+1) from the winning rotation.
     """
 
     def __init__(self, states: int = 16, L: int = 16,
@@ -2268,98 +2279,211 @@ class V34ViterbiDecoder:
         self.L         = L
         self.traceback = traceback
         if states == 16:
-            self._ns  = _CONV16_NS    # shape (16, 4)
-            self._out = _CONV16_OUT   # shape (16, 4)
+            self._ns  = _CONV16_NS    # (16,4) next-state table
+            self._out = _CONV16_OUT   # (16,4) output Y0 table
         else:
             raise NotImplementedError(f"{states}-state Viterbi not yet wired")
-        # Pre-compute per-state, per-subset bit lookup
-        # subset_of_pt[k] = 3-bit subset label for constellation point k
-        pts = v34_constellation(L)
-        self._subset  = v34_subset_labels_array(pts)   # (L,) uint8
-        # Build reverse map: subset → list of point indices
-        self._sub_pts: dict[int, np.ndarray] = {}
-        for sub in range(8):
-            mask = self._subset == sub
-            self._sub_pts[sub] = np.where(mask)[0].astype(np.int32)
+
+        # Group constellation points by their 3-bit subset label (0..7).
+        pts    = v34_constellation(L)
+        labels = v34_subset_labels_array(pts)        # (L,) uint8
+        self._pts_by_label = [pts[(labels & 7) == s] for s in range(8)]
+
+        # Precompute valid (s_e, s_o) pairs for each k=(Y2_h*2 + Y1_h) hypothesis.
+        # Table 13 maps (s_even, s_odd) → [Y4,Y3,Y2,Y1]; we need bits 1 and 0.
+        self._valid_pairs: list[list[tuple[int, int]]] = []
+        for k in range(4):
+            Y2_h = (k >> 1) & 1
+            Y1_h = k & 1
+            pairs = [(s_e, s_o)
+                     for s_e in range(8) for s_o in range(8)
+                     if (int(_V34_TABLE13[s_e, s_o]) >> 1) & 1 == Y2_h
+                     and int(_V34_TABLE13[s_e, s_o]) & 1 == Y1_h]
+            self._valid_pairs.append(pairs)
         self.reset()
 
     def reset(self) -> None:
-        INF = 1e30
-        self._pm   = np.full(self.states, INF)     # path metrics
-        self._pm[0] = 0.0                           # start from state 0
-        self._tb   : list[np.ndarray] = []          # traceback decisions
-
-    def _branch_metric(self, y_norm: complex, subset: int) -> float:
-        """Min squared distance from y_norm to any point in ``subset``."""
-        idxs = self._sub_pts.get(subset, np.array([], dtype=np.int32))
-        if len(idxs) == 0:
-            return 1e30
-        pts = v34_constellation(self.L)[idxs]
-        return float(np.min(np.abs(y_norm - pts) ** 2))
+        self._pm  = np.full(self.states, 1e30)
+        self._pm[0] = 0.0
+        # Traceback stores (predecessor_state, input_k) for each new state
+        self._tb_pred: list[np.ndarray] = []   # predecessor state, shape (S,)
+        self._tb_k   : list[np.ndarray] = []   # input k,           shape (S,)
 
     def step(self, y_2m: complex, y_2m1: complex,
              scale: float = 1.0) -> int | None:
-        """Process one 4D interval; return decoded Y0(m) or None if buffering.
+        """Process one 4D interval; return decoded Y0(m−traceback) or None.
 
-        ``y_2m`` and ``y_2m1`` are the two channel output symbols y(2m) and
-        y(2m+1) (output of precoder inverse, before de-MAP).  ``scale`` is the
-        constellation normalisation factor (RMS of y / RMS of reference points).
-
-        Returns the decoded Y0(m) for the symbol ``traceback`` steps ago, or
-        None while the traceback buffer is filling.
+        ``scale`` converts received y(n) to the same units as the stored
+        constellation points (RMS normalisation factor from precoder output).
+        Returns None while the traceback buffer is filling (first ``traceback``
+        calls), then returns one Y0 per call thereafter.
         """
-        # Compute subset labels for this 4D pair
-        I0 = int(round(y_2m.real  / scale))
-        Q0 = int(round(y_2m.imag  / scale))
-        I1 = int(round(y_2m1.real / scale))
-        Q1 = int(round(y_2m1.imag / scale))
-        s0 = v34_subset_label(I0, Q0)
-        s1 = v34_subset_label(I1, Q1)
-        Y_bits = v34_symbol_to_bits(s0, s1)   # [Y4,Y3,Y2,Y1] as 4-bit int
+        y0 = y_2m  / scale
+        y1 = y_2m1 / scale
+
+        # Per-label min squared distance for each received symbol.
+        d_e = [float(np.min(np.abs(y0 - p) ** 2)) if len(p) else 1e30
+               for p in self._pts_by_label]
+        d_o = [float(np.min(np.abs(y1 - p) ** 2)) if len(p) else 1e30
+               for p in self._pts_by_label]
+
+        # Branch metric for each hypothesis k = Y2_h*2 + Y1_h.
+        # Use Table 13 to enumerate all 16 (s_e, s_o) pairs consistent with k,
+        # and take the minimum sum of per-label distances (joint metric).
+        bm = [min(d_e[s_e] + d_o[s_o] for s_e, s_o in self._valid_pairs[k])
+              for k in range(4)]
 
         new_pm   = np.full(self.states, 1e30)
-        decision = np.zeros(self.states, dtype=np.uint8)
+        pred     = np.zeros(self.states, dtype=np.uint8)
+        best_k   = np.zeros(self.states, dtype=np.uint8)
 
         for s in range(self.states):
             if self._pm[s] >= 1e29:
                 continue
-            for k in range(4):        # k = Y2*2 + Y1
-                Y2 = (k >> 1) & 1
-                Y1 = k & 1
-                # Branch metric: distance of received symbols to nearest
-                # point consistent with the (s0,s1) pair for this transition.
-                # For 16-state encoder the subset is determined by Y0 + state.
-                Y0_hyp   = int(self._out[s, k])
-                ns       = int(self._ns[s, k])
-                # Soft branch metric: Euclidean distance to nearest point
-                # in the subset that agrees with this Y0 hypothesis.
-                # The transmitted subset index for y(2m) depends on Z(m)
-                # and U0(m); without those we use the raw subset label.
-                metric = (self._branch_metric(y_2m,  s0) +
-                          self._branch_metric(y_2m1, s1))
-                candidate = self._pm[s] + metric
+            for k in range(4):
+                ns        = int(self._ns[s, k])
+                candidate = self._pm[s] + bm[k]
                 if candidate < new_pm[ns]:
-                    new_pm[ns]   = candidate
-                    decision[ns] = s            # surviving predecessor
+                    new_pm[ns]  = candidate
+                    pred[ns]    = s
+                    best_k[ns]  = k
 
         self._pm = new_pm
-        self._tb.append(decision)
+        self._tb_pred.append(pred)
+        self._tb_k.append(best_k)
 
-        if len(self._tb) < self.traceback:
+        if len(self._tb_pred) < self.traceback:
             return None   # buffer filling
 
-        # Traceback: find best final state
-        best = int(np.argmin(self._pm))
-        st   = best
-        for dec in reversed(self._tb[-self.traceback:]):
-            st = int(dec[st])
-        # Retrieve the Y0 output for the oldest surviving path entry
-        old_dec = self._tb[-self.traceback]
-        old_k   = (old_dec[st]) if self.traceback > 1 else 0
-        Y0_out  = int(self._out[st, 0])   # approximate; full traceback needed
-        if len(self._tb) > self.traceback * 2:
-            self._tb = self._tb[-self.traceback * 2:]
+        # --- Traceback ---
+        # Walk from the newest buffer entry (index -1) back `traceback-1` steps.
+        # The oldest entry in the traceback window is at index -(traceback).
+        n = len(self._tb_pred)
+        best_end = int(np.argmin(self._pm))
+        st = best_end
+        for i in range(n - 1, n - self.traceback, -1):
+            st = int(self._tb_pred[i][st])
+        # st is now the destination state at the oldest buffer entry.
+        # Y0 for that step = bit3(predecessor) = bit0(destination), because
+        # d_new[0] = Y0 = d[3], so bit-0 of the new state encodes the output.
+        k_oldest = int(self._tb_k[n - self.traceback][st])
+        Y0_out   = st & 1
+
+        # Remove the oldest entry (it has been decoded and output).
+        self._tb_pred.pop(0)
+        self._tb_k.pop(0)
+
         return Y0_out
+
+    def decode_sequence(self, y_seq: np.ndarray,
+                        c_seq: np.ndarray,
+                        V0_seq: np.ndarray,
+                        scale: float = 1.0
+                        ) -> tuple[np.ndarray, np.ndarray]:
+        """Decode a sequence of precoder-inverse outputs.
+
+        Parameters
+        ----------
+        y_seq  : complex array of length 2N — channel output symbols y(0)..y(2N-1)
+        c_seq  : complex array of length 2N — precoder quantised output c(n)
+        V0_seq : int array of length N — V0(m) bit-inversion pattern per 4D step
+        scale  : normalisation scale factor for y(n) vs reference constellation
+
+        Returns
+        -------
+        Y0_seq : uint8 array (N,) — decoded trellis parity bit per 4D step
+        U0_seq : uint8 array (N,) — = Y0 ⊕ C0 ⊕ V0 per 4D step
+        """
+        assert len(y_seq) % 2 == 0
+        N = len(y_seq) // 2
+        Y0_buf: list[int] = []
+        U0_buf: list[int] = []
+        for m in range(N):
+            C0 = v34_modulo_encode(c_seq[2 * m], c_seq[2 * m + 1])
+            V0 = int(V0_seq[m]) & 1
+            y0 = complex(y_seq[2 * m    ])
+            y1 = complex(y_seq[2 * m + 1])
+            Y0 = self.step(y0, y1, scale=scale)
+            if Y0 is not None:
+                U0 = int(Y0) ^ C0 ^ V0
+                Y0_buf.append(int(Y0))
+                U0_buf.append(U0)
+        # Flush traceback at end-of-block
+        for _ in range(self.traceback):
+            Y0 = self.step(0j, 0j, scale=scale)
+            if Y0 is not None:
+                Y0_buf.append(int(Y0))
+                U0_buf.append(0)
+        return np.array(Y0_buf, dtype=np.uint8), np.array(U0_buf, dtype=np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Post-Viterbi symbol recovery
+# ---------------------------------------------------------------------------
+
+def v34_recover_Z_I1_Q(y_2m: complex, y_2m1: complex,
+                       U0: int, Z_prev: int, L: int
+                       ) -> tuple[int, int, int, int, int]:
+    """Recover Z(m), I(m), I1, Q(2m), Q(2m+1) from a decoded 4D symbol pair.
+
+    Called after the Viterbi has produced U0(m) for this 4D interval.
+
+    Algorithm (§9.6.1 inverse):
+      1. Find Z(m): for each candidate z∈{0,1,2,3}, de-rotate y(2m) CCW by z×90°
+         and find nearest quarter-constellation point.  Pick z minimising distance.
+      2. I(m) = (Z(m) − Z_prev) mod 4  →  I2 = I(m)&1,  I3 = I(m)>>1.
+      3. Q(2m) = label of nearest quarter point after de-rotation by Z(m).
+      4. Find I1: for each I1∈{0,1}, de-rotate y(2m+1) CCW by (Z+2I1+U0)%4×90°
+         and find nearest quarter point.  Pick I1 minimising distance.
+      5. Q(2m+1) = that nearest label.
+
+    Returns (Z_m, I_m, I1, Q_even, Q_odd) where:
+      Z_m    = Z(m) ∈ {0..3}
+      I_m    = I(m) ∈ {0..3}  (encodes I2, I3 data bits)
+      I1     = I1_{i,j} ∈ {0,1}
+      Q_even = Q(2m) ∈ {0..L/4−1}
+      Q_odd  = Q(2m+1) ∈ {0..L/4−1}
+    """
+    quarter = _v34_quarter_points()[:L // 4]   # reference quarter pts
+
+    # --- Step 1: determine Z(m) from even symbol ---
+    # CCW rotation by k×90° = multiply by j^k
+    best_z_dist = 1e30
+    best_Z = 0
+    best_Q_even = 0
+    for z in range(4):
+        rot_inv = (1, 1j, -1, -1j)[z]
+        v_cand  = y_2m * rot_inv
+        dists   = np.abs(v_cand - quarter) ** 2
+        idx     = int(np.argmin(dists))
+        d       = float(dists[idx])
+        if d < best_z_dist:
+            best_z_dist = d
+            best_Z      = z
+            best_Q_even = idx
+
+    Z_m = best_Z
+
+    # --- Step 2: I(m) ---
+    I_m = (Z_m - Z_prev) % 4
+
+    # --- Steps 4–5: determine I1 and Q(2m+1) from odd symbol ---
+    best_i1_dist = 1e30
+    best_I1 = 0
+    best_Q_odd = 0
+    for I1_hyp in (0, 1):
+        k_odd   = (Z_m + 2 * I1_hyp + U0) & 3
+        rot_inv = (1, 1j, -1, -1j)[k_odd]
+        v_cand  = y_2m1 * rot_inv
+        dists   = np.abs(v_cand - quarter) ** 2
+        idx     = int(np.argmin(dists))
+        d       = float(dists[idx])
+        if d < best_i1_dist:
+            best_i1_dist = d
+            best_I1      = I1_hyp
+            best_Q_odd   = idx
+
+    return Z_m, I_m, best_I1, best_Q_even, best_Q_odd
 
 
 def demod_quality_metrics(symbols: np.ndarray,
