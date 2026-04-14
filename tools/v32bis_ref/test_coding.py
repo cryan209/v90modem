@@ -47,6 +47,7 @@ from tools.v32bis_ref.stream import (
 )
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
+from tools.v32bis_ref.tx import startup_symbol_to_point, startup_trace_to_complex_symbols
 from tools.v32bis_ref.training import (
     STATE_A,
     STATE_B,
@@ -516,6 +517,29 @@ class StartupSimulationTests(unittest.TestCase):
         self.assertIsNone(result.selected_rate)
         self.assertIsNone(result.caller_e_rate)
         self.assertIsNone(result.answerer_e_rate)
+
+
+class TxSymbolTests(unittest.TestCase):
+    def test_startup_symbol_to_point_for_sync_states(self) -> None:
+        self.assertEqual(startup_symbol_to_point("A"), complex(-6.0, -2.0))
+        self.assertEqual(startup_symbol_to_point("B"), complex(-2.0, 6.0))
+        self.assertEqual(startup_symbol_to_point("C"), complex(6.0, 2.0))
+        self.assertEqual(startup_symbol_to_point("D"), complex(2.0, -6.0))
+
+    def test_startup_symbol_to_point_for_q_state(self) -> None:
+        self.assertEqual(startup_symbol_to_point("Q3"), complex(6.0, 2.0))
+
+    def test_startup_trace_maps_to_complex_symbols(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        self.assertGreater(len(transmitted), 0)
+        self.assertEqual(transmitted[0].source_name, "conditioning")
+        self.assertEqual(transmitted[0].symbol, "A")
+        self.assertEqual(transmitted[0].point, complex(-6.0, -2.0))
 
 
 if __name__ == "__main__":
