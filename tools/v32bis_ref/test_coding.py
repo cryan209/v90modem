@@ -36,6 +36,11 @@ from tools.v32bis_ref.negotiation import (
     validate_rate_signal_bits,
 )
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
+from tools.v32bis_ref.rx_frontend import (
+    nearest_symbol_label,
+    passband_to_baseband,
+    recover_symbols_ideal,
+)
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
 from tools.v32bis_ref.stream import (
     flatten_startup_trace,
@@ -584,6 +589,43 @@ class TxWaveformTests(unittest.TestCase):
         self.assertEqual(passband.sample_rate, 24000)
         self.assertEqual(passband.carrier_hz, 1800.0)
         self.assertTrue(any(abs(sample) > 0.0 for sample in passband.samples))
+
+
+class RxFrontendTests(unittest.TestCase):
+    def test_nearest_symbol_label_for_clean_sync_point(self) -> None:
+        self.assertEqual(nearest_symbol_label(complex(-6.0, -2.0), "A"), "A")
+        self.assertEqual(nearest_symbol_label(complex(6.0, 2.0), "Q3"), "Q3")
+
+    def test_passband_to_baseband_returns_complex_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        remixed = passband_to_baseband(passband)
+        self.assertEqual(len(remixed), len(passband.samples))
+        self.assertTrue(any(sample != 0j for sample in remixed))
+
+    def test_clean_roundtrip_recovers_startup_symbols(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:2])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered = recover_symbols_ideal(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        self.assertEqual(len(recovered), len(transmitted))
+        self.assertEqual([symbol.decided_symbol for symbol in recovered[:16]], [symbol.symbol for symbol in transmitted[:16]])
 
 
 if __name__ == "__main__":

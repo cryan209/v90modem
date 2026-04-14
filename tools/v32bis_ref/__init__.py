@@ -34,6 +34,14 @@ from .negotiation import (
     validate_rate_signal_bits,
 )
 from .receiver import DetectedEvent, ReceiverStats, V32bisLogicalReceiver
+from .rx_frontend import (
+    RecoveredSymbol,
+    ideal_symbol_samples,
+    matched_filter,
+    nearest_symbol_label,
+    passband_to_baseband,
+    recover_symbols_ideal,
+)
 from .stream import (
     ObservableSymbol,
     flatten_startup_trace,
@@ -89,6 +97,12 @@ __all__ = [
     "DetectedEvent",
     "ReceiverStats",
     "V32bisLogicalReceiver",
+    "RecoveredSymbol",
+    "passband_to_baseband",
+    "matched_filter",
+    "ideal_symbol_samples",
+    "nearest_symbol_label",
+    "recover_symbols_ideal",
     "ObservableSymbol",
     "flatten_startup_trace",
     "impair_stream",
