@@ -29,6 +29,13 @@ class TimingSearchResult:
     recovered: list[RecoveredSymbol]
 
 
+@dataclass(frozen=True)
+class CarrierSearchResult:
+    carrier_hz: float
+    metric: float
+    recovered: list[RecoveredSymbol]
+
+
 def passband_to_baseband(
     waveform: PassbandWaveform,
     *,
@@ -180,6 +187,42 @@ def recover_symbols_with_timing_offset(
     return recovered
 
 
+def recover_symbols_with_frontend(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+    timing_offset: int = 0,
+    carrier_hz: float | None = None,
+) -> list[RecoveredSymbol]:
+    """Recover symbols using specified timing and carrier choices."""
+
+    baseband = passband_to_baseband(passband, carrier_hz=carrier_hz)
+    filtered = matched_filter(baseband, taps)
+    sampled = ideal_symbol_samples(
+        filtered,
+        symbol_count=len(transmitted_symbols),
+        samples_per_symbol=samples_per_symbol,
+        filter_len=len(taps),
+        offset=timing_offset,
+    )
+
+    recovered: list[RecoveredSymbol] = []
+    for point, transmitted in zip(sampled, transmitted_symbols):
+        decided = nearest_symbol_label(point, transmitted.symbol)
+        recovered.append(
+            RecoveredSymbol(
+                point=point,
+                decided_symbol=decided,
+                source_name=transmitted.source_name,
+                source_instance=transmitted.source_instance,
+                expected_symbol=transmitted.symbol,
+            )
+        )
+    return recovered
+
+
 def search_symbol_timing(
     passband: PassbandWaveform,
     *,
@@ -208,6 +251,45 @@ def search_symbol_timing(
 
     return TimingSearchResult(
         offset=best_offset,
+        metric=best_metric,
+        recovered=best_recovered,
+    )
+
+
+def search_carrier_frequency(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+    timing_offset: int = 0,
+    carrier_candidates_hz: list[float],
+) -> CarrierSearchResult:
+    """Search over RX carrier frequencies and return the best one."""
+
+    if not carrier_candidates_hz:
+        raise ValueError("carrier_candidates_hz must not be empty")
+
+    best_carrier = carrier_candidates_hz[0]
+    best_metric = float("inf")
+    best_recovered: list[RecoveredSymbol] = []
+    for carrier_hz in carrier_candidates_hz:
+        recovered = recover_symbols_with_frontend(
+            passband,
+            transmitted_symbols=transmitted_symbols,
+            taps=taps,
+            samples_per_symbol=samples_per_symbol,
+            timing_offset=timing_offset,
+            carrier_hz=carrier_hz,
+        )
+        metric = symbol_error_metric(recovered)
+        if metric < best_metric:
+            best_metric = metric
+            best_carrier = carrier_hz
+            best_recovered = recovered
+
+    return CarrierSearchResult(
+        carrier_hz=best_carrier,
         metric=best_metric,
         recovered=best_recovered,
     )

@@ -35,14 +35,17 @@ from .negotiation import (
 )
 from .receiver import DetectedEvent, ReceiverStats, V32bisLogicalReceiver
 from .rx_frontend import (
+    CarrierSearchResult,
     RecoveredSymbol,
     TimingSearchResult,
     ideal_symbol_samples,
     matched_filter,
     nearest_symbol_label,
     passband_to_baseband,
+    recover_symbols_with_frontend,
     recover_symbols_ideal,
     recover_symbols_with_timing_offset,
+    search_carrier_frequency,
     search_symbol_timing,
     symbol_error_metric,
 )
@@ -103,12 +106,15 @@ __all__ = [
     "V32bisLogicalReceiver",
     "RecoveredSymbol",
     "TimingSearchResult",
+    "CarrierSearchResult",
     "passband_to_baseband",
     "matched_filter",
     "ideal_symbol_samples",
     "nearest_symbol_label",
+    "recover_symbols_with_frontend",
     "recover_symbols_ideal",
     "recover_symbols_with_timing_offset",
+    "search_carrier_frequency",
     "search_symbol_timing",
     "symbol_error_metric",
     "ObservableSymbol",

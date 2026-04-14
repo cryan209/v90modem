@@ -39,8 +39,10 @@ from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
     nearest_symbol_label,
     passband_to_baseband,
+    recover_symbols_with_frontend,
     recover_symbols_ideal,
     recover_symbols_with_timing_offset,
+    search_carrier_frequency,
     search_symbol_timing,
     symbol_error_metric,
 )
@@ -671,6 +673,50 @@ class RxFrontendTests(unittest.TestCase):
             samples_per_symbol=10,
         )
         self.assertEqual(search.offset, 0)
+        self.assertEqual(len(search.recovered), len(transmitted))
+
+    def test_carrier_mismatch_changes_error_metric(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered_1800 = recover_symbols_with_frontend(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_hz=1800.0,
+        )
+        recovered_1810 = recover_symbols_with_frontend(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_hz=1810.0,
+        )
+        self.assertLess(symbol_error_metric(recovered_1800), symbol_error_metric(recovered_1810))
+
+    def test_carrier_search_finds_best_frequency(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        search = search_carrier_frequency(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_candidates_hz=[1790.0, 1800.0, 1810.0],
+        )
+        self.assertEqual(search.carrier_hz, 1800.0)
         self.assertEqual(len(search.recovered), len(transmitted))
 
 
