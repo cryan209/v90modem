@@ -39,6 +39,8 @@ from .stream import (
     flatten_startup_trace,
     impair_stream,
     impair_stream_burst,
+    impair_stream_insert,
+    impair_stream_q_neighbor,
     impair_stream_random,
 )
 from .startup import generate_answer_startup_trace, generate_call_startup_trace
@@ -87,6 +89,8 @@ __all__ = [
     "flatten_startup_trace",
     "impair_stream",
     "impair_stream_burst",
+    "impair_stream_insert",
+    "impair_stream_q_neighbor",
     "impair_stream_random",
     "Scrambler",
     "Descrambler",

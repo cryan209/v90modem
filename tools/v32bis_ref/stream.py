@@ -129,3 +129,59 @@ def impair_stream_random(
         if rng.random() < flip_probability:
             replacements[index] = replacement_choices[rng.randrange(len(replacement_choices))]
     return impair_stream(stream, replacements=replacements)
+
+
+def impair_stream_q_neighbor(
+    stream: list[ObservableSymbol],
+    *,
+    every_nth_q: int,
+) -> list[ObservableSymbol]:
+    """Confuse every Nth observed Q-state with a nearby Q-state.
+
+    This is a crude symbol-decision model: `Q0->Q1`, `Q1->Q2`, `Q2->Q3`,
+    `Q3->Q2`.
+    """
+
+    if every_nth_q <= 0:
+        raise ValueError("every_nth_q must be positive")
+
+    replacements: dict[int, str] = {}
+    q_seen = 0
+    neighbor_map = {
+        "Q0": "Q1",
+        "Q1": "Q2",
+        "Q2": "Q3",
+        "Q3": "Q2",
+    }
+
+    for index, observable in enumerate(stream):
+        if observable.symbol.startswith("Q"):
+            q_seen += 1
+            if q_seen % every_nth_q == 0 and observable.symbol in neighbor_map:
+                replacements[index] = neighbor_map[observable.symbol]
+
+    return impair_stream(stream, replacements=replacements)
+
+
+def impair_stream_insert(
+    stream: list[ObservableSymbol],
+    *,
+    index: int,
+    symbol: str,
+) -> list[ObservableSymbol]:
+    """Insert one observable symbol into the stream at the given index."""
+
+    if not 0 <= index <= len(stream):
+        raise ValueError("index out of range")
+    if not stream:
+        raise ValueError("cannot insert into an empty stream")
+
+    template = stream[min(index, len(stream) - 1)]
+    inserted = ObservableSymbol(
+        symbol=symbol,
+        source_name=template.source_name,
+        source_instance=template.source_instance,
+        tx_calling_party=template.tx_calling_party,
+        selected_rate=template.selected_rate,
+    )
+    return stream[:index] + [inserted] + stream[index:]

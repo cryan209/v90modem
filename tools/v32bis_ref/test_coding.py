@@ -41,6 +41,8 @@ from tools.v32bis_ref.stream import (
     flatten_startup_trace,
     impair_stream,
     impair_stream_burst,
+    impair_stream_insert,
+    impair_stream_q_neighbor,
     impair_stream_random,
 )
 from tools.v32bis_ref.simulator import simulate_startup
@@ -377,6 +379,48 @@ class ReceiverTests(unittest.TestCase):
         event_names = [event.name for event in events]
         self.assertIn("S", event_names)
         self.assertIn("B1", event_names)
+
+    def test_neighbor_q_confusions_can_preserve_some_protocol(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+            r1_repetitions=3,
+            r3_repetitions=3,
+        )
+        stream = flatten_startup_trace(trace)
+        impaired = impair_stream_q_neighbor(stream, every_nth_q=17)
+        events = receiver.ingest_all(impaired)
+        event_names = [event.name for event in events]
+        self.assertIn("S", event_names)
+        self.assertIn("B1", event_names)
+
+    def test_q_insertion_can_break_word_alignment_for_r1(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        stream = flatten_startup_trace(trace)
+        r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
+        impaired = impair_stream_insert(stream, index=r1_start + 3, symbol="Q1")
+        events = receiver.ingest_all(impaired)
+        self.assertNotIn("R1", [event.name for event in events])
+
+    def test_q_deletion_can_break_word_alignment_for_r1(self) -> None:
+        receiver = V32bisLogicalReceiver()
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        stream = flatten_startup_trace(trace)
+        r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
+        impaired = impair_stream(stream, drops={r1_start + 3})
+        events = receiver.ingest_all(impaired)
+        self.assertNotIn("R1", [event.name for event in events])
 
 
 class NegotiationTests(unittest.TestCase):
