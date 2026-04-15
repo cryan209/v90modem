@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-echo-delay", type=int, default=0)
     parser.add_argument("--channel-echo-gain", type=float, default=0.0)
     parser.add_argument("--channel-multi-echo", type=str)
+    parser.add_argument("--near-end-echo", type=str)
+    parser.add_argument("--cancel-near-end-echo", action="store_true")
+    parser.add_argument("--near-end-echo-estimate", type=str)
+    parser.add_argument("--adaptive-near-end-echo-cancel", action="store_true")
+    parser.add_argument("--adaptive-echo-tap-count", type=int, default=16)
+    parser.add_argument("--adaptive-echo-step-size", type=float, default=0.1)
     parser.add_argument("--rx-carrier-hz", type=float, default=1801.0)
     parser.add_argument("--timing-offset", type=float, default=1.0)
     parser.add_argument("--carrier-phase-gain", type=float, default=0.05)
@@ -47,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     fir_taps = tuple(float(part.strip()) for part in args.channel_fir.split(",") if part.strip()) if args.channel_fir else ()
+    near_end_paths = _parse_multi_echo(args.near_end_echo)
+    near_end_estimate = _parse_multi_echo(args.near_end_echo_estimate)
     datapump = V32bisDatapump(
         tx_config=TxConfig(),
         rx_config=RxConfig(
@@ -64,6 +72,12 @@ def main(argv: list[str]) -> int:
             echo_delay=args.channel_echo_delay,
             echo_gain=args.channel_echo_gain,
             multi_echo_paths=_parse_multi_echo(args.channel_multi_echo),
+            near_end_echo_paths=near_end_paths,
+            cancel_near_end_echo=args.cancel_near_end_echo,
+            near_end_echo_estimate_paths=near_end_estimate,
+            adaptive_near_end_echo_cancel=args.adaptive_near_end_echo_cancel,
+            adaptive_echo_tap_count=args.adaptive_echo_tap_count,
+            adaptive_echo_step_size=args.adaptive_echo_step_size,
         ),
     )
     result = datapump.run_startup()

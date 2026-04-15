@@ -4,7 +4,12 @@ from .channel import ChannelConfig, apply_channel
 from .oracle import compare_events, expected_startup_events
 from .runtime import DatapumpResult, V32bisDatapump
 from .rx import RxConfig, StartupRecovery, recover_startup
-from .tx import StartupWaveform, TxConfig, generate_answer_startup_waveform
+from .tx import (
+    StartupWaveform,
+    TxConfig,
+    generate_answer_startup_waveform,
+    generate_call_startup_waveform,
+)
 
 __all__ = [
     "ChannelConfig",
@@ -18,5 +23,6 @@ __all__ = [
     "compare_events",
     "expected_startup_events",
     "generate_answer_startup_waveform",
+    "generate_call_startup_waveform",
     "recover_startup",
 ]

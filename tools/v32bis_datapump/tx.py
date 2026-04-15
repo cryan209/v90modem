@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tools.v32bis_ref.rate_signal import rate_mask_from_list
-from tools.v32bis_ref.startup import generate_answer_startup_trace
+from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.tx import TransmittedSymbol, startup_trace_to_complex_symbols
 from tools.v32bis_ref.tx_passband import PassbandWaveform, baseband_to_passband
 from tools.v32bis_ref.tx_waveform import BasebandWaveform, symbols_to_baseband
@@ -33,6 +33,29 @@ def generate_answer_startup_waveform(config: TxConfig) -> StartupWaveform:
     """Generate an answer-mode startup waveform for the datapump."""
 
     trace = generate_answer_startup_trace(
+        r1_mask=rate_mask_from_list(list(config.r1_rates)),
+        r2_mask=rate_mask_from_list(list(config.r2_rates)),
+        r3_selected_rate=config.selected_rate,
+        trn_length=config.trn_length,
+    )
+    transmitted = startup_trace_to_complex_symbols(trace)
+    baseband = symbols_to_baseband(transmitted, samples_per_symbol=config.samples_per_symbol)
+    passband = baseband_to_passband(
+        baseband,
+        sample_rate=config.sample_rate,
+        carrier_hz=config.carrier_hz,
+    )
+    return StartupWaveform(
+        transmitted_symbols=transmitted,
+        baseband=baseband,
+        passband=passband,
+    )
+
+
+def generate_call_startup_waveform(config: TxConfig) -> StartupWaveform:
+    """Generate a caller-mode startup waveform for duplex leakage tests."""
+
+    trace = generate_call_startup_trace(
         r1_mask=rate_mask_from_list(list(config.r1_rates)),
         r2_mask=rate_mask_from_list(list(config.r2_rates)),
         r3_selected_rate=config.selected_rate,
