@@ -14,6 +14,7 @@ if REPO_ROOT not in sys.path:
 from tools.v32bis_ref.rate_signal import rate_mask_from_list
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
+    recover_startup_with_decision_directed_tracking,
     recover_symbols_ideal,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
@@ -100,24 +101,43 @@ def main(argv: list[str]) -> int:
         )
         recovered = search.recovered
     elif args.track_both:
-        tracking = recover_symbols_with_tracking(
-            passband,
-            transmitted_symbols=transmitted,
-            taps=baseband.taps,
-            samples_per_symbol=args.samples_per_symbol,
-            timing_offset=float(args.timing_offset),
-            carrier_hz=args.rx_carrier_hz,
-            phase_gain=args.carrier_phase_gain,
-            timing_gain=args.timing_gain,
-            early_late_spacing=args.early_late_spacing,
-            decision_directed=args.decision_directed,
-        )
-        print(
-            f"# final_phase_rad={tracking.final_phase_rad:.6f} "
-            f"final_offset={tracking.final_offset} "
-            f"metric={tracking.metric:.6f}"
-        )
-        recovered = tracking.recovered
+        if args.decision_directed:
+            tracking = recover_startup_with_decision_directed_tracking(
+                passband,
+                transmitted_symbols=transmitted,
+                taps=baseband.taps,
+                samples_per_symbol=args.samples_per_symbol,
+                timing_offset=float(args.timing_offset),
+                carrier_hz=args.rx_carrier_hz,
+                phase_gain=args.carrier_phase_gain,
+                timing_gain=args.timing_gain,
+                early_late_spacing=args.early_late_spacing,
+            )
+            print(
+                f"# selected_mode={tracking.mode} "
+                f"events={','.join(tracking.event_names)} "
+                f"metric={tracking.metric:.6f}"
+            )
+            recovered = tracking.recovered
+        else:
+            tracking = recover_symbols_with_tracking(
+                passband,
+                transmitted_symbols=transmitted,
+                taps=baseband.taps,
+                samples_per_symbol=args.samples_per_symbol,
+                timing_offset=float(args.timing_offset),
+                carrier_hz=args.rx_carrier_hz,
+                phase_gain=args.carrier_phase_gain,
+                timing_gain=args.timing_gain,
+                early_late_spacing=args.early_late_spacing,
+                decision_directed=args.decision_directed,
+            )
+            print(
+                f"# final_phase_rad={tracking.final_phase_rad:.6f} "
+                f"final_offset={tracking.final_offset} "
+                f"metric={tracking.metric:.6f}"
+            )
+            recovered = tracking.recovered
     elif args.search_carrier:
         center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
         candidates = []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from .receiver import V32bisLogicalReceiver
 from .stream import ObservableSymbol
 from .tx import SYNC_STATE_TO_INDEX, TransmittedSymbol, startup_symbol_to_point
 from .tx_passband import PassbandWaveform
@@ -72,6 +73,14 @@ class TimingLoopResult:
 class FrontendTrackingResult:
     final_phase_rad: float
     final_offset: float
+    metric: float
+    recovered: list[RecoveredSymbol]
+
+
+@dataclass(frozen=True)
+class StartupTrackingResult:
+    mode: str
+    event_names: list[str]
     metric: float
     recovered: list[RecoveredSymbol]
 
@@ -175,6 +184,10 @@ def _tracking_target(point: complex, expected_symbol: str, *, decision_directed:
     if decision_directed:
         return decided, startup_symbol_to_point(decided)
     return decided, startup_symbol_to_point(expected_symbol)
+
+
+def _wrapped_offset(candidate_offset: float, samples_per_symbol: int) -> float:
+    return candidate_offset % samples_per_symbol
 
 
 def _offset_lookahead_metric(
@@ -624,6 +637,7 @@ def recover_symbols_with_tracking(
     timing_gain: float = 0.02,
     early_late_spacing: float = 0.5,
     decision_directed: bool = False,
+    timing_refine_step: float = 0.25,
 ) -> FrontendTrackingResult:
     """Recover symbols with simple joint timing-loop and carrier tracking."""
 
@@ -633,6 +647,8 @@ def recover_symbols_with_tracking(
         raise ValueError("timing_gain must be positive")
     if early_late_spacing <= 0.0:
         raise ValueError("early_late_spacing must be positive")
+    if timing_refine_step < 0.0:
+        raise ValueError("timing_refine_step must be non-negative")
 
     baseband = passband_to_baseband(passband, carrier_hz=carrier_hz)
     filtered = matched_filter(baseband, taps)
@@ -642,24 +658,45 @@ def recover_symbols_with_tracking(
     phase_estimate = 0.0
     recovered: list[RecoveredSymbol] = []
     for index, transmitted in enumerate(transmitted_symbols):
-        nominal = start + index * samples_per_symbol + phase_offset
-        point = _interpolated_sample(filtered, nominal)
-        early = _interpolated_sample(filtered, nominal - early_late_spacing)
-        late = _interpolated_sample(filtered, nominal + early_late_spacing)
+        best_offset = phase_offset
+        best_point = 0j
+        best_early = 0j
+        best_late = 0j
+        best_corrected = 0j
+        best_decided = transmitted.symbol
+        target = startup_symbol_to_point(transmitted.symbol)
+        best_phase_error = 0.0
+        best_metric = float("inf")
+        for delta in (-timing_refine_step, 0.0, timing_refine_step):
+            candidate_offset = _wrapped_offset(phase_offset + delta, samples_per_symbol)
+            nominal = start + index * samples_per_symbol + candidate_offset
+            point = _interpolated_sample(filtered, nominal)
+            early = _interpolated_sample(filtered, nominal - early_late_spacing)
+            late = _interpolated_sample(filtered, nominal + early_late_spacing)
 
-        corrected = _rotate(point, -phase_estimate)
-        corrected_early = _rotate(early, -phase_estimate)
-        corrected_late = _rotate(late, -phase_estimate)
-        best_decided, target = _tracking_target(
-            corrected,
-            transmitted.symbol,
-            decision_directed=decision_directed,
-        )
-        best_phase_error = _phase_error(corrected, target)
-        _best_metric = _symbol_metric(corrected, target)
+            corrected = _rotate(point, -phase_estimate)
+            decided, candidate_target = _tracking_target(
+                corrected,
+                transmitted.symbol,
+                decision_directed=decision_directed,
+            )
+            candidate_metric = _symbol_metric(corrected, candidate_target)
+            if candidate_metric < best_metric:
+                best_offset = candidate_offset
+                best_point = point
+                best_early = early
+                best_late = late
+                best_corrected = corrected
+                best_decided = decided
+                target = candidate_target
+                best_phase_error = _phase_error(corrected, candidate_target)
+                best_metric = candidate_metric
+
+        corrected_early = _rotate(best_early, -phase_estimate)
+        corrected_late = _rotate(best_late, -phase_estimate)
         recovered.append(
             RecoveredSymbol(
-                point=corrected,
+                point=best_corrected,
                 decided_symbol=best_decided,
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
@@ -670,8 +707,7 @@ def recover_symbols_with_tracking(
         )
         early_metric = _symbol_metric(corrected_early, target)
         late_metric = _symbol_metric(corrected_late, target)
-        phase_offset += timing_gain * (early_metric - late_metric)
-        phase_offset %= samples_per_symbol
+        phase_offset = _wrapped_offset(best_offset + timing_gain * (early_metric - late_metric), samples_per_symbol)
         phase_estimate += phase_gain * best_phase_error
 
     return FrontendTrackingResult(
@@ -757,3 +793,83 @@ def recovered_to_observable_stream(recovered: list[RecoveredSymbol]) -> list[Obs
         )
         for symbol in recovered
     ]
+
+
+def _startup_event_names(recovered: list[RecoveredSymbol]) -> list[str]:
+    receiver = V32bisLogicalReceiver()
+    events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+    return [event.name for event in events]
+
+
+def recover_startup_with_decision_directed_tracking(
+    passband: PassbandWaveform,
+    *,
+    transmitted_symbols: list[TransmittedSymbol],
+    taps: list[float],
+    samples_per_symbol: int,
+    timing_offset: float = 0.0,
+    carrier_hz: float | None = None,
+    phase_gain: float = 0.05,
+    timing_gain: float = 0.005,
+    early_late_spacing: float = 0.5,
+) -> StartupTrackingResult:
+    """Run several decision-directed startup trackers and keep the best event recovery."""
+
+    carrier_result = recover_symbols_with_carrier_tracking(
+        passband,
+        transmitted_symbols=transmitted_symbols,
+        taps=taps,
+        samples_per_symbol=samples_per_symbol,
+        timing_offset=int(timing_offset),
+        carrier_hz=carrier_hz,
+        phase_gain=phase_gain,
+        decision_directed=True,
+    )
+    timing_result = recover_symbols_with_timing_loop(
+        passband,
+        transmitted_symbols=transmitted_symbols,
+        taps=taps,
+        samples_per_symbol=samples_per_symbol,
+        timing_offset=timing_offset,
+        carrier_hz=carrier_hz,
+        timing_gain=timing_gain,
+        early_late_spacing=early_late_spacing,
+        decision_directed=True,
+    )
+    joint_result = recover_symbols_with_tracking(
+        passband,
+        transmitted_symbols=transmitted_symbols,
+        taps=taps,
+        samples_per_symbol=samples_per_symbol,
+        timing_offset=timing_offset,
+        carrier_hz=carrier_hz,
+        phase_gain=phase_gain,
+        timing_gain=timing_gain,
+        early_late_spacing=early_late_spacing,
+        decision_directed=True,
+    )
+
+    candidates = [
+        ("carrier", carrier_result.recovered, carrier_result.metric),
+        ("timing", timing_result.recovered, timing_result.metric),
+        ("joint", joint_result.recovered, joint_result.metric),
+    ]
+
+    best_mode = candidates[0][0]
+    best_events = _startup_event_names(candidates[0][1])
+    best_metric = candidates[0][2]
+    best_recovered = candidates[0][1]
+    for mode, recovered, metric in candidates[1:]:
+        event_names = _startup_event_names(recovered)
+        if (len(event_names), -metric) > (len(best_events), -best_metric):
+            best_mode = mode
+            best_events = event_names
+            best_metric = metric
+            best_recovered = recovered
+
+    return StartupTrackingResult(
+        mode=best_mode,
+        event_names=best_events,
+        metric=best_metric,
+        recovered=best_recovered,
+    )
