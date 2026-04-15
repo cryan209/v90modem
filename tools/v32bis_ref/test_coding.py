@@ -75,6 +75,7 @@ from tools.v32bis_ref.tx_passband import (
     impair_passband_echo,
     impair_passband_fir,
     impair_passband_gain,
+    impair_passband_multi_echo,
 )
 from tools.v32bis_ref.tx_waveform import rrc_taps, symbols_to_baseband
 from tools.v32bis_ref.training import (
@@ -678,6 +679,21 @@ class TxWaveformTests(unittest.TestCase):
         self.assertEqual(len(impaired.samples), len(passband.samples) + 6)
         probe = len(passband.samples) // 3
         self.assertNotEqual(impaired.samples[probe + 6], passband.samples[probe])
+
+    def test_passband_multi_echo_impairment_adds_multiple_delayed_paths(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        impaired = impair_passband_multi_echo(passband, paths=[(4, 0.2), (11, -0.1)])
+        self.assertEqual(len(impaired.samples), len(passband.samples) + 11)
+        probe = len(passband.samples) // 3
+        self.assertNotEqual(impaired.samples[probe + 4], passband.samples[probe])
+        self.assertNotEqual(impaired.samples[probe + 11], passband.samples[probe])
 
 
 class RxFrontendTests(unittest.TestCase):
@@ -1329,6 +1345,29 @@ class RxFrontendTests(unittest.TestCase):
         passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-6)
         passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
         passband = impair_passband_echo(passband, delay_samples=6, gain=0.25)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_mild_multi_echo_channel(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_multi_echo(passband, paths=[(4, 0.2), (11, -0.1)])
         tracked = recover_startup_with_decision_directed_tracking(
             passband,
             transmitted_symbols=transmitted,

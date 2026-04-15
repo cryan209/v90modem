@@ -152,3 +152,33 @@ def impair_passband_echo(
         sample_rate=waveform.sample_rate,
         carrier_hz=waveform.carrier_hz,
     )
+
+
+def impair_passband_multi_echo(
+    waveform: PassbandWaveform,
+    *,
+    paths: list[tuple[int, float]],
+) -> PassbandWaveform:
+    """Add multiple delayed echo paths to the passband waveform."""
+
+    if not paths:
+        return waveform
+
+    max_delay = max(delay for delay, _gain in paths)
+    if max_delay < 0:
+        raise ValueError("echo delays must be non-negative")
+
+    output = list(waveform.samples) + [0.0] * max_delay
+    for delay, gain in paths:
+        if delay < 0:
+            raise ValueError("echo delays must be non-negative")
+        if delay == 0 or gain == 0.0:
+            continue
+        for index, sample in enumerate(waveform.samples):
+            output[index + delay] += gain * sample
+
+    return PassbandWaveform(
+        samples=output,
+        sample_rate=waveform.sample_rate,
+        carrier_hz=waveform.carrier_hz,
+    )

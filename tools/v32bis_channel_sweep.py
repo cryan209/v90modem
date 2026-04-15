@@ -22,6 +22,7 @@ from tools.v32bis_ref.tx_passband import (
     impair_passband_echo,
     impair_passband_fir,
     impair_passband_gain,
+    impair_passband_multi_echo,
 )
 from tools.v32bis_ref.tx_waveform import symbols_to_baseband
 
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-fir", type=str, default="0.9,0.25,-0.1")
     parser.add_argument("--channel-echo-delay", type=int, default=0)
     parser.add_argument("--channel-echo-gain", type=float, default=0.0)
+    parser.add_argument("--channel-multi-echo", type=str)
     parser.add_argument("--snr-start", type=float, default=34.0)
     parser.add_argument("--snr-stop", type=float, default=16.0)
     parser.add_argument("--snr-step", type=float, default=2.0)
@@ -69,6 +71,14 @@ def main(argv: list[str]) -> int:
     transmitted = startup_trace_to_complex_symbols(trace)
     baseband = symbols_to_baseband(transmitted, samples_per_symbol=args.samples_per_symbol)
     fir_taps = [float(part.strip()) for part in args.channel_fir.split(",") if part.strip()]
+    multi_echo_paths = []
+    if args.channel_multi_echo:
+        for part in args.channel_multi_echo.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            delay_text, gain_text = part.split(":")
+            multi_echo_paths.append((int(delay_text), float(gain_text)))
 
     print("# snr_db mode metric events")
     snr = args.snr_start
@@ -84,6 +94,8 @@ def main(argv: list[str]) -> int:
                 delay_samples=args.channel_echo_delay,
                 gain=args.channel_echo_gain,
             )
+        if multi_echo_paths:
+            passband = impair_passband_multi_echo(passband, paths=multi_echo_paths)
         tracked = recover_startup_with_decision_directed_tracking(
             passband,
             transmitted_symbols=transmitted,

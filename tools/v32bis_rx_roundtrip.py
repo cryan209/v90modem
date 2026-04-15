@@ -37,6 +37,7 @@ from tools.v32bis_ref.tx_passband import (
     impair_passband_echo,
     impair_passband_fir,
     impair_passband_gain,
+    impair_passband_multi_echo,
 )
 from tools.v32bis_ref.tx_waveform import symbols_to_baseband
 
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-fir", type=str)
     parser.add_argument("--channel-echo-delay", type=int, default=0)
     parser.add_argument("--channel-echo-gain", type=float, default=0.0)
+    parser.add_argument("--channel-multi-echo", type=str)
     parser.add_argument("--rx-carrier-hz", type=float)
     parser.add_argument("--search-carrier", action="store_true")
     parser.add_argument("--search-both", action="store_true")
@@ -117,6 +119,15 @@ def main(argv: list[str]) -> int:
             delay_samples=args.channel_echo_delay,
             gain=args.channel_echo_gain,
         )
+    if args.channel_multi_echo:
+        paths = []
+        for part in args.channel_multi_echo.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            delay_text, gain_text = part.split(":")
+            paths.append((int(delay_text), float(gain_text)))
+        passband = impair_passband_multi_echo(passband, paths=paths)
     if args.search_both:
         center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
         candidates = []
