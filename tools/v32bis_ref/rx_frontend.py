@@ -85,6 +85,13 @@ class StartupTrackingResult:
     recovered: list[RecoveredSymbol]
 
 
+@dataclass(frozen=True)
+class EqualizerResult:
+    recovered: list[RecoveredSymbol]
+    taps: list[complex]
+    metric: float
+
+
 def passband_to_baseband(
     waveform: PassbandWaveform,
     *,
@@ -812,6 +819,58 @@ def recovered_to_metadata_free_observable_stream(recovered: list[RecoveredSymbol
     ]
 
 
+def equalize_recovered_symbols(
+    recovered: list[RecoveredSymbol],
+    *,
+    tap_count: int = 5,
+    step_size: float = 0.002,
+    training_symbols: int | None = None,
+    decision_directed: bool = False,
+) -> EqualizerResult:
+    """Apply a simple symbol-rate LMS equalizer to recovered startup symbols."""
+
+    if tap_count < 1:
+        raise ValueError("tap_count must be positive")
+    if step_size <= 0.0:
+        raise ValueError("step_size must be positive")
+    if not recovered:
+        return EqualizerResult(recovered=[], taps=[1.0 + 0.0j], metric=0.0)
+
+    half = tap_count // 2
+    padded = [0j] * half + [symbol.point for symbol in recovered] + [0j] * half
+    taps = [0j] * tap_count
+    taps[half] = 1.0 + 0.0j
+    equalized: list[RecoveredSymbol] = []
+    train_count = len(recovered) if training_symbols is None else min(training_symbols, len(recovered))
+
+    for index, symbol in enumerate(recovered):
+        window = padded[index:index + tap_count]
+        output = sum(tap * sample for tap, sample in zip(taps, window))
+        decided = nearest_symbol_label(output, symbol.expected_symbol)
+        target = startup_symbol_to_point(decided if decision_directed and index >= train_count else symbol.expected_symbol)
+        error = target - output
+        if index < train_count or decision_directed:
+            for tap_index in range(tap_count):
+                taps[tap_index] += step_size * error * window[tap_index].conjugate()
+        equalized.append(
+            RecoveredSymbol(
+                point=output,
+                decided_symbol=decided,
+                source_name=symbol.source_name,
+                source_instance=symbol.source_instance,
+                expected_symbol=symbol.expected_symbol,
+                tx_calling_party=symbol.tx_calling_party,
+                selected_rate=symbol.selected_rate,
+            )
+        )
+
+    return EqualizerResult(
+        recovered=equalized,
+        taps=taps,
+        metric=symbol_error_metric(equalized),
+    )
+
+
 def _startup_event_names(recovered: list[RecoveredSymbol]) -> list[str]:
     receiver = V32bisLogicalReceiver()
     events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(recovered))
@@ -871,6 +930,18 @@ def recover_startup_with_decision_directed_tracking(
         ("timing", timing_result.recovered, timing_result.metric),
         ("joint", joint_result.recovered, joint_result.metric),
     ]
+
+    equalized_candidates = []
+    for mode, recovered, _metric in candidates:
+        equalized = equalize_recovered_symbols(
+            recovered,
+            tap_count=5,
+            step_size=0.002,
+            training_symbols=min(512, len(recovered)),
+            decision_directed=True,
+        )
+        equalized_candidates.append((f"{mode}+eq", equalized.recovered, equalized.metric))
+    candidates.extend(equalized_candidates)
 
     best_mode = candidates[0][0]
     best_events = _startup_event_names(candidates[0][1])

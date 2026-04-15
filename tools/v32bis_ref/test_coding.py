@@ -37,6 +37,7 @@ from tools.v32bis_ref.negotiation import (
 )
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
+    equalize_recovered_symbols,
     nearest_symbol_label,
     passband_to_baseband,
     recover_startup_with_decision_directed_tracking,
@@ -66,7 +67,13 @@ from tools.v32bis_ref.stream import (
 from tools.v32bis_ref.simulator import simulate_startup
 from tools.v32bis_ref.startup import generate_answer_startup_trace, generate_call_startup_trace
 from tools.v32bis_ref.tx import startup_symbol_to_point, startup_trace_to_complex_symbols
-from tools.v32bis_ref.tx_passband import baseband_to_passband
+from tools.v32bis_ref.tx_passband import (
+    baseband_to_passband,
+    impair_passband_awgn,
+    impair_passband_carrier_drift,
+    impair_passband_fir,
+    impair_passband_gain,
+)
 from tools.v32bis_ref.tx_waveform import rrc_taps, symbols_to_baseband
 from tools.v32bis_ref.training import (
     STATE_A,
@@ -603,6 +610,59 @@ class TxWaveformTests(unittest.TestCase):
         self.assertEqual(passband.carrier_hz, 1800.0)
         self.assertTrue(any(abs(sample) > 0.0 for sample in passband.samples))
 
+    def test_passband_gain_impairment_scales_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        impaired = impair_passband_gain(passband, gain=0.5)
+        self.assertAlmostEqual(impaired.samples[10], passband.samples[10] * 0.5, places=12)
+
+    def test_passband_awgn_impairment_changes_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        impaired = impair_passband_awgn(passband, snr_db=20.0, seed=7)
+        self.assertEqual(len(impaired.samples), len(passband.samples))
+        self.assertNotEqual(impaired.samples[:8], passband.samples[:8])
+
+    def test_passband_carrier_drift_impairment_changes_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        impaired = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-4)
+        self.assertEqual(len(impaired.samples), len(passband.samples))
+        middle = len(passband.samples) // 2
+        self.assertNotEqual(impaired.samples[middle:middle + 8], passband.samples[middle:middle + 8])
+
+    def test_passband_fir_impairment_changes_samples(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        symbols = startup_trace_to_complex_symbols(trace[:1])
+        waveform = symbols_to_baseband(symbols, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(waveform, sample_rate=24000, carrier_hz=1800.0)
+        impaired = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
+        self.assertGreater(len(impaired.samples), len(passband.samples))
+        middle = len(passband.samples) // 2
+        self.assertNotEqual(impaired.samples[middle:middle + 8], passband.samples[middle:middle + 8])
+
 
 class RxFrontendTests(unittest.TestCase):
     def test_nearest_symbol_label_for_clean_sync_point(self) -> None:
@@ -1046,6 +1106,123 @@ class RxFrontendTests(unittest.TestCase):
         receiver = V32bisLogicalReceiver()
         events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(tracked.recovered))
         self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_equalizer_improves_symbol_metric_under_mild_fir_distortion(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
+        recovered = recover_symbols_ideal(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        equalized = equalize_recovered_symbols(
+            recovered,
+            tap_count=5,
+            step_size=0.002,
+            training_symbols=min(256, len(recovered)),
+            decision_directed=True,
+        )
+        self.assertLess(equalized.metric, symbol_error_metric(recovered))
+
+    def test_startup_tracking_survives_mild_awgn(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_awgn(passband, snr_db=28.0, seed=9)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_mild_gain_error(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_gain(passband, gain=0.7)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_small_carrier_drift(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-6)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_mild_fir_distortion(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
 
 
 if __name__ == "__main__":

@@ -104,3 +104,27 @@ def impair_passband_carrier_drift(
         sample_rate=waveform.sample_rate,
         carrier_hz=waveform.carrier_hz,
     )
+
+
+def impair_passband_fir(
+    waveform: PassbandWaveform,
+    *,
+    taps: list[float],
+) -> PassbandWaveform:
+    """Apply a real FIR channel model to the passband waveform."""
+
+    if not taps:
+        raise ValueError("taps must not be empty")
+
+    output = [0.0] * (len(waveform.samples) + len(taps) - 1)
+    for i, sample in enumerate(waveform.samples):
+        if sample == 0.0:
+            continue
+        for j, tap in enumerate(taps):
+            output[i + j] += sample * tap
+
+    return PassbandWaveform(
+        samples=output,
+        sample_rate=waveform.sample_rate,
+        carrier_hz=waveform.carrier_hz,
+    )
