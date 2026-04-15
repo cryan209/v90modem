@@ -148,12 +148,15 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test FORCE
+.PHONY: all clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
+
+v32bis-datapump-test:
+	python3 -m unittest discover -s tools/v32bis_datapump -t .
 
 $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
