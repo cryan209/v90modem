@@ -12,6 +12,8 @@ from .channel import (
     subtract_passbands,
     synthesize_near_end_echo,
 )
+from .channel import apply_channel as _apply_channel_to_passband
+from .data import DataResult, DataWaveform, generate_data_waveform, measure_ber, recover_data
 from .oracle import OracleComparison, compare_events
 from .rx import RxConfig, StartupRecovery, recover_startup, recover_startup_blind
 from .tx import (
@@ -92,4 +94,117 @@ class V32bisDatapump:
             local_waveform=local,
             recovery=recovery,
             oracle=oracle,
+        )
+
+    def run_data(
+        self,
+        *,
+        bit_rate: int | None = None,
+        n_symbols: int = 512,
+        seed: int = 42,
+        calling_party: bool = True,
+    ) -> DataResult:
+        """Run a data-mode BER simulation at *bit_rate* bps.
+
+        Generates a random payload, scrambles it, TCM-encodes it, applies the
+        configured channel impairments, then demodulates and measures BER/SER.
+
+        Parameters
+        ----------
+        bit_rate:
+            One of 4800, 7200, 9600, 12000, 14400 bps.  Defaults to
+            ``tx_config.selected_rate``.
+        n_symbols:
+            Number of data symbols to transmit.
+        seed:
+            RNG seed for deterministic payload generation.
+        calling_party:
+            Selects the scrambler polynomial (True = calling party, tap=17).
+
+        Returns
+        -------
+        DataResult
+            BER, SER, symbol/bit counts, residual carrier phase error, and
+            full waveform/recovery objects for further inspection.
+        """
+        rate = bit_rate if bit_rate is not None else self.tx_config.selected_rate
+
+        # 1. Generate TX waveform.
+        waveform = generate_data_waveform(
+            self.tx_config,
+            bit_rate=rate,
+            n_symbols=n_symbols,
+            seed=seed,
+            calling_party=calling_party,
+        )
+
+        # 2. Apply channel impairments.
+        impaired = _apply_channel_to_passband(waveform.passband, self.channel_config)
+        if self.channel_config.near_end_echo_paths:
+            from .channel import (
+                adaptive_cancel_near_end_echo,
+                mix_passbands,
+                subtract_passbands,
+                synthesize_near_end_echo,
+            )
+            # For data mode, near-end echo uses the same TX waveform as the
+            # local transmitter (self-interference).
+            leaked = synthesize_near_end_echo(
+                waveform.passband,
+                paths=self.channel_config.near_end_echo_paths,
+            )
+            impaired = mix_passbands(impaired, leaked)
+            if self.channel_config.adaptive_near_end_echo_cancel:
+                impaired, _taps = adaptive_cancel_near_end_echo(
+                    impaired,
+                    waveform.passband,
+                    tap_count=self.channel_config.adaptive_echo_tap_count,
+                    step_size=self.channel_config.adaptive_echo_step_size,
+                )
+            elif self.channel_config.cancel_near_end_echo:
+                estimate_paths = (
+                    self.channel_config.near_end_echo_estimate_paths
+                    or self.channel_config.near_end_echo_paths
+                )
+                estimated = synthesize_near_end_echo(
+                    waveform.passband,
+                    paths=estimate_paths,
+                )
+                impaired = subtract_passbands(impaired, estimated)
+
+        # 3. Demodulate.
+        recovery = recover_data(
+            impaired,
+            matched_filter_taps=waveform.baseband.taps,
+            n_symbols=n_symbols,
+            bit_rate=rate,
+            rx_carrier_hz=self.rx_config.rx_carrier_hz,
+            samples_per_symbol=self.tx_config.samples_per_symbol,
+            timing_offset=max(0, min(int(round(self.rx_config.timing_offset)),
+                                     self.tx_config.samples_per_symbol - 1)),
+            phase_gain=self.rx_config.phase_gain,
+            calling_party=calling_party,
+        )
+
+        # 4. Measure BER / SER.
+        from tools.v32bis_ref.data_mode import DataModeEncoder
+        bpg = DataModeEncoder(rate).bits_per_group
+        bit_errors, ber, sym_errors, ser = measure_ber(
+            waveform.tx_bits,
+            recovery.decoded_bits,
+            bits_per_group=bpg,
+        )
+
+        return DataResult(
+            bit_rate=rate,
+            n_symbols=n_symbols,
+            n_bits=len(waveform.tx_bits),
+            bit_errors=bit_errors,
+            ber=ber,
+            symbol_errors=sym_errors,
+            ser=ser,
+            snr_db=self.channel_config.snr_db,
+            carrier_phase_error_rad=recovery.carrier_phase_error_rad,
+            waveform=waveform,
+            recovery=recovery,
         )
