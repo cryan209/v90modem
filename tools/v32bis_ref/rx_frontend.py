@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from .stream import ObservableSymbol
 from .tx import SYNC_STATE_TO_INDEX, TransmittedSymbol, startup_symbol_to_point
 from .tx_passband import PassbandWaveform
 from .tx_waveform import BasebandWaveform
@@ -20,6 +21,8 @@ class RecoveredSymbol:
     source_name: str
     source_instance: int
     expected_symbol: str
+    tx_calling_party: bool
+    selected_rate: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,7 @@ class TimingLoopResult:
 @dataclass(frozen=True)
 class FrontendTrackingResult:
     final_phase_rad: float
-    final_offset: int
+    final_offset: float
     metric: float
     recovered: list[RecoveredSymbol]
 
@@ -167,6 +170,13 @@ def _decide_rotated_symbol(point: complex, expected_symbol: str) -> tuple[str, c
     return decided, target, _phase_error(point, target), _symbol_metric(point, target)
 
 
+def _tracking_target(point: complex, expected_symbol: str, *, decision_directed: bool) -> tuple[str, complex]:
+    decided = nearest_symbol_label(point, expected_symbol)
+    if decision_directed:
+        return decided, startup_symbol_to_point(decided)
+    return decided, startup_symbol_to_point(expected_symbol)
+
+
 def _offset_lookahead_metric(
     filtered: list[complex],
     transmitted_symbols: list[TransmittedSymbol],
@@ -257,6 +267,8 @@ def recover_symbols_ideal(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
     return recovered
@@ -302,6 +314,8 @@ def recover_symbols_with_timing_offset(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
     return recovered
@@ -338,6 +352,8 @@ def recover_symbols_with_frontend(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
     return recovered
@@ -467,6 +483,7 @@ def recover_symbols_with_carrier_tracking(
     timing_offset: int = 0,
     carrier_hz: float | None = None,
     phase_gain: float = 0.2,
+    decision_directed: bool = False,
 ) -> CarrierTrackingResult:
     """Recover symbols with a simple decision-directed carrier phase tracker."""
 
@@ -484,7 +501,12 @@ def recover_symbols_with_carrier_tracking(
     recovered: list[RecoveredSymbol] = []
     for point, transmitted in zip(sampled, transmitted_symbols):
         corrected = _rotate(point, -phase_estimate)
-        decided, _target, phase_error, _metric = _decide_rotated_symbol(corrected, transmitted.symbol)
+        decided, target = _tracking_target(
+            corrected,
+            transmitted.symbol,
+            decision_directed=decision_directed,
+        )
+        phase_error = _phase_error(corrected, target)
         recovered.append(
             RecoveredSymbol(
                 point=corrected,
@@ -492,6 +514,8 @@ def recover_symbols_with_carrier_tracking(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
         phase_estimate += phase_gain * phase_error
@@ -576,6 +600,8 @@ def recover_symbols_with_timing_tracking(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
 
@@ -597,6 +623,7 @@ def recover_symbols_with_tracking(
     phase_gain: float = 0.2,
     timing_gain: float = 0.02,
     early_late_spacing: float = 0.5,
+    decision_directed: bool = False,
 ) -> FrontendTrackingResult:
     """Recover symbols with simple joint timing-loop and carrier tracking."""
 
@@ -623,8 +650,11 @@ def recover_symbols_with_tracking(
         corrected = _rotate(point, -phase_estimate)
         corrected_early = _rotate(early, -phase_estimate)
         corrected_late = _rotate(late, -phase_estimate)
-        best_decided = nearest_symbol_label(corrected, transmitted.symbol)
-        target = startup_symbol_to_point(transmitted.symbol)
+        best_decided, target = _tracking_target(
+            corrected,
+            transmitted.symbol,
+            decision_directed=decision_directed,
+        )
         best_phase_error = _phase_error(corrected, target)
         _best_metric = _symbol_metric(corrected, target)
         recovered.append(
@@ -634,6 +664,8 @@ def recover_symbols_with_tracking(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
         early_metric = _symbol_metric(corrected_early, target)
@@ -660,6 +692,7 @@ def recover_symbols_with_timing_loop(
     carrier_hz: float | None = None,
     timing_gain: float = 0.01,
     early_late_spacing: float = 0.5,
+    decision_directed: bool = False,
 ) -> TimingLoopResult:
     """Recover symbols with a simple early/late timing error detector loop."""
 
@@ -682,8 +715,11 @@ def recover_symbols_with_timing_loop(
         early = _interpolated_sample(filtered, nominal - early_late_spacing)
         late = _interpolated_sample(filtered, nominal + early_late_spacing)
 
-        decided = nearest_symbol_label(point, transmitted.symbol)
-        target = startup_symbol_to_point(transmitted.symbol)
+        decided, target = _tracking_target(
+            point,
+            transmitted.symbol,
+            decision_directed=decision_directed,
+        )
         early_metric = _symbol_metric(early, target)
         late_metric = _symbol_metric(late, target)
         phase_offset += timing_gain * (early_metric - late_metric)
@@ -696,6 +732,8 @@ def recover_symbols_with_timing_loop(
                 source_name=transmitted.source_name,
                 source_instance=transmitted.source_instance,
                 expected_symbol=transmitted.symbol,
+                tx_calling_party=transmitted.tx_calling_party,
+                selected_rate=transmitted.selected_rate,
             )
         )
 
@@ -704,3 +742,18 @@ def recover_symbols_with_timing_loop(
         metric=symbol_error_metric(recovered),
         recovered=recovered,
     )
+
+
+def recovered_to_observable_stream(recovered: list[RecoveredSymbol]) -> list[ObservableSymbol]:
+    """Convert recovered symbol decisions into logical protocol observations."""
+
+    return [
+        ObservableSymbol(
+            symbol=symbol.decided_symbol,
+            source_name=symbol.source_name,
+            source_instance=symbol.source_instance,
+            tx_calling_party=symbol.tx_calling_party,
+            selected_rate=symbol.selected_rate,
+        )
+        for symbol in recovered
+    ]

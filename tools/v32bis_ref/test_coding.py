@@ -39,6 +39,7 @@ from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
     nearest_symbol_label,
     passband_to_baseband,
+    recovered_to_observable_stream,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
     recover_symbols_ideal,
@@ -770,6 +771,33 @@ class RxFrontendTests(unittest.TestCase):
         )
         self.assertLess(tracked.metric, symbol_error_metric(mismatched))
 
+    def test_decision_directed_carrier_tracking_improves_mismatched_carrier_metric(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        mismatched = recover_symbols_with_frontend(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_hz=1810.0,
+        )
+        tracked = recover_symbols_with_carrier_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_hz=1810.0,
+            phase_gain=0.3,
+            decision_directed=True,
+        )
+        self.assertLess(tracked.metric, symbol_error_metric(mismatched))
+
     def test_timing_tracking_improves_bad_initial_offset(self) -> None:
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
@@ -828,6 +856,38 @@ class RxFrontendTests(unittest.TestCase):
         self.assertLess(tracked.metric, symbol_error_metric(fixed))
         self.assertTrue(0.0 <= tracked.final_offset < 10.0)
 
+    def test_decision_directed_joint_tracking_improves_combined_mismatch(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        fixed = recover_symbols_with_frontend(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=5,
+            carrier_hz=1810.0,
+        )
+        tracked = recover_symbols_with_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=5.0,
+            carrier_hz=1810.0,
+            phase_gain=0.3,
+            timing_gain=0.02,
+            early_late_spacing=0.5,
+            decision_directed=True,
+        )
+        self.assertLess(tracked.metric, symbol_error_metric(fixed))
+        self.assertTrue(0.0 <= tracked.final_offset < 10.0)
+
     def test_timing_loop_improves_bad_initial_offset_without_search(self) -> None:
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
@@ -855,6 +915,70 @@ class RxFrontendTests(unittest.TestCase):
         )
         self.assertLess(loop.metric, symbol_error_metric(fixed))
         self.assertTrue(0.0 <= loop.final_offset < 10.0)
+
+    def test_recovered_stream_drives_logical_receiver_events(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered = recover_symbols_ideal(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_decision_directed_carrier_tracking_stream_yields_startup_events(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered = recover_symbols_with_carrier_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            decision_directed=True,
+        ).recovered
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_decision_directed_timing_loop_stream_yields_startup_events(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered = recover_symbols_with_timing_loop(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+            decision_directed=True,
+        ).recovered
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
 
 
 if __name__ == "__main__":

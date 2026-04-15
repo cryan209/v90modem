@@ -12,10 +12,12 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from tools.v32bis_ref.rate_signal import rate_mask_from_list
+from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
     recover_symbols_ideal,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
+    recovered_to_observable_stream,
     recover_symbols_with_timing_loop,
     recover_symbols_with_timing_tracking,
     recover_symbols_with_timing_offset,
@@ -59,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timing-step", type=int, default=1)
     parser.add_argument("--timing-gain", type=float, default=0.02)
     parser.add_argument("--early-late-spacing", type=float, default=0.5)
+    parser.add_argument("--decision-directed", action="store_true")
+    parser.add_argument("--emit-events", action="store_true")
     parser.add_argument("--limit", type=int, default=20)
     return parser
 
@@ -106,6 +110,7 @@ def main(argv: list[str]) -> int:
             phase_gain=args.carrier_phase_gain,
             timing_gain=args.timing_gain,
             early_late_spacing=args.early_late_spacing,
+            decision_directed=args.decision_directed,
         )
         print(
             f"# final_phase_rad={tracking.final_phase_rad:.6f} "
@@ -139,6 +144,7 @@ def main(argv: list[str]) -> int:
             timing_offset=args.timing_offset,
             carrier_hz=args.rx_carrier_hz,
             phase_gain=args.carrier_phase_gain,
+            decision_directed=args.decision_directed,
         )
         print(
             f"# final_phase_rad={tracking.final_phase_rad:.6f} "
@@ -164,6 +170,7 @@ def main(argv: list[str]) -> int:
             carrier_hz=args.rx_carrier_hz,
             timing_gain=args.timing_gain,
             early_late_spacing=args.early_late_spacing,
+            decision_directed=args.decision_directed,
         )
         print(f"# final_offset={tracking.final_offset:.6f} metric={tracking.metric:.6f}")
         recovered = tracking.recovered
@@ -212,6 +219,19 @@ def main(argv: list[str]) -> int:
             f"{symbol.point.real:8.3f} "
             f"{symbol.point.imag:8.3f}"
         )
+    if args.emit_events:
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+        print("# events")
+        for event in events:
+            parts = [event.name]
+            if event.rate_mask is not None:
+                parts.append(f"rate_mask=0x{event.rate_mask:04x}")
+            if event.selected_rate is not None:
+                parts.append(f"selected_rate={event.selected_rate}")
+            if event.repetitions is not None:
+                parts.append(f"repetitions={event.repetitions}")
+            print(" ".join(parts))
     return 0
 
 

@@ -26,6 +26,8 @@ class TransmittedSymbol:
     source_instance: int
     symbol: str
     bit_rate: int
+    tx_calling_party: bool
+    selected_rate: int | None = None
 
 
 def startup_symbol_to_point(symbol: str) -> complex:
@@ -55,6 +57,8 @@ def observable_to_transmitted_symbol(observable: ObservableSymbol) -> Transmitte
         source_instance=observable.source_instance,
         symbol=observable.symbol,
         bit_rate=4800,
+        tx_calling_party=observable.tx_calling_party,
+        selected_rate=observable.selected_rate,
     )
 
 
