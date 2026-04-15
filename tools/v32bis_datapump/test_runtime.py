@@ -122,6 +122,57 @@ class DatapumpRuntimeTests(unittest.TestCase):
         result = datapump.run_startup()
         self.assertTrue(result.oracle.matches)
 
+    def test_blind_runtime_recovers_full_startup_on_clean_distorted_channel(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=28.0,
+                noise_seed=1,
+                drift_hz_per_sample=1e-6,
+                fir_taps=(0.9, 0.25, -0.1),
+            ),
+            blind_runtime=True,
+        )
+        result = datapump.run_startup()
+        names = [event.name for event in result.recovery.events]
+        self.assertEqual(names, ["S", "R1", "S", "R3", "E", "B1"])
+        self.assertTrue(result.oracle.matches)
+
+    def test_blind_runtime_recovers_full_startup_on_multi_echo_channel(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=6.0,
+                noise_seed=1,
+                drift_hz_per_sample=1e-6,
+                fir_taps=(0.9, 0.25, -0.1),
+                multi_echo_paths=((4, 0.2), (11, -0.1)),
+            ),
+            blind_runtime=True,
+        )
+        result = datapump.run_startup()
+        names = [event.name for event in result.recovery.events]
+        self.assertEqual(names, ["S", "R1", "S", "R3", "E", "B1"])
+        self.assertTrue(result.oracle.matches)
+
+    def test_blind_runtime_recovers_full_startup_with_adaptive_near_end_echo_cancellation(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=6.0,
+                noise_seed=1,
+                drift_hz_per_sample=1e-6,
+                fir_taps=(0.9, 0.25, -0.1),
+                near_end_echo_paths=((3, 0.9), (9, 0.45)),
+                adaptive_near_end_echo_cancel=True,
+            ),
+            blind_runtime=True,
+        )
+        result = datapump.run_startup()
+        names = [event.name for event in result.recovery.events]
+        self.assertEqual(names, ["S", "R1", "S", "R3", "E", "B1"])
+        self.assertTrue(result.oracle.matches)
+
 
 if __name__ == "__main__":
     unittest.main()
