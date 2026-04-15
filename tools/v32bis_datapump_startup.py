@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adaptive-near-end-echo-cancel", action="store_true")
     parser.add_argument("--adaptive-echo-tap-count", type=int, default=16)
     parser.add_argument("--adaptive-echo-step-size", type=float, default=0.1)
+    parser.add_argument("--blind-runtime", action="store_true")
     parser.add_argument("--rx-carrier-hz", type=float, default=1801.0)
     parser.add_argument("--timing-offset", type=float, default=1.0)
     parser.add_argument("--carrier-phase-gain", type=float, default=0.05)
@@ -79,6 +80,7 @@ def main(argv: list[str]) -> int:
             adaptive_echo_tap_count=args.adaptive_echo_tap_count,
             adaptive_echo_step_size=args.adaptive_echo_step_size,
         ),
+        blind_runtime=args.blind_runtime,
     )
     result = datapump.run_startup()
     print(f"# mode={result.recovery.mode} metric={result.recovery.metric:.6f}")
