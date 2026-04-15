@@ -19,6 +19,7 @@ from tools.v32bis_ref.tx_passband import (
     baseband_to_passband,
     impair_passband_awgn,
     impair_passband_carrier_drift,
+    impair_passband_echo,
     impair_passband_fir,
     impair_passband_gain,
 )
@@ -47,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-gain", type=float, default=0.8)
     parser.add_argument("--channel-drift-hz-per-sample", type=float, default=1e-6)
     parser.add_argument("--channel-fir", type=str, default="0.9,0.25,-0.1")
+    parser.add_argument("--channel-echo-delay", type=int, default=0)
+    parser.add_argument("--channel-echo-gain", type=float, default=0.0)
     parser.add_argument("--snr-start", type=float, default=34.0)
     parser.add_argument("--snr-stop", type=float, default=16.0)
     parser.add_argument("--snr-step", type=float, default=2.0)
@@ -75,6 +78,12 @@ def main(argv: list[str]) -> int:
         passband = impair_passband_awgn(passband, snr_db=snr, seed=args.noise_seed)
         passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=args.channel_drift_hz_per_sample)
         passband = impair_passband_fir(passband, taps=fir_taps)
+        if args.channel_echo_delay > 0 and args.channel_echo_gain != 0.0:
+            passband = impair_passband_echo(
+                passband,
+                delay_samples=args.channel_echo_delay,
+                gain=args.channel_echo_gain,
+            )
         tracked = recover_startup_with_decision_directed_tracking(
             passband,
             transmitted_symbols=transmitted,

@@ -128,3 +128,27 @@ def impair_passband_fir(
         sample_rate=waveform.sample_rate,
         carrier_hz=waveform.carrier_hz,
     )
+
+
+def impair_passband_echo(
+    waveform: PassbandWaveform,
+    *,
+    delay_samples: int,
+    gain: float,
+) -> PassbandWaveform:
+    """Add a single delayed echo path to the passband waveform."""
+
+    if delay_samples < 0:
+        raise ValueError("delay_samples must be non-negative")
+    if gain == 0.0 or delay_samples == 0:
+        return waveform
+
+    output = list(waveform.samples) + [0.0] * delay_samples
+    for index, sample in enumerate(waveform.samples):
+        output[index + delay_samples] += gain * sample
+
+    return PassbandWaveform(
+        samples=output,
+        sample_rate=waveform.sample_rate,
+        carrier_hz=waveform.carrier_hz,
+    )

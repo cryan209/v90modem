@@ -34,6 +34,7 @@ from tools.v32bis_ref.tx_passband import (
     baseband_to_passband,
     impair_passband_awgn,
     impair_passband_carrier_drift,
+    impair_passband_echo,
     impair_passband_fir,
     impair_passband_gain,
 )
@@ -59,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-noise-seed", type=int, default=1)
     parser.add_argument("--channel-drift-hz-per-sample", type=float, default=0.0)
     parser.add_argument("--channel-fir", type=str)
+    parser.add_argument("--channel-echo-delay", type=int, default=0)
+    parser.add_argument("--channel-echo-gain", type=float, default=0.0)
     parser.add_argument("--rx-carrier-hz", type=float)
     parser.add_argument("--search-carrier", action="store_true")
     parser.add_argument("--search-both", action="store_true")
@@ -108,6 +111,12 @@ def main(argv: list[str]) -> int:
     if args.channel_fir:
         taps = [float(part.strip()) for part in args.channel_fir.split(",") if part.strip()]
         passband = impair_passband_fir(passband, taps=taps)
+    if args.channel_echo_delay > 0 and args.channel_echo_gain != 0.0:
+        passband = impair_passband_echo(
+            passband,
+            delay_samples=args.channel_echo_delay,
+            gain=args.channel_echo_gain,
+        )
     if args.search_both:
         center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
         candidates = []
