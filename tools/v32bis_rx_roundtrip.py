@@ -18,6 +18,7 @@ from tools.v32bis_ref.rx_frontend import (
     recover_symbols_ideal,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
+    recovered_to_metadata_free_observable_stream,
     recovered_to_observable_stream,
     recover_symbols_with_timing_loop,
     recover_symbols_with_timing_tracking,
@@ -29,7 +30,12 @@ from tools.v32bis_ref.rx_frontend import (
 )
 from tools.v32bis_ref.startup import generate_answer_startup_trace
 from tools.v32bis_ref.tx import startup_trace_to_complex_symbols
-from tools.v32bis_ref.tx_passband import baseband_to_passband
+from tools.v32bis_ref.tx_passband import (
+    baseband_to_passband,
+    impair_passband_awgn,
+    impair_passband_carrier_drift,
+    impair_passband_gain,
+)
 from tools.v32bis_ref.tx_waveform import symbols_to_baseband
 
 
@@ -47,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-symbol", type=int, default=10)
     parser.add_argument("--sample-rate", type=int, default=24000)
     parser.add_argument("--carrier-hz", type=float, default=1800.0)
+    parser.add_argument("--channel-gain", type=float, default=1.0)
+    parser.add_argument("--channel-snr-db", type=float)
+    parser.add_argument("--channel-noise-seed", type=int, default=1)
+    parser.add_argument("--channel-drift-hz-per-sample", type=float, default=0.0)
     parser.add_argument("--rx-carrier-hz", type=float)
     parser.add_argument("--search-carrier", action="store_true")
     parser.add_argument("--search-both", action="store_true")
@@ -80,6 +90,19 @@ def main(argv: list[str]) -> int:
     transmitted = startup_trace_to_complex_symbols(trace)
     baseband = symbols_to_baseband(transmitted, samples_per_symbol=args.samples_per_symbol)
     passband = baseband_to_passband(baseband, sample_rate=args.sample_rate, carrier_hz=args.carrier_hz)
+    if args.channel_gain != 1.0:
+        passband = impair_passband_gain(passband, gain=args.channel_gain)
+    if args.channel_snr_db is not None:
+        passband = impair_passband_awgn(
+            passband,
+            snr_db=args.channel_snr_db,
+            seed=args.channel_noise_seed,
+        )
+    if args.channel_drift_hz_per_sample != 0.0:
+        passband = impair_passband_carrier_drift(
+            passband,
+            drift_hz_per_sample=args.channel_drift_hz_per_sample,
+        )
     if args.search_both:
         center = args.rx_carrier_hz if args.rx_carrier_hz is not None else args.carrier_hz
         candidates = []
@@ -241,7 +264,7 @@ def main(argv: list[str]) -> int:
         )
     if args.emit_events:
         receiver = V32bisLogicalReceiver()
-        events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+        events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(recovered))
         print("# events")
         for event in events:
             parts = [event.name]

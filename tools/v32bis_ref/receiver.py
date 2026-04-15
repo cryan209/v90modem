@@ -42,10 +42,13 @@ class V32bisLogicalReceiver:
 
     def __init__(self) -> None:
         self._recent_symbols: deque[str] = deque(maxlen=256)
-        self._q_run_symbols: dict[int, deque[str]] = {}
-        self._rate_sequences: dict[int, list[list[int]]] = {}
-        self._b1_run_lengths: dict[int, int] = {}
-        self._emitted_instances: set[tuple[str, int]] = set()
+        self._q_run_symbols: deque[str] = deque()
+        self._rate_sequences: list[list[int]] = []
+        self._b1_run_length = 0
+        self._in_s_run = False
+        self._b1_emitted_current_run = False
+        self._rate_signal_count = 0
+        self._seen_e_in_run = False
         self._q_candidates_tested = 0
         self._q_invalid_candidates = 0
         self._q_resync_shifts = 0
@@ -53,31 +56,53 @@ class V32bisLogicalReceiver:
         self._r_words_detected = 0
         self._e_words_detected = 0
 
+    def _reset_q_run(self) -> None:
+        self._q_run_symbols.clear()
+        self._rate_sequences.clear()
+        self._seen_e_in_run = False
+
+    def _rate_event_name(self, observable: ObservableSymbol) -> str:
+        if observable.source_name in {"R1", "R2", "R3"}:
+            return observable.source_name
+        self._rate_signal_count += 1
+        if self._rate_signal_count == 1:
+            return "R1"
+        if self._rate_signal_count == 2:
+            return "R3"
+        return f"R{self._rate_signal_count}"
+
     def ingest(self, observable: ObservableSymbol) -> list[DetectedEvent]:
         events: list[DetectedEvent] = []
-        instance_key = (observable.source_name, observable.source_instance)
 
         if observable.symbol not in {STATE_A, STATE_B, "B1"} and not observable.symbol.startswith("Q"):
-            self._q_run_symbols.pop(observable.source_instance, None)
+            self._reset_q_run()
+            self._recent_symbols.clear()
+            self._in_s_run = False
+            self._b1_run_length = 0
+            self._b1_emitted_current_run = False
             return events
 
         if observable.symbol in {STATE_A, STATE_B}:
+            self._reset_q_run()
+            self._b1_run_length = 0
+            self._b1_emitted_current_run = False
             self._recent_symbols.append(observable.symbol)
-            if (
-                instance_key not in self._emitted_instances
-                and len(self._recent_symbols) == 256
-                and detect_s_sequence(list(self._recent_symbols))
-            ):
-                self._emitted_instances.add(instance_key)
+            detected = len(self._recent_symbols) == 256 and detect_s_sequence(list(self._recent_symbols))
+            if detected and not self._in_s_run:
+                self._in_s_run = True
                 events.append(DetectedEvent(name="S"))
+            elif not detected:
+                self._in_s_run = False
             return events
 
         if observable.symbol.startswith("Q"):
-            run_key = observable.source_instance
-            symbol_run = self._q_run_symbols.setdefault(run_key, deque())
-            symbol_run.append(observable.symbol)
-            while len(symbol_run) >= 8:
-                candidate = list(symbol_run)[:8]
+            self._recent_symbols.clear()
+            self._in_s_run = False
+            self._b1_run_length = 0
+            self._b1_emitted_current_run = False
+            self._q_run_symbols.append(observable.symbol)
+            while len(self._q_run_symbols) >= 8:
+                candidate = list(self._q_run_symbols)[:8]
                 self._q_candidates_tested += 1
                 try:
                     decoded_bits = decode_rate_sequence_symbols(
@@ -88,14 +113,14 @@ class V32bisLogicalReceiver:
                 except ValueError:
                     self._q_invalid_candidates += 1
                     self._q_resync_shifts += 1
-                    symbol_run.popleft()
+                    self._q_run_symbols.popleft()
                     continue
-                if is_e_sequence_bits(decoded_bits) and instance_key not in self._emitted_instances:
+                if is_e_sequence_bits(decoded_bits) and not self._seen_e_in_run:
                     self._q_valid_words += 1
                     self._e_words_detected += 1
                     for _ in range(8):
-                        symbol_run.popleft()
-                    self._emitted_instances.add(instance_key)
+                        self._q_run_symbols.popleft()
+                    self._seen_e_in_run = True
                     events.append(
                         DetectedEvent(
                             name="E",
@@ -106,17 +131,17 @@ class V32bisLogicalReceiver:
                 if is_rate_signal_bits(decoded_bits):
                     self._q_valid_words += 1
                     for _ in range(8):
-                        symbol_run.popleft()
-                    sequences = self._rate_sequences.setdefault(run_key, [])
-                    sequences.append(decoded_bits)
+                        self._q_run_symbols.popleft()
+                    self._rate_sequences.append(decoded_bits)
                     self._r_words_detected += 1
-                    if len(sequences) >= 2:
-                        rate_mask = detect_repeated_rate_signal(sequences[-2:])
-                        if rate_mask is not None and instance_key not in self._emitted_instances:
-                            self._emitted_instances.add(instance_key)
+                    if len(self._rate_sequences) >= 2:
+                        rate_mask = detect_repeated_rate_signal(self._rate_sequences[-2:])
+                        if rate_mask is not None:
+                            name = self._rate_event_name(observable)
+                            self._rate_sequences.clear()
                             events.append(
                                 DetectedEvent(
-                                    name=observable.source_name,
+                                    name=name,
                                     rate_mask=rate_mask,
                                     repetitions=2,
                                 )
@@ -124,19 +149,21 @@ class V32bisLogicalReceiver:
                     continue
                 self._q_invalid_candidates += 1
                 self._q_resync_shifts += 1
-                symbol_run.popleft()
+                self._q_run_symbols.popleft()
             return events
 
         if observable.symbol == "B1":
-            run_key = observable.source_instance
-            self._b1_run_lengths[run_key] = self._b1_run_lengths.get(run_key, 0) + 1
-            if self._b1_run_lengths[run_key] >= 24 and instance_key not in self._emitted_instances:
-                self._emitted_instances.add(instance_key)
+            self._reset_q_run()
+            self._recent_symbols.clear()
+            self._in_s_run = False
+            self._b1_run_length += 1
+            if self._b1_run_length >= 24 and not self._b1_emitted_current_run:
+                self._b1_emitted_current_run = True
                 events.append(
                     DetectedEvent(
                         name="B1",
                         selected_rate=observable.selected_rate,
-                        repetitions=self._b1_run_lengths[run_key],
+                        repetitions=self._b1_run_length,
                     )
                 )
         return events

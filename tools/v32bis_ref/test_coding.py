@@ -40,6 +40,7 @@ from tools.v32bis_ref.rx_frontend import (
     nearest_symbol_label,
     passband_to_baseband,
     recover_startup_with_decision_directed_tracking,
+    recovered_to_metadata_free_observable_stream,
     recovered_to_observable_stream,
     recover_symbols_with_carrier_tracking,
     recover_symbols_with_frontend,
@@ -936,6 +937,25 @@ class RxFrontendTests(unittest.TestCase):
         events = receiver.ingest_all(recovered_to_observable_stream(recovered))
         self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
 
+    def test_metadata_free_recovered_stream_drives_logical_receiver_events(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        recovered = recover_symbols_ideal(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(recovered))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
+
     def test_decision_directed_carrier_tracking_stream_yields_startup_events(self) -> None:
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
@@ -1002,6 +1022,30 @@ class RxFrontendTests(unittest.TestCase):
             early_late_spacing=0.5,
         )
         self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_decision_directed_startup_tracking_metadata_free_events(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        receiver = V32bisLogicalReceiver()
+        events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(tracked.recovered))
+        self.assertEqual([event.name for event in events], ["S", "R1", "S", "R3", "E", "B1"])
 
 
 if __name__ == "__main__":

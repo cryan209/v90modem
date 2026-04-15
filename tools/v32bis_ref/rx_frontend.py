@@ -795,9 +795,26 @@ def recovered_to_observable_stream(recovered: list[RecoveredSymbol]) -> list[Obs
     ]
 
 
+def recovered_to_metadata_free_observable_stream(recovered: list[RecoveredSymbol]) -> list[ObservableSymbol]:
+    """Convert recovered symbols into a continuous stream without TX segment metadata."""
+
+    tx_calling_party = recovered[0].tx_calling_party if recovered else False
+    selected_rate = next((symbol.selected_rate for symbol in recovered if symbol.selected_rate is not None), None)
+    return [
+        ObservableSymbol(
+            symbol=symbol.decided_symbol,
+            source_name="",
+            source_instance=0,
+            tx_calling_party=tx_calling_party,
+            selected_rate=selected_rate,
+        )
+        for symbol in recovered
+    ]
+
+
 def _startup_event_names(recovered: list[RecoveredSymbol]) -> list[str]:
     receiver = V32bisLogicalReceiver()
-    events = receiver.ingest_all(recovered_to_observable_stream(recovered))
+    events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(recovered))
     return [event.name for event in events]
 
 
