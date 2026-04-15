@@ -38,6 +38,7 @@ from tools.v32bis_ref.negotiation import (
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
 from tools.v32bis_ref.rx_frontend import (
     equalize_recovered_symbols,
+    equalize_recovered_symbols_dfe,
     nearest_symbol_label,
     passband_to_baseband,
     recover_startup_with_decision_directed_tracking,
@@ -1147,6 +1148,32 @@ class RxFrontendTests(unittest.TestCase):
         )
         self.assertLess(equalized.metric, symbol_error_metric(recovered))
 
+    def test_dfe_improves_symbol_metric_under_echo_distortion(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace[:1])
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_echo(passband, delay_samples=6, gain=0.25)
+        recovered = recover_symbols_ideal(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+        )
+        dfe = equalize_recovered_symbols_dfe(
+            recovered,
+            feedforward_taps=9,
+            feedback_taps=4,
+            step_size=0.0008,
+            training_symbols=min(256, len(recovered)),
+            decision_directed=True,
+        )
+        self.assertLess(dfe.metric, symbol_error_metric(recovered))
+
     def test_startup_tracking_survives_mild_awgn(self) -> None:
         trace = generate_answer_startup_trace(
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
@@ -1299,6 +1326,60 @@ class RxFrontendTests(unittest.TestCase):
         passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
         passband = impair_passband_gain(passband, gain=0.8)
         passband = impair_passband_awgn(passband, snr_db=28.0, seed=11)
+        passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-6)
+        passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
+        passband = impair_passband_echo(passband, delay_samples=6, gain=0.25)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_stronger_echo_channel(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_gain(passband, gain=0.8)
+        passband = impair_passband_awgn(passband, snr_db=4.0, seed=11)
+        passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-6)
+        passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
+        passband = impair_passband_echo(passband, delay_samples=6, gain=0.25)
+        tracked = recover_startup_with_decision_directed_tracking(
+            passband,
+            transmitted_symbols=transmitted,
+            taps=baseband.taps,
+            samples_per_symbol=10,
+            timing_offset=1.0,
+            carrier_hz=1801.0,
+            phase_gain=0.05,
+            timing_gain=0.005,
+            early_late_spacing=0.5,
+        )
+        self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+    def test_startup_tracking_survives_low_snr_echo_channel_with_dfe(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
+            r2_mask=RATE_4800 | RATE_9600,
+            r3_selected_rate=9600,
+        )
+        transmitted = startup_trace_to_complex_symbols(trace)
+        baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
+        passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
+        passband = impair_passband_gain(passband, gain=0.8)
+        passband = impair_passband_awgn(passband, snr_db=2.0, seed=11)
         passband = impair_passband_carrier_drift(passband, drift_hz_per_sample=1e-6)
         passband = impair_passband_fir(passband, taps=[0.9, 0.25, -0.1])
         passband = impair_passband_echo(passband, delay_samples=6, gain=0.25)

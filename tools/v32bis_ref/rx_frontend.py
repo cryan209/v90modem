@@ -871,6 +871,70 @@ def equalize_recovered_symbols(
     )
 
 
+def equalize_recovered_symbols_dfe(
+    recovered: list[RecoveredSymbol],
+    *,
+    feedforward_taps: int = 7,
+    feedback_taps: int = 3,
+    step_size: float = 0.001,
+    training_symbols: int | None = None,
+    decision_directed: bool = False,
+) -> EqualizerResult:
+    """Apply a simple symbol-rate decision-feedback equalizer."""
+
+    if feedforward_taps < 1:
+        raise ValueError("feedforward_taps must be positive")
+    if feedback_taps < 1:
+        raise ValueError("feedback_taps must be positive")
+    if step_size <= 0.0:
+        raise ValueError("step_size must be positive")
+    if not recovered:
+        return EqualizerResult(recovered=[], taps=[1.0 + 0.0j], metric=0.0)
+
+    ff_half = feedforward_taps // 2
+    padded = [0j] * ff_half + [symbol.point for symbol in recovered] + [0j] * ff_half
+    ff_taps = [0j] * feedforward_taps
+    ff_taps[ff_half] = 1.0 + 0.0j
+    fb_taps = [0j] * feedback_taps
+    past_targets = [0j] * feedback_taps
+    equalized: list[RecoveredSymbol] = []
+    train_count = len(recovered) if training_symbols is None else min(training_symbols, len(recovered))
+
+    for index, symbol in enumerate(recovered):
+        ff_window = padded[index:index + feedforward_taps]
+        ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
+        fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
+        output = ff_output - fb_output
+        decided = nearest_symbol_label(output, symbol.expected_symbol)
+        target = startup_symbol_to_point(
+            decided if decision_directed and index >= train_count else symbol.expected_symbol
+        )
+        error = target - output
+        if index < train_count or decision_directed:
+            for tap_index in range(feedforward_taps):
+                ff_taps[tap_index] += step_size * error * ff_window[tap_index].conjugate()
+            for tap_index in range(feedback_taps):
+                fb_taps[tap_index] -= step_size * error * past_targets[tap_index].conjugate()
+        past_targets = [target] + past_targets[:-1]
+        equalized.append(
+            RecoveredSymbol(
+                point=output,
+                decided_symbol=decided,
+                source_name=symbol.source_name,
+                source_instance=symbol.source_instance,
+                expected_symbol=symbol.expected_symbol,
+                tx_calling_party=symbol.tx_calling_party,
+                selected_rate=symbol.selected_rate,
+            )
+        )
+
+    return EqualizerResult(
+        recovered=equalized,
+        taps=ff_taps + fb_taps,
+        metric=symbol_error_metric(equalized),
+    )
+
+
 def _startup_event_names(recovered: list[RecoveredSymbol]) -> list[str]:
     receiver = V32bisLogicalReceiver()
     events = receiver.ingest_all(recovered_to_metadata_free_observable_stream(recovered))
@@ -932,15 +996,35 @@ def recover_startup_with_decision_directed_tracking(
     ]
 
     equalized_candidates = []
+    equalizer_configs = [
+        (5, 0.002),
+        (7, 0.0015),
+        (9, 0.001),
+    ]
     for mode, recovered, _metric in candidates:
-        equalized = equalize_recovered_symbols(
-            recovered,
-            tap_count=5,
-            step_size=0.002,
-            training_symbols=min(512, len(recovered)),
-            decision_directed=True,
-        )
-        equalized_candidates.append((f"{mode}+eq", equalized.recovered, equalized.metric))
+        for tap_count, step_size in equalizer_configs:
+            equalized = equalize_recovered_symbols(
+                recovered,
+                tap_count=tap_count,
+                step_size=step_size,
+                training_symbols=min(768, len(recovered)),
+                decision_directed=True,
+            )
+            equalized_candidates.append(
+                (f"{mode}+eq{tap_count}", equalized.recovered, equalized.metric)
+            )
+        for ff_taps, fb_taps, step_size in ((7, 3, 0.001), (9, 4, 0.0008)):
+            dfe = equalize_recovered_symbols_dfe(
+                recovered,
+                feedforward_taps=ff_taps,
+                feedback_taps=fb_taps,
+                step_size=step_size,
+                training_symbols=min(768, len(recovered)),
+                decision_directed=True,
+            )
+            equalized_candidates.append(
+                (f"{mode}+dfe{ff_taps}x{fb_taps}", dfe.recovered, dfe.metric)
+            )
     candidates.extend(equalized_candidates)
 
     best_mode = candidates[0][0]
