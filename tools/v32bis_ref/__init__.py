@@ -75,6 +75,14 @@ from .training import (
     generate_s_segment,
     generate_trn_segment,
 )
+from .data_mode import (
+    SUPPORTED_DATA_RATES,
+    DataModeEncoder,
+    DataModeDecoder,
+    encode_data_bits,
+    decode_data_symbols_hard,
+    encode_data_bytes,
+)
 
 __all__ = [
     "SUPPORTED_BIT_RATES",
@@ -141,6 +149,12 @@ __all__ = [
     "generate_conditioning_signal",
     "generate_call_startup_trace",
     "generate_answer_startup_trace",
+    "SUPPORTED_DATA_RATES",
+    "DataModeEncoder",
+    "DataModeDecoder",
+    "encode_data_bits",
+    "decode_data_symbols_hard",
+    "encode_data_bytes",
     "TransmittedSymbol",
     "startup_symbol_to_point",
     "startup_trace_to_complex_symbols",

@@ -1436,5 +1436,98 @@ class RxFrontendTests(unittest.TestCase):
         self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
 
 
+class DataModeTests(unittest.TestCase):
+    """Tests for the data_mode.py TCM wrapper (wires v32bis_tcm into ref package)."""
+
+    def _roundtrip(self, bit_rate: int, n_groups: int = 32) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder, decode_data_symbols_hard
+        enc = DataModeEncoder(bit_rate)
+        n = enc.bits_per_group
+        bits = [(i * 3 + i // 7) % 2 for i in range(n * n_groups)]
+        symbols = enc.encode(bits)
+        self.assertEqual(len(symbols), n_groups)
+        decoded = decode_data_symbols_hard(symbols, bit_rate)
+        self.assertEqual(decoded[: len(bits)], bits)
+
+    def test_roundtrip_4800(self) -> None:
+        self._roundtrip(4800)
+
+    def test_roundtrip_7200(self) -> None:
+        self._roundtrip(7200)
+
+    def test_roundtrip_9600(self) -> None:
+        self._roundtrip(9600)
+
+    def test_roundtrip_12000(self) -> None:
+        self._roundtrip(12000)
+
+    def test_roundtrip_14400(self) -> None:
+        self._roundtrip(14400)
+
+    def test_encoder_bits_per_group(self) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder
+        expected = {4800: 2, 7200: 3, 9600: 4, 12000: 5, 14400: 6}
+        for rate, n in expected.items():
+            self.assertEqual(DataModeEncoder(rate).bits_per_group, n)
+
+    def test_encoder_reset_restores_zero_state(self) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder, decode_data_symbols_hard
+        enc = DataModeEncoder(9600)
+        bits = [1, 0, 1, 1, 0, 0, 1, 0]
+        syms_first = enc.encode(bits)
+        enc.reset()
+        syms_after_reset = enc.encode(bits)
+        self.assertEqual(syms_first, syms_after_reset)
+
+    def test_encode_data_bytes_roundtrip(self) -> None:
+        from tools.v32bis_ref.data_mode import (
+            encode_data_bytes, decode_data_symbols_hard,
+        )
+        msg = b"V.32bis"
+        for rate in (4800, 7200, 9600, 12000, 14400):
+            symbols = encode_data_bytes(msg, rate)
+            bits_in = []
+            for byte in msg:
+                for shift in range(7, -1, -1):
+                    bits_in.append((byte >> shift) & 1)
+            from tools.v32bis_ref.coding import bits_per_symbol
+            n = bits_per_symbol(rate)
+            while len(bits_in) % n:
+                bits_in.append(0)
+            decoded = decode_data_symbols_hard(symbols, rate)
+            self.assertEqual(decoded[: len(bits_in)], bits_in,
+                             f"encode_data_bytes roundtrip failed at {rate} bps")
+
+    def test_package_level_imports(self) -> None:
+        import tools.v32bis_ref as ref
+        self.assertIn("DataModeEncoder", dir(ref))
+        self.assertIn("DataModeDecoder", dir(ref))
+        self.assertIn("encode_data_bits", dir(ref))
+        self.assertIn("decode_data_symbols_hard", dir(ref))
+        self.assertIn("encode_data_bytes", dir(ref))
+        self.assertIn("SUPPORTED_DATA_RATES", dir(ref))
+
+    def test_decoder_hard_block(self) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder, DataModeDecoder
+        enc = DataModeEncoder(9600)
+        bits = [0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1]
+        syms = enc.encode(bits)
+        dec = DataModeDecoder(9600, soft=False)
+        decoded = dec.decode_hard(syms)
+        self.assertEqual(decoded[: len(bits)], bits)
+
+    def test_decoder_streaming_4800(self) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder, DataModeDecoder
+        enc = DataModeEncoder(4800)
+        dec = DataModeDecoder(4800)
+        pairs = [(0, 0), (0, 1), (1, 0), (1, 1), (1, 1), (0, 0)]
+        for q1_in, q2_in in pairs:
+            sym = enc.encode([q1_in, q2_in])
+            i, q = sym[0]
+            result = dec.decode_symbol(float(i), float(q))
+            self.assertIsNotNone(result)
+            self.assertEqual(result, [q1_in, q2_in])
+
+
 if __name__ == "__main__":
     unittest.main()
