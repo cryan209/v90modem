@@ -258,6 +258,101 @@ def simulate_python_tx_symbols(
     return [tuple(map(float, point)) for point in encoder.encode(scrambled)]
 
 
+def simulate_python_variant_symbols(
+    bit_rate: int,
+    bits: list[int],
+    *,
+    calling_party: bool,
+    scrambler_register: int,
+    prev_y_state: tuple[int, int],
+    conv_state: int = 0,
+) -> list[tuple[float, float]]:
+    """Run the Python encoder with explicit startup state overrides."""
+    from tools.v32bis_ref.scrambler import Scrambler
+    from tools.v32bis_tcm import TrellisEncoder
+
+    tap = scrambler_tap(calling_party=calling_party, transmit=True)
+    scrambled = Scrambler(tap, register=scrambler_register).process_bits(bits)
+    encoder = TrellisEncoder(bit_rate)
+    encoder._prev_y1, encoder._prev_y2 = prev_y_state
+    encoder._conv_state = conv_state
+    return [tuple(map(float, point)) for point in encoder.encode_bits(scrambled)]
+
+
+def _matching_prefix_length(left: list[tuple[float, float]], right: list[tuple[float, float]]) -> int:
+    count = 0
+    for lval, rval in zip(left, right):
+        if lval != rval:
+            break
+        count += 1
+    return count
+
+
+def diagnose_emitted_symbol_mismatch(
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+    *,
+    symbol_count: int = 32,
+    seed: int = 7,
+    calling_party: bool = True,
+) -> list[dict[str, object]]:
+    """Try simple Python startup-state variants and report the closest match."""
+    rows: list[dict[str, object]] = []
+    variant_specs = [
+        {"name": "python_default", "scrambler_register": 0, "prev_y_state": (0, 0), "conv_state": 0},
+        {"name": "spandsp_scrambler_seed", "scrambler_register": 0x2ECDD5, "prev_y_state": (0, 0), "conv_state": 0},
+        {"name": "spandsp_seed_diff00", "scrambler_register": 0x2ECDD5, "prev_y_state": (0, 0), "conv_state": 0},
+        {"name": "spandsp_seed_diff01", "scrambler_register": 0x2ECDD5, "prev_y_state": (0, 1), "conv_state": 0},
+        {"name": "spandsp_seed_diff10", "scrambler_register": 0x2ECDD5, "prev_y_state": (1, 0), "conv_state": 0},
+        {"name": "spandsp_seed_diff11", "scrambler_register": 0x2ECDD5, "prev_y_state": (1, 1), "conv_state": 0},
+    ]
+
+    for rate in SUPPORTED_RATES:
+        bits_per_symbol = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}[rate]
+        bits = _make_deterministic_bits(symbol_count * bits_per_symbol, seed)
+        target = simulate_spandsp_tx_symbols(
+            rate,
+            bits,
+            calling_party=calling_party,
+            spandsp_maps=spandsp_maps,
+        )
+        best_variant: dict[str, object] | None = None
+        for variant in variant_specs:
+            trial = simulate_python_variant_symbols(
+                rate,
+                bits,
+                calling_party=calling_party,
+                scrambler_register=variant["scrambler_register"],
+                prev_y_state=variant["prev_y_state"],
+                conv_state=variant["conv_state"],
+            )
+            exact_matches = sum(sp == py for sp, py in zip(target, trial))
+            prefix_matches = _matching_prefix_length(target, trial)
+            result = {
+                "name": variant["name"],
+                "scrambler_register": variant["scrambler_register"],
+                "prev_y_state": variant["prev_y_state"],
+                "conv_state": variant["conv_state"],
+                "exact_match_count": exact_matches,
+                "prefix_match_count": prefix_matches,
+                "first_symbol": trial[0] if trial else None,
+            }
+            if best_variant is None or (
+                result["exact_match_count"],
+                result["prefix_match_count"],
+            ) > (
+                best_variant["exact_match_count"],
+                best_variant["prefix_match_count"],
+            ):
+                best_variant = result
+        rows.append(
+            {
+                "rate": rate,
+                "best_variant": best_variant,
+            }
+        )
+    return rows
+
+
 def compare_emitted_symbol_streams(
     spandsp_maps: dict[int, list[tuple[float, float]]],
     *,
@@ -311,6 +406,7 @@ def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
         "spandsp_c_file": str(c_path),
         "constellations": constellation_rows,
         "emitted_symbols": compare_emitted_symbol_streams(sp_maps),
+        "emitted_symbol_diagnostics": diagnose_emitted_symbol_mismatch(sp_maps),
         "scrambler_taps": compare_scrambler_assignments(sp_taps, py_taps),
         "all_constellation_sets_match": all(row["same_set"] for row in constellation_rows),
         "all_constellation_orders_match": all(row["same_order"] for row in constellation_rows),
@@ -348,6 +444,10 @@ def _format_text_report(report: dict[str, object]) -> str:
         lines.append(f"{row['rate']}: same_stream={row['same_stream']} symbol_count={row['symbol_count']}")
         if not row["same_stream"]:
             lines.append(f"  first_difference={row['first_difference']}")
+    lines.append("")
+    lines.append("## Emitted Symbol Diagnostics")
+    for row in report["emitted_symbol_diagnostics"]:
+        lines.append(f"{row['rate']}: best_variant={row['best_variant']}")
     return "\n".join(lines)
 
 
