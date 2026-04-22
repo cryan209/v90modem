@@ -19,7 +19,11 @@ import math
 import random
 from dataclasses import dataclass
 
-from tools.v32bis_ref.data_mode import DataModeEncoder, decode_data_symbols_hard
+from tools.v32bis_ref.data_mode import (
+    DataModeEncoder,
+    decode_data_symbols_hard,
+    decode_data_symbols_soft,
+)
 from tools.v32bis_ref.rx_frontend import matched_filter, passband_to_baseband
 from tools.v32bis_ref.scrambler import Descrambler, Scrambler, scrambler_tap
 from tools.v32bis_ref.tx_passband import PassbandWaveform, baseband_to_passband
@@ -46,7 +50,7 @@ class DataRecovery:
     """Data-mode receive result."""
 
     rx_points: list[tuple[float, float]]   # matched-filter output sampled at symbol instants
-    decoded_scrambled: list[int]           # hard-decision bits before descrambling
+    decoded_scrambled: list[int]           # decoded bits before descrambling
     decoded_bits: list[int]                # descrambled payload bits
     carrier_phase_error_rad: float         # residual phase after tracking loop
 
@@ -248,9 +252,12 @@ def recover_data(
                 phase_error = (corrected * nearest.conjugate()).imag / (mag * mag)
                 phase_est += phase_gain * phase_error
 
-    # Hard-decision decode (produces scrambled bits)
+    # Use soft-decision Viterbi decoding for the trellis rates.
     rx_points_float = [(s.real, s.imag) for s in symbol_samples]
-    decoded_scrambled = decode_data_symbols_hard(rx_points_float, bit_rate)
+    if bit_rate == 4800:
+        decoded_scrambled = decode_data_symbols_hard(rx_points_float, bit_rate)
+    else:
+        decoded_scrambled = decode_data_symbols_soft(rx_points_float, bit_rate)
 
     # Descramble.
     # In a full duplex link the answer side descrambles what the call side sent

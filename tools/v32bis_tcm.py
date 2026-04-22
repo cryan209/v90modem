@@ -516,7 +516,23 @@ _INF = float("inf")
 @dataclass
 class _PathState:
     metric: float
-    bits: list[int]
+    symbols: list[tuple[int, int, list[int]]]
+    start_prev_y: tuple[int, int]
+
+
+_ANGLE_OF = {(0, 0): 0, (0, 1): 90, (1, 0): 180, (1, 1): 270}
+_FROM_ANGLE = {0: (0, 0), 90: (0, 1), 180: (1, 0), 270: (1, 1)}
+
+
+def _inverse_differential(
+    prev_y1: int,
+    prev_y2: int,
+    y1: int,
+    y2: int,
+) -> tuple[int, int]:
+    """Recover the transmitted quadrant dibit from successive Y states."""
+    rot = (_ANGLE_OF[(y1, y2)] - _ANGLE_OF[(prev_y1, prev_y2)]) % 360
+    return _FROM_ANGLE[rot]
 
 
 class ViterbiDecoder:
@@ -547,21 +563,23 @@ class ViterbiDecoder:
 
         # Survivor paths: 4 states, each a (metric, bit_history) pair
         self._paths: list[_PathState] = [
-            _PathState(metric=0.0 if s == 0 else _INF, bits=[])
+            _PathState(
+                metric=0.0 if s == 0 else _INF,
+                symbols=[],
+                start_prev_y=(0, 0),
+            )
             for s in range(4)
         ]
-
-        # Differential decoder state
-        self._prev_y1 = 0
-        self._prev_y2 = 0
 
     def reset(self) -> None:
         self._paths = [
-            _PathState(metric=0.0 if s == 0 else _INF, bits=[])
+            _PathState(
+                metric=0.0 if s == 0 else _INF,
+                symbols=[],
+                start_prev_y=(0, 0),
+            )
             for s in range(4)
         ]
-        self._prev_y1 = 0
-        self._prev_y2 = 0
 
     def _build_branch_table(self) -> dict[tuple[int,int], list[tuple[list[int], int]]]:
         """Build transition table: (from_state, to_state) → [(data_bits, codeword), ...]
@@ -608,13 +626,15 @@ class ViterbiDecoder:
         (length = bits_per_group).
         """
         new_paths: list[_PathState] = [
-            _PathState(metric=_INF, bits=[]) for _ in range(4)
+            _PathState(metric=_INF, symbols=[], start_prev_y=(0, 0))
+            for _ in range(4)
         ]
 
         # For each possible next state, find the best predecessor
         for next_state in range(4):
             best_metric = _INF
-            best_bits: list[int] = []
+            best_symbols: list[tuple[int, int, list[int]]] = []
+            best_start_prev_y = (0, 0)
 
             # Enumerate all (prev_state, y1, y2) that transition to next_state
             for prev_state in range(4):
@@ -634,13 +654,15 @@ class ViterbiDecoder:
 
                         if total < best_metric:
                             best_metric = total
-                            # Recover Q1,Q2 from inverse differential — deferred
-                            # to traceback; store (y1,y2,q_extra) for now
-                            best_bits = self._paths[prev_state].bits + \
-                                        [y1, y2] + q_extra
+                            best_symbols = (
+                                self._paths[prev_state].symbols
+                                + [(y1, y2, q_extra)]
+                            )
+                            best_start_prev_y = self._paths[prev_state].start_prev_y
 
             new_paths[next_state].metric = best_metric
-            new_paths[next_state].bits = best_bits
+            new_paths[next_state].symbols = best_symbols
+            new_paths[next_state].start_prev_y = best_start_prev_y
 
         self._paths = new_paths
 
@@ -648,17 +670,35 @@ class ViterbiDecoder:
         min_metric = min(p.metric for p in self._paths)
         best_path = next(p for p in self._paths if p.metric == min_metric)
 
-        depth = len(best_path.bits) // (2 + self._bits_per_group - 2)  # symbols stored
+        depth = len(best_path.symbols)
         if depth >= self.TRACEBACK_DEPTH:
-            # Extract oldest symbol's bits
-            chunk_size = 2 + (self._bits_per_group - 2)
-            oldest = best_path.bits[:chunk_size]
-            # Trim all paths
+            oldest_y1, oldest_y2, oldest_q_extra = best_path.symbols[0]
+            q1, q2 = _inverse_differential(
+                best_path.start_prev_y[0],
+                best_path.start_prev_y[1],
+                oldest_y1,
+                oldest_y2,
+            )
             for p in self._paths:
-                if len(p.bits) >= chunk_size:
-                    p.bits = p.bits[chunk_size:]
-            return oldest
+                if p.symbols:
+                    first_y1, first_y2, _ = p.symbols[0]
+                    p.symbols = p.symbols[1:]
+                    p.start_prev_y = (first_y1, first_y2)
+            return [q1, q2] + oldest_q_extra
         return None
+
+    def flush(self) -> list[int]:
+        """Flush remaining survivor history after the final input symbol."""
+        min_metric = min(p.metric for p in self._paths)
+        best_path = next(p for p in self._paths if p.metric == min_metric)
+        output: list[int] = []
+        prev_y1, prev_y2 = best_path.start_prev_y
+        for y1, y2, q_extra in best_path.symbols:
+            q1, q2 = _inverse_differential(prev_y1, prev_y2, y1, y2)
+            output.extend([q1, q2] + q_extra)
+            prev_y1, prev_y2 = y1, y2
+        self.reset()
+        return output
 
     def _best_point_metric(
         self, i_rx: float, q_rx: float,
@@ -797,10 +837,7 @@ def decode_symbols_hard(
             #   angle_out = (angle_in + Q1Q2_rotation) mod 360
             #   Q1Q2_rotation = (angle_out - angle_in) mod 360
             #   where rotation 0=Q1Q2=00, 90=01, 180=10, 270=11
-            _angle_of = {(0,0):0, (0,1):90, (1,0):180, (1,1):270}
-            _from_angle = {0:(0,0), 90:(0,1), 180:(1,0), 270:(1,1)}
-            rot = (_angle_of[(y1,y2)] - _angle_of[(prev_y1,prev_y2)]) % 360
-            q1q2 = _from_angle[rot]
+            q1q2 = _inverse_differential(prev_y1, prev_y2, y1, y2)
             # Advance convolutional encoder state
             conv_state, _ = _NEXT_STATE_TABLE[(conv_state, y1, y2)]
             prev_y1, prev_y2 = y1, y2

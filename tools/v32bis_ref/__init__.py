@@ -81,6 +81,7 @@ from .data_mode import (
     DataModeDecoder,
     encode_data_bits,
     decode_data_symbols_hard,
+    decode_data_symbols_soft,
     encode_data_bytes,
 )
 
@@ -154,6 +155,7 @@ __all__ = [
     "DataModeDecoder",
     "encode_data_bits",
     "decode_data_symbols_hard",
+    "decode_data_symbols_soft",
     "encode_data_bytes",
     "TransmittedSymbol",
     "startup_symbol_to_point",

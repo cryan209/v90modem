@@ -173,6 +173,12 @@ class DatapumpRuntimeTests(unittest.TestCase):
         self.assertEqual(names, ["S", "R1", "S", "R3", "E", "B1"])
         self.assertTrue(result.oracle.matches)
 
+    def test_datapump_data_mode_clean_channel_has_zero_ber_at_all_rates(self) -> None:
+        datapump = V32bisDatapump()
+        for rate in (4800, 7200, 9600, 12000, 14400):
+            result = datapump.run_data(bit_rate=rate, n_symbols=256, seed=7)
+            self.assertEqual(result.bit_errors, 0, f"clean-channel BER failed at {rate} bps")
+
 
 if __name__ == "__main__":
     unittest.main()

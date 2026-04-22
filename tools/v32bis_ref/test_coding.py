@@ -1504,6 +1504,7 @@ class DataModeTests(unittest.TestCase):
         self.assertIn("DataModeDecoder", dir(ref))
         self.assertIn("encode_data_bits", dir(ref))
         self.assertIn("decode_data_symbols_hard", dir(ref))
+        self.assertIn("decode_data_symbols_soft", dir(ref))
         self.assertIn("encode_data_bytes", dir(ref))
         self.assertIn("SUPPORTED_DATA_RATES", dir(ref))
 
@@ -1527,6 +1528,19 @@ class DataModeTests(unittest.TestCase):
             result = dec.decode_symbol(float(i), float(q))
             self.assertIsNotNone(result)
             self.assertEqual(result, [q1_in, q2_in])
+
+    def test_decoder_soft_block_roundtrip_for_trellis_rates(self) -> None:
+        from tools.v32bis_ref.data_mode import DataModeEncoder, decode_data_symbols_soft
+        for rate in (7200, 9600, 12000, 14400):
+            enc = DataModeEncoder(rate)
+            n = enc.bits_per_group
+            bits = [(i * 5 + i // 3) % 2 for i in range(n * 48)]
+            symbols = enc.encode(bits)
+            decoded = decode_data_symbols_soft(
+                [(float(i_val), float(q_val)) for i_val, q_val in symbols],
+                rate,
+            )
+            self.assertEqual(decoded[: len(bits)], bits)
 
 
 if __name__ == "__main__":

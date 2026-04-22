@@ -178,10 +178,9 @@ class V32bisDatapump:
             matched_filter_taps=waveform.baseband.taps,
             n_symbols=n_symbols,
             bit_rate=rate,
-            rx_carrier_hz=self.rx_config.rx_carrier_hz,
+            rx_carrier_hz=self.tx_config.carrier_hz,
             samples_per_symbol=self.tx_config.samples_per_symbol,
-            timing_offset=max(0, min(int(round(self.rx_config.timing_offset)),
-                                     self.tx_config.samples_per_symbol - 1)),
+            timing_offset=0,
             phase_gain=self.rx_config.phase_gain,
             calling_party=calling_party,
         )

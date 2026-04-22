@@ -50,6 +50,7 @@ __all__ = [
     "DataModeDecoder",
     "encode_data_bits",
     "decode_data_symbols_hard",
+    "decode_data_symbols_soft",
     "encode_data_bytes",
     "DIFF_TABLE1",
     "DIFF_TABLE2",
@@ -222,6 +223,24 @@ def decode_data_symbols_hard(
         One of 4800, 7200, 9600, 12000, 14400 bps.
     """
     return _decode_symbols_hard(symbols, bit_rate)
+
+
+def decode_data_symbols_soft(
+    symbols: list[tuple[float, float]],
+    bit_rate: int = 14400,
+) -> list[int]:
+    """Soft-decision decode ``(I, Q)`` symbols to a flat bit list."""
+    if bit_rate == 4800:
+        return _decode_symbols_hard(symbols, bit_rate)
+
+    decoder = DataModeDecoder(bit_rate, soft=True)
+    bits: list[int] = []
+    for i_rx, q_rx in symbols:
+        decoded = decoder.decode_symbol(i_rx, q_rx)
+        if decoded is not None:
+            bits.extend(decoded)
+    bits.extend(decoder._viterbi.flush())
+    return bits
 
 
 def encode_data_bytes(
