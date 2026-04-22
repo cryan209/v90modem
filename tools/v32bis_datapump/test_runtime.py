@@ -179,6 +179,42 @@ class DatapumpRuntimeTests(unittest.TestCase):
             result = datapump.run_data(bit_rate=rate, n_symbols=256, seed=7)
             self.assertEqual(result.bit_errors, 0, f"clean-channel BER failed at {rate} bps")
 
+    def test_datapump_data_mode_awgn16_stays_within_rate_specific_ber_targets(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                snr_db=16.0,
+                noise_seed=11,
+            ),
+        )
+        ber_limits = {
+            4800: 0.0,
+            7200: 0.0,
+            9600: 0.0,
+            12000: 0.0,
+            14400: 0.005,
+        }
+        for rate, max_ber in ber_limits.items():
+            result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
+            self.assertLessEqual(
+                result.ber,
+                max_ber,
+                f"AWGN BER target failed at {rate} bps: got {result.ber:.6f}",
+            )
+
+    def test_datapump_data_mode_block_agc_handles_gain_scaled_awgn(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=20.0,
+                noise_seed=11,
+            ),
+        )
+        for rate in (4800, 7200, 9600, 12000, 14400):
+            result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
+            self.assertEqual(result.bit_errors, 0, f"gain-scaled BER failed at {rate} bps")
+            self.assertGreater(result.recovery.agc_gain, 1.15)
+            self.assertLess(result.recovery.agc_gain, 1.35)
+
 
 if __name__ == "__main__":
     unittest.main()

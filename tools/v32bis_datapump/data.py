@@ -53,6 +53,7 @@ class DataRecovery:
     decoded_scrambled: list[int]           # decoded bits before descrambling
     decoded_bits: list[int]                # descrambled payload bits
     carrier_phase_error_rad: float         # residual phase after tracking loop
+    agc_gain: float                        # block gain applied before decoding
 
 
 @dataclass(frozen=True)
@@ -227,21 +228,32 @@ def recover_data(
     from tools.v32bis_tcm import _RATE_INFO
     _const_map = _RATE_INFO[bit_rate][1]  # dict: codeword → (I, Q)
     _const_points = [complex(i, q) for (i, q) in _const_map.values()]
+    _avg_const_power = sum((p.real * p.real + p.imag * p.imag) for p in _const_points) / len(_const_points)
 
-    # Sample at symbol instants with decision-directed carrier phase tracking.
+    # Sample at symbol instants, then apply a block AGC to normalize amplitude.
     start = len(matched_filter_taps) - 1 + timing_offset
-    phase_est = 0.0
-    symbol_samples: list[complex] = []
+    raw_samples: list[complex] = []
 
     for k in range(n_symbols):
         idx = start + k * samples_per_symbol
         if idx >= len(filtered):
-            symbol_samples.append(0j)
+            raw_samples.append(0j)
             continue
-        raw = filtered[idx]
+        raw_samples.append(filtered[idx])
+
+    observed_power = sum((s.real * s.real + s.imag * s.imag) for s in raw_samples if s != 0j)
+    observed_count = sum(1 for s in raw_samples if s != 0j)
+    if observed_count > 0 and observed_power > 0.0:
+        agc_gain = math.sqrt((_avg_const_power * observed_count) / observed_power)
+    else:
+        agc_gain = 1.0
+    scaled_samples = [sample * agc_gain for sample in raw_samples]
+
+    phase_est = 0.0
+    symbol_samples: list[complex] = []
+    for raw in scaled_samples:
         corrected = raw * complex(math.cos(-phase_est), math.sin(-phase_est))
         symbol_samples.append(corrected)
-
         # Decision-directed phase error: imag(corrected × conj(nearest_point)).
         # Find the nearest constellation point and use it as the phase reference.
         if phase_gain > 0.0 and abs(corrected) > 1e-9:
@@ -275,6 +287,7 @@ def recover_data(
         decoded_scrambled=decoded_scrambled[:n_bits],
         decoded_bits=decoded_bits,
         carrier_phase_error_rad=phase_est,
+        agc_gain=agc_gain,
     )
 
 
