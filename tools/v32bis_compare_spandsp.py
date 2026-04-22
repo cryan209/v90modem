@@ -168,6 +168,73 @@ def compare_constellations(
     return rows
 
 
+def compare_encoder_state_tables() -> dict[str, object]:
+    """Compare Python and SpanDSP differential/convolution transition tables."""
+    v17_differential_encoder = (
+        (0, 1, 2, 3),
+        (1, 2, 3, 0),
+        (2, 3, 0, 1),
+        (3, 0, 1, 2),
+    )
+    v17_convolutional_encoder = (
+        (0, 2, 3, 1),
+        (4, 7, 5, 6),
+        (1, 3, 2, 0),
+        (7, 4, 6, 5),
+        (2, 0, 1, 3),
+        (6, 5, 7, 4),
+        (3, 1, 0, 2),
+        (5, 6, 4, 7),
+    )
+
+    diff_rows: list[dict[str, object]] = []
+    for prev_diff in range(4):
+        for q_dibit in range(4):
+            sp_diff = v17_differential_encoder[prev_diff][q_dibit]
+            y_prev = _INDEX_TO_Y_STATE[prev_diff]
+            q1 = q_dibit & 0x01
+            q2 = (q_dibit >> 1) & 0x01
+            py_y = DIFF_TABLE1[(q1, q2, y_prev[0], y_prev[1])]
+            py_diff = _Y_STATE_TO_INDEX[py_y]
+            diff_rows.append(
+                {
+                    "prev_diff": prev_diff,
+                    "q_dibit": q_dibit,
+                    "spandsp_diff": sp_diff,
+                    "python_diff": py_diff,
+                    "matches": sp_diff == py_diff,
+                }
+            )
+
+    conv_rows: list[dict[str, object]] = []
+    for prev_conv in range(8):
+        for diff_state in range(4):
+            sp_conv = v17_convolutional_encoder[prev_conv][diff_state]
+            y_state = _INDEX_TO_Y_STATE[diff_state]
+            py_conv, py_y0 = _NEXT_STATE_TABLE[(prev_conv & 0x03, y_state[0], y_state[1])]
+            conv_rows.append(
+                {
+                    "prev_convolution": prev_conv,
+                    "diff_state": diff_state,
+                    "spandsp_convolution": sp_conv,
+                    "python_convolution": py_conv,
+                    "python_y0": py_y0,
+                    "matches": sp_conv == py_conv,
+                }
+            )
+
+    return {
+        "differential": {
+            "all_match": all(row["matches"] for row in diff_rows),
+            "mismatches": [row for row in diff_rows if not row["matches"]],
+        },
+        "convolution": {
+            "all_match": all(row["matches"] for row in conv_rows),
+            "mismatches": [row for row in conv_rows if not row["matches"]],
+        },
+    }
+
+
 def compare_scrambler_assignments(
     spandsp_taps: dict[str, int],
     python_taps: dict[str, int],
@@ -364,6 +431,7 @@ def trace_spandsp_tx_stages(
             convolution = v17_convolutional_encoder[convolution][diff]
             convolution_out = convolution
             codeword = ((q << 1) & 0x78) | (diff << 1) | ((convolution >> 2) & 1)
+        y_state = _INDEX_TO_Y_STATE[diff & 0x03]
         rows.append(
             {
                 "symbol_index": symbol_index,
@@ -372,8 +440,14 @@ def trace_spandsp_tx_stages(
                 "q": q,
                 "diff_in": diff_in,
                 "diff_out": diff,
+                "y_state": y_state,
                 "convolution_out": convolution_out,
                 "codeword": codeword,
+                "codeword_prefix": {
+                    "y0": (codeword >> (bits_per_symbol - 1)) & 0x01 if bit_rate != 4800 else None,
+                    "y1": y_state[0],
+                    "y2": y_state[1],
+                },
                 "point": spandsp_maps[bit_rate][codeword],
             }
         )
@@ -525,6 +599,7 @@ def trace_python_tx_stages(
             diff_out = _Y_STATE_TO_INDEX[(y1, y2)]
             codeword = (y1 << 1) | y2
             convolution_out = conv_state
+            y0 = None
         else:
             q1, q2 = scrambled_bits[0], scrambled_bits[1]
             q_extra = scrambled_bits[2:]
@@ -538,17 +613,30 @@ def trace_python_tx_stages(
             codeword = (y0 << (n_bits - 1)) | (y1 << (n_bits - 2)) | (y2 << (n_bits - 3))
             for index, qbit in enumerate(q_extra):
                 codeword |= qbit << (n_bits - 4 - index)
-        q_value = sum(bit << (bits_per_symbol - 1 - index) for index, bit in enumerate(scrambled_bits))
+        q_value_lsb = sum(bit << index for index, bit in enumerate(scrambled_bits))
+        q_value_msb = sum(bit << (bits_per_symbol - 1 - index) for index, bit in enumerate(scrambled_bits))
+        spandsp_style_codeword = codeword
+        if bit_rate != 4800:
+            spandsp_style_codeword = ((q_value_lsb << 1) & 0x78) | (diff_out << 1) | ((convolution_out >> 2) & 0x01)
         rows.append(
             {
                 "symbol_index": symbol_index,
                 "input_bits": input_bits,
                 "scrambled_bits": scrambled_bits,
-                "q": q_value,
+                "q": q_value_msb,
+                "q_lsb": q_value_lsb,
+                "q_msb": q_value_msb,
                 "diff_in": diff_in,
                 "diff_out": diff_out,
+                "y_state": (y1, y2),
                 "convolution_out": convolution_out,
                 "codeword": codeword,
+                "spandsp_style_codeword": spandsp_style_codeword,
+                "codeword_prefix": {
+                    "y0": y0,
+                    "y1": y1,
+                    "y2": y2,
+                },
                 "point": tuple(map(float, const_map[codeword])),
             }
         )
@@ -663,6 +751,40 @@ def build_startup_handoff_diagnostics(
                     }
         return None
 
+    grouping_diagnostics: list[dict[str, object]] = []
+    for sp_row, py_row in zip(sp_rows, py_spandsp_rows):
+        grouping_diagnostics.append(
+            {
+                "symbol_index": sp_row["symbol_index"],
+                "scrambled_bits_match": sp_row["scrambled_bits"] == py_row["scrambled_bits"],
+                "spandsp_q": sp_row["q"],
+                "python_q_lsb": py_row["q_lsb"],
+                "python_q_msb": py_row["q_msb"],
+                "q_matches_python_lsb": sp_row["q"] == py_row["q_lsb"],
+                "q_matches_python_msb": sp_row["q"] == py_row["q_msb"],
+                "spandsp_y_state": sp_row["y_state"],
+                "python_y_state": py_row["y_state"],
+                "y_state_matches": sp_row["y_state"] == py_row["y_state"],
+                "spandsp_diff_in": sp_row["diff_in"],
+                "python_diff_in": py_row["diff_in"],
+                "diff_in_matches": sp_row["diff_in"] == py_row["diff_in"],
+                "spandsp_diff_out": sp_row["diff_out"],
+                "python_diff_out": py_row["diff_out"],
+                "diff_out_matches": sp_row["diff_out"] == py_row["diff_out"],
+                "spandsp_convolution_out": sp_row["convolution_out"],
+                "python_convolution_out": py_row["convolution_out"],
+                "convolution_out_matches": sp_row["convolution_out"] == py_row["convolution_out"],
+                "spandsp_codeword_prefix": sp_row["codeword_prefix"],
+                "python_codeword_prefix": py_row["codeword_prefix"],
+                "codeword_prefix_matches": sp_row["codeword_prefix"] == py_row["codeword_prefix"],
+                "spandsp_codeword": sp_row["codeword"],
+                "python_codeword": py_row["codeword"],
+                "python_spandsp_style_codeword": py_row["spandsp_style_codeword"],
+                "codeword_matches_python_native": sp_row["codeword"] == py_row["codeword"],
+                "codeword_matches_python_spandsp_style": sp_row["codeword"] == py_row["spandsp_style_codeword"],
+            }
+        )
+
     return {
         "rate": rate,
         "symbol_count": symbol_count,
@@ -670,6 +792,7 @@ def build_startup_handoff_diagnostics(
         "spandsp_post_training_state": spandsp_post_training_state,
         "first_divergence_python_spec_seed": _first_divergence(py_spec_rows),
         "first_divergence_python_spandsp_seed": _first_divergence(py_spandsp_rows),
+        "grouping_diagnostics_python_spandsp_seed": grouping_diagnostics,
         "spandsp_rows": sp_rows,
         "python_spec_rows": py_spec_rows,
         "python_spandsp_seed_rows": py_spandsp_rows,
@@ -802,6 +925,7 @@ def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
         "spandsp_header": str(header_path),
         "spandsp_c_file": str(c_path),
         "constellations": constellation_rows,
+        "encoder_state_tables": compare_encoder_state_tables(),
         "emitted_symbols": compare_emitted_symbol_streams(sp_maps),
         "emitted_symbol_diagnostics": diagnose_emitted_symbol_mismatch(sp_maps),
         "stage_diagnostics": build_stage_diagnostics(sp_maps),
@@ -838,6 +962,17 @@ def _format_text_report(report: dict[str, object]) -> str:
             lines.append(f"  python_only_examples={row['python_only_examples']}")
             lines.append(f"  spandsp_only_examples={row['spandsp_only_examples']}")
     lines.append("")
+    lines.append("## Encoder State Tables")
+    encoder_tables = report["encoder_state_tables"]
+    lines.append(
+        f"differential_all_match={encoder_tables['differential']['all_match']} "
+        f"convolution_all_match={encoder_tables['convolution']['all_match']}"
+    )
+    if not encoder_tables["differential"]["all_match"]:
+        lines.append(f"  differential_mismatches={encoder_tables['differential']['mismatches'][:8]}")
+    if not encoder_tables["convolution"]["all_match"]:
+        lines.append(f"  convolution_mismatches={encoder_tables['convolution']['mismatches'][:8]}")
+    lines.append("")
     lines.append("## Emitted Symbols")
     for row in report["emitted_symbols"]:
         lines.append(f"{row['rate']}: same_stream={row['same_stream']} symbol_count={row['symbol_count']}")
@@ -870,6 +1005,27 @@ def _format_text_report(report: dict[str, object]) -> str:
         f"first_divergence_python_spec_seed={handoff['first_divergence_python_spec_seed']} "
         f"first_divergence_python_spandsp_seed={handoff['first_divergence_python_spandsp_seed']}"
     )
+    for row in handoff["grouping_diagnostics_python_spandsp_seed"][:3]:
+        lines.append(
+            "  "
+            f"symbol={row['symbol_index']} "
+            f"q(sp)={row['spandsp_q']} q(py_lsb)={row['python_q_lsb']} q(py_msb)={row['python_q_msb']} "
+            f"q_matches_lsb={row['q_matches_python_lsb']} q_matches_msb={row['q_matches_python_msb']} "
+            f"diff_in(sp)={row['spandsp_diff_in']} diff_in(py)={row['python_diff_in']} "
+            f"diff_in_match={row['diff_in_matches']} "
+            f"diff_out(sp)={row['spandsp_diff_out']} diff_out(py)={row['python_diff_out']} "
+            f"diff_out_match={row['diff_out_matches']} "
+            f"conv(sp)={row['spandsp_convolution_out']} conv(py)={row['python_convolution_out']} "
+            f"conv_match={row['convolution_out_matches']} "
+            f"y(sp)={row['spandsp_y_state']} y(py)={row['python_y_state']} "
+            f"y_match={row['y_state_matches']} "
+            f"prefix(sp)={row['spandsp_codeword_prefix']} prefix(py)={row['python_codeword_prefix']} "
+            f"prefix_match={row['codeword_prefix_matches']} "
+            f"cw(sp)={row['spandsp_codeword']} cw(py)={row['python_codeword']} "
+            f"cw(py_sp_style)={row['python_spandsp_style_codeword']} "
+            f"cw_match_py={row['codeword_matches_python_native']} "
+            f"cw_match_py_sp_style={row['codeword_matches_python_spandsp_style']}"
+        )
     return "\n".join(lines)
 
 

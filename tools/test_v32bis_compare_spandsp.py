@@ -35,10 +35,12 @@ class CompareSpanDSPTests(unittest.TestCase):
             REPO_ROOT / "spandsp-master/src/v32bis.c",
         )
         self.assertEqual([row["rate"] for row in report["constellations"]], [14400, 12000, 9600, 7200, 4800])
+        self.assertIn("encoder_state_tables", report)
         self.assertEqual([row["rate"] for row in report["emitted_symbols"]], [14400, 12000, 9600, 7200, 4800])
         self.assertEqual([row["rate"] for row in report["emitted_symbol_diagnostics"]], [14400, 12000, 9600, 7200, 4800])
         self.assertEqual(report["stage_diagnostics"]["rate"], 12000)
         self.assertEqual(report["startup_handoff_diagnostics"]["rate"], 12000)
+        self.assertTrue(report["startup_handoff_diagnostics"]["grouping_diagnostics_python_spandsp_seed"])
         self.assertTrue(report["scrambler_taps"]["same"])
 
     def test_simulated_spandsp_stream_has_expected_length(self) -> None:
