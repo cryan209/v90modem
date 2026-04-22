@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .scrambler import Scrambler, scrambler_tap
+from .spec_policy import TRN_INITIAL_SCRAMBLER_REGISTER
 
 
 STATE_A = "A"
@@ -39,11 +40,18 @@ def generate_s_bar_segment(length: int = 16) -> list[str]:
 
 
 def generate_trn_bits(calling_party: bool, symbol_count: int) -> list[tuple[int, int]]:
-    """Generate the scrambled dibits that underlie the TRN segment."""
+    """Generate the scrambled dibits that underlie the TRN segment.
+
+    V.32bis section 5.2.3 explicitly initializes the TRN scrambler to all
+    zeros, so this helper always starts from register 0.
+    """
 
     if symbol_count < 0:
         raise ValueError("symbol_count must be non-negative")
-    scrambler = Scrambler(scrambler_tap(calling_party, transmit=True), register=0)
+    scrambler = Scrambler(
+        scrambler_tap(calling_party, transmit=True),
+        register=TRN_INITIAL_SCRAMBLER_REGISTER,
+    )
     dibits = []
     for _ in range(symbol_count):
         b0 = scrambler.process_bit(1)
@@ -73,17 +81,30 @@ class ConditioningSignal:
     s: list[str]
     s_bar: list[str]
     trn: list[str]
+    trn_final_scrambler_register: int
 
     @property
     def symbols(self) -> list[str]:
         return self.s + self.s_bar + self.trn
 
+    @property
+    def final_trn_symbol(self) -> str:
+        return self.trn[-1]
+
 
 def generate_conditioning_signal(calling_party: bool, trn_length: int = 1280) -> ConditioningSignal:
     """Generate the full receiver-conditioning signal from section 5.2."""
+
+    scrambler = Scrambler(
+        scrambler_tap(calling_party, transmit=True),
+        register=TRN_INITIAL_SCRAMBLER_REGISTER,
+    )
+    for _ in range(trn_length * 2):
+        scrambler.process_bit(1)
 
     return ConditioningSignal(
         s=generate_s_segment(),
         s_bar=generate_s_bar_segment(),
         trn=generate_trn_segment(calling_party, trn_length),
+        trn_final_scrambler_register=scrambler.register,
     )

@@ -124,6 +124,7 @@ class RateSignalEncoding:
     output_dibits: list[int]
     differential_states: list[int]
     final_state: int
+    initial_scrambler_register: int
 
 
 def decode_rate_sequence_symbols(
@@ -168,13 +169,22 @@ def encode_rate_sequence_bits(
     *,
     calling_party: bool,
     initial_diff_state: int,
+    initial_scrambler_register: int = 0,
 ) -> RateSignalEncoding:
-    """Scramble and 4800-differentially encode a 16-bit R or E sequence."""
+    """Scramble and 4800-differentially encode a 16-bit R or E sequence.
+
+    Renegotiation explicitly restarts this scrambler from zero. Normal startup
+    after TRN is less explicit in the Recommendation, so callers can override
+    the carried register when modelling continuity across startup segments.
+    """
 
     if len(bits) != 16:
         raise ValueError("rate sequence must contain exactly 16 bits")
 
-    scrambler = Scrambler(scrambler_tap(calling_party, transmit=True))
+    scrambler = Scrambler(
+        scrambler_tap(calling_party, transmit=True),
+        register=initial_scrambler_register,
+    )
     scrambled = scrambler.process_bits(bits)
 
     states = []
@@ -191,4 +201,5 @@ def encode_rate_sequence_bits(
         output_dibits=dibits,
         differential_states=states,
         final_state=diff_state,
+        initial_scrambler_register=initial_scrambler_register,
     )

@@ -34,6 +34,14 @@ from .negotiation import (
     validate_rate_signal_bits,
 )
 from .receiver import DetectedEvent, ReceiverStats, V32bisLogicalReceiver
+from .spec_policy import (
+    NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E,
+    POST_E_INITIAL_CONVOLUTION_STATE,
+    RENEGOTIATION_INITIAL_SCRAMBLER_REGISTER,
+    TRN_INITIAL_SCRAMBLER_REGISTER,
+    startup_diff_state_from_final_trn_symbol,
+    startup_scrambler_register_from_trn,
+)
 from .rx_frontend import (
     CarrierSearchResult,
     JointSearchResult,
@@ -115,6 +123,12 @@ __all__ = [
     "DetectedEvent",
     "ReceiverStats",
     "V32bisLogicalReceiver",
+    "TRN_INITIAL_SCRAMBLER_REGISTER",
+    "RENEGOTIATION_INITIAL_SCRAMBLER_REGISTER",
+    "POST_E_INITIAL_CONVOLUTION_STATE",
+    "NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E",
+    "startup_diff_state_from_final_trn_symbol",
+    "startup_scrambler_register_from_trn",
     "RecoveredSymbol",
     "TimingSearchResult",
     "CarrierSearchResult",
