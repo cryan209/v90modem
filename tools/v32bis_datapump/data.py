@@ -255,6 +255,7 @@ def recover_data(
         agc_gain = math.sqrt((_avg_const_power * observed_count) / observed_power)
     else:
         agc_gain = 1.0
+    scaled_filtered = [sample * agc_gain for sample in filtered]
     scaled_samples = [sample * agc_gain for sample in raw_samples]
 
     phase_est = 0.0
@@ -284,7 +285,7 @@ def recover_data(
             raise ValueError("equalizer_step_size must be positive")
 
         ff_half = equalizer_feedforward_taps // 2
-        padded = [0j] * ff_half + phase_corrected + [0j] * ff_half
+        ff_spacing = max(1, samples_per_symbol // 2)
         ff_taps = [0j] * equalizer_feedforward_taps
         ff_taps[ff_half] = 1.0 + 0.0j
         fb_taps = [0j] * equalizer_feedback_taps
@@ -299,7 +300,16 @@ def recover_data(
         eq_training_symbols = train_count
 
         for index in range(len(phase_corrected)):
-            ff_window = padded[index:index + equalizer_feedforward_taps]
+            center = start + index * samples_per_symbol
+            ff_window: list[complex] = []
+            for tap_index in range(equalizer_feedforward_taps):
+                sample_index = center + (tap_index - ff_half) * ff_spacing
+                if 0 <= sample_index < len(scaled_filtered):
+                    sample = scaled_filtered[sample_index]
+                else:
+                    sample = 0j
+                ff_window.append(sample * complex(math.cos(-phase_est), math.sin(-phase_est)))
+
             ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
             fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
             output = ff_output - fb_output
@@ -316,6 +326,11 @@ def recover_data(
             for tap_index in range(equalizer_feedback_taps):
                 fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
             past_targets = [target] + past_targets[:-1]
+            if phase_gain > 0.0 and abs(output) > 1e-9:
+                target_mag = abs(target)
+                if target_mag > 1e-9:
+                    phase_error = (output * target.conjugate()).imag / (target_mag * target_mag)
+                    phase_est += phase_gain * phase_error
             symbol_samples.append(output)
 
         eq_taps = ff_taps + fb_taps

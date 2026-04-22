@@ -180,7 +180,7 @@ class V32bisDatapump:
             or self.channel_config.near_end_echo_paths
         )
         if enable_equalizer and rate >= 12000:
-            phase_gain = min(self.rx_config.phase_gain, 0.02)
+            phase_gain = min(self.rx_config.phase_gain, 0.015 if rate == 12000 else 0.02)
             equalizer_step_size = 0.0005
             equalizer_training_symbols = 256
         else:

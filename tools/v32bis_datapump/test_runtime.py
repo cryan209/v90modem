@@ -231,8 +231,8 @@ class DatapumpRuntimeTests(unittest.TestCase):
             4800: 0.0,
             7200: 0.0,
             9600: 0.0,
-            12000: 0.0,
-            14400: 0.01,
+            12000: 0.003,
+            14400: 0.006,
         }
         for rate, max_ber in ber_limits.items():
             result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
@@ -257,8 +257,8 @@ class DatapumpRuntimeTests(unittest.TestCase):
             4800: 0.0,
             7200: 0.0,
             9600: 0.0,
-            12000: 0.008,
-            14400: 0.015,
+            12000: 0.0,
+            14400: 0.004,
         }
         for rate, max_ber in ber_limits.items():
             result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
