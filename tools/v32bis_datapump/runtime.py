@@ -194,10 +194,14 @@ class V32bisDatapump:
             bit_rate=rate,
             rx_carrier_hz=self.tx_config.carrier_hz,
             samples_per_symbol=self.tx_config.samples_per_symbol,
-            timing_offset=0,
+            timing_offset=(
+                max(0, min(int(round(self.rx_config.timing_offset)), self.tx_config.samples_per_symbol - 1))
+                if enable_equalizer else 0
+            ),
             phase_gain=phase_gain,
             calling_party=calling_party,
             enable_equalizer=enable_equalizer,
+            search_timing=enable_equalizer,
             training_points=waveform.tx_points,
             equalizer_step_size=equalizer_step_size,
             equalizer_training_symbols=equalizer_training_symbols,

@@ -56,6 +56,8 @@ class DataRecovery:
     agc_gain: float                        # block gain applied before decoding
     equalizer_taps: list[complex]          # concatenated feedforward/feedback taps
     equalizer_training_symbols: int        # number of known target symbols used
+    selected_timing_offset: int            # symbol strobe selected for this recovery
+    training_error_metric: float           # squared error over the known training window
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,7 @@ def recover_data(
     phase_gain: float = 0.05,
     calling_party: bool = True,
     enable_equalizer: bool = False,
+    search_timing: bool = False,
     training_points: list[tuple[int, int]] | None = None,
     equalizer_feedforward_taps: int = 9,
     equalizer_feedback_taps: int = 4,
@@ -232,136 +235,142 @@ def recover_data(
     filtered = matched_filter(bb, matched_filter_taps)
 
     # Build a fast nearest-point lookup for the carrier loop discriminant.
-    # We need the full constellation as a list of complex points.
     from tools.v32bis_tcm import _RATE_INFO
-    _const_map = _RATE_INFO[bit_rate][1]  # dict: codeword → (I, Q)
+    _const_map = _RATE_INFO[bit_rate][1]
     _const_points = [complex(i, q) for (i, q) in _const_map.values()]
     _avg_const_power = sum((p.real * p.real + p.imag * p.imag) for p in _const_points) / len(_const_points)
 
-    # Sample at symbol instants, then apply a block AGC to normalize amplitude.
-    start = len(matched_filter_taps) - 1 + timing_offset
-    raw_samples: list[complex] = []
+    def _recover_at_offset(candidate_offset: int) -> DataRecovery:
+        start = len(matched_filter_taps) - 1 + candidate_offset
+        raw_samples: list[complex] = []
+        for k in range(n_symbols):
+            idx = start + k * samples_per_symbol
+            if idx >= len(filtered):
+                raw_samples.append(0j)
+                continue
+            raw_samples.append(filtered[idx])
 
-    for k in range(n_symbols):
-        idx = start + k * samples_per_symbol
-        if idx >= len(filtered):
-            raw_samples.append(0j)
-            continue
-        raw_samples.append(filtered[idx])
-
-    observed_power = sum((s.real * s.real + s.imag * s.imag) for s in raw_samples if s != 0j)
-    observed_count = sum(1 for s in raw_samples if s != 0j)
-    if observed_count > 0 and observed_power > 0.0:
-        agc_gain = math.sqrt((_avg_const_power * observed_count) / observed_power)
-    else:
-        agc_gain = 1.0
-    scaled_filtered = [sample * agc_gain for sample in filtered]
-    scaled_samples = [sample * agc_gain for sample in raw_samples]
-
-    phase_est = 0.0
-    phase_corrected: list[complex] = []
-    for raw in scaled_samples:
-        corrected = raw * complex(math.cos(-phase_est), math.sin(-phase_est))
-        phase_corrected.append(corrected)
-        # Decision-directed phase error: imag(corrected × conj(nearest_point)).
-        # Find the nearest constellation point and use it as the phase reference.
-        if phase_gain > 0.0 and abs(corrected) > 1e-9:
-            nearest = min(_const_points,
-                          key=lambda p: (corrected.real - p.real) ** 2 + (corrected.imag - p.imag) ** 2)
-            mag = abs(nearest)
-            if mag > 1e-9:
-                phase_error = (corrected * nearest.conjugate()).imag / (mag * mag)
-                phase_est += phase_gain * phase_error
-
-    eq_taps: list[complex] = [1.0 + 0.0j]
-    eq_training_symbols = 0
-    symbol_samples = phase_corrected
-    if enable_equalizer and bit_rate != 4800 and phase_corrected:
-        if equalizer_feedforward_taps < 1:
-            raise ValueError("equalizer_feedforward_taps must be positive")
-        if equalizer_feedback_taps < 1:
-            raise ValueError("equalizer_feedback_taps must be positive")
-        if equalizer_step_size <= 0.0:
-            raise ValueError("equalizer_step_size must be positive")
-
-        ff_half = equalizer_feedforward_taps // 2
-        ff_spacing = max(1, samples_per_symbol // 2)
-        ff_taps = [0j] * equalizer_feedforward_taps
-        ff_taps[ff_half] = 1.0 + 0.0j
-        fb_taps = [0j] * equalizer_feedback_taps
-        past_targets = [0j] * equalizer_feedback_taps
-        symbol_samples = []
-
-        if training_points is None:
-            known_targets: list[complex] = []
+        observed_power = sum((s.real * s.real + s.imag * s.imag) for s in raw_samples if s != 0j)
+        observed_count = sum(1 for s in raw_samples if s != 0j)
+        if observed_count > 0 and observed_power > 0.0:
+            agc_gain = math.sqrt((_avg_const_power * observed_count) / observed_power)
         else:
-            known_targets = [complex(i_val, q_val) for i_val, q_val in training_points[:n_symbols]]
-        train_count = min(equalizer_training_symbols, len(phase_corrected), len(known_targets))
-        eq_training_symbols = train_count
+            agc_gain = 1.0
+        scaled_filtered = [sample * agc_gain for sample in filtered]
+        scaled_samples = [sample * agc_gain for sample in raw_samples]
 
-        for index in range(len(phase_corrected)):
-            center = start + index * samples_per_symbol
-            ff_window: list[complex] = []
-            for tap_index in range(equalizer_feedforward_taps):
-                sample_index = center + (tap_index - ff_half) * ff_spacing
-                if 0 <= sample_index < len(scaled_filtered):
-                    sample = scaled_filtered[sample_index]
-                else:
-                    sample = 0j
-                ff_window.append(sample * complex(math.cos(-phase_est), math.sin(-phase_est)))
-
-            ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
-            fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
-            output = ff_output - fb_output
-            if index < train_count:
-                target = known_targets[index]
-            else:
-                target = min(
+        phase_est = 0.0
+        phase_corrected: list[complex] = []
+        for raw in scaled_samples:
+            corrected = raw * complex(math.cos(-phase_est), math.sin(-phase_est))
+            phase_corrected.append(corrected)
+            if phase_gain > 0.0 and abs(corrected) > 1e-9:
+                nearest = min(
                     _const_points,
-                    key=lambda p: (output.real - p.real) ** 2 + (output.imag - p.imag) ** 2,
+                    key=lambda p: (corrected.real - p.real) ** 2 + (corrected.imag - p.imag) ** 2,
                 )
-            error = target - output
-            for tap_index in range(equalizer_feedforward_taps):
-                ff_taps[tap_index] += equalizer_step_size * error * ff_window[tap_index].conjugate()
-            for tap_index in range(equalizer_feedback_taps):
-                fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
-            past_targets = [target] + past_targets[:-1]
-            if phase_gain > 0.0 and abs(output) > 1e-9:
-                target_mag = abs(target)
-                if target_mag > 1e-9:
-                    phase_error = (output * target.conjugate()).imag / (target_mag * target_mag)
+                mag = abs(nearest)
+                if mag > 1e-9:
+                    phase_error = (corrected * nearest.conjugate()).imag / (mag * mag)
                     phase_est += phase_gain * phase_error
-            symbol_samples.append(output)
 
-        eq_taps = ff_taps + fb_taps
+        eq_taps: list[complex] = [1.0 + 0.0j]
+        eq_training_symbols = 0
+        training_error_metric = 0.0
+        symbol_samples = phase_corrected
+        if enable_equalizer and bit_rate != 4800 and phase_corrected:
+            if equalizer_feedforward_taps < 1:
+                raise ValueError("equalizer_feedforward_taps must be positive")
+            if equalizer_feedback_taps < 1:
+                raise ValueError("equalizer_feedback_taps must be positive")
+            if equalizer_step_size <= 0.0:
+                raise ValueError("equalizer_step_size must be positive")
 
-    # Use soft-decision Viterbi decoding for the trellis rates.
-    rx_points_float = [(s.real, s.imag) for s in symbol_samples]
-    if bit_rate == 4800:
-        decoded_scrambled = decode_data_symbols_hard(rx_points_float, bit_rate)
-    else:
-        decoded_scrambled = decode_data_symbols_soft(rx_points_float, bit_rate)
+            ff_half = equalizer_feedforward_taps // 2
+            ff_spacing = max(1, samples_per_symbol // 2)
+            ff_taps = [0j] * equalizer_feedforward_taps
+            ff_taps[ff_half] = 1.0 + 0.0j
+            fb_taps = [0j] * equalizer_feedback_taps
+            past_targets = [0j] * equalizer_feedback_taps
+            symbol_samples = []
 
-    # Descramble.
-    # In a full duplex link the answer side descrambles what the call side sent
-    # (both use tap 17). In this loopback simulation the same-party receiver
-    # descrambles its own transmission, so we use the *transmit* tap of the
-    # opposite party (which equals the transmit tap of this party — both are
-    # tap 17 for V.32bis per §2.2 Table 3).
-    rx_tap = scrambler_tap(calling_party=not calling_party, transmit=False)
-    bpg = DataModeEncoder(bit_rate).bits_per_group
-    n_bits = n_symbols * bpg
-    decoded_bits = Descrambler(rx_tap).process_bits(decoded_scrambled[:n_bits])
+            if training_points is None:
+                known_targets: list[complex] = []
+            else:
+                known_targets = [complex(i_val, q_val) for i_val, q_val in training_points[:n_symbols]]
+            train_count = min(equalizer_training_symbols, len(phase_corrected), len(known_targets))
+            eq_training_symbols = train_count
 
-    return DataRecovery(
-        rx_points=rx_points_float,
-        decoded_scrambled=decoded_scrambled[:n_bits],
-        decoded_bits=decoded_bits,
-        carrier_phase_error_rad=phase_est,
-        agc_gain=agc_gain,
-        equalizer_taps=eq_taps,
-        equalizer_training_symbols=eq_training_symbols,
-    )
+            for index in range(len(phase_corrected)):
+                center = start + index * samples_per_symbol
+                ff_window: list[complex] = []
+                phase_rot = complex(math.cos(-phase_est), math.sin(-phase_est))
+                for tap_index in range(equalizer_feedforward_taps):
+                    sample_index = center + (tap_index - ff_half) * ff_spacing
+                    if 0 <= sample_index < len(scaled_filtered):
+                        sample = scaled_filtered[sample_index]
+                    else:
+                        sample = 0j
+                    ff_window.append(sample * phase_rot)
+
+                ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
+                fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
+                output = ff_output - fb_output
+                if index < train_count:
+                    target = known_targets[index]
+                    training_error_metric += (target.real - output.real) ** 2 + (target.imag - output.imag) ** 2
+                else:
+                    target = min(
+                        _const_points,
+                        key=lambda p: (output.real - p.real) ** 2 + (output.imag - p.imag) ** 2,
+                    )
+                error = target - output
+                for tap_index in range(equalizer_feedforward_taps):
+                    ff_taps[tap_index] += equalizer_step_size * error * ff_window[tap_index].conjugate()
+                for tap_index in range(equalizer_feedback_taps):
+                    fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
+                past_targets = [target] + past_targets[:-1]
+                if phase_gain > 0.0 and abs(output) > 1e-9:
+                    target_mag = abs(target)
+                    if target_mag > 1e-9:
+                        phase_error = (output * target.conjugate()).imag / (target_mag * target_mag)
+                        phase_est += phase_gain * phase_error
+                symbol_samples.append(output)
+
+            eq_taps = ff_taps + fb_taps
+
+        rx_points_float = [(s.real, s.imag) for s in symbol_samples]
+        if bit_rate == 4800:
+            decoded_scrambled = decode_data_symbols_hard(rx_points_float, bit_rate)
+        else:
+            decoded_scrambled = decode_data_symbols_soft(rx_points_float, bit_rate)
+
+        rx_tap = scrambler_tap(calling_party=not calling_party, transmit=False)
+        bpg = DataModeEncoder(bit_rate).bits_per_group
+        n_bits = n_symbols * bpg
+        decoded_bits = Descrambler(rx_tap).process_bits(decoded_scrambled[:n_bits])
+
+        return DataRecovery(
+            rx_points=rx_points_float,
+            decoded_scrambled=decoded_scrambled[:n_bits],
+            decoded_bits=decoded_bits,
+            carrier_phase_error_rad=phase_est,
+            agc_gain=agc_gain,
+            equalizer_taps=eq_taps,
+            equalizer_training_symbols=eq_training_symbols,
+            selected_timing_offset=candidate_offset,
+            training_error_metric=training_error_metric,
+        )
+
+    if search_timing and enable_equalizer:
+        best = _recover_at_offset(max(0, min(timing_offset, samples_per_symbol - 1)))
+        for candidate_offset in range(samples_per_symbol):
+            candidate = _recover_at_offset(candidate_offset)
+            if candidate.training_error_metric < best.training_error_metric:
+                best = candidate
+        return best
+
+    return _recover_at_offset(timing_offset)
 
 
 # ---------------------------------------------------------------------------

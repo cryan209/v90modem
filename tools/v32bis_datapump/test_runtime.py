@@ -270,6 +270,24 @@ class DatapumpRuntimeTests(unittest.TestCase):
                 f"multipath BER target failed at {rate} bps: got {result.ber:.6f}",
             )
 
+    def test_datapump_data_mode_timing_search_ignores_bad_receiver_hint(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=20.0,
+                noise_seed=11,
+                fir_taps=(0.9, 0.25, -0.1),
+                multi_echo_paths=((4, 0.2), (11, -0.1)),
+            ),
+            rx_config=RxConfig(timing_offset=3.0),
+        )
+        result_12000 = datapump.run_data(bit_rate=12000, n_symbols=512, seed=7)
+        result_14400 = datapump.run_data(bit_rate=14400, n_symbols=512, seed=7)
+        self.assertEqual(result_12000.recovery.selected_timing_offset, 0)
+        self.assertEqual(result_14400.recovery.selected_timing_offset, 0)
+        self.assertLessEqual(result_12000.ber, 0.0)
+        self.assertLessEqual(result_14400.ber, 0.004)
+
 
 if __name__ == "__main__":
     unittest.main()
