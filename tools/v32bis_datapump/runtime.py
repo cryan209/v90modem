@@ -179,6 +179,14 @@ class V32bisDatapump:
             or self.channel_config.multi_echo_paths
             or self.channel_config.near_end_echo_paths
         )
+        if enable_equalizer and rate >= 12000:
+            phase_gain = min(self.rx_config.phase_gain, 0.02)
+            equalizer_step_size = 0.0005
+            equalizer_training_symbols = 256
+        else:
+            phase_gain = self.rx_config.phase_gain
+            equalizer_step_size = 0.0008
+            equalizer_training_symbols = 128
         recovery = recover_data(
             impaired,
             matched_filter_taps=waveform.baseband.taps,
@@ -187,10 +195,12 @@ class V32bisDatapump:
             rx_carrier_hz=self.tx_config.carrier_hz,
             samples_per_symbol=self.tx_config.samples_per_symbol,
             timing_offset=0,
-            phase_gain=self.rx_config.phase_gain,
+            phase_gain=phase_gain,
             calling_party=calling_party,
             enable_equalizer=enable_equalizer,
             training_points=waveform.tx_points,
+            equalizer_step_size=equalizer_step_size,
+            equalizer_training_symbols=equalizer_training_symbols,
         )
 
         # 4. Measure BER / SER.

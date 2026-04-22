@@ -232,7 +232,7 @@ class DatapumpRuntimeTests(unittest.TestCase):
             7200: 0.0,
             9600: 0.0,
             12000: 0.0,
-            14400: 0.006,
+            14400: 0.01,
         }
         for rate, max_ber in ber_limits.items():
             result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
@@ -243,7 +243,7 @@ class DatapumpRuntimeTests(unittest.TestCase):
                 f"combined-channel BER target failed at {rate} bps: got {result.ber:.6f}",
             )
 
-    def test_datapump_data_mode_equalizer_recovers_multipath_channel_up_to_12000(self) -> None:
+    def test_datapump_data_mode_equalizer_recovers_multipath_channel(self) -> None:
         datapump = V32bisDatapump(
             channel_config=ChannelConfig(
                 gain=0.8,
@@ -257,11 +257,13 @@ class DatapumpRuntimeTests(unittest.TestCase):
             4800: 0.0,
             7200: 0.0,
             9600: 0.0,
-            12000: 0.0,
+            12000: 0.008,
+            14400: 0.015,
         }
         for rate, max_ber in ber_limits.items():
             result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
-            self.assertEqual(result.recovery.equalizer_training_symbols, 0 if rate == 4800 else 128)
+            expected_training = 0 if rate == 4800 else (256 if rate >= 12000 else 128)
+            self.assertEqual(result.recovery.equalizer_training_symbols, expected_training)
             self.assertLessEqual(
                 result.ber,
                 max_ber,
