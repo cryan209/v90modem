@@ -11,6 +11,7 @@ from tools.v32bis_compare_spandsp import (
     parse_spandsp_constellation_maps,
     parse_spandsp_scrambler_taps,
     python_scrambler_taps,
+    simulate_spandsp_tx_symbols,
 )
 
 
@@ -34,7 +35,15 @@ class CompareSpanDSPTests(unittest.TestCase):
             REPO_ROOT / "spandsp-master/src/v32bis.c",
         )
         self.assertEqual([row["rate"] for row in report["constellations"]], [14400, 12000, 9600, 7200, 4800])
+        self.assertEqual([row["rate"] for row in report["emitted_symbols"]], [14400, 12000, 9600, 7200, 4800])
         self.assertTrue(report["scrambler_taps"]["same"])
+
+    def test_simulated_spandsp_stream_has_expected_length(self) -> None:
+        header = REPO_ROOT / "spandsp-master/src/v17_v32bis_tx_constellation_maps.h"
+        maps = parse_spandsp_constellation_maps(header)
+        bits = [0, 1, 1, 0, 1, 0, 0, 1]
+        symbols = simulate_spandsp_tx_symbols(4800, bits, calling_party=True, spandsp_maps=maps)
+        self.assertEqual(len(symbols), 4)
 
 
 if __name__ == "__main__":

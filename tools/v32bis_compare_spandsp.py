@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 from pathlib import Path
@@ -167,6 +168,137 @@ def compare_scrambler_assignments(
     }
 
 
+def _make_deterministic_bits(count: int, seed: int) -> list[int]:
+    rng = random.Random(seed)
+    return [rng.randint(0, 1) for _ in range(count)]
+
+
+def simulate_spandsp_tx_symbols(
+    bit_rate: int,
+    bits: list[int],
+    *,
+    calling_party: bool,
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+) -> list[tuple[float, float]]:
+    """Simulate SpanDSP's V.32bis/V.17 TX symbol mapping for user-data mode only."""
+    bits_per_symbol = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}[bit_rate]
+    if len(bits) % bits_per_symbol != 0:
+        raise ValueError("bit count must be a multiple of bits_per_symbol")
+
+    v32bis_4800_differential_encoder = (
+        (2, 3, 0, 1),
+        (0, 2, 1, 3),
+        (3, 1, 2, 0),
+        (1, 0, 3, 2),
+    )
+    v17_differential_encoder = (
+        (0, 1, 2, 3),
+        (1, 2, 3, 0),
+        (2, 3, 0, 1),
+        (3, 0, 1, 2),
+    )
+    v17_convolutional_encoder = (
+        (0, 2, 3, 1),
+        (4, 7, 5, 6),
+        (1, 3, 2, 0),
+        (7, 4, 6, 5),
+        (2, 0, 1, 3),
+        (6, 5, 7, 4),
+        (3, 1, 0, 2),
+        (5, 6, 4, 7),
+    )
+
+    scrambler_state = 0x2ECDD5
+    scrambler_tap_index = 17 if calling_party else 4
+    diff = 1
+    convolution = 0
+    constellation = spandsp_maps[bit_rate]
+    emitted: list[tuple[float, float]] = []
+
+    def _scramble(input_bit: int) -> int:
+        nonlocal scrambler_state
+        out_bit = (
+            input_bit
+            ^ ((scrambler_state >> scrambler_tap_index) & 1)
+            ^ ((scrambler_state >> (23 - 1)) & 1)
+        ) & 1
+        scrambler_state = ((scrambler_state << 1) | out_bit) & ((1 << 23) - 1)
+        return out_bit
+
+    for offset in range(0, len(bits), bits_per_symbol):
+        group = bits[offset:offset + bits_per_symbol]
+        q = 0
+        for index, bit in enumerate(group):
+            q |= _scramble(bit) << index  # SpanDSP packs bits LSB-first.
+
+        if bits_per_symbol == 2:
+            diff = v32bis_4800_differential_encoder[diff][q & 0x03]
+            codeword = diff
+        else:
+            diff = v17_differential_encoder[diff][q & 0x03]
+            convolution = v17_convolutional_encoder[convolution][diff]
+            codeword = ((q << 1) & 0x78) | (diff << 1) | ((convolution >> 2) & 1)
+        emitted.append(constellation[codeword])
+    return emitted
+
+
+def simulate_python_tx_symbols(
+    bit_rate: int,
+    bits: list[int],
+    *,
+    calling_party: bool,
+) -> list[tuple[float, float]]:
+    """Run the Python reference data path on the same deterministic bit stream."""
+    tap = scrambler_tap(calling_party=calling_party, transmit=True)
+    from tools.v32bis_ref.scrambler import Scrambler
+    from tools.v32bis_ref.data_mode import DataModeEncoder
+
+    scrambled = Scrambler(tap).process_bits(bits)
+    encoder = DataModeEncoder(bit_rate)
+    return [tuple(map(float, point)) for point in encoder.encode(scrambled)]
+
+
+def compare_emitted_symbol_streams(
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+    *,
+    symbol_count: int = 32,
+    seed: int = 7,
+    calling_party: bool = True,
+) -> list[dict[str, object]]:
+    """Compare deterministic emitted symbol streams for user-data mode."""
+    rows: list[dict[str, object]] = []
+    for rate in SUPPORTED_RATES:
+        bits_per_symbol = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}[rate]
+        bits = _make_deterministic_bits(symbol_count * bits_per_symbol, seed)
+        spandsp_symbols = simulate_spandsp_tx_symbols(
+            rate,
+            bits,
+            calling_party=calling_party,
+            spandsp_maps=spandsp_maps,
+        )
+        python_symbols = simulate_python_tx_symbols(rate, bits, calling_party=calling_party)
+        first_difference = None
+        for index, (sp_point, py_point) in enumerate(zip(spandsp_symbols, python_symbols)):
+            if sp_point != py_point:
+                first_difference = {
+                    "symbol_index": index,
+                    "spandsp": sp_point,
+                    "python": py_point,
+                }
+                break
+        rows.append(
+            {
+                "rate": rate,
+                "symbol_count": symbol_count,
+                "same_stream": spandsp_symbols == python_symbols,
+                "spandsp_first_symbols": spandsp_symbols[:8],
+                "python_first_symbols": python_symbols[:8],
+                "first_difference": first_difference,
+            }
+        )
+    return rows
+
+
 def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
     """Build the complete SpanDSP comparison report."""
     sp_maps = parse_spandsp_constellation_maps(header_path)
@@ -178,9 +310,11 @@ def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
         "spandsp_header": str(header_path),
         "spandsp_c_file": str(c_path),
         "constellations": constellation_rows,
+        "emitted_symbols": compare_emitted_symbol_streams(sp_maps),
         "scrambler_taps": compare_scrambler_assignments(sp_taps, py_taps),
         "all_constellation_sets_match": all(row["same_set"] for row in constellation_rows),
         "all_constellation_orders_match": all(row["same_order"] for row in constellation_rows),
+        "all_emitted_streams_match": all(row["same_stream"] for row in compare_emitted_symbol_streams(sp_maps)),
     }
 
 
@@ -208,6 +342,12 @@ def _format_text_report(report: dict[str, object]) -> str:
         if not row["same_set"]:
             lines.append(f"  python_only_examples={row['python_only_examples']}")
             lines.append(f"  spandsp_only_examples={row['spandsp_only_examples']}")
+    lines.append("")
+    lines.append("## Emitted Symbols")
+    for row in report["emitted_symbols"]:
+        lines.append(f"{row['rate']}: same_stream={row['same_stream']} symbol_count={row['symbol_count']}")
+        if not row["same_stream"]:
+            lines.append(f"  first_difference={row['first_difference']}")
     return "\n".join(lines)
 
 
