@@ -26,6 +26,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.v32bis_ref.scrambler import scrambler_tap
+from tools.v32bis_ref.spec_policy import (
+    POST_E_INITIAL_CONVOLUTION_STATE,
+    startup_diff_state_from_final_trn_symbol,
+    startup_scrambler_register_from_trn,
+)
+from tools.v32bis_ref.training import generate_conditioning_signal
 from tools.v32bis_tcm import (
     DIFF_TABLE1,
     DIFF_TABLE2,
@@ -191,6 +197,9 @@ def simulate_spandsp_tx_symbols(
     *,
     calling_party: bool,
     spandsp_maps: dict[int, list[tuple[float, float]]],
+    initial_scrambler_register: int = 0x2ECDD5,
+    initial_diff_state: int = 1,
+    initial_convolution_state: int = 0,
 ) -> list[tuple[float, float]]:
     """Simulate SpanDSP's V.32bis/V.17 TX symbol mapping for user-data mode only."""
     bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
@@ -220,10 +229,10 @@ def simulate_spandsp_tx_symbols(
         (5, 6, 4, 7),
     )
 
-    scrambler_state = 0x2ECDD5
+    scrambler_state = initial_scrambler_register
     scrambler_tap_index = 17 if calling_party else 4
-    diff = 1
-    convolution = 0
+    diff = initial_diff_state
+    convolution = initial_convolution_state
     constellation = spandsp_maps[bit_rate]
     emitted: list[tuple[float, float]] = []
 
@@ -297,6 +306,9 @@ def trace_spandsp_tx_stages(
     *,
     calling_party: bool,
     spandsp_maps: dict[int, list[tuple[float, float]]],
+    initial_scrambler_register: int = 0x2ECDD5,
+    initial_diff_state: int = 1,
+    initial_convolution_state: int = 0,
 ) -> list[dict[str, object]]:
     """Trace SpanDSP's user-data TX stages symbol by symbol."""
     v32bis_4800_differential_encoder = (
@@ -322,10 +334,10 @@ def trace_spandsp_tx_stages(
         (5, 6, 4, 7),
     )
     bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
-    scrambler_state = 0x2ECDD5
+    scrambler_state = initial_scrambler_register
     scrambler_tap_index = 17 if calling_party else 4
-    diff = 1
-    convolution = 0
+    diff = initial_diff_state
+    convolution = initial_convolution_state
     rows: list[dict[str, object]] = []
 
     def _scramble(input_bit: int) -> int:
@@ -591,6 +603,79 @@ def build_stage_diagnostics(
     }
 
 
+def build_startup_handoff_diagnostics(
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+    *,
+    rate: int = 12000,
+    symbol_count: int = 8,
+    calling_party: bool = True,
+    trn_length: int = 1280,
+) -> dict[str, object]:
+    """Compare post-training/post-E handoff seeds and first scrambled-ones symbols."""
+    conditioning = generate_conditioning_signal(calling_party, trn_length)
+    python_spec_state = {
+        "scrambler_register": startup_scrambler_register_from_trn(conditioning.trn_final_scrambler_register),
+        "diff": startup_diff_state_from_final_trn_symbol(conditioning.final_trn_symbol),
+        "convolution": POST_E_INITIAL_CONVOLUTION_STATE,
+        "final_trn_symbol": conditioning.final_trn_symbol,
+        "bits_per_symbol": BITS_PER_SYMBOL[rate],
+    }
+    spandsp_post_training_state = simulate_spandsp_post_training_state(rate, calling_party=calling_party)
+    ones_bits = [1] * (symbol_count * BITS_PER_SYMBOL[rate])
+
+    sp_rows = trace_spandsp_tx_stages(
+        rate,
+        ones_bits,
+        calling_party=calling_party,
+        spandsp_maps=spandsp_maps,
+        initial_scrambler_register=int(spandsp_post_training_state["scrambler_register"]),
+        initial_diff_state=int(spandsp_post_training_state["diff"]),
+        initial_convolution_state=int(spandsp_post_training_state["convolution"]),
+    )
+    py_spec_rows = trace_python_tx_stages(
+        rate,
+        ones_bits,
+        calling_party=calling_party,
+        scrambler_register=int(python_spec_state["scrambler_register"]),
+        prev_y_state=_INDEX_TO_Y_STATE[int(python_spec_state["diff"]) & 0x03],
+        conv_state=int(python_spec_state["convolution"]),
+    )
+    py_spandsp_rows = trace_python_tx_stages(
+        rate,
+        ones_bits,
+        calling_party=calling_party,
+        scrambler_register=int(spandsp_post_training_state["scrambler_register"]),
+        prev_y_state=_INDEX_TO_Y_STATE[int(spandsp_post_training_state["diff"]) & 0x03],
+        conv_state=0,
+    )
+
+    stage_names = ("scrambled_bits", "q", "diff_in", "diff_out", "convolution_out", "codeword", "point")
+
+    def _first_divergence(compare_rows: list[dict[str, object]]) -> dict[str, object] | None:
+        for sp_row, py_row in zip(sp_rows, compare_rows):
+            for stage_name in stage_names:
+                if sp_row[stage_name] != py_row[stage_name]:
+                    return {
+                        "symbol_index": sp_row["symbol_index"],
+                        "stage": stage_name,
+                        "spandsp": sp_row[stage_name],
+                        "python": py_row[stage_name],
+                    }
+        return None
+
+    return {
+        "rate": rate,
+        "symbol_count": symbol_count,
+        "python_spec_state": python_spec_state,
+        "spandsp_post_training_state": spandsp_post_training_state,
+        "first_divergence_python_spec_seed": _first_divergence(py_spec_rows),
+        "first_divergence_python_spandsp_seed": _first_divergence(py_spandsp_rows),
+        "spandsp_rows": sp_rows,
+        "python_spec_rows": py_spec_rows,
+        "python_spandsp_seed_rows": py_spandsp_rows,
+    }
+
+
 def _matching_prefix_length(left: list[tuple[float, float]], right: list[tuple[float, float]]) -> int:
     count = 0
     for lval, rval in zip(left, right):
@@ -720,6 +805,7 @@ def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
         "emitted_symbols": compare_emitted_symbol_streams(sp_maps),
         "emitted_symbol_diagnostics": diagnose_emitted_symbol_mismatch(sp_maps),
         "stage_diagnostics": build_stage_diagnostics(sp_maps),
+        "startup_handoff_diagnostics": build_startup_handoff_diagnostics(sp_maps),
         "scrambler_taps": compare_scrambler_assignments(sp_taps, py_taps),
         "all_constellation_sets_match": all(row["same_set"] for row in constellation_rows),
         "all_constellation_orders_match": all(row["same_order"] for row in constellation_rows),
@@ -771,6 +857,18 @@ def _format_text_report(report: dict[str, object]) -> str:
     lines.append(
         f"spandsp_post_training_state={stage['spandsp_post_training_state']} "
         f"first_stage_divergence_with_post_training_seed={stage['first_stage_divergence_with_post_training_seed']}"
+    )
+    lines.append("")
+    lines.append("## Startup Handoff Diagnostics")
+    handoff = report["startup_handoff_diagnostics"]
+    lines.append(
+        f"rate={handoff['rate']} symbol_count={handoff['symbol_count']} "
+        f"python_spec_state={handoff['python_spec_state']}"
+    )
+    lines.append(
+        f"spandsp_post_training_state={handoff['spandsp_post_training_state']} "
+        f"first_divergence_python_spec_seed={handoff['first_divergence_python_spec_seed']} "
+        f"first_divergence_python_spandsp_seed={handoff['first_divergence_python_spandsp_seed']}"
     )
     return "\n".join(lines)
 
