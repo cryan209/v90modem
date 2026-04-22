@@ -26,10 +26,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.v32bis_ref.scrambler import scrambler_tap
-from tools.v32bis_tcm import _CONST_12000, _CONST_14400, _CONST_4800, _CONST_7200, _CONST_9600
+from tools.v32bis_tcm import (
+    DIFF_TABLE1,
+    DIFF_TABLE2,
+    _CONST_12000,
+    _CONST_14400,
+    _CONST_4800,
+    _CONST_7200,
+    _CONST_9600,
+    _NEXT_STATE_TABLE,
+)
 
 
 SUPPORTED_RATES = (14400, 12000, 9600, 7200, 4800)
+BITS_PER_SYMBOL = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}
+_Y_STATE_TO_INDEX = {(0, 0): 0, (0, 1): 1, (1, 0): 2, (1, 1): 3}
+_INDEX_TO_Y_STATE = {value: key for key, value in _Y_STATE_TO_INDEX.items()}
 
 
 def _extract_brace_block(text: str, start_index: int) -> str:
@@ -181,7 +193,7 @@ def simulate_spandsp_tx_symbols(
     spandsp_maps: dict[int, list[tuple[float, float]]],
 ) -> list[tuple[float, float]]:
     """Simulate SpanDSP's V.32bis/V.17 TX symbol mapping for user-data mode only."""
-    bits_per_symbol = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}[bit_rate]
+    bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
     if len(bits) % bits_per_symbol != 0:
         raise ValueError("bit count must be a multiple of bits_per_symbol")
 
@@ -277,6 +289,306 @@ def simulate_python_variant_symbols(
     encoder._prev_y1, encoder._prev_y2 = prev_y_state
     encoder._conv_state = conv_state
     return [tuple(map(float, point)) for point in encoder.encode_bits(scrambled)]
+
+
+def trace_spandsp_tx_stages(
+    bit_rate: int,
+    bits: list[int],
+    *,
+    calling_party: bool,
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+) -> list[dict[str, object]]:
+    """Trace SpanDSP's user-data TX stages symbol by symbol."""
+    v32bis_4800_differential_encoder = (
+        (2, 3, 0, 1),
+        (0, 2, 1, 3),
+        (3, 1, 2, 0),
+        (1, 0, 3, 2),
+    )
+    v17_differential_encoder = (
+        (0, 1, 2, 3),
+        (1, 2, 3, 0),
+        (2, 3, 0, 1),
+        (3, 0, 1, 2),
+    )
+    v17_convolutional_encoder = (
+        (0, 2, 3, 1),
+        (4, 7, 5, 6),
+        (1, 3, 2, 0),
+        (7, 4, 6, 5),
+        (2, 0, 1, 3),
+        (6, 5, 7, 4),
+        (3, 1, 0, 2),
+        (5, 6, 4, 7),
+    )
+    bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
+    scrambler_state = 0x2ECDD5
+    scrambler_tap_index = 17 if calling_party else 4
+    diff = 1
+    convolution = 0
+    rows: list[dict[str, object]] = []
+
+    def _scramble(input_bit: int) -> int:
+        nonlocal scrambler_state
+        out_bit = (
+            input_bit
+            ^ ((scrambler_state >> scrambler_tap_index) & 1)
+            ^ ((scrambler_state >> (23 - 1)) & 1)
+        ) & 1
+        scrambler_state = ((scrambler_state << 1) | out_bit) & ((1 << 23) - 1)
+        return out_bit
+
+    for symbol_index, offset in enumerate(range(0, len(bits), bits_per_symbol)):
+        input_bits = bits[offset:offset + bits_per_symbol]
+        scrambled_bits = [_scramble(bit) for bit in input_bits]
+        q = sum(bit << index for index, bit in enumerate(scrambled_bits))
+        diff_in = diff
+        if bits_per_symbol == 2:
+            diff = v32bis_4800_differential_encoder[diff][q & 0x03]
+            codeword = diff
+            convolution_out = convolution
+        else:
+            diff = v17_differential_encoder[diff][q & 0x03]
+            convolution = v17_convolutional_encoder[convolution][diff]
+            convolution_out = convolution
+            codeword = ((q << 1) & 0x78) | (diff << 1) | ((convolution >> 2) & 1)
+        rows.append(
+            {
+                "symbol_index": symbol_index,
+                "input_bits": input_bits,
+                "scrambled_bits": scrambled_bits,
+                "q": q,
+                "diff_in": diff_in,
+                "diff_out": diff,
+                "convolution_out": convolution_out,
+                "codeword": codeword,
+                "point": spandsp_maps[bit_rate][codeword],
+            }
+        )
+    return rows
+
+
+def simulate_spandsp_post_training_state(
+    bit_rate: int,
+    *,
+    calling_party: bool,
+    short_train: bool = False,
+) -> dict[str, object]:
+    """Simulate SpanDSP's transmitter state at the first real data symbol.
+
+    This follows the control flow in ``v17_tx_restart``/``training_get``/``getbaud``
+    closely enough to recover the scrambler, differential, and convolutional
+    states that feed the first real user-data symbol after training.
+    """
+    v17_differential_encoder = (
+        (0, 1, 2, 3),
+        (1, 2, 3, 0),
+        (2, 3, 0, 1),
+        (3, 0, 1, 2),
+    )
+    v17_convolutional_encoder = (
+        (0, 2, 3, 1),
+        (4, 7, 5, 6),
+        (1, 3, 2, 0),
+        (7, 4, 6, 5),
+        (2, 0, 1, 3),
+        (6, 5, 7, 4),
+        (3, 1, 0, 2),
+        (5, 6, 4, 7),
+    )
+    v32bis_4800_differential_encoder = (
+        (2, 3, 0, 1),
+        (0, 2, 1, 3),
+        (3, 1, 2, 0),
+        (1, 0, 3, 2),
+    )
+    cdba_to_abcd = (2, 3, 1, 0)
+    dibit_to_step = (1, 0, 2, 3)
+
+    seg_tep_a = 0
+    seg_tep_b = seg_tep_a + 480
+    seg_1 = seg_tep_b + 48
+    seg_2 = seg_1 + 256
+    seg_3 = seg_2 + 2976
+    seg_4 = seg_3 + 64
+    seg_short_4 = seg_2 + 38
+    seg_end = seg_4 + 48
+    bridge_word = 0x8880
+
+    bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
+    scrambler_state = 0x2ECDD5
+    scrambler_tap_index = 17 if calling_party else 4
+    diff = 0 if short_train else 1
+    convolution = 0
+    constellation_state = 0
+    in_training = True
+    training_step = seg_1
+
+    def _scramble(input_bit: int) -> int:
+        nonlocal scrambler_state
+        out_bit = (
+            input_bit
+            ^ ((scrambler_state >> scrambler_tap_index) & 1)
+            ^ ((scrambler_state >> (23 - 1)) & 1)
+        ) & 1
+        scrambler_state = ((scrambler_state << 1) | out_bit) & ((1 << 23) - 1)
+        return out_bit
+
+    while in_training:
+        if training_step <= seg_end:
+            if training_step < seg_4:
+                training_step += 1
+                if training_step <= seg_3:
+                    if training_step <= seg_2:
+                        if training_step <= seg_1:
+                            continue
+                        bits = _scramble(1)
+                        bits = (bits << 1) | _scramble(1)
+                        constellation_state = cdba_to_abcd[bits]
+                        if short_train and training_step == seg_short_4:
+                            training_step = seg_4
+                        continue
+                    shift = ((training_step - seg_3 - 1) & 0x7) << 1
+                    bits = _scramble((bridge_word >> shift) & 1)
+                    bits = (bits << 1) | _scramble((bridge_word >> (shift + 1)) & 1)
+                    constellation_state = (constellation_state + dibit_to_step[bits]) & 3
+                    continue
+            training_step += 1
+            if training_step > seg_end:
+                in_training = False
+                break
+            # Segment 4 sends fake_get_bit()=1 through the normal data path.
+            q = 0
+            for bit_index in range(bits_per_symbol):
+                q |= _scramble(1) << bit_index
+            if bits_per_symbol == 2:
+                diff = v32bis_4800_differential_encoder[diff][q & 0x03]
+            else:
+                diff = v17_differential_encoder[diff][q & 0x03]
+                convolution = v17_convolutional_encoder[convolution][diff]
+        else:
+            break
+
+    return {
+        "scrambler_register": scrambler_state,
+        "diff": diff,
+        "convolution": convolution,
+        "constellation_state": constellation_state,
+        "bits_per_symbol": bits_per_symbol,
+    }
+
+
+def trace_python_tx_stages(
+    bit_rate: int,
+    bits: list[int],
+    *,
+    calling_party: bool,
+    scrambler_register: int = 0,
+    prev_y_state: tuple[int, int] = (0, 0),
+    conv_state: int = 0,
+) -> list[dict[str, object]]:
+    """Trace the Python user-data TX stages symbol by symbol."""
+    from tools.v32bis_ref.scrambler import Scrambler
+
+    const_map = {
+        14400: _CONST_14400,
+        12000: _CONST_12000,
+        9600: _CONST_9600,
+        7200: _CONST_7200,
+        4800: _CONST_4800,
+    }[bit_rate]
+    bits_per_symbol = BITS_PER_SYMBOL[bit_rate]
+    scrambler = Scrambler(scrambler_tap(calling_party=calling_party, transmit=True), register=scrambler_register)
+    prev_y1, prev_y2 = prev_y_state
+    rows: list[dict[str, object]] = []
+
+    for symbol_index, offset in enumerate(range(0, len(bits), bits_per_symbol)):
+        input_bits = bits[offset:offset + bits_per_symbol]
+        scrambled_bits = [scrambler.process_bit(bit) for bit in input_bits]
+        if bit_rate == 4800:
+            q1, q2 = scrambled_bits[0], scrambled_bits[1]
+            diff_in = _Y_STATE_TO_INDEX[(prev_y1, prev_y2)]
+            y1, y2 = DIFF_TABLE2[(q1, q2, prev_y1, prev_y2)]
+            prev_y1, prev_y2 = y1, y2
+            diff_out = _Y_STATE_TO_INDEX[(y1, y2)]
+            codeword = (y1 << 1) | y2
+            convolution_out = conv_state
+        else:
+            q1, q2 = scrambled_bits[0], scrambled_bits[1]
+            q_extra = scrambled_bits[2:]
+            diff_in = _Y_STATE_TO_INDEX[(prev_y1, prev_y2)]
+            y1, y2 = DIFF_TABLE1[(q1, q2, prev_y1, prev_y2)]
+            prev_y1, prev_y2 = y1, y2
+            diff_out = _Y_STATE_TO_INDEX[(y1, y2)]
+            conv_state, y0 = _NEXT_STATE_TABLE[(conv_state, y1, y2)]
+            convolution_out = conv_state
+            n_bits = 1 + 2 + len(q_extra)
+            codeword = (y0 << (n_bits - 1)) | (y1 << (n_bits - 2)) | (y2 << (n_bits - 3))
+            for index, qbit in enumerate(q_extra):
+                codeword |= qbit << (n_bits - 4 - index)
+        q_value = sum(bit << (bits_per_symbol - 1 - index) for index, bit in enumerate(scrambled_bits))
+        rows.append(
+            {
+                "symbol_index": symbol_index,
+                "input_bits": input_bits,
+                "scrambled_bits": scrambled_bits,
+                "q": q_value,
+                "diff_in": diff_in,
+                "diff_out": diff_out,
+                "convolution_out": convolution_out,
+                "codeword": codeword,
+                "point": tuple(map(float, const_map[codeword])),
+            }
+        )
+    return rows
+
+
+def build_stage_diagnostics(
+    spandsp_maps: dict[int, list[tuple[float, float]]],
+    *,
+    rate: int = 12000,
+    symbol_count: int = 8,
+    seed: int = 7,
+    calling_party: bool = True,
+) -> dict[str, object]:
+    """Build a stage-by-stage diagnostic trace for the easiest narrowing target."""
+    bits = _make_deterministic_bits(symbol_count * BITS_PER_SYMBOL[rate], seed)
+    sp_rows = trace_spandsp_tx_stages(rate, bits, calling_party=calling_party, spandsp_maps=spandsp_maps)
+    py_rows = trace_python_tx_stages(rate, bits, calling_party=calling_party)
+    post_training = simulate_spandsp_post_training_state(rate, calling_party=calling_party)
+    py_post_rows = trace_python_tx_stages(
+        rate,
+        bits,
+        calling_party=calling_party,
+        scrambler_register=int(post_training["scrambler_register"]),
+        prev_y_state=_INDEX_TO_Y_STATE[int(post_training["diff"]) & 0x03],
+        conv_state=0,
+    )
+    stage_names = ("input_bits", "scrambled_bits", "q", "diff_in", "diff_out", "convolution_out", "codeword", "point")
+    def _first_divergence(compare_rows: list[dict[str, object]]) -> dict[str, object] | None:
+        for sp_row, py_row in zip(sp_rows, compare_rows):
+            for stage_name in stage_names:
+                if sp_row[stage_name] != py_row[stage_name]:
+                    return {
+                        "symbol_index": sp_row["symbol_index"],
+                        "stage": stage_name,
+                        "spandsp": sp_row[stage_name],
+                        "python": py_row[stage_name],
+                    }
+        return None
+
+    first_stage_divergence = _first_divergence(py_rows)
+    first_stage_divergence_post_training = _first_divergence(py_post_rows)
+    return {
+        "rate": rate,
+        "symbol_count": symbol_count,
+        "first_stage_divergence": first_stage_divergence,
+        "spandsp_post_training_state": post_training,
+        "first_stage_divergence_with_post_training_seed": first_stage_divergence_post_training,
+        "spandsp_rows": sp_rows,
+        "python_rows": py_rows,
+        "python_post_training_seed_rows": py_post_rows,
+    }
 
 
 def _matching_prefix_length(left: list[tuple[float, float]], right: list[tuple[float, float]]) -> int:
@@ -407,6 +719,7 @@ def build_report(header_path: Path, c_path: Path) -> dict[str, object]:
         "constellations": constellation_rows,
         "emitted_symbols": compare_emitted_symbol_streams(sp_maps),
         "emitted_symbol_diagnostics": diagnose_emitted_symbol_mismatch(sp_maps),
+        "stage_diagnostics": build_stage_diagnostics(sp_maps),
         "scrambler_taps": compare_scrambler_assignments(sp_taps, py_taps),
         "all_constellation_sets_match": all(row["same_set"] for row in constellation_rows),
         "all_constellation_orders_match": all(row["same_order"] for row in constellation_rows),
@@ -448,6 +761,17 @@ def _format_text_report(report: dict[str, object]) -> str:
     lines.append("## Emitted Symbol Diagnostics")
     for row in report["emitted_symbol_diagnostics"]:
         lines.append(f"{row['rate']}: best_variant={row['best_variant']}")
+    lines.append("")
+    lines.append("## Stage Diagnostics")
+    stage = report["stage_diagnostics"]
+    lines.append(
+        f"rate={stage['rate']} symbol_count={stage['symbol_count']} "
+        f"first_stage_divergence={stage['first_stage_divergence']}"
+    )
+    lines.append(
+        f"spandsp_post_training_state={stage['spandsp_post_training_state']} "
+        f"first_stage_divergence_with_post_training_seed={stage['first_stage_divergence_with_post_training_seed']}"
+    )
     return "\n".join(lines)
 
 
