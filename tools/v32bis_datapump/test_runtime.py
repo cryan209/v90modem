@@ -215,6 +215,59 @@ class DatapumpRuntimeTests(unittest.TestCase):
             self.assertGreater(result.recovery.agc_gain, 1.15)
             self.assertLess(result.recovery.agc_gain, 1.35)
 
+    def test_datapump_data_mode_equalizer_handles_mild_combined_channel(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=28.0,
+                noise_seed=11,
+                drift_hz_per_sample=1e-6,
+                fir_taps=(0.9, 0.25, -0.1),
+                echo_delay=6,
+                echo_gain=0.25,
+            ),
+        )
+        ber_limits = {
+            4800: 0.0,
+            7200: 0.0,
+            9600: 0.0,
+            12000: 0.0,
+            14400: 0.006,
+        }
+        for rate, max_ber in ber_limits.items():
+            result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
+            self.assertGreaterEqual(result.recovery.equalizer_training_symbols, 0)
+            self.assertLessEqual(
+                result.ber,
+                max_ber,
+                f"combined-channel BER target failed at {rate} bps: got {result.ber:.6f}",
+            )
+
+    def test_datapump_data_mode_equalizer_recovers_multipath_channel_up_to_12000(self) -> None:
+        datapump = V32bisDatapump(
+            channel_config=ChannelConfig(
+                gain=0.8,
+                snr_db=20.0,
+                noise_seed=11,
+                fir_taps=(0.9, 0.25, -0.1),
+                multi_echo_paths=((4, 0.2), (11, -0.1)),
+            ),
+        )
+        ber_limits = {
+            4800: 0.0,
+            7200: 0.0,
+            9600: 0.0,
+            12000: 0.0,
+        }
+        for rate, max_ber in ber_limits.items():
+            result = datapump.run_data(bit_rate=rate, n_symbols=512, seed=7)
+            self.assertEqual(result.recovery.equalizer_training_symbols, 0 if rate == 4800 else 128)
+            self.assertLessEqual(
+                result.ber,
+                max_ber,
+                f"multipath BER target failed at {rate} bps: got {result.ber:.6f}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

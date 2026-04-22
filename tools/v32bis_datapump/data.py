@@ -54,6 +54,8 @@ class DataRecovery:
     decoded_bits: list[int]                # descrambled payload bits
     carrier_phase_error_rad: float         # residual phase after tracking loop
     agc_gain: float                        # block gain applied before decoding
+    equalizer_taps: list[complex]          # concatenated feedforward/feedback taps
+    equalizer_training_symbols: int        # number of known target symbols used
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,12 @@ def recover_data(
     timing_offset: int = 0,
     phase_gain: float = 0.05,
     calling_party: bool = True,
+    enable_equalizer: bool = False,
+    training_points: list[tuple[int, int]] | None = None,
+    equalizer_feedforward_taps: int = 9,
+    equalizer_feedback_taps: int = 4,
+    equalizer_step_size: float = 0.0008,
+    equalizer_training_symbols: int = 128,
 ) -> DataRecovery:
     """Demodulate a data-mode passband waveform.
 
@@ -250,10 +258,10 @@ def recover_data(
     scaled_samples = [sample * agc_gain for sample in raw_samples]
 
     phase_est = 0.0
-    symbol_samples: list[complex] = []
+    phase_corrected: list[complex] = []
     for raw in scaled_samples:
         corrected = raw * complex(math.cos(-phase_est), math.sin(-phase_est))
-        symbol_samples.append(corrected)
+        phase_corrected.append(corrected)
         # Decision-directed phase error: imag(corrected × conj(nearest_point)).
         # Find the nearest constellation point and use it as the phase reference.
         if phase_gain > 0.0 and abs(corrected) > 1e-9:
@@ -263,6 +271,54 @@ def recover_data(
             if mag > 1e-9:
                 phase_error = (corrected * nearest.conjugate()).imag / (mag * mag)
                 phase_est += phase_gain * phase_error
+
+    eq_taps: list[complex] = [1.0 + 0.0j]
+    eq_training_symbols = 0
+    symbol_samples = phase_corrected
+    if enable_equalizer and bit_rate != 4800 and phase_corrected:
+        if equalizer_feedforward_taps < 1:
+            raise ValueError("equalizer_feedforward_taps must be positive")
+        if equalizer_feedback_taps < 1:
+            raise ValueError("equalizer_feedback_taps must be positive")
+        if equalizer_step_size <= 0.0:
+            raise ValueError("equalizer_step_size must be positive")
+
+        ff_half = equalizer_feedforward_taps // 2
+        padded = [0j] * ff_half + phase_corrected + [0j] * ff_half
+        ff_taps = [0j] * equalizer_feedforward_taps
+        ff_taps[ff_half] = 1.0 + 0.0j
+        fb_taps = [0j] * equalizer_feedback_taps
+        past_targets = [0j] * equalizer_feedback_taps
+        symbol_samples = []
+
+        if training_points is None:
+            known_targets: list[complex] = []
+        else:
+            known_targets = [complex(i_val, q_val) for i_val, q_val in training_points[:n_symbols]]
+        train_count = min(equalizer_training_symbols, len(phase_corrected), len(known_targets))
+        eq_training_symbols = train_count
+
+        for index in range(len(phase_corrected)):
+            ff_window = padded[index:index + equalizer_feedforward_taps]
+            ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
+            fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
+            output = ff_output - fb_output
+            if index < train_count:
+                target = known_targets[index]
+            else:
+                target = min(
+                    _const_points,
+                    key=lambda p: (output.real - p.real) ** 2 + (output.imag - p.imag) ** 2,
+                )
+            error = target - output
+            for tap_index in range(equalizer_feedforward_taps):
+                ff_taps[tap_index] += equalizer_step_size * error * ff_window[tap_index].conjugate()
+            for tap_index in range(equalizer_feedback_taps):
+                fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
+            past_targets = [target] + past_targets[:-1]
+            symbol_samples.append(output)
+
+        eq_taps = ff_taps + fb_taps
 
     # Use soft-decision Viterbi decoding for the trellis rates.
     rx_points_float = [(s.real, s.imag) for s in symbol_samples]
@@ -288,6 +344,8 @@ def recover_data(
         decoded_bits=decoded_bits,
         carrier_phase_error_rad=phase_est,
         agc_gain=agc_gain,
+        equalizer_taps=eq_taps,
+        equalizer_training_symbols=eq_training_symbols,
     )
 
 

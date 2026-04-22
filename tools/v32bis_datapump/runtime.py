@@ -173,6 +173,12 @@ class V32bisDatapump:
                 impaired = subtract_passbands(impaired, estimated)
 
         # 3. Demodulate.
+        enable_equalizer = bool(
+            self.channel_config.fir_taps
+            or (self.channel_config.echo_delay > 0 and self.channel_config.echo_gain != 0.0)
+            or self.channel_config.multi_echo_paths
+            or self.channel_config.near_end_echo_paths
+        )
         recovery = recover_data(
             impaired,
             matched_filter_taps=waveform.baseband.taps,
@@ -183,6 +189,8 @@ class V32bisDatapump:
             timing_offset=0,
             phase_gain=self.rx_config.phase_gain,
             calling_party=calling_party,
+            enable_equalizer=enable_equalizer,
+            training_points=waveform.tx_points,
         )
 
         # 4. Measure BER / SER.
