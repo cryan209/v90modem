@@ -6,6 +6,8 @@ from .coding import (
     encode_symbol_bits,
     differential_encode,
     convolution_encode,
+    EncoderState,
+    EncodedSymbol,
 )
 from .constellation import symbol_to_point
 from .rate_signal import (
@@ -83,6 +85,44 @@ from .training import (
     generate_s_segment,
     generate_trn_segment,
 )
+from .constellation import (
+    V32_NONREDUNDANT_9600_CONSTELLATION,
+    v32_nonredundant_symbol_to_point,
+)
+from .coding import (
+    encode_v32_nr_symbol_bits,
+    decode_v32_nr_symbol_index,
+)
+from .v32_rate_signal import (
+    V32_CAP_4800,
+    V32_CAP_9600,
+    V32_CAP_TRELLIS,
+    V32_CAP_CLEARDOWN,
+    V32_RATE_SYNC_BITS,
+    V32_E_SYNC_BITS,
+    v32_rate_signal_bits,
+    v32_e_sequence_bits,
+    is_v32_rate_signal_bits,
+    is_v32_e_sequence_bits,
+    decode_v32_rate_signal,
+    decode_v32_e_sequence,
+    encode_v32_rate_sequence_bits,
+    decode_v32_rate_sequence_symbols,
+    v32_cap_mask,
+    v32_highest_common_rate,
+)
+from .v32_startup import (
+    generate_aa_segment,
+    generate_cc_segment,
+    generate_ac_segment,
+    generate_ca_segment,
+    generate_v32_call_startup_trace,
+    generate_v32_answer_startup_trace,
+)
+from .v32_receiver import (
+    V32DetectedEvent,
+    V32LogicalReceiver,
+)
 from .data_mode import (
     SUPPORTED_DATA_RATES,
     DataModeEncoder,
@@ -99,6 +139,8 @@ __all__ = [
     "encode_symbol_bits",
     "differential_encode",
     "convolution_encode",
+    "EncoderState",
+    "EncodedSymbol",
     "symbol_to_point",
     "RATE_14400",
     "RATE_12000",
@@ -180,4 +222,37 @@ __all__ = [
     "symbols_to_baseband",
     "baseband_to_passband",
     "simulate_startup",
+    # V.32 non-redundant 9600 constellation
+    "V32_NONREDUNDANT_9600_CONSTELLATION",
+    "v32_nonredundant_symbol_to_point",
+    # V.32 non-redundant 9600 encoder / decoder
+    "encode_v32_nr_symbol_bits",
+    "decode_v32_nr_symbol_index",
+    # V.32 rate / E sequence helpers
+    "V32_CAP_4800",
+    "V32_CAP_9600",
+    "V32_CAP_TRELLIS",
+    "V32_CAP_CLEARDOWN",
+    "V32_RATE_SYNC_BITS",
+    "V32_E_SYNC_BITS",
+    "v32_rate_signal_bits",
+    "v32_e_sequence_bits",
+    "is_v32_rate_signal_bits",
+    "is_v32_e_sequence_bits",
+    "decode_v32_rate_signal",
+    "decode_v32_e_sequence",
+    "encode_v32_rate_sequence_bits",
+    "decode_v32_rate_sequence_symbols",
+    "v32_cap_mask",
+    "v32_highest_common_rate",
+    # V.32 startup trace generators and segment factories
+    "generate_aa_segment",
+    "generate_cc_segment",
+    "generate_ac_segment",
+    "generate_ca_segment",
+    "generate_v32_call_startup_trace",
+    "generate_v32_answer_startup_trace",
+    # V.32 logical receiver
+    "V32DetectedEvent",
+    "V32LogicalReceiver",
 ]

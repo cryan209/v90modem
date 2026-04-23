@@ -147,3 +147,60 @@ def encode_symbol_bits(bit_rate: int, bits: int, state: EncoderState) -> Encoded
         symbol_index=symbol_index,
         state=EncoderState(diff_state=diff_state, conv_state=conv_state),
     )
+
+
+# ---------------------------------------------------------------------------
+# V.32 non-redundant 9600 bit/s (16-QAM, no trellis)
+# ---------------------------------------------------------------------------
+
+def encode_v32_nr_symbol_bits(bits: int, state: EncoderState) -> EncodedSymbol:
+    """Encode 4 scrambled data bits using V.32 non-redundant (16-QAM) coding.
+
+    Differentially encodes Q1n, Q2n → Y1n, Y2n via Table 1/V.32 (same table
+    as 4800 bit/s differential encoding).  Q3n and Q4n pass through unchanged.
+
+    Symbol index = Y1·8 + Y2·4 + Q3·2 + Q4  (range 0–15).
+
+    Input bit ordering (LSB-first, same convention as :func:`encode_symbol_bits`):
+      bit 0 → Q1n, bit 1 → Q2n, bit 2 → Q3n, bit 3 → Q4n
+    """
+    if not 0 <= bits <= 15:
+        raise ValueError("bits must be in range 0..15 for V.32 non-redundant 9600")
+
+    dibit = bits & 0x03
+    diff_state = differential_encode(state.diff_state, dibit, 4800)
+
+    # Y1 = MSB of diff_state, Y2 = LSB of diff_state (see Table 1/V.32 mapping)
+    y1 = (diff_state >> 1) & 1
+    y2 = diff_state & 1
+    q3 = (bits >> 2) & 1
+    q4 = (bits >> 3) & 1
+    symbol_index = (y1 << 3) | (y2 << 2) | (q3 << 1) | q4
+
+    return EncodedSymbol(
+        symbol_index=symbol_index,
+        state=EncoderState(diff_state=diff_state, conv_state=state.conv_state),
+    )
+
+
+def decode_v32_nr_symbol_index(
+    symbol_index: int, state: EncoderState
+) -> tuple[int, EncoderState]:
+    """Decode a V.32 non-redundant 9600 symbol index (0–15) to 4 data bits.
+
+    Returns ``(bits, new_state)`` where ``bits`` is the recovered 4-bit group
+    in the same LSB-first ordering as :func:`encode_v32_nr_symbol_bits`.
+    """
+    if not 0 <= symbol_index <= 15:
+        raise ValueError("symbol_index must be in range 0..15")
+
+    y1 = (symbol_index >> 3) & 1
+    y2 = (symbol_index >> 2) & 1
+    q3 = (symbol_index >> 1) & 1
+    q4 = symbol_index & 1
+
+    diff_state = (y1 << 1) | y2
+    dibit = differential_decode(state.diff_state, diff_state, 4800)
+    bits = dibit | (q3 << 2) | (q4 << 3)
+
+    return bits, EncoderState(diff_state=diff_state, conv_state=state.conv_state)

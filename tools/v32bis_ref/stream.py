@@ -24,7 +24,7 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
 
     stream: list[ObservableSymbol] = []
     for source_instance, segment in enumerate(trace):
-        if segment.kind in {"conditioning", "s_hold"} and segment.symbols:
+        if segment.kind in {"conditioning", "s_hold", "aa", "cc", "ac", "ca"} and segment.symbols:
             for symbol in segment.symbols:
                 stream.append(
                     ObservableSymbol(

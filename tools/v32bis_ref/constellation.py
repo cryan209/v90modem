@@ -1,6 +1,42 @@
-"""Exact constellation coordinates for selected V.32bis data modes."""
+"""Exact constellation coordinates for V.32 and V.32bis data modes."""
 
 from __future__ import annotations
+
+
+# V.32 non-redundant 9600 bit/s — 16-point QAM (Figure 1 / Table 3 of V.32).
+#
+# Indexed by (Y1n << 3) | (Y2n << 2) | (Q3n << 1) | Q4n, where Y1n, Y2n are
+# the differentially-encoded outputs of Q1n, Q2n via Table 1/V.32.  Points are
+# (Re, Im) integer coordinates on the ±1, ±3 grid.
+#
+# The A, B, C, D training-subset points are at indices 1, 5, 13, 9 respectively.
+V32_NONREDUNDANT_9600_CONSTELLATION: tuple[tuple[float, float], ...] = (
+    (-1.0, -1.0),  # 0: Y1=0 Y2=0 Q3=0 Q4=0
+    (-3.0, -1.0),  # 1: Y1=0 Y2=0 Q3=0 Q4=1  ← A
+    (-1.0, -3.0),  # 2: Y1=0 Y2=0 Q3=1 Q4=0
+    (-3.0, -3.0),  # 3: Y1=0 Y2=0 Q3=1 Q4=1
+    ( 1.0, -1.0),  # 4: Y1=0 Y2=1 Q3=0 Q4=0
+    ( 1.0, -3.0),  # 5: Y1=0 Y2=1 Q3=0 Q4=1  ← B
+    ( 3.0, -1.0),  # 6: Y1=0 Y2=1 Q3=1 Q4=0
+    ( 3.0, -3.0),  # 7: Y1=0 Y2=1 Q3=1 Q4=1
+    (-1.0,  1.0),  # 8: Y1=1 Y2=0 Q3=0 Q4=0
+    (-1.0,  3.0),  # 9: Y1=1 Y2=0 Q3=0 Q4=1  ← D
+    (-3.0,  1.0),  # 10: Y1=1 Y2=0 Q3=1 Q4=0
+    (-3.0,  3.0),  # 11: Y1=1 Y2=0 Q3=1 Q4=1
+    ( 1.0,  1.0),  # 12: Y1=1 Y2=1 Q3=0 Q4=0
+    ( 3.0,  1.0),  # 13: Y1=1 Y2=1 Q3=0 Q4=1  ← C
+    ( 1.0,  3.0),  # 14: Y1=1 Y2=1 Q3=1 Q4=0
+    ( 3.0,  3.0),  # 15: Y1=1 Y2=1 Q3=1 Q4=1
+)
+
+
+def v32_nonredundant_symbol_to_point(symbol_index: int) -> tuple[float, float]:
+    """Map a V.32 non-redundant 9600 symbol index (0–15) to its (Re, Im) point."""
+    if not 0 <= symbol_index <= 15:
+        raise ValueError(
+            f"symbol_index must be in range 0..15, got {symbol_index}"
+        )
+    return V32_NONREDUNDANT_9600_CONSTELLATION[symbol_index]
 
 
 CONSTELLATIONS = {
