@@ -339,15 +339,14 @@ def simulate_python_tx_symbols(
     *,
     calling_party: bool,
 ) -> list[tuple[float, float]]:
-    """Run the Python reference data path with SpanDSP-compatible defaults."""
-    return simulate_python_variant_symbols(
-        bit_rate,
-        bits,
-        calling_party=calling_party,
-        scrambler_register=_SPANDSP_SCRAMBLER_SEED,
-        prev_y_state=_SPANDSP_INITIAL_DIFF_STATE,
-        conv_state=_SPANDSP_INITIAL_CONV_STATE,
-    )
+    """Run the Python reference data path from a fresh reference reset state."""
+    tap = scrambler_tap(calling_party=calling_party, transmit=True)
+    from tools.v32bis_ref.scrambler import Scrambler
+    from tools.v32bis_ref.data_mode import DataModeEncoder
+
+    scrambled = Scrambler(tap).process_bits(bits)
+    encoder = DataModeEncoder(bit_rate)
+    return [tuple(map(float, point)) for point in encoder.encode(scrambled)]
 
 
 def simulate_python_variant_symbols(
@@ -573,9 +572,9 @@ def trace_python_tx_stages(
     bits: list[int],
     *,
     calling_party: bool,
-    scrambler_register: int = _SPANDSP_SCRAMBLER_SEED,
-    prev_y_state: tuple[int, int] = _SPANDSP_INITIAL_DIFF_STATE,
-    conv_state: int = _SPANDSP_INITIAL_CONV_STATE,
+    scrambler_register: int = 0,
+    prev_y_state: tuple[int, int] = (0, 0),
+    conv_state: int = 0,
 ) -> list[dict[str, object]]:
     """Trace the Python user-data TX stages symbol by symbol."""
     from tools.v32bis_ref.scrambler import Scrambler

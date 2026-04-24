@@ -112,7 +112,7 @@ def generate_call_startup_trace(
     trn_length: int = 1280,
     r2_repetitions: int = 2,
     b1_symbols: int = 128,
-    spec_derived_startup_state: bool = False,
+    spec_derived_startup_state: bool = True,
 ) -> list[StartupSegment]:
     """Generate the caller's transmitter-side start-up trace after detecting R1."""
 
@@ -152,7 +152,7 @@ def generate_answer_startup_trace(
     r1_repetitions: int = 2,
     r3_repetitions: int = 2,
     b1_symbols: int = 128,
-    spec_derived_startup_state: bool = False,
+    spec_derived_startup_state: bool = True,
 ) -> list[StartupSegment]:
     """Generate the answerer's transmitter-side start-up trace from section 6.2."""
 

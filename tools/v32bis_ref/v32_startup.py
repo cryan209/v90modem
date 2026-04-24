@@ -190,7 +190,7 @@ def generate_v32_call_startup_trace(
     trn_length: int = 1280,
     r2_repetitions: int = 2,
     b1_symbols: int = 128,
-    spec_derived_startup_state: bool = False,
+    spec_derived_startup_state: bool = True,
 ) -> list[StartupSegment]:
     """Generate the V.32 calling-modem startup trace (Figure 4/V.32).
 
@@ -262,7 +262,7 @@ def generate_v32_answer_startup_trace(
     r1_repetitions: int = 2,
     r3_repetitions: int = 2,
     b1_symbols: int = 128,
-    spec_derived_startup_state: bool = False,
+    spec_derived_startup_state: bool = True,
 ) -> list[StartupSegment]:
     """Generate the V.32 answering-modem startup trace (Figure 4/V.32).
 
