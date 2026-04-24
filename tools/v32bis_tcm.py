@@ -22,7 +22,9 @@ prints).
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 
@@ -58,35 +60,22 @@ for q1 in range(2):
             next_diff = _V17_DIFFERENTIAL_ENCODER[prev_diff][q_dibit]
             DIFF_TABLE1[(q1, q2, prev_y1, prev_y2)] = _INDEX_TO_Y_STATE[next_diff]
 
-# Table 2/V.32bis — 4800 bps differential encoding (no trellis)
-# Keyed (Q1n, Q2n, Y1_{n-1}, Y2_{n-1}) → (Y1n, Y2n)
-_TABLE2_RAW = [
-    # +90°
-    (0, 0, 0, 0,  0, 1),
-    (0, 0, 0, 1,  1, 1),
-    (0, 0, 1, 0,  0, 0),
-    (0, 0, 1, 1,  1, 0),
-    # 0°
-    (0, 1, 0, 0,  0, 0),
-    (0, 1, 0, 1,  0, 1),
-    (0, 1, 1, 0,  1, 0),
-    (0, 1, 1, 1,  1, 1),
-    # +180°
-    (1, 0, 0, 0,  1, 1),
-    (1, 0, 0, 1,  1, 0),
-    (1, 0, 1, 0,  0, 1),
-    (1, 0, 1, 1,  0, 0),
-    # +270°
-    (1, 1, 0, 0,  1, 0),
-    (1, 1, 0, 1,  0, 0),
-    (1, 1, 1, 0,  1, 1),
-    (1, 1, 1, 1,  0, 1),
-]
+# SpanDSP's 4800 bps V.32bis differential encoder.
+_V32BIS_4800_DIFFERENTIAL_ENCODER = (
+    (2, 3, 0, 1),
+    (0, 2, 1, 3),
+    (3, 1, 2, 0),
+    (1, 0, 3, 2),
+)
 
-DIFF_TABLE2: dict[tuple[int, int, int, int], tuple[int, int]] = {
-    (q1, q2, py1, py2): (y1, y2)
-    for q1, q2, py1, py2, y1, y2 in _TABLE2_RAW
-}
+DIFF_TABLE2: dict[tuple[int, int, int, int], tuple[int, int]] = {}
+for q1 in range(2):
+    for q2 in range(2):
+        q_dibit = q1 | (q2 << 1)
+        for prev_diff in range(4):
+            prev_y1, prev_y2 = _INDEX_TO_Y_STATE[prev_diff]
+            next_diff = _V32BIS_4800_DIFFERENTIAL_ENCODER[prev_diff][q_dibit]
+            DIFF_TABLE2[(q1, q2, prev_y1, prev_y2)] = _INDEX_TO_Y_STATE[next_diff]
 
 
 # ---------------------------------------------------------------------------
@@ -352,12 +341,53 @@ def _parse_4800_constellation() -> dict[int, tuple[int, int]]:
     }
 
 
-# Build constellation tables once at import time
-_CONST_14400 = _parse_14400_constellation()
-_CONST_12000 = _parse_12000_constellation()
-_CONST_9600  = _parse_9600_constellation()
-_CONST_7200  = _parse_7200_constellation()
-_CONST_4800  = _parse_4800_constellation()
+def _extract_brace_block(text: str, start_index: int) -> str:
+    open_index = text.find("{", start_index)
+    if open_index < 0:
+        raise ValueError("opening brace not found")
+    depth = 0
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_index + 1:index]
+    raise ValueError("unterminated brace block")
+
+
+def _load_spandsp_constellations() -> dict[int, dict[int, tuple[int, int]]]:
+    header = Path(__file__).resolve().parent.parent / "spandsp-master" / "src" / "v17_v32bis_tx_constellation_maps.h"
+    text = header.read_text()
+    point_pattern = re.compile(
+        r"\{\s*FP_CONSTELLATION_SCALE\(\s*([-0-9.]+)f\),\s*FP_CONSTELLATION_SCALE\(\s*([-0-9.]+)f\)\s*\}"
+    )
+    parsed: dict[int, dict[int, tuple[int, int]]] = {}
+    for rate, expected_count in ((14400, 128), (12000, 64), (9600, 32), (7200, 16), (4800, 4)):
+        marker = f"v17_v32bis_{rate}_constellation["
+        start = text.find(marker)
+        if start < 0:
+            raise ValueError(f"could not find {marker} in {header}")
+        body = _extract_brace_block(text, start)
+        points = [
+            (int(round(float(i_text))), int(round(float(q_text))))
+            for i_text, q_text in point_pattern.findall(body)
+        ]
+        if len(points) != expected_count:
+            raise ValueError(f"expected {expected_count} points for {rate}, found {len(points)}")
+        parsed[rate] = {index: point for index, point in enumerate(points)}
+    return parsed
+
+
+# Build the active constellation tables from the bundled SpanDSP maps so the
+# Python datapump matches the local implementation target exactly.
+_SPANDSP_CONSTELLATIONS = _load_spandsp_constellations()
+_CONST_14400 = _SPANDSP_CONSTELLATIONS[14400]
+_CONST_12000 = _SPANDSP_CONSTELLATIONS[12000]
+_CONST_9600  = _SPANDSP_CONSTELLATIONS[9600]
+_CONST_7200  = _SPANDSP_CONSTELLATIONS[7200]
+_CONST_4800  = _SPANDSP_CONSTELLATIONS[4800]
 
 # Reverse maps: (I,Q) → codeword (for the decoder's nearest-neighbour search)
 def _invert(m: dict[int, tuple[int,int]]) -> dict[tuple[int,int], int]:
@@ -453,12 +483,14 @@ class TrellisEncoder:
         ns, y0 = _NEXT_STATE_TABLE[(self._conv_state, y1, y2)]
         self._conv_state = ns
 
-        # Step 3: form codeword and look up constellation
-        # Bit order: Y0 (MSB), Y1, Y2, Q3[, Q4[, Q5[, Q6]]] (LSB)
-        n_bits = 1 + 2 + len(q_extra)   # total bits in codeword
-        codeword = (y0 << (n_bits - 1)) | (y1 << (n_bits - 2)) | (y2 << (n_bits - 3))
-        for k, qbit in enumerate(q_extra):
-            codeword |= qbit << (n_bits - 4 - k)
+        # Step 3: pack the codeword the same way SpanDSP does:
+        #   bits 0      -> redundant Y0
+        #   bits 1..2   -> differential state (Y1,Y2 packed as diff index)
+        #   bits 3..    -> uncoded Q3..Q6 bits in ascending bit order
+        diff_state = _Y_STATE_TO_INDEX[(y1, y2)]
+        codeword = (diff_state << 1) | y0
+        for bit_index, qbit in enumerate(q_extra, start=3):
+            codeword |= qbit << bit_index
 
         return self._const[codeword]
 
@@ -480,8 +512,10 @@ class _PathState:
     start_prev_y: tuple[int, int]
 
 
-_ANGLE_OF = {(0, 0): 0, (0, 1): 90, (1, 0): 180, (1, 1): 270}
-_FROM_ANGLE = {0: (0, 0), 90: (0, 1), 180: (1, 0), 270: (1, 1)}
+_INVERSE_DIFF_TABLE1 = {
+    (prev_y1, prev_y2, y1, y2): (q1, q2)
+    for (q1, q2, prev_y1, prev_y2), (y1, y2) in DIFF_TABLE1.items()
+}
 
 
 def _inverse_differential(
@@ -491,8 +525,7 @@ def _inverse_differential(
     y2: int,
 ) -> tuple[int, int]:
     """Recover the transmitted quadrant dibit from successive Y states."""
-    rot = (_ANGLE_OF[(y1, y2)] - _ANGLE_OF[(prev_y1, prev_y2)]) % 360
-    return _FROM_ANGLE[rot]
+    return _INVERSE_DIFF_TABLE1[(prev_y1, prev_y2, y1, y2)]
 
 
 class ViterbiDecoder:
@@ -675,10 +708,10 @@ class ViterbiDecoder:
         for extra_val in range(1 << n_extra):
             extra_bits = [(extra_val >> (n_extra - 1 - k)) & 1
                           for k in range(n_extra)]
-            # Build codeword
-            codeword = (y0 << (n_total - 1)) | (y1 << (n_total - 2)) | (y2 << (n_total - 3))
-            for k, b in enumerate(extra_bits):
-                codeword |= b << (n_total - 4 - k)
+            diff_state = _Y_STATE_TO_INDEX[(y1, y2)]
+            codeword = (diff_state << 1) | y0
+            for bit_index, bit in enumerate(extra_bits, start=3):
+                codeword |= bit << bit_index
 
             if codeword not in self._const:
                 continue
@@ -779,32 +812,21 @@ def decode_symbols_hard(
         # Hard decision: find nearest constellation point
         best_cw = min(const, key=lambda cw: (i_rx - const[cw][0])**2 +
                                              (q_rx - const[cw][1])**2)
-        # Extract bits from codeword (MSB first)
-        cw_bits = [(best_cw >> (n_total_bits - 1 - k)) & 1
-                   for k in range(n_total_bits)]
-
         if use_trellis:
-            # y0=cw_bits[0], y1=cw_bits[1], y2=cw_bits[2]
-            y0, y1, y2 = cw_bits[0], cw_bits[1], cw_bits[2]
-            q_extra = cw_bits[3:]
+            diff_state = (best_cw >> 1) & 0x03
+            y1, y2 = _INDEX_TO_Y_STATE[diff_state]
+            q_extra = [(best_cw >> (bit_index + 3)) & 1
+                       for bit_index in range(bits_per_group - 2)]
 
             # Inverse differential: recover Q1, Q2.
-            # With the corrected Table 1 (bijective rotation table), there is
-            # exactly one (Q1,Q2) per (Y1,Y2,prevY1,prevY2).
-            # Closed-form inverse: Q1 = (angle(Y1,Y2) - angle(prevY1,prevY2)) // 90 bit1,
-            # or equivalently via the same rotation rule.
-            # Simpler: use the direct formula derived from the rotation convention:
-            #   angle_out = (angle_in + Q1Q2_rotation) mod 360
-            #   Q1Q2_rotation = (angle_out - angle_in) mod 360
-            #   where rotation 0=Q1Q2=00, 90=01, 180=10, 270=11
             q1q2 = _inverse_differential(prev_y1, prev_y2, y1, y2)
-            # Advance convolutional encoder state
             conv_state, _ = _NEXT_STATE_TABLE[(conv_state, y1, y2)]
             prev_y1, prev_y2 = y1, y2
             decoded_bits.extend([q1q2[0], q1q2[1]] + q_extra)
         else:
             # 4800 bps
-            y1, y2 = cw_bits[0], cw_bits[1]
+            y1 = (best_cw >> 1) & 1
+            y2 = best_cw & 1
             q1q2 = None
             for (q1, q2, py1, py2), (oy1, oy2) in DIFF_TABLE2.items():
                 if py1 == prev_y1 and py2 == prev_y2 and oy1 == y1 and oy2 == y2:

@@ -591,6 +591,7 @@ def trace_python_tx_stages(
     for symbol_index, offset in enumerate(range(0, len(bits), bits_per_symbol)):
         input_bits = bits[offset:offset + bits_per_symbol]
         scrambled_bits = [scrambler.process_bit(bit) for bit in input_bits]
+        q_value_lsb = sum(bit << index for index, bit in enumerate(scrambled_bits))
         if bit_rate == 4800:
             q1, q2 = scrambled_bits[0], scrambled_bits[1]
             diff_in = _Y_STATE_TO_INDEX[(prev_y1, prev_y2)]
@@ -609,11 +610,9 @@ def trace_python_tx_stages(
             diff_out = _Y_STATE_TO_INDEX[(y1, y2)]
             conv_state, y0 = _NEXT_STATE_TABLE[(conv_state, y1, y2)]
             convolution_out = conv_state
-            n_bits = 1 + 2 + len(q_extra)
-            codeword = (y0 << (n_bits - 1)) | (y1 << (n_bits - 2)) | (y2 << (n_bits - 3))
-            for index, qbit in enumerate(q_extra):
-                codeword |= qbit << (n_bits - 4 - index)
-        q_value_lsb = sum(bit << index for index, bit in enumerate(scrambled_bits))
+            codeword = (diff_out << 1) | y0
+            for bit_index, qbit in enumerate(q_extra, start=3):
+                codeword |= qbit << bit_index
         q_value_msb = sum(bit << (bits_per_symbol - 1 - index) for index, bit in enumerate(scrambled_bits))
         spandsp_style_codeword = codeword
         if bit_rate != 4800:
@@ -623,7 +622,7 @@ def trace_python_tx_stages(
                 "symbol_index": symbol_index,
                 "input_bits": input_bits,
                 "scrambled_bits": scrambled_bits,
-                "q": q_value_msb,
+                "q": q_value_lsb,
                 "q_lsb": q_value_lsb,
                 "q_msb": q_value_msb,
                 "diff_in": diff_in,

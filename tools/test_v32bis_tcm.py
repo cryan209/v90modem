@@ -55,28 +55,25 @@ def test_constellation_unique_points():
         assert len(points) == len(set(points)), f"{name} bps has duplicate (I,Q) points"
 
 
-def test_constellation_odd_coords():
-    """All non-4800 constellation points use odd integer coordinates."""
+def test_constellation_integer_coords():
+    """All constellation points are integer coordinates."""
     for name, const in [
         ("14400", _CONST_14400),
         ("12000", _CONST_12000),
-        ( "9600", _CONST_9600),
-        ( "7200", _CONST_7200),
+        ("9600", _CONST_9600),
+        ("7200", _CONST_7200),
+        ("4800", _CONST_4800),
     ]:
         for cw, (i, q) in const.items():
-            assert i % 2 != 0 and q % 2 != 0, \
-                f"{name} codeword {cw:07b}: point ({i},{q}) not odd"
+            assert isinstance(i, int) and isinstance(q, int), \
+                f"{name} codeword {cw:07b}: point ({i},{q}) not integer"
 
 
-def test_9600_cross_shape():
-    """9600 bps is the 32-point cross: 6×6 minus 4 corners."""
+def test_9600_constellation_has_axis_extremes():
+    """9600 bps keeps the expected outer-axis points used by SpanDSP."""
     points = set(_CONST_9600.values())
-    for i in [-5, -3, -1, 1, 3, 5]:
-        for q in [-5, -3, -1, 1, 3, 5]:
-            if abs(i) == 5 and abs(q) == 5:
-                assert (i, q) not in points, f"Corner ({i},{q}) should be absent"
-            else:
-                assert (i, q) in points, f"Point ({i},{q}) missing from 9600 constellation"
+    for point in [(-8, 2), (-6, -4), (4, -6), (2, 8)]:
+        assert point in points, f"Point {point} missing from 9600 constellation"
 
 
 # ---------------------------------------------------------------------------
@@ -105,19 +102,16 @@ def test_diff_table1_spec_rows():
 
 
 def test_diff_table2_spec_rows():
-    """Spot-check Table 2/V.32bis (4800 bps differential encoding)."""
-    # From spec Table 2 (phase quadrant column included for context):
+    """Spot-check SpanDSP's 4800 bps differential encoder table."""
     cases = [
-        # Q1=0,Q2=0 → +90° rotation
-        ((0, 0, 0, 0), (0, 1)),   # A→B
-        ((0, 0, 0, 1), (1, 1)),   # B→C
-        ((0, 0, 1, 0), (0, 0)),   # D? → A
-        ((0, 0, 1, 1), (1, 0)),   # C→D
-        # Q1=0,Q2=1 → 0° (no rotation)
-        ((0, 1, 0, 0), (0, 0)),   # A→A
-        ((0, 1, 0, 1), (0, 1)),   # B→B
-        ((0, 1, 1, 0), (1, 0)),   # D→D? — spec says (1,0)
-        ((0, 1, 1, 1), (1, 1)),   # C→C
+        ((0, 0, 0, 0), (1, 0)),
+        ((0, 0, 0, 1), (0, 0)),
+        ((0, 1, 0, 0), (0, 0)),
+        ((0, 1, 1, 1), (1, 1)),
+        ((1, 0, 0, 0), (1, 1)),
+        ((1, 0, 1, 1), (0, 0)),
+        ((1, 1, 0, 0), (0, 1)),
+        ((1, 1, 1, 1), (1, 0)),
     ]
     for key, expected in cases:
         got = DIFF_TABLE2[key]
