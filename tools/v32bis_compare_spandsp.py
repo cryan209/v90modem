@@ -48,6 +48,9 @@ SUPPORTED_RATES = (14400, 12000, 9600, 7200, 4800)
 BITS_PER_SYMBOL = {14400: 6, 12000: 5, 9600: 4, 7200: 3, 4800: 2}
 _Y_STATE_TO_INDEX = {(0, 0): 0, (0, 1): 1, (1, 0): 2, (1, 1): 3}
 _INDEX_TO_Y_STATE = {value: key for key, value in _Y_STATE_TO_INDEX.items()}
+_SPANDSP_SCRAMBLER_SEED = 0x2ECDD5
+_SPANDSP_INITIAL_DIFF_STATE = (0, 1)
+_SPANDSP_INITIAL_CONV_STATE = 0
 
 
 def _extract_brace_block(text: str, start_index: int) -> str:
@@ -336,14 +339,15 @@ def simulate_python_tx_symbols(
     *,
     calling_party: bool,
 ) -> list[tuple[float, float]]:
-    """Run the Python reference data path on the same deterministic bit stream."""
-    tap = scrambler_tap(calling_party=calling_party, transmit=True)
-    from tools.v32bis_ref.scrambler import Scrambler
-    from tools.v32bis_ref.data_mode import DataModeEncoder
-
-    scrambled = Scrambler(tap).process_bits(bits)
-    encoder = DataModeEncoder(bit_rate)
-    return [tuple(map(float, point)) for point in encoder.encode(scrambled)]
+    """Run the Python reference data path with SpanDSP-compatible defaults."""
+    return simulate_python_variant_symbols(
+        bit_rate,
+        bits,
+        calling_party=calling_party,
+        scrambler_register=_SPANDSP_SCRAMBLER_SEED,
+        prev_y_state=_SPANDSP_INITIAL_DIFF_STATE,
+        conv_state=_SPANDSP_INITIAL_CONV_STATE,
+    )
 
 
 def simulate_python_variant_symbols(
@@ -569,9 +573,9 @@ def trace_python_tx_stages(
     bits: list[int],
     *,
     calling_party: bool,
-    scrambler_register: int = 0,
-    prev_y_state: tuple[int, int] = (0, 0),
-    conv_state: int = 0,
+    scrambler_register: int = _SPANDSP_SCRAMBLER_SEED,
+    prev_y_state: tuple[int, int] = _SPANDSP_INITIAL_DIFF_STATE,
+    conv_state: int = _SPANDSP_INITIAL_CONV_STATE,
 ) -> list[dict[str, object]]:
     """Trace the Python user-data TX stages symbol by symbol."""
     from tools.v32bis_ref.scrambler import Scrambler
@@ -661,7 +665,7 @@ def build_stage_diagnostics(
         calling_party=calling_party,
         scrambler_register=int(post_training["scrambler_register"]),
         prev_y_state=_INDEX_TO_Y_STATE[int(post_training["diff"]) & 0x03],
-        conv_state=0,
+        conv_state=int(post_training["convolution"]),
     )
     stage_names = ("input_bits", "scrambled_bits", "q", "diff_in", "diff_out", "convolution_out", "codeword", "point")
     def _first_divergence(compare_rows: list[dict[str, object]]) -> dict[str, object] | None:
@@ -733,7 +737,7 @@ def build_startup_handoff_diagnostics(
         calling_party=calling_party,
         scrambler_register=int(spandsp_post_training_state["scrambler_register"]),
         prev_y_state=_INDEX_TO_Y_STATE[int(spandsp_post_training_state["diff"]) & 0x03],
-        conv_state=0,
+        conv_state=int(spandsp_post_training_state["convolution"]),
     )
 
     stage_names = ("scrambled_bits", "q", "diff_in", "diff_out", "convolution_out", "codeword", "point")
