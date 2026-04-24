@@ -29,59 +29,34 @@ from typing import Sequence
 # ---------------------------------------------------------------------------
 # §2.3  Differential quadrant encoder — Table 1/V.32bis
 # ---------------------------------------------------------------------------
-# Keyed by (Q1n, Q2n, Y1_{n-1}, Y2_{n-1}) → (Y1n, Y2n)
-_DIFF_TABLE1: dict[tuple[int, int, int, int], tuple[int, int]] = {
-    # Q1 Q2 prev_Y1 prev_Y2 → Y1 Y2
-    (0, 0, 0, 0): (0, 0),
-    (0, 0, 0, 1): (0, 1),
-    (0, 0, 1, 0): (1, 0),
-    (0, 0, 1, 1): (1, 1),
-
-    (0, 1, 0, 0): (0, 1),
-    (0, 1, 0, 1): (1, 0),   # spec row: Q1=0,Q2=1,prev=01 → 10? — check below
-    (0, 1, 1, 0): (1, 1),
-    (0, 1, 1, 1): (0, 0),   # spec: 0,1,1,1 → 1,0 — see note
-
-    (1, 0, 0, 0): (1, 0),
-    (1, 0, 0, 1): (1, 1),
-    (1, 0, 1, 0): (0, 1),
-    (1, 0, 1, 1): (0, 0),
-
-    (1, 1, 0, 0): (1, 1),
-    (1, 1, 0, 1): (0, 0),   # spec row
-    (1, 1, 1, 0): (0, 1),   # spec row — actually 0,0? let's use spec literally
-    (1, 1, 1, 1): (0, 1),
+# SpanDSP and the V.17/V.32bis datapump both model the differential encoder as a
+# 4-state quadrant accumulator. The Q dibit is packed LSB-first as
+# ``q_dibit = Q1 | (Q2 << 1)`` and added modulo 4 to the previous differential
+# state. The state-index order is:
+#   0 -> (0,0), 1 -> (0,1), 2 -> (1,0), 3 -> (1,1)
+_INDEX_TO_Y_STATE = {
+    0: (0, 0),
+    1: (0, 1),
+    2: (1, 0),
+    3: (1, 1),
 }
+_Y_STATE_TO_INDEX = {value: key for key, value in _INDEX_TO_Y_STATE.items()}
 
-# Re-read Table 1 literally from the spec image (rows top→bottom):
-# Q1 Q2  prevY1 prevY2  Y1  Y2
-_TABLE1_RAW = [
-    # Q1,Q2,prevY1,prevY2 → Y1,Y2
-    # Implements differential phase rotation:
-    #   Q1Q2=00 → +0°, Q1Q2=01 → +90°, Q1Q2=10 → +180°, Q1Q2=11 → +270°
-    # using quadrant convention (0,0)=0°, (0,1)=90°, (1,0)=180°, (1,1)=270°.
-    (0, 0, 0, 0,  0, 0),
-    (0, 0, 0, 1,  0, 1),
-    (0, 0, 1, 0,  1, 0),
-    (0, 0, 1, 1,  1, 1),
-    (0, 1, 0, 0,  0, 1),
-    (0, 1, 0, 1,  1, 0),
-    (0, 1, 1, 0,  1, 1),
-    (0, 1, 1, 1,  0, 0),
-    (1, 0, 0, 0,  1, 0),
-    (1, 0, 0, 1,  1, 1),
-    (1, 0, 1, 0,  0, 0),   # corrected: +180° of (1,0)=180° is (0,0)=0°, not (0,1)
-    (1, 0, 1, 1,  0, 1),   # corrected: +180° of (1,1)=270° is (0,1)=90°, not (0,0)
-    (1, 1, 0, 0,  1, 1),
-    (1, 1, 0, 1,  0, 0),
-    (1, 1, 1, 0,  0, 1),
-    (1, 1, 1, 1,  1, 0),   # corrected: +270° of (1,1)=270° is (1,0)=180°, not (0,1)
-]
+_V17_DIFFERENTIAL_ENCODER = (
+    (0, 1, 2, 3),
+    (1, 2, 3, 0),
+    (2, 3, 0, 1),
+    (3, 0, 1, 2),
+)
 
-DIFF_TABLE1: dict[tuple[int, int, int, int], tuple[int, int]] = {
-    (q1, q2, py1, py2): (y1, y2)
-    for q1, q2, py1, py2, y1, y2 in _TABLE1_RAW
-}
+DIFF_TABLE1: dict[tuple[int, int, int, int], tuple[int, int]] = {}
+for q1 in range(2):
+    for q2 in range(2):
+        q_dibit = q1 | (q2 << 1)
+        for prev_diff in range(4):
+            prev_y1, prev_y2 = _INDEX_TO_Y_STATE[prev_diff]
+            next_diff = _V17_DIFFERENTIAL_ENCODER[prev_diff][q_dibit]
+            DIFF_TABLE1[(q1, q2, prev_y1, prev_y2)] = _INDEX_TO_Y_STATE[next_diff]
 
 # Table 2/V.32bis — 4800 bps differential encoding (no trellis)
 # Keyed (Q1n, Q2n, Y1_{n-1}, Y2_{n-1}) → (Y1n, Y2n)
@@ -149,46 +124,31 @@ DIFF_TABLE2: dict[tuple[int, int, int, int], tuple[int, int]] = {
 # assignment visible in Figure 2-1.  This is the standard V.32/V.32bis encoder:
 
 def _build_conv_table() -> tuple[
-    dict[tuple[int, int, int], int],           # (state, Y1, Y2) → Y0
-    dict[tuple[int, int, int], tuple[int,int]] # (state, Y1, Y2) → next_state
+    dict[tuple[int, int, int], int],
+    dict[tuple[int, int, int], tuple[int, int]],
 ]:
-    """Build convolutional encoder tables from Figure 1.
+    """Build the SpanDSP-compatible 8-state convolution transition table."""
+    v17_convolutional_encoder = (
+        (0, 2, 3, 1),
+        (4, 7, 5, 6),
+        (1, 3, 2, 0),
+        (7, 4, 6, 5),
+        (2, 0, 1, 3),
+        (6, 5, 7, 4),
+        (3, 1, 0, 2),
+        (5, 6, 4, 7),
+    )
 
-    The encoder has 4 states (2 delay elements c0, c1).
-    Input bits: (Y1n, Y2n).  The spec Figure 1 shows:
-      - Y1,Y2 feed into the differential encoder output already,
-        so we use them directly as encoder inputs.
-      - The OR / XOR symbol gates combine inputs with state to give Y0.
-
-    From the Figure 1 shift register and the symbol truth table:
-        s1 = Y1 XOR c0          (XOR box on upper path)
-        s2 = Y2 OR  c0          (OR  box on lower path)
-        Y0 = c1 XOR s1 XOR s2  (final XOR chain — simplified from full 6-tap)
-
-    Next state:
-        c0_new = Y1 XOR Y2      (feeds back through the T flip-flops)
-        c1_new = c0
-
-    This matches the 4-state trellis of V.32/V.32bis as documented in
-    published implementations (e.g. ITU-T T1700310-90 reference circuit).
-    """
     y0_table: dict[tuple[int, int, int], int] = {}
     next_state_table: dict[tuple[int, int, int], tuple[int, int]] = {}
 
-    for state in range(4):
-        c0 = (state >> 1) & 1
-        c1 = state & 1
-        for y1 in range(2):
-            for y2 in range(2):
-                s1 = y1 ^ c0
-                s2 = y2 | c0
-                y0 = c1 ^ s1 ^ s2
-                # Next state: shift register advances
-                c0_new = y1 ^ y2
-                c1_new = c0
-                ns = (c0_new << 1) | c1_new
-                y0_table[(state, y1, y2)] = y0
-                next_state_table[(state, y1, y2)] = (ns, y0)
+    for state in range(8):
+        for diff_state in range(4):
+            y1, y2 = _INDEX_TO_Y_STATE[diff_state]
+            next_state = v17_convolutional_encoder[state][diff_state]
+            y0 = (next_state >> 2) & 0x01
+            y0_table[(state, y1, y2)] = y0
+            next_state_table[(state, y1, y2)] = (next_state, y0)
 
     return y0_table, next_state_table
 
@@ -445,7 +405,7 @@ class TrellisEncoder:
         # Differential encoder state: previous Y1, Y2 output
         self._prev_y1: int = 0
         self._prev_y2: int = 0
-        # Convolutional encoder state (2-bit: c0 in bit1, c1 in bit0)
+        # SpanDSP-compatible 3-bit convolutional encoder state.
         self._conv_state: int = 0
 
     def reset(self) -> None:
@@ -568,7 +528,7 @@ class ViterbiDecoder:
                 symbols=[],
                 start_prev_y=(0, 0),
             )
-            for s in range(4)
+            for s in range(8)
         ]
 
     def reset(self) -> None:
@@ -578,7 +538,7 @@ class ViterbiDecoder:
                 symbols=[],
                 start_prev_y=(0, 0),
             )
-            for s in range(4)
+            for s in range(8)
         ]
 
     def _build_branch_table(self) -> dict[tuple[int,int], list[tuple[list[int], int]]]:
@@ -591,7 +551,7 @@ class ViterbiDecoder:
         n = self._bits_per_group
         branches: dict[tuple[int,int], list[tuple[list[int], int]]] = {}
 
-        for state in range(4):
+        for state in range(8):
             for q1 in range(2):
                 for q2 in range(2):
                     # Try all Q3..Q6 combinations
@@ -627,17 +587,17 @@ class ViterbiDecoder:
         """
         new_paths: list[_PathState] = [
             _PathState(metric=_INF, symbols=[], start_prev_y=(0, 0))
-            for _ in range(4)
+            for _ in range(8)
         ]
 
         # For each possible next state, find the best predecessor
-        for next_state in range(4):
+        for next_state in range(8):
             best_metric = _INF
             best_symbols: list[tuple[int, int, list[int]]] = []
             best_start_prev_y = (0, 0)
 
             # Enumerate all (prev_state, y1, y2) that transition to next_state
-            for prev_state in range(4):
+            for prev_state in range(8):
                 if self._paths[prev_state].metric == _INF:
                     continue
                 for y1 in range(2):

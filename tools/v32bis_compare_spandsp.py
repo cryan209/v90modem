@@ -211,7 +211,7 @@ def compare_encoder_state_tables() -> dict[str, object]:
         for diff_state in range(4):
             sp_conv = v17_convolutional_encoder[prev_conv][diff_state]
             y_state = _INDEX_TO_Y_STATE[diff_state]
-            py_conv, py_y0 = _NEXT_STATE_TABLE[(prev_conv & 0x03, y_state[0], y_state[1])]
+            py_conv, py_y0 = _NEXT_STATE_TABLE[(prev_conv, y_state[0], y_state[1])]
             conv_rows.append(
                 {
                     "prev_convolution": prev_conv,

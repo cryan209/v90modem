@@ -88,18 +88,16 @@ def test_diff_table1_size():
 
 
 def test_diff_table1_spec_rows():
-    """Spot-check several rows against Table 1/V.32bis."""
-    # From spec Table 1 (verbatim):
+    """Spot-check several rows against the SpanDSP-compatible diff-state mapping."""
     cases = [
         # (Q1, Q2, prevY1, prevY2) → (Y1, Y2)
         ((0, 0, 0, 0), (0, 0)),
-        ((0, 0, 1, 1), (1, 1)),
-        ((0, 1, 0, 0), (0, 1)),
-        ((0, 1, 1, 1), (0, 0)),
-        ((1, 0, 0, 0), (1, 0)),
-        ((1, 0, 1, 1), (0, 1)),   # +180° of (1,1)=270° → 90° = (0,1)
+        ((1, 0, 0, 0), (0, 1)),
+        ((0, 1, 0, 0), (1, 0)),
         ((1, 1, 0, 0), (1, 1)),
-        ((1, 1, 1, 1), (1, 0)),   # +270° of (1,1)=270° → 180° = (1,0)
+        ((1, 0, 1, 1), (0, 0)),
+        ((0, 1, 1, 1), (0, 1)),
+        ((1, 1, 1, 1), (1, 0)),
     ]
     for key, expected in cases:
         got = DIFF_TABLE1[key]
@@ -147,13 +145,13 @@ def test_conv_reset():
 
 
 def test_conv_state_transitions_valid():
-    """All 4 states must have defined transitions for all (y1,y2) inputs."""
-    for state in range(4):
+    """All 8 states must have defined transitions for all (y1,y2) inputs."""
+    for state in range(8):
         for y1 in range(2):
             for y2 in range(2):
                 assert (state, y1, y2) in _NEXT_STATE_TABLE
                 ns, y0 = _NEXT_STATE_TABLE[(state, y1, y2)]
-                assert 0 <= ns <= 3
+                assert 0 <= ns <= 7
                 assert y0 in (0, 1)
 
 
