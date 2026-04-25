@@ -43,6 +43,24 @@ reference, but `spandsp-master/tests/v32bis_tests.c` explicitly marks its
 V.32bis support as work in progress. It is not sufficient evidence of
 compliance.
 
+## Reference vs SpanDSP
+
+The Python reference layer follows the ITU-T Recommendation by default.
+
+- Default startup modelling uses the ITU-oriented handoff policy:
+  differential state is derived from the final transmitted `TRN` symbol,
+  scrambler continuity is carried from the end of `TRN`, and the
+  convolutional state is explicitly zeroed at `B1` entry.
+- The normal-startup scrambler carry-forward is still an interoperability
+  assumption, because the Recommendation is less explicit here than it is for
+  `TRN` initialization and renegotiation.
+- The local SpanDSP comparison harness is still valuable, but it should be read
+  as an implementation cross-check, not as the normative source.
+- When the comparison harness reports a better match with a SpanDSP-specific
+  startup seed, that does not override the Recommendation. It means SpanDSP is
+  making additional startup-state choices beyond the explicitly modelled ITU
+  handoff path.
+
 ## Work Breakdown
 
 ### Phase 1: Spec-Locked Tables and Bit-Level Logic

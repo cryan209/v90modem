@@ -25,8 +25,7 @@ from __future__ import annotations
 
 from .rate_signal import encode_rate_sequence_bits
 from .spec_policy import (
-    startup_diff_state_from_final_trn_symbol,
-    startup_scrambler_register_from_trn,
+    startup_state_from_trn,
 )
 from .startup import StartupSegment
 from .training import (
@@ -215,12 +214,12 @@ def generate_v32_call_startup_trace(
     initial_diff_state = 1
     initial_scrambler_register = 0
     if spec_derived_startup_state:
-        initial_diff_state = startup_diff_state_from_final_trn_symbol(
-            conditioning.final_trn_symbol
+        startup_state = startup_state_from_trn(
+            conditioning.final_trn_symbol,
+            conditioning.trn_final_scrambler_register,
         )
-        initial_scrambler_register = startup_scrambler_register_from_trn(
-            conditioning.trn_final_scrambler_register
-        )
+        initial_diff_state = startup_state.diff_state
+        initial_scrambler_register = startup_state.scrambler_register
 
     r2_bits = v32_rate_signal_bits(
         support_4800=support_4800,
@@ -295,10 +294,18 @@ def generate_v32_answer_startup_trace(
     r1_scr = 0
     r3_scr = 0
     if spec_derived_startup_state:
-        r1_diff = startup_diff_state_from_final_trn_symbol(r1_cond.final_trn_symbol)
-        r3_diff = startup_diff_state_from_final_trn_symbol(r3_cond.final_trn_symbol)
-        r1_scr = startup_scrambler_register_from_trn(r1_cond.trn_final_scrambler_register)
-        r3_scr = startup_scrambler_register_from_trn(r3_cond.trn_final_scrambler_register)
+        r1_startup_state = startup_state_from_trn(
+            r1_cond.final_trn_symbol,
+            r1_cond.trn_final_scrambler_register,
+        )
+        r3_startup_state = startup_state_from_trn(
+            r3_cond.final_trn_symbol,
+            r3_cond.trn_final_scrambler_register,
+        )
+        r1_diff = r1_startup_state.diff_state
+        r3_diff = r3_startup_state.diff_state
+        r1_scr = r1_startup_state.scrambler_register
+        r3_scr = r3_startup_state.scrambler_register
 
     r1_bits = v32_rate_signal_bits(
         support_4800=support_4800,

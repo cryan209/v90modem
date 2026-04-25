@@ -14,8 +14,7 @@ from .rate_signal import (
     rate_signal_bits,
 )
 from .spec_policy import (
-    startup_diff_state_from_final_trn_symbol,
-    startup_scrambler_register_from_trn,
+    startup_state_from_trn,
 )
 from .training import ConditioningSignal, generate_conditioning_signal
 
@@ -120,8 +119,12 @@ def generate_call_startup_trace(
     initial_diff_state = 1
     initial_scrambler_register = 0
     if spec_derived_startup_state:
-        initial_diff_state = startup_diff_state_from_final_trn_symbol(conditioning.final_trn_symbol)
-        initial_scrambler_register = startup_scrambler_register_from_trn(conditioning.trn_final_scrambler_register)
+        startup_state = startup_state_from_trn(
+            conditioning.final_trn_symbol,
+            conditioning.trn_final_scrambler_register,
+        )
+        initial_diff_state = startup_state.diff_state
+        initial_scrambler_register = startup_state.scrambler_register
     return [
         StartupSegment(name="S_NT", kind="s_hold", tx_calling_party=True),
         _conditioning_segment(calling_party=True, conditioning=conditioning),
@@ -163,10 +166,18 @@ def generate_answer_startup_trace(
     r1_initial_scrambler_register = 0
     r3_initial_scrambler_register = 0
     if spec_derived_startup_state:
-        r1_initial_diff_state = startup_diff_state_from_final_trn_symbol(r1_conditioning.final_trn_symbol)
-        r3_initial_diff_state = startup_diff_state_from_final_trn_symbol(r3_conditioning.final_trn_symbol)
-        r1_initial_scrambler_register = startup_scrambler_register_from_trn(r1_conditioning.trn_final_scrambler_register)
-        r3_initial_scrambler_register = startup_scrambler_register_from_trn(r3_conditioning.trn_final_scrambler_register)
+        r1_startup_state = startup_state_from_trn(
+            r1_conditioning.final_trn_symbol,
+            r1_conditioning.trn_final_scrambler_register,
+        )
+        r3_startup_state = startup_state_from_trn(
+            r3_conditioning.final_trn_symbol,
+            r3_conditioning.trn_final_scrambler_register,
+        )
+        r1_initial_diff_state = r1_startup_state.diff_state
+        r3_initial_diff_state = r3_startup_state.diff_state
+        r1_initial_scrambler_register = r1_startup_state.scrambler_register
+        r3_initial_scrambler_register = r3_startup_state.scrambler_register
     return [
         _conditioning_segment(calling_party=False, conditioning=r1_conditioning),
         _rate_segment(

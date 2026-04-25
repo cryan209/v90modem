@@ -40,9 +40,11 @@ from .spec_policy import (
     NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E,
     POST_E_INITIAL_CONVOLUTION_STATE,
     RENEGOTIATION_INITIAL_SCRAMBLER_REGISTER,
+    StartupTransmitState,
     TRN_INITIAL_SCRAMBLER_REGISTER,
     startup_diff_state_from_final_trn_symbol,
     startup_scrambler_register_from_trn,
+    startup_state_from_trn,
 )
 from .rx_frontend import (
     CarrierSearchResult,
@@ -169,8 +171,10 @@ __all__ = [
     "RENEGOTIATION_INITIAL_SCRAMBLER_REGISTER",
     "POST_E_INITIAL_CONVOLUTION_STATE",
     "NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E",
+    "StartupTransmitState",
     "startup_diff_state_from_final_trn_symbol",
     "startup_scrambler_register_from_trn",
+    "startup_state_from_trn",
     "RecoveredSymbol",
     "TimingSearchResult",
     "CarrierSearchResult",

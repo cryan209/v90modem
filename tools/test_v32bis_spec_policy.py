@@ -15,6 +15,7 @@ from tools.v32bis_ref import (
     generate_call_startup_trace,
     generate_conditioning_signal,
     rate_signal_bits,
+    startup_state_from_trn,
     startup_diff_state_from_final_trn_symbol,
     startup_scrambler_register_from_trn,
 )
@@ -54,6 +55,22 @@ class V32bisSpecPolicyTests(unittest.TestCase):
 
     def test_post_e_convolution_policy_is_explicit_zero(self) -> None:
         self.assertEqual(POST_E_INITIAL_CONVOLUTION_STATE, 0)
+
+    def test_startup_state_from_trn_centralizes_reference_handoff(self) -> None:
+        conditioning = generate_conditioning_signal(True, 260)
+        state = startup_state_from_trn(
+            conditioning.final_trn_symbol,
+            conditioning.trn_final_scrambler_register,
+        )
+        self.assertEqual(
+            state.diff_state,
+            startup_diff_state_from_final_trn_symbol(conditioning.final_trn_symbol),
+        )
+        self.assertEqual(
+            state.scrambler_register,
+            startup_scrambler_register_from_trn(conditioning.trn_final_scrambler_register),
+        )
+        self.assertEqual(state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
 
     def test_normal_startup_scrambler_reset_remains_unresolved(self) -> None:
         self.assertIsNone(NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E)

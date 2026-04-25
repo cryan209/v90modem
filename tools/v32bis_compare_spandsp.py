@@ -945,6 +945,11 @@ def _format_text_report(report: dict[str, object]) -> str:
         f"header: {report['spandsp_header']}",
         f"c_file: {report['spandsp_c_file']}",
         "",
+        "## Interpretation",
+        "python_default: ITU-oriented reference startup state",
+        "spandsp_seed_*: diagnostic variants for implementation parity checks",
+        "Note: a SpanDSP seed match does not change the normative ITU reference path.",
+        "",
         "## Scrambler taps",
     ]
     scrambler = report["scrambler_taps"]
@@ -984,6 +989,7 @@ def _format_text_report(report: dict[str, object]) -> str:
     lines.append("## Emitted Symbol Diagnostics")
     for row in report["emitted_symbol_diagnostics"]:
         lines.append(f"{row['rate']}: best_variant={row['best_variant']}")
+    lines.append("If best_variant is a spandsp_seed_* mode, the divergence is in startup-state seeding, not in the aligned datapump core.")
     lines.append("")
     lines.append("## Stage Diagnostics")
     stage = report["stage_diagnostics"]
