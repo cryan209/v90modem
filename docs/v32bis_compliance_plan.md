@@ -61,6 +61,66 @@ The Python reference layer follows the ITU-T Recommendation by default.
   making additional startup-state choices beyond the explicitly modelled ITU
   handoff path.
 
+## Startup Handoff Status
+
+The startup path now has a sharper split between what the Recommendation says
+explicitly and what the reference model still has to infer.
+
+Explicitly anchored in the Recommendation:
+
+- `TRN` starts with the scrambler register at zero.
+- Startup differential state is derived from the final transmitted `TRN`
+  symbol.
+- The convolutional/trellis state is explicitly zero at `B1` entry.
+- Renegotiation startup is a separate case with an explicit scrambler reset.
+
+Current ITU-oriented reference policy:
+
+- Normal startup carries scrambler continuity forward from the end of `TRN`
+  into the `R`/`E`/`B1` path.
+- Repeated startup `R` words are emitted as identical 16-bit words so the
+  logical receiver can detect the required repeated-rate pattern.
+- `E` is emitted as a standalone startup word with the same ITU-oriented seed
+  model, and `B1` begins with the carried scrambler/differential state plus
+  zero convolution state.
+
+What remains inferred rather than fully proven from the Recommendation text:
+
+- The normal-startup scrambler carry-forward across `TRN -> R -> E -> B1`.
+- Whether every implementation should preserve exactly the same effective seed
+  that SpanDSP uses at the first real post-training data symbol.
+
+Current implementation evidence:
+
+- The Python reference path is internally consistent with the ITU-oriented
+  startup model and the local receiver/frontend tests.
+- The SpanDSP comparison harness shows that the aligned datapump core matches
+  SpanDSP once the startup seed is forced to SpanDSP's effective state.
+- The current harness therefore distinguishes two questions:
+  normative startup modelling and implementation-parity startup seeding.
+
+Practical reading of the local comparison report:
+
+- `seed_summary` tells us whether the ITU-oriented Python startup state and the
+  SpanDSP post-training state agree on scrambler, differential, and
+  convolutional state.
+- `python_spec_exact_match_prefix_symbols` tells us how many initial startup
+  symbols match under the ITU-oriented seed.
+- `python_spandsp_seed_exact_match_prefix_symbols` tells us how many initial
+  startup symbols match when the Python path is forced to SpanDSP's effective
+  seed.
+- If the SpanDSP-seeded path matches while the ITU-oriented path diverges at
+  `scrambled_bits`, the remaining difference is startup-state policy, not the
+  datapump core.
+
+Current project stance:
+
+- The Python default remains the ITU-oriented reference path.
+- SpanDSP-seeded startup is a diagnostic mode, not the normative default.
+- Any future integration into the main modem path should preserve this
+  distinction explicitly rather than silently adopting SpanDSP startup seeding
+  as the standard.
+
 ## Work Breakdown
 
 ### Phase 1: Spec-Locked Tables and Bit-Level Logic

@@ -66,6 +66,10 @@ typedef struct modem_passthrough_port_s {
 } modem_passthrough_port_t;
 
 static int16_t g_tx_linear[SAMPLES_PER_FRAME * 2];
+static me_state_t g_last_logged_me_state = ME_IDLE;
+static int g_last_logged_media_connected = 0;
+
+static void log_modem_diag_snapshot(const char *reason);
 
 /* Ring state for incoming calls — emulates S0 register auto-answer */
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
@@ -299,10 +303,39 @@ static void on_call_media_state(pjsua_call_id call_id)
             if (!g_media_connected) {
                 me_on_sip_connected();
                 g_media_connected = PJ_TRUE;
+                g_last_logged_media_connected = 1;
+                log_modem_diag_snapshot("media-connected");
             }
             break;
         }
     }
+}
+
+static void log_modem_diag_snapshot(const char *reason)
+{
+    me_diag_snapshot_t snapshot;
+
+    me_get_diag_snapshot(&snapshot);
+    PJ_LOG(
+        3,
+        ("sip_modem",
+         "ME trace (%s): state=%s mod=%s law=%s role=%s media=%s phase_ms=%llu "
+         "v34_rx=%d v34_tx=%d v90_rx=%d v90_tx=%d v90_event=%d phase3=%d j=%d dil=%d",
+         reason,
+         me_state_to_str(snapshot.state),
+         me_modulation_to_str(snapshot.modulation),
+         me_law_to_str(snapshot.law),
+         snapshot.calling_party ? "caller" : "answerer",
+         g_media_connected ? "up" : "down",
+         (unsigned long long) snapshot.phase_elapsed_ms,
+         snapshot.v34_rx_stage,
+         snapshot.v34_tx_stage,
+         snapshot.v90_bridge_rx_stage,
+         snapshot.v90_bridge_tx_stage,
+         snapshot.v90_bridge_rx_event,
+         snapshot.v90_phase3_started,
+         snapshot.v90_phase3_j_seen,
+         snapshot.v90_dil_valid));
 }
 
 static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
@@ -567,11 +600,24 @@ int main(int argc, char *argv[])
     }
 
     PJ_LOG(3, ("sip_modem", "SIP V.90 modem ready. PTY link: %s", pty_link));
+    log_modem_diag_snapshot("startup");
 
     /* ── Main event loop ─────────────────────────────────────────── */
     while (g_running) {
+        me_state_t state_now;
+
         /* Poll for PJSIP events (10 ms tick) */
         pjsua_handle_events(10);
+
+        state_now = me_get_state();
+        if (state_now != g_last_logged_me_state) {
+            g_last_logged_me_state = state_now;
+            log_modem_diag_snapshot("state-change");
+        }
+        if ((g_media_connected ? 1 : 0) != g_last_logged_media_connected) {
+            g_last_logged_media_connected = g_media_connected ? 1 : 0;
+            log_modem_diag_snapshot(g_media_connected ? "media-up" : "media-down");
+        }
 
         /* ── Ring timer: send RING and auto-answer after N rings ── */
         if (g_ringing_call != PJSUA_INVALID_ID) {
@@ -600,7 +646,7 @@ int main(int argc, char *argv[])
         }
 
         /* Check if ATD has put us into DIALING state */
-        if (me_get_state() == ME_DIALING && g_call_id == PJSUA_INVALID_ID) {
+        if (state_now == ME_DIALING && g_call_id == PJSUA_INVALID_ID) {
             const char *uri = me_get_dial_uri();
             if (uri && uri[0]) {
                 pj_str_t dst = pj_str((char *)uri);
@@ -618,7 +664,7 @@ int main(int argc, char *argv[])
         }
 
         /* Check if the modem engine requested a hang-up */
-        if (me_get_state() == ME_HANGUP && g_call_id != PJSUA_INVALID_ID) {
+        if (state_now == ME_HANGUP && g_call_id != PJSUA_INVALID_ID) {
             pjsua_call_hangup(g_call_id, 0, NULL, NULL);
             /* on_call_state DISCONNECTED will clean up */
         }

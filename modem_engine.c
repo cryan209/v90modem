@@ -406,6 +406,33 @@ static const char *me_mod_to_str(me_modulation_t mod)
     }
 }
 
+const char *me_state_to_str(me_state_t state)
+{
+    switch (state) {
+    case ME_IDLE:     return "IDLE";
+    case ME_DIALING:  return "DIALING";
+    case ME_V8:       return "V8";
+    case ME_TRAINING: return "TRAINING";
+    case ME_DATA:     return "DATA";
+    case ME_HANGUP:   return "HANGUP";
+    default:          return "UNKNOWN";
+    }
+}
+
+const char *me_modulation_to_str(me_modulation_t modulation)
+{
+    return me_mod_to_str(modulation);
+}
+
+const char *me_law_to_str(me_law_t law)
+{
+    switch (law) {
+    case ME_LAW_ULAW: return "ULAW";
+    case ME_LAW_ALAW: return "ALAW";
+    default:          return "UNKNOWN";
+    }
+}
+
 static void v8_mod_mask_to_str(int mask, char *buf, size_t size)
 {
     int off = 0;
@@ -2071,6 +2098,30 @@ me_modulation_t me_get_modulation(void)
     me_modulation_t m = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
     return m;
+}
+
+void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
+{
+    if (!snapshot)
+        return;
+
+    pthread_mutex_lock(&g_state_mtx);
+    snapshot->state = g_state;
+    snapshot->modulation = g_mod;
+    snapshot->law = g_law;
+    snapshot->calling_party = g_calling_party ? 1 : 0;
+    snapshot->v34_rx_stage = g_last_rx_stage;
+    snapshot->v34_tx_stage = g_last_tx_stage;
+    snapshot->v90_bridge_rx_stage = g_last_v90_bridge_rx_stage;
+    snapshot->v90_bridge_tx_stage = g_last_v90_bridge_tx_stage;
+    snapshot->v90_bridge_rx_event = g_last_v90_bridge_rx_event;
+    snapshot->v90_phase3_started = g_v90_phase3_started ? 1 : 0;
+    snapshot->v90_phase3_j_seen = g_v90_phase3_j_seen ? 1 : 0;
+    snapshot->v90_dil_valid = g_v90_pending_dil_valid ? 1 : 0;
+    snapshot->phase_elapsed_ms = (g_phase_start_ms != 0 && g_state != ME_IDLE)
+        ? (trace_now_ms() - g_phase_start_ms)
+        : 0;
+    pthread_mutex_unlock(&g_state_mtx);
 }
 
 void me_set_law(me_law_t law)

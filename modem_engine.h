@@ -43,6 +43,22 @@ typedef enum {
     ME_LAW_ALAW = 1   /* G.711 A-law (PCMA, payload type 8) — Europe/international */
 } me_law_t;
 
+typedef struct {
+    me_state_t state;
+    me_modulation_t modulation;
+    me_law_t law;
+    int calling_party;
+    int v34_rx_stage;
+    int v34_tx_stage;
+    int v90_bridge_rx_stage;
+    int v90_bridge_tx_stage;
+    int v90_bridge_rx_event;
+    int v90_phase3_started;
+    int v90_phase3_j_seen;
+    int v90_dil_valid;
+    uint64_t phase_elapsed_ms;
+} me_diag_snapshot_t;
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
@@ -127,6 +143,10 @@ int me_get_data(uint8_t *buf, int max_len);
 
 me_state_t      me_get_state(void);
 me_modulation_t me_get_modulation(void);
+void            me_get_diag_snapshot(me_diag_snapshot_t *snapshot);
+const char     *me_state_to_str(me_state_t state);
+const char     *me_modulation_to_str(me_modulation_t modulation);
+const char     *me_law_to_str(me_law_t law);
 
 /*
  * Returns the SIP URI requested by the last ATD command (ME_DIALING state).
