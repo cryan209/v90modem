@@ -125,6 +125,7 @@ class RateSignalEncoding:
     differential_states: list[int]
     final_state: int
     initial_scrambler_register: int
+    final_scrambler_register: int
 
 
 def decode_rate_sequence_symbols(
@@ -132,13 +133,17 @@ def decode_rate_sequence_symbols(
     *,
     calling_party: bool,
     initial_diff_state: int,
+    initial_scrambler_register: int = 0,
 ) -> list[int]:
     """Recover a 16-bit R or E word from eight observed 4800 startup symbols."""
 
     if len(symbols) != 8:
         raise ValueError("rate sequence symbol run must contain exactly 8 symbols")
 
-    descrambler = Descrambler(scrambler_tap(calling_party, transmit=True))
+    descrambler = Descrambler(
+        scrambler_tap(calling_party, transmit=True),
+        register=initial_scrambler_register,
+    )
     diff_state = initial_diff_state
     bits: list[int] = []
     for symbol in symbols:
@@ -202,4 +207,5 @@ def encode_rate_sequence_bits(
         differential_states=states,
         final_state=diff_state,
         initial_scrambler_register=initial_scrambler_register,
+        final_scrambler_register=scrambler.register,
     )

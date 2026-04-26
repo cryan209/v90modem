@@ -60,6 +60,20 @@ def generate_trn_bits(calling_party: bool, symbol_count: int) -> list[tuple[int,
     return dibits
 
 
+def trn_final_scrambler_register(calling_party: bool, symbol_count: int) -> int:
+    """Return the scrambler register after emitting `symbol_count` TRN symbols."""
+
+    if symbol_count < 0:
+        raise ValueError("symbol_count must be non-negative")
+    scrambler = Scrambler(
+        scrambler_tap(calling_party, transmit=True),
+        register=TRN_INITIAL_SCRAMBLER_REGISTER,
+    )
+    for _ in range(symbol_count * 2):
+        scrambler.process_bit(1)
+    return scrambler.register
+
+
 def generate_trn_segment(calling_party: bool, symbol_count: int = 1280) -> list[str]:
     """Generate the TRN signal-state sequence from section 5.2.3."""
 
@@ -95,16 +109,9 @@ class ConditioningSignal:
 def generate_conditioning_signal(calling_party: bool, trn_length: int = 1280) -> ConditioningSignal:
     """Generate the full receiver-conditioning signal from section 5.2."""
 
-    scrambler = Scrambler(
-        scrambler_tap(calling_party, transmit=True),
-        register=TRN_INITIAL_SCRAMBLER_REGISTER,
-    )
-    for _ in range(trn_length * 2):
-        scrambler.process_bit(1)
-
     return ConditioningSignal(
         s=generate_s_segment(),
         s_bar=generate_s_bar_segment(),
         trn=generate_trn_segment(calling_party, trn_length),
-        trn_final_scrambler_register=scrambler.register,
+        trn_final_scrambler_register=trn_final_scrambler_register(calling_party, trn_length),
     )

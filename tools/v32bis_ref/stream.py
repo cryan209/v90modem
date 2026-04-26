@@ -17,6 +17,8 @@ class ObservableSymbol:
     source_instance: int
     tx_calling_party: bool
     selected_rate: int | None = None
+    initial_diff_state: int | None = None
+    initial_scrambler_register: int | None = None
 
 
 def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]:
@@ -45,6 +47,14 @@ def flatten_startup_trace(trace: list[StartupSegment]) -> list[ObservableSymbol]
                         source_instance=source_instance,
                         tx_calling_party=segment.tx_calling_party,
                         selected_rate=segment.bit_rate,
+                        initial_diff_state=(
+                            None if segment.initial_tx_state is None else segment.initial_tx_state.diff_state
+                        ),
+                        initial_scrambler_register=(
+                            None
+                            if segment.initial_tx_state is None
+                            else segment.initial_tx_state.scrambler_register
+                        ),
                     )
                 )
             continue
@@ -90,6 +100,8 @@ def impair_stream(
                     source_instance=observable.source_instance,
                     tx_calling_party=observable.tx_calling_party,
                     selected_rate=observable.selected_rate,
+                    initial_diff_state=observable.initial_diff_state,
+                    initial_scrambler_register=observable.initial_scrambler_register,
                 )
             )
         else:
@@ -183,5 +195,7 @@ def impair_stream_insert(
         source_instance=template.source_instance,
         tx_calling_party=template.tx_calling_party,
         selected_rate=template.selected_rate,
+        initial_diff_state=template.initial_diff_state,
+        initial_scrambler_register=template.initial_scrambler_register,
     )
     return stream[:index] + [inserted] + stream[index:]

@@ -13,6 +13,7 @@ from tools.v32bis_ref import (
     TRN_INITIAL_SCRAMBLER_REGISTER,
     encode_rate_sequence_bits,
     generate_call_startup_trace,
+    generate_answer_startup_trace,
     generate_conditioning_signal,
     rate_signal_bits,
     startup_state_from_trn,
@@ -52,6 +53,45 @@ class V32bisSpecPolicyTests(unittest.TestCase):
             spec_derived_startup_state=True,
         )
         self.assertEqual(trace[2].symbols, [f"Q{state}" for state in expected.differential_states])
+
+    def test_call_trace_repeats_identical_r2_word_and_keeps_e_standalone(self) -> None:
+        trace = generate_call_startup_trace(
+            r1_mask=RATE_7200 | RATE_9600 | RATE_12000,
+            r2_mask=RATE_7200 | RATE_9600,
+            r3_selected_rate=9600,
+            trn_length=260,
+            r2_repetitions=2,
+        )
+        r2 = trace[2]
+        e = trace[3]
+        b1 = trace[4]
+        self.assertIsNotNone(r2.final_tx_state)
+        self.assertEqual(r2.symbols[:8], r2.symbols[8:16])
+        self.assertEqual(e.initial_tx_state, r2.initial_tx_state)
+        self.assertIsNotNone(e.final_tx_state)
+        self.assertEqual(b1.initial_tx_state.diff_state, e.final_tx_state.diff_state)
+        self.assertEqual(b1.initial_tx_state.scrambler_register, e.final_tx_state.scrambler_register)
+        self.assertEqual(b1.initial_tx_state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
+
+    def test_answer_trace_repeats_identical_r3_word_and_keeps_e_standalone(self) -> None:
+        trace = generate_answer_startup_trace(
+            r1_mask=RATE_7200 | RATE_9600 | RATE_12000,
+            r2_mask=RATE_7200 | RATE_9600,
+            r3_selected_rate=9600,
+            trn_length=260,
+            r1_repetitions=2,
+            r3_repetitions=2,
+        )
+        r3 = trace[3]
+        e = trace[4]
+        b1 = trace[5]
+        self.assertIsNotNone(r3.final_tx_state)
+        self.assertEqual(r3.symbols[:8], r3.symbols[8:16])
+        self.assertEqual(e.initial_tx_state, r3.initial_tx_state)
+        self.assertIsNotNone(e.final_tx_state)
+        self.assertEqual(b1.initial_tx_state.diff_state, e.final_tx_state.diff_state)
+        self.assertEqual(b1.initial_tx_state.scrambler_register, e.final_tx_state.scrambler_register)
+        self.assertEqual(b1.initial_tx_state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
 
     def test_post_e_convolution_policy_is_explicit_zero(self) -> None:
         self.assertEqual(POST_E_INITIAL_CONVOLUTION_STATE, 0)
