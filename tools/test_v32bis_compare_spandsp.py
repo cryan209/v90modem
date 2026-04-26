@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from tools.v32bis_compare_spandsp import (
+    _format_text_report,
     REPO_ROOT,
     build_report,
     parse_spandsp_constellation_maps,
@@ -41,6 +42,11 @@ class CompareSpanDSPTests(unittest.TestCase):
         self.assertEqual(report["stage_diagnostics"]["rate"], 12000)
         self.assertEqual(report["startup_handoff_diagnostics"]["rate"], 12000)
         self.assertTrue(report["startup_handoff_diagnostics"]["grouping_diagnostics_python_spandsp_seed"])
+        self.assertIn("seed_summary", report["startup_handoff_diagnostics"])
+        self.assertIn("python_spec_alignment", report["startup_handoff_diagnostics"])
+        self.assertIn("python_spandsp_seed_alignment", report["startup_handoff_diagnostics"])
+        self.assertIn("python_spec_exact_match_prefix_symbols", report["startup_handoff_diagnostics"])
+        self.assertIn("python_spandsp_seed_exact_match_prefix_symbols", report["startup_handoff_diagnostics"])
         self.assertTrue(report["scrambler_taps"]["same"])
 
     def test_simulated_spandsp_stream_has_expected_length(self) -> None:
@@ -49,6 +55,17 @@ class CompareSpanDSPTests(unittest.TestCase):
         bits = [0, 1, 1, 0, 1, 0, 0, 1]
         symbols = simulate_spandsp_tx_symbols(4800, bits, calling_party=True, spandsp_maps=maps)
         self.assertEqual(len(symbols), 4)
+
+    def test_text_report_surfaces_startup_seed_alignment_summary(self) -> None:
+        report = build_report(
+            REPO_ROOT / "spandsp-master/src/v17_v32bis_tx_constellation_maps.h",
+            REPO_ROOT / "spandsp-master/src/v32bis.c",
+        )
+        text = _format_text_report(report)
+        self.assertIn("seed_summary:", text)
+        self.assertIn("startup_prefix_match_symbols:", text)
+        self.assertIn("python_spec_alignment_first_symbols:", text)
+        self.assertIn("python_spandsp_seed_alignment_first_symbols:", text)
 
 
 if __name__ == "__main__":

@@ -693,6 +693,44 @@ def build_stage_diagnostics(
     }
 
 
+def _startup_alignment_rows(
+    sp_rows: list[dict[str, object]],
+    py_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Build a compact per-symbol alignment summary for startup comparisons."""
+    stage_names = ("scrambled_bits", "q", "diff_in", "diff_out", "convolution_out", "codeword", "point")
+    rows: list[dict[str, object]] = []
+    for sp_row, py_row in zip(sp_rows, py_rows):
+        first_divergent_stage = None
+        stage_matches: dict[str, bool] = {}
+        for stage_name in stage_names:
+            matches = sp_row[stage_name] == py_row[stage_name]
+            stage_matches[f"{stage_name}_match"] = matches
+            if first_divergent_stage is None and not matches:
+                first_divergent_stage = stage_name
+        rows.append(
+            {
+                "symbol_index": sp_row["symbol_index"],
+                "exact_match": first_divergent_stage is None,
+                "first_divergent_stage": first_divergent_stage,
+                "spandsp_point": sp_row["point"],
+                "python_point": py_row["point"],
+                **stage_matches,
+            }
+        )
+    return rows
+
+
+def _alignment_prefix_length(rows: list[dict[str, object]]) -> int:
+    """Return the number of leading symbols that match exactly."""
+    count = 0
+    for row in rows:
+        if not row["exact_match"]:
+            break
+        count += 1
+    return count
+
+
 def build_startup_handoff_diagnostics(
     spandsp_maps: dict[int, list[tuple[float, float]]],
     *,
@@ -787,13 +825,38 @@ def build_startup_handoff_diagnostics(
             }
         )
 
+    spec_alignment = _startup_alignment_rows(sp_rows, py_spec_rows)
+    spandsp_seed_alignment = _startup_alignment_rows(sp_rows, py_spandsp_rows)
+
     return {
         "rate": rate,
         "symbol_count": symbol_count,
         "python_spec_state": python_spec_state,
         "spandsp_post_training_state": spandsp_post_training_state,
+        "seed_summary": {
+            "python_spec_scrambler_register": python_spec_state["scrambler_register"],
+            "spandsp_scrambler_register": spandsp_post_training_state["scrambler_register"],
+            "scrambler_register_matches": (
+                int(python_spec_state["scrambler_register"])
+                == int(spandsp_post_training_state["scrambler_register"])
+            ),
+            "python_spec_diff": python_spec_state["diff"],
+            "spandsp_diff": spandsp_post_training_state["diff"],
+            "diff_matches": int(python_spec_state["diff"]) == int(spandsp_post_training_state["diff"]),
+            "python_spec_convolution": python_spec_state["convolution"],
+            "spandsp_convolution": spandsp_post_training_state["convolution"],
+            "convolution_matches": (
+                int(python_spec_state["convolution"])
+                == int(spandsp_post_training_state["convolution"])
+            ),
+            "final_trn_symbol": python_spec_state["final_trn_symbol"],
+        },
         "first_divergence_python_spec_seed": _first_divergence(py_spec_rows),
         "first_divergence_python_spandsp_seed": _first_divergence(py_spandsp_rows),
+        "python_spec_alignment": spec_alignment,
+        "python_spandsp_seed_alignment": spandsp_seed_alignment,
+        "python_spec_exact_match_prefix_symbols": _alignment_prefix_length(spec_alignment),
+        "python_spandsp_seed_exact_match_prefix_symbols": _alignment_prefix_length(spandsp_seed_alignment),
         "grouping_diagnostics_python_spandsp_seed": grouping_diagnostics,
         "spandsp_rows": sp_rows,
         "python_spec_rows": py_spec_rows,
@@ -1004,6 +1067,7 @@ def _format_text_report(report: dict[str, object]) -> str:
     lines.append("")
     lines.append("## Startup Handoff Diagnostics")
     handoff = report["startup_handoff_diagnostics"]
+    seed_summary = handoff["seed_summary"]
     lines.append(
         f"rate={handoff['rate']} symbol_count={handoff['symbol_count']} "
         f"python_spec_state={handoff['python_spec_state']}"
@@ -1013,6 +1077,40 @@ def _format_text_report(report: dict[str, object]) -> str:
         f"first_divergence_python_spec_seed={handoff['first_divergence_python_spec_seed']} "
         f"first_divergence_python_spandsp_seed={handoff['first_divergence_python_spandsp_seed']}"
     )
+    lines.append(
+        "seed_summary: "
+        f"scrambler_match={seed_summary['scrambler_register_matches']} "
+        f"diff_match={seed_summary['diff_matches']} "
+        f"convolution_match={seed_summary['convolution_matches']} "
+        f"final_trn_symbol={seed_summary['final_trn_symbol']}"
+    )
+    lines.append(
+        "startup_prefix_match_symbols: "
+        f"python_spec={handoff['python_spec_exact_match_prefix_symbols']} "
+        f"python_spandsp_seed={handoff['python_spandsp_seed_exact_match_prefix_symbols']}"
+    )
+    lines.append("python_spec_alignment_first_symbols:")
+    for row in handoff["python_spec_alignment"][:4]:
+        lines.append(
+            "  "
+            f"symbol={row['symbol_index']} exact_match={row['exact_match']} "
+            f"first_divergent_stage={row['first_divergent_stage']} "
+            f"scrambled_bits_match={row['scrambled_bits_match']} "
+            f"q_match={row['q_match']} diff_in_match={row['diff_in_match']} "
+            f"diff_out_match={row['diff_out_match']} conv_match={row['convolution_out_match']} "
+            f"codeword_match={row['codeword_match']} point_match={row['point_match']}"
+        )
+    lines.append("python_spandsp_seed_alignment_first_symbols:")
+    for row in handoff["python_spandsp_seed_alignment"][:4]:
+        lines.append(
+            "  "
+            f"symbol={row['symbol_index']} exact_match={row['exact_match']} "
+            f"first_divergent_stage={row['first_divergent_stage']} "
+            f"scrambled_bits_match={row['scrambled_bits_match']} "
+            f"q_match={row['q_match']} diff_in_match={row['diff_in_match']} "
+            f"diff_out_match={row['diff_out_match']} conv_match={row['convolution_out_match']} "
+            f"codeword_match={row['codeword_match']} point_match={row['point_match']}"
+        )
     for row in handoff["grouping_diagnostics_python_spandsp_seed"][:3]:
         lines.append(
             "  "
