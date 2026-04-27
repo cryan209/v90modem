@@ -12,6 +12,7 @@ LOCAL_PORT="5060"
 VERBOSE=1
 BUILD_FIRST=1
 LOG_FILE=""
+RUN_PREFLIGHT=1
 
 usage() {
   cat <<EOF
@@ -27,6 +28,7 @@ Options:
   --local-port <port>     Local SIP UDP port (default: ${LOCAL_PORT})
   --log-file <path>       Optional log output file
   --no-build              Skip 'make sip_v90_modem'
+  --skip-preflight        Skip local UDP bind preflight check
   --quiet                 Do not pass --verbose to sip_v90_modem
   -h, --help              Show this help
 
@@ -52,6 +54,8 @@ while [[ $# -gt 0 ]]; do
       LOG_FILE="${2:-}"; shift 2 ;;
     --no-build)
       BUILD_FIRST=0; shift ;;
+    --skip-preflight)
+      RUN_PREFLIGHT=0; shift ;;
     --quiet)
       VERBOSE=0; shift ;;
     -h|--help)
@@ -63,6 +67,40 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+check_udp_bindability() {
+  local port="$1"
+  local pid=""
+
+  if ! command -v nc >/dev/null 2>&1; then
+    echo "Preflight: 'nc' not found; skipping UDP bind check."
+    return 0
+  fi
+
+  # First try macOS/BSD style: nc -u -l 127.0.0.1 <port>
+  (nc -u -l 127.0.0.1 "${port}" >/dev/null 2>&1) &
+  pid=$!
+  sleep 0.2
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+    return 0
+  fi
+  wait "${pid}" >/dev/null 2>&1 || true
+
+  # Fallback syntax used by some nc variants: nc -u -l <port>
+  (nc -u -l "${port}" >/dev/null 2>&1) &
+  pid=$!
+  sleep 0.2
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+    return 0
+  fi
+  wait "${pid}" >/dev/null 2>&1 || true
+
+  return 1
+}
+
 if [[ "${BUILD_FIRST}" -eq 1 ]]; then
   make -C "${ROOT_DIR}" sip_v90_modem
 fi
@@ -70,6 +108,15 @@ fi
 if [[ ! -x "${BIN}" ]]; then
   echo "Binary not found or not executable: ${BIN}" >&2
   exit 1
+fi
+
+if [[ "${RUN_PREFLIGHT}" -eq 1 ]]; then
+  if ! check_udp_bindability "${LOCAL_PORT}"; then
+    echo "Preflight failed: cannot bind local UDP port ${LOCAL_PORT}." >&2
+    echo "This usually means the port is blocked/in use, or sandbox/network policy prevents binding." >&2
+    echo "Try another port with --local-port, or bypass with --skip-preflight." >&2
+    exit 1
+  fi
 fi
 
 CMD=("${BIN}" "--pty-link" "${PTY_LINK}" "--local-port" "${LOCAL_PORT}")

@@ -25,6 +25,7 @@
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/passthrough.h>
+#include <pjmedia-audiodev/audiodev.h>
 #include <pjmedia/frame.h>
 
 #include <stdio.h>
@@ -506,6 +507,7 @@ int main(int argc, char *argv[])
     const char *password    = NULL;
     const char *pty_link    = "/tmp/modem0";
     int         local_port  = 5060;
+    pj_bool_t   aud_subsys_inited = PJ_FALSE;
 
     /* Parse command-line arguments */
     for (int i = 1; i < argc; i++) {
@@ -532,20 +534,22 @@ int main(int argc, char *argv[])
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
-    /* ── Initialise modem engine and PTY ─────────────────────────── */
+    /* ── Initialise modem engine ──────────────────────────────────── */
     me_init();
-
-    di_set_callbacks(on_dial, on_answer, on_hangup, NULL);
-    if (di_open(pty_link) < 0) {
-        fprintf(stderr, "Failed to open PTY\n");
-        return 1;
-    }
 
     /* ── Initialise PJSUA ────────────────────────────────────────── */
     pj_status_t status = pjsua_create();
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "pjsua_create failed"));
+        me_destroy();
         return 1;
+    }
+
+    status = pjmedia_aud_subsys_init(pjsua_get_pool_factory());
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(2, ("sip_modem", "Audio subsystem init failed (continuing): %d", status));
+    } else {
+        aud_subsys_inited = PJ_TRUE;
     }
 
     /* UA config */
@@ -565,9 +569,10 @@ int main(int argc, char *argv[])
     /* Media config — disable all AEC, AGC, NR (modem signals must be clean) */
     pjsua_media_config media_cfg;
     pjsua_media_config_default(&media_cfg);
-    media_cfg.snd_clock_rate  = SAMPLE_RATE;
+    media_cfg.clock_rate      = SAMPLE_RATE;
     media_cfg.channel_count   = 1;
     media_cfg.audio_frame_ptime = 20;   /* 20 ms frames */
+    media_cfg.enable_ice      = PJ_FALSE;
     media_cfg.ec_tail_len     = 0;      /* No echo cancellation */
     media_cfg.no_vad          = PJ_TRUE; /* No voice activity detection */
     /* For modem pass-through, adaptive jitter buffering can destroy
@@ -580,7 +585,10 @@ int main(int argc, char *argv[])
     status = pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "pjsua_init failed"));
+        if (aud_subsys_inited)
+            pjmedia_aud_subsys_shutdown();
         pjsua_destroy();
+        me_destroy();
         return 1;
     }
 
@@ -594,7 +602,10 @@ int main(int argc, char *argv[])
     status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &trans_cfg, NULL);
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "Transport create failed"));
+        if (aud_subsys_inited)
+            pjmedia_aud_subsys_shutdown();
         pjsua_destroy();
+        me_destroy();
         return 1;
     }
 
@@ -604,7 +615,10 @@ int main(int argc, char *argv[])
     status = pjsua_start();
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "pjsua_start failed"));
+        if (aud_subsys_inited)
+            pjmedia_aud_subsys_shutdown();
         pjsua_destroy();
+        me_destroy();
         return 1;
     }
 
@@ -618,6 +632,17 @@ int main(int argc, char *argv[])
 
     /* Restrict to G.711 */
     restrict_to_g711();
+
+    /* ── Initialise PTY/AT interface after PJSUA media init ─────── */
+    di_set_callbacks(on_dial, on_answer, on_hangup, NULL);
+    if (di_open(pty_link) < 0) {
+        fprintf(stderr, "Failed to open PTY\n");
+        if (aud_subsys_inited)
+            pjmedia_aud_subsys_shutdown();
+        pjsua_destroy();
+        me_destroy();
+        return 1;
+    }
 
     /* ── Optional SIP account registration ──────────────────────── */
     if (sip_server && username) {
@@ -729,6 +754,8 @@ int main(int argc, char *argv[])
 
     pjsua_handle_events(200); /* flush pending events */
     pjsua_destroy();
+    if (aud_subsys_inited)
+        pjmedia_aud_subsys_shutdown();
 
     di_close();
     me_destroy();

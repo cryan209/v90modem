@@ -173,6 +173,7 @@ Useful flags:
 - `--local-port 5060` (local SIP UDP port)
 - `--log-file /tmp/v90modem.log` (capture runtime logs)
 - `--no-build` (skip rebuild)
+- `--skip-preflight` (bypass local UDP bind check)
 
 Once running, connect to the PTY with minicom or any serial terminal:
 ```bash
