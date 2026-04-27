@@ -86,9 +86,10 @@ sudo apt install build-essential autoconf automake libtool pkg-config \
 make
 
 # Run
-./sip_v90_modem --sip-uri sip:modem@your-provider.com \
-                --sip-password yourpassword \
-                --pty /tmp/v90modem
+./sip_v90_modem --sip-server your-provider.com \
+                --username modem \
+                --password yourpassword \
+                --pty-link /tmp/v90modem
 ```
 
 ### macOS notes
@@ -141,6 +142,37 @@ python3 -m venv .venv
 ```
 
 ## Usage
+
+### Softmodem Debug Mode (no PJMEDIA passthrough)
+
+If your local `pjproject` build does not include PJMEDIA passthrough codecs,
+`sip_v90_modem` now falls back to a linear PCM bridge automatically instead of
+exiting. This mode is intended for interoperability/debugging with softmodems.
+
+- On startup, look for:
+  - `G.711 passthrough enabled` (preferred), or
+  - `falling back to linear PCM bridge for softmodem debugging`
+- Keep your SIP call on G.711 (`PCMU/PCMA`) and disable VAD/echo cancellation
+  on your PBX/ATA path as usual.
+
+Quick launcher:
+
+```bash
+./scripts/softmodem_debug.sh --sip-server your-provider.com --username 6001 --password 6001
+```
+
+Local/no-register launcher:
+
+```bash
+./scripts/softmodem_debug.sh
+```
+
+Useful flags:
+
+- `--pty-link /tmp/v90modem` (serial endpoint symlink)
+- `--local-port 5060` (local SIP UDP port)
+- `--log-file /tmp/v90modem.log` (capture runtime logs)
+- `--no-build` (skip rebuild)
 
 Once running, connect to the PTY with minicom or any serial terminal:
 ```bash

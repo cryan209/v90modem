@@ -54,6 +54,7 @@ static pjsua_call_id    g_call_id    = PJSUA_INVALID_ID;
 static volatile int     g_running    = 1;
 static me_law_t         g_media_law  = ME_LAW_ULAW;
 static pj_bool_t        g_media_connected = PJ_FALSE;
+static pj_bool_t        g_passthrough_enabled = PJ_FALSE;
 
 typedef struct modem_passthrough_port_s {
     pjmedia_port base;
@@ -96,6 +97,12 @@ static void g711_payload_to_linear(const uint8_t *payload,
     }
 }
 
+static void clamp_linear_payload_samples(unsigned *count, unsigned max)
+{
+    if (*count == 0 || *count > max)
+        *count = max;
+}
+
 static void linear_to_g711_payload(const int16_t *linear,
                                    int linear_len,
                                    uint8_t *payload)
@@ -115,19 +122,28 @@ static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
 {
     modem_passthrough_port_t *port = (modem_passthrough_port_t *) this_port;
     pjmedia_frame_ext *tx_ext;
-    int count;
+    pjmedia_frame audio_frame;
+    unsigned count;
 
     PJ_UNUSED_ARG(frame);
 
     if (!port || !port->downstream_port)
         return PJ_EINVAL;
 
-    count = (int) port->payload_samples_per_frame;
-    if (count > (int) PJ_ARRAY_SIZE(g_tx_linear))
-        count = (int) PJ_ARRAY_SIZE(g_tx_linear);
+    count = port->payload_samples_per_frame;
+    clamp_linear_payload_samples(&count, (unsigned) PJ_ARRAY_SIZE(g_tx_linear));
 
-    me_tx_audio(g_tx_linear, count);
-    linear_to_g711_payload(g_tx_linear, count, port->tx_payload);
+    me_tx_audio(g_tx_linear, (int) count);
+    if (!g_passthrough_enabled) {
+        audio_frame.type = PJMEDIA_FRAME_TYPE_AUDIO;
+        audio_frame.buf = g_tx_linear;
+        audio_frame.size = count * sizeof(int16_t);
+        audio_frame.timestamp.u64 = 0;
+        audio_frame.bit_info = 0;
+        return pjmedia_port_put_frame(port->downstream_port, &audio_frame);
+    }
+
+    linear_to_g711_payload(g_tx_linear, (int) count, port->tx_payload);
 
     memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
     tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
@@ -150,6 +166,32 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 
     if (!port || !frame || !port->downstream_port)
         return PJ_EINVAL;
+
+    if (!g_passthrough_enabled) {
+        pjmedia_frame audio_in;
+        unsigned byte_count;
+        unsigned sample_count;
+
+        pj_bzero(&audio_in, sizeof(audio_in));
+        audio_in.type = PJMEDIA_FRAME_TYPE_AUDIO;
+        audio_in.buf = g_tx_linear;
+        audio_in.size = sizeof(g_tx_linear);
+
+        st = pjmedia_port_get_frame(port->downstream_port, &audio_in);
+        if (st == PJ_SUCCESS && audio_in.type == PJMEDIA_FRAME_TYPE_AUDIO
+            && audio_in.buf && audio_in.size >= sizeof(int16_t)) {
+            byte_count = (unsigned) audio_in.size;
+            if (byte_count > sizeof(g_tx_linear))
+                byte_count = sizeof(g_tx_linear);
+            sample_count = byte_count / sizeof(int16_t);
+            if (sample_count > 0)
+                me_rx_audio((const int16_t *) audio_in.buf, (int) sample_count);
+        }
+
+        frame->type = PJMEDIA_FRAME_TYPE_NONE;
+        frame->size = 0;
+        return PJ_SUCCESS;
+    }
 
     rx_ext = (pjmedia_frame_ext *) port->rx_ext_buf;
     pj_bzero(rx_ext, sizeof(pjmedia_frame_ext));
@@ -390,10 +432,13 @@ static void restrict_to_g711(void)
 
 static pj_status_t register_g711_passthrough(void)
 {
+#if PJMEDIA_HAS_PASSTHROUGH_CODECS
     pjmedia_codec_passthrough_setting setting;
     pjmedia_format fmts[2];
+#endif
 
 #if !PJMEDIA_HAS_PASSTHROUGH_CODECS
+    g_passthrough_enabled = PJ_FALSE;
     return PJ_ENOTSUP;
 #else
     memset(&setting, 0, sizeof(setting));
@@ -407,7 +452,12 @@ static pj_status_t register_g711_passthrough(void)
     setting.ilbc_mode = 20;
 
     pjmedia_codec_passthrough_deinit();
-    return pjmedia_codec_passthrough_init2(pjsua_get_pjmedia_endpt(), &setting);
+    if (pjmedia_codec_passthrough_init2(pjsua_get_pjmedia_endpt(), &setting) == PJ_SUCCESS) {
+        g_passthrough_enabled = PJ_TRUE;
+        return PJ_SUCCESS;
+    }
+    g_passthrough_enabled = PJ_FALSE;
+    return PJ_ENOTSUP;
 #endif
 }
 
@@ -560,9 +610,10 @@ int main(int argc, char *argv[])
 
     status = register_g711_passthrough();
     if (status != PJ_SUCCESS) {
-        PJ_LOG(1, ("sip_modem", "G.711 passthrough init failed"));
-        pjsua_destroy();
-        return 1;
+        PJ_LOG(2, ("sip_modem",
+                   "G.711 passthrough unavailable; falling back to linear PCM bridge for softmodem debugging"));
+    } else {
+        PJ_LOG(3, ("sip_modem", "G.711 passthrough enabled"));
     }
 
     /* Restrict to G.711 */
