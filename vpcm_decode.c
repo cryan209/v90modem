@@ -18759,6 +18759,34 @@ static void run_decode_stage_a(const char *label,
                     printf("\n");
                 }
             }
+            if (p12.v92_proc.evaluated) {
+                printf("  V.92 clause 9.2 procedure: figure %s, family %d, call=%s, answer=%s\n",
+                       phase12_v92_proc_figure_name(p12.v92_proc.figure),
+                       p12.v92_proc.family,
+                       p12.v92_proc.call_side_digital ? "digital" : "analogue",
+                       p12.v92_proc.answer_side_digital ? "digital" : "analogue");
+                for (int i = 0; i < p12.v92_proc.step_count; i++) {
+                    const p12_v92_proc_step_t *step = &p12.v92_proc.steps[i];
+
+                    printf("    [%s] %-7s %-12s",
+                           step->clause,
+                           step->signal,
+                           phase12_v92_proc_step_status_name(step->status));
+                    if (step->sample_offset >= 0)
+                        printf(" %.1f ms", sample_to_ms(step->sample_offset, sample_rate));
+                    if (step->note[0])
+                        printf("  %s", step->note);
+                    printf("\n");
+                }
+                printf("    outcome: %s (%d missing, %d late)",
+                       phase12_v92_proc_outcome_name(p12.v92_proc.outcome),
+                       p12.v92_proc.missing_count,
+                       p12.v92_proc.late_count);
+                if (p12.v92_proc.phase2_handoff_sample >= 0)
+                    printf(", Phase 2 handoff %.1f ms",
+                           sample_to_ms(p12.v92_proc.phase2_handoff_sample, sample_rate));
+                printf("\n");
+            }
             if (p12.call_init.v92_qts_seen) {
                 printf("  V.92 QTS: %.1f ms (%d QTS reps, %d QTS\\\\ reps, align=%d, symbols=%d, score=%d)\n",
                        sample_to_ms(p12.call_init.v92_qts_sample, sample_rate),

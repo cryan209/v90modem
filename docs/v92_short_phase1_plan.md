@@ -160,6 +160,8 @@ Produce a spec audit table for all eight short-Phase-1 signals:
 - Step 3 completed on 2026-04-05.
 - Step 4 completed on 2026-04-05.
 - Step 6 completed on 2026-04-05.
+- Step 7 first stage completed on 2026-07-10 (clause 9.2 procedure evaluator
+  over the Phase-1 timeline; see "Step 7 Progress" below).
 - Completed work:
   - read clauses 8.2, 8.3, and 9.2 of `ITU Docs/T-REC-V.92-200011-I!!PDF-E.pdf`
   - verified the exact table structures for `QC1a`, `QCA1a`, `QC1d`, `QCA1d`, `QC2a`, `QCA2a`, `QC2d`, `QCA2d`
@@ -507,3 +509,77 @@ Step 4 should continue the original Step 3 area, now on top of the stricter star
 - keep recovery paths diagnostic-only
 - continue with the digital short-Phase-1 chain and its procedural integration only after strict
   Phase-1 candidates can be recovered reliably
+
+## Step 7 Progress (2026-07-10)
+
+### What changed
+
+Implemented the first stage of the clause 9.2 procedure rework: an explicit
+timeline-driven procedure evaluator instead of mixed summary flags.
+
+- `phase12_decode.h` gained `p12_v92_proc_result_t`: an ordered step trace
+  (`p12_v92_proc_step_t` with per-step clause reference, signal name, timing
+  status `observed/late/missing/unobservable`, sample and note), a matched
+  figure (Figures 3–8/V.92), the call/answer side forms, a terminal outcome
+  (`short-phase2`, `v34-phase2`, `v8-fallback`, `v8bis-fallback`,
+  `incomplete`), and a Phase 2 handoff sample.
+- `p12_eval_v92_clause92_procedure()` in `phase12_decode.c` walks the sorted
+  Phase-1 event timeline and matches the 9.2.1–9.2.4 branch structure:
+  - start condition (1 s ANSam for `QC1`, 50 ms CRe for `QC2`)
+  - `QC1 -> CM` "followed immediately" with an explicit immediate window
+    (QC1 end + 150 ms) and a graded late window instead of the old flat
+    1200 ms accept
+  - `QCA` response with the normative 1 s bound for `QCA2` and a CM-repeat
+    window for `QCA1`
+  - digital-side chain `75 ± 5 ms silence -> QTS/QTS\ -> ANSpcm`
+  - analogue-side `TONEq` and the `75 ± 5 ms` silence to Phase 2 handoff
+  - fallbacks: `JM` after `QC1` without `QCA1` resolves to V.8; missing
+    `QCA2` resolves to V.8bis (or V.8 when plain ANS follows `QC2`);
+    Figures 7/8 (both analogue) resolve to V.34 Phase 2
+- `p12_reconcile_v92_proc()` makes the ordered story primary: a complete
+  short-phase2 story supplies the Phase 2 handoff when the legacy chain did
+  not, and a fallback story clears stale `v92_digital_chain_valid` /
+  handoff summary flags.
+- The Phase-1 timeline now also carries `QTS`, `ANSpcm` and `TONEq` events,
+  so the follow-up chain is part of the ordered event story.
+- Fixed a real ordering defect: `finalize_v92_analog_short_phase1()` and
+  `detect_v92_short_phase1_followup()` select their procedure branch from
+  timeline events, but the timeline used to be built only at the very end of
+  Phase-1 decode — so strict `QC1/QCA1` and `CM` events were invisible to
+  branch selection (the `QC1 -> CM` rule could never fire, and only
+  `QC2/QCA2` V.8bis-derived events could anchor a branch).  The timeline is
+  now built before branch selection, with the false-CM ANS-window discard
+  moved ahead of it.
+- Initialised `v92_short_p1_uqts_ucode` and `stereo_short_p1_partner_sample`
+  to `-1`; both were memset-zero and passed `>= 0` guards, silently masking
+  the QC2/partner UQTS fallback in the follow-up chain.
+- `vpcm_decode --phase12` raw output prints the new procedure trace
+  ("V.92 clause 9.2 procedure" section) with per-step clause references and
+  the terminal outcome.
+
+### Verification
+
+- `make vpcm_decode` passes.
+- Baseline-vs-new output diff on five captures (`Agere-SV92-QC`,
+  `Agere-SV92-NC`, `Motorola-SM56-V92QC`, `Motorola-SM56-V92NC`,
+  `USR-Message-V92NC`): identical except the new `TONEq` timeline events.
+  No startup classification changed.
+- The evaluator itself was exercised with a synthetic-timeline harness
+  (scratchpad-only, includes `phase12_decode.c` directly) covering:
+  complete Figure 3 (outcome short-phase2, handoff = TONEq end + 75 ms,
+  reconcile supplies the handoff), `QC1d`+JM without QCA (v8-fallback and
+  stale chain flags cleared), `QC2a` without QCA2 (v8bis-fallback), late CM
+  (step graded late, outcome incomplete), and Figure 7 both-analogue
+  (v34-phase2).  All checks pass.
+
+### What Step 7 still needs
+
+- On the QC captures the evaluator currently has nothing to anchor on
+  because strict `QC1/QCA1` acquisition still fails there (the known Step 4
+  remainder).  Once acquisition recovers true strict candidates, the
+  procedure trace will light up on real captures and the remaining 9.2
+  branch behaviours (QCA response transmission windows, `QTS/QTS\` gap
+  verification against the 768T/48T durations, ODP/ADP bypass in 9.2.5)
+  should be tightened against them.
+- Phase 2 interpretation should eventually consume `v92_proc.outcome`
+  directly instead of the reconciled legacy flags.

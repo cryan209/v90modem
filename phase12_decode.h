@@ -324,6 +324,71 @@ typedef enum {
 } p12_short_p1_form_t;
 
 /* ------------------------------------------------------------------ */
+/* V.92 clause 9.2 short-Phase-1 procedure evaluation                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Which clause 9.2 procedure the ordered Phase-1 event story matches.
+ * The call modem transmits QC*, the answer modem transmits QCA*;
+ * the trailing 'a'/'d' on the signal name gives analogue vs digital.
+ */
+typedef enum {
+    P12_V92_PROC_FIGURE_UNKNOWN = 0,
+    P12_V92_PROC_FIGURE_3,   /* call analogue,  answer digital,  ANSam start */
+    P12_V92_PROC_FIGURE_4,   /* call digital,   answer analogue, ANSam start */
+    P12_V92_PROC_FIGURE_5,   /* call analogue,  answer digital,  CRe start   */
+    P12_V92_PROC_FIGURE_6,   /* call digital,   answer analogue, CRe start   */
+    P12_V92_PROC_FIGURE_7,   /* both analogue,                   ANSam start */
+    P12_V92_PROC_FIGURE_8    /* both analogue,                   CRe start   */
+} p12_v92_proc_figure_t;
+
+typedef enum {
+    P12_V92_PROC_OUTCOME_UNKNOWN = 0,
+    P12_V92_PROC_OUTCOME_SHORT_PHASE2,    /* full chain observed; proceed to
+                                             V.92 short Phase 2 (9.2.x.3) */
+    P12_V92_PROC_OUTCOME_V34_PHASE2,      /* both-analogue TONEq path to
+                                             V.34 Phase 2 (9.2.1.4/9.2.3.4) */
+    P12_V92_PROC_OUTCOME_V8_FALLBACK,     /* JM / CM / 3 s ANS fallback */
+    P12_V92_PROC_OUTCOME_V8BIS_FALLBACK,  /* no QCA2 within 1 s of QC2 */
+    P12_V92_PROC_OUTCOME_INCOMPLETE       /* story starts but never resolves */
+} p12_v92_proc_outcome_t;
+
+typedef enum {
+    P12_V92_PROC_STEP_MISSING = 0,   /* required signal never observed */
+    P12_V92_PROC_STEP_OBSERVED,      /* observed with acceptable timing */
+    P12_V92_PROC_STEP_LATE,          /* observed but outside the clause
+                                        timing bound */
+    P12_V92_PROC_STEP_UNOBSERVABLE   /* signal belongs to the unobserved
+                                        stereo side; presence known only
+                                        via partner hints or not at all */
+} p12_v92_proc_step_status_t;
+
+typedef struct {
+    char clause[12];                 /* e.g. "9.2.1.1" */
+    char signal[12];                 /* e.g. "QC1a" */
+    p12_v92_proc_step_status_t status;
+    int sample_offset;               /* -1 if not observed */
+    char note[64];
+} p12_v92_proc_step_t;
+
+#define P12_V92_PROC_MAX_STEPS 12
+
+typedef struct {
+    bool evaluated;                  /* a short-P1 story was found at all */
+    p12_v92_proc_figure_t figure;
+    p12_v92_proc_outcome_t outcome;
+    int family;                      /* 1 = QC1/QCA1, 2 = QC2/QCA2 */
+    bool call_side_digital;          /* from the QC anchor form */
+    bool answer_side_digital;        /* from the QCA anchor form */
+    int step_count;
+    p12_v92_proc_step_t steps[P12_V92_PROC_MAX_STEPS];
+    int missing_count;               /* required steps never observed */
+    int late_count;                  /* steps observed outside timing bounds */
+    int phase2_handoff_sample;       /* -1 unknown; end of the 75 +/- 5 ms
+                                        post-TONEq silence otherwise */
+} p12_v92_proc_result_t;
+
+/* ------------------------------------------------------------------ */
 /* Phase 2 V.21 FSK burst detection                                    */
 /* ------------------------------------------------------------------ */
 
@@ -397,6 +462,9 @@ typedef struct {
     /* Chronological Phase 1 event timeline */
     int phase1_event_count;
     p12_phase1_event_t phase1_events[P12_MAX_PHASE1_EVENTS];
+
+    /* Clause 9.2 procedure evaluation over the timeline */
+    p12_v92_proc_result_t v92_proc;
 
     /* Optional stereo arbitration hints supplied by the caller. */
     bool stereo_short_p1_hint_valid;
@@ -479,6 +547,9 @@ const char *phase12_phase2_role_name(p12_phase2_role_t role);
 const char *phase12_phase2_step_name(p12_phase2_step_t step);
 const char *phase12_info0_kind_name(p12_info0_kind_t kind);
 const char *phase12_info1_kind_name(p12_info1_kind_t kind);
+const char *phase12_v92_proc_figure_name(p12_v92_proc_figure_t figure);
+const char *phase12_v92_proc_outcome_name(p12_v92_proc_outcome_t outcome);
+const char *phase12_v92_proc_step_status_name(p12_v92_proc_step_status_t status);
 
 /*
  * Decode Phase 2 only (V.34 probing / INFO exchange).

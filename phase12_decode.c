@@ -3066,8 +3066,493 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 result->call_init.v92_qca2_name,
                                 detail);
     }
+    if (result->call_init.v92_qts_seen) {
+        snprintf(detail, sizeof(detail), "reps=%d qts_bar=%d score=%d",
+                 result->call_init.v92_qts_reps,
+                 result->call_init.v92_qts_bar_reps,
+                 result->call_init.v92_qts_score);
+        p12_append_phase1_event(result,
+                                result->call_init.v92_qts_sample,
+                                result->call_init.v92_qts_symbol_count,
+                                "V.92",
+                                "QTS",
+                                detail);
+    }
+    if (result->call_init.v92_anspcm_seen) {
+        snprintf(detail, sizeof(detail), "level=%s score=%d",
+                 v92_anspcm_level_to_str(result->call_init.v92_anspcm_level),
+                 result->call_init.v92_anspcm_score);
+        p12_append_phase1_event(result,
+                                result->call_init.v92_anspcm_sample,
+                                result->call_init.v92_anspcm_duration_symbols,
+                                "V.92",
+                                "ANSpcm",
+                                detail);
+    }
+    if (result->call_init.v92_toneq_seen) {
+        p12_append_phase1_event(result,
+                                result->call_init.v92_toneq_sample,
+                                result->call_init.v92_toneq_duration_samples,
+                                "V.92",
+                                "TONEq",
+                                "");
+    }
 
     p12_sort_phase1_events(result);
+}
+
+/* ------------------------------------------------------------------ */
+/* V.92 clause 9.2 short-Phase-1 procedure evaluation                  */
+/*                                                                     */
+/* Walks the chronological Phase-1 event timeline and matches it       */
+/* against the operating procedures of ITU-T V.92 clause 9.2           */
+/* (Figures 3-8).  The result is an explicit ordered step trace with   */
+/* per-step clause references and timing status, plus a terminal       */
+/* outcome (short Phase 2, V.34 Phase 2, V.8/V.8bis fallback).         */
+/* ------------------------------------------------------------------ */
+
+/* V.21 short-Phase-1 sequence lengths at 300 bit/s (clause 8.2):
+ * QC1 is 60 bits, QCA1 is 70 bits including the trailing ten ones. */
+enum {
+    P12_V92_QC1_DEFAULT_MS = 200,
+    P12_V92_QCA1_DEFAULT_MS = 234,
+    /* "followed immediately by CM": allow decode jitter on top of the QC1
+     * end before calling the CM start late. */
+    P12_V92_QC_TO_CM_IMMEDIATE_MS = 150,
+    P12_V92_QC_TO_CM_LATE_MS = 1200,
+    /* QCA1 answer arrives while CM repeats; QCA2 has a normative 1 s bound. */
+    P12_V92_QC1_TO_QCA_MAX_MS = 1500,
+    P12_V92_QC2_TO_QCA_MAX_MS = 1000,
+    /* 75 +/- 5 ms inter-signal silence, with detection tolerance. */
+    P12_V92_SILENCE_GAP_TOL_MS = 100,
+    /* Analogue side must see ANSpcm for 1 s before TONEq (9.2.1.3), but may
+     * respond immediately when ANSam was already seen. */
+    P12_V92_ANSPCM_TO_TONEQ_MAX_MS = 1500
+};
+
+static const p12_phase1_event_t *p12_proc_find_earliest(const phase12_result_t *result,
+                                                        const char *const *labels,
+                                                        int label_count,
+                                                        int min_sample)
+{
+    const p12_phase1_event_t *best = NULL;
+
+    if (!result || !labels)
+        return NULL;
+    for (int i = 0; i < result->phase1_event_count; i++) {
+        const p12_phase1_event_t *ev = &result->phase1_events[i];
+
+        if (!ev->seen || ev->sample_offset < min_sample)
+            continue;
+        for (int l = 0; l < label_count; l++) {
+            if (strcmp(ev->label, labels[l]) != 0)
+                continue;
+            if (!best || ev->sample_offset < best->sample_offset)
+                best = ev;
+            break;
+        }
+    }
+    return best;
+}
+
+static int p12_proc_event_end(const p12_phase1_event_t *ev,
+                              int sample_rate,
+                              int default_ms)
+{
+    if (!ev)
+        return -1;
+    if (ev->duration_samples > 0)
+        return ev->sample_offset + ev->duration_samples;
+    return ev->sample_offset + (sample_rate * default_ms) / 1000;
+}
+
+static void p12_proc_add_step(p12_v92_proc_result_t *proc,
+                              const char *clause,
+                              const char *signal,
+                              p12_v92_proc_step_status_t status,
+                              int sample_offset,
+                              const char *note)
+{
+    p12_v92_proc_step_t *step;
+
+    if (!proc || proc->step_count >= P12_V92_PROC_MAX_STEPS)
+        return;
+    step = &proc->steps[proc->step_count++];
+    memset(step, 0, sizeof(*step));
+    snprintf(step->clause, sizeof(step->clause), "%s", clause ? clause : "");
+    snprintf(step->signal, sizeof(step->signal), "%s", signal ? signal : "");
+    step->status = status;
+    step->sample_offset = sample_offset;
+    if (note && note[0])
+        snprintf(step->note, sizeof(step->note), "%s", note);
+    if (status == P12_V92_PROC_STEP_MISSING)
+        proc->missing_count++;
+    else if (status == P12_V92_PROC_STEP_LATE)
+        proc->late_count++;
+}
+
+static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
+                                            int sample_rate)
+{
+    static const char *const qc_labels[] = { "QC1a", "QC1d", "QC2a", "QC2d" };
+    static const char *const qca_labels[] = { "QCA1a", "QCA1d", "QCA2a", "QCA2d" };
+    static const char *const cre_labels[] = { "CRe" };
+    static const char *const cm_labels[] = { "CM" };
+    static const char *const jm_labels[] = { "JM" };
+    p12_v92_proc_result_t *proc;
+    const p12_phase1_event_t *qc;
+    const p12_phase1_event_t *qca;
+    const p12_phase1_event_t *cm = NULL;
+    const p12_phase1_event_t *jm = NULL;
+    const p12_phase1_event_t *cre;
+    bool partner_analog_hint = false;
+    bool partner_digital_hint = false;
+    bool partner_hint = false;
+    bool call_is_digital = false;
+    bool answer_is_digital = false;
+    bool one_side_digital;
+    bool ansam_seen;
+    bool qca_timing_late = false;
+    const char *qc_clause;
+    const char *qca_clause;
+    const char *analog_side_clause3;
+    const char *digital_side_clause;
+    char note[64];
+    int ans_start = -1;
+    int qc_end = -1;
+    int qca_end = -1;
+    int ms;
+
+    if (!result || sample_rate <= 0)
+        return;
+    proc = &result->v92_proc;
+    memset(proc, 0, sizeof(*proc));
+    proc->phase2_handoff_sample = -1;
+
+    qc = p12_proc_find_earliest(result, qc_labels, 4, 0);
+    qca = p12_proc_find_earliest(result, qca_labels, 4, 0);
+
+    /* A stereo split puts each side's transmissions on its own decode, so
+     * the partner's short-P1 may be known only through arbitration hints.
+     * UQTS is an analogue-only parameter and LM a digital-only one, so the
+     * populated hint field tells us the partner side's form. */
+    if (result->stereo_short_p1_hint_valid
+        && result->stereo_short_p1_partner_sample >= 0) {
+        partner_hint = true;
+        partner_analog_hint = result->stereo_short_p1_partner_uqts_ucode >= 0;
+        partner_digital_hint = result->stereo_short_p1_partner_lm_level >= 0;
+    }
+
+    if (!qc && !qca)
+        return;                    /* no V.92 short-Phase-1 story to evaluate */
+
+    proc->evaluated = true;
+    proc->family = qc ? p12_phase1_event_family(qc) : p12_phase1_event_family(qca);
+    if (qc)
+        call_is_digital = strchr(qc->label, 'd') != NULL;
+    else
+        call_is_digital = partner_digital_hint && !partner_analog_hint;
+    if (qca)
+        answer_is_digital = strchr(qca->label, 'd') != NULL;
+    else
+        answer_is_digital = partner_digital_hint && !partner_analog_hint;
+    proc->call_side_digital = call_is_digital;
+    proc->answer_side_digital = answer_is_digital;
+    one_side_digital = call_is_digital != answer_is_digital;
+
+    if (proc->family == 1) {
+        if (!call_is_digital && answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_3;
+        else if (call_is_digital && !answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_4;
+        else if (!call_is_digital && !answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_7;
+    } else if (proc->family == 2) {
+        if (!call_is_digital && answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_5;
+        else if (call_is_digital && !answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_6;
+        else if (!call_is_digital && !answer_is_digital)
+            proc->figure = P12_V92_PROC_FIGURE_8;
+    }
+
+    qc_clause = (proc->family == 2)
+              ? (call_is_digital ? "9.2.2.2" : "9.2.1.2")
+              : (call_is_digital ? "9.2.2.1" : "9.2.1.1");
+    qca_clause = (proc->family == 2)
+               ? (answer_is_digital ? "9.2.4.2" : "9.2.3.2")
+               : (answer_is_digital ? "9.2.4.1" : "9.2.3.1");
+    analog_side_clause3 = call_is_digital ? "9.2.3.3" : "9.2.1.3";
+    digital_side_clause = answer_is_digital ? "9.2.4.1" : "9.2.2.1";
+
+    ansam_seen = result->answer_tone.detected
+              && (result->answer_tone.type == P12_TONE_ANSAM
+                  || result->answer_tone.type == P12_TONE_ANSAM_PR);
+    if (result->answer_tone.detected)
+        ans_start = result->answer_tone.start_sample;
+
+    /* --- start condition: 1 s of ANSam (family 1) / 50 ms of CRe (family 2) */
+    if (proc->family == 2) {
+        cre = p12_proc_find_earliest(result, cre_labels, 1, 0);
+        if (cre) {
+            if (qc && qc->sample_offset < cre->sample_offset + (sample_rate * 50) / 1000) {
+                ms = (int)(((double)(qc->sample_offset - cre->sample_offset) * 1000.0)
+                           / (double)sample_rate);
+                snprintf(note, sizeof(note), "QC2 only %d ms after CRe start (>=50 required)", ms);
+                p12_proc_add_step(proc, qc_clause, "CRe", P12_V92_PROC_STEP_LATE,
+                                  cre->sample_offset, note);
+            } else {
+                p12_proc_add_step(proc, qc_clause, "CRe", P12_V92_PROC_STEP_OBSERVED,
+                                  cre->sample_offset, "");
+            }
+        } else {
+            p12_proc_add_step(proc, qc_clause, "CRe", P12_V92_PROC_STEP_MISSING,
+                              -1, "no CRe before QC2");
+        }
+    } else {
+        if (ansam_seen) {
+            if (qc && qc->sample_offset < ans_start + (sample_rate * 800) / 1000) {
+                ms = (int)(((double)(qc->sample_offset - ans_start) * 1000.0)
+                           / (double)sample_rate);
+                snprintf(note, sizeof(note), "QC1 only %d ms after ANSam start (1 s required)", ms);
+                p12_proc_add_step(proc, qc_clause, "ANSam", P12_V92_PROC_STEP_LATE,
+                                  ans_start, note);
+            } else {
+                p12_proc_add_step(proc, qc_clause, "ANSam", P12_V92_PROC_STEP_OBSERVED,
+                                  ans_start, "");
+            }
+        } else {
+            p12_proc_add_step(proc, qc_clause, "ANSam", P12_V92_PROC_STEP_MISSING,
+                              -1, result->answer_tone.detected
+                                  ? "answer tone present but not ANSam"
+                                  : "no answer tone");
+        }
+    }
+
+    /* --- QC from the call modem */
+    if (qc) {
+        snprintf(note, sizeof(note), "%s call modem",
+                 call_is_digital ? "digital" : "analogue");
+        p12_proc_add_step(proc, qc_clause, qc->label, P12_V92_PROC_STEP_OBSERVED,
+                          qc->sample_offset, note);
+        qc_end = p12_proc_event_end(qc, sample_rate,
+                                    proc->family == 1 ? P12_V92_QC1_DEFAULT_MS : 0);
+    } else {
+        p12_proc_add_step(proc, qc_clause,
+                          proc->family == 2 ? "QC2" : "QC1",
+                          partner_hint ? P12_V92_PROC_STEP_UNOBSERVABLE
+                                       : P12_V92_PROC_STEP_MISSING,
+                          -1,
+                          partner_hint ? "on unobserved stereo side" : "");
+    }
+
+    /* --- QC1 must be followed immediately by CM (family 1 only) */
+    if (proc->family == 1 && qc) {
+        cm = p12_proc_find_earliest(result, cm_labels, 1, qc->sample_offset);
+        if (cm && cm->sample_offset
+                <= qc_end + (sample_rate * P12_V92_QC_TO_CM_IMMEDIATE_MS) / 1000) {
+            p12_proc_add_step(proc, qc_clause, "CM", P12_V92_PROC_STEP_OBSERVED,
+                              cm->sample_offset, "immediately follows QC1");
+        } else if (cm && cm->sample_offset
+                       <= qc_end + (sample_rate * P12_V92_QC_TO_CM_LATE_MS) / 1000) {
+            ms = (int)(((double)(cm->sample_offset - qc_end) * 1000.0)
+                       / (double)sample_rate);
+            snprintf(note, sizeof(note), "CM %d ms after QC1 end (immediate required)", ms);
+            p12_proc_add_step(proc, qc_clause, "CM", P12_V92_PROC_STEP_LATE,
+                              cm->sample_offset, note);
+        } else {
+            p12_proc_add_step(proc, qc_clause, "CM", P12_V92_PROC_STEP_MISSING,
+                              -1, "QC1 not followed by CM");
+        }
+    }
+
+    /* --- QCA from the answer modem */
+    if (qca) {
+        int bound = -1;
+
+        if (qc && qc_end >= 0) {
+            int max_ms = (proc->family == 2) ? P12_V92_QC2_TO_QCA_MAX_MS
+                                             : P12_V92_QC1_TO_QCA_MAX_MS;
+            bound = qc_end + (sample_rate * max_ms) / 1000;
+        }
+        qca_timing_late = (bound >= 0 && qca->sample_offset > bound);
+        if (qca_timing_late) {
+            ms = (int)(((double)(qca->sample_offset - qc_end) * 1000.0)
+                       / (double)sample_rate);
+            snprintf(note, sizeof(note), "QCA %d ms after QC end", ms);
+        } else {
+            snprintf(note, sizeof(note), "%s answer modem",
+                     answer_is_digital ? "digital" : "analogue");
+        }
+        p12_proc_add_step(proc, qca_clause, qca->label,
+                          qca_timing_late ? P12_V92_PROC_STEP_LATE
+                                          : P12_V92_PROC_STEP_OBSERVED,
+                          qca->sample_offset, note);
+        qca_end = p12_proc_event_end(qca, sample_rate,
+                                     proc->family == 1 ? P12_V92_QCA1_DEFAULT_MS : 0);
+    } else {
+        p12_proc_add_step(proc, qca_clause,
+                          proc->family == 2 ? "QCA2" : "QCA1",
+                          partner_hint ? P12_V92_PROC_STEP_UNOBSERVABLE
+                                       : P12_V92_PROC_STEP_MISSING,
+                          partner_hint ? result->stereo_short_p1_partner_sample : -1,
+                          partner_hint ? "on unobserved stereo side" : "no QCA response");
+        if (partner_hint && result->stereo_short_p1_partner_sample >= 0)
+            qca_end = result->stereo_short_p1_partner_sample
+                    + (sample_rate * (proc->family == 1 ? P12_V92_QCA1_DEFAULT_MS : 0)) / 1000;
+    }
+
+    /* --- digital-side chain: 75 +/- 5 ms silence, then QTS/QTS\, ANSpcm
+     *     (Figures 3-6; clauses 9.2.2.1/9.2.4.1) */
+    if (one_side_digital) {
+        if (result->call_init.v92_qts_seen) {
+            int qts_start = result->call_init.v92_qts_sample;
+            int gap_max = (sample_rate * (P12_V92_SHORT_P1_TO_PHASE2_MS
+                                          + P12_V92_SILENCE_GAP_TOL_MS)) / 1000;
+
+            if (qca_end >= 0
+                && (qts_start < qca_end || qts_start > qca_end + gap_max)) {
+                ms = (int)(((double)(qts_start - qca_end) * 1000.0) / (double)sample_rate);
+                snprintf(note, sizeof(note), "QTS %d ms after QCA end (75 +/- 5 expected)", ms);
+                p12_proc_add_step(proc, digital_side_clause, "QTS",
+                                  P12_V92_PROC_STEP_LATE, qts_start, note);
+            } else {
+                snprintf(note, sizeof(note), "reps=%d qts_bar=%d",
+                         result->call_init.v92_qts_reps,
+                         result->call_init.v92_qts_bar_reps);
+                p12_proc_add_step(proc, digital_side_clause, "QTS",
+                                  P12_V92_PROC_STEP_OBSERVED, qts_start, note);
+            }
+        } else {
+            p12_proc_add_step(proc, digital_side_clause, "QTS",
+                              P12_V92_PROC_STEP_MISSING, -1, "");
+        }
+        if (result->call_init.v92_anspcm_seen) {
+            snprintf(note, sizeof(note), "level=%s",
+                     v92_anspcm_level_to_str(result->call_init.v92_anspcm_level));
+            p12_proc_add_step(proc, digital_side_clause, "ANSpcm",
+                              P12_V92_PROC_STEP_OBSERVED,
+                              result->call_init.v92_anspcm_sample, note);
+        } else {
+            p12_proc_add_step(proc, digital_side_clause, "ANSpcm",
+                              P12_V92_PROC_STEP_MISSING, -1, "");
+        }
+    }
+
+    /* --- TONEq from the analogue side */
+    if (result->call_init.v92_toneq_seen) {
+        int toneq_start = result->call_init.v92_toneq_sample;
+        int toneq_end = toneq_start + result->call_init.v92_toneq_duration_samples;
+
+        if (one_side_digital
+            && result->call_init.v92_anspcm_seen
+            && toneq_start > result->call_init.v92_anspcm_sample
+                             + (sample_rate * P12_V92_ANSPCM_TO_TONEQ_MAX_MS) / 1000) {
+            ms = (int)(((double)(toneq_start - result->call_init.v92_anspcm_sample) * 1000.0)
+                       / (double)sample_rate);
+            snprintf(note, sizeof(note), "TONEq %d ms after ANSpcm start", ms);
+            p12_proc_add_step(proc, analog_side_clause3, "TONEq",
+                              P12_V92_PROC_STEP_LATE, toneq_start, note);
+        } else {
+            p12_proc_add_step(proc, analog_side_clause3, "TONEq",
+                              P12_V92_PROC_STEP_OBSERVED, toneq_start, "");
+        }
+        proc->phase2_handoff_sample =
+            toneq_end + (sample_rate * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000;
+    } else if (one_side_digital) {
+        p12_proc_add_step(proc, analog_side_clause3, "TONEq",
+                          P12_V92_PROC_STEP_MISSING, -1,
+                          "2 s TONEq timeout falls back to ANSam (9.2.4.3)");
+    }
+
+    /* --- terminal outcome */
+    jm = qc ? p12_proc_find_earliest(result, jm_labels, 1, qc->sample_offset) : NULL;
+    if (one_side_digital
+        && result->call_init.v92_anspcm_seen
+        && result->call_init.v92_toneq_seen) {
+        proc->outcome = P12_V92_PROC_OUTCOME_SHORT_PHASE2;
+    } else if (!call_is_digital && !answer_is_digital
+               && qca && result->call_init.v92_toneq_seen) {
+        /* Figures 7/8: both analogue, TONEq answers the second ANSam and
+         * both sides drop to V.34 Phase 2. */
+        proc->outcome = P12_V92_PROC_OUTCOME_V34_PHASE2;
+    } else if (proc->family == 1 && qc && !qca && !partner_hint && jm) {
+        /* 9.2.1.1/9.2.2.1: JM instead of QCA means the answerer is not a
+         * V.92 quick-connect peer; the call continues under V.8. */
+        p12_proc_add_step(proc, qc_clause, "JM", P12_V92_PROC_STEP_OBSERVED,
+                          jm->sample_offset, "V.8 fallback");
+        proc->outcome = P12_V92_PROC_OUTCOME_V8_FALLBACK;
+    } else if (proc->family == 2 && qc && !qca && !partner_hint) {
+        /* 9.2.1.2/9.2.2.2: plain ANS after QC2 falls back to V.8; otherwise
+         * the 1 s QCA2 timeout falls back to V.8bis. */
+        if (result->answer_tone.detected && !ansam_seen
+            && result->answer_tone.start_sample > qc->sample_offset)
+            proc->outcome = P12_V92_PROC_OUTCOME_V8_FALLBACK;
+        else
+            proc->outcome = P12_V92_PROC_OUTCOME_V8BIS_FALLBACK;
+    } else {
+        proc->outcome = P12_V92_PROC_OUTCOME_INCOMPLETE;
+    }
+
+    if (p12_debug_enabled()) {
+        fprintf(stderr,
+                "[p12] V.92 clause 9.2: figure=%s family=%d call=%s answer=%s outcome=%s"
+                " steps=%d missing=%d late=%d handoff=%.1fms\n",
+                phase12_v92_proc_figure_name(proc->figure),
+                proc->family,
+                call_is_digital ? "digital" : "analogue",
+                answer_is_digital ? "digital" : "analogue",
+                phase12_v92_proc_outcome_name(proc->outcome),
+                proc->step_count,
+                proc->missing_count,
+                proc->late_count,
+                proc->phase2_handoff_sample >= 0
+                    ? (double)proc->phase2_handoff_sample * 1000.0 / (double)sample_rate
+                    : -1.0);
+    }
+}
+
+/*
+ * Reconcile the ordered clause 9.2 story with the summary chain flags.
+ * The procedure trace is primary: when the ordered events resolve to a
+ * V.8/V.8bis fallback, any chain/handoff summary derived from mixed flags
+ * is stale and must not steer Phase 2 interpretation.
+ */
+static void p12_reconcile_v92_proc(phase12_result_t *result, int sample_rate)
+{
+    p12_v92_proc_result_t *proc;
+
+    if (!result || sample_rate <= 0)
+        return;
+    proc = &result->v92_proc;
+    if (!proc->evaluated)
+        return;
+
+    if (proc->outcome == P12_V92_PROC_OUTCOME_SHORT_PHASE2
+        && proc->phase2_handoff_sample >= 0
+        && !result->call_init.v92_phase2_handoff_known) {
+        result->call_init.v92_phase2_handoff_known = true;
+        result->call_init.v92_phase2_handoff_sample = proc->phase2_handoff_sample;
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] V.92 clause 9.2 supplies Phase 2 handoff at %.1fms\n",
+                    (double)proc->phase2_handoff_sample * 1000.0 / (double)sample_rate);
+        }
+    }
+
+    if ((proc->outcome == P12_V92_PROC_OUTCOME_V8_FALLBACK
+         || proc->outcome == P12_V92_PROC_OUTCOME_V8BIS_FALLBACK)
+        && (result->call_init.v92_digital_chain_valid
+            || result->call_init.v92_phase2_handoff_known)) {
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] V.92 clause 9.2 story resolves to %s; clearing stale chain flags\n",
+                    phase12_v92_proc_outcome_name(proc->outcome));
+        }
+        result->call_init.v92_digital_chain_valid = false;
+        result->call_init.v92_phase2_handoff_known = false;
+        result->call_init.v92_phase2_handoff_sample = -1;
+    }
 }
 
 static void detect_phase1_tones(const int16_t *samples,
@@ -4506,6 +4991,25 @@ static void detect_phase1_v8(const int16_t *samples,
                           V21_CH2, phase1_ch2_windows, phase1_ch2_window_count,
                           &result->jm, &result->cj);
 
+    /* Discard a CM decode whose sample_offset falls within the ANS tone
+     * window.  p12_targeted_v21_decode_cm_jm extends its search backward by
+     * ~200ms + pre_pad, so a false decode from ANS phase-reversal energy can
+     * slip through the burst filter above.  CM (sent by the CALLER on CH1)
+     * cannot legitimately appear while the answerer's ANS is still transmitting.
+     * JM is NOT filtered here: the answerer sends JM on CH2 around the end of
+     * the ANS tone, so JM within or just after the ANS window is expected.
+     * This must happen before the Phase-1 timeline is built below, or a false
+     * CM event would survive in the timeline. */
+    if (result->answer_tone.detected && result->answer_tone.duration_samples > 0) {
+        int ans_start = result->answer_tone.start_sample;
+        int ans_end   = ans_start + result->answer_tone.duration_samples;
+        if (result->cm.detected
+            && result->cm.sample_offset >= ans_start
+            && result->cm.sample_offset < ans_end) {
+            memset(&result->cm, 0, sizeof(result->cm));
+        }
+    }
+
     /* Probe for V.92 short Phase 1 control after the answer tone and before
      * the main CM/JM exchange completes. */
     detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
@@ -4513,6 +5017,16 @@ static void detect_phase1_v8(const int16_t *samples,
     if (!result->call_init.v92_short_p1_seen)
         detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
                                 V21_CH2, phase1_ch2_windows, phase1_ch2_window_count, result);
+
+    /* Build the chronological Phase-1 timeline now so the clause 9.2 branch
+     * selection below can anchor on the ordered event story (strict short-P1
+     * candidates, CM/JM, tones).  Until this point the timeline only holds
+     * pre-ANS call-initiation events; without this the QC1->CM rule and the
+     * strict QC1/QCA1 anchors were invisible to the branch selectors.  The
+     * builder deduplicates, so rebuilding it again after the follow-up chain
+     * completes is safe. */
+    p12_build_phase1_timeline(result, sample_rate);
+
     finalize_v92_analog_short_phase1(result, result, sample_rate);
     detect_v92_short_phase1_followup(samples,
                                      codewords,
@@ -4558,23 +5072,6 @@ static void detect_phase1_v8(const int16_t *samples,
                         (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
                         (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
             }
-        }
-    }
-
-    /* Discard a CM decode whose sample_offset falls within the ANS tone
-     * window.  p12_targeted_v21_decode_cm_jm extends its search backward by
-     * ~200ms + pre_pad, so a false decode from ANS phase-reversal energy can
-     * slip through the burst filter above.  CM (sent by the CALLER on CH1)
-     * cannot legitimately appear while the answerer's ANS is still transmitting.
-     * JM is NOT filtered here: the answerer sends JM on CH2 around the end of
-     * the ANS tone, so JM within or just after the ANS window is expected. */
-    if (result->answer_tone.detected && result->answer_tone.duration_samples > 0) {
-        int ans_start = result->answer_tone.start_sample;
-        int ans_end   = ans_start + result->answer_tone.duration_samples;
-        if (result->cm.detected
-            && result->cm.sample_offset >= ans_start
-            && result->cm.sample_offset < ans_end) {
-            memset(&result->cm, 0, sizeof(result->cm));
         }
     }
 
@@ -6800,6 +7297,42 @@ const char *phase12_info1_kind_name(p12_info1_kind_t kind)
     }
 }
 
+const char *phase12_v92_proc_figure_name(p12_v92_proc_figure_t figure)
+{
+    switch (figure) {
+    case P12_V92_PROC_FIGURE_3: return "3/V.92 (analogue call, ANSam)";
+    case P12_V92_PROC_FIGURE_4: return "4/V.92 (digital call, ANSam)";
+    case P12_V92_PROC_FIGURE_5: return "5/V.92 (analogue call, CRe)";
+    case P12_V92_PROC_FIGURE_6: return "6/V.92 (digital call, CRe)";
+    case P12_V92_PROC_FIGURE_7: return "7/V.92 (both analogue, ANSam)";
+    case P12_V92_PROC_FIGURE_8: return "8/V.92 (both analogue, CRe)";
+    default: return "unknown";
+    }
+}
+
+const char *phase12_v92_proc_outcome_name(p12_v92_proc_outcome_t outcome)
+{
+    switch (outcome) {
+    case P12_V92_PROC_OUTCOME_SHORT_PHASE2: return "short-phase2";
+    case P12_V92_PROC_OUTCOME_V34_PHASE2: return "v34-phase2";
+    case P12_V92_PROC_OUTCOME_V8_FALLBACK: return "v8-fallback";
+    case P12_V92_PROC_OUTCOME_V8BIS_FALLBACK: return "v8bis-fallback";
+    case P12_V92_PROC_OUTCOME_INCOMPLETE: return "incomplete";
+    default: return "unknown";
+    }
+}
+
+const char *phase12_v92_proc_step_status_name(p12_v92_proc_step_status_t status)
+{
+    switch (status) {
+    case P12_V92_PROC_STEP_OBSERVED: return "observed";
+    case P12_V92_PROC_STEP_LATE: return "late";
+    case P12_V92_PROC_STEP_UNOBSERVABLE: return "unobservable";
+    case P12_V92_PROC_STEP_MISSING: return "missing";
+    default: return "unknown";
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -6811,14 +7344,17 @@ void phase12_result_init(phase12_result_t *r)
     memset(r, 0, sizeof(*r));
     r->stereo_short_p1_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     r->stereo_short_p1_followup_allowed = true;
+    r->stereo_short_p1_partner_sample = -1;
     r->stereo_short_p1_partner_uqts_ucode = -1;
     r->stereo_short_p1_partner_lm_level = -1;
     r->call_init.v92_qc2_uqts_ucode = -1;
     r->call_init.v92_qc2_lm_level = -1;
     r->call_init.v92_qca2_uqts_ucode = -1;
     r->call_init.v92_qca2_lm_level = -1;
+    r->call_init.v92_short_p1_uqts_ucode = -1;
     r->call_init.v92_short_p1_lm_level = -1;
     r->call_init.v92_phase2_handoff_sample = -1;
+    r->v92_proc.phase2_handoff_sample = -1;
     r->log.events = NULL;
     r->log.count = 0;
     r->log.cap = 0;
@@ -6873,6 +7409,8 @@ bool phase12_decode_phase1_with_codewords(const int16_t *samples,
                      max_sample,
                      result);
     p12_build_phase1_timeline(result, sample_rate);
+    p12_eval_v92_clause92_procedure(result, sample_rate);
+    p12_reconcile_v92_proc(result, sample_rate);
     phase12_finalize_diagnostics(result);
 
     return (result->cng.detected || result->ct.detected
