@@ -14896,6 +14896,10 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
             left_analog_score -= 10;  /* JM = answerer = typically digital */
         if (ctx->left_p12.digital_side_likely)
             left_analog_score -= 5;
+        /* Strict V.92 short-P1 outweighs CM/JM heuristics: QC* is the call
+         * modem's transmission, QCA* the answer modem's. */
+        if (ctx->left_p12.call_init.v92_short_p1_seen)
+            left_analog_score += ctx->left_p12.call_init.v92_short_p1_qca ? -20 : 20;
     }
     if (ctx->right_p12_valid) {
         if (ctx->right_p12.cm.detected)
@@ -14904,6 +14908,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
             right_analog_score -= 10;
         if (ctx->right_p12.digital_side_likely)
             right_analog_score -= 5;
+        if (ctx->right_p12.call_init.v92_short_p1_seen)
+            right_analog_score += ctx->right_p12.call_init.v92_short_p1_qca ? -20 : 20;
     }
 
     if (left_analog_score > right_analog_score) {

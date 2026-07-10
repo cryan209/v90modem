@@ -583,3 +583,86 @@ timeline-driven procedure evaluator instead of mixed summary flags.
   should be tightened against them.
 - Phase 2 interpretation should eventually consume `v92_proc.outcome`
   directly instead of the reconciled legacy flags.
+
+## Step 4 Continuation — Strict Acquisition Unblocked (2026-07-10)
+
+### Root cause of the acquisition failure
+
+The strict scanner was never shown the QC1/QCA1 audio:
+
+1. `detect_phase1_v8()` deleted every CH1 FSK burst overlapping the ANS
+   tone window ("the caller never sends CM during ANS") before the short-P1
+   scan ran — but per Figures 3/4 of V.92 the call modem transmits QC1
+   followed by CM *while* the answerer's ANSam is still playing.  The QC1a
+   burst always overlaps ANS and was always discarded.
+2. The "ANSam" procedure window (ANS start + 950 ms) only opened when the
+   15 Hz AM classifier fired.  Real V.92 QC captures routinely classify as
+   `ANS/PR`, so the window that covers QC1a never existed and only the CRe
+   window (which ends long before QC1a) was scanned.
+3. The scan stopped after the first channel with a primary winner, so the
+   answer side's QCA on CH2 was never scanned when CH1 found the QC.
+
+The earlier "near-miss QCA1d" diagnostics were red herrings — bit-level
+dumps show they were substrings of the JM message body, not degraded
+QCA1d sequences.
+
+### What changed
+
+- Short-P1 CH1 scanning uses a pre-filter snapshot of the CH1 bursts; the
+  ANS-overlap filter itself now only drops bursts *contained in* the ANS
+  window (bursts extending >= 200 ms past ANS end are real signal), which
+  also lets the CM immediately following QC1a decode.
+- The ANSam procedure window opens for any detected answer tone >= 1 s
+  (strict sequence validation protects the accept path) and extends 1 s
+  past the apparent tone end.
+- Both V.21 channels are always scanned; a second channel's strict
+  candidates merge into the per-form strict slots without replacing the
+  primary winner.
+- A decoded CM/JM whose start falls inside a strict short-P1 sequence span
+  is dropped as a misread (a QCA1d body reliably decodes as a bogus JM
+  with nonsense fields).
+- All saved CM/JM observations go on the Phase-1 timeline (the summary hit
+  keeps only the most recent decode, which hid the CM that immediately
+  follows QC1a behind a later V.8-retry CM).
+- The ans-end fallback TONEq detector rejects hits overlapping a strict
+  QC1+CM span — TONEq and the V.21 CH1 mark are both 980 Hz.
+- Role detection and stereo cross-channel resolution use the strict
+  short-P1 form (QC* = call side, QCA* = answer side) ahead of tone
+  heuristics.
+- Clause 9.2 evaluator refinements: the stereo partner's form is inferred
+  as the complement of this side's expected form; the ANSam start
+  condition accepts a >= 1 s answer tone with an "AM not classified" note;
+  and a new terminal outcome implements the 9.2.3.3/9.2.4.3 TONEq-timeout
+  fallback (QCA observed, no QTS/ANSpcm/TONEq chain, and a CM/JM restart
+  >= 1.5 s after the QCA end resolves to v8-fallback with a "V.8 retry
+  after TONEq timeout" step).
+
+### Verification (capture truth set)
+
+- `Motorola-SM56-V92QC`: strict QC1a at 5286.5 ms (WXYZ=7 → UQTS 74) on
+  the right/caller channel and strict QCA1d (LAPM=1, LM=-15 dBm0) at
+  5978.0 ms on the left/answerer channel; QC1 -> CM verified at 5519.4 ms
+  ("immediately follows QC1"); both channels agree on Figure 3; stereo
+  arbitration reports the complementary pair and correct sides
+  (Right=analog caller, Left=digital answerer).
+- `Motorola-SM56-V92NC`: strict pair QC1a 4911.8 ms / QCA1d 5591.2 ms.
+- `USR-Message-V92NC`: strict pair QC1a 5364.8 ms / QCA1d 6038.9 ms.
+  (The NC captures legitimately contain short Phase 1: the exchange runs,
+  times out without QTS/ANSpcm/TONEq, and the late CM matches the
+  9.2.4.3 V.8 retry — the evaluator resolves all three captures to
+  v8-fallback with an auditable step trace.)
+- What used to be reported on these files as "JM" with junk fields
+  (pcm=1/7, 272 ms) was bit-verified to be the QCA1d sequence; it is now
+  decoded strictly and the bogus JM is dropped.
+- `Agere-SV92-QC` / `Agere-SV92-NC`: no strict QC1/QCA1 (the Agere call
+  starts from CRe, i.e. the QC2/V.8bis family — its procedural decode is
+  the remaining gap); outputs unchanged apart from the richer CM
+  observation timeline.
+- Synthetic clause 9.2 evaluator tests still pass.
+
+### Remaining
+
+- QC2/QCA2 (CRe-family) procedural integration for the Agere captures.
+- QTS/ANSpcm detection requires G.711 codewords; WAV-only decodes cannot
+  confirm the digital-side chain, so a completed quick connect currently
+  reads as "incomplete" unless TONEq+ANSpcm are visible.

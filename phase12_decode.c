@@ -1771,13 +1771,19 @@ static void detect_v92_short_phase1(const int16_t *samples,
         }
     }
 
+    /* Clause 9.2.1.1/9.2.2.1: the call modem transmits QC1 after detecting
+     * ANSam for 1 s, while the answer tone is still playing.  Accept any
+     * detected answer tone of at least 1 s here, not only AM-classified
+     * ones: the 15 Hz AM classifier is unreliable on real captures (V.92 QC
+     * recordings routinely classify as ANS/PR), and the strict sequence
+     * validator already protects the accept path.  QC1 followed by CM also
+     * extends past the apparent tone end, so give the window a tail. */
     if (result->answer_tone.detected
-        && (result->answer_tone.type == P12_TONE_ANSAM
-            || result->answer_tone.type == P12_TONE_ANSAM_PR)
         && result->answer_tone.duration_samples >= (sample_rate * 1000) / 1000
         && procedure_window_count < (int) (sizeof(procedure_windows) / sizeof(procedure_windows[0]))) {
         int start = result->answer_tone.start_sample + (sample_rate * 950) / 1000;
-        int end = result->answer_tone.start_sample + result->answer_tone.duration_samples;
+        int end = result->answer_tone.start_sample + result->answer_tone.duration_samples
+                + (sample_rate * 1000) / 1000;
 
         if (result->cm.detected && result->cm.sample_offset > start && result->cm.sample_offset < end)
             end = result->cm.sample_offset;
@@ -1972,19 +1978,24 @@ static void detect_v92_short_phase1(const int16_t *samples,
         return;
     }
 
-    result->call_init.v92_short_p1_seen = true;
-    result->call_init.v92_short_p1_sample = sample;
-    snprintf(result->call_init.v92_short_p1_name,
-             sizeof(result->call_init.v92_short_p1_name),
-             "%s",
-             candidate.name ? candidate.name : "V92-shortP1");
-    result->call_init.v92_short_p1_digital = candidate.digital_modem;
-    result->call_init.v92_short_p1_qca = candidate.qca;
-    result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
-    result->call_init.v92_short_p1_lm_level = candidate.digital_modem ? candidate.aux_value : -1;
-    result->call_init.v92_short_p1_strict_analog_seen = false;
-    result->call_init.v92_short_p1_strict_digital_seen = false;
-    if (analog_alt.ok && !analog_alt.digital_modem && analog_alt_sample >= 0) {
+    /* A previous channel scan may already hold the primary winner (the call
+     * side's QC on CH1); this scan's strict candidates (typically the answer
+     * side's QCA on CH2) then merge into the empty strict per-form slots
+     * below instead of replacing the primary. */
+    if (!result->call_init.v92_short_p1_seen) {
+        result->call_init.v92_short_p1_seen = true;
+        result->call_init.v92_short_p1_sample = sample;
+        snprintf(result->call_init.v92_short_p1_name,
+                 sizeof(result->call_init.v92_short_p1_name),
+                 "%s",
+                 candidate.name ? candidate.name : "V92-shortP1");
+        result->call_init.v92_short_p1_digital = candidate.digital_modem;
+        result->call_init.v92_short_p1_qca = candidate.qca;
+        result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
+        result->call_init.v92_short_p1_lm_level = candidate.digital_modem ? candidate.aux_value : -1;
+    }
+    if (analog_alt.ok && !analog_alt.digital_modem && analog_alt_sample >= 0
+        && !result->call_init.v92_short_p1_strict_analog_seen) {
         result->call_init.v92_short_p1_strict_analog_seen = true;
         result->call_init.v92_short_p1_strict_analog_sample = analog_alt_sample;
         snprintf(result->call_init.v92_short_p1_strict_analog_name,
@@ -1995,7 +2006,8 @@ static void detect_v92_short_phase1(const int16_t *samples,
         result->call_init.v92_short_p1_strict_analog_uqts_ucode = analog_alt.uqts_ucode;
         result->call_init.v92_short_p1_strict_analog_lm_level = analog_alt.digital_modem ? analog_alt.aux_value : -1;
     }
-    if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0) {
+    if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0
+        && !result->call_init.v92_short_p1_strict_digital_seen) {
         result->call_init.v92_short_p1_strict_digital_seen = true;
         result->call_init.v92_short_p1_strict_digital_sample = digital_alt_sample;
         snprintf(result->call_init.v92_short_p1_strict_digital_name,
@@ -2006,8 +2018,9 @@ static void detect_v92_short_phase1(const int16_t *samples,
         result->call_init.v92_short_p1_strict_digital_uqts_ucode = digital_alt.uqts_ucode;
         result->call_init.v92_short_p1_strict_digital_lm_level = digital_alt.digital_modem ? digital_alt.aux_value : -1;
     }
-    result->call_init.v92_short_p1_alt_digital_seen = false;
-    if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0) {
+    if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0
+        && (!result->call_init.v92_short_p1_alt_digital_seen
+            || digital_alt.soft_score > result->call_init.v92_short_p1_alt_digital_score)) {
         result->call_init.v92_short_p1_alt_digital_seen = true;
         result->call_init.v92_short_p1_alt_digital_sample = digital_alt_sample;
         snprintf(result->call_init.v92_short_p1_alt_digital_name,
@@ -2024,12 +2037,13 @@ static void detect_v92_short_phase1(const int16_t *samples,
 
     if (p12_debug_enabled()) {
         fprintf(stderr,
-                "[p12] V.92 short Phase 1 %s at %.1fms channel=%s digital=%s qca=%s\n",
-                result->call_init.v92_short_p1_name,
+                "[p12] V.92 short Phase 1 %s at %.1fms channel=%s digital=%s qca=%s (primary=%s)\n",
+                candidate.name ? candidate.name : "V92-shortP1",
                 (double) sample * 1000.0 / (double) sample_rate,
                 (channel == V21_CH2) ? "CH2" : "CH1",
                 candidate.digital_modem ? "yes" : "no",
-                candidate.qca ? "yes" : "no");
+                candidate.qca ? "yes" : "no",
+                result->call_init.v92_short_p1_name);
         if (result->call_init.v92_short_p1_alt_digital_seen) {
             fprintf(stderr,
                     "[p12] V.92 short Phase 1 alt-digital %s at %.1fms qca=%s score=%d bit_errors=%d\n",
@@ -2980,6 +2994,11 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 p12_tone_type_name(result->answer_tone.type),
                                 detail);
     }
+    /* CM/JM keep sample_offset of the most recent decode, but each saved
+     * observation is a distinct on-air occurrence (e.g. the CM immediately
+     * following QC1a and a later V.8-fallback CM).  Put them all on the
+     * timeline so ordered checks like "QC1 followed immediately by CM" can
+     * anchor on the right occurrence. */
     if (result->cm.detected) {
         snprintf(detail, sizeof(detail),
                  "seen=%d drift=%d pcm=%d",
@@ -2992,6 +3011,16 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 "V.8",
                                 "CM",
                                 detail);
+        for (int i = 0; i < result->cm.saved_count; i++) {
+            snprintf(detail, sizeof(detail), "observation %d/%d",
+                     i + 1, result->cm.saved_count);
+            p12_append_phase1_event(result,
+                                    result->cm.saved_sample_offsets[i],
+                                    0,
+                                    "V.8",
+                                    "CM",
+                                    detail);
+        }
     }
     if (result->jm.detected) {
         snprintf(detail, sizeof(detail),
@@ -3005,6 +3034,16 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 "V.8",
                                 "JM",
                                 detail);
+        for (int i = 0; i < result->jm.saved_count; i++) {
+            snprintf(detail, sizeof(detail), "observation %d/%d",
+                     i + 1, result->jm.saved_count);
+            p12_append_phase1_event(result,
+                                    result->jm.saved_sample_offsets[i],
+                                    0,
+                                    "V.8",
+                                    "JM",
+                                    detail);
+        }
     }
     if (result->cj.detected) {
         p12_append_phase1_event(result,
@@ -3234,13 +3273,20 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
 
     /* A stereo split puts each side's transmissions on its own decode, so
      * the partner's short-P1 may be known only through arbitration hints.
-     * UQTS is an analogue-only parameter and LM a digital-only one, so the
-     * populated hint field tells us the partner side's form. */
+     * The hint's expected form describes THIS side; the partner is the
+     * complementary form.  (The UQTS/LM hint fields carry both sides'
+     * values, so they cannot distinguish the partner's form.) */
     if (result->stereo_short_p1_hint_valid
         && result->stereo_short_p1_partner_sample >= 0) {
         partner_hint = true;
-        partner_analog_hint = result->stereo_short_p1_partner_uqts_ucode >= 0;
-        partner_digital_hint = result->stereo_short_p1_partner_lm_level >= 0;
+        if (result->stereo_short_p1_expected_form == P12_SHORT_P1_FORM_ANALOG)
+            partner_digital_hint = true;
+        else if (result->stereo_short_p1_expected_form == P12_SHORT_P1_FORM_DIGITAL)
+            partner_analog_hint = true;
+        else {
+            partner_analog_hint = result->stereo_short_p1_partner_uqts_ucode >= 0;
+            partner_digital_hint = result->stereo_short_p1_partner_lm_level >= 0;
+        }
     }
 
     if (!qc && !qca)
@@ -3310,7 +3356,13 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                               -1, "no CRe before QC2");
         }
     } else {
-        if (ansam_seen) {
+        /* The 15 Hz AM classifier is unreliable on real captures, so any
+         * answer tone of at least 1 s satisfies the ANSam start condition;
+         * the note records when AM was not positively classified. */
+        bool ans_long_enough = result->answer_tone.detected
+                            && result->answer_tone.duration_samples >= sample_rate;
+
+        if (ansam_seen || ans_long_enough) {
             if (qc && qc->sample_offset < ans_start + (sample_rate * 800) / 1000) {
                 ms = (int)(((double)(qc->sample_offset - ans_start) * 1000.0)
                            / (double)sample_rate);
@@ -3319,12 +3371,13 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                                   ans_start, note);
             } else {
                 p12_proc_add_step(proc, qc_clause, "ANSam", P12_V92_PROC_STEP_OBSERVED,
-                                  ans_start, "");
+                                  ans_start,
+                                  ansam_seen ? "" : "AM not classified; 2100 Hz tone >= 1 s");
             }
         } else {
             p12_proc_add_step(proc, qc_clause, "ANSam", P12_V92_PROC_STEP_MISSING,
                               -1, result->answer_tone.detected
-                                  ? "answer tone present but not ANSam"
+                                  ? "answer tone shorter than 1 s"
                                   : "no answer tone");
         }
     }
@@ -3476,6 +3529,37 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
         /* Figures 7/8: both analogue, TONEq answers the second ANSam and
          * both sides drop to V.34 Phase 2. */
         proc->outcome = P12_V92_PROC_OUTCOME_V34_PHASE2;
+    } else if ((qca || (partner_hint && qca_end >= 0))
+               && !result->call_init.v92_qts_seen
+               && !result->call_init.v92_anspcm_seen
+               && !result->call_init.v92_toneq_seen
+               && qca_end >= 0) {
+        /* 9.2.3.3/9.2.4.3: the QCA was answered by nothing — no QTS/ANSpcm
+         * chain and no TONEq within the 2 s timeout.  A CM or JM restarting
+         * well after the QCA is the V.8 retry that follows the timeout. */
+        const p12_phase1_event_t *retry_cm =
+            p12_proc_find_earliest(result, cm_labels, 1,
+                                   qca_end + (sample_rate * 1500) / 1000);
+        const p12_phase1_event_t *retry_jm =
+            p12_proc_find_earliest(result, jm_labels, 1,
+                                   qca_end + (sample_rate * 1500) / 1000);
+
+        if (retry_cm || retry_jm) {
+            const p12_phase1_event_t *retry =
+                (retry_cm && (!retry_jm
+                              || retry_cm->sample_offset <= retry_jm->sample_offset))
+                    ? retry_cm : retry_jm;
+
+            p12_proc_add_step(proc,
+                              answer_is_digital ? "9.2.4.3" : "9.2.3.3",
+                              (retry == retry_cm) ? "CM" : "JM",
+                              P12_V92_PROC_STEP_OBSERVED,
+                              retry->sample_offset,
+                              "V.8 retry after TONEq timeout");
+            proc->outcome = P12_V92_PROC_OUTCOME_V8_FALLBACK;
+        } else {
+            proc->outcome = P12_V92_PROC_OUTCOME_INCOMPLETE;
+        }
     } else if (proc->family == 1 && qc && !qca && !partner_hint && jm) {
         /* 9.2.1.1/9.2.2.1: JM instead of QCA means the answerer is not a
          * V.92 quick-connect peer; the call continues under V.8. */
@@ -4922,9 +5006,11 @@ static void detect_phase1_v8(const int16_t *samples,
 {
     p12_fsk_burst_t phase1_ch1_windows[P12_MAX_FSK_BURSTS];
     p12_fsk_burst_t phase1_ch2_windows[P12_MAX_FSK_BURSTS];
+    p12_fsk_burst_t short_p1_ch1_windows[P12_MAX_FSK_BURSTS];
     int phase1_merge_gap;
     int phase1_ch1_window_count;
     int phase1_ch2_window_count;
+    int short_p1_ch1_window_count = 0;
     int limit = (max_sample > 0 && max_sample < total_samples) ? max_sample : total_samples;
 
     if (limit > (sample_rate * P12_CALL_INIT_MAX_MS) / 1000)
@@ -4948,20 +5034,31 @@ static void detect_phase1_v8(const int16_t *samples,
                                                  0, limit, V21_CH2,
                                                  result->ch2_bursts, P12_MAX_FSK_BURSTS);
 
-    /* Remove CH1 FSK bursts that overlap the ANS tone window.
+    /* Snapshot the unfiltered CH1 bursts for the V.92 short-Phase-1 scan
+     * before the ANS-overlap filter below: per Figures 3/4 of V.92, the call
+     * modem transmits QC1 followed by CM while the answerer's ANSam is still
+     * playing, so short-P1 bursts legitimately overlap the ANS window. */
+    memcpy(short_p1_ch1_windows, result->ch1_bursts, sizeof(short_p1_ch1_windows));
+    short_p1_ch1_window_count = result->ch1_burst_count;
+
+    /* Remove CH1 FSK bursts contained in the ANS tone window.
      * ANS phase reversals at 2100 Hz can create false energy in the CH1
-     * (980/1180 Hz) detector.  The caller never sends CM during ANS. */
+     * (980/1180 Hz) detector, and those artifacts live inside the tone
+     * span.  A burst that extends well past the ANS end is real signal:
+     * in V.92 short Phase 1 the caller's QC1 followed by CM starts while
+     * ANSam is still playing and continues after it stops. */
     if (result->answer_tone.detected && result->answer_tone.start_sample >= 0
         && result->answer_tone.duration_samples > 0) {
         int ans_start = result->answer_tone.start_sample;
         int ans_end   = ans_start + result->answer_tone.duration_samples;
+        int tail_min  = (sample_rate * 200) / 1000;
         int out = 0;
         for (int i = 0; i < result->ch1_burst_count; i++) {
             int bs = result->ch1_bursts[i].start_sample;
             int be = bs + result->ch1_bursts[i].duration_samples;
-            /* Keep burst only if it is fully before ANS or fully after ANS */
             bool overlaps = (bs < ans_end && be > ans_start);
-            if (!overlaps)
+            bool extends_past = (be >= ans_end + tail_min);
+            if (!overlaps || extends_past)
                 result->ch1_bursts[out++] = result->ch1_bursts[i];
         }
         result->ch1_burst_count = out;
@@ -4976,6 +5073,9 @@ static void detect_phase1_v8(const int16_t *samples,
     phase1_ch2_window_count = p12_merge_bursts_in_place(phase1_ch2_windows,
                                                         result->ch2_burst_count,
                                                         phase1_merge_gap);
+    short_p1_ch1_window_count = p12_merge_bursts_in_place(short_p1_ch1_windows,
+                                                          short_p1_ch1_window_count,
+                                                          phase1_merge_gap);
     if (p12_debug_enabled()) {
         p12_debug_log_bursts("phase1 CH1 windows", phase1_ch1_windows, phase1_ch1_window_count, sample_rate);
         p12_debug_log_bursts("phase1 CH2 windows", phase1_ch2_windows, phase1_ch2_window_count, sample_rate);
@@ -5011,12 +5111,68 @@ static void detect_phase1_v8(const int16_t *samples,
     }
 
     /* Probe for V.92 short Phase 1 control after the answer tone and before
-     * the main CM/JM exchange completes. */
+     * the main CM/JM exchange completes.  CH1 uses the pre-ANS-filter burst
+     * snapshot (QC1/CM legitimately overlap ANSam).  Always scan CH2 as
+     * well: one capture side can carry the call side's QC on CH1 and the
+     * answer side's QCA response on CH2; the second scan merges into the
+     * strict per-form candidate slots without replacing the primary. */
     detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
-                            V21_CH1, phase1_ch1_windows, phase1_ch1_window_count, result);
-    if (!result->call_init.v92_short_p1_seen)
-        detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
-                                V21_CH2, phase1_ch2_windows, phase1_ch2_window_count, result);
+                            V21_CH1, short_p1_ch1_windows, short_p1_ch1_window_count, result);
+    detect_v92_short_phase1(samples, total_samples, sample_rate, limit,
+                            V21_CH2, phase1_ch2_windows, phase1_ch2_window_count, result);
+
+    /* A strict V.21 short-P1 sequence and a V.8 message cannot occupy the
+     * same bits: when the decoded CM/JM start falls inside a strict QC/QCA
+     * sequence span, the V.8 decode is a misread of that sequence (e.g. a
+     * QCA1d body decoding as JM).  The CM that legitimately follows QC1
+     * starts after the sequence span and is unaffected. */
+    {
+        struct {
+            bool seen;
+            int sample;
+            bool qca;
+        } spans[2] = {
+            { result->call_init.v92_short_p1_strict_analog_seen,
+              result->call_init.v92_short_p1_strict_analog_sample,
+              result->call_init.v92_short_p1_strict_analog_qca },
+            { result->call_init.v92_short_p1_strict_digital_seen,
+              result->call_init.v92_short_p1_strict_digital_sample,
+              result->call_init.v92_short_p1_strict_digital_qca },
+        };
+
+        for (int i = 0; i < 2; i++) {
+            int span_end;
+
+            if (!spans[i].seen)
+                continue;
+            span_end = spans[i].sample
+                     + (sample_rate * (spans[i].qca ? 70 : 60) * 10) / 3000;
+            if (result->jm.detected
+                && result->jm.sample_offset >= spans[i].sample
+                && result->jm.sample_offset < span_end) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] drop JM at %.1fms: inside strict short-P1 span %.1f-%.1fms\n",
+                            (double) result->jm.sample_offset * 1000.0 / (double) sample_rate,
+                            (double) spans[i].sample * 1000.0 / (double) sample_rate,
+                            (double) span_end * 1000.0 / (double) sample_rate);
+                }
+                memset(&result->jm, 0, sizeof(result->jm));
+            }
+            if (result->cm.detected
+                && result->cm.sample_offset >= spans[i].sample
+                && result->cm.sample_offset < span_end) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] drop CM at %.1fms: inside strict short-P1 span %.1f-%.1fms\n",
+                            (double) result->cm.sample_offset * 1000.0 / (double) sample_rate,
+                            (double) spans[i].sample * 1000.0 / (double) sample_rate,
+                            (double) span_end * 1000.0 / (double) sample_rate);
+                }
+                memset(&result->cm, 0, sizeof(result->cm));
+            }
+        }
+    }
 
     /* Build the chronological Phase-1 timeline now so the clause 9.2 branch
      * selection below can anchor on the ordered event story (strict short-P1
@@ -5063,14 +5219,53 @@ static void detect_phase1_v8(const int16_t *samples,
                                       4,
                                       P12_V92_TONEQ_MIN_MS,
                                       &toneq_hit)) {
-            result->call_init.v92_toneq_seen = true;
-            result->call_init.v92_toneq_sample = toneq_hit.start_sample;
-            result->call_init.v92_toneq_duration_samples = toneq_hit.duration_samples;
-            if (p12_debug_enabled()) {
-                fprintf(stderr,
-                        "[p12] V.92 TONEq (ans-end fallback) at %.1fms dur=%.1fms\n",
-                        (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
-                        (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
+            /* TONEq is 980 Hz — the same frequency as the V.21 CH1 mark.  A
+             * strict QC1 lock means the 980 Hz energy here is the QC1
+             * sequence and the CM that immediately follows it, not TONEq. */
+            bool overlaps_qc1 = false;
+            struct {
+                bool seen;
+                int sample;
+                bool qca;
+                bool digital;
+            } qc_spans[2] = {
+                { result->call_init.v92_short_p1_strict_analog_seen,
+                  result->call_init.v92_short_p1_strict_analog_sample,
+                  result->call_init.v92_short_p1_strict_analog_qca, false },
+                { result->call_init.v92_short_p1_strict_digital_seen,
+                  result->call_init.v92_short_p1_strict_digital_sample,
+                  result->call_init.v92_short_p1_strict_digital_qca, true },
+            };
+
+            for (int i = 0; i < 2; i++) {
+                int qc_end;
+
+                if (!qc_spans[i].seen || qc_spans[i].qca)
+                    continue;
+                /* QC1 span plus the immediately following CM repetitions */
+                qc_end = qc_spans[i].sample + (sample_rate * 1500) / 1000;
+                if (toneq_hit.start_sample >= qc_spans[i].sample
+                    && toneq_hit.start_sample < qc_end) {
+                    overlaps_qc1 = true;
+                    break;
+                }
+            }
+            if (overlaps_qc1) {
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] reject ans-end TONEq at %.1fms: overlaps strict QC1+CM span\n",
+                            (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate);
+                }
+            } else {
+                result->call_init.v92_toneq_seen = true;
+                result->call_init.v92_toneq_sample = toneq_hit.start_sample;
+                result->call_init.v92_toneq_duration_samples = toneq_hit.duration_samples;
+                if (p12_debug_enabled()) {
+                    fprintf(stderr,
+                            "[p12] V.92 TONEq (ans-end fallback) at %.1fms dur=%.1fms\n",
+                            (double) toneq_hit.start_sample * 1000.0 / (double) sample_rate,
+                            (double) toneq_hit.duration_samples * 1000.0 / (double) sample_rate);
+                }
             }
         }
     }
@@ -5095,6 +5290,12 @@ static void detect_phase1_v8(const int16_t *samples,
                && !p12_cm_jm_is_strong_role_evidence(&result->cm)) {
         result->role_detected = true;
         result->is_caller = false;
+    } else if (result->call_init.v92_short_p1_seen) {
+        /* V.92 short Phase 1: QC* is transmitted by the call modem and
+         * QCA* by the answer modem, so a strict primary winner identifies
+         * which side this capture channel carries. */
+        result->role_detected = true;
+        result->is_caller = !result->call_init.v92_short_p1_qca;
     } else if (result->call_init.v92_toneq_seen
                && result->answer_tone.detected
                && !p12_cm_jm_is_strong_role_evidence(&result->jm)) {
