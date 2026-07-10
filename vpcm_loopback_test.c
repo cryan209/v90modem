@@ -371,6 +371,7 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
+static bool test_v90_shaped_phase4(v91_law_t law);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
@@ -1098,6 +1099,260 @@ static void v90_cp_test_frame_handler(void *user_data, const vpcm_cp_diag_t *dia
         return;
     capture->count++;
     capture->frame = diag->frame;
+}
+
+static bool test_v90_shaped_phase4(v91_law_t law)
+{
+    enum { MAX_SYMBOLS = 20000 };
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    int first_magnitudes[3][VPCM_CP_FRAME_INTERVALS] = {{0}};
+
+    vpcm_log("Test: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0/1 (%s)", law_name);
+    for (int sr = 1; sr <= 3; sr++) {
+        for (int lookahead = 0; lookahead <= 1; lookahead++) {
+            for (int drn = 4; drn <= 22 - sr; drn++) {
+                vpcm_cp_frame_t cpt;
+                v90_state_t *tx = v90_init_data_pump(v90_law);
+                uint8_t mp_bits[256];
+                int mp_nbits;
+
+                if (!tx)
+                    return false;
+                vpcm_cp_init(&cpt);
+                cpt.v90_compatibility = false;
+                cpt.codec_alaw = (law == V91_LAW_ALAW);
+                cpt.upstream_rate_mask = 0x1FFF;
+                cpt.shaping_redundancy = (uint8_t)sr;
+                cpt.shaping_lookahead = (uint8_t)lookahead;
+                cpt.drn = (uint8_t)drn;
+                vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+                if (!v90_set_phase4_cp(tx, &cpt)) {
+                    fprintf(stderr,
+                            "V.90 rejected valid shaped CPt rate Sr=%d ld=%d drn=%d\n",
+                            sr, lookahead, drn);
+                    v90_free(tx);
+                    return false;
+                }
+                mp_nbits = v90_copy_phase4_mp_bits(tx,
+                                                   mp_bits,
+                                                   (int)sizeof(mp_bits));
+                if (mp_nbits <= 0 || mp_nbits % (drn + 8) != 0) {
+                    fprintf(stderr,
+                            "V.90 shaped MP padding is not frame aligned Sr=%d ld=%d drn=%d\n",
+                            sr, lookahead, drn);
+                    v90_free(tx);
+                    return false;
+                }
+                v90_free(tx);
+            }
+        }
+    }
+    for (int sr = 1; sr <= 3; sr++) {
+        for (int lookahead = 0; lookahead <= 1; lookahead++) {
+            v90_state_t *tx = v90_init_data_pump(v90_law);
+            vpcm_cp_frame_t cpt;
+            vpcm_cp_frame_t data_cp;
+            uint8_t mp_bits[256];
+            uint8_t codeword = 0;
+            int symbols = 0;
+            int mp_nbits;
+            int ed_symbols = 0;
+            bool failed = false;
+
+            if (!tx)
+                return false;
+            vpcm_cp_init(&cpt);
+            cpt.v90_compatibility = false;
+            cpt.drn = 9;
+            cpt.codec_alaw = (law == V91_LAW_ALAW);
+            cpt.upstream_rate_mask = 0x1FFF;
+            cpt.constellation_count = 2;
+            cpt.shaping_redundancy = (uint8_t)sr;
+            cpt.shaping_lookahead = (uint8_t)lookahead;
+            cpt.shaping_a1_q1_6 = 0x18;
+            cpt.shaping_a2_q1_6 = 0xF0;
+            cpt.shaping_b1_q1_6 = 0x10;
+            cpt.shaping_b2_q1_6 = 0xF8;
+            for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+                cpt.dfi[i] = (uint8_t)(i & 1);
+            vpcm_cp_enable_odd_ucodes(cpt.masks[0]);
+            vpcm_cp_enable_all_ucodes(cpt.masks[1]);
+            data_cp = cpt;
+            data_cp.v90_compatibility = true;
+            data_cp.shaping_redundancy = 0;
+            data_cp.shaping_lookahead = 0;
+
+            v90_start_phase3(tx, 66);
+            while (v90_get_tx_phase(tx) != V90_TX_JD
+                   && symbols++ < MAX_SYMBOLS) {
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            }
+            if (v90_get_tx_phase(tx) != V90_TX_JD
+                || !v90_handle_rx_event(tx, V90_RX_EVENT_S)) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            while (v90_get_tx_phase(tx) != V90_TX_TRN2D
+                   && symbols++ < MAX_SYMBOLS) {
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            }
+            if (v90_get_tx_phase(tx) != V90_TX_TRN2D
+                || !v90_set_phase4_cp(tx, &cpt)
+                || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            for (int i = 0; i < 24; i++)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            for (int i = 0; i < 2040; i++) {
+                int ucode;
+                int constellation;
+
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+                ucode = v91_codeword_to_ucode(law, codeword);
+                constellation = cpt.dfi[i % VPCM_CP_FRAME_INTERVALS];
+                if (ucode < 0
+                    || !vpcm_cp_mask_get(cpt.masks[constellation], ucode)) {
+                    fprintf(stderr,
+                            "V.90 shaped TRN2d escaped CPt constellation Sr=%d ld=%d\n",
+                            sr, lookahead);
+                    failed = true;
+                    goto shaped_phase4_done;
+                }
+                if (i < VPCM_CP_FRAME_INTERVALS) {
+                    if (lookahead == 0) {
+                        first_magnitudes[sr - 1][i] = ucode;
+                    } else if (ucode != first_magnitudes[sr - 1][i]) {
+                        fprintf(stderr,
+                                "V.90 first TRN2d magnitudes changed with ld Sr=%d interval=%d\n",
+                                sr, i);
+                        failed = true;
+                        goto shaped_phase4_done;
+                    }
+                }
+            }
+            if (v90_get_tx_phase(tx) != V90_TX_MP
+                || !v90_set_phase4_cp(tx, &data_cp)
+                || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            for (int i = 0; i < 500; i++) {
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+                mp_nbits = v90_copy_phase4_mp_bits(tx,
+                                                   mp_bits,
+                                                   (int)sizeof(mp_bits));
+                if (mp_nbits > 33 && mp_bits[33] == 1)
+                    break;
+            }
+            mp_nbits = v90_copy_phase4_mp_bits(tx,
+                                               mp_bits,
+                                               (int)sizeof(mp_bits));
+            if (mp_nbits <= 33 || mp_bits[33] != 1
+                || !v90_handle_rx_event(tx, V90_RX_EVENT_E)) {
+                fprintf(stderr,
+                        "V.90 shaped MP did not reach acknowledged MP' Sr=%d ld=%d\n",
+                        sr, lookahead);
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            symbols = 0;
+            while (v90_get_tx_phase(tx) == V90_TX_MP && symbols++ < 500)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            if (v90_get_tx_phase(tx) != V90_TX_ED) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            while (v90_get_tx_phase(tx) == V90_TX_ED && ed_symbols < 30) {
+                int ucode;
+                int constellation;
+
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+                ucode = v91_codeword_to_ucode(law, codeword);
+                constellation = cpt.dfi[ed_symbols % VPCM_CP_FRAME_INTERVALS];
+                if (ucode < 0
+                    || !vpcm_cp_mask_get(cpt.masks[constellation], ucode)) {
+                    failed = true;
+                    goto shaped_phase4_done;
+                }
+                ed_symbols++;
+            }
+            if (v90_get_tx_phase(tx) != V90_TX_B1D
+                || ed_symbols != 12 + lookahead * VPCM_CP_FRAME_INTERVALS) {
+                fprintf(stderr,
+                        "V.90 shaped Ed drain length wrong Sr=%d ld=%d symbols=%d\n",
+                        sr, lookahead, ed_symbols);
+                failed = true;
+            }
+
+shaped_phase4_done:
+            v90_free(tx);
+            if (failed)
+                return false;
+        }
+    }
+    for (int sr = 1; sr <= 3; sr++) {
+        vpcm_cp_frame_t cpt;
+        v90_state_t *valid = v90_init_data_pump(v90_law);
+        v90_state_t *invalid = v90_init_data_pump(v90_law);
+
+        if (!valid || !invalid) {
+            if (valid)
+                v90_free(valid);
+            if (invalid)
+                v90_free(invalid);
+            return false;
+        }
+        vpcm_cp_init(&cpt);
+        cpt.v90_compatibility = false;
+        cpt.codec_alaw = (law == V91_LAW_ALAW);
+        cpt.upstream_rate_mask = 0x1FFF;
+        cpt.shaping_redundancy = (uint8_t)sr;
+        cpt.shaping_lookahead = 1;
+        cpt.drn = (uint8_t)(22 - sr);
+        vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+        if (!v90_set_phase4_cp(valid, &cpt)) {
+            fprintf(stderr, "V.90 rejected valid Table 17 boundary Sr=%d drn=%d\n",
+                    sr, cpt.drn);
+            v90_free(valid);
+            v90_free(invalid);
+            return false;
+        }
+        cpt.drn++;
+        if (v90_set_phase4_cp(invalid, &cpt)) {
+            fprintf(stderr, "V.90 accepted out-of-range Table 17 K Sr=%d drn=%d\n",
+                    sr, cpt.drn);
+            v90_free(valid);
+            v90_free(invalid);
+            return false;
+        }
+        v90_free(valid);
+        v90_free(invalid);
+    }
+    {
+        vpcm_cp_frame_t cpt;
+        v90_state_t *tx = v90_init_data_pump(v90_law);
+
+        if (!tx)
+            return false;
+        vpcm_cp_init(&cpt);
+        cpt.v90_compatibility = false;
+        cpt.codec_alaw = (law == V91_LAW_ALAW);
+        cpt.upstream_rate_mask = 0x1FFF;
+        cpt.drn = 9;
+        cpt.shaping_redundancy = 1;
+        cpt.shaping_lookahead = 2;
+        vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+        if (v90_set_phase4_cp(tx, &cpt)) {
+            fprintf(stderr, "V.90 accepted optional unsupported CPt ld=2\n");
+            v90_free(tx);
+            return false;
+        }
+        v90_free(tx);
+    }
+    vpcm_log("PASS: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0/1 (%s)", law_name);
+    return true;
 }
 
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
@@ -6145,6 +6400,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_data_codeword_state(V91_LAW_ALAW)
         && test_v90_strict_receiver_events(V91_LAW_ULAW)
         && test_v90_strict_receiver_events(V91_LAW_ALAW)
+        && test_v90_shaped_phase4(V91_LAW_ULAW)
+        && test_v90_shaped_phase4(V91_LAW_ALAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)

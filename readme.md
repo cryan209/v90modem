@@ -158,12 +158,12 @@ This writes `live-rx.g711` and `live-tx.g711`. Modem diagnostic snapshots also
 report total RX/TX octets and split outgoing octets between raw V.90 generation
 and the linear compatibility path. During Phase 4 they also report `cp_bits`,
 `cp_valid`, and `cp_rejected` for the strict analogue-side CPt receiver.
-Accepted CPt drives negotiated `Sr=0` Ri/TRN2d/MP/Ed training, while the later
-CP/CP-prime selects the independent 48-frame B1d and connected-data mapper.
-Data mode supports `Sr=0/1/2/3`; the shaped modes implement the mandatory
-zero- and one-frame lookahead algorithms. The live raw-G.711 path consumes the
-negotiated D bits per six-codeword frame. Shaped CPt training and optional
-two-/three-frame lookahead are deliberately rejected until implemented.
+Accepted CPt drives negotiated `Sr=0/1/2/3` Ri/TRN2d/MP/Ed training, while the
+later CP/CP-prime selects the independent 48-frame B1d and connected-data
+mapper. Both mappers implement the mandatory zero- and one-frame lookahead
+algorithms. The live raw-G.711 path consumes the negotiated D bits per
+six-codeword frame. Optional two-/three-frame lookahead is deliberately
+rejected until implemented.
 
 ### Softmodem Debug Mode (no PJMEDIA passthrough)
 

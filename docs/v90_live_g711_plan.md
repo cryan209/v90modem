@@ -129,9 +129,8 @@ Remaining baseline issues:
   compatibility mapper; the live modem path no longer uses it.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- Phase 4 CPt training still accepts only `Sr=0`; the separate data mapper now
-  supports `Sr=1/2/3` with mandatory `ld=0/1`, but optional `ld=2/3` is not
-  implemented.
+- Phase 4 CPt training and the separate data mapper support `Sr=1/2/3` with
+  mandatory `ld=0/1`; optional `ld=2/3` is not implemented.
 - the synthetic coupled-training harness still infers some remote events from
   its proxy transmitter stages even though the live Jd/DIL path no longer does.
 - `clock_recovery` is initialized and reset but is not connected to RTP timing.
@@ -306,9 +305,9 @@ port and these APIs. It must not decode and re-encode a raw V.90 transmit frame.
 The live `Sr=0` milestone was completed on 2026-07-11. CPt configures
 TRN2d/MP/Ed, data-mode CP independently configures B1d/data, and the live RTP
 path consumes exactly the negotiated D bits per six-symbol frame. All 22
-`Sr=0` rate indices now have PCMU/PCMA vectors, and data mode supports
-`Sr=1/2/3` with the mandatory `ld=0/1` shaping algorithms. Shaped CPt training
-and optional `ld=2/3` remain future work.
+`Sr=0` rate indices now have PCMU/PCMA vectors, and both CPt training and data
+mode support `Sr=1/2/3` with the mandatory `ld=0/1` shaping algorithms.
+Optional `ld=2/3` remains future work.
 
 ### Work
 
@@ -478,7 +477,8 @@ Status: live negotiated `Sr=0` B1d/data path completed on 2026-07-11.
 7. Add all-rate `Sr=0` fixtures for PCMU and PCMA — completed.
 8. Add `Sr=1/2/3` data shaping with mandatory `ld=0/1` — completed.
 9. Surface received E and allow it to complete MP-prime — completed.
-10. Remaining: shaped CPt training, optional `ld=2/3`, and real-modem results.
+10. Add shaped CPt TRN2d/MP/Ed with mandatory `ld=0/1` — completed.
+11. Remaining: optional `ld=2/3` and real-modem results.
 
 ## Sixth Patch Set
 
@@ -491,6 +491,9 @@ completed on 2026-07-11.
 4. Propagate detected E from SpanDSP to the V.90 Phase 4 state machine.
 5. Add a bounded hardware runner that preserves logs, G.711 taps, parsed
    summaries, hashes, and build metadata. See `v90_hardware_interop.md`.
+6. Apply the CPt-selected shaper to TRN2d, MP/MP-prime, and Ed, with a separate
+   zero-initialized filter state, Table 17 K/S validation, and a complete
+   law/Sr/ld transition matrix.
 
 ## Definition Of Done
 

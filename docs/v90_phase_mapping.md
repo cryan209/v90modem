@@ -260,8 +260,8 @@ Phase 4 is not "CP/CP' in disguise".
   emits two mapped Ed frames
 - B1d is 48 negotiated data frames with a zero-state mapper reset, followed by
   connected data using the same scrambler, differential, DFI, and modulus state
-- data mode supports `Sr=1/2/3` spectral shaping with mandatory `ld=0/1`;
-  shaped CPt training and optional `ld=2/3` remain unsupported
+- CPt training and data mode support `Sr=1/2/3` spectral shaping with
+  mandatory `ld=0/1`; optional `ld=2/3` remains unsupported
 - deterministic PCMU and PCMA tests cover all 22 `Sr=0` downstream rates and
   shaped vectors for each supported Sr/lookahead combination
 - repeatable real-modem evidence collection is documented in
@@ -302,8 +302,8 @@ Compatibility layers that should disappear over time:
 4. Implement answerer-side Phase 3 control flow as:
    `Sd -> S̄d -> TRN1d -> Jd until S -> Jd'`.
 5. Carry the negotiated Phase 4 mapper through B1d into connected data.
-   Completed for `Sr=0/1/2/3` data mode with mandatory `ld=0/1`; Phase 4 CPt
-   training remains limited to `Sr=0`.
+   Completed for `Sr=0/1/2/3` CPt training and data mode with mandatory
+   `ld=0/1`.
 6. Remove the remaining V.91 `CP/Es/B1` compatibility truth model from the
    synthetic session.
 

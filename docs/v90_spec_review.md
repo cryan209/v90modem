@@ -11,8 +11,8 @@ The current implementation is best described as:
 - Phase 2: mostly implemented and reasonably close to the spec
 - Phase 3 TX waveforms and receiver-gated control: implemented, pending real
   modem interoperability hardening
-- Phase 4 digital TX: Ri/TRN2d/MP/MP-prime/Ed/B1d implemented for unshaped
-  CPt; received E can terminate repeated MP-prime
+- Phase 4 digital TX: Ri/TRN2d/MP/MP-prime/Ed/B1d implements CPt-selected
+  `Sr=0/1/2/3` and mandatory `ld=0/1`; received E can terminate MP-prime
 - Data mode encoder: all 22 downstream rate indices are covered for `Sr=0`;
   `Sr=1/2/3` data shaping implements the mandatory `ld=0/1` algorithms
 
@@ -46,7 +46,11 @@ In particular, the existing code:
   - CPt drives Phase 4 training while CP independently drives B1d/data DFI,
     per-interval modulus mapping, scrambler state, and differential signs.
   - `Sr = 1/2/3` supports mandatory `ld=0` and `ld=1` operation.
-  - Shaped CPt training and optional `ld=2/3` are not implemented.
+  - CPt training uses the same shaping rules for TRN2d, MP/MP-prime, and Ed.
+  - Table 17's `K=6..24` boundary is enforced for every CPt Sr value.
+  - Both laws cover every valid shaped CPt drn/Sr/ld combination and verify MP
+    padding remains aligned to six-symbol mapping frames.
+  - Optional `ld=2/3` is not implemented.
 
 ### Phase 2
 
@@ -82,15 +86,15 @@ In particular, the existing code:
   - The receiver reports E explicitly, and E terminates MP-prime only after
     acknowledgement and data-mapper configuration are valid.
   - B1d is 48 mapped frames and continues into live data for `Sr=0`.
-  - CPt training currently requires `Sr=0`; shaped CPt is rejected at mapper
-    configuration rather than mis-encoded.
+  - CPt-selected `Sr=1/2/3` shaping covers TRN2d, MP/MP-prime, and Ed with
+    independent zero-initialized filter memory.
 
 ### Data mode
 
 - Section 5 data mode supports `Sr=0/1/2/3` on the live raw-G.711 path, with
   the mandatory `ld=0/1` shapers and all-rate `Sr=0` fixtures. Legacy
   standalone compatibility APIs remain for older synthetic tests; rate
-  renegotiation, shaped CPt training, and optional `ld=2/3` remain incomplete.
+  rate renegotiation and optional `ld=2/3` remain incomplete.
 
 ## Reuse Strategy
 
@@ -113,7 +117,7 @@ What should be used only as a template:
 
 What still needs V.90-specific implementation:
 
-- shaped CPt training and optional `ld=2/3` lookahead
+- optional `ld=2/3` lookahead
 - downstream and upstream hardware interoperability/retrain hardening
 
 ## First Patch Set
@@ -159,4 +163,4 @@ Expected result:
    - `Sr = 1/2/3`
    - shaping trellis
    - lookahead and shaping filter
-   - remaining: shaped CPt training and optional `ld=2/3`
+   - remaining: optional `ld=2/3`
