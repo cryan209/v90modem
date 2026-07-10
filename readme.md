@@ -227,6 +227,13 @@ Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and
 `summary.json`. Password arguments are redacted from the manifest. Use
 `--dry-run` to verify the command without starting the modem or writing files.
 
+### V.92 Phase 4
+
+Strict Table 31 SUVd and mandatory-part Table 30 CPd codecs are implemented,
+and the Phase 4 analyzer now reports progression through SUVd, CPd,
+acknowledgement, Ed, B1d, and DATA. Full CPd optional parts and live CPu-driven
+exchange remain under development; see `docs/v92_phase4_implementation.md`.
+
 ## License
 
 GPL-2.0 (due to spandsp LGPL and linmodem GPL heritage)

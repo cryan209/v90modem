@@ -11,6 +11,7 @@
 
 #include "v90.h"
 #include "vpcm_cp.h"
+#include "v92_phase4_decode.h"
 
 #include <spandsp.h>
 
@@ -37,7 +38,6 @@
 /* V.92 Phase 4 constants (ITU-T V.92 §8.8.5 Table 31) */
 /* SUVd: 17 sync + 1 start + 1 id + 13 rsv + 1 silent + 1 ack + 1 start
  *       + 16 CRC + 1 fill = 52 bits → round to next multiple of 6 = 54 */
-#define V90_SUVD_BITS    54
 /* Ed: 2 downstream data frames × 6 symbols/frame = 12 codewords (§8.8.2/V.92) */
 #define V90_ED_SYMBOLS   12
 
@@ -194,7 +194,7 @@ struct v90_state_s {
 
     /* V.92 Phase 4 state */
     bool             v92_mode;                  /* V.92 Phase 4 enabled */
-    uint8_t          suv_bits[V90_SUVD_BITS];   /* Encoded SUVd bit stream (one bit per byte) */
+    uint8_t          suv_bits[V92_SUVD_BITS];   /* Encoded SUVd bit stream (one bit per byte) */
     int              suv_bit_pos;               /* Current bit index in suv_bits */
 
     /* Downstream PCM encoder state (data mode) */
@@ -299,39 +299,15 @@ static uint16_t v90_crc_bit_block(const uint8_t buf[], int first_bit, int last_b
  * 54 bits total: 17 sync ones + frame fields + 16-bit CRC + fill to multiple of 6.
  * The ack bit (bit 33) is set when the digital modem has received CPu.
  */
-static void v90_build_suvd(uint8_t bits[V90_SUVD_BITS], bool ack)
+static void v90_build_suvd(uint8_t bits[V92_SUVD_BITS], bool ack)
 {
-    int pos = 0;
-    int i;
-    uint16_t crc;
+    v92_suvd_frame_t frame = {
+        .silent_period_requested = false,
+        .acknowledge = ack
+    };
 
-    /* Frame Sync: 17 ones (bits 0:16) */
-    for (i = 0; i < 17; i++)
-        bits[pos++] = 1;
-    /* Start bit: 0 (bit 17) */
-    bits[pos++] = 0;
-    /* SUVd ID: 1 (bit 18) */
-    bits[pos++] = 1;
-    /* Reserved: 13 zeros (bits 19:31) */
-    for (i = 0; i < 13; i++)
-        bits[pos++] = 0;
-    /* Silent period request: 0 (bit 32) */
-    bits[pos++] = 0;
-    /* Acknowledge bit (bit 33): 1 = received CPu from analogue modem */
-    bits[pos++] = ack ? 1 : 0;
-    /* Start bit: 0 (bit 34) */
-    bits[pos++] = 0;
-    /* CRC-16 over bits 0..34 (bits 35:50) — bit 0 of CRC transmitted first */
-    crc = 0xFFFF;
-    for (i = 0; i < pos; i++)
-        crc = crc_itu16_bits(bits[i], 1, crc);
-    for (i = 0; i < 16; i++)
-        bits[pos++] = (crc >> i) & 1;
-    /* Fill bit: 0 (bit 51) */
-    bits[pos++] = 0;
-    /* Fill to next multiple of 6 (bits 52-53) */
-    while (pos < V90_SUVD_BITS)
-        bits[pos++] = 0;
+    if (!v92_suvd_encode(&frame, bits, V92_SUVD_BITS))
+        memset(bits, 0, V92_SUVD_BITS);
 }
 
 static bool v90_info_fill_and_sync_ok(const uint8_t *bits, int expected_bits)
@@ -2175,10 +2151,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue), no ack.
          * Scrambled and differentially encoded at U_INFO, 54 codewords. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=0)\n", V90_SUVD_BITS);
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=0)\n", V92_SUVD_BITS);
             s->phase4_hold_logged = true;
         }
-        if (s->suv_bit_pos >= V90_SUVD_BITS) {
+        if (s->suv_bit_pos >= V92_SUVD_BITS) {
             /* SUVd complete → CPd; diff_enc continues */
             s->tx_phase = V90_TX_CP;
             s->sample_count = 0;
@@ -2194,9 +2170,13 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
     case V90_TX_CP:
-        /* V.92 compatibility CPd transmitter.  V.90 uses mapped MP/MP'. */
+        /* Legacy V.92 harness payload. This is a V.90-shaped CP frame, not a
+         * native Table 30 CPd; native CPd remains gated on real CPu-derived
+         * rate, gain, filter, and constellation parameters. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: CPd (%d bits)\n", s->cp_nbits);
+            fprintf(stderr,
+                    "[V90] Phase 4 V.92 compatibility: legacy CP payload (%d bits; not native CPd)\n",
+                    s->cp_nbits);
             s->phase4_hold_logged = true;
         }
         if (s->cp_bit_pos >= s->cp_nbits) {
@@ -2219,10 +2199,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         /* V.92 §9.6.1.1: SUVd' — Short Update Values with acknowledge bit set.
          * Signals to analogue that digital has received CPu. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: SUVd' (%d bits, ack=1)\n", V90_SUVD_BITS);
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd' (%d bits, ack=1)\n", V92_SUVD_BITS);
             s->phase4_hold_logged = true;
         }
-        if (s->suv_bit_pos >= V90_SUVD_BITS) {
+        if (s->suv_bit_pos >= V92_SUVD_BITS) {
             /* SUVd' complete → Ed */
             s->tx_phase = V90_TX_ED;
             s->sample_count = 0;

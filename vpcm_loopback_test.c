@@ -21,6 +21,7 @@
 #include "vpcm_v91_loopback.h"
 #include "v90_cp_rx.h"
 #include "v92_ja_decode.h"
+#include "v92_phase4_decode.h"
 
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
@@ -375,6 +376,7 @@ static bool test_v90_shaped_phase4(v91_law_t law);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
+static bool test_v92_suvd_codec_and_phase4(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -1352,6 +1354,188 @@ shaped_phase4_done:
         v90_free(tx);
     }
     vpcm_log("PASS: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0/1 (%s)", law_name);
+    return true;
+}
+
+static bool test_v92_suvd_codec_and_phase4(void)
+{
+    static const uint16_t expected_crc[2][2] = {
+        {0x0FD7, 0x4DD3},
+        {0x2ED5, 0x6CD1}
+    };
+    uint8_t bits[V92_SUVD_BITS];
+
+    vpcm_log("Test: V.92 Table 30/31 CPd/SUVd codecs and Phase 4 progression");
+    for (int silent = 0; silent <= 1; silent++) {
+        for (int acknowledge = 0; acknowledge <= 1; acknowledge++) {
+            v92_suvd_frame_t input = {
+                .silent_period_requested = silent != 0,
+                .acknowledge = acknowledge != 0
+            };
+            v92_suvd_frame_t output;
+            v92_suvd_diag_t diag;
+
+            if (!v92_suvd_encode(&input, bits, (int)sizeof(bits))
+                || !v92_suvd_decode(bits, V92_SUVD_BITS, &output, &diag)
+                || !diag.valid
+                || diag.crc_field != expected_crc[silent][acknowledge]
+                || diag.crc_expected != diag.crc_field
+                || output.silent_period_requested != input.silent_period_requested
+                || output.acknowledge != input.acknowledge) {
+                fprintf(stderr,
+                        "V.92 SUVd round trip failed silent=%d ack=%d crc=%04X/%04X\n",
+                        silent, acknowledge, diag.crc_field, diag.crc_expected);
+                return false;
+            }
+        }
+    }
+    {
+        v92_suvd_frame_t frame = {false, false};
+        v92_suvd_diag_t diag;
+
+        if (!v92_suvd_encode(&frame, bits, (int)sizeof(bits)))
+            return false;
+        bits[19] = 1;
+        if (v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag)
+            || diag.reserved_ok) {
+            fprintf(stderr, "V.92 SUVd accepted a non-zero reserved bit\n");
+            return false;
+        }
+        if (!v92_suvd_encode(&frame, bits, (int)sizeof(bits)))
+            return false;
+        bits[35] ^= 1;
+        if (v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag) || diag.crc_ok) {
+            fprintf(stderr, "V.92 SUVd accepted a damaged CRC\n");
+            return false;
+        }
+        if (!v92_suvd_encode(&frame, bits, (int)sizeof(bits)))
+            return false;
+        bits[53] = 1;
+        if (v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag)
+            || diag.fill_bits_ok) {
+            fprintf(stderr, "V.92 SUVd accepted non-zero frame fill\n");
+            return false;
+        }
+        if (v92_suvd_decode(bits, V92_SUVD_BITS - 1, NULL, &diag)) {
+            fprintf(stderr, "V.92 SUVd accepted a truncated sequence\n");
+            return false;
+        }
+        if (!v92_suvd_encode(&frame, bits, (int)sizeof(bits)))
+            return false;
+        bits[10] = 2;
+        if (v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag)
+            || diag.binary_bits_ok) {
+            fprintf(stderr, "V.92 SUVd accepted a non-binary bit value\n");
+            return false;
+        }
+    }
+    {
+        uint8_t cpd_bits[V92_CPD_BASE_BITS];
+        v92_cpd_base_frame_t input = {
+            .selected_upstream_drn = 19,
+            .trellis_select = 2,
+            .extend_e2u = true,
+            .acknowledge = true,
+            .gain_q0_16 = 0x8000
+        };
+        v92_cpd_base_frame_t output;
+        v92_cpd_base_diag_t diag;
+
+        if (!v92_cpd_base_encode(&input, cpd_bits, (int)sizeof(cpd_bits))
+            || !v92_cpd_base_decode(cpd_bits,
+                                    V92_CPD_BASE_BITS,
+                                    &output,
+                                    &diag)
+            || !diag.valid
+            || diag.crc_field != 0x9B98
+            || output.selected_upstream_drn != input.selected_upstream_drn
+            || output.trellis_select != input.trellis_select
+            || output.extend_e2u != input.extend_e2u
+            || output.acknowledge != input.acknowledge
+            || output.gain_q0_16 != input.gain_q0_16) {
+            fprintf(stderr, "V.92 mandatory-part CPd round trip failed\n");
+            return false;
+        }
+        cpd_bits[20] = 1;
+        if (v92_cpd_base_decode(cpd_bits,
+                                V92_CPD_BASE_BITS,
+                                NULL,
+                                &diag)
+            || diag.optional_parts_absent) {
+            fprintf(stderr, "V.92 base CPd accepted an unsupported optional part\n");
+            return false;
+        }
+        if (!v92_cpd_base_encode(&input, cpd_bits, (int)sizeof(cpd_bits)))
+            return false;
+        cpd_bits[52] ^= 1;
+        if (v92_cpd_base_decode(cpd_bits,
+                                V92_CPD_BASE_BITS,
+                                NULL,
+                                &diag)
+            || diag.crc_ok) {
+            fprintf(stderr, "V.92 base CPd accepted a damaged CRC\n");
+            return false;
+        }
+        input.gain_q0_16 = 0;
+        if (v92_cpd_base_encode(&input, cpd_bits, (int)sizeof(cpd_bits))) {
+            fprintf(stderr, "V.92 base CPd accepted zero prefilter gain\n");
+            return false;
+        }
+    }
+    {
+        v92_phase4_observation_t obs;
+        v92_phase4_result_t result;
+
+        memset(&obs, 0, sizeof(obs));
+        obs.phase4_sample = -1;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_phase4") != 0)
+            return false;
+        obs.phase4_seen = true;
+        obs.phase4_sample = 100;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_suvd") != 0)
+            return false;
+        obs.suvd_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "invalid_suvd") != 0)
+            return false;
+        obs.suvd_valid = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_cpd") != 0)
+            return false;
+        obs.cpd_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "invalid_cpd") != 0)
+            return false;
+        obs.cpd_valid = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_suvd_ack") != 0)
+            return false;
+        obs.suvd_acknowledge_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_ed") != 0)
+            return false;
+        obs.ed_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_b1d") != 0)
+            return false;
+        obs.b1d_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || strcmp(result.status, "waiting_data") != 0)
+            return false;
+        obs.data_seen = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || !result.complete
+            || strcmp(result.status, "complete") != 0)
+            return false;
+        obs.training_failed = true;
+        if (!v92_phase4_analyze(&obs, &result)
+            || result.complete
+            || strcmp(result.status, "failed") != 0)
+            return false;
+    }
+    vpcm_log("PASS: V.92 Table 30/31 CPd/SUVd codecs and Phase 4 progression");
     return true;
 }
 
@@ -6408,6 +6592,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_negotiated_data_rates(V91_LAW_ALAW)
         && test_v90_spectral_shaping(V91_LAW_ULAW)
         && test_v90_spectral_shaping(V91_LAW_ALAW)
+        && test_v92_suvd_codec_and_phase4()
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)
