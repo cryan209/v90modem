@@ -291,6 +291,29 @@ void v90_notify_cp_ready(v90_state_t *s);
  */
 void v90_enable_v92_mode(v90_state_t *s);
 
+/*
+ * Enable native V.92 upstream Phase 4 gating (§9.6.1.1/V.92).  Requires
+ * v90_enable_v92_mode().  When enabled, SUVd repeats until a real SUVu or
+ * CPu is received, a single CPd is sent per received SUVu/CPu, the SUVd
+ * acknowledge bit is set only after a valid CPu, and Ed starts only once an
+ * acknowledged sequence has been sent and CPu'/SUVu' (or E2u) received.
+ */
+void v90_enable_v92_native_cpu_rx(v90_state_t *s);
+
+/* Apply a received V.92 SUVu/SUVu' frame (Table 27) to Phase 4. */
+bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge);
+
+/*
+ * Apply a received V.92 CPu/CPu' frame (Table 23, converted to the shared
+ * V.PCM CP representation with v92_cp_frame_to_vpcm) to Phase 4.  The first
+ * CPu configures the negotiated data-mode mapper used for B1d and data mode;
+ * repeated frames may change only the acknowledge bit.
+ */
+bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu);
+
+/* Copy the CPu-derived data-mode CP for native CPd construction. */
+bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out);
+
 /* Reset the active negotiated or compatibility data mapper state. */
 void v90_reset_data_mode(v90_state_t *s);
 

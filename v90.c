@@ -197,6 +197,15 @@ struct v90_state_s {
     uint8_t          suv_bits[V92_SUVD_BITS];   /* Encoded SUVd bit stream (one bit per byte) */
     int              suv_bit_pos;               /* Current bit index in suv_bits */
 
+    /* V.92 native upstream Phase 4 gating (§9.6.1.1), driven by real
+     * SUVu/CPu/CPu' receive events instead of the compatibility sequence. */
+    bool             v92_native_cpu_rx;
+    bool             v92_suvu_received;
+    bool             v92_cpu_received;
+    bool             v92_remote_ack_received;   /* CPu'/SUVu' ack, or E2u */
+    bool             v92_cpd_sent;
+    bool             v92_ack_sent;              /* sent >= 1 SUVd' (ack=1) */
+
     /* Downstream PCM encoder state (data mode) */
     v90_scrambler_t  data_scrambler;
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
@@ -2148,14 +2157,42 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
     case V90_TX_SUVD:
-        /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue), no ack.
+        /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue).
          * Scrambled and differentially encoded at U_INFO, 54 codewords. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=0)\n", V92_SUVD_BITS);
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=%d)\n",
+                    V92_SUVD_BITS,
+                    (s->v92_native_cpu_rx && s->v92_cpu_received) ? 1 : 0);
             s->phase4_hold_logged = true;
         }
         if (s->suv_bit_pos >= V92_SUVD_BITS) {
-            /* SUVd complete → CPd; diff_enc continues */
+            if (s->v92_native_cpu_rx) {
+                /* §9.6.1.1.4: after sending an acknowledged sequence and
+                 * receiving CPu'/SUVu' (or E2u), move to Ed. */
+                if (s->v92_ack_sent && s->v92_remote_ack_received) {
+                    s->tx_phase = V90_TX_ED;
+                    s->sample_count = 0;
+                    s->phase4_hold_logged = false;
+                    return v90_pcm_idle(s->law);
+                }
+                /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
+                if (!s->v92_cpd_sent
+                    && (s->v92_suvu_received || s->v92_cpu_received)) {
+                    s->tx_phase = V90_TX_CP;
+                    s->sample_count = 0;
+                    s->phase4_hold_logged = false;
+                    s->cp_bit_pos = 0;
+                    return v90_pcm_idle(s->law);
+                }
+                /* Otherwise repeat SUVd; ack tracks CPu receipt. */
+                v90_build_suvd(s->suv_bits, s->v92_cpu_received);
+                if (s->v92_cpu_received)
+                    s->v92_ack_sent = true;
+                s->suv_bit_pos = 0;
+                s->phase4_hold_logged = false;
+                return v90_pcm_idle(s->law);
+            }
+            /* Compatibility path: SUVd complete → CPd; diff_enc continues */
             s->tx_phase = V90_TX_CP;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
@@ -2182,7 +2219,18 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         if (s->cp_bit_pos >= s->cp_nbits) {
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            /* V.92: CPd → SUVd' (with ack bit set). */
+            if (s->v92_native_cpu_rx) {
+                /* §9.6.1.1.2: single CPd, then more SUVd sequences whose
+                 * ack bit is gated on a real CPu having been received. */
+                s->v92_cpd_sent = true;
+                v90_build_suvd(s->suv_bits, s->v92_cpu_received);
+                if (s->v92_cpu_received)
+                    s->v92_ack_sent = true;
+                s->suv_bit_pos = 0;
+                s->tx_phase = V90_TX_SUVD;
+                return v90_pcm_idle(s->law);
+            }
+            /* Compatibility: CPd → SUVd' (with ack bit set). */
             v90_build_suvd(s->suv_bits, true);
             s->suv_bit_pos = 0;
             s->tx_phase = V90_TX_SUVD_ACK;
@@ -2246,7 +2294,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->tx_phase = V90_TX_B1D;
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
-                if (!s->v92_mode)
+                if (!s->v92_mode
+                    || (s->v92_native_cpu_rx && s->data_mapper_ready))
                     v90_reset_negotiated_data_mapper(s);
             }
             return codeword;
@@ -2260,7 +2309,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     V90_B1D_FRAMES, V90_B1D_SYMBOLS);
             s->phase4_hold_logged = true;
         }
-        if (!s->v92_mode && s->data_mapper_ready) {
+        /* §9.6.1.1.5/V.92: in native mode B1d runs at the negotiated rate
+         * using the data-mode constellation parameters received in CPu. */
+        if (s->data_mapper_ready
+            && (!s->v92_mode || s->v92_native_cpu_rx)) {
             uint8_t codeword = v90_data_mapper_ones_codeword(s);
 
             s->sample_count++;
@@ -2434,6 +2486,11 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->data_mapper_frame_pos = V90_FRAME_LEN;
     s->data_input_bits = 0;
     s->data_input_bit_count = 0;
+    s->v92_suvu_received = false;
+    s->v92_cpu_received = false;
+    s->v92_remote_ack_received = false;
+    s->v92_cpd_sent = false;
+    s->v92_ack_sent = false;
     v90_reset_data_pump_state(s);
     v90_dil_reset_tx(s);
 
@@ -2522,6 +2579,17 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_E:
+        if (s->v92_mode && s->v92_native_cpu_rx) {
+            /* §9.6.1.1.4/V.92: E2u counts as remote acknowledgement. */
+            if (s->tx_phase == V90_TX_SUVD || s->tx_phase == V90_TX_CP) {
+                fprintf(stderr,
+                        "[V90] Phase 4 V.92: far-end E2u received; completing current sequence\n");
+                s->e_received = true;
+                s->v92_remote_ack_received = true;
+                return true;
+            }
+            return false;
+        }
         if (s->tx_phase == V90_TX_MP && s->mp_acknowledge
             && s->data_mapper_ready) {
             fprintf(stderr,
@@ -2685,6 +2753,72 @@ void v90_enable_v92_mode(v90_state_t *s)
 {
     if (s)
         s->v92_mode = true;
+}
+
+void v90_enable_v92_native_cpu_rx(v90_state_t *s)
+{
+    if (s && s->v92_mode)
+        s->v92_native_cpu_rx = true;
+}
+
+bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge)
+{
+    if (!s || !s->v92_mode || !s->v92_native_cpu_rx)
+        return false;
+    s->v92_suvu_received = true;
+    if (acknowledge)
+        s->v92_remote_ack_received = true;
+    return true;
+}
+
+bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
+{
+    vpcm_cp_frame_t expected;
+    vpcm_cp_frame_t received;
+
+    if (!s || !cpu || !s->v92_mode || !s->v92_native_cpu_rx)
+        return false;
+    /* CPu carries data-mode parameters (d = drn + 20). */
+    if (!cpu->v90_compatibility)
+        return false;
+
+    if (!s->v92_cpu_received) {
+        expected = *cpu;
+        expected.acknowledge = false;
+        if (!v90_configure_data_mapper(s, &expected))
+            return false;
+        s->data_cp_frame.acknowledge = cpu->acknowledge;
+        s->v92_cpu_received = true;
+        if (cpu->acknowledge)
+            s->v92_remote_ack_received = true;
+        fprintf(stderr,
+                "[V90] Phase 4 V.92: CPu%s accepted (drn=%u, D=%d, K=%d, Sr=%d)\n",
+                cpu->acknowledge ? "'" : "", (unsigned)cpu->drn,
+                s->data_mapper_d, s->data_mapper_k, s->data_mapper_sr);
+        return true;
+    }
+
+    /* Repeated CPu/CPu' frames may change only the acknowledge bit. */
+    expected = s->data_cp_frame;
+    received = *cpu;
+    expected.acknowledge = false;
+    received.acknowledge = false;
+    if (!vpcm_cp_frames_equal(&expected, &received))
+        return false;
+    if (cpu->acknowledge) {
+        s->v92_remote_ack_received = true;
+        fprintf(stderr, "[V90] Phase 4 V.92: CPu' acknowledgement received\n");
+    }
+    s->data_cp_frame.acknowledge = cpu->acknowledge;
+    return true;
+}
+
+bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out)
+{
+    if (!s || !out || !s->v92_cpu_received)
+        return false;
+    *out = s->data_cp_frame;
+    return true;
 }
 
 void v90_reset_data_mode(v90_state_t *s)

@@ -20,6 +20,7 @@
 #include "vpcm_v90_session.h"
 #include "vpcm_v91_loopback.h"
 #include "v90_cp_rx.h"
+#include "v92_cp_rx.h"
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
 
@@ -1536,6 +1537,496 @@ static bool test_v92_suvd_codec_and_phase4(void)
             return false;
     }
     vpcm_log("PASS: V.92 Table 30/31 CPd/SUVd codecs and Phase 4 progression");
+    return true;
+}
+
+typedef struct {
+    int cp_count;
+    int cpus_count;
+    int suvu_count;
+    v92_p4u_kind_t last_kind;
+    v92_cp_frame_t last_cp;
+    v92_cpus_frame_t last_cpus;
+    v92_suvu_frame_t last_suvu;
+} v92_p4u_capture_t;
+
+static void v92_p4u_test_handler(void *user_data,
+                                 v92_p4u_kind_t kind,
+                                 const v92_cp_diag_t *cp,
+                                 const v92_cpus_diag_t *cpus,
+                                 const v92_suvu_diag_t *suvu)
+{
+    v92_p4u_capture_t *capture = (v92_p4u_capture_t *)user_data;
+
+    if (!capture)
+        return;
+    capture->last_kind = kind;
+    if ((kind == V92_P4U_KIND_CPT || kind == V92_P4U_KIND_CPU) && cp) {
+        capture->cp_count++;
+        capture->last_cp = cp->frame;
+    } else if (kind == V92_P4U_KIND_CPUS && cpus) {
+        capture->cpus_count++;
+        capture->last_cpus = cpus->frame;
+    } else if (kind == V92_P4U_KIND_SUVU && suvu) {
+        capture->suvu_count++;
+        capture->last_suvu = suvu->frame;
+    }
+}
+
+static void v92_test_build_cpu(v92_cp_frame_t *cpu, bool alaw, bool ack)
+{
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->type = V92_CP_TYPE_CPU;
+    cpu->drn = 9;
+    cpu->acknowledge = ack;
+    cpu->codec_alaw = alaw;
+    cpu->trn1d_gain_q3_13 = 0x2000;   /* 1.0 in Q3.13 */
+    cpu->shaping_a1_q1_6 = 0x18;
+    cpu->shaping_a2_q1_6 = 0xF0;
+    cpu->shaping_b1_q1_6 = 0x10;
+    cpu->shaping_b2_q1_6 = 0xF8;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        cpu->dfi[i] = (uint8_t)(i & 1);
+    cpu->constellation_count = 2;
+    vpcm_cp_enable_odd_ucodes(cpu->masks[0]);
+    vpcm_cp_enable_all_ucodes(cpu->masks[1]);
+}
+
+static bool v92_test_feed_frame(v92_cp_rx_t *rx, const uint8_t *bits, int nbits)
+{
+    bool accepted = false;
+
+    for (int i = 0; i < nbits; i++) {
+        if (v92_cp_rx_put_bit(rx, bits[i]))
+            accepted = true;
+    }
+    return accepted;
+}
+
+static bool test_v92_native_cpu_receiver(void)
+{
+    uint8_t bits[V92_CP_RX_MAX_BITS];
+    int nbits;
+    v92_cp_frame_t cpu;
+    v92_cp_diag_t cp_diag;
+    v92_cp_rx_t rx;
+    v92_p4u_capture_t capture;
+
+    vpcm_log("Test: V.92 Table 23/24/27 CPu/CPus/SUVu codecs and bitstream receiver");
+
+    /* Long CPu with two constellations and differing codec sets. */
+    v92_test_build_cpu(&cpu, false, false);
+    cpu.codec_constellations_differ = true;
+    vpcm_cp_enable_all_ucodes(cpu.codec_masks[0]);
+    vpcm_cp_enable_odd_ucodes(cpu.codec_masks[1]);
+    if (v92_cp_bit_length(&cpu, 4) != 720
+        || v92_cp_bit_length(&cpu, 8) != 720
+        || !v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits)
+        || nbits != 720
+        || !v92_cp_decode_diag(bits, nbits, &cp_diag)
+        || cp_diag.frame.type != V92_CP_TYPE_CPU
+        || cp_diag.frame.drn != cpu.drn
+        || cp_diag.frame.trn1d_gain_q3_13 != cpu.trn1d_gain_q3_13
+        || cp_diag.frame.shaping_a1_q1_6 != cpu.shaping_a1_q1_6
+        || cp_diag.frame.shaping_b2_q1_6 != cpu.shaping_b2_q1_6
+        || cp_diag.frame.constellation_count != 2
+        || !cp_diag.frame.codec_constellations_differ
+        || memcmp(cp_diag.frame.dfi, cpu.dfi, sizeof(cpu.dfi)) != 0
+        || memcmp(cp_diag.frame.masks[0], cpu.masks[0], V92_CP_MASK_BYTES) != 0
+        || memcmp(cp_diag.frame.masks[1], cpu.masks[1], V92_CP_MASK_BYTES) != 0
+        || memcmp(cp_diag.frame.codec_masks[0], cpu.codec_masks[0], V92_CP_MASK_BYTES) != 0
+        || memcmp(cp_diag.frame.codec_masks[1], cpu.codec_masks[1], V92_CP_MASK_BYTES) != 0) {
+        fprintf(stderr, "V.92 CPu round trip failed\n");
+        return false;
+    }
+
+    /* Single-constellation CPt at the 8-point TRN2u alignment. */
+    {
+        v92_cp_frame_t cpt;
+
+        memset(&cpt, 0, sizeof(cpt));
+        cpt.type = V92_CP_TYPE_CPT;
+        cpt.drn = 14;   /* d = drn + 8 = 22 for CPt */
+        cpt.codec_alaw = true;
+        cpt.constellation_count = 1;
+        vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+        if (!v92_cp_encode(&cpt, 8, bits, (int)sizeof(bits), &nbits)
+            || nbits != 324
+            || !v92_cp_decode_diag(bits, nbits, &cp_diag)
+            || cp_diag.frame.type != V92_CP_TYPE_CPT
+            || cp_diag.frame.drn != 14
+            || !cp_diag.frame.codec_alaw
+            || cp_diag.frame.constellation_count != 1) {
+            fprintf(stderr, "V.92 CPt round trip failed\n");
+            return false;
+        }
+    }
+
+    /* Strict rejections. */
+    v92_test_build_cpu(&cpu, false, false);
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[26] = 1;
+    if (v92_cp_decode_diag(bits, nbits, &cp_diag) || cp_diag.reserved_ok) {
+        fprintf(stderr, "V.92 CPu accepted a non-zero reserved bit\n");
+        return false;
+    }
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[nbits - 30] ^= 1;   /* inside the CRC/fill tail */
+    if (v92_cp_decode_diag(bits, nbits, &cp_diag)) {
+        fprintf(stderr, "V.92 CPu accepted a damaged frame\n");
+        return false;
+    }
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[103] = 0;
+    bits[104] = 1;
+    bits[105] = 1;
+    bits[106] = 0;   /* dfi0 = 6, out of range */
+    if (v92_cp_decode_diag(bits, nbits, &cp_diag) || cp_diag.parameters_ok) {
+        fprintf(stderr, "V.92 CPu accepted dfi > 5\n");
+        return false;
+    }
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    if (v92_cp_decode_diag(bits, nbits - 24, &cp_diag)) {
+        fprintf(stderr, "V.92 CPu accepted a truncated frame\n");
+        return false;
+    }
+    bits[10] = 2;
+    if (v92_cp_decode_diag(bits, nbits, &cp_diag) || cp_diag.binary_bits_ok) {
+        fprintf(stderr, "V.92 CPu accepted a non-binary bit value\n");
+        return false;
+    }
+
+    /* Short frames. */
+    {
+        v92_cpus_frame_t cpus_in = { .drn = 9, .acknowledge = true };
+        v92_cpus_diag_t cpus_diag;
+        v92_suvu_frame_t suvu_in = {
+            .wait_for_cpu = true,
+            .prefilter_level_q2_2 = 16,
+            .silent_period_requested = false,
+            .acknowledge = true
+        };
+        v92_suvu_diag_t suvu_diag;
+
+        if (!v92_cpus_encode(&cpus_in, 4, bits, (int)sizeof(bits), &nbits)
+            || nbits != 72
+            || !v92_cpus_decode_diag(bits, nbits, &cpus_diag)
+            || cpus_diag.frame.drn != 9
+            || !cpus_diag.frame.acknowledge) {
+            fprintf(stderr, "V.92 CPus round trip failed\n");
+            return false;
+        }
+        bits[35] ^= 1;
+        if (v92_cpus_decode_diag(bits, nbits, &cpus_diag) || cpus_diag.crc_ok) {
+            fprintf(stderr, "V.92 CPus accepted a damaged CRC\n");
+            return false;
+        }
+        if (!v92_suvu_encode(&suvu_in, 4, bits, (int)sizeof(bits), &nbits)
+            || nbits != 72
+            || !v92_suvu_decode_diag(bits, nbits, &suvu_diag)
+            || !suvu_diag.frame.wait_for_cpu
+            || suvu_diag.frame.prefilter_level_q2_2 != 16
+            || suvu_diag.frame.silent_period_requested
+            || !suvu_diag.frame.acknowledge) {
+            fprintf(stderr, "V.92 SUVu round trip failed\n");
+            return false;
+        }
+        bits[19] = 1;
+        if (v92_suvu_decode_diag(bits, nbits, &suvu_diag) || suvu_diag.reserved_ok) {
+            fprintf(stderr, "V.92 SUVu accepted a non-zero reserved bit\n");
+            return false;
+        }
+    }
+
+    /* Bitstream receiver: idle ones, then SUVu, CPu, CPus in sequence. */
+    memset(&capture, 0, sizeof(capture));
+    v92_cp_rx_init(&rx, 4, false, v92_p4u_test_handler, &capture);
+    for (int i = 0; i < 40; i++)
+        v92_cp_rx_put_bit(&rx, 1);
+    {
+        v92_suvu_frame_t suvu_in = {
+            .wait_for_cpu = false,
+            .prefilter_level_q2_2 = 5,
+            .silent_period_requested = false,
+            .acknowledge = false
+        };
+
+        if (!v92_suvu_encode(&suvu_in, 4, bits, (int)sizeof(bits), &nbits)
+            || !v92_test_feed_frame(&rx, bits, nbits)
+            || capture.suvu_count != 1
+            || capture.last_kind != V92_P4U_KIND_SUVU
+            || capture.last_suvu.prefilter_level_q2_2 != 5) {
+            fprintf(stderr, "V.92 receiver did not deliver SUVu\n");
+            return false;
+        }
+    }
+    v92_test_build_cpu(&cpu, false, true);
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits)
+        || !v92_test_feed_frame(&rx, bits, nbits)
+        || capture.cp_count != 1
+        || capture.last_kind != V92_P4U_KIND_CPU
+        || capture.last_cp.drn != 9
+        || !capture.last_cp.acknowledge) {
+        fprintf(stderr, "V.92 receiver did not deliver CPu'\n");
+        return false;
+    }
+    {
+        v92_cpus_frame_t cpus_in = { .drn = 9, .acknowledge = false };
+
+        if (!v92_cpus_encode(&cpus_in, 4, bits, (int)sizeof(bits), &nbits)
+            || !v92_test_feed_frame(&rx, bits, nbits)
+            || capture.cpus_count != 1
+            || capture.last_kind != V92_P4U_KIND_CPUS) {
+            fprintf(stderr, "V.92 receiver did not deliver CPus\n");
+            return false;
+        }
+    }
+
+    /* Receiver resynchronises after a damaged frame and rejects a law
+     * mismatch. */
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[nbits - 30] ^= 1;
+    if (v92_test_feed_frame(&rx, bits, nbits) || rx.rejected_frames != 1) {
+        fprintf(stderr, "V.92 receiver accepted a damaged CPu\n");
+        return false;
+    }
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits)
+        || !v92_test_feed_frame(&rx, bits, nbits)
+        || capture.cp_count != 2) {
+        fprintf(stderr, "V.92 receiver failed to resynchronise\n");
+        return false;
+    }
+    v92_test_build_cpu(&cpu, true, false);   /* A-law against µ-law receiver */
+    if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
+        return false;
+    if (v92_test_feed_frame(&rx, bits, nbits) || rx.rejected_frames != 2) {
+        fprintf(stderr, "V.92 receiver accepted a codec-law mismatch\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.92 Table 23/24/27 CPu/CPus/SUVu codecs and bitstream receiver");
+    return true;
+}
+
+typedef struct {
+    v90_state_t *tx;
+    int applied;
+    int rejected;
+} v92_native_apply_t;
+
+static void v92_native_apply_handler(void *user_data,
+                                     v92_p4u_kind_t kind,
+                                     const v92_cp_diag_t *cp,
+                                     const v92_cpus_diag_t *cpus,
+                                     const v92_suvu_diag_t *suvu)
+{
+    v92_native_apply_t *ctx = (v92_native_apply_t *)user_data;
+    bool ok = false;
+
+    (void)cpus;
+    if (!ctx || !ctx->tx)
+        return;
+    if (kind == V92_P4U_KIND_SUVU && suvu) {
+        ok = v90_set_v92_suvu(ctx->tx, suvu->frame.acknowledge);
+    } else if (kind == V92_P4U_KIND_CPU && cp) {
+        vpcm_cp_frame_t vp;
+
+        ok = v92_cp_frame_to_vpcm(&cp->frame, &vp)
+          && v90_set_v92_cpu(ctx->tx, &vp);
+    }
+    if (ok)
+        ctx->applied++;
+    else
+        ctx->rejected++;
+}
+
+static bool test_v92_native_cpu_phase4(v91_law_t law)
+{
+    enum { MAX_SYMBOLS = 20000 };
+    const bool alaw = (law == V91_LAW_ALAW);
+    v90_law_t v90_law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v90_state_t *tx = v90_init_data_pump(v90_law);
+    vpcm_cp_frame_t legacy_cp;
+    v92_cp_frame_t cpu;
+    v92_cp_rx_t rx;
+    v92_native_apply_t apply = { tx, 0, 0 };
+    uint8_t frame_bits[V92_CP_RX_MAX_BITS];
+    uint8_t codeword = 0;
+    int nbits;
+    int symbols = 0;
+    bool failed = true;
+
+    vpcm_log("Test: V.92 native CPu-gated Phase 4 progression (%s)",
+             alaw ? "alaw" : "ulaw");
+    if (!tx)
+        return false;
+    v90_enable_v92_mode(tx);
+    v90_enable_v92_native_cpu_rx(tx);
+    v92_cp_rx_init(&rx, 4, alaw, v92_native_apply_handler, &apply);
+
+    /* Legacy CPd payload the compatibility transmitter still carries. */
+    vpcm_cp_init(&legacy_cp);
+    legacy_cp.drn = 12;
+    legacy_cp.codec_alaw = alaw;
+    vpcm_cp_enable_all_ucodes(legacy_cp.masks[0]);
+    if (!v90_set_phase4_cp(tx, &legacy_cp))
+        goto done;
+
+    v90_start_phase3(tx, 66);
+    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JD
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_S))
+        goto done;
+    while (v90_get_tx_phase(tx) != V90_TX_TRN2D && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_TRN2D
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID))
+        goto done;
+    while (v90_get_tx_phase(tx) != V90_TX_SUVD && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_SUVD)
+        goto done;
+
+    /* No SUVu/CPu yet: SUVd must repeat without a CPd or Ed. */
+    for (int i = 0; i < 4 * (V92_SUVD_BITS + 1); i++) {
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+            fprintf(stderr,
+                    "V.92 native Phase 4 left SUVd without receiving SUVu/CPu\n");
+            goto done;
+        }
+    }
+
+    /* SUVu arrives: exactly one CPd goes out, then SUVd resumes. */
+    {
+        v92_suvu_frame_t suvu = {
+            .wait_for_cpu = false,
+            .prefilter_level_q2_2 = 16,
+            .silent_period_requested = false,
+            .acknowledge = false
+        };
+
+        if (!v92_suvu_encode(&suvu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
+            || !v92_test_feed_frame(&rx, frame_bits, nbits)
+            || apply.applied != 1)
+            goto done;
+    }
+    symbols = 0;
+    while (v90_get_tx_phase(tx) != V90_TX_CP && symbols++ < 2 * V92_SUVD_BITS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_CP) {
+        fprintf(stderr, "V.92 native Phase 4 did not send CPd after SUVu\n");
+        goto done;
+    }
+    symbols = 0;
+    while (v90_get_tx_phase(tx) == V90_TX_CP && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_SUVD)
+        goto done;
+
+    /* Still no CPu: no Ed, no second CPd. */
+    for (int i = 0; i < 3 * (V92_SUVD_BITS + 1); i++) {
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+            fprintf(stderr,
+                    "V.92 native Phase 4 advanced without a real CPu\n");
+            goto done;
+        }
+    }
+
+    /* CPu through the bitstream receiver configures the data mapper. */
+    v92_test_build_cpu(&cpu, alaw, false);
+    if (!v92_cp_encode(&cpu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
+        || !v92_test_feed_frame(&rx, frame_bits, nbits)
+        || apply.applied != 2
+        || v90_data_bits_per_frame(tx) != cpu.drn + 20) {
+        fprintf(stderr, "V.92 native CPu did not configure the data mapper\n");
+        goto done;
+    }
+    {
+        vpcm_cp_frame_t negotiated;
+
+        if (!v90_get_v92_cpu(tx, &negotiated)
+            || negotiated.drn != cpu.drn
+            || negotiated.trn1d_gain_q3_13 != cpu.trn1d_gain_q3_13)
+            goto done;
+    }
+
+    /* Ack goes out in SUVd', but Ed still needs the remote acknowledgement. */
+    for (int i = 0; i < 2 * (V92_SUVD_BITS + 1); i++) {
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+            fprintf(stderr,
+                    "V.92 native Phase 4 reached Ed without CPu'/SUVu'\n");
+            goto done;
+        }
+    }
+
+    /* A repeated CPu may only change its acknowledge bit. */
+    {
+        vpcm_cp_frame_t bad;
+
+        v92_cp_frame_to_vpcm(&cpu, &bad);
+        bad.drn = 8;
+        if (v90_set_v92_cpu(tx, &bad)) {
+            fprintf(stderr,
+                    "V.92 native Phase 4 accepted a mismatched repeated CPu\n");
+            goto done;
+        }
+    }
+
+    /* CPu' releases Ed → B1d over the negotiated mapper → data mode. */
+    v92_test_build_cpu(&cpu, alaw, true);
+    if (!v92_cp_encode(&cpu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
+        || !v92_test_feed_frame(&rx, frame_bits, nbits)
+        || apply.applied != 3)
+        goto done;
+    symbols = 0;
+    while (v90_get_tx_phase(tx) != V90_TX_ED && symbols++ < 2 * V92_SUVD_BITS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_ED) {
+        fprintf(stderr, "V.92 native Phase 4 did not reach Ed after CPu'\n");
+        goto done;
+    }
+    symbols = 0;
+    while (v90_get_tx_phase(tx) == V90_TX_ED && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_B1D)
+        goto done;
+    symbols = 0;
+    while (v90_get_tx_phase(tx) == V90_TX_B1D && symbols++ < MAX_SYMBOLS) {
+        int ucode;
+        int constellation;
+
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        ucode = v91_codeword_to_ucode(law, codeword);
+        constellation = cpu.dfi[(symbols - 1) % VPCM_CP_FRAME_INTERVALS];
+        if (ucode < 0
+            || !vpcm_cp_mask_get(cpu.masks[constellation], ucode)) {
+            fprintf(stderr,
+                    "V.92 native B1d escaped the CPu constellation\n");
+            goto done;
+        }
+    }
+    if (v90_get_tx_phase(tx) != V90_TX_DATA || !v90_training_complete(tx))
+        goto done;
+
+    failed = false;
+done:
+    v90_free(tx);
+    if (failed) {
+        fprintf(stderr, "V.92 native CPu Phase 4 test failed (%s)\n",
+                alaw ? "alaw" : "ulaw");
+        return false;
+    }
+    vpcm_log("PASS: V.92 native CPu-gated Phase 4 progression (%s)",
+             alaw ? "alaw" : "ulaw");
     return true;
 }
 
@@ -6593,6 +7084,9 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_spectral_shaping(V91_LAW_ULAW)
         && test_v90_spectral_shaping(V91_LAW_ALAW)
         && test_v92_suvd_codec_and_phase4()
+        && test_v92_native_cpu_receiver()
+        && test_v92_native_cpu_phase4(V91_LAW_ULAW)
+        && test_v92_native_cpu_phase4(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)
