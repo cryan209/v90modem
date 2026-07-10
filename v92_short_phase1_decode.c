@@ -424,6 +424,8 @@ bool v92_decode_short_phase1_candidate_soft(const uint8_t *bits,
 
 const char *v92_anspcm_level_to_str(int level)
 {
+    if (level < 0)
+        return "unknown";
     switch (level & 0x03) {
     case 0: return "-9.5 dBm0";
     case 1: return "-12 dBm0";
@@ -756,4 +758,250 @@ bool v92_detect_anspcm_sequence(const uint8_t *codewords,
 
     *out = best;
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Waveform-structure detectors for analog line captures              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * QTS structure test at one position: over win samples, x[k+3] should be
+ * -x[k] (QTS has only odd harmonics of 1333 Hz).  Returns true when the
+ * antisymmetry error is small relative to the amplitude, and stores the
+ * summed per-sample amplitude for the caller's floor check.
+ */
+static bool v92_qts_antisym_ok(const int16_t *samples,
+                               int pos,
+                               int win,
+                               long *amp_out)
+{
+    long err = 0;
+    long amp = 0;
+
+    for (int k = 0; k < win; k++) {
+        long a = samples[pos + k];
+        long b = samples[pos + k + 3];
+
+        err += labs(a + b);
+        amp += (labs(a) + labs(b)) / 2;
+    }
+    if (amp_out)
+        *amp_out = amp;
+    /* err < 25% of amplitude */
+    return err * 4 < amp;
+}
+
+bool v92_detect_qts_waveform(const int16_t *samples,
+                             int total,
+                             int search_start,
+                             int search_end,
+                             v92_qts_hit_t *out)
+{
+    /* Nominal QTS is 768T + 48T of QTS\; require at least 24 blocks
+     * (144 samples) so noise cannot lock. */
+    enum {
+        QTS_MIN_RUN = 144,
+        QTS_PROBE_WIN = 36,          /* 6 blocks for the initial lock */
+        QTS_AMP_FLOOR = 60           /* mean |x| per sample, linear units */
+    };
+
+    if (!samples || total <= 0 || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total)
+        search_end = total;
+    if (search_end - search_start < QTS_MIN_RUN + 6)
+        return false;
+
+    for (int offset = search_start;
+         offset + QTS_MIN_RUN + 6 <= search_end;
+         offset++) {
+        long amp = 0;
+        int pos;
+        int flip_pos = -1;
+        int run_end;
+
+        if (!v92_qts_antisym_ok(samples, offset, QTS_PROBE_WIN, &amp))
+            continue;
+        if (amp < (long) QTS_PROBE_WIN * QTS_AMP_FLOOR)
+            continue;
+
+        /* Extend forward in 3-sample steps.  The QTS -> QTS\ boundary is a
+         * polarity flip: for exactly one 3-sample stretch x[k+3] equals
+         * +x[k]; tolerate one such flip and keep extending. */
+        pos = offset + QTS_PROBE_WIN;
+        while (pos + 6 <= search_end) {
+            long a2 = 0;
+
+            if (v92_qts_antisym_ok(samples, pos, 3, &a2)
+                && a2 >= 3 * QTS_AMP_FLOOR) {
+                pos += 3;
+                continue;
+            }
+            if (flip_pos < 0 && a2 >= 3 * QTS_AMP_FLOOR) {
+                long esame = 0;
+
+                for (int k = 0; k < 3; k++)
+                    esame += labs((long) samples[pos + k] - samples[pos + k + 3]);
+                if (esame * 4 < a2) {
+                    flip_pos = pos + 3;
+                    pos += 3;
+                    continue;
+                }
+            }
+            break;
+        }
+        run_end = pos + 3;
+        if (run_end - offset < QTS_MIN_RUN)
+            continue;
+
+        out->seen = true;
+        out->start_sample = offset;
+        if (flip_pos > offset) {
+            out->qts_reps = (flip_pos - offset) / 6;
+            out->qts_bar_reps = (run_end - flip_pos) / 6;
+        } else {
+            out->qts_reps = (run_end - offset) / 6;
+            out->qts_bar_reps = 0;
+        }
+        out->alignment_phase = offset % 6;
+        out->symbol_count = run_end - offset;
+        out->score = run_end - offset;
+        return true;
+    }
+    return false;
+}
+
+/* Normalized correlation between [pos, pos+win) and [pos+lag, pos+lag+win).
+ * Returns 0.0 when the leading window is below the amplitude floor. */
+static double v92_anspcm_period_corr(const int16_t *samples,
+                                     int pos,
+                                     int lag,
+                                     int win,
+                                     double floor_energy)
+{
+    double xx = 0.0, yy = 0.0, xy = 0.0;
+
+    for (int k = 0; k < win; k++) {
+        double x = samples[pos + k];
+        double y = samples[pos + k + lag];
+
+        xx += x * x;
+        yy += y * y;
+        xy += x * y;
+    }
+    if (xx < floor_energy || yy <= 0.0)
+        return 0.0;
+    return xy / sqrt(xx * yy);
+}
+
+bool v92_detect_anspcm_waveform(const int16_t *samples,
+                                int total,
+                                int search_start,
+                                int search_end,
+                                int lm_level_hint,
+                                v92_anspcm_hit_t *out)
+{
+    /* The nominal period is 301 samples, but a resampled line capture has
+     * an independent clock: allow a couple of samples of lag error and
+     * track slow drift while extending. */
+    enum {
+        ANSPCM_PERIOD_SAMPLES = 301,
+        ANSPCM_LAG_TOL = 2,
+        ANSPCM_RMS_FLOOR = 80
+    };
+    const double floor_energy = (double) ANSPCM_PERIOD_SAMPLES
+                              * ANSPCM_RMS_FLOOR * ANSPCM_RMS_FLOOR;
+
+    if (!samples || total <= 0 || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->level = lm_level_hint;
+
+    if (search_start < 0)
+        search_start = 0;
+    if (search_end <= 0 || search_end > total)
+        search_end = total;
+    if (search_end - search_start
+        < 2 * (ANSPCM_PERIOD_SAMPLES + ANSPCM_LAG_TOL) + 8)
+        return false;
+
+    for (int offset = search_start;
+         offset + 2 * ANSPCM_PERIOD_SAMPLES + ANSPCM_LAG_TOL <= search_end;
+         offset += 2) {
+        int lag = 0;
+        double best_r = 0.0;
+        int pos;
+        int duration;
+
+        for (int l = ANSPCM_PERIOD_SAMPLES - ANSPCM_LAG_TOL;
+             l <= ANSPCM_PERIOD_SAMPLES + ANSPCM_LAG_TOL;
+             l++) {
+            double r = v92_anspcm_period_corr(samples, offset, l,
+                                              ANSPCM_PERIOD_SAMPLES,
+                                              floor_energy);
+
+            if (r > best_r) {
+                best_r = r;
+                lag = l;
+            }
+        }
+        /* r >= 0.93 between adjacent periods; ANSpcm is digitally periodic,
+         * so genuine hits sit close to 1.0 at the true lag. */
+        if (best_r < 0.93)
+            continue;
+
+        /* Extend period by period at the tracked lag.  The signal's phase
+         * reversal (every ~12 periods) lands mid-window and destroys the
+         * correlation of TWO adjacent period pairs, so up to two failing
+         * pairs in a row are carried as tentative periods and rolled back
+         * when the signal does not resume. */
+        duration = 2 * lag;
+        pos = offset + lag;
+        {
+            int pending_miss = 0;
+
+            while (pos + 2 * (lag + 1) <= search_end) {
+                double r = 0.0;
+                int next_lag = lag;
+
+                for (int l = lag - 1; l <= lag + 1; l++) {
+                    double rl = v92_anspcm_period_corr(samples, pos, l,
+                                                       ANSPCM_PERIOD_SAMPLES,
+                                                       floor_energy);
+
+                    if (fabs(rl) > fabs(r)) {
+                        r = rl;
+                        next_lag = l;
+                    }
+                }
+                if (fabs(r) >= 0.93) {
+                    pending_miss = 0;
+                    lag = next_lag;
+                } else if (pending_miss < 2) {
+                    pending_miss++;
+                } else {
+                    /* third miss in a row: the signal ended before the
+                     * tentative periods; drop them and stop */
+                    duration -= 2 * lag;
+                    pending_miss = 0;
+                    break;
+                }
+                duration += lag;
+                pos += lag;
+            }
+            duration -= pending_miss * lag;
+        }
+
+        out->seen = true;
+        out->start_sample = offset;
+        out->duration_symbols = duration;
+        out->score = duration;
+        out->avg_abs_error = -1;
+        return true;
+    }
+    return false;
 }

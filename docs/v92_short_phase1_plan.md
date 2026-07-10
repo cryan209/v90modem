@@ -733,3 +733,66 @@ QCA1d sequences.
 - `USR-Message-V92NC`: unchanged single-stage figure 3 story.
 - `Agere-SV92-NC`: byte-identical output (plain V.8 call, no QC content).
 - Synthetic clause 9.2 evaluator tests still pass.
+
+## Waveform-Structure QTS/ANSpcm Confirmation (2026-07-10)
+
+### Why the codeword detectors could not fire on line captures
+
+The codeword-exact `v92_detect_qts_sequence()` / `v92_detect_anspcm_sequence()`
+assume the G.711 stream is the DS0 tap the digital modem emitted.  On an
+analog line capture the signal passed the D/A, line and A/D: bit-level
+inspection of the Motorola capture shows the QTS arriving as a perfectly
+stable 6-sample pattern `-64 -33 +61 +64 +33 -60` — the channel filter
+reshapes the nominal `[+u, +0, +u, -u, -0, -u]` template beyond any
+per-symbol ucode tolerance.  What survives an LTI channel is structure:
+
+- QTS: 6-sample periodic and antisymmetric at 3 samples (`x[k+3] = -x[k]`,
+  only odd harmonics of 1333 Hz), QTS\ a polarity flip;
+- ANSpcm: digitally generated 2099.7 Hz tone with an exact 301-sample
+  period (adjacent-period correlation measures +1.000 on the capture),
+  phase reversal every 3612 samples.
+
+### What changed
+
+- New `v92_detect_qts_waveform()` and `v92_detect_anspcm_waveform()` in
+  `v92_short_phase1_decode.c` implement those structure tests on the
+  linear waveform.  The ANSpcm detector estimates the true lag (+/-2
+  samples, resampled-capture clock offset) and tracks drift; the phase
+  reversal lands mid-window and destroys two adjacent period pairs, so up
+  to two tentative misses are carried and rolled back.  Levels cannot be
+  measured from a gain-unknown capture, so `out->level` carries the LM
+  hint from the QCA1d/QC2 decode.
+- `detect_v92_short_phase1_followup()` runs the codeword-exact detectors
+  first and falls back to the waveform detectors; the QTS waveform path
+  also runs when no UQTS value is known (the structure test needs none).
+- The clause 9.2 TONEq-timeout fallback now fires whenever TONEq is
+  missing after the QCA — even when the digital side did transmit its
+  QTS/ANSpcm chain — since a missing TONEq answer aborts the quick
+  connect either way (9.2.4.3).
+- `v92_anspcm_level_to_str()` guards negative (unknown) levels.
+
+### Verification
+
+- `Motorola-SM56-V92QC` left/digital channel: QTS observed at 6313.6 ms
+  with 777 samples — the nominal 768T — and ANSpcm at 6413.0 ms for
+  1730.8 ms, ending right at the 2 s post-QCA1d timeout that precedes the
+  V.8 retry CM at 8226.8 ms.  The digital-side chain is now fully
+  confirmed: `QCA1d -> QTS -> ANSpcm -> (TONEq missing) -> CM retry`,
+  outcome v8-fallback with only TONEq missing.
+- `Motorola-SM56-V92NC`: QTS 777 samples at 5926.8 ms, ANSpcm 1655.5 ms.
+- `USR-Message-V92NC`: QTS 777 samples at 6374.4 ms, ANSpcm 903.0 ms —
+  a different vendor producing the same 768T QTS confirms the detector
+  locks the real signal.
+- No false hits on the Agere captures (their QC2 stage aborted before any
+  chain ran) or the plain-V.8 Agere NC; synthetic evaluator tests pass.
+
+### Remaining after this step
+
+- The QTS\ polarity flip is not being separated (qts_bar_reps=0): the
+  antisymmetry run ends at ANSpcm start, so QTS\ either overlaps the
+  measured 777 samples or the flip transient ends the run early.
+  Diagnostic only.
+- A successful quick connect (TONEq answered, Phase 2 short startup)
+  still has no capture in the truth set; the short-phase2 outcome remains
+  verified by synthetic tests only.
+- ODP/ADP bypass (9.2.5) not yet modeled.

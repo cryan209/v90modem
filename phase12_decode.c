@@ -2255,6 +2255,39 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         }
     }
 
+    /* Waveform-structure fallback for analog line captures: channel
+     * filtering reshapes the codeword-exact QTS template, but the
+     * 6-periodic / 3-antisymmetric structure survives.  This path also
+     * runs when no UQTS value is known — the structure test needs none. */
+    if (!result->call_init.v92_qts_seen) {
+        v92_qts_hit_t wave_qts;
+        int wstart = qts_sequence_start;
+        int wend = qts_sequence_start + 3600;
+
+        if (wstart < 0)
+            wstart = 0;
+        if (wend > total_samples)
+            wend = total_samples;
+        memset(&wave_qts, 0, sizeof(wave_qts));
+        if (v92_detect_qts_waveform(samples, total_samples, wstart, wend, &wave_qts)) {
+            result->call_init.v92_qts_seen = true;
+            result->call_init.v92_qts_sample = wave_qts.start_sample;
+            result->call_init.v92_qts_reps = wave_qts.qts_reps;
+            result->call_init.v92_qts_bar_reps = wave_qts.qts_bar_reps;
+            result->call_init.v92_qts_alignment_phase = wave_qts.alignment_phase;
+            result->call_init.v92_qts_symbol_count = wave_qts.symbol_count;
+            result->call_init.v92_qts_score = wave_qts.score;
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 QTS (waveform) at %.1fms reps=%d qts_bar=%d syms=%d\n",
+                        (double) wave_qts.start_sample * 1000.0 / (double) sample_rate,
+                        wave_qts.qts_reps,
+                        wave_qts.qts_bar_reps,
+                        wave_qts.symbol_count);
+            }
+        }
+    }
+
     if (codewords && total_codewords > 0
         && effective_lm_level >= 0
         && result->call_init.v92_qts_seen) {
@@ -2307,6 +2340,43 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                         anspcm_hit.score,
                         anspcm_hit.avg_abs_error,
                         (anspcm_law == V91_LAW_ALAW) ? "alaw" : "ulaw");
+            }
+        }
+    }
+
+    /* Waveform fallback: ANSpcm is a digitally generated 2099.7 Hz tone
+     * with an exact 301-sample period; that periodicity survives the
+     * analog channel even when the absolute-level codeword template does
+     * not match.  Only searched directly after a detected QTS. */
+    if (result->call_init.v92_qts_seen && !result->call_init.v92_anspcm_seen) {
+        v92_anspcm_hit_t wave_ans;
+        int astart = result->call_init.v92_qts_sample
+                   + result->call_init.v92_qts_symbol_count - 48;
+        /* ANSpcm runs until the 2 s TONEq timeout after the QCA; allow the
+         * full span plus margin so the measured duration is not clipped. */
+        int aend = astart + 20000;
+
+        if (astart < 0)
+            astart = 0;
+        if (aend > total_samples)
+            aend = total_samples;
+        memset(&wave_ans, 0, sizeof(wave_ans));
+        if (v92_detect_anspcm_waveform(samples, total_samples,
+                                       astart, aend,
+                                       effective_lm_level,
+                                       &wave_ans)) {
+            result->call_init.v92_anspcm_seen = true;
+            result->call_init.v92_anspcm_sample = wave_ans.start_sample;
+            result->call_init.v92_anspcm_duration_symbols = wave_ans.duration_symbols;
+            result->call_init.v92_anspcm_level = wave_ans.level;
+            result->call_init.v92_anspcm_score = wave_ans.score;
+            result->call_init.v92_anspcm_avg_abs_error = wave_ans.avg_abs_error;
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 ANSpcm (waveform) at %.1fms dur=%.1fms level=%s\n",
+                        (double) wave_ans.start_sample * 1000.0 / (double) sample_rate,
+                        (double) wave_ans.duration_symbols * 1000.0 / (double) sample_rate,
+                        v92_anspcm_level_to_str(wave_ans.level));
             }
         }
     }
@@ -3649,13 +3719,12 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
          * both sides drop to V.34 Phase 2. */
         proc->outcome = P12_V92_PROC_OUTCOME_V34_PHASE2;
     } else if ((qca || (partner_hint && qca_end >= 0))
-               && !result->call_init.v92_qts_seen
-               && !result->call_init.v92_anspcm_seen
                && !result->call_init.v92_toneq_seen
                && qca_end >= 0) {
-        /* 9.2.3.3/9.2.4.3: the QCA was answered by nothing — no QTS/ANSpcm
-         * chain and no TONEq within the 2 s timeout.  A CM or JM restarting
-         * well after the QCA is the V.8 retry that follows the timeout. */
+        /* 9.2.3.3/9.2.4.3: no TONEq within the 2 s following the QCA — even
+         * when the digital side did transmit its QTS/ANSpcm chain, a missing
+         * TONEq answer aborts the quick connect.  A CM or JM restarting well
+         * after the QCA is the V.8 retry that follows the timeout. */
         const p12_phase1_event_t *retry_cm =
             p12_proc_find_earliest(result, cm_labels, 1,
                                    qca_end + (sample_rate * 1500) / 1000);

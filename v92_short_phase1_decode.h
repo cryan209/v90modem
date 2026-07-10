@@ -89,4 +89,34 @@ bool v92_detect_anspcm_sequence(const uint8_t *codewords,
                                 int search_end,
                                 v92_anspcm_hit_t *out);
 
+/*
+ * Waveform-structure detectors for analog line captures.
+ *
+ * The codeword-exact detectors above assume the G.711 stream is the DS0
+ * tap the digital modem emitted.  A capture taken on the analog side has
+ * been through the D/A, line and A/D: channel filtering reshapes the
+ * per-sample codeword pattern beyond template matching.  What survives an
+ * LTI channel is structure:
+ *   - QTS is 6-sample periodic and antisymmetric at 3 samples
+ *     (x[k+3] = -x[k]; only odd harmonics of 1333 Hz), with QTS\ a
+ *     polarity flip of QTS;
+ *   - ANSpcm is a digitally generated 2099.7 Hz tone with an exact
+ *     301-sample period (phase reversals roughly every 3612 samples).
+ * These detectors work on the linear waveform.  They carry no level
+ * information, so out->level is taken from the lm_level_hint argument
+ * (pass -1 when unknown).
+ */
+bool v92_detect_qts_waveform(const int16_t *samples,
+                             int total,
+                             int search_start,
+                             int search_end,
+                             v92_qts_hit_t *out);
+
+bool v92_detect_anspcm_waveform(const int16_t *samples,
+                                int total,
+                                int search_start,
+                                int search_end,
+                                int lm_level_hint,
+                                v92_anspcm_hit_t *out);
+
 #endif /* V92_SHORT_PHASE1_DECODE_H */
