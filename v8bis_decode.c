@@ -604,8 +604,11 @@ static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
 
     if (!msg || !out)
         return false;
-    /* V.92 QC2/QCA2 identification field uses V.8bis message type 1011b */
-    if (msg->msg_type != 0xB || msg->info_len < 1)
+    /* V.92 QC2/QCA2 identification field uses message type "1011" written
+     * in TRANSMISSION order in Tables 12/13/V.92.  HDLC octets are
+     * assembled LSB-first, so the wire sequence 1,0,1,1 packs to 0xD in
+     * the low nibble (bit-verified against a CRC-valid QC2a capture). */
+    if (msg->msg_type != 0xD || msg->info_len < 1)
         return false;
 
     memset(out, 0, sizeof(*out));
@@ -622,7 +625,9 @@ static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
     out->lapm = lapm;
 
     if (digital_modem) {
-        int lm = (int) (b & 0x03U);         /* bits 8..9 */
+        /* "LM" at bits 8:9 is written L-first in transmission order, so
+         * L lands in octet bit 0 and M in bit 1; the level code is 2L+M. */
+        int lm = (int) (((b & 0x01U) << 1) | ((b >> 1) & 0x01U));
 
         /* bits 10..12 should be 000 per V.92 Tables 12 and 14; log if set
          * but do not reject — real hardware sometimes sets reserved bits */
@@ -636,7 +641,12 @@ static bool v92_decode_qc2_id(const v8bis_decoded_msg_t *msg,
         return true;
     }
 
-    out->wxyz = (int) (b & 0x0FU);          /* bits 8..11 */
+    /* "WXYZ" at bits 8:11 is written W-first in transmission order, so W
+     * lands in octet bit 0; the UQTS table indexes with W as the MSB. */
+    out->wxyz = (int) ((((b >> 0) & 1U) << 3)
+                     | (((b >> 1) & 1U) << 2)
+                     | (((b >> 2) & 1U) << 1)
+                     | ((b >> 3) & 1U));
     /* bit 12 should be 0 per V.92 Tables 3 and 5; log if set but do not
      * reject — V.8bis compatibility says receivers ignore unknown bits */
     out->reserved_bits_set = ((b & 0x10U) != 0);
@@ -885,6 +895,52 @@ static void v8bis_hdlc_put_bit(void *user_data, int bit)
     }
 }
 
+int v8bis_scan_qc2_bitstream(const uint8_t *bits,
+                             int bit_count,
+                             int channel,
+                             v8bis_qc2_bits_hit_t *hits,
+                             int max_hits)
+{
+    v8bis_hdlc_rx_t rx;
+    int hit_count = 0;
+
+    if (!bits || bit_count <= 0 || !hits || max_hits <= 0)
+        return 0;
+
+    memset(&rx, 0, sizeof(rx));
+    rx.channel = channel;
+    /* carrier_on_sample stays 0, so committed frames carry
+     * sample_offset = frame_start_bit / 300 * 8000; invert that below. */
+    for (int i = 0; i < bit_count; i++)
+        v8bis_hdlc_put_bit(&rx, bits[i] & 1);
+    /* Flush a frame terminated by end-of-stream marking (abort path
+     * already handled inside put_bit); a trailing committed flag is the
+     * normal close, so nothing more to do here. */
+
+    for (int i = 0; i < rx.msg_count && hit_count < max_hits; i++) {
+        v92_qc2_id_t qc2;
+        v8bis_qc2_bits_hit_t *hit;
+
+        if (!v92_decode_qc2_id(&rx.msgs[i], &qc2))
+            continue;
+        hit = &hits[hit_count++];
+        memset(hit, 0, sizeof(*hit));
+        hit->ok = true;
+        snprintf(hit->name, sizeof(hit->name), "%s", qc2.name);
+        hit->digital_modem = qc2.digital_modem;
+        hit->qca = qc2.qca;
+        hit->lapm = qc2.lapm;
+        hit->revision = qc2.revision;
+        hit->wxyz = qc2.wxyz;
+        hit->uqts_ucode = qc2.uqts_ucode;
+        hit->lm = qc2.lm;
+        hit->channel_mismatch = qc2.channel_mismatch;
+        hit->frame_start_bit =
+            (int) lround((double) rx.msgs[i].sample_offset * 300.0 / 8000.0);
+    }
+    return hit_count;
+}
+
 /* ------------------------------------------------------------------ */
 /* Event collection functions                                         */
 /* ------------------------------------------------------------------ */
@@ -1060,9 +1116,13 @@ void v8bis_collect_msg_events(call_log_t *log,
         const char *ch_str = (msg->channel == 0) ? "initiating/CH1" : "responding/CH2";
         uint8_t dedup_key = msg->msg_type | (uint8_t)(msg->channel << 4);
         v92_qc2_id_t v92_qc2;
+        bool is_qc2 = v92_decode_qc2_id(msg, &v92_qc2);
 
-        /* Skip frames with unknown/undefined type */
-        if (msg->msg_type == 0 || strcmp(type_str, "unknown") == 0)
+        /* Skip frames with unknown/undefined type.  The V.92 QC2/QCA2
+         * identification frame uses a type nibble outside the V.8bis table
+         * ("1011" in transmission order = 0xD LSB-packed), so it must be
+         * recognized before this check. */
+        if (!is_qc2 && (msg->msg_type == 0 || strcmp(type_str, "unknown") == 0))
             continue;
 
         /* Dedup: skip if same (type, channel) key seen within ~400ms (3200 samples) */
@@ -1106,10 +1166,11 @@ void v8bis_collect_msg_events(call_log_t *log,
             }
         }
 
-        call_log_append(log, msg->sample_offset, 0, "V.8bis", summary, detail);
+        if (!is_qc2)
+            call_log_append(log, msg->sample_offset, 0, "V.8bis", summary, detail);
 
         /* Also emit explicit V.92 QC2/QCA2 identification when present. */
-        if (v92_decode_qc2_id(msg, &v92_qc2)) {
+        if (is_qc2) {
             snprintf(summary, sizeof(summary), "%s", v92_qc2.name);
             if (v92_qc2.digital_modem) {
                 snprintf(detail, sizeof(detail),

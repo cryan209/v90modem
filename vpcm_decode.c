@@ -14897,9 +14897,14 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
         if (ctx->left_p12.digital_side_likely)
             left_analog_score -= 5;
         /* Strict V.92 short-P1 outweighs CM/JM heuristics: QC* is the call
-         * modem's transmission, QCA* the answer modem's. */
+         * modem's transmission, QCA* the answer modem's.  The CRC-verified
+         * QC2/QCA2 identification frames carry the same side information. */
         if (ctx->left_p12.call_init.v92_short_p1_seen)
             left_analog_score += ctx->left_p12.call_init.v92_short_p1_qca ? -20 : 20;
+        if (ctx->left_p12.call_init.v92_qc2_seen)
+            left_analog_score += 15;
+        if (ctx->left_p12.call_init.v92_qca2_seen)
+            left_analog_score -= 15;
     }
     if (ctx->right_p12_valid) {
         if (ctx->right_p12.cm.detected)
@@ -14910,6 +14915,10 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
             right_analog_score -= 5;
         if (ctx->right_p12.call_init.v92_short_p1_seen)
             right_analog_score += ctx->right_p12.call_init.v92_short_p1_qca ? -20 : 20;
+        if (ctx->right_p12.call_init.v92_qc2_seen)
+            right_analog_score += 15;
+        if (ctx->right_p12.call_init.v92_qca2_seen)
+            right_analog_score -= 15;
     }
 
     if (left_analog_score > right_analog_score) {
@@ -18336,6 +18345,19 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
         return out->family != 0;
     }
 
+    if (p12->call_init.v92_qca2_seen
+        && p12->call_init.v92_qca2_digital == expect_digital) {
+        out->seen = true;
+        out->sample = p12->call_init.v92_qca2_sample;
+        out->digital = p12->call_init.v92_qca2_digital;
+        out->qca = true;
+        out->family = phase12_short_p1_family_from_name(p12->call_init.v92_qca2_name);
+        out->uqts_ucode = p12->call_init.v92_qca2_uqts_ucode;
+        out->lm_level = p12->call_init.v92_qca2_lm_level;
+        out->name = p12->call_init.v92_qca2_name;
+        return out->family != 0;
+    }
+
     return false;
 }
 
@@ -18459,9 +18481,12 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
                                  && right_digital_sig.qca != left_analog_sig.qca;
         }
 
+        /* analog_ready is the family-1 QC1->CM procedural gate; a family-2
+         * pair is CRC-verified V.8bis frames, so the complementary pair is
+         * evidence enough by itself. */
         if (out->analog_uqts_ucode < 0
             || out->digital_lm_level < 0
-            || !out->analog_ready
+            || !(out->analog_ready || out->pair_family == 2)
             || out->pair_family == 0
             || !out->pair_qca_opposed) {
             out->valid = false;
@@ -18500,7 +18525,8 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
 
     p12->stereo_short_p1_hint_valid = true;
     p12->stereo_short_p1_expected_form = (p12_short_p1_form_t) expected_form;
-    p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL) && hint->analog_ready;
+    p12->stereo_short_p1_followup_allowed = (expected_form == P12_SHORT_P1_FORM_DIGITAL)
+                                          && (hint->analog_ready || hint->pair_family == 2);
     p12->stereo_short_p1_partner_family = is_left ? hint->left_partner_family : hint->right_partner_family;
     p12->stereo_short_p1_partner_qca = is_left ? hint->left_partner_qca : hint->right_partner_qca;
     p12->stereo_short_p1_partner_sample = is_left ? hint->left_partner_sample : hint->right_partner_sample;

@@ -382,7 +382,9 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              v92_short_phase1_candidate_t *analog_alt_out,
                                              int *analog_alt_score_out,
                                              int *analog_alt_sample_out,
-                                             int *sample_out);
+                                             int *sample_out,
+                                             v8bis_qc2_bits_hit_t *qc2_out,
+                                             int *qc2_sample_out);
 static int p12_prune_low_energy_bursts_in_place(p12_fsk_burst_t *bursts,
                                                 int burst_count,
                                                 double relative_cutoff,
@@ -1722,15 +1724,19 @@ static void detect_v92_short_phase1(const int16_t *samples,
     v92_short_phase1_candidate_t best_candidate;
     v92_short_phase1_candidate_t best_digital_alt;
     v92_short_phase1_candidate_t best_analog_alt;
+    v8bis_qc2_bits_hit_t qc2_hit;
+    v8bis_qc2_bits_hit_t best_qc2_hit;
     int sample = -1;
     int digital_alt_sample = -1;
     int analog_alt_sample = -1;
+    int qc2_sample = -1;
     int best_score = -1000000;
     int best_digital_score = -1000000;
     int best_analog_score = -1000000;
     int best_sample = -1;
     int best_digital_alt_sample = -1;
     int best_analog_alt_sample = -1;
+    int best_qc2_sample = -1;
     bool found = false;
     const p12_phase1_event_t *cre_event = NULL;
 
@@ -1745,6 +1751,8 @@ static void detect_v92_short_phase1(const int16_t *samples,
     memset(&best_candidate, 0, sizeof(best_candidate));
     memset(&best_digital_alt, 0, sizeof(best_digital_alt));
     memset(&best_analog_alt, 0, sizeof(best_analog_alt));
+    memset(&qc2_hit, 0, sizeof(qc2_hit));
+    memset(&best_qc2_hit, 0, sizeof(best_qc2_hit));
 
     if ((p12_find_phase1_event_label(result, "CRe", &cre_event)
          || (result->call_init.v8bis_signal_seen
@@ -1915,22 +1923,37 @@ static void detect_v92_short_phase1(const int16_t *samples,
         if (window_end - window_start < 160)
             continue;
 
-        if (!p12_scan_v92_short_phase1_window(samples,
-                                              total_samples,
-                                              sample_rate,
-                                              window_start,
-                                              window_end,
-                                              channel,
-                                              &candidate,
-                                              &candidate_score,
-                                              &digital_alt,
-                                              &digital_score,
-                                              &digital_alt_sample,
-                                              &analog_alt,
-                                              &analog_score,
-                                              &analog_alt_sample,
-                                              &sample)) {
-            continue;
+        {
+            bool scan_ok = p12_scan_v92_short_phase1_window(samples,
+                                                            total_samples,
+                                                            sample_rate,
+                                                            window_start,
+                                                            window_end,
+                                                            channel,
+                                                            &candidate,
+                                                            &candidate_score,
+                                                            &digital_alt,
+                                                            &digital_score,
+                                                            &digital_alt_sample,
+                                                            &analog_alt,
+                                                            &analog_score,
+                                                            &analog_alt_sample,
+                                                            &sample,
+                                                            &qc2_hit,
+                                                            &qc2_sample);
+
+            /* CRC-valid QC2/QCA2 frames stand on their own even when no
+             * strict QC1/QCA1 sequence was found in the window. */
+            if (qc2_hit.ok
+                && (!best_qc2_hit.ok
+                    || (best_qc2_hit.channel_mismatch && !qc2_hit.channel_mismatch)
+                    || (best_qc2_hit.channel_mismatch == qc2_hit.channel_mismatch
+                        && qc2_sample < best_qc2_sample))) {
+                best_qc2_hit = qc2_hit;
+                best_qc2_sample = qc2_sample;
+            }
+            if (!scan_ok)
+                continue;
         }
 
         found = true;
@@ -1948,6 +1971,38 @@ static void detect_v92_short_phase1(const int16_t *samples,
             best_analog_score = analog_score;
             best_analog_alt = analog_alt;
             best_analog_alt_sample = analog_alt_sample;
+        }
+    }
+
+    /* Record a CRC-valid QC2/QCA2 identification frame independently of the
+     * QC1/QCA1 result.  Fill only unclaimed slots: the pre-ANS V.8bis
+     * message pass may already have decoded the same frame. */
+    if (best_qc2_hit.ok) {
+        if (best_qc2_hit.qca && !result->call_init.v92_qca2_seen) {
+            result->call_init.v92_qca2_seen = true;
+            result->call_init.v92_qca2_sample = best_qc2_sample;
+            snprintf(result->call_init.v92_qca2_name,
+                     sizeof(result->call_init.v92_qca2_name),
+                     "%s", best_qc2_hit.name);
+            result->call_init.v92_qca2_digital = best_qc2_hit.digital_modem;
+            result->call_init.v92_qca2_uqts_ucode = best_qc2_hit.digital_modem
+                                                  ? -1 : best_qc2_hit.uqts_ucode;
+            result->call_init.v92_qca2_lm_level = best_qc2_hit.digital_modem
+                                                ? best_qc2_hit.lm : -1;
+            result->v92_capable = true;
+        } else if (!best_qc2_hit.qca && !result->call_init.v92_qc2_seen) {
+            result->call_init.v92_qc2_seen = true;
+            result->call_init.v92_qc2_sample = best_qc2_sample;
+            snprintf(result->call_init.v92_qc2_name,
+                     sizeof(result->call_init.v92_qc2_name),
+                     "%s", best_qc2_hit.name);
+            result->call_init.v92_qc2_digital = best_qc2_hit.digital_modem;
+            result->call_init.v92_qc2_qca = false;
+            result->call_init.v92_qc2_uqts_ucode = best_qc2_hit.digital_modem
+                                                 ? -1 : best_qc2_hit.uqts_ucode;
+            result->call_init.v92_qc2_lm_level = best_qc2_hit.digital_modem
+                                               ? best_qc2_hit.lm : -1;
+            result->v92_capable = true;
         }
     }
 
@@ -2793,44 +2848,54 @@ static bool p12_phase1_find_short_p1_event(const phase12_result_t *result,
     if (!result)
         return false;
 
-    for (int i = 0; i < result->phase1_event_count; i++) {
-        const p12_phase1_event_t *ev = &result->phase1_events[i];
-        const p12_phase1_event_t *cm_event = NULL;
-        bool is_digital;
-        bool needs_cm_after = false;
+    /* Family-1 events take priority over family-2: when both appear in one
+     * call the QC2 exchange was superseded by the ANSam-triggered QC1 stage
+     * (9.2.1.2/9.2.2.2), so the QC1/QCA1 branch is the operative one. */
+    for (int family_pass = 1; family_pass <= 2; family_pass++) {
+        for (int i = 0; i < result->phase1_event_count; i++) {
+            const p12_phase1_event_t *ev = &result->phase1_events[i];
+            const p12_phase1_event_t *cm_event = NULL;
+            bool is_digital;
+            bool needs_cm_after = false;
 
-        if (!ev->seen)
-            continue;
-        if (strcmp(ev->source, "V.92") != 0)
-            continue;
-        if (!(p12_phase1_event_is_label(ev, "QC1a")
-              || p12_phase1_event_is_label(ev, "QCA1a")
-              || p12_phase1_event_is_label(ev, "QC1d")
-              || p12_phase1_event_is_label(ev, "QCA1d")
-              || p12_phase1_event_is_label(ev, "QC2a")
-              || p12_phase1_event_is_label(ev, "QCA2a")
-              || p12_phase1_event_is_label(ev, "QC2d")
-              || p12_phase1_event_is_label(ev, "QCA2d"))) {
-            continue;
+            if (!ev->seen)
+                continue;
+            if (strcmp(ev->source, "V.92") != 0)
+                continue;
+            if (family_pass == 1) {
+                if (!(p12_phase1_event_is_label(ev, "QC1a")
+                      || p12_phase1_event_is_label(ev, "QCA1a")
+                      || p12_phase1_event_is_label(ev, "QC1d")
+                      || p12_phase1_event_is_label(ev, "QCA1d"))) {
+                    continue;
+                }
+            } else {
+                if (!(p12_phase1_event_is_label(ev, "QC2a")
+                      || p12_phase1_event_is_label(ev, "QCA2a")
+                      || p12_phase1_event_is_label(ev, "QC2d")
+                      || p12_phase1_event_is_label(ev, "QCA2d"))) {
+                    continue;
+                }
+            }
+
+            is_digital = (strchr(ev->label, 'd') != NULL);
+            if (is_digital != want_digital)
+                continue;
+            needs_cm_after = p12_phase1_event_is_label(ev, "QC1a")
+                          || p12_phase1_event_is_label(ev, "QC1d");
+            if (needs_cm_after
+                && !p12_phase1_find_event_after(result,
+                                                "CM",
+                                                ev->sample_offset,
+                                                -1,
+                                                &cm_event)) {
+                continue;
+            }
+
+            if (event_out)
+                *event_out = ev;
+            return true;
         }
-
-        is_digital = (strchr(ev->label, 'd') != NULL);
-        if (is_digital != want_digital)
-            continue;
-        needs_cm_after = p12_phase1_event_is_label(ev, "QC1a")
-                      || p12_phase1_event_is_label(ev, "QC1d");
-        if (needs_cm_after
-            && !p12_phase1_find_event_after(result,
-                                            "CM",
-                                            ev->sample_offset,
-                                            -1,
-                                            &cm_event)) {
-            continue;
-        }
-
-        if (event_out)
-            *event_out = ev;
-        return true;
     }
     return false;
 }
@@ -3233,20 +3298,27 @@ static void p12_proc_add_step(p12_v92_proc_result_t *proc,
 static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                                             int sample_rate)
 {
-    static const char *const qc_labels[] = { "QC1a", "QC1d", "QC2a", "QC2d" };
-    static const char *const qca_labels[] = { "QCA1a", "QCA1d", "QCA2a", "QCA2d" };
-    static const char *const cre_labels[] = { "CRe" };
+    static const char *const qc1_labels[] = { "QC1a", "QC1d" };
+    static const char *const qca1_labels[] = { "QCA1a", "QCA1d" };
+    static const char *const qc2_labels[] = { "QC2a", "QC2d" };
+    static const char *const qca2_labels[] = { "QCA2a", "QCA2d" };
+    static const char *const cre_labels[] = { "CRe", "CRd" };
     static const char *const cm_labels[] = { "CM" };
     static const char *const jm_labels[] = { "JM" };
     p12_v92_proc_result_t *proc;
     const p12_phase1_event_t *qc;
     const p12_phase1_event_t *qca;
+    const p12_phase1_event_t *qc1_ev;
+    const p12_phase1_event_t *qca1_ev;
+    const p12_phase1_event_t *qc2_ev;
+    const p12_phase1_event_t *qca2_ev;
     const p12_phase1_event_t *cm = NULL;
     const p12_phase1_event_t *jm = NULL;
     const p12_phase1_event_t *cre;
     bool partner_analog_hint = false;
     bool partner_digital_hint = false;
     bool partner_hint = false;
+    bool two_stage = false;
     bool call_is_digital = false;
     bool answer_is_digital = false;
     bool one_side_digital;
@@ -3268,8 +3340,23 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
     memset(proc, 0, sizeof(*proc));
     proc->phase2_handoff_sample = -1;
 
-    qc = p12_proc_find_earliest(result, qc_labels, 4, 0);
-    qca = p12_proc_find_earliest(result, qca_labels, 4, 0);
+    qc1_ev = p12_proc_find_earliest(result, qc1_labels, 2, 0);
+    qca1_ev = p12_proc_find_earliest(result, qca1_labels, 2, 0);
+    qc2_ev = p12_proc_find_earliest(result, qc2_labels, 2, 0);
+    qca2_ev = p12_proc_find_earliest(result, qca2_labels, 2, 0);
+
+    /* Both families can appear in one call: per 9.2.1.2/9.2.2.2, ANSam
+     * detected after the QC2 exchange moves the procedure to 9.2.1.1 — the
+     * QC1 stage is then the operative story and the QC2 exchange becomes
+     * its prologue. */
+    if (qc1_ev || qca1_ev) {
+        qc = qc1_ev;
+        qca = qca1_ev;
+        two_stage = (qc2_ev != NULL) || (qca2_ev != NULL);
+    } else {
+        qc = qc2_ev;
+        qca = qca2_ev;
+    }
 
     /* A stereo split puts each side's transmissions on its own decode, so
      * the partner's short-P1 may be known only through arbitration hints.
@@ -3294,6 +3381,16 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
 
     proc->evaluated = true;
     proc->family = qc ? p12_phase1_event_family(qc) : p12_phase1_event_family(qca);
+
+    /* Only let the partner hint stand in for the operative family's
+     * missing side; a family-2 hint cannot substitute for a QC1/QCA1. */
+    if (partner_hint
+        && result->stereo_short_p1_partner_family != 0
+        && result->stereo_short_p1_partner_family != proc->family) {
+        partner_hint = false;
+        partner_analog_hint = false;
+        partner_digital_hint = false;
+    }
     if (qc)
         call_is_digital = strchr(qc->label, 'd') != NULL;
     else
@@ -3337,18 +3434,40 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
     if (result->answer_tone.detected)
         ans_start = result->answer_tone.start_sample;
 
+    /* --- two-stage prologue: the CRe/QC2 exchange that preceded the
+     *     operative QC1 stage (9.2.1.2/9.2.2.2 move to 9.2.1.1 on ANSam) */
+    if (two_stage) {
+        cre = p12_proc_find_earliest(result, cre_labels, 2, 0);
+        if (cre) {
+            p12_proc_add_step(proc, "9.2.1.2", cre->label,
+                              P12_V92_PROC_STEP_OBSERVED,
+                              cre->sample_offset, "first-stage capabilities request");
+        }
+        if (qc2_ev) {
+            p12_proc_add_step(proc, "9.2.1.2", qc2_ev->label,
+                              P12_V92_PROC_STEP_OBSERVED,
+                              qc2_ev->sample_offset, "first stage");
+        }
+        if (qca2_ev) {
+            p12_proc_add_step(proc, "9.2.3.2", qca2_ev->label,
+                              P12_V92_PROC_STEP_OBSERVED,
+                              qca2_ev->sample_offset,
+                              "first stage; ANSam then moves to 9.2.1.1");
+        }
+    }
+
     /* --- start condition: 1 s of ANSam (family 1) / 50 ms of CRe (family 2) */
     if (proc->family == 2) {
-        cre = p12_proc_find_earliest(result, cre_labels, 1, 0);
+        cre = p12_proc_find_earliest(result, cre_labels, 2, 0);
         if (cre) {
             if (qc && qc->sample_offset < cre->sample_offset + (sample_rate * 50) / 1000) {
                 ms = (int)(((double)(qc->sample_offset - cre->sample_offset) * 1000.0)
                            / (double)sample_rate);
                 snprintf(note, sizeof(note), "QC2 only %d ms after CRe start (>=50 required)", ms);
-                p12_proc_add_step(proc, qc_clause, "CRe", P12_V92_PROC_STEP_LATE,
+                p12_proc_add_step(proc, qc_clause, cre->label, P12_V92_PROC_STEP_LATE,
                                   cre->sample_offset, note);
             } else {
-                p12_proc_add_step(proc, qc_clause, "CRe", P12_V92_PROC_STEP_OBSERVED,
+                p12_proc_add_step(proc, qc_clause, cre->label, P12_V92_PROC_STEP_OBSERVED,
                                   cre->sample_offset, "");
             }
         } else {
@@ -3577,6 +3696,12 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
     } else {
         proc->outcome = P12_V92_PROC_OUTCOME_INCOMPLETE;
     }
+
+    /* A Phase 2 handoff estimate only means something when the procedure
+     * actually proceeds to Phase 2; a fallback outcome invalidates it. */
+    if (proc->outcome != P12_V92_PROC_OUTCOME_SHORT_PHASE2
+        && proc->outcome != P12_V92_PROC_OUTCOME_V34_PHASE2)
+        proc->phase2_handoff_sample = -1;
 
     if (p12_debug_enabled()) {
         fprintf(stderr,
@@ -4164,7 +4289,9 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                                              v92_short_phase1_candidate_t *analog_alt_out,
                                              int *analog_alt_score_out,
                                              int *analog_alt_sample_out,
-                                             int *sample_out)
+                                             int *sample_out,
+                                             v8bis_qc2_bits_hit_t *qc2_out,
+                                             int *qc2_sample_out)
 {
     const double mark_hz = (channel == V21_CH2) ? 1650.0 : 980.0;
     const double space_hz = (channel == V21_CH2) ? 1850.0 : 1180.0;
@@ -4176,14 +4303,21 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
     v92_short_phase1_candidate_t best_digital_candidate;
     v92_short_phase1_candidate_t best_analog_candidate;
     v92_short_phase1_candidate_t best_soft_candidate;
+    v8bis_qc2_bits_hit_t best_qc2;
     int best_sample = -1;
     int best_digital_sample = -1;
     int best_analog_sample = -1;
     int best_soft_sample = -1;
+    int best_qc2_sample = -1;
     bool use_ch2 = (channel == V21_CH2);
 
     if (!samples || total_samples <= 0 || sample_rate <= 0 || !candidate_out || !sample_out)
         return false;
+    memset(&best_qc2, 0, sizeof(best_qc2));
+    if (qc2_out)
+        memset(qc2_out, 0, sizeof(*qc2_out));
+    if (qc2_sample_out)
+        *qc2_sample_out = -1;
     if (search_start < 0)
         search_start = 0;
     if (search_end <= 0 || search_end > total_samples)
@@ -4278,6 +4412,35 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                     bit_count++;
                 }
 
+                /* QC2/QCA2 are HDLC-framed V.8bis identification messages
+                 * (clauses 8.2/8.3): deframe the whole aligned stream once
+                 * per alignment; the CRC-16 makes each hit strict. */
+                if (!invert && bit_count >= 60) {
+                    v8bis_qc2_bits_hit_t qhits[4];
+                    int qn = v8bis_scan_qc2_bitstream(bits, bit_count,
+                                                      use_ch2 ? 1 : 0,
+                                                      qhits, 4);
+
+                    for (int q = 0; q < qn; q++) {
+                        int qsample = search_start
+                            + (int) lround(phase
+                                           + (double) qhits[q].frame_start_bit
+                                             * symbol_samples);
+                        bool better;
+
+                        if (!best_qc2.ok)
+                            better = true;
+                        else if (best_qc2.channel_mismatch != qhits[q].channel_mismatch)
+                            better = best_qc2.channel_mismatch;
+                        else
+                            better = qsample < best_qc2_sample;
+                        if (better) {
+                            best_qc2 = qhits[q];
+                            best_qc2_sample = qsample;
+                        }
+                    }
+                }
+
                 for (int i = 0; i + 30 <= bit_count; i++) {
                     int score;
                     v92_short_phase1_candidate_t candidate;
@@ -4330,6 +4493,24 @@ static bool p12_scan_v92_short_phase1_window(const int16_t *samples,
                     }
                 }
             }
+        }
+    }
+
+    if (best_qc2.ok) {
+        if (qc2_out)
+            *qc2_out = best_qc2;
+        if (qc2_sample_out)
+            *qc2_sample_out = best_qc2_sample;
+        if (p12_debug_enabled()) {
+            fprintf(stderr,
+                    "[p12] V.92 %s (CRC ok) at %.1fms channel=%s lapm=%s uqts=%d lm=%d%s\n",
+                    best_qc2.name,
+                    (double) best_qc2_sample * 1000.0 / (double) sample_rate,
+                    (channel == V21_CH2) ? "CH2" : "CH1",
+                    best_qc2.lapm ? "yes" : "no",
+                    best_qc2.uqts_ucode,
+                    best_qc2.digital_modem ? best_qc2.lm : -1,
+                    best_qc2.channel_mismatch ? " channel_mismatch" : "");
         }
     }
 
@@ -5124,49 +5305,63 @@ static void detect_phase1_v8(const int16_t *samples,
     /* A strict V.21 short-P1 sequence and a V.8 message cannot occupy the
      * same bits: when the decoded CM/JM start falls inside a strict QC/QCA
      * sequence span, the V.8 decode is a misread of that sequence (e.g. a
-     * QCA1d body decoding as JM).  The CM that legitimately follows QC1
-     * starts after the sequence span and is unaffected. */
+     * QCA1d body decoding as JM, or a QC2a HDLC frame decoding as JM).
+     * The CM that legitimately follows QC1 starts after the sequence span
+     * and is unaffected. */
     {
         struct {
             bool seen;
-            int sample;
-            bool qca;
-        } spans[2] = {
-            { result->call_init.v92_short_p1_strict_analog_seen,
-              result->call_init.v92_short_p1_strict_analog_sample,
-              result->call_init.v92_short_p1_strict_analog_qca },
-            { result->call_init.v92_short_p1_strict_digital_seen,
-              result->call_init.v92_short_p1_strict_digital_sample,
-              result->call_init.v92_short_p1_strict_digital_qca },
-        };
+            int start;
+            int end;
+        } spans[4];
+        int qc2_pre = (sample_rate * 400) / 1000;   /* preamble + flags */
+        int qc2_post = (sample_rate * 300) / 1000;  /* frame + closing */
 
-        for (int i = 0; i < 2; i++) {
+        spans[0].seen = result->call_init.v92_short_p1_strict_analog_seen;
+        spans[0].start = result->call_init.v92_short_p1_strict_analog_sample;
+        spans[0].end = spans[0].start
+                     + (sample_rate
+                        * (result->call_init.v92_short_p1_strict_analog_qca ? 70 : 60)
+                        * 10) / 3000;
+        spans[1].seen = result->call_init.v92_short_p1_strict_digital_seen;
+        spans[1].start = result->call_init.v92_short_p1_strict_digital_sample;
+        spans[1].end = spans[1].start
+                     + (sample_rate
+                        * (result->call_init.v92_short_p1_strict_digital_qca ? 70 : 60)
+                        * 10) / 3000;
+        spans[2].seen = result->call_init.v92_qc2_seen;
+        spans[2].start = result->call_init.v92_qc2_sample - qc2_pre;
+        spans[2].end = result->call_init.v92_qc2_sample + qc2_post;
+        spans[3].seen = result->call_init.v92_qca2_seen;
+        spans[3].start = result->call_init.v92_qca2_sample - qc2_pre;
+        spans[3].end = result->call_init.v92_qca2_sample + qc2_post;
+
+        for (int i = 0; i < 4; i++) {
             int span_end;
 
             if (!spans[i].seen)
                 continue;
-            span_end = spans[i].sample
-                     + (sample_rate * (spans[i].qca ? 70 : 60) * 10) / 3000;
+            span_end = spans[i].end;
             if (result->jm.detected
-                && result->jm.sample_offset >= spans[i].sample
+                && result->jm.sample_offset >= spans[i].start
                 && result->jm.sample_offset < span_end) {
                 if (p12_debug_enabled()) {
                     fprintf(stderr,
                             "[p12] drop JM at %.1fms: inside strict short-P1 span %.1f-%.1fms\n",
                             (double) result->jm.sample_offset * 1000.0 / (double) sample_rate,
-                            (double) spans[i].sample * 1000.0 / (double) sample_rate,
+                            (double) spans[i].start * 1000.0 / (double) sample_rate,
                             (double) span_end * 1000.0 / (double) sample_rate);
                 }
                 memset(&result->jm, 0, sizeof(result->jm));
             }
             if (result->cm.detected
-                && result->cm.sample_offset >= spans[i].sample
+                && result->cm.sample_offset >= spans[i].start
                 && result->cm.sample_offset < span_end) {
                 if (p12_debug_enabled()) {
                     fprintf(stderr,
                             "[p12] drop CM at %.1fms: inside strict short-P1 span %.1f-%.1fms\n",
                             (double) result->cm.sample_offset * 1000.0 / (double) sample_rate,
-                            (double) spans[i].sample * 1000.0 / (double) sample_rate,
+                            (double) spans[i].start * 1000.0 / (double) sample_rate,
                             (double) span_end * 1000.0 / (double) sample_rate);
                 }
                 memset(&result->cm, 0, sizeof(result->cm));
@@ -5248,6 +5443,27 @@ static void detect_phase1_v8(const int16_t *samples,
                     && toneq_hit.start_sample < qc_end) {
                     overlaps_qc1 = true;
                     break;
+                }
+            }
+            /* Same reasoning for any decoded CM/JM observation that starts
+             * inside the tone span: the transmitter cannot send TONEq and a
+             * V.21 message at once, so the 980 Hz run is the message's mark
+             * preamble, not TONEq. */
+            if (!overlaps_qc1) {
+                int toneq_end = toneq_hit.start_sample + toneq_hit.duration_samples;
+                const p12_cm_jm_hit_t *msgs[2] = { &result->cm, &result->jm };
+
+                for (int m = 0; m < 2 && !overlaps_qc1; m++) {
+                    if (!msgs[m]->detected)
+                        continue;
+                    for (int o = 0; o < msgs[m]->saved_count; o++) {
+                        int obs = msgs[m]->saved_sample_offsets[o];
+
+                        if (obs >= toneq_hit.start_sample && obs < toneq_end) {
+                            overlaps_qc1 = true;
+                            break;
+                        }
+                    }
                 }
             }
             if (overlaps_qc1) {

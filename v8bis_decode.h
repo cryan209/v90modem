@@ -168,6 +168,42 @@ void v8bis_dedup_msgs(call_log_t *log);
  */
 const char *v8bis_msg_type_str(int type);
 
+/* ------------------------------------------------------------------ */
+/* V.92 QC2/QCA2 bitstream scan                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Result of scanning an already-demodulated 300 bit/s bit stream for
+ * V.92 QC2/QCA2 identification frames (clauses 8.2/8.3 of V.92: V.8bis
+ * frame structure with a Table 12/13 identification field).  Only frames
+ * with a valid HDLC CRC are reported.
+ */
+typedef struct {
+    bool ok;
+    char name[8];            /* QC2a / QCA2a / QC2d / QCA2d */
+    bool digital_modem;
+    bool qca;
+    bool lapm;
+    int revision;
+    int wxyz;                /* analogue forms, W as index MSB */
+    int uqts_ucode;          /* analogue forms */
+    int lm;                  /* digital forms (2L+M level code) */
+    bool channel_mismatch;   /* arrived on unexpected V.21 channel */
+    int frame_start_bit;     /* bit index of the frame in the stream */
+} v8bis_qc2_bits_hit_t;
+
+/*
+ * Deframe a demodulated V.21 bit stream (HDLC flags, bit destuffing,
+ * CRC-16) and report every CRC-valid V.92 QC2/QCA2 identification frame.
+ * channel: 0 = V.21(L)/CH1 (QCA2x expected), 1 = V.21(H)/CH2 (QC2x).
+ * Returns the number of hits stored.
+ */
+int v8bis_scan_qc2_bitstream(const uint8_t *bits,
+                             int bit_count,
+                             int channel,
+                             v8bis_qc2_bits_hit_t *hits,
+                             int max_hits);
+
 /*
  * Convert V.8bis SPar(1) capability bits to a mode description string.
  */

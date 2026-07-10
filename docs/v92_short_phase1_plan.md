@@ -666,3 +666,70 @@ QCA1d sequences.
 - QTS/ANSpcm detection requires G.711 codewords; WAV-only decodes cannot
   confirm the digital-side chain, so a completed quick connect currently
   reads as "incomplete" unless TONEq+ANSpcm are visible.
+
+## QC2/QCA2 (CRe Family) Integration (2026-07-10)
+
+### Root causes of the QC2 decode gap
+
+1. **Wrong bit conventions in the ID-field parser.**  Tables 12/13/V.92
+   write field bit sequences in TRANSMISSION order, while HDLC octets are
+   assembled LSB-first.  The wire sequence "1011" (message type) packs to
+   0xD, not 0xB; "WXYZ" packs W into octet bit 0 (the UQTS table indexes W
+   as MSB); "LM" packs L into bit 0 (level code is 2L+M).
+   `v92_decode_qc2_id()` gated on `msg_type == 0xB` and read WXYZ/LM
+   unreversed, so no real QC2/QCA2 frame could ever pass.  Bit-verified
+   against a CRC-valid QC2a capture frame (octets `2D 29`: type 1011,
+   rev, WXYZ=1001 → UQTS 78, P=1, QC, analogue).
+2. **Type-0xD frames were skipped as "unknown"** in
+   `v8bis_collect_msg_events()` before the QC2 parse ran.
+3. **The SpanDSP FSK path missed some frames entirely** (the Agere caller's
+   QC2a on CH2 produced no bits at all), the same acquisition failure class
+   as the QC1 story.
+
+### What changed
+
+- Fixed the ID-field bit order in `v92_decode_qc2_id()` and recognized
+  QC2/QCA2 frames before the unknown-type skip.
+- New `v8bis_scan_qc2_bitstream()`: HDLC deframe (flags, destuffing,
+  CRC-16 residual check) of an already-demodulated 300 bit/s stream,
+  returning only CRC-valid QC2/QCA2 identification frames.
+- The phase12 short-P1 scanner now runs that deframe once per demod
+  alignment (invert x bit-rate x clock-phase), so QC2/QCA2 acquisition
+  gets the same aligned-block robustness as QC1/QCA1; CRC-valid hits are
+  recorded into `call_init` (fill-if-unseen), the timeline, and the
+  V.8-misread drop spans (a QC2a HDLC body reliably misdecodes as a bogus
+  JM, as on the Agere right channel).
+- Two-stage procedure support: per 9.2.1.2/9.2.2.2, ANSam after the QC2
+  exchange moves the procedure to 9.2.1.1.  When both families appear in
+  one call (the Motorola captures do exactly this), family 1 is the
+  operative story and the evaluator emits the CRe/QC2/QCA2 exchange as
+  prologue steps; `p12_phase1_find_short_p1_event()` prefers family-1
+  anchors so branch selection and stereo pairing are not stolen by the
+  superseded first stage.
+- Stereo arbitration: the per-side signal extractor now also surfaces
+  QCA2x candidates, a family-2 CRC-verified pair no longer requires the
+  family-1 `analog_ready` gate, and QC2/QCA2 evidence weighs into role
+  resolution (+/-15) alongside strict short-P1 (+/-20).
+- The clause 9.2 evaluator accepts CRe or CRd as the family-2 start
+  condition, gates partner hints on family match, and invalidates the
+  Phase 2 handoff estimate for fallback outcomes; the ans-end TONEq
+  fallback also rejects hits with a CM/JM observation starting inside the
+  tone span (the 980 Hz run is the message's mark preamble).
+
+### Verification (capture truth set)
+
+- `Agere-SV92-QC`: both channels now tell the complete Figure 5 story —
+  CRe (1140/1260 ms) -> QC2a at 1973.2 ms (CRC-valid, UQTS 78, LAPM) on
+  the right/caller channel -> QCA2d at 3093.2 ms (LM -12 dBm0) on the
+  left/answerer channel -> no QTS/ANSpcm/TONEq -> CM at ~4.9 s = V.8
+  retry -> v8-fallback.  Stereo pair `family=2 qca_opposed=yes`, roles
+  Right=analog(caller)/Left=digital(answerer).  The QCA2d was decodable
+  by the old path all along and rejected only by the 0xB gate; the QC2a
+  needed the new aligned bitstream scan.
+- `Motorola-SM56-V92QC/V92NC`: now reveal a two-stage short Phase 1 —
+  CRe/CRd + QC2a (UQTS 74) + QCA2d prologue, then ANSam -> QC1a -> CM ->
+  QCA1d -> TONEq timeout -> V.8 retry.  Family-1 pairing, figure 3 and
+  roles all preserved.
+- `USR-Message-V92NC`: unchanged single-stage figure 3 story.
+- `Agere-SV92-NC`: byte-identical output (plain V.8 call, no QC content).
+- Synthetic clause 9.2 evaluator tests still pass.
