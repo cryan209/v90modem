@@ -122,7 +122,7 @@ typedef enum {
 
 /* V.90 Phase 3/4 TX sub-states for the digital modem.
  * V.90 order (§9.3.1/§9.4.1):
- *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → CP → B1d → Data
+ *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → MP/MP' → Ed → B1d → Data
  * V.92 Phase 4 extension (§9.6.1/V.92):
  *   … → TRN2d → SUVd → CPd → SUVd' → Ed → B1d → Data */
 typedef enum {
@@ -134,11 +134,12 @@ typedef enum {
     V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
     V90_TX_DIL,           /* Sending DIL descriptor symbols */
     V90_TX_RI,            /* Phase 4: Ri — retrain init (idle codewords, §9.4.1.1) */
-    V90_TX_TRN2D,         /* Phase 4: TRN2d — scrambled ones at U_INFO until CP ready */
+    V90_TX_TRN2D,         /* Phase 4: post-CP Ri plus negotiated mapped TRN2d */
+    V90_TX_MP,            /* V.90 Phase 4: MP/MP' modulation-parameter frames */
     V90_TX_SUVD,          /* V.92 Phase 4: SUVd (no ack) — short update values digital */
-    V90_TX_CP,            /* Phase 4: CP frame — call parameters as PCM codewords */
+    V90_TX_CP,            /* V.92 Phase 4: CPd compatibility frame */
     V90_TX_SUVD_ACK,      /* V.92 Phase 4: SUVd' (ack bit set) — acknowledges CPu */
-    V90_TX_ED,            /* V.92 Phase 4: Ed — 2 data frames of scrambled zeros */
+    V90_TX_ED,            /* Phase 4: Ed — 2 data frames of scrambled zeros */
     V90_TX_B1D,           /* Phase 4: B1d — data-mode entry marker */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
@@ -254,19 +255,21 @@ const char *v90_rx_event_name(v90_rx_event_t event);
 bool v90_training_complete(v90_state_t *s);
 
 /*
- * Configure the CP frame to transmit during Phase 4.
- * Must be called before v90_notify_cp_ready(). The frame is encoded
- * immediately; the caller's cp pointer need not remain valid after return.
- * Returns false if encoding fails (invalid cp frame).
+ * Apply a received CPt/CP' frame to Phase 4.  In V.90 mode this configures
+ * the negotiated Sr=0 modulus mapper; a repeated frame may change only its
+ * acknowledge bit.  V.92 mode retains the CPd compatibility transmitter.
+ * The caller's cp pointer need not remain valid after return.
  */
 bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
 
+/* Copy the currently prepared Type-0 MP/MP' bitstream for diagnostics/tests.
+ * Returns its bit length, or 0 if the V.90 Phase 4 mapper is not configured. */
+int v90_copy_phase4_mp_bits(const v90_state_t *s, uint8_t *bits, int max_bits);
+
 /*
- * Compatibility wrapper signalling that the analogue modem's valid CP frame
- * has been received. This advances from TRN2d into the current Phase 4
- * control-frame transmitter (still a CP-shaped compatibility placeholder;
- * the conforming V.90 digital-side transmission is MP).
- * Has no effect unless the TX phase is currently V90_TX_TRN2D.
+ * Signal that the analogue modem's most recently supplied CPt/CP' frame has
+ * passed strict receive validation.  CPt starts post-CP Ri/TRN2d; CP' permits
+ * the transmitter to leave repeated MP' after completing its current frame.
  */
 void v90_notify_cp_ready(v90_state_t *s);
 

@@ -21,6 +21,8 @@ typedef struct {
     uint8_t drn;
     bool acknowledge;
     bool codec_alaw;
+    uint8_t shaping_redundancy;
+    uint16_t upstream_rate_mask;
     uint8_t constellation_count;
     uint8_t dfi[VPCM_CP_FRAME_INTERVALS];
     uint8_t masks[VPCM_CP_MAX_CONSTELLATIONS][VPCM_CP_MASK_BYTES];

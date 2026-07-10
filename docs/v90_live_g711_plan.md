@@ -50,6 +50,13 @@ Completed on 2026-07-11:
   4-point symbol alignment, and negotiated G.711 law
 - live `CP_VALID` state transition plus CP input/valid/rejected diagnostics
 - positive and malformed CPt vectors for both μ-law and A-law
+- CPt shaping-redundancy and upstream-rate fields from Table 14
+- negotiated `Sr=0` six-symbol Phase 4 modulus mapping from CPt DFI/masks
+- standards-timed 192T Ri, post-CPt 24T Ri, and 2040T TRN2d
+- Type-0 MP/MP-prime construction, CRC, mapping-frame padding, acknowledge
+  exchange, CP-prime gating, and two-frame mapped Ed
+- μ-law and A-law tests for timing, constellation membership, MP layout/CRC,
+  MP-prime repetition, and strict malformed/unsupported CPt rejection
 
 The parity test confirms why the raw bearer is required: 72 of the first 512
 μ-law Phase 3 octets change when decoded to linear PCM and re-encoded, including
@@ -114,8 +121,9 @@ Remaining baseline issues:
   not the negotiated V.90 section 5 mapper.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- the current digital Phase 4 control transmitter is a CP-shaped compatibility
-  placeholder; V.90 requires the digital modem to transmit MP/MP-prime.
+- B1d and connected downstream data still use compatibility behavior rather
+  than continuing the negotiated Phase 4 mapper state into section 5 data.
+- only `Sr=0` is accepted; spectral shaping (`Sr=1/2/3`) is not implemented.
 - the synthetic coupled-training harness still infers some remote events from
   its proxy transmitter stages even though the live Jd/DIL path no longer does.
 - `clock_recovery` is initialized and reset but is not connected to RTP timing.
@@ -287,6 +295,11 @@ port and these APIs. It must not decode and re-encode a raw V.90 transmit frame.
 
 ## Milestone 5: Implement The Negotiated V.90 Section 5 Data Pump
 
+Initial Phase 4 mapper work completed on 2026-07-11: CPt now configures an
+`Sr=0` six-interval modulus mapper, and TRN2d, MP/MP-prime, and Ed use it. The
+remaining milestone is to carry that mapper into B1d and payload data, add
+long-run negotiated-rate tests, then implement spectral shaping.
+
 ### Work
 
 - Represent the negotiated downstream data signalling rate explicitly.
@@ -428,6 +441,18 @@ work.
 3. Connect strict Ja/DIL parsing to the live state.
 4. Add malformed-frame and timeout tests.
 5. Create the initial real-call expectation manifest.
+
+## Fourth Patch Set
+
+Status: Phase 4 transmit core completed on 2026-07-11.
+
+1. Decode and strictly validate the analogue modem's Table 14 CPt.
+2. Configure the `Sr=0` six-symbol mapper from negotiated DFI and constellation
+   masks.
+3. Enforce Ri/post-CPt/TRN2d timing and frame alignment.
+4. Generate Type-0 MP and repeated MP-prime with CRC and acknowledge handling.
+5. Accept only a parameter-identical CP-prime and emit mapped Ed.
+6. Next: replace the B1d/data compatibility mapper with the negotiated mapper.
 
 ## Definition Of Done
 

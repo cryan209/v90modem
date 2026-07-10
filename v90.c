@@ -5,7 +5,7 @@
  *
  * Phase 2: Wraps SpanDSP V.34 for INFO0d/INFO1d exchange.
  * Phase 3: Generates PCM codewords (Jd, J'd, Sd, S̄d, TRN1d) directly.
- * Phase 4: V.90-specific MP/CP exchange (TODO).
+ * Phase 4: V.90-specific CP receive and MP/MP' transmit.
  * Data:    Modulus encoder → PCM codewords at 8 kHz.
  */
 
@@ -27,8 +27,11 @@
 #define V90_JD_BITS         72
 
 /* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
-#define V90_RI_SYMBOLS   64   /* Ri duration: ≥8 ms at 8 kHz */
+#define V90_RI_SYMBOLS   192  /* Ri duration: at least 192T (§9.4.1.1) */
+#define V90_RI_POST_CP_SYMBOLS 24
+#define V90_TRN2D_SYMBOLS 2040
 #define V90_B1D_SYMBOLS  48   /* B1d: 6 frame-intervals of 6 symbols each */
+#define V90_MP_MAX_BITS  256
 
 /* V.92 Phase 4 constants (ITU-T V.92 §8.8.5 Table 31) */
 /* SUVd: 17 sync + 1 start + 1 id + 13 rsv + 1 silent + 1 ack + 1 start
@@ -140,6 +143,21 @@ struct v90_state_s {
     uint8_t          cp_bits[VPCM_CP_MAX_BITS]; /* Encoded CP bits (one per byte) */
     int              cp_nbits;                  /* Total encoded CP bits */
     int              cp_bit_pos;                /* Current bit index in cp_bits */
+    bool             cp_ack_received;
+
+    /* V.90 Phase 4 Type-0 MP and Sr=0 modulus mapper. */
+    uint8_t          mp_bits[V90_MP_MAX_BITS];
+    int              mp_nbits;
+    int              mp_bit_pos;
+    bool             mp_acknowledge;
+    bool             mp_unack_sent;
+    bool             phase4_mapper_ready;
+    int              phase4_k;
+    int              phase4_d;
+    v90_scrambler_t  phase4_scrambler;
+    int              phase4_prev_sign;
+    uint8_t          phase4_frame[V90_FRAME_LEN];
+    int              phase4_frame_pos;
 
     /* V.92 Phase 4 state */
     bool             v92_mode;                  /* V.92 Phase 4 enabled */
@@ -359,6 +377,193 @@ static bool v90_decode_codeword_to_octet(v90_state_t *s, uint8_t codeword, uint8
     }
     *out_octet = plain_octet;
     return true;
+}
+
+static int v90_cp_constellation_ucode(const vpcm_cp_frame_t *cp,
+                                      int frame_interval,
+                                      int label)
+{
+    int constellation;
+
+    if (!cp || frame_interval < 0 || frame_interval >= V90_FRAME_LEN || label < 0)
+        return -1;
+    constellation = cp->dfi[frame_interval];
+    if (constellation < 0 || constellation >= cp->constellation_count)
+        return -1;
+    for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+        if (!vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            continue;
+        if (label-- == 0)
+            return ucode;
+    }
+    return -1;
+}
+
+static int v90_cp_max_upstream_drn(const vpcm_cp_frame_t *cp)
+{
+    if (!cp)
+        return 0;
+    for (int bit = 12; bit >= 0; bit--) {
+        if (cp->upstream_rate_mask & (1U << bit))
+            return bit + 2;
+    }
+    return 0;
+}
+
+static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
+{
+    uint16_t crc;
+    int upstream_drn;
+    int pos = 0;
+
+    if (!s || s->phase4_d <= 0)
+        return false;
+    upstream_drn = v90_cp_max_upstream_drn(&s->cp_frame);
+    if (upstream_drn < 2 || upstream_drn > 14)
+        return false;
+
+    memset(s->mp_bits, 0, sizeof(s->mp_bits));
+    for (int i = 0; i < 17; i++)
+        s->mp_bits[pos++] = 1;
+    s->mp_bits[pos++] = 0; /* bit 17: start */
+    s->mp_bits[pos++] = 0; /* bit 18: Type 0 */
+    pos += 5;              /* bits 19:23 reserved */
+    for (int i = 0; i < 4; i++)
+        s->mp_bits[pos++] = (uint8_t)((upstream_drn >> i) & 1);
+    s->mp_bits[pos++] = 0; /* bit 28 reserved */
+    s->mp_bits[pos++] = 0; /* bits 29:30, 16-state trellis */
+    s->mp_bits[pos++] = 0;
+    s->mp_bits[pos++] = 0; /* bit 31, Q=0 */
+    s->mp_bits[pos++] = 0; /* bit 32, minimum shaping */
+    s->mp_bits[pos++] = acknowledge ? 1 : 0;
+    s->mp_bits[pos++] = 0; /* bit 34: start */
+    s->mp_bits[pos++] = 0; /* bit 35 reserved */
+    for (int i = 0; i < 13; i++)
+        s->mp_bits[pos++] = (uint8_t)((s->cp_frame.upstream_rate_mask >> i) & 1);
+    s->mp_bits[pos++] = 0; /* bit 49 reserved */
+    s->mp_bits[pos++] = 0; /* bit 50 reserved */
+    s->mp_bits[pos++] = 0; /* bit 51: start */
+    pos += 16;             /* bits 52:67 reserved */
+    s->mp_bits[pos++] = 0; /* bit 68: start */
+
+    crc = 0xFFFF;
+    for (int i = 0; i < pos; i++)
+        crc = crc_itu16_bits(s->mp_bits[i], 1, crc);
+    for (int i = 0; i < 16; i++)
+        s->mp_bits[pos++] = (uint8_t)((crc >> i) & 1);
+    s->mp_bits[pos++] = 0; /* mandatory fill bit 85 */
+    while ((pos % s->phase4_d) != 0 && pos < V90_MP_MAX_BITS)
+        s->mp_bits[pos++] = 0;
+    if (pos > V90_MP_MAX_BITS || (pos % s->phase4_d) != 0)
+        return false;
+    s->mp_nbits = pos;
+    s->mp_bit_pos = 0;
+    s->mp_acknowledge = acknowledge;
+    return true;
+}
+
+static bool v90_configure_phase4_mapper(v90_state_t *s,
+                                        const vpcm_cp_frame_t *cp)
+{
+    uint64_t product = 1;
+
+    if (!s || !cp || !vpcm_cp_validate(cp, NULL, 0)
+        || !cp->v90_compatibility
+        || cp->acknowledge
+        || cp->codec_alaw != (s->law == V90_LAW_ALAW)
+        || cp->shaping_redundancy != 0
+        || cp->drn < 4 || cp->drn > 22)
+        return false;
+
+    s->phase4_d = cp->drn + 8;
+    s->phase4_k = s->phase4_d - 6;
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = cp->dfi[i];
+        int m;
+
+        if (constellation < 0 || constellation >= cp->constellation_count)
+            return false;
+        m = vpcm_cp_mask_population(cp->masks[constellation]);
+        if (m <= 0)
+            return false;
+        product *= (uint64_t)m;
+    }
+    if (product < (1ULL << s->phase4_k))
+        return false;
+
+    s->cp_frame = *cp;
+    v90_scrambler_init(&s->phase4_scrambler);
+    s->phase4_prev_sign = 0;
+    s->phase4_frame_pos = V90_FRAME_LEN;
+    s->phase4_mapper_ready = true;
+    s->mp_unack_sent = false;
+    s->cp_ack_received = false;
+    if (!v90_build_mp_type0(s, false)) {
+        s->phase4_mapper_ready = false;
+        return false;
+    }
+    return true;
+}
+
+typedef enum {
+    V90_PHASE4_INPUT_ONES,
+    V90_PHASE4_INPUT_MP,
+    V90_PHASE4_INPUT_ZEROS
+} v90_phase4_input_t;
+
+static bool v90_phase4_fill_frame(v90_state_t *s, v90_phase4_input_t input)
+{
+    uint8_t scrambled[32];
+    uint32_t r = 0;
+    int sign;
+
+    if (!s || !s->phase4_mapper_ready || s->phase4_d > (int)sizeof(scrambled))
+        return false;
+    for (int i = 0; i < s->phase4_d; i++) {
+        int bit;
+
+        if (input == V90_PHASE4_INPUT_ONES) {
+            bit = 1;
+        } else if (input == V90_PHASE4_INPUT_ZEROS) {
+            bit = 0;
+        } else {
+            if (s->mp_bit_pos >= s->mp_nbits)
+                return false;
+            bit = s->mp_bits[s->mp_bit_pos++] & 1;
+        }
+        scrambled[i] = (uint8_t)v90_scramble_bit(&s->phase4_scrambler, bit);
+    }
+    for (int i = 0; i < s->phase4_k; i++)
+        r |= (uint32_t)scrambled[6 + i] << i;
+
+    sign = s->phase4_prev_sign;
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = s->cp_frame.dfi[i];
+        int m = vpcm_cp_mask_population(s->cp_frame.masks[constellation]);
+        int label = (int)(r % (uint32_t)m);
+        int ucode;
+
+        r /= (uint32_t)m;
+        ucode = v90_cp_constellation_ucode(&s->cp_frame, i, label);
+        if (ucode < 0)
+            return false;
+        sign = (scrambled[i] & 1) ^ sign;
+        s->phase4_frame[i] = v90_pcm_signed_codeword(s->law, ucode, sign);
+    }
+    if (r != 0)
+        return false;
+    s->phase4_prev_sign = sign;
+    s->phase4_frame_pos = 0;
+    return true;
+}
+
+static uint8_t v90_phase4_codeword(v90_state_t *s, v90_phase4_input_t input)
+{
+    if (s->phase4_frame_pos >= V90_FRAME_LEN) {
+        if (!v90_phase4_fill_frame(s, input))
+            return v90_pcm_idle(s->law);
+    }
+    return s->phase4_frame[s->phase4_frame_pos++];
 }
 
 void v90_info0a_init(v90_info0a_t *info)
@@ -1432,29 +1637,76 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         return v90_pcm_idle(s->law);
 
     case V90_TX_TRN2D:
-        /* §9.4.1.2 TRN2d: scrambled ones at U_INFO until cp_ready is set */
+        /* §9.4.1.1/§9.4.1.2: remain in Ri while acquiring CPt.  After
+         * accepting CPt, send 24T more Ri followed by at least 2040T of
+         * TRN2d using the negotiated six-interval modulus mapper. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4: TRN2d at U_INFO=%d%s\n",
-                    s->u_info, s->v92_mode ? " (V.92)" : "");
+            fprintf(stderr, "[V90] Phase 4: waiting for valid CPt%s\n",
+                    s->v92_mode ? " (V.92 compatibility path)" : "");
             s->phase4_hold_logged = true;
         }
-        if (s->cp_ready) {
+        if (!s->cp_ready)
+            return v90_pcm_idle(s->law);
+
+        if (s->v92_mode) {
+            /* Preserve the existing V.92 compatibility sequence until its
+             * independent Phase 4 mapper is implemented. */
+            v90_build_suvd(s->suv_bits, false);
+            s->suv_bit_pos = 0;
+            s->tx_phase = V90_TX_SUVD;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            if (s->v92_mode) {
-                /* V.92: TRN2d → SUVd (no ack); diff_enc continues from TRN2d */
-                v90_build_suvd(s->suv_bits, false);
-                s->suv_bit_pos = 0;
-                s->tx_phase = V90_TX_SUVD;
-            } else {
-                /* V.90: TRN2d → CP; reset differential encoder per spec */
-                s->diff_enc = 0;
-                s->tx_phase = V90_TX_CP;
-            }
+            return v90_pcm_idle(s->law);
         }
-        sign = v90_scramble_bit(&s->scrambler, 1);
-        s->sample_count++;
-        return v90_pcm_signed_codeword(s->law, s->u_info, sign);
+
+        if (s->sample_count < V90_RI_POST_CP_SYMBOLS) {
+            s->sample_count++;
+            return v90_pcm_idle(s->law);
+        }
+        if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
+            fprintf(stderr,
+                    "[V90] Phase 4: CPt accepted; TRN2d (%d mapped symbols, D=%d, K=%d)\n",
+                    V90_TRN2D_SYMBOLS, s->phase4_d, s->phase4_k);
+        }
+        {
+            uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ONES);
+
+            s->sample_count++;
+            if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + V90_TRN2D_SYMBOLS) {
+                s->tx_phase = V90_TX_MP;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+            }
+            return codeword;
+        }
+
+    case V90_TX_MP:
+        /* §9.4.1.3: send MP once with acknowledge=0, then repeat MP' with
+         * acknowledge=1 until the analogue modem returns CP'. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Phase 4: MP%s (%d bits, D=%d)\n",
+                    s->mp_acknowledge ? "'" : "",
+                    s->mp_nbits, s->phase4_d);
+            s->phase4_hold_logged = true;
+        }
+        {
+            uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_MP);
+
+            if (s->mp_bit_pos >= s->mp_nbits
+                && s->phase4_frame_pos >= V90_FRAME_LEN) {
+                s->phase4_hold_logged = false;
+                if (!s->mp_unack_sent) {
+                    s->mp_unack_sent = true;
+                    (void)v90_build_mp_type0(s, true);
+                } else if (s->cp_ack_received) {
+                    s->tx_phase = V90_TX_ED;
+                    s->sample_count = 0;
+                } else {
+                    (void)v90_build_mp_type0(s, true);
+                }
+            }
+            return codeword;
+        }
 
     case V90_TX_SUVD:
         /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue), no ack.
@@ -1479,25 +1731,18 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
     case V90_TX_CP:
-        /* §9.4.1.3 CP: call parameters frame as differentially-sign-encoded
-           PCM codewords at U_INFO. Each CP bit is scrambled then XORed into
-           the running sign. */
+        /* V.92 compatibility CPd transmitter.  V.90 uses mapped MP/MP'. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4: CP (%d bits)\n", s->cp_nbits);
+            fprintf(stderr, "[V90] Phase 4 V.92: CPd (%d bits)\n", s->cp_nbits);
             s->phase4_hold_logged = true;
         }
         if (s->cp_bit_pos >= s->cp_nbits) {
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            if (s->v92_mode) {
-                /* V.92: CP → SUVd' (with ack bit set) */
-                v90_build_suvd(s->suv_bits, true);
-                s->suv_bit_pos = 0;
-                s->tx_phase = V90_TX_SUVD_ACK;
-            } else {
-                /* V.90: CP → B1d */
-                s->tx_phase = V90_TX_B1D;
-            }
+            /* V.92: CPd → SUVd' (with ack bit set). */
+            v90_build_suvd(s->suv_bits, true);
+            s->suv_bit_pos = 0;
+            s->tx_phase = V90_TX_SUVD_ACK;
             return v90_pcm_idle(s->law);
         }
         {
@@ -1529,23 +1774,30 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
     case V90_TX_ED:
-        /* V.92 §8.8.2: Ed — 2 downstream data frames of scrambled binary zeros.
-         * TRN2d modulation; differential encoder continues from SUVd'. */
+        /* Ed is two downstream mapping frames of scrambled binary zeros. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: Ed (%d symbols, scrambled zeros)\n",
-                    V90_ED_SYMBOLS);
+            fprintf(stderr, "[V90] Phase 4%s: Ed (%d symbols, scrambled zeros)\n",
+                    s->v92_mode ? " V.92" : "", V90_ED_SYMBOLS);
             s->phase4_hold_logged = true;
         }
-        s->sample_count++;
-        if (s->sample_count >= V90_ED_SYMBOLS) {
-            s->tx_phase = V90_TX_B1D;
-            s->sample_count = 0;
-            s->phase4_hold_logged = false;
-        }
         {
-            int zero_bit = v90_scramble_bit(&s->scrambler, 0);
-            s->diff_enc ^= zero_bit;
-            return v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
+            uint8_t codeword;
+
+            if (s->v92_mode) {
+                int zero_bit = v90_scramble_bit(&s->scrambler, 0);
+
+                s->diff_enc ^= zero_bit;
+                codeword = v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
+            } else {
+                codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ZEROS);
+            }
+            s->sample_count++;
+            if (s->sample_count >= V90_ED_SYMBOLS) {
+                s->tx_phase = V90_TX_B1D;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+            }
+            return codeword;
         }
 
     case V90_TX_B1D:
@@ -1695,6 +1947,15 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->training_complete = false;
     s->dil_terminate_requested = false;
     s->use_internal_v34_tx = false;
+    s->cp_ready = false;
+    s->cp_ack_received = false;
+    s->phase4_mapper_ready = false;
+    s->phase4_k = 0;
+    s->phase4_d = 0;
+    s->phase4_frame_pos = V90_FRAME_LEN;
+    s->mp_nbits = 0;
+    s->mp_bit_pos = 0;
+    s->mp_unack_sent = false;
     v90_reset_data_pump_state(s);
     v90_dil_reset_tx(s);
 
@@ -1766,9 +2027,16 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_CP_VALID:
-        if (s->tx_phase == V90_TX_TRN2D && s->cp_nbits > 0 && !s->cp_ready) {
-            fprintf(stderr, "[V90] Phase 4: valid far-end CP received, completing TRN2d\n");
+        if (s->tx_phase == V90_TX_TRN2D
+            && (s->v92_mode ? (s->cp_nbits > 0) : s->phase4_mapper_ready)
+            && !s->cp_ready) {
+            fprintf(stderr, "[V90] Phase 4: valid far-end CPt received\n");
             s->cp_ready = true;
+            s->sample_count = 0;
+            return true;
+        }
+        if (s->tx_phase == V90_TX_MP && s->cp_ack_received) {
+            fprintf(stderr, "[V90] Phase 4: valid far-end CP' received\n");
             return true;
         }
         return false;
@@ -1790,13 +2058,46 @@ bool v90_training_complete(v90_state_t *s)
 
 bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
 {
+    vpcm_cp_frame_t expected;
+    vpcm_cp_frame_t received;
+
     if (!s || !cp)
         return false;
     if (!vpcm_cp_encode_bits(cp, s->cp_bits, &s->cp_nbits))
         return false;
-    s->cp_frame = *cp;
     s->cp_bit_pos = 0;
+
+    if (s->v92_mode) {
+        s->cp_frame = *cp;
+        return true;
+    }
+
+    if (!s->phase4_mapper_ready)
+        return v90_configure_phase4_mapper(s, cp);
+
+    /* A repeated CP/CP' must retain all negotiated mapper parameters; only
+     * the acknowledge bit may change without restarting Phase 4. */
+    expected = s->cp_frame;
+    received = *cp;
+    expected.acknowledge = false;
+    received.acknowledge = false;
+    if (!vpcm_cp_frames_equal(&expected, &received))
+        return false;
+    if (cp->acknowledge && s->tx_phase != V90_TX_MP)
+        return false;
+    if (cp->acknowledge)
+        s->cp_ack_received = true;
+    s->cp_frame.acknowledge = cp->acknowledge;
     return true;
+}
+
+int v90_copy_phase4_mp_bits(const v90_state_t *s, uint8_t *bits, int max_bits)
+{
+    if (!s || !bits || !s->phase4_mapper_ready
+        || s->mp_nbits <= 0 || max_bits < s->mp_nbits)
+        return 0;
+    memcpy(bits, s->mp_bits, (size_t)s->mp_nbits);
+    return s->mp_nbits;
 }
 
 void v90_notify_cp_ready(v90_state_t *s)

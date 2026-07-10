@@ -219,9 +219,9 @@ Already present:
 
 Still missing / incomplete:
 
-- `Jd until S` control flow
-- DIL branch point in native Phase 3
-- spec-faithful completion criteria
+- strict analogue-side waveform detection still needs hardware validation
+- the synthetic session harness retains compatibility proxies in places
+- full receiver-driven failure, retry, retrain, and timeout criteria
 
 ## Phase 4
 
@@ -252,9 +252,15 @@ Phase 4 is not "CP/CP' in disguise".
 
 ### Current repo status
 
-- local SpanDSP V.34 code has strong Phase 4 scaffolding
-- native V.90 Phase 4 in our top-level `v90` path is still effectively missing
-- the current V.90 session uses V.91 `CP/Es/B1` as a placeholder contract path
+- the live V.34 bit callback feeds a strict Table 14 CPt receiver
+- `v90.c` enforces Ri/post-CPt/TRN2d timing and maps TRN2d with the negotiated
+  `Sr=0` six-interval constellations
+- the digital path emits Type-0 MP, repeats MP-prime until a matching CP-prime,
+  and emits two mapped Ed frames
+- B1d and connected downstream data still use compatibility mapping rather
+  than continuing the negotiated section 5 mapper
+- the synthetic V.90/V.92 session contract still uses V.91-derived helper
+  objects and must not be treated as native V.90 interoperability proof
 
 ## What `vpcm_v90_session` Should Eventually Look Like
 
@@ -288,8 +294,9 @@ Compatibility layers that should disappear over time:
 3. Replace seeded V.91 DIL alignment with a native V.90 Phase 3 branch.
 4. Implement answerer-side Phase 3 control flow as:
    `Sd -> S̄d -> TRN1d -> Jd until S -> Jd'`.
-5. Add native Phase 4 entry and stop using V.91 `CP/Es/B1` as the session's
-   truth model.
+5. Carry the negotiated Phase 4 mapper through B1d into connected data.
+6. Remove the remaining V.91 `CP/Es/B1` compatibility truth model from the
+   synthetic session.
 
 ## Source Pointers
 

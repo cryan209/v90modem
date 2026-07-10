@@ -9,18 +9,20 @@ against ITU-T V.90 (09/98), using the local reference copy in
 The current implementation is best described as:
 
 - Phase 2: mostly implemented and reasonably close to the spec
-- Phase 3 TX waveforms: partially implemented
-- Phase 3 control flow: incomplete
-- Phase 4: not implemented
+- Phase 3 TX waveforms and receiver-gated control: implemented, pending real
+  modem interoperability hardening
+- Phase 4 digital TX: `Sr=0` Ri/TRN2d/MP/MP-prime/Ed implemented
 - Data mode encoder: simplified placeholder, not a full V.90 section 5 encoder
 
 In particular, the existing code:
 
 - correctly models much of the V.90 answerer-side Phase 2 handshake
 - generates `Sd`, `S̄d`, `TRN1d`, `Jd`, and `Jd'` waveforms
-- does not terminate `Jd` according to the spec
-- does not implement DIL
-- does not implement V.90 Phase 4 (`Ri`, `TRN2d`, `MP/MP'`, `Ed`, `B1d`)
+- terminates repeated `Jd` only after a strict received-S event
+- generates and receiver-gates the DIL branch
+- decodes strict CPt and implements negotiated `Sr=0` Ri, TRN2d, Type-0
+  MP/MP-prime, CP-prime acknowledgement, and mapped Ed
+- still emits compatibility B1d rather than negotiated mapped B1d
 - does not use a negotiated downstream PCM encoder in data mode
 
 ## Clause-Level Findings
@@ -35,9 +37,11 @@ In particular, the existing code:
   - The V.34 GPC polynomial is used in the local V.90 code.
 
 - `5.4 Mapping parameters / modulus encoder / mapper / spectral shaping`:
-  mostly missing
-  - The data path uses a simplified fixed mapping (`Mi = 128`, `Sr = 0`)
-    rather than the negotiated V.90 section 5 encoder.
+  partially implemented
+  - Phase 4 uses CPt-negotiated DFI, per-interval constellation sizes, modulus
+    mapping, scrambler state, and differential signs for `Sr = 0`.
+  - Connected data still uses the simplified compatibility mapper, and
+    `Sr = 1/2/3` shaping remains missing.
 
 ### Phase 2
 
@@ -47,10 +51,9 @@ In particular, the existing code:
 
 ### Phase 3
 
-- `8.4.2 Jd`: partial
-  - Bit layout is implemented, but the startup behavior is not.
-  - The spec requires repeating `Jd` until the analogue modem's `S` is
-    detected; the code currently terminates `Jd` after a fixed duration.
+- `8.4.2 Jd`: implemented
+  - Jd repeats until a strict received-S event, then completes its current
+    frame before Jd-prime.
 
 - `8.4.3 Jd'`: implemented
 
@@ -58,18 +61,20 @@ In particular, the existing code:
 
 - `8.4.5 TRN1d`: implemented
 
-- `8.4.1 DIL`: missing
+- `8.4.1 DIL`: implemented for the decoded Table 12 descriptor
 
-- `9.3.1.5 Jd termination`: missing
-  - This is the highest-impact spec mismatch in the current Phase 3 code.
+- `9.3.1.5 Jd termination`: implemented with receiver event gating
 
-- `9.3.1.6 DIL transmission`: missing
+- `9.3.1.6 DIL transmission`: implemented; hardware interoperability remains
+  to be established
 
 ### Phase 4
 
-- `8.6` and `9.4.1`: missing
-  - The code currently enters a placeholder hold waveform instead of real
-    V.90 Phase 4 signaling.
+- `8.6` and `9.4.1`: partially implemented
+  - Strict CPt configures the downstream mapper.
+  - Ri, post-CPt Ri, TRN2d, Type-0 MP/MP-prime, CP-prime gating, and Ed use
+    Recommendation-shaped timing and mapping.
+  - B1d mapping and continuation into negotiated data remain incomplete.
 
 ### Data mode
 
@@ -98,12 +103,13 @@ What should be used only as a template:
 
 What needs new V.90-specific implementation:
 
-- DIL descriptor handling and DIL transmission
-- `Ri`, `TRN2d`, `MP/MP'`, `Ed`, `B1d`
-- V.90 CP/CPt handling
-- full V.90 section 5 downstream PCM encoder
+- mapped B1d and continuation into the negotiated section 5 downstream encoder
+- `Sr = 1/2/3` shaping and its trellis/lookahead behavior
+- downstream and upstream hardware interoperability/retrain hardening
 
 ## First Patch Set
+
+Status: completed.
 
 The first patch set should stay small and reduce the biggest spec gap without
 trying to implement all of Phase 4 at once.
@@ -123,11 +129,11 @@ Expected result:
 
 ## Follow-On Implementation Order
 
-1. Finish Phase 3 control flow
+1. Finish Phase 3 control flow — completed
    - `Jd until S`
    - DIL generation
 
-2. Implement minimum viable Phase 4
+2. Implement minimum viable Phase 4 — completed through mapped Ed
    - `Ri`
    - `TRN2d`
    - `MP/MP'`

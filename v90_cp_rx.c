@@ -22,6 +22,8 @@ static bool v90_cp_diag_is_strict(const v90_cp_rx_t *rx,
         && diag->frame.drn <= 22
         && diag->bits[18] == 0
         && diag->bits[30] == 0
+        && diag->frame.shaping_redundancy == 0
+        && diag->frame.upstream_rate_mask != 0
         && ((diag->bits[35] != 0) == rx->expected_alaw);
 }
 

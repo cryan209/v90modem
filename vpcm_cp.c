@@ -63,6 +63,8 @@ bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
         && a->drn == b->drn
         && a->acknowledge == b->acknowledge
         && a->codec_alaw == b->codec_alaw
+        && a->shaping_redundancy == b->shaping_redundancy
+        && a->upstream_rate_mask == b->upstream_rate_mask
         && a->constellation_count == b->constellation_count
         && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
         && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
@@ -76,6 +78,8 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
     msg = NULL;
     if (cp->drn > 28) {
         msg = "drn exceeds 28";
+    } else if (cp->shaping_redundancy > 3) {
+        msg = "shaping_redundancy out of range";
     } else if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS) {
         msg = "constellation_count out of range";
     } else {
@@ -150,10 +154,12 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
     vpcm_cp_set_bit(bits_out, 18, cp->transparent_mode_granted ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 19, cp->v90_compatibility ? 1 : 0);
     vpcm_cp_set_bits(bits_out, 20, 5, cp->drn);
-    vpcm_cp_set_bits(bits_out, 30, 3, 0);
+    vpcm_cp_set_bit(bits_out, 30, 0);
+    vpcm_cp_set_bits(bits_out, 31, 2, cp->shaping_redundancy);
     vpcm_cp_set_bit(bits_out, 33, cp->acknowledge ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 34, 0);
     vpcm_cp_set_bit(bits_out, 35, cp->codec_alaw ? 1 : 0);
+    vpcm_cp_set_bits(bits_out, 36, 13, cp->upstream_rate_mask & 0x1FFFU);
     vpcm_cp_set_bit(bits_out, 51, 0);
     vpcm_cp_set_bit(bits_out, 68, 0);
     vpcm_cp_set_bit(bits_out, 85, 0);
@@ -321,6 +327,8 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     diag->frame.drn = (uint8_t) vpcm_cp_get_bits(bits, 20, 5);
     diag->frame.acknowledge = (bits[33] != 0);
     diag->frame.codec_alaw = (bits[35] != 0);
+    diag->frame.shaping_redundancy = (uint8_t)vpcm_cp_get_bits(bits, 31, 2);
+    diag->frame.upstream_rate_mask = (uint16_t)vpcm_cp_get_bits(bits, 36, 13);
     diag->frame.dfi[0] = (uint8_t) vpcm_cp_get_bits(bits, 103, 4);
     diag->frame.dfi[1] = (uint8_t) vpcm_cp_get_bits(bits, 107, 4);
     diag->frame.dfi[2] = (uint8_t) vpcm_cp_get_bits(bits, 111, 4);

@@ -158,6 +158,8 @@ This writes `live-rx.g711` and `live-tx.g711`. Modem diagnostic snapshots also
 report total RX/TX octets and split outgoing octets between raw V.90 generation
 and the linear compatibility path. During Phase 4 they also report `cp_bits`,
 `cp_valid`, and `cp_rejected` for the strict analogue-side CPt receiver.
+Accepted CPt now drives the negotiated `Sr=0` Ri/TRN2d/MP/MP-prime/Ed
+transmitter; B1d and connected data mapping remain the next section 5 step.
 
 ### Softmodem Debug Mode (no PJMEDIA passthrough)
 
