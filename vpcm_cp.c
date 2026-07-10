@@ -64,6 +64,12 @@ bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
         && a->acknowledge == b->acknowledge
         && a->codec_alaw == b->codec_alaw
         && a->shaping_redundancy == b->shaping_redundancy
+        && a->shaping_lookahead == b->shaping_lookahead
+        && a->trn1d_gain_q3_13 == b->trn1d_gain_q3_13
+        && a->shaping_a1_q1_6 == b->shaping_a1_q1_6
+        && a->shaping_a2_q1_6 == b->shaping_a2_q1_6
+        && a->shaping_b1_q1_6 == b->shaping_b1_q1_6
+        && a->shaping_b2_q1_6 == b->shaping_b2_q1_6
         && a->upstream_rate_mask == b->upstream_rate_mask
         && a->constellation_count == b->constellation_count
         && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
@@ -80,6 +86,8 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
         msg = "drn exceeds 28";
     } else if (cp->shaping_redundancy > 3) {
         msg = "shaping_redundancy out of range";
+    } else if (cp->shaping_lookahead > 3) {
+        msg = "shaping_lookahead out of range";
     } else if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS) {
         msg = "constellation_count out of range";
     } else {
@@ -160,9 +168,15 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
     vpcm_cp_set_bit(bits_out, 34, 0);
     vpcm_cp_set_bit(bits_out, 35, cp->codec_alaw ? 1 : 0);
     vpcm_cp_set_bits(bits_out, 36, 13, cp->upstream_rate_mask & 0x1FFFU);
+    vpcm_cp_set_bits(bits_out, 49, 2, cp->shaping_lookahead);
     vpcm_cp_set_bit(bits_out, 51, 0);
+    vpcm_cp_set_bits(bits_out, 52, 16, cp->trn1d_gain_q3_13);
     vpcm_cp_set_bit(bits_out, 68, 0);
+    vpcm_cp_set_bits(bits_out, 69, 8, cp->shaping_a1_q1_6);
+    vpcm_cp_set_bits(bits_out, 77, 8, cp->shaping_a2_q1_6);
     vpcm_cp_set_bit(bits_out, 85, 0);
+    vpcm_cp_set_bits(bits_out, 86, 8, cp->shaping_b1_q1_6);
+    vpcm_cp_set_bits(bits_out, 94, 8, cp->shaping_b2_q1_6);
     vpcm_cp_set_bit(bits_out, 102, 0);
     for (c = 0; c < VPCM_CP_FRAME_INTERVALS; c++)
         vpcm_cp_set_bits(bits_out, 103 + 4 * c + (c >= 4 ? 1 : 0), 4, cp->dfi[c]);
@@ -318,8 +332,7 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
     for (i = 129; i <= 135; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
-    diag->v90_compat_ok = (bits[19] == 1
-                           && bits[30] == 0
+    diag->v90_compat_ok = (bits[30] == 0
                            && bits[128] == 0);
 
     diag->frame.transparent_mode_granted = (bits[18] != 0);
@@ -329,6 +342,12 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     diag->frame.codec_alaw = (bits[35] != 0);
     diag->frame.shaping_redundancy = (uint8_t)vpcm_cp_get_bits(bits, 31, 2);
     diag->frame.upstream_rate_mask = (uint16_t)vpcm_cp_get_bits(bits, 36, 13);
+    diag->frame.shaping_lookahead = (uint8_t)vpcm_cp_get_bits(bits, 49, 2);
+    diag->frame.trn1d_gain_q3_13 = (uint16_t)vpcm_cp_get_bits(bits, 52, 16);
+    diag->frame.shaping_a1_q1_6 = (uint8_t)vpcm_cp_get_bits(bits, 69, 8);
+    diag->frame.shaping_a2_q1_6 = (uint8_t)vpcm_cp_get_bits(bits, 77, 8);
+    diag->frame.shaping_b1_q1_6 = (uint8_t)vpcm_cp_get_bits(bits, 86, 8);
+    diag->frame.shaping_b2_q1_6 = (uint8_t)vpcm_cp_get_bits(bits, 94, 8);
     diag->frame.dfi[0] = (uint8_t) vpcm_cp_get_bits(bits, 103, 4);
     diag->frame.dfi[1] = (uint8_t) vpcm_cp_get_bits(bits, 107, 4);
     diag->frame.dfi[2] = (uint8_t) vpcm_cp_get_bits(bits, 111, 4);

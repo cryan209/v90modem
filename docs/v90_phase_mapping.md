@@ -252,13 +252,13 @@ Phase 4 is not "CP/CP' in disguise".
 
 ### Current repo status
 
-- the live V.34 bit callback feeds a strict Table 14 CPt receiver
+- the live V.34 bit callback feeds a strict Table 14 CPt/CP receiver
 - `v90.c` enforces Ri/post-CPt/TRN2d timing and maps TRN2d with the negotiated
   `Sr=0` six-interval constellations
-- the digital path emits Type-0 MP, repeats MP-prime until a matching CP-prime,
-  and emits two mapped Ed frames
-- B1d and connected downstream data still use compatibility mapping rather
-  than continuing the negotiated section 5 mapper
+- the digital path repeats MP with acknowledge clear until data-mode CP, then
+  repeats MP-prime until matching CP-prime and emits two mapped Ed frames
+- B1d is 48 negotiated data frames with a zero-state mapper reset, followed by
+  connected data using the same scrambler, differential, DFI, and modulus state
 - the synthetic V.90/V.92 session contract still uses V.91-derived helper
   objects and must not be treated as native V.90 interoperability proof
 
@@ -295,6 +295,7 @@ Compatibility layers that should disappear over time:
 4. Implement answerer-side Phase 3 control flow as:
    `Sd -> S̄d -> TRN1d -> Jd until S -> Jd'`.
 5. Carry the negotiated Phase 4 mapper through B1d into connected data.
+   Completed for `Sr=0`.
 6. Remove the remaining V.91 `CP/Es/B1` compatibility truth model from the
    synthetic session.
 

@@ -22,6 +22,12 @@ typedef struct {
     bool acknowledge;
     bool codec_alaw;
     uint8_t shaping_redundancy;
+    uint8_t shaping_lookahead;
+    uint16_t trn1d_gain_q3_13;
+    uint8_t shaping_a1_q1_6;
+    uint8_t shaping_a2_q1_6;
+    uint8_t shaping_b1_q1_6;
+    uint8_t shaping_b2_q1_6;
     uint16_t upstream_rate_mask;
     uint8_t constellation_count;
     uint8_t dfi[VPCM_CP_FRAME_INTERVALS];

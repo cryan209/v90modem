@@ -870,13 +870,15 @@ static void v90_live_cp_frame(void *user_data, const vpcm_cp_diag_t *diag)
         return;
     accepted = v90_set_phase4_cp(g_v90, &diag->frame)
         && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
-    ME_LOG("[ME] V.90 strict RX event=CP_VALID bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
+    ME_LOG("[ME] V.90 strict RX event=CP_VALID kind=%s bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
+           diag->frame.v90_compatibility ? "CP" : "CPt",
            diag->nbits,
            (unsigned)diag->frame.drn,
            diag->frame.acknowledge ? 1 : 0,
            (unsigned)diag->frame.constellation_count,
            accepted ? 1 : 0);
-    trace_phase("V90 strict RX event=CP_VALID bits=%d drn=%u accepted=%d",
+    trace_phase("V90 strict RX event=CP_VALID kind=%s bits=%d drn=%u accepted=%d",
+                diag->frame.v90_compatibility ? "CP" : "CPt",
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
 }
 
@@ -1907,16 +1909,28 @@ static void generate_v90_data_codewords_locked(uint8_t *codewords, int len)
 
         if (g_v90_data_frame_pos >= V90_DATA_FRAME_LEN) {
             uint8_t data_in[V90_DATA_FRAME_LEN];
+            int needed;
+            int input_len;
+            int consumed;
 
             memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
-            if (dring_available(&downstream_ring) >= V90_DATA_FRAME_LEN
-                && dring_read(&downstream_ring, data_in, V90_DATA_FRAME_LEN)
-                       == V90_DATA_FRAME_LEN
-                && v90_tx_codewords(g_v90,
-                                     g_v90_data_frame,
-                                     V90_DATA_FRAME_LEN,
-                                     data_in,
-                                     V90_DATA_FRAME_LEN) != V90_DATA_FRAME_LEN) {
+            needed = v90_data_input_bytes_needed(g_v90);
+            input_len = dring_available(&downstream_ring);
+            if (input_len > needed)
+                input_len = needed;
+            if (input_len > 0
+                && dring_read(&downstream_ring, data_in, input_len) != input_len) {
+                ME_LOG("[ME] V.90 data ring read failed\n");
+                input_len = 0;
+            }
+            consumed = 0;
+            if (v90_tx_data_frame_codewords(g_v90,
+                                            g_v90_data_frame,
+                                            data_in,
+                                            input_len,
+                                            &consumed,
+                                            true) != V90_DATA_FRAME_LEN
+                || consumed != input_len) {
                 ME_LOG("[ME] V.90 data mapper failed to produce one frame\n");
                 memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
             }
@@ -1936,19 +1950,21 @@ static void generate_v90_data_codewords_locked(uint8_t *codewords, int len)
 
 static void enter_v90_data_locked(void)
 {
+    int downstream_rate;
     int upstream_rate;
 
     if (g_state != ME_TRAINING || !g_v90 || !g_v34)
         return;
     upstream_rate = v34_get_current_bit_rate(g_v34);
+    downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     ME_LOG("[ME] V.90 startup complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
-           upstream_rate, V90_RATE_BPS);
+           upstream_rate, downstream_rate);
     trace_phase("V90 enter DATA after B1d: upstream=%d downstream=%d",
-                upstream_rate, V90_RATE_BPS);
-    di_on_connected(V90_RATE_BPS);
+                upstream_rate, downstream_rate);
+    di_on_connected(downstream_rate);
 }
 
 /* Called with g_state_mtx held. Returns true when codewords were generated

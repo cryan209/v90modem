@@ -16,9 +16,9 @@ static bool v90_cp_diag_is_strict(const v90_cp_rx_t *rx,
 {
     if (!rx || !diag || !diag->valid)
         return false;
-    /* Initial Phase 4 uses CPt (Table 14 bit 19 = 1), without a silence
-     * request, and the advertised digital-side law must match bit 35. */
-    return diag->frame.v90_compatibility
+    /* Accept both CPt (bit 19 = 0) and data-mode CP (bit 19 = 1). The V.90
+     * state machine applies the phase-specific distinction. */
+    return diag->frame.drn >= 1
         && diag->frame.drn <= 22
         && diag->bits[18] == 0
         && diag->bits[30] == 0

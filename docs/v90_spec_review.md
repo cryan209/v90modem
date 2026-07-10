@@ -11,8 +11,8 @@ The current implementation is best described as:
 - Phase 2: mostly implemented and reasonably close to the spec
 - Phase 3 TX waveforms and receiver-gated control: implemented, pending real
   modem interoperability hardening
-- Phase 4 digital TX: `Sr=0` Ri/TRN2d/MP/MP-prime/Ed implemented
-- Data mode encoder: simplified placeholder, not a full V.90 section 5 encoder
+- Phase 4 digital TX: `Sr=0` Ri/TRN2d/MP/MP-prime/Ed/B1d implemented
+- Data mode encoder: negotiated `Sr=0` live path implemented; shaping pending
 
 In particular, the existing code:
 
@@ -20,28 +20,25 @@ In particular, the existing code:
 - generates `Sd`, `S̄d`, `TRN1d`, `Jd`, and `Jd'` waveforms
 - terminates repeated `Jd` only after a strict received-S event
 - generates and receiver-gates the DIL branch
-- decodes strict CPt and implements negotiated `Sr=0` Ri, TRN2d, Type-0
-  MP/MP-prime, CP-prime acknowledgement, and mapped Ed
-- still emits compatibility B1d rather than negotiated mapped B1d
-- does not use a negotiated downstream PCM encoder in data mode
+- decodes distinct strict CPt and CP/CP-prime parameter sets
+- implements negotiated `Sr=0` Ri, TRN2d, Type-0 MP/MP-prime, Ed, and B1d
+- carries the B1d mapper state into live data at the CP-selected rate
 
 ## Clause-Level Findings
 
 ### Core encoder
 
-- `5.1 Data signalling rates`: missing
-  - The code assumes a fixed downstream rate instead of negotiating the
-    selected V.90 downstream rate in Phase 4.
+- `5.1 Data signalling rates`: implemented for live `Sr=0`
+  - Data-mode CP selects D, and the live path reports and consumes that rate.
 
 - `5.3 Scrambler`: implemented
   - The V.34 GPC polynomial is used in the local V.90 code.
 
 - `5.4 Mapping parameters / modulus encoder / mapper / spectral shaping`:
   partially implemented
-  - Phase 4 uses CPt-negotiated DFI, per-interval constellation sizes, modulus
-    mapping, scrambler state, and differential signs for `Sr = 0`.
-  - Connected data still uses the simplified compatibility mapper, and
-    `Sr = 1/2/3` shaping remains missing.
+  - CPt drives Phase 4 training while CP independently drives B1d/data DFI,
+    per-interval modulus mapping, scrambler state, and differential signs.
+  - `Sr = 1/2/3` shaping remains missing.
 
 ### Phase 2
 
@@ -71,16 +68,16 @@ In particular, the existing code:
 ### Phase 4
 
 - `8.6` and `9.4.1`: partially implemented
-  - Strict CPt configures the downstream mapper.
+  - Strict CPt configures training; strict CP configures B1d/data.
   - Ri, post-CPt Ri, TRN2d, Type-0 MP/MP-prime, CP-prime gating, and Ed use
     Recommendation-shaped timing and mapping.
-  - B1d mapping and continuation into negotiated data remain incomplete.
+  - B1d is 48 mapped frames and continues into live data for `Sr=0`.
 
 ### Data mode
 
-- Section 5 data mode is only partially represented
-  - The repository contains a downstream PCM encoder, but it is a simplified
-    placeholder and not the negotiated V.90 encoder required by the spec.
+- Section 5 data mode is implemented for `Sr=0` on the live raw-G.711 path.
+  Legacy standalone compatibility APIs remain for older synthetic tests;
+  shaping, rate renegotiation, and broad all-rate fixtures remain incomplete.
 
 ## Reuse Strategy
 
@@ -103,7 +100,6 @@ What should be used only as a template:
 
 What needs new V.90-specific implementation:
 
-- mapped B1d and continuation into the negotiated section 5 downstream encoder
 - `Sr = 1/2/3` shaping and its trellis/lookahead behavior
 - downstream and upstream hardware interoperability/retrain hardening
 

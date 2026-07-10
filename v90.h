@@ -140,7 +140,7 @@ typedef enum {
     V90_TX_CP,            /* V.92 Phase 4: CPd compatibility frame */
     V90_TX_SUVD_ACK,      /* V.92 Phase 4: SUVd' (ack bit set) — acknowledges CPu */
     V90_TX_ED,            /* Phase 4: Ed — 2 data frames of scrambled zeros */
-    V90_TX_B1D,           /* Phase 4: B1d — data-mode entry marker */
+    V90_TX_B1D,           /* Phase 4: B1d — 48 mapped data frames */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
 
@@ -255,9 +255,9 @@ const char *v90_rx_event_name(v90_rx_event_t event);
 bool v90_training_complete(v90_state_t *s);
 
 /*
- * Apply a received CPt/CP' frame to Phase 4.  In V.90 mode this configures
- * the negotiated Sr=0 modulus mapper; a repeated frame may change only its
- * acknowledge bit.  V.92 mode retains the CPd compatibility transmitter.
+ * Apply a received CPt, data-mode CP, or CP' frame to Phase 4.  CPt configures
+ * TRN2d/MP/Ed; CP configures B1d/data; a repeated data-mode CP may change only
+ * its acknowledge bit. V.92 mode retains the CPd compatibility transmitter.
  * The caller's cp pointer need not remain valid after return.
  */
 bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
@@ -266,10 +266,20 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
  * Returns its bit length, or 0 if the V.90 Phase 4 mapper is not configured. */
 int v90_copy_phase4_mp_bits(const v90_state_t *s, uint8_t *bits, int max_bits);
 
+/* Negotiated V.90 data-mode mapper diagnostics and one-frame encoder. */
+int v90_data_bits_per_frame(const v90_state_t *s);
+int v90_data_input_bytes_needed(const v90_state_t *s);
+int v90_tx_data_frame_codewords(v90_state_t *s,
+                                uint8_t codewords[6],
+                                const uint8_t *data,
+                                int data_len,
+                                int *data_consumed,
+                                bool fill_with_ones);
+
 /*
- * Signal that the analogue modem's most recently supplied CPt/CP' frame has
- * passed strict receive validation.  CPt starts post-CP Ri/TRN2d; CP' permits
- * the transmitter to leave repeated MP' after completing its current frame.
+ * Signal that the analogue modem's most recently supplied CPt, CP, or CP'
+ * frame passed strict receive validation. CPt starts post-CP Ri/TRN2d, CP
+ * causes MP' acknowledgement, and CP' permits Ed at an MP' frame boundary.
  */
 void v90_notify_cp_ready(v90_state_t *s);
 
@@ -281,7 +291,7 @@ void v90_notify_cp_ready(v90_state_t *s);
  */
 void v90_enable_v92_mode(v90_state_t *s);
 
-/* Reset the simplified data-pump scrambler and differential-sign state. */
+/* Reset the active negotiated or compatibility data mapper state. */
 void v90_reset_data_mode(v90_state_t *s);
 
 /*
@@ -300,10 +310,9 @@ int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len);
 int v90_phase3_tx_codewords(v90_state_t *s, uint8_t codewords[], int len);
 
 /*
- * Encode downstream payload bytes directly into G.711 codewords.
- * The current implementation uses the same simplified byte-per-symbol mapping
- * as v90_tx_data(), but exposes it at the codeword level for loopback tests
- * and session plumbing.
+ * Legacy byte-per-symbol compatibility mapper retained for older standalone
+ * loopback/session tests. Live negotiated V.90 uses
+ * v90_tx_data_frame_codewords().
  */
 int v90_tx_codewords(v90_state_t *s,
                      uint8_t *g711_out,
@@ -312,8 +321,7 @@ int v90_tx_codewords(v90_state_t *s,
                      int data_len);
 
 /*
- * Decode downstream G.711 codewords produced by v90_tx_codewords() back into
- * payload bytes.
+ * Decode the legacy v90_tx_codewords() compatibility format.
  */
 int v90_rx_codewords(v90_state_t *s,
                      uint8_t *data_out,
@@ -322,8 +330,7 @@ int v90_rx_codewords(v90_state_t *s,
                      int g711_len);
 
 /*
- * Encode downstream data into PCM codewords for the G.711 RTP stream.
- * Call this instead of v34_tx() once training completes.
+ * Legacy linear wrapper around the compatibility mapper.
  */
 int v90_tx_data(v90_state_t *s, int16_t amp[], int len,
                 const uint8_t *data_in, int data_len);

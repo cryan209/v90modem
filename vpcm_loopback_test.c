@@ -762,11 +762,19 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     enum { MAX_SYMBOLS = 20000 };
     static const int first_trn_ucode[6] = {31, 120, 127, 127, 127, 127};
     static const bool first_trn_positive[6] = {true, false, true, false, true, true};
+    static const int first_b1_ucode[6] = {31, 120, 99, 112, 127, 127};
+    static const bool first_b1_positive[6] = {true, false, true, false, true, true};
+    static const int first_data_ucode[6] = {59, 67, 83, 123, 127, 127};
+    static const bool first_data_positive[6] = {false, false, true, true, true, true};
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
     v90_state_t *tx = NULL;
     vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t data_cp;
     uint8_t mp_bits[256];
+    uint8_t data_codewords[6];
+    const uint8_t data_bytes[4] = {0xA5, 0x5A, 0xC3, 0x3C};
+    uint8_t long_data[400];
     uint8_t codeword;
     uint8_t idle;
     uint16_t crc;
@@ -779,7 +787,7 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     if (!tx)
         goto done;
     vpcm_cp_init(&cp);
-    cp.v90_compatibility = true;
+    cp.v90_compatibility = false; /* Table 14 bit 19: CPt */
     cp.drn = 9;
     cp.codec_alaw = (law == V91_LAW_ALAW);
     cp.upstream_rate_mask = 0x1FFF;
@@ -788,6 +796,8 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         cp.dfi[i] = (uint8_t)(i & 1);
     vpcm_cp_enable_odd_ucodes(cp.masks[0]);
     vpcm_cp_enable_all_ucodes(cp.masks[1]);
+    data_cp = cp;
+    data_cp.v90_compatibility = true; /* Table 14 bit 19: data-mode CP */
     idle = v91_idle_codeword(law);
 
     v90_start_phase3(tx, 66);
@@ -836,7 +846,7 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         goto done;
     }
     {
-        vpcm_cp_frame_t early_cp_prime = cp;
+        vpcm_cp_frame_t early_cp_prime = data_cp;
 
         early_cp_prime.acknowledge = true;
         if (v90_set_phase4_cp(tx, &early_cp_prime)) {
@@ -901,19 +911,35 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         goto done;
     }
 
-    /* D=17 gives a 102-bit MP: six mapping frames, 36 symbols. */
+    /* D=17 gives a 102-bit MP: six mapping frames, 36 symbols.  MP must
+     * continue with acknowledge clear until the data-mode CP arrives. */
     for (int i = 0; i < 36; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     mp_nbits = v90_copy_phase4_mp_bits(tx, mp_bits, (int)sizeof(mp_bits));
+    if (v90_get_tx_phase(tx) != V90_TX_MP || mp_nbits != 102 || mp_bits[33] != 0) {
+        fprintf(stderr, "V.90 transmitter acknowledged before receiving data-mode CP\n");
+        goto done;
+    }
+
+    for (int i = 0; i < 6; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (!v90_set_phase4_cp(tx, &data_cp)
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
+        fprintf(stderr, "V.90 strict event test rejected data-mode CP\n");
+        goto done;
+    }
+    for (int i = 0; i < 30; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    mp_nbits = v90_copy_phase4_mp_bits(tx, mp_bits, (int)sizeof(mp_bits));
     if (v90_get_tx_phase(tx) != V90_TX_MP || mp_nbits != 102 || mp_bits[33] != 1) {
-        fprintf(stderr, "V.90 transmitter did not change MP to MP' at its frame boundary\n");
+        fprintf(stderr, "V.90 transmitter did not change MP to MP' after data-mode CP\n");
         goto done;
     }
 
     for (int i = 0; i < 6; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     {
-        vpcm_cp_frame_t mismatched_cp = cp;
+        vpcm_cp_frame_t mismatched_cp = data_cp;
 
         mismatched_cp.acknowledge = true;
         mismatched_cp.drn++;
@@ -922,8 +948,8 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             goto done;
         }
     }
-    cp.acknowledge = true;
-    if (!v90_set_phase4_cp(tx, &cp)
+    data_cp.acknowledge = true;
+    if (!v90_set_phase4_cp(tx, &data_cp)
         || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
         fprintf(stderr, "V.90 strict event test rejected matching CP'\n");
         goto done;
@@ -940,6 +966,101 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     if (v90_get_tx_phase(tx) != V90_TX_B1D) {
         fprintf(stderr, "V.90 Ed did not contain exactly two mapping frames\n");
         goto done;
+    }
+
+    for (int i = 0; i < 288; i++) {
+        int ucode;
+        int constellation;
+
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (i < 6
+            && codeword != v91_ucode_to_codeword(law,
+                                                 first_b1_ucode[i],
+                                                 first_b1_positive[i])) {
+            fprintf(stderr, "V.90 first B1d frame mismatched the zero-state data vector\n");
+            goto done;
+        }
+        ucode = v91_codeword_to_ucode(law, codeword);
+        constellation = data_cp.dfi[i % VPCM_CP_FRAME_INTERVALS];
+        if (ucode < 0
+            || !vpcm_cp_mask_get(data_cp.masks[constellation], ucode)) {
+            fprintf(stderr, "V.90 B1d symbol escaped data-mode constellation\n");
+            goto done;
+        }
+    }
+    if (v90_get_tx_phase(tx) != V90_TX_DATA
+        || !v90_training_complete(tx)
+        || v90_data_bits_per_frame(tx) != 29
+        || v90_data_input_bytes_needed(tx) != 4) {
+        fprintf(stderr, "V.90 B1d did not enter negotiated 38666-bit/s data mode\n");
+        goto done;
+    }
+    {
+        int consumed = 0;
+
+        if (v90_tx_data_frame_codewords(tx,
+                                        data_codewords,
+                                        data_bytes,
+                                        (int)sizeof(data_bytes),
+                                        &consumed,
+                                        false) != 6
+            || consumed != 4
+            || v90_data_input_bytes_needed(tx) != 4) {
+            fprintf(stderr, "V.90 negotiated mapper consumed the wrong number of payload bits\n");
+            goto done;
+        }
+        for (int i = 0; i < 6; i++) {
+            int ucode = v91_codeword_to_ucode(law, data_codewords[i]);
+            int constellation = data_cp.dfi[i];
+
+            if (data_codewords[i]
+                    != v91_ucode_to_codeword(law,
+                                             first_data_ucode[i],
+                                             first_data_positive[i])) {
+                fprintf(stderr, "V.90 first payload frame mismatched B1d-continuous vector\n");
+                goto done;
+            }
+            if (ucode < 0
+                || !vpcm_cp_mask_get(data_cp.masks[constellation], ucode)) {
+                fprintf(stderr, "V.90 payload symbol escaped data-mode constellation\n");
+                goto done;
+            }
+        }
+    }
+    fill_pattern(long_data, (int)sizeof(long_data), 0x90DA7A11U);
+    {
+        int total_consumed = 0;
+
+        for (int frame = 0; frame < 100; frame++) {
+            int consumed = 0;
+
+            if (v90_tx_data_frame_codewords(tx,
+                                            data_codewords,
+                                            long_data + total_consumed,
+                                            (int)sizeof(long_data) - total_consumed,
+                                            &consumed,
+                                            false) != 6) {
+                fprintf(stderr, "V.90 negotiated mapper stalled during long-run packing\n");
+                goto done;
+            }
+            total_consumed += consumed;
+            for (int i = 0; i < 6; i++) {
+                int ucode = v91_codeword_to_ucode(law, data_codewords[i]);
+                int constellation = data_cp.dfi[i];
+
+                if (ucode < 0
+                    || !vpcm_cp_mask_get(data_cp.masks[constellation], ucode)) {
+                    fprintf(stderr, "V.90 long-run payload escaped negotiated constellation\n");
+                    goto done;
+                }
+            }
+        }
+        if (total_consumed != 363 || v90_data_input_bytes_needed(tx) != 3) {
+            fprintf(stderr,
+                    "V.90 long-run mapper bit reservoir drifted (bytes=%d, need=%d)\n",
+                    total_consumed, v90_data_input_bytes_needed(tx));
+            goto done;
+        }
     }
 
     vpcm_log("PASS: V.90 strict receiver-driven transitions (%s)", law_name);
@@ -980,7 +1101,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
     vpcm_log("Test: V.90 strict CP bitstream receiver (%s)", law_name);
     memset(&capture, 0, sizeof(capture));
     vpcm_cp_init(&cp);
-    cp.v90_compatibility = true; /* Table 14 bit 19: CPt */
+    cp.v90_compatibility = false; /* Table 14 bit 19: CPt */
     cp.drn = 12;
     cp.codec_alaw = alaw;
     cp.upstream_rate_mask = 0x1FFF;
@@ -995,7 +1116,8 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
     vpcm_cp_enable_all_ucodes(cp.masks[1]);
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits)
         || nbits != vpcm_cp_modulated_bit_length(&cp, 4)
-        || (nbits % 12) != 0) {
+        || (nbits % 12) != 0
+        || bits[19] != 0) {
         fprintf(stderr, "V.90 strict CP test could not build 4-point CPt\n");
         return false;
     }
@@ -1024,23 +1146,28 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
     }
     cp.transparent_mode_granted = false;
 
-    cp.v90_compatibility = false; /* CP, not the CPt required at startup. */
+    cp.v90_compatibility = true; /* Data-mode CP is also a valid Table 14 frame. */
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
         return false;
-    for (int i = 0; i < nbits; i++)
-        v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 3) {
-        fprintf(stderr, "V.90 strict CP receiver accepted CP where CPt was required\n");
+    if (damaged[19] != 1) {
+        fprintf(stderr, "V.90 data-mode CP did not set Table 14 bit 19\n");
         return false;
     }
-    cp.v90_compatibility = true;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 1 || rx.valid_frames != 1
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr, "V.90 strict CP receiver rejected a valid data-mode CP\n");
+        return false;
+    }
+    cp.v90_compatibility = false;
 
     cp.drn = 23;
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 4) {
+    if (capture.count != 1 || rx.rejected_frames != 3) {
         fprintf(stderr, "V.90 strict CP receiver accepted DRN above 22\n");
         return false;
     }
@@ -1051,7 +1178,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 5) {
+    if (capture.count != 1 || rx.rejected_frames != 4) {
         fprintf(stderr, "V.90 strict CP receiver accepted the wrong codec law\n");
         return false;
     }
@@ -1062,7 +1189,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 6) {
+    if (capture.count != 1 || rx.rejected_frames != 5) {
         fprintf(stderr, "V.90 strict CP receiver accepted unsupported spectral shaping\n");
         return false;
     }
@@ -1073,18 +1200,24 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 7) {
+    if (capture.count != 1 || rx.rejected_frames != 6) {
         fprintf(stderr, "V.90 strict CP receiver accepted an empty upstream-rate mask\n");
         return false;
     }
     cp.upstream_rate_mask = 0x1FFF;
+    cp.shaping_lookahead = 2;
+    cp.trn1d_gain_q3_13 = 0x2345;
+    cp.shaping_a1_q1_6 = 0x12;
+    cp.shaping_a2_q1_6 = 0xE7;
+    cp.shaping_b1_q1_6 = 0x09;
+    cp.shaping_b2_q1_6 = 0xF4;
 
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits))
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, bits[i]);
-    if (capture.count != 1
-        || rx.valid_frames != 1
+    if (capture.count != 2
+        || rx.valid_frames != 2
         || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
         fprintf(stderr, "V.90 strict CP receiver rejected a valid CPt frame\n");
         return false;

@@ -57,6 +57,14 @@ Completed on 2026-07-11:
   exchange, CP-prime gating, and two-frame mapped Ed
 - μ-law and A-law tests for timing, constellation membership, MP layout/CRC,
   MP-prime repetition, and strict malformed/unsupported CPt rejection
+- distinct CPt training and CP/CP-prime data-mode parameter sets
+- Table 14 bit-19 polarity plus lookahead, TRN1d gain, and shaping-filter
+  fields preserved for strict repeated-frame comparison
+- MP acknowledgement held clear until data-mode CP and Ed held until CP-prime
+- B1d corrected to 48 mapped data frames with its required zero-state reset
+- live payload mapping at the CP-selected rate with exact bit-reservoir
+  consumption and continuity from B1d
+- deterministic B1d/payload vectors and 100-frame packing tests in both laws
 
 The parity test confirms why the raw bearer is required: 72 of the first 512
 μ-law Phase 3 octets change when decoded to linear PCM and re-encoded, including
@@ -117,12 +125,10 @@ The repository already has:
 
 Remaining baseline issues:
 
-- the current V.90 data APIs implement a simplified byte-per-codeword mapping,
-  not the negotiated V.90 section 5 mapper.
+- legacy standalone V.90 test APIs still expose the old byte-per-codeword
+  compatibility mapper; the live modem path no longer uses it.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- B1d and connected downstream data still use compatibility behavior rather
-  than continuing the negotiated Phase 4 mapper state into section 5 data.
 - only `Sr=0` is accepted; spectral shaping (`Sr=1/2/3`) is not implemented.
 - the synthetic coupled-training harness still infers some remote events from
   its proxy transmitter stages even though the live Jd/DIL path no longer does.
@@ -295,10 +301,10 @@ port and these APIs. It must not decode and re-encode a raw V.90 transmit frame.
 
 ## Milestone 5: Implement The Negotiated V.90 Section 5 Data Pump
 
-Initial Phase 4 mapper work completed on 2026-07-11: CPt now configures an
-`Sr=0` six-interval modulus mapper, and TRN2d, MP/MP-prime, and Ed use it. The
-remaining milestone is to carry that mapper into B1d and payload data, add
-long-run negotiated-rate tests, then implement spectral shaping.
+The live `Sr=0` milestone was completed on 2026-07-11. CPt configures
+TRN2d/MP/Ed, data-mode CP independently configures B1d/data, and the live RTP
+path consumes exactly the negotiated D bits per six-symbol frame. Remaining
+work in this milestone is broader rate-vector coverage and `Sr=1/2/3` shaping.
 
 ### Work
 
@@ -452,7 +458,20 @@ Status: Phase 4 transmit core completed on 2026-07-11.
 3. Enforce Ri/post-CPt/TRN2d timing and frame alignment.
 4. Generate Type-0 MP and repeated MP-prime with CRC and acknowledge handling.
 5. Accept only a parameter-identical CP-prime and emit mapped Ed.
-6. Next: replace the B1d/data compatibility mapper with the negotiated mapper.
+6. Replace the B1d/data compatibility mapper with the negotiated mapper.
+
+## Fifth Patch Set
+
+Status: live negotiated `Sr=0` B1d/data path completed on 2026-07-11.
+
+1. Decode CPt and data-mode CP as distinct Table 14 parameter sets.
+2. Hold MP acknowledge clear until CP, then repeat MP-prime until CP-prime.
+3. Reset the data scrambler/differential state before 48-frame B1d.
+4. Preserve mapper state from B1d into connected payload data.
+5. Consume D negotiated bits per six G.711 codewords with a cross-frame byte
+   reservoir and binary-one underrun fill.
+6. Report the negotiated downstream rate rather than a fixed 56/64 kbit/s.
+7. Next: add all-rate fixtures, then implement `Sr=1/2/3` shaping.
 
 ## Definition Of Done
 
