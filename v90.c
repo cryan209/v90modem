@@ -1725,17 +1725,62 @@ void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
     s->dil_requested = (s->dil.n > 0);
 }
 
-void v90_notify_s_detected(v90_state_t *s)
+const char *v90_rx_event_name(v90_rx_event_t event)
+{
+    switch (event) {
+    case V90_RX_EVENT_NONE:           return "NONE";
+    case V90_RX_EVENT_INFO1A_VALID:   return "INFO1A_VALID";
+    case V90_RX_EVENT_INFO1A_INVALID: return "INFO1A_INVALID";
+    case V90_RX_EVENT_S:              return "S";
+    case V90_RX_EVENT_TRN_LOCK:       return "TRN_LOCK";
+    case V90_RX_EVENT_J:              return "J";
+    case V90_RX_EVENT_J_PRIME:        return "J_PRIME";
+    case V90_RX_EVENT_CP_VALID:       return "CP_VALID";
+    case V90_RX_EVENT_CP_INVALID:     return "CP_INVALID";
+    case V90_RX_EVENT_E:              return "E";
+    case V90_RX_EVENT_B1:             return "B1";
+    case V90_RX_EVENT_FAILURE:        return "FAILURE";
+    case V90_RX_EVENT_RETRAIN:        return "RETRAIN";
+    case V90_RX_EVENT_TIMEOUT:        return "TIMEOUT";
+    }
+    return "UNKNOWN";
+}
+
+bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
 {
     if (!s)
-        return;
-    if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
-        fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
-        s->jd_terminate_requested = true;
-    } else if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
-        fprintf(stderr, "[V90] Phase 3: far-end S detected during DIL, terminating at the next segment boundary\n");
-        s->dil_terminate_requested = true;
+        return false;
+
+    switch (event) {
+    case V90_RX_EVENT_S:
+        if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
+            fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
+            s->jd_terminate_requested = true;
+            return true;
+        }
+        if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
+            fprintf(stderr, "[V90] Phase 3: subsequent far-end S detected during DIL, terminating at the next segment boundary\n");
+            s->dil_terminate_requested = true;
+            return true;
+        }
+        return false;
+
+    case V90_RX_EVENT_CP_VALID:
+        if (s->tx_phase == V90_TX_TRN2D && s->cp_nbits > 0 && !s->cp_ready) {
+            fprintf(stderr, "[V90] Phase 4: valid far-end CP received, completing TRN2d\n");
+            s->cp_ready = true;
+            return true;
+        }
+        return false;
+
+    default:
+        return false;
     }
+}
+
+void v90_notify_s_detected(v90_state_t *s)
+{
+    (void)v90_handle_rx_event(s, V90_RX_EVENT_S);
 }
 
 bool v90_training_complete(v90_state_t *s)
@@ -1756,8 +1801,7 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
 
 void v90_notify_cp_ready(v90_state_t *s)
 {
-    if (s && s->tx_phase == V90_TX_TRN2D)
-        s->cp_ready = true;
+    (void)v90_handle_rx_event(s, V90_RX_EVENT_CP_VALID);
 }
 
 void v90_enable_v92_mode(v90_state_t *s)

@@ -239,6 +239,12 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
     return 0;
 }
 
+SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s)
+{
+    (void)s;
+    return 0;
+}
+
 SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
 {
     (void)s;

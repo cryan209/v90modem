@@ -101,6 +101,25 @@ typedef enum {
     V90_LAW_ALAW = 1
 } v90_law_t;
 
+/* Strict receiver events used to drive live V.90 startup. Diagnostic guesses
+ * and local transmitter stages must not be translated into these values. */
+typedef enum {
+    V90_RX_EVENT_NONE = 0,
+    V90_RX_EVENT_INFO1A_VALID,
+    V90_RX_EVENT_INFO1A_INVALID,
+    V90_RX_EVENT_S,
+    V90_RX_EVENT_TRN_LOCK,
+    V90_RX_EVENT_J,
+    V90_RX_EVENT_J_PRIME,
+    V90_RX_EVENT_CP_VALID,
+    V90_RX_EVENT_CP_INVALID,
+    V90_RX_EVENT_E,
+    V90_RX_EVENT_B1,
+    V90_RX_EVENT_FAILURE,
+    V90_RX_EVENT_RETRAIN,
+    V90_RX_EVENT_TIMEOUT
+} v90_rx_event_t;
+
 /* V.90 Phase 3/4 TX sub-states for the digital modem.
  * V.90 order (§9.3.1/§9.4.1):
  *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → CP → B1d → Data
@@ -222,6 +241,12 @@ bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *
  */
 void v90_notify_s_detected(v90_state_t *s);
 
+/* Apply a strict receiver event to the transmit startup machine. Returns true
+ * only when the event is valid for, and accepted by, the current TX phase. */
+bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event);
+
+const char *v90_rx_event_name(v90_rx_event_t event);
+
 /*
  * Check whether the V.90 state machine has completed startup and may enter
  * data mode. Returns true after B1d completes and the state enters V90_TX_DATA.
@@ -237,9 +262,10 @@ bool v90_training_complete(v90_state_t *s);
 bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
 
 /*
- * Signal that the analogue modem's MP frame has been received and the
- * digital modem should transition from TRN2d into CP transmission
- * (V.90) or SUVd (V.92).
+ * Compatibility wrapper signalling that the analogue modem's valid CP frame
+ * has been received. This advances from TRN2d into the current Phase 4
+ * control-frame transmitter (still a CP-shaped compatibility placeholder;
+ * the conforming V.90 digital-side transmission is MP).
  * Has no effect unless the TX phase is currently V90_TX_TRN2D.
  */
 void v90_notify_cp_ready(v90_state_t *s);

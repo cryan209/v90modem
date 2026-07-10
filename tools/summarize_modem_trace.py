@@ -24,7 +24,7 @@ ME_TRACE_RE = re.compile(
     r"v90_tx=(?P<v90_tx>-?\d+) "
     r"v90_event=(?P<v90_event>-?\d+) "
     r"phase3=(?P<phase3>\d+) "
-    r"j=(?P<j_seen>\d+) "
+    r"s_events=(?P<s_events>\d+) "
     r"dil=(?P<dil>\d+)"
 )
 
@@ -130,7 +130,7 @@ def parse_log_lines(lines: list[str]) -> dict[str, object]:
                     "v90_tx_stage": int(me_match.group("v90_tx")),
                     "v90_event": int(me_match.group("v90_event")),
                     "v90_phase3_started": int(me_match.group("phase3")),
-                    "v90_phase3_j_seen": int(me_match.group("j_seen")),
+                    "v90_phase3_s_events": int(me_match.group("s_events")),
                     "v90_dil_valid": int(me_match.group("dil")),
                     "raw": line,
                 }
@@ -218,7 +218,7 @@ def format_text_report(report: dict[str, object]) -> str:
             f"law={event['law']} role={event['role']} media={event['media']} "
             f"phase_ms={event['phase_ms']} v34=({event['v34_rx_stage']},{event['v34_tx_stage']}) "
             f"v90=({event['v90_rx_stage']},{event['v90_tx_stage']},event={event['v90_event']}) "
-            f"phase3={event['v90_phase3_started']} j={event['v90_phase3_j_seen']} "
+            f"phase3={event['v90_phase3_started']} s_events={event['v90_phase3_s_events']} "
             f"dil={event['v90_dil_valid']}"
         )
     if len(me_events) > 20:

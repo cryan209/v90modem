@@ -369,6 +369,7 @@ static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
+static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -751,6 +752,91 @@ done:
         v90_free(chunked_tx);
     if (rx)
         v90_free(rx);
+    return ok;
+}
+
+static bool test_v90_strict_receiver_events(v91_law_t law)
+{
+    enum { MAX_SYMBOLS = 20000 };
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_state_t *tx = NULL;
+    vpcm_cp_frame_t cp;
+    uint8_t codeword;
+    int symbols = 0;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 strict receiver-driven transitions (%s)", law_name);
+    tx = v90_init_data_pump(v90_law);
+    if (!tx)
+        goto done;
+    vpcm_cp_init(&cp);
+    cp.v90_compatibility = true;
+    cp.drn = 9;
+    cp.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cp.masks[0]);
+    if (!v90_set_phase4_cp(tx, &cp)) {
+        fprintf(stderr, "V.90 strict event test could not configure CP\n");
+        goto done;
+    }
+
+    v90_start_phase3(tx, 66);
+    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JD) {
+        fprintf(stderr, "V.90 strict event test did not reach Jd\n");
+        goto done;
+    }
+
+    if (v90_handle_rx_event(tx, V90_RX_EVENT_J)
+        || v90_handle_rx_event(tx, V90_RX_EVENT_J_PRIME)) {
+        fprintf(stderr, "V.90 strict event test accepted J/J' as an S transition\n");
+        goto done;
+    }
+    for (int i = 0; i < 144; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JD) {
+        fprintf(stderr, "V.90 Jd advanced without a strict S event\n");
+        goto done;
+    }
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_S)) {
+        fprintf(stderr, "V.90 strict event test rejected S during Jd\n");
+        goto done;
+    }
+
+    while (v90_get_tx_phase(tx) != V90_TX_TRN2D && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
+        fprintf(stderr, "V.90 strict event test did not reach TRN2d\n");
+        goto done;
+    }
+    if (v90_handle_rx_event(tx, V90_RX_EVENT_J)
+        || v90_handle_rx_event(tx, V90_RX_EVENT_CP_INVALID)) {
+        fprintf(stderr, "V.90 strict event test accepted an invalid Phase 4 event\n");
+        goto done;
+    }
+    for (int i = 0; i < 256; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
+        fprintf(stderr, "V.90 TRN2d advanced without a valid CP event\n");
+        goto done;
+    }
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
+        fprintf(stderr, "V.90 strict event test rejected valid CP during TRN2d\n");
+        goto done;
+    }
+    v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_CP) {
+        fprintf(stderr, "V.90 valid CP event did not advance the Phase 4 transmitter\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: V.90 strict receiver-driven transitions (%s)", law_name);
+    ok = true;
+
+done:
+    if (tx)
+        v90_free(tx);
     return ok;
 }
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
@@ -5452,6 +5538,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v90_data_codeword_state(V91_LAW_ULAW)
         && test_v90_data_codeword_state(V91_LAW_ALAW)
+        && test_v90_strict_receiver_events(V91_LAW_ULAW)
+        && test_v90_strict_receiver_events(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)

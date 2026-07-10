@@ -5113,17 +5113,32 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      s->phase3_s_counts[2], s->phase3_s_counts[3]);
         }
 
-        if (s->calling_party
+        if ((s->calling_party || (s->v90_mode && !s->calling_party))
             && s->phase3_j_trn16 >= 0
-            && s->received_event == V34_EVENT_NONE
+            && !s->phase3_s_present
             && s->duration >= 64
             && s->bit_count >= 24)
         {
+            s->phase3_s_present = true;
+            s->phase3_s_event_count++;
             s->received_event = V34_EVENT_S;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: far-end S detected for caller after J decode (rev=%d/32 bits=%d trn=%s)\n",
+                     "Rx - Phase 3: distinct far-end S detected after J decode (count=%d role=%s rev=%d/32 bits=%d trn=%s)\n",
+                     s->phase3_s_event_count,
+                     s->calling_party ? "caller" : "V.90 digital answerer",
                      s->bit_count, s->phase3_j_bits,
                      s->phase3_j_trn16 ? "16-point" : "4-point");
+        }
+
+        /* Rearm only after the S reversal pattern has genuinely disappeared;
+           this lets V.90 distinguish the later DIL-termination S transition
+           without counting one long S signal more than once. */
+        if (s->phase3_s_present && s->duration >= 96 && s->bit_count <= 8)
+        {
+            s->phase3_s_present = false;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 3: S detector rearmed after transition %d\n",
+                     s->phase3_s_event_count);
         }
 
         /* In this path detection is armed only after local J starts (Phase 3),
@@ -7983,6 +7998,12 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s)
+{
+    return s ? s->rx.phase3_s_event_count : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier)
 {
     int i;
@@ -8077,6 +8098,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.total_baud_timing_correction = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
+    s->rx.phase3_s_event_count = 0;
+    s->rx.phase3_s_present = false;
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));

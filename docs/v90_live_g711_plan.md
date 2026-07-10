@@ -33,6 +33,14 @@ Completed on 2026-07-10:
 - six-symbol data-frame continuity across arbitrary RTP pull sizes
 - live raw RX/TX taps and G.711 path counters
 - μ-law and A-law raw/linear parity, reset, chunking, and round-trip tests
+- typed strict receiver events for INFO1a, S, TRN/J, CP, E/B1, failure,
+  retrain, and timeout conditions
+- live Phase 3 entry gated by a CRC-valid, reserved-bit-clean INFO1a with valid
+  V.90 symbol-rate fields
+- distinct received-S event counting so Jd and DIL termination cannot collapse
+  into one sticky receiver status
+- negative transition tests proving J/J-prime cannot terminate Jd and malformed
+  Phase 4 input cannot end TRN2d
 
 The parity test confirms why the raw bearer is required: 72 of the first 512
 μ-law Phase 3 octets change when decoded to linear PCM and re-encoded, including
@@ -97,8 +105,12 @@ Remaining baseline issues:
   not the negotiated V.90 section 5 mapper.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- some live transitions are inferred from transmitter stages instead of
-  explicit receiver events.
+- the live analogue-side CP decoder is not yet connected to
+  `V90_RX_EVENT_CP_VALID`.
+- the current digital Phase 4 control transmitter is a CP-shaped compatibility
+  placeholder; V.90 requires the digital modem to transmit MP/MP-prime.
+- the synthetic coupled-training harness still infers some remote events from
+  its proxy transmitter stages even though the live Jd/DIL path no longer does.
 - `clock_recovery` is initialized and reset but is not connected to RTP timing.
 
 ## Target Interfaces

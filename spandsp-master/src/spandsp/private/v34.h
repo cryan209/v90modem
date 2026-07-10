@@ -839,6 +839,8 @@ typedef struct
     int persistence2;
     int phase3_s_guard_samples;
     int phase3_s_hits;
+    int phase3_s_event_count;
+    bool phase3_s_present;
     uint8_t phase3_s_ring[32];
     float phase3_s_mag_ring[32];
     int phase3_s_counts[4];

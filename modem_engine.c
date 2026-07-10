@@ -529,7 +529,7 @@ static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
-static bool           g_v90_phase3_j_seen = false;
+static int            g_v90_phase3_s_events = 0;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -851,7 +851,7 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_capture_search = 0;
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
-    g_v90_phase3_j_seen = false;
+    g_v90_phase3_s_events = 0;
     g_last_v90_bridge_rx_stage = -1;
     g_last_v90_bridge_tx_stage = -1;
     g_last_v90_bridge_rx_event = -1;
@@ -1719,30 +1719,34 @@ void me_rx_audio(const int16_t *amp, int len)
                         || rx_event != g_last_v90_bridge_rx_event))
                 {
                     fprintf(stderr,
-                            "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d j_seen=%d\n",
+                            "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d s_events=%d\n",
                             g_v90_phase3_started ? 1 : 0,
                             g_v90 ? 1 : 0,
                             v34_rx_stage_name(rx_stage), rx_stage,
                             v34_tx_stage_name(tx_stage), tx_stage,
                             rx_event,
-                            g_v90_phase3_j_seen ? 1 : 0);
+                            g_v90_phase3_s_events);
                     g_last_v90_bridge_rx_stage = rx_stage;
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
                 }
 
-                if (g_mod == ME_MOD_V90
-                    && g_v90
-                    && !g_v90_phase3_j_seen
-                    && (rx_event == V34_EVENT_J || rx_event == V34_EVENT_J_DASHED))
-                {
-                    fprintf(stderr,
-                            "[ME] V.90 Phase 3: far-end %s seen in RX, terminating external Jd at the next boundary\n",
-                            (rx_event == V34_EVENT_J_DASHED) ? "J'" : "J");
-                    trace_phase("V90 Phase3 RX event=%s -> terminate external Jd",
-                                (rx_event == V34_EVENT_J_DASHED) ? "J_DASHED" : "J");
-                    v90_notify_s_detected(g_v90);
-                    g_v90_phase3_j_seen = true;
+                if (g_mod == ME_MOD_V90 && g_v90) {
+                    int s_events = v34_get_phase3_s_event_count(g_v34);
+
+                    while (g_v90_phase3_s_events < s_events) {
+                        bool accepted;
+
+                        g_v90_phase3_s_events++;
+                        accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
+                        fprintf(stderr,
+                                "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d\n",
+                                g_v90_phase3_s_events,
+                                (int)v90_get_tx_phase(g_v90),
+                                accepted ? 1 : 0);
+                        trace_phase("V90 strict RX event=S count=%d accepted=%d",
+                                    g_v90_phase3_s_events, accepted ? 1 : 0);
+                    }
                 }
                 /* RX PCM dump during training */
                 {
@@ -1781,20 +1785,45 @@ void me_rx_audio(const int16_t *amp, int len)
     }
 }
 
+static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
+{
+    v34_v90_info1a_t received;
+
+    if (!info || !g_v34
+        || !v34_get_v90_received_info1a(g_v34, &received))
+        return false;
+
+    info->md = (uint8_t)received.md;
+    info->u_info = (uint8_t)received.u_info;
+    info->upstream_symbol_rate_code = (uint8_t)received.upstream_symbol_rate_code;
+    info->downstream_rate_code = (uint8_t)received.downstream_rate_code;
+    info->freq_offset = (int16_t)received.freq_offset;
+
+    /* V.90 Table 10: reserved fields are zero, upstream is one of the
+     * specified 3000/3200/3429 codes, and downstream PCM is code 6 (8000). */
+    return received.raw_12_17 == 0
+        && received.raw_32_33 == 0
+        && received.u_info > 0
+        && received.upstream_symbol_rate_code >= 3
+        && received.upstream_symbol_rate_code <= 5
+        && received.downstream_rate_code == 6
+        && v90_info1a_validate(info);
+}
+
 /* Called with g_state_mtx held. */
 static void prepare_v90_phase3_locked(void)
 {
-    int tx_stage;
-    int u_info;
+    v90_info1a_t info1a;
 
     if (g_mod != ME_MOD_V90 || !g_v34 || g_v90_phase3_started)
         return;
 
-    tx_stage = v34_get_tx_stage(g_v34);
-    u_info = v34_get_v90_u_info(g_v34);
-    if (tx_stage >= V34_TX_STAGE_FIRST_S && u_info > 0) {
-        ME_LOG("[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
-               tx_stage, u_info);
+    if (get_strict_v90_info1a_locked(&info1a)) {
+        ME_LOG("[ME] V.90 strict RX event: valid INFO1a U_INFO=%u MD=%u upstream_code=%u downstream_code=%u\n",
+               (unsigned)info1a.u_info,
+               (unsigned)info1a.md,
+               (unsigned)info1a.upstream_symbol_rate_code,
+               (unsigned)info1a.downstream_rate_code);
         if (!g_v90) {
             v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
             g_v90 = v90_init_with_v34(g_v34, law);
@@ -1802,13 +1831,27 @@ static void prepare_v90_phase3_locked(void)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
         }
         if (g_v90) {
-            v90_start_phase3(g_v90, u_info);
+            v90_start_phase3(g_v90, info1a.u_info);
             g_v90_phase3_started = true;
             g_v90_completion_deferred_logged = false;
             g_v90_wait_info1_logged = false;
+            trace_phase("V90 strict RX event=INFO1A_VALID u_info=%u -> Phase3",
+                        (unsigned)info1a.u_info);
         }
-    } else if (tx_stage >= V34_TX_STAGE_FIRST_S && !g_v90_wait_info1_logged) {
-        ME_LOG("[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
+    } else if (!g_v90_wait_info1_logged) {
+        v34_v90_info1a_t received;
+
+        if (v34_get_v90_received_info1a(g_v34, &received)) {
+            ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d\n",
+                   received.raw_12_17,
+                   received.raw_32_33,
+                   received.u_info,
+                   received.upstream_symbol_rate_code,
+                   received.downstream_rate_code);
+            trace_phase("V90 strict RX event=INFO1A_INVALID -> remain Phase2");
+        } else {
+            ME_LOG("[ME] V.90: waiting for CRC-valid INFO1a before Phase 3 TX\n");
+        }
         g_v90_wait_info1_logged = true;
     }
 }
@@ -1881,8 +1924,6 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (!g_v90_phase3_started || !g_v90 || v90_using_internal_v34_tx(g_v90))
             return false;
 
-        if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
-            v90_notify_s_detected(g_v90);
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                 return false;
@@ -1967,8 +2008,6 @@ void me_tx_audio(int16_t *amp, int len)
                 prepare_v90_phase3_locked();
 
                 if (g_v90_phase3_started && g_v90) {
-                    if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
-                        v90_notify_s_detected(g_v90);
                     if (v90_using_internal_v34_tx(g_v90)) {
                         v34_tx(g_v34, amp, len);
                     } else {
@@ -2181,7 +2220,7 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->v90_bridge_tx_stage = g_last_v90_bridge_tx_stage;
     snapshot->v90_bridge_rx_event = g_last_v90_bridge_rx_event;
     snapshot->v90_phase3_started = g_v90_phase3_started ? 1 : 0;
-    snapshot->v90_phase3_j_seen = g_v90_phase3_j_seen ? 1 : 0;
+    snapshot->v90_phase3_s_events = g_v90_phase3_s_events;
     snapshot->v90_dil_valid = g_v90_pending_dil_valid ? 1 : 0;
     snapshot->phase_elapsed_ms = (g_phase_start_ms != 0 && g_state != ME_IDLE)
         ? (trace_now_ms() - g_phase_start_ms)

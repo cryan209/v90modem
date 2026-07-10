@@ -340,6 +340,11 @@ SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *
     \return The current rx.received_event value (v34_events_e). */
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
 
+/*! Get the number of distinct, strictly detected Phase 3 S transitions.
+    param s The modem context.
+    eturn A monotonically increasing count for the current training attempt. */
+SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s);
+
 /*! Get the number of Phase 3 J-detector bits accumulated so far.
     \param s The modem context.
     \return The current rx.phase3_j_bits counter. */

@@ -54,7 +54,7 @@ typedef struct {
     int v90_bridge_tx_stage;
     int v90_bridge_rx_event;
     int v90_phase3_started;
-    int v90_phase3_j_seen;
+    int v90_phase3_s_events;
     int v90_dil_valid;
     uint64_t phase_elapsed_ms;
     uint64_t g711_rx_octets;
