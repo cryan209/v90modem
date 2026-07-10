@@ -367,6 +367,8 @@ static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int
 static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
+static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
+static bool test_v90_data_codeword_state(v91_law_t law);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -607,6 +609,149 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
     free(actual);
     v90_free(tx);
     return true;
+}
+
+static bool test_v90_phase3_raw_codeword_parity(v91_law_t law)
+{
+    enum { SYMBOLS = 512, U_INFO = 66 };
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_state_t *raw_tx = NULL;
+    v90_state_t *linear_tx = NULL;
+    uint8_t raw[SYMBOLS];
+    uint8_t canonical[SYMBOLS];
+    int16_t linear[SYMBOLS];
+    int canonical_changes = 0;
+    static const int sd_ucode[6] = {
+        16 + U_INFO, 0, 16 + U_INFO, 16 + U_INFO, 0, 16 + U_INFO
+    };
+    static const bool sd_positive[6] = {true, true, true, false, false, false};
+    bool ok = false;
+
+    vpcm_log("Test: V.90 Phase 3 raw G.711 parity (%s)", law_name);
+    raw_tx = v90_init_data_pump(v90_law);
+    linear_tx = v90_init_data_pump(v90_law);
+    if (!raw_tx || !linear_tx) {
+        fprintf(stderr, "V.90 raw parity state initialization failed\n");
+        goto done;
+    }
+
+    v90_start_phase3(raw_tx, U_INFO);
+    v90_start_phase3(linear_tx, U_INFO);
+    if (v90_phase3_tx_codewords(raw_tx, raw, SYMBOLS) != SYMBOLS
+        || v90_phase3_tx(linear_tx, linear, SYMBOLS) != SYMBOLS) {
+        fprintf(stderr, "V.90 raw parity generation failed\n");
+        goto done;
+    }
+
+    for (int i = 0; i < SYMBOLS; i++) {
+        canonical[i] = v91_linear_to_codeword(law, linear[i]);
+        if (linear[i] != v91_codeword_to_linear(law, raw[i])) {
+            fprintf(stderr,
+                    "V.90 raw/linear sample mismatch at symbol %d: raw=%02X raw-linear=%d linear=%d\n",
+                    i, raw[i], v91_codeword_to_linear(law, raw[i]), linear[i]);
+            goto done;
+        }
+        if (canonical[i] != raw[i])
+            canonical_changes++;
+    }
+    for (int i = 0; i < 6; i++) {
+        uint8_t expected = v91_ucode_to_codeword(law, sd_ucode[i], sd_positive[i]);
+        if (raw[i] != expected) {
+            fprintf(stderr,
+                    "V.90 raw Sd mismatch at symbol %d: expected=%02X actual=%02X\n",
+                    i, expected, raw[i]);
+            goto done;
+        }
+    }
+
+    if (law == V91_LAW_ULAW && canonical_changes == 0) {
+        fprintf(stderr, "V.90 raw parity test did not exercise a non-canonical u-law codeword\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: V.90 Phase 3 raw G.711 parity (%s, symbols=%d, linear-roundtrip changes=%d)",
+             law_name, SYMBOLS, canonical_changes);
+    ok = true;
+
+done:
+    if (raw_tx)
+        v90_free(raw_tx);
+    if (linear_tx)
+        v90_free(linear_tx);
+    return ok;
+}
+
+static bool test_v90_data_codeword_state(v91_law_t law)
+{
+    enum { OCTETS = 96 };
+    static const int chunk_sizes[] = {6, 18, 30, 42};
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_state_t *whole_tx = NULL;
+    v90_state_t *chunked_tx = NULL;
+    v90_state_t *rx = NULL;
+    uint8_t input[OCTETS];
+    uint8_t whole[OCTETS];
+    uint8_t chunked[OCTETS];
+    uint8_t repeated[OCTETS];
+    uint8_t decoded[OCTETS];
+    int pos = 0;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 data codeword state and chunking (%s)", law_name);
+    for (int i = 0; i < OCTETS; i++)
+        input[i] = (uint8_t) ((i * 73 + 19) & 0xFF);
+
+    whole_tx = v90_init_data_pump(v90_law);
+    chunked_tx = v90_init_data_pump(v90_law);
+    rx = v90_init_data_pump(v90_law);
+    if (!whole_tx || !chunked_tx || !rx) {
+        fprintf(stderr, "V.90 data codeword state initialization failed\n");
+        goto done;
+    }
+
+    if (v90_tx_codewords(whole_tx, whole, OCTETS, input, OCTETS) != OCTETS) {
+        fprintf(stderr, "V.90 whole-buffer data mapping failed\n");
+        goto done;
+    }
+    for (size_t i = 0; i < sizeof(chunk_sizes) / sizeof(chunk_sizes[0]); i++) {
+        int n = chunk_sizes[i];
+        if (v90_tx_codewords(chunked_tx, chunked + pos, n, input + pos, n) != n) {
+            fprintf(stderr, "V.90 chunked data mapping failed at offset %d\n", pos);
+            goto done;
+        }
+        pos += n;
+    }
+    if (pos != OCTETS || memcmp(whole, chunked, OCTETS) != 0) {
+        fprintf(stderr, "V.90 data mapping changed across packet chunking\n");
+        goto done;
+    }
+
+    v90_reset_data_mode(chunked_tx);
+    if (v90_tx_codewords(chunked_tx, repeated, OCTETS, input, OCTETS) != OCTETS
+        || memcmp(whole, repeated, OCTETS) != 0) {
+        fprintf(stderr, "V.90 data mapper reset did not reproduce the initial stream\n");
+        goto done;
+    }
+    if (v90_rx_codewords(rx, decoded, OCTETS, whole, OCTETS) != OCTETS
+        || memcmp(input, decoded, OCTETS) != 0) {
+        fprintf(stderr, "V.90 data codeword round trip failed\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: V.90 data codeword state and chunking (%s, octets=%d)",
+             law_name, OCTETS);
+    ok = true;
+
+done:
+    if (whole_tx)
+        v90_free(whole_tx);
+    if (chunked_tx)
+        v90_free(chunked_tx);
+    if (rx)
+        v90_free(rx);
+    return ok;
 }
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
@@ -5233,20 +5378,22 @@ static bool test_v91_full_duplex(v91_law_t law)
 
         a_prod = v91_tx_codewords(&a_tx, a_to_b, 160, a_input + a_in_pos, a_want);
         b_prod = v91_tx_codewords(&b_tx, b_to_a, 160, b_input + b_in_pos, b_want);
-        if (!vpcm_call_transfer_codewords(&caller,
-                                          &answerer,
-                                          a_to_b,
-                                          a_prod,
-                                          false,
-                                          a_to_b,
-                                          sizeof(a_to_b))
-            || !vpcm_call_transfer_codewords(&answerer,
-                                             &caller,
-                                             b_to_a,
-                                             b_prod,
-                                             false,
-                                             b_to_a,
-                                             sizeof(b_to_a))) {
+        if ((a_prod > 0
+             && !vpcm_call_transfer_codewords(&caller,
+                                              &answerer,
+                                              a_to_b,
+                                              a_prod,
+                                              false,
+                                              a_to_b,
+                                              sizeof(a_to_b)))
+            || (b_prod > 0
+                && !vpcm_call_transfer_codewords(&answerer,
+                                                 &caller,
+                                                 b_to_a,
+                                                 b_prod,
+                                                 false,
+                                                 b_to_a,
+                                                 sizeof(b_to_a)))) {
             fprintf(stderr, "V.91 full duplex stream transfer failed\n");
             return false;
         }
@@ -5301,6 +5448,10 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
+        && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
+        && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
+        && test_v90_data_codeword_state(V91_LAW_ULAW)
+        && test_v90_data_codeword_state(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)

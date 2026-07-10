@@ -20,6 +20,24 @@ on a linear-PCM round trip to preserve the selected codeword. The upstream path
 must retain the raw G.711 capture while also decoding it once to linear PCM for
 the V.34 receiver.
 
+## Implementation Status
+
+Completed on 2026-07-10:
+
+- Milestone 0 green regression baseline
+- `make test` running the full loopback suite
+- raw `me_rx_g711()` and `me_tx_g711()` live engine APIs
+- direct PJMEDIA passthrough routing through the raw APIs
+- raw V.90 Phase 3/4 codeword generation in `v90.c`
+- one live `v90_state_t` for Phase 3, Phase 4, and connected data
+- six-symbol data-frame continuity across arbitrary RTP pull sizes
+- live raw RX/TX taps and G.711 path counters
+- μ-law and A-law raw/linear parity, reset, chunking, and round-trip tests
+
+The parity test confirms why the raw bearer is required: 72 of the first 512
+μ-law Phase 3 octets change when decoded to linear PCM and re-encoded, including
+the `0x7F` negative-zero codeword. The raw path preserves those exact octets.
+
 ## Scope
 
 This plan covers:
@@ -73,12 +91,8 @@ The repository already has:
 - raw G.711 capture support in the loopback harness
 - real-modem capture artifacts
 
-Known baseline issues:
+Remaining baseline issues:
 
-- `sip_modem.c` asks the modem engine for linear PCM and recompands it even
-  when PJMEDIA passthrough is enabled.
-- `modem_engine.c` contains a second simplified V.90 encoder instead of using
-  `v90_state_t` for live data.
 - the current V.90 data APIs implement a simplified byte-per-codeword mapping,
   not the negotiated V.90 section 5 mapper.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
@@ -86,9 +100,6 @@ Known baseline issues:
 - some live transitions are inferred from transmitter stages instead of
   explicit receiver events.
 - `clock_recovery` is initialized and reset but is not connected to RTP timing.
-- `make` succeeds and the session suite passes, but `--all-tests` currently
-  stops in the V.91 raw-G.711 full-duplex test when one direction reaches a
-  zero-length transfer.
 
 ## Target Interfaces
 
@@ -366,6 +377,8 @@ Once the physical layer exchanges reliable unframed data:
 - test flow control between the negotiated modem rate and the PTY/TCP endpoint
 
 ## First Patch Set
+
+Status: completed on 2026-07-10.
 
 The first implementation patch set should stay narrow:
 

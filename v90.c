@@ -147,12 +147,25 @@ struct v90_state_s {
     int              suv_bit_pos;               /* Current bit index in suv_bits */
 
     /* Downstream PCM encoder state (data mode) */
+    v90_scrambler_t  data_scrambler;
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
     uint32_t         rx_scramble_reg;
     int              rx_prev_sign;
 
     bool             owns_v34;      /* true if we allocated v34 (v90_init), false if external */
 };
+
+static void v90_reset_data_pump_state(v90_state_t *s)
+{
+    if (!s)
+        return;
+    /* Preserve the legacy live mapper's all-ones data scrambler seed while
+     * keeping the Phase 3/4 scrambler independent. */
+    s->data_scrambler.sr = 0x7FFFFF;
+    s->prev_sign = 0;
+    s->rx_scramble_reg = 0x7FFFFF;
+    s->rx_prev_sign = 0;
+}
 
 /* ---- PCM codeword helpers ---- */
 
@@ -175,13 +188,13 @@ static inline uint8_t v90_pcm_idle(v90_law_t law)
     return (law == V90_LAW_ALAW) ? (uint8_t)0xD5 : (uint8_t)0xFF;
 }
 
-/* Generate a signed PCM sample from a Ucode and sign bit.
+/* Generate a signed G.711 codeword from a Ucode and sign bit.
  * sign=1 → positive, sign=0 → negative. */
-static inline int16_t v90_pcm_signed(v90_law_t law, int ucode, int sign)
+static inline uint8_t v90_pcm_signed_codeword(v90_law_t law, int ucode, int sign)
 {
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
     pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
-    return v90_pcm_to_linear(law, pcm);
+    return pcm;
 }
 
 static void v90_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
@@ -301,7 +314,7 @@ static uint8_t v90_encode_octet_to_codeword(v90_state_t *s, uint8_t in_octet)
     int sign;
     uint8_t pcm;
 
-    sc = v90_scramble_byte(&s->scrambler, in_octet);
+    sc = v90_scramble_byte(&s->data_scrambler, in_octet);
     mag = sc & 0x7F;
     s_bit = (sc >> 7) & 1;
 
@@ -990,7 +1003,7 @@ static void v90_dil_reset_tx(v90_state_t *s)
     s->dil_terminate_requested = false;
 }
 
-static int16_t v90_dil_sample(v90_state_t *s)
+static uint8_t v90_dil_codeword(v90_state_t *s)
 {
     int seg_idx;
     int n;
@@ -1009,7 +1022,7 @@ static int16_t v90_dil_sample(v90_state_t *s)
         s->tx_phase = V90_TX_RI;
         s->sample_count = 0;
         s->phase4_hold_logged = false;
-        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        return v90_pcm_idle(s->law);
     }
 
     seg_idx = s->dil_segment_index % n;
@@ -1040,7 +1053,7 @@ static int16_t v90_dil_sample(v90_state_t *s)
         }
     }
 
-    return v90_pcm_signed(s->law, ucode, sp_bit);
+    return v90_pcm_signed_codeword(s->law, ucode, sp_bit);
 }
 
 bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len)
@@ -1271,8 +1284,8 @@ bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *
     return true;
 }
 
-/* Generate one Phase 3 TX sample */
-static int16_t v90_phase3_sample(v90_state_t *s)
+/* Generate one raw G.711 codeword for the Phase 3/4 transmit sequence. */
+static uint8_t v90_phase3_codeword(v90_state_t *s)
 {
     int sign;
 
@@ -1287,11 +1300,11 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->sample_count++;
 
             switch (pos_in_pattern) {
-            case 0: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
-            case 1: return v90_pcm_signed(s->law, 0, 1);       /* +0 */
-            case 2: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
-            case 3: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
-            case 4: return v90_pcm_signed(s->law, 0, 0);       /* -0 */
+            case 0: return v90_pcm_signed_codeword(s->law, w_ucode, 1); /* +W */
+            case 1: return v90_pcm_signed_codeword(s->law, 0, 1);       /* +0 */
+            case 2: return v90_pcm_signed_codeword(s->law, w_ucode, 1); /* +W */
+            case 3: return v90_pcm_signed_codeword(s->law, w_ucode, 0); /* -W */
+            case 4: return v90_pcm_signed_codeword(s->law, 0, 0);       /* -0 */
             case 5:
                 s->rep_count++;
                 if (s->rep_count >= V90_SD_REPS) {
@@ -1301,7 +1314,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                     s->sample_count = 0;
                     s->rep_count = 0;
                 }
-                return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
+                return v90_pcm_signed_codeword(s->law, w_ucode, 0); /* -W */
             }
             break;  /* unreachable */
         }
@@ -1314,11 +1327,11 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->sample_count++;
 
             switch (pos_in_pattern) {
-            case 0: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
-            case 1: return v90_pcm_signed(s->law, 0, 0);       /* -0 */
-            case 2: return v90_pcm_signed(s->law, w_ucode, 0); /* -W */
-            case 3: return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
-            case 4: return v90_pcm_signed(s->law, 0, 1);       /* +0 */
+            case 0: return v90_pcm_signed_codeword(s->law, w_ucode, 0); /* -W */
+            case 1: return v90_pcm_signed_codeword(s->law, 0, 0);       /* -0 */
+            case 2: return v90_pcm_signed_codeword(s->law, w_ucode, 0); /* -W */
+            case 3: return v90_pcm_signed_codeword(s->law, w_ucode, 1); /* +W */
+            case 4: return v90_pcm_signed_codeword(s->law, 0, 1);       /* +0 */
             case 5:
                 s->rep_count++;
                 if (s->rep_count >= V90_SD_BAR_REPS) {
@@ -1328,7 +1341,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                     /* §8.4.5: scrambler initialized to zero for TRN1d */
                     v90_scrambler_init(&s->scrambler);
                 }
-                return v90_pcm_signed(s->law, w_ucode, 1); /* +W */
+                return v90_pcm_signed_codeword(s->law, w_ucode, 1); /* +W */
             }
             break;  /* unreachable */
         }
@@ -1351,7 +1364,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                 s->jd_bit_pos = 0;
                 /* Scrambler continues from TRN1d into Jd (not reinitialized) */
             }
-            return v90_pcm_signed(s->law, s->u_info, sign);
+            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
         }
 
     case V90_TX_JD:
@@ -1372,7 +1385,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                 s->tx_phase = V90_TX_JD_PRIME;
                 s->sample_count = 0;
             }
-            return v90_pcm_signed(s->law, s->u_info, sign);
+            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
         }
 
     case V90_TX_JD_PRIME:
@@ -1393,7 +1406,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
             }
-            return v90_pcm_signed(s->law, s->u_info, sign);
+            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
         }
 
     case V90_TX_DIL:
@@ -1402,7 +1415,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                     s->dil.n, s->dil.lsp, s->dil.ltp);
             s->phase4_hold_logged = true;
         }
-        return v90_dil_sample(s);
+        return v90_dil_codeword(s);
 
     case V90_TX_RI:
         /* §9.4.1.1 Ri: retrain init — send idle codewords for V90_RI_SYMBOLS */
@@ -1416,7 +1429,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->sample_count = 0;
             s->phase4_hold_logged = false;
         }
-        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        return v90_pcm_idle(s->law);
 
     case V90_TX_TRN2D:
         /* §9.4.1.2 TRN2d: scrambled ones at U_INFO until cp_ready is set */
@@ -1441,7 +1454,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
         }
         sign = v90_scramble_bit(&s->scrambler, 1);
         s->sample_count++;
-        return v90_pcm_signed(s->law, s->u_info, sign);
+        return v90_pcm_signed_codeword(s->law, s->u_info, sign);
 
     case V90_TX_SUVD:
         /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue), no ack.
@@ -1456,13 +1469,13 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->sample_count = 0;
             s->phase4_hold_logged = false;
             s->cp_bit_pos = 0;
-            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+            return v90_pcm_idle(s->law);
         }
         {
             int suv_bit = s->suv_bits[s->suv_bit_pos++] & 1;
             suv_bit = v90_scramble_bit(&s->scrambler, suv_bit);
             s->diff_enc ^= suv_bit;
-            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+            return v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
         }
 
     case V90_TX_CP:
@@ -1485,13 +1498,13 @@ static int16_t v90_phase3_sample(v90_state_t *s)
                 /* V.90: CP → B1d */
                 s->tx_phase = V90_TX_B1D;
             }
-            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+            return v90_pcm_idle(s->law);
         }
         {
             int cp_bit = s->cp_bits[s->cp_bit_pos++] & 1;
             cp_bit = v90_scramble_bit(&s->scrambler, cp_bit);
             s->diff_enc ^= cp_bit;
-            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+            return v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
         }
 
     case V90_TX_SUVD_ACK:
@@ -1506,13 +1519,13 @@ static int16_t v90_phase3_sample(v90_state_t *s)
             s->tx_phase = V90_TX_ED;
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+            return v90_pcm_idle(s->law);
         }
         {
             int suv_bit = s->suv_bits[s->suv_bit_pos++] & 1;
             suv_bit = v90_scramble_bit(&s->scrambler, suv_bit);
             s->diff_enc ^= suv_bit;
-            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+            return v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
         }
 
     case V90_TX_ED:
@@ -1532,7 +1545,7 @@ static int16_t v90_phase3_sample(v90_state_t *s)
         {
             int zero_bit = v90_scramble_bit(&s->scrambler, 0);
             s->diff_enc ^= zero_bit;
-            return v90_pcm_signed(s->law, s->u_info, s->diff_enc);
+            return v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
         }
 
     case V90_TX_B1D:
@@ -1540,20 +1553,21 @@ static int16_t v90_phase3_sample(v90_state_t *s)
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] Phase 4: B1d (%d symbols), entering data mode\n", V90_B1D_SYMBOLS);
             s->phase4_hold_logged = true;
-            s->training_complete = true;
         }
         s->sample_count++;
         if (s->sample_count >= V90_B1D_SYMBOLS) {
             s->tx_phase = V90_TX_DATA;
             s->sample_count = 0;
+            v90_reset_data_pump_state(s);
+            s->training_complete = true;
         }
-        return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+        return v90_pcm_idle(s->law);
 
     default:
         break;
     }
 
-    return v90_pcm_to_linear(s->law, v90_pcm_idle(s->law));
+    return v90_pcm_idle(s->law);
 }
 
 /* ---- Public API ---- */
@@ -1571,9 +1585,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->owns_v34 = false;
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
-    s->prev_sign = 0;
-    s->rx_scramble_reg = 0;
-    s->rx_prev_sign = 0;
+    v90_reset_data_pump_state(s);
     s->phase4_hold_logged = false;
     s->jd_terminate_requested = false;
     s->training_complete = false;
@@ -1608,9 +1620,7 @@ v90_state_t *v90_init(int baud_rate,
     s->u_info = 80;  /* Default U_INFO (safe mid-range value) */
     v90_scrambler_init(&s->scrambler);
     s->diff_enc = 0;
-    s->prev_sign = 0;
-    s->rx_scramble_reg = 0;
-    s->rx_prev_sign = 0;
+    v90_reset_data_pump_state(s);
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_requested = false;
@@ -1685,9 +1695,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->training_complete = false;
     s->dil_terminate_requested = false;
     s->use_internal_v34_tx = false;
-    s->prev_sign = 0;
-    s->rx_scramble_reg = 0;
-    s->rx_prev_sign = 0;
+    v90_reset_data_pump_state(s);
     v90_dil_reset_tx(s);
 
     s->tx_phase = V90_TX_SD;
@@ -1758,10 +1766,26 @@ void v90_enable_v92_mode(v90_state_t *s)
         s->v92_mode = true;
 }
 
+void v90_reset_data_mode(v90_state_t *s)
+{
+    v90_reset_data_pump_state(s);
+}
+
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
 {
+    for (int i = 0; i < len; i++) {
+        uint8_t codeword = v90_phase3_codeword(s);
+        amp[i] = v90_pcm_to_linear(s->law, codeword);
+    }
+    return len;
+}
+
+int v90_phase3_tx_codewords(v90_state_t *s, uint8_t codewords[], int len)
+{
+    if (!s || !codewords || len <= 0)
+        return 0;
     for (int i = 0; i < len; i++)
-        amp[i] = v90_phase3_sample(s);
+        codewords[i] = v90_phase3_codeword(s);
     return len;
 }
 

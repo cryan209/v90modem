@@ -143,6 +143,21 @@ python3 -m venv .venv
 
 ## Usage
 
+### Live raw G.711 taps
+
+When PJMEDIA passthrough is available, the live modem engine now receives and
+transmits PCMU/PCMA octets directly. To capture the engine-side bearer, point
+`VPCM_G711_TAP_DIR` at an existing directory before starting the modem:
+
+```bash
+mkdir -p /tmp/v90-g711
+VPCM_G711_TAP_DIR=/tmp/v90-g711 ./sip_v90_modem ...
+```
+
+This writes `live-rx.g711` and `live-tx.g711`. Modem diagnostic snapshots also
+report total RX/TX octets and split outgoing octets between raw V.90 generation
+and the linear compatibility path.
+
 ### Softmodem Debug Mode (no PJMEDIA passthrough)
 
 If your local `pjproject` build does not include PJMEDIA passthrough codecs,

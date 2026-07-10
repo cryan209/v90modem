@@ -57,6 +57,10 @@ typedef struct {
     int v90_phase3_j_seen;
     int v90_dil_valid;
     uint64_t phase_elapsed_ms;
+    uint64_t g711_rx_octets;
+    uint64_t g711_tx_octets;
+    uint64_t g711_raw_v90_tx_octets;
+    uint64_t g711_linear_tx_octets;
 } me_diag_snapshot_t;
 
 /* ------------------------------------------------------------------ */
@@ -101,6 +105,13 @@ void me_rx_audio(const int16_t *amp, int len);
  * amp: output buffer to fill, len = samples to generate.
  */
 void me_tx_audio(int16_t *amp, int len);
+
+/*
+ * Receive and transmit octet-transparent G.711 media. These are the preferred
+ * live PJMEDIA entry points when the negotiated codec is PCMU or PCMA.
+ */
+void me_rx_g711(const uint8_t *codewords, int count);
+int  me_tx_g711(uint8_t *codewords, int count);
 
 /* Notify the engine that a SIP call has been connected (audio active). */
 void me_on_sip_connected(void);

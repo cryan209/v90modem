@@ -125,68 +125,11 @@ enum v34_events_e {
     V34_EVENT_TRAINING_FAILED,
 };
 
-/* ------------------------------------------------------------------ */
-/* V.90 downstream encoder constants (ITU-T V.90 §5)                  */
-/* ------------------------------------------------------------------ */
-
-/*
- * Number of positive constellation points per data frame interval.
- * V.90 uses 6 data frame intervals (i=0..5), each with Mi points.
- * For simplicity we use Mi=128 (7 magnitude bits per symbol),
- * giving a theoretical max of 7+1 (sign) = 8 bits/symbol @ 8000 sym/s.
- *
- * K=42 magnitude bits + S=6 sign bits per 6-symbol frame.
- * Scrambled throughput ≈ 48 bits/frame × (8000/6 frames/s) ≈ 64 kbps;
- * after framing/overhead the effective rate is ≈ 56 kbps.
- *
- * NOTE: In a conforming implementation, Mi is negotiated during training.
- */
-#define V90_MI          128     /* Constellation points per frame interval */
-#define V90_K_BITS      42      /* Magnitude data bits per 6-symbol frame */
-#define V90_FRAME_LEN   6       /* Symbols per data frame */
-#define V90_RATE_BPS    56000   /* Advertised downstream rate */
-
-/*
- * Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90).
- *
- * µ-law: simple formula: positive codeword = 0xFF - Ucode.
- * A-law: independent mapping defined in Table 1 (not derivable via linear).
- * The polarity (sign) is applied separately via the MSB of the G.711 byte.
- */
-
-/* A-law positive codewords indexed by Ucode (from ITU-T V.90 Table 1) */
-static const uint8_t v90_ucode_to_alaw[128] = {
-    /* Ucode   0-  7 */ 0xD5, 0xD4, 0xD7, 0xD6, 0xD1, 0xD0, 0xD3, 0xD2,
-    /* Ucode   8- 15 */ 0xDD, 0xDC, 0xDF, 0xDE, 0xD9, 0xD8, 0xDB, 0xDA,
-    /* Ucode  16- 23 */ 0xC5, 0xC4, 0xC7, 0xC6, 0xC1, 0xC0, 0xC3, 0xC2,
-    /* Ucode  24- 31 */ 0xCD, 0xCC, 0xCF, 0xCE, 0xC9, 0xC8, 0xCB, 0xCA,
-    /* Ucode  32- 39 */ 0xF5, 0xF4, 0xF7, 0xF6, 0xF1, 0xF0, 0xF3, 0xF2,
-    /* Ucode  40- 47 */ 0xFD, 0xFC, 0xFF, 0xFE, 0xF9, 0xF8, 0xFB, 0xFA,
-    /* Ucode  48- 55 */ 0xE5, 0xE4, 0xE7, 0xE6, 0xE1, 0xE0, 0xE3, 0xE2,
-    /* Ucode  56- 63 */ 0xED, 0xEC, 0xEF, 0xEE, 0xE9, 0xE8, 0xEB, 0xEA,
-    /* Ucode  64- 71 */ 0x95, 0x94, 0x97, 0x96, 0x91, 0x90, 0x93, 0x92,
-    /* Ucode  72- 79 */ 0x9D, 0x9C, 0x9F, 0x9E, 0x99, 0x98, 0x9B, 0x9A,
-    /* Ucode  80- 87 */ 0x85, 0x84, 0x87, 0x86, 0x81, 0x80, 0x83, 0x82,
-    /* Ucode  88- 95 */ 0x8D, 0x8C, 0x8F, 0x8E, 0x89, 0x88, 0x8B, 0x8A,
-    /* Ucode  96-103 */ 0xB5, 0xB4, 0xB7, 0xB6, 0xB1, 0xB0, 0xB3, 0xB2,
-    /* Ucode 104-111 */ 0xBD, 0xBC, 0xBF, 0xBE, 0xB9, 0xB8, 0xBB, 0xBA,
-    /* Ucode 112-119 */ 0xA5, 0xA4, 0xA7, 0xA6, 0xA1, 0xA0, 0xA3, 0xA2,
-    /* Ucode 120-127 */ 0xAD, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB, 0xAA,
-};
-
-/* Current G.711 law (set by sip_modem.c after codec negotiation) */
+/* Current G.711 law (set by sip_modem.c after codec negotiation). */
 static me_law_t g_law = ME_LAW_ULAW;
 
-/*
- * Convert a Ucode (0-127) to the positive G.711 codeword for the
- * currently negotiated law.
- */
-static inline uint8_t ucode_to_pcm_positive(int ucode)
-{
-    if (g_law == ME_LAW_ALAW)
-        return v90_ucode_to_alaw[ucode & 0x7F];
-    return (uint8_t)(0xFF - ucode);  /* µ-law */
-}
+#define V90_DATA_FRAME_LEN 6
+#define V90_RATE_BPS       56000
 
 /*
  * Convert a positive G.711 codeword to linear PCM, using the
@@ -199,114 +142,19 @@ static inline int16_t pcm_to_linear(uint8_t codeword)
     return ulaw_to_linear(codeword);
 }
 
+static inline uint8_t linear_to_pcm(int16_t sample)
+{
+    if (g_law == ME_LAW_ALAW)
+        return linear_to_alaw(sample);
+    return linear_to_ulaw(sample);
+}
+
 /*
  * Return the idle (silence) codeword for the current law.
  */
 static inline uint8_t pcm_idle(void)
 {
-    return (g_law == ME_LAW_ALAW) ? (uint8_t)0xD5 : (uint8_t)0xFF;
-}
-
-/* ------------------------------------------------------------------ */
-/* V.90 scrambler (V.34 polynomial GPC, ITU-T V.34 §7)                */
-/* ------------------------------------------------------------------ */
-
-/*
- * Self-synchronising scrambler using the V.34 generator polynomial:
- *   GPC(x) = x^23 + x^5 + 1   (23-stage LFSR)
- */
-typedef struct {
-    uint32_t sr; /* shift register, 23 bits significant */
-} v90_scrambler_t;
-
-static void v90_scrambler_init(v90_scrambler_t *s)
-{
-    s->sr = 0x7FFFFF; /* all-ones start state */
-}
-
-static uint8_t v90_scramble_byte(v90_scrambler_t *s, uint8_t in)
-{
-    uint8_t out = 0;
-    for (int i = 0; i < 8; i++) {
-        int in_bit  = (in >> i) & 1;
-        int fb      = ((s->sr >> 22) ^ (s->sr >> 4)) & 1; /* x^23 XOR x^5 */
-        int out_bit = in_bit ^ fb;
-        s->sr = ((s->sr << 1) | out_bit) & 0x7FFFFF;
-        out  |= (uint8_t)(out_bit << i);
-    }
-    return out;
-}
-
-/* ------------------------------------------------------------------ */
-/* V.90 downstream encoder state                                       */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    v90_scrambler_t scrambler;
-
-    /* Modulus encoder residue across frames */
-    uint64_t R;
-
-    /* Data frame interval index (0..5) */
-    int frame_idx;
-
-    /* Sign bit differential coding state (§5.4.5.1) */
-    int prev_sign; /* $5 of previous data frame */
-
-    /* Bit accumulator for pulling whole bytes from the upstream data buffer */
-    uint8_t  byte_acc;
-    int      bits_in_acc;
-} v90_enc_t;
-
-static void v90_enc_init(v90_enc_t *e)
-{
-    memset(e, 0, sizeof(*e));
-    v90_scrambler_init(&e->scrambler);
-    e->prev_sign = 0;
-}
-
-/*
- * Encode one 6-symbol data frame from the downstream data buffer.
- * Fills pcm_out[0..5] with µ-law codewords ready for the RTP stream.
- *
- * Uses simplified encoding (Mi=128 for all intervals, Sr=0 spectral shaping):
- *   1. Scramble 6 raw data bytes (one per symbol, 48 bits total)
- *   2. Split into 6 × (7 magnitude bits + 1 sign bit)
- *   3. Map magnitude → Ucode → µ-law positive code
- *   4. Apply sign via differential coding (§5.4.5.1)
- *   5. Set µ-law MSB from the differentially-coded sign
- */
-static void v90_encode_frame(v90_enc_t *e, const uint8_t *data_in,
-                              uint8_t *pcm_out)
-{
-    int sign = e->prev_sign;
-
-    for (int i = 0; i < V90_FRAME_LEN; i++) {
-        /* Scramble one byte */
-        uint8_t s = v90_scramble_byte(&e->scrambler, data_in[i]);
-
-        /* 7 magnitude bits (b0..b6) select the constellation point */
-        uint8_t mag   = s & 0x7F;          /* Ucode: 0..127             */
-        int     s_bit = (s >> 7) & 1;      /* raw sign bit from data    */
-
-        /* §5.4.5.1 differential coding for sign (Sr=0):
-         *   $i = s_i XOR $_{i-1}  (where $_{-1} = $5 of previous frame) */
-        sign = s_bit ^ sign;
-
-        /* Map Ucode → positive PCM codeword (µ-law or A-law per negotiated law) */
-        uint8_t mu = ucode_to_pcm_positive(mag);
-
-        /* Apply polarity: G.711 MSB=1 → positive, MSB=0 → negative
-         * (same convention for both µ-law and A-law).
-         * ucode_to_pcm_positive returns positive codewords (MSB=1).
-         * For negative: clear the MSB. */
-        if (sign == 0)
-            mu &= 0x7F; /* make negative */
-
-        pcm_out[i] = mu;
-    }
-
-    e->prev_sign = sign; /* save $5 for next frame */
+    return v90_idle_codeword(g_law == ME_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW);
 }
 
 /* ------------------------------------------------------------------ */
@@ -676,14 +524,14 @@ static v8_state_t     *g_v8      = NULL;
 static v22bis_state_t *g_v22bis  = NULL;
 static v34_state_t    *g_v34     = NULL;
 
-/* V.90 downstream encoder (legacy, used in data mode) */
-static v90_enc_t      g_v90_enc;
-
-/* V.90 state (Phase 3/4 TX) */
+/* V.90 state (Phase 3/4 TX and data mode) */
 static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
+static bool           g_v90_wait_info1_logged = false;
 static bool           g_v90_phase3_j_seen = false;
+static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
+static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
 static int            g_v34_fallback_status = 0;
 static int            g_last_v90_bridge_rx_stage = -1;
@@ -756,6 +604,14 @@ static notch_filter_t g_notch = {0};
 /* Clock recovery */
 static cr_state_t     g_cr;
 
+/* Raw G.711 bearer diagnostics and optional live taps. */
+static uint64_t       g_g711_rx_octets = 0;
+static uint64_t       g_g711_tx_octets = 0;
+static uint64_t       g_g711_raw_v90_tx_octets = 0;
+static uint64_t       g_g711_linear_tx_octets = 0;
+static FILE          *g_g711_rx_tap = NULL;
+static FILE          *g_g711_tx_tap = NULL;
+
 /* Audio diagnostics: accumulated energy and sample count for V.8 logging */
 static int64_t g_v8_rx_energy;
 static int64_t g_v8_tx_energy;
@@ -772,6 +628,42 @@ static int v8_alternate_answer_tone(int tone)
     return (tone == MODEM_CONNECT_TONES_ANSAM_PR)
         ? MODEM_CONNECT_TONES_ANSAM
         : MODEM_CONNECT_TONES_ANSAM_PR;
+}
+
+static void g711_taps_close(void)
+{
+    if (g_g711_rx_tap) {
+        fclose(g_g711_rx_tap);
+        g_g711_rx_tap = NULL;
+    }
+    if (g_g711_tx_tap) {
+        fclose(g_g711_tx_tap);
+        g_g711_tx_tap = NULL;
+    }
+}
+
+static void g711_taps_init(void)
+{
+    const char *dir = getenv("VPCM_G711_TAP_DIR");
+    char rx_path[1024];
+    char tx_path[1024];
+
+    g711_taps_close();
+    if (!dir || !dir[0])
+        return;
+    if (snprintf(rx_path, sizeof(rx_path), "%s/live-rx.g711", dir) >= (int)sizeof(rx_path)
+        || snprintf(tx_path, sizeof(tx_path), "%s/live-tx.g711", dir) >= (int)sizeof(tx_path)) {
+        fprintf(stderr, "[ME] VPCM_G711_TAP_DIR path is too long; live taps disabled\n");
+        return;
+    }
+    g_g711_rx_tap = fopen(rx_path, "wb");
+    g_g711_tx_tap = fopen(tx_path, "wb");
+    if (!g_g711_rx_tap || !g_g711_tx_tap) {
+        fprintf(stderr, "[ME] Unable to open live G.711 taps in %s\n", dir);
+        g711_taps_close();
+        return;
+    }
+    ME_LOG("[ME] Live G.711 taps: RX=%s TX=%s\n", rx_path, tx_path);
 }
 
 static const char *me_v92_anspcm_level_to_str(int level)
@@ -978,6 +870,8 @@ static void cleanup_v34_v90_training_locked(void)
     }
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
+    g_v90_wait_info1_logged = false;
+    g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     g_v34_fallback_to_v22bis_pending = false;
     g_v34_fallback_status = 0;
     v90_dil_capture_reset();
@@ -1108,8 +1002,8 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
                                 rate, V90_RATE_BPS);
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
-                        /* Re-init V.90 encoder for clean data mode start */
-                        v90_enc_init(&g_v90_enc);
+                        v90_reset_data_mode(g_v90);
+                        g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
                         di_on_connected(V90_RATE_BPS);
                     } else if (!g_v90_completion_deferred_logged) {
                         ME_LOG("[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
@@ -1419,6 +1313,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
         g_v90_phase3_started = false;
         g_v90_completion_deferred_logged = false;
+        g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
         v90_dil_capture_reset();
         /* Phase 2 CC carriers: V.90 digital answerer TX=1200 Hz, RX=2400 Hz.
            The data carriers at 3200 baud are only 91 Hz apart so start_v34_training()
@@ -1458,7 +1353,11 @@ void me_init(void)
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
     cr_init(&g_cr, 8000);
-    v90_enc_init(&g_v90_enc);
+    g_g711_rx_octets = 0;
+    g_g711_tx_octets = 0;
+    g_g711_raw_v90_tx_octets = 0;
+    g_g711_linear_tx_octets = 0;
+    g711_taps_init();
     {
         const char *inv = getenv("ME_V34_INVERT_ROLE");
         g_invert_v34_role = (inv && (inv[0] == '1' || inv[0] == 'y' || inv[0] == 'Y' ||
@@ -1491,6 +1390,7 @@ void me_destroy(void)
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     cleanup_v34_v90_training_locked();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
+    g711_taps_close();
     pthread_mutex_destroy(&g_state_mtx);
 }
 
@@ -1881,6 +1781,153 @@ void me_rx_audio(const int16_t *amp, int len)
     }
 }
 
+/* Called with g_state_mtx held. */
+static void prepare_v90_phase3_locked(void)
+{
+    int tx_stage;
+    int u_info;
+
+    if (g_mod != ME_MOD_V90 || !g_v34 || g_v90_phase3_started)
+        return;
+
+    tx_stage = v34_get_tx_stage(g_v34);
+    u_info = v34_get_v90_u_info(g_v34);
+    if (tx_stage >= V34_TX_STAGE_FIRST_S && u_info > 0) {
+        ME_LOG("[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
+               tx_stage, u_info);
+        if (!g_v90) {
+            v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+            g_v90 = v90_init_with_v34(g_v34, law);
+            if (g_v90 && g_v90_pending_dil_valid)
+                v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+        }
+        if (g_v90) {
+            v90_start_phase3(g_v90, u_info);
+            g_v90_phase3_started = true;
+            g_v90_completion_deferred_logged = false;
+            g_v90_wait_info1_logged = false;
+        }
+    } else if (tx_stage >= V34_TX_STAGE_FIRST_S && !g_v90_wait_info1_logged) {
+        ME_LOG("[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
+        g_v90_wait_info1_logged = true;
+    }
+}
+
+/* Preserve six-symbol data-frame boundaries across arbitrary RTP pull sizes. */
+static void generate_v90_data_codewords_locked(uint8_t *codewords, int len)
+{
+    int out_pos = 0;
+
+    while (out_pos < len) {
+        int available;
+
+        if (g_v90_data_frame_pos >= V90_DATA_FRAME_LEN) {
+            uint8_t data_in[V90_DATA_FRAME_LEN];
+
+            memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
+            if (dring_available(&downstream_ring) >= V90_DATA_FRAME_LEN
+                && dring_read(&downstream_ring, data_in, V90_DATA_FRAME_LEN)
+                       == V90_DATA_FRAME_LEN
+                && v90_tx_codewords(g_v90,
+                                     g_v90_data_frame,
+                                     V90_DATA_FRAME_LEN,
+                                     data_in,
+                                     V90_DATA_FRAME_LEN) != V90_DATA_FRAME_LEN) {
+                ME_LOG("[ME] V.90 data mapper failed to produce one frame\n");
+                memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
+            }
+            g_v90_data_frame_pos = 0;
+        }
+
+        available = V90_DATA_FRAME_LEN - g_v90_data_frame_pos;
+        if (available > len - out_pos)
+            available = len - out_pos;
+        memcpy(codewords + out_pos,
+               g_v90_data_frame + g_v90_data_frame_pos,
+               (size_t)available);
+        g_v90_data_frame_pos += available;
+        out_pos += available;
+    }
+}
+
+static void enter_v90_data_locked(void)
+{
+    int upstream_rate;
+
+    if (g_state != ME_TRAINING || !g_v90 || !g_v34)
+        return;
+    upstream_rate = v34_get_current_bit_rate(g_v34);
+    g_state = ME_DATA;
+    g_phase_start_ms = 0;
+    g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    ME_LOG("[ME] V.90 startup complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
+           upstream_rate, V90_RATE_BPS);
+    trace_phase("V90 enter DATA after B1d: upstream=%d downstream=%d",
+                upstream_rate, V90_RATE_BPS);
+    di_on_connected(V90_RATE_BPS);
+}
+
+/* Called with g_state_mtx held. Returns true when codewords were generated
+ * without a linear-PCM round trip. */
+static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
+{
+    if (!codewords || len <= 0 || g_mod != ME_MOD_V90)
+        return false;
+
+    if (g_state == ME_TRAINING && g_v34) {
+        int pos = 0;
+
+        prepare_v90_phase3_locked();
+        if (!g_v90_phase3_started || !g_v90 || v90_using_internal_v34_tx(g_v90))
+            return false;
+
+        if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
+            v90_notify_s_detected(g_v90);
+        while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
+            if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
+                return false;
+            pos++;
+        }
+
+        /* Keep the wrapped V.34 state machine advancing while its waveform is
+         * replaced by the authoritative V.90 codeword stream. */
+        {
+            int16_t discard[len];
+            v34_tx(g_v34, discard, len);
+        }
+
+        if (v90_get_tx_phase(g_v90) == V90_TX_DATA) {
+            enter_v90_data_locked();
+            if (pos < len)
+                generate_v90_data_codewords_locked(codewords + pos, len - pos);
+        }
+        return true;
+    }
+
+    if (g_state == ME_DATA) {
+        if (!g_v90)
+            return false;
+        generate_v90_data_codewords_locked(codewords, len);
+        return true;
+    }
+
+    return false;
+}
+
+static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
+{
+    if (!amp || len <= 0 || (g_mod != ME_MOD_V34 && g_mod != ME_MOD_V90))
+        return;
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_echo_can) {
+        for (int i = 0; i < len; i++) {
+            g_tx_buf[g_tx_buf_wr] = amp[i];
+            g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
+        }
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
 void me_tx_audio(int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
@@ -1916,39 +1963,8 @@ void me_tx_audio(int16_t *amp, int len)
         if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
             if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
-                /* V.90: detect Phase 2→3 transition and switch TX to PCM codewords.
-                   We must wait for INFO1a (which carries U_INFO) before starting
-                   Phase 3 TX.  The V.34 RX stays on the CC demodulator at
-                   INFO1A stage until INFO1a is received, then transitions to
-                   PHASE3_TRAINING.  We use U_INFO > 0 as the signal. */
-                if (g_mod == ME_MOD_V90 && !g_v90_phase3_started) {
-                    int tx_stage = v34_get_tx_stage(g_v34);
-                    int u_info = v34_get_v90_u_info(g_v34);
-                    if (tx_stage >= V34_TX_STAGE_FIRST_S && u_info > 0) {
-                        ME_LOG("[ME] V.90 Phase 3 intercept: tx_stage=%d, U_INFO=%d\n",
-                                tx_stage, u_info);
-                        /* Create V.90 state wrapping existing V.34 */
-                        if (!g_v90) {
-                            v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
-                            g_v90 = v90_init_with_v34(g_v34, law);
-                            if (g_v90 && g_v90_pending_dil_valid)
-                                v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
-                        }
-                        if (g_v90) {
-                            v90_start_phase3(g_v90, u_info);
-                            g_v90_phase3_started = true;
-                            g_v90_completion_deferred_logged = false;
-                        }
-                    } else if (tx_stage >= V34_TX_STAGE_FIRST_S && !g_v90_phase3_started) {
-                        /* TX has entered Phase 3 but INFO1a not yet received.
-                           Send silence (idle PCM) while waiting. */
-                        static bool logged_wait = false;
-                        if (!logged_wait) {
-                            ME_LOG("[ME] V.90: waiting for INFO1a (U_INFO) before Phase 3 TX\n");
-                            logged_wait = true;
-                        }
-                    }
-                }
+                /* V.90: detect Phase 2→3 and create the raw-codeword state. */
+                prepare_v90_phase3_locked();
 
                 if (g_v90_phase3_started && g_v90) {
                     if (v34_get_tx_stage(g_v34) >= V34_TX_STAGE_PHASE4_WAIT)
@@ -2015,28 +2031,15 @@ void me_tx_audio(int16_t *amp, int len)
                 v34_tx(g_v34, amp, len);
             pthread_mutex_unlock(&g_state_mtx);
         } else if (g_mod == ME_MOD_V90) {
-            /*
-             * V.90 downstream: encode 6 bytes per frame into 6 µ-law
-             * codewords and convert to linear PCM for the RTP stream.
-             */
-            int pos = 0;
-            while (pos + V90_FRAME_LEN <= len) {
-                uint8_t data_in[V90_FRAME_LEN];
-                uint8_t pcm_out[V90_FRAME_LEN];
+            uint8_t pcm_out[len];
+            bool generated;
 
-                if (dring_read(&downstream_ring, data_in, V90_FRAME_LEN)
-                    < V90_FRAME_LEN) {
-                    uint8_t idle = pcm_idle();
-                    for (int i = 0; i < V90_FRAME_LEN; i++)
-                        amp[pos + i] = pcm_to_linear(idle);
-                    pos += V90_FRAME_LEN;
-                    continue;
-                }
-
-                v90_encode_frame(&g_v90_enc, data_in, pcm_out);
-                for (int i = 0; i < V90_FRAME_LEN; i++)
-                    amp[pos + i] = pcm_to_linear(pcm_out[i]);
-                pos += V90_FRAME_LEN;
+            pthread_mutex_lock(&g_state_mtx);
+            generated = generate_v90_raw_codewords_locked(pcm_out, len);
+            pthread_mutex_unlock(&g_state_mtx);
+            if (generated) {
+                for (int i = 0; i < len; i++)
+                    amp[i] = pcm_to_linear(pcm_out[i]);
             }
         } else {
             /* V.22bis duplex downstream TX */
@@ -2052,16 +2055,78 @@ void me_tx_audio(int16_t *amp, int len)
     /* Buffer TX samples for the echo canceller.
        Must happen after TX generation so me_rx_audio can subtract
        our echo from the received signal. */
-    if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
-        pthread_mutex_lock(&g_state_mtx);
-        if (g_echo_can) {
-            for (int i = 0; i < len; i++) {
-                g_tx_buf[g_tx_buf_wr] = amp[i];
-                g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
-            }
-        }
-        pthread_mutex_unlock(&g_state_mtx);
+    buffer_tx_samples_for_echo(amp, len);
+}
+
+void me_rx_g711(const uint8_t *codewords, int count)
+{
+    int offset;
+
+    if (!codewords || count <= 0)
+        return;
+
+    pthread_mutex_lock(&g_state_mtx);
+    g_g711_rx_octets += (uint64_t)count;
+    pthread_mutex_unlock(&g_state_mtx);
+    if (g_g711_rx_tap)
+        (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+
+    for (offset = 0; offset < count; ) {
+        int16_t linear[320];
+        int chunk = count - offset;
+
+        if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
+            chunk = (int)(sizeof(linear) / sizeof(linear[0]));
+        for (int i = 0; i < chunk; i++)
+            linear[i] = pcm_to_linear(codewords[offset + i]);
+        me_rx_audio(linear, chunk);
+        offset += chunk;
     }
+}
+
+int me_tx_g711(uint8_t *codewords, int count)
+{
+    int offset;
+    uint64_t raw_octets = 0;
+    uint64_t linear_octets = 0;
+
+    if (!codewords || count <= 0)
+        return 0;
+
+    for (offset = 0; offset < count; ) {
+        int16_t linear[320];
+        int chunk = count - offset;
+        bool raw_v90;
+
+        if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
+            chunk = (int)(sizeof(linear) / sizeof(linear[0]));
+
+        pthread_mutex_lock(&g_state_mtx);
+        raw_v90 = generate_v90_raw_codewords_locked(codewords + offset, chunk);
+        pthread_mutex_unlock(&g_state_mtx);
+
+        if (raw_v90) {
+            for (int i = 0; i < chunk; i++)
+                linear[i] = pcm_to_linear(codewords[offset + i]);
+            buffer_tx_samples_for_echo(linear, chunk);
+            raw_octets += (uint64_t)chunk;
+        } else {
+            me_tx_audio(linear, chunk);
+            for (int i = 0; i < chunk; i++)
+                codewords[offset + i] = linear_to_pcm(linear[i]);
+            linear_octets += (uint64_t)chunk;
+        }
+        offset += chunk;
+    }
+
+    pthread_mutex_lock(&g_state_mtx);
+    g_g711_tx_octets += (uint64_t)count;
+    g_g711_raw_v90_tx_octets += raw_octets;
+    g_g711_linear_tx_octets += linear_octets;
+    pthread_mutex_unlock(&g_state_mtx);
+    if (g_g711_tx_tap)
+        (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+    return count;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2121,6 +2186,10 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->phase_elapsed_ms = (g_phase_start_ms != 0 && g_state != ME_IDLE)
         ? (trace_now_ms() - g_phase_start_ms)
         : 0;
+    snapshot->g711_rx_octets = g_g711_rx_octets;
+    snapshot->g711_tx_octets = g_g711_tx_octets;
+    snapshot->g711_raw_v90_tx_octets = g_g711_raw_v90_tx_octets;
+    snapshot->g711_linear_tx_octets = g_g711_linear_tx_octets;
     pthread_mutex_unlock(&g_state_mtx);
 }
 

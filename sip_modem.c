@@ -20,9 +20,7 @@
 
 #include "modem_engine.h"
 #include "data_interface.h"
-#include "clock_recovery.h"
 
-#include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/passthrough.h>
 #include <pjmedia-audiodev/audiodev.h>
@@ -40,10 +38,6 @@
 
 #define SAMPLE_RATE     8000    /* G.711 / V.90 sample rate */
 #define SAMPLES_PER_FRAME 160   /* 20 ms frame at 8000 Hz */
-#define BITS_PER_SAMPLE  16
-
-/* PJMEDIA port signature tag ('M','O','D','M') */
-#define PORT_SIG PJMEDIA_FOURCC('M','O','D','M')
 
 /* ------------------------------------------------------------------ */
 /* Global state                                                        */
@@ -53,7 +47,6 @@ static pj_pool_t       *g_pool       = NULL;
 static pjsua_acc_id     g_acc_id     = PJSUA_INVALID_ID;
 static pjsua_call_id    g_call_id    = PJSUA_INVALID_ID;
 static volatile int     g_running    = 1;
-static me_law_t         g_media_law  = ME_LAW_ULAW;
 static pj_bool_t        g_media_connected = PJ_FALSE;
 static pj_bool_t        g_passthrough_enabled = PJ_FALSE;
 
@@ -84,38 +77,10 @@ static pj_time_val     g_last_ring_time;
 /* Raw G.711 passthrough bridge between PJSIP and modem_engine        */
 /* ------------------------------------------------------------------ */
 
-static void g711_payload_to_linear(const uint8_t *payload,
-                                   int payload_len,
-                                   int16_t *linear)
-{
-    int i;
-
-    for (i = 0; i < payload_len; i++) {
-        if (g_media_law == ME_LAW_ALAW)
-            linear[i] = alaw_to_linear(payload[i]);
-        else
-            linear[i] = ulaw_to_linear(payload[i]);
-    }
-}
-
 static void clamp_linear_payload_samples(unsigned *count, unsigned max)
 {
     if (*count == 0 || *count > max)
         *count = max;
-}
-
-static void linear_to_g711_payload(const int16_t *linear,
-                                   int linear_len,
-                                   uint8_t *payload)
-{
-    int i;
-
-    for (i = 0; i < linear_len; i++) {
-        if (g_media_law == ME_LAW_ALAW)
-            payload[i] = linear_to_alaw(linear[i]);
-        else
-            payload[i] = linear_to_ulaw(linear[i]);
-    }
 }
 
 static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
@@ -134,8 +99,8 @@ static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
     count = port->payload_samples_per_frame;
     clamp_linear_payload_samples(&count, (unsigned) PJ_ARRAY_SIZE(g_tx_linear));
 
-    me_tx_audio(g_tx_linear, (int) count);
     if (!g_passthrough_enabled) {
+        me_tx_audio(g_tx_linear, (int) count);
         audio_frame.type = PJMEDIA_FRAME_TYPE_AUDIO;
         audio_frame.buf = g_tx_linear;
         audio_frame.size = count * sizeof(int16_t);
@@ -144,7 +109,8 @@ static pj_status_t modem_passthrough_put_frame(pjmedia_port *this_port,
         return pjmedia_port_put_frame(port->downstream_port, &audio_frame);
     }
 
-    linear_to_g711_payload(g_tx_linear, (int) count, port->tx_payload);
+    if (me_tx_g711(port->tx_payload, (int)count) != (int)count)
+        return PJ_EBUG;
 
     memset(port->tx_ext_buf, 0, sizeof(port->tx_ext_buf));
     tx_ext = (pjmedia_frame_ext *) port->tx_ext_buf;
@@ -207,16 +173,14 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             sf_bytes = ((unsigned) sf->bitlen + 7U) >> 3;
             if (sf_bytes == 0 || sf_bytes > PJ_ARRAY_SIZE(g_tx_linear))
                 continue;
-            g711_payload_to_linear((const uint8_t *) sf->data, (int) sf_bytes, g_tx_linear);
-            me_rx_audio(g_tx_linear, (int) sf_bytes);
+            me_rx_g711((const uint8_t *)sf->data, (int)sf_bytes);
         }
     } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
                && rx_ext->base.buf && rx_ext->base.size > 0) {
         unsigned sz = (unsigned) rx_ext->base.size;
         if (sz > PJ_ARRAY_SIZE(g_tx_linear))
             sz = PJ_ARRAY_SIZE(g_tx_linear);
-        g711_payload_to_linear((const uint8_t *) rx_ext->base.buf, (int) sz, g_tx_linear);
-        me_rx_audio(g_tx_linear, (int) sz);
+        me_rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
     }
 
     frame->type = PJMEDIA_FRAME_TYPE_NONE;
@@ -334,11 +298,9 @@ static void on_call_media_state(pjsua_call_id call_id)
                 si.type == PJMEDIA_TYPE_AUDIO) {
                 pj_str_t pcma_name = pj_str("PCMA");
                 if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
-                    g_media_law = ME_LAW_ALAW;
                     me_set_law(ME_LAW_ALAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law passthrough)"));
                 } else {
-                    g_media_law = ME_LAW_ULAW;
                     me_set_law(ME_LAW_ULAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
                 }
@@ -363,7 +325,8 @@ static void log_modem_diag_snapshot(const char *reason)
         3,
         ("sip_modem",
          "ME trace (%s): state=%s mod=%s law=%s role=%s media=%s phase_ms=%llu "
-         "v34_rx=%d v34_tx=%d v90_rx=%d v90_tx=%d v90_event=%d phase3=%d j=%d dil=%d",
+         "v34_rx=%d v34_tx=%d v90_rx=%d v90_tx=%d v90_event=%d phase3=%d j=%d dil=%d "
+         "g711_rx=%llu g711_tx=%llu raw_v90_tx=%llu linear_tx=%llu",
          reason,
          me_state_to_str(snapshot.state),
          me_modulation_to_str(snapshot.modulation),
@@ -378,7 +341,11 @@ static void log_modem_diag_snapshot(const char *reason)
          snapshot.v90_bridge_rx_event,
          snapshot.v90_phase3_started,
          snapshot.v90_phase3_j_seen,
-         snapshot.v90_dil_valid));
+         snapshot.v90_dil_valid,
+         (unsigned long long)snapshot.g711_rx_octets,
+         (unsigned long long)snapshot.g711_tx_octets,
+         (unsigned long long)snapshot.g711_raw_v90_tx_octets,
+         (unsigned long long)snapshot.g711_linear_tx_octets));
 }
 
 static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,

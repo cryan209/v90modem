@@ -252,6 +252,9 @@ void v90_notify_cp_ready(v90_state_t *s);
  */
 void v90_enable_v92_mode(v90_state_t *s);
 
+/* Reset the simplified data-pump scrambler and differential-sign state. */
+void v90_reset_data_mode(v90_state_t *s);
+
 /*
  * Generate V.90 Phase 3 TX samples (PCM codewords as linear samples).
  * Call this instead of v34_tx() for the downstream direction once
@@ -260,6 +263,12 @@ void v90_enable_v92_mode(v90_state_t *s);
  * Returns the number of samples written (always == len).
  */
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len);
+
+/*
+ * Generate the same Phase 3/4 transmit sequence directly as G.711 octets.
+ * This is the authoritative path for an octet-transparent RTP bearer.
+ */
+int v90_phase3_tx_codewords(v90_state_t *s, uint8_t codewords[], int len);
 
 /*
  * Encode downstream payload bytes directly into G.711 codewords.

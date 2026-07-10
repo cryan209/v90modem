@@ -148,9 +148,12 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
+
+test: $(TEST_TARGETS)
+	./vpcm_loopback_test --all-tests
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
@@ -193,8 +196,8 @@ $(SPANDSP_LIB): FORCE
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-sip_modem.o:      sip_modem.c      modem_engine.h clock_recovery.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h
+sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
+modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
