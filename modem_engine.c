@@ -124,6 +124,7 @@ enum v34_events_e {
     V34_EVENT_J_DASHED,
     V34_EVENT_PHASE4_TRN_READY,
     V34_EVENT_TRAINING_FAILED,
+    V34_EVENT_E,
 };
 
 /* Current G.711 law (set by sip_modem.c after codec negotiation). */
@@ -1761,6 +1762,9 @@ void me_rx_audio(const int16_t *amp, int len)
                         || tx_stage != g_last_v90_bridge_tx_stage
                         || rx_event != g_last_v90_bridge_rx_event))
                 {
+                    bool new_e_event = (rx_event == V34_EVENT_E
+                                        && g_last_v90_bridge_rx_event != V34_EVENT_E);
+
                     fprintf(stderr,
                             "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d s_events=%d\n",
                             g_v90_phase3_started ? 1 : 0,
@@ -1772,6 +1776,15 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_v90_bridge_rx_stage = rx_stage;
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
+                    if (new_e_event && g_v90) {
+                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
+
+                        fprintf(stderr,
+                                "[ME] V.90 strict RX event=E tx_phase=%d accepted=%d\n",
+                                (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0);
+                        trace_phase("V90 strict RX event=E accepted=%d",
+                                    accepted ? 1 : 0);
+                    }
                 }
 
                 if (g_mod == ME_MOD_V90 && g_v90) {

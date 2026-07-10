@@ -160,7 +160,10 @@ and the linear compatibility path. During Phase 4 they also report `cp_bits`,
 `cp_valid`, and `cp_rejected` for the strict analogue-side CPt receiver.
 Accepted CPt drives negotiated `Sr=0` Ri/TRN2d/MP/Ed training, while the later
 CP/CP-prime selects the independent 48-frame B1d and connected-data mapper.
-The live raw-G.711 path consumes the negotiated D bits per six-codeword frame.
+Data mode supports `Sr=0/1/2/3`; the shaped modes implement the mandatory
+zero- and one-frame lookahead algorithms. The live raw-G.711 path consumes the
+negotiated D bits per six-codeword frame. Shaped CPt training and optional
+two-/three-frame lookahead are deliberately rejected until implemented.
 
 ### Softmodem Debug Mode (no PJMEDIA passthrough)
 
@@ -203,6 +206,26 @@ Or use the TCP data port:
 ```bash
 nc localhost 5800
 ```
+
+### Reproducible hardware interoperability run
+
+Use the bounded runner to test an analogue modem/FXS path while preserving the
+modem log, raw RX/TX G.711 taps, hashes, build revision, and parsed timeline:
+
+```bash
+./tools/v90_hardware_interop.py \
+  --label "Courier-V-Everything" \
+  --duration 180 \
+  -- \
+  --sip-server asterisk.example \
+  --username 6001 \
+  --password 'secret' \
+  --pty /tmp/v90modem
+```
+
+Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and
+`summary.json`. Password arguments are redacted from the manifest. Use
+`--dry-run` to verify the command without starting the modem or writing files.
 
 ## License
 

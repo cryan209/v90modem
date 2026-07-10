@@ -11,8 +11,10 @@ The current implementation is best described as:
 - Phase 2: mostly implemented and reasonably close to the spec
 - Phase 3 TX waveforms and receiver-gated control: implemented, pending real
   modem interoperability hardening
-- Phase 4 digital TX: `Sr=0` Ri/TRN2d/MP/MP-prime/Ed/B1d implemented
-- Data mode encoder: negotiated `Sr=0` live path implemented; shaping pending
+- Phase 4 digital TX: Ri/TRN2d/MP/MP-prime/Ed/B1d implemented for unshaped
+  CPt; received E can terminate repeated MP-prime
+- Data mode encoder: all 22 downstream rate indices are covered for `Sr=0`;
+  `Sr=1/2/3` data shaping implements the mandatory `ld=0/1` algorithms
 
 In particular, the existing code:
 
@@ -23,22 +25,28 @@ In particular, the existing code:
 - decodes distinct strict CPt and CP/CP-prime parameter sets
 - implements negotiated `Sr=0` Ri, TRN2d, Type-0 MP/MP-prime, Ed, and B1d
 - carries the B1d mapper state into live data at the CP-selected rate
+- surfaces the V.90 E detector from SpanDSP into the Phase 4 state machine
+- implements section 5 spectral shaping for `Sr=1/2/3`, including the
+  shaping trellis, differential signs, filter metric, and mandatory zero- and
+  one-frame lookahead
 
 ## Clause-Level Findings
 
 ### Core encoder
 
-- `5.1 Data signalling rates`: implemented for live `Sr=0`
+- `5.1 Data signalling rates`: implemented for all 22 `Sr=0` rate indices
   - Data-mode CP selects D, and the live path reports and consumes that rate.
+  - Deterministic PCMU and PCMA vectors cover every rate index.
 
 - `5.3 Scrambler`: implemented
   - The V.34 GPC polynomial is used in the local V.90 code.
 
 - `5.4 Mapping parameters / modulus encoder / mapper / spectral shaping`:
-  partially implemented
+  implemented for data mode with mandatory lookahead support
   - CPt drives Phase 4 training while CP independently drives B1d/data DFI,
     per-interval modulus mapping, scrambler state, and differential signs.
-  - `Sr = 1/2/3` shaping remains missing.
+  - `Sr = 1/2/3` supports mandatory `ld=0` and `ld=1` operation.
+  - Shaped CPt training and optional `ld=2/3` are not implemented.
 
 ### Phase 2
 
@@ -71,13 +79,18 @@ In particular, the existing code:
   - Strict CPt configures training; strict CP configures B1d/data.
   - Ri, post-CPt Ri, TRN2d, Type-0 MP/MP-prime, CP-prime gating, and Ed use
     Recommendation-shaped timing and mapping.
+  - The receiver reports E explicitly, and E terminates MP-prime only after
+    acknowledgement and data-mapper configuration are valid.
   - B1d is 48 mapped frames and continues into live data for `Sr=0`.
+  - CPt training currently requires `Sr=0`; shaped CPt is rejected at mapper
+    configuration rather than mis-encoded.
 
 ### Data mode
 
-- Section 5 data mode is implemented for `Sr=0` on the live raw-G.711 path.
-  Legacy standalone compatibility APIs remain for older synthetic tests;
-  shaping, rate renegotiation, and broad all-rate fixtures remain incomplete.
+- Section 5 data mode supports `Sr=0/1/2/3` on the live raw-G.711 path, with
+  the mandatory `ld=0/1` shapers and all-rate `Sr=0` fixtures. Legacy
+  standalone compatibility APIs remain for older synthetic tests; rate
+  renegotiation, shaped CPt training, and optional `ld=2/3` remain incomplete.
 
 ## Reuse Strategy
 
@@ -98,9 +111,9 @@ What should be used only as a template:
 - V.34 Phase 4 MP/MPh exchange
 - V.34 data-mode encoder
 
-What needs new V.90-specific implementation:
+What still needs V.90-specific implementation:
 
-- `Sr = 1/2/3` shaping and its trellis/lookahead behavior
+- shaped CPt training and optional `ld=2/3` lookahead
 - downstream and upstream hardware interoperability/retrain hardening
 
 ## First Patch Set
@@ -142,7 +155,8 @@ Expected result:
    - mapper
    - negotiated downstream rate
 
-4. Add full section 5 shaping support
+4. Add section 5 shaping support — mandatory data-mode support completed
    - `Sr = 1/2/3`
    - shaping trellis
    - lookahead and shaping filter
+   - remaining: shaped CPt training and optional `ld=2/3`

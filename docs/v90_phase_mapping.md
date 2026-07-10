@@ -256,9 +256,16 @@ Phase 4 is not "CP/CP' in disguise".
 - `v90.c` enforces Ri/post-CPt/TRN2d timing and maps TRN2d with the negotiated
   `Sr=0` six-interval constellations
 - the digital path repeats MP with acknowledge clear until data-mode CP, then
-  repeats MP-prime until matching CP-prime and emits two mapped Ed frames
+  repeats MP-prime until matching CP-prime or a valid received E event, and
+  emits two mapped Ed frames
 - B1d is 48 negotiated data frames with a zero-state mapper reset, followed by
   connected data using the same scrambler, differential, DFI, and modulus state
+- data mode supports `Sr=1/2/3` spectral shaping with mandatory `ld=0/1`;
+  shaped CPt training and optional `ld=2/3` remain unsupported
+- deterministic PCMU and PCMA tests cover all 22 `Sr=0` downstream rates and
+  shaped vectors for each supported Sr/lookahead combination
+- repeatable real-modem evidence collection is documented in
+  `docs/v90_hardware_interop.md`; no hardware result is implied by that tooling
 - the synthetic V.90/V.92 session contract still uses V.91-derived helper
   objects and must not be treated as native V.90 interoperability proof
 
@@ -295,7 +302,8 @@ Compatibility layers that should disappear over time:
 4. Implement answerer-side Phase 3 control flow as:
    `Sd -> S̄d -> TRN1d -> Jd until S -> Jd'`.
 5. Carry the negotiated Phase 4 mapper through B1d into connected data.
-   Completed for `Sr=0`.
+   Completed for `Sr=0/1/2/3` data mode with mandatory `ld=0/1`; Phase 4 CPt
+   training remains limited to `Sr=0`.
 6. Remove the remaining V.91 `CP/Es/B1` compatibility truth model from the
    synthetic session.
 

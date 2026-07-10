@@ -129,7 +129,9 @@ Remaining baseline issues:
   compatibility mapper; the live modem path no longer uses it.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- only `Sr=0` is accepted; spectral shaping (`Sr=1/2/3`) is not implemented.
+- Phase 4 CPt training still accepts only `Sr=0`; the separate data mapper now
+  supports `Sr=1/2/3` with mandatory `ld=0/1`, but optional `ld=2/3` is not
+  implemented.
 - the synthetic coupled-training harness still infers some remote events from
   its proxy transmitter stages even though the live Jd/DIL path no longer does.
 - `clock_recovery` is initialized and reset but is not connected to RTP timing.
@@ -303,8 +305,10 @@ port and these APIs. It must not decode and re-encode a raw V.90 transmit frame.
 
 The live `Sr=0` milestone was completed on 2026-07-11. CPt configures
 TRN2d/MP/Ed, data-mode CP independently configures B1d/data, and the live RTP
-path consumes exactly the negotiated D bits per six-symbol frame. Remaining
-work in this milestone is broader rate-vector coverage and `Sr=1/2/3` shaping.
+path consumes exactly the negotiated D bits per six-symbol frame. All 22
+`Sr=0` rate indices now have PCMU/PCMA vectors, and data mode supports
+`Sr=1/2/3` with the mandatory `ld=0/1` shaping algorithms. Shaped CPt training
+and optional `ld=2/3` remain future work.
 
 ### Work
 
@@ -471,7 +475,22 @@ Status: live negotiated `Sr=0` B1d/data path completed on 2026-07-11.
 5. Consume D negotiated bits per six G.711 codewords with a cross-frame byte
    reservoir and binary-one underrun fill.
 6. Report the negotiated downstream rate rather than a fixed 56/64 kbit/s.
-7. Next: add all-rate fixtures, then implement `Sr=1/2/3` shaping.
+7. Add all-rate `Sr=0` fixtures for PCMU and PCMA — completed.
+8. Add `Sr=1/2/3` data shaping with mandatory `ld=0/1` — completed.
+9. Surface received E and allow it to complete MP-prime — completed.
+10. Remaining: shaped CPt training, optional `ld=2/3`, and real-modem results.
+
+## Sixth Patch Set
+
+Status: mandatory spectral shaping and repeatable hardware test tooling
+completed on 2026-07-11.
+
+1. Implement the Table 3/4 shaping-sign construction and two-state trellis.
+2. Minimize the section 5 shaping-filter metric with `ld=0` and `ld=1`.
+3. Cover `Sr=1/2/3`, PCMU/PCMA, exact reservoir use, and stable vectors.
+4. Propagate detected E from SpanDSP to the V.90 Phase 4 state machine.
+5. Add a bounded hardware runner that preserves logs, G.711 taps, parsed
+   summaries, hashes, and build metadata. See `v90_hardware_interop.md`.
 
 ## Definition Of Done
 

@@ -372,6 +372,8 @@ static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
+static bool test_v90_negotiated_data_rates(v91_law_t law);
+static bool test_v90_spectral_shaping(v91_law_t law);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -920,6 +922,10 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         fprintf(stderr, "V.90 transmitter acknowledged before receiving data-mode CP\n");
         goto done;
     }
+    if (v90_handle_rx_event(tx, V90_RX_EVENT_E)) {
+        fprintf(stderr, "V.90 transmitter accepted E before starting MP'\n");
+        goto done;
+    }
 
     for (int i = 0; i < 6; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
@@ -948,17 +954,24 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             goto done;
         }
     }
-    data_cp.acknowledge = true;
-    if (!v90_set_phase4_cp(tx, &data_cp)
-        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
-        fprintf(stderr, "V.90 strict event test rejected matching CP'\n");
-        goto done;
+    if (law == V91_LAW_ULAW) {
+        if (!v90_handle_rx_event(tx, V90_RX_EVENT_E)) {
+            fprintf(stderr, "V.90 strict event test rejected 20-bit E during MP'\n");
+            goto done;
+        }
+    } else {
+        data_cp.acknowledge = true;
+        if (!v90_set_phase4_cp(tx, &data_cp)
+            || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
+            fprintf(stderr, "V.90 strict event test rejected matching CP'\n");
+            goto done;
+        }
     }
     symbols = 0;
     while (v90_get_tx_phase(tx) == V90_TX_MP && symbols++ < 200)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_ED) {
-        fprintf(stderr, "V.90 CP' did not terminate MP' at a frame boundary\n");
+        fprintf(stderr, "V.90 CP'/E did not terminate MP' at a frame boundary\n");
         goto done;
     }
     for (int i = 0; i < 12; i++)
@@ -1189,8 +1202,9 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 1 || rx.rejected_frames != 5) {
-        fprintf(stderr, "V.90 strict CP receiver accepted unsupported spectral shaping\n");
+    if (capture.count != 2 || rx.valid_frames != 2
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr, "V.90 strict CP receiver rejected a valid shaped CPt\n");
         return false;
     }
     cp.shaping_redundancy = 0;
@@ -1200,7 +1214,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 1 || rx.rejected_frames != 6) {
+    if (capture.count != 2 || rx.rejected_frames != 5) {
         fprintf(stderr, "V.90 strict CP receiver accepted an empty upstream-rate mask\n");
         return false;
     }
@@ -1216,8 +1230,8 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, bits[i]);
-    if (capture.count != 2
-        || rx.valid_frames != 2
+    if (capture.count != 3
+        || rx.valid_frames != 3
         || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
         fprintf(stderr, "V.90 strict CP receiver rejected a valid CPt frame\n");
         return false;
@@ -1225,6 +1239,208 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
 
     vpcm_log("PASS: V.90 strict CP bitstream receiver (%s, bits=%d)",
              law_name, nbits);
+    return true;
+}
+
+static v90_state_t *v90_test_create_negotiated_mapper(v91_law_t law,
+                                                       int drn,
+                                                       int shaping_redundancy,
+                                                       int lookahead)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v90_state_t *tx;
+    vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t cp;
+
+    tx = v90_init_data_pump(v90_law);
+    if (!tx)
+        return NULL;
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 4;
+    cpt.codec_alaw = (law == V91_LAW_ALAW);
+    cpt.upstream_rate_mask = 0x1FFF;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    if (!v90_set_phase4_cp(tx, &cpt)) {
+        v90_free(tx);
+        return NULL;
+    }
+
+    cp = cpt;
+    cp.v90_compatibility = true;
+    cp.drn = (uint8_t)drn;
+    cp.shaping_redundancy = (uint8_t)shaping_redundancy;
+    cp.shaping_lookahead = (uint8_t)lookahead;
+    cp.shaping_a1_q1_6 = 0x18; /* +0.375 */
+    cp.shaping_a2_q1_6 = 0xF0; /* -0.250 */
+    cp.shaping_b1_q1_6 = 0x10; /* +0.250 */
+    cp.shaping_b2_q1_6 = 0xF8; /* -0.125 */
+    if (!v90_set_phase4_cp(tx, &cp)) {
+        v90_free(tx);
+        return NULL;
+    }
+    v90_reset_data_mode(tx);
+    return tx;
+}
+
+static bool test_v90_negotiated_data_rates(v91_law_t law)
+{
+    enum { FRAMES = 97, INPUT_BYTES = 520 };
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    uint8_t input[INPUT_BYTES];
+    uint8_t codewords[6];
+
+    vpcm_log("Test: V.90 negotiated Sr=0 data rates (%s)", law_name);
+    fill_pattern(input, INPUT_BYTES, 0x905A0000U ^ (uint32_t)law);
+    for (int drn = 1; drn <= 22; drn++) {
+        v90_state_t *tx = v90_test_create_negotiated_mapper(law, drn, 0, 0);
+        int total_consumed = 0;
+        int d = drn + 20;
+        int expected_consumed = (FRAMES * d + 7) / 8;
+
+        if (!tx) {
+            fprintf(stderr, "V.90 could not configure drn=%d Sr=0\n", drn);
+            return false;
+        }
+        if (v90_data_bits_per_frame(tx) != d) {
+            fprintf(stderr, "V.90 drn=%d selected D=%d instead of %d\n",
+                    drn, v90_data_bits_per_frame(tx), d);
+            v90_free(tx);
+            return false;
+        }
+        for (int frame = 0; frame < FRAMES; frame++) {
+            int consumed = 0;
+
+            if (v90_tx_data_frame_codewords(tx,
+                                            codewords,
+                                            input + total_consumed,
+                                            INPUT_BYTES - total_consumed,
+                                            &consumed,
+                                            false) != 6) {
+                fprintf(stderr, "V.90 drn=%d stalled at frame %d\n", drn, frame);
+                v90_free(tx);
+                return false;
+            }
+            total_consumed += consumed;
+        }
+        if (total_consumed != expected_consumed) {
+            fprintf(stderr, "V.90 drn=%d consumed %d bytes; expected %d\n",
+                    drn, total_consumed, expected_consumed);
+            v90_free(tx);
+            return false;
+        }
+        v90_free(tx);
+    }
+    vpcm_log("PASS: V.90 negotiated Sr=0 data rates (%s, drn=1..22)", law_name);
+    return true;
+}
+
+static bool test_v90_spectral_shaping(v91_law_t law)
+{
+    enum { FRAMES = 256, INPUT_BYTES = 1024 };
+    static const uint8_t first_frame[2][3][6] = {
+        {
+            {0x69, 0x95, 0x41, 0x06, 0x80, 0x80},
+            {0x53, 0xAB, 0x02, 0x0D, 0x80, 0x80},
+            {0x27, 0xD7, 0x84, 0x9A, 0x00, 0x80}
+        },
+        {
+            {0x4B, 0x2D, 0x07, 0xAC, 0xAA, 0x2A},
+            {0x69, 0x25, 0x70, 0xA6, 0x2A, 0x2A},
+            {0x2D, 0x35, 0x9E, 0xB3, 0x2A, 0x2A}
+        }
+    };
+    static const uint8_t first_frame_ld1[2][3][6] = {
+        {
+            {0x69, 0x95, 0x41, 0x06, 0x80, 0x80},
+            {0x53, 0xAB, 0x02, 0x0D, 0x80, 0x80},
+            {0x27, 0xD7, 0x04, 0x1A, 0x80, 0x80}
+        },
+        {
+            {0x4B, 0x2D, 0x07, 0xAC, 0xAA, 0x2A},
+            {0xE9, 0xA5, 0xF0, 0x26, 0x2A, 0xAA},
+            {0x2D, 0x35, 0x9E, 0xB3, 0x2A, 0x2A}
+        }
+    };
+    int law_index = (law == V91_LAW_ALAW) ? 1 : 0;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    uint8_t input[INPUT_BYTES];
+    uint8_t codewords[6];
+
+    vpcm_log("Test: V.90 Sr=1/2/3 spectral shaping ld=0/1 (%s)", law_name);
+    fill_pattern(input, INPUT_BYTES, 0x905A5100U ^ (uint32_t)law);
+    for (int lookahead = 0; lookahead <= 1; lookahead++) {
+        for (int sr = 1; sr <= 3; sr++) {
+            v90_state_t *tx = v90_test_create_negotiated_mapper(law, 9, sr, lookahead);
+            int total_consumed = 0;
+            int output_frames = 0;
+            int submissions = FRAMES + lookahead;
+
+            if (!tx) {
+                fprintf(stderr, "V.90 could not configure Sr=%d ld=%d\n",
+                        sr, lookahead);
+                return false;
+            }
+            for (int submission = 0; submission < submissions; submission++) {
+                int consumed = 0;
+                int produced;
+
+                produced = v90_tx_data_frame_codewords(tx,
+                                                        codewords,
+                                                        input + total_consumed,
+                                                        INPUT_BYTES - total_consumed,
+                                                        &consumed,
+                                                        false);
+                total_consumed += consumed;
+                if (lookahead == 1 && submission == 0) {
+                    if (produced != 0)
+                        goto shaping_failure;
+                    continue;
+                }
+                if (produced != 6) {
+shaping_failure:
+                    fprintf(stderr,
+                            "V.90 Sr=%d ld=%d stalled at submission %d\n",
+                            sr, lookahead, submission);
+                    v90_free(tx);
+                    return false;
+                }
+                if (output_frames == 0 && lookahead == 0) {
+                    if (memcmp(codewords, first_frame[law_index][sr - 1], 6) != 0) {
+                        fprintf(stderr,
+                                "V.90 Sr=%d ld=0 first-frame vector mismatch (%s)\n",
+                                sr, law_name);
+                        v90_free(tx);
+                        return false;
+                    }
+                } else if (output_frames == 0
+                           && memcmp(codewords,
+                                     first_frame_ld1[law_index][sr - 1],
+                                     6) != 0) {
+                    fprintf(stderr,
+                            "V.90 Sr=%d ld=1 first-frame vector mismatch (%s)\n",
+                            sr, law_name);
+                    v90_free(tx);
+                    return false;
+                }
+                output_frames++;
+            }
+            if (output_frames != FRAMES
+                || total_consumed != (submissions * 29 + 7) / 8) {
+                fprintf(stderr,
+                        "V.90 Sr=%d ld=%d reservoir drifted (frames=%d bytes=%d)\n",
+                        sr, lookahead, output_frames, total_consumed);
+                v90_free(tx);
+                return false;
+            }
+            v90_free(tx);
+        }
+    }
+    if (v90_test_create_negotiated_mapper(law, 9, 1, 2) != NULL) {
+        fprintf(stderr, "V.90 accepted unsupported spectral lookahead ld=2\n");
+        return false;
+    }
+    vpcm_log("PASS: V.90 Sr=1/2/3 spectral shaping ld=0/1 (%s)", law_name);
     return true;
 }
 
@@ -5931,6 +6147,10 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_strict_receiver_events(V91_LAW_ALAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
+        && test_v90_negotiated_data_rates(V91_LAW_ULAW)
+        && test_v90_negotiated_data_rates(V91_LAW_ALAW)
+        && test_v90_spectral_shaping(V91_LAW_ULAW)
+        && test_v90_spectral_shaping(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)

@@ -6823,6 +6823,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
                     s->mp_seen = 2;
+                    s->received_event = V34_EVENT_E;
                     /* Initialize data mode state */
                     s->step_2d = 0;
                     s->data_frame = 0;
