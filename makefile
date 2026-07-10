@@ -135,11 +135,11 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode
-TEST_OBJS = vpcm_loopback_test.o v90.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o p3_demod.o
+TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o
 
 USE_V34_STUBS ?= 0
@@ -197,12 +197,13 @@ $(SPANDSP_LIB): FORCE
 	$(CC) $(CFLAGS) -c $< -o $@
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h
+modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h v90_cp_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
 v91.o:            v91.c            v91.h vpcm_cp.h
 vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
+v90_cp_rx.o:      v90_cp_rx.c      v90_cp_rx.h vpcm_cp.h
 vpcm_g711_stream.o: vpcm_g711_stream.c vpcm_g711_stream.h v91.h
 vpcm_call.o:      vpcm_call.c      vpcm_call.h vpcm_g711_stream.h vpcm_v91_session.h v91.h
 vpcm_call_pair.o: vpcm_call_pair.c vpcm_call_pair.h vpcm_call.h vpcm_g711_stream.h v91.h

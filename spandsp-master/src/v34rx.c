@@ -6493,7 +6493,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (sc0 >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
-                        && d1 == 0
+                        && (d1 == 0
+                            || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > chosen_score)
@@ -6514,7 +6515,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     if (h == hint_h
                         && sc0 >= MP_HINT_LOCK_SCORE_MIN
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
-                        && d1 == 0
+                        && (d1 == 0
+                            || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > hint_score)
@@ -6531,7 +6533,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     sc = mp_preamble_score(bstream);
-                    if ((!strict_mp0_lock || expected_mp_type != 0)
+                    if ((!strict_mp0_lock || expected_mp_type != 0
+                         || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
                         && sc >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
@@ -6552,7 +6555,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         chosen_preamble_stream = bstream;
                     }
                     /*endif*/
-                    if ((!strict_mp0_lock || expected_mp_type != 0)
+                    if ((!strict_mp0_lock || expected_mp_type != 0
+                         || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
                         && h == hint_h
                         && sc >= MP_HINT_LOCK_SCORE_MIN
                         && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
@@ -6629,6 +6633,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             s->bit_count = 0;
                         }
                         /*endif*/
+                        if (s->v90_mode && !s->calling_party && s->put_phase4_bit)
+                        {
+                            int replay_len;
+
+                            replay_len = s->mp_frame_pos;
+                            for (int replay = 0; replay < replay_len; replay++)
+                                s->put_phase4_bit(s->put_phase4_bit_user_data,
+                                                  s->mp_frame_bits[replay] & 1);
+                            /* The project-owned Table 14 framer owns CP length,
+                               CRC, fill and semantics from this boundary on. */
+                            s->mp_frame_pos = 0;
+                            s->mp_frame_target = 0;
+                        }
                         log_mp_lock_seed(s,
                                          chosen_hyp,
                                          chosen_type_bit,
@@ -6650,6 +6667,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
 
         s->duration++;
+        if (s->v90_mode && !s->calling_party && s->put_phase4_bit)
+        {
+            if (s->mp_hypothesis >= 0 && !locked_this_symbol)
+            {
+                s->put_phase4_bit(s->put_phase4_bit_user_data, bits[0] & 1);
+                s->put_phase4_bit(s->put_phase4_bit_user_data, bits[1] & 1);
+            }
+            /* CP is variable length and is validated by the V.90 layer. Do not
+               apply V.34 MP lengths, semantic recovery or forced E timeouts. */
+            break;
+        }
         /* MP stage timeout: if we haven't successfully decoded an MP frame
            within ~2s (4800 bauds at 2400 baud rate), signal training failure
            so the call can retrain or drop.  The far-end won't wait forever. */
@@ -7989,6 +8017,27 @@ SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_b
 {
     s->rx.put_aux_bit = put_bit;
     s->rx.put_aux_bit_user_data = user_data;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_put_phase4_bit(v34_state_t *s,
+                                          span_put_bit_func_t put_bit,
+                                          void *user_data)
+{
+    s->rx.put_phase4_bit = put_bit;
+    s->rx.put_phase4_bit_user_data = user_data;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
+{
+    if (!s || !s->rx.v90_mode || s->rx.calling_party
+        || s->rx.stage != V34_RX_STAGE_PHASE4_MP)
+        return;
+    s->rx.mp_phase4_reject_streak++;
+    mp_reset_hypothesis_search(&s->rx);
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 Phase 4: strict CP framer rejected hypothesis; resuming preamble search\n");
 }
 /*- End of function --------------------------------------------------------*/
 

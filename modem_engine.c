@@ -23,6 +23,7 @@
 #include "data_interface.h"
 #include "clock_recovery.h"
 #include "v90.h"
+#include "v90_cp_rx.h"
 
 #include <spandsp.h>
 
@@ -530,6 +531,7 @@ static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
 static int            g_v90_phase3_s_events = 0;
+static v90_cp_rx_t    g_v90_cp_rx;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -858,6 +860,37 @@ static void v90_dil_capture_reset(void)
     memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
 }
 
+/* Runs synchronously inside v34_rx() while g_state_mtx is already held. */
+static void v90_live_cp_frame(void *user_data, const vpcm_cp_diag_t *diag)
+{
+    bool accepted;
+
+    (void)user_data;
+    if (!diag || !g_v90 || g_mod != ME_MOD_V90)
+        return;
+    accepted = v90_set_phase4_cp(g_v90, &diag->frame)
+        && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
+    ME_LOG("[ME] V.90 strict RX event=CP_VALID bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
+           diag->nbits,
+           (unsigned)diag->frame.drn,
+           diag->frame.acknowledge ? 1 : 0,
+           (unsigned)diag->frame.constellation_count,
+           accepted ? 1 : 0);
+    trace_phase("V90 strict RX event=CP_VALID bits=%d drn=%u accepted=%d",
+                diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
+}
+
+static void v90_live_cp_bit(void *user_data, int bit)
+{
+    uint32_t rejected_before;
+
+    (void)user_data;
+    rejected_before = g_v90_cp_rx.rejected_frames;
+    (void)v90_cp_rx_put_bit(&g_v90_cp_rx, bit);
+    if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before)
+        v34_reject_v90_phase4_hypothesis(g_v34);
+}
+
 static void cleanup_v34_v90_training_locked(void)
 {
     if (g_v90) {
@@ -872,6 +905,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    v90_cp_rx_reset(&g_v90_cp_rx);
     g_v34_fallback_to_v22bis_pending = false;
     g_v34_fallback_status = 0;
     v90_dil_capture_reset();
@@ -1309,6 +1343,13 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+        v90_cp_rx_init(&g_v90_cp_rx,
+                       4,
+                       g_law == ME_LAW_ALAW,
+                       v90_live_cp_frame,
+                       NULL);
+        if (g_v34)
+            v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
         if (g_v34)
             v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
         g_v90_phase3_started = false;
@@ -2222,6 +2263,9 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->v90_phase3_started = g_v90_phase3_started ? 1 : 0;
     snapshot->v90_phase3_s_events = g_v90_phase3_s_events;
     snapshot->v90_dil_valid = g_v90_pending_dil_valid ? 1 : 0;
+    snapshot->v90_cp_input_bits = g_v90_cp_rx.input_bits;
+    snapshot->v90_cp_valid_frames = g_v90_cp_rx.valid_frames;
+    snapshot->v90_cp_rejected_frames = g_v90_cp_rx.rejected_frames;
     snapshot->phase_elapsed_ms = (g_phase_start_ms != 0 && g_state != ME_IDLE)
         ? (trace_now_ms() - g_phase_start_ms)
         : 0;

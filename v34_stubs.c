@@ -209,6 +209,20 @@ SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_b
     (void)user_data;
 }
 
+SPAN_DECLARE(void) v34_set_put_phase4_bit(v34_state_t *s,
+                                          span_put_bit_func_t put_bit,
+                                          void *user_data)
+{
+    (void)s;
+    (void)put_bit;
+    (void)user_data;
+}
+
+SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
+{
+    (void)s;
+}
+
 SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 {
     (void)s;

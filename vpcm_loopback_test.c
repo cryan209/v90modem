@@ -19,6 +19,7 @@
 #include "vpcm_link.h"
 #include "vpcm_v90_session.h"
 #include "vpcm_v91_loopback.h"
+#include "v90_cp_rx.h"
 #include "v92_ja_decode.h"
 
 #include <spandsp.h>
@@ -370,6 +371,7 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
+static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -839,6 +841,128 @@ done:
         v90_free(tx);
     return ok;
 }
+
+typedef struct {
+    int count;
+    vpcm_cp_frame_t frame;
+} v90_cp_test_capture_t;
+
+static void v90_cp_test_frame_handler(void *user_data, const vpcm_cp_diag_t *diag)
+{
+    v90_cp_test_capture_t *capture = (v90_cp_test_capture_t *)user_data;
+
+    if (!capture || !diag)
+        return;
+    capture->count++;
+    capture->frame = diag->frame;
+}
+
+static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
+{
+    const bool alaw = (law == V91_LAW_ALAW);
+    const char *law_name = alaw ? "alaw" : "ulaw";
+    vpcm_cp_frame_t cp;
+    v90_cp_rx_t rx;
+    v90_cp_test_capture_t capture;
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    uint8_t damaged[VPCM_CP_MAX_BITS];
+    int nbits;
+
+    vpcm_log("Test: V.90 strict CP bitstream receiver (%s)", law_name);
+    memset(&capture, 0, sizeof(capture));
+    vpcm_cp_init(&cp);
+    cp.v90_compatibility = true; /* Table 14 bit 19: CPt */
+    cp.drn = 12;
+    cp.codec_alaw = alaw;
+    cp.constellation_count = 2;
+    cp.dfi[0] = 0;
+    cp.dfi[1] = 1;
+    cp.dfi[2] = 0;
+    cp.dfi[3] = 1;
+    cp.dfi[4] = 0;
+    cp.dfi[5] = 1;
+    vpcm_cp_enable_odd_ucodes(cp.masks[0]);
+    vpcm_cp_enable_all_ucodes(cp.masks[1]);
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits)
+        || nbits != vpcm_cp_modulated_bit_length(&cp, 4)
+        || (nbits % 12) != 0) {
+        fprintf(stderr, "V.90 strict CP test could not build 4-point CPt\n");
+        return false;
+    }
+
+    v90_cp_rx_init(&rx, 4, alaw, v90_cp_test_frame_handler, &capture);
+    for (int i = 0; i < 23; i++)
+        v90_cp_rx_put_bit(&rx, i & 1);
+
+    memcpy(damaged, bits, (size_t)nbits);
+    damaged[200] ^= 1;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 0 || rx.rejected_frames != 1) {
+        fprintf(stderr, "V.90 strict CP receiver accepted a CRC-damaged frame\n");
+        return false;
+    }
+
+    cp.transparent_mode_granted = true; /* V.90 reserves Table 14 bit 18. */
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
+        return false;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 0 || rx.rejected_frames != 2) {
+        fprintf(stderr, "V.90 strict CP receiver accepted reserved bit 18\n");
+        return false;
+    }
+    cp.transparent_mode_granted = false;
+
+    cp.v90_compatibility = false; /* CP, not the CPt required at startup. */
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
+        return false;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 0 || rx.rejected_frames != 3) {
+        fprintf(stderr, "V.90 strict CP receiver accepted CP where CPt was required\n");
+        return false;
+    }
+    cp.v90_compatibility = true;
+
+    cp.drn = 23;
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
+        return false;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 0 || rx.rejected_frames != 4) {
+        fprintf(stderr, "V.90 strict CP receiver accepted DRN above 22\n");
+        return false;
+    }
+    cp.drn = 12;
+
+    cp.codec_alaw = !alaw;
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
+        return false;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, damaged[i]);
+    if (capture.count != 0 || rx.rejected_frames != 5) {
+        fprintf(stderr, "V.90 strict CP receiver accepted the wrong codec law\n");
+        return false;
+    }
+
+    cp.codec_alaw = alaw;
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits))
+        return false;
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, bits[i]);
+    if (capture.count != 1
+        || rx.valid_frames != 1
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr, "V.90 strict CP receiver rejected a valid CPt frame\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.90 strict CP bitstream receiver (%s, bits=%d)",
+             law_name, nbits);
+    return true;
+}
+
 static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law);
 static int run_v91_e2e_mode(v91_law_t law, int data_seconds);
 static int run_v92_e2e_mode(v91_law_t law, int data_seconds);
@@ -5540,6 +5664,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_data_codeword_state(V91_LAW_ALAW)
         && test_v90_strict_receiver_events(V91_LAW_ULAW)
         && test_v90_strict_receiver_events(V91_LAW_ALAW)
+        && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
+        && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)
         && test_v91_codeword_loopback(V91_LAW_ALAW)
         && test_v91_startup_primitives(V91_LAW_ULAW)

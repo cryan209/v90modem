@@ -238,6 +238,7 @@ typedef struct {
     bool v92_qc2_qca;
     int v92_qc2_uqts_ucode;
     int v92_qc2_lm_level;
+    int v92_qc2_lapm;                 /* P bit: -1 unknown, 0, 1 */
 
     bool v92_qca2_seen;
     int v92_qca2_sample;
@@ -245,6 +246,7 @@ typedef struct {
     bool v92_qca2_digital;
     int v92_qca2_uqts_ucode;
     int v92_qca2_lm_level;
+    int v92_qca2_lapm;                /* P bit: -1 unknown, 0, 1 */
 
     bool v92_short_p1_seen;
     int v92_short_p1_sample;
@@ -253,6 +255,7 @@ typedef struct {
     bool v92_short_p1_qca;
     int v92_short_p1_uqts_ucode;
     int v92_short_p1_lm_level;
+    int v92_short_p1_lapm;            /* P bit: -1 unknown, 0, 1 */
     bool v92_short_p1_alt_digital_seen;
     int v92_short_p1_alt_digital_sample;
     char v92_short_p1_alt_digital_name[16];
@@ -267,12 +270,14 @@ typedef struct {
     bool v92_short_p1_strict_analog_qca;
     int v92_short_p1_strict_analog_uqts_ucode;
     int v92_short_p1_strict_analog_lm_level;
+    int v92_short_p1_strict_analog_lapm;   /* P bit: -1 unknown, 0, 1 */
     bool v92_short_p1_strict_digital_seen;
     int v92_short_p1_strict_digital_sample;
     char v92_short_p1_strict_digital_name[16];
     bool v92_short_p1_strict_digital_qca;
     int v92_short_p1_strict_digital_uqts_ucode;
     int v92_short_p1_strict_digital_lm_level;
+    int v92_short_p1_strict_digital_lapm;  /* P bit: -1 unknown, 0, 1 */
 
     bool v92_qts_seen;
     int v92_qts_sample;
@@ -371,7 +376,7 @@ typedef struct {
     char note[64];
 } p12_v92_proc_step_t;
 
-#define P12_V92_PROC_MAX_STEPS 12
+#define P12_V92_PROC_MAX_STEPS 16
 
 typedef struct {
     bool evaluated;                  /* a short-P1 story was found at all */
@@ -386,6 +391,10 @@ typedef struct {
     int late_count;                  /* steps observed outside timing bounds */
     int phase2_handoff_sample;       /* -1 unknown; end of the 75 +/- 5 ms
                                         post-TONEq silence otherwise */
+    int call_lapm;                   /* call modem's P bit: -1 unknown, 0, 1 */
+    int answer_lapm;                 /* answer modem's P bit */
+    int odp_adp_bypass;              /* 9.2.5: 1 = V.42 ODP/ADP bypassed,
+                                        0 = not bypassed, -1 = unknown */
 } p12_v92_proc_result_t;
 
 /* ------------------------------------------------------------------ */
@@ -475,6 +484,7 @@ typedef struct {
     int stereo_short_p1_partner_sample;
     int stereo_short_p1_partner_uqts_ucode;
     int stereo_short_p1_partner_lm_level;
+    int stereo_short_p1_partner_lapm;
 
     /* V.21 FSK bursts detected */
     int ch1_burst_count;

@@ -62,6 +62,7 @@ bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
         && a->v90_compatibility == b->v90_compatibility
         && a->drn == b->drn
         && a->acknowledge == b->acknowledge
+        && a->codec_alaw == b->codec_alaw
         && a->constellation_count == b->constellation_count
         && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
         && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
@@ -95,7 +96,7 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
     return (msg == NULL);
 }
 
-int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp)
+static int vpcm_cp_bit_length_aligned(const vpcm_cp_frame_t *cp, int alignment)
 {
     int nbits;
 
@@ -104,12 +105,29 @@ int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp)
 
     nbits = 136 + 136 * cp->constellation_count;
     nbits += 17; /* CRC start bit + 16 CRC bits */
-    while ((nbits % 6) != 0)
+    while ((nbits % alignment) != 0)
         nbits++;
     return nbits;
 }
 
-bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out)
+int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp)
+{
+    return vpcm_cp_bit_length_aligned(cp, 6);
+}
+
+int vpcm_cp_modulated_bit_length(const vpcm_cp_frame_t *cp, int constellation_points)
+{
+    if (constellation_points == 4)
+        return vpcm_cp_bit_length_aligned(cp, 12);
+    if (constellation_points == 16)
+        return vpcm_cp_bit_length_aligned(cp, 24);
+    return 0;
+}
+
+static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
+                                        int alignment,
+                                        uint8_t *bits_out,
+                                        int *nbits_out)
 {
     int nbits;
     int max_idx;
@@ -121,7 +139,7 @@ bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbit
     if (!cp || !bits_out || !nbits_out || !vpcm_cp_validate(cp, NULL, 0))
         return false;
 
-    nbits = vpcm_cp_bit_length(cp);
+    nbits = vpcm_cp_bit_length_aligned(cp, alignment);
     if (nbits <= 0 || nbits > VPCM_CP_MAX_BITS)
         return false;
     memset(bits_out, 0, (size_t) nbits);
@@ -135,6 +153,7 @@ bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbit
     vpcm_cp_set_bits(bits_out, 30, 3, 0);
     vpcm_cp_set_bit(bits_out, 33, cp->acknowledge ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 34, 0);
+    vpcm_cp_set_bit(bits_out, 35, cp->codec_alaw ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 51, 0);
     vpcm_cp_set_bit(bits_out, 68, 0);
     vpcm_cp_set_bit(bits_out, 85, 0);
@@ -160,11 +179,33 @@ bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbit
     crc = vpcm_cp_crc_bits(bits_out, pos);
     vpcm_cp_set_bits(bits_out, pos, 16, crc);
     pos += 16;
-    while ((pos % 6) != 0)
+    while ((pos % alignment) != 0)
         bits_out[pos++] = 0;
 
     *nbits_out = pos;
     return true;
+}
+
+
+bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out)
+{
+    return vpcm_cp_encode_bits_aligned(cp, 6, bits_out, nbits_out);
+}
+
+bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
+                                   int constellation_points,
+                                   uint8_t *bits_out,
+                                   int *nbits_out)
+{
+    int alignment;
+
+    if (constellation_points == 4)
+        alignment = 12;
+    else if (constellation_points == 16)
+        alignment = 24;
+    else
+        return false;
+    return vpcm_cp_encode_bits_aligned(cp, alignment, bits_out, nbits_out);
 }
 
 bool vpcm_cp_decode_bits(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out)
@@ -212,10 +253,13 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
                            && diag->bits[102] == 0
                            && diag->bits[119] == 0
                            && diag->bits[128] == 0);
+    diag->reserved_bits_ok = true;
+    for (int i = 25; i <= 29; i++)
+        diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
+    for (int i = 129; i <= 135; i++)
+        diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
     diag->v90_compat_ok = (diag->bits[19] == 1
                            && diag->bits[30] == 0
-                           && diag->bits[31] == 0
-                           && diag->bits[32] == 0
                            && diag->bits[128] == 0);
     diag->fill_ok = true;
     for (int i = diag->nbits - 1; i >= 0 && (i % 6) != 5; i--) {
@@ -226,6 +270,7 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
     }
     diag->valid = (diag->frame_sync_ok
                    && diag->start_bits_ok
+                   && diag->reserved_bits_ok
                    && diag->v90_compat_ok
                    && diag->fill_ok
                    && diag->crc_remainder == 0);
@@ -262,16 +307,20 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
                            && bits[102] == 0
                            && bits[119] == 0
                            && bits[128] == 0);
+    diag->reserved_bits_ok = true;
+    for (i = 25; i <= 29; i++)
+        diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
+    for (i = 129; i <= 135; i++)
+        diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
     diag->v90_compat_ok = (bits[19] == 1
                            && bits[30] == 0
-                           && bits[31] == 0
-                           && bits[32] == 0
                            && bits[128] == 0);
 
     diag->frame.transparent_mode_granted = (bits[18] != 0);
     diag->frame.v90_compatibility = (bits[19] != 0);
     diag->frame.drn = (uint8_t) vpcm_cp_get_bits(bits, 20, 5);
     diag->frame.acknowledge = (bits[33] != 0);
+    diag->frame.codec_alaw = (bits[35] != 0);
     diag->frame.dfi[0] = (uint8_t) vpcm_cp_get_bits(bits, 103, 4);
     diag->frame.dfi[1] = (uint8_t) vpcm_cp_get_bits(bits, 107, 4);
     diag->frame.dfi[2] = (uint8_t) vpcm_cp_get_bits(bits, 111, 4);
@@ -311,6 +360,7 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
 
     diag->valid = (diag->frame_sync_ok
                    && diag->start_bits_ok
+                   && diag->reserved_bits_ok
                    && diag->v90_compat_ok
                    && diag->fill_ok
                    && diag->crc_remainder == 0

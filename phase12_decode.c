@@ -221,6 +221,24 @@ static int p12_parse_detail_int(const char *detail, const char *key, int fallbac
     return (int) strtol(p, NULL, 0);
 }
 
+/* Parse a "key=yes"/"key=no" flag from an event detail string. */
+static int p12_parse_detail_yesno(const char *detail, const char *key, int fallback)
+{
+    const char *p;
+
+    if (!detail || !key)
+        return fallback;
+    p = strstr(detail, key);
+    if (!p)
+        return fallback;
+    p += strlen(key);
+    if (strncmp(p, "yes", 3) == 0)
+        return 1;
+    if (strncmp(p, "no", 2) == 0)
+        return 0;
+    return fallback;
+}
+
 static bool p12_dump_v8_enabled(void)
 {
     if (g_p12_dump_v8_enabled < 0)
@@ -1671,6 +1689,7 @@ static void detect_call_initiation_signals(const int16_t *samples,
             result->call_init.v92_qca2_digital = (strstr(ev->summary, "d") != NULL);
             result->call_init.v92_qca2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
             result->call_init.v92_qca2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
+            result->call_init.v92_qca2_lapm = p12_parse_detail_yesno(ev->detail, "lapm=", -1);
         } else {
             /* QC2a or QC2d — the responding-station identification */
             result->call_init.v92_qc2_seen = true;
@@ -1683,6 +1702,7 @@ static void detect_call_initiation_signals(const int16_t *samples,
             result->call_init.v92_qc2_qca = false;
             result->call_init.v92_qc2_uqts_ucode = p12_parse_detail_int(ev->detail, "uqts_ucode=", -1);
             result->call_init.v92_qc2_lm_level = p12_parse_detail_int(ev->detail, "lm=", -1);
+            result->call_init.v92_qc2_lapm = p12_parse_detail_yesno(ev->detail, "lapm=", -1);
         }
     }
     free(tmp_log.events);
@@ -1989,6 +2009,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
                                                   ? -1 : best_qc2_hit.uqts_ucode;
             result->call_init.v92_qca2_lm_level = best_qc2_hit.digital_modem
                                                 ? best_qc2_hit.lm : -1;
+            result->call_init.v92_qca2_lapm = best_qc2_hit.lapm ? 1 : 0;
             result->v92_capable = true;
         } else if (!best_qc2_hit.qca && !result->call_init.v92_qc2_seen) {
             result->call_init.v92_qc2_seen = true;
@@ -2002,6 +2023,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
                                                  ? -1 : best_qc2_hit.uqts_ucode;
             result->call_init.v92_qc2_lm_level = best_qc2_hit.digital_modem
                                                ? best_qc2_hit.lm : -1;
+            result->call_init.v92_qc2_lapm = best_qc2_hit.lapm ? 1 : 0;
             result->v92_capable = true;
         }
     }
@@ -2048,6 +2070,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
         result->call_init.v92_short_p1_qca = candidate.qca;
         result->call_init.v92_short_p1_uqts_ucode = candidate.uqts_ucode;
         result->call_init.v92_short_p1_lm_level = candidate.digital_modem ? candidate.aux_value : -1;
+        result->call_init.v92_short_p1_lapm = candidate.lapm ? 1 : 0;
     }
     if (analog_alt.ok && !analog_alt.digital_modem && analog_alt_sample >= 0
         && !result->call_init.v92_short_p1_strict_analog_seen) {
@@ -2060,6 +2083,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
         result->call_init.v92_short_p1_strict_analog_qca = analog_alt.qca;
         result->call_init.v92_short_p1_strict_analog_uqts_ucode = analog_alt.uqts_ucode;
         result->call_init.v92_short_p1_strict_analog_lm_level = analog_alt.digital_modem ? analog_alt.aux_value : -1;
+        result->call_init.v92_short_p1_strict_analog_lapm = analog_alt.lapm ? 1 : 0;
     }
     if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0
         && !result->call_init.v92_short_p1_strict_digital_seen) {
@@ -2072,6 +2096,7 @@ static void detect_v92_short_phase1(const int16_t *samples,
         result->call_init.v92_short_p1_strict_digital_qca = digital_alt.qca;
         result->call_init.v92_short_p1_strict_digital_uqts_ucode = digital_alt.uqts_ucode;
         result->call_init.v92_short_p1_strict_digital_lm_level = digital_alt.digital_modem ? digital_alt.aux_value : -1;
+        result->call_init.v92_short_p1_strict_digital_lapm = digital_alt.lapm ? 1 : 0;
     }
     if (digital_alt.ok && digital_alt.digital_modem && digital_alt_sample >= 0
         && (!result->call_init.v92_short_p1_alt_digital_seen
@@ -3365,6 +3390,29 @@ static void p12_proc_add_step(p12_v92_proc_result_t *proc,
         proc->late_count++;
 }
 
+/*
+ * Which P (LAPM) bit did one side indicate?  The call modem transmits QC*
+ * and the answer modem QCA*, in either family; the operative family-1
+ * strict slots take priority over the family-2 identification frames.
+ * Returns -1 when that side's signal was not decoded on this channel.
+ */
+static int p12_v92_side_lapm(const p12_call_init_t *ci, bool want_qca)
+{
+    if (ci->v92_short_p1_strict_analog_seen
+        && ci->v92_short_p1_strict_analog_qca == want_qca
+        && ci->v92_short_p1_strict_analog_lapm >= 0)
+        return ci->v92_short_p1_strict_analog_lapm;
+    if (ci->v92_short_p1_strict_digital_seen
+        && ci->v92_short_p1_strict_digital_qca == want_qca
+        && ci->v92_short_p1_strict_digital_lapm >= 0)
+        return ci->v92_short_p1_strict_digital_lapm;
+    if (!want_qca && ci->v92_qc2_seen)
+        return ci->v92_qc2_lapm;
+    if (want_qca && ci->v92_qca2_seen)
+        return ci->v92_qca2_lapm;
+    return -1;
+}
+
 static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                                             int sample_rate)
 {
@@ -3409,6 +3457,9 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
     proc = &result->v92_proc;
     memset(proc, 0, sizeof(*proc));
     proc->phase2_handoff_sample = -1;
+    proc->call_lapm = -1;
+    proc->answer_lapm = -1;
+    proc->odp_adp_bypass = -1;
 
     qc1_ev = p12_proc_find_earliest(result, qc1_labels, 2, 0);
     qca1_ev = p12_proc_find_earliest(result, qca1_labels, 2, 0);
@@ -3771,6 +3822,29 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
     if (proc->outcome != P12_V92_PROC_OUTCOME_SHORT_PHASE2
         && proc->outcome != P12_V92_PROC_OUTCOME_V34_PHASE2)
         proc->phase2_handoff_sample = -1;
+
+    /* --- 9.2.5: ODP/ADP bypass verdict from the P bits of the short-P1
+     *     signals.  The stereo partner hint stands in for the side this
+     *     channel did not capture. */
+    proc->call_lapm = p12_v92_side_lapm(&result->call_init, false);
+    proc->answer_lapm = p12_v92_side_lapm(&result->call_init, true);
+    if (partner_hint && result->stereo_short_p1_partner_lapm >= 0) {
+        if (proc->call_lapm < 0 && !result->stereo_short_p1_partner_qca)
+            proc->call_lapm = result->stereo_short_p1_partner_lapm;
+        if (proc->answer_lapm < 0 && result->stereo_short_p1_partner_qca)
+            proc->answer_lapm = result->stereo_short_p1_partner_lapm;
+    }
+    if (proc->call_lapm == 1 && proc->answer_lapm == 1) {
+        proc->odp_adp_bypass = 1;
+        p12_proc_add_step(proc, "9.2.5", "ODP/ADP", P12_V92_PROC_STEP_OBSERVED,
+                          -1, "V.42 ODP/ADP exchange bypassed (both P=1)");
+    } else if (proc->call_lapm == 0 || proc->answer_lapm == 0) {
+        proc->odp_adp_bypass = 0;
+        snprintf(note, sizeof(note), "no bypass (call P=%d, answer P=%d)",
+                 proc->call_lapm, proc->answer_lapm);
+        p12_proc_add_step(proc, "9.2.5", "ODP/ADP", P12_V92_PROC_STEP_OBSERVED,
+                          -1, note);
+    }
 
     if (p12_debug_enabled()) {
         fprintf(stderr,
@@ -7833,14 +7907,23 @@ void phase12_result_init(phase12_result_t *r)
     r->stereo_short_p1_partner_sample = -1;
     r->stereo_short_p1_partner_uqts_ucode = -1;
     r->stereo_short_p1_partner_lm_level = -1;
+    r->stereo_short_p1_partner_lapm = -1;
     r->call_init.v92_qc2_uqts_ucode = -1;
     r->call_init.v92_qc2_lm_level = -1;
+    r->call_init.v92_qc2_lapm = -1;
     r->call_init.v92_qca2_uqts_ucode = -1;
     r->call_init.v92_qca2_lm_level = -1;
+    r->call_init.v92_qca2_lapm = -1;
     r->call_init.v92_short_p1_uqts_ucode = -1;
     r->call_init.v92_short_p1_lm_level = -1;
+    r->call_init.v92_short_p1_lapm = -1;
+    r->call_init.v92_short_p1_strict_analog_lapm = -1;
+    r->call_init.v92_short_p1_strict_digital_lapm = -1;
     r->call_init.v92_phase2_handoff_sample = -1;
     r->v92_proc.phase2_handoff_sample = -1;
+    r->v92_proc.call_lapm = -1;
+    r->v92_proc.answer_lapm = -1;
+    r->v92_proc.odp_adp_bypass = -1;
     r->log.events = NULL;
     r->log.count = 0;
     r->log.cap = 0;

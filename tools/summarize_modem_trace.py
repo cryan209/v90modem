@@ -25,7 +25,10 @@ ME_TRACE_RE = re.compile(
     r"v90_event=(?P<v90_event>-?\d+) "
     r"phase3=(?P<phase3>\d+) "
     r"s_events=(?P<s_events>\d+) "
-    r"dil=(?P<dil>\d+)"
+    r"dil=(?P<dil>\d+) "
+    r"cp_bits=(?P<cp_bits>\d+) "
+    r"cp_valid=(?P<cp_valid>\d+) "
+    r"cp_rejected=(?P<cp_rejected>\d+)"
 )
 
 ENGINE_TRACE_RE = re.compile(r"\[TRACE \+(?P<elapsed_ms>\d+)ms\] (?P<message>.*)")
@@ -132,6 +135,9 @@ def parse_log_lines(lines: list[str]) -> dict[str, object]:
                     "v90_phase3_started": int(me_match.group("phase3")),
                     "v90_phase3_s_events": int(me_match.group("s_events")),
                     "v90_dil_valid": int(me_match.group("dil")),
+                    "v90_cp_input_bits": int(me_match.group("cp_bits")),
+                    "v90_cp_valid_frames": int(me_match.group("cp_valid")),
+                    "v90_cp_rejected_frames": int(me_match.group("cp_rejected")),
                     "raw": line,
                 }
             )
@@ -219,6 +225,7 @@ def format_text_report(report: dict[str, object]) -> str:
             f"phase_ms={event['phase_ms']} v34=({event['v34_rx_stage']},{event['v34_tx_stage']}) "
             f"v90=({event['v90_rx_stage']},{event['v90_tx_stage']},event={event['v90_event']}) "
             f"phase3={event['v90_phase3_started']} s_events={event['v90_phase3_s_events']} "
+            f"cp={event['v90_cp_valid_frames']}/{event['v90_cp_rejected_frames']} "
             f"dil={event['v90_dil_valid']}"
         )
     if len(me_events) > 20:

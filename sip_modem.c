@@ -326,6 +326,7 @@ static void log_modem_diag_snapshot(const char *reason)
         ("sip_modem",
          "ME trace (%s): state=%s mod=%s law=%s role=%s media=%s phase_ms=%llu "
          "v34_rx=%d v34_tx=%d v90_rx=%d v90_tx=%d v90_event=%d phase3=%d s_events=%d dil=%d "
+         "cp_bits=%llu cp_valid=%u cp_rejected=%u "
          "g711_rx=%llu g711_tx=%llu raw_v90_tx=%llu linear_tx=%llu",
          reason,
          me_state_to_str(snapshot.state),
@@ -342,6 +343,9 @@ static void log_modem_diag_snapshot(const char *reason)
          snapshot.v90_phase3_started,
          snapshot.v90_phase3_s_events,
          snapshot.v90_dil_valid,
+         (unsigned long long)snapshot.v90_cp_input_bits,
+         snapshot.v90_cp_valid_frames,
+         snapshot.v90_cp_rejected_frames,
          (unsigned long long)snapshot.g711_rx_octets,
          (unsigned long long)snapshot.g711_tx_octets,
          (unsigned long long)snapshot.g711_raw_v90_tx_octets,

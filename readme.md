@@ -156,7 +156,8 @@ VPCM_G711_TAP_DIR=/tmp/v90-g711 ./sip_v90_modem ...
 
 This writes `live-rx.g711` and `live-tx.g711`. Modem diagnostic snapshots also
 report total RX/TX octets and split outgoing octets between raw V.90 generation
-and the linear compatibility path.
+and the linear compatibility path. During Phase 4 they also report `cp_bits`,
+`cp_valid`, and `cp_rejected` for the strict analogue-side CPt receiver.
 
 ### Softmodem Debug Mode (no PJMEDIA passthrough)
 

@@ -628,6 +628,10 @@ typedef struct
     /*! \brief A user specified opaque pointer passed to the put_aux_bit routine. */
     void *put_aux_bit_user_data;
 
+    /*! V.90 digital-side callback for strictly descrambled Phase 4 CP bits. */
+    span_put_bit_func_t put_phase4_bit;
+    void *put_phase4_bit_user_data;
+
     /*! \brief A callback function which may be enabled to report every symbol's
                constellation position. */
     qam_report_handler_t qam_report;

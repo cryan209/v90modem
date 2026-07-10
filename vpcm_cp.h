@@ -20,6 +20,7 @@ typedef struct {
     bool v90_compatibility;
     uint8_t drn;
     bool acknowledge;
+    bool codec_alaw;
     uint8_t constellation_count;
     uint8_t dfi[VPCM_CP_FRAME_INTERVALS];
     uint8_t masks[VPCM_CP_MAX_CONSTELLATIONS][VPCM_CP_MASK_BYTES];
@@ -33,6 +34,7 @@ typedef struct {
     uint16_t crc_remainder;
     bool frame_sync_ok;
     bool start_bits_ok;
+    bool reserved_bits_ok;
     bool v90_compat_ok;
     bool fill_ok;
     bool valid;
@@ -41,7 +43,12 @@ typedef struct {
 void vpcm_cp_init(vpcm_cp_frame_t *cp);
 bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len);
 int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp);
+int vpcm_cp_modulated_bit_length(const vpcm_cp_frame_t *cp, int constellation_points);
 bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out);
+bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
+                                   int constellation_points,
+                                   uint8_t *bits_out,
+                                   int *nbits_out);
 bool vpcm_cp_decode_bits(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out);
 bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag);
 bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag);

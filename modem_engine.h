@@ -56,6 +56,9 @@ typedef struct {
     int v90_phase3_started;
     int v90_phase3_s_events;
     int v90_dil_valid;
+    uint64_t v90_cp_input_bits;
+    uint32_t v90_cp_valid_frames;
+    uint32_t v90_cp_rejected_frames;
     uint64_t phase_elapsed_ms;
     uint64_t g711_rx_octets;
     uint64_t g711_tx_octets;

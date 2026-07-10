@@ -294,6 +294,16 @@ SPAN_DECLARE(void) v34_set_put_bit(v34_state_t *s, span_put_bit_func_t put_bit, 
     \param user_data An opaque pointer. */
 SPAN_DECLARE(void) v34_set_put_aux_bit(v34_state_t *s, span_put_bit_func_t put_bit, void *user_data);
 
+/*! Set a callback for descrambled V.90 analogue-side Phase 4 CP bits.
+    This callback is active only for a V.90 digital answerer. */
+SPAN_DECLARE(void) v34_set_put_phase4_bit(v34_state_t *s,
+                                          span_put_bit_func_t put_bit,
+                                          void *user_data);
+
+/*! Reject only the current V.90 Phase 4 CP decode hypothesis and resume
+    preamble acquisition without restarting carrier/equalizer training. */
+SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s);
+
 /*! Check if the V.34 modem has entered the primary channel phase (Phase 3/4
     or data mode).  During Phase 2, both sides share the same 1200 Hz carrier,
     so an external echo canceller would cancel the far-end signal.  After this

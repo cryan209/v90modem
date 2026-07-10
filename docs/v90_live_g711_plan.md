@@ -42,6 +42,15 @@ Completed on 2026-07-10:
 - negative transition tests proving J/J-prime cannot terminate Jd and malformed
   Phase 4 input cannot end TRN2d
 
+Completed on 2026-07-11:
+
+- strict Table 14 CPt framing on the live analogue-to-digital V.34 bitstream
+- variable CPt length derived from the six DFI fields
+- validation of frame sync, inserted starts, reserved bits, CRC, fill, DRN,
+  4-point symbol alignment, and negotiated G.711 law
+- live `CP_VALID` state transition plus CP input/valid/rejected diagnostics
+- positive and malformed CPt vectors for both μ-law and A-law
+
 The parity test confirms why the raw bearer is required: 72 of the first 512
 μ-law Phase 3 octets change when decoded to linear PCM and re-encoded, including
 the `0x7F` negative-zero codeword. The raw path preserves those exact octets.
@@ -105,8 +114,6 @@ Remaining baseline issues:
   not the negotiated V.90 section 5 mapper.
 - `vpcm_v90_session.c` still uses V.91 compatibility and placeholder objects in
   parts of its startup contract.
-- the live analogue-side CP decoder is not yet connected to
-  `V90_RX_EVENT_CP_VALID`.
 - the current digital Phase 4 control transmitter is a CP-shaped compatibility
   placeholder; V.90 requires the digital modem to transmit MP/MP-prime.
 - the synthetic coupled-training harness still infers some remote events from
