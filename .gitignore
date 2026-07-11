@@ -31,6 +31,7 @@ sip_v90_modem
 vpcm_loopback_test
 v92_trn2u_replay
 data_stack_test
+v42_link_test
 
 # Common maps/logs
 *.map

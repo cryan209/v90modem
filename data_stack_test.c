@@ -232,6 +232,46 @@ static void test_packed_byte_helpers(void)
           "V.14 packed idle fill is mark");
 }
 
+/* V.90 consumes a non-byte-aligned number of bits per six-symbol frame.  This
+ * mirrors its byte reservoir at d=29 and proves packed V.14 state remains
+ * continuous across frame boundaries. */
+static void test_v14_v90_style_reservoir(void)
+{
+    enum { PAYLOAD_LEN = 512, FRAME_BITS = 29, MAX_FRAMES = 2048 };
+    data_stack_t tx, rx;
+    uint8_t payload[PAYLOAD_LEN];
+    uint64_t reservoir = 0;
+    int reservoir_bits = 0;
+
+    for (int i = 0; i < PAYLOAD_LEN; i++)
+        payload[i] = (uint8_t)(i * 61 + 7);
+    ds_init(&tx, DS_FRAMING_V14, pull_byte, NULL, NULL, NULL);
+    ds_init(&rx, DS_FRAMING_V14, NULL, NULL, push_byte, NULL);
+    load_tx(payload, PAYLOAD_LEN);
+
+    for (int frame = 0; frame < MAX_FRAMES && rx_sink_len < PAYLOAD_LEN; frame++) {
+        uint8_t packed[8];
+        uint64_t frame_bits;
+        int missing = FRAME_BITS - reservoir_bits;
+        int needed = missing > 0 ? (missing + 7) / 8 : 0;
+
+        ds_tx_fill_bytes(&tx, packed, needed);
+        for (int i = 0; i < needed; i++) {
+            reservoir |= (uint64_t)packed[i] << reservoir_bits;
+            reservoir_bits += 8;
+        }
+        frame_bits = reservoir & ((1ULL << FRAME_BITS) - 1ULL);
+        reservoir >>= FRAME_BITS;
+        reservoir_bits -= FRAME_BITS;
+        for (int i = 0; i < FRAME_BITS; i++)
+            ds_rx_put_bit(&rx, (int)((frame_bits >> i) & 1ULL));
+    }
+
+    CHECK(rx_sink_len == PAYLOAD_LEN
+          && memcmp(rx_sink, payload, PAYLOAD_LEN) == 0,
+          "V.14 remains byte exact through V.90-style 29-bit frames");
+}
+
 /* Random payloads through the bit interface with idle gaps between bursts. */
 static void test_v14_bursty_random(void)
 {
@@ -278,6 +318,7 @@ int main(void)
     test_reset_clears_partial_character_and_rate_phase();
     test_raw_roundtrip();
     test_packed_byte_helpers();
+    test_v14_v90_style_reservoir();
     test_v14_bursty_random();
 
     if (failures) {

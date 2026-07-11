@@ -205,13 +205,6 @@ static int dring_read(data_ring_t *r, uint8_t *buf, int max) {
     return n;
 }
 
-static int dring_available(data_ring_t *r) {
-    pthread_mutex_lock(&r->mtx);
-    int n = (r->head - r->tail + DATA_RING_SIZE) % DATA_RING_SIZE;
-    pthread_mutex_unlock(&r->mtx);
-    return n;
-}
-
 /* ------------------------------------------------------------------ */
 /* V.22bis get_bit / put_bit callbacks for SpanDSP                    */
 /* ------------------------------------------------------------------ */
@@ -475,6 +468,15 @@ static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
     (void)user_data;
     if (dring_write(&upstream_ring, &byte, 1) != 1)
         ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
+}
+
+static void data_stack_restart(int dte_bit_rate, int line_bit_rate)
+{
+    ds_init(&g_data_stack,
+            g_data_framing,
+            data_stack_pull_dte_byte, NULL,
+            data_stack_push_dte_byte, NULL);
+    ds_set_v14_rates(&g_data_stack, dte_bit_rate, line_bit_rate);
 }
 
 static int v22bis_get_bit_cb(void *user_data)
@@ -828,6 +830,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 {
     pthread_mutex_lock(&g_state_mtx);
     if (g_state == ME_TRAINING && g_mod == mod) {
+        data_stack_restart(rate, rate);
         g_state = ME_DATA;
         g_phase_start_ms = 0;
         pthread_mutex_unlock(&g_state_mtx);
@@ -846,12 +849,6 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 /* Forward declarations */
 static void start_v22bis_training(void);
 void me_hangup(void);
-
-/* Bit accumulators for V.34 TX and RX (one byte at a time) */
-static uint8_t  v34_tx_byte = 0;
-static int      v34_tx_bits = 0;
-static uint8_t  v34_rx_byte = 0;
-static int      v34_rx_bits = 0;
 
 static void v90_dil_capture_reset(void)
 {
@@ -1033,20 +1030,11 @@ static bool v90_dil_capture_try_parse_at(int start)
 
 static int v34_get_bit_cb(void *user_data)
 {
+    int bit;
+
     (void)user_data;
-    if (v34_tx_bits == 0) {
-        uint8_t b;
-        if (dring_read(&downstream_ring, &b, 1) == 1) {
-            v34_tx_byte = b;
-            v34_tx_bits = 8;
-        } else {
-            return SIG_STATUS_END_OF_DATA;
-        }
-    }
-    int bit = v34_tx_byte & 1;
-    v34_tx_byte >>= 1;
-    v34_tx_bits--;
-    return bit;
+    bit = ds_tx_get_bit(&g_data_stack);
+    return (bit == DS_TX_NO_DATA) ? SIG_STATUS_END_OF_DATA : bit;
 }
 
 static void v34_put_aux_bit_cb(void *user_data, int bit)
@@ -1093,20 +1081,26 @@ static void v34_put_bit_cb(void *user_data, int bit)
                 int rate = v34_get_current_bit_rate(g_v34);
                 if (g_mod == ME_MOD_V90) {
                     if (g_v90 && (v90_training_complete(g_v90) || v90_using_internal_v34_tx(g_v90))) {
+                        int downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
+
+                        if (downstream_rate <= 0)
+                            downstream_rate = V90_RATE_BPS;
+                        data_stack_restart(downstream_rate, downstream_rate);
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
-                                rate, V90_RATE_BPS);
-                        trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, V90_RATE_BPS);
+                                rate, downstream_rate);
+                        trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
                         v90_reset_data_mode(g_v90);
                         g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
-                        di_on_connected(V90_RATE_BPS);
+                        di_on_connected(downstream_rate);
                     } else if (!g_v90_completion_deferred_logged) {
                         ME_LOG("[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
                         trace_phase("V90 deferred DATA entry: V34 success before V90 startup complete");
                         g_v90_completion_deferred_logged = true;
                     }
                 } else {
+                    data_stack_restart(rate, rate);
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
@@ -1134,14 +1128,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
         ME_LOG("[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
         return;
     }
-    /* Normal data bit — accumulate into bytes, write to upstream ring */
-    v34_rx_byte |= (uint8_t)((bit & 1) << v34_rx_bits);
-    v34_rx_bits++;
-    if (v34_rx_bits == 8) {
-        dring_write(&upstream_ring, &v34_rx_byte, 1);
-        v34_rx_byte = 0;
-        v34_rx_bits = 0;
-    }
+    ds_rx_put_bit(&g_data_stack, bit);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1156,11 +1143,7 @@ static void start_v22bis_training(void)
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
-    ds_init(&g_data_stack,
-            g_data_framing,
-            data_stack_pull_dte_byte, NULL,
-            data_stack_push_dte_byte, NULL);
-    ds_set_v14_rates(&g_data_stack, 2400, 2400);
+    data_stack_restart(2400, 2400);
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
@@ -1188,12 +1171,6 @@ static void start_v34_training(void)
     g_last_tx_stage = 0;
     v90_dil_capture_reset();
 
-    /* Reset bit accumulators */
-    v34_tx_byte = 0;
-    v34_tx_bits = 0;
-    v34_rx_byte = 0;
-    v34_rx_bits = 0;
-
     if (g_v34) {
         v34_free(g_v34);
         g_v34 = NULL;
@@ -1205,6 +1182,7 @@ static void start_v34_training(void)
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
      */
     int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
+    data_stack_restart(bps, bps);
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
                      bps,
@@ -2022,27 +2000,19 @@ static void generate_v90_data_codewords_locked(uint8_t *codewords, int len)
         if (g_v90_data_frame_pos >= V90_DATA_FRAME_LEN) {
             uint8_t data_in[V90_DATA_FRAME_LEN];
             int needed;
-            int input_len;
             int consumed;
 
             memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
             needed = v90_data_input_bytes_needed(g_v90);
-            input_len = dring_available(&downstream_ring);
-            if (input_len > needed)
-                input_len = needed;
-            if (input_len > 0
-                && dring_read(&downstream_ring, data_in, input_len) != input_len) {
-                ME_LOG("[ME] V.90 data ring read failed\n");
-                input_len = 0;
-            }
+            ds_tx_fill_bytes(&g_data_stack, data_in, needed);
             consumed = 0;
             if (v90_tx_data_frame_codewords(g_v90,
                                             g_v90_data_frame,
                                             data_in,
-                                            input_len,
+                                            needed,
                                             &consumed,
                                             true) != V90_DATA_FRAME_LEN
-                || consumed != input_len) {
+                || consumed != needed) {
                 ME_LOG("[ME] V.90 data mapper failed to produce one frame\n");
                 memset(g_v90_data_frame, pcm_idle(), sizeof(g_v90_data_frame));
             }
@@ -2069,6 +2039,9 @@ static void enter_v90_data_locked(void)
         return;
     upstream_rate = v34_get_current_bit_rate(g_v34);
     downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
+    if (downstream_rate <= 0)
+        downstream_rate = V90_RATE_BPS;
+    data_stack_restart(downstream_rate, downstream_rate);
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;

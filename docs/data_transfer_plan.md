@@ -55,18 +55,19 @@ can be migrated separately to avoid mixing a risky rename with protocol work.
 
 | Area | Current state | Gap |
 |---|---|---|
-| `modem_engine.c` | V.22bis uses the common V.14 stack; V.34 still packs/unpacks raw bytes; V.90 TX reads DTE bytes directly | Extend the common framed-bit seam to V.34/V.90; V.90 RX data delivery is not yet a complete peer of TX |
-| `data_stack.[ch]` | Implements raw diagnostics and 8N1 V.14 framing, fractional stop-bit deletion, underspeed mark insertion, and packed-byte helpers | Add bounded queues/backpressure and integrate the remaining datapumps |
-| `data_stack_test.c` | Normal build/test target covering round trips, long-run rate ratios, idle mark, deleted stop bits, invalid input, reset, packed boundaries, and bursts | Add queue/overflow cases when bounded queues land |
+| `modem_engine.c` | V.22bis, V.34, and live V.90 use the common V.14 stack; V.90 preserves its non-byte-aligned mapper reservoir | Add bounded queues/backpressure and validate each live path with real hardware |
+| `data_stack.[ch]` | Implements raw diagnostics and 8N1 V.14 framing, fractional stop-bit deletion, underspeed mark insertion, and packed-byte helpers | Add bounded queues/backpressure, then the LAPM mode |
+| `data_stack_test.c` | Normal build/test target covering round trips, long-run rate ratios, V.90-style 29-bit frames, idle mark, deleted stop bits, invalid input, reset, packed boundaries, and bursts | Add queue/overflow cases when bounded queues land |
 | `data_interface.[ch]` | Mode A, guarded `+++`, `ATO`, and a Mode B two-PTY scaffold exist | Still singleton-based; split mode has no CLI wiring; partial writes, close semantics, and policy commands need hardening |
 | `sip_modem.c` | Opens only the classic `--pty-link` interface | No split-port or exec configuration |
-| SpanDSP `v42.c` | LAPM detection, HDLC, XID, windowing, retransmission, and bit callbacks exist | Timer rate defaults to 28800; public negotiation/status/config surfaces are insufficient and need validation |
+| SpanDSP `v42.c` | LAPM detection, HDLC, XID, windowing, retransmission, bit callbacks, a configurable timer rate, and public detection statuses exist | XID result exposure, busy/release/retry qualification, and live integration remain |
+| `v42_link_test.c` | Tests detection, byte-exact duplex transfer, T400 at 2400/9600/28800/33600 bit/s, corrupted-frame retransmission, RNR/RR, DISC/UA, and sustained-outage retry exhaustion | Add public negotiated-XID result checks when that API lands |
 | SpanDSP `v42bis.c` | Compressor/decompressor with dynamic/always/never modes exists | Must be driven by negotiated XID values, not fixed sample defaults |
 | V.92 startup | Tracks the peer LAPM P bit and whether ODP/ADP may be bypassed | Result must be carried into the live data-stack start policy |
 
-The first V.22bis integration slice is complete. The remaining physical-layer
-work is to carry the same seam through V.34 and both V.90 directions before
-starting LAPM.
+The common V.14 seam now covers the implemented V.22bis, V.34, and live V.90
+paths. LAPM is being qualified in isolation before it is selected by live
+calls.
 
 ## Layer model
 
@@ -468,8 +469,8 @@ behavior change.
 
 ### Milestone 1: integrate complete V.14
 
-Status: **in progress**. Rate adaptation and V.22bis integration are complete;
-V.34 and V.90 integration remain.
+Status: **implementation complete; hardware validation pending**. Rate
+adaptation is wired through V.22bis, V.34, and live V.90 data mode.
 
 - Extend `data_stack` with TX rate adaptation and explicit RX framing errors.
 - Replace V.22bis and V.34 raw-byte accumulators with the common bit seam.
@@ -482,6 +483,11 @@ Exit gate: bidirectional binary transfers over in-process V.22bis and the
 available V.34/V.90 data paths are byte-exact at multiple DTE/line rate ratios.
 
 ### Milestone 2: qualify the SpanDSP LAPM core in isolation
+
+Status: **in progress**. The bit-pipe harness, configurable line-rate timers,
+public detection statuses, multirate T400 checks, duplex transfer,
+corrupted-frame recovery, RNR/RR, DISC/UA, and sustained-outage retry
+exhaustion are complete. Public negotiated-XID results remain.
 
 - Build a two-ended bit-pipe test around two `v42_state_t` instances.
 - Add the timer-rate and stable-status/config APIs described above.

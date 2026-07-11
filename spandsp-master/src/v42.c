@@ -188,6 +188,26 @@ SPAN_DECLARE(const char *) lapm_status_to_str(int status)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(const char *) v42_status_to_str(int status)
+{
+    switch (status)
+    {
+    case V42_STATUS_DETECTING:
+        return "V.42 detection started";
+    case V42_STATUS_DETECTION_SUCCEEDED:
+        return "V.42 detection succeeded";
+    case V42_STATUS_DETECTION_UNSUPPORTED:
+        return "V.42 unsupported";
+    case SIG_STATUS_LINK_CONNECTED:
+    case SIG_STATUS_LINK_DISCONNECTED:
+    case SIG_STATUS_LINK_ERROR:
+    case SIG_STATUS_LINK_IDLE:
+        return signal_status_to_str(status);
+    }
+    return "Unknown V.42 status";
+}
+/*- End of function --------------------------------------------------------*/
+
 static void report_rx_status_change(v42_state_t *s, int status)
 {
     if (s->lapm.status_handler)
@@ -503,7 +523,7 @@ static void t400_expired(v42_state_t *ss)
     /* Give up trying to detect a V.42 capable peer. */
     ss->bit_timer = 0;
     ss->lapm.state = LAPM_V42_UNSUPPORTED;
-    report_rx_status_change(ss, ss->lapm.state);
+    report_rx_status_change(ss, V42_STATUS_DETECTION_UNSUPPORTED);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1311,7 +1331,7 @@ static void negotiation_rx_bit(v42_state_t *s, int new_bit)
                 {
                     t400_stop(s);
                     s->lapm.state = LAPM_IDLE;
-                    report_rx_status_change(s, s->lapm.state);
+                    report_rx_status_change(s, V42_STATUS_DETECTION_SUCCEEDED);
                     restart_lapm(s);
                 }
                 else
@@ -1372,7 +1392,7 @@ static int v42_support_negotiation_tx_bit(v42_state_t *s)
                 {
                     t400_stop(s);
                     s->lapm.state = LAPM_IDLE;
-                    report_rx_status_change(s, s->lapm.state);
+                    report_rx_status_change(s, V42_STATUS_DETECTION_SUCCEEDED);
                     s->neg.txstream = 1;
                     restart_lapm(s);
                 }
@@ -1436,6 +1456,21 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
+{
+    if (s == NULL  ||  bit_rate <= 0)
+        return -1;
+    s->tx_bit_rate = bit_rate;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s)
+{
+    return (s != NULL)  ?  s->tx_bit_rate  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(bool) v42_set_local_busy_status(v42_state_t *s, bool busy)
 {
     bool previous_busy;
@@ -1483,6 +1518,7 @@ SPAN_DECLARE(void) v42_restart(v42_state_t *s)
         s->neg.odp_seen = false;
         t400_start(s);
         s->lapm.state = LAPM_DETECT;
+        report_rx_status_change(s, V42_STATUS_DETECTING);
     }
     else
     {

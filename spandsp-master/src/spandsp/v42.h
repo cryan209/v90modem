@@ -38,12 +38,23 @@ far modem supports V.42 is also defined.
 
 typedef struct v42_state_s v42_state_t;
 
+/* Positive V.42-specific status callback values.  Link lifecycle events use
+ * the public negative SIG_STATUS_LINK_* values from async.h. */
+typedef enum
+{
+    V42_STATUS_DETECTING = 0,
+    V42_STATUS_DETECTION_SUCCEEDED = 1,
+    V42_STATUS_DETECTION_UNSUPPORTED = 2
+} v42_status_t;
+
 #if defined(__cplusplus)
 extern "C"
 {
 #endif
 
 SPAN_DECLARE(const char *) lapm_status_to_str(int status);
+
+SPAN_DECLARE(const char *) v42_status_to_str(int status);
 
 SPAN_DECLARE(void) lapm_receive(void *user_data, const uint8_t *frame, int len, int ok);
 
@@ -68,6 +79,16 @@ SPAN_DECLARE(void) v42_rx_bit(void *user_data, int bit);
 
 SPAN_DECLARE(int) v42_tx_bit(void *user_data);
 
+/*! Set the synchronous transmit bit rate used to express V.42 timers in
+    clocked bit calls.  Configure this before v42_restart().
+    \param s The V.42 context.
+    \param bit_rate Positive line transmit bit rate in bit/s.
+    \return 0 on success, or -1 for an invalid rate. */
+SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
+
+/*! Return the transmit bit rate currently used by the V.42 timers. */
+SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s);
+
 SPAN_DECLARE(void) v42_set_status_callback(v42_state_t *s, span_modem_status_func_t callback, void *user_data);
 
 /*! Get the logging context associated with a V.42 context.
@@ -80,8 +101,8 @@ SPAN_DECLARE(logging_state_t *) v42_get_logging_state(v42_state_t *s);
     \param s The V.42 context.
     \param calling_party True if caller mode, else answerer mode.
     \param detect True to perform the V.42 detection, else go straight into LAP.M
-    \param iframe_get A callback function to handle received frames of data.
-    \param iframe_put A callback function to get frames of data for transmission.
+    \param iframe_get A callback function to get frames for transmission.
+    \param iframe_put A callback function to handle received frames of data.
     \param user_data An opaque pointer passed to the frame handler routines.
     \return ???
 */
