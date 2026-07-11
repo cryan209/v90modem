@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <limits.h>
+#include <float.h>
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -12897,7 +12898,7 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
         p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
         int count;
         int best_idx = -1;
-        float best_total_score = -1.0f;
+        float best_total_score = -FLT_MAX;
         float best_base_score = 0.0f;
         float best_seq_score = 0.0f;
         p3_result_t *best_detail = NULL;
@@ -18865,15 +18866,109 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
     return -1;
 }
 
+/* p3_scan_all_hypotheses only fully demodulates every baud/carrier
+ * combination when its (possibly active-region-trimmed) input is <=12000
+ * samples (1.5s); past that it pre-ranks hypotheses with a cheap carrier
+ * correlation and only fully demodulates the top few. Over a long
+ * post-INFO1 span that pre-ranking is dominated by whatever carrier
+ * dominates the bulk of the window (usually the eventual data-mode
+ * signal), so the correct Phase 3 training hypothesis can be dropped from
+ * the shortlist before it is ever demodulated, or its score buried under
+ * data-mode noise even when it is tested. Scanning short (<=1.5s),
+ * unbiased sub-windows first reliably identifies the real baud/carrier
+ * from the training burst itself; the caller then reuses that fixed
+ * hypothesis for a single full-length demod pass. */
+#define V34_P3_PROMOTE_SUBWINDOW_SAMPLES 12000
+#define V34_P3_PROMOTE_SUBWINDOW_STEP    8000
+#define V34_P3_PROMOTE_SUBWINDOW_TRIES   6
+
+/* preferred_baud_code restricts candidate selection to one V.34 Table 1
+ * baud rate (0..5, matching P3_BAUD_*) when the caller already knows it
+ * from a decoded INFO1 symbol-rate code; -1 means no restriction. Without
+ * this, spurious false locks at the wrong baud (real trellis-coded 33.6k
+ * data can coincidentally look periodic under several baud hypotheses)
+ * can score higher than the genuine, noisier training lock at the
+ * INFO1-negotiated rate. */
+static bool find_v34_phase3_hypothesis_from_subwindows(const int16_t *samples,
+                                                        int start,
+                                                        int len,
+                                                        int preferred_baud_code,
+                                                        int *baud_code_out,
+                                                        int *carrier_sel_out)
+{
+    for (int attempt = 0; attempt < V34_P3_PROMOTE_SUBWINDOW_TRIES; attempt++) {
+        p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+        int sub_start = attempt * V34_P3_PROMOTE_SUBWINDOW_STEP;
+        int sub_len;
+        int count;
+
+        if (sub_start >= len)
+            break;
+        sub_len = len - sub_start;
+        if (sub_len > V34_P3_PROMOTE_SUBWINDOW_SAMPLES)
+            sub_len = V34_P3_PROMOTE_SUBWINDOW_SAMPLES;
+        if (sub_len < 800)
+            break;
+
+        count = p3_scan_all_hypotheses(samples + start + sub_start,
+                                       sub_len,
+                                       start + sub_start,
+                                       8000,
+                                       hypotheses,
+                                       P3_BAUD_COUNT * 2);
+        {
+            int best_i = -1;
+            float best_score = -FLT_MAX;
+
+            /* Several baud/carrier combinations can spuriously satisfy the
+               coarse has_s/has_trn/has_j thresholds (e.g. a false J lock at
+               the wrong baud); take the highest-scoring qualifying
+               hypothesis rather than the first one in pre-score order. */
+            for (int i = 0; i < count; i++) {
+                if (preferred_baud_code >= 0 && hypotheses[i].baud_code != preferred_baud_code)
+                    continue;
+                if (hypotheses[i].has_s && hypotheses[i].has_trn && hypotheses[i].has_j
+                    && hypotheses[i].score > best_score) {
+                    best_score = hypotheses[i].score;
+                    best_i = i;
+                }
+            }
+            if (best_i >= 0) {
+                *baud_code_out = hypotheses[best_i].baud_code;
+                *carrier_sel_out = hypotheses[best_i].carrier_sel;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* V.34 Table 1 baud code (0..5) implied by the already-decoded INFO1
+ * symbol-rate, or -1 if INFO1 doesn't pin down a single rate. */
+static int v34_info1_preferred_baud_code(const decode_v34_result_t *result)
+{
+    if (!result || !result->info1_seen)
+        return -1;
+    if (!result->info1_is_c && !result->info1_is_d) {
+        int up = result->info1a.upstream_symbol_rate_code;
+        int dn = result->info1a.downstream_rate_code;
+
+        if (up >= 0 && up <= 5 && up == dn)
+            return up;
+    }
+    return -1;
+}
+
 static bool promote_v34_phases_from_p3(const int16_t *samples,
                                        int total_samples,
                                        decode_v34_result_t *result)
 {
-    p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
     int start;
     int len;
-    int count;
-    bool changed = false;
+    int baud_code;
+    int carrier_sel;
+    p3_result_t *detail;
+    int phase4_sample;
 
     if (!samples || total_samples <= 0 || !result
         || (result->phase3_seen && result->phase4_seen)
@@ -18892,50 +18987,44 @@ static bool promote_v34_phases_from_p3(const int16_t *samples,
     if (len < 800)
         return false;
 
-    count = p3_scan_all_hypotheses(samples + start,
-                                   len,
-                                   start,
-                                   8000,
-                                   hypotheses,
-                                   P3_BAUD_COUNT * 2);
-    for (int i = 0; i < count; i++) {
-        if (hypotheses[i].has_s
-            && hypotheses[i].has_trn
-            && hypotheses[i].has_j) {
-            p3_result_t *detail;
-            int phase4_sample;
+    {
+        int preferred_baud_code = v34_info1_preferred_baud_code(result);
 
-            if (!result->phase3_seen) {
-                result->phase3_seen = true;
-                result->phase3_from_p3_demod = true;
-                result->phase3_sample = start;
-                changed = true;
-            }
-
-            if (result->phase4_seen)
-                continue;
-            detail = p3_demod_run(samples + start,
-                                  len,
-                                  start,
-                                  hypotheses[i].baud_code,
-                                  hypotheses[i].carrier_sel,
-                                  8000);
-            if (!detail)
-                continue;
-            phase4_sample = p3_find_phase4_handoff_sample(detail);
-            p3_result_free(detail);
-            if (phase4_sample >= 0) {
-                result->phase4_ready_seen = true;
-                result->phase4_ready_sample = phase4_sample;
-                result->phase4_seen = true;
-                result->phase4_from_p3_demod = true;
-                result->phase4_sample = phase4_sample;
-                changed = true;
-                break;
-            }
-        }
+        if (!find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
+                                                         preferred_baud_code,
+                                                         &baud_code, &carrier_sel)
+            && (preferred_baud_code < 0
+                || !find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
+                                                               -1,
+                                                               &baud_code, &carrier_sel)))
+            return false;
     }
-    return changed;
+
+    if (!result->phase3_seen) {
+        result->phase3_seen = true;
+        result->phase3_from_p3_demod = true;
+        result->phase3_sample = start;
+    }
+
+    if (result->phase4_seen)
+        return true;
+
+    /* Re-demodulate the full span at the now-known hypothesis: a single
+       fixed-hypothesis pass has none of the multi-candidate shortlisting
+       or score dilution that made the wide scan unreliable above. */
+    detail = p3_demod_run(samples + start, len, start, baud_code, carrier_sel, 8000);
+    if (!detail)
+        return true;
+    phase4_sample = p3_find_phase4_handoff_sample(detail);
+    p3_result_free(detail);
+    if (phase4_sample >= 0) {
+        result->phase4_ready_seen = true;
+        result->phase4_ready_sample = phase4_sample;
+        result->phase4_seen = true;
+        result->phase4_from_p3_demod = true;
+        result->phase4_sample = phase4_sample;
+    }
+    return true;
 }
 
 /* Stage A: Phase 1/2, V.34, V.8 decode — produces cross-channel info.

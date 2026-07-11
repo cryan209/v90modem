@@ -1561,10 +1561,19 @@ int p3_scan_all_hypotheses(const int16_t *samples,
         }
     }
 
-    /* Cap scan length to avoid very long demod runs on full-stream fallback.
-     * Phase 3 is typically 2-8 seconds; 5 seconds is generous. */
-    if (scan_len > 5 * sample_rate)
-        scan_len = 5 * sample_rate;
+    /* Cap the window used for full per-hypothesis demodulation. Real
+     * captures show Phase 3 (S/!S/MD/S/!S/PP/TRN/J) commonly running past
+     * 5 seconds after INFO1 (e.g. banksia-wavesp336 R lands its S/TRN/J
+     * sequence at 4566ms post-INFO1, right at the old cap); 12 seconds keeps
+     * runtime bounded while covering the observed range.
+     *
+     * The candidate-ranking pre-score below stays anchored to the original
+     * 5-second sub-window regardless of this cap: widening the full-demod
+     * cap must not shift which baud/carrier hypotheses get ranked highest,
+     * or short captures that previously matched inside 5s can lose their
+     * hypothesis to a worse-ranked candidate. */
+    if (scan_len > 12 * sample_rate)
+        scan_len = 12 * sample_rate;
 
     /* Quick pre-score: correlate a short window with each carrier.
      * For short Phase 3 windows we evaluate all hypotheses; for long
@@ -1574,9 +1583,12 @@ int p3_scan_all_hypotheses(const int16_t *samples,
         int order[P3_BAUD_COUNT * 2];
         int n_hyp = 0;
         int candidates_to_run;
-        /* Use a 2000-sample window from the middle of the active region */
-        int pre_len = (scan_len < 2000) ? scan_len : 2000;
-        int pre_start = scan_start + (scan_len - pre_len) / 2;
+        int prescore_cap = 5 * sample_rate;
+        int prescore_len = (scan_len < prescore_cap) ? scan_len : prescore_cap;
+        /* Use a 2000-sample window from the middle of the (unwidened)
+         * pre-score region */
+        int pre_len = (prescore_len < 2000) ? prescore_len : 2000;
+        int pre_start = scan_start + (prescore_len - pre_len) / 2;
         const int16_t *pre_samples = samples + pre_start;
 
         nco_init_tables();
