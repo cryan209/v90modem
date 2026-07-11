@@ -18833,7 +18833,19 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
 /* Promote a bounded post-INFO1 scan only when the independent demodulator
  * finds the Phase 3 S, TRN, and J signatures under one baud/carrier
  * hypothesis.  Requiring the full signature set keeps ordinary carrier and
- * data-mode periodicity from turning an INFO-only capture into Phase 3. */
+ * data-mode periodicity from turning an INFO-only capture into Phase 3.
+ *
+ * Tried summing TRN length across nearby fragments (tolerating a bounded
+ * amount of intervening non-TRN content) to cover captures where decode
+ * noise breaks the segmenter's extension threshold mid-run. Reverted: the
+ * cap needed to avoid false positives on ordinary data-mode noise was
+ * stricter than this un-capped single-segment check in the case that
+ * actually mattered (a real S anchor can sit a long, quiet way ahead of
+ * the eventual clean >=512-symbol TRN segment), so it broke more
+ * previously-working captures than it fixed. Requiring one unbroken
+ * segment is a strong, cheap filter against spurious matches — real
+ * noise essentially never produces an uninterrupted 512-symbol run by
+ * chance the way scattered fragments summed over many seconds can. */
 static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
 {
     if (!detail)

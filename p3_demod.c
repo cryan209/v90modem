@@ -1382,11 +1382,17 @@ p3_result_t *p3_demod_run(const int16_t *samples,
     /* Estimate max symbols: samples / (samples_per_symbol) + margin */
     est_symbols = (int)((float)sample_count * 2.0f) + 100;
 
-    /* Reduce trials on long inputs to avoid excessive runtime.
-     * Phase strobe sweep matters most for short, targeted windows. */
-    if (sample_count > 40000)
-        trials = 1;
-    else if (sample_count > 16000)
+    /* Reduce trials on long inputs to avoid excessive runtime, but never
+     * drop to a single trial: this demodulator has no closed-loop symbol
+     * timing recovery (baud_phase advances open-loop from the initial
+     * strobe offset), so the phase-strobe sweep is what finds a workable
+     * lock at all, not just a refinement for short windows. Dropping to
+     * trials=1 above 40000 samples used to make the one-shot full-length
+     * demod in promote_v34_phases_from_p3() a coin flip on the correct
+     * phase (verified: 3429-baud Phase 4 J/TRN on conexant-rh56sp locks
+     * at trials=2 and is silently lost at trials=1, with an identical
+     * start sample and hypothesis both times). */
+    if (sample_count > 16000)
         trials = 2;
     else
         trials = 4;
