@@ -1,9 +1,17 @@
 /*
  * data_interface.h — PTY creation and AT command interface
  *
- * Creates a virtual serial port (PTY) that applications can open as a modem.
+ * Two DTE presentation modes:
+ *
+ *   Mode A (classic): one PTY carries AT commands and data inline. "+++"
+ *   with 1 s guard times escapes online data to command mode; ATO returns
+ *   online.
+ *
+ *   Mode B (split):  a control PTY that always speaks AT (RING/CONNECT and
+ *   other unsolicited codes appear here, commands work mid-call) and a
+ *   separate data PTY that carries only the connection payload.
+ *
  * Uses SpanDSP's at_state_t for AT command parsing (ATD, ATA, ATH, ATZ, ...).
- * Switches between COMMAND mode and DATA mode when a connection is established.
  */
 
 #ifndef DATA_INTERFACE_H
@@ -18,13 +26,20 @@ typedef void (*di_answer_cb_t)(void *user_data);
 typedef void (*di_hangup_cb_t)(void *user_data);
 
 /*
- * Open a PTY pair and start the reader thread.
+ * Mode A: open one PTY pair and start the reader thread.
  * symlink_path: path for the convenience symlink (e.g. "/tmp/modem0").
  * Returns 0 on success, -1 on error.
  */
 int di_open(const char *symlink_path);
 
-/* Close the PTY and stop the reader thread. */
+/*
+ * Mode B: open a control PTY (AT commands, result codes) and a data PTY
+ * (connection payload only). Returns 0 on success, -1 on error.
+ */
+int di_open_split(const char *control_symlink_path,
+                  const char *data_symlink_path);
+
+/* Close the PTY(s) and stop the reader thread. */
 void di_close(void);
 
 /* Register callbacks invoked when the AT interpreter requests modem actions. */
@@ -36,33 +51,31 @@ void di_set_callbacks(di_dial_cb_t  dial_cb,
 /*
  * Called by the modem engine when a connection is established.
  * rate: negotiated data rate in bit/s (e.g. 2400, 56000).
- * Sends CONNECT <rate> to the PTY and switches to DATA mode.
+ * Sends CONNECT <rate> to the control port; in Mode A also switches the
+ * port to DATA mode, in Mode B activates the data port.
  */
 void di_on_connected(int rate);
 
 /*
  * Called by the modem engine when the call ends.
- * Sends NO CARRIER to the PTY and switches back to COMMAND mode.
+ * Sends NO CARRIER and returns to command/idle state.
  */
 void di_on_disconnected(void);
 
 /*
  * Called by the modem engine when an incoming call rings.
- * Sends RING to the PTY; if S0 register > 0, auto-answers.
+ * Sends RING to the control port.
  */
 void di_on_ring(void);
 
 /*
- * Read bytes from the PTY (upstream: application → modem).
- * Returns number of bytes copied (0 if none available).
- * Non-blocking; only valid in DATA mode.
+ * Read DTE payload bytes (application → modem). Non-blocking; returns the
+ * number of bytes copied (0 when idle or not in data transfer).
  */
 int di_read_data(uint8_t *buf, int max_len);
 
 /*
- * Write bytes to the PTY (downstream: modem → application).
- * Returns number of bytes written.
- * Non-blocking; only valid in DATA mode.
+ * Write received payload bytes (modem → application). Non-blocking.
  */
 int di_write_data(const uint8_t *buf, int len);
 
