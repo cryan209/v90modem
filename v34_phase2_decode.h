@@ -14,11 +14,31 @@
  * The implementation is still SpanDSP-backed today, but callers should depend
  * on this interface rather than on the raw SpanDSP modem loop.
  */
+/* Probing results for one candidate symbol rate from INFO1c (V.34 Table 6).
+   max_bit_rate is a multiple of 2400 bit/s; 0 means the symbol rate cannot
+   be used. Index order: 2400, 2743, 2800, 3000, 3200, 3429 baud. */
+typedef struct {
+    bool use_high_carrier;
+    int pre_emphasis;
+    int max_bit_rate;
+} v34_info1c_rate_parms_t;
+
+typedef struct {
+    int power_reduction;
+    int additional_power_reduction;
+    int md;
+    int freq_offset;
+    v34_info1c_rate_parms_t rate_data[6];
+} v34_info1c_summary_t;
+
 typedef struct {
     bool info0_seen;
     bool info1_seen;
     bool info0_is_d;
     bool info1_is_d;
+    /* True when the decoded INFO1 was a plain-V.34 INFO1c (109 bits, from
+       the call modem); payload is in info1c. */
+    bool info1_is_c;
     bool info0_ok_event_seen;
     bool info0_bad_event_seen;
     bool info1_ok_event_seen;
@@ -142,6 +162,7 @@ typedef struct {
     v34_v90_info1a_t info1a_raw;
     v90_info1a_t info1a;
     v34_v90_info1d_t info1d;
+    v34_info1c_summary_t info1c;
 } decode_v34_result_t;
 
 #define V34_PHASE2_CACHE_SLOTS 8

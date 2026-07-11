@@ -55,15 +55,15 @@ for wav in "${TONE_DIR}"/*.wav; do
         info1_ms="-"
         phase3_ms="-"
 
-        if printf '%s\n' "${output}" | grep -q "INFO0a:          decoded"; then
+        if printf '%s\n' "${output}" | grep -Eq "INFO0[acd]:          decoded"; then
             info0="yes"
-            info0_ms="$(printf '%s\n' "${output}" | sed -n 's/.*INFO0a:          decoded at \([0-9.]*\) ms/\1/p' | head -n 1)"
+            info0_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO0[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
             [[ -n "${info0_ms}" ]] || info0_ms="-"
         fi
 
-        if printf '%s\n' "${output}" | grep -q "INFO1a:          decoded"; then
+        if printf '%s\n' "${output}" | grep -Eq "INFO1[acd]:          decoded"; then
             info1="yes"
-            info1_ms="$(printf '%s\n' "${output}" | sed -n 's/.*INFO1a:          decoded at \([0-9.]*\) ms/\1/p' | head -n 1)"
+            info1_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO1[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
             [[ -n "${info1_ms}" ]] || info1_ms="-"
         fi
 

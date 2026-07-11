@@ -577,6 +577,58 @@ static void format_v34_info1d_table_summary(char *buf,
     appendf(buf, len, " tail=0xF");
 }
 
+static void format_v34_info1c_table_summary(char *buf,
+                                            size_t len,
+                                            const v34_info1c_summary_t *info,
+                                            const char *role_name)
+{
+    static const int info1c_bauds[6] = { 2400, 2743, 2800, 3000, 3200, 3429 };
+
+    if (!buf || len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (!info)
+        return;
+
+    appendf(buf, len, "role=%s", role_name ? role_name : "unknown");
+    appendf(buf, len, " table=V34_T6_INFO1c");
+    appendf(buf, len, " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
+    appendf(buf, len, " b12_14_min_pwr_red=%d", info->power_reduction);
+    appendf(buf, len, " b15_17_addl_pwr_red=%d", info->additional_power_reduction);
+    appendf(buf, len, " b18_24_md=%d", info->md);
+    for (int i = 0; i < 6; i++) {
+        appendf(buf, len, " row%d_hicar=%u row%d_preemp=%d row%d_maxrate=%d",
+                info1c_bauds[i], info->rate_data[i].use_high_carrier ? 1U : 0U,
+                info1c_bauds[i], info->rate_data[i].pre_emphasis,
+                info1c_bauds[i], info->rate_data[i].max_bit_rate);
+    }
+    appendf(buf, len, " freq_offset_10b=0x%03X(%+d)",
+            (unsigned) ((info->freq_offset < 0) ? (0x400 + info->freq_offset) : info->freq_offset) & 0x3FFU,
+            info->freq_offset);
+    appendf(buf, len, " crc_bits=89:104");
+    appendf(buf, len, " crc16=unavailable");
+    appendf(buf, len, " tail_bits=105:108");
+    appendf(buf, len, " tail=0xF");
+}
+
+/* Highest projected data rate advertised in INFO1c probing results (bps),
+   or -1 if every symbol rate is marked unusable. */
+static int v34_info1c_max_projected_rate_bps(const v34_info1c_summary_t *info)
+{
+    int best = -1;
+
+    if (!info)
+        return -1;
+    for (int i = 0; i < 6; i++) {
+        int rate = info->rate_data[i].max_bit_rate * 2400;
+
+        if (info->rate_data[i].max_bit_rate > 0 && rate > best)
+            best = rate;
+    }
+    return best;
+}
+
 static bool snapshot_v34_info0a_from_rx_state(v34_v90_info0a_t *dst, const v34_state_t *v34)
 {
     enum {
@@ -1228,7 +1280,16 @@ static bool v34_infer_mp_rates_from_info_sequences(const decode_v34_result_t *re
     if (!result || !a_to_c_bps_out || !c_to_a_bps_out)
         return false;
 
-    if (result->info1_seen && !result->info1_is_d) {
+    if (result->info1_seen && result->info1_is_c) {
+        int best_n = -1;
+
+        for (int i = 0; i < 6; i++) {
+            if (result->info1c.rate_data[i].max_bit_rate > best_n)
+                best_n = result->info1c.rate_data[i].max_bit_rate;
+        }
+        if (best_n > 0)
+            a_to_c = c_to_a = v34_mp_rate_n_to_bps(best_n);
+    } else if (result->info1_seen && !result->info1_is_d) {
         int up_code = result->info1a.upstream_symbol_rate_code;
         int dn_code = result->info1a.downstream_rate_code;
 
@@ -11333,6 +11394,28 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 }
             }
         }
+        if (!result->info1_seen
+            && config->plain_v34
+            && !calling_party
+            && rx_event == V34_EVENT_INFO1_OK
+            && v34->rx.info1c_received) {
+            /* Plain V.34 answerer receives INFO1c (109 bits) from the call
+               modem; surface its probing results instead of misreading the
+               unset INFO1a state. */
+            result->info1_seen = true;
+            result->info1_is_c = true;
+            result->info1_sample = offset;
+            result->info1c.power_reduction = v34->rx.info1c.power_reduction;
+            result->info1c.additional_power_reduction = v34->rx.info1c.additional_power_reduction;
+            result->info1c.md = v34->rx.info1c.md;
+            result->info1c.freq_offset = v34->rx.info1c.freq_offset;
+            for (int i = 0; i < 6; i++) {
+                result->info1c.rate_data[i].use_high_carrier = v34->rx.info1c.rate_data[i].use_high_carrier;
+                result->info1c.rate_data[i].pre_emphasis = v34->rx.info1c.rate_data[i].pre_emphasis;
+                result->info1c.rate_data[i].max_bit_rate = v34->rx.info1c.rate_data[i].max_bit_rate;
+            }
+            last_progress_sample = offset;
+        }
         if (!result->info1_seen) {
             int have_info1a = 0;
 
@@ -14205,6 +14288,20 @@ static void print_v34_result(const decode_v34_result_t *result,
     }
     if (suppress_v90_phase2 && !result->plain_v34_mode) {
         printf("  INFO1a/INFO1d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
+    } else if (result->info1_seen && result->info1_is_c) {
+        char info1_detail[1024];
+        int projected = v34_info1c_max_projected_rate_bps(&result->info1c);
+
+        printf("  INFO1c:          decoded at %.1f ms\n", sample_to_ms(result->info1_sample, 8000));
+        if (result->info1_from_rescue)
+            printf("                   source=rescue_pass\n");
+        format_v34_info1c_table_summary(info1_detail,
+                                        sizeof(info1_detail),
+                                        &result->info1c,
+                                        "active_pass");
+        printf("                   %s\n", info1_detail);
+        if (projected > 0)
+            printf("                   projected_max_a_to_c=%d bps\n", projected);
     } else if (result->info1_seen && !result->info1_is_d) {
         char info1_detail[1024];
 
@@ -14412,7 +14509,27 @@ static void print_v34_result(const decode_v34_result_t *result,
             printf("                   notes: %s\n", ef_eval.notes);
     }
 
-    if (!suppress_v90_phase2 && result->info1_seen && !result->info1_is_d) {
+    if ((!suppress_v90_phase2 || result->plain_v34_mode)
+        && result->info1_seen && result->info1_is_c) {
+        int best_idx = -1;
+        int best_n = -1;
+
+        for (int i = 0; i < 6; i++) {
+            if (result->info1c.rate_data[i].max_bit_rate > best_n) {
+                best_n = result->info1c.rate_data[i].max_bit_rate;
+                best_idx = i;
+            }
+        }
+        if (best_idx >= 0 && best_n > 0) {
+            static const int baud_list[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+            printf("  INFO params:     best_row=%d (%d baud) max_rate=%d bps carrier=%s preemph=%d\n",
+                   best_idx,
+                   baud_list[best_idx],
+                   best_n * 2400,
+                   result->info1c.rate_data[best_idx].use_high_carrier ? "high" : "low",
+                   result->info1c.rate_data[best_idx].pre_emphasis);
+        }
+    } else if (!suppress_v90_phase2 && result->info1_seen && !result->info1_is_d) {
         int up_code = result->info1a.upstream_symbol_rate_code;
         int dn_code = result->info1a.downstream_rate_code;
         int up_baud = v34_symbol_rate_code_to_baud(up_code);
@@ -14629,7 +14746,12 @@ static void collect_v34_events(call_log_t *log,
             call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__, role_is_caller__), detail); \
         } \
         if ((!(suppress_v90_phase2) || res__->plain_v34_mode) && !(suppress_phase12_early_events) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
-            if (res__->info1_is_d) { \
+            if (res__->info1_is_c) { \
+                format_v34_info1c_table_summary(detail, sizeof(detail), &res__->info1c, role_name); \
+                if (res__->info1_from_rescue) \
+                    appendf(detail, sizeof(detail), " source=rescue_pass"); \
+                call_log_append(log, res__->info1_sample, 0, "V.34", "INFO1c decoded", detail); \
+            } else if (res__->info1_is_d) { \
                 format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
                 if (res__->info1_from_rescue) \
                     appendf(detail, sizeof(detail), " source=rescue_pass"); \

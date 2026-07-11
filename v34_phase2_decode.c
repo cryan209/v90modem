@@ -12,7 +12,7 @@ typedef struct {
 
 enum {
     V34_PHASE2_MAX_CANDIDATE_WINDOWS = 6,
-    V34_PHASE2_MAX_TRIES_PER_SIDE = 2
+    V34_PHASE2_MAX_TRIES_PER_SIDE = 3
 };
 
 static void v34_phase2_insert_candidate_window(v34_phase2_candidate_window_t *windows,
@@ -396,7 +396,10 @@ static void merge_info1_from_rescue(decode_v34_result_t *dst, const decode_v34_r
     dst->u_info = src->u_info;
     dst->u_info_from_info1a = src->u_info_from_info1a;
     dst->tx_info1_sample = src->tx_info1_sample;
-    if (src->info1_is_d)
+    dst->info1_is_c = src->info1_is_c;
+    if (src->info1_is_c)
+        dst->info1c = src->info1c;
+    else if (src->info1_is_d)
         dst->info1d = src->info1d;
     else {
         dst->info1a = src->info1a;
@@ -436,8 +439,9 @@ static bool v34_phase2_result_is_sufficient(const decode_v34_result_t *result, b
         return true;
     if (result->info0_seen || result->info1_seen)
         return true;
-    if (result->info0_bad_event_seen || result->info1_bad_event_seen)
-        return true;
+    /* A bad INFO event alone is not sufficient: a false sync in a data-mode
+       window would otherwise stop the search before the real Phase 2 window
+       is tried. The best-quality result is retained across windows anyway. */
     return false;
 }
 
