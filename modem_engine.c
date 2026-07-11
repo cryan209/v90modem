@@ -622,28 +622,84 @@ static v90_dil_desc_t g_v90_pending_dil;
 static bool           g_v90_pending_dil_valid = false;
 static uint64_t       g_phase_start_ms = 0;
 
-/* V.91 symmetric raw-G.711 startup and data path. */
+/* V.91 symmetric raw-G.711 startup and data path.
+ *
+ * TX streams a fixed script through the DIL, then repeats SCR until the
+ * local rate decision is available (absorbing startup skew between the
+ * two directions), then sends CP/Es/B1 built from that decision.
+ * RX is a staged parser: it decodes the peer's INFO frames, receives the
+ * DIL at the codeword level (which performs robbed-bit detection), finds
+ * the CP inside the peer's variable-length SCR run via the descrambled
+ * ones-run, and verifies Es/B1.  The final rate is the minimum of both
+ * sides' selections. */
 #define V91_LIVE_STARTUP_MAX 4096
-#define V91_LIVE_DATA_CODEWORDS 24
-#define V91_LIVE_DATA_BYTES 21
+#define V91_LIVE_DATA_FRAMES 8
+#define V91_LIVE_DATA_CODEWORDS (V91_LIVE_DATA_FRAMES * VPCM_CP_FRAME_INTERVALS)
+#define V91_LIVE_SCR_FIRST_SYMBOLS 18
+#define V91_LIVE_SCR_MAX_SYMBOLS 24000
+typedef enum {
+    V91_LIVE_TX_SCRIPT = 0,
+    V91_LIVE_TX_SCR,
+    V91_LIVE_TX_TAIL,
+    V91_LIVE_TX_DONE
+} v91_live_tx_stage_t;
+typedef enum {
+    V91_LIVE_RX_HUNT_EZ = 0,
+    V91_LIVE_RX_INFO,
+    V91_LIVE_RX_INFO_ACK,
+    V91_LIVE_RX_EU,
+    V91_LIVE_RX_DIL,
+    V91_LIVE_RX_SCR_CP,
+    V91_LIVE_RX_ES,
+    V91_LIVE_RX_B1,
+    V91_LIVE_RX_DONE
+} v91_live_rx_stage_t;
 static v91_state_t g_v91_tx;
 static v91_state_t g_v91_rx;
+static vpcm_cp_frame_t g_v91_cp_template;
 static vpcm_cp_frame_t g_v91_cp_ack;
+static vpcm_cp_frame_t g_v91_peer_cp;
+static v91_dil_desc_t g_v91_default_dil;
+static uint8_t g_v91_local_drn;
+static uint8_t g_v91_peer_drn;
 static uint8_t g_v91_startup_tx[V91_LIVE_STARTUP_MAX];
-static uint8_t g_v91_startup_remote[V91_LIVE_STARTUP_MAX];
 static int g_v91_startup_tx_len;
 static int g_v91_startup_tx_pos;
-static int g_v91_startup_remote_len;
-static int g_v91_startup_remote_pos;
+static v91_live_tx_stage_t g_v91_tx_stage;
+static int g_v91_scr_sent;
+static uint8_t g_v91_rx_accum[V91_LIVE_STARTUP_MAX];
+static int g_v91_rx_accum_len;
+static v91_live_rx_stage_t g_v91_rx_stage;
+static uint8_t g_v91_cp_bits[VPCM_CP_MAX_BITS];
+static int g_v91_cp_bit_pos;
+static int g_v91_cp_total_bits;
+static bool g_v91_cp_started;
+static int g_v91_scr_ones_run;
+static int g_v91_es_bits;
 static int g_v91_ez_run;
-static bool g_v91_rx_synced;
-static bool g_v91_rx_startup_complete;
 static uint8_t g_v91_data_tx[V91_LIVE_DATA_CODEWORDS];
 static int g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
 static uint8_t g_v91_data_rx[V91_LIVE_DATA_CODEWORDS];
 static int g_v91_data_rx_pos;
+static int g_v91_data_bytes;
 static bool g_v91_data_tx_guard;
 static bool g_v91_data_rx_synced;
+/* Robbed-cadence frame alignment.  A robbed-bit trunk steals the LSB of
+ * every sixth codeword at a fixed cadence; the data mapper protects only
+ * frame interval 5 (odd Ucodes), so each transmitter must align its data
+ * framing to the cadence its receiver observed.  The receiver measures
+ * the cadence during DIL reception, converts it to peer-stream
+ * coordinates (the DIL always starts at position 760 of the peer's
+ * startup script), and requests alignment through the low bits of the
+ * CP upstream_rate_mask field (0 = none, 1..6 = phase + 1). */
+#define V91_LIVE_DIL_PEER_START 760
+static long long g_v91_tx_abs_pos;
+static long long g_v91_rx_abs_pos;
+static long long g_v91_rx_dil_start_abs;
+static int g_v91_rx_robbed_phase;   /* robbed cadence on our RX path, -1 = none */
+static int g_v91_tx_align_phase;    /* peer-requested cadence for our TX, -1 = none */
+static bool g_v91_data_tx_aligned;
+static int g_v91_sim_robbed_phase;  /* env V91_SIM_ROBBED_RX, -1 = off */
 
 static int v91_live_append(uint8_t *dst, int cap, int pos,
                            const uint8_t *src, int len)
@@ -654,15 +710,15 @@ static int v91_live_append(uint8_t *dst, int cap, int pos,
     return pos + len;
 }
 
-static int v91_live_build_startup(bool calling_party,
-                                  v91_law_t law,
+/* Fixed part of the startup script: everything through the DIL.  SCR and
+ * the rate-dependent CP/Es/B1 tail are generated later, once the received
+ * DIL has been analysed and the local rate selected. */
+static int v91_live_build_startup(v91_law_t law,
                                   v91_state_t *state,
                                   uint8_t *out,
                                   int out_cap)
 {
     v91_info_frame_t info;
-    v91_dil_desc_t dil;
-    vpcm_cp_frame_t cp;
     uint8_t tmp[2048];
     int pos = 0;
     int len;
@@ -672,7 +728,6 @@ static int v91_live_build_startup(bool calling_party,
     info.request_default_dil = true;
     info.tx_uses_alaw = (law == V91_LAW_ALAW);
     info.power_measured_after_digital_impairments = true;
-    v91_default_dil_init(&dil);
 
 #define V91_APPEND_EXPR(expr) do { \
         len = (expr); \
@@ -685,13 +740,45 @@ static int v91_live_build_startup(bool calling_party,
     info.acknowledge_info_frame = true;
     V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
     V91_APPEND_EXPR(v91_tx_eu_codewords(state, tmp, sizeof(tmp)));
-    V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &dil));
-    V91_APPEND_EXPR(v91_tx_scr_codewords(state, tmp, sizeof(tmp), 18));
-    cp = g_v91_cp_ack;
+    V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &g_v91_default_dil));
+#undef V91_APPEND_EXPR
+    return pos;
+}
+
+/* Rate-dependent tail: CP with the locally selected drn, then Es and B1. */
+static int v91_live_build_tail(bool calling_party,
+                               v91_state_t *state,
+                               uint8_t drn,
+                               uint8_t *out,
+                               int out_cap)
+{
+    vpcm_cp_frame_t cp;
+    uint8_t tmp[2048];
+    int pos = 0;
+    int len;
+
+    cp = g_v91_cp_template;
+    cp.drn = drn;
     cp.acknowledge = calling_party ? false : true;
+    /* Ask the peer to align its data framing to the robbed cadence we
+     * observed on our receive path (in peer-stream coordinates). */
+    if (g_v91_rx.rx_robbed_bit_detected && g_v91_rx.rx_robbed_slot_mask != 0) {
+        int slot = 0;
+
+        while (slot < VPCM_CP_FRAME_INTERVALS
+               && !(g_v91_rx.rx_robbed_slot_mask & (1U << slot)))
+            slot++;
+        cp.upstream_rate_mask =
+            (uint16_t)(((V91_LIVE_DIL_PEER_START + slot) % 6) + 1);
+    }
+#define V91_APPEND_EXPR(expr) do { \
+        len = (expr); \
+        if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0) \
+            return 0; \
+    } while (0)
     V91_APPEND_EXPR(v91_tx_cp_codewords(state, tmp, sizeof(tmp), &cp, true));
     V91_APPEND_EXPR(v91_tx_es_codewords(state, tmp, sizeof(tmp)));
-    V91_APPEND_EXPR(v91_tx_b1_codewords(state, tmp, sizeof(tmp), &g_v91_cp_ack));
+    V91_APPEND_EXPR(v91_tx_b1_codewords(state, tmp, sizeof(tmp), &cp));
 #undef V91_APPEND_EXPR
     return pos;
 }
@@ -702,63 +789,102 @@ static void v91_live_reset(void)
     memset(&g_v91_rx, 0, sizeof(g_v91_rx));
     g_v91_startup_tx_len = 0;
     g_v91_startup_tx_pos = 0;
-    g_v91_startup_remote_len = 0;
-    g_v91_startup_remote_pos = 0;
+    g_v91_tx_stage = V91_LIVE_TX_SCRIPT;
+    g_v91_scr_sent = 0;
+    g_v91_rx_accum_len = 0;
+    g_v91_rx_stage = V91_LIVE_RX_HUNT_EZ;
+    g_v91_cp_bit_pos = 0;
+    g_v91_cp_total_bits = 0;
+    g_v91_cp_started = false;
+    g_v91_scr_ones_run = 0;
+    g_v91_es_bits = 0;
+    g_v91_local_drn = 0;
+    g_v91_peer_drn = 0;
     g_v91_ez_run = 0;
-    g_v91_rx_synced = false;
-    g_v91_rx_startup_complete = false;
     g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
     g_v91_data_rx_pos = 0;
+    g_v91_data_bytes = 0;
     g_v91_data_tx_guard = false;
     g_v91_data_rx_synced = false;
+    g_v91_tx_abs_pos = 0;
+    g_v91_rx_abs_pos = 0;
+    g_v91_rx_dil_start_abs = 0;
+    g_v91_rx_robbed_phase = -1;
+    g_v91_tx_align_phase = -1;
+    g_v91_data_tx_aligned = false;
+    g_v91_sim_robbed_phase = -1;
 }
 
 static bool v91_live_start_locked(void)
 {
-    v91_state_t expected_remote_state;
     v91_law_t law = (g_law == ME_LAW_ALAW) ? V91_LAW_ALAW : V91_LAW_ULAW;
+    const char *sim_env;
 
     v91_live_reset();
-    vpcm_cp_init_robbed_bit_safe_profile(&g_v91_cp_ack,
-                                         vpcm_cp_recommended_robbed_bit_drn(),
-                                         false);
-    g_v91_cp_ack.acknowledge = true;
-    g_v91_startup_tx_len = v91_live_build_startup(g_calling_party, law,
-                                                   &g_v91_tx,
-                                                   g_v91_startup_tx,
-                                                   sizeof(g_v91_startup_tx));
-    g_v91_startup_remote_len = v91_live_build_startup(!g_calling_party, law,
-                                                       &expected_remote_state,
-                                                       g_v91_startup_remote,
-                                                       sizeof(g_v91_startup_remote));
+    /* Test hook: simulate a robbed-bit trunk on our receive path by
+     * clearing the LSB of every sixth incoming codeword at the given
+     * cadence phase (0..5). */
+    sim_env = getenv("V91_SIM_ROBBED_RX");
+    if (sim_env && *sim_env) {
+        int phase = atoi(sim_env);
+
+        if (phase >= 0 && phase <= 5)
+            g_v91_sim_robbed_phase = phase;
+    }
+    /* Offer ceiling with a robbed-bit-safe constellation set; the actual
+     * rate is selected from the received DIL analysis and robbed-bit
+     * detection once the peer's DIL has arrived. */
+    vpcm_cp_init_robbed_bit_safe_profile(&g_v91_cp_template, 28, false);
+    g_v91_cp_template.codec_alaw = (law == V91_LAW_ALAW);
+    g_v91_cp_total_bits = vpcm_cp_bit_length(&g_v91_cp_template);
+    v91_default_dil_init(&g_v91_default_dil);
+    g_v91_startup_tx_len = v91_live_build_startup(law,
+                                                  &g_v91_tx,
+                                                  g_v91_startup_tx,
+                                                  sizeof(g_v91_startup_tx));
     v91_init(&g_v91_rx, law, V91_MODE_TRANSPARENT);
     if (g_v91_startup_tx_len <= V91_PHASE1_SILENCE_SYMBOLS
-        || g_v91_startup_remote_len <= V91_PHASE1_SILENCE_SYMBOLS)
+        || g_v91_cp_total_bits <= 0
+        || g_v91_cp_total_bits > VPCM_CP_MAX_BITS)
         return false;
-    data_stack_prepare((int)vpcm_cp_drn_to_bps(g_v91_cp_ack.drn));
+    data_stack_prepare((int)vpcm_cp_drn_to_bps(vpcm_cp_recommended_robbed_bit_drn()));
     g_mod = ME_MOD_V91;
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
-    trace_phase("enter TRAINING: mod=V91 role=%s startup_tx=%d expected_rx=%d",
+    trace_phase("enter TRAINING: mod=V91 role=%s startup_tx=%d ceiling_drn=%u",
                 g_calling_party ? "caller" : "answerer",
-                g_v91_startup_tx_len, g_v91_startup_remote_len);
+                g_v91_startup_tx_len, g_v91_cp_template.drn);
     return true;
 }
 
 static void v91_live_try_enter_data_locked(void)
 {
+    uint8_t final_drn;
     int rate;
 
     if (g_state != ME_TRAINING || g_mod != ME_MOD_V91
+        || g_v91_tx_stage != V91_LIVE_TX_DONE
         || g_v91_startup_tx_pos < g_v91_startup_tx_len
-        || !g_v91_rx_startup_complete)
+        || g_v91_rx_stage != V91_LIVE_RX_DONE)
         return;
+    /* Both sides computed a selection from their own received DIL; the
+     * connection runs at the smaller of the two. */
+    final_drn = (g_v91_peer_drn < g_v91_local_drn) ? g_v91_peer_drn : g_v91_local_drn;
+    if (final_drn == 0) {
+        g_state = ME_HANGUP;
+        return;
+    }
+    g_v91_cp_ack = g_v91_cp_template;
+    g_v91_cp_ack.drn = final_drn;
+    g_v91_cp_ack.acknowledge = true;
     if (!v91_activate_data_mode(&g_v91_tx, &g_v91_cp_ack)
         || !v91_activate_data_mode(&g_v91_rx, &g_v91_cp_ack)) {
         g_state = ME_HANGUP;
         return;
     }
-    rate = (int)vpcm_cp_drn_to_bps(g_v91_cp_ack.drn);
+    /* 8 frames per data block keep the byte count exact for every drn. */
+    g_v91_data_bytes = (int)final_drn + 20;
+    rate = (int)vpcm_cp_drn_to_bps(final_drn);
     data_stack_start_online(rate, g_calling_party);
     g_state = ME_DATA;
     g_phase_start_ms = 0;
@@ -771,48 +897,139 @@ static void v91_live_try_enter_data_locked(void)
     g_v91_data_rx_synced = false;
     g_data_connect_reported = true;
     di_on_connected(rate);
-    trace_phase("V91 enter DATA: rate=%d", rate);
+    trace_phase("V91 enter DATA: rate=%d (local drn=%u peer drn=%u robbed=%d rx_phase=%d tx_align=%d)",
+                rate, g_v91_local_drn, g_v91_peer_drn,
+                g_v91_rx.rx_robbed_bit_detected ? 1 : 0,
+                g_v91_rx_robbed_phase, g_v91_tx_align_phase);
+}
+
+/* Refill the TX startup queue when it drains.  Returns false when the
+ * current stage is finished and nothing further can be produced yet. */
+static bool v91_live_tx_refill_locked(void)
+{
+    int len;
+
+    switch (g_v91_tx_stage) {
+    case V91_LIVE_TX_SCRIPT:
+        /* Fixed script drained: start the SCR run (GPC reset). */
+        len = v91_tx_scr_codewords(&g_v91_tx, g_v91_startup_tx,
+                                   (int)sizeof(g_v91_startup_tx),
+                                   V91_LIVE_SCR_FIRST_SYMBOLS);
+        if (len != V91_LIVE_SCR_FIRST_SYMBOLS)
+            return false;
+        g_v91_startup_tx_len = len;
+        g_v91_startup_tx_pos = 0;
+        g_v91_scr_sent = len;
+        g_v91_tx_stage = V91_LIVE_TX_SCR;
+        return true;
+    case V91_LIVE_TX_SCR:
+        if (g_v91_local_drn > 0) {
+            /* Rate decided from the received DIL: send CP/Es/B1. */
+            len = v91_live_build_tail(g_calling_party, &g_v91_tx,
+                                      g_v91_local_drn,
+                                      g_v91_startup_tx,
+                                      (int)sizeof(g_v91_startup_tx));
+            if (len <= 0)
+                return false;
+            g_v91_startup_tx_len = len;
+            g_v91_startup_tx_pos = 0;
+            g_v91_tx_stage = V91_LIVE_TX_TAIL;
+            return true;
+        }
+        if (g_v91_scr_sent >= V91_LIVE_SCR_MAX_SYMBOLS)
+            return false;
+        /* Keep the line filled with SCR (no GPC reset) while the peer's
+         * DIL is still arriving. */
+        len = v91_tx_phil_codewords(&g_v91_tx, g_v91_startup_tx,
+                                    (int)sizeof(g_v91_startup_tx),
+                                    VPCM_CP_FRAME_INTERVALS, true);
+        if (len != VPCM_CP_FRAME_INTERVALS)
+            return false;
+        g_v91_startup_tx_len = len;
+        g_v91_startup_tx_pos = 0;
+        g_v91_scr_sent += len;
+        return true;
+    case V91_LIVE_TX_TAIL:
+        g_v91_tx_stage = V91_LIVE_TX_DONE;
+        return false;
+    case V91_LIVE_TX_DONE:
+    default:
+        return false;
+    }
 }
 
 static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
 {
+    long long base;
     int pos = 0;
 
     if (!out || len <= 0 || g_mod != ME_MOD_V91)
         return false;
+    base = g_v91_tx_abs_pos;
+    g_v91_tx_abs_pos = base + len;
     memset(out, v91_idle_codeword(g_v91_tx.law), (size_t)len);
     if (g_state == ME_TRAINING) {
-        int remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
-        int copy = remain < len ? remain : len;
+        while (pos < len) {
+            int remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
+            int copy;
 
-        if (copy > 0) {
-            memcpy(out, g_v91_startup_tx + g_v91_startup_tx_pos, (size_t)copy);
+            if (remain <= 0) {
+                if (!v91_live_tx_refill_locked()) {
+                    if (g_v91_tx_stage == V91_LIVE_TX_SCR) {
+                        ME_LOG("[ME] V.91 SCR fill exhausted waiting for peer DIL\n");
+                        g_state = ME_HANGUP;
+                        return false;
+                    }
+                    break;
+                }
+                remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
+            }
+            copy = remain < (len - pos) ? remain : (len - pos);
+            memcpy(out + pos, g_v91_startup_tx + g_v91_startup_tx_pos, (size_t)copy);
             g_v91_startup_tx_pos += copy;
-            pos = copy;
+            pos += copy;
         }
         v91_live_try_enter_data_locked();
         /* Do not mix B1 and primary-channel data in one RTP packet.  Starting
-         * data on the next pull gives both receivers an unambiguous 24-codeword
-         * mapper boundary after discarding the peer's final startup packet. */
+         * data on the next pull gives both receivers an unambiguous mapper
+         * boundary after discarding the peer's final startup packet. */
         return true;
     }
     if (g_state == ME_DATA && g_v91_data_tx_guard) {
         g_v91_data_tx_guard = false;
         return true;
     }
+    if (!g_v91_data_tx_aligned) {
+        if (g_v91_tx_align_phase >= 0) {
+            /* Pad with idle so the first data codeword (frame interval 0)
+             * puts interval 5 on the robbed cadence the peer reported. */
+            int want = (g_v91_tx_align_phase + 1) % 6;
+            int pad = (int)((want - (base + pos) % 6 + 6) % 6);
+
+            if (pad > len - pos)
+                return true;
+            pos += pad;
+        }
+        g_v91_data_tx_aligned = true;
+        if (g_v91_tx_align_phase >= 0)
+            trace_phase("V91 data TX aligned to robbed cadence (phase=%d)",
+                        g_v91_tx_align_phase);
+    }
     while (pos < len) {
         int available;
         int copy;
 
         if (g_v91_data_tx_pos >= V91_LIVE_DATA_CODEWORDS) {
-            uint8_t data[V91_LIVE_DATA_BYTES];
+            uint8_t data[V91_LIVE_DATA_CODEWORDS];
 
-            ds_tx_fill_bytes(&g_data_stack, data, sizeof(data));
+            if (g_v91_data_bytes <= 0 || g_v91_data_bytes > (int)sizeof(data))
+                return false;
+            ds_tx_fill_bytes(&g_data_stack, data, g_v91_data_bytes);
             if (v91_tx_codewords(&g_v91_tx,
                                  g_v91_data_tx,
                                  sizeof(g_v91_data_tx),
                                  data,
-                                 sizeof(data)) != V91_LIVE_DATA_CODEWORDS)
+                                 g_v91_data_bytes) != V91_LIVE_DATA_CODEWORDS)
                 return false;
             g_v91_data_tx_pos = 0;
         }
@@ -825,50 +1042,233 @@ static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
     return true;
 }
 
-static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
+static void v91_live_rx_fail_locked(const char *what)
+{
+    ME_LOG("[ME] V.91 startup receive failed at %s\n", what);
+    v91_request_retrain(&g_v91_rx);
+    g_state = ME_HANGUP;
+}
+
+/* Accumulate codewords for the current RX stage; true once `need` are held. */
+static bool v91_live_rx_collect(uint8_t cw, int need)
+{
+    if (g_v91_rx_accum_len < need && g_v91_rx_accum_len < (int)sizeof(g_v91_rx_accum))
+        g_v91_rx_accum[g_v91_rx_accum_len++] = cw;
+    return g_v91_rx_accum_len >= need;
+}
+
+static void v91_live_rx_enter_stage(v91_live_rx_stage_t stage)
+{
+    g_v91_rx_stage = stage;
+    g_v91_rx_accum_len = 0;
+}
+
+/* Robbed-bit trunks clear the LSB of the transported codeword. */
+static bool v91_live_codeword_matches(uint8_t cw, uint8_t expected)
+{
+    return cw == expected || cw == (uint8_t)(expected & 0xFE);
+}
+
+static void v91_live_rx_training_codeword_locked(uint8_t cw, long long abs_pos)
 {
     uint8_t ez = v91_ucode_to_codeword(g_v91_rx.law, 66, false);
+
+    switch (g_v91_rx_stage) {
+    case V91_LIVE_RX_HUNT_EZ:
+        if (v91_live_codeword_matches(cw, ez))
+            g_v91_ez_run++;
+        else
+            g_v91_ez_run = 0;
+        if (g_v91_ez_run == V91_EZ_SYMBOLS) {
+            trace_phase("V91 RX synchronized at Ez");
+            v91_live_rx_enter_stage(V91_LIVE_RX_INFO);
+        }
+        return;
+    case V91_LIVE_RX_INFO:
+    case V91_LIVE_RX_INFO_ACK: {
+        v91_info_frame_t info;
+        bool want_ack = (g_v91_rx_stage == V91_LIVE_RX_INFO_ACK);
+
+        if (!v91_live_rx_collect(cw, V91_INFO_SYMBOLS))
+            return;
+        if (!v91_rx_info_codewords(&g_v91_rx, g_v91_rx_accum, V91_INFO_SYMBOLS, &info)
+            || info.acknowledge_info_frame != want_ack) {
+            v91_live_rx_fail_locked(want_ack ? "INFO'" : "INFO");
+            return;
+        }
+        v91_live_rx_enter_stage(want_ack ? V91_LIVE_RX_EU : V91_LIVE_RX_INFO_ACK);
+        return;
+    }
+    case V91_LIVE_RX_EU: {
+        int ucode = v91_codeword_to_ucode(g_v91_rx.law, cw);
+
+        /* An LSB-robbed Eu codeword decodes to the adjacent Ucode. */
+        if (ucode != 66 && ucode != 67) {
+            v91_live_rx_fail_locked("Eu");
+            return;
+        }
+        if (v91_live_rx_collect(cw, V91_EU_SYMBOLS))
+            v91_live_rx_enter_stage(V91_LIVE_RX_DIL);
+        return;
+    }
+    case V91_LIVE_RX_DIL: {
+        int dil_len = v91_dil_symbol_count(&g_v91_default_dil);
+
+        if (g_v91_rx_accum_len == 0)
+            g_v91_rx_dil_start_abs = abs_pos;
+        if (!v91_live_rx_collect(cw, dil_len))
+            return;
+        if (!v91_rx_dil_codewords(&g_v91_rx, g_v91_rx_accum, dil_len,
+                                  &g_v91_default_dil)) {
+            v91_live_rx_fail_locked("DIL");
+            return;
+        }
+        if (g_v91_rx.rx_robbed_bit_detected && g_v91_rx.rx_robbed_slot_mask != 0) {
+            int slot = 0;
+
+            while (slot < VPCM_CP_FRAME_INTERVALS
+                   && !(g_v91_rx.rx_robbed_slot_mask & (1U << slot)))
+                slot++;
+            g_v91_rx_robbed_phase =
+                (int)((g_v91_rx_dil_start_abs + slot) % 6);
+        }
+        g_v91_local_drn = v91_select_drn(&g_v91_rx, &g_v91_cp_template, false);
+        if (g_v91_local_drn == 0) {
+            v91_live_rx_fail_locked("rate selection");
+            return;
+        }
+        trace_phase("V91 DIL analysed: selected drn=%u (%d bps)%s",
+                    g_v91_local_drn,
+                    (int)vpcm_cp_drn_to_bps(g_v91_local_drn),
+                    g_v91_rx.rx_robbed_bit_detected
+                        ? " robbed-bit detected" : "");
+        v91_rx_diff_reset(&g_v91_rx);
+        g_v91_scr_ones_run = 0;
+        g_v91_cp_started = false;
+        g_v91_cp_bit_pos = 0;
+        v91_live_rx_enter_stage(V91_LIVE_RX_SCR_CP);
+        return;
+    }
+    case V91_LIVE_RX_SCR_CP: {
+        int bit = v91_rx_diff_scrambled_bit(&g_v91_rx, cw);
+
+        if (!g_v91_cp_started) {
+            if (bit != 0) {
+                if (++g_v91_scr_ones_run > V91_LIVE_SCR_MAX_SYMBOLS + g_v91_cp_total_bits)
+                    v91_live_rx_fail_locked("SCR (no CP)");
+                return;
+            }
+            /* First zero after the SCR ones-run is CP bit 17 of the
+             * 17-ones frame-sync pattern. */
+            if (g_v91_scr_ones_run < 17) {
+                v91_live_rx_fail_locked("CP frame sync");
+                return;
+            }
+            memset(g_v91_cp_bits, 1, 17);
+            g_v91_cp_bits[17] = 0;
+            g_v91_cp_bit_pos = 18;
+            g_v91_cp_started = true;
+            return;
+        }
+        g_v91_cp_bits[g_v91_cp_bit_pos++] = (uint8_t)bit;
+        if (g_v91_cp_bit_pos < g_v91_cp_total_bits)
+            return;
+        {
+            vpcm_cp_frame_t expected;
+            unsigned align_req;
+
+            if (!vpcm_cp_decode_bits(g_v91_cp_bits, g_v91_cp_total_bits,
+                                     &g_v91_peer_cp)) {
+                v91_live_rx_fail_locked("CP decode");
+                return;
+            }
+            expected = g_v91_cp_template;
+            expected.drn = g_v91_peer_cp.drn;
+            /* The answerer's CP carries the acknowledge flag; the
+             * upstream_rate_mask field carries the peer's alignment
+             * request for our transmit direction. */
+            expected.acknowledge = g_calling_party;
+            expected.upstream_rate_mask = g_v91_peer_cp.upstream_rate_mask;
+            align_req = g_v91_peer_cp.upstream_rate_mask;
+            if (g_v91_peer_cp.drn == 0
+                || !v91_cp_supports_drn(&g_v91_cp_template, g_v91_peer_cp.drn)
+                || align_req > 6
+                || !vpcm_cp_frames_equal(&expected, &g_v91_peer_cp)) {
+                v91_live_rx_fail_locked("CP contents");
+                return;
+            }
+            g_v91_tx_align_phase = (align_req >= 1) ? (int)(align_req - 1) : -1;
+            g_v91_peer_drn = g_v91_peer_cp.drn;
+            trace_phase("V91 peer CP: drn=%u (%d bps) tx_align=%d",
+                        g_v91_peer_drn,
+                        (int)vpcm_cp_drn_to_bps(g_v91_peer_drn),
+                        g_v91_tx_align_phase);
+        }
+        g_v91_es_bits = 0;
+        v91_live_rx_enter_stage(V91_LIVE_RX_ES);
+        return;
+    }
+    case V91_LIVE_RX_ES: {
+        int bit = v91_rx_diff_scrambled_bit(&g_v91_rx, cw);
+
+        if (bit != 0) {
+            v91_live_rx_fail_locked("Es");
+            return;
+        }
+        if (++g_v91_es_bits >= V91_ES_SYMBOLS)
+            v91_live_rx_enter_stage(V91_LIVE_RX_B1);
+        return;
+    }
+    case V91_LIVE_RX_B1: {
+        v91_state_t b1_state;
+        uint8_t expected[V91_B1_SYMBOLS];
+        int i;
+
+        if (!v91_live_rx_collect(cw, V91_B1_SYMBOLS))
+            return;
+        v91_init(&b1_state, g_v91_rx.law, V91_MODE_TRANSPARENT);
+        if (v91_tx_b1_codewords(&b1_state, expected, V91_B1_SYMBOLS,
+                                &g_v91_peer_cp) != V91_B1_SYMBOLS) {
+            v91_live_rx_fail_locked("B1 reference");
+            return;
+        }
+        for (i = 0; i < V91_B1_SYMBOLS; i++) {
+            if (!v91_live_codeword_matches(g_v91_rx_accum[i], expected[i])) {
+                v91_live_rx_fail_locked("B1");
+                return;
+            }
+        }
+        trace_phase("V91 RX startup complete");
+        v91_live_rx_enter_stage(V91_LIVE_RX_DONE);
+        v91_live_try_enter_data_locked();
+        return;
+    }
+    case V91_LIVE_RX_DONE:
+    default:
+        return;
+    }
+}
+
+static void v91_live_receive_chunk_locked(const uint8_t *in, int len, long long base)
+{
     int pos = 0;
 
     while (pos < len && g_mod == ME_MOD_V91) {
         if (g_state == ME_TRAINING) {
-            uint8_t cw = in[pos++];
-
             /* The peer may finish a few codewords before our final RTP pull.
              * Startup is already validated; discard the short overlap until
              * our local B1 has also been transmitted. */
-            if (g_v91_rx_startup_complete) {
+            if (g_v91_rx_stage == V91_LIVE_RX_DONE) {
                 pos = len;
                 v91_live_try_enter_data_locked();
                 continue;
             }
-
-            if (!g_v91_rx_synced) {
-                if (cw == ez)
-                    g_v91_ez_run++;
-                else
-                    g_v91_ez_run = 0;
-                if (g_v91_ez_run == V91_EZ_SYMBOLS) {
-                    g_v91_rx_synced = true;
-                    g_v91_startup_remote_pos = V91_PHASE1_SILENCE_SYMBOLS + V91_EZ_SYMBOLS;
-                    trace_phase("V91 RX synchronized at Ez");
-                }
-                continue;
-            }
-            if (g_v91_startup_remote_pos >= g_v91_startup_remote_len
-                || cw != g_v91_startup_remote[g_v91_startup_remote_pos++]) {
-                ME_LOG("[ME] V.91 startup mismatch at expected offset %d\n",
-                       g_v91_startup_remote_pos - 1);
-                v91_request_retrain(&g_v91_rx);
-                g_state = ME_HANGUP;
+            v91_live_rx_training_codeword_locked(in[pos], base + pos);
+            pos++;
+            if (g_state == ME_HANGUP)
                 return;
-            }
-            if (g_v91_startup_remote_pos == g_v91_startup_remote_len) {
-                g_v91_rx_startup_complete = true;
-                trace_phase("V91 RX startup complete");
-                v91_live_try_enter_data_locked();
+            if (g_v91_rx_stage == V91_LIVE_RX_DONE)
                 pos = len;
-            }
             continue;
         }
         if (g_state == ME_DATA) {
@@ -876,8 +1276,24 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
             int copy = V91_LIVE_DATA_CODEWORDS - g_v91_data_rx_pos;
 
             if (!g_v91_data_rx_synced) {
-                while (pos < len && in[pos] == idle)
-                    pos++;
+                /* On a robbed path, the peer aligns its data framing so
+                 * frame interval 5 sits on the robbed cadence: the first
+                 * data codeword arrives at phase (robbed + 1), and a
+                 * robbed idle (LSB cleared) never sits on that phase. */
+                while (pos < len) {
+                    if (g_v91_rx_robbed_phase >= 0) {
+                        if ((int)((base + pos) % 6)
+                                != (g_v91_rx_robbed_phase + 1) % 6
+                            || in[pos] == idle) {
+                            pos++;
+                            continue;
+                        }
+                    } else if (in[pos] == idle) {
+                        pos++;
+                        continue;
+                    }
+                    break;
+                }
                 if (pos == len)
                     continue;
                 g_v91_data_rx_synced = true;
@@ -890,12 +1306,15 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
             g_v91_data_rx_pos += copy;
             pos += copy;
             if (g_v91_data_rx_pos == V91_LIVE_DATA_CODEWORDS) {
-                uint8_t data[V91_LIVE_DATA_BYTES];
+                uint8_t data[V91_LIVE_DATA_CODEWORDS];
                 int all_idle = 1;
                 int decoded;
 
                 for (int i = 0; i < V91_LIVE_DATA_CODEWORDS; i++) {
-                    if (g_v91_data_rx[i] != idle) {
+                    /* Robbed idles arrive with the LSB cleared. */
+                    if (g_v91_rx_robbed_phase >= 0
+                            ? !v91_live_codeword_matches(g_v91_data_rx[i], idle)
+                            : g_v91_data_rx[i] != idle) {
                         all_idle = 0;
                         break;
                     }
@@ -909,9 +1328,9 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
                                                 sizeof(data),
                                                 g_v91_data_rx,
                                                 sizeof(g_v91_data_rx));
-                if (decoded != V91_LIVE_DATA_BYTES) {
+                if (decoded != g_v91_data_bytes) {
                     ME_LOG("[ME] V.91 data frame decode failed: decoded=%d/%d codewords=",
-                           decoded, V91_LIVE_DATA_BYTES);
+                           decoded, g_v91_data_bytes);
                     if (me_verbose_enabled()) {
                         for (int i = 0; i < V91_LIVE_DATA_CODEWORDS; i++)
                             fprintf(stderr, "%02X%s", g_v91_data_rx[i],
@@ -927,6 +1346,29 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
             continue;
         }
         break;
+    }
+}
+
+static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
+{
+    uint8_t buf[512];
+
+    while (len > 0 && g_mod == ME_MOD_V91) {
+        long long base = g_v91_rx_abs_pos;
+        int chunk = len < (int)sizeof(buf) ? len : (int)sizeof(buf);
+        int i;
+
+        memcpy(buf, in, (size_t)chunk);
+        if (g_v91_sim_robbed_phase >= 0) {
+            for (i = 0; i < chunk; i++) {
+                if ((int)((base + i) % 6) == g_v91_sim_robbed_phase)
+                    buf[i] &= 0xFE;
+            }
+        }
+        g_v91_rx_abs_pos = base + chunk;
+        v91_live_receive_chunk_locked(buf, chunk, base);
+        in += chunk;
+        len -= chunk;
     }
 }
 static bool           g_v90_dil_parse_logged = false;

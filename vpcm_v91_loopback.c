@@ -15,9 +15,11 @@ static int vpcm_v91_loopback_frames_from_seconds(int seconds)
     frames = ((long long) seconds * 8000LL) / (long long) VPCM_CP_FRAME_INTERVALS;
     if (frames < 1)
         frames = 1;
-    frames -= (frames % 4LL);
-    if (frames < 4)
-        frames = 4;
+    /* Multiples of 8 frames keep chunk byte accounting exact for every
+       drn, including odd bits-per-frame rates such as drn=19 (39 bits). */
+    frames -= (frames % 8LL);
+    if (frames < 8)
+        frames = 8;
     if (frames > 2000000000LL)
         frames = 2000000000LL;
     return (int) frames;

@@ -37,6 +37,10 @@ typedef struct {
     vpcm_cp_frame_t cp_ack;
     int caller_startup_len;
     int answerer_startup_len;
+    uint8_t template_drn;
+    uint8_t adapted_drn;
+    bool robbed_bit_detected;
+    uint8_t robbed_slot_mask;
 } vpcm_v91_startup_report_t;
 
 void vpcm_v91_session_init(vpcm_v91_session_t *session, v91_law_t law);

@@ -436,6 +436,27 @@ static int v91_rx_diff_bits_stateful(v91_state_t *s,
     return g711_len;
 }
 
+void v91_rx_diff_reset(v91_state_t *s)
+{
+    if (!s)
+        return;
+    s->rx_prev_sign = 0;
+    s->rx_scramble_reg = 0;
+}
+
+int v91_rx_diff_scrambled_bit(v91_state_t *s, uint8_t codeword)
+{
+    int sign;
+    int bit;
+
+    if (!s)
+        return 0;
+    sign = (codeword & 0x80) ? 1 : 0;
+    bit = sign ^ s->rx_prev_sign;
+    s->rx_prev_sign = sign;
+    return v91_descramble_reg_bit(&s->rx_scramble_reg, bit);
+}
+
 static uint16_t v91_crc_bits(const uint8_t *bits, int nbits)
 {
     uint16_t crc;
@@ -1278,6 +1299,71 @@ int v91_tx_default_dil_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max
     return v91_tx_dil_codewords(s, g711_out, g711_max, &desc);
 }
 
+bool v91_rx_dil_codewords(v91_state_t *s,
+                          const uint8_t *g711_in,
+                          int g711_len,
+                          const v91_dil_desc_t *desc)
+{
+    int flips[VPCM_CP_FRAME_INTERVALS];
+    int n;
+    int lsp;
+    int ltp;
+    int in_pos;
+    int seg_idx;
+    int slot;
+    uint8_t slot_mask;
+
+    if (!s || !g711_in || !desc || g711_len <= 0)
+        return false;
+    n = desc->n;
+    if (n <= 0 || n > 255)
+        return false;
+    if (g711_len != v91_dil_symbol_count(desc))
+        return false;
+    lsp = v91_clamp_positive(desc->lsp, 128);
+    ltp = v91_clamp_positive(desc->ltp, 128);
+
+    memset(flips, 0, sizeof(flips));
+    in_pos = 0;
+    for (seg_idx = 0; seg_idx < n; seg_idx++) {
+        int training_ucode;
+        int uchord_idx;
+        int seg_len;
+        int pos;
+
+        training_ucode = desc->train_u[seg_idx] & 0x7F;
+        uchord_idx = v91_dil_uchord_index(training_ucode);
+        seg_len = (int) (desc->h[uchord_idx] + 1) * 6;
+        for (pos = 0; pos < seg_len; pos++) {
+            int sp_bit;
+            int tp_bit;
+            int ucode;
+            uint8_t expected;
+
+            sp_bit = desc->sp[pos % lsp] ? 1 : 0;
+            tp_bit = desc->tp[pos % ltp] ? 1 : 0;
+            ucode = tp_bit ? training_ucode : (desc->ref[uchord_idx] & 0x7F);
+            expected = v91_ucode_to_codeword(s->law, ucode, sp_bit != 0);
+            if (g711_in[in_pos] != expected) {
+                if ((uint8_t) (g711_in[in_pos] ^ expected) != 0x01)
+                    return false;
+                flips[in_pos % VPCM_CP_FRAME_INTERVALS]++;
+            }
+            in_pos++;
+        }
+    }
+
+    slot_mask = 0;
+    for (slot = 0; slot < VPCM_CP_FRAME_INTERVALS; slot++) {
+        if (flips[slot] >= V91_ROBBED_BIT_DETECT_MIN_FLIPS)
+            slot_mask |= (uint8_t) (1U << slot);
+    }
+    s->rx_robbed_slot_mask |= slot_mask;
+    if (slot_mask != 0)
+        s->rx_robbed_bit_detected = true;
+    return v91_note_received_dil(s, desc, NULL);
+}
+
 int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
                                           uint8_t *g711_out,
                                           int g711_max,
@@ -1394,6 +1480,37 @@ void v91_request_cleardown(v91_state_t *s)
 void v91_note_recovery_timeout(v91_state_t *s)
 {
     v91_request_cleardown(s);
+}
+
+bool v91_cp_supports_drn(const vpcm_cp_frame_t *cp, uint8_t drn)
+{
+    return v91_data_mode_supported(cp, vpcm_cp_drn_to_k(drn));
+}
+
+uint8_t v91_select_drn(const v91_state_t *s,
+                       const vpcm_cp_frame_t *cp_template,
+                       bool robbed_bit)
+{
+    bool robbed;
+    int drn;
+
+    if (!cp_template || cp_template->drn == 0 || cp_template->drn > 28)
+        return 0;
+    robbed = robbed_bit || (s && s->rx_robbed_bit_detected);
+    /* A transparent 64 kbps bearer cannot survive LSB robbing: only pass
+       it through untouched when the path shows no robbed-bit evidence. */
+    if (cp_template->transparent_mode_granted && !robbed)
+        return cp_template->drn;
+
+    drn = cp_template->drn;
+    if (s && s->last_rx_dil_analysis_valid
+        && (int) s->last_rx_dil_analysis.recommended_downstream_drn < drn)
+        drn = s->last_rx_dil_analysis.recommended_downstream_drn;
+    if (robbed && drn > (int) vpcm_cp_recommended_robbed_bit_drn())
+        drn = vpcm_cp_recommended_robbed_bit_drn();
+    while (drn > 0 && !v91_cp_supports_drn(cp_template, (uint8_t) drn))
+        drn--;
+    return (uint8_t) drn;
 }
 
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp)

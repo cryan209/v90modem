@@ -175,21 +175,28 @@ bool vpcm_v91_session_run_dil(vpcm_v91_session_t *session,
         return false;
     vpcm_v91_session_enter_dil(session);
     len = v91_tx_startup_dil_sequence_codewords(caller, startup_buf, startup_cap, default_dil, NULL);
-    if (len <= 0)
+    if (len <= V91_EU_SYMBOLS || len > transport_cap)
         return false;
     *caller_startup_len = len;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, startup_buf, len);
-    if (!v91_note_received_dil(answerer, default_dil, NULL))
+    /* Decode the transported DIL codewords (not the descriptor) so LSB
+       robbing on the path is actually observed. */
+    if (!v91_rx_dil_codewords(answerer,
+                              transport_buf + V91_EU_SYMBOLS,
+                              len - V91_EU_SYMBOLS,
+                              default_dil))
         return false;
 
     len = v91_tx_startup_dil_sequence_codewords(answerer, startup_buf, startup_cap, default_dil, NULL);
-    if (len <= 0)
+    if (len <= V91_EU_SYMBOLS || len > transport_cap)
         return false;
     *answerer_startup_len = len;
     vpcm_v91_transport_codewords(robbed_bit, transport_buf, startup_buf, len);
-    if (!v91_note_received_dil(caller, default_dil, NULL))
+    if (!v91_rx_dil_codewords(caller,
+                              transport_buf + V91_EU_SYMBOLS,
+                              len - V91_EU_SYMBOLS,
+                              default_dil))
         return false;
-    (void) transport_cap;
     return true;
 }
 
@@ -371,6 +378,57 @@ bool vpcm_v91_session_run_startup(vpcm_v91_session_t *session,
                                   robbed_bit)) {
         fprintf(stderr, "V.91 session startup failed at DIL\n");
         return false;
+    }
+    /* Rate adaptation: both sides have analysed the received DIL, so cap
+       the offered rate before CP instead of committing to the template's
+       single rate. Robbed-bit handling is driven by what DIL reception
+       actually observed on the path, not by configuration: an undetected
+       robbed trunk must never end up carrying full-rate or transparent
+       64 kbps codewords whose LSBs get overwritten. */
+    local_report.robbed_bit_detected = (caller->rx_robbed_bit_detected
+                                        || answerer->rx_robbed_bit_detected);
+    local_report.robbed_slot_mask = (uint8_t) (caller->rx_robbed_slot_mask
+                                               | answerer->rx_robbed_slot_mask);
+    if (local_report.robbed_bit_detected) {
+        if (startup_cfg.cp_offer.transparent_mode_granted
+            && (startup_cfg.caller_info.cleardown_if_transparent_denied
+                || startup_cfg.answerer_info.cleardown_if_transparent_denied)) {
+            fprintf(stderr,
+                    "V.91 session startup cleardown: transparent mode denied on robbed-bit path (slots=0x%02X)\n",
+                    (unsigned) local_report.robbed_slot_mask);
+            return false;
+        }
+        startup_cfg.cp_offer.transparent_mode_granted = false;
+        if (!vpcm_cp_apply_robbed_bit_safe_slots(&startup_cfg.cp_offer,
+                                                 local_report.robbed_slot_mask)) {
+            fprintf(stderr,
+                    "V.91 session startup failed applying robbed-bit-safe constellations (slots=0x%02X)\n",
+                    (unsigned) local_report.robbed_slot_mask);
+            return false;
+        }
+        startup_cfg.cp_ack = startup_cfg.cp_offer;
+        startup_cfg.cp_ack.acknowledge = true;
+    }
+    local_report.template_drn = startup_cfg.cp_offer.drn;
+    {
+        uint8_t caller_drn;
+        uint8_t answerer_drn;
+        uint8_t adapted_drn;
+
+        caller_drn = v91_select_drn(caller, &startup_cfg.cp_offer, false);
+        answerer_drn = v91_select_drn(answerer, &startup_cfg.cp_offer, false);
+        adapted_drn = (caller_drn < answerer_drn) ? caller_drn : answerer_drn;
+        if (adapted_drn == 0) {
+            fprintf(stderr,
+                    "V.91 session startup failed at rate selection (template drn=%u, caller=%u, answerer=%u)\n",
+                    (unsigned) local_report.template_drn,
+                    (unsigned) caller_drn,
+                    (unsigned) answerer_drn);
+            return false;
+        }
+        startup_cfg.cp_offer.drn = adapted_drn;
+        startup_cfg.cp_ack.drn = adapted_drn;
+        local_report.adapted_drn = adapted_drn;
     }
     if (!vpcm_v91_session_run_scr(session,
                                   caller,

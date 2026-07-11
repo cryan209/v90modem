@@ -164,6 +164,7 @@ test: $(TEST_TARGETS)
 
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .

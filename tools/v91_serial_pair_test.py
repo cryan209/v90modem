@@ -95,7 +95,16 @@ def main() -> int:
     parser.add_argument("--caller-port", type=int, default=5091)
     parser.add_argument("--answerer-port", type=int, default=5092)
     parser.add_argument("--timeout", type=float, default=25.0)
+    parser.add_argument(
+        "--robbed-phase", type=int, default=None,
+        help="simulate a robbed-bit trunk on both receive paths at this cadence phase (0-5)")
     args = parser.parse_args()
+
+    child_env = dict(os.environ)
+    label = "bidirectional PTY payload over SIP/RTP"
+    if args.robbed_phase is not None:
+        child_env["V91_SIM_ROBBED_RX"] = str(args.robbed_phase)
+        label += f", simulated robbed-bit trunk phase={args.robbed_phase}"
 
     binary = str(pathlib.Path(args.binary).resolve())
     with tempfile.TemporaryDirectory(prefix="v91-serial-pair-") as temp_dir:
@@ -111,6 +120,7 @@ def main() -> int:
              "--pty-link", str(answerer_pty), "--verbose"],
             stdout=answerer_log,
             stderr=subprocess.STDOUT,
+            env=child_env,
         )
         caller = subprocess.Popen(
             [binary, "--sip-server", f"127.0.0.1:{args.answerer_port}",
@@ -118,6 +128,7 @@ def main() -> int:
              "--pty-link", str(caller_pty), "--verbose"],
             stdout=caller_log,
             stderr=subprocess.STDOUT,
+            env=child_env,
         )
         caller_fd = -1
         answerer_fd = -1
@@ -135,7 +146,7 @@ def main() -> int:
             a2c = b"V91-ANSWERER-TO-CALLER-9876543210\r\n"
             expect_payload(caller_fd, answerer_fd, c2a, 5)
             expect_payload(answerer_fd, caller_fd, a2c, 5)
-            print("v91_serial_pair_test: OK (bidirectional PTY payload over SIP/RTP)")
+            print(f"v91_serial_pair_test: OK ({label})")
             return 0
         except Exception as exc:
             print(f"v91_serial_pair_test: FAIL: {exc}", file=sys.stderr)

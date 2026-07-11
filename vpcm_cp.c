@@ -470,6 +470,50 @@ void vpcm_cp_init_robbed_bit_safe_profile(vpcm_cp_frame_t *cp,
     vpcm_cp_enable_odd_ucodes(cp->masks[1]);
 }
 
+bool vpcm_cp_apply_robbed_bit_safe_slots(vpcm_cp_frame_t *cp, uint8_t slot_mask)
+{
+    uint8_t odd_only[VPCM_CP_MASK_BYTES];
+    uint8_t restricted[VPCM_CP_MASK_BYTES];
+    int slot;
+    int i;
+    int idx;
+
+    if (!cp || cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS)
+        return false;
+
+    vpcm_cp_enable_odd_ucodes(odd_only);
+    for (slot = 0; slot < VPCM_CP_FRAME_INTERVALS; slot++) {
+        const uint8_t *current;
+
+        if (!(slot_mask & (1U << slot)))
+            continue;
+        if (cp->dfi[slot] >= cp->constellation_count)
+            return false;
+        current = cp->masks[cp->dfi[slot]];
+        for (i = 0; i < VPCM_CP_MASK_BYTES; i++)
+            restricted[i] = (uint8_t) (current[i] & odd_only[i]);
+        if (vpcm_cp_mask_population(restricted) <= 0)
+            return false;
+        if (memcmp(restricted, current, VPCM_CP_MASK_BYTES) == 0)
+            continue;
+        idx = -1;
+        for (i = 0; i < cp->constellation_count; i++) {
+            if (memcmp(cp->masks[i], restricted, VPCM_CP_MASK_BYTES) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            if (cp->constellation_count >= VPCM_CP_MAX_CONSTELLATIONS)
+                return false;
+            idx = cp->constellation_count++;
+            memcpy(cp->masks[idx], restricted, VPCM_CP_MASK_BYTES);
+        }
+        cp->dfi[slot] = (uint8_t) idx;
+    }
+    return true;
+}
+
 int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high)
 {
     int constellation_idx;

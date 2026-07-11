@@ -5224,8 +5224,10 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                                                                 const v8_parms_t *answer_v8_parms,
                                                                 const vpcm_cp_frame_t *cp_offer_template,
                                                                 bool robbed_bit,
+                                                                const v91_dil_desc_t *dil_override,
                                                                 uint32_t data_seed,
-                                                                int data_seconds)
+                                                                int data_seconds,
+                                                                vpcm_v91_startup_report_t *report_out)
 {
     enum { VPCM_SESSION_STREAM_CAPACITY = 8192 };
     v91_dil_desc_t default_dil;
@@ -5258,7 +5260,9 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
     vpcm_v91_loopback_run_t loopback_run;
     vpcm_call_pair_v91_data_report_t data_report;
 
-    if (robbed_bit)
+    if (dil_override)
+        default_dil = *dil_override;
+    else if (robbed_bit)
         vpcm_init_robbed_bit_dil_profile(&default_dil);
     else
         v91_default_dil_init(&default_dil);
@@ -5381,6 +5385,8 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
         fprintf(stderr, "%s startup/data activation failed\n", family_label);
         return false;
     }
+    if (report_out)
+        *report_out = startup_report;
     vpcm_log_e2e_phase("PHASE1", "Silence complete (%d symbols)", V91_PHASE1_SILENCE_SYMBOLS);
     vpcm_log_e2e_phase("PHASE1", "Ez exchanged (%d symbols)", V91_EZ_SYMBOLS);
     vpcm_log_e2e_phase("INFO",
@@ -5393,6 +5399,13 @@ static bool __attribute__((unused)) run_vpcm_full_phase_session(v91_law_t law,
                        startup_report.caller_startup_len,
                        startup_report.answerer_startup_len);
     vpcm_log_e2e_phase("SCR", "SCR/SCR' exchanged");
+    vpcm_format_rate(rate_buf, sizeof(rate_buf), startup_report.adapted_drn);
+    vpcm_log_e2e_phase("RATE",
+                       "DIL-driven rate adaptation: ceiling drn=%u -> negotiated drn=%u (%s)%s",
+                       startup_report.template_drn,
+                       startup_report.adapted_drn,
+                       rate_buf,
+                       startup_report.robbed_bit_detected ? ", robbed-bit detected on path" : "");
     cp_ack = startup_report.cp_ack;
     vpcm_log_e2e_phase("CP",
                        "CP/CP' complete (transparent=%d drn=%u rate=%.0f bps)",
@@ -7131,6 +7144,390 @@ static bool test_v92_dil_rate_adaptation(void)
     return true;
 }
 
+static bool test_v91_dil_rate_adaptation(void)
+{
+    v91_dil_desc_t clean_dil;
+    v91_dil_desc_t robbed_dil;
+    v91_dil_desc_t echo_dil;
+    v91_dil_desc_t impaired_dil;
+    v91_state_t clean_state;
+    v91_state_t robbed_state;
+    v91_state_t echo_state;
+    v91_state_t impaired_state;
+    v91_state_t blind_state;
+    vpcm_cp_frame_t cp_template;
+    vpcm_cp_frame_t low_template;
+    vpcm_cp_frame_t transparent_template;
+    vpcm_cp_frame_t narrow_cp;
+    uint8_t drn;
+    int ucode;
+
+    vpcm_log("Test: V.91 DIL-driven rate adaptation");
+
+    v91_default_dil_init(&clean_dil);
+    vpcm_init_robbed_bit_dil_profile(&robbed_dil);
+    /* Shortened DIL on a non-default sign pattern period: echo-limited. */
+    v91_default_dil_init(&echo_dil);
+    echo_dil.n = 90;
+    echo_dil.lsp = 10;
+    /* Heavily shortened DIL with few distinct training Ucodes: impaired. */
+    v91_default_dil_init(&impaired_dil);
+    impaired_dil.n = 50;
+    impaired_dil.lsp = 10;
+
+    v91_init(&clean_state, V91_LAW_ULAW, V91_MODE_TRANSPARENT);
+    v91_init(&robbed_state, V91_LAW_ULAW, V91_MODE_TRANSPARENT);
+    v91_init(&echo_state, V91_LAW_ULAW, V91_MODE_TRANSPARENT);
+    v91_init(&impaired_state, V91_LAW_ULAW, V91_MODE_TRANSPARENT);
+    v91_init(&blind_state, V91_LAW_ULAW, V91_MODE_TRANSPARENT);
+    if (!v91_note_received_dil(&clean_state, &clean_dil, NULL)
+        || !v91_note_received_dil(&robbed_state, &robbed_dil, NULL)
+        || !v91_note_received_dil(&echo_state, &echo_dil, NULL)
+        || !v91_note_received_dil(&impaired_state, &impaired_dil, NULL)) {
+        fprintf(stderr, "V.91 rate adaptation DIL analysis failed\n");
+        return false;
+    }
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp_template, 28, false);
+
+    drn = v91_select_drn(&clean_state, &cp_template, false);
+    if (drn != 19) {
+        fprintf(stderr, "V.91 clean DIL selected drn=%u expected 19\n", drn);
+        return false;
+    }
+    drn = v91_select_drn(&robbed_state, &cp_template, true);
+    if (drn != vpcm_cp_recommended_robbed_bit_drn()) {
+        fprintf(stderr, "V.91 robbed-bit DIL selected drn=%u expected %u\n",
+                drn, vpcm_cp_recommended_robbed_bit_drn());
+        return false;
+    }
+    drn = v91_select_drn(&echo_state, &cp_template, false);
+    if (drn != 16) {
+        fprintf(stderr, "V.91 echo-limited DIL selected drn=%u expected 16\n", drn);
+        return false;
+    }
+    drn = v91_select_drn(&impaired_state, &cp_template, false);
+    if (drn != 13) {
+        fprintf(stderr, "V.91 impaired DIL selected drn=%u expected 13\n", drn);
+        return false;
+    }
+
+    /* The template rate is a ceiling: it wins when below the recommendation. */
+    vpcm_cp_init_robbed_bit_safe_profile(&low_template, 9, false);
+    drn = v91_select_drn(&clean_state, &low_template, false);
+    if (drn != 9) {
+        fprintf(stderr, "V.91 low template ceiling selected drn=%u expected 9\n", drn);
+        return false;
+    }
+
+    /* Without a DIL analysis, only the mask capacity and robbed-bit caps apply. */
+    drn = v91_select_drn(&blind_state, &cp_template, false);
+    if (drn != 27) {
+        fprintf(stderr, "V.91 blind selection chose drn=%u expected mask ceiling 27\n", drn);
+        return false;
+    }
+    drn = v91_select_drn(&blind_state, &cp_template, true);
+    if (drn != vpcm_cp_recommended_robbed_bit_drn()) {
+        fprintf(stderr, "V.91 blind robbed-bit selection chose drn=%u expected %u\n",
+                drn, vpcm_cp_recommended_robbed_bit_drn());
+        return false;
+    }
+
+    /* Narrow constellations force the rate below the DIL recommendation. */
+    vpcm_cp_init(&narrow_cp);
+    narrow_cp.drn = 28;
+    narrow_cp.constellation_count = 1;
+    memset(narrow_cp.dfi, 0, sizeof(narrow_cp.dfi));
+    for (ucode = 0; ucode < 8; ucode++)
+        vpcm_cp_mask_set(narrow_cp.masks[0], ucode, true);
+    drn = v91_select_drn(&clean_state, &narrow_cp, false);
+    if (drn != 4) {
+        fprintf(stderr, "V.91 narrow-mask selection chose drn=%u expected 4\n", drn);
+        return false;
+    }
+    vpcm_cp_mask_set(narrow_cp.masks[0], 1, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 2, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 3, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 4, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 5, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 6, false);
+    vpcm_cp_mask_set(narrow_cp.masks[0], 7, false);
+    drn = v91_select_drn(&clean_state, &narrow_cp, false);
+    if (drn != 0) {
+        fprintf(stderr, "V.91 unusable-mask selection chose drn=%u expected 0\n", drn);
+        return false;
+    }
+
+    /* Transparent mode is a fixed 64 kbps bearer: no adaptation. */
+    vpcm_cp_init(&transparent_template);
+    transparent_template.transparent_mode_granted = true;
+    transparent_template.drn = 28;
+    vpcm_cp_enable_all_ucodes(transparent_template.masks[0]);
+    drn = v91_select_drn(&impaired_state, &transparent_template, false);
+    if (drn != 28) {
+        fprintf(stderr, "V.91 transparent template adapted to drn=%u expected 28\n", drn);
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 DIL-driven rate adaptation (clean=19, robbed-bit=%u, echo=16, impaired=13, mask-limited=4)",
+             vpcm_cp_recommended_robbed_bit_drn());
+    return true;
+}
+
+static bool test_v91_robbed_bit_detection(v91_law_t law)
+{
+    v91_dil_desc_t dil;
+    v91_state_t tx;
+    v91_state_t clean_rx;
+    v91_state_t robbed_rx;
+    vpcm_cp_frame_t transparent_template;
+    uint8_t buf[V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t robbed[V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t drn;
+    int len;
+
+    vpcm_log("Test: V.91 robbed-bit detection from received DIL (%s)", vpcm_law_to_str(law));
+
+    v91_default_dil_init(&dil);
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&clean_rx, law, V91_MODE_TRANSPARENT);
+    v91_init(&robbed_rx, law, V91_MODE_TRANSPARENT);
+    len = v91_tx_dil_codewords(&tx, buf, (int) sizeof(buf), &dil);
+    if (len != V91_DEFAULT_DIL_SYMBOLS) {
+        fprintf(stderr, "V.91 robbed-bit detection DIL tx failed (len=%d)\n", len);
+        return false;
+    }
+
+    if (!v91_rx_dil_codewords(&clean_rx, buf, len, &dil)) {
+        fprintf(stderr, "V.91 robbed-bit detection clean DIL rx failed\n");
+        return false;
+    }
+    if (clean_rx.rx_robbed_bit_detected || clean_rx.rx_robbed_slot_mask != 0) {
+        fprintf(stderr, "V.91 robbed-bit detection false positive on clean path (mask=0x%02X)\n",
+                clean_rx.rx_robbed_slot_mask);
+        return false;
+    }
+
+    vpcm_transport_robbed_bit_codewords(robbed, buf, len);
+    if (!v91_rx_dil_codewords(&robbed_rx, robbed, len, &dil)) {
+        fprintf(stderr, "V.91 robbed-bit detection robbed DIL rx failed\n");
+        return false;
+    }
+    if (!robbed_rx.rx_robbed_bit_detected || robbed_rx.rx_robbed_slot_mask != 0x20) {
+        fprintf(stderr, "V.91 robbed-bit detection missed robbed slot (detected=%d mask=0x%02X)\n",
+                robbed_rx.rx_robbed_bit_detected ? 1 : 0,
+                robbed_rx.rx_robbed_slot_mask);
+        return false;
+    }
+
+    /* Corruption beyond the LSB is not robbed-bit signalling. */
+    robbed[100] ^= 0x40;
+    if (v91_rx_dil_codewords(&robbed_rx, robbed, len, &dil)) {
+        fprintf(stderr, "V.91 robbed-bit detection accepted non-LSB corruption\n");
+        return false;
+    }
+    robbed[100] ^= 0x40;
+
+    /* A transparent 64 kbps template must not survive robbed-bit evidence. */
+    vpcm_cp_init(&transparent_template);
+    transparent_template.transparent_mode_granted = true;
+    transparent_template.drn = 28;
+    vpcm_cp_enable_all_ucodes(transparent_template.masks[0]);
+    if (v91_select_drn(&clean_rx, &transparent_template, false) != 28) {
+        fprintf(stderr, "V.91 clean path did not keep transparent drn 28\n");
+        return false;
+    }
+    drn = v91_select_drn(&robbed_rx, &transparent_template, false);
+    if (drn == 28 || drn == 0) {
+        fprintf(stderr, "V.91 robbed path kept transparent rate (drn=%u)\n", drn);
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 robbed-bit detection from received DIL (%s, slot mask=0x20, transparent demoted to drn=%u)",
+             vpcm_law_to_str(law), drn);
+    return true;
+}
+
+static bool test_v91_robbed_bit_session_rate_adaptation(v91_law_t law)
+{
+    enum { V91_ROBBED_TEST_FRAMES = 8 };
+    vpcm_v91_session_t session;
+    v91_state_t caller;
+    v91_state_t answerer;
+    v91_state_t caller_tx;
+    v91_state_t caller_rx;
+    v91_state_t answerer_tx;
+    v91_state_t answerer_rx;
+    v91_dil_desc_t default_dil;
+    vpcm_cp_frame_t cp_template;
+    vpcm_v91_startup_report_t report;
+    uint8_t startup_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t transport_buf[V91_EU_SYMBOLS + V91_DEFAULT_DIL_SYMBOLS];
+    uint8_t scr_buf[18];
+    uint8_t cp_buf[VPCM_CP_MAX_BITS];
+    uint8_t es_buf[V91_ES_SYMBOLS];
+    uint8_t b1_buf[V91_B1_SYMBOLS];
+    uint8_t data_in[(V91_ROBBED_TEST_FRAMES * (19 + 20)) / 8];
+    uint8_t data_out[(V91_ROBBED_TEST_FRAMES * (19 + 20)) / 8];
+    uint8_t pcm[V91_ROBBED_TEST_FRAMES * VPCM_CP_FRAME_INTERVALS];
+    uint8_t robbed_pcm[V91_ROBBED_TEST_FRAMES * VPCM_CP_FRAME_INTERVALS];
+    int i;
+
+    vpcm_log("Test: V.91 undeclared robbed-bit trunk forces safe negotiation (%s)", vpcm_law_to_str(law));
+
+    /* Naive full-rate template and a peer that advertises a clean default
+       DIL: only on-path detection can notice the robbed trunk. */
+    vpcm_v91_session_init(&session, law);
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    v91_default_dil_init(&default_dil);
+    vpcm_cp_init(&cp_template);
+    cp_template.drn = 28;
+    cp_template.codec_alaw = (law == V91_LAW_ALAW);
+    vpcm_cp_enable_all_ucodes(cp_template.masks[0]);
+
+    if (!vpcm_v91_session_run_startup(&session,
+                                      &caller,
+                                      &answerer,
+                                      &default_dil,
+                                      &cp_template,
+                                      true,
+                                      startup_buf,
+                                      (int) sizeof(startup_buf),
+                                      transport_buf,
+                                      (int) sizeof(transport_buf),
+                                      scr_buf,
+                                      (int) sizeof(scr_buf),
+                                      cp_buf,
+                                      (int) sizeof(cp_buf),
+                                      es_buf,
+                                      (int) sizeof(es_buf),
+                                      b1_buf,
+                                      (int) sizeof(b1_buf),
+                                      &report,
+                                      &caller_tx,
+                                      &caller_rx,
+                                      &answerer_tx,
+                                      &answerer_rx)) {
+        fprintf(stderr, "V.91 robbed-trunk startup failed\n");
+        return false;
+    }
+    if (!report.robbed_bit_detected || report.robbed_slot_mask != 0x20) {
+        fprintf(stderr, "V.91 robbed-trunk startup missed detection (detected=%d mask=0x%02X)\n",
+                report.robbed_bit_detected ? 1 : 0,
+                report.robbed_slot_mask);
+        return false;
+    }
+    if (report.adapted_drn != 19) {
+        fprintf(stderr, "V.91 robbed-trunk startup selected drn=%u expected 19\n",
+                report.adapted_drn);
+        return false;
+    }
+    if (report.cp_ack.constellation_count != 2
+        || report.cp_ack.dfi[VPCM_CP_FRAME_INTERVALS - 1] != 1
+        || vpcm_cp_mask_population(report.cp_ack.masks[1]) != 64) {
+        fprintf(stderr, "V.91 robbed-trunk startup did not restrict the robbed slot (constellations=%u dfi5=%u pop=%d)\n",
+                report.cp_ack.constellation_count,
+                report.cp_ack.dfi[VPCM_CP_FRAME_INTERVALS - 1],
+                vpcm_cp_mask_population(report.cp_ack.masks[1]));
+        return false;
+    }
+
+    /* The negotiated constellation must be immune to LSB robbing in data
+       mode: the robbed transport may not change a single codeword. */
+    for (i = 0; i < (int) sizeof(data_in); i++)
+        data_in[i] = (uint8_t) (0xA5 ^ (i * 29));
+    if (v91_tx_codewords(&caller_tx, pcm, (int) sizeof(pcm), data_in, (int) sizeof(data_in))
+        != (int) sizeof(pcm)) {
+        fprintf(stderr, "V.91 robbed-trunk data encode failed\n");
+        return false;
+    }
+    vpcm_transport_robbed_bit_codewords(robbed_pcm, pcm, (int) sizeof(pcm));
+    if (memcmp(pcm, robbed_pcm, sizeof(pcm)) != 0) {
+        fprintf(stderr, "V.91 robbed-trunk data stream still uses LSB-sensitive codewords in the robbed slot\n");
+        return false;
+    }
+    if (v91_rx_codewords(&answerer_rx, data_out, (int) sizeof(data_out), robbed_pcm, (int) sizeof(robbed_pcm))
+        != (int) sizeof(data_out)
+        || memcmp(data_in, data_out, sizeof(data_in)) != 0) {
+        fprintf(stderr, "V.91 robbed-trunk data decode mismatch\n");
+        return false;
+    }
+
+    /* A transparent 64 kbps request over the same trunk must clear down. */
+    vpcm_v91_session_init(&session, law);
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    cp_template.transparent_mode_granted = true;
+    if (vpcm_v91_session_run_startup(&session,
+                                     &caller,
+                                     &answerer,
+                                     &default_dil,
+                                     &cp_template,
+                                     true,
+                                     startup_buf,
+                                     (int) sizeof(startup_buf),
+                                     transport_buf,
+                                     (int) sizeof(transport_buf),
+                                     scr_buf,
+                                     (int) sizeof(scr_buf),
+                                     cp_buf,
+                                     (int) sizeof(cp_buf),
+                                     es_buf,
+                                     (int) sizeof(es_buf),
+                                     b1_buf,
+                                     (int) sizeof(b1_buf),
+                                     &report,
+                                     &caller_tx,
+                                     &caller_rx,
+                                     &answerer_tx,
+                                     &answerer_rx)) {
+        fprintf(stderr, "V.91 transparent 64k was granted on a robbed-bit trunk\n");
+        return false;
+    }
+
+    /* The same transparent request on a clean trunk still runs at 64k. */
+    vpcm_v91_session_init(&session, law);
+    v91_init(&caller, law, V91_MODE_TRANSPARENT);
+    v91_init(&answerer, law, V91_MODE_TRANSPARENT);
+    if (!vpcm_v91_session_run_startup(&session,
+                                      &caller,
+                                      &answerer,
+                                      &default_dil,
+                                      &cp_template,
+                                      false,
+                                      startup_buf,
+                                      (int) sizeof(startup_buf),
+                                      transport_buf,
+                                      (int) sizeof(transport_buf),
+                                      scr_buf,
+                                      (int) sizeof(scr_buf),
+                                      cp_buf,
+                                      (int) sizeof(cp_buf),
+                                      es_buf,
+                                      (int) sizeof(es_buf),
+                                      b1_buf,
+                                      (int) sizeof(b1_buf),
+                                      &report,
+                                      &caller_tx,
+                                      &caller_rx,
+                                      &answerer_tx,
+                                      &answerer_rx)
+        || report.robbed_bit_detected
+        || report.adapted_drn != 28
+        || !report.cp_ack.transparent_mode_granted) {
+        fprintf(stderr, "V.91 transparent 64k failed on a clean trunk (detected=%d drn=%u transparent=%d)\n",
+                report.robbed_bit_detected ? 1 : 0,
+                report.adapted_drn,
+                report.cp_ack.transparent_mode_granted ? 1 : 0);
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 undeclared robbed-bit trunk forces safe negotiation (%s, drn=19, slot 5 odd-restricted, transparent 64k denied)",
+             vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v92_ja_strict_descriptor_parsing(void)
 {
     v90_dil_desc_t profile;
@@ -7580,9 +7977,73 @@ static bool test_v91_full_duplex(v91_law_t law)
         && expect_equal("V.91 full duplex B<-A", a_input, b_output, TEST_PAYLOAD_LEN);
 }
 
+static bool test_v91_undeclared_robbed_trunk_e2e(v91_law_t law)
+{
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    v91_dil_desc_t clean_dil;
+    vpcm_cp_frame_t naive_offer;
+    vpcm_v91_startup_report_t report;
+
+    vpcm_log("Test: V.91 undeclared robbed trunk full E2E (%s)", vpcm_law_to_str(law));
+
+    /* Full call flow with a naive full-rate offer and a peer advertising a
+       clean default DIL: only on-path detection during DIL reception can
+       notice that the trunk robs bits. */
+    init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
+    init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
+    v91_default_dil_init(&clean_dil);
+    vpcm_cp_init(&naive_offer);
+    naive_offer.drn = 28;
+    naive_offer.codec_alaw = (law == V91_LAW_ALAW);
+    vpcm_cp_enable_all_ucodes(naive_offer.masks[0]);
+
+    memset(&report, 0, sizeof(report));
+    if (!run_vpcm_full_phase_session(law,
+                                     "V.91 undeclared robbed trunk E2E",
+                                     "naive full-rate offer over robbed trunk",
+                                     &caller_parms,
+                                     &answer_parms,
+                                     &naive_offer,
+                                     true,
+                                     &clean_dil,
+                                     0x0B0B0000U ^ (uint32_t) law,
+                                     1,
+                                     &report)) {
+        fprintf(stderr, "V.91 undeclared robbed trunk E2E call failed\n");
+        return false;
+    }
+    if (!report.robbed_bit_detected
+        || report.robbed_slot_mask != 0x20
+        || report.adapted_drn != 19
+        || report.cp_ack.transparent_mode_granted
+        || report.cp_ack.dfi[VPCM_CP_FRAME_INTERVALS - 1] == 0
+        || vpcm_cp_mask_population(report.cp_ack.masks[report.cp_ack.dfi[VPCM_CP_FRAME_INTERVALS - 1]]) != 64) {
+        fprintf(stderr,
+                "V.91 undeclared robbed trunk E2E negotiated unsafely (detected=%d mask=0x%02X drn=%u transparent=%d dfi5=%u)\n",
+                report.robbed_bit_detected ? 1 : 0,
+                report.robbed_slot_mask,
+                report.adapted_drn,
+                report.cp_ack.transparent_mode_granted ? 1 : 0,
+                report.cp_ack.dfi[VPCM_CP_FRAME_INTERVALS - 1]);
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 undeclared robbed trunk full E2E (%s, ceiling drn=28 -> drn=19, slot 5 odd-restricted, data verified through robbing)",
+             vpcm_law_to_str(law));
+    return true;
+}
+
 static bool run_vpcm_session_suite(void)
 {
     return test_v92_dil_rate_adaptation()
+        && test_v91_dil_rate_adaptation()
+        && test_v91_robbed_bit_detection(V91_LAW_ULAW)
+        && test_v91_robbed_bit_detection(V91_LAW_ALAW)
+        && test_v91_robbed_bit_session_rate_adaptation(V91_LAW_ULAW)
+        && test_v91_robbed_bit_session_rate_adaptation(V91_LAW_ALAW)
+        && test_v91_undeclared_robbed_trunk_e2e(V91_LAW_ULAW)
+        && test_v91_undeclared_robbed_trunk_e2e(V91_LAW_ALAW)
         && test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW)
         && test_v8_v90_startup_over_analog_g711(V91_LAW_ALAW)
         && (!g_vpcm_experimental_v90_info
@@ -8885,7 +9346,9 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
     init_v8_parms(&caller_parms, true, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
     init_v8_parms(&answer_parms, false, V8_MOD_V22 | V8_MOD_V34, V8_PSTN_PCM_MODEM_V91);
 
-    vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, vpcm_cp_recommended_robbed_bit_drn(), false);
+    /* Offer the maximum rate as a ceiling; startup rate adaptation caps it
+       from the DIL analysis and the robbed-bit safe limit. */
+    vpcm_cp_init_robbed_bit_safe_profile(&cp_offer, 28, false);
     return run_vpcm_full_phase_session(law,
                                        "V.91 single-call E2E",
                                        "robbed-bit-safe profile",
@@ -8893,8 +9356,10 @@ static bool run_v91_single_e2e_call(v91_law_t law, uint32_t seed, int data_secon
                                        &answer_parms,
                                        &cp_offer,
                                        true,
+                                       NULL,
                                        seed,
-                                       data_seconds);
+                                       data_seconds,
+                                       NULL);
 }
 
 static bool run_v92_single_e2e_call(v91_law_t law, uint32_t seed, int data_seconds)

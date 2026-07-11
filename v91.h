@@ -41,6 +41,7 @@ typedef enum {
 #define V91_DEFAULT_DIL_SEGMENT_SYMBOLS 12
 #define V91_DEFAULT_DIL_SYMBOLS (V91_DEFAULT_DIL_SEGMENTS * V91_DEFAULT_DIL_SEGMENT_SYMBOLS)
 #define V91_J_MAX_BITS 4096
+#define V91_ROBBED_BIT_DETECT_MIN_FLIPS 4
 
 typedef struct {
     uint16_t reserved_12_25; /* Raw 14-bit reserved field */
@@ -115,6 +116,8 @@ typedef struct {
     int diff_sign;
     int rx_prev_sign;
     bool frame_aligned;
+    bool rx_robbed_bit_detected;
+    uint8_t rx_robbed_slot_mask;
     bool retrain_requested;
     bool retrain_timer_active;
     bool rx_data_clamped;
@@ -227,6 +230,29 @@ int v91_tx_dil_codewords(v91_state_t *s,
                          int g711_max,
                          const v91_dil_desc_t *desc);
 int v91_tx_default_dil_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+
+/*
+ * Receive DIL codewords and compare them against the sequence the peer's
+ * descriptor says it transmitted. Codewords that differ only in the LSB are
+ * tolerated and counted per frame-interval slot: a slot accumulating
+ * V91_ROBBED_BIT_DETECT_MIN_FLIPS or more LSB flips marks the path as
+ * robbed-bit (rx_robbed_bit_detected / rx_robbed_slot_mask). Any other
+ * corruption fails the reception. On success the descriptor is recorded and
+ * analysed as with v91_note_received_dil().
+ */
+bool v91_rx_dil_codewords(v91_state_t *s,
+                          const uint8_t *g711_in,
+                          int g711_len,
+                          const v91_dil_desc_t *desc);
+
+/*
+ * Streaming access to the differential-sign GPC descrambler used by the
+ * SCR/CP/Es startup signals, for receivers that must locate the CP start
+ * inside a variable-length SCR run (SCR descrambles to continuous ones;
+ * the first zero bit is CP bit 17 of the frame-sync pattern).
+ */
+void v91_rx_diff_reset(v91_state_t *s);
+int v91_rx_diff_scrambled_bit(v91_state_t *s, uint8_t codeword);
 int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
                                           uint8_t *g711_out,
                                           int g711_max,
@@ -244,6 +270,30 @@ void v91_request_cleardown(v91_state_t *s);
 void v91_note_recovery_timeout(v91_state_t *s);
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
 void v91_deactivate_data_mode(v91_state_t *s);
+
+/*
+ * True when the CP frame's constellation masks can carry the K data bits
+ * per frame implied by the given data-rate number.
+ */
+bool v91_cp_supports_drn(const vpcm_cp_frame_t *cp, uint8_t drn);
+
+/*
+ * Rate adaptation: select the data-rate number for a CP offer.
+ * The template drn is the configured ceiling; it is capped by the
+ * received-DIL analysis recommendation and, on robbed-bit paths, by the
+ * robbed-bit safe ceiling, then stepped down until the template's
+ * constellation masks can carry the implied K bits per frame.
+ * A path counts as robbed-bit when the robbed_bit hint is set OR when
+ * DIL reception detected LSB robbing (rx_robbed_bit_detected) — detection
+ * is authoritative, so an undetected-by-config robbed trunk still gets
+ * capped. Transparent-mode templates are returned unchanged only on paths
+ * with no robbed-bit evidence; a transparent 64 kbps bearer cannot survive
+ * LSB robbing, so detection forces normal mapped-rate selection instead.
+ * Returns 0 when no rate is usable (cleardown).
+ */
+uint8_t v91_select_drn(const v91_state_t *s,
+                       const vpcm_cp_frame_t *cp_template,
+                       bool robbed_bit);
 
 /*
  * Encode application octets to G.711 codewords.

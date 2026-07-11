@@ -70,6 +70,15 @@ void vpcm_cp_enable_odd_ucodes(uint8_t mask[VPCM_CP_MASK_BYTES]);
 void vpcm_cp_init_robbed_bit_safe_profile(vpcm_cp_frame_t *cp,
                                           uint8_t drn,
                                           bool transparent_mode_granted);
+
+/*
+ * Restrict the constellations used on robbed frame-interval slots
+ * (slot_mask bit i = frame interval i) to odd Ucodes, whose codewords
+ * carry a zero LSB in both laws and therefore survive LSB robbing.
+ * Adds or reuses constellations as needed; fails if a restricted mask
+ * would be empty or the constellation table is full.
+ */
+bool vpcm_cp_apply_robbed_bit_safe_slots(vpcm_cp_frame_t *cp, uint8_t slot_mask);
 int vpcm_cp_select_ucode(const vpcm_cp_frame_t *cp, int frame_interval, bool prefer_high);
 
 void vpcm_cp_mask_set(uint8_t mask[VPCM_CP_MASK_BYTES], int ucode, bool enabled);
