@@ -135,11 +135,11 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode
-TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o p3_demod.o
+TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o
 
 USE_V34_STUBS ?= 0
@@ -222,6 +222,7 @@ v92_phase3_decode.o: v92_phase3_decode.c v92_phase3_decode.h v92_phase3_ru.h
 v92_phase3_ru.o: v92_phase3_ru.c v92_phase3_ru.h v92_phase3_decode.h
 v92_phase4_decode.o: v92_phase4_decode.c v92_phase4_decode.h
 v92_cp_rx.o:      v92_cp_rx.c      v92_cp_rx.h vpcm_cp.h
+v92_trn2u.o:      v92_trn2u.c      v92_trn2u.h v92_cp_rx.h
 v92_ja_decode.o:  v92_ja_decode.c  v92_ja_decode.h v90.h
 v92_p3_rx.o:      v92_p3_rx.c      v92_p3_rx.h v92_ja_decode.h v90.h p3_demod.h
 p3_demod.o:       p3_demod.c       p3_demod.h

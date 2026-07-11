@@ -23,6 +23,7 @@
 #include "v92_cp_rx.h"
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
+#include "v92_trn2u.h"
 
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
@@ -1813,6 +1814,230 @@ static bool test_v92_native_cpu_receiver(void)
     return true;
 }
 
+static bool test_v92_cpd_full_codec(void)
+{
+    static uint8_t bits[4096];
+    v92_cpd_frame_t in;
+    v92_cpd_frame_t out;
+    v92_cpd_diag_t diag;
+    int nbits;
+
+    vpcm_log("Test: V.92 full Table 30 CPd codec with optional parts");
+    memset(&in, 0, sizeof(in));
+    in.modulus_present = true;
+    in.coeffs_present = true;
+    in.constellations_present = true;
+    in.selected_upstream_drn = 19;
+    in.trellis_select = 2;
+    in.extend_e2u = true;
+    in.acknowledge = true;
+    in.gain_q0_16 = 0xBEEF;
+    for (int i = 0; i < 12; i++)
+        in.moduli[i] = (uint8_t)(100 + i);
+    in.lz1 = 2;
+    in.precoder_ff[0] = 0x1234;
+    in.precoder_ff[1] = -0x789;
+    in.lp1 = 1;
+    in.precoder_fb[0] = -0x4000;
+    in.lz2 = 3;
+    in.prefilter_ff[0] = 17;
+    in.prefilter_ff[1] = -17;
+    in.prefilter_ff[2] = 0x7FFF;
+    in.lp2 = 0;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        in.dfi[i] = (uint8_t)(i & 1);
+    in.set_sizes[0] = 4;
+    in.set_sizes[1] = 3;
+    in.points[0][0] = 100;
+    in.points[0][1] = 200;
+    in.points[0][2] = 300;
+    in.points[0][3] = 400;
+    in.points[1][0] = 50;
+    in.points[1][1] = 60;
+    in.points[1][2] = 70;
+
+    for (int alignment = 6; alignment <= 17; alignment += 11) {
+        if (!v92_cpd_encode(&in, alignment, bits, (int)sizeof(bits), &nbits)
+            || nbits != v92_cpd_bit_length(&in, alignment)
+            || (nbits % alignment) != 0
+            || !v92_cpd_decode(bits, nbits, &out, &diag)
+            || !diag.valid
+            || out.selected_upstream_drn != in.selected_upstream_drn
+            || out.trellis_select != in.trellis_select
+            || out.extend_e2u != in.extend_e2u
+            || out.acknowledge != in.acknowledge
+            || out.gain_q0_16 != in.gain_q0_16
+            || memcmp(out.moduli, in.moduli, sizeof(in.moduli)) != 0
+            || out.lz1 != in.lz1 || out.lp1 != in.lp1
+            || out.lz2 != in.lz2 || out.lp2 != in.lp2
+            || out.precoder_ff[0] != in.precoder_ff[0]
+            || out.precoder_ff[1] != in.precoder_ff[1]
+            || out.precoder_fb[0] != in.precoder_fb[0]
+            || out.prefilter_ff[2] != in.prefilter_ff[2]
+            || memcmp(out.dfi, in.dfi, sizeof(in.dfi)) != 0
+            || memcmp(out.set_sizes, in.set_sizes, sizeof(in.set_sizes)) != 0
+            || memcmp(out.points[0], in.points[0], sizeof(in.points[0])) != 0
+            || memcmp(out.points[1], in.points[1], sizeof(in.points[1])) != 0) {
+            fprintf(stderr, "V.92 full CPd round trip failed (align=%d)\n",
+                    alignment);
+            return false;
+        }
+    }
+
+    if (!v92_cpd_encode(&in, 17, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[nbits - 20] ^= 1;
+    if (v92_cpd_decode(bits, nbits, NULL, &diag)) {
+        fprintf(stderr, "V.92 full CPd accepted a damaged frame\n");
+        return false;
+    }
+    if (!v92_cpd_encode(&in, 17, bits, (int)sizeof(bits), &nbits))
+        return false;
+    bits[163] = 1;   /* reserved bits of the LZ1 header word */
+    if (v92_cpd_decode(bits, nbits, NULL, &diag) || diag.reserved_ok) {
+        fprintf(stderr, "V.92 full CPd accepted a non-zero reserved bit\n");
+        return false;
+    }
+    if (!v92_cpd_encode(&in, 17, bits, (int)sizeof(bits), &nbits))
+        return false;
+    if (v92_cpd_decode(bits, nbits - 17, NULL, &diag)) {
+        fprintf(stderr, "V.92 full CPd accepted a truncated frame\n");
+        return false;
+    }
+    {
+        v92_cpd_frame_t bad = in;
+
+        bad.points[0][1] = bad.points[0][0];
+        if (v92_cpd_encode(&bad, 17, bits, (int)sizeof(bits), &nbits)) {
+            fprintf(stderr, "V.92 full CPd accepted non-ascending points\n");
+            return false;
+        }
+        bad = in;
+        bad.set_sizes[0] = 0;
+        if (v92_cpd_encode(&bad, 17, bits, (int)sizeof(bits), &nbits)) {
+            fprintf(stderr,
+                    "V.92 full CPd accepted a zero-size set listed first\n");
+            return false;
+        }
+        bad = in;
+        bad.selected_upstream_drn = 20;
+        if (v92_cpd_encode(&bad, 17, bits, (int)sizeof(bits), &nbits)) {
+            fprintf(stderr, "V.92 full CPd accepted drn > 19\n");
+            return false;
+        }
+    }
+
+    /* SUVd filled to a mapped data frame. */
+    {
+        v92_suvd_frame_t suvd = { .silent_period_requested = false,
+                                  .acknowledge = true };
+        v92_suvd_frame_t parsed;
+        v92_suvd_diag_t sdiag;
+
+        if (v92_suvd_bit_length(17) != 68
+            || !v92_suvd_encode_aligned(&suvd, 17, bits, (int)sizeof(bits),
+                                        &nbits)
+            || nbits != 68
+            || !v92_suvd_decode_bits(bits, nbits, &parsed, &sdiag)
+            || !sdiag.valid
+            || !parsed.acknowledge) {
+            fprintf(stderr, "V.92 mapped SUVd round trip failed\n");
+            return false;
+        }
+    }
+    vpcm_log("PASS: V.92 full Table 30 CPd codec with optional parts");
+    return true;
+}
+
+static bool test_v92_trn2u_loopback(void)
+{
+    static uint8_t frame_bits[V92_CP_RX_MAX_BITS];
+    static uint8_t codewords[4096];
+    int nbits;
+    int nsym;
+
+    vpcm_log("Test: V.92 TRN2u PAM loopback feeding the CPu receiver");
+    for (int alaw = 0; alaw <= 1; alaw++) {
+        for (int points = 4; points <= 8; points += 4) {
+            v92_p4u_capture_t capture;
+            v92_cp_rx_t rx;
+            v92_trn2u_tx_t utx;
+            v92_trn2u_demod_t udemod;
+            v92_cp_frame_t cpu;
+            v92_suvu_frame_t suvu = {
+                .wait_for_cpu = true,
+                .prefilter_level_q2_2 = 7,
+                .silent_period_requested = false,
+                .acknowledge = false
+            };
+            v92_cpus_frame_t cpus = { .drn = 3, .acknowledge = true };
+
+            memset(&capture, 0, sizeof(capture));
+            v92_cp_rx_init(&rx, points, alaw != 0,
+                           v92_p4u_test_handler, &capture);
+            v92_trn2u_tx_init(&utx, points, 8000.0, alaw != 0);
+            v92_trn2u_demod_init(&udemod, points, 8000.0, alaw != 0, &rx);
+
+            nsym = v92_trn2u_tx_ones(&utx, codewords, 48);
+            v92_trn2u_demod_feed(&udemod, codewords, nsym);
+
+            if (!v92_suvu_encode(&suvu, points, frame_bits,
+                                 (int)sizeof(frame_bits), &nbits))
+                return false;
+            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+                                     codewords, (int)sizeof(codewords));
+            if (nsym <= 0
+                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || capture.suvu_count != 1
+                || !capture.last_suvu.wait_for_cpu
+                || capture.last_suvu.prefilter_level_q2_2 != 7) {
+                fprintf(stderr,
+                        "V.92 TRN2u SUVu loopback failed (alaw=%d points=%d)\n",
+                        alaw, points);
+                return false;
+            }
+
+            v92_test_build_cpu(&cpu, alaw != 0, true);
+            if (!v92_cp_encode(&cpu, points, frame_bits,
+                               (int)sizeof(frame_bits), &nbits))
+                return false;
+            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+                                     codewords, (int)sizeof(codewords));
+            if (nsym <= 0
+                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || capture.cp_count != 1
+                || capture.last_kind != V92_P4U_KIND_CPU
+                || capture.last_cp.drn != cpu.drn
+                || !capture.last_cp.acknowledge) {
+                fprintf(stderr,
+                        "V.92 TRN2u CPu loopback failed (alaw=%d points=%d)\n",
+                        alaw, points);
+                return false;
+            }
+
+            nsym = v92_trn2u_tx_ones(&utx, codewords, 24);
+            v92_trn2u_demod_feed(&udemod, codewords, nsym);
+            if (!v92_cpus_encode(&cpus, points, frame_bits,
+                                 (int)sizeof(frame_bits), &nbits))
+                return false;
+            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+                                     codewords, (int)sizeof(codewords));
+            if (nsym <= 0
+                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || capture.cpus_count != 1
+                || capture.last_cpus.drn != 3
+                || rx.rejected_frames != 0) {
+                fprintf(stderr,
+                        "V.92 TRN2u CPus loopback failed (alaw=%d points=%d)\n",
+                        alaw, points);
+                return false;
+            }
+        }
+    }
+    vpcm_log("PASS: V.92 TRN2u PAM loopback feeding the CPu receiver");
+    return true;
+}
+
 typedef struct {
     v90_state_t *tx;
     int applied;
@@ -1838,6 +2063,12 @@ static void v92_native_apply_handler(void *user_data,
 
         ok = v92_cp_frame_to_vpcm(&cp->frame, &vp)
           && v90_set_v92_cpu(ctx->tx, &vp);
+    } else if (kind == V92_P4U_KIND_CPT && cp) {
+        vpcm_cp_frame_t vp;
+
+        ok = v92_cp_frame_to_vpcm(&cp->frame, &vp)
+          && v90_set_phase4_cp(ctx->tx, &vp)
+          && v90_handle_rx_event(ctx->tx, V90_RX_EVENT_CP_VALID);
     }
     if (ok)
         ctx->applied++;
@@ -1845,37 +2076,92 @@ static void v92_native_apply_handler(void *user_data,
         ctx->rejected++;
 }
 
+/* Wire-level demap of the native mapped downstream into a descrambled bit
+ * stream, six codewords (one data frame) at a time. */
+typedef struct {
+    vpcm_cp_frame_t cp;
+    int d;
+    uint32_t reg;
+    int prev_sign;
+    uint8_t cwbuf[VPCM_CP_FRAME_INTERVALS];
+    int cw_fill;
+    uint8_t stream[16384];
+    int nbits;
+    bool failed;
+} v92_demap_stream_t;
+
+static void v92_demap_stream_push(v92_demap_stream_t *ds,
+                                  v90_law_t law,
+                                  uint8_t codeword)
+{
+    ds->cwbuf[ds->cw_fill++] = codeword;
+    if (ds->cw_fill < VPCM_CP_FRAME_INTERVALS)
+        return;
+    ds->cw_fill = 0;
+    if (ds->nbits + ds->d > (int)sizeof(ds->stream)
+        || v90_demap_mapped_frame(law, &ds->cp, ds->d,
+                                  &ds->reg, &ds->prev_sign,
+                                  ds->cwbuf,
+                                  ds->stream + ds->nbits) != ds->d) {
+        ds->failed = true;
+        return;
+    }
+    ds->nbits += ds->d;
+}
+
+/* Send one upstream frame through the analogue-side TRN2u modulator into
+ * the digital-side demodulator (whose sink applies frames to the v90). */
+static bool v92_test_upstream_send(v92_trn2u_tx_t *utx,
+                                   v92_trn2u_demod_t *udemod,
+                                   const uint8_t *bits,
+                                   int nbits)
+{
+    static uint8_t codewords[4096];
+    int nsym;
+
+    nsym = v92_trn2u_tx_bits(utx, bits, nbits,
+                             codewords, (int)sizeof(codewords));
+    if (nsym <= 0)
+        return false;
+    return v92_trn2u_demod_feed(udemod, codewords, nsym) == 1;
+}
+
 static bool test_v92_native_cpu_phase4(v91_law_t law)
 {
-    enum { MAX_SYMBOLS = 20000 };
+    enum { MAX_SYMBOLS = 20000, TRN2D_LEN = 2040, RI_POST_CP = 24 };
     const bool alaw = (law == V91_LAW_ALAW);
     v90_law_t v90_law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
     v90_state_t *tx = v90_init_data_pump(v90_law);
-    vpcm_cp_frame_t legacy_cp;
+    static v92_demap_stream_t ds;
+    v92_cp_frame_t cpt;
     v92_cp_frame_t cpu;
     v92_cp_rx_t rx;
+    v92_trn2u_tx_t utx;
+    v92_trn2u_demod_t udemod;
     v92_native_apply_t apply = { tx, 0, 0 };
     uint8_t frame_bits[V92_CP_RX_MAX_BITS];
+    uint8_t seed_cw[24];
     uint8_t codeword = 0;
     int nbits;
     int symbols = 0;
+    int trn2d_bits;
     bool failed = true;
 
-    vpcm_log("Test: V.92 native CPu-gated Phase 4 progression (%s)",
+    vpcm_log("Test: V.92 native mapped Phase 4 (CPt/SUVu/CPu over TRN2u, %s)",
              alaw ? "alaw" : "ulaw");
     if (!tx)
         return false;
     v90_enable_v92_mode(tx);
     v90_enable_v92_native_cpu_rx(tx);
-    v92_cp_rx_init(&rx, 4, alaw, v92_native_apply_handler, &apply);
-
-    /* Legacy CPd payload the compatibility transmitter still carries. */
-    vpcm_cp_init(&legacy_cp);
-    legacy_cp.drn = 12;
-    legacy_cp.codec_alaw = alaw;
-    vpcm_cp_enable_all_ucodes(legacy_cp.masks[0]);
-    if (!v90_set_phase4_cp(tx, &legacy_cp))
+    if (!v90_set_v92_cpd_profile(tx, 10, 1, 0x8000))
         goto done;
+    v92_cp_rx_init(&rx, 4, alaw, v92_native_apply_handler, &apply);
+    v92_trn2u_tx_init(&utx, 4, 8000.0, alaw);
+    v92_trn2u_demod_init(&udemod, 4, 8000.0, alaw, &rx);
+
+    /* TRN2u seeds the upstream differential decoder and descrambler. */
+    v92_trn2u_tx_ones(&utx, seed_cw, (int)sizeof(seed_cw));
+    v92_trn2u_demod_feed(&udemod, seed_cw, (int)sizeof(seed_cw));
 
     v90_start_phase3(tx, 66);
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
@@ -1885,25 +2171,62 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
         goto done;
     while (v90_get_tx_phase(tx) != V90_TX_TRN2D && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_TRN2D
-        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID))
-        goto done;
-    while (v90_get_tx_phase(tx) != V90_TX_SUVD && symbols++ < MAX_SYMBOLS)
-        v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_SUVD)
+    if (v90_get_tx_phase(tx) != V90_TX_TRN2D)
         goto done;
 
-    /* No SUVu/CPu yet: SUVd must repeat without a CPd or Ed. */
-    for (int i = 0; i < 4 * (V92_SUVD_BITS + 1); i++) {
+    /* A Table 23 CPt over TRN2u configures the TRN2d mapper (d = 17). */
+    memset(&cpt, 0, sizeof(cpt));
+    cpt.type = V92_CP_TYPE_CPT;
+    cpt.drn = 9;
+    cpt.codec_alaw = alaw;
+    cpt.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    if (!v92_cp_encode(&cpt, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
+        || !v92_test_upstream_send(&utx, &udemod, frame_bits, nbits)
+        || apply.applied != 1) {
+        fprintf(stderr, "V.92 native CPt did not configure the mapper\n");
+        goto done;
+    }
+
+    /* Demap everything the mapper transmits from here on. */
+    memset(&ds, 0, sizeof(ds));
+    if (!v92_cp_frame_to_vpcm(&cpt, &ds.cp))
+        goto done;
+    ds.d = cpt.drn + 8;
+
+    /* 24 Ri idle symbols, then 2040T of mapped TRN2d (scrambled ones). */
+    for (int i = 0; i < RI_POST_CP; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
-        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+    for (int i = 0; i < TRN2D_LEN; i++) {
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        v92_demap_stream_push(&ds, v90_law, codeword);
+    }
+    trn2d_bits = (TRN2D_LEN / VPCM_CP_FRAME_INTERVALS) * ds.d;
+    if (ds.failed || ds.nbits != trn2d_bits
+        || v90_get_tx_phase(tx) != V90_TX_SUVD) {
+        fprintf(stderr, "V.92 native mapped TRN2d demap failed\n");
+        goto done;
+    }
+    /* Descrambled TRN2d is binary ones once the descrambler synchronises. */
+    for (int i = 23; i < trn2d_bits; i++) {
+        if (ds.stream[i] != 1) {
+            fprintf(stderr, "V.92 native TRN2d bit %d not one\n", i);
+            goto done;
+        }
+    }
+
+    /* No SUVu/CPu yet: mapped SUVd must repeat without a CPd or Ed. */
+    for (int i = 0; i < 4 * 24; i++) {
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        v92_demap_stream_push(&ds, v90_law, codeword);
+        if (ds.failed || v90_get_tx_phase(tx) != V90_TX_SUVD) {
             fprintf(stderr,
                     "V.92 native Phase 4 left SUVd without receiving SUVu/CPu\n");
             goto done;
         }
     }
 
-    /* SUVu arrives: exactly one CPd goes out, then SUVd resumes. */
+    /* SUVu over TRN2u: exactly one native CPd goes out, then SUVd resumes. */
     {
         v92_suvu_frame_t suvu = {
             .wait_for_cpu = false,
@@ -1912,39 +2235,45 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
             .acknowledge = false
         };
 
-        if (!v92_suvu_encode(&suvu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
-            || !v92_test_feed_frame(&rx, frame_bits, nbits)
-            || apply.applied != 1)
+        if (!v92_suvu_encode(&suvu, 4, frame_bits, (int)sizeof(frame_bits),
+                             &nbits)
+            || !v92_test_upstream_send(&utx, &udemod, frame_bits, nbits)
+            || apply.applied != 2)
             goto done;
     }
     symbols = 0;
-    while (v90_get_tx_phase(tx) != V90_TX_CP && symbols++ < 2 * V92_SUVD_BITS)
+    while (v90_get_tx_phase(tx) != V90_TX_CP && symbols++ < 200) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_CP) {
+        v92_demap_stream_push(&ds, v90_law, codeword);
+    }
+    if (ds.failed || v90_get_tx_phase(tx) != V90_TX_CP) {
         fprintf(stderr, "V.92 native Phase 4 did not send CPd after SUVu\n");
         goto done;
     }
     symbols = 0;
-    while (v90_get_tx_phase(tx) == V90_TX_CP && symbols++ < MAX_SYMBOLS)
+    while (v90_get_tx_phase(tx) == V90_TX_CP && symbols++ < MAX_SYMBOLS) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_SUVD)
+        v92_demap_stream_push(&ds, v90_law, codeword);
+    }
+    if (ds.failed || v90_get_tx_phase(tx) != V90_TX_SUVD)
         goto done;
 
     /* Still no CPu: no Ed, no second CPd. */
-    for (int i = 0; i < 3 * (V92_SUVD_BITS + 1); i++) {
+    for (int i = 0; i < 3 * 24; i++) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+        v92_demap_stream_push(&ds, v90_law, codeword);
+        if (ds.failed || v90_get_tx_phase(tx) != V90_TX_SUVD) {
             fprintf(stderr,
                     "V.92 native Phase 4 advanced without a real CPu\n");
             goto done;
         }
     }
 
-    /* CPu through the bitstream receiver configures the data mapper. */
+    /* CPu over TRN2u configures the negotiated data mapper. */
     v92_test_build_cpu(&cpu, alaw, false);
     if (!v92_cp_encode(&cpu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
-        || !v92_test_feed_frame(&rx, frame_bits, nbits)
-        || apply.applied != 2
+        || !v92_test_upstream_send(&utx, &udemod, frame_bits, nbits)
+        || apply.applied != 3
         || v90_data_bits_per_frame(tx) != cpu.drn + 20) {
         fprintf(stderr, "V.92 native CPu did not configure the data mapper\n");
         goto done;
@@ -1959,9 +2288,10 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     }
 
     /* Ack goes out in SUVd', but Ed still needs the remote acknowledgement. */
-    for (int i = 0; i < 2 * (V92_SUVD_BITS + 1); i++) {
+    for (int i = 0; i < 2 * 24; i++) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-        if (v90_get_tx_phase(tx) != V90_TX_SUVD) {
+        v92_demap_stream_push(&ds, v90_law, codeword);
+        if (ds.failed || v90_get_tx_phase(tx) != V90_TX_SUVD) {
             fprintf(stderr,
                     "V.92 native Phase 4 reached Ed without CPu'/SUVu'\n");
             goto done;
@@ -1981,23 +2311,27 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
         }
     }
 
-    /* CPu' releases Ed → B1d over the negotiated mapper → data mode. */
+    /* CPu' releases Ed (mapped zeros) → B1d over the CPu mapper → data. */
     v92_test_build_cpu(&cpu, alaw, true);
     if (!v92_cp_encode(&cpu, 4, frame_bits, (int)sizeof(frame_bits), &nbits)
-        || !v92_test_feed_frame(&rx, frame_bits, nbits)
-        || apply.applied != 3)
+        || !v92_test_upstream_send(&utx, &udemod, frame_bits, nbits)
+        || apply.applied != 4)
         goto done;
     symbols = 0;
-    while (v90_get_tx_phase(tx) != V90_TX_ED && symbols++ < 2 * V92_SUVD_BITS)
+    while (v90_get_tx_phase(tx) != V90_TX_ED && symbols++ < 200) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_ED) {
+        v92_demap_stream_push(&ds, v90_law, codeword);
+    }
+    if (ds.failed || v90_get_tx_phase(tx) != V90_TX_ED) {
         fprintf(stderr, "V.92 native Phase 4 did not reach Ed after CPu'\n");
         goto done;
     }
     symbols = 0;
-    while (v90_get_tx_phase(tx) == V90_TX_ED && symbols++ < MAX_SYMBOLS)
+    while (v90_get_tx_phase(tx) == V90_TX_ED && symbols++ < MAX_SYMBOLS) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_B1D)
+        v92_demap_stream_push(&ds, v90_law, codeword);
+    }
+    if (ds.failed || v90_get_tx_phase(tx) != V90_TX_B1D)
         goto done;
     symbols = 0;
     while (v90_get_tx_phase(tx) == V90_TX_B1D && symbols++ < MAX_SYMBOLS) {
@@ -2017,15 +2351,112 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     if (v90_get_tx_phase(tx) != V90_TX_DATA || !v90_training_complete(tx))
         goto done;
 
+    /* Wire-level check of the demapped downstream: SUVd frames with a
+     * monotonic acknowledge progression, exactly one native Table 30 CPd
+     * with the profile parameters, ending in Ed's scrambled zeros. */
+    {
+        v92_cpd_frame_t expected_cpd;
+        int suvd_len = v92_suvd_bit_length(ds.d);
+        int cpd_len;
+        int pos = trn2d_bits;
+        int suvd_count = 0;
+        int cpd_count = 0;
+        int acked_suvd = 0;
+        bool ack_seen = false;
+        bool ed_seen = false;
+
+        if (!v90_build_v92_cpd_frame(tx, &expected_cpd))
+            goto done;
+        expected_cpd.acknowledge = false;   /* CPd went out before CPu */
+        cpd_len = v92_cpd_bit_length(&expected_cpd, ds.d);
+        if (suvd_len <= 0 || cpd_len <= 0)
+            goto done;
+
+        while (pos + 19 <= ds.nbits) {
+            bool sync = true;
+
+            for (int i = 0; i < 17; i++)
+                sync = sync && ds.stream[pos + i] == 1;
+            sync = sync && ds.stream[pos + 17] == 0;
+            if (!sync) {
+                /* Only Ed's scrambled zeros may follow the frames. */
+                for (int i = pos; i < ds.nbits; i++) {
+                    if (ds.stream[i] != 0) {
+                        fprintf(stderr,
+                                "V.92 native stream corrupt at bit %d\n", i);
+                        goto done;
+                    }
+                }
+                ed_seen = (ds.nbits - pos) >= 2 * ds.d;
+                break;
+            }
+            if (ds.stream[pos + 18]) {
+                v92_suvd_frame_t sf;
+                v92_suvd_diag_t sd;
+
+                if (pos + suvd_len > ds.nbits
+                    || !v92_suvd_decode_bits(ds.stream + pos, suvd_len,
+                                             &sf, &sd)) {
+                    fprintf(stderr, "V.92 native mapped SUVd invalid\n");
+                    goto done;
+                }
+                if (sf.acknowledge) {
+                    ack_seen = true;
+                    acked_suvd++;
+                } else if (ack_seen) {
+                    fprintf(stderr,
+                            "V.92 native SUVd acknowledge regressed\n");
+                    goto done;
+                }
+                suvd_count++;
+                pos += suvd_len;
+            } else {
+                v92_cpd_frame_t cf;
+                v92_cpd_diag_t cd;
+
+                if (pos + cpd_len > ds.nbits
+                    || !v92_cpd_decode(ds.stream + pos, cpd_len, &cf, &cd)
+                    || cf.selected_upstream_drn != 10
+                    || cf.trellis_select != 1
+                    || cf.gain_q0_16 != 0x8000
+                    || !cf.modulus_present
+                    || cf.coeffs_present
+                    || !cf.constellations_present
+                    || cf.acknowledge
+                    || cf.set_sizes[0] != expected_cpd.set_sizes[0]
+                    || memcmp(cf.points[0], expected_cpd.points[0],
+                              sizeof(cf.points[0])) != 0
+                    || memcmp(cf.moduli, expected_cpd.moduli,
+                              sizeof(cf.moduli)) != 0) {
+                    fprintf(stderr, "V.92 native mapped CPd invalid\n");
+                    goto done;
+                }
+                if (ack_seen || cpd_count != 0) {
+                    fprintf(stderr,
+                            "V.92 native CPd count or ordering wrong\n");
+                    goto done;
+                }
+                cpd_count++;
+                pos += cpd_len;
+            }
+        }
+        if (cpd_count != 1 || suvd_count < 3 || acked_suvd < 1 || !ed_seen) {
+            fprintf(stderr,
+                    "V.92 native stream summary wrong (suvd=%d cpd=%d ack=%d ed=%d)\n",
+                    suvd_count, cpd_count, acked_suvd, ed_seen ? 1 : 0);
+            goto done;
+        }
+    }
+
     failed = false;
 done:
     v90_free(tx);
     if (failed) {
-        fprintf(stderr, "V.92 native CPu Phase 4 test failed (%s)\n",
+        fprintf(stderr, "V.92 native mapped Phase 4 test failed (%s)\n",
                 alaw ? "alaw" : "ulaw");
         return false;
     }
-    vpcm_log("PASS: V.92 native CPu-gated Phase 4 progression (%s)",
+    vpcm_log("PASS: V.92 native mapped Phase 4 (CPt/SUVu/CPu over TRN2u, %s)",
              alaw ? "alaw" : "ulaw");
     return true;
 }
@@ -7084,7 +7515,9 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_spectral_shaping(V91_LAW_ULAW)
         && test_v90_spectral_shaping(V91_LAW_ALAW)
         && test_v92_suvd_codec_and_phase4()
+        && test_v92_cpd_full_codec()
         && test_v92_native_cpu_receiver()
+        && test_v92_trn2u_loopback()
         && test_v92_native_cpu_phase4(V91_LAW_ULAW)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)
         && test_v91_codeword_loopback(V91_LAW_ULAW)

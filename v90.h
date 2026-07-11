@@ -17,6 +17,7 @@
 #include <stdbool.h>
 
 #include "vpcm_cp.h"
+#include "v92_phase4_decode.h"
 
 /* V.90 downstream encoder state */
 typedef struct v90_state_s v90_state_t;
@@ -313,6 +314,38 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu);
 
 /* Copy the CPu-derived data-mode CP for native CPd construction. */
 bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out);
+
+/*
+ * Set the Table 30 CPd upstream profile (analogue-to-digital rate 0..19,
+ * trellis select 0..2, prefilter gain 4G in unsigned Q0.16).  Native V.92
+ * mode transmits these in the mapped CPd until real upstream receiver
+ * measurements can refine them.
+ */
+bool v90_set_v92_cpd_profile(v90_state_t *s,
+                             uint8_t upstream_drn,
+                             uint8_t trellis_select,
+                             uint16_t gain_q0_16);
+
+/*
+ * Fill the native Table 30 CPd frame this context would transmit: profile
+ * rate/trellis/gain, modulus parameters, and the robbed-bit-safe upstream
+ * constellation set; the acknowledge bit reflects CPu receipt.
+ */
+bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out);
+
+/*
+ * Demap one Sr=0 six-symbol mapped data frame (TRN2d/SUVd/CPd/Ed or B1d)
+ * back into its descrambled input bits.  bits_per_frame is the mapper's d;
+ * descramble_reg/prev_sign carry receiver state across frames (init 0).
+ * Returns bits_per_frame, or 0 when the codewords escape the CP mapping.
+ */
+int v90_demap_mapped_frame(v90_law_t law,
+                           const vpcm_cp_frame_t *cp,
+                           int bits_per_frame,
+                           uint32_t *descramble_reg,
+                           int *prev_sign,
+                           const uint8_t codewords[6],
+                           uint8_t bits_out[]);
 
 /* Reset the active negotiated or compatibility data mapper state. */
 void v90_reset_data_mode(v90_state_t *s);

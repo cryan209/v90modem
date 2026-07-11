@@ -34,6 +34,9 @@
 #define V90_B1D_FRAMES    48
 #define V90_B1D_SYMBOLS   (V90_B1D_FRAMES * V90_FRAME_LEN)
 #define V90_MP_MAX_BITS  256
+/* Native V.92 mapped SUVd/CPd queue: a profile CPd (base + modulus +
+ * one 64-point constellation set) is ~1.4k bits after frame fill. */
+#define V90_V92_TX_QUEUE_BITS 2048
 
 /* V.92 Phase 4 constants (ITU-T V.92 §8.8.5 Table 31) */
 /* SUVd: 17 sync + 1 start + 1 id + 13 rsv + 1 silent + 1 ack + 1 start
@@ -206,6 +209,15 @@ struct v90_state_s {
     bool             v92_cpd_sent;
     bool             v92_ack_sent;              /* sent >= 1 SUVd' (ack=1) */
 
+    /* V.92 native mapped Phase 4 TX: SUVd/CPd bit queue transmitted through
+     * the CPt-negotiated TRN2d mapper, and the CPd upstream profile. */
+    uint8_t          v92_tx_bits[V90_V92_TX_QUEUE_BITS];
+    int              v92_tx_nbits;
+    int              v92_tx_pos;
+    uint8_t          v92_upstream_drn;          /* Table 30 drn, 0..19 */
+    uint8_t          v92_trellis_select;
+    uint16_t         v92_gain_q0_16;
+
     /* Downstream PCM encoder state (data mode) */
     v90_scrambler_t  data_scrambler;
     int              prev_sign;     /* §5.4.5.1 differential sign coding */
@@ -317,6 +329,84 @@ static void v90_build_suvd(uint8_t bits[V92_SUVD_BITS], bool ack)
 
     if (!v92_suvd_encode(&frame, bits, V92_SUVD_BITS))
         memset(bits, 0, V92_SUVD_BITS);
+}
+
+/*
+ * Queue an SUVd sequence for native V.92 TRN2d-mapped transmission.  The
+ * Table 31 fill rule extends the frame to the next multiple of 6 symbols,
+ * which is one d-bit data frame of the CPt-negotiated mapper.
+ */
+static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
+{
+    v92_suvd_frame_t frame = {
+        .silent_period_requested = false,
+        .acknowledge = ack
+    };
+
+    if (!s || s->phase4_d < 1)
+        return false;
+    if (!v92_suvd_encode_aligned(&frame, s->phase4_d,
+                                 s->v92_tx_bits,
+                                 (int)sizeof(s->v92_tx_bits),
+                                 &s->v92_tx_nbits))
+        return false;
+    s->v92_tx_pos = 0;
+    if (ack)
+        s->v92_ack_sent = true;
+    return true;
+}
+
+/*
+ * Queue a native Table 30 CPd for TRN2d-mapped transmission.  The base part
+ * carries the selected upstream rate, trellis, and prefilter gain from the
+ * V.92 CPd profile; the modulus parameters and a single robbed-bit-safe
+ * constellation set (odd Ucodes, smallest magnitude first) describe the
+ * upstream data-mode modulation.  Precoder/prefilter coefficients stay
+ * absent until real upstream channel measurements exist.  The acknowledge
+ * bit reflects whether a valid CPu has been received.
+ */
+bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
+{
+    int points = 0;
+
+    if (!s || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->modulus_present = true;
+    out->constellations_present = true;
+    out->selected_upstream_drn = s->v92_upstream_drn;
+    out->trellis_select = s->v92_trellis_select;
+    out->extend_e2u = false;
+    out->acknowledge = s->v92_cpu_received;
+    out->gain_q0_16 = s->v92_gain_q0_16;
+    for (int ucode = 1; ucode < 128 && points < V92_CPD_MAX_POINTS;
+         ucode += 2) {
+        int16_t linear = v90_pcm_to_linear(
+            s->law, ucode_to_pcm_positive(s->law, ucode));
+
+        if (linear <= 0)
+            continue;
+        out->points[0][points++] = (uint16_t)linear;
+    }
+    out->set_sizes[0] = (uint8_t)points;
+    for (int i = 0; i < 12; i++)
+        out->moduli[i] = (uint8_t)(2 * points > 255 ? 255 : 2 * points);
+    return points > 0;
+}
+
+static bool v90_build_v92_cpd_native(v90_state_t *s)
+{
+    v92_cpd_frame_t cpd;
+
+    if (!s || s->phase4_d < 1 || !v90_build_v92_cpd_frame(s, &cpd))
+        return false;
+    if (!v92_cpd_encode(&cpd, s->phase4_d,
+                        s->v92_tx_bits,
+                        (int)sizeof(s->v92_tx_bits),
+                        &s->v92_tx_nbits))
+        return false;
+    s->v92_tx_pos = 0;
+    return true;
 }
 
 static bool v90_info_fill_and_sync_ok(const uint8_t *bits, int expected_bits)
@@ -618,7 +708,8 @@ static bool v90_map_scrambled_frame(v90_state_t *s,
 typedef enum {
     V90_PHASE4_INPUT_ONES,
     V90_PHASE4_INPUT_MP,
-    V90_PHASE4_INPUT_ZEROS
+    V90_PHASE4_INPUT_ZEROS,
+    V90_PHASE4_INPUT_V92    /* native V.92 SUVd/CPd bit queue */
 } v90_phase4_input_t;
 
 static bool v90_map_shaped_scrambled_frame(
@@ -644,6 +735,10 @@ static bool v90_phase4_fill_frame(v90_state_t *s, v90_phase4_input_t input)
             bit = 1;
         } else if (input == V90_PHASE4_INPUT_ZEROS) {
             bit = 0;
+        } else if (input == V90_PHASE4_INPUT_V92) {
+            if (s->v92_tx_pos >= s->v92_tx_nbits)
+                return false;
+            bit = s->v92_tx_bits[s->v92_tx_pos++] & 1;
         } else {
             if (s->mp_bit_pos >= s->mp_nbits)
                 return false;
@@ -2093,9 +2188,9 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         if (!s->cp_ready)
             return v90_pcm_idle(s->law);
 
-        if (s->v92_mode) {
-            /* Preserve the existing V.92 compatibility sequence until its
-             * independent Phase 4 mapper is implemented. */
+        if (s->v92_mode && !s->v92_native_cpu_rx) {
+            /* Compatibility path: no negotiated Phase 4 mapper; jump
+             * straight to sign-modulated SUVd at U_INFO. */
             v90_build_suvd(s->suv_bits, false);
             s->suv_bit_pos = 0;
             s->tx_phase = V90_TX_SUVD;
@@ -2118,7 +2213,14 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
 
             s->sample_count++;
             if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + V90_TRN2D_SYMBOLS) {
-                s->tx_phase = V90_TX_MP;
+                if (s->v92_mode) {
+                    /* §9.6.1.1.1/V.92: TRN2d done; condition for SUVu and
+                     * transmit SUVd sequences over the TRN2d mapper. */
+                    (void)v90_build_v92_suvd_mapped(s, false);
+                    s->tx_phase = V90_TX_SUVD;
+                } else {
+                    s->tx_phase = V90_TX_MP;
+                }
                 s->sample_count = 0;
                 s->phase4_hold_logged = false;
             }
@@ -2158,40 +2260,43 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
 
     case V90_TX_SUVD:
         /* V.92 §9.6.1.1: SUVd — Short Update Values (digital→analogue).
-         * Scrambled and differentially encoded at U_INFO, 54 codewords. */
+         * Native mode transmits over the CPt-negotiated TRN2d mapper;
+         * the compatibility path sign-modulates at U_INFO. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%d bits, ack=%d)\n",
-                    V92_SUVD_BITS,
+            fprintf(stderr, "[V90] Phase 4 V.92: SUVd (%s, ack=%d)\n",
+                    s->v92_native_cpu_rx ? "TRN2d mapped" : "U_INFO",
                     (s->v92_native_cpu_rx && s->v92_cpu_received) ? 1 : 0);
             s->phase4_hold_logged = true;
         }
-        if (s->suv_bit_pos >= V92_SUVD_BITS) {
-            if (s->v92_native_cpu_rx) {
+        if (s->v92_native_cpu_rx) {
+            uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_V92);
+
+            if (s->v92_tx_pos >= s->v92_tx_nbits
+                && s->phase4_frame_pos >= V90_FRAME_LEN) {
+                s->phase4_hold_logged = false;
                 /* §9.6.1.1.4: after sending an acknowledged sequence and
                  * receiving CPu'/SUVu' (or E2u), move to Ed. */
                 if (s->v92_ack_sent && s->v92_remote_ack_received) {
                     s->tx_phase = V90_TX_ED;
                     s->sample_count = 0;
-                    s->phase4_hold_logged = false;
-                    return v90_pcm_idle(s->law);
+                } else if (!s->v92_cpd_sent
+                           && (s->v92_suvu_received || s->v92_cpu_received)) {
+                    /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
+                    if (v90_build_v92_cpd_native(s)) {
+                        s->tx_phase = V90_TX_CP;
+                        s->sample_count = 0;
+                    } else {
+                        (void)v90_build_v92_suvd_mapped(s,
+                                                        s->v92_cpu_received);
+                    }
+                } else {
+                    /* Otherwise repeat SUVd; ack tracks CPu receipt. */
+                    (void)v90_build_v92_suvd_mapped(s, s->v92_cpu_received);
                 }
-                /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
-                if (!s->v92_cpd_sent
-                    && (s->v92_suvu_received || s->v92_cpu_received)) {
-                    s->tx_phase = V90_TX_CP;
-                    s->sample_count = 0;
-                    s->phase4_hold_logged = false;
-                    s->cp_bit_pos = 0;
-                    return v90_pcm_idle(s->law);
-                }
-                /* Otherwise repeat SUVd; ack tracks CPu receipt. */
-                v90_build_suvd(s->suv_bits, s->v92_cpu_received);
-                if (s->v92_cpu_received)
-                    s->v92_ack_sent = true;
-                s->suv_bit_pos = 0;
-                s->phase4_hold_logged = false;
-                return v90_pcm_idle(s->law);
             }
+            return codeword;
+        }
+        if (s->suv_bit_pos >= V92_SUVD_BITS) {
             /* Compatibility path: SUVd complete → CPd; diff_enc continues */
             s->tx_phase = V90_TX_CP;
             s->sample_count = 0;
@@ -2211,25 +2316,35 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * native Table 30 CPd; native CPd remains gated on real CPu-derived
          * rate, gain, filter, and constellation parameters. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr,
-                    "[V90] Phase 4 V.92 compatibility: legacy CP payload (%d bits; not native CPd)\n",
-                    s->cp_nbits);
+            if (s->v92_native_cpu_rx)
+                fprintf(stderr,
+                        "[V90] Phase 4 V.92: native Table 30 CPd (%d bits, TRN2d mapped, ack=%d)\n",
+                        s->v92_tx_nbits, s->v92_cpu_received ? 1 : 0);
+            else
+                fprintf(stderr,
+                        "[V90] Phase 4 V.92 compatibility: legacy CP payload (%d bits; not native CPd)\n",
+                        s->cp_nbits);
             s->phase4_hold_logged = true;
+        }
+        if (s->v92_native_cpu_rx) {
+            /* Native Table 30 CPd over the TRN2d mapper. */
+            uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_V92);
+
+            if (s->v92_tx_pos >= s->v92_tx_nbits
+                && s->phase4_frame_pos >= V90_FRAME_LEN) {
+                /* §9.6.1.1.2: single CPd, then more SUVd sequences whose
+                 * ack bit is gated on a real CPu having been received. */
+                s->v92_cpd_sent = true;
+                s->phase4_hold_logged = false;
+                s->sample_count = 0;
+                (void)v90_build_v92_suvd_mapped(s, s->v92_cpu_received);
+                s->tx_phase = V90_TX_SUVD;
+            }
+            return codeword;
         }
         if (s->cp_bit_pos >= s->cp_nbits) {
             s->sample_count = 0;
             s->phase4_hold_logged = false;
-            if (s->v92_native_cpu_rx) {
-                /* §9.6.1.1.2: single CPd, then more SUVd sequences whose
-                 * ack bit is gated on a real CPu having been received. */
-                s->v92_cpd_sent = true;
-                v90_build_suvd(s->suv_bits, s->v92_cpu_received);
-                if (s->v92_cpu_received)
-                    s->v92_ack_sent = true;
-                s->suv_bit_pos = 0;
-                s->tx_phase = V90_TX_SUVD;
-                return v90_pcm_idle(s->law);
-            }
             /* Compatibility: CPd → SUVd' (with ack bit set). */
             v90_build_suvd(s->suv_bits, true);
             s->suv_bit_pos = 0;
@@ -2275,7 +2390,12 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             uint8_t codeword;
             int tx_symbols = V90_ED_SYMBOLS;
 
-            if (s->v92_mode) {
+            if (s->v92_mode && s->v92_native_cpu_rx) {
+                /* §8.8.2/V.92: Ed uses the corresponding TRN2d modulation. */
+                if (s->cp_frame.shaping_lookahead == 1)
+                    tx_symbols += V90_FRAME_LEN;
+                codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ZEROS);
+            } else if (s->v92_mode) {
                 int zero_bit = v90_scramble_bit(&s->scrambler, 0);
 
                 s->diff_enc ^= zero_bit;
@@ -2491,6 +2611,8 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_remote_ack_received = false;
     s->v92_cpd_sent = false;
     s->v92_ack_sent = false;
+    s->v92_tx_nbits = 0;
+    s->v92_tx_pos = 0;
     v90_reset_data_pump_state(s);
     v90_dil_reset_tx(s);
 
@@ -2563,7 +2685,10 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
 
     case V90_RX_EVENT_CP_VALID:
         if (s->tx_phase == V90_TX_TRN2D
-            && (s->v92_mode ? (s->cp_nbits > 0) : s->phase4_mapper_ready)
+            && (s->v92_mode
+                ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
+                                        : (s->cp_nbits > 0))
+                : s->phase4_mapper_ready)
             && !s->cp_ready) {
             fprintf(stderr, "[V90] Phase 4: valid far-end CPt received\n");
             s->cp_ready = true;
@@ -2634,6 +2759,10 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
     s->cp_bit_pos = 0;
 
     if (s->v92_mode) {
+        /* Native mode: a CPt (training parameters) configures the TRN2d
+         * mapper used for the mapped SUVd/CPd/Ed transmit path. */
+        if (s->v92_native_cpu_rx && !cp->v90_compatibility)
+            return v90_configure_phase4_mapper(s, cp);
         s->cp_frame = *cp;
         return true;
     }
@@ -2749,10 +2878,105 @@ void v90_notify_cp_ready(v90_state_t *s)
     (void)v90_handle_rx_event(s, V90_RX_EVENT_CP_VALID);
 }
 
+static int v90_codeword_to_ucode_law(v90_law_t law, uint8_t codeword)
+{
+    uint8_t magnitude = (uint8_t)(codeword & 0x7F);
+
+    if (law == V90_LAW_ULAW)
+        return 0x7F - magnitude;
+    for (int ucode = 0; ucode < 128; ucode++) {
+        if ((v90_ucode_to_alaw[ucode] & 0x7F) == magnitude)
+            return ucode;
+    }
+    return -1;
+}
+
+int v90_demap_mapped_frame(v90_law_t law,
+                           const vpcm_cp_frame_t *cp,
+                           int bits_per_frame,
+                           uint32_t *descramble_reg,
+                           int *prev_sign,
+                           const uint8_t codewords[V90_FRAME_LEN],
+                           uint8_t bits_out[])
+{
+    int labels[V90_FRAME_LEN];
+    int moduli[V90_FRAME_LEN];
+    uint8_t scrambled[64];
+    uint64_t r;
+    int sign_prev;
+    int k;
+
+    if (!cp || !descramble_reg || !prev_sign || !codewords || !bits_out
+        || cp->shaping_redundancy != 0
+        || bits_per_frame < V90_FRAME_LEN
+        || bits_per_frame > (int)sizeof(scrambled))
+        return 0;
+    k = bits_per_frame - V90_FRAME_LEN;
+
+    sign_prev = *prev_sign;
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = cp->dfi[i];
+        int sign = (codewords[i] & 0x80) ? 1 : 0;
+        int ucode = v90_codeword_to_ucode_law(law, codewords[i]);
+        int label = 0;
+        int m = 0;
+
+        if (ucode < 0 || constellation >= cp->constellation_count
+            || !vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            return 0;
+        for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+            if (vpcm_cp_mask_get(cp->masks[constellation], u)) {
+                if (u < ucode)
+                    label++;
+                m++;
+            }
+        }
+        labels[i] = label;
+        moduli[i] = m;
+        scrambled[i] = (uint8_t)((sign ^ sign_prev) & 1);
+        sign_prev = sign;
+    }
+
+    r = 0;
+    for (int i = V90_FRAME_LEN - 1; i >= 0; i--)
+        r = (uint64_t)moduli[i] * r + (uint64_t)labels[i];
+    if (k < 64 && (r >> k) != 0)
+        return 0;
+    for (int i = 0; i < k; i++)
+        scrambled[V90_FRAME_LEN + i] = (uint8_t)((r >> i) & 1);
+
+    for (int i = 0; i < bits_per_frame; i++)
+        bits_out[i] = (uint8_t)v90_descramble_reg_bit(descramble_reg,
+                                                      scrambled[i]);
+    *prev_sign = sign_prev;
+    return bits_per_frame;
+}
+
 void v90_enable_v92_mode(v90_state_t *s)
 {
-    if (s)
-        s->v92_mode = true;
+    if (!s)
+        return;
+    s->v92_mode = true;
+    /* Default Table 30 CPd profile until real upstream measurements or an
+     * explicit v90_set_v92_cpd_profile() call refine it. */
+    if (s->v92_gain_q0_16 == 0) {
+        s->v92_upstream_drn = 14;      /* (14 + 17) x 8000 / 6 bps */
+        s->v92_trellis_select = 0;     /* 16-state */
+        s->v92_gain_q0_16 = 0x8000;    /* 4G = 0.5 -> G = 0.125 */
+    }
+}
+
+bool v90_set_v92_cpd_profile(v90_state_t *s,
+                             uint8_t upstream_drn,
+                             uint8_t trellis_select,
+                             uint16_t gain_q0_16)
+{
+    if (!s || upstream_drn > 19 || trellis_select > 2 || gain_q0_16 == 0)
+        return false;
+    s->v92_upstream_drn = upstream_drn;
+    s->v92_trellis_select = trellis_select;
+    s->v92_gain_q0_16 = gain_q0_16;
+    return true;
 }
 
 void v90_enable_v92_native_cpu_rx(v90_state_t *s)

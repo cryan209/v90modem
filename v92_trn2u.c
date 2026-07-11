@@ -1,0 +1,220 @@
+/*
+ * v92_trn2u.c — V.92 TRN2u PAM modem (upstream Phase 4 control channel)
+ */
+
+#include "v92_trn2u.h"
+
+#include <spandsp.h>
+
+#include <math.h>
+#include <string.h>
+
+/* Upstream GPA scrambler, x^23 + x^18 + 1 (matches v92_p3_rx.c). */
+static inline int v92_gpa_scramble(uint32_t *reg, int in_bit)
+{
+    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+
+    *reg = (*reg << 1) | (uint32_t)out;
+    return out;
+}
+
+static inline int v92_gpa_descramble(uint32_t *reg, int in_bit)
+{
+    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+
+    *reg = (*reg << 1) | (uint32_t)in_bit;
+    return out;
+}
+
+int v92_trn2u_bits_per_symbol(int constellation_points)
+{
+    if (constellation_points == 4)
+        return 2;
+    if (constellation_points == 8)
+        return 3;
+    return 0;
+}
+
+/* Table 28/29 magnitude: label 0..1 → (1,3)/sqrt(5), 0..3 → (1..7)/sqrt(21). */
+static double v92_trn2u_level(int constellation_points, int label, double lu)
+{
+    if (constellation_points == 4)
+        return ((double)(2 * label + 1) / sqrt(5.0)) * lu;
+    return ((double)(2 * label + 1) / sqrt(21.0)) * lu;
+}
+
+static uint8_t v92_trn2u_encode_linear(bool alaw, double value)
+{
+    int16_t sample;
+
+    if (value > 32767.0)
+        value = 32767.0;
+    if (value < -32768.0)
+        value = -32768.0;
+    sample = (int16_t)lrint(value);
+    return alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
+}
+
+static int16_t v92_trn2u_decode_linear(bool alaw, uint8_t codeword)
+{
+    return alaw ? alaw_to_linear(codeword) : ulaw_to_linear(codeword);
+}
+
+void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
+                       int constellation_points,
+                       double lu,
+                       bool alaw)
+{
+    if (!tx)
+        return;
+    memset(tx, 0, sizeof(*tx));
+    tx->constellation_points = constellation_points;
+    tx->lu = lu;
+    tx->alaw = alaw;
+}
+
+static uint8_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
+{
+    int bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
+    int msb;
+    int label = 0;
+    double value;
+
+    /* First bit is the constellation MSB (sign), differentially encoded. */
+    msb = bits[0] ^ tx->prev_sign;
+    tx->prev_sign = msb;
+    for (int i = 1; i < bps; i++)
+        label = (label << 1) | bits[i];
+    value = v92_trn2u_level(tx->constellation_points, label, tx->lu);
+    if (msb)
+        value = -value;
+    return v92_trn2u_encode_linear(tx->alaw, value);
+}
+
+int v92_trn2u_tx_bits(v92_trn2u_tx_t *tx,
+                      const uint8_t *bits,
+                      int nbits,
+                      uint8_t *codewords,
+                      int codewords_max)
+{
+    int bps;
+    int nsymbols;
+    int scrambled[3];
+
+    if (!tx || !bits || !codewords)
+        return 0;
+    bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
+    if (bps == 0 || nbits <= 0 || (nbits % bps) != 0)
+        return 0;
+    nsymbols = nbits / bps;
+    if (nsymbols > codewords_max)
+        return 0;
+    for (int s = 0; s < nsymbols; s++) {
+        for (int i = 0; i < bps; i++)
+            scrambled[i] = v92_gpa_scramble(&tx->scramble_reg,
+                                            bits[s * bps + i] & 1);
+        codewords[s] = v92_trn2u_tx_symbol(tx, scrambled);
+    }
+    return nsymbols;
+}
+
+int v92_trn2u_tx_ones(v92_trn2u_tx_t *tx,
+                      uint8_t *codewords,
+                      int nsymbols)
+{
+    int bps;
+    int scrambled[3];
+
+    if (!tx || !codewords || nsymbols <= 0)
+        return 0;
+    bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
+    if (bps == 0)
+        return 0;
+    for (int s = 0; s < nsymbols; s++) {
+        for (int i = 0; i < bps; i++)
+            scrambled[i] = v92_gpa_scramble(&tx->scramble_reg, 1);
+        codewords[s] = v92_trn2u_tx_symbol(tx, scrambled);
+    }
+    return nsymbols;
+}
+
+void v92_trn2u_demod_init(v92_trn2u_demod_t *demod,
+                          int constellation_points,
+                          double lu,
+                          bool alaw,
+                          v92_cp_rx_t *sink)
+{
+    if (!demod)
+        return;
+    memset(demod, 0, sizeof(*demod));
+    demod->constellation_points = constellation_points;
+    demod->lu = lu;
+    demod->alaw = alaw;
+    demod->sink = sink;
+}
+
+static int v92_trn2u_slice_label(const v92_trn2u_demod_t *demod,
+                                 double magnitude)
+{
+    int labels = demod->constellation_points / 2;
+    int label = labels - 1;
+
+    for (int i = 0; i < labels - 1; i++) {
+        double threshold = ((double)(2 * i + 2)
+                            / sqrt(demod->constellation_points == 4
+                                       ? 5.0 : 21.0))
+                           * demod->lu;
+
+        if (magnitude < threshold) {
+            label = i;
+            break;
+        }
+    }
+    return label;
+}
+
+int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
+                         const uint8_t *codewords,
+                         int count)
+{
+    int bps;
+    int accepted = 0;
+
+    if (!demod || !codewords || count <= 0)
+        return 0;
+    bps = v92_trn2u_bits_per_symbol(demod->constellation_points);
+    if (bps == 0)
+        return 0;
+    for (int s = 0; s < count; s++) {
+        int16_t linear = v92_trn2u_decode_linear(demod->alaw, codewords[s]);
+        int sign = (linear < 0) ? 1 : 0;
+        int label = v92_trn2u_slice_label(demod,
+                                          linear < 0 ? -(double)linear
+                                                     : (double)linear);
+        int msb;
+
+        demod->symbols++;
+        if (!demod->prev_sign_valid) {
+            demod->prev_sign = sign;
+            demod->prev_sign_valid = true;
+            continue;
+        }
+        msb = sign ^ demod->prev_sign;
+        demod->prev_sign = sign;
+
+        if (demod->sink) {
+            int bit = v92_gpa_descramble(&demod->descramble_reg, msb);
+
+            if (v92_cp_rx_put_bit(demod->sink, bit))
+                accepted++;
+            for (int i = bps - 2; i >= 0; i--) {
+                bit = v92_gpa_descramble(&demod->descramble_reg,
+                                         (label >> i) & 1);
+                if (v92_cp_rx_put_bit(demod->sink, bit))
+                    accepted++;
+            }
+        }
+    }
+    demod->frames_accepted += (uint32_t)accepted;
+    return accepted;
+}
