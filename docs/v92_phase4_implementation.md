@@ -119,7 +119,8 @@ raises the longest descrambled-one run only to 39 bits. A locked TRN2u interval
 should produce thousands of consecutive descrambled ones. No tested bit-order,
 polarity, differential, or polynomial alternative therefore explains the
 recordings; the dominant remaining issue is symbol recovery/channel filtering
-or absence of a complete TRN2u interval in these calls.
+in the critically sampled recordings. The corrected upstream windows and
+channel assignments are recorded in `docs/v92_test_call_windows.md`.
 On the checked-in Agere, Motorola, and USR V.92 calls, fractional timing and
 equalization now expose occasional 17-one frame candidates, but none yet pass
 the strict CRC.  This narrows the remaining offline problem to adaptive timing
