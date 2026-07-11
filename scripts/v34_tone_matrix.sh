@@ -24,8 +24,8 @@ if [[ ! -d "${TONE_DIR}" ]]; then
     exit 1
 fi
 
-printf "%-42s %-3s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
-    "file" "ch" "exp_rates" "info0a" "info1a" "phase3" "info0_ms" "info1_ms" "phase3_ms"
+printf "%-42s %-3s %-8s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
+    "file" "ch" "exp_rates" "info0a" "info1a" "phase3" "phase4" "info0_ms" "info1_ms" "phase3_ms"
 
 for wav in "${TONE_DIR}"/*.wav; do
     [[ -e "${wav}" ]] || continue
@@ -51,30 +51,38 @@ for wav in "${TONE_DIR}"/*.wav; do
         info0="no"
         info1="no"
         phase3="no"
+        phase4="no"
         info0_ms="-"
         info1_ms="-"
         phase3_ms="-"
 
         if grep -Eq "INFO0[acd]:          decoded" <<<"${output}"; then
             info0="yes"
-            info0_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO0[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
+            info0_ms="$(sed -n -E 's/.*INFO0[acd]:          decoded at ([0-9.]*) ms/\1/p' <<<"${output}")"
+            info0_ms="${info0_ms%%$'\n'*}"
             [[ -n "${info0_ms}" ]] || info0_ms="-"
         fi
 
         if grep -Eq "INFO1[acd]:          decoded" <<<"${output}"; then
             info1="yes"
-            info1_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO1[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
+            info1_ms="$(sed -n -E 's/.*INFO1[acd]:          decoded at ([0-9.]*) ms/\1/p' <<<"${output}")"
+            info1_ms="${info1_ms%%$'\n'*}"
             [[ -n "${info1_ms}" ]] || info1_ms="-"
         fi
 
         if grep -q "Phase 3:         seen" <<<"${output}"; then
             phase3="yes"
-            phase3_ms="$(printf '%s\n' "${output}" | sed -n 's/.*Phase 3:         seen at \([0-9.]*\) ms/\1/p' | head -n 1)"
+            phase3_ms="$(sed -n 's/.*Phase 3:         seen at \([0-9.]*\) ms/\1/p' <<<"${output}")"
+            phase3_ms="${phase3_ms%%$'\n'*}"
             [[ -n "${phase3_ms}" ]] || phase3_ms="-"
         fi
 
-        printf "%-42s %-3s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
-            "$(basename "${wav}")" "${ch}" "${expected_rates}" "${info0}" "${info1}" "${phase3}" \
+        if grep -q "Phase 4 / MP:    seen" <<<"${output}"; then
+            phase4="yes"
+        fi
+
+        printf "%-42s %-3s %-8s %-8s %-8s %-8s %-8s %-9s %-9s %-9s\n" \
+            "$(basename "${wav}")" "${ch}" "${expected_rates}" "${info0}" "${info1}" "${phase3}" "${phase4}" \
             "${info0_ms}" "${info1_ms}" "${phase3_ms}"
     done
 done

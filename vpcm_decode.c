@@ -14497,8 +14497,11 @@ static void print_v34_result(const decode_v34_result_t *result,
     }
     if (result->phase4_ready_seen)
         printf("  Phase 4 ready:   seen at %.1f ms\n", sample_to_ms(result->phase4_ready_sample, 8000));
-    if (result->phase4_seen)
-        printf("  Phase 4 / MP:    seen at %.1f ms\n", sample_to_ms(result->phase4_sample, 8000));
+    if (result->phase4_seen) {
+        printf("  Phase 4 / MP:    seen at %.1f ms%s\n",
+               sample_to_ms(result->phase4_sample, 8000),
+               result->phase4_from_p3_demod ? " (independent J/S/TRN demod)" : "");
+    }
 
     v34_evaluate_errorfree_phase3(result, &ef_eval);
     if (ef_eval.evaluated) {
@@ -18830,7 +18833,39 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
  * finds the Phase 3 S, TRN, and J signatures under one baud/carrier
  * hypothesis.  Requiring the full signature set keeps ordinary carrier and
  * data-mode periodicity from turning an INFO-only capture into Phase 3. */
-static bool promote_v34_phase3_from_p3(const int16_t *samples,
+static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
+{
+    if (!detail)
+        return -1;
+
+    for (int j = 0; j < detail->segment_count; j++) {
+        const p3_segment_t *j_seg = &detail->segments[j];
+        int s_sample = -1;
+
+        if (j_seg->type != P3_SIGNAL_J || j_seg->length < 48) {
+            continue;
+        }
+
+        for (int i = j + 1; i < detail->segment_count; i++) {
+            const p3_segment_t *seg = &detail->segments[i];
+
+            if (s_sample < 0
+                && (seg->type == P3_SIGNAL_S || seg->type == P3_SIGNAL_S_BAR)
+                && seg->length >= 12) {
+                s_sample = seg->start_sample;
+                continue;
+            }
+            if (s_sample >= 0
+                && seg->type == P3_SIGNAL_TRN
+                && seg->length >= 512) {
+                return s_sample;
+            }
+        }
+    }
+    return -1;
+}
+
+static bool promote_v34_phases_from_p3(const int16_t *samples,
                                        int total_samples,
                                        decode_v34_result_t *result)
 {
@@ -18838,18 +18873,22 @@ static bool promote_v34_phase3_from_p3(const int16_t *samples,
     int start;
     int len;
     int count;
+    bool changed = false;
 
     if (!samples || total_samples <= 0 || !result
-        || result->phase3_seen || !result->info1_seen) {
+        || (result->phase3_seen && result->phase4_seen)
+        || (!result->info1_seen && !result->phase3_seen)) {
         return false;
     }
 
-    start = result->info1_sample;
+    start = result->info1_seen ? result->info1_sample : result->phase3_sample;
     if (start < 0 || start >= total_samples)
         return false;
     len = total_samples - start;
-    if (len > 8 * 8000)
-        len = 8 * 8000;
+    /* Some real V.34 handshakes spend well over ten seconds in Phase 3
+       before J/J' and the Phase 4 S/TRN handoff arrive. */
+    if (len > 20 * 8000)
+        len = 20 * 8000;
     if (len < 800)
         return false;
 
@@ -18863,13 +18902,40 @@ static bool promote_v34_phase3_from_p3(const int16_t *samples,
         if (hypotheses[i].has_s
             && hypotheses[i].has_trn
             && hypotheses[i].has_j) {
-            result->phase3_seen = true;
-            result->phase3_from_p3_demod = true;
-            result->phase3_sample = start;
-            return true;
+            p3_result_t *detail;
+            int phase4_sample;
+
+            if (!result->phase3_seen) {
+                result->phase3_seen = true;
+                result->phase3_from_p3_demod = true;
+                result->phase3_sample = start;
+                changed = true;
+            }
+
+            if (result->phase4_seen)
+                continue;
+            detail = p3_demod_run(samples + start,
+                                  len,
+                                  start,
+                                  hypotheses[i].baud_code,
+                                  hypotheses[i].carrier_sel,
+                                  8000);
+            if (!detail)
+                continue;
+            phase4_sample = p3_find_phase4_handoff_sample(detail);
+            p3_result_free(detail);
+            if (phase4_sample >= 0) {
+                result->phase4_ready_seen = true;
+                result->phase4_ready_sample = phase4_sample;
+                result->phase4_seen = true;
+                result->phase4_from_p3_demod = true;
+                result->phase4_sample = phase4_sample;
+                changed = true;
+                break;
+            }
         }
     }
-    return false;
+    return changed;
 }
 
 /* Stage A: Phase 1/2, V.34, V.8 decode — produces cross-channel info.
@@ -18990,9 +19056,9 @@ static void run_decode_stage_a(const char *label,
                                       &caller,
                                       &have_caller);
         if (have_answerer)
-            (void) promote_v34_phase3_from_p3(linear_samples, total_samples, &answerer);
+            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &answerer);
         if (have_caller)
-            (void) promote_v34_phase3_from_p3(linear_samples, total_samples, &caller);
+            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {

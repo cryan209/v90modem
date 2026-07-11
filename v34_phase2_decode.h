@@ -49,6 +49,7 @@ typedef struct {
     bool phase3_from_p3_demod;
     bool phase4_ready_seen;
     bool phase4_seen;
+    bool phase4_from_p3_demod;
     bool training_failed;
     bool u_info_from_info1a;
     bool ja_bits_known;

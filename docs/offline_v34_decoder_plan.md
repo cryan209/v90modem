@@ -8,12 +8,15 @@
 - The offline pass initializes the modem full duplex; `enable_tx` had been
   passed as the duplex flag, mis-framing INFO0 as 51-bit INFOh.
 - `scripts/v34_tone_matrix.sh` over `gough-lui-v34-modem-sounds`:
-  47/54 INFO0, 47/54 INFO1, 42/54 Phase 3 (was 0 across the board), with
+  47/54 INFO0, 47/54 INFO1, 42/54 Phase 3, and 3/54 conservative Phase 4
+  handoffs (Phase 3 was originally 0 across the board), with
   INFO-inferred rates matching capture filenames. Phase 2 candidates that end
   after INFO0 are now continued through the INFO1/Phase 3 handoff instead of
   being accepted as complete partial decodes. INFO-only results are promoted
   to Phase 3 only when the independent demodulator finds S, TRN, and J under
-  the same post-INFO1 baud/carrier hypothesis.
+  the same post-INFO1 baud/carrier hypothesis. Phase 4 additionally requires
+  an ordered J -> S/S-bar -> continuous TRN sequence with at least 512 TRN
+  symbols; an inferred MP rate alone is not treated as Phase 4 evidence.
 
 ## Goal
 
