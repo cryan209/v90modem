@@ -49,6 +49,9 @@ typedef struct {
     bool mp_asymmetric_rates_allowed;
     bool mp_local_ack_bit;
     bool mp_rates_valid;
+    /* True when this result came from a plain-V.34 pass (no V.90 CC carrier
+       swap, 49-bit INFO0 framing) rather than the V.90/V.92 mode pass. */
+    bool plain_v34_mode;
     int info0_sample;
     int info1_sample;
     int info0_ok_event_sample;
@@ -154,6 +157,9 @@ typedef bool (*v34_phase2_pass_fn_t)(void *ctx,
 
 typedef struct {
     bool enable_tx;
+    /* Run the pass as a plain V.34 modem (standard CC carriers, 49-bit INFO0)
+       instead of V.90/V.92 mode. */
+    bool plain_v34;
 } v34_offline_decode_config_t;
 
 typedef struct {

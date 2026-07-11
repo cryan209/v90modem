@@ -381,7 +381,9 @@ static void format_v34_info0_table_summary(char *buf,
                                            const v90_info0a_t *info,
                                            const v34_v90_info0a_t *raw_info,
                                            const char *role_name,
-                                           bool info0_is_d)
+                                           bool info0_is_d,
+                                           bool plain_v34,
+                                           bool calling_party)
 {
     v90_info0a_diag_t diag;
     bool have_crc = false;
@@ -401,7 +403,10 @@ static void format_v34_info0_table_summary(char *buf,
         raw_26_27 = raw_info->raw_26_27;
 
     appendf(buf, len, "role=%s", role_name ? role_name : "unknown");
-    appendf(buf, len, " profile=%s", info0_is_d ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
+    if (plain_v34)
+        appendf(buf, len, " profile=%s", calling_party ? "V34_INFO0a_T4" : "V34_INFO0c_T4");
+    else
+        appendf(buf, len, " profile=%s", info0_is_d ? "V90V92_INFO0d_T7_T15" : "V90V92_INFO0a_T8_T16");
     appendf(buf, len, " fsync=0x%03X", V90_INFO_FILL_AND_SYNC_BITS);
     appendf(buf, len, " b12_2743=%u", info->support_2743 ? 1U : 0U);
     appendf(buf, len, " b13_2800=%u", info->support_2800 ? 1U : 0U);
@@ -446,6 +451,17 @@ static void format_v34_info0_table_summary(char *buf,
         appendf(buf, len, " crc_bits=42:57");
         appendf(buf, len, " crc16=unavailable");
         appendf(buf, len, " tail_bits=58:61");
+        appendf(buf, len, " tail=0xF");
+    } else if (plain_v34) {
+        /* V.34 Table 4: bits 26:27 are the transmitter clock source and
+           bit 28 acknowledges detection of the other side's INFO0. */
+        appendf(buf, len, " b26_27_tx_clock=%u", (unsigned) raw_26_27);
+        appendf(buf, len, " b28_ack_info0=%u", info->acknowledge_info0d ? 1U : 0U);
+        appendf(buf, len, " crc_bits=29:44");
+        appendf(buf, len, " crc16=%s", have_crc ? "" : "n/a");
+        if (have_crc)
+            appendf(buf, len, "0x%04X", (unsigned) diag.crc_field);
+        appendf(buf, len, " tail_bits=45:48");
         appendf(buf, len, " tail=0xF");
     } else {
         appendf(buf, len, " b26_v92_cap=%u", (unsigned) (raw_26_27 & 0x01U));
@@ -571,7 +587,7 @@ static bool snapshot_v34_info0a_from_rx_state(v34_v90_info0a_t *dst, const v34_s
         V34_CAP_3429 = 5
     };
 
-    if (!dst || !v34 || !v34->rx.v90_mode)
+    if (!dst || !v34)
         return false;
 
     memset(dst, 0, sizeof(*dst));
@@ -602,7 +618,7 @@ static bool snapshot_v34_info0a_from_rx_state(v34_v90_info0a_t *dst, const v34_s
 
 static bool snapshot_v34_info1a_from_rx_state(v34_v90_info1a_t *dst, const v34_state_t *v34)
 {
-    if (!dst || !v34 || !v34->rx.v90_mode)
+    if (!dst || !v34)
         return false;
 
     memset(dst, 0, sizeof(*dst));
@@ -1034,6 +1050,10 @@ static int g_v8_probe_cache_next = 0;
 static const v34_offline_decode_config_t g_v34_offline_decode_config = {
     .enable_tx = false,
 };
+static const v34_offline_decode_config_t g_v34_offline_plain_config = {
+    .enable_tx = false,
+    .plain_v34 = true,
+};
 static bool decode_v34_pass_mode(const int16_t *samples,
                                  int total_samples,
                                  v91_law_t law,
@@ -1061,6 +1081,15 @@ static bool decode_v34_phase2_only_pass(const int16_t *samples,
                                         const v34_offline_decode_config_t *config,
                                         decode_v34_result_t *result);
 
+/* Retry a weak V.90-mode result as plain V.34 and keep the better decode.
+   V.90 mode swaps the CC carriers and changes INFO0 framing, so a pure-V.34
+   capture decodes nothing in V.90 mode; the reverse is equally true, which
+   makes the spec score a safe arbiter. */
+static bool v34_pass_result_is_weak(const decode_v34_result_t *result, bool ok)
+{
+    return !ok || (!result->info0_seen && !result->info1_seen);
+}
+
 static bool decode_v34_pass_bridge(void *ctx,
                                    const int16_t *samples,
                                    int total_samples,
@@ -1071,15 +1100,37 @@ static bool decode_v34_pass_bridge(void *ctx,
                                    decode_v34_result_t *result)
 {
     const v34_offline_decode_config_t *config = (const v34_offline_decode_config_t *) ctx;
+    bool ok;
 
-    return decode_v34_pass(samples,
-                           total_samples,
-                           law,
-                           calling_party,
-                           info_db_cutoff,
-                           allow_info_rate_infer,
-                           config,
-                           result);
+    ok = decode_v34_pass(samples,
+                         total_samples,
+                         law,
+                         calling_party,
+                         info_db_cutoff,
+                         allow_info_rate_infer,
+                         config,
+                         result);
+    if (config && !config->plain_v34 && v34_pass_result_is_weak(result, ok)) {
+        decode_v34_result_t plain_result;
+        bool plain_ok;
+
+        plain_ok = decode_v34_pass(samples,
+                                   total_samples,
+                                   law,
+                                   calling_party,
+                                   info_db_cutoff,
+                                   allow_info_rate_infer,
+                                   &g_v34_offline_plain_config,
+                                   &plain_result);
+        if (plain_ok
+            && (!ok
+                || v34_phase2_result_spec_score(&plain_result)
+                   > v34_phase2_result_spec_score(result))) {
+            *result = plain_result;
+            ok = plain_ok;
+        }
+    }
+    return ok;
 }
 
 static bool decode_v34_phase2_only_pass_bridge(void *ctx,
@@ -1092,15 +1143,37 @@ static bool decode_v34_phase2_only_pass_bridge(void *ctx,
                                                decode_v34_result_t *result)
 {
     const v34_offline_decode_config_t *config = (const v34_offline_decode_config_t *) ctx;
+    bool ok;
 
-    return decode_v34_phase2_only_pass(samples,
-                                       total_samples,
-                                       law,
-                                       calling_party,
-                                       info_db_cutoff,
-                                       allow_info_rate_infer,
-                                       config,
-                                       result);
+    ok = decode_v34_phase2_only_pass(samples,
+                                     total_samples,
+                                     law,
+                                     calling_party,
+                                     info_db_cutoff,
+                                     allow_info_rate_infer,
+                                     config,
+                                     result);
+    if (config && !config->plain_v34 && v34_pass_result_is_weak(result, ok)) {
+        decode_v34_result_t plain_result;
+        bool plain_ok;
+
+        plain_ok = decode_v34_phase2_only_pass(samples,
+                                               total_samples,
+                                               law,
+                                               calling_party,
+                                               info_db_cutoff,
+                                               allow_info_rate_infer,
+                                               &g_v34_offline_plain_config,
+                                               &plain_result);
+        if (plain_ok
+            && (!ok
+                || v34_phase2_result_spec_score(&plain_result)
+                   > v34_phase2_result_spec_score(result))) {
+            *result = plain_result;
+            ok = plain_ok;
+        }
+    }
+    return ok;
 }
 
 static v34_phase2_engine_t g_v34_phase2_engine = {
@@ -9936,8 +10009,10 @@ static const decode_v34_result_t *pick_analogue_phase2_side(const decode_v34_res
     return a;
 }
 
-static const char *v34_info0_label(const decode_v34_result_t *result)
+static const char *v34_info0_label(const decode_v34_result_t *result, bool role_is_caller)
 {
+    if (result && result->plain_v34_mode)
+        return role_is_caller ? "INFO0a decoded" : "INFO0c decoded";
     return (result && result->info0_is_d) ? "INFO0d decoded" : "INFO0a decoded";
 }
 
@@ -10995,13 +11070,19 @@ static bool decode_v34_pass_mode(const int16_t *samples,
     if (!config)
         config = &g_v34_offline_decode_config;
 
-    v34 = v34_init(NULL, 3200, 21600, calling_party, config->enable_tx,
+    /* Always configure the modem as full duplex: the captures under analysis
+       are full-duplex V.34/V.90 calls, and the duplex flag selects INFO0
+       (49-bit) versus INFOh (51-bit) framing. TX is driven separately via
+       config->enable_tx. */
+    v34 = v34_init(NULL, 3200, 21600, calling_party, true,
                    v34_dummy_get_bit, NULL,
                    v34_dummy_put_bit, NULL);
     if (!v34)
         return false;
 
-    v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
+    result->plain_v34_mode = config->plain_v34;
+    if (!config->plain_v34)
+        v34_set_v90_mode(v34, law == V91_LAW_ALAW ? 1 : 0);
     /* Keep a stricter threshold for initial INFO0 lock, then relax after
        INFO0. For already-permissive rescue passes, preserve that permissive
        threshold so INFO1 can still be acquired. */
@@ -11240,7 +11321,9 @@ static bool decode_v34_pass_mode(const int16_t *samples,
                 && ((phase2_only && rx_event == V34_EVENT_INFO0_OK)
                     || v34_map_received_info0a(&result->info0a, &raw_info0a))) {
                 result->info0_seen = true;
-                result->info0_is_d = calling_party;
+                /* Plain V.34 has no INFO0d: the caller receives INFO0a and
+                   the answerer receives INFO0c (same field layout). */
+                result->info0_is_d = config->plain_v34 ? false : calling_party;
                 result->info0_raw = raw_info0a;
                 result->info0_sample = offset;
                 last_progress_sample = offset;
@@ -14059,12 +14142,15 @@ static void print_v34_result(const decode_v34_result_t *result,
         return;
     phase3_target = p3_detect_flow_standard(result, NULL);
     if (phase3_target == P3_FLOW_STANDARD_UNKNOWN)
-        phase3_target = suppress_v90_phase2 ? P3_FLOW_STANDARD_V34 : P3_FLOW_STANDARD_V90;
+        phase3_target = (suppress_v90_phase2 || result->plain_v34_mode)
+            ? P3_FLOW_STANDARD_V34 : P3_FLOW_STANDARD_V90;
 
     printf("  Role:            %s\n", calling_party ? "caller" : "answerer");
-    if (!suppress_v90_phase2) {
+    if (!suppress_v90_phase2 || result->plain_v34_mode) {
         printf("  Phase 3 target:  %s\n",
                phase3_target == P3_FLOW_STANDARD_UNKNOWN ? "unknown" : p3_flow_standard_name(phase3_target));
+        if (result->plain_v34_mode)
+            printf("  Phase 2 mode:    plain V.34 (V.90 CC pass found no INFO)\n");
     }
     printf("  Final RX stage:  %s (%d)\n",
            v34_rx_stage_to_str_local(result->final_rx_stage),
@@ -14085,13 +14171,18 @@ static void print_v34_result(const decode_v34_result_t *result,
                result->phase2_selected_window_active_hits,
                (double) result->phase2_selected_window_peak_db_tenths / 10.0);
     }
-    if (suppress_v90_phase2) {
+    if (suppress_v90_phase2 && !result->plain_v34_mode) {
         printf("  INFO0a/INFO0d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
     } else if (result->info0_seen) {
         char info0_detail[1024];
+        const char *info0_label;
 
-        printf("  %-16sdecoded at %.1f ms\n",
-               result->info0_is_d ? "INFO0d:" : "INFO0a:",
+        if (result->plain_v34_mode)
+            info0_label = calling_party ? "INFO0a:" : "INFO0c:";
+        else
+            info0_label = result->info0_is_d ? "INFO0d:" : "INFO0a:";
+        printf("  %-17sdecoded at %.1f ms\n",
+               info0_label,
                sample_to_ms(result->info0_sample, 8000));
         if (result->info0_from_rescue)
             printf("                   source=rescue_pass\n");
@@ -14100,7 +14191,9 @@ static void print_v34_result(const decode_v34_result_t *result,
                                        &result->info0a,
                                        &result->info0_raw,
                                        "active_pass",
-                                       result->info0_is_d);
+                                       result->info0_is_d,
+                                       result->plain_v34_mode,
+                                       calling_party);
         printf("                   %s\n", info0_detail);
     } else {
         printf("  INFO0a/INFO0d:   not decoded");
@@ -14110,7 +14203,7 @@ static void print_v34_result(const decode_v34_result_t *result,
             printf(" (INFO0_OK event seen at %.1f ms; frame payload unavailable)", sample_to_ms(result->info0_ok_event_sample, 8000));
         printf("\n");
     }
-    if (suppress_v90_phase2) {
+    if (suppress_v90_phase2 && !result->plain_v34_mode) {
         printf("  INFO1a/INFO1d:   suppressed by V.8 gate (no V.90/V.92 digital capability in CM/JM)\n");
     } else if (result->info1_seen && !result->info1_is_d) {
         char info1_detail[1024];
@@ -14528,13 +14621,14 @@ static void collect_v34_events(call_log_t *log,
         const char *phase3_proto__ = phase3_proto_global; \
         if (!res__) \
             break; \
-        if (!(suppress_v90_phase2) && !(suppress_phase12_early_events) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
-            format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d); \
+        bool role_is_caller__ = (role_name != NULL && strcmp(role_name, "caller") == 0); \
+        if ((!(suppress_v90_phase2) || res__->plain_v34_mode) && !(suppress_phase12_early_events) && res__->info0_seen && should_emit_phase2_event(res__->info0_sample, (PHASE2_CUTOFF))) { \
+            format_v34_info0_table_summary(detail, sizeof(detail), &res__->info0a, &res__->info0_raw, role_name, res__->info0_is_d, res__->plain_v34_mode, role_is_caller__); \
             if (res__->info0_from_rescue) \
                 appendf(detail, sizeof(detail), " source=rescue_pass"); \
-            call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__), detail); \
+            call_log_append(log, res__->info0_sample, 0, "V.34", v34_info0_label(res__, role_is_caller__), detail); \
         } \
-        if (!(suppress_v90_phase2) && !(suppress_phase12_early_events) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
+        if ((!(suppress_v90_phase2) || res__->plain_v34_mode) && !(suppress_phase12_early_events) && res__->info1_seen && should_emit_phase2_event(res__->info1_sample, (PHASE2_CUTOFF))) { \
             if (res__->info1_is_d) { \
                 format_v34_info1d_table_summary(detail, sizeof(detail), &res__->info1d, role_name); \
                 if (res__->info1_from_rescue) \
