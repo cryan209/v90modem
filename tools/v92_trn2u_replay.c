@@ -399,12 +399,13 @@ int main(int argc, char **argv)
                "timing_mu=%.5f eq=%d eq_mu=%.5f "
                "start=%" PRIu64
                " samples=%" PRIu64 " symbols=%u input_bits=%u valid=%u rejected=%u "
-               "CPt=%u CPu=%u CPus=%u SUVu=%u\n",
+               "longest_ones=%u CPt=%u CPu=%u CPus=%u SUVu=%u\n",
                path, wav_channel ? 'R' : 'L', alaw ? "alaw" : "ulaw",
                points, lu, timing_phase, clock_ppm, gain,
                timing_loop ? 1 : 0, timing_mu, equalizer ? 1 : 0,
                eq_mu, start, fed,
                demod.symbols, rx.input_bits, rx.valid_frames, rx.rejected_frames,
+               demod.longest_descrambled_one_run,
                report.cpt, report.cpu, report.cpus, report.suvu);
         return 0;
     }
@@ -442,9 +443,10 @@ int main(int argc, char **argv)
 
     printf("summary file=%s law=%s points=%d lu=%.3f start=%" PRIu64
            " samples=%" PRIu64 " symbols=%u input_bits=%u valid=%u rejected=%u "
-           "CPt=%u CPu=%u CPus=%u SUVu=%u\n",
+           "longest_ones=%u CPt=%u CPu=%u CPus=%u SUVu=%u\n",
            path, alaw ? "alaw" : "ulaw", points, lu, start, fed,
            demod.symbols, rx.input_bits, rx.valid_frames, rx.rejected_frames,
+           demod.longest_descrambled_one_run,
            report.cpt, report.cpu, report.cpus, report.suvu);
     return 0;
 }

@@ -73,6 +73,14 @@ void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
     tx->alaw = alaw;
 }
 
+void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign)
+{
+    if (!tx)
+        return;
+    tx->scramble_reg = 0;
+    tx->prev_sign = preceding_e1u_sign ? 1 : 0;
+}
+
 static uint8_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
 {
     int bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
@@ -205,11 +213,25 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
         if (demod->sink) {
             int bit = v92_gpa_descramble(&demod->descramble_reg, msb);
 
+            if (bit) {
+                demod->descrambled_one_run++;
+                if (demod->descrambled_one_run > demod->longest_descrambled_one_run)
+                    demod->longest_descrambled_one_run = demod->descrambled_one_run;
+            } else {
+                demod->descrambled_one_run = 0;
+            }
             if (v92_cp_rx_put_bit(demod->sink, bit))
                 accepted++;
             for (int i = bps - 2; i >= 0; i--) {
                 bit = v92_gpa_descramble(&demod->descramble_reg,
                                          (label >> i) & 1);
+                if (bit) {
+                    demod->descrambled_one_run++;
+                    if (demod->descrambled_one_run > demod->longest_descrambled_one_run)
+                        demod->longest_descrambled_one_run = demod->descrambled_one_run;
+                } else {
+                    demod->descrambled_one_run = 0;
+                }
                 if (v92_cp_rx_put_bit(demod->sink, bit))
                     accepted++;
             }

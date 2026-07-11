@@ -68,6 +68,15 @@ TRN2u slicer reference is 8000 linear units and can be calibrated against a
 real bearer with `V92_TRN2U_LU`; accepted/rejected frame and symbol counters
 are included in the regular modem diagnostic snapshot.
 
+TRN2u entry follows the split initialization required by 8.7.6/V.92: GPA is
+reset to zero at the beginning of TRN2u, while the differential sign memory
+is carried from the final E1u sign. `v92_trn2u_tx_start()` makes that boundary
+explicit instead of relying on both states having the same initial value.
+The demodulator also records its longest run of descrambled ones. A real
+TRN2u interval should make this counter very large; values around 20 on an
+entire call are indistinguishable from random data and show that symbol or bit
+recovery has not locked yet.
+
 Raw bearer captures can be replayed directly through the same receiver with:
 
 ```sh

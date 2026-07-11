@@ -201,7 +201,7 @@ $(SPANDSP_LIB): FORCE
 	$(CC) $(CFLAGS) -c $< -o $@
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h v90_cp_rx.h
+modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h v90_cp_rx.h v92_cp_rx.h v92_trn2u.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 v90.o:            v90.c            v90.h
@@ -237,7 +237,7 @@ v21_fsk_demod.o:  v21_fsk_demod.c  v21_fsk_demod.h
 phase12_decode.o: phase12_decode.c phase12_decode.h v21_fsk_demod.h v34_info_decode.h v90.h v8bis_decode.h
 call_init_tone_probe.o: call_init_tone_probe.c call_init_tone_probe.h
 vpcm_decode.o:    vpcm_decode.c    v34_info_decode.h v34_phase2_decode.h v90.h v91.h vpcm_cp.h v8bis_decode.h v92_short_phase1_decode.h v92_short_phase2_decode.h v92_phase3_decode.h v92_ja_decode.h p3_demod.h phase12_decode.h
-vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call_pair.h vpcm_link.h vpcm_v90_session.h
+vpcm_loopback_test.o: vpcm_loopback_test.c v91.h vpcm_cp.h vpcm_call.h vpcm_call_pair.h vpcm_link.h vpcm_v90_session.h v92_cp_rx.h v92_trn2u.h
 
 spandsp: $(SPANDSP_LIB)
 

@@ -50,12 +50,17 @@ typedef struct {
     v92_cp_rx_t *sink;          /* receives every descrambled bit */
     uint32_t symbols;
     uint32_t frames_accepted;   /* sink frames that passed validation */
+    uint32_t descrambled_one_run;
+    uint32_t longest_descrambled_one_run; /* TRN2u lock-quality diagnostic */
 } v92_trn2u_demod_t;
 
 void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
                        int constellation_points,
                        double lu,
                        bool alaw);
+
+/* §8.7.6: reset GPA at TRN2u entry while carrying the final E1u sign. */
+void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign);
 
 /* Bits per PAM symbol: 2 for 4-point, 3 for 8-point. */
 int v92_trn2u_bits_per_symbol(int constellation_points);

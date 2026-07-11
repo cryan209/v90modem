@@ -2395,6 +2395,8 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->v92_active = g_v92_active ? 1 : 0;
     snapshot->v92_trn2u_active = g_v92_trn2u_active ? 1 : 0;
     snapshot->v92_trn2u_symbols = g_v92_trn2u_demod.symbols;
+    snapshot->v92_trn2u_longest_ones =
+        g_v92_trn2u_demod.longest_descrambled_one_run;
     snapshot->v92_cp_input_bits = g_v92_cp_rx.input_bits;
     snapshot->v92_cp_valid_frames = g_v92_cp_rx.valid_frames;
     snapshot->v92_cp_rejected_frames = g_v92_cp_rx.rejected_frames;

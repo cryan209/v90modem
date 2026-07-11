@@ -1976,10 +1976,19 @@ static bool test_v92_trn2u_loopback(void)
             v92_cp_rx_init(&rx, points, alaw != 0,
                            v92_p4u_test_handler, &capture);
             v92_trn2u_tx_init(&utx, points, 8000.0, alaw != 0);
+            /* TRN2u resets GPA but carries the final E1u differential sign. */
+            v92_trn2u_tx_start(&utx, 1);
             v92_trn2u_demod_init(&udemod, points, 8000.0, alaw != 0, &rx);
 
             nsym = v92_trn2u_tx_ones(&utx, codewords, 48);
             v92_trn2u_demod_feed(&udemod, codewords, nsym);
+            if (udemod.longest_descrambled_one_run < 48) {
+                fprintf(stderr,
+                        "V.92 TRN2u failed to lock to scrambled ones (alaw=%d points=%d run=%u)\n",
+                        alaw, points,
+                        (unsigned)udemod.longest_descrambled_one_run);
+                return false;
+            }
 
             if (!v92_suvu_encode(&suvu, points, frame_bits,
                                  (int)sizeof(frame_bits), &nbits))
@@ -2157,6 +2166,7 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
         goto done;
     v92_cp_rx_init(&rx, 4, alaw, v92_native_apply_handler, &apply);
     v92_trn2u_tx_init(&utx, 4, 8000.0, alaw);
+    v92_trn2u_tx_start(&utx, 1);
     v92_trn2u_demod_init(&udemod, 4, 8000.0, alaw, &rx);
 
     /* TRN2u seeds the upstream differential decoder and descrambler. */

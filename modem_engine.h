@@ -62,6 +62,7 @@ typedef struct {
     int v92_active;
     int v92_trn2u_active;
     uint64_t v92_trn2u_symbols;
+    uint32_t v92_trn2u_longest_ones;
     uint64_t v92_cp_input_bits;
     uint32_t v92_cp_valid_frames;
     uint32_t v92_cp_rejected_frames;
