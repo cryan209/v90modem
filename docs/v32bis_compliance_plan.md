@@ -121,6 +121,24 @@ Current project stance:
   distinction explicitly rather than silently adopting SpanDSP startup seeding
   as the standard.
 
+Blind (oracle-free) startup word decoding:
+
+- The reference transmitter encodes every startup word (each R word and E)
+  from the same TRN-derived state: differential state from the final TRN
+  symbol, scrambler register carried from the end of TRN. E does not continue
+  from the end of R3.
+- The blind datapump receiver therefore seeds each candidate word decode with
+  the recovered constellation state at the end of the relevant conditioning
+  segment (the TRN state labels map to the same points as `Q0..Q3`, so the
+  recovered state index is the differential seed directly) and the nominal
+  1280-symbol TRN-end scrambler register.
+- Decoding isolated 8-symbol windows from a zero scrambler register is wrong
+  under this policy: the 23-bit self-synchronizing descrambler never sees
+  enough history inside a single 16-bit word to recover, which silently
+  suppresses E detection while the looser R sync pattern can still match.
+- An E detection is only accepted when its rate field decodes to exactly one
+  rate, mirroring the logical receiver's guard.
+
 ## Work Breakdown
 
 ### Phase 1: Spec-Locked Tables and Bit-Level Logic

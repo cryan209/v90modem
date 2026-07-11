@@ -301,41 +301,62 @@ def recover_data(
             train_count = min(equalizer_training_symbols, len(phase_corrected), len(known_targets))
             eq_training_symbols = train_count
 
-            for index in range(len(phase_corrected)):
-                center = start + index * samples_per_symbol
-                ff_window: list[complex] = []
-                phase_rot = complex(math.cos(-phase_est), math.sin(-phase_est))
-                for tap_index in range(equalizer_feedforward_taps):
-                    sample_index = center + (tap_index - ff_half) * ff_spacing
-                    if 0 <= sample_index < len(scaled_filtered):
-                        sample = scaled_filtered[sample_index]
-                    else:
-                        sample = 0j
-                    ff_window.append(sample * phase_rot)
+            def run_equalizer_pass(symbol_count: int, *, collect: bool) -> tuple[float, float]:
+                """Adapt the DFE over *symbol_count* symbols from the burst start.
 
-                ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
-                fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
-                output = ff_output - fb_output
-                if index < train_count:
-                    target = known_targets[index]
-                    training_error_metric += (target.real - output.real) ** 2 + (target.imag - output.imag) ** 2
-                else:
-                    target = min(
-                        _const_points,
-                        key=lambda p: (output.real - p.real) ** 2 + (output.imag - p.imag) ** 2,
-                    )
-                error = target - output
-                for tap_index in range(equalizer_feedforward_taps):
-                    ff_taps[tap_index] += equalizer_step_size * error * ff_window[tap_index].conjugate()
-                for tap_index in range(equalizer_feedback_taps):
-                    fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
-                past_targets = [target] + past_targets[:-1]
-                if phase_gain > 0.0 and abs(output) > 1e-9:
-                    target_mag = abs(target)
-                    if target_mag > 1e-9:
-                        phase_error = (output * target.conjugate()).imag / (target_mag * target_mag)
-                        phase_est += phase_gain * phase_error
-                symbol_samples.append(output)
+                The taps persist across passes; the phase loop and feedback
+                history restart at the burst start so a warm-up pass leaves
+                the state aligned for re-decoding from symbol 0.
+                """
+
+                nonlocal past_targets
+                past_targets = [0j] * equalizer_feedback_taps
+                pass_phase_est = 0.0
+                pass_error_metric = 0.0
+                for index in range(symbol_count):
+                    center = start + index * samples_per_symbol
+                    ff_window: list[complex] = []
+                    phase_rot = complex(math.cos(-pass_phase_est), math.sin(-pass_phase_est))
+                    for tap_index in range(equalizer_feedforward_taps):
+                        sample_index = center + (tap_index - ff_half) * ff_spacing
+                        if 0 <= sample_index < len(scaled_filtered):
+                            sample = scaled_filtered[sample_index]
+                        else:
+                            sample = 0j
+                        ff_window.append(sample * phase_rot)
+
+                    ff_output = sum(tap * sample for tap, sample in zip(ff_taps, ff_window))
+                    fb_output = sum(tap * sample for tap, sample in zip(fb_taps, past_targets))
+                    output = ff_output - fb_output
+                    if index < train_count:
+                        target = known_targets[index]
+                        pass_error_metric += (target.real - output.real) ** 2 + (target.imag - output.imag) ** 2
+                    else:
+                        target = min(
+                            _const_points,
+                            key=lambda p: (output.real - p.real) ** 2 + (output.imag - p.imag) ** 2,
+                        )
+                    error = target - output
+                    for tap_index in range(equalizer_feedforward_taps):
+                        ff_taps[tap_index] += equalizer_step_size * error * ff_window[tap_index].conjugate()
+                    for tap_index in range(equalizer_feedback_taps):
+                        fb_taps[tap_index] -= equalizer_step_size * error * past_targets[tap_index].conjugate()
+                    past_targets = [target] + past_targets[:-1]
+                    if phase_gain > 0.0 and abs(output) > 1e-9:
+                        target_mag = abs(target)
+                        if target_mag > 1e-9:
+                            phase_error = (output * target.conjugate()).imag / (target_mag * target_mag)
+                            pass_phase_est += phase_gain * phase_error
+                    if collect:
+                        symbol_samples.append(output)
+                return pass_error_metric, pass_phase_est
+
+            # Warm-up pass: adapt over the known training window so the
+            # decode pass below starts with converged taps instead of
+            # burning the first symbols on the convergence transient.
+            if train_count > 0:
+                run_equalizer_pass(train_count, collect=False)
+            training_error_metric, phase_est = run_equalizer_pass(len(phase_corrected), collect=True)
 
             eq_taps = ff_taps + fb_taps
 
