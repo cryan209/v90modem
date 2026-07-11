@@ -68,6 +68,20 @@ TRN2u slicer reference is 8000 linear units and can be calibrated against a
 real bearer with `V92_TRN2U_LU`; accepted/rejected frame and symbol counters
 are included in the regular modem diagnostic snapshot.
 
+Raw bearer captures can be replayed directly through the same receiver with:
+
+```sh
+make v92_trn2u_replay
+./v92_trn2u_replay capture.g711 --law ulaw --points 4 --lu 8000
+```
+
+The tool reports every CRC-valid CPt, CPu, CPus, or SUVu with its sample/time
+position and ends with receiver counters.  It is intended for octet-transparent
+DS0 captures.  Analogue recordings sampled at 8 kHz are a harder input: their
+sample clock and phase are not necessarily locked to the 8 ksymbol/s PAM, so
+failure to find frame sync there identifies a need for timing recovery and
+equalization rather than proving that the strict frame codec is incorrect.
+
 ## Remaining native runtime work
 
 - derive TRN2u `L_U` from Phase 3/receiver measurements instead of the

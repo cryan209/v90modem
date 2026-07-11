@@ -29,6 +29,7 @@
 # Project binaries
 sip_v90_modem
 vpcm_loopback_test
+v92_trn2u_replay
 
 # Common maps/logs
 *.map
