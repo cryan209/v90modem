@@ -24,6 +24,7 @@
 #include "data_stack.h"
 #include "clock_recovery.h"
 #include "v90.h"
+#include "v91.h"
 #include "v90_cp_rx.h"
 #include "v92_cp_rx.h"
 #include "v92_trn2u.h"
@@ -213,6 +214,10 @@ static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static data_stack_t g_data_stack;
 static ds_framing_t g_data_framing = DS_FRAMING_V14;
+static bool g_data_lapm_detect = true;
+static int g_data_connect_rate = 0;
+static bool g_data_connect_reported = false;
+static volatile bool g_data_link_failed = false;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 
@@ -247,6 +252,7 @@ static const char *me_mod_to_str(me_modulation_t mod)
 {
     switch (mod) {
     case ME_MOD_NONE:   return "NONE";
+    case ME_MOD_V91:    return "V91";
     case ME_MOD_V90:    return "V90";
     case ME_MOD_V34:    return "V34";
     case ME_MOD_V22BIS: return "V22BIS";
@@ -470,13 +476,79 @@ static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
         ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
 }
 
-static void data_stack_restart(int dte_bit_rate, int line_bit_rate)
+static void data_stack_link_event(void *user_data, ds_link_event_t event)
 {
+    (void)user_data;
+    switch (event) {
+    case DS_LINK_DETECTING:
+        ME_LOG("[ME] V.42 detection started\n");
+        break;
+    case DS_LINK_XID_NEGOTIATED:
+        ME_LOG("[ME] V.42 XID negotiated\n");
+        break;
+    case DS_LINK_CONNECTED:
+        ME_LOG("[ME] V.42 LAPM connected\n");
+        if (!g_data_connect_reported) {
+            g_data_connect_reported = true;
+            di_on_connected(g_data_connect_rate);
+        }
+        break;
+    case DS_LINK_UNSUPPORTED:
+        ME_LOG("[ME] V.42 detection reported unsupported peer\n");
+        g_data_link_failed = true;
+        break;
+    case DS_LINK_DISCONNECTED:
+        ME_LOG("[ME] V.42 LAPM disconnected\n");
+        g_data_link_failed = true;
+        break;
+    case DS_LINK_ERROR:
+        ME_LOG("[ME] V.42 LAPM link error\n");
+        g_data_link_failed = true;
+        break;
+    }
+}
+
+/* Install a harmless framing source while the physical modem trains. */
+static void data_stack_prepare(int bit_rate)
+{
+    ds_framing_t framing = (g_data_framing == DS_FRAMING_V42)
+                         ? DS_FRAMING_V14 : g_data_framing;
+
+    ds_release(&g_data_stack);
     ds_init(&g_data_stack,
-            g_data_framing,
+            framing,
             data_stack_pull_dte_byte, NULL,
             data_stack_push_dte_byte, NULL);
-    ds_set_v14_rates(&g_data_stack, dte_bit_rate, line_bit_rate);
+    ds_set_v14_rates(&g_data_stack, bit_rate, bit_rate);
+}
+
+/* Start the selected link protocol once the datapump data clock is stable. */
+static int data_stack_start_online(int bit_rate, bool calling_party)
+{
+    int result = 0;
+
+    ds_release(&g_data_stack);
+    g_data_connect_rate = bit_rate;
+    g_data_connect_reported = false;
+    g_data_link_failed = false;
+    if (g_data_framing == DS_FRAMING_V42) {
+        result = ds_init_v42(&g_data_stack,
+                             calling_party,
+                             g_data_lapm_detect,
+                             bit_rate,
+                             data_stack_pull_dte_byte, NULL,
+                             data_stack_push_dte_byte, NULL,
+                             data_stack_link_event, NULL);
+        if (result != 0)
+            g_data_link_failed = true;
+    } else {
+        ds_init(&g_data_stack,
+                g_data_framing,
+                data_stack_pull_dte_byte, NULL,
+                data_stack_push_dte_byte, NULL);
+        ds_set_v14_rates(&g_data_stack, bit_rate, bit_rate);
+    }
+    return result;
 }
 
 static int v22bis_get_bit_cb(void *user_data)
@@ -548,6 +620,315 @@ static int            g_last_v90_bridge_tx_stage = -1;
 static int            g_last_v90_bridge_rx_event = -1;
 static v90_dil_desc_t g_v90_pending_dil;
 static bool           g_v90_pending_dil_valid = false;
+static uint64_t       g_phase_start_ms = 0;
+
+/* V.91 symmetric raw-G.711 startup and data path. */
+#define V91_LIVE_STARTUP_MAX 4096
+#define V91_LIVE_DATA_CODEWORDS 24
+#define V91_LIVE_DATA_BYTES 21
+static v91_state_t g_v91_tx;
+static v91_state_t g_v91_rx;
+static vpcm_cp_frame_t g_v91_cp_ack;
+static uint8_t g_v91_startup_tx[V91_LIVE_STARTUP_MAX];
+static uint8_t g_v91_startup_remote[V91_LIVE_STARTUP_MAX];
+static int g_v91_startup_tx_len;
+static int g_v91_startup_tx_pos;
+static int g_v91_startup_remote_len;
+static int g_v91_startup_remote_pos;
+static int g_v91_ez_run;
+static bool g_v91_rx_synced;
+static bool g_v91_rx_startup_complete;
+static uint8_t g_v91_data_tx[V91_LIVE_DATA_CODEWORDS];
+static int g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
+static uint8_t g_v91_data_rx[V91_LIVE_DATA_CODEWORDS];
+static int g_v91_data_rx_pos;
+static bool g_v91_data_tx_guard;
+static bool g_v91_data_rx_synced;
+
+static int v91_live_append(uint8_t *dst, int cap, int pos,
+                           const uint8_t *src, int len)
+{
+    if (!dst || !src || pos < 0 || len < 0 || pos + len > cap)
+        return -1;
+    memcpy(dst + pos, src, (size_t)len);
+    return pos + len;
+}
+
+static int v91_live_build_startup(bool calling_party,
+                                  v91_law_t law,
+                                  v91_state_t *state,
+                                  uint8_t *out,
+                                  int out_cap)
+{
+    v91_info_frame_t info;
+    v91_dil_desc_t dil;
+    vpcm_cp_frame_t cp;
+    uint8_t tmp[2048];
+    int pos = 0;
+    int len;
+
+    v91_init(state, law, V91_MODE_TRANSPARENT);
+    memset(&info, 0, sizeof(info));
+    info.request_default_dil = true;
+    info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    info.power_measured_after_digital_impairments = true;
+    v91_default_dil_init(&dil);
+
+#define V91_APPEND_EXPR(expr) do { \
+        len = (expr); \
+        if (len <= 0 || (pos = v91_live_append(out, out_cap, pos, tmp, len)) < 0) \
+            return 0; \
+    } while (0)
+    V91_APPEND_EXPR(v91_tx_phase1_silence_codewords(state, tmp, sizeof(tmp)));
+    V91_APPEND_EXPR(v91_tx_ez_codewords(state, tmp, sizeof(tmp)));
+    V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
+    info.acknowledge_info_frame = true;
+    V91_APPEND_EXPR(v91_tx_info_codewords(state, tmp, sizeof(tmp), &info));
+    V91_APPEND_EXPR(v91_tx_eu_codewords(state, tmp, sizeof(tmp)));
+    V91_APPEND_EXPR(v91_tx_dil_codewords(state, tmp, sizeof(tmp), &dil));
+    V91_APPEND_EXPR(v91_tx_scr_codewords(state, tmp, sizeof(tmp), 18));
+    cp = g_v91_cp_ack;
+    cp.acknowledge = calling_party ? false : true;
+    V91_APPEND_EXPR(v91_tx_cp_codewords(state, tmp, sizeof(tmp), &cp, true));
+    V91_APPEND_EXPR(v91_tx_es_codewords(state, tmp, sizeof(tmp)));
+    V91_APPEND_EXPR(v91_tx_b1_codewords(state, tmp, sizeof(tmp), &g_v91_cp_ack));
+#undef V91_APPEND_EXPR
+    return pos;
+}
+
+static void v91_live_reset(void)
+{
+    memset(&g_v91_tx, 0, sizeof(g_v91_tx));
+    memset(&g_v91_rx, 0, sizeof(g_v91_rx));
+    g_v91_startup_tx_len = 0;
+    g_v91_startup_tx_pos = 0;
+    g_v91_startup_remote_len = 0;
+    g_v91_startup_remote_pos = 0;
+    g_v91_ez_run = 0;
+    g_v91_rx_synced = false;
+    g_v91_rx_startup_complete = false;
+    g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
+    g_v91_data_rx_pos = 0;
+    g_v91_data_tx_guard = false;
+    g_v91_data_rx_synced = false;
+}
+
+static bool v91_live_start_locked(void)
+{
+    v91_state_t expected_remote_state;
+    v91_law_t law = (g_law == ME_LAW_ALAW) ? V91_LAW_ALAW : V91_LAW_ULAW;
+
+    v91_live_reset();
+    vpcm_cp_init_robbed_bit_safe_profile(&g_v91_cp_ack,
+                                         vpcm_cp_recommended_robbed_bit_drn(),
+                                         false);
+    g_v91_cp_ack.acknowledge = true;
+    g_v91_startup_tx_len = v91_live_build_startup(g_calling_party, law,
+                                                   &g_v91_tx,
+                                                   g_v91_startup_tx,
+                                                   sizeof(g_v91_startup_tx));
+    g_v91_startup_remote_len = v91_live_build_startup(!g_calling_party, law,
+                                                       &expected_remote_state,
+                                                       g_v91_startup_remote,
+                                                       sizeof(g_v91_startup_remote));
+    v91_init(&g_v91_rx, law, V91_MODE_TRANSPARENT);
+    if (g_v91_startup_tx_len <= V91_PHASE1_SILENCE_SYMBOLS
+        || g_v91_startup_remote_len <= V91_PHASE1_SILENCE_SYMBOLS)
+        return false;
+    data_stack_prepare((int)vpcm_cp_drn_to_bps(g_v91_cp_ack.drn));
+    g_mod = ME_MOD_V91;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+    trace_phase("enter TRAINING: mod=V91 role=%s startup_tx=%d expected_rx=%d",
+                g_calling_party ? "caller" : "answerer",
+                g_v91_startup_tx_len, g_v91_startup_remote_len);
+    return true;
+}
+
+static void v91_live_try_enter_data_locked(void)
+{
+    int rate;
+
+    if (g_state != ME_TRAINING || g_mod != ME_MOD_V91
+        || g_v91_startup_tx_pos < g_v91_startup_tx_len
+        || !g_v91_rx_startup_complete)
+        return;
+    if (!v91_activate_data_mode(&g_v91_tx, &g_v91_cp_ack)
+        || !v91_activate_data_mode(&g_v91_rx, &g_v91_cp_ack)) {
+        g_state = ME_HANGUP;
+        return;
+    }
+    rate = (int)vpcm_cp_drn_to_bps(g_v91_cp_ack.drn);
+    data_stack_start_online(rate, g_calling_party);
+    g_state = ME_DATA;
+    g_phase_start_ms = 0;
+    g_v91_data_tx_pos = V91_LIVE_DATA_CODEWORDS;
+    g_v91_data_rx_pos = 0;
+    g_v91_data_tx_guard = true;
+    /* The peer's B1 tail and explicit guard can end at arbitrary RTP-frame
+     * offsets.  The receiver acquires the mapper boundary at the first
+     * non-idle primary-channel codeword instead of guessing packet counts. */
+    g_v91_data_rx_synced = false;
+    g_data_connect_reported = true;
+    di_on_connected(rate);
+    trace_phase("V91 enter DATA: rate=%d", rate);
+}
+
+static bool v91_live_generate_codewords_locked(uint8_t *out, int len)
+{
+    int pos = 0;
+
+    if (!out || len <= 0 || g_mod != ME_MOD_V91)
+        return false;
+    memset(out, v91_idle_codeword(g_v91_tx.law), (size_t)len);
+    if (g_state == ME_TRAINING) {
+        int remain = g_v91_startup_tx_len - g_v91_startup_tx_pos;
+        int copy = remain < len ? remain : len;
+
+        if (copy > 0) {
+            memcpy(out, g_v91_startup_tx + g_v91_startup_tx_pos, (size_t)copy);
+            g_v91_startup_tx_pos += copy;
+            pos = copy;
+        }
+        v91_live_try_enter_data_locked();
+        /* Do not mix B1 and primary-channel data in one RTP packet.  Starting
+         * data on the next pull gives both receivers an unambiguous 24-codeword
+         * mapper boundary after discarding the peer's final startup packet. */
+        return true;
+    }
+    if (g_state == ME_DATA && g_v91_data_tx_guard) {
+        g_v91_data_tx_guard = false;
+        return true;
+    }
+    while (pos < len) {
+        int available;
+        int copy;
+
+        if (g_v91_data_tx_pos >= V91_LIVE_DATA_CODEWORDS) {
+            uint8_t data[V91_LIVE_DATA_BYTES];
+
+            ds_tx_fill_bytes(&g_data_stack, data, sizeof(data));
+            if (v91_tx_codewords(&g_v91_tx,
+                                 g_v91_data_tx,
+                                 sizeof(g_v91_data_tx),
+                                 data,
+                                 sizeof(data)) != V91_LIVE_DATA_CODEWORDS)
+                return false;
+            g_v91_data_tx_pos = 0;
+        }
+        available = V91_LIVE_DATA_CODEWORDS - g_v91_data_tx_pos;
+        copy = available < (len - pos) ? available : (len - pos);
+        memcpy(out + pos, g_v91_data_tx + g_v91_data_tx_pos, (size_t)copy);
+        g_v91_data_tx_pos += copy;
+        pos += copy;
+    }
+    return true;
+}
+
+static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
+{
+    uint8_t ez = v91_ucode_to_codeword(g_v91_rx.law, 66, false);
+    int pos = 0;
+
+    while (pos < len && g_mod == ME_MOD_V91) {
+        if (g_state == ME_TRAINING) {
+            uint8_t cw = in[pos++];
+
+            /* The peer may finish a few codewords before our final RTP pull.
+             * Startup is already validated; discard the short overlap until
+             * our local B1 has also been transmitted. */
+            if (g_v91_rx_startup_complete) {
+                pos = len;
+                v91_live_try_enter_data_locked();
+                continue;
+            }
+
+            if (!g_v91_rx_synced) {
+                if (cw == ez)
+                    g_v91_ez_run++;
+                else
+                    g_v91_ez_run = 0;
+                if (g_v91_ez_run == V91_EZ_SYMBOLS) {
+                    g_v91_rx_synced = true;
+                    g_v91_startup_remote_pos = V91_PHASE1_SILENCE_SYMBOLS + V91_EZ_SYMBOLS;
+                    trace_phase("V91 RX synchronized at Ez");
+                }
+                continue;
+            }
+            if (g_v91_startup_remote_pos >= g_v91_startup_remote_len
+                || cw != g_v91_startup_remote[g_v91_startup_remote_pos++]) {
+                ME_LOG("[ME] V.91 startup mismatch at expected offset %d\n",
+                       g_v91_startup_remote_pos - 1);
+                v91_request_retrain(&g_v91_rx);
+                g_state = ME_HANGUP;
+                return;
+            }
+            if (g_v91_startup_remote_pos == g_v91_startup_remote_len) {
+                g_v91_rx_startup_complete = true;
+                trace_phase("V91 RX startup complete");
+                v91_live_try_enter_data_locked();
+                pos = len;
+            }
+            continue;
+        }
+        if (g_state == ME_DATA) {
+            uint8_t idle = v91_idle_codeword(g_v91_rx.law);
+            int copy = V91_LIVE_DATA_CODEWORDS - g_v91_data_rx_pos;
+
+            if (!g_v91_data_rx_synced) {
+                while (pos < len && in[pos] == idle)
+                    pos++;
+                if (pos == len)
+                    continue;
+                g_v91_data_rx_synced = true;
+                g_v91_data_rx_pos = 0;
+            }
+
+            if (copy > len - pos)
+                copy = len - pos;
+            memcpy(g_v91_data_rx + g_v91_data_rx_pos, in + pos, (size_t)copy);
+            g_v91_data_rx_pos += copy;
+            pos += copy;
+            if (g_v91_data_rx_pos == V91_LIVE_DATA_CODEWORDS) {
+                uint8_t data[V91_LIVE_DATA_BYTES];
+                int all_idle = 1;
+                int decoded;
+
+                for (int i = 0; i < V91_LIVE_DATA_CODEWORDS; i++) {
+                    if (g_v91_data_rx[i] != idle) {
+                        all_idle = 0;
+                        break;
+                    }
+                }
+                if (all_idle) {
+                    g_v91_data_rx_pos = 0;
+                    continue;
+                }
+                decoded = v91_rx_codewords(&g_v91_rx,
+                                                data,
+                                                sizeof(data),
+                                                g_v91_data_rx,
+                                                sizeof(g_v91_data_rx));
+                if (decoded != V91_LIVE_DATA_BYTES) {
+                    ME_LOG("[ME] V.91 data frame decode failed: decoded=%d/%d codewords=",
+                           decoded, V91_LIVE_DATA_BYTES);
+                    if (me_verbose_enabled()) {
+                        for (int i = 0; i < V91_LIVE_DATA_CODEWORDS; i++)
+                            fprintf(stderr, "%02X%s", g_v91_data_rx[i],
+                                    i + 1 == V91_LIVE_DATA_CODEWORDS ? "\n" : " ");
+                    }
+                    v91_note_frame_sync_loss(&g_v91_rx);
+                    g_state = ME_HANGUP;
+                    return;
+                }
+                ds_rx_push_bytes(&g_data_stack, data, decoded);
+                g_v91_data_rx_pos = 0;
+            }
+            continue;
+        }
+        break;
+    }
+}
 static bool           g_v90_dil_parse_logged = false;
 
 #define V90_DIL_CAPTURE_MAX_BITS 8192
@@ -577,7 +958,6 @@ static int        g_training_tx_samples = 0; /* Sample counter for TX silencing 
 /* Handshake timeouts (in milliseconds) */
 #define V8_TIMEOUT_MS       10000   /* V.8 negotiation: 10 seconds */
 #define TRAINING_TIMEOUT_MS 30000   /* V.34 training (Phase 2-4): 30 seconds */
-static uint64_t g_phase_start_ms = 0;      /* When current phase started */
 
 /* V.34 RX stage tracking — used for notch filter activation and diagnostics */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
@@ -734,10 +1114,11 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     if (g_advertise_v90) {
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL
+                                               | V8_PSTN_PCM_MODEM_V91;
     } else {
         v8_parms.jm_cm.pstn_access            = 0;
-        v8_parms.jm_cm.pcm_modem_availability = 0;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V91;
     }
     v8_parms.jm_cm.nsf                = -1;
     v8_parms.jm_cm.t66                = -1;
@@ -830,13 +1211,18 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 {
     pthread_mutex_lock(&g_state_mtx);
     if (g_state == ME_TRAINING && g_mod == mod) {
-        data_stack_restart(rate, rate);
+        data_stack_start_online(rate, g_calling_party);
         g_state = ME_DATA;
         g_phase_start_ms = 0;
         pthread_mutex_unlock(&g_state_mtx);
         ME_LOG("[ME] %s training complete (%d bps)\n", name, rate);
         trace_phase("%s training complete: rate=%d mod=%s", name, rate, me_mod_to_str(mod));
-        di_on_connected(rate);
+        if (g_data_framing != DS_FRAMING_V42) {
+            g_data_connect_reported = true;
+            di_on_connected(rate);
+        } else {
+            ME_LOG("[ME] Physical carrier ready; waiting for V.42 LAPM\n");
+        }
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
@@ -1085,7 +1471,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
 
                         if (downstream_rate <= 0)
                             downstream_rate = V90_RATE_BPS;
-                        data_stack_restart(downstream_rate, downstream_rate);
+                        data_stack_start_online(downstream_rate, g_calling_party);
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
@@ -1093,19 +1479,25 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
                         v90_reset_data_mode(g_v90);
                         g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
-                        di_on_connected(downstream_rate);
+                        if (g_data_framing != DS_FRAMING_V42) {
+                            g_data_connect_reported = true;
+                            di_on_connected(downstream_rate);
+                        }
                     } else if (!g_v90_completion_deferred_logged) {
                         ME_LOG("[ME] V.90 received generic training success from V.34, but V.90 startup is not complete yet; remaining in TRAINING\n");
                         trace_phase("V90 deferred DATA entry: V34 success before V90 startup complete");
                         g_v90_completion_deferred_logged = true;
                     }
                 } else {
-                    data_stack_restart(rate, rate);
+                    data_stack_start_online(rate, g_calling_party);
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
-                    di_on_connected(rate);
+                    if (g_data_framing != DS_FRAMING_V42) {
+                        g_data_connect_reported = true;
+                        di_on_connected(rate);
+                    }
                 }
                 return;
             }
@@ -1143,7 +1535,7 @@ static void start_v22bis_training(void)
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
-    data_stack_restart(2400, 2400);
+    data_stack_prepare(2400);
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
@@ -1182,7 +1574,7 @@ static void start_v34_training(void)
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
      */
     int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
-    data_stack_restart(bps, bps);
+    data_stack_prepare(bps);
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
                      bps,
@@ -1328,8 +1720,10 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     me_log_v8_peer_summary(result);
 
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
-    if (result->status == V8_STATUS_IN_PROGRESS ||
-        result->status == V8_STATUS_V8_OFFERED) {
+    if (result->status == V8_STATUS_IN_PROGRESS
+        || result->status == V8_STATUS_V8_OFFERED
+        || result->status == V8_STATUS_CALL_FUNCTION_RECEIVED
+        || result->status == V8_STATUS_CALLING_TONE_RECEIVED) {
         ME_LOG("[ME] V.8 in progress (status=%d)\n", result->status);
         return;
     }
@@ -1363,7 +1757,15 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
+    if ((result->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V91) != 0) {
+        ME_LOG("[ME] V.8 negotiated V.91 symmetric PCM mode\n");
+        trace_phase("V8 selected V91");
+        if (!v91_live_start_locked()) {
+            pthread_mutex_unlock(&g_state_mtx);
+            me_hangup();
+            return;
+        }
+    } else if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
         && (result->jm_cm.modulations & V8_MOD_V34)) {
         /*
          * V.90 selected: downstream = PCM codeword injection (up to 56 kbps),
@@ -1439,12 +1841,21 @@ void me_init(void)
     {
         const char *framing = getenv("ME_DATA_FRAMING");
 
-        if (framing && strcmp(framing, "raw") == 0)
+        if (framing && strcmp(framing, "raw") == 0) {
             g_data_framing = DS_FRAMING_RAW;
-        else
+        } else if (framing && strcmp(framing, "lapm") == 0) {
+            g_data_framing = DS_FRAMING_V42;
+            g_data_lapm_detect = true;
+        } else if (framing && strcmp(framing, "lapm-bypass") == 0) {
+            g_data_framing = DS_FRAMING_V42;
+            g_data_lapm_detect = false;
+        } else {
             g_data_framing = DS_FRAMING_V14;
+        }
         ME_LOG("[ME] DTE framing: %s%s\n",
-               g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" : "RAW",
+               g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
+               g_data_framing == DS_FRAMING_RAW ? "RAW" :
+               g_data_lapm_detect ? "V.42 LAPM" : "V.42 LAPM (ODP/ADP bypass)",
                g_data_framing == DS_FRAMING_RAW ? " (diagnostic only)" : "");
     }
     cr_init(&g_cr, 8000);
@@ -1484,6 +1895,7 @@ void me_init(void)
     }
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
+    v91_live_reset();
 }
 
 void me_destroy(void)
@@ -1491,7 +1903,9 @@ void me_destroy(void)
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     cleanup_v34_v90_training_locked();
+    v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
+    ds_release(&g_data_stack);
     g711_taps_close();
     pthread_mutex_destroy(&g_state_mtx);
 }
@@ -1541,6 +1955,8 @@ void me_on_sip_connected(void)
     g_v8_answer_tone_retry_done = false;
     g_v92_active = false;
     g_v92_trn2u_active = false;
+    g_data_link_failed = false;
+    g_data_connect_reported = false;
 
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
@@ -1576,7 +1992,9 @@ void me_on_sip_disconnected(void)
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     cleanup_v34_v90_training_locked();
+    v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
+    ds_release(&g_data_stack);
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
 
@@ -1599,7 +2017,30 @@ void me_rx_audio(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
+    me_modulation_t mod = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
+
+    /* Linear PCM is a debugging fallback for V.91.  Real carriage enters via
+     * me_rx_g711(), but keeping this path functional makes failures explicit
+     * instead of silently feeding V.91 codewords into the V.34 receiver. */
+    if (mod == ME_MOD_V91 && (state == ME_TRAINING || state == ME_DATA)) {
+        int offset = 0;
+
+        while (offset < len) {
+            uint8_t codewords[320];
+            int chunk = len - offset;
+
+            if (chunk > (int)sizeof(codewords))
+                chunk = (int)sizeof(codewords);
+            for (int i = 0; i < chunk; i++)
+                codewords[i] = linear_to_pcm(amp[offset + i]);
+            pthread_mutex_lock(&g_state_mtx);
+            v91_live_receive_codewords_locked(codewords, chunk);
+            pthread_mutex_unlock(&g_state_mtx);
+            offset += chunk;
+        }
+        return;
+    }
 
     /* Check for phase timeouts */
     if (g_phase_start_ms > 0) {
@@ -2041,7 +2482,7 @@ static void enter_v90_data_locked(void)
     downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
     if (downstream_rate <= 0)
         downstream_rate = V90_RATE_BPS;
-    data_stack_restart(downstream_rate, downstream_rate);
+    data_stack_start_online(downstream_rate, g_calling_party);
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -2049,7 +2490,12 @@ static void enter_v90_data_locked(void)
            upstream_rate, downstream_rate);
     trace_phase("V90 enter DATA after B1d: upstream=%d downstream=%d",
                 upstream_rate, downstream_rate);
-    di_on_connected(downstream_rate);
+    if (g_data_framing != DS_FRAMING_V42) {
+        g_data_connect_reported = true;
+        di_on_connected(downstream_rate);
+    } else {
+        ME_LOG("[ME] V.90 carrier ready; waiting for V.42 LAPM\n");
+    }
 }
 
 /* Called with g_state_mtx held. Returns true when codewords were generated
@@ -2143,7 +2589,16 @@ void me_tx_audio(int16_t *amp, int len)
          * equalizer training). The put_bit callback fires SIG_STATUS_CARRIER_UP
          * when training completes, transitioning us to ME_DATA.
          */
-        if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
+        if (g_mod == ME_MOD_V91) {
+            uint8_t pcm_out[len];
+
+            pthread_mutex_lock(&g_state_mtx);
+            if (v91_live_generate_codewords_locked(pcm_out, len)) {
+                for (int i = 0; i < len; i++)
+                    amp[i] = pcm_to_linear(pcm_out[i]);
+            }
+            pthread_mutex_unlock(&g_state_mtx);
+        } else if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
             if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
                 /* V.90: detect Phase 2→3 and create the raw-codeword state. */
@@ -2205,7 +2660,16 @@ void me_tx_audio(int16_t *amp, int len)
         break;
 
     case ME_DATA:
-        if (g_mod == ME_MOD_V34) {
+        if (g_mod == ME_MOD_V91) {
+            uint8_t pcm_out[len];
+
+            pthread_mutex_lock(&g_state_mtx);
+            if (v91_live_generate_codewords_locked(pcm_out, len)) {
+                for (int i = 0; i < len; i++)
+                    amp[i] = pcm_to_linear(pcm_out[i]);
+            }
+            pthread_mutex_unlock(&g_state_mtx);
+        } else if (g_mod == ME_MOD_V34) {
             /* V.34 full duplex data TX */
             pthread_mutex_lock(&g_state_mtx);
             if (g_mod == ME_MOD_V34 && g_v34)
@@ -2242,12 +2706,17 @@ void me_tx_audio(int16_t *amp, int len)
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
+    bool raw_v91;
 
     if (!codewords || count <= 0)
         return;
 
     pthread_mutex_lock(&g_state_mtx);
     g_g711_rx_octets += (uint64_t)count;
+    raw_v91 = (g_mod == ME_MOD_V91
+               && (g_state == ME_TRAINING || g_state == ME_DATA));
+    if (raw_v91)
+        v91_live_receive_codewords_locked(codewords, count);
     if (g_v92_trn2u_active && g_v92_active && g_v90
         && g_state == ME_TRAINING
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
@@ -2257,6 +2726,15 @@ void me_rx_g711(const uint8_t *codewords, int count)
     pthread_mutex_unlock(&g_state_mtx);
     if (g_g711_rx_tap)
         (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+
+    if (raw_v91) {
+        uint8_t buf[256];
+        int n;
+
+        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
+            di_write_data(buf, n);
+        return;
+    }
 
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
@@ -2283,16 +2761,17 @@ int me_tx_g711(uint8_t *codewords, int count)
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
         int chunk = count - offset;
-        bool raw_v90;
+        bool raw_pcm;
 
         if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
             chunk = (int)(sizeof(linear) / sizeof(linear[0]));
 
         pthread_mutex_lock(&g_state_mtx);
-        raw_v90 = generate_v90_raw_codewords_locked(codewords + offset, chunk);
+        raw_pcm = v91_live_generate_codewords_locked(codewords + offset, chunk)
+               || generate_v90_raw_codewords_locked(codewords + offset, chunk);
         pthread_mutex_unlock(&g_state_mtx);
 
-        if (raw_v90) {
+        if (raw_pcm) {
             for (int i = 0; i < chunk; i++)
                 linear[i] = pcm_to_linear(codewords[offset + i]);
             buffer_tx_samples_for_echo(linear, chunk);
@@ -2339,6 +2818,12 @@ int me_get_data(uint8_t *buf, int max_len)
 me_state_t me_get_state(void)
 {
     pthread_mutex_lock(&g_state_mtx);
+    if (g_data_link_failed && g_state == ME_DATA) {
+        g_data_link_failed = false;
+        ME_LOG("[ME] V.42 failure requested call teardown\n");
+        trace_phase("V42 link failure -> HANGUP");
+        g_state = ME_HANGUP;
+    }
     me_state_t s = g_state;
     pthread_mutex_unlock(&g_state_mtx);
     return s;

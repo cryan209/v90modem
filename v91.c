@@ -3,6 +3,7 @@
  */
 
 #include "v91.h"
+#include "v90.h"
 
 #include <spandsp.h>
 
@@ -203,6 +204,8 @@ static void v91_complete_alignment_signal(v91_state_t *s)
 {
     s->frame_aligned = true;
     s->retrain_requested = false;
+    s->retrain_timer_active = false;
+    s->rx_data_clamped = false;
     s->circuit_107_on = true;
     s->next_frame_interval = 0;
 }
@@ -412,7 +415,7 @@ static int v91_rx_diff_bits_stateful(v91_state_t *s,
 {
     int i;
 
-    if (!s || !g711_in || !bits_out || g711_len <= 0 || g711_len > VPCM_CP_MAX_BITS)
+    if (!s || !g711_in || !bits_out || g711_len <= 0)
         return 0;
 
     if (reset_coders) {
@@ -654,6 +657,25 @@ int v91_tx_eu_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
     return count;
 }
 
+bool v91_rx_eu_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len)
+{
+    int prev_sign;
+    int i;
+
+    if (!s || !g711_in || g711_len != V91_EU_SYMBOLS)
+        return false;
+    prev_sign = s->rx_prev_sign;
+    for (i = 0; i < g711_len; i++) {
+        int sign = (g711_in[i] & 0x80) ? 1 : 0;
+        if ((sign ^ prev_sign) != 0 || v91_codeword_to_ucode(s->law, g711_in[i]) != 66)
+            return false;
+        prev_sign = sign;
+    }
+    s->rx_prev_sign = prev_sign;
+    v91_complete_alignment_signal(s);
+    return true;
+}
+
 int v91_tx_em_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
 {
     int i;
@@ -673,6 +695,24 @@ int v91_tx_em_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
     if (count == V91_EM_SYMBOLS)
         v91_complete_alignment_signal(s);
     return count;
+}
+
+bool v91_rx_em_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len)
+{
+    uint8_t bits[V91_EM_SYMBOLS];
+    int i;
+
+    if (!s || !g711_in || g711_len != V91_EM_SYMBOLS)
+        return false;
+    if (v91_rx_diff_bits_stateful(s, g711_in, g711_len,
+                                  bits, false, true) != g711_len)
+        return false;
+    for (i = 0; i < g711_len; i++) {
+        if (bits[i] != 0 || v91_codeword_to_ucode(s->law, g711_in[i]) != 66)
+            return false;
+    }
+    v91_complete_alignment_signal(s);
+    return true;
 }
 
 int v91_tx_ez_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
@@ -698,20 +738,157 @@ int v91_tx_ez_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max)
     return count;
 }
 
+bool v91_rx_ez_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len)
+{
+    uint8_t expected;
+    int i;
+
+    if (!s || !g711_in || g711_len != V91_EZ_SYMBOLS)
+        return false;
+    expected = v91_ucode_to_codeword(s->law, 66, false);
+    for (i = 0; i < g711_len; i++) {
+        if (g711_in[i] != expected)
+            return false;
+    }
+    s->scramble_reg = 0;
+    s->rx_scramble_reg = 0;
+    s->diff_sign = 0;
+    s->rx_prev_sign = 0;
+    s->frame_aligned = false;
+    s->circuit_107_on = false;
+    s->next_frame_interval = -1;
+    return true;
+}
+
 int v91_tx_phil_codewords(v91_state_t *s,
                           uint8_t *g711_out,
                           int g711_max,
                           int nsymbols,
                           bool continue_from_current)
 {
-    /* PHIL resets its line coders unless it follows J, which we have not
-       implemented yet. The caller can still request state continuity for
-       future J->PHIL use. */
+    /* V.91 7.10: reset unless PHIL immediately follows J. */
     return v91_tx_scrambled_ones_codewords(s,
                                            g711_out,
                                            g711_max,
                                            nsymbols,
                                            !continue_from_current);
+}
+
+bool v91_rx_phil_codewords(v91_state_t *s,
+                           const uint8_t *g711_in,
+                           int g711_len,
+                           bool continue_from_current)
+{
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int i;
+
+    if (!s || !g711_in || g711_len <= 0 || g711_len > VPCM_CP_MAX_BITS)
+        return false;
+    if (v91_rx_diff_bits_stateful(s,
+                                  g711_in,
+                                  g711_len,
+                                  bits,
+                                  !continue_from_current,
+                                  true) != g711_len)
+        return false;
+    for (i = 0; i < g711_len; i++) {
+        if (bits[i] != 1)
+            return false;
+    }
+    return true;
+}
+
+static void v91_dil_to_v90(v90_dil_desc_t *dst, const v91_dil_desc_t *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->n = src->n;
+    dst->lsp = src->lsp;
+    dst->ltp = src->ltp;
+    memcpy(dst->sp, src->sp, sizeof(dst->sp));
+    memcpy(dst->tp, src->tp, sizeof(dst->tp));
+    memcpy(dst->h, src->h, sizeof(dst->h));
+    memcpy(dst->ref, src->ref, sizeof(dst->ref));
+    memcpy(dst->train_u, src->train_u, sizeof(dst->train_u));
+}
+
+static void v91_dil_from_v90(v91_dil_desc_t *dst, const v90_dil_desc_t *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->n = src->n;
+    dst->lsp = src->lsp;
+    dst->ltp = src->ltp;
+    memcpy(dst->sp, src->sp, sizeof(dst->sp));
+    memcpy(dst->tp, src->tp, sizeof(dst->tp));
+    memcpy(dst->h, src->h, sizeof(dst->h));
+    memcpy(dst->ref, src->ref, sizeof(dst->ref));
+    memcpy(dst->train_u, src->train_u, sizeof(dst->train_u));
+}
+
+int v91_j_descriptor_bit_len(const v91_dil_desc_t *desc)
+{
+    v90_dil_desc_t v90_desc;
+
+    if (!desc)
+        return 0;
+    v91_dil_to_v90(&v90_desc, desc);
+    return v90_dil_descriptor_bit_len(&v90_desc);
+}
+
+int v91_tx_j_codewords(v91_state_t *s,
+                       uint8_t *g711_out,
+                       int g711_max,
+                       const v91_dil_desc_t *desc)
+{
+    v90_dil_desc_t v90_desc;
+    uint8_t packed[(V91_J_MAX_BITS + 7) / 8];
+    uint8_t bits[V91_J_MAX_BITS];
+    int bit_len;
+    int i;
+
+    if (!s || !g711_out || !desc)
+        return 0;
+    v91_dil_to_v90(&v90_desc, desc);
+    if (!v90_build_dil_descriptor_bits(packed, sizeof(packed), &bit_len, &v90_desc)
+        || bit_len <= 0 || bit_len > V91_J_MAX_BITS || g711_max < bit_len)
+        return 0;
+    for (i = 0; i < bit_len; i++)
+        bits[i] = (uint8_t) ((packed[i / 8] >> (i % 8)) & 1U);
+
+    /* V.91 7.9: keep the final INFO differential state, reset only GPC. */
+    s->scramble_reg = 0;
+    if (v91_tx_diff_bits_codewords(s, g711_out, g711_max,
+                                   bits, bit_len, false, true) != bit_len)
+        return 0;
+    s->last_tx_dil = *desc;
+    s->last_tx_dil_valid = true;
+    return bit_len;
+}
+
+bool v91_rx_j_codewords(v91_state_t *s,
+                        const uint8_t *g711_in,
+                        int g711_len,
+                        v91_dil_desc_t *desc_out)
+{
+    v90_dil_desc_t v90_desc;
+    uint8_t packed[(V91_J_MAX_BITS + 7) / 8];
+    uint8_t bits[V91_J_MAX_BITS];
+    int i;
+
+    if (!s || !g711_in || !desc_out || g711_len <= 0 || g711_len > V91_J_MAX_BITS)
+        return false;
+    s->rx_scramble_reg = 0;
+    if (v91_rx_diff_bits_stateful(s, g711_in, g711_len,
+                                  bits, false, true) != g711_len)
+        return false;
+    memset(packed, 0, sizeof(packed));
+    for (i = 0; i < g711_len; i++) {
+        if (bits[i])
+            packed[i / 8] |= (uint8_t) (1U << (i % 8));
+    }
+    if (!v90_parse_dil_descriptor(&v90_desc, packed, g711_len))
+        return false;
+    v91_dil_from_v90(desc_out, &v90_desc);
+    return v91_note_received_dil(s, desc_out, NULL);
 }
 
 int v91_tx_scr_codewords(v91_state_t *s,
@@ -914,6 +1091,8 @@ bool v91_rx_info_codewords(v91_state_t *s,
     }
     s->last_rx_info = *info_out;
     s->last_rx_info_valid = true;
+    /* J, when present, continues from the final received INFO sign. */
+    s->rx_prev_sign = prev_sign;
     return true;
 }
 
@@ -1146,18 +1325,75 @@ int v91_tx_startup_dil_sequence_codewords(v91_state_t *s,
 
 void v91_note_frame_sync_loss(v91_state_t *s)
 {
+    if (!s)
+        return;
     s->frame_aligned = false;
     s->retrain_requested = true;
+    s->retrain_timer_active = true;
+    s->rx_data_clamped = true;
     s->next_frame_interval = -1;
     s->data_mode_active = false;
-    s->active_k = 0;
-    s->active_s = 0;
-    s->active_primary_bits_per_frame = 0;
-    s->active_transparent_mode = false;
-    s->tx_bit_accum = 0;
-    s->tx_bit_count = 0;
     s->rx_bit_accum = 0;
     s->rx_bit_count = 0;
+}
+
+bool v91_note_frame_sync_reacquired(v91_state_t *s)
+{
+    if (!s || s->connection_terminated || s->active_k <= 0)
+        return false;
+    s->frame_aligned = true;
+    s->retrain_timer_active = false;
+    s->rx_data_clamped = false;
+    s->retrain_requested = false;
+    s->next_frame_interval = 0;
+    s->data_mode_active = true;
+    s->rx_bit_accum = 0;
+    s->rx_bit_count = 0;
+    return true;
+}
+
+void v91_request_retrain(v91_state_t *s)
+{
+    if (!s || s->connection_terminated)
+        return;
+    s->circuit_106_on = false;
+    s->rx_data_clamped = true;
+    s->retrain_requested = true;
+    s->retrain_timer_active = true;
+    s->frame_aligned = false;
+    s->data_mode_active = false;
+    s->next_frame_interval = -1;
+}
+
+void v91_note_retrain_complete(v91_state_t *s)
+{
+    if (!s || s->connection_terminated)
+        return;
+    s->retrain_requested = false;
+    s->retrain_timer_active = false;
+    s->rx_data_clamped = true;
+    s->frame_aligned = false;
+    s->next_frame_interval = -1;
+}
+
+void v91_request_cleardown(v91_state_t *s)
+{
+    if (!s)
+        return;
+    s->cleardown_requested = true;
+    s->connection_terminated = true;
+    s->retrain_timer_active = false;
+    s->retrain_requested = false;
+    s->rx_data_clamped = true;
+    s->data_mode_active = false;
+    s->circuit_106_on = false;
+    s->circuit_107_on = false;
+    s->circuit_109_on = false;
+}
+
+void v91_note_recovery_timeout(v91_state_t *s)
+{
+    v91_request_cleardown(s);
 }
 
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp)
@@ -1176,6 +1412,14 @@ bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp)
     s->active_primary_bits_per_frame = v91_primary_bits_per_frame(cp, k);
     s->active_transparent_mode = (cp->transparent_mode_granted && cp->drn == 28);
     s->data_mode_active = true;
+    s->connection_terminated = false;
+    s->cleardown_requested = false;
+    s->retrain_requested = false;
+    s->retrain_timer_active = false;
+    s->rx_data_clamped = false;
+    s->circuit_106_on = true;
+    s->circuit_107_on = true;
+    s->circuit_109_on = true;
     s->tx_bit_accum = 0;
     s->tx_bit_count = 0;
     s->rx_bit_accum = 0;

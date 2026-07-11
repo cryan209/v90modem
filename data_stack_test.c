@@ -272,6 +272,101 @@ static void test_v14_v90_style_reservoir(void)
           "V.14 remains byte exact through V.90-style 29-bit frames");
 }
 
+typedef struct {
+    uint8_t tx[2048];
+    int tx_len;
+    int tx_pos;
+    uint8_t rx[2048];
+    int rx_len;
+    bool connected;
+    bool xid;
+    bool failed;
+} lapm_endpoint_t;
+
+static int lapm_pull(void *ctx)
+{
+    lapm_endpoint_t *ep = (lapm_endpoint_t *)ctx;
+
+    return (ep->tx_pos < ep->tx_len) ? ep->tx[ep->tx_pos++] : -1;
+}
+
+static void lapm_push(void *ctx, uint8_t byte)
+{
+    lapm_endpoint_t *ep = (lapm_endpoint_t *)ctx;
+
+    if (ep->rx_len < (int)sizeof(ep->rx))
+        ep->rx[ep->rx_len++] = byte;
+}
+
+static void lapm_event(void *ctx, ds_link_event_t event)
+{
+    lapm_endpoint_t *ep = (lapm_endpoint_t *)ctx;
+
+    if (event == DS_LINK_CONNECTED)
+        ep->connected = true;
+    else if (event == DS_LINK_XID_NEGOTIATED)
+        ep->xid = true;
+    else if (event == DS_LINK_ERROR || event == DS_LINK_UNSUPPORTED)
+        ep->failed = true;
+}
+
+static void test_lapm_data_stack_roundtrip_mode(bool detect, const char *label)
+{
+    data_stack_t caller;
+    data_stack_t answerer;
+    lapm_endpoint_t caller_ep;
+    lapm_endpoint_t answerer_ep;
+    bool caller_initialized;
+    bool answerer_initialized;
+
+    memset(&caller_ep, 0, sizeof(caller_ep));
+    memset(&answerer_ep, 0, sizeof(answerer_ep));
+    memset(&caller, 0, sizeof(caller));
+    memset(&answerer, 0, sizeof(answerer));
+    caller_ep.tx_len = 1024;
+    answerer_ep.tx_len = 1024;
+    for (int i = 0; i < 1024; i++) {
+        caller_ep.tx[i] = (uint8_t)(i * 29 + 3);
+        answerer_ep.tx[i] = (uint8_t)(i * 47 + 11);
+    }
+
+    caller_initialized = ds_init_v42(&caller, true, detect, 9600,
+                                     lapm_pull, &caller_ep,
+                                     lapm_push, &caller_ep,
+                                     lapm_event, &caller_ep) == 0;
+    answerer_initialized = ds_init_v42(&answerer, false, detect, 9600,
+                                       lapm_pull, &answerer_ep,
+                                       lapm_push, &answerer_ep,
+                                       lapm_event, &answerer_ep) == 0;
+    if (caller_initialized && answerer_initialized) {
+        for (int tick = 0; tick < 9600 * 10; tick++) {
+            ds_rx_put_bit(&answerer, ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller, ds_tx_get_bit(&answerer));
+            if (caller_ep.rx_len == answerer_ep.tx_len
+                && answerer_ep.rx_len == caller_ep.tx_len) {
+                break;
+            }
+        }
+    }
+
+    CHECK(caller_initialized && answerer_initialized
+          && caller_ep.connected && answerer_ep.connected
+          && caller_ep.xid && answerer_ep.xid
+          && ds_link_is_ready(&caller) && ds_link_is_ready(&answerer)
+          && !caller_ep.failed && !answerer_ep.failed
+          && caller_ep.rx_len == answerer_ep.tx_len
+          && answerer_ep.rx_len == caller_ep.tx_len
+          && memcmp(caller_ep.rx, answerer_ep.tx,
+                    (size_t)answerer_ep.tx_len) == 0
+          && memcmp(answerer_ep.rx, caller_ep.tx,
+                    (size_t)caller_ep.tx_len) == 0,
+          label);
+    if (caller_initialized)
+        ds_release(&caller);
+    if (answerer_initialized)
+        ds_release(&answerer);
+}
+
 /* Random payloads through the bit interface with idle gaps between bursts. */
 static void test_v14_bursty_random(void)
 {
@@ -319,6 +414,10 @@ int main(void)
     test_raw_roundtrip();
     test_packed_byte_helpers();
     test_v14_v90_style_reservoir();
+    test_lapm_data_stack_roundtrip_mode(true,
+          "data stack LAPM detection negotiates and transfers byte-exact payloads");
+    test_lapm_data_stack_roundtrip_mode(false,
+          "data stack LAPM bypass negotiates and transfers byte-exact payloads");
     test_v14_bursty_random();
 
     if (failures) {

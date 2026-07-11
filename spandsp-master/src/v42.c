@@ -198,6 +198,8 @@ SPAN_DECLARE(const char *) v42_status_to_str(int status)
         return "V.42 detection succeeded";
     case V42_STATUS_DETECTION_UNSUPPORTED:
         return "V.42 unsupported";
+    case V42_STATUS_XID_NEGOTIATED:
+        return "V.42 XID negotiated";
     case SIG_STATUS_LINK_CONNECTED:
     case SIG_STATUS_LINK_DISCONNECTED:
     case SIG_STATUS_LINK_ERROR:
@@ -306,7 +308,7 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     s = &ss->lapm;
     if (frame[2] != FI_GENERAL)
         return -1;
-    memset(&config, 0, sizeof(config));
+    config = ss->config;
     /* Skip the header octets */
     frame += 3;
     len -= 3;
@@ -399,7 +401,15 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
             break;
         }
     }
-    //v42_update_config(ss, &config);
+    ss->negotiated.valid = true;
+    ss->negotiated.tx_n401 = s->tx_n401;
+    ss->negotiated.rx_n401 = s->rx_n401;
+    ss->negotiated.tx_window_size_k = s->tx_window_size_k;
+    ss->negotiated.rx_window_size_k = s->rx_window_size_k;
+    ss->negotiated.compression_p0 = config.comp;
+    ss->negotiated.compression_p1 = config.comp_dict_size;
+    ss->negotiated.compression_p2 = config.comp_max_string;
+    report_rx_status_change(ss, V42_STATUS_XID_NEGOTIATED);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1471,6 +1481,16 @@ SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v42_get_negotiated_parameters(const v42_state_t *s,
+                                                v42_negotiated_parameters_t *out)
+{
+    if (s == NULL  ||  out == NULL  ||  !s->negotiated.valid)
+        return -1;
+    *out = s->negotiated;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(bool) v42_set_local_busy_status(v42_state_t *s, bool busy)
 {
     bool previous_busy;
@@ -1502,6 +1522,7 @@ SPAN_DECLARE(void) v42_set_status_callback(v42_state_t *s, span_modem_status_fun
 
 SPAN_DECLARE(void) v42_restart(v42_state_t *s)
 {
+    memset(&s->negotiated, 0, sizeof(s->negotiated));
     hdlc_tx_init(&s->lapm.hdlc_tx, false, 1, true, lapm_hdlc_underflow, s);
     hdlc_rx_init(&s->lapm.hdlc_rx, false, false, 1, lapm_receive, s);
 

@@ -293,6 +293,8 @@ static void on_call_media_state(pjsua_call_id call_id)
 
         if (ci.media[i].type == PJMEDIA_TYPE_AUDIO &&
             ci.media[i].status == PJSUA_CALL_MEDIA_ACTIVE) {
+            pjsua_conf_port_id conf_port;
+
             g_call_id = call_id;
             if (pjsua_call_get_stream_info(call_id, i, &si) == PJ_SUCCESS &&
                 si.type == PJMEDIA_TYPE_AUDIO) {
@@ -304,6 +306,20 @@ static void on_call_media_state(pjsua_call_id call_id)
                     me_set_law(ME_LAW_ULAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
                 }
+            }
+            /* The null sound device supplies the media clock, but PJSUA does
+             * not connect a call to it automatically.  Clock both directions
+             * so the passthrough port's get/put callbacks actually run. */
+            conf_port = pjsua_call_get_conf_port(call_id);
+            if (conf_port != PJSUA_INVALID_ID) {
+                pj_status_t tx_st = pjsua_conf_connect(0, conf_port);
+                pj_status_t rx_st = pjsua_conf_connect(conf_port, 0);
+
+                if (tx_st != PJ_SUCCESS || rx_st != PJ_SUCCESS)
+                    PJ_LOG(2, ("sip_modem", "Media clock wiring failed: conf=%d tx=%d rx=%d",
+                               conf_port, tx_st, rx_st));
+                else
+                    PJ_LOG(3, ("sip_modem", "Media clock wired: conf %d <-> 0", conf_port));
             }
             if (!g_media_connected) {
                 me_on_sip_connected();
@@ -660,9 +676,24 @@ int main(int argc, char *argv[])
     /* ── Main event loop ─────────────────────────────────────────── */
     while (g_running) {
         me_state_t state_now;
+        uint8_t dte_buf[256];
+        int dte_len;
 
         /* Poll for PJSIP events (10 ms tick) */
         pjsua_handle_events(10);
+
+        /* Move online serial payload into the modem engine.  The PTY reader
+         * owns AT/escape handling; only bytes exposed by di_read_data() are
+         * connection payload. */
+        while ((dte_len = di_read_data(dte_buf, (int) sizeof(dte_buf))) > 0) {
+            int accepted = me_put_data(dte_buf, dte_len);
+
+            if (accepted != dte_len) {
+                PJ_LOG(2, ("sip_modem", "DTE TX ring overrun: accepted %d/%d bytes",
+                           accepted, dte_len));
+                break;
+            }
+        }
 
         state_now = me_get_state();
         if (state_now != g_last_logged_me_state) {
@@ -692,10 +723,12 @@ int main(int argc, char *argv[])
                     /* Answer the call */
                     PJ_LOG(3, ("sip_modem", "Auto-answering after %d rings",
                                g_ring_count));
-                    pjsua_call_answer(g_ringing_call, 200, NULL, NULL);
                     g_call_id      = g_ringing_call;
                     g_ringing_call = PJSUA_INVALID_ID;
                     g_ring_count   = 0;
+                    /* Set g_call_id before pjsua_call_answer(): stream-created
+                     * callbacks may run synchronously from the answer call. */
+                    pjsua_call_answer(g_call_id, 200, NULL, NULL);
                 }
             }
         }
@@ -704,16 +737,27 @@ int main(int argc, char *argv[])
         if (state_now == ME_DIALING && g_call_id == PJSUA_INVALID_ID) {
             const char *uri = me_get_dial_uri();
             if (uri && uri[0]) {
-                pj_str_t dst = pj_str((char *)uri);
+                char dial_uri[512];
+                const char *resolved_uri = uri;
+
+                /* Hayes dial strings are normally numeric and SpanDSP's AT
+                 * parser deliberately rejects SIP punctuation. Resolve a DTE
+                 * number against --sip-server while still accepting a full
+                 * URI from non-AT callers of me_dial(). */
+                if (strncmp(uri, "sip:", 4) != 0 && sip_server && sip_server[0]) {
+                    snprintf(dial_uri, sizeof(dial_uri), "sip:%s@%s", uri, sip_server);
+                    resolved_uri = dial_uri;
+                }
+                pj_str_t dst = pj_str((char *)resolved_uri);
                 pjsua_call_setting opt;
                 pjsua_call_setting_default(&opt);
                 status = pjsua_call_make_call(g_acc_id, &dst, &opt,
                                               NULL, NULL, &g_call_id);
                 if (status != PJ_SUCCESS) {
-                    PJ_LOG(2, ("sip_modem", "Call to %s failed", uri));
+                    PJ_LOG(2, ("sip_modem", "Call to %s failed", resolved_uri));
                     me_hangup();
                 } else {
-                    PJ_LOG(3, ("sip_modem", "Outgoing call to %s", uri));
+                    PJ_LOG(3, ("sip_modem", "Outgoing call to %s", resolved_uri));
                 }
             }
         }

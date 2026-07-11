@@ -23,6 +23,7 @@ typedef struct {
     bool detecting;
     bool detection_succeeded;
     bool detection_unsupported;
+    bool xid_negotiated;
     bool connected;
     bool disconnected;
     bool link_error;
@@ -85,6 +86,9 @@ static void status_changed(void *user_data, int status)
         ep->detection_unsupported = true;
         ep->unsupported_at = ep->tick;
         break;
+    case V42_STATUS_XID_NEGOTIATED:
+        ep->xid_negotiated = true;
+        break;
     case SIG_STATUS_LINK_CONNECTED:
         ep->connected = true;
         break;
@@ -120,6 +124,8 @@ static bool run_link_case(int bit_rate,
     endpoint_t answerer_ep;
     v42_state_t *caller = NULL;
     v42_state_t *answerer = NULL;
+    v42_negotiated_parameters_t caller_xid;
+    v42_negotiated_parameters_t answerer_xid;
     uint64_t max_ticks = (uint64_t)bit_rate*20U;
     uint64_t busy_release_tick = 0;
     bool busy_started = false;
@@ -194,8 +200,21 @@ static bool run_link_case(int bit_rate,
         }
     }
 
+    memset(&caller_xid, 0, sizeof(caller_xid));
+    memset(&answerer_xid, 0, sizeof(answerer_xid));
     ok = caller_ep.detecting && answerer_ep.detecting
       && caller_ep.detection_succeeded && answerer_ep.detection_succeeded
+      && caller_ep.xid_negotiated && answerer_ep.xid_negotiated
+      && v42_get_negotiated_parameters(caller, &caller_xid) == 0
+      && v42_get_negotiated_parameters(answerer, &answerer_xid) == 0
+      && caller_xid.valid && answerer_xid.valid
+      && caller_xid.tx_n401 == 128 && caller_xid.rx_n401 == 128
+      && answerer_xid.tx_n401 == 128 && answerer_xid.rx_n401 == 128
+      && caller_xid.tx_window_size_k == 15
+      && answerer_xid.tx_window_size_k == 15
+      && caller_xid.compression_p0 == 1
+      && answerer_xid.compression_p1 == 512
+      && answerer_xid.compression_p2 == 6
       && (exercise_release
           ? (caller_ep.disconnected && answerer_ep.disconnected)
           : (caller_ep.connected && answerer_ep.connected))

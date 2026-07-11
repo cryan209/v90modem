@@ -10,6 +10,8 @@ USE_LOCAL_PJPROJECT ?= 1
 PJ_LOCAL_ROOT ?= pjproject
 PJ_LOCAL_MAKEFILE := $(PJ_LOCAL_ROOT)/Makefile
 PJ_HOST_STAMP := $(PJ_LOCAL_ROOT)/.build-host
+PJ_CONFIG_SITE := pj_config_site.h
+PJ_LOCAL_CONFIG_SITE := $(PJ_LOCAL_ROOT)/pjlib/include/pj/config_site.h
 
 # Local SpanDSP 3.0.0 build (with V.34 support)
 SPANDSP_ROOT = spandsp-master
@@ -151,7 +153,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -159,6 +161,9 @@ test: $(TEST_TARGETS)
 	./data_stack_test
 	./v42_link_test
 	./vpcm_loopback_test --all-tests
+
+v91-serial-pair-test: $(TARGET)
+	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
@@ -178,8 +183,8 @@ vpcm_decode: $(DECODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
 v92_trn2u_replay: $(V92_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V92_REPLAY_OBJS) -o $@ $(LDFLAGS)
 
-data_stack_test: $(DATA_STACK_TEST_OBJS)
-	$(CC) $(DATA_STACK_TEST_OBJS) -o $@
+data_stack_test: $(DATA_STACK_TEST_OBJS) spandsp
+	$(CC) $(DATA_STACK_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v42_link_test: $(V42_LINK_TEST_OBJS) spandsp
 	$(CC) $(V42_LINK_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
@@ -211,12 +216,12 @@ $(SPANDSP_LIB): FORCE
 	$(CC) $(CFLAGS) -c $< -o $@
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v92_cp_rx.h v92_trn2u.h
+modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_cp_rx.h v92_trn2u.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
-data_stack.o:     data_stack.c     data_stack.h
+data_stack.o:     data_stack.c     data_stack.h $(SPANDSP_DIR)/spandsp/v42.h
 v90.o:            v90.c            v90.h
-v91.o:            v91.c            v91.h vpcm_cp.h
+v91.o:            v91.c            v91.h v90.h vpcm_cp.h
 vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
 v90_cp_rx.o:      v90_cp_rx.c      v90_cp_rx.h vpcm_cp.h
 vpcm_g711_stream.o: vpcm_g711_stream.c vpcm_g711_stream.h v91.h
@@ -254,6 +259,9 @@ spandsp: $(SPANDSP_LIB)
 
 pjproject:
 	@set -e; \
+	if ! cmp -s "$(PJ_CONFIG_SITE)" "$(PJ_LOCAL_CONFIG_SITE)"; then \
+		cp "$(PJ_CONFIG_SITE)" "$(PJ_LOCAL_CONFIG_SITE)"; \
+	fi; \
 	current_host="$(HOST_TAG)"; \
 	previous_host=""; \
 	if [ -f "$(PJ_HOST_STAMP)" ]; then \

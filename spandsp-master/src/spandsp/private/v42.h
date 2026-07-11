@@ -141,6 +141,7 @@ struct v42_state_s
     int tx_bit_rate;
 
     v42_config_parameters_t config;
+    v42_negotiated_parameters_t negotiated;
     v42_negotiation_t neg;
     lapm_state_t lapm;
 

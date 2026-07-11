@@ -56,12 +56,12 @@ can be migrated separately to avoid mixing a risky rename with protocol work.
 | Area | Current state | Gap |
 |---|---|---|
 | `modem_engine.c` | V.22bis, V.34, and live V.90 use the common V.14 stack; V.90 preserves its non-byte-aligned mapper reservoir | Add bounded queues/backpressure and validate each live path with real hardware |
-| `data_stack.[ch]` | Implements raw diagnostics and 8N1 V.14 framing, fractional stop-bit deletion, underspeed mark insertion, and packed-byte helpers | Add bounded queues/backpressure, then the LAPM mode |
-| `data_stack_test.c` | Normal build/test target covering round trips, long-run rate ratios, V.90-style 29-bit frames, idle mark, deleted stop bits, invalid input, reset, packed boundaries, and bursts | Add queue/overflow cases when bounded queues land |
+| `data_stack.[ch]` | Implements raw diagnostics, 8N1 V.14 rate adaptation, and a V.42 detection/XID/LAPM mode with stable link events | Add bounded queues/backpressure and preferred-policy fallback |
+| `data_stack_test.c` | Normal build/test target covering V.14 framing/rates/V.90-style packing plus duplex LAPM negotiation and payload transfer | Add queue/overflow cases when bounded queues land |
 | `data_interface.[ch]` | Mode A, guarded `+++`, `ATO`, and a Mode B two-PTY scaffold exist | Still singleton-based; split mode has no CLI wiring; partial writes, close semantics, and policy commands need hardening |
 | `sip_modem.c` | Opens only the classic `--pty-link` interface | No split-port or exec configuration |
-| SpanDSP `v42.c` | LAPM detection, HDLC, XID, windowing, retransmission, bit callbacks, a configurable timer rate, and public detection statuses exist | XID result exposure, busy/release/retry qualification, and live integration remain |
-| `v42_link_test.c` | Tests detection, byte-exact duplex transfer, T400 at 2400/9600/28800/33600 bit/s, corrupted-frame retransmission, RNR/RR, DISC/UA, and sustained-outage retry exhaustion | Add public negotiated-XID result checks when that API lands |
+| SpanDSP `v42.c` | LAPM detection, HDLC, XID, windowing, retransmission, configurable timers, stable statuses, and a public negotiated-XID snapshot exist | Compression-direction semantics need validation before V.42bis |
+| `v42_link_test.c` | Tests detection/XID, byte-exact duplex transfer, T400 at four rates, corruption recovery, RNR/RR, DISC/UA, and retry exhaustion | Extend with non-default XID offers before compression work |
 | SpanDSP `v42bis.c` | Compressor/decompressor with dynamic/always/never modes exists | Must be driven by negotiated XID values, not fixed sample defaults |
 | V.92 startup | Tracks the peer LAPM P bit and whether ODP/ADP may be bypassed | Result must be carried into the live data-stack start policy |
 
@@ -487,7 +487,8 @@ available V.34/V.90 data paths are byte-exact at multiple DTE/line rate ratios.
 Status: **in progress**. The bit-pipe harness, configurable line-rate timers,
 public detection statuses, multirate T400 checks, duplex transfer,
 corrupted-frame recovery, RNR/RR, DISC/UA, and sustained-outage retry
-exhaustion are complete. Public negotiated-XID results remain.
+exhaustion are complete. Negotiated XID results are now public and verified;
+non-default/asymmetric offers remain before V.42bis.
 
 - Build a two-ended bit-pipe test around two `v42_state_t` instances.
 - Add the timer-rate and stable-status/config APIs described above.
@@ -500,6 +501,11 @@ Exit gate: deterministic LAPM tests pass at 2400, 9600, 28800, and 33600 bit/s
 with sanitizers enabled.
 
 ### Milestone 3: integrate V.42 policy and flow control
+
+Status: **in progress**. Explicit required LAPM and ODP/ADP-bypass modes are
+live through `ME_DATA_FRAMING=lapm` and `lapm-bypass`. `CONNECT` is gated on
+LAPM establishment and failures use deferred teardown. AT policy selection,
+preferred fallback, and queue-watermark RNR/RR remain.
 
 - Add `DS_POLICY_*` configuration and the link state machine.
 - Carry V.8/V.92 LAPM and ODP/ADP-bypass verdicts into each call.

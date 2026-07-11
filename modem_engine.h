@@ -32,6 +32,7 @@ typedef enum {
 /* Negotiated modulation after V.8 */
 typedef enum {
     ME_MOD_NONE,
+    ME_MOD_V91,      /* Symmetric digital PCM modem over raw G.711 */
     ME_MOD_V90,      /* V.90 downstream PCM + V.34 upstream (future) */
     ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS    /* Full V.22bis duplex (fallback) */

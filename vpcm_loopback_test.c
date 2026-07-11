@@ -4151,6 +4151,97 @@ static bool test_v91_phil_and_scr_sequences(v91_law_t law)
     return true;
 }
 
+static bool test_v91_j_phil_recovery_sequences(v91_law_t law)
+{
+    v91_state_t tx;
+    v91_state_t rx;
+    v91_info_frame_t info;
+    v91_info_frame_t info_rx;
+    v91_dil_desc_t dil;
+    v91_dil_desc_t dil_rx;
+    vpcm_cp_frame_t cp;
+    uint8_t info_cw[V91_INFO_SYMBOLS];
+    uint8_t j_cw[V91_J_MAX_BITS];
+    uint8_t phil_cw[18];
+    uint8_t em_cw[V91_EM_SYMBOLS];
+    int j_len;
+
+    vpcm_log("Test: V.91 J/PHIL/recovery (%s)", vpcm_law_to_str(law));
+    v91_init(&tx, law, V91_MODE_TRANSPARENT);
+    v91_init(&rx, law, V91_MODE_TRANSPARENT);
+    memset(&info, 0, sizeof(info));
+    info.request_default_dil = false;
+    info.tx_uses_alaw = (law == V91_LAW_ALAW);
+    v91_default_dil_init(&dil);
+
+    if (v91_tx_info_codewords(&tx, info_cw, sizeof(info_cw), &info) != V91_INFO_SYMBOLS
+        || !v91_rx_info_codewords(&rx, info_cw, sizeof(info_cw), &info_rx)) {
+        fprintf(stderr, "V.91 J test INFO setup failed\n");
+        return false;
+    }
+    j_len = v91_tx_j_codewords(&tx, j_cw, sizeof(j_cw), &dil);
+    if (j_len != v91_j_descriptor_bit_len(&dil) || j_len <= 0) {
+        fprintf(stderr, "V.91 J descriptor encode failed (len=%d)\n", j_len);
+        return false;
+    }
+    if (!v91_rx_j_codewords(&rx, j_cw, j_len, &dil_rx)) {
+        fprintf(stderr, "V.91 J descriptor decode failed (len=%d)\n", j_len);
+        return false;
+    }
+    if (memcmp(&dil, &dil_rx, sizeof(dil)) != 0) {
+        fprintf(stderr, "V.91 J descriptor mismatch (len=%d, N=%u/%u LSP=%u/%u LTP=%u/%u)\n",
+                j_len, dil.n, dil_rx.n, dil.lsp, dil_rx.lsp, dil.ltp, dil_rx.ltp);
+        return false;
+    }
+    if (v91_tx_phil_codewords(&tx, phil_cw, sizeof(phil_cw), sizeof(phil_cw), true)
+            != (int) sizeof(phil_cw)
+        || !v91_rx_phil_codewords(&rx, phil_cw, sizeof(phil_cw), true)) {
+        fprintf(stderr, "V.91 J-to-PHIL coder continuation failed\n");
+        return false;
+    }
+    if (v91_tx_em_codewords(&tx, em_cw, sizeof(em_cw)) != V91_EM_SYMBOLS
+        || !v91_rx_em_codewords(&rx, em_cw, sizeof(em_cw))
+        || !tx.frame_aligned || !rx.frame_aligned
+        || tx.next_frame_interval != 0 || rx.next_frame_interval != 0) {
+        fprintf(stderr, "V.91 J/PHIL-to-Em alignment failed\n");
+        return false;
+    }
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp, vpcm_cp_recommended_robbed_bit_drn(), false);
+    cp.acknowledge = true;
+    if (!v91_activate_data_mode(&rx, &cp)) {
+        fprintf(stderr, "V.91 recovery test data activation failed\n");
+        return false;
+    }
+    v91_note_frame_sync_loss(&rx);
+    if (!rx.rx_data_clamped || !rx.retrain_timer_active || !rx.retrain_requested
+        || rx.data_mode_active || rx.connection_terminated
+        || !v91_note_frame_sync_reacquired(&rx) || !rx.data_mode_active) {
+        fprintf(stderr, "V.91 frame-sync reacquisition state transition failed\n");
+        return false;
+    }
+    v91_request_retrain(&rx);
+    if (!rx.retrain_requested || !rx.retrain_timer_active || rx.circuit_106_on
+        || !rx.circuit_107_on || !rx.circuit_109_on) {
+        fprintf(stderr, "V.91 retrain initiation state transition failed\n");
+        return false;
+    }
+    v91_note_retrain_complete(&rx);
+    if (rx.retrain_requested || rx.retrain_timer_active || !rx.rx_data_clamped) {
+        fprintf(stderr, "V.91 retrain completion state transition failed\n");
+        return false;
+    }
+    v91_request_cleardown(&rx);
+    if (!rx.cleardown_requested || !rx.connection_terminated
+        || rx.circuit_106_on || rx.circuit_107_on || rx.circuit_109_on) {
+        fprintf(stderr, "V.91 cleardown state transition failed\n");
+        return false;
+    }
+
+    vpcm_log("PASS: V.91 J/PHIL/recovery (%s)", vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v91_eu_startup_sequence(v91_law_t law)
 {
     v91_state_t tx;
@@ -7545,6 +7636,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v91_eu_and_frame_alignment(V91_LAW_ALAW)
         && test_v91_phil_and_scr_sequences(V91_LAW_ULAW)
         && test_v91_phil_and_scr_sequences(V91_LAW_ALAW)
+        && test_v91_j_phil_recovery_sequences(V91_LAW_ULAW)
+        && test_v91_j_phil_recovery_sequences(V91_LAW_ALAW)
         && test_v91_cp_exchange(V91_LAW_ULAW)
         && test_v91_cp_exchange(V91_LAW_ALAW)
         && test_v91_startup_to_b1_multirate(V91_LAW_ULAW)

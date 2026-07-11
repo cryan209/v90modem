@@ -44,8 +44,21 @@ typedef enum
 {
     V42_STATUS_DETECTING = 0,
     V42_STATUS_DETECTION_SUCCEEDED = 1,
-    V42_STATUS_DETECTION_UNSUPPORTED = 2
+    V42_STATUS_DETECTION_UNSUPPORTED = 2,
+    V42_STATUS_XID_NEGOTIATED = 3
 } v42_status_t;
+
+typedef struct
+{
+    bool valid;
+    int tx_n401;
+    int rx_n401;
+    int tx_window_size_k;
+    int rx_window_size_k;
+    int compression_p0;
+    int compression_p1;
+    int compression_p2;
+} v42_negotiated_parameters_t;
 
 #if defined(__cplusplus)
 extern "C"
@@ -88,6 +101,11 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
 
 /*! Return the transmit bit rate currently used by the V.42 timers. */
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s);
+
+/*! Copy the parameters most recently agreed through XID.
+    \return 0 when a valid XID result is available, otherwise -1. */
+SPAN_DECLARE(int) v42_get_negotiated_parameters(const v42_state_t *s,
+                                                v42_negotiated_parameters_t *out);
 
 SPAN_DECLARE(void) v42_set_status_callback(v42_state_t *s, span_modem_status_func_t callback, void *user_data);
 

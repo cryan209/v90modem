@@ -13,7 +13,7 @@
  *                     Only interoperates with another instance of this
  *                     software; kept for loopback debugging.
  *
- * V.42 LAPM will slot in here as a third framing in a later phase.
+ *   DS_FRAMING_V42  — V.42 detection/XID/LAPM framing through SpanDSP.
  *
  * Threading: all calls are expected from the engine/RTP clock domain. The
  * DTE-side pull/push callbacks are the boundary to other threads and must
@@ -23,20 +23,34 @@
 #ifndef DATA_STACK_H
 #define DATA_STACK_H
 
+#include <stdbool.h>
 #include <stdint.h>
+
+typedef struct v42_state_s v42_state_t;
 
 typedef enum {
     DS_FRAMING_RAW = 0,
-    DS_FRAMING_V14 = 1
+    DS_FRAMING_V14 = 1,
+    DS_FRAMING_V42 = 2
 } ds_framing_t;
+
+typedef enum {
+    DS_LINK_DETECTING,
+    DS_LINK_XID_NEGOTIATED,
+    DS_LINK_CONNECTED,
+    DS_LINK_UNSUPPORTED,
+    DS_LINK_DISCONNECTED,
+    DS_LINK_ERROR
+} ds_link_event_t;
 
 /* Pull one DTE byte to transmit; return -1 when none is pending. */
 typedef int (*ds_pull_byte_fn)(void *ctx);
 /* Push one received DTE byte. */
 typedef void (*ds_push_byte_fn)(void *ctx, uint8_t byte);
+typedef void (*ds_link_event_fn)(void *ctx, ds_link_event_t event);
 
 /* ds_tx_get_bit() returns this when framing is RAW and no data is pending.
- * V.14 framing never returns it (idle is mark). */
+ * V.14 and V.42 always return a clocked line bit. */
 #define DS_TX_NO_DATA (-1)
 
 typedef struct {
@@ -45,6 +59,12 @@ typedef struct {
     void *pull_ctx;
     ds_push_byte_fn push;
     void *push_ctx;
+
+    /* V.42 mode (opaque SpanDSP state). */
+    v42_state_t *v42;
+    ds_link_event_fn link_event;
+    void *link_event_ctx;
+    bool link_ready;
 
     /* TX shift register: bit 0 is the next bit on the line.  V.14 keeps
      * start+data here and emits the rate-adapted stop/idle marks separately. */
@@ -76,6 +96,21 @@ void ds_init(data_stack_t *s,
              ds_framing_t framing,
              ds_pull_byte_fn pull, void *pull_ctx,
              ds_push_byte_fn push, void *push_ctx);
+
+/* Initialize a V.42 LAPM stack and start detection/establishment. */
+int ds_init_v42(data_stack_t *s,
+                bool calling_party,
+                bool detect,
+                int line_bit_rate,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx);
+
+/* Release protocol resources. Safe after any successful ds_init call. */
+void ds_release(data_stack_t *s);
+
+bool ds_link_is_ready(const data_stack_t *s);
+void ds_stop_link(data_stack_t *s);
 
 /* Reset framing state (e.g. on retrain) without dropping callbacks. */
 void ds_reset(data_stack_t *s);

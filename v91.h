@@ -7,11 +7,9 @@
  *   - Phase 1/V.91 transition silence
  *   - Ez
  *   - INFO/INFO'
- *   - Eu/Em, PHIL, SCR, CP, Es and B1 generation
+ *   - Eu/Em, J, PHIL, SCR, CP, Es and B1 generation/reception
  *
- * That gives us a concrete startup/data boundary for the loopback harness
- * while later V.91 signals (J) are
- * still to be implemented.
+ *   - frame-loss recovery, retrain and cleardown state transitions
  */
 
 #ifndef V91_H
@@ -42,6 +40,7 @@ typedef enum {
 #define V91_DEFAULT_DIL_SEGMENTS 125
 #define V91_DEFAULT_DIL_SEGMENT_SYMBOLS 12
 #define V91_DEFAULT_DIL_SYMBOLS (V91_DEFAULT_DIL_SEGMENTS * V91_DEFAULT_DIL_SEGMENT_SYMBOLS)
+#define V91_J_MAX_BITS 4096
 
 typedef struct {
     uint16_t reserved_12_25; /* Raw 14-bit reserved field */
@@ -117,7 +116,13 @@ typedef struct {
     int rx_prev_sign;
     bool frame_aligned;
     bool retrain_requested;
+    bool retrain_timer_active;
+    bool rx_data_clamped;
+    bool cleardown_requested;
+    bool connection_terminated;
+    bool circuit_106_on;
     bool circuit_107_on;
+    bool circuit_109_on;
     int next_frame_interval;
     bool data_mode_active;
     vpcm_cp_frame_t active_cp;
@@ -147,13 +152,29 @@ int v91_codeword_to_ucode(v91_law_t law, uint8_t codeword);
 
 int v91_tx_phase1_silence_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
 int v91_tx_eu_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+bool v91_rx_eu_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len);
 int v91_tx_em_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+bool v91_rx_em_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len);
 int v91_tx_ez_codewords(v91_state_t *s, uint8_t *g711_out, int g711_max);
+bool v91_rx_ez_codewords(v91_state_t *s, const uint8_t *g711_in, int g711_len);
 int v91_tx_phil_codewords(v91_state_t *s,
                           uint8_t *g711_out,
                           int g711_max,
                           int nsymbols,
                           bool continue_from_current);
+bool v91_rx_phil_codewords(v91_state_t *s,
+                           const uint8_t *g711_in,
+                           int g711_len,
+                           bool continue_from_current);
+int v91_j_descriptor_bit_len(const v91_dil_desc_t *desc);
+int v91_tx_j_codewords(v91_state_t *s,
+                       uint8_t *g711_out,
+                       int g711_max,
+                       const v91_dil_desc_t *desc);
+bool v91_rx_j_codewords(v91_state_t *s,
+                        const uint8_t *g711_in,
+                        int g711_len,
+                        v91_dil_desc_t *desc_out);
 int v91_tx_scr_codewords(v91_state_t *s,
                          uint8_t *g711_out,
                          int g711_max,
@@ -216,6 +237,11 @@ bool v91_note_received_dil(v91_state_t *s,
                            const v91_dil_desc_t *desc,
                            v91_dil_analysis_t *analysis_out);
 void v91_note_frame_sync_loss(v91_state_t *s);
+bool v91_note_frame_sync_reacquired(v91_state_t *s);
+void v91_request_retrain(v91_state_t *s);
+void v91_note_retrain_complete(v91_state_t *s);
+void v91_request_cleardown(v91_state_t *s);
+void v91_note_recovery_timeout(v91_state_t *s);
 bool v91_activate_data_mode(v91_state_t *s, const vpcm_cp_frame_t *cp);
 void v91_deactivate_data_mode(v91_state_t *s);
 

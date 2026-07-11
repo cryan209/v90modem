@@ -1,0 +1,9 @@
+#ifndef V90MODEM_PJ_CONFIG_SITE_H
+#define V90MODEM_PJ_CONFIG_SITE_H
+
+/* Preserve G.711 payload bytes end-to-end for PCM modem operation. */
+#define PJMEDIA_HAS_PASSTHROUGH_CODECS 1
+#define PJMEDIA_HAS_PASSTHROUGH_CODEC_PCMU 1
+#define PJMEDIA_HAS_PASSTHROUGH_CODEC_PCMA 1
+
+#endif

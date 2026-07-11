@@ -5,7 +5,71 @@
 
 #include "data_stack.h"
 
+#include <spandsp.h>
+
 #include <string.h>
+
+static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
+{
+    data_stack_t *s = (data_stack_t *)user_data;
+    int len = 0;
+
+    while (len < max_len && s->pull) {
+        int byte = s->pull(s->pull_ctx);
+
+        if (byte < 0)
+            break;
+        msg[len++] = (uint8_t)byte;
+    }
+    return len;
+}
+
+static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
+{
+    data_stack_t *s = (data_stack_t *)user_data;
+
+    if (!msg || len <= 0 || !s->push)
+        return;
+    for (int i = 0; i < len; i++)
+        s->push(s->push_ctx, msg[i]);
+}
+
+static void ds_v42_status(void *user_data, int status)
+{
+    data_stack_t *s = (data_stack_t *)user_data;
+    ds_link_event_t event;
+    bool report = true;
+
+    switch (status) {
+    case V42_STATUS_DETECTING:
+        event = DS_LINK_DETECTING;
+        break;
+    case V42_STATUS_XID_NEGOTIATED:
+        event = DS_LINK_XID_NEGOTIATED;
+        break;
+    case V42_STATUS_DETECTION_UNSUPPORTED:
+        s->link_ready = false;
+        event = DS_LINK_UNSUPPORTED;
+        break;
+    case SIG_STATUS_LINK_CONNECTED:
+        s->link_ready = true;
+        event = DS_LINK_CONNECTED;
+        break;
+    case SIG_STATUS_LINK_DISCONNECTED:
+        s->link_ready = false;
+        event = DS_LINK_DISCONNECTED;
+        break;
+    case SIG_STATUS_LINK_ERROR:
+        s->link_ready = false;
+        event = DS_LINK_ERROR;
+        break;
+    default:
+        report = false;
+        break;
+    }
+    if (report && s->link_event)
+        s->link_event(s->link_event_ctx, event);
+}
 
 void ds_init(data_stack_t *s,
              ds_framing_t framing,
@@ -23,6 +87,57 @@ void ds_init(data_stack_t *s,
     s->line_bit_rate = 1;
 }
 
+int ds_init_v42(data_stack_t *s,
+                bool calling_party,
+                bool detect,
+                int line_bit_rate,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx)
+{
+    ds_init(s, DS_FRAMING_V42, pull, pull_ctx, push, push_ctx);
+    s->link_event = link_event;
+    s->link_event_ctx = link_event_ctx;
+    s->v42 = v42_init(NULL,
+                      calling_party,
+                      detect,
+                      ds_v42_get_frame,
+                      ds_v42_put_frame,
+                      s);
+    if (!s->v42)
+        return -1;
+    v42_set_status_callback(s->v42, ds_v42_status, s);
+    if (v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
+        v42_free(s->v42);
+        s->v42 = NULL;
+        return -1;
+    }
+    s->line_bit_rate = line_bit_rate;
+    v42_restart(s->v42);
+    return 0;
+}
+
+void ds_release(data_stack_t *s)
+{
+    if (s && s->v42) {
+        v42_free(s->v42);
+        s->v42 = NULL;
+    }
+    if (s)
+        s->link_ready = false;
+}
+
+bool ds_link_is_ready(const data_stack_t *s)
+{
+    return s && (s->framing != DS_FRAMING_V42 || s->link_ready);
+}
+
+void ds_stop_link(data_stack_t *s)
+{
+    if (s && s->v42)
+        v42_stop(s->v42);
+}
+
 void ds_reset(data_stack_t *s)
 {
     s->tx_shift = 0;
@@ -32,6 +147,9 @@ void ds_reset(data_stack_t *s)
     s->rx_hunting = 1;
     s->rx_shift = 0;
     s->rx_bits = 0;
+    s->link_ready = false;
+    if (s->v42)
+        v42_restart(s->v42);
 }
 
 void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate)
@@ -100,6 +218,8 @@ int ds_tx_get_bit(data_stack_t *s)
 {
     int bit;
 
+    if (s->framing == DS_FRAMING_V42)
+        return s->v42 ? v42_tx_bit(s->v42) : 1;
     if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
         && s->tx_mark_bits > 0) {
         s->tx_mark_bits--;
@@ -126,6 +246,12 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
         return;
     }
     bit &= 1;
+
+    if (s->framing == DS_FRAMING_V42) {
+        if (s->v42)
+            v42_rx_bit(s->v42, bit);
+        return;
+    }
 
     if (s->framing == DS_FRAMING_RAW) {
         s->rx_shift |= (uint8_t) (bit << s->rx_bits);
