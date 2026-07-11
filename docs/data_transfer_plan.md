@@ -55,17 +55,18 @@ can be migrated separately to avoid mixing a risky rename with protocol work.
 
 | Area | Current state | Gap |
 |---|---|---|
-| `modem_engine.c` | V.22bis and V.34 callbacks pack/unpack raw bytes; V.90 TX reads DTE bytes directly | No common framed-bit seam; V.90 RX data delivery is not yet a complete peer of TX |
-| `data_stack.[ch]` | Implements standalone raw and simple 8N1 V.14 bit framing plus packed-byte helpers | Not linked by the Makefile or used by an engine; TX rate adaptation is not implemented |
-| `data_stack_test.c` | Covers round trips, idle mark, receive-side deleted stop bits, and bursts | Not a build/test target; no rate-ratio, overflow, reset, or malformed-stream cases |
+| `modem_engine.c` | V.22bis uses the common V.14 stack; V.34 still packs/unpacks raw bytes; V.90 TX reads DTE bytes directly | Extend the common framed-bit seam to V.34/V.90; V.90 RX data delivery is not yet a complete peer of TX |
+| `data_stack.[ch]` | Implements raw diagnostics and 8N1 V.14 framing, fractional stop-bit deletion, underspeed mark insertion, and packed-byte helpers | Add bounded queues/backpressure and integrate the remaining datapumps |
+| `data_stack_test.c` | Normal build/test target covering round trips, long-run rate ratios, idle mark, deleted stop bits, invalid input, reset, packed boundaries, and bursts | Add queue/overflow cases when bounded queues land |
 | `data_interface.[ch]` | Mode A, guarded `+++`, `ATO`, and a Mode B two-PTY scaffold exist | Still singleton-based; split mode has no CLI wiring; partial writes, close semantics, and policy commands need hardening |
 | `sip_modem.c` | Opens only the classic `--pty-link` interface | No split-port or exec configuration |
 | SpanDSP `v42.c` | LAPM detection, HDLC, XID, windowing, retransmission, and bit callbacks exist | Timer rate defaults to 28800; public negotiation/status/config surfaces are insufficient and need validation |
 | SpanDSP `v42bis.c` | Compressor/decompressor with dynamic/always/never modes exists | Must be driven by negotiated XID values, not fixed sample defaults |
 | V.92 startup | Tracks the peer LAPM P bit and whether ODP/ADP may be bypassed | Result must be carried into the live data-stack start policy |
 
-The first implementation milestone is therefore integration and hardening, not
-creation of a second V.14 implementation or another split-PTY prototype.
+The first V.22bis integration slice is complete. The remaining physical-layer
+work is to carry the same seam through V.34 and both V.90 directions before
+starting LAPM.
 
 ## Layer model
 
@@ -453,6 +454,9 @@ Each milestone must land with its tests and leave the default path usable.
 
 ### Milestone 0: make the current scaffold a green baseline
 
+Status: **in progress**. The normal test target and framing/reset coverage are
+complete; the scripted raw V.22bis baseline and call diagnostics remain.
+
 - Add `data_stack.o` to the relevant build only when it is used.
 - Add `data_stack_test` to Makefile build/check targets now.
 - Add reset, malformed stop-bit, packed-boundary, and queue-empty tests.
@@ -463,6 +467,9 @@ Exit gate: clean build plus existing tests and `data_stack_test`; no runtime
 behavior change.
 
 ### Milestone 1: integrate complete V.14
+
+Status: **in progress**. Rate adaptation and V.22bis integration are complete;
+V.34 and V.90 integration remain.
 
 - Extend `data_stack` with TX rate adaptation and explicit RX framing errors.
 - Replace V.22bis and V.34 raw-byte accumulators with the common bit seam.

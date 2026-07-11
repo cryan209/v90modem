@@ -135,13 +135,14 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = vpcm_loopback_test vpcm_decode v92_trn2u_replay
+TEST_TARGETS = vpcm_loopback_test vpcm_decode v92_trn2u_replay data_stack_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o
 V92_REPLAY_OBJS = tools/v92_trn2u_replay.o v92_trn2u.o v92_cp_rx.o vpcm_cp.o
+DATA_STACK_TEST_OBJS = data_stack_test.o data_stack.o
 
 USE_V34_STUBS ?= 0
 ifeq ($(USE_V34_STUBS),1)
@@ -154,6 +155,7 @@ endif
 all: $(TARGET) $(TEST_TARGETS)
 
 test: $(TEST_TARGETS)
+	./data_stack_test
 	./vpcm_loopback_test --all-tests
 
 v32bis-ref-test:
@@ -173,6 +175,9 @@ vpcm_decode: $(DECODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
 
 v92_trn2u_replay: $(V92_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V92_REPLAY_OBJS) -o $@ $(LDFLAGS)
+
+data_stack_test: $(DATA_STACK_TEST_OBJS)
+	$(CC) $(DATA_STACK_TEST_OBJS) -o $@
 
 $(SPANDSP_LIB): FORCE
 	@set -e; \
@@ -201,9 +206,10 @@ $(SPANDSP_LIB): FORCE
 	$(CC) $(CFLAGS) -c $< -o $@
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h clock_recovery.h v90.h v90_cp_rx.h v92_cp_rx.h v92_trn2u.h
+modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v92_cp_rx.h v92_trn2u.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
+data_stack.o:     data_stack.c     data_stack.h
 v90.o:            v90.c            v90.h
 v91.o:            v91.c            v91.h vpcm_cp.h
 vpcm_cp.o:        vpcm_cp.c        vpcm_cp.h
@@ -263,7 +269,7 @@ pjproject:
 	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(TEST_TARGETS)
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(DATA_STACK_TEST_OBJS) $(TEST_TARGETS)
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)"

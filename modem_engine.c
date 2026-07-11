@@ -21,6 +21,7 @@
 
 #include "modem_engine.h"
 #include "data_interface.h"
+#include "data_stack.h"
 #include "clock_recovery.h"
 #include "v90.h"
 #include "v90_cp_rx.h"
@@ -217,6 +218,8 @@ static int dring_available(data_ring_t *r) {
 
 static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
+static data_stack_t g_data_stack;
+static ds_framing_t g_data_framing = DS_FRAMING_V14;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 
@@ -457,32 +460,31 @@ static bool valid_v34_bps(int bps)
     return bps >= 2400 && bps <= 33600 && (bps % 2400) == 0;
 }
 
-/* Bit accumulator for V.22bis TX (one byte at a time) */
-static uint8_t  v22bis_tx_byte = 0;
-static int      v22bis_tx_bits = 0;
+static int data_stack_pull_dte_byte(void *user_data)
+{
+    uint8_t byte;
+
+    (void)user_data;
+    if (dring_read(&downstream_ring, &byte, 1) != 1)
+        return -1;
+    return byte;
+}
+
+static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
+{
+    (void)user_data;
+    if (dring_write(&upstream_ring, &byte, 1) != 1)
+        ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
+}
 
 static int v22bis_get_bit_cb(void *user_data)
 {
-    (void)user_data;
-    if (v22bis_tx_bits == 0) {
-        /* Fetch the next byte from the downstream ring */
-        uint8_t b;
-        if (dring_read(&downstream_ring, &b, 1) == 1) {
-            v22bis_tx_byte = b;
-            v22bis_tx_bits = 8;
-        } else {
-            return SIG_STATUS_END_OF_DATA; /* Mark for silence */
-        }
-    }
-    int bit = v22bis_tx_byte & 1;
-    v22bis_tx_byte >>= 1;
-    v22bis_tx_bits--;
-    return bit;
-}
+    int bit;
 
-/* Bit accumulator for V.22bis RX */
-static uint8_t  v22bis_rx_byte = 0;
-static int      v22bis_rx_bits = 0;
+    (void)user_data;
+    bit = ds_tx_get_bit(&g_data_stack);
+    return (bit == DS_TX_NO_DATA) ? SIG_STATUS_END_OF_DATA : bit;
+}
 
 static void v22bis_put_bit_cb(void *user_data, int bit)
 {
@@ -501,13 +503,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
         return;
     }
 
-    v22bis_rx_byte |= (uint8_t)((bit & 1) << v22bis_rx_bits);
-    v22bis_rx_bits++;
-    if (v22bis_rx_bits == 8) {
-        dring_write(&upstream_ring, &v22bis_rx_byte, 1);
-        v22bis_rx_byte = 0;
-        v22bis_rx_bits = 0;
-    }
+    ds_rx_put_bit(&g_data_stack, bit);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1160,10 +1156,11 @@ static void start_v22bis_training(void)
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
-    v22bis_tx_byte = 0;
-    v22bis_tx_bits = 0;
-    v22bis_rx_byte = 0;
-    v22bis_rx_bits = 0;
+    ds_init(&g_data_stack,
+            g_data_framing,
+            data_stack_pull_dte_byte, NULL,
+            data_stack_push_dte_byte, NULL);
+    ds_set_v14_rates(&g_data_stack, 2400, 2400);
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
@@ -1461,6 +1458,17 @@ void me_init(void)
     pthread_mutex_init(&g_state_mtx, NULL);
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
+    {
+        const char *framing = getenv("ME_DATA_FRAMING");
+
+        if (framing && strcmp(framing, "raw") == 0)
+            g_data_framing = DS_FRAMING_RAW;
+        else
+            g_data_framing = DS_FRAMING_V14;
+        ME_LOG("[ME] DTE framing: %s%s\n",
+               g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" : "RAW",
+               g_data_framing == DS_FRAMING_RAW ? " (diagnostic only)" : "");
+    }
     cr_init(&g_cr, 8000);
     g_g711_rx_octets = 0;
     g_g711_tx_octets = 0;

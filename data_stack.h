@@ -46,9 +46,17 @@ typedef struct {
     ds_push_byte_fn push;
     void *push_ctx;
 
-    /* TX shift register: bit 0 is the next bit on the line. */
+    /* TX shift register: bit 0 is the next bit on the line.  V.14 keeps
+     * start+data here and emits the rate-adapted stop/idle marks separately. */
     uint16_t tx_shift;
     int tx_bits;
+    int tx_mark_bits;
+
+    /* V.14 rate adaptation.  Rates are bit/s.  The accumulator schedules
+     * the number of synchronous line bits occupied by each 8N1 character. */
+    int dte_bit_rate;
+    int line_bit_rate;
+    uint64_t tx_rate_accum;
 
     /* RX character assembly */
     int rx_hunting;      /* 1 = waiting for a start bit */
@@ -58,7 +66,10 @@ typedef struct {
     /* Statistics */
     uint64_t tx_chars;
     uint64_t rx_chars;
+    uint64_t tx_deleted_stop_bits;
+    uint64_t tx_extra_mark_bits;
     uint64_t rx_deleted_stop_bits;
+    uint64_t rx_invalid_bits;
 } data_stack_t;
 
 void ds_init(data_stack_t *s,
@@ -68,6 +79,13 @@ void ds_init(data_stack_t *s,
 
 /* Reset framing state (e.g. on retrain) without dropping callbacks. */
 void ds_reset(data_stack_t *s);
+
+/* Configure V.14 rate adaptation.  dte_bit_rate is the virtual asynchronous
+ * DTE rate and line_bit_rate is the synchronous datapump bit rate.  Equal
+ * rates produce ordinary 8N1 (10 line bits per character).  A modest DTE
+ * overspeed deletes stop bits as permitted by V.14; an underspeed inserts
+ * additional mark bits.  Non-positive values restore equal-rate 8N1. */
+void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate);
 
 /* Line side, bit-oriented (V.22bis / V.34 datapump callbacks).
  * Returns 0/1, or DS_TX_NO_DATA in RAW framing when idle. */

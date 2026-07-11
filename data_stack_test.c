@@ -116,6 +116,74 @@ static void test_v14_deleted_stop_bits(void)
           "V.14 deleted stop bits are counted");
 }
 
+static void test_v14_rate_adaptation(void)
+{
+    data_stack_t tx, rx;
+    uint8_t payload[2400];
+
+    for (int i = 0; i < (int)sizeof(payload); i++)
+        payload[i] = (uint8_t)(0x30 + i);
+
+    /* 2280 line bit/s for a 2400 bit/s DTE averages 9.5 line bits per
+     * character: half the stop bits are deleted. */
+    ds_init(&tx, DS_FRAMING_V14, pull_byte, NULL, NULL, NULL);
+    ds_init(&rx, DS_FRAMING_V14, NULL, NULL, push_byte, NULL);
+    ds_set_v14_rates(&tx, 2400, 2280);
+    load_tx(payload, (int)sizeof(payload));
+    for (int i = 0; i < 22800; i++)
+        ds_rx_put_bit(&rx, ds_tx_get_bit(&tx));
+
+    CHECK(rx_sink_len == (int)sizeof(payload)
+          && memcmp(rx_sink, payload, sizeof(payload)) == 0,
+          "V.14 fractional overspeed remains byte exact");
+    CHECK(tx.tx_deleted_stop_bits == 1200
+          && rx.rx_deleted_stop_bits == 1200,
+          "V.14 fractional overspeed deletes the scheduled stop bits");
+
+    /* A DTE running at half the synchronous line rate needs ten additional
+     * mark bits after each normal 8N1 character. */
+    ds_init(&tx, DS_FRAMING_V14, pull_byte, NULL, NULL, NULL);
+    ds_set_v14_rates(&tx, 1200, 2400);
+    load_tx(payload, 1);
+    for (int i = 0; i < 20; i++)
+        (void)ds_tx_get_bit(&tx);
+    CHECK(tx.tx_extra_mark_bits == 10 && tx.tx_chars == 1,
+          "V.14 underspeed inserts the scheduled idle marks");
+}
+
+static void test_v14_invalid_line_value_resets_receiver(void)
+{
+    data_stack_t rx;
+
+    ds_init(&rx, DS_FRAMING_V14, NULL, NULL, push_byte, NULL);
+    rx_sink_len = 0;
+    ds_rx_put_bit(&rx, 0);
+    ds_rx_put_bit(&rx, 1);
+    ds_rx_put_bit(&rx, -1);
+
+    CHECK(rx.rx_invalid_bits == 1 && rx.rx_hunting,
+          "V.14 invalid line value is counted and resynchronises the receiver");
+}
+
+static void test_reset_clears_partial_character_and_rate_phase(void)
+{
+    data_stack_t tx, rx;
+    const uint8_t payload[] = { 0x55, 0xAA };
+
+    ds_init(&tx, DS_FRAMING_V14, pull_byte, NULL, NULL, NULL);
+    ds_init(&rx, DS_FRAMING_V14, NULL, NULL, push_byte, NULL);
+    ds_set_v14_rates(&tx, 2400, 2280);
+    load_tx(payload, (int)sizeof(payload));
+    for (int i = 0; i < 4; i++)
+        ds_rx_put_bit(&rx, ds_tx_get_bit(&tx));
+
+    ds_reset(&tx);
+    ds_reset(&rx);
+    CHECK(tx.tx_bits == 0 && tx.tx_mark_bits == 0 && tx.tx_rate_accum == 0
+          && rx.rx_hunting && rx.rx_bits == 0,
+          "data stack reset clears partial framing and rate phase");
+}
+
 static void test_raw_roundtrip(void)
 {
     data_stack_t tx, rx;
@@ -205,6 +273,9 @@ int main(void)
     test_v14_roundtrip();
     test_v14_idle_is_mark();
     test_v14_deleted_stop_bits();
+    test_v14_rate_adaptation();
+    test_v14_invalid_line_value_resets_receiver();
+    test_reset_clears_partial_character_and_rate_phase();
     test_raw_roundtrip();
     test_packed_byte_helpers();
     test_v14_bursty_random();

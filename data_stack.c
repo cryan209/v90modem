@@ -19,15 +19,49 @@ void ds_init(data_stack_t *s,
     s->push = push;
     s->push_ctx = push_ctx;
     s->rx_hunting = 1;
+    s->dte_bit_rate = 1;
+    s->line_bit_rate = 1;
 }
 
 void ds_reset(data_stack_t *s)
 {
     s->tx_shift = 0;
     s->tx_bits = 0;
+    s->tx_mark_bits = 0;
+    s->tx_rate_accum = 0;
     s->rx_hunting = 1;
     s->rx_shift = 0;
     s->rx_bits = 0;
+}
+
+void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate)
+{
+    if (dte_bit_rate <= 0 || line_bit_rate <= 0) {
+        dte_bit_rate = 1;
+        line_bit_rate = 1;
+    }
+    s->dte_bit_rate = dte_bit_rate;
+    s->line_bit_rate = line_bit_rate;
+    s->tx_rate_accum = 0;
+}
+
+/* Number of synchronous line bits allocated to the next 8N1 character.
+ * V.14 can reduce a character from 10 to 9 bits by deleting its stop bit.
+ * Ratios requiring fewer than 9 bits cannot be represented; the DTE queue
+ * must provide the remaining rate buffering/flow control. */
+static int ds_v14_character_line_bits(data_stack_t *s)
+{
+    uint64_t scaled;
+    uint64_t bits;
+
+    scaled = s->tx_rate_accum + 10u*(uint64_t)s->line_bit_rate;
+    bits = scaled/(uint64_t)s->dte_bit_rate;
+    s->tx_rate_accum = scaled%(uint64_t)s->dte_bit_rate;
+    if (bits < 9)
+        bits = 9;
+    if (bits > 1000000)
+        bits = 1000000;
+    return (int)bits;
 }
 
 /* Load the next DTE byte into the TX shift register. Returns 0 if no byte
@@ -43,9 +77,17 @@ static int ds_tx_load(data_stack_t *s)
         return 0;
 
     if (s->framing == DS_FRAMING_V14) {
-        /* start(0), data LSB-first, stop(1): 10 bits, bit 0 first */
-        s->tx_shift = (uint16_t) (0x200u | ((unsigned) (byte & 0xFF) << 1));
-        s->tx_bits = 10;
+        int line_bits = ds_v14_character_line_bits(s);
+
+        /* start(0), data LSB-first: 9 fixed bits, bit 0 first.  The stop
+         * mark and any rate-adaptation marks follow from tx_mark_bits. */
+        s->tx_shift = (uint16_t) ((unsigned) (byte & 0xFF) << 1);
+        s->tx_bits = 9;
+        s->tx_mark_bits = line_bits - 9;
+        if (s->tx_mark_bits == 0)
+            s->tx_deleted_stop_bits++;
+        else if (s->tx_mark_bits > 1)
+            s->tx_extra_mark_bits += (uint64_t)(s->tx_mark_bits - 1);
     } else {
         s->tx_shift = (uint16_t) (byte & 0xFF);
         s->tx_bits = 8;
@@ -58,6 +100,11 @@ int ds_tx_get_bit(data_stack_t *s)
 {
     int bit;
 
+    if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
+        && s->tx_mark_bits > 0) {
+        s->tx_mark_bits--;
+        return 1;
+    }
     if (s->tx_bits == 0 && !ds_tx_load(s)) {
         /* Idle: async lines rest at mark; RAW keeps the legacy
          * "no data" signal so the caller can transmit silence. */
@@ -71,6 +118,13 @@ int ds_tx_get_bit(data_stack_t *s)
 
 void ds_rx_put_bit(data_stack_t *s, int bit)
 {
+    if (bit != 0 && bit != 1) {
+        s->rx_invalid_bits++;
+        s->rx_hunting = 1;
+        s->rx_shift = 0;
+        s->rx_bits = 0;
+        return;
+    }
     bit &= 1;
 
     if (s->framing == DS_FRAMING_RAW) {
