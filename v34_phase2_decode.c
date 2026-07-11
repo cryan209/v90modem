@@ -437,7 +437,10 @@ static bool v34_phase2_result_is_sufficient(const decode_v34_result_t *result, b
         return false;
     if (result->phase3_seen || result->phase4_seen || result->training_failed)
         return true;
-    if (result->info0_seen || result->info1_seen)
+    /* A lone INFO frame is a useful partial result, but it must not stop the
+       candidate search.  Later/overlapping windows may contain the complete
+       INFO0 -> INFO1 transition and Phase 3 handoff. */
+    if (result->info0_seen && result->info1_seen)
         return true;
     /* A bad INFO event alone is not sufficient: a false sync in a data-mode
        window would otherwise stop the search before the real Phase 2 window
@@ -457,6 +460,7 @@ static bool v34_phase2_decode_candidate_with_pass(v34_phase2_pass_fn_t pass_fn,
                                                   decode_v34_result_t *result_out)
 {
     static const float rescue_cutoffs[] = { -60.0f, -68.0f };
+    enum { PARTIAL_INFO_EXTENSION_SAMPLES = 5 * 8000 };
     decode_v34_result_t candidate;
     bool have_candidate = false;
     int decode_start;
@@ -484,6 +488,40 @@ static bool v34_phase2_decode_candidate_with_pass(v34_phase2_pass_fn_t pass_fn,
     if (!have_candidate)
         return false;
     v34_phase2_offset_result_samples(&candidate, decode_start);
+
+    /*
+     * Energy segmentation can legitimately end between INFO0 and INFO1: the
+     * intervening tone/reversal and probing sequence is not always above the
+     * RMS activity floor.  Once INFO0 proves that this is the right Phase 2
+     * region, continue the same modem pass far enough to observe INFO1 and
+     * the Phase 3 handoff.  Starting a separate candidate at INFO1 cannot
+     * work reliably because the receive state machine has lost the preceding
+     * INFO0 and carrier selection.
+     */
+    if (candidate.info0_seen && !candidate.info1_seen && decode_end < total_samples) {
+        decode_v34_result_t extended;
+        int extended_end = decode_end + PARTIAL_INFO_EXTENSION_SAMPLES;
+
+        if (extended_end > total_samples)
+            extended_end = total_samples;
+        if (pass_fn(pass_ctx,
+                    samples + decode_start,
+                    extended_end - decode_start,
+                    law,
+                    calling_party,
+                    -52.0f,
+                    allow_info_rate_infer,
+                    &extended)) {
+            v34_phase2_offset_result_samples(&extended, decode_start);
+            if (extended.info0_seen
+                && (extended.info1_seen
+                    || v34_phase2_result_spec_score(&extended)
+                       >= v34_phase2_result_spec_score(&candidate))) {
+                candidate = extended;
+                decode_end = extended_end;
+            }
+        }
+    }
 
     if (!candidate.info0_seen || !candidate.info1_seen) {
         for (size_t i = 0; i < sizeof(rescue_cutoffs)/sizeof(rescue_cutoffs[0]); i++) {
