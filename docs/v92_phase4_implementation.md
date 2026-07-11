@@ -82,6 +82,27 @@ sample clock and phase are not necessarily locked to the 8 ksymbol/s PAM, so
 failure to find frame sync there identifies a need for timing recovery and
 equalization rather than proving that the strict frame codec is incorrect.
 
+For those analogue recordings, the same tool has an offline front end with
+fractional linear interpolation, sample-clock correction, gain control, and a
+five-tap normalized decision-directed PAM equalizer:
+
+```sh
+./v92_trn2u_replay call.wav --analog-wav --channel R \
+  --start 76000 --max 16000 --phase 0.375 --clock-ppm -250 \
+  --points 4 --lu 75 --timing-loop --timing-mu 0.002 \
+  --equalizer --eq-mu 0.01
+```
+
+The timing loop uses a decision-directed Mueller-and-Muller error detector on
+the PAM decisions; `--clock-ppm` supplies its nominal rate. Corpus sweeps should
+vary `--start`, `--phase`, `--clock-ppm`, and `--lu` and rank configurations
+first by valid frames, then by rejected frame candidates.
+On the checked-in Agere, Motorola, and USR V.92 calls, fractional timing and
+equalization now expose occasional 17-one frame candidates, but none yet pass
+the strict CRC.  This narrows the remaining offline problem to adaptive timing
+tracking/equalizer training or a TRN2u wire-format assumption; amplitude alone
+is not the cause.
+
 ## Remaining native runtime work
 
 - derive TRN2u `L_U` from Phase 3/receiver measurements instead of the
