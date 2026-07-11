@@ -37,7 +37,7 @@ for wav in "${TONE_DIR}"/*.wav; do
 
     channels=(L R)
     first_output="$("${DECODER}" --v34 --channel L --law "${LAW}" "${wav}" 2>/dev/null)"
-    if printf '%s\n' "${first_output}" | grep -q '^Channel: Mono,'; then
+    if grep -q '^Channel: Mono,' <<<"${first_output}"; then
         channels=(mono)
     fi
 
@@ -55,19 +55,19 @@ for wav in "${TONE_DIR}"/*.wav; do
         info1_ms="-"
         phase3_ms="-"
 
-        if printf '%s\n' "${output}" | grep -Eq "INFO0[acd]:          decoded"; then
+        if grep -Eq "INFO0[acd]:          decoded" <<<"${output}"; then
             info0="yes"
             info0_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO0[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
             [[ -n "${info0_ms}" ]] || info0_ms="-"
         fi
 
-        if printf '%s\n' "${output}" | grep -Eq "INFO1[acd]:          decoded"; then
+        if grep -Eq "INFO1[acd]:          decoded" <<<"${output}"; then
             info1="yes"
             info1_ms="$(printf '%s\n' "${output}" | sed -n -E 's/.*INFO1[acd]:          decoded at ([0-9.]*) ms/\1/p' | head -n 1)"
             [[ -n "${info1_ms}" ]] || info1_ms="-"
         fi
 
-        if printf '%s\n' "${output}" | grep -q "Phase 3:         seen"; then
+        if grep -q "Phase 3:         seen" <<<"${output}"; then
             phase3="yes"
             phase3_ms="$(printf '%s\n' "${output}" | sed -n 's/.*Phase 3:         seen at \([0-9.]*\) ms/\1/p' | head -n 1)"
             [[ -n "${phase3_ms}" ]] || phase3_ms="-"

@@ -12859,6 +12859,11 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
     phase3_start = result->phase3_sample;
     if (phase3_start < 0)
         phase3_start = result->tx_first_s_sample;
+    /* INFO1 is the Phase 2 handoff immediately preceding Phase 3.  When the
+       live SpanDSP state machine fails to advance its stage, retain INFO1 as
+       a bounded anchor for the independent Phase 3 demodulator. */
+    if (phase3_start < 0 && result->info1_seen)
+        phase3_start = result->info1_sample;
     if (phase3_start < 0)
         return;
 
@@ -13064,6 +13069,8 @@ static bool p3_demod_get_phase3_window(const decode_v34_result_t *result,
     phase3_start = result->phase3_sample;
     if (phase3_start < 0)
         phase3_start = result->tx_first_s_sample;
+    if (phase3_start < 0 && result->info1_seen)
+        phase3_start = result->info1_sample;
     if (phase3_start < 0 || phase3_start >= total_samples)
         return false;
 
@@ -13804,8 +13811,8 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
      */
     {
         /* Find the last TRN segment before J, or start from J - 200 syms */
-        int wide_start = best_j->start_symbol > 200
-                         ? best_j->start_symbol - 200 : 0;
+        int wide_anchor = best_j ? best_j->start_symbol : best_trn->start_symbol;
+        int wide_start = wide_anchor > 200 ? wide_anchor - 200 : 0;
         int wide_end = detail->symbol_count;
         int wide_syms = wide_end - wide_start;
 
@@ -14340,8 +14347,11 @@ static void print_v34_result(const decode_v34_result_t *result,
                result->u_info_from_info1a ? "INFO1a bits 25:31" : "SpanDSP fallback state",
                result->u_info);
     }
-    if (result->phase3_seen)
-        printf("  Phase 3:         seen at %.1f ms\n", sample_to_ms(result->phase3_sample, 8000));
+    if (result->phase3_seen) {
+        printf("  Phase 3:         seen at %.1f ms%s\n",
+               sample_to_ms(result->phase3_sample, 8000),
+               result->phase3_from_p3_demod ? " (independent S/TRN/J demod)" : "");
+    }
     if (result->tx_first_s_sample >= 0
         || result->tx_first_not_s_sample >= 0
         || result->tx_second_s_sample >= 0
@@ -18816,6 +18826,52 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
            (hint.left_expected_form == P12_SHORT_P1_FORM_ANALOG) ? "Left" : "Right");
 }
 
+/* Promote a bounded post-INFO1 scan only when the independent demodulator
+ * finds the Phase 3 S, TRN, and J signatures under one baud/carrier
+ * hypothesis.  Requiring the full signature set keeps ordinary carrier and
+ * data-mode periodicity from turning an INFO-only capture into Phase 3. */
+static bool promote_v34_phase3_from_p3(const int16_t *samples,
+                                       int total_samples,
+                                       decode_v34_result_t *result)
+{
+    p3_hypothesis_t hypotheses[P3_BAUD_COUNT * 2];
+    int start;
+    int len;
+    int count;
+
+    if (!samples || total_samples <= 0 || !result
+        || result->phase3_seen || !result->info1_seen) {
+        return false;
+    }
+
+    start = result->info1_sample;
+    if (start < 0 || start >= total_samples)
+        return false;
+    len = total_samples - start;
+    if (len > 8 * 8000)
+        len = 8 * 8000;
+    if (len < 800)
+        return false;
+
+    count = p3_scan_all_hypotheses(samples + start,
+                                   len,
+                                   start,
+                                   8000,
+                                   hypotheses,
+                                   P3_BAUD_COUNT * 2);
+    for (int i = 0; i < count; i++) {
+        if (hypotheses[i].has_s
+            && hypotheses[i].has_trn
+            && hypotheses[i].has_j) {
+            result->phase3_seen = true;
+            result->phase3_from_p3_demod = true;
+            result->phase3_sample = start;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Stage A: Phase 1/2, V.34, V.8 decode — produces cross-channel info.
  * When ctx is non-NULL, stores results in the stereo context. */
 static void run_decode_stage_a(const char *label,
@@ -18933,6 +18989,10 @@ static void run_decode_stage_a(const char *label,
                                       &have_answerer,
                                       &caller,
                                       &have_caller);
+        if (have_answerer)
+            (void) promote_v34_phase3_from_p3(linear_samples, total_samples, &answerer);
+        if (have_caller)
+            (void) promote_v34_phase3_from_p3(linear_samples, total_samples, &caller);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {
@@ -18949,9 +19009,9 @@ static void run_decode_stage_a(const char *label,
             printf("  V.34 probe init failed\n");
 
         /* Lightweight Phase 3 demodulation (supplementary) */
-        if (have_answerer && answerer.phase3_seen)
+        if (have_answerer && (answerer.phase3_seen || answerer.info1_seen))
             p3_demod_analyse_phase3(linear_samples, total_samples, &answerer, false);
-        if (have_caller && caller.phase3_seen)
+        if (have_caller && (caller.phase3_seen || caller.info1_seen))
             p3_demod_analyse_phase3(linear_samples, total_samples, &caller, true);
     }
 

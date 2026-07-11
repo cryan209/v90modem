@@ -46,6 +46,7 @@ typedef struct {
     bool info0_from_rescue;
     bool info1_from_rescue;
     bool phase3_seen;
+    bool phase3_from_p3_demod;
     bool phase4_ready_seen;
     bool phase4_seen;
     bool training_failed;
