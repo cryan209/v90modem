@@ -18,11 +18,30 @@ static inline int v92_gpa_scramble(uint32_t *reg, int in_bit)
     return out;
 }
 
-static inline int v92_gpa_descramble(uint32_t *reg, int in_bit)
+static inline int v92_trn2u_descramble(v92_trn2u_demod_t *demod, int in_bit)
 {
-    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+    uint32_t *reg = &demod->descramble_reg;
+    int out;
 
-    *reg = (*reg << 1) | (uint32_t)in_bit;
+    switch ((v92_trn2u_descrambler_mode_t)demod->descrambler_mode) {
+    case V92_TRN2U_DESCRAMBLER_GPA_RIGHT:
+        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 5)) & 1;
+        *reg = (*reg >> 1) | ((uint32_t)(in_bit & 1) << 22);
+        break;
+    case V92_TRN2U_DESCRAMBLER_GPC_LEFT:
+        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 4)) & 1;
+        *reg = ((*reg << 1) | (uint32_t)(in_bit & 1)) & 0x7FFFFFU;
+        break;
+    case V92_TRN2U_DESCRAMBLER_GPC_RIGHT:
+        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 18)) & 1;
+        *reg = (*reg >> 1) | ((uint32_t)(in_bit & 1) << 22);
+        break;
+    case V92_TRN2U_DESCRAMBLER_GPA_LEFT:
+    default:
+        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+        *reg = ((*reg << 1) | (uint32_t)(in_bit & 1)) & 0x7FFFFFU;
+        break;
+    }
     return out;
 }
 
@@ -159,6 +178,55 @@ void v92_trn2u_demod_init(v92_trn2u_demod_t *demod,
     demod->lu = lu;
     demod->alaw = alaw;
     demod->sink = sink;
+    demod->bit_permutation[0] = 0;
+    demod->bit_permutation[1] = 1;
+    demod->bit_permutation[2] = 2;
+}
+
+bool v92_trn2u_demod_set_hypothesis(
+    v92_trn2u_demod_t *demod,
+    const int bit_permutation[3],
+    v92_trn2u_sign_mode_t sign_mode,
+    v92_trn2u_descrambler_mode_t descrambler_mode)
+{
+    int bps;
+    bool seen[3] = {false, false, false};
+
+    if (!demod || !bit_permutation
+        || sign_mode < V92_TRN2U_SIGN_DIFFERENTIAL
+        || sign_mode > V92_TRN2U_SIGN_ABSOLUTE_INVERTED
+        || descrambler_mode < V92_TRN2U_DESCRAMBLER_GPA_LEFT
+        || descrambler_mode > V92_TRN2U_DESCRAMBLER_GPC_RIGHT)
+        return false;
+    bps = v92_trn2u_bits_per_symbol(demod->constellation_points);
+    for (int i = 0; i < bps; i++) {
+        int p = bit_permutation[i];
+
+        if (p < 0 || p >= bps || seen[p])
+            return false;
+        seen[p] = true;
+        demod->bit_permutation[i] = p;
+    }
+    demod->sign_mode = sign_mode;
+    demod->descrambler_mode = descrambler_mode;
+    return true;
+}
+
+static void v92_trn2u_put_recovered_bit(v92_trn2u_demod_t *demod,
+                                         int raw_bit,
+                                         int *accepted)
+{
+    int bit = v92_trn2u_descramble(demod, raw_bit);
+
+    if (bit) {
+        demod->descrambled_one_run++;
+        if (demod->descrambled_one_run > demod->longest_descrambled_one_run)
+            demod->longest_descrambled_one_run = demod->descrambled_one_run;
+    } else {
+        demod->descrambled_one_run = 0;
+    }
+    if (demod->sink && v92_cp_rx_put_bit(demod->sink, bit))
+        (*accepted)++;
 }
 
 static int v92_trn2u_slice_label(const v92_trn2u_demod_t *demod,
@@ -199,43 +267,35 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
         int label = v92_trn2u_slice_label(demod,
                                           linear < 0 ? -(double)linear
                                                      : (double)linear);
+        int recovered[3] = {0, 0, 0};
         int msb;
 
         demod->symbols++;
-        if (!demod->prev_sign_valid) {
+        if (!demod->prev_sign_valid
+            && (demod->sign_mode == V92_TRN2U_SIGN_DIFFERENTIAL
+                || demod->sign_mode == V92_TRN2U_SIGN_DIFFERENTIAL_INVERTED)) {
             demod->prev_sign = sign;
             demod->prev_sign_valid = true;
             continue;
         }
-        msb = sign ^ demod->prev_sign;
-        demod->prev_sign = sign;
-
-        if (demod->sink) {
-            int bit = v92_gpa_descramble(&demod->descramble_reg, msb);
-
-            if (bit) {
-                demod->descrambled_one_run++;
-                if (demod->descrambled_one_run > demod->longest_descrambled_one_run)
-                    demod->longest_descrambled_one_run = demod->descrambled_one_run;
-            } else {
-                demod->descrambled_one_run = 0;
-            }
-            if (v92_cp_rx_put_bit(demod->sink, bit))
-                accepted++;
-            for (int i = bps - 2; i >= 0; i--) {
-                bit = v92_gpa_descramble(&demod->descramble_reg,
-                                         (label >> i) & 1);
-                if (bit) {
-                    demod->descrambled_one_run++;
-                    if (demod->descrambled_one_run > demod->longest_descrambled_one_run)
-                        demod->longest_descrambled_one_run = demod->descrambled_one_run;
-                } else {
-                    demod->descrambled_one_run = 0;
-                }
-                if (v92_cp_rx_put_bit(demod->sink, bit))
-                    accepted++;
-            }
+        if (demod->sign_mode == V92_TRN2U_SIGN_ABSOLUTE
+            || demod->sign_mode == V92_TRN2U_SIGN_ABSOLUTE_INVERTED) {
+            msb = sign;
+        } else {
+            msb = sign ^ demod->prev_sign;
         }
+        if (demod->sign_mode == V92_TRN2U_SIGN_DIFFERENTIAL_INVERTED
+            || demod->sign_mode == V92_TRN2U_SIGN_ABSOLUTE_INVERTED)
+            msb ^= 1;
+        demod->prev_sign = sign;
+        demod->prev_sign_valid = true;
+        recovered[0] = msb;
+        for (int i = 1; i < bps; i++)
+            recovered[i] = (label >> (bps - 1 - i)) & 1;
+
+        for (int i = 0; i < bps; i++)
+            v92_trn2u_put_recovered_bit(
+                demod, recovered[demod->bit_permutation[i]], &accepted);
     }
     demod->frames_accepted += (uint32_t)accepted;
     return accepted;

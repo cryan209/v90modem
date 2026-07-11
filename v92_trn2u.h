@@ -52,7 +52,24 @@ typedef struct {
     uint32_t frames_accepted;   /* sink frames that passed validation */
     uint32_t descrambled_one_run;
     uint32_t longest_descrambled_one_run; /* TRN2u lock-quality diagnostic */
+    int bit_permutation[3];    /* diagnostic wire hypothesis; default 0,1,2 */
+    int sign_mode;             /* v92_trn2u_sign_mode_t */
+    int descrambler_mode;      /* v92_trn2u_descrambler_mode_t */
 } v92_trn2u_demod_t;
+
+typedef enum {
+    V92_TRN2U_SIGN_DIFFERENTIAL = 0,
+    V92_TRN2U_SIGN_DIFFERENTIAL_INVERTED,
+    V92_TRN2U_SIGN_ABSOLUTE,
+    V92_TRN2U_SIGN_ABSOLUTE_INVERTED
+} v92_trn2u_sign_mode_t;
+
+typedef enum {
+    V92_TRN2U_DESCRAMBLER_GPA_LEFT = 0,
+    V92_TRN2U_DESCRAMBLER_GPA_RIGHT,
+    V92_TRN2U_DESCRAMBLER_GPC_LEFT,
+    V92_TRN2U_DESCRAMBLER_GPC_RIGHT
+} v92_trn2u_descrambler_mode_t;
 
 void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
                        int constellation_points,
@@ -85,6 +102,13 @@ void v92_trn2u_demod_init(v92_trn2u_demod_t *demod,
                           double lu,
                           bool alaw,
                           v92_cp_rx_t *sink);
+
+/* Diagnostic-only wire hypotheses. Defaults implement Tables 28/29 and GPA. */
+bool v92_trn2u_demod_set_hypothesis(
+    v92_trn2u_demod_t *demod,
+    const int bit_permutation[3],
+    v92_trn2u_sign_mode_t sign_mode,
+    v92_trn2u_descrambler_mode_t descrambler_mode);
 
 /*
  * Feed raw G.711 codewords; recovered bits go to the v92_cp_rx sink.

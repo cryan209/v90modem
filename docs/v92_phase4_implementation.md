@@ -106,6 +106,20 @@ The timing loop uses a decision-directed Mueller-and-Muller error detector on
 the PAM decisions; `--clock-ppm` supplies its nominal rate. Corpus sweeps should
 vary `--start`, `--phase`, `--clock-ppm`, and `--lu` and rank configurations
 first by valid frames, then by rejected frame candidates.
+
+Diagnostic wire hypotheses are available without changing the live defaults:
+`--perm` selects the recovered bit order within each symbol, `--sign` compares
+differential/absolute and normal/inverted sign decisions, and `--descrambler`
+compares the GPA/GPC polynomials in both register directions. The compliant
+default is `--perm 01 --sign diff --descrambler gpa-left` for 4-point TRN2u
+(`012` for 8-point).
+
+Across the Agere, Motorola, and USR QC captures, the complete hypothesis sweep
+raises the longest descrambled-one run only to 39 bits. A locked TRN2u interval
+should produce thousands of consecutive descrambled ones. No tested bit-order,
+polarity, differential, or polynomial alternative therefore explains the
+recordings; the dominant remaining issue is symbol recovery/channel filtering
+or absence of a complete TRN2u interval in these calls.
 On the checked-in Agere, Motorola, and USR V.92 calls, fractional timing and
 equalization now expose occasional 17-one frame candidates, but none yet pass
 the strict CRC.  This narrows the remaining offline problem to adaptive timing

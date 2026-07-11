@@ -29,7 +29,9 @@ static void usage(const char *argv0)
             "[--lu amplitude] [--start sample] [--max samples] "
             "[--analog-wav --channel L|R --phase 0..1 --clock-ppm ppm "
             "--gain scale --timing-loop --timing-mu gain "
-            "--equalizer --eq-mu gain]\n",
+            "--equalizer --eq-mu gain] [--perm 012|...] "
+            "[--sign diff|diff-inv|abs|abs-inv] "
+            "[--descrambler gpa-left|gpa-right|gpc-left|gpc-right]\n",
             argv0);
 }
 
@@ -178,6 +180,11 @@ int main(int argc, char **argv)
     bool timing_loop = false;
     double timing_mu = 0.002;
     int wav_channel = 0;
+    int bit_permutation[3] = {0, 1, 2};
+    v92_trn2u_sign_mode_t sign_mode = V92_TRN2U_SIGN_DIFFERENTIAL;
+    v92_trn2u_descrambler_mode_t descrambler_mode = V92_TRN2U_DESCRAMBLER_GPA_LEFT;
+    const char *sign_name = "diff";
+    const char *descrambler_name = "gpa-left";
     uint64_t start = 0;
     uint64_t max_samples = 0;
     uint64_t fed = 0;
@@ -275,6 +282,44 @@ int main(int argc, char **argv)
                 usage(argv[0]);
                 return 2;
             }
+        } else if (strcmp(argv[i], "--perm") == 0 && i + 1 < argc) {
+            const char *perm = argv[++i];
+            size_t expected = points == 4 ? 2U : 3U;
+
+            if (strlen(perm) != expected) {
+                usage(argv[0]);
+                return 2;
+            }
+            for (size_t p = 0; p < expected; p++)
+                bit_permutation[p] = perm[p] - '0';
+        } else if (strcmp(argv[i], "--sign") == 0 && i + 1 < argc) {
+            sign_name = argv[++i];
+            if (strcmp(sign_name, "diff") == 0)
+                sign_mode = V92_TRN2U_SIGN_DIFFERENTIAL;
+            else if (strcmp(sign_name, "diff-inv") == 0)
+                sign_mode = V92_TRN2U_SIGN_DIFFERENTIAL_INVERTED;
+            else if (strcmp(sign_name, "abs") == 0)
+                sign_mode = V92_TRN2U_SIGN_ABSOLUTE;
+            else if (strcmp(sign_name, "abs-inv") == 0)
+                sign_mode = V92_TRN2U_SIGN_ABSOLUTE_INVERTED;
+            else {
+                usage(argv[0]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--descrambler") == 0 && i + 1 < argc) {
+            descrambler_name = argv[++i];
+            if (strcmp(descrambler_name, "gpa-left") == 0)
+                descrambler_mode = V92_TRN2U_DESCRAMBLER_GPA_LEFT;
+            else if (strcmp(descrambler_name, "gpa-right") == 0)
+                descrambler_mode = V92_TRN2U_DESCRAMBLER_GPA_RIGHT;
+            else if (strcmp(descrambler_name, "gpc-left") == 0)
+                descrambler_mode = V92_TRN2U_DESCRAMBLER_GPC_LEFT;
+            else if (strcmp(descrambler_name, "gpc-right") == 0)
+                descrambler_mode = V92_TRN2U_DESCRAMBLER_GPC_RIGHT;
+            else {
+                usage(argv[0]);
+                return 2;
+            }
         } else {
             usage(argv[0]);
             return 2;
@@ -303,6 +348,12 @@ int main(int argc, char **argv)
         report.sample = start;
         v92_cp_rx_init(&rx, points, alaw, frame_handler, &report);
         v92_trn2u_demod_init(&demod, points, lu, alaw, &rx);
+        if (!v92_trn2u_demod_set_hypothesis(&demod, bit_permutation,
+                                             sign_mode, descrambler_mode)) {
+            fprintf(stderr, "invalid TRN2u hypothesis\n");
+            free(wav.samples);
+            return 2;
+        }
         position = (double)start + timing_phase;
         while (position + 1.0 < (double)wav.frames
                && (!max_samples || fed < max_samples)) {
@@ -396,14 +447,15 @@ int main(int argc, char **argv)
         free(wav.samples);
         printf("summary file=%s input=analog-wav channel=%c law=%s points=%d "
                "lu=%.3f phase=%.6f clock_ppm=%.3f gain=%.3f timing=%d "
-               "timing_mu=%.5f eq=%d eq_mu=%.5f "
+               "timing_mu=%.5f eq=%d eq_mu=%.5f perm=%d%d%d sign=%s descrambler=%s "
                "start=%" PRIu64
                " samples=%" PRIu64 " symbols=%u input_bits=%u valid=%u rejected=%u "
                "longest_ones=%u CPt=%u CPu=%u CPus=%u SUVu=%u\n",
                path, wav_channel ? 'R' : 'L', alaw ? "alaw" : "ulaw",
                points, lu, timing_phase, clock_ppm, gain,
                timing_loop ? 1 : 0, timing_mu, equalizer ? 1 : 0,
-               eq_mu, start, fed,
+               eq_mu, bit_permutation[0], bit_permutation[1],
+               bit_permutation[2], sign_name, descrambler_name, start, fed,
                demod.symbols, rx.input_bits, rx.valid_frames, rx.rejected_frames,
                demod.longest_descrambled_one_run,
                report.cpt, report.cpu, report.cpus, report.suvu);
@@ -424,6 +476,12 @@ int main(int argc, char **argv)
     report.sample = start;
     v92_cp_rx_init(&rx, points, alaw, frame_handler, &report);
     v92_trn2u_demod_init(&demod, points, lu, alaw, &rx);
+    if (!v92_trn2u_demod_set_hypothesis(&demod, bit_permutation,
+                                         sign_mode, descrambler_mode)) {
+        fprintf(stderr, "invalid TRN2u hypothesis\n");
+        fclose(fp);
+        return 2;
+    }
     while (!max_samples || fed < max_samples) {
         size_t want = sizeof(buffer);
         size_t got;
@@ -441,10 +499,13 @@ int main(int argc, char **argv)
     }
     fclose(fp);
 
-    printf("summary file=%s law=%s points=%d lu=%.3f start=%" PRIu64
+    printf("summary file=%s law=%s points=%d lu=%.3f perm=%d%d%d sign=%s "
+           "descrambler=%s start=%" PRIu64
            " samples=%" PRIu64 " symbols=%u input_bits=%u valid=%u rejected=%u "
            "longest_ones=%u CPt=%u CPu=%u CPus=%u SUVu=%u\n",
-           path, alaw ? "alaw" : "ulaw", points, lu, start, fed,
+           path, alaw ? "alaw" : "ulaw", points, lu,
+           bit_permutation[0], bit_permutation[1], bit_permutation[2],
+           sign_name, descrambler_name, start, fed,
            demod.symbols, rx.input_bits, rx.valid_frames, rx.rejected_frames,
            demod.longest_descrambled_one_run,
            report.cpt, report.cpu, report.cpus, report.suvu);
