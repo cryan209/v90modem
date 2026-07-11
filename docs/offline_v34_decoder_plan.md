@@ -1,5 +1,16 @@
 # Offline V.34/V.90 Decoder Plan
 
+## Status Notes (2026-07)
+
+- Pure V.34 captures now decode: the Phase 2 engine bridges retry a weak
+  V.90-mode pass as plain V.34 (standard CC carriers, 49-bit INFO0) and keep
+  the higher-scoring result (`decode_v34_result_t.plain_v34_mode`).
+- The offline pass initializes the modem full duplex; `enable_tx` had been
+  passed as the duplex flag, mis-framing INFO0 as 51-bit INFOh.
+- `scripts/v34_tone_matrix.sh` over `gough-lui-v34-modem-sounds`:
+  31/54 INFO0, 35/54 INFO1, 26/54 Phase 3 (was 0 across the board), with
+  INFO-inferred rates matching capture filenames.
+
 ## Goal
 
 Move `vpcm_decode` away from driving the full SpanDSP V.34 modem state machine
