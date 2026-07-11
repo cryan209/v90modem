@@ -53,23 +53,28 @@ only their acknowledge bit.  `v90_get_v92_cpu()` exposes the accepted
 CPu-derived parameters (rate, TRN1d gain, shaping filter, constellations)
 for native CPd construction.
 
+## Live runtime integration
+
+The SIP modem now advertises the V.92 QC/QCA byte alongside the V.90-family
+CM/JM modulation set.  When the peer returns a V.92 byte, the live V.90
+context switches to native V.92 Phase 4.  Raw, octet-transparent G.711 input
+is passed directly to the 4-point TRN2u demodulator, which descrambles and
+differentially decodes CPt, CPu/CPu-prime, and SUVu/SUVu-prime.  Accepted
+frames drive the native transmitter gates described above.  The legacy V.90
+Phase 4 bit callback remains selected when the peer does not negotiate V.92.
+
+The 4-point selection matches the current Jp bit-48 profile.  The initial
+TRN2u slicer reference is 8000 linear units and can be calibrated against a
+real bearer with `V92_TRN2U_LU`; accepted/rejected frame and symbol counters
+are included in the regular modem diagnostic snapshot.
+
 ## Remaining native runtime work
 
-The live V.92 startup path still needs:
-
-- a TRN2u demodulator/descrambler feeding the CPu bit receiver from the
-  G.711 stream (the Phase 3 receiver in `v92_p3_rx.c` stops at Ja);
-- full Table 30 optional-part support for modulus parameters, prefilter and
-  precoder coefficients, and constellation sets, so the CPd payload becomes
-  a native Table 30 frame built from the received CPu instead of the legacy
-  compatibility payload;
-- selection of a real CPd prefilter gain and upstream rate from receiver
-  measurements rather than compatibility-profile values;
-- transmission of CPd through the negotiated TRN2d mapper (V.92-mode CPt is
-  still applied through the compatibility path, so SUVd/CPd remain
-  sign-modulated at U_INFO);
-- strict Ed/B1d and DATA transition events connected to the analyzer;
-- rate renegotiation, fast parameter exchange, and modem-on-hold procedures.
-
-Until those pieces are connected, the shared startup harness's CP/B1 fallback
-remains diagnostic compatibility behavior and is not native V.92 proof.
+- derive TRN2u `L_U` from Phase 3/receiver measurements instead of the
+  calibration default;
+- apply CPus to a complete rate-renegotiation state machine (it is currently
+  strictly decoded and logged but ignored during initial Phase 4);
+- implement E2u detection as the alternate final acknowledgement path;
+- connect fast parameter exchange and modem-on-hold procedures;
+- validate the slicer, acknowledgements, Ed/B1d transition, and sustained
+  data mode against real V.92 client modems over a transparent G.711 bearer.

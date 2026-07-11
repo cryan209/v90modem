@@ -2204,7 +2204,10 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     trn2d_bits = (TRN2D_LEN / VPCM_CP_FRAME_INTERVALS) * ds.d;
     if (ds.failed || ds.nbits != trn2d_bits
         || v90_get_tx_phase(tx) != V90_TX_SUVD) {
-        fprintf(stderr, "V.92 native mapped TRN2d demap failed\n");
+        fprintf(stderr,
+                "V.92 native mapped TRN2d demap failed: demap=%d bits=%d/%d phase=%d\n",
+                ds.failed ? 1 : 0, ds.nbits, trn2d_bits,
+                (int)v90_get_tx_phase(tx));
         goto done;
     }
     /* Descrambled TRN2d is binary ones once the descrambler synchronises. */
@@ -6902,7 +6905,7 @@ static bool test_v8_v91_advertisement_over_analog_g711(v91_law_t law)
     return true;
 }
 
-static bool __attribute__((unused)) test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
+static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
 {
     v8_parms_t caller_parms;
     v8_parms_t answer_parms;
@@ -6911,7 +6914,7 @@ static bool __attribute__((unused)) test_v8_v92_qc_exchange_over_analog_g711(v91
     uint32_t expected_mods;
     int expected_pcm;
     const int caller_v92 = 0x45;
-    const int answer_v92 = 0x46;
+    const int answer_v92 = 0x47;
 
     /*
      * Current SpanDSP V.8 behavior in this path keeps the CM/JM modulation
@@ -7486,6 +7489,8 @@ static bool run_vpcm_session_suite(void)
                 && test_spandsp_v90_info_startup_over_analog_g711(V91_LAW_ALAW)))
         && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ULAW)
         && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW)
+        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW)
+        && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)

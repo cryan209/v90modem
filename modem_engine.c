@@ -24,6 +24,8 @@
 #include "clock_recovery.h"
 #include "v90.h"
 #include "v90_cp_rx.h"
+#include "v92_cp_rx.h"
+#include "v92_trn2u.h"
 
 #include <spandsp.h>
 
@@ -533,6 +535,12 @@ static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
 static int            g_v90_phase3_s_events = 0;
 static v90_cp_rx_t    g_v90_cp_rx;
+static bool           g_v92_active = false;
+static bool           g_v92_trn2u_active = false;
+static int            g_v92_trn2u_points = 4;
+static double         g_v92_trn2u_lu = 8000.0;
+static v92_cp_rx_t    g_v92_cp_rx;
+static v92_trn2u_demod_t g_v92_trn2u_demod;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -718,7 +726,9 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
                                                   : answer_tone;
     v8_parms.send_ci            = g_calling_party;
-    v8_parms.v92                = -1;
+    /* V.92 Table 5 QC/QCA: this endpoint is always the digital modem.
+       The current Jp profile selects the mandatory 4-point TRN2u channel. */
+    v8_parms.v92                = g_calling_party ? 0x45 : 0x47;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
     if (g_advertise_v90)
@@ -894,6 +904,56 @@ static void v90_live_cp_bit(void *user_data, int bit)
         v34_reject_v90_phase4_hypothesis(g_v34);
 }
 
+/* Runs synchronously inside me_rx_g711() while g_state_mtx is held. */
+static void v92_live_p4u_frame(void *user_data,
+                               v92_p4u_kind_t kind,
+                               const v92_cp_diag_t *cp,
+                               const v92_cpus_diag_t *cpus,
+                               const v92_suvu_diag_t *suvu)
+{
+    bool accepted = false;
+    const char *name = "unknown";
+    int bits = 0;
+    unsigned drn = 0;
+    int ack = 0;
+
+    (void)user_data;
+    if (!g_v90 || g_mod != ME_MOD_V90 || !g_v92_active)
+        return;
+
+    if ((kind == V92_P4U_KIND_CPT || kind == V92_P4U_KIND_CPU) && cp) {
+        vpcm_cp_frame_t vp;
+
+        name = (kind == V92_P4U_KIND_CPT) ? "CPt" : "CPu";
+        bits = cp->nbits;
+        drn = cp->frame.drn;
+        ack = cp->frame.acknowledge ? 1 : 0;
+        accepted = v92_cp_frame_to_vpcm(&cp->frame, &vp);
+        if (accepted && kind == V92_P4U_KIND_CPT) {
+            accepted = v90_set_phase4_cp(g_v90, &vp)
+                && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
+        } else if (accepted) {
+            accepted = v90_set_v92_cpu(g_v90, &vp);
+        }
+    } else if (kind == V92_P4U_KIND_SUVU && suvu) {
+        name = "SUVu";
+        bits = v92_suvu_bit_length(g_v92_trn2u_points);
+        ack = suvu->frame.acknowledge ? 1 : 0;
+        accepted = v90_set_v92_suvu(g_v90, suvu->frame.acknowledge);
+    } else if (kind == V92_P4U_KIND_CPUS && cpus) {
+        /* CPus belongs to rate renegotiation, not initial Phase 4. */
+        name = "CPus";
+        bits = v92_cpus_bit_length(g_v92_trn2u_points);
+        drn = cpus->frame.drn;
+        ack = cpus->frame.acknowledge ? 1 : 0;
+    }
+
+    ME_LOG("[ME] V.92 strict RX frame=%s bits=%d drn=%u ack=%d accepted=%d\n",
+           name, bits, drn, ack, accepted ? 1 : 0);
+    trace_phase("V92 strict RX frame=%s bits=%d drn=%u ack=%d accepted=%d",
+                name, bits, drn, ack, accepted ? 1 : 0);
+}
+
 static void cleanup_v34_v90_training_locked(void)
 {
     if (g_v90) {
@@ -909,6 +969,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_wait_info1_logged = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
+    v92_cp_rx_reset(&g_v92_cp_rx);
+    memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
+    g_v92_trn2u_active = false;
     g_v34_fallback_to_v22bis_pending = false;
     g_v34_fallback_status = 0;
     v90_dil_capture_reset();
@@ -1332,8 +1395,10 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
          * upstream = V.34 modulation.  Training uses V.34 Phases 2-4; after
          * training completes, TX switches from V.34 to direct PCM injection.
          */
-        ME_LOG("[ME] V.8 negotiated V.90 (PCM downstream + V.34 upstream)\n");
-        trace_phase("V8 selected V90");
+        g_v92_active = result->v92 >= 0;
+        ME_LOG("[ME] V.8 negotiated %s (PCM downstream + V.34 upstream)\n",
+               g_v92_active ? "V.92" : "V.90");
+        trace_phase("V8 selected %s", g_v92_active ? "V92" : "V90");
         g_mod = ME_MOD_V90;
         /* V.90 §6.2: analog modem only supports 3200 baud (mandatory) */
         int saved_baud = g_v34_start_baud;
@@ -1351,7 +1416,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                        g_law == ME_LAW_ALAW,
                        v90_live_cp_frame,
                        NULL);
-        if (g_v34)
+        if (g_v34 && !g_v92_active)
             v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
         if (g_v34)
             v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
@@ -1401,6 +1466,13 @@ void me_init(void)
     g_g711_tx_octets = 0;
     g_g711_raw_v90_tx_octets = 0;
     g_g711_linear_tx_octets = 0;
+    {
+        int env_lu = parse_env_int("V92_TRN2U_LU", (int)g_v92_trn2u_lu);
+        if (env_lu >= 500 && env_lu <= 30000)
+            g_v92_trn2u_lu = (double)env_lu;
+        ME_LOG("[ME] V.92 TRN2u receiver: %d-point PAM, L_U=%.0f\n",
+               g_v92_trn2u_points, g_v92_trn2u_lu);
+    }
     g711_taps_init();
     {
         const char *inv = getenv("ME_V34_INVERT_ROLE");
@@ -1481,6 +1553,8 @@ void me_on_sip_connected(void)
     g_v8_tx_count      = 0;
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
+    g_v92_active = false;
+    g_v92_trn2u_active = false;
 
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
@@ -1887,6 +1961,23 @@ static void prepare_v90_phase3_locked(void)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
         }
         if (g_v90) {
+            if (g_v92_active) {
+                v90_enable_v92_mode(g_v90);
+                v90_enable_v92_native_cpu_rx(g_v90);
+                v92_cp_rx_init(&g_v92_cp_rx,
+                               g_v92_trn2u_points,
+                               g_law == ME_LAW_ALAW,
+                               v92_live_p4u_frame,
+                               NULL);
+                v92_trn2u_demod_init(&g_v92_trn2u_demod,
+                                     g_v92_trn2u_points,
+                                     g_v92_trn2u_lu,
+                                     g_law == ME_LAW_ALAW,
+                                     &g_v92_cp_rx);
+                g_v92_trn2u_active = true;
+                ME_LOG("[ME] V.92 native Phase 4 RX enabled: %d-point TRN2u, L_U=%.0f\n",
+                       g_v92_trn2u_points, g_v92_trn2u_lu);
+            }
             v90_start_phase3(g_v90, info1a.u_info);
             g_v90_phase3_started = true;
             g_v90_completion_deferred_logged = false;
@@ -2176,6 +2267,12 @@ void me_rx_g711(const uint8_t *codewords, int count)
 
     pthread_mutex_lock(&g_state_mtx);
     g_g711_rx_octets += (uint64_t)count;
+    if (g_v92_trn2u_active && g_v92_active && g_v90
+        && g_state == ME_TRAINING
+        && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
+        && v90_get_tx_phase(g_v90) < V90_TX_DATA) {
+        (void)v92_trn2u_demod_feed(&g_v92_trn2u_demod, codewords, count);
+    }
     pthread_mutex_unlock(&g_state_mtx);
     if (g_g711_rx_tap)
         (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
@@ -2295,6 +2392,12 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->v90_cp_input_bits = g_v90_cp_rx.input_bits;
     snapshot->v90_cp_valid_frames = g_v90_cp_rx.valid_frames;
     snapshot->v90_cp_rejected_frames = g_v90_cp_rx.rejected_frames;
+    snapshot->v92_active = g_v92_active ? 1 : 0;
+    snapshot->v92_trn2u_active = g_v92_trn2u_active ? 1 : 0;
+    snapshot->v92_trn2u_symbols = g_v92_trn2u_demod.symbols;
+    snapshot->v92_cp_input_bits = g_v92_cp_rx.input_bits;
+    snapshot->v92_cp_valid_frames = g_v92_cp_rx.valid_frames;
+    snapshot->v92_cp_rejected_frames = g_v92_cp_rx.rejected_frames;
     snapshot->phase_elapsed_ms = (g_phase_start_ms != 0 && g_state != ME_IDLE)
         ? (trace_now_ms() - g_phase_start_ms)
         : 0;

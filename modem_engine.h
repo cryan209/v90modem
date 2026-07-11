@@ -59,6 +59,12 @@ typedef struct {
     uint64_t v90_cp_input_bits;
     uint32_t v90_cp_valid_frames;
     uint32_t v90_cp_rejected_frames;
+    int v92_active;
+    int v92_trn2u_active;
+    uint64_t v92_trn2u_symbols;
+    uint64_t v92_cp_input_bits;
+    uint32_t v92_cp_valid_frames;
+    uint32_t v92_cp_rejected_frames;
     uint64_t phase_elapsed_ms;
     uint64_t g711_rx_octets;
     uint64_t g711_tx_octets;

@@ -611,7 +611,10 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
     s->phase4_frame_pos = V90_FRAME_LEN;
     s->phase4_mapper_ready = true;
     s->cp_ack_received = false;
-    if (!v90_build_mp_type0(s, false)) {
+    /* Native V.92 follows TRN2d with SUVd/CPd and has no V.90 Type-0 MP.
+       Table 23 CPt therefore carries no V.90 upstream-rate mask. */
+    if (!(s->v92_mode && s->v92_native_cpu_rx)
+        && !v90_build_mp_type0(s, false)) {
         s->phase4_mapper_ready = false;
         return false;
     }
@@ -2926,7 +2929,9 @@ int v90_demap_mapped_frame(v90_law_t law,
             return 0;
         for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
             if (vpcm_cp_mask_get(cp->masks[constellation], u)) {
-                if (u < ucode)
+                /* The transmitter assigns labels in descending U-code
+                   order; count selected values above this U-code. */
+                if (u > ucode)
                     label++;
                 m++;
             }
