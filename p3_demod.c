@@ -738,7 +738,8 @@ static bool is_ru_pattern(const p3_symbol_t *syms, int start, int len,
 
 /* Detect J frame: 16-bit repeating pattern in descrambled bits */
 static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
-                             uint16_t *trn16, int *hypothesis)
+                             uint16_t *trn16, int *hypothesis,
+                             int *match_pct_out)
 {
     uint16_t best_pat = 0;
     int best_phase = 0;
@@ -813,6 +814,8 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
 
     if (trn16) *trn16 = best_pat;
     if (hypothesis) *hypothesis = best_phase;
+    if (match_pct_out)
+        *match_pct_out = (best_matches * 100 + best_checks / 2) / best_checks;
     return true;
 }
 
@@ -1052,6 +1055,7 @@ int p3_segment_symbols(p3_result_t *result)
         float pp_conf = 0.0f;
         uint16_t j_trn16 = 0;
         int j_hyp = 0;
+        int j_periodic_match_pct = 0;
 
 
         /* Skip silence */
@@ -1166,9 +1170,23 @@ int p3_segment_symbols(p3_result_t *result)
             {
                 int checks = 0;
                 int error_bits = trn_recurrence_errors(syms, pos, seg_len, &checks);
+                int descr_errors = 0;
+                int descr_bits = seg_len * 2;
                 float conf;
+
+                for (int b = 0; b < descr_bits; b++) {
+                    if (symbol_descrambled_bit(syms, pos, b) != 1)
+                        descr_errors++;
+                }
                 add_segment(result, P3_SIGNAL_TRN, pos, seg_len, syms);
                 result->segments[result->segment_count - 1].trn_errors = error_bits;
+                result->segments[result->segment_count - 1].trn_recurrence_checks = checks;
+                result->segments[result->segment_count - 1].trn_recurrence_match_pct =
+                    (checks > 0) ? ((checks - error_bits) * 100 + checks / 2) / checks : 0;
+                result->segments[result->segment_count - 1].trn_descrambled_errors = descr_errors;
+                result->segments[result->segment_count - 1].trn_descrambled_bits = descr_bits;
+                result->segments[result->segment_count - 1].trn_descrambled_ber_pct =
+                    (descr_bits > 0) ? (descr_errors * 100 + descr_bits / 2) / descr_bits : 0;
                 if (checks > 0)
                     conf = 1.0f - (float) error_bits / (float) checks;
                 else
@@ -1181,7 +1199,8 @@ int p3_segment_symbols(p3_result_t *result)
 
         /* Check for J frame (16-bit repeating descrambled pattern) */
         if (remaining >= 48
-            && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp)) {
+            && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp,
+                                &j_periodic_match_pct)) {
             int j_table_bits = 0;
             int j_table_phase = 0;
             int j_table_transform = 0;
@@ -1214,6 +1233,7 @@ int p3_segment_symbols(p3_result_t *result)
                 seg = &result->segments[result->segment_count - 1];
                 seg->j_trn16 = j_trn16;
                 seg->j_hypothesis = j_hyp;
+                seg->j_periodic_match_pct = j_periodic_match_pct;
                 classify_j_table18(syms,
                                    pos,
                                    seg_len,

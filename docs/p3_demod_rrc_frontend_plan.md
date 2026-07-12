@@ -1,5 +1,47 @@
 # p3_demod RX Front-End Rewrite Plan (RRC Filter + Resampler + Timing Recovery)
 
+## Update 2026-07-12: match-quality characterization found no separating scalar threshold
+
+The proposed next experiment has now been run against the three verified
+Phase 4 detections and against accepted false matches in ordinary payload data.
+`p3_segment_t` now records the learned 16-bit J periodic-match percentage, the
+canonical Table 18 match percentage, TRN scrambler-recurrence match percentage,
+and TRN descrambled bit error rate. Setting `P3_MATCH_STATS=1` on
+`vpcm_decode --v34` prints these values for the exact full-span hypothesis used
+by `p3_find_phase4_handoff_sample()`, including its J anchor and chosen TRN.
+The diagnostics do not change classification.
+
+Verified handoff measurements:
+
+| Capture/channel | J learned periodic | J Table 18 | Chosen TRN recurrence | Chosen TRN DBER |
+|---|---:|---:|---:|---:|
+| `motorola-sm56-problematic1` L | 83% | 73% | 1793/1801 (100% rounded) | 21/1824 (1%) |
+| `motorola-sm56-problematic2` L | 85% | 69% | 8899/8905 (100% rounded) | 21/8928 (0% rounded) |
+| `motorola-sm56-problematic2` R | 84% | 71% | 1262/1297 (97%) | 49/1320 (4%) |
+
+The false/data-mode population overlaps and often looks *better*:
+
+- accepted false J candidates reach 90-95% learned periodicity and 80-81%
+  canonical Table 18 match;
+- long false TRN candidates reach 100% recurrence with 0-1% descrambled BER;
+- `banksia-wavesp336` alone contains a 996-symbol false TRN at 100%/1%, a
+  684-symbol false TRN at 100%/1%, and false J candidates up to 95% learned
+  periodicity and 81% Table 18 match.
+
+This is enough to rule out a separating threshold on any one of these metrics:
+raising J periodicity above 83% or Table 18 above 69% loses a verified handoff,
+while lowering TRN BER below 4% or requiring recurrence above 97% retains
+ordinary payload candidates that are cleaner than the genuine signal. A
+weighted combination of the same monotonic quality metrics has the same
+ordering problem.
+
+**Result:** do not tighten `is_trn_pattern()` or `detect_j_pattern()` using
+percentage/BER alone. The next segmenter experiment must add independent
+structure: the ordered J/J' -> S (128T) -> S-bar (16T) -> TRN (>=512T)
+topology, realistic inter-segment gaps/durations, and consistency with the
+INFO1-negotiated role/rate. Reintroduce the RRC+Godard front end only together
+with that context-aware sequence classifier.
+
 ## Update 2026-07-12: Stages 1-2 implemented and validated; Stage 3 revealed a new, more fundamental blocker
 
 Implemented and independently validated Stages 1 (Bresenham T/2 resampler)

@@ -142,10 +142,16 @@ typedef struct {
     int   j_table_phase;          /* Best Table 18 phase offset (0-15) */
     int   j_table_transform;      /* 0=none,1=invert,2=swap,3=swap+invert */
     int   j_table_match_pct;      /* Best periodic Table 18 match percentage */
+    int   j_periodic_match_pct;   /* Best learned 16-bit periodic match percentage */
     int   jprime_match_pct;       /* Best Table 19 one-block match percentage */
 
     /* For TRN */
-    int   trn_errors;             /* Number of descrambled bits != 1 */
+    int   trn_errors;             /* Number of scrambler-recurrence errors */
+    int   trn_recurrence_checks;  /* Scrambler-recurrence comparisons */
+    int   trn_recurrence_match_pct; /* Scrambler-recurrence match percentage */
+    int   trn_descrambled_errors; /* Descrambled zero bits (TRN expects ones) */
+    int   trn_descrambled_bits;   /* Descrambled bits included in BER */
+    int   trn_descrambled_ber_pct; /* Rounded descrambled bit-error percentage */
 
     /* For Ru/uR */
     bool  ru_positive_first;      /* true = +LU first (Ru), false = -LU (uR) */

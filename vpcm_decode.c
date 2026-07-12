@@ -13004,11 +13004,19 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                            seg->avg_magnitude,
                            seg->confidence);
                     if (seg->type == P3_SIGNAL_TRN)
-                        printf(" errors=%d", seg->trn_errors);
+                        printf(" recurrence=%d/%d(%d%%) dber=%d/%d(%d%%)",
+                               seg->trn_recurrence_checks - seg->trn_errors,
+                               seg->trn_recurrence_checks,
+                               seg->trn_recurrence_match_pct,
+                               seg->trn_descrambled_errors,
+                               seg->trn_descrambled_bits,
+                               seg->trn_descrambled_ber_pct);
                     if (seg->type == P3_SIGNAL_PP)
                         printf(" blocks=%d phase=%d", seg->pp_blocks, seg->pp_phase);
                     if (seg->type == P3_SIGNAL_J) {
-                        printf(" trn16=0x%04X", seg->j_trn16);
+                        printf(" trn16=0x%04X periodic=%d%%",
+                               seg->j_trn16,
+                               seg->j_periodic_match_pct);
                         if (seg->j_table_bits > 0)
                             printf(" table18=%dpt(%d%%) phase=%d xform=%d",
                                    seg->j_table_bits,
@@ -14156,11 +14164,19 @@ static void p3_demod_scan_window(const int16_t *samples,
                        seg->avg_magnitude,
                        seg->confidence);
                 if (seg->type == P3_SIGNAL_TRN)
-                    printf(" errors=%d", seg->trn_errors);
+                    printf(" recurrence=%d/%d(%d%%) dber=%d/%d(%d%%)",
+                           seg->trn_recurrence_checks - seg->trn_errors,
+                           seg->trn_recurrence_checks,
+                           seg->trn_recurrence_match_pct,
+                           seg->trn_descrambled_errors,
+                           seg->trn_descrambled_bits,
+                           seg->trn_descrambled_ber_pct);
                 if (seg->type == P3_SIGNAL_PP)
                     printf(" blocks=%d phase=%d", seg->pp_blocks, seg->pp_phase);
                 if (seg->type == P3_SIGNAL_J) {
-                    printf(" trn16=0x%04X", seg->j_trn16);
+                    printf(" trn16=0x%04X periodic=%d%%",
+                           seg->j_trn16,
+                           seg->j_periodic_match_pct);
                     if (seg->j_table_bits > 0)
                         printf(" table18=%dpt(%d%%) phase=%d xform=%d",
                                seg->j_table_bits,
@@ -18864,6 +18880,7 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
 static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
 {
     enum { PHASE4_MAX_SAMPLES_FROM_J = 32000 }; /* ~4s @ 8kHz */
+    const bool dump_match_stats = getenv("P3_MATCH_STATS") != NULL;
     int j;
     int deadline_sample;
     int s_sample;
@@ -18885,6 +18902,44 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
     if (j >= detail->segment_count)
         return -1;
 
+    if (dump_match_stats) {
+        fprintf(stderr,
+                "[P3MATCH] anchor_j segment=%d sample=%d symbols=%d periodic=%d%% table18=%dpt/%d%%\n",
+                j,
+                detail->segments[j].start_sample,
+                detail->segments[j].length,
+                detail->segments[j].j_periodic_match_pct,
+                detail->segments[j].j_table_bits,
+                detail->segments[j].j_table_match_pct);
+        for (int i = 0; i < detail->segment_count; i++) {
+            const p3_segment_t *seg = &detail->segments[i];
+
+            if (seg->type == P3_SIGNAL_J) {
+                fprintf(stderr,
+                        "[P3MATCH] candidate=J segment=%d sample=%d symbols=%d periodic=%d%% table18=%dpt/%d%%%s\n",
+                        i,
+                        seg->start_sample,
+                        seg->length,
+                        seg->j_periodic_match_pct,
+                        seg->j_table_bits,
+                        seg->j_table_match_pct,
+                        (i == j) ? " anchor=yes" : "");
+            } else if (seg->type == P3_SIGNAL_TRN) {
+                fprintf(stderr,
+                        "[P3MATCH] candidate=TRN segment=%d sample=%d symbols=%d recurrence=%d/%d(%d%%) dber=%d/%d(%d%%)\n",
+                        i,
+                        seg->start_sample,
+                        seg->length,
+                        seg->trn_recurrence_checks - seg->trn_errors,
+                        seg->trn_recurrence_checks,
+                        seg->trn_recurrence_match_pct,
+                        seg->trn_descrambled_errors,
+                        seg->trn_descrambled_bits,
+                        seg->trn_descrambled_ber_pct);
+            }
+        }
+    }
+
     deadline_sample = detail->segments[j].start_sample + PHASE4_MAX_SAMPLES_FROM_J;
     s_sample = -1;
     for (int i = j + 1; i < detail->segment_count; i++) {
@@ -18902,6 +18957,14 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
         if (s_sample >= 0
             && seg->type == P3_SIGNAL_TRN
             && seg->length >= 512) {
+            if (dump_match_stats) {
+                fprintf(stderr,
+                        "[P3MATCH] handoff s_sample=%d trn_segment=%d trn_sample=%d trn_symbols=%d\n",
+                        s_sample,
+                        i,
+                        seg->start_sample,
+                        seg->length);
+            }
             return s_sample;
         }
     }
