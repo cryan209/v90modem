@@ -66,6 +66,7 @@ typedef struct {
     float im;                     /* Baseband Q component */
     float magnitude;              /* |symbol| */
     float phase;                  /* Phase angle (radians) */
+    int   quadrant;               /* Absolute received quadrant (0-3) */
     int   dibit;                  /* Differential dibit (0-3) */
     int   bit0;                   /* First descrambled bit */
     int   bit1;                   /* Second descrambled bit */
@@ -126,6 +127,18 @@ typedef struct {
     float ted_mixed_coeff;
     int   timing_correction;
     bool  use_rrc_frontend;
+    float rrc_agc_gain;
+
+    /* 127-tap T/2 fractionally-spaced equalizer (SpanDSP dimensions). */
+    float eq_buf_re[128];
+    float eq_buf_im[128];
+    float eq_coeff_re[127];
+    float eq_coeff_im[127];
+    int   eq_buf_pos;
+    float eq_delta;
+    int   cma_freeze_symbols;
+    int   s_alternating_run;
+    int   s_previous_dibit;
 
     /* Previous symbol for differential decode */
     float prev_re;
@@ -281,6 +294,22 @@ bool p3_find_phase4_timing(const p3_result_t *result,
                            bool source_calling_party,
                            p3_phase4_timing_quality_t *out);
 
+/* Find the answer-modem S(128T) -> S-bar(16T) -> TRN transition without
+ * relying on the legacy J/S/TRN segmenter. */
+bool p3_find_answer_phase4_timing(const p3_result_t *result,
+                                  p3_phase4_timing_quality_t *out);
+
+/* Joint stereo timing: pair the call modem's J'->TRN boundary with the
+ * answer modem's S->S-bar->TRN boundary in the standard 0..500 ms response
+ * window.  This disambiguates Phase 4 from the identical S/S-bar waveform
+ * used at the beginning of Phase 3. */
+bool p3_find_stereo_phase4_timing(const p3_result_t *call_source,
+                                  const p3_result_t *answer_source,
+                                  int min_start_sample,
+                                  p3_phase4_timing_quality_t *call_out,
+                                  p3_phase4_timing_quality_t *answer_out,
+                                  int *score_out);
+
 /*
  * Run demodulation on a sample range with known parameters.
  * Convenience function: init + process + segment.
@@ -291,6 +320,34 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                           int baud_code,
                           int carrier_sel,
                           int sample_rate);
+
+/* As above, but choose the initial timing-phase trial by the normative
+ * answer-modem Phase-4 S/S-bar signature before falling back to the generic
+ * segment score. */
+p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,
+                                        int sample_count,
+                                        int sample_offset,
+                                        int baud_code,
+                                        int carrier_sel,
+                                        int sample_rate);
+
+/* Select the timing-phase trial by the call modem's J'->TRN evidence. */
+p3_result_t *p3_demod_run_call_phase4(const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate);
+
+/* Role-specific Phase-4 trial selection with an explicit timing-phase count. */
+p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
+                                        int sample_count,
+                                        int sample_offset,
+                                        int baud_code,
+                                        int carrier_sel,
+                                        int sample_rate,
+                                        bool source_calling_party,
+                                        int timing_trials);
 
 /*
  * Try all baud/carrier combinations and return the best match.

@@ -1,5 +1,40 @@
 # p3_demod RX Front-End Rewrite Plan (RRC Filter + Resampler + Timing Recovery)
 
+## Update 2026-07-12: spec-timed RRC/equalizer path is now the default
+
+The missing 127-tap T/2 fractionally-spaced equalizer and normalized CMA stage
+have been added after RRC+Godard. CMA freezes when the receiver acquires the
+long S alternation so that S-bar and 16-point TRN retain their amplitude
+structure. TRN analysis was also corrected to distinguish J's differential
+encoding from TRN's direct constellation mapping and now evaluates the same
+absolute/differential, 24-dibit-map, and serialization hypotheses used by
+SpanDSP.
+
+The final classifier treats Phase 4 as a stereo event. This is essential:
+S(128T)+S-bar(16T) also opens Phase 3, so even a perfect single-channel S
+match cannot identify which phase it belongs to. The decoder now pairs an
+answer-channel S/S-bar/TRN boundary with the call channel's J'/TRN boundary
+inside the specified response window. It uses the directional baud rates
+from INFO1a, tests both carriers and both channel orientations, and only uses
+the four-phase timing sweep as a fallback when the stable two-phase sweep
+finds no joint event. Single-channel answer-side promotion is disabled by
+default (`P3_ALLOW_UNPAIRED_ANSWER_PHASE4=1` exists for diagnostics only).
+
+This recovers 22 of the 26 V.34 calls in the stereo corpus (85%); the V.32bis
+capture is correctly excluded. The four remaining captures are
+`aztech-ti-28800-33600`, `banksia-wavesp336-33600-33600`,
+`maestro-woomera-28800-33600`, and `motorola-sm56-problematic1`. All accepted
+events have an explicit call-J'/answer-S timing pair rather than a later
+same-channel payload match. `motorola-sm56-problematic2` remains the reference
+case: answer S is recovered at exactly 21466.0 ms, with the TRN boundary
+exactly 360 samples later at 3200 baud.
+
+The RRC/equalizer front end and normative stereo Phase 4 gate are therefore
+now the defaults. `P3_LEGACY_FRONTEND=1` and `P3_LEGACY_PHASE4_GATE=1` retain
+the old research baseline when comparison is needed. The old 3/54 result is
+not a target: all three were shown to use unrelated later payload TRN and fail
+at their claimed immediate spec boundary.
+
 ## Update 2026-07-12: normative, role-specific Phase 4 timing gate implemented
 
 The timing contract is now taken directly from ITU-T V.34 (10/96), not from
@@ -23,14 +58,14 @@ scanner tests the opposite (transmitting) modem's correct sequence. It also
 examines every J candidate rather than assuming the first loose J segment is
 the real transition.
 
-Two opt-in research controls keep this work reproducible without regressing
-the verified default matrix while the front end is still incomplete:
+At this stage two opt-in research controls were initially used to keep the
+work reproducible while the front end was incomplete:
 
-- `P3_RRC_FRONTEND=1` selects the integrated SpanDSP-table RRC T/2 resampler
-  and Godard timing loop; otherwise the 5-tap baseline remains active;
-- `P3_SPEC_TIMING_GATE=1` makes the normative sequence the Phase 4 promotion
-  gate (Table 18 >=70%, role-specific S/S-bar or J' >=75%, TRN recurrence
-  >=90%, DBER <=10%); otherwise it is diagnostic only.
+- the RRC front end selected the integrated SpanDSP-table RRC T/2 resampler
+  and Godard timing loop;
+- the normative gate required either J' plus strong TRN on a call-modem
+  transmitter, or the much longer exact 128T S plus 16T S-bar transition on
+  an answer-modem transmitter, with TRN beginning at the calculated boundary.
 
 The three legacy 3/54 handoffs all fail the normative gate. At their claimed
 immediate TRN boundaries the old front end produces only 46-64% recurrence and
@@ -40,10 +75,8 @@ is no longer ambiguous: the front end/equalization still does not recover the
 actual boundary well enough. A later, unrelated clean payload run must not be
 used to certify Phase 4.
 
-Full 54-channel regression: default mode remains 3/54; combined
-`P3_RRC_FRONTEND=1 P3_SPEC_TIMING_GATE=1` is 0/54. The latter has no false
-accepts, but it is intentionally not the default until at least one real
-transition is recovered at its exact spec boundary.
+The initial combined path was 0/54 before equalization and the TRN-domain fix;
+the newest update above supersedes that intermediate result.
 
 ## Update 2026-07-12: match-quality characterization found no separating scalar threshold
 

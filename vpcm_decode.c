@@ -15154,7 +15154,138 @@ static void stereo_decode_context_init(stereo_decode_context_t *ctx)
 }
 
 /* Resolve cross-channel dependencies after both Stage A passes complete. */
-static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
+static bool stereo_info1a_baud_codes(const decode_v34_result_t *primary,
+                                     const decode_v34_result_t *fallback,
+                                     int *a_to_c_out,
+                                     int *c_to_a_out,
+                                     int *anchor_out)
+{
+    const decode_v34_result_t *result = primary;
+
+    if (!result || !result->info1_seen || result->info1_is_c || result->info1_is_d)
+        result = fallback;
+    if (!result || !result->info1_seen || result->info1_is_c || result->info1_is_d)
+        return false;
+    if (result->info1a.upstream_symbol_rate_code < 0
+        || result->info1a.upstream_symbol_rate_code >= P3_BAUD_COUNT
+        || result->info1a.downstream_rate_code < 0
+        || result->info1a.downstream_rate_code >= P3_BAUD_COUNT) {
+        return false;
+    }
+    *a_to_c_out = result->info1a.upstream_symbol_rate_code;
+    *c_to_a_out = result->info1a.downstream_rate_code;
+    *anchor_out = result->info1_sample;
+    return true;
+}
+
+static bool stereo_try_phase4_orientation(const int16_t *call_samples,
+                                          const int16_t *answer_samples,
+                                          int total_samples,
+                                          int info1_anchor,
+                                          int call_baud_code,
+                                          int answer_baud_code,
+                                          int timing_trials,
+                                          p3_phase4_timing_quality_t *call_out,
+                                          p3_phase4_timing_quality_t *answer_out,
+                                          int *score_out)
+{
+    p3_result_t *call_detail[2] = {NULL, NULL};
+    p3_result_t *answer_detail[2] = {NULL, NULL};
+    int call_start;
+    int answer_start;
+    int call_len;
+    int answer_len;
+    int best_score = INT_MIN;
+    bool found = false;
+
+    if (!call_samples || !answer_samples
+        || info1_anchor < 0 || info1_anchor >= total_samples)
+        return false;
+    call_start = info1_anchor - 4000;
+    answer_start = info1_anchor;
+    if (call_start < 0)
+        call_start = 0;
+    if (answer_start < 0)
+        answer_start = 0;
+    call_len = total_samples - call_start;
+    answer_len = total_samples - answer_start;
+    if (call_len > 20 * 8000)
+        call_len = 20 * 8000;
+    if (answer_len > 20 * 8000)
+        answer_len = 20 * 8000;
+    if (call_len < 800 || answer_len < 800)
+        return false;
+
+    for (int carrier = P3_CARRIER_LOW; carrier <= P3_CARRIER_HIGH; carrier++) {
+        call_detail[carrier] = p3_demod_run_phase4_trials(call_samples + call_start,
+                                                          call_len,
+                                                          call_start,
+                                                          call_baud_code,
+                                                          carrier,
+                                                          8000,
+                                                          true,
+                                                          timing_trials);
+        answer_detail[carrier] = p3_demod_run_phase4_trials(answer_samples + answer_start,
+                                                            answer_len,
+                                                            answer_start,
+                                                            answer_baud_code,
+                                                            carrier,
+                                                            8000,
+                                                            false,
+                                                            timing_trials);
+    }
+    for (int call_carrier = P3_CARRIER_LOW;
+         call_carrier <= P3_CARRIER_HIGH;
+         call_carrier++) {
+        for (int answer_carrier = P3_CARRIER_LOW;
+             answer_carrier <= P3_CARRIER_HIGH;
+             answer_carrier++) {
+            p3_phase4_timing_quality_t call_timing;
+            p3_phase4_timing_quality_t answer_timing;
+            int score;
+
+            if (p3_find_stereo_phase4_timing(call_detail[call_carrier],
+                                             answer_detail[answer_carrier],
+                                             info1_anchor + 4000,
+                                             &call_timing,
+                                             &answer_timing,
+                                             &score)
+                && score > best_score) {
+                best_score = score;
+                *call_out = call_timing;
+                *answer_out = answer_timing;
+                found = true;
+            }
+        }
+    }
+    for (int carrier = P3_CARRIER_LOW; carrier <= P3_CARRIER_HIGH; carrier++) {
+        p3_result_free(call_detail[carrier]);
+        p3_result_free(answer_detail[carrier]);
+    }
+    if (found && score_out)
+        *score_out = best_score;
+    return found;
+}
+
+static void mark_stereo_phase4_result(decode_v34_result_t *result,
+                                      int sample)
+{
+    if (!result || sample < 0)
+        return;
+    result->phase3_seen = true;
+    if (result->phase3_sample < 0 || result->phase3_sample > sample)
+        result->phase3_sample = result->info1_seen ? result->info1_sample : sample;
+    result->phase4_ready_seen = true;
+    result->phase4_ready_sample = sample;
+    result->phase4_seen = true;
+    result->phase4_from_p3_demod = true;
+    result->phase4_sample = sample;
+}
+
+static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
+                                         const int16_t *left_samples,
+                                         const int16_t *right_samples,
+                                         int total_samples)
 {
     if (!ctx)
         return;
@@ -15248,6 +15379,105 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx)
         ctx->cross_u_info = best_u_info;
         ctx->cross_u_info_valid = true;
         ctx->cross_u_info_source = best_source;
+    }
+
+    /* Phase 4 is a stereo event.  The answer-side S/S-bar waveform is also
+     * used at Phase-3 entry, so pair it with the call-side J'/TRN boundary
+     * before promoting either channel.  Evaluate both possible channel
+     * orientations when Phase 1 role evidence is tied. */
+    if (left_samples && right_samples && total_samples > 0) {
+        int orientations[2][2] = {{0, 1}, {1, 0}};
+        int orientation_count = 2;
+        int best_joint_score = INT_MIN;
+        int best_call_channel = -1;
+        p3_phase4_timing_quality_t best_call_timing;
+        p3_phase4_timing_quality_t best_answer_timing;
+
+        if (ctx->roles_assigned) {
+            orientations[0][0] = ctx->analog_channel;
+            orientations[0][1] = ctx->digital_channel;
+            orientations[1][0] = ctx->digital_channel;
+            orientations[1][1] = ctx->analog_channel;
+        }
+        for (int trial_pass = 0;
+             trial_pass < 2 && best_call_channel < 0;
+             trial_pass++) {
+            int timing_trials = trial_pass == 0 ? 2 : 4;
+
+            for (int oi = 0; oi < orientation_count && best_call_channel < 0; oi++) {
+                int call_channel = orientations[oi][0];
+                int answer_channel = orientations[oi][1];
+                decode_v34_result_t *answer_caller = answer_channel == 0
+                                                   ? (ctx->left_caller_valid ? &ctx->left_caller : NULL)
+                                                   : (ctx->right_caller_valid ? &ctx->right_caller : NULL);
+                decode_v34_result_t *answer_fallback = answer_channel == 0
+                                                     ? (ctx->left_answerer_valid ? &ctx->left_answerer : NULL)
+                                                     : (ctx->right_answerer_valid ? &ctx->right_answerer : NULL);
+                const int16_t *call_pcm = call_channel == 0 ? left_samples : right_samples;
+                const int16_t *answer_pcm = answer_channel == 0 ? left_samples : right_samples;
+                int answer_baud;
+                int call_baud;
+                int anchor;
+                p3_phase4_timing_quality_t call_timing;
+                p3_phase4_timing_quality_t answer_timing;
+                int score;
+
+                if (!stereo_info1a_baud_codes(answer_caller,
+                                              answer_fallback,
+                                              &answer_baud,
+                                              &call_baud,
+                                              &anchor)) {
+                    continue;
+                }
+                /* Each direction gets enough pre-INFO1 context for its adaptive
+                 * front end; normative Phase-4 timing remains absolute. */
+                if (stereo_try_phase4_orientation(call_pcm,
+                                                  answer_pcm,
+                                                  total_samples,
+                                                  anchor,
+                                                  call_baud,
+                                                  answer_baud,
+                                                  timing_trials,
+                                                  &call_timing,
+                                                  &answer_timing,
+                                                  &score)
+                    && score > best_joint_score) {
+                    best_joint_score = score;
+                    best_call_channel = call_channel;
+                    best_call_timing = call_timing;
+                    best_answer_timing = answer_timing;
+                }
+            }
+        }
+        if (best_call_channel >= 0) {
+            decode_v34_result_t *call_receiver = best_call_channel == 0
+                                               ? (ctx->left_answerer_valid ? &ctx->left_answerer : NULL)
+                                               : (ctx->right_answerer_valid ? &ctx->right_answerer : NULL);
+            decode_v34_result_t *answer_receiver = best_call_channel == 0
+                                                 ? (ctx->right_caller_valid ? &ctx->right_caller : NULL)
+                                                 : (ctx->left_caller_valid ? &ctx->left_caller : NULL);
+
+            mark_stereo_phase4_result(call_receiver, best_call_timing.start_sample);
+            mark_stereo_phase4_result(answer_receiver, best_answer_timing.start_sample);
+            ctx->analog_channel = best_call_channel;
+            ctx->digital_channel = 1 - best_call_channel;
+            ctx->roles_assigned = true;
+            printf("\n=== Stereo Phase 4 Recovery ===\n");
+            printf("  Boundary: call J' %.1f ms, answer S %.1f ms (delta %.1f ms, joint score %d)\n",
+                   sample_to_ms(best_call_timing.start_sample, 8000),
+                   sample_to_ms(best_answer_timing.start_sample, 8000),
+                   sample_to_ms(best_answer_timing.start_sample
+                                - best_call_timing.start_sample, 8000),
+                   best_joint_score);
+            printf("  Quality: J'=%d%% call_TRN=%d%%/%d%%err, S=%d%% Sbar=%d%% answer_TRN=%d%%/%d%%err\n",
+                   best_call_timing.jprime_match_pct,
+                   best_call_timing.trn_recurrence_match_pct,
+                   best_call_timing.trn_descrambled_ber_pct,
+                   best_answer_timing.s_match_pct,
+                   best_answer_timing.sbar_match_pct,
+                   best_answer_timing.trn_recurrence_match_pct,
+                   best_answer_timing.trn_descrambled_ber_pct);
+        }
     }
 
     if (ctx->cross_u_info_valid || ctx->roles_assigned) {
@@ -18947,7 +19177,22 @@ static int p3_best_phase4_timing(const p3_result_t *detail,
             best = candidate;
         }
     }
-    if (best_j < 0)
+    if (receiver_calling_party) {
+        p3_phase4_timing_quality_t candidate;
+
+        if (p3_find_answer_phase4_timing(detail, &candidate)) {
+            int score = candidate.s_match_pct * 3
+                      + candidate.sbar_match_pct * 4
+                      + candidate.trn_recurrence_match_pct
+                      - candidate.trn_descrambled_ber_pct;
+            if (score > best_score) {
+                best_score = score;
+                best_j = -2; /* Global S/S-bar scan, no J segment required. */
+                best = candidate;
+            }
+        }
+    }
+    if (best_score == INT_MIN)
         return INT_MIN;
     *best_out = best;
     if (j_segment_out)
@@ -18982,18 +19227,21 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail,
             break;
     }
     if (j >= detail->segment_count)
-        return -1;
+        j = -1;
 
     (void) p3_best_phase4_timing(detail,
                                  receiver_calling_party,
                                  &timing,
                                  &timing_j);
 
-    if (timing_j >= 0 && dump_match_stats) {
+    if (timing_j != -1 && dump_match_stats) {
+        int j_table_pct = (timing_j >= 0)
+                        ? detail->segments[timing_j].j_table_match_pct : 0;
         if (timing.source_calling_party) {
             fprintf(stderr,
-                    "[P3MATCH] spec_timing source=call j_segment=%d start_sample=%d jprime=%d%% trn_sample=%d recurrence=%d%% dber=%d%%\n",
+                    "[P3MATCH] spec_timing source=call j_segment=%d j_table=%d%% start_sample=%d jprime=%d%% trn_sample=%d trn_score=%d%% dber=%d%%\n",
                     timing_j,
+                    j_table_pct,
                     timing.start_sample,
                     timing.jprime_match_pct,
                     timing.trn_start_sample,
@@ -19001,8 +19249,9 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail,
                     timing.trn_descrambled_ber_pct);
         } else {
             fprintf(stderr,
-                    "[P3MATCH] spec_timing source=answer j_segment=%d start_sample=%d s=%d%% sbar=%d%% trn_sample=%d recurrence=%d%% dber=%d%%\n",
+                    "[P3MATCH] spec_timing source=answer j_segment=%d j_table=%d%% start_sample=%d s=%d%% sbar=%d%% trn_sample=%d trn_score=%d%% dber=%d%%\n",
                     timing_j,
+                    j_table_pct,
                     timing.start_sample,
                     timing.s_match_pct,
                     timing.sbar_match_pct,
@@ -19012,18 +19261,30 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail,
         }
     }
 
-    if (getenv("P3_SPEC_TIMING_GATE")) {
+    if (!getenv("P3_LEGACY_PHASE4_GATE")) {
         bool accepted = false;
 
-        if (timing_j >= 0
-            && detail->segments[timing_j].j_table_match_pct >= 70
-            && timing.trn_recurrence_match_pct >= 90
-            && timing.trn_descrambled_ber_pct <= 10) {
+        if (timing_j != -1) {
             if (timing.source_calling_party) {
-                accepted = timing.jprime_match_pct >= 75;
+                accepted = timing_j >= 0
+                        && detail->segments[timing_j].j_table_match_pct >= 70
+                        && timing.jprime_match_pct >= 75
+                        && timing.trn_recurrence_match_pct >= 90
+                        && timing.trn_descrambled_ber_pct <= 10;
             } else {
-                accepted = timing.s_match_pct >= 75
-                        && timing.sbar_match_pct >= 75;
+                /* The 143 checked S/S-bar differential transitions are the
+                 * discriminating evidence here. The TRN floor only verifies
+                 * that a live constellation begins at the exact 144T boundary;
+                 * 16-point Q bits prevent this lightweight slicer from treating
+                 * its two observed I bits as a contiguous scrambler stream.
+                 * However, the same S/S-bar waveform opens Phase 3, so a
+                 * single channel cannot label it Phase 4 unambiguously. The
+                 * default promotion is therefore the stereo J'/S pairing;
+                 * retain this override only for diagnostics. */
+                accepted = getenv("P3_ALLOW_UNPAIRED_ANSWER_PHASE4")
+                        && timing.s_match_pct >= 75
+                        && timing.sbar_match_pct >= 75
+                        && timing.trn_recurrence_match_pct >= 50;
             }
         }
         if (dump_match_stats) {
@@ -19033,6 +19294,9 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail,
         }
         return accepted ? timing.start_sample : -1;
     }
+
+    if (j < 0)
+        return -1;
 
     if (dump_match_stats) {
         fprintf(stderr,
@@ -19196,18 +19460,36 @@ static bool find_v34_phase3_hypothesis_from_subwindows(const int16_t *samples,
 
 /* V.34 Table 1 baud code (0..5) implied by the already-decoded INFO1
  * symbol-rate, or -1 if INFO1 doesn't pin down a single rate. */
-static int v34_info1_preferred_baud_code(const decode_v34_result_t *result)
+static int v34_info1_preferred_baud_code(const decode_v34_result_t *result,
+                                         bool receiver_calling_party)
 {
+    int code;
+
     if (!result || !result->info1_seen)
         return -1;
     if (!result->info1_is_c && !result->info1_is_d) {
-        int up = result->info1a.upstream_symbol_rate_code;
-        int dn = result->info1a.downstream_rate_code;
-
-        if (up >= 0 && up <= 5 && up == dn)
-            return up;
+        /* INFO1a names the two directions explicitly.  A receiver acting as
+         * the call modem is observing the answer-to-call (A-to-C) signal;
+         * the reciprocal pass observes C-to-A.  Requiring the two fields to
+         * be equal discarded every asymmetric connected call even though
+         * INFO1 had already told us the exact rate to demodulate. */
+        code = receiver_calling_party
+             ? result->info1a.upstream_symbol_rate_code
+             : result->info1a.downstream_rate_code;
+        if (code >= 0 && code <= 5)
+            return code;
     }
     return -1;
+}
+
+static int p3_answer_phase4_timing_score(const p3_phase4_timing_quality_t *timing)
+{
+    if (!timing || !timing->found)
+        return INT_MIN;
+    return timing->s_match_pct * 3
+         + timing->sbar_match_pct * 4
+         + timing->trn_recurrence_match_pct
+         - timing->trn_descrambled_ber_pct;
 }
 
 static bool promote_v34_phases_from_p3(const int16_t *samples,
@@ -19219,7 +19501,7 @@ static bool promote_v34_phases_from_p3(const int16_t *samples,
     int len;
     int baud_code;
     int carrier_sel;
-    p3_result_t *detail;
+    p3_result_t *detail = NULL;
     int phase4_sample;
 
     if (!samples || total_samples <= 0 || !result
@@ -19240,16 +19522,72 @@ static bool promote_v34_phases_from_p3(const int16_t *samples,
         return false;
 
     {
-        int preferred_baud_code = v34_info1_preferred_baud_code(result);
+        int preferred_baud_code = v34_info1_preferred_baud_code(result,
+                                                                calling_party);
 
-        if (!find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
-                                                         preferred_baud_code,
-                                                         &baud_code, &carrier_sel)
-            && (preferred_baud_code < 0
-                || !find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
-                                                               -1,
-                                                               &baud_code, &carrier_sel)))
-            return false;
+        /* The answer transmitter's Phase-4 S/S-bar waveform is a much more
+         * selective hypothesis test than the loose segment labels.  When
+         * INFO1a supplies its exact A-to-C baud rate, fully demodulate both
+         * legal carrier choices and retain the one with the best normative
+         * 128T S + 16T S-bar boundary.  This prevents payload-dominated
+         * coarse scoring from eliminating the genuine training carrier. */
+        if (calling_party && preferred_baud_code >= 0 && !result->phase4_seen) {
+            int best_timing_score = INT_MIN;
+
+            for (int candidate_carrier = P3_CARRIER_LOW;
+                 candidate_carrier <= P3_CARRIER_HIGH;
+                 candidate_carrier++) {
+                p3_result_t *candidate;
+                p3_phase4_timing_quality_t timing;
+                int timing_score;
+
+                candidate = p3_demod_run_answer_phase4(samples + start,
+                                                       len,
+                                                       start,
+                                                       preferred_baud_code,
+                                                       candidate_carrier,
+                                                       8000);
+                if (!candidate)
+                    continue;
+                timing_score = p3_find_answer_phase4_timing(candidate, &timing)
+                             ? p3_answer_phase4_timing_score(&timing)
+                             : INT_MIN;
+                if (getenv("P3_MATCH_STATS")) {
+                    fprintf(stderr,
+                            "[P3MATCH] info1_hyp baud=%d carrier=%s timing_score=%d start_sample=%d S=%d%% Sbar=%d%% TRN=%d%% DBER=%d%%\n",
+                            (int) candidate->baud_rate_estimate,
+                            candidate_carrier == P3_CARRIER_HIGH ? "high" : "low",
+                            timing_score,
+                            timing_score == INT_MIN ? -1 : timing.start_sample,
+                            timing_score == INT_MIN ? 0 : timing.s_match_pct,
+                            timing_score == INT_MIN ? 0 : timing.sbar_match_pct,
+                            timing_score == INT_MIN ? 0 : timing.trn_recurrence_match_pct,
+                            timing_score == INT_MIN ? 100 : timing.trn_descrambled_ber_pct);
+                }
+                if (timing_score > best_timing_score) {
+                    if (detail)
+                        p3_result_free(detail);
+                    detail = candidate;
+                    candidate = NULL;
+                    best_timing_score = timing_score;
+                    baud_code = preferred_baud_code;
+                    carrier_sel = candidate_carrier;
+                }
+                if (candidate)
+                    p3_result_free(candidate);
+            }
+        }
+
+        if (!detail) {
+            if (!find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
+                                                             preferred_baud_code,
+                                                             &baud_code, &carrier_sel)
+                && (preferred_baud_code < 0
+                    || !find_v34_phase3_hypothesis_from_subwindows(samples, start, len,
+                                                                   -1,
+                                                                   &baud_code, &carrier_sel)))
+                return false;
+        }
     }
 
     if (!result->phase3_seen) {
@@ -19264,7 +19602,8 @@ static bool promote_v34_phases_from_p3(const int16_t *samples,
     /* Re-demodulate the full span at the now-known hypothesis: a single
        fixed-hypothesis pass has none of the multi-candidate shortlisting
        or score dilution that made the wide scan unreliable above. */
-    detail = p3_demod_run(samples + start, len, start, baud_code, carrier_sel, 8000);
+    if (!detail)
+        detail = p3_demod_run(samples + start, len, start, baud_code, carrier_sel, 8000);
     if (!detail)
         return true;
     phase4_sample = p3_find_phase4_handoff_sample(detail, calling_party);
@@ -19415,11 +19754,15 @@ static void run_decode_stage_a(const char *label,
         else
             printf("  V.34 probe init failed\n");
 
-        /* Lightweight Phase 3 demodulation (supplementary) */
-        if (have_answerer && (answerer.phase3_seen || answerer.info1_seen))
-            p3_demod_analyse_phase3(linear_samples, total_samples, &answerer, false);
-        if (have_caller && (caller.phase3_seen || caller.info1_seen))
-            p3_demod_analyse_phase3(linear_samples, total_samples, &caller, true);
+        /* Lightweight Phase 3 demodulation (supplementary).  Corpus tests
+           can suppress this verbose second analysis pass while retaining
+           the independent demodulator used above for result promotion. */
+        if (!getenv("P3_SKIP_ANALYSIS")) {
+            if (have_answerer && (answerer.phase3_seen || answerer.info1_seen))
+                p3_demod_analyse_phase3(linear_samples, total_samples, &answerer, false);
+            if (have_caller && (caller.phase3_seen || caller.info1_seen))
+                p3_demod_analyse_phase3(linear_samples, total_samples, &caller, true);
+        }
     }
 
     if (opts->raw_output_enabled && opts->do_v8) {
@@ -19926,7 +20269,7 @@ static void run_decode_suite(const char *label,
                        total_samples, total_codewords, sample_rate, law,
                        stereo_hint, is_left_channel, opts, codeword_info,
                        expected_rate_1, expected_rate_2, &ctx);
-    stereo_resolve_cross_channel(&ctx);
+    stereo_resolve_cross_channel(&ctx, NULL, NULL, 0);
     run_decode_stage_b(label, linear_samples, g711_codewords,
                        total_samples, total_codewords, sample_rate, law,
                        stereo_hint, is_left_channel, opts, &ctx);
@@ -20327,7 +20670,10 @@ int main(int argc, char **argv)
                                    expected_rate_1, expected_rate_2, &stereo_ctx);
 
                 /* Resolve cross-channel dependencies */
-                stereo_resolve_cross_channel(&stereo_ctx);
+                stereo_resolve_cross_channel(&stereo_ctx,
+                                             left_linear_samples,
+                                             right_linear_samples,
+                                             total_samples);
 
                 /* Stage B: V.90 decode using cross-channel info */
                 run_decode_stage_b("Left", left_linear_samples, left_g711_codewords,

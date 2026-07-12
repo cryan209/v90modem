@@ -8,7 +8,9 @@
 #include "p3_demod.h"
 
 #include <float.h>
+#include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -209,7 +211,11 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->rrc_hist_pos = 0;
     d->rrc_half_baud = 0;
     create_godard_coeffs(d, 0.99f);
-    d->use_rrc_frontend = getenv("P3_RRC_FRONTEND") != NULL;
+    d->use_rrc_frontend = getenv("P3_LEGACY_FRONTEND") == NULL;
+    d->rrc_agc_gain = 1.0f / 8000.0f;
+    d->eq_coeff_re[63] = 1.0f;
+    d->eq_delta = 0.21f / 127.0f;
+    d->s_previous_dibit = -1;
 
     /* AGC */
     d->agc_gain = 1.0f / 8000.0f;  /* Initial conservative gain */
@@ -254,6 +260,17 @@ void p3_demod_reset(p3_demod_t *d)
     memset(d->ted_dc, 0, sizeof(d->ted_dc));
     d->ted_phase = 0.0f;
     d->timing_correction = 0;
+    d->rrc_agc_gain = 1.0f / 8000.0f;
+    memset(d->eq_buf_re, 0, sizeof(d->eq_buf_re));
+    memset(d->eq_buf_im, 0, sizeof(d->eq_buf_im));
+    memset(d->eq_coeff_re, 0, sizeof(d->eq_coeff_re));
+    memset(d->eq_coeff_im, 0, sizeof(d->eq_coeff_im));
+    d->eq_coeff_re[63] = 1.0f;
+    d->eq_buf_pos = 0;
+    d->eq_delta = 0.21f / 127.0f;
+    d->cma_freeze_symbols = 0;
+    d->s_alternating_run = 0;
+    d->s_previous_dibit = -1;
     d->prev_re = 0.0f;
     d->prev_im = 0.0f;
     d->prev_valid = false;
@@ -371,7 +388,7 @@ int p3_descramble_bits(const uint8_t *scrambled, int count,
 /* ------------------------------------------------------------------ */
 
 static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
-                        int sample_idx, p3_result_t *result)
+                        int sample_idx, bool pre_scaled, p3_result_t *result)
 {
     p3_symbol_t *sym;
     float mag;
@@ -382,16 +399,21 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
     if (!result || result->symbol_count >= result->symbol_capacity)
         return;
 
-    /* AGC */
-    mag = sqrtf(bb_re * bb_re + bb_im * bb_im);
-    if (mag > 1e-10f) {
-        float err = d->agc_target - mag * d->agc_gain;
-        d->agc_gain += 0.005f * err;
-        if (d->agc_gain < 1e-10f)
-            d->agc_gain = 1e-10f;
+    /* AGC. The RRC path normalizes before its adaptive equalizer. */
+    if (pre_scaled) {
+        scaled_re = bb_re;
+        scaled_im = bb_im;
+    } else {
+        mag = sqrtf(bb_re * bb_re + bb_im * bb_im);
+        if (mag > 1e-10f) {
+            float err = d->agc_target - mag * d->agc_gain;
+            d->agc_gain += 0.005f * err;
+            if (d->agc_gain < 1e-10f)
+                d->agc_gain = 1e-10f;
+        }
+        scaled_re = bb_re * d->agc_gain;
+        scaled_im = bb_im * d->agc_gain;
     }
-    scaled_re = bb_re * d->agc_gain;
-    scaled_im = bb_im * d->agc_gain;
     mag = sqrtf(scaled_re * scaled_re + scaled_im * scaled_im);
 
     /* Differential decode */
@@ -424,6 +446,21 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
     bit0 = descramble_bit(&d->descrambler_sr, dibit & 1);
     bit1 = descramble_bit(&d->descrambler_sr, (dibit >> 1) & 1);
 
+    /* S is an exact 1/3 differential-dibit alternation for 128T. Once a
+     * strong run is present, freeze blind CMA through S-bar and the first
+     * 512T of TRN so a 16-point constellation keeps its amplitude levels. */
+    if ((dibit == P3_DIBIT_1 || dibit == P3_DIBIT_3)
+        && (d->s_previous_dibit == P3_DIBIT_1
+            || d->s_previous_dibit == P3_DIBIT_3)
+        && dibit != d->s_previous_dibit) {
+        d->s_alternating_run++;
+    } else {
+        d->s_alternating_run = 0;
+    }
+    d->s_previous_dibit = dibit;
+    if (d->s_alternating_run >= 96)
+        d->cma_freeze_symbols = 16 + 512 + 64;
+
     /* Store symbol */
     sym = &result->symbols[result->symbol_count++];
     sym->sample_index = sample_idx;
@@ -431,6 +468,7 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
     sym->im = scaled_im;
     sym->magnitude = mag;
     sym->phase = atan2f(scaled_im, scaled_re);
+    sym->quadrant = phase_to_dibit(scaled_re, scaled_im, 1.0f, 0.0f);
     sym->dibit = dibit;
     sym->bit0 = bit0;
     sym->bit1 = bit1;
@@ -515,6 +553,68 @@ static void godard_symbol_sync(p3_demod_t *d)
     }
 }
 
+static void equalizer_push(p3_demod_t *d, float re, float im)
+{
+    d->eq_buf_re[d->eq_buf_pos] = re;
+    d->eq_buf_im[d->eq_buf_pos] = im;
+    d->eq_buf_pos = (d->eq_buf_pos + 1) & 127;
+}
+
+static void equalizer_get(const p3_demod_t *d, float *re_out, float *im_out)
+{
+    float re = 0.0f;
+    float im = 0.0f;
+    int p = d->eq_buf_pos - 1;
+
+    for (int i = 0; i < 127; i++) {
+        float xr;
+        float xi;
+        float cr = d->eq_coeff_re[i];
+        float ci = d->eq_coeff_im[i];
+
+        p = (p - 1) & 127;
+        xr = d->eq_buf_re[p];
+        xi = d->eq_buf_im[p];
+        re += cr * xr - ci * xi;
+        im += cr * xi + ci * xr;
+    }
+    *re_out = re;
+    *im_out = im;
+}
+
+static void equalizer_tune_cma(p3_demod_t *d, float out_re, float out_im)
+{
+    float mag2 = out_re * out_re + out_im * out_im;
+    float error;
+    float norm;
+    float grad_re;
+    float grad_im;
+    int p;
+
+    if (!isfinite(mag2) || mag2 < 0.001f || mag2 > 100.0f)
+        return;
+    error = 1.0f - mag2;
+    if (error < -4.0f)
+        error = -4.0f;
+    else if (error > 4.0f)
+        error = 4.0f;
+    norm = (mag2 > 0.001f) ? mag2 : 0.001f;
+    grad_re = 0.1f * d->eq_delta * error * out_re / norm;
+    grad_im = 0.1f * d->eq_delta * error * out_im / norm;
+
+    p = d->eq_buf_pos - 1;
+    for (int i = 0; i < 127; i++) {
+        float xr;
+        float xi;
+
+        p = (p - 1) & 127;
+        xr = d->eq_buf_re[p];
+        xi = d->eq_buf_im[p];
+        d->eq_coeff_re[i] += grad_re * xr + grad_im * xi;
+        d->eq_coeff_im[i] += grad_im * xr - grad_re * xi;
+    }
+}
+
 static int p3_rrc_demod_process(p3_demod_t *d,
                                 const int16_t *samples,
                                 int sample_count,
@@ -543,7 +643,7 @@ static int p3_rrc_demod_process(p3_demod_t *d,
             phase += P3_RRC_PHASES;
 
         ii = rrc_circular_dot(d->rrc_hist, d->rrc_hist_pos, d->rrc_re[phase]);
-        godard_filter_update(d, ii * d->agc_gain);
+        godard_filter_update(d, ii * d->rrc_agc_gain);
 
         if (d->rrc_step <= 0) {
             float qq;
@@ -551,17 +651,38 @@ static int p3_rrc_demod_process(p3_demod_t *d,
             float sin_val;
             float sym_re;
             float sym_im;
+            float raw_mag;
+            float eq_re;
+            float eq_im;
 
             d->rrc_step += d->rrc_steps_per_baud / 2;
             qq = rrc_circular_dot(d->rrc_hist, d->rrc_hist_pos, d->rrc_im[phase]);
             nco_get(d->nco_phase, &cos_val, &sin_val);
             sym_re = ii * cos_val - qq * sin_val;
             sym_im = -ii * sin_val - qq * cos_val;
+            raw_mag = hypotf(sym_re, sym_im);
+            if (raw_mag > 1.0f && isfinite(raw_mag)) {
+                float target_gain = 1.0f / raw_mag;
+                d->rrc_agc_gain = 0.995f * d->rrc_agc_gain + 0.005f * target_gain;
+            }
+            sym_re *= d->rrc_agc_gain;
+            sym_im *= d->rrc_agc_gain;
+            equalizer_push(d, sym_re, sym_im);
 
             if (d->rrc_half_baud) {
                 d->rrc_half_baud = 0;
                 godard_symbol_sync(d);
-                emit_symbol(d, sym_re, sym_im, sample_offset + i, result);
+                equalizer_get(d, &eq_re, &eq_im);
+                if (d->cma_freeze_symbols > 0)
+                    d->cma_freeze_symbols--;
+                else
+                    equalizer_tune_cma(d, eq_re, eq_im);
+                emit_symbol(d,
+                            eq_re,
+                            eq_im,
+                            sample_offset + i - (int)(32.0f * d->samples_per_symbol + 0.5f),
+                            true,
+                            result);
             } else {
                 d->rrc_half_baud = 1;
             }
@@ -623,7 +744,7 @@ static int p3_legacy_demod_process(p3_demod_t *d,
                 sym_re = d->mf_prev_re * (1.0f - frac) + filt_re * frac;
                 sym_im = d->mf_prev_im * (1.0f - frac) + filt_im * frac;
             }
-            emit_symbol(d, sym_re, sym_im, sample_offset + i, result);
+            emit_symbol(d, sym_re, sym_im, sample_offset + i, false, result);
             d->baud_phase -= spb;
         }
         d->mf_prev_re = filt_re;
@@ -817,13 +938,23 @@ static bool is_pp_pattern(const p3_symbol_t *syms, int start, int len,
     return true;
 }
 
-static int symbol_scrambled_bit(const p3_symbol_t *syms, int start, int bit_pos)
+static int symbol_trn_scrambled_bit(const p3_symbol_t *syms,
+                                    int start,
+                                    int bit_pos,
+                                    int transform)
 {
     int sym_idx = bit_pos / 2;
     int bit_sel = bit_pos & 1;
-    int dibit = syms[start + sym_idx].dibit;
+    int quadrant = syms[start + sym_idx].quadrant & 3;
 
-    return bit_sel ? ((dibit >> 1) & 1) : (dibit & 1);
+    /* Unknown carrier phase gives four rotations; an I/Q conjugation reverses
+     * the quadrant direction. V.34 TRN maps I directly to this absolute
+     * quadrant, unlike the differentially encoded J sequence. */
+    if (transform & 4)
+        quadrant = (-quadrant) & 3;
+    quadrant = (quadrant + (transform & 3)) & 3;
+
+    return bit_sel ? ((quadrant >> 1) & 1) : (quadrant & 1);
 }
 
 static int symbol_descrambled_bit(const p3_symbol_t *syms, int start, int bit_pos)
@@ -838,11 +969,16 @@ static int symbol_descrambled_bit(const p3_symbol_t *syms, int start, int bit_po
  * in[n] = 1 ^ in[n-23] ^ in[n-5]
  * This recurrence is independent of descrambler start state once we have
  * enough history, so it gives a robust pattern test on mid-stream captures. */
-static int trn_recurrence_errors(const p3_symbol_t *syms, int start, int len, int *checks_out)
+static int trn_recurrence_errors(const p3_symbol_t *syms,
+                                 int start,
+                                 int len,
+                                 int *checks_out,
+                                 int *transform_out)
 {
     int total_bits;
-    int checks = 0;
-    int errors = 0;
+    int checks;
+    int best_errors = INT_MAX;
+    int best_transform = 0;
 
     if (!syms || len <= 0) {
         if (checks_out)
@@ -851,17 +987,46 @@ static int trn_recurrence_errors(const p3_symbol_t *syms, int start, int len, in
     }
 
     total_bits = len * 2;
-    for (int b = 23; b < total_bits; b++) {
-        int prev23 = symbol_scrambled_bit(syms, start, b - 23);
-        int prev5 = symbol_scrambled_bit(syms, start, b - 5);
-        int expect = 1 ^ prev23 ^ prev5;
-        int got = symbol_scrambled_bit(syms, start, b);
-        checks++;
-        if (got != expect)
-            errors++;
+    checks = total_bits - 23;
+    for (int transform = 0; transform < 8; transform++) {
+        int errors = 0;
+        for (int b = 23; b < total_bits; b++) {
+            int prev23 = symbol_trn_scrambled_bit(syms, start, b - 23, transform);
+            int prev5 = symbol_trn_scrambled_bit(syms, start, b - 5, transform);
+            int expect = 1 ^ prev23 ^ prev5;
+            int got = symbol_trn_scrambled_bit(syms, start, b, transform);
+            if (got != expect)
+                errors++;
+        }
+        if (errors < best_errors) {
+            best_errors = errors;
+            best_transform = transform;
+        }
     }
     if (checks_out)
         *checks_out = checks;
+    if (transform_out)
+        *transform_out = best_transform;
+    return best_errors;
+}
+
+static int trn_descrambled_errors(const p3_symbol_t *syms,
+                                  int start,
+                                  int len,
+                                  int transform,
+                                  int *bits_out)
+{
+    uint32_t sr = 0;
+    int errors = 0;
+    int bits = len * 2;
+
+    for (int b = 0; b < bits; b++) {
+        int in = symbol_trn_scrambled_bit(syms, start, b, transform);
+        if (descramble_bit(&sr, in) != 1)
+            errors++;
+    }
+    if (bits_out)
+        *bits_out = bits;
     return errors;
 }
 
@@ -870,28 +1035,24 @@ static bool is_trn_pattern(const p3_symbol_t *syms, int start, int len)
 {
     int checks;
     int errors;
-    int descr_ones = 0;
-    int descr_bits = 0;
+    int transform;
+    int descr_errors;
+    int descr_bits;
 
     if (len < 24)
         return false;
 
-    errors = trn_recurrence_errors(syms, start, len, &checks);
+    errors = trn_recurrence_errors(syms, start, len, &checks, &transform);
     if (checks >= 24) {
         /* Recurrence match >= 78% */
         if ((checks - errors) * 100 >= checks * 78)
             return true;
     }
 
-    /* Fallback when recurrence window is short/noisy */
-    for (int i = 0; i < len; i++) {
-        if (syms[start + i].bit0 == 1)
-            descr_ones++;
-        if (syms[start + i].bit1 == 1)
-            descr_ones++;
-        descr_bits += 2;
-    }
-    return (descr_ones * 100 >= descr_bits * 80);
+    /* Fallback when recurrence window is short/noisy. TRN resets its
+     * scrambler, so descramble locally at the candidate boundary. */
+    descr_errors = trn_descrambled_errors(syms, start, len, transform, &descr_bits);
+    return ((descr_bits - descr_errors) * 100 >= descr_bits * 80);
 }
 
 /* Check for Ru/uR 2-point pattern (V.92 §3.8):
@@ -1353,33 +1514,32 @@ int p3_segment_symbols(p3_result_t *result)
             /* Extend incrementally: check scrambler recurrence on new symbols */
             seg_len = 24;
             while (pos + seg_len + 12 <= n) {
-                int ext_errors = 0;
+                int ext_errors;
                 int ext_checks = 0;
-                int ext_total_bits = (seg_len + 12) * 2;
-                for (int b = seg_len * 2; b < ext_total_bits && b >= 23; b++) {
-                    int prev23 = symbol_scrambled_bit(syms, pos, b - 23);
-                    int prev5 = symbol_scrambled_bit(syms, pos, b - 5);
-                    int expect = 1 ^ prev23 ^ prev5;
-                    int got = symbol_scrambled_bit(syms, pos, b);
-                    ext_checks++;
-                    if (got != expect)
-                        ext_errors++;
-                }
+                ext_errors = trn_recurrence_errors(syms,
+                                                   pos,
+                                                   seg_len + 12,
+                                                   &ext_checks,
+                                                   NULL);
                 if (ext_checks > 0 && (ext_checks - ext_errors) * 100 < ext_checks * 70)
                     break;
                 seg_len += 12;
             }
             {
                 int checks = 0;
-                int error_bits = trn_recurrence_errors(syms, pos, seg_len, &checks);
-                int descr_errors = 0;
-                int descr_bits = seg_len * 2;
+                int transform;
+                int error_bits = trn_recurrence_errors(syms,
+                                                       pos,
+                                                       seg_len,
+                                                       &checks,
+                                                       &transform);
+                int descr_bits;
+                int descr_errors = trn_descrambled_errors(syms,
+                                                          pos,
+                                                          seg_len,
+                                                          transform,
+                                                          &descr_bits);
                 float conf;
-
-                for (int b = 0; b < descr_bits; b++) {
-                    if (symbol_descrambled_bit(syms, pos, b) != 1)
-                        descr_errors++;
-                }
                 add_segment(result, P3_SIGNAL_TRN, pos, seg_len, syms);
                 result->segments[result->segment_count - 1].trn_errors = error_bits;
                 result->segments[result->segment_count - 1].trn_recurrence_checks = checks;
@@ -1489,27 +1649,55 @@ static int rounded_pct(int matches, int checks)
 static void phase4_trn_quality(const p3_symbol_t *syms,
                                int start,
                                int len,
+                               bool source_calling_party,
                                int *recurrence_pct_out,
                                int *dber_pct_out)
 {
-    int checks = 0;
-    int errors;
-    int descr_errors = 0;
-    int descr_checks = 0;
+    static const uint8_t map_table[24][4] = {
+        {0,1,2,3}, {1,0,3,2}, {2,3,0,1}, {3,2,1,0},
+        {0,2,1,3}, {2,0,3,1}, {1,3,0,2}, {3,1,2,0},
+        {0,3,2,1}, {1,2,3,0}, {2,1,0,3}, {3,0,1,2},
+        {0,1,3,2}, {1,0,2,3}, {2,3,1,0}, {3,2,0,1},
+        {0,2,3,1}, {1,3,2,0}, {2,0,1,3}, {3,1,0,2},
+        {0,3,1,2}, {1,2,0,3}, {2,1,3,0}, {3,0,2,1}
+    };
+    int best_ones = -1;
+    int total_bits = len * 2;
+    int tap = source_calling_party ? 17 : 4;
 
-    errors = trn_recurrence_errors(syms, start, len, &checks);
-    /* A transmitter resets its scrambler at TRN. The batch descrambler did
-     * not know that boundary, but the self-synchronizing polynomial has
-     * converged after 23 received bits, so exclude that prefix from DBER. */
-    for (int b = 23; b < len * 2; b++) {
-        if (symbol_descrambled_bit(syms, start, b) != 1)
-            descr_errors++;
-        descr_checks++;
-    }
+    /* Mirror SpanDSP's robust Phase 4 TRN search: absolute/differential
+     * domains, all 24 invertible dibit maps, and both bit serialization
+     * orders. The exact timing boundary supplies the scrambler reset. */
+    for (int domain = 0; domain < 2; domain++) {
+        for (int order = 0; order < 2; order++) {
+            for (int h = 0; h < 24; h++) {
+                uint32_t reg = 0;
+                int ones = 0;
+
+                for (int sym = 0; sym < len; sym++) {
+                    int raw = domain ? syms[start + sym].quadrant
+                                     : syms[start + sym].dibit;
+                    int mapped = map_table[h][raw & 3];
+                    int first = order ? ((mapped >> 1) & 1) : (mapped & 1);
+                    int second = order ? (mapped & 1) : ((mapped >> 1) & 1);
+                    int d0 = (first ^ (reg >> tap) ^ (reg >> 22)) & 1;
+
+                    reg = ((reg << 1) | (uint32_t)first) & 0x7FFFFF;
+                    {
+                        int d1 = (second ^ (reg >> tap) ^ (reg >> 22)) & 1;
+                        reg = ((reg << 1) | (uint32_t)second) & 0x7FFFFF;
+                        ones += d0 + d1;
+                    }
+                }
+                if (ones > best_ones)
+                    best_ones = ones;
+            }
+            }
+        }
     if (recurrence_pct_out)
-        *recurrence_pct_out = rounded_pct(checks - errors, checks);
+        *recurrence_pct_out = rounded_pct(best_ones, total_bits);
     if (dber_pct_out)
-        *dber_pct_out = rounded_pct(descr_errors, descr_checks);
+        *dber_pct_out = rounded_pct(total_bits - best_ones, total_bits);
 }
 
 static void phase4_s_sbar_quality(const p3_symbol_t *syms,
@@ -1611,6 +1799,7 @@ bool p3_find_phase4_timing(const p3_result_t *result,
                 break;
             jprime_pct = phase4_jprime_quality(syms, start, j_transform);
             phase4_trn_quality(syms, start + 8, 512,
+                               source_calling_party,
                                &recurrence_pct, &dber_pct);
             score = jprime_pct * 2 + recurrence_pct - dber_pct;
             if (score > best_score) {
@@ -1641,6 +1830,7 @@ bool p3_find_phase4_timing(const p3_result_t *result,
                 break;
             phase4_s_sbar_quality(syms, start, &s_pct, &sbar_pct);
             phase4_trn_quality(syms, start + 144, 512,
+                               source_calling_party,
                                &recurrence_pct, &dber_pct);
             score = s_pct * 2 + sbar_pct * 2 + recurrence_pct - dber_pct;
             if (score > best_score) {
@@ -1660,6 +1850,354 @@ bool p3_find_phase4_timing(const p3_result_t *result,
     out->found = true;
     out->start_sample = syms[out->start_symbol].sample_index;
     out->trn_start_sample = syms[out->trn_start_symbol].sample_index;
+    return true;
+}
+
+bool p3_find_answer_phase4_timing(const p3_result_t *result,
+                                  p3_phase4_timing_quality_t *out)
+{
+    int best_score = INT_MIN;
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!result || !result->symbols || result->symbol_count < 144 + 512)
+        return false;
+
+    out->source_calling_party = false;
+    for (int start = 1; start + 144 + 512 <= result->symbol_count; start++) {
+        int s_pct;
+        int sbar_pct;
+        int trn_pct;
+        int dber_pct;
+        int score;
+
+        phase4_s_sbar_quality(result->symbols, start, &s_pct, &sbar_pct);
+        /* Avoid the expensive 24-hypothesis TRN evaluation unless the long
+         * normative waveform already has meaningful evidence. */
+        if (s_pct < 65 || sbar_pct < 63)
+            continue;
+        phase4_trn_quality(result->symbols,
+                           start + 144,
+                           512,
+                           false,
+                           &trn_pct,
+                           &dber_pct);
+        score = s_pct * 3 + sbar_pct * 4 + trn_pct - dber_pct;
+        if (score > best_score) {
+            best_score = score;
+            out->start_symbol = start;
+            out->start_sample = result->symbols[start].sample_index;
+            out->trn_start_symbol = start + 144;
+            out->trn_start_sample = result->symbols[start + 144].sample_index;
+            out->s_match_pct = s_pct;
+            out->sbar_match_pct = sbar_pct;
+            out->trn_recurrence_match_pct = trn_pct;
+            out->trn_descrambled_ber_pct = dber_pct;
+        }
+    }
+    if (best_score == INT_MIN)
+        return false;
+    out->found = true;
+    return true;
+}
+
+typedef struct {
+    p3_phase4_timing_quality_t timing;
+    int j_table_match_pct;
+} p3_call_phase4_candidate_t;
+
+bool p3_find_stereo_phase4_timing(const p3_result_t *call_source,
+                                  const p3_result_t *answer_source,
+                                  int min_start_sample,
+                                  p3_phase4_timing_quality_t *call_out,
+                                  p3_phase4_timing_quality_t *answer_out,
+                                  int *score_out)
+{
+    p3_call_phase4_candidate_t *calls;
+    int call_count = 0;
+    int j_segments = 0;
+    int j48_segments = 0;
+    int best_jprime_pct = 0;
+    int best_call_trn_pct = 0;
+    int fallback_answer_count = 0;
+    int fallback_jprime_count = 0;
+    int fallback_prefix_count = 0;
+    int answer_pattern_count = 0;
+    int nearby_pattern_count = 0;
+    int best_score = INT_MIN;
+    p3_phase4_timing_quality_t best_call;
+    p3_phase4_timing_quality_t best_answer;
+
+    if (!call_source || !answer_source || !call_out || !answer_out
+        || !call_source->symbols || !answer_source->symbols
+        || call_source->segment_count <= 0
+        || answer_source->symbol_count < 144 + 512) {
+        return false;
+    }
+    calls = calloc((size_t) call_source->symbol_count, sizeof(*calls));
+    if (!calls)
+        return false;
+
+    /* J' is only 16 bits, so it is not sufficient by itself.  Retain J
+     * candidates only when the immediately following 512T also has useful
+     * TRN recurrence; the opposite channel supplies the final discriminator. */
+    for (int i = 0; i < call_source->segment_count; i++) {
+        const p3_segment_t *seg = &call_source->segments[i];
+        p3_phase4_timing_quality_t timing;
+
+        if (seg->type != P3_SIGNAL_J)
+            continue;
+        j_segments++;
+        if (seg->length < 48)
+            continue;
+        j48_segments++;
+        if (!p3_find_phase4_timing(call_source,
+                                   seg->start_symbol,
+                                   seg->length,
+                                   seg->j_table_transform,
+                                   true,
+                                   &timing)) {
+            continue;
+        }
+        if (timing.jprime_match_pct > best_jprime_pct)
+            best_jprime_pct = timing.jprime_match_pct;
+        if (timing.trn_recurrence_match_pct > best_call_trn_pct)
+            best_call_trn_pct = timing.trn_recurrence_match_pct;
+        if (getenv("P3_MATCH_STATS")) {
+            fprintf(stderr,
+                    "[P3STEREO-J] sample=%d table=%d%% Jprime=%d%% TRN=%d%% DBER=%d%% min=%d\n",
+                    timing.start_sample,
+                    seg->j_table_match_pct,
+                    timing.jprime_match_pct,
+                    timing.trn_recurrence_match_pct,
+                    timing.trn_descrambled_ber_pct,
+                    min_start_sample);
+        }
+        if (timing.jprime_match_pct < 63
+            || timing.trn_recurrence_match_pct < 65
+            || timing.trn_descrambled_ber_pct > 35
+            || timing.start_sample < min_start_sample) {
+            continue;
+        }
+        calls[call_count].timing = timing;
+        calls[call_count].j_table_match_pct = seg->j_table_match_pct;
+        call_count++;
+    }
+
+    /* If the loose segmenter found no usable late J, search only in the
+     * standard response window around plausible answer-side S/S-bar
+     * boundaries.  J' alone is short, so require both a 64T TRN prefix and
+     * the full 512T recurrence before retaining a boundary. */
+    if (call_count == 0) {
+        int last_added_sample = -1;
+
+        for (int astart = 1;
+             astart + 144 + 512 <= answer_source->symbol_count;
+             astart++) {
+            int s_pct;
+            int sbar_pct;
+            int answer_sample;
+            int answer_trn_pct;
+            int answer_dber_pct;
+
+            phase4_s_sbar_quality(answer_source->symbols,
+                                  astart,
+                                  &s_pct,
+                                  &sbar_pct);
+            if (s_pct < 60 || sbar_pct < 75)
+                continue;
+            answer_sample = answer_source->symbols[astart].sample_index;
+            if (answer_sample < min_start_sample)
+                continue;
+            phase4_trn_quality(answer_source->symbols,
+                               astart + 144,
+                               512,
+                               false,
+                               &answer_trn_pct,
+                               &answer_dber_pct);
+            if (answer_trn_pct < 50)
+                continue;
+            fallback_answer_count++;
+
+            for (int cstart = 1; cstart + 8 + 512 <= call_source->symbol_count; cstart++) {
+                int call_sample = call_source->symbols[cstart].sample_index;
+                int best_jprime = 0;
+                int j_bits;
+                int j_phase;
+                int j_transform;
+                int j_table_pct;
+                int prefix_pct;
+                int prefix_dber;
+                int trn_pct;
+                int dber_pct;
+
+                if (call_sample < answer_sample - 4400)
+                    continue;
+                if (call_sample > answer_sample + 400)
+                    break;
+                if (call_sample < min_start_sample || call_sample == last_added_sample
+                    || cstart < 64)
+                    continue;
+                for (int transform = 0; transform < 4; transform++) {
+                    int pct = phase4_jprime_quality(call_source->symbols,
+                                                    cstart,
+                                                    transform);
+                    if (pct > best_jprime)
+                        best_jprime = pct;
+                }
+                if (best_jprime < 75)
+                    continue;
+                fallback_jprime_count++;
+                phase4_trn_quality(call_source->symbols,
+                                   cstart + 8,
+                                   64,
+                                   true,
+                                   &prefix_pct,
+                                   &prefix_dber);
+                if (prefix_pct < 60 || prefix_dber > 40)
+                    continue;
+                fallback_prefix_count++;
+                classify_j_table18(call_source->symbols,
+                                   cstart - 64,
+                                   64,
+                                   &j_bits,
+                                   &j_phase,
+                                   &j_transform,
+                                   &j_table_pct);
+                best_jprime = phase4_jprime_quality(call_source->symbols,
+                                                    cstart,
+                                                    j_transform);
+                if (j_table_pct < 60 || best_jprime < 63)
+                    continue;
+                phase4_trn_quality(call_source->symbols,
+                                   cstart + 8,
+                                   512,
+                                   true,
+                                   &trn_pct,
+                                   &dber_pct);
+                if (trn_pct < 50)
+                    continue;
+                memset(&calls[call_count], 0, sizeof(calls[call_count]));
+                calls[call_count].timing.found = true;
+                calls[call_count].timing.source_calling_party = true;
+                calls[call_count].timing.start_symbol = cstart;
+                calls[call_count].timing.start_sample = call_sample;
+                calls[call_count].timing.trn_start_symbol = cstart + 8;
+                calls[call_count].timing.trn_start_sample =
+                    call_source->symbols[cstart + 8].sample_index;
+                calls[call_count].timing.jprime_match_pct = best_jprime;
+                calls[call_count].timing.trn_recurrence_match_pct = trn_pct;
+                calls[call_count].timing.trn_descrambled_ber_pct = dber_pct;
+                calls[call_count].j_table_match_pct = j_table_pct;
+                last_added_sample = call_sample;
+                call_count++;
+                if (call_count >= call_source->symbol_count)
+                    break;
+            }
+            if (call_count >= call_source->symbol_count)
+                break;
+        }
+    }
+
+    memset(&best_call, 0, sizeof(best_call));
+    memset(&best_answer, 0, sizeof(best_answer));
+    for (int start = 1;
+         call_count > 0 && start + 144 + 512 <= answer_source->symbol_count;
+         start++) {
+        int s_pct;
+        int sbar_pct;
+        int answer_sample;
+        bool has_nearby_call = false;
+
+        phase4_s_sbar_quality(answer_source->symbols, start, &s_pct, &sbar_pct);
+        if (s_pct < 60 || sbar_pct < 75)
+            continue;
+        answer_pattern_count++;
+        answer_sample = answer_source->symbols[start].sample_index;
+        if (answer_sample < min_start_sample)
+            continue;
+        for (int c = 0; c < call_count; c++) {
+            int delta = answer_sample - calls[c].timing.start_sample;
+
+            /* Allow a small negative skew for independent matched-filter
+             * delays, then the V.34 answerer's specified <=500 ms J wait. */
+            if (delta >= -400 && delta <= 4400) {
+                has_nearby_call = true;
+                break;
+            }
+        }
+        if (has_nearby_call) {
+            int trn_pct;
+            int dber_pct;
+
+            nearby_pattern_count++;
+
+            phase4_trn_quality(answer_source->symbols,
+                               start + 144,
+                               512,
+                               false,
+                               &trn_pct,
+                               &dber_pct);
+            if (trn_pct < 50)
+                continue;
+            for (int c = 0; c < call_count; c++) {
+                int delta = answer_sample - calls[c].timing.start_sample;
+                int proximity;
+                int score;
+
+                if (delta < -400 || delta > 4400)
+                    continue;
+                proximity = abs(delta) / 40; /* 5 ms per point */
+                score = calls[c].j_table_match_pct
+                      + 2 * calls[c].timing.jprime_match_pct
+                      + 2 * calls[c].timing.trn_recurrence_match_pct
+                      - 2 * calls[c].timing.trn_descrambled_ber_pct
+                      + 3 * s_pct + 4 * sbar_pct
+                      + trn_pct - dber_pct
+                      - proximity;
+                if (score > best_score) {
+                    best_score = score;
+                    best_call = calls[c].timing;
+                    memset(&best_answer, 0, sizeof(best_answer));
+                    best_answer.found = true;
+                    best_answer.source_calling_party = false;
+                    best_answer.start_symbol = start;
+                    best_answer.start_sample = answer_sample;
+                    best_answer.trn_start_symbol = start + 144;
+                    best_answer.trn_start_sample =
+                        answer_source->symbols[start + 144].sample_index;
+                    best_answer.s_match_pct = s_pct;
+                    best_answer.sbar_match_pct = sbar_pct;
+                    best_answer.trn_recurrence_match_pct = trn_pct;
+                    best_answer.trn_descrambled_ber_pct = dber_pct;
+                }
+            }
+        }
+    }
+    free(calls);
+    if (getenv("P3_MATCH_STATS")) {
+        fprintf(stderr,
+                "[P3STEREO] J=%d J48=%d best_Jprime=%d%% best_call_TRN=%d%% fallback_answer=%d fallback_Jprime=%d fallback_prefix=%d call_candidates=%d answer_patterns=%d nearby_patterns=%d found=%s score=%d\n",
+                j_segments,
+                j48_segments,
+                best_jprime_pct,
+                best_call_trn_pct,
+                fallback_answer_count,
+                fallback_jprime_count,
+                fallback_prefix_count,
+                call_count,
+                answer_pattern_count,
+                nearby_pattern_count,
+                best_score == INT_MIN ? "no" : "yes",
+                best_score);
+    }
+    if (best_score == INT_MIN)
+        return false;
+    *call_out = best_call;
+    *answer_out = best_answer;
+    if (score_out)
+        *score_out = best_score;
     return true;
 }
 
@@ -1721,7 +2259,7 @@ static float coarse_trn_recurrence_score(const p3_symbol_t *syms, int n)
 
     if (!syms || n < 24)
         return 0.0f;
-    errors = trn_recurrence_errors(syms, 0, n, &checks);
+    errors = trn_recurrence_errors(syms, 0, n, &checks, NULL);
     return (checks > 0) ? ((float) (checks - errors) / (float) checks) : 0.0f;
 }
 
@@ -1768,15 +2306,18 @@ static float score_result(const p3_result_t *result);
 /*  Convenience: run full demodulation on a sample range              */
 /* ------------------------------------------------------------------ */
 
-p3_result_t *p3_demod_run(const int16_t *samples,
-                          int sample_count,
-                          int sample_offset,
-                          int baud_code,
-                          int carrier_sel,
-                          int sample_rate)
+static p3_result_t *p3_demod_run_internal(const int16_t *samples,
+                                          int sample_count,
+                                          int sample_offset,
+                                          int baud_code,
+                                          int carrier_sel,
+                                          int sample_rate,
+                                          int preferred_phase4_role,
+                                          int trials_override)
 {
     p3_result_t *best_result = NULL;
     float best_score = -FLT_MAX;
+    int best_timing_score = INT_MIN;
     int trials;
     int est_symbols;
 
@@ -1796,7 +2337,9 @@ p3_result_t *p3_demod_run(const int16_t *samples,
      * phase (verified: 3429-baud Phase 4 J/TRN on conexant-rh56sp locks
      * at trials=2 and is silently lost at trials=1, with an identical
      * start sample and hypothesis both times). */
-    if (sample_count > 16000)
+    if (trials_override > 0)
+        trials = trials_override;
+    else if (sample_count > 16000)
         trials = 2;
     else
         trials = 4;
@@ -1805,6 +2348,7 @@ p3_result_t *p3_demod_run(const int16_t *samples,
         p3_demod_t demod;
         p3_result_t *result;
         float s;
+        int timing_score = INT_MIN;
 
         result = p3_result_alloc(est_symbols, est_symbols / 4 + 16);
         if (!result)
@@ -1827,17 +2371,123 @@ p3_result_t *p3_demod_run(const int16_t *samples,
         }
 
         s = score_result(result);
-        if (!best_result || s > best_score) {
+        if (preferred_phase4_role == 1) {
+            p3_phase4_timing_quality_t timing;
+
+            if (p3_find_answer_phase4_timing(result, &timing)) {
+                timing_score = timing.s_match_pct * 3
+                             + timing.sbar_match_pct * 4
+                             + timing.trn_recurrence_match_pct
+                             - timing.trn_descrambled_ber_pct;
+            }
+        } else if (preferred_phase4_role == 2) {
+            for (int i = 0; i < result->segment_count; i++) {
+                const p3_segment_t *seg = &result->segments[i];
+                p3_phase4_timing_quality_t timing;
+                int candidate_score;
+
+                if (seg->type != P3_SIGNAL_J || seg->length < 48)
+                    continue;
+                if (!p3_find_phase4_timing(result,
+                                           seg->start_symbol,
+                                           seg->length,
+                                           seg->j_table_transform,
+                                           true,
+                                           &timing)) {
+                    continue;
+                }
+                candidate_score = seg->j_table_match_pct
+                                + 2 * timing.jprime_match_pct
+                                + 2 * timing.trn_recurrence_match_pct
+                                - 2 * timing.trn_descrambled_ber_pct;
+                if (candidate_score > timing_score)
+                    timing_score = candidate_score;
+            }
+        }
+        if (!best_result
+            || timing_score > best_timing_score
+            || (timing_score == best_timing_score && s > best_score)) {
             if (best_result)
                 p3_result_free(best_result);
             best_result = result;
             best_score = s;
+            best_timing_score = timing_score;
         } else {
             p3_result_free(result);
         }
     }
 
     return best_result;
+}
+
+p3_result_t *p3_demod_run(const int16_t *samples,
+                          int sample_count,
+                          int sample_offset,
+                          int baud_code,
+                          int carrier_sel,
+                          int sample_rate)
+{
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 0,
+                                 0);
+}
+
+p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,
+                                        int sample_count,
+                                        int sample_offset,
+                                        int baud_code,
+                                        int carrier_sel,
+                                        int sample_rate)
+{
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 1,
+                                 0);
+}
+
+p3_result_t *p3_demod_run_call_phase4(const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate)
+{
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 2,
+                                 0);
+}
+
+p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
+                                        int sample_count,
+                                        int sample_offset,
+                                        int baud_code,
+                                        int carrier_sel,
+                                        int sample_rate,
+                                        bool source_calling_party,
+                                        int timing_trials)
+{
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 source_calling_party ? 2 : 1,
+                                 timing_trials);
 }
 
 /* ------------------------------------------------------------------ */
