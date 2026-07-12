@@ -2,6 +2,19 @@
 
 ## Status Notes (2026-07)
 
+**2026-07-12 update:** `p3_demod`'s Phase 3->4 handoff search
+(`p3_find_phase4_handoff_sample()`) had no bound on how far past a
+qualifying S segment it searched for TRN, so it was matching ordinary
+post-handshake V.34 data as false positives; fixed (bounded to ~4s past
+the first genuine J, calibrated from spandsp's own interop guards). The
+verified, correct current count is **3/54 Phase 4** (not the "3/54
+conservative" figure below, which predates that fix and was itself
+partly coincidental). Root-caused the remaining gap to the RX front
+end's signal quality (crude 5-tap smoothing filter, no closed-loop
+timing recovery) rather than the segmenter/threshold logic — see
+`docs/p3_demod_rrc_frontend_plan.md` for the scoped follow-up plan and
+`v34-offline-decode` memory for the full investigation history.
+
 - Pure V.34 captures now decode: the Phase 2 engine bridges retry a weak
   V.90-mode pass as plain V.34 (standard CC carriers, 49-bit INFO0) and keep
   the higher-scoring result (`decode_v34_result_t.plain_v34_mode`).
