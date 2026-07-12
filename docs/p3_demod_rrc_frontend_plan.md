@@ -1,5 +1,68 @@
 # p3_demod RX Front-End Rewrite Plan (RRC Filter + Resampler + Timing Recovery)
 
+## Update 2026-07-12: Stages 1-2 implemented and validated; Stage 3 revealed a new, more fundamental blocker
+
+Implemented and independently validated Stages 1 (Bresenham T/2 resampler)
+and 2 (Godard timing recovery) exactly as scoped below, using spandsp's
+literal formulas (`create_godard_coeffs()`, `steps_per_baud[]` including
+the 2800-baud approximation, `pri_symbol_sync()`'s cross-correlation +
+DC-removal + integrate-and-trigger logic). Standalone validation against
+real captured audio (not synthetic tones) confirmed exactly what Stage 1-2
+of this plan asked for: the T/2-rate stream is smooth (no more of the
+filter-only port's alternating-null artifact), Godard's timing corrections
+engage sensibly and stay bounded, and `baud_phase`/`eq_put_step` remain
+stable — checked over the *entire* ~20s file (68,571 bauds), not just a
+short window. This part of the plan is technically sound and the
+implementation is correct.
+
+Wiring this into the actual `p3_demod.c` pipeline (Stage 3) **regressed
+the tone matrix from 3/54 to 0/54 phase4** — every previously-verified
+detection was lost, and the segmenter now finds dramatically *more* false
+S/TRN/J activity than before (e.g. one file went from isolated small false
+matches to a single spurious 2792-symbol "J" segment). Root cause: a
+materially better demodulator doesn't just recover genuine training signal
+more faithfully — it recovers *ordinary payload data* more faithfully too,
+at a lower descrambled-bit-error-rate than the old crude filter ever
+achieved. Since the segmenter's pattern thresholds (`is_s_pattern`,
+`is_trn_pattern`, `detect_j_pattern`) were already shown (2026-07-12,
+`v34-offline-decode` memory) to be triggered by real V.34 trellis-coded
+data given a good enough recovery, *improving* the front end makes that
+existing problem worse, not better. The `p3_find_phase4_handoff_sample()`
+"first J" anchor heuristic (fixed the same day, commit a53ac73) assumed
+the first J encountered would be the genuine one near INFO1; a
+higher-fidelity demodulator increases the odds that a spurious, marginal
+J-like match appears even earlier or more densely, breaking that
+assumption too.
+
+**This changes the plan's scope.** The front-end rewrite (Stages 1-2) is
+necessary but empirically **not sufficient** on its own — this doc's
+original Non-Goals section explicitly ruled out touching the segmenter,
+but that's no longer defensible: any front-end quality improvement needs
+to ship together with tighter segmenter discrimination (either stricter
+match/error-rate thresholds in `is_trn_pattern()`/`detect_j_pattern()`,
+or some other way to distinguish genuine spec-defined training patterns
+from coincidentally-similar trellis-coded data — see the "not yet
+attempted" note in the `v34-offline-decode` memory's pinned finding from
+earlier the same day, which already flagged this exact tension without
+yet having proof). Reverted (`git checkout -- p3_demod.c p3_demod.h`,
+verified clean, matrix back to 3/54, known-good detections restored) —
+nothing committed. The validated Stage 1-2 code was not preserved in a
+branch; re-implementing it is straightforward given how precisely it's
+specified below and in the reference line numbers, and re-validating it
+standalone (before wiring in) is *not* the expensive part — re-scoping
+Stage 3 to include segmenter changes is.
+
+**Next attempt should:** implement Stages 1-2 as below (fast, since it's
+now a known-good recipe), but treat Stage 3 as "front end + segmenter
+tightening together," not "front end, existing segmenter unchanged."
+Consider validating segmenter selectivity changes *independently* first —
+e.g. characterize real match-quality statistics (percentage match,
+descrambled-bit-error-rate) for confirmed-genuine J/TRN near real
+handshakes vs. confirmed-spurious matches deep in data (both populations
+now exist in this session's findings) to find a threshold that actually
+separates them — before assuming a better front end will help rather than
+hurt.
+
 ## Goal
 
 Replace `p3_demod.c`'s current RX front end — a crude fixed 5-tap smoothing
