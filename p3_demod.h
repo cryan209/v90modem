@@ -137,6 +137,7 @@ typedef struct {
     int   eq_buf_pos;
     float eq_delta;
     int   cma_freeze_symbols;
+    int   cma_freeze_after_sample;
     int   s_alternating_run;
     int   s_previous_dibit;
 
@@ -348,6 +349,20 @@ p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
                                         int sample_rate,
                                         bool source_calling_party,
                                         int timing_trials);
+
+/* Run the Phase-4-selected front end through data while freezing the CMA
+ * equalizer at an absolute sample boundary.  This preserves the trained
+ * channel inverse when the signal changes from constant-modulus TRN/MP to
+ * the multi-ring data constellation. */
+p3_result_t *p3_demod_run_phase4_data(const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate,
+                                      bool source_calling_party,
+                                      int timing_trials,
+                                      int cma_freeze_after_sample);
 
 /*
  * Try all baud/carrier combinations and return the best match.

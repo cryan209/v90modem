@@ -582,15 +582,15 @@ typedef struct
     struct
     {
         /*! \brief Cumulative path metric */
-        uint32_t cumulative_path_metric[16];
+        uint32_t cumulative_path_metric[64];
         /*! \brief Previous path pointer */
-        uint16_t previous_path_ptr[16];
-        uint16_t pts[16];
-        uint16_t branch_error_x[8];
+        uint16_t previous_path_ptr[64];
+        uint16_t pts[64];
+        uint16_t branch_error_x[16];
         /*! \brief Branches of the x and y coords of the points in the eight 4D subsets
                    to which a sequence of 2D points has been sliced.
                    indexed from 0 to 15 --> 8 points for 16 past 4D symbols */
-        complexi16_t bb[2][8];
+        complexi16_t bb[2][16];
     } vit[16];
     /*! \brief Latest viterbi table slot. */
     int ptr;
@@ -604,7 +604,14 @@ typedef struct
                Indexed array for indexing from viterbi lookup table */
     uint16_t branch_error[8];
 
-    const uint8_t (*conv_decode_table)[4];
+    /*! Number of states in the negotiated trellis (16, 32, or 64). */
+    int state_count;
+    /*! Predecessor state and branch for each state/input-bit pair.  These are
+        kept separately because a packed byte cannot represent a 64-state
+        predecessor plus the three-bit branch label. */
+    uint8_t previous_state[64][4];
+    uint8_t branch[64][4];
+    const uint8_t (*encode_table)[16];
 } viterbi_t;
 
 typedef struct
@@ -639,6 +646,8 @@ typedef struct
     /*! \brief A user specified opaque pointer passed to the qam_report callback
                routine. */
     void *qam_user_data;
+    /*! \brief Absolute sample index of the latest primary-channel symbol. */
+    int qam_sample_time;
 
     /*! \brief The current baud rate selection, as a value from 0 to 5. */
     int baud_rate;
@@ -652,6 +661,9 @@ typedef struct
     uint32_t scramble_reg;
     /*! \brief The scrambler tap which selects between the caller and answerer scramblers */
     int scrambler_tap;
+
+    /*! \brief Whether the far-end transmitter uses V.34 nonlinear precoding. */
+    bool use_non_linear_encoder;
 
     uint16_t v0_pattern;
 
@@ -680,6 +692,9 @@ typedef struct
                before calling v34_put_mapping_frame() */
     int16_t mapping_frame_buf[16];
     int mapping_frame_count;
+    float data_symbol_scale;
+    int data_symbol_rotation;
+    bool data_symbol_conjugate;
 
     /*! \brief Parameters for the current bit rate and baud rate */
     v34_parameters_t parms;
@@ -922,6 +937,8 @@ typedef struct
     int mp_len;
     int mp_and_fill_len;
     int mp_seen;
+    bool last_rx_mp_valid;
+    mp_t last_rx_mp;
     /*! \brief Baud count when mp_seen was first set to 1 (for E-detect timeout) */
     int mp_accepted_baud;
     int mp_remote_ack_seen;

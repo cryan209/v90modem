@@ -1698,6 +1698,8 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
                  type, mp->bit_rate_c_to_a, mp->signalling_rate_mask & 0x7FFF);
     }
     /*endif*/
+    s->last_rx_mp = *mp;
+    s->last_rx_mp_valid = true;
     return true;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2183,65 +2185,86 @@ static void viterbi_calculate_branch_errors(viterbi_t *s, complexi16_t xy[2][4],
 }
 /*- End of function --------------------------------------------------------*/
 
-static void viterbi_update_path_metrics(viterbi_t *s)
+static void viterbi_update_path_metrics(viterbi_t *s, complexi16_t xy[2][4])
 {
-    int16_t i;
-    int16_t j;
-    int16_t prev_state;
-    int16_t branch;
+    int16_t state;
+    int16_t k0;
+    int16_t k1;
     uint32_t curr_min_metric;
     uint32_t min_metric;
     uint32_t metric;
-    uint16_t min_state;
-    uint16_t min_branch;
     int prev_ptr;
 
     curr_min_metric = UINT32_MAX;
-    /* Loop through each state */
-    prev_ptr = (s->ptr - 1) & 0xF;
-    for (i = 0;  i < 16;  i++)
+    /* Build the full 4D candidate set.  The old dormant decoder collapsed
+       these to eight branches and then tried to invert a generated table;
+       that loses the actual Table-13 subset pair and is not a valid trellis
+       metric. */
+    for (k0 = 0; k0 < 4; k0++)
     {
-        min_metric = UINT32_MAX;
-        min_state = 0;
-        min_branch = 0;
-        /* Loop through each possible branch from the previous state */
-        for (j = 0;  j < 4;  j++)
+        for (k1 = 0; k1 < 4; k1++)
         {
-            prev_state = s->conv_decode_table[i][j] >> 3;
-            branch = s->conv_decode_table[i][j] & 0x7;
-            metric = s->vit[prev_ptr].cumulative_path_metric[prev_state] + s->branch_error[branch];
-
-//if (metric == 0)
-//    printf("HHH %p metric is zero - %2d %2d %2d %2d %2d\n", s, prev_ptr, i, j, prev_state, branch);
-///*endif*/
-//if (s->branch_error[branch] == 0)
-//    printf("HHX %p metric is zero - %2d %2d %2d %2d %2d\n", s, prev_ptr, i, j, prev_state, branch);
-///*endif*/
-            if (metric < min_metric)
-            {
-                min_metric = metric;
-                min_state = prev_state;
-                min_branch = branch;
-            }
-            /*endif*/
+            int branch = 4*k0 + k1;
+            s->vit[s->ptr].bb[0][branch] = xy[0][k0];
+            s->vit[s->ptr].bb[1][branch] = xy[1][k1];
+            s->vit[s->ptr].branch_error_x[branch] =
+                s->error[0][k0] + s->error[1][k1];
         }
         /*endfor*/
-        s->vit[s->ptr].cumulative_path_metric[i] = min_metric;
-        s->vit[s->ptr].previous_path_ptr[i] = min_state;
-        s->vit[s->ptr].pts[i] = min_branch;
-        if (min_metric < curr_min_metric)
+    }
+    /*endfor*/
+    prev_ptr = (s->ptr - 1) & 0xF;
+    for (state = 0; state < s->state_count; state++)
+    {
+        s->vit[s->ptr].cumulative_path_metric[state] = UINT32_MAX;
+        s->vit[s->ptr].previous_path_ptr[state] = 0;
+        s->vit[s->ptr].pts[state] = 0;
+    }
+    /*endfor*/
+    for (state = 0; state < s->state_count; state++)
+    {
+        for (k0 = 0; k0 < 4; k0++)
         {
-            curr_min_metric = min_metric;
-            s->curr_min_state = i;
+            int subset0 = get_binary_subset_label(&xy[0][k0]) & 7;
+
+            for (k1 = 0; k1 < 4; k1++)
+            {
+                int subset1 = get_binary_subset_label(&xy[1][k1]) & 7;
+                int input = conv_encode_input[subset0][subset1];
+                int next_state = s->encode_table[state][input];
+                int branch = 4*k0 + k1;
+
+                metric = s->vit[prev_ptr].cumulative_path_metric[state]
+                       + s->vit[s->ptr].branch_error_x[branch];
+                if (metric < s->vit[s->ptr].cumulative_path_metric[next_state])
+                {
+                    s->vit[s->ptr].cumulative_path_metric[next_state] = metric;
+                    s->vit[s->ptr].previous_path_ptr[next_state] = state;
+                    s->vit[s->ptr].pts[next_state] = branch;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    for (state = 0; state < s->state_count; state++)
+    {
+        metric = s->vit[s->ptr].cumulative_path_metric[state];
+        if (metric < curr_min_metric)
+        {
+            curr_min_metric = metric;
+            s->curr_min_state = state;
         }
         /*endif*/
     }
     /*endfor*/
 //printf("GGG %p min metric %d, state %d\n", s, curr_min_metric, s->curr_min_state);
 //printf("JJJ %p ", s);
-    for (i = 0;  i < 16;  i++)
+    for (state = 0; state < s->state_count; state++)
     {
-        s->vit[s->ptr].cumulative_path_metric[i] -= curr_min_metric;
+        s->vit[s->ptr].cumulative_path_metric[state] -= curr_min_metric;
 //printf("%4d ", s->cumulative_path_metric[s->ptr][i]);
     }
     /*endfor*/
@@ -2279,6 +2302,80 @@ static void viterbi_trace_back(viterbi_t *s, complexi16_t y[2])
 
     y[0] = s->vit[last_baud].bb[0][branch];
     y[1] = s->vit[last_baud].bb[1][branch];
+}
+/*- End of function --------------------------------------------------------*/
+
+static int viterbi_set_trellis(viterbi_t *s,
+                               const uint8_t (*encode_table)[16],
+                               int state_count)
+{
+    int state;
+    int input;
+    int previous;
+    int found;
+
+    if (!s || !encode_table
+        || (state_count != 16 && state_count != 32 && state_count != 64))
+        return -1;
+    /* In Figures 10-12/V.34 each destination state has one predecessor for
+       each of the four coded input pairs.  Build the inverse mapping from the
+       authoritative encoder tables so the receiver supports every negotiated
+       trellis without maintaining another set of generated tables. */
+    for (state = 0;  state < state_count;  state++)
+    {
+        for (input = 0;  input < 4;  input++)
+        {
+            found = -1;
+            for (previous = 0;  previous < state_count;  previous++)
+            {
+                if (encode_table[previous][input] == state)
+                    found = previous;
+                /*endif*/
+            }
+            /*endfor*/
+            if (found < 0)
+                return -1;
+            s->previous_state[state][input] = (uint8_t) found;
+            s->branch[state][input] = (uint8_t) ((input << 1) | (found & 1));
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    s->state_count = state_count;
+    s->encode_table = encode_table;
+    memset(s->vit, 0, sizeof(s->vit));
+    s->ptr = 0;
+    s->windup = 15;
+    s->curr_min_state = 0;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int set_trellis_mode(v34_state_t *s, int trellis_size)
+{
+    const uint8_t (*table)[16];
+    int states;
+
+    switch (trellis_size)
+    {
+    case V34_TRELLIS_16:
+        table = v34_conv16_encode_table;
+        states = 16;
+        break;
+    case V34_TRELLIS_32:
+        table = v34_conv32_encode_table;
+        states = 32;
+        break;
+    case V34_TRELLIS_64:
+        table = v34_conv64_encode_table;
+        states = 64;
+        break;
+    default:
+        return -1;
+    }
+    /*endswitch*/
+    s->tx.conv_encode_table = table;
+    return viterbi_set_trellis(&s->rx.viterbi, table, states);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4463,22 +4560,8 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                                 memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                             }
                             /*endif*/
-                            switch (mp.trellis_size)
-                            {
-                            case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
-                                break;
-                            case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
-                                break;
-                            case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
-                                break;
-                            default:
+                            if (set_trellis_mode(t, mp.trellis_size))
                                 span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
-                                break;
-                            }
-                            /*endswitch*/
                         }
                         else
                         {
@@ -4490,22 +4573,8 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                                 memcpy(&t->tx.precoder_coeffs, mph.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                             }
                             /*endif*/
-                            switch (mph.trellis_size)
-                            {
-                            case V34_TRELLIS_16:
-                                t->tx.conv_encode_table = v34_conv16_encode_table;
-                                break;
-                            case V34_TRELLIS_32:
-                                t->tx.conv_encode_table = v34_conv32_encode_table;
-                                break;
-                            case V34_TRELLIS_64:
-                                t->tx.conv_encode_table = v34_conv64_encode_table;
-                                break;
-                            default:
+                            if (set_trellis_mode(t, mph.trellis_size))
                                 span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
-                                break;
-                            }
-                            /*endswitch*/
                         }
                         /*endif*/
                         s->mp_seen = 1;
@@ -4679,6 +4748,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     pri_symbol_sync(s);
     eq_sample = equalizer_get(s);
     sym = &eq_sample;
+    if (s->qam_report)
+        s->qam_report(s->qam_user_data, sym, NULL, s->qam_sample_time);
 
     if (V34_TRACE_DIAGNOSTICS
         && (s->stage == V34_RX_STAGE_PHASE3_TRAINING || s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
@@ -7181,24 +7252,12 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                         if (mp.type == 1)
                                             memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
                                         /*endif*/
-                                        switch (mp.trellis_size)
+                                        if (set_trellis_mode(t, mp.trellis_size))
                                         {
-                                        case V34_TRELLIS_16:
-                                            t->tx.conv_encode_table = v34_conv16_encode_table;
-                                            break;
-                                        case V34_TRELLIS_32:
-                                            t->tx.conv_encode_table = v34_conv32_encode_table;
-                                            break;
-                                        case V34_TRELLIS_64:
-                                            t->tx.conv_encode_table = v34_conv64_encode_table;
-                                            break;
-                                        default:
                                             span_log(&t->logging, SPAN_LOG_FLOW,
                                                      "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
                                             semantic_good = false;
-                                            break;
                                         }
-                                        /*endswitch*/
                                         /* Update RX data mode parameters from MP-negotiated bit rate.
                                            We receive from the far end:
                                            - If we are answerer: receive at bit_rate_c_to_a
@@ -7384,20 +7443,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                                 if (mp.mp_acknowledged)
                                                     s->mp_remote_ack_seen = 1;
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                                                switch (mp.trellis_size)
-                                                {
-                                                case V34_TRELLIS_16:
-                                                    t->tx.conv_encode_table = v34_conv16_encode_table;
-                                                    break;
-                                                case V34_TRELLIS_32:
-                                                    t->tx.conv_encode_table = v34_conv32_encode_table;
-                                                    break;
-                                                case V34_TRELLIS_64:
-                                                    t->tx.conv_encode_table = v34_conv64_encode_table;
-                                                    break;
-                                                default:
-                                                    break;
-                                                }
+                                                (void) set_trellis_mode(t, mp.trellis_size);
                                                 span_log(s->logging, SPAN_LOG_FLOW,
                                                          "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
                                                          accepted_vote_frames);
@@ -7483,20 +7529,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                                     s->mp_remote_ack_seen = 1;
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                                 memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                                                switch (mp.trellis_size)
-                                                {
-                                                case V34_TRELLIS_16:
-                                                    t->tx.conv_encode_table = v34_conv16_encode_table;
-                                                    break;
-                                                case V34_TRELLIS_32:
-                                                    t->tx.conv_encode_table = v34_conv32_encode_table;
-                                                    break;
-                                                case V34_TRELLIS_64:
-                                                    t->tx.conv_encode_table = v34_conv64_encode_table;
-                                                    break;
-                                                default:
-                                                    break;
-                                                }
+                                                (void) set_trellis_mode(t, mp.trellis_size);
                                                 span_log(s->logging, SPAN_LOG_FLOW,
                                                          "Rx - Phase 4: MP1 ACCEPTED via majority vote\n");
                                                 s->mp_seen = 1;
@@ -7553,10 +7586,44 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            and run the full decode pipeline.
            The CMA equalizer (frozen from training) normalizes to unit magnitude.
            Training DQPSK had magnitude TRAINING_AMP=10, so the frozen equalizer
-           divides by 10.  Multiply by 10 to recover the integer constellation grid
+           divides by the training amplitude.  The live equalizer output requires
+           a data-mode gain calibration before slicing; 70 is the measured bridge
+           from its unit-radius training normalization to the Q9.7 constellation
+           used by the mapper on the reference 31.2 kbit/s calls.
            (odd integers 1..43) expected by quantize_n_ways() in Q9.7 format. */
-        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->re * 128.0f * 10.0f);
-        s->mapping_frame_buf[s->mapping_frame_count++] = (int16_t)(sym->im * 128.0f * 10.0f);
+        {
+            float re;
+            float im;
+            float transformed_re;
+            float transformed_im;
+
+            re = sym->re;
+            im = s->data_symbol_conjugate ? -sym->im : sym->im;
+            switch (s->data_symbol_rotation & 3)
+            {
+            case 1:
+                transformed_re = -im;
+                transformed_im = re;
+                break;
+            case 2:
+                transformed_re = -re;
+                transformed_im = -im;
+                break;
+            case 3:
+                transformed_re = im;
+                transformed_im = -re;
+                break;
+            default:
+                transformed_re = re;
+                transformed_im = im;
+                break;
+            }
+            /*endswitch*/
+            s->mapping_frame_buf[s->mapping_frame_count++] =
+                (int16_t)(transformed_re * 128.0f * s->data_symbol_scale);
+            s->mapping_frame_buf[s->mapping_frame_count++] =
+                (int16_t)(transformed_im * 128.0f * s->data_symbol_scale);
+        }
         s->duration++;
         if (s->mapping_frame_count >= 16)
         {
@@ -7711,6 +7778,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     }
     for (i = 0;  i < len;  i++)
     {
+        s->qam_sample_time++;
         s->rrc_filter[s->rrc_filter_step] = amp[i];
         if (++s->rrc_filter_step >= V34_RX_FILTER_STEPS)
             s->rrc_filter_step = 0;
@@ -7847,8 +7915,7 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
             else
                 invert = false;
             /*endif*/
-            viterbi_calculate_branch_errors(&s->viterbi, s->xy, invert);
-            viterbi_update_path_metrics(&s->viterbi);
+            viterbi_update_path_metrics(&s->viterbi, s->xy);
 //printf("EEE %p %4d %4d %4d %4d %4d %4d %4d %4d (%d)\n",
 //       s,
 //       s->viterbi.branch_error[0],
@@ -8054,6 +8121,87 @@ SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_seed_rx_mp(v34_state_t *s,
+                                 int bit_rate_n,
+                                 int trellis_size,
+                                 int use_non_linear_encoder,
+                                 int expanded_shaping,
+                                 const int16_t precoder_coeffs[6])
+{
+    int i;
+
+    if (!s || bit_rate_n < 1 || bit_rate_n > 14
+        || set_trellis_mode(s, trellis_size))
+        return -1;
+    s->rx.bit_rate = (bit_rate_n - 1)*2;
+    v34_set_working_parameters(&s->rx.parms,
+                               s->rx.baud_rate,
+                               s->rx.bit_rate,
+                               expanded_shaping != 0);
+    s->rx.use_non_linear_encoder = (use_non_linear_encoder != 0);
+    for (i = 0;  i < 3;  i++)
+    {
+        s->rx.h[i].re = precoder_coeffs ? precoder_coeffs[2*i] : 0;
+        s->rx.h[i].im = precoder_coeffs ? precoder_coeffs[2*i + 1] : 0;
+    }
+    /*endfor*/
+    /* The external detector has supplied the receive parameters which our MP
+       requested of the far-end transmitter.  Mark MP established so the
+       existing Phase 4 path can detect E and enter DATA without guessing a
+       frame boundary. */
+    s->rx.mp_seen = 1;
+    s->rx.mp_accepted_baud = s->rx.duration;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
+                                            float scale,
+                                            int rotation,
+                                            int conjugate)
+{
+    if (!s || !isfinite(scale) || scale <= 0.0f
+        || rotation < 0 || rotation > 3)
+        return -1;
+    s->rx.data_symbol_scale = scale;
+    s->rx.data_symbol_rotation = rotation;
+    s->rx.data_symbol_conjugate = (conjugate != 0);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
+{
+    if (!s)
+        return -1;
+    s->rx.step_2d = 0;
+    s->rx.data_frame = 0;
+    s->rx.super_frame = 0;
+    s->rx.v0_pattern = 0;
+    s->rx.mapping_frame_count = 0;
+    s->rx.s_bit_cnt = 0;
+    s->rx.aux_bit_cnt = 0;
+    memset(s->rx.xt, 0, sizeof(s->rx.xt));
+    memset(s->rx.x, 0, sizeof(s->rx.x));
+    memset(s->rx.ww, 0, sizeof(s->rx.ww));
+    s->rx.viterbi.ptr = 0;
+    s->rx.viterbi.windup = 15;
+    s->rx.received_event = V34_EVENT_E;
+    s->rx.mp_seen = 2;
+    s->rx.stage = V34_RX_STAGE_DATA;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
+                                               int16_t bits[16])
+{
+    if (s && bits)
+        v34_put_mapping_frame(&s->rx, bits);
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier)
 {
     int i;
@@ -8218,6 +8366,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_phase4_alt_tap_active = 0;
     s->rx.mp_phase4_alt_order_active = 0;
     s->rx.mp_phase4_alt_domain_active = 0;
+    s->rx.last_rx_mp_valid = false;
+    memset(&s->rx.last_rx_mp, 0, sizeof(s->rx.last_rx_mp));
     s->rx.mp_phase4_retry_mode = 0;
     s->rx.mp_phase4_bit_order = 0;
     s->rx.mp_phase4_domain = 0;
@@ -8239,7 +8389,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.scramble_reg = 0;
 
     s->rx.current_demodulator = V34_MODULATION_TONES;
-    s->rx.viterbi.conv_decode_table = v34_conv16_decode_table;
+    (void) set_trellis_mode(s, V34_TRELLIS_16);
 
     s->rx.v0_pattern = 0;
     s->rx.super_frame = 0;
@@ -8247,6 +8397,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.s_bit_cnt = 0;
     s->rx.aux_bit_cnt = 0;
     s->rx.mapping_frame_count = 0;
+    s->rx.data_symbol_scale = 70.0f;
+    s->rx.data_symbol_rotation = 0;
+    s->rx.data_symbol_conjugate = false;
 
     return 0;
 }

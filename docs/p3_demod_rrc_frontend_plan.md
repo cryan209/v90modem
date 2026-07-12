@@ -428,3 +428,38 @@ attempt's diagnosis). Budget accordingly:
   filter design intent against spec if deeper debugging is needed.
 - Memory: `v34-offline-decode` (this session's full investigation
   history, including exact numeric findings referenced above).
+
+## 2026-07-12 V.90 upstream payload investigation
+
+The payload problem is downstream of the verified Phase-4 timing work and
+must not be reported as solved merely because a plausible B1 timestamp is
+found.
+
+- The dormant SpanDSP receive mapper was hard-wired to the 16-state table and
+  used an incomplete eight-branch Viterbi shortcut. The receive trellis now
+  evaluates every physical 4D candidate pair and selects the negotiated
+  16/32/64-state transition table. A deterministic TX-mapper to RX-mapper
+  loopback recovers 15,288 bits with zero errors for each trellis selection.
+- V.34 B1 is one complete 35/40-ms data frame (`P` mapping frames), not one
+  eight-symbol mapping frame. It also starts with the superframe inversion
+  state corresponding to the final data frame. Short 41-bit resemblance is
+  therefore only a coarse candidate statistic; full-frame constellation
+  geometry is the required discriminator.
+- On `Agere-Mars-HV90-bipbipbipbip.wav`, INFO1a and the upstream carrier rise
+  remain stable at 10,680 ms and 21,680 ms. However, the strongest zero-
+  precoder (MP0) B1 hypothesis has only 7.5% normalized full-frame geometry
+  and 41% descrambled ones. It is now explicitly rejected rather than printed
+  as a recovered boundary.
+- The missing negotiated state is the digital modem's V.90 MP/MP-prime. It
+  selects the upstream rate, trellis, nonlinear encoder, shaping, and (for
+  MP1) three complex precoder coefficients. INFO1a supplies the upstream
+  symbol rate and a capability ceiling, not those selected data-mode values.
+- Recovering MP requires first decoding the analogue modem's repeated CPt,
+  because CPt defines the PCM constellations used by the digital modem for
+  TRN2d/MP/Ed. CPt and MP may use the V.34 16-point Phase-4 modulation (four
+  scrambled bits per symbol); a differential-dibit-only receiver discards the
+  two quarter-constellation bits and cannot validate CPt.
+- Payload success remains a valid B1 frame followed by FCS-valid HDLC/LAPM.
+  The public modem-sound clip ends at 25.631 s and may not contain enough user
+  payload to produce an HDLC frame, so connected live-call captures must be
+  the final payload validation corpus.

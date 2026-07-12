@@ -1807,6 +1807,15 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
+                                              int16_t bits[16])
+{
+    if (!s || !bits)
+        return -1;
+    return v34_get_mapping_frame(&s->tx, bits);
+}
+/*- End of function --------------------------------------------------------*/
+
 static __inline__ float exact_baud_rate(int symbol_rate_code)
 {
     float a;
@@ -5377,6 +5386,72 @@ void v34_set_working_parameters(v34_parameters_t *s, int baud_rate, int bit_rate
     s->samples_per_symbol_numerator = baud_rate_parameters[baud_rate].samples_per_symbol_numerator;
     /* The denominator of the number of samples per symbol ratio. */
     s->samples_per_symbol_denominator = baud_rate_parameters[baud_rate].samples_per_symbol_denominator;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
+                                   int bit_rate_n,
+                                   int trellis_size,
+                                   int use_non_linear_encoder,
+                                   int expanded_shaping,
+                                   const int16_t precoder_coeffs[6])
+{
+    const uint8_t (*table)[16];
+
+    if (!s || bit_rate_n < 1 || bit_rate_n > 14)
+        return -1;
+    switch (trellis_size)
+    {
+    case V34_TRELLIS_16:
+        table = v34_conv16_encode_table;
+        break;
+    case V34_TRELLIS_32:
+        table = v34_conv32_encode_table;
+        break;
+    case V34_TRELLIS_64:
+        table = v34_conv64_encode_table;
+        break;
+    default:
+        return -1;
+    }
+    s->tx.bit_rate = (bit_rate_n - 1)*2;
+    v34_set_working_parameters(&s->tx.parms,
+                               s->tx.baud_rate,
+                               s->tx.bit_rate,
+                               expanded_shaping != 0);
+    s->tx.conv_encode_table = table;
+    s->tx.use_non_linear_encoder = (use_non_linear_encoder != 0);
+    s->tx.scramble_reg = 0;
+    s->tx.diff = 0;
+    s->tx.r0 = 0;
+    memset(s->tx.qbits, 0, sizeof(s->tx.qbits));
+    memset(s->tx.ibits, 0, sizeof(s->tx.ibits));
+    memset(s->tx.mjk, 0, sizeof(s->tx.mjk));
+    memset(s->tx.x, 0, sizeof(s->tx.x));
+    memset(s->tx.precoder_coeffs, 0, sizeof(s->tx.precoder_coeffs));
+    if (precoder_coeffs)
+    {
+        for (int i = 0;  i < 3;  i++)
+        {
+            s->tx.precoder_coeffs[i].re = precoder_coeffs[2*i];
+            s->tx.precoder_coeffs[i].im = precoder_coeffs[2*i + 1];
+        }
+    }
+    s->tx.c.re = 0;
+    s->tx.c.im = 0;
+    s->tx.p.re = 0;
+    s->tx.p.im = 0;
+    s->tx.z = 0;
+    s->tx.y0 = 0;
+    s->tx.state = 0;
+    s->tx.step_2d = 0;
+    s->tx.super_frame = 0;
+    s->tx.data_frame = 0;
+    s->tx.s_bit_cnt = 0;
+    s->tx.aux_bit_cnt = 0;
+    s->tx.v0_pattern = 0;
+    s->tx.current_get_bit = s->tx.get_bit;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 

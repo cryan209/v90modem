@@ -393,6 +393,48 @@ SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s);
     and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */
 SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
 
+/*! Seed the receive-side Phase 4 MP parameters when an external/offline
+    detector has already validated the answer modem's MP frame.  The rate is
+    the V.34 MP N value (rate = N * 2400 bit/s), and precoder_coeffs contains
+    h(1..3) as interleaved Q2.14 real/imaginary values.  Passing NULL selects
+    zero coefficients (MP0).
+    \return 0 on success, or -1 for invalid parameters. */
+SPAN_DECLARE(int) v34_seed_rx_mp(v34_state_t *s,
+                                 int bit_rate_n,
+                                 int trellis_size,
+                                 int use_non_linear_encoder,
+                                 int expanded_shaping,
+                                 const int16_t precoder_coeffs[6]);
+
+/*! Seed a transmit data mapper at the reset state used for B1.  This is the
+    transmit-side counterpart of v34_seed_rx_mp() and is primarily useful to
+    build deterministic B1 reference mapping frames for offline acquisition. */
+SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
+                                   int bit_rate_n,
+                                   int trellis_size,
+                                   int use_non_linear_encoder,
+                                   int expanded_shaping,
+                                   const int16_t precoder_coeffs[6]);
+
+/*! Produce one complete V.34 mapping frame (eight Q9.7 complex symbols). */
+SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
+                                              int16_t bits[16]);
+
+/*! Set the final complex transform between the trained primary-channel
+    equalizer and the V.34 data constellation slicer.  Rotation is 0..3 in
+    counter-clockwise quarter turns. */
+SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
+                                            float scale,
+                                            int rotation,
+                                            int conjugate);
+
+/*! Enter receive DATA mode after externally validated E/B1 timing. */
+SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s);
+
+/*! Decode one complete V.34 mapping frame (eight Q9.7 complex symbols). */
+SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
+                                               int16_t bits[16]);
+
 /*! Enable V.90 mode on a V.34 modem context.  When enabled, the digital
     modem sends INFO0d (V.90 Table 7) instead of standard V.34 INFO0 during
     Phase 2, and expects INFO0a (V.90 Table 8) from the analog modem.
