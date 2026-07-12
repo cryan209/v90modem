@@ -107,6 +107,26 @@ typedef struct {
     float mf_prev_im;
     bool  mf_prev_valid;
 
+    /* SpanDSP V.34 RRC T/2 resampler */
+    float rrc_hist[27];
+    int   rrc_hist_pos;
+    const float (*rrc_re)[27];
+    const float (*rrc_im)[27];
+    int   rrc_step;
+    int   rrc_steps_per_baud;
+    int   rrc_half_baud;
+
+    /* Godard band-edge timing recovery */
+    float ted_low[2];
+    float ted_high[2];
+    float ted_dc[2];
+    float ted_phase;
+    float ted_low_coeff[3];
+    float ted_high_coeff[3];
+    float ted_mixed_coeff;
+    int   timing_correction;
+    bool  use_rrc_frontend;
+
     /* Previous symbol for differential decode */
     float prev_re;
     float prev_im;
@@ -178,6 +198,23 @@ typedef struct {
     bool  locked;
 } p3_result_t;
 
+/* Spec-timed Phase 4 transition quality. The transmitting call modem sends
+ * J -> one J' block -> TRN; the transmitting answer modem sends
+ * S(128T) -> S-bar(16T) -> TRN. */
+typedef struct {
+    bool  found;
+    bool  source_calling_party;
+    int   start_symbol;
+    int   start_sample;
+    int   trn_start_symbol;
+    int   trn_start_sample;
+    int   s_match_pct;
+    int   sbar_match_pct;
+    int   jprime_match_pct;
+    int   trn_recurrence_match_pct;
+    int   trn_descrambled_ber_pct;
+} p3_phase4_timing_quality_t;
+
 /* Multi-hypothesis scan result */
 typedef struct {
     int   baud_code;
@@ -234,6 +271,15 @@ void p3_result_free(p3_result_t *r);
  * Populates result->segments. Returns number of segments found.
  */
 int p3_segment_symbols(p3_result_t *result);
+
+/* Search around an accepted Phase 3 J segment for the role-specific,
+ * symbol-exact Phase 4 transition defined by V.34 clauses 10.1.3 and 11.4. */
+bool p3_find_phase4_timing(const p3_result_t *result,
+                           int j_start_symbol,
+                           int j_length,
+                           int j_transform,
+                           bool source_calling_party,
+                           p3_phase4_timing_quality_t *out);
 
 /*
  * Run demodulation on a sample range with known parameters.

@@ -12841,6 +12841,10 @@ static bool p3_try_extract_ja_dil(const p3_result_t *detail,
                                    const char *prefix,
                                    v90_dil_desc_t *desc_out,
                                    v90_dil_analysis_t *analysis_out);
+static int p3_best_phase4_timing(const p3_result_t *detail,
+                                 bool receiver_calling_party,
+                                 p3_phase4_timing_quality_t *best_out,
+                                 int *j_segment_out);
 
 static void p3_demod_analyse_phase3(const int16_t *samples,
                                     int total_samples,
@@ -12921,6 +12925,29 @@ static void p3_demod_analyse_phase3(const int16_t *samples,
                                                   8000);
             float seq_score = p3_sequence_guided_score(candidate, result, phase3_start, phase3_end);
             float total_score = h->score + seq_score;
+
+            if (getenv("P3_MATCH_STATS") && candidate) {
+                p3_phase4_timing_quality_t tq;
+                int tq_j = -1;
+                int tq_score = p3_best_phase4_timing(candidate,
+                                                     calling_party,
+                                                     &tq,
+                                                     &tq_j);
+                if (tq_score != INT_MIN) {
+                    printf("    [P3TIMING-HYP] %d baud %s score=%d j=%d start=%.1fms trn=%.1fms S=%d%% Sbar=%d%% Jprime=%d%% recurrence=%d%% dber=%d%%\n",
+                           (int) h->baud_rate,
+                           h->carrier_sel == P3_CARRIER_HIGH ? "high" : "low",
+                           tq_score,
+                           tq_j,
+                           sample_to_ms(tq.start_sample, 8000),
+                           sample_to_ms(tq.trn_start_sample, 8000),
+                           tq.s_match_pct,
+                           tq.sbar_match_pct,
+                           tq.jprime_match_pct,
+                           tq.trn_recurrence_match_pct,
+                           tq.trn_descrambled_ber_pct);
+                }
+            }
 
             if (total_score > best_total_score) {
                 best_total_score = total_score;
@@ -18877,13 +18904,68 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
  * matrix by discarding valid-but-distant S anchors while still leaving
  * unbounded S-to-TRN search open, so it neither fixed the false-positive
  * problem nor preserved the real detections. Reverted.) */
-static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
+static int p3_best_phase4_timing(const p3_result_t *detail,
+                                 bool receiver_calling_party,
+                                 p3_phase4_timing_quality_t *best_out,
+                                 int *j_segment_out)
+{
+    int best_score = INT_MIN;
+    int best_j = -1;
+    p3_phase4_timing_quality_t best;
+
+    if (!detail || !best_out)
+        return INT_MIN;
+    memset(&best, 0, sizeof(best));
+    for (int i = 0; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+        p3_phase4_timing_quality_t candidate;
+        int score;
+
+        if (seg->type != P3_SIGNAL_J || seg->length < 48)
+            continue;
+        if (!p3_find_phase4_timing(detail,
+                                   seg->start_symbol,
+                                   seg->length,
+                                   seg->j_table_transform,
+                                   !receiver_calling_party,
+                                   &candidate)) {
+            continue;
+        }
+        if (candidate.source_calling_party) {
+            score = candidate.jprime_match_pct * 2
+                  + candidate.trn_recurrence_match_pct
+                  - candidate.trn_descrambled_ber_pct;
+        } else {
+            score = candidate.s_match_pct * 2
+                  + candidate.sbar_match_pct * 2
+                  + candidate.trn_recurrence_match_pct
+                  - candidate.trn_descrambled_ber_pct;
+        }
+        if (score > best_score) {
+            best_score = score;
+            best_j = i;
+            best = candidate;
+        }
+    }
+    if (best_j < 0)
+        return INT_MIN;
+    *best_out = best;
+    if (j_segment_out)
+        *j_segment_out = best_j;
+    return best_score;
+}
+
+static int p3_find_phase4_handoff_sample(const p3_result_t *detail,
+                                         bool receiver_calling_party)
 {
     enum { PHASE4_MAX_SAMPLES_FROM_J = 32000 }; /* ~4s @ 8kHz */
     const bool dump_match_stats = getenv("P3_MATCH_STATS") != NULL;
     int j;
     int deadline_sample;
     int s_sample;
+    int s_segment;
+    p3_phase4_timing_quality_t timing;
+    int timing_j = -1;
 
     if (!detail)
         return -1;
@@ -18901,6 +18983,56 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
     }
     if (j >= detail->segment_count)
         return -1;
+
+    (void) p3_best_phase4_timing(detail,
+                                 receiver_calling_party,
+                                 &timing,
+                                 &timing_j);
+
+    if (timing_j >= 0 && dump_match_stats) {
+        if (timing.source_calling_party) {
+            fprintf(stderr,
+                    "[P3MATCH] spec_timing source=call j_segment=%d start_sample=%d jprime=%d%% trn_sample=%d recurrence=%d%% dber=%d%%\n",
+                    timing_j,
+                    timing.start_sample,
+                    timing.jprime_match_pct,
+                    timing.trn_start_sample,
+                    timing.trn_recurrence_match_pct,
+                    timing.trn_descrambled_ber_pct);
+        } else {
+            fprintf(stderr,
+                    "[P3MATCH] spec_timing source=answer j_segment=%d start_sample=%d s=%d%% sbar=%d%% trn_sample=%d recurrence=%d%% dber=%d%%\n",
+                    timing_j,
+                    timing.start_sample,
+                    timing.s_match_pct,
+                    timing.sbar_match_pct,
+                    timing.trn_start_sample,
+                    timing.trn_recurrence_match_pct,
+                    timing.trn_descrambled_ber_pct);
+        }
+    }
+
+    if (getenv("P3_SPEC_TIMING_GATE")) {
+        bool accepted = false;
+
+        if (timing_j >= 0
+            && detail->segments[timing_j].j_table_match_pct >= 70
+            && timing.trn_recurrence_match_pct >= 90
+            && timing.trn_descrambled_ber_pct <= 10) {
+            if (timing.source_calling_party) {
+                accepted = timing.jprime_match_pct >= 75;
+            } else {
+                accepted = timing.s_match_pct >= 75
+                        && timing.sbar_match_pct >= 75;
+            }
+        }
+        if (dump_match_stats) {
+            fprintf(stderr,
+                    "[P3MATCH] spec_gate accepted=%s\n",
+                    accepted ? "yes" : "no");
+        }
+        return accepted ? timing.start_sample : -1;
+    }
 
     if (dump_match_stats) {
         fprintf(stderr,
@@ -18936,12 +19068,23 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
                         seg->trn_descrambled_errors,
                         seg->trn_descrambled_bits,
                         seg->trn_descrambled_ber_pct);
+            } else if ((seg->type == P3_SIGNAL_S || seg->type == P3_SIGNAL_S_BAR)
+                       && seg->start_sample >= detail->segments[j].start_sample
+                       && seg->start_sample <= detail->segments[j].start_sample
+                                                  + PHASE4_MAX_SAMPLES_FROM_J) {
+                fprintf(stderr,
+                        "[P3MATCH] candidate=%s segment=%d sample=%d symbols=%d\n",
+                        seg->type == P3_SIGNAL_S ? "S" : "Sbar",
+                        i,
+                        seg->start_sample,
+                        seg->length);
             }
         }
     }
 
     deadline_sample = detail->segments[j].start_sample + PHASE4_MAX_SAMPLES_FROM_J;
     s_sample = -1;
+    s_segment = -1;
     for (int i = j + 1; i < detail->segment_count; i++) {
         const p3_segment_t *seg = &detail->segments[i];
 
@@ -18952,6 +19095,7 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
             && (seg->type == P3_SIGNAL_S || seg->type == P3_SIGNAL_S_BAR)
             && seg->length >= 12) {
             s_sample = seg->start_sample;
+            s_segment = i;
             continue;
         }
         if (s_sample >= 0
@@ -18959,8 +19103,10 @@ static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
             && seg->length >= 512) {
             if (dump_match_stats) {
                 fprintf(stderr,
-                        "[P3MATCH] handoff s_sample=%d trn_segment=%d trn_sample=%d trn_symbols=%d\n",
+                        "[P3MATCH] handoff s_segment=%d s_sample=%d s_symbols=%d trn_segment=%d trn_sample=%d trn_symbols=%d\n",
+                        s_segment,
                         s_sample,
+                        detail->segments[s_segment].length,
                         i,
                         seg->start_sample,
                         seg->length);
@@ -19066,7 +19212,8 @@ static int v34_info1_preferred_baud_code(const decode_v34_result_t *result)
 
 static bool promote_v34_phases_from_p3(const int16_t *samples,
                                        int total_samples,
-                                       decode_v34_result_t *result)
+                                       decode_v34_result_t *result,
+                                       bool calling_party)
 {
     int start;
     int len;
@@ -19120,7 +19267,7 @@ static bool promote_v34_phases_from_p3(const int16_t *samples,
     detail = p3_demod_run(samples + start, len, start, baud_code, carrier_sel, 8000);
     if (!detail)
         return true;
-    phase4_sample = p3_find_phase4_handoff_sample(detail);
+    phase4_sample = p3_find_phase4_handoff_sample(detail, calling_party);
     p3_result_free(detail);
     if (phase4_sample >= 0) {
         result->phase4_ready_seen = true;
@@ -19250,9 +19397,9 @@ static void run_decode_stage_a(const char *label,
                                       &caller,
                                       &have_caller);
         if (have_answerer)
-            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &answerer);
+            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &answerer, false);
         if (have_caller)
-            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &caller);
+            (void) promote_v34_phases_from_p3(linear_samples, total_samples, &caller, true);
     }
 
     if (opts->raw_output_enabled && opts->do_v34) {

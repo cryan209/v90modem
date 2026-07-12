@@ -1,5 +1,50 @@
 # p3_demod RX Front-End Rewrite Plan (RRC Filter + Resampler + Timing Recovery)
 
+## Update 2026-07-12: normative, role-specific Phase 4 timing gate implemented
+
+The timing contract is now taken directly from ITU-T V.34 (10/96), not from
+the legacy segmenter's inferred gaps:
+
+- clause 10.1.3.7 defines S as a two-point alternating sequence;
+- clauses 11.4.1.2.1-2 require an answer modem transmitter to send exactly
+  S(128T), S-bar(16T), then TRN immediately for at least 512T;
+- clauses 10.1.3.4 and 11.4.1.1.1-2 require a call modem transmitter to end J
+  with exactly one 16-bit (8T) J' block, then send TRN immediately for at
+  least 512T;
+- clause 11.3.1.2.6 permits the answer modem to wait no more than 500 ms after
+  receiving J before it starts its Phase 4 S.
+
+`p3_find_phase4_timing()` measures those exact symbol spans directly from the
+demodulated stream. It tests both I/Q polarities for S, preserves the J
+transform when testing J', evaluates the first 512T at the mandated boundary,
+and excludes the descrambler's 23-bit synchronization prefix from TRN DBER.
+`promote_v34_phases_from_p3()` now passes the receiver role explicitly so the
+scanner tests the opposite (transmitting) modem's correct sequence. It also
+examines every J candidate rather than assuming the first loose J segment is
+the real transition.
+
+Two opt-in research controls keep this work reproducible without regressing
+the verified default matrix while the front end is still incomplete:
+
+- `P3_RRC_FRONTEND=1` selects the integrated SpanDSP-table RRC T/2 resampler
+  and Godard timing loop; otherwise the 5-tap baseline remains active;
+- `P3_SPEC_TIMING_GATE=1` makes the normative sequence the Phase 4 promotion
+  gate (Table 18 >=70%, role-specific S/S-bar or J' >=75%, TRN recurrence
+  >=90%, DBER <=10%); otherwise it is diagnostic only.
+
+The three legacy 3/54 handoffs all fail the normative gate. At their claimed
+immediate TRN boundaries the old front end produces only 46-64% recurrence and
+36-54% DBER; the answer-side S/S-bar candidate is only 24%/31%. The RRC+Godard
+path also currently yields no accepted transition, so the remaining problem
+is no longer ambiguous: the front end/equalization still does not recover the
+actual boundary well enough. A later, unrelated clean payload run must not be
+used to certify Phase 4.
+
+Full 54-channel regression: default mode remains 3/54; combined
+`P3_RRC_FRONTEND=1 P3_SPEC_TIMING_GATE=1` is 0/54. The latter has no false
+accepts, but it is intentionally not the default until at least one real
+transition is recovered at its exact spec boundary.
+
 ## Update 2026-07-12: match-quality characterization found no separating scalar threshold
 
 The proposed next experiment has now been run against the three verified

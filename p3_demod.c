@@ -12,6 +12,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Use SpanDSP's generated, validated 192-phase V.34 receive filters. Keep
+ * the explicit path: same-named files at the repository root are stubs. */
+#include "spandsp-master/src/v34_rx_2400_low_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_2400_high_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_2743_low_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_2743_high_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_2800_low_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_2800_high_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_3000_low_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_3000_high_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_3200_low_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_3200_high_carrier_rrc.h"
+#include "spandsp-master/src/v34_rx_3429_rrc.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -41,6 +55,49 @@ static const baud_entry_t baud_table[P3_BAUD_COUNT] = {
     { 3200,    5,  2,   4,    7,     3,     5  },   /* 3200: low=1829, high=1920 */
     { 3429,    7,  3,   4,    7,     4,     7  },   /* 3429: low=1959, high=1959 */
 };
+
+#define P3_RRC_PHASES 192
+#define P3_RRC_TAPS   27
+
+static const float (*const p3_rrc_re[P3_BAUD_COUNT][2])[P3_RRC_TAPS] = {
+    {rx_pulseshaper_2400_low_carrier_re, rx_pulseshaper_2400_high_carrier_re},
+    {rx_pulseshaper_2743_low_carrier_re, rx_pulseshaper_2743_high_carrier_re},
+    {rx_pulseshaper_2800_low_carrier_re, rx_pulseshaper_2800_high_carrier_re},
+    {rx_pulseshaper_3000_low_carrier_re, rx_pulseshaper_3000_high_carrier_re},
+    {rx_pulseshaper_3200_low_carrier_re, rx_pulseshaper_3200_high_carrier_re},
+    {rx_pulseshaper_3429_re, rx_pulseshaper_3429_re}
+};
+
+static const float (*const p3_rrc_im[P3_BAUD_COUNT][2])[P3_RRC_TAPS] = {
+    {rx_pulseshaper_2400_low_carrier_im, rx_pulseshaper_2400_high_carrier_im},
+    {rx_pulseshaper_2743_low_carrier_im, rx_pulseshaper_2743_high_carrier_im},
+    {rx_pulseshaper_2800_low_carrier_im, rx_pulseshaper_2800_high_carrier_im},
+    {rx_pulseshaper_3000_low_carrier_im, rx_pulseshaper_3000_high_carrier_im},
+    {rx_pulseshaper_3200_low_carrier_im, rx_pulseshaper_3200_high_carrier_im},
+    {rx_pulseshaper_3429_im, rx_pulseshaper_3429_im}
+};
+
+/* Literal steps_per_baud[] values from SpanDSP primary_channel_rx(). */
+static const int p3_rrc_steps_per_baud[P3_BAUD_COUNT] = {
+    640, 560, 540, 512, 480, 448
+};
+
+static void create_godard_coeffs(p3_demod_t *d, float alpha)
+{
+    float low_edge = (float)(2.0 * M_PI)
+                   * (d->carrier_hz - d->baud_rate / 2.0f) / (float)d->sample_rate;
+    float high_edge = (float)(2.0 * M_PI)
+                    * (d->carrier_hz + d->baud_rate / 2.0f) / (float)d->sample_rate;
+
+    d->ted_low_coeff[0] = 2.0f * alpha * cosf(low_edge);
+    d->ted_high_coeff[0] = 2.0f * alpha * cosf(high_edge);
+    d->ted_low_coeff[1] = d->ted_high_coeff[1] = -alpha * alpha;
+    d->ted_low_coeff[2] = -alpha * sinf(low_edge);
+    d->ted_high_coeff[2] = -alpha * sinf(high_edge);
+    d->ted_mixed_coeff = -alpha * alpha
+                       * (sinf(high_edge) * cosf(low_edge)
+                          - sinf(low_edge) * cosf(high_edge));
+}
 
 /* ------------------------------------------------------------------ */
 /*  NCO helpers                                                       */
@@ -144,6 +201,16 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->mf_prev_im = 0.0f;
     d->mf_prev_valid = false;
 
+    /* RRC T/2 resampler and Godard timing loop */
+    d->rrc_re = p3_rrc_re[baud_code][carrier_sel ? 1 : 0];
+    d->rrc_im = p3_rrc_im[baud_code][carrier_sel ? 1 : 0];
+    d->rrc_steps_per_baud = p3_rrc_steps_per_baud[baud_code];
+    d->rrc_step = 0;
+    d->rrc_hist_pos = 0;
+    d->rrc_half_baud = 0;
+    create_godard_coeffs(d, 0.99f);
+    d->use_rrc_frontend = getenv("P3_RRC_FRONTEND") != NULL;
+
     /* AGC */
     d->agc_gain = 1.0f / 8000.0f;  /* Initial conservative gain */
     d->agc_target = 1.0f;
@@ -178,6 +245,15 @@ void p3_demod_reset(p3_demod_t *d)
     d->mf_prev_re = 0.0f;
     d->mf_prev_im = 0.0f;
     d->mf_prev_valid = false;
+    memset(d->rrc_hist, 0, sizeof(d->rrc_hist));
+    d->rrc_hist_pos = 0;
+    d->rrc_step = 0;
+    d->rrc_half_baud = 0;
+    memset(d->ted_low, 0, sizeof(d->ted_low));
+    memset(d->ted_high, 0, sizeof(d->ted_high));
+    memset(d->ted_dc, 0, sizeof(d->ted_dc));
+    d->ted_phase = 0.0f;
+    d->timing_correction = 0;
     d->prev_re = 0.0f;
     d->prev_im = 0.0f;
     d->prev_valid = false;
@@ -370,37 +446,157 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
     d->magnitude_count++;
 }
 
-int p3_demod_process(p3_demod_t *d,
-                     const int16_t *samples,
-                     int sample_count,
-                     int sample_offset,
-                     p3_result_t *result)
+static float rrc_circular_dot(const float hist[P3_RRC_TAPS],
+                              int pos,
+                              const float coeff[P3_RRC_TAPS])
+{
+    float sum = 0.0f;
+
+    for (int i = 0; i < P3_RRC_TAPS; i++) {
+        int idx = pos + i;
+        if (idx >= P3_RRC_TAPS)
+            idx -= P3_RRC_TAPS;
+        sum += hist[idx] * coeff[i];
+    }
+    return sum;
+}
+
+static void godard_filter_update(p3_demod_t *d, float sample_re)
+{
+    float v;
+
+    v = d->ted_low[0] * d->ted_low_coeff[0]
+      + d->ted_low[1] * d->ted_low_coeff[1] + sample_re;
+    d->ted_low[1] = d->ted_low[0];
+    d->ted_low[0] = v;
+
+    v = d->ted_high[0] * d->ted_high_coeff[0]
+      + d->ted_high[1] * d->ted_high_coeff[1] + sample_re;
+    d->ted_high[1] = d->ted_high[0];
+    d->ted_high[0] = v;
+}
+
+static void godard_symbol_sync(p3_demod_t *d)
+{
+    const float error_clip = 50.0f;
+    const float fine_trigger = 100.0f;
+    const float coarse_trigger = 200.0f;
+    float v;
+    float p;
+
+    v = d->ted_low[1] * d->ted_high[0] * d->ted_low_coeff[2]
+      - d->ted_low[0] * d->ted_high[1] * d->ted_high_coeff[2]
+      + d->ted_low[1] * d->ted_high[1] * d->ted_mixed_coeff;
+    p = v - d->ted_dc[1];
+    if (!isfinite(p))
+        p = 0.0f;
+    else if (p > error_clip)
+        p = error_clip;
+    else if (p < -error_clip)
+        p = -error_clip;
+    d->ted_dc[1] = d->ted_dc[0];
+    d->ted_dc[0] = v;
+    d->ted_phase -= p;
+    if (!isfinite(d->ted_phase))
+        d->ted_phase = 0.0f;
+    else if (d->ted_phase > 500.0f)
+        d->ted_phase = 500.0f;
+    else if (d->ted_phase < -500.0f)
+        d->ted_phase = -500.0f;
+
+    v = fabsf(d->ted_phase);
+    if (v > fine_trigger) {
+        int correction = (v > coarse_trigger) ? 2 : 1;
+        if (d->ted_phase < 0.0f)
+            correction = -correction;
+        d->rrc_step += correction;
+        d->timing_correction += correction;
+        d->ted_phase -= (float)correction * fine_trigger;
+    }
+}
+
+static int p3_rrc_demod_process(p3_demod_t *d,
+                                const int16_t *samples,
+                                int sample_count,
+                                int sample_offset,
+                                p3_result_t *result)
 {
     int start_count;
-    float spb;
-    static const float mf_taps[5] = {0.40f, 0.25f, 0.18f, 0.11f, 0.06f};
 
-    if (!d || !samples || sample_count <= 0 || !result)
+    if (!d || !samples || sample_count <= 0 || !result || !d->rrc_re || !d->rrc_im)
         return 0;
 
     start_count = result->symbol_count;
-    spb = d->samples_per_symbol;
+    for (int i = 0; i < sample_count; i++) {
+        float ii;
+        int phase;
+
+        d->rrc_hist[d->rrc_hist_pos] = (float)samples[i];
+        if (++d->rrc_hist_pos >= P3_RRC_TAPS)
+            d->rrc_hist_pos = 0;
+
+        d->rrc_step -= P3_RRC_PHASES;
+        phase = -d->rrc_step;
+        if (phase >= P3_RRC_PHASES)
+            phase = P3_RRC_PHASES - 1;
+        while (phase < 0)
+            phase += P3_RRC_PHASES;
+
+        ii = rrc_circular_dot(d->rrc_hist, d->rrc_hist_pos, d->rrc_re[phase]);
+        godard_filter_update(d, ii * d->agc_gain);
+
+        if (d->rrc_step <= 0) {
+            float qq;
+            float cos_val;
+            float sin_val;
+            float sym_re;
+            float sym_im;
+
+            d->rrc_step += d->rrc_steps_per_baud / 2;
+            qq = rrc_circular_dot(d->rrc_hist, d->rrc_hist_pos, d->rrc_im[phase]);
+            nco_get(d->nco_phase, &cos_val, &sin_val);
+            sym_re = ii * cos_val - qq * sin_val;
+            sym_im = -ii * sin_val - qq * cos_val;
+
+            if (d->rrc_half_baud) {
+                d->rrc_half_baud = 0;
+                godard_symbol_sync(d);
+                emit_symbol(d, sym_re, sym_im, sample_offset + i, result);
+            } else {
+                d->rrc_half_baud = 1;
+            }
+        }
+        d->nco_phase += d->nco_phase_inc;
+    }
+
+    return result->symbol_count - start_count;
+}
+
+static int p3_legacy_demod_process(p3_demod_t *d,
+                                   const int16_t *samples,
+                                   int sample_count,
+                                   int sample_offset,
+                                   p3_result_t *result)
+{
+    static const float mf_taps[5] = {0.40f, 0.25f, 0.18f, 0.11f, 0.06f};
+    int start_count = result->symbol_count;
+    float spb = d->samples_per_symbol;
 
     for (int i = 0; i < sample_count; i++) {
         float sample = (float)samples[i];
-        float cos_val, sin_val;
-        float bb_re, bb_im;
-        float filt_re = 0.0f, filt_im = 0.0f;
+        float cos_val;
+        float sin_val;
+        float bb_re;
+        float bb_im;
+        float filt_re = 0.0f;
+        float filt_im = 0.0f;
         float phase_prev;
 
-        /* Mix down to baseband */
         nco_get(d->nco_phase, &cos_val, &sin_val);
         d->nco_phase += d->nco_phase_inc;
-
         bb_re = sample * cos_val;
         bb_im = sample * (-sin_val);
 
-        /* Push into short causal FIR (matched-filter approximation). */
         d->mf_hist_re[d->mf_hist_pos] = bb_re;
         d->mf_hist_im[d->mf_hist_pos] = bb_im;
         d->mf_hist_pos = (d->mf_hist_pos + 1) % 5;
@@ -412,7 +608,6 @@ int p3_demod_process(p3_demod_t *d,
             filt_im += mf_taps[k] * d->mf_hist_im[idx];
         }
 
-        /* Check for baud strobe */
         phase_prev = d->baud_phase;
         d->baud_phase += 1.0f;
         if (d->baud_phase >= spb) {
@@ -425,23 +620,30 @@ int p3_demod_process(p3_demod_t *d,
             if (frac > 1.0f)
                 frac = 1.0f;
             if (d->mf_prev_valid) {
-                sym_re = d->mf_prev_re*(1.0f - frac) + filt_re*frac;
-                sym_im = d->mf_prev_im*(1.0f - frac) + filt_im*frac;
+                sym_re = d->mf_prev_re * (1.0f - frac) + filt_re * frac;
+                sym_im = d->mf_prev_im * (1.0f - frac) + filt_im * frac;
             }
-
-            emit_symbol(d,
-                        sym_re,
-                        sym_im,
-                        sample_offset + i,
-                        result);
+            emit_symbol(d, sym_re, sym_im, sample_offset + i, result);
             d->baud_phase -= spb;
         }
         d->mf_prev_re = filt_re;
         d->mf_prev_im = filt_im;
         d->mf_prev_valid = true;
     }
-
     return result->symbol_count - start_count;
+}
+
+int p3_demod_process(p3_demod_t *d,
+                     const int16_t *samples,
+                     int sample_count,
+                     int sample_offset,
+                     p3_result_t *result)
+{
+    if (!d || !samples || sample_count <= 0 || !result)
+        return 0;
+    if (d->use_rrc_frontend)
+        return p3_rrc_demod_process(d, samples, sample_count, sample_offset, result);
+    return p3_legacy_demod_process(d, samples, sample_count, sample_offset, result);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1279,6 +1481,188 @@ int p3_segment_symbols(p3_result_t *result)
     return result->segment_count;
 }
 
+static int rounded_pct(int matches, int checks)
+{
+    return (checks > 0) ? (matches * 100 + checks / 2) / checks : 0;
+}
+
+static void phase4_trn_quality(const p3_symbol_t *syms,
+                               int start,
+                               int len,
+                               int *recurrence_pct_out,
+                               int *dber_pct_out)
+{
+    int checks = 0;
+    int errors;
+    int descr_errors = 0;
+    int descr_checks = 0;
+
+    errors = trn_recurrence_errors(syms, start, len, &checks);
+    /* A transmitter resets its scrambler at TRN. The batch descrambler did
+     * not know that boundary, but the self-synchronizing polynomial has
+     * converged after 23 received bits, so exclude that prefix from DBER. */
+    for (int b = 23; b < len * 2; b++) {
+        if (symbol_descrambled_bit(syms, start, b) != 1)
+            descr_errors++;
+        descr_checks++;
+    }
+    if (recurrence_pct_out)
+        *recurrence_pct_out = rounded_pct(checks - errors, checks);
+    if (dber_pct_out)
+        *dber_pct_out = rounded_pct(descr_errors, descr_checks);
+}
+
+static void phase4_s_sbar_quality(const p3_symbol_t *syms,
+                                  int start,
+                                  int *s_pct_out,
+                                  int *sbar_pct_out)
+{
+    int best_s = 0;
+    int best_sbar = 0;
+    int best_total = -1;
+
+    /* V.34 10.1.3.7: S alternates 0,-90 degrees for 128T; S-bar
+     * alternates 180,+90 degrees for 16T. Test both spectral polarities,
+     * since an I/Q conjugation swaps differential dibits 1 and 3. */
+    for (int polarity = 0; polarity < 2; polarity++) {
+        int neg90 = polarity ? P3_DIBIT_1 : P3_DIBIT_3;
+        int pos90 = polarity ? P3_DIBIT_3 : P3_DIBIT_1;
+        int s_matches = 0;
+        int sbar_matches = 0;
+
+        for (int i = 1; i < 128; i++) {
+            int expected = (i & 1) ? neg90 : pos90;
+            if (syms[start + i].dibit == expected)
+                s_matches++;
+        }
+        /* Include the S-to-S-bar transition as the first S-bar check.
+         * S ends at -90 degrees and S-bar starts at 180 degrees, another
+         * -90-degree differential step. */
+        for (int i = 128; i < 144; i++) {
+            int local = i - 128;
+            int expected = (local == 0 || (local & 1)) ? neg90 : pos90;
+            if (syms[start + i].dibit == expected)
+                sbar_matches++;
+        }
+        if (s_matches + sbar_matches > best_total) {
+            best_total = s_matches + sbar_matches;
+            best_s = s_matches;
+            best_sbar = sbar_matches;
+        }
+    }
+    if (s_pct_out)
+        *s_pct_out = rounded_pct(best_s, 127);
+    if (sbar_pct_out)
+        *sbar_pct_out = rounded_pct(best_sbar, 16);
+}
+
+static int phase4_jprime_quality(const p3_symbol_t *syms, int start, int transform)
+{
+    int matches = 0;
+
+    if (transform < 0 || transform > 3)
+        return 0;
+    for (int b = 0; b < 16; b++) {
+        int got = j_transformed_bit(syms, start, b, transform);
+        if (got == j_table19_prime_bits[b])
+            matches++;
+    }
+    return rounded_pct(matches, 16);
+}
+
+bool p3_find_phase4_timing(const p3_result_t *result,
+                           int j_start_symbol,
+                           int j_length,
+                           int j_transform,
+                           bool source_calling_party,
+                           p3_phase4_timing_quality_t *out)
+{
+    const p3_symbol_t *syms;
+    int j_end;
+    int lo;
+    int hi;
+    int best_score = -1;
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->source_calling_party = source_calling_party;
+    if (!result || !result->symbols || j_start_symbol < 0 || j_length < 48)
+        return false;
+
+    syms = result->symbols;
+    j_end = j_start_symbol + j_length;
+    lo = j_end - 24;
+    if (lo < j_start_symbol + 32)
+        lo = j_start_symbol + 32;
+
+    if (source_calling_party) {
+        /* Call modem: J is terminated by exactly one 16-bit (8T) J'
+         * sequence, immediately followed by TRN. Search only across the
+         * demodulator's possible J end-boundary error. */
+        hi = j_end + 32;
+        for (int start = lo; start <= hi; start++) {
+            int jprime_pct;
+            int recurrence_pct;
+            int dber_pct;
+            int score;
+
+            if (start + 8 + 512 > result->symbol_count)
+                break;
+            jprime_pct = phase4_jprime_quality(syms, start, j_transform);
+            phase4_trn_quality(syms, start + 8, 512,
+                               &recurrence_pct, &dber_pct);
+            score = jprime_pct * 2 + recurrence_pct - dber_pct;
+            if (score > best_score) {
+                best_score = score;
+                out->start_symbol = start;
+                out->trn_start_symbol = start + 8;
+                out->jprime_match_pct = jprime_pct;
+                out->trn_recurrence_match_pct = recurrence_pct;
+                out->trn_descrambled_ber_pct = dber_pct;
+            }
+        }
+    } else {
+        int max_wait_symbols = (int)(result->baud_rate_estimate * 0.5f + 0.5f);
+
+        /* Answer modem: it may wait up to 500 ms after J, then sends
+         * S(128T), S-bar(16T), and TRN with no intervening gap. */
+        if (max_wait_symbols <= 0)
+            max_wait_symbols = 1715;
+        hi = j_end + max_wait_symbols + 24;
+        for (int start = lo; start <= hi; start++) {
+            int s_pct;
+            int sbar_pct;
+            int recurrence_pct;
+            int dber_pct;
+            int score;
+
+            if (start + 144 + 512 > result->symbol_count)
+                break;
+            phase4_s_sbar_quality(syms, start, &s_pct, &sbar_pct);
+            phase4_trn_quality(syms, start + 144, 512,
+                               &recurrence_pct, &dber_pct);
+            score = s_pct * 2 + sbar_pct * 2 + recurrence_pct - dber_pct;
+            if (score > best_score) {
+                best_score = score;
+                out->start_symbol = start;
+                out->trn_start_symbol = start + 144;
+                out->s_match_pct = s_pct;
+                out->sbar_match_pct = sbar_pct;
+                out->trn_recurrence_match_pct = recurrence_pct;
+                out->trn_descrambled_ber_pct = dber_pct;
+            }
+        }
+    }
+
+    if (best_score < 0)
+        return false;
+    out->found = true;
+    out->start_sample = syms[out->start_symbol].sample_index;
+    out->trn_start_sample = syms[out->trn_start_symbol].sample_index;
+    return true;
+}
+
 static float coarse_s6_repeat_score(const p3_symbol_t *syms, int n)
 {
     int checks = 0;
@@ -1429,6 +1813,7 @@ p3_result_t *p3_demod_run(const int16_t *samples,
         p3_demod_init(&demod, baud_code, carrier_sel, sample_rate);
         /* Sweep initial strobe phase to reduce aliasing to a bad symbol cut. */
         demod.baud_phase = ((float) t / (float) trials) * demod.samples_per_symbol;
+        demod.rrc_step = (t * P3_RRC_PHASES) / trials;
         p3_demod_process(&demod, samples, sample_count, sample_offset, result);
         p3_segment_symbols(result);
 
