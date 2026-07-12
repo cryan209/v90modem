@@ -18835,44 +18835,74 @@ static void print_stereo_channel_tells(const int16_t *left_linear_samples,
  * hypothesis.  Requiring the full signature set keeps ordinary carrier and
  * data-mode periodicity from turning an INFO-only capture into Phase 3.
  *
- * Tried summing TRN length across nearby fragments (tolerating a bounded
- * amount of intervening non-TRN content) to cover captures where decode
- * noise breaks the segmenter's extension threshold mid-run. Reverted: the
- * cap needed to avoid false positives on ordinary data-mode noise was
- * stricter than this un-capped single-segment check in the case that
- * actually mattered (a real S anchor can sit a long, quiet way ahead of
- * the eventual clean >=512-symbol TRN segment), so it broke more
- * previously-working captures than it fixed. Requiring one unbroken
- * segment is a strong, cheap filter against spurious matches — real
- * noise essentially never produces an uninterrupted 512-symbol run by
- * chance the way scattered fragments summed over many seconds can. */
+ * V.34 Phase 4 (S 128T + S-bar 16T + TRN>=512T, V.34 §11.4.1.2) must begin
+ * shortly after J: SpanDSP's own interop guard allows about 1s of wait
+ * after J before falling back (j_wait_max_bauds in v34tx.c) and caps TRN
+ * itself at about 2s worth of baud, or 512 symbols, whichever is larger
+ * (phase4_trn_max_bauds). A real handshake completes this whole sequence
+ * within a few seconds of J, not from anywhere later in the file.
+ *
+ * Without a bound here, the search matches ordinary V.34 data mode: on
+ * real connected calls (gough-lui captures), normal 28.8-33.6k
+ * trellis-coded data throughout the *entire* remainder of the file
+ * frequently produces long, sometimes zero-error runs that satisfy
+ * is_trn_pattern()'s match/error thresholds, plus recurring 16-bit
+ * periodicities that satisfy detect_j_pattern() — e.g. banksia-wavesp336's
+ * S at 11597ms (267ms after INFO1, looked completely plausible) only
+ * "confirmed" against a TRN>=512 segment at 29515ms, 18 seconds later,
+ * deep in genuine data. This isn't a noise artifact of one file: the
+ * same pattern (many clean, sometimes 0-error TRN-length segments and
+ * several distinct J-like periodicities recurring every ~1000-5000
+ * symbols) shows up throughout motorola-sm56-problematic1/2 too. Bounding
+ * total span from J keeps the search inside where Phase 4 can actually
+ * occur instead of scanning real payload data for coincidental matches.
+ * (Previously tried summing fragmented TRN length within a bounded gap
+ * from S alone, without bounding distance from J — regressed the tone
+ * matrix by discarding valid-but-distant S anchors while still leaving
+ * unbounded S-to-TRN search open, so it neither fixed the false-positive
+ * problem nor preserved the real detections. Reverted.) */
 static int p3_find_phase4_handoff_sample(const p3_result_t *detail)
 {
+    enum { PHASE4_MAX_SAMPLES_FROM_J = 32000 }; /* ~4s @ 8kHz */
+    int j;
+    int deadline_sample;
+    int s_sample;
+
     if (!detail)
         return -1;
 
-    for (int j = 0; j < detail->segment_count; j++) {
-        const p3_segment_t *j_seg = &detail->segments[j];
-        int s_sample = -1;
+    /* Genuine Phase 3->4 happens exactly once. detect_j_pattern() itself
+       fires on ordinary data too (verified: real captures show several
+       *different* trn16 values recurring throughout, which a single real
+       J could never produce), so trying every J segment in the file as a
+       fallback anchor reopens the same false-positive door the distance
+       bound above is meant to close. Anchor on the first qualifying J
+       only, closest to the real Phase 3 handshake. */
+    for (j = 0; j < detail->segment_count; j++) {
+        if (detail->segments[j].type == P3_SIGNAL_J && detail->segments[j].length >= 48)
+            break;
+    }
+    if (j >= detail->segment_count)
+        return -1;
 
-        if (j_seg->type != P3_SIGNAL_J || j_seg->length < 48) {
+    deadline_sample = detail->segments[j].start_sample + PHASE4_MAX_SAMPLES_FROM_J;
+    s_sample = -1;
+    for (int i = j + 1; i < detail->segment_count; i++) {
+        const p3_segment_t *seg = &detail->segments[i];
+
+        if (seg->start_sample > deadline_sample)
+            break;
+
+        if (s_sample < 0
+            && (seg->type == P3_SIGNAL_S || seg->type == P3_SIGNAL_S_BAR)
+            && seg->length >= 12) {
+            s_sample = seg->start_sample;
             continue;
         }
-
-        for (int i = j + 1; i < detail->segment_count; i++) {
-            const p3_segment_t *seg = &detail->segments[i];
-
-            if (s_sample < 0
-                && (seg->type == P3_SIGNAL_S || seg->type == P3_SIGNAL_S_BAR)
-                && seg->length >= 12) {
-                s_sample = seg->start_sample;
-                continue;
-            }
-            if (s_sample >= 0
-                && seg->type == P3_SIGNAL_TRN
-                && seg->length >= 512) {
-                return s_sample;
-            }
+        if (s_sample >= 0
+            && seg->type == P3_SIGNAL_TRN
+            && seg->length >= 512) {
+            return s_sample;
         }
     }
     return -1;
