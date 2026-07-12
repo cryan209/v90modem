@@ -364,6 +364,21 @@ p3_result_t *p3_demod_run_phase4_data(const int16_t *samples,
                                       int timing_trials,
                                       int cma_freeze_after_sample);
 
+/* Run one exact member of the timing-phase sweep.  Protocol-aware callers
+ * use this to retain every trial until a CRC-valid frame selects the winner,
+ * instead of letting the training segment score discard the useful phase. */
+p3_result_t *p3_demod_run_phase4_data_at_timing(
+                                      const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate,
+                                      bool source_calling_party,
+                                      int timing_index,
+                                      int timing_count,
+                                      int cma_freeze_after_sample);
+
 /*
  * Try all baud/carrier combinations and return the best match.
  * Useful when INFO frames are not available.

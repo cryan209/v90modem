@@ -2323,7 +2323,8 @@ static p3_result_t *p3_demod_run_internal(const int16_t *samples,
                                           int sample_rate,
                                           int preferred_phase4_role,
                                           int trials_override,
-                                          int cma_freeze_after_sample)
+                                          int cma_freeze_after_sample,
+                                          int forced_trial)
 {
     p3_result_t *best_result = NULL;
     float best_score = -FLT_MAX;
@@ -2354,7 +2355,9 @@ static p3_result_t *p3_demod_run_internal(const int16_t *samples,
     else
         trials = 4;
 
-    for (int t = 0; t < trials; t++) {
+    for (int t = forced_trial >= 0 ? forced_trial : 0;
+         t < (forced_trial >= 0 ? forced_trial + 1 : trials);
+         t++) {
         p3_demod_t demod;
         p3_result_t *result;
         float s;
@@ -2446,6 +2449,7 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                                  sample_rate,
                                  0,
                                  0,
+                                 -1,
                                  -1);
 }
 
@@ -2464,6 +2468,7 @@ p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,
                                  sample_rate,
                                  1,
                                  0,
+                                 -1,
                                  -1);
 }
 
@@ -2482,6 +2487,7 @@ p3_result_t *p3_demod_run_call_phase4(const int16_t *samples,
                                  sample_rate,
                                  2,
                                  0,
+                                 -1,
                                  -1);
 }
 
@@ -2502,6 +2508,7 @@ p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
                                  sample_rate,
                                  source_calling_party ? 2 : 1,
                                  timing_trials,
+                                 -1,
                                  -1);
 }
 
@@ -2523,7 +2530,34 @@ p3_result_t *p3_demod_run_phase4_data(const int16_t *samples,
                                  sample_rate,
                                  source_calling_party ? 2 : 1,
                                  timing_trials,
-                                 cma_freeze_after_sample);
+                                 cma_freeze_after_sample,
+                                 -1);
+}
+
+p3_result_t *p3_demod_run_phase4_data_at_timing(
+                                      const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate,
+                                      bool source_calling_party,
+                                      int timing_index,
+                                      int timing_count,
+                                      int cma_freeze_after_sample)
+{
+    if (timing_count <= 0 || timing_index < 0 || timing_index >= timing_count)
+        return NULL;
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 source_calling_party ? 2 : 1,
+                                 timing_count,
+                                 cma_freeze_after_sample,
+                                 timing_index);
 }
 
 /* ------------------------------------------------------------------ */

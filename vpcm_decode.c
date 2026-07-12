@@ -1575,6 +1575,8 @@ typedef struct {
     int jd_start_sample;
     int jd_frame_errors;
     int jd_repetitions;
+    bool jd_crc_valid;
+    bool jd_trn16;
     bool jd_prime_seen;
     int jd_prime_sample;
     int jd_prime_zero_count;
@@ -7280,6 +7282,8 @@ static p3_result_t *v34_run_native_phase4_symbols(const int16_t *samples,
 
 static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                                        int cp_start_sample,
+                                       int baud_code,
+                                       bool allow_16_point,
                                        vpcm_cp_diag_t *out)
 {
     static const uint8_t map_table[24][4] = {
@@ -7336,6 +7340,8 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
             }
         }
     }
+    if (!allow_16_point)
+        return false;
     /* CP may use the V.34 16-point Phase-4 constellation, which carries
      * I1,I2,Q1,Q2 per symbol.  Recover its absolute square-QAM orientation
      * with the fourth power, slice all four bits, then differentially decode
@@ -7349,10 +7355,6 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
         };
         double fourth_re = 0.0;
         double fourth_im = 0.0;
-        double fourth_step_re = 0.0;
-        double fourth_step_im = 0.0;
-        double previous_fourth_re = 0.0;
-        double previous_fourth_im = 0.0;
         double power = 0.0;
         int first_symbol = 0;
         int orient_count;
@@ -7363,74 +7365,67 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
             first_symbol++;
         }
         orient_count = detail->symbol_count - first_symbol;
-
         if (orient_count > 512)
             orient_count = 512;
         for (int i = 0; i < orient_count; i++) {
             double xr = detail->symbols[first_symbol + i].re;
             double xi = detail->symbols[first_symbol + i].im;
-            double x2r = xr * xr - xi * xi;
-            double x2i = 2.0 * xr * xi;
 
-            double x4r = x2r * x2r - x2i * x2i;
-            double x4i = 2.0 * x2r * x2i;
-
-            if (i > 0) {
-                fourth_step_re += x4r * previous_fourth_re
-                                + x4i * previous_fourth_im;
-                fourth_step_im += x4i * previous_fourth_re
-                                - x4r * previous_fourth_im;
-            }
-            previous_fourth_re = x4r;
-            previous_fourth_im = x4i;
             power += xr * xr + xi * xi;
         }
         if (orient_count > 0 && power > 1e-9) {
-            float carrier_delta = (float)(0.25
-                                  * atan2(fourth_step_im,
-                                          fourth_step_re));
-            float base_phase;
             float base_scale = (float)sqrt(10.0 * orient_count / power);
             int end_symbol = detail->symbol_count;
 
-            fourth_re = 0.0;
-            fourth_im = 0.0;
-            for (int i = 0; i < orient_count; i++) {
-                double xr = detail->symbols[first_symbol + i].re;
-                double xi = detail->symbols[first_symbol + i].im;
-                double angle = -(double)carrier_delta * i;
-                double zr = xr * cos(angle) - xi * sin(angle);
-                double zi = xr * sin(angle) + xi * cos(angle);
-                double z2r = zr * zr - zi * zi;
-                double z2i = 2.0 * zr * zi;
-
-                fourth_re += z2r * z2r - z2i * z2i;
-                fourth_im += 2.0 * z2r * z2i;
-            }
-            base_phase = (float)(-0.25 * atan2(fourth_im, fourth_re));
-
             if (getenv("VPCM_V34_CP16_DIAG")) {
                 fprintf(stderr,
-                        "cp16 symbols=%d first=%d orient=%d rms=%.4f phase=%.5f delta=%+.7f scale=%.4f\n",
+                        "cp16 symbols=%d first=%d orient=%d rms=%.4f carrier=%.3f baud=%d scale=%.4f\n",
                         detail->symbol_count,
                         first_symbol,
                         orient_count,
                         sqrt(power / orient_count),
-                        base_phase,
-                        carrier_delta,
+                        detail->carrier_freq_estimate,
+                        v34_baud_code_to_rate(baud_code),
                         base_scale);
             }
 
             if (end_symbol > first_symbol + 6400)
                 end_symbol = first_symbol + 6400;
-            for (int conjugate = 0; conjugate < 2; conjugate++) {
-              for (int diagonal = 0; diagonal < 2; diagonal++) {
-                for (int phase_step = -4; phase_step <= 4; phase_step++) {
+            /* The old adjacent fourth-power estimator mistook the changing
+             * 16-QAM data symbols for a residual carrier of tens of hertz.
+             * At this point the Phase-3 PLL is already locked and frozen, so
+             * search only the physically plausible residual range.  For each
+             * trial, use the aggregate fourth moment to remove the remaining
+             * absolute square-QAM orientation.  A frame is accepted only by
+             * the full CP CRC and semantic checks below. */
+            for (int carrier_step = -16; carrier_step <= 16; carrier_step++) {
+                float carrier_delta = carrier_step * (float)(M_PI / 4096.0);
+                float base_phase;
+
+                fourth_re = 0.0;
+                fourth_im = 0.0;
+                for (int i = 0; i < orient_count; i++) {
+                    double xr = detail->symbols[first_symbol + i].re;
+                    double xi = detail->symbols[first_symbol + i].im;
+                    double angle = -(double)carrier_delta * i;
+                    double zr = xr * cos(angle) - xi * sin(angle);
+                    double zi = xr * sin(angle) + xi * cos(angle);
+                    double z2r = zr * zr - zi * zi;
+                    double z2i = 2.0 * zr * zi;
+
+                    fourth_re += z2r * z2r - z2i * z2i;
+                    fourth_im += 2.0 * z2r * z2i;
+                }
+                base_phase = (float)(-0.25 * atan2(fourth_im, fourth_re));
+
+              for (int conjugate = 0; conjugate < 2; conjugate++) {
+                for (int diagonal = 0; diagonal < 2; diagonal++) {
+                  for (int phase_step = -2; phase_step <= 2; phase_step++) {
                     float static_phase = base_phase
                                        + diagonal * (float)(M_PI / 4.0)
                                        + phase_step * (float)(M_PI / 32.0);
 
-                    for (int scale_step = -4; scale_step <= 4; scale_step++) {
+                    for (int scale_step = -2; scale_step <= 2; scale_step++) {
                         float scale = base_scale * (1.0f + 0.075f * scale_step);
 
                         for (int bit_order = 0; bit_order < 4; bit_order++) {
@@ -7517,6 +7512,7 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                             }
                         }
                     }
+                  }
                 }
               }
             }
@@ -17775,6 +17771,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 int b1_template_count = 0;
                 p3_result_t *symbols;
                 p3_result_t *cp_symbols;
+                int cp_carrier = -1;
+                int cp_timing = -1;
                 v34_p3_trn_fit_t blind_fit;
                 v34_upstream_mp_recovery_t v90_mp;
                 v34_upstream_replay_result_t trial;
@@ -17812,26 +17810,66 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     total_samples,
                     onset > 1600 ? onset - 1600 : 0,
                     baud_code,
-                    P3_CARRIER_HIGH,
-                    onset + 8000,
+                    P3_CARRIER_LOW,
+                    onset + 160,
                     &native_cp);
+                if (native_cp.valid)
+                    cp_carrier = P3_CARRIER_LOW;
+                if (!native_cp.valid && symbols) {
+                    (void) v34_recover_v90_cp_from_p3(symbols,
+                                                     onset,
+                                                     baud_code,
+                                                     false,
+                                                     &native_cp);
+                    if (native_cp.valid)
+                        cp_carrier = P3_CARRIER_LOW;
+                }
                 if (!native_cp.valid) {
-                    int cp_start = p3_start;
+                    int cp_start = onset > 4000 ? onset - 4000 : 0;
+                    int cp_end = onset + 16000;
 
-                    cp_symbols = p3_demod_run_phase4_data(
-                        analog_pcm + cp_start,
-                        total_samples - cp_start,
-                        cp_start,
-                        baud_code,
-                        P3_CARRIER_HIGH,
-                        8000,
-                        true,
-                        4,
-                        onset);
-                    if (cp_symbols)
-                        (void) v34_recover_v90_cp_from_p3(cp_symbols,
+                    if (cp_end > total_samples)
+                        cp_end = total_samples;
+
+                    /* Preserve every timing member until the CP CRC chooses
+                     * one.  The general Phase-3 segment score is intentionally
+                     * not used here: payload-like symbols can outscore the
+                     * short, correct CP acquisition interval. */
+                    for (int carrier = P3_CARRIER_LOW;
+                         carrier <= P3_CARRIER_HIGH && !native_cp.valid;
+                         carrier++) {
+                        for (int timing = 0;
+                             timing < 4 && !native_cp.valid;
+                             timing++) {
+                            p3_result_t *trial_symbols =
+                                p3_demod_run_phase4_data_at_timing(
+                                    analog_pcm + cp_start,
+                                    cp_end - cp_start,
+                                    cp_start,
+                                    baud_code,
+                                    carrier,
+                                    8000,
+                                    true,
+                                    timing,
+                                    4,
+                                    onset);
+
+                            if (!trial_symbols)
+                                continue;
+                            if (v34_recover_v90_cp_from_p3(trial_symbols,
                                                          onset,
-                                                         &native_cp);
+                                                         baud_code,
+                                                         carrier == P3_CARRIER_LOW
+                                                             && timing == 0,
+                                                         &native_cp)) {
+                                cp_symbols = trial_symbols;
+                                cp_carrier = carrier;
+                                cp_timing = timing;
+                            } else {
+                                p3_result_free(trial_symbols);
+                            }
+                        }
+                    }
                 }
                 if (getenv("VPCM_V34_NATIVE_SYMBOLS") && symbols) {
                     fprintf(stderr,
@@ -17844,10 +17882,12 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             onset);
                 }
                 if (native_cp.valid) {
-                    printf("\n  Native CPt: CRC valid, upstream mask=0x%04X, downstream drn=%u, constellations=%u\n",
+                    printf("\n  V.90 CPt: CRC valid, upstream mask=0x%04X, downstream drn=%u, constellations=%u, carrier=%s%s\n",
                            native_cp.frame.upstream_rate_mask,
                            (unsigned) native_cp.frame.drn,
-                           (unsigned) native_cp.frame.constellation_count);
+                           (unsigned) native_cp.frame.constellation_count,
+                           cp_carrier == P3_CARRIER_HIGH ? "high" : "low",
+                           cp_timing >= 0 ? " (CRC-selected timing)" : "");
                 }
                 if (!symbols || symbols->symbol_count < 100) {
                     if (symbols)
@@ -17857,7 +17897,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         total_samples - p3_start,
                         p3_start,
                         baud_code,
-                        P3_CARRIER_HIGH,
+                        P3_CARRIER_LOW,
                         8000,
                         true,
                         4,
@@ -20219,46 +20259,33 @@ static int offline_v90_descramble_reg_bit(uint32_t *reg, int in_bit)
     return out_bit;
 }
 
-static void offline_v90_build_jd_bits(uint8_t bits[OFFLINE_V90_JD_BITS])
+static int offline_v90_jd_error_count(
+                                const uint8_t bits[OFFLINE_V90_JD_BITS])
 {
-    uint8_t packed[(OFFLINE_V90_JD_BITS + 7) / 8];
-    int pos = 0;
     uint16_t crc = 0xFFFF;
-
-    memset(bits, 0, OFFLINE_V90_JD_BITS);
-    memset(packed, 0, sizeof(packed));
+    uint16_t received_crc = 0;
+    int errors = 0;
 
     for (int i = 0; i < 17; i++)
-        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
-    pos++;
-    for (int i = 18; i <= 33; i++)
-        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
-    pos++;
-    for (int i = 35; i <= 40; i++)
-        packed[pos / 8] |= (uint8_t) (1U << (pos % 8)), pos++;
-    pos += 6;
-    pos++;
-    pos++;
-    packed[pos / 8] |= (uint8_t) (1U << (pos % 8));
-    pos++;
-    pos++;
-    pos++;
-
+        errors += bits[i] == 0;
+    errors += bits[17] != 0;
+    errors += bits[34] != 0;
+    for (int i = 41; i <= 46; i++)
+        errors += bits[i] != 0;
+    errors += bits[51] != 0;
+    for (int i = 68; i <= 71; i++)
+        errors += bits[i] != 0;
     for (int i = 0; i < 52; i++) {
-        int bit = (packed[i / 8] >> (i % 8)) & 1;
-        int fb = ((crc >> 15) ^ bit) & 1;
+        int fb = ((crc >> 15) ^ bits[i]) & 1;
         crc <<= 1;
         if (fb)
             crc ^= 0x8005;
         crc &= 0xFFFF;
     }
-    for (int i = 0; i < 16; i++) {
-        if ((crc >> (15 - i)) & 1)
-            packed[(52 + i) / 8] |= (uint8_t) (1U << ((52 + i) % 8));
-    }
-
-    for (int i = 0; i < OFFLINE_V90_JD_BITS; i++)
-        bits[i] = (uint8_t) ((packed[i / 8] >> (i % 8)) & 1U);
+    for (int i = 52; i <= 67; i++)
+        received_crc = (uint16_t)((received_crc << 1) | bits[i]);
+    errors += __builtin_popcount((unsigned)(crc ^ received_crc));
+    return errors;
 }
 
 static int offline_v90_decode_jd_bits(const uint8_t *codewords,
@@ -20269,15 +20296,12 @@ static int offline_v90_decode_jd_bits(const uint8_t *codewords,
 {
     uint32_t descramble_reg;
     int prev_sign;
-    int errors = 0;
-    uint8_t expected[OFFLINE_V90_JD_BITS];
 
     if (!codewords || !out_bits
         || start_sample < (OFFLINE_V90_SCRAMBLER_HISTORY + 1)
         || start_sample + OFFLINE_V90_JD_BITS > total_codewords)
         return OFFLINE_V90_JD_BITS + 1;
 
-    offline_v90_build_jd_bits(expected);
     descramble_reg = 0;
     prev_sign = ((codewords[start_sample - OFFLINE_V90_SCRAMBLER_HISTORY - 1] & 0x80) ? 1 : 0);
     if (invert_sign)
@@ -20304,11 +20328,9 @@ static int offline_v90_decode_jd_bits(const uint8_t *codewords,
         prev_sign = sign;
         plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
         out_bits[i] = (uint8_t) plain;
-        if (plain != expected[i])
-            errors++;
     }
 
-    return errors;
+    return offline_v90_jd_error_count(out_bits);
 }
 
 static bool decode_jd_stage(const uint8_t *codewords,
@@ -20323,7 +20345,9 @@ static bool decode_jd_stage(const uint8_t *codewords,
     int search_end;
     int best_errors = OFFLINE_V90_JD_BITS + 1;
     int best_start = -1;
+    int best_vote_reps = 1;
     bool best_invert = false;
+    uint8_t best_bits[OFFLINE_V90_JD_BITS];
 
     if (!codewords || total_codewords <= 0 || !out)
         return false;
@@ -20373,26 +20397,62 @@ static bool decode_jd_stage(const uint8_t *codewords,
                 best_errors = errors;
                 best_start = candidate;
                 best_invert = (invert != 0);
+                best_vote_reps = 1;
+                memcpy(best_bits, decoded_bits, sizeof(best_bits));
+            }
+            /* Jd is repeated on a 72-bit boundary.  Majority-combine real
+             * repetitions before applying the CRC, so isolated sign errors
+             * in a live recording cannot select the constellation-size bit. */
+            for (int reps = 3; reps <= 8; reps++) {
+                int votes[OFFLINE_V90_JD_BITS] = {0};
+                uint8_t combined[OFFLINE_V90_JD_BITS];
+
+                if (candidate + reps * OFFLINE_V90_JD_BITS > total_codewords)
+                    break;
+                for (int rep = 0; rep < reps; rep++) {
+                    uint8_t frame[OFFLINE_V90_JD_BITS];
+
+                    (void) offline_v90_decode_jd_bits(
+                        codewords,
+                        total_codewords,
+                        candidate + rep * OFFLINE_V90_JD_BITS,
+                        invert != 0,
+                        frame);
+                    for (int bit = 0; bit < OFFLINE_V90_JD_BITS; bit++)
+                        votes[bit] += frame[bit];
+                }
+                for (int bit = 0; bit < OFFLINE_V90_JD_BITS; bit++)
+                    combined[bit] = (uint8_t)(votes[bit] * 2 >= reps);
+                errors = offline_v90_jd_error_count(combined);
+                if (errors < best_errors) {
+                    best_errors = errors;
+                    best_start = candidate;
+                    best_invert = (invert != 0);
+                    best_vote_reps = reps;
+                    memcpy(best_bits, combined, sizeof(best_bits));
+                }
             }
         }
     }
 
-    if (best_start < 0 || best_errors > 20)
+    if (best_start < 0 || best_errors != 0)
         return false;
 
     out->ok = true;
     out->jd_start_sample = best_start;
     out->jd_frame_errors = best_errors;
-    out->jd_repetitions = 0;
+    out->jd_crc_valid = true;
+    out->jd_trn16 = best_bits[47] != 0;
+    out->jd_repetitions = best_vote_reps;
 
-    for (int rep = 0; ; rep++) {
+    for (int rep = best_vote_reps; ; rep++) {
         int rep_start = best_start + rep * OFFLINE_V90_JD_BITS;
         uint8_t decoded_bits[OFFLINE_V90_JD_BITS];
         int errors = offline_v90_decode_jd_bits(codewords, total_codewords, rep_start,
                                                 best_invert, decoded_bits);
         if (errors > 16)
             break;
-        out->jd_repetitions++;
+        out->jd_repetitions = rep + 1;
     }
 
     if (out->jd_repetitions < 1)
@@ -20457,7 +20517,10 @@ static void print_jd_stage_decode(const jd_stage_decode_t *result)
         printf("  Far-end S:        %.1f ms\n", sample_to_ms(result->far_end_s_sample, 8000));
     printf("  Jd start:         %.1f ms\n", sample_to_ms(result->jd_start_sample, 8000));
     printf("  Jd repetitions:   %d\n", result->jd_repetitions);
-    printf("  Jd frame errors:  %d/72 on best alignment\n", result->jd_frame_errors);
+    printf("  Jd frame errors:  %d/72 on best alignment (%s, CP=%s-point)\n",
+           result->jd_frame_errors,
+           result->jd_crc_valid ? "CRC valid" : "CRC invalid",
+           result->jd_trn16 ? "16" : "4");
     if (result->jd_prime_seen) {
         printf("  J'd:              seen at %.1f ms (%d/12 zero bits)\n",
                sample_to_ms(result->jd_prime_sample, 8000),
