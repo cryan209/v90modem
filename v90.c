@@ -3268,12 +3268,14 @@ int v90_generate_trn2d_codewords(v90_law_t law,
     int bits_per_frame;
     int sign_bits;
     int modulus_bits;
+    int output_frame = 0;
+    int input_frames;
 
     if (!cp || !initial_state || !codewords_out || frames <= 0
         || codewords_max < frames * V90_FRAME_LEN
         || cp->shaping_redundancy < 1
         || cp->shaping_redundancy > 3
-        || cp->shaping_lookahead != 0)
+        || cp->shaping_lookahead > 1)
         return 0;
     bits_per_frame = cp->drn + 8;
     sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
@@ -3289,7 +3291,11 @@ int v90_generate_trn2d_codewords(v90_law_t law,
            sizeof(initial_state->prev_t));
     shaper.trellis_state = initial_state->trellis_state;
     v90_scrambler_init(&scrambler);
-    for (int frame = 0; frame < frames; frame++) {
+    /* ld=1 buffers one frame so its magnitudes and initial signs can be
+     * included when selecting the current frame's shaping rule.  Feed one
+     * extra all-ones frame to emit the requested final TRN2d frame. */
+    input_frames = frames + (cp->shaping_lookahead == 1 ? 1 : 0);
+    for (int input_frame = 0; input_frame < input_frames; input_frame++) {
         uint8_t scrambled[64];
 
         for (int bit = 0; bit < bits_per_frame; bit++)
@@ -3302,11 +3308,16 @@ int v90_generate_trn2d_codewords(v90_law_t law,
                 modulus_bits,
                 scrambled,
                 &shaper,
-                codewords_out + frame * V90_FRAME_LEN)) {
+                codewords_out + output_frame * V90_FRAME_LEN)) {
+            if (cp->shaping_lookahead == 1 && shaper.pending_valid
+                && input_frame == 0) {
+                continue;
+            }
             return 0;
         }
+        output_frame++;
     }
-    return frames * V90_FRAME_LEN;
+    return output_frame * V90_FRAME_LEN;
 }
 
 void v90_enable_v92_mode(v90_state_t *s)

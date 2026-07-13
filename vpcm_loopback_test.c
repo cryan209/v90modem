@@ -1272,8 +1272,7 @@ static bool test_v90_shaped_phase4(v91_law_t law)
                         goto shaped_phase4_done;
                     }
                 }
-                if (lookahead == 0
-                    && (i % VPCM_CP_FRAME_INTERVALS)
+                if ((i % VPCM_CP_FRAME_INTERVALS)
                        == VPCM_CP_FRAME_INTERVALS - 1) {
                     int got = v90_demap_shaped_frame(
                         v90_law,

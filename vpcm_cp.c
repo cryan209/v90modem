@@ -34,14 +34,38 @@ static uint32_t vpcm_cp_get_bits(const uint8_t *bits, int first, int nbits)
     return value;
 }
 
-static uint16_t vpcm_cp_crc_bits(const uint8_t *bits, int nbits)
+static bool vpcm_cp_crc_excluded_bit(int bit)
+{
+    if (bit <= 17)
+        return true;  /* frame sync 0:16 and start bit 17 */
+    if (bit == 34 || bit == 51 || bit == 68 || bit == 85
+        || bit == 102 || bit == 119) {
+        return true;
+    }
+    /* Each constellation-mask Uchord is a start bit plus 16 payload bits.
+     * The final start bit before the CRC lies on the same 17-bit cadence. */
+    return bit >= 136 && ((bit - 136) % 17) == 0;
+}
+
+static uint16_t vpcm_cp_crc_information(const uint8_t *bits, int crc_start)
 {
     uint16_t crc;
     int i;
 
     crc = 0xFFFF;
-    for (i = 0; i < nbits; i++)
-        crc = crc_itu16_bits(bits[i], 1, crc);
+    for (i = 0; i < crc_start; i++) {
+        if (!vpcm_cp_crc_excluded_bit(i))
+            crc = crc_itu16_bits(bits[i], 1, crc);
+    }
+    return crc;
+}
+
+static uint16_t vpcm_cp_crc_remainder(const uint8_t *bits, int crc_start)
+{
+    uint16_t crc = vpcm_cp_crc_information(bits, crc_start);
+
+    for (int bit = 0; bit < 16; bit++)
+        crc = crc_itu16_bits(bits[crc_start + bit], 1, crc);
     return crc;
 }
 
@@ -221,7 +245,7 @@ static bool vpcm_cp_encode_bits_fixed_fill(const vpcm_cp_frame_t *cp,
     }
 
     vpcm_cp_set_bit(bits_out, pos++, 0);
-    crc = vpcm_cp_crc_bits(bits_out, pos);
+    crc = vpcm_cp_crc_information(bits_out, pos);
     vpcm_cp_set_bits(bits_out, pos, 16, crc);
     pos += 16;
     for (int fill = 0; fill < 3; fill++)
@@ -277,7 +301,7 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
                     * (cp->codec_constellations_differ ? 2 : 1)
                   + 1;
         diag->crc_field = (uint16_t) vpcm_cp_get_bits(diag->bits, crc_start, 16);
-        diag->crc_remainder = vpcm_cp_crc_bits(diag->bits, crc_start + 16);
+        diag->crc_remainder = vpcm_cp_crc_remainder(diag->bits, crc_start);
     }
     diag->frame_sync_ok = true;
     for (int i = 0; i <= 16; i++) {
@@ -292,8 +316,7 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
                            && diag->bits[68] == 0
                            && diag->bits[85] == 0
                            && diag->bits[102] == 0
-                           && diag->bits[119] == 0
-                           && diag->bits[128] == 0);
+                           && diag->bits[119] == 0);
     diag->reserved_bits_ok = true;
     for (int i = 25; i <= 29; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
@@ -415,7 +438,7 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     if (bits[pos++] != 0)
         diag->start_bits_ok = false;
     diag->crc_field = (uint16_t) vpcm_cp_get_bits(bits, pos, 16);
-    diag->crc_remainder = vpcm_cp_crc_bits(bits, pos + 16);
+    diag->crc_remainder = vpcm_cp_crc_remainder(bits, pos);
     pos += 16;
     diag->fill_ok = true;
     while (pos < nbits) {
