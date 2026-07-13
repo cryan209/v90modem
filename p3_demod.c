@@ -212,6 +212,7 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->rrc_half_baud = 0;
     create_godard_coeffs(d, 0.99f);
     d->use_rrc_frontend = getenv("P3_LEGACY_FRONTEND") == NULL;
+    d->bypass_equalizer = getenv("P3_BYPASS_EQUALIZER") != NULL;
     d->rrc_agc_gain = 1.0f / 8000.0f;
     d->rrc_signal_active = false;
     d->eq_coeff_re[63] = 1.0f;
@@ -685,6 +686,10 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                 if (d->rrc_signal_active)
                     godard_symbol_sync(d);
                 equalizer_get(d, &eq_re, &eq_im);
+                if (d->bypass_equalizer) {
+                    eq_re = sym_re;
+                    eq_im = sym_im;
+                }
                 if (d->cma_freeze_after_sample >= 0
                     && sample_offset + i >= d->cma_freeze_after_sample) {
                     /* Preserve the TRN/MP-trained equalizer in data mode. */

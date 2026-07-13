@@ -127,6 +127,7 @@ typedef struct {
     float ted_mixed_coeff;
     int   timing_correction;
     bool  use_rrc_frontend;
+    bool  bypass_equalizer;
     float rrc_agc_gain;
     bool  rrc_signal_active;
 

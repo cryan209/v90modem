@@ -382,6 +382,17 @@ int v90_generate_trn2d_codewords(v90_law_t law,
                                  uint8_t codewords_out[],
                                  int codewords_max);
 
+/* Map an explicit Phase-4 plaintext bitstream from reset scrambler/shaper
+ * state.  The input contains frames*(cp->drn+8) bits and is useful for
+ * protocol-constrained offline MP waveform recovery. */
+int v90_generate_phase4_codewords(v90_law_t law,
+                                  const vpcm_cp_frame_t *cp,
+                                  const v90_shaped_rx_state_t *initial_state,
+                                  const uint8_t plain_bits[],
+                                  int frames,
+                                  uint8_t codewords_out[],
+                                  int codewords_max);
+
 /* Reset the active negotiated or compatibility data mapper state. */
 void v90_reset_data_mode(v90_state_t *s);
 

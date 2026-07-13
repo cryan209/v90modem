@@ -558,9 +558,12 @@ static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
     pos += 16;             /* bits 52:67 reserved */
     s->mp_bits[pos++] = 0; /* bit 68: start */
 
+    /* V.34 10.1.2.3.2 excludes frame sync and each start bit. */
     crc = 0xFFFF;
-    for (int i = 0; i < pos; i++)
-        crc = crc_itu16_bits(s->mp_bits[i], 1, crc);
+    for (int start = 17; start < 68; start += 17) {
+        for (int bit = start + 1; bit <= start + 16; bit++)
+            crc = crc_itu16_bits(s->mp_bits[bit], 1, crc);
+    }
     for (int i = 0; i < 16; i++)
         s->mp_bits[pos++] = (uint8_t)((crc >> i) & 1);
     s->mp_bits[pos++] = 0; /* mandatory fill bit 85 */
@@ -1443,20 +1446,19 @@ static void v90_build_jd(v90_state_t *s)
     /* Bit 51 — start bit (0) */
     pos++;
 
-    /* Bits 52:67 — CRC (16 bits). Computed over bits 0:51.
-     * Using the CRC generator from V.34 §10.1.2.3.2. */
+    /* Bits 52:67 — CRC.  V.34 10.1.2.3.2 excludes frame sync and
+     * start/fill bits, so only the two 16-bit information groups enter the
+     * generator.  The CRC field is serialized LSB first. */
     {
         uint16_t crc = 0xFFFF;
-        for (int i = 0; i < 52; i++) {
-            int bit = (s->jd_bits[i/8] >> (i%8)) & 1;
-            int fb = ((crc >> 15) ^ bit) & 1;
-            crc <<= 1;
-            if (fb)
-                crc ^= 0x8005;  /* CRC-16 polynomial */
-            crc &= 0xFFFF;
-        }
+        for (int i = 18; i <= 33; i++)
+            crc = crc_itu16_bits(
+                (s->jd_bits[i / 8] >> (i % 8)) & 1, 1, crc);
+        for (int i = 35; i <= 50; i++)
+            crc = crc_itu16_bits(
+                (s->jd_bits[i / 8] >> (i % 8)) & 1, 1, crc);
         for (int i = 0; i < 16; i++) {
-            if ((crc >> (15 - i)) & 1)
+            if ((crc >> i) & 1)
                 s->jd_bits[(52+i)/8] |= (1 << ((52+i)%8));
         }
     }
@@ -3300,6 +3302,74 @@ int v90_generate_trn2d_codewords(v90_law_t law,
 
         for (int bit = 0; bit < bits_per_frame; bit++)
             scrambled[bit] = (uint8_t)v90_scramble_bit(&scrambler, 1);
+        if (!v90_map_shaped_scrambled_frame(
+                &local,
+                cp,
+                cp->shaping_redundancy,
+                sign_bits,
+                modulus_bits,
+                scrambled,
+                &shaper,
+                codewords_out + output_frame * V90_FRAME_LEN)) {
+            if (cp->shaping_lookahead == 1 && shaper.pending_valid
+                && input_frame == 0) {
+                continue;
+            }
+            return 0;
+        }
+        output_frame++;
+    }
+    return output_frame * V90_FRAME_LEN;
+}
+
+int v90_generate_phase4_codewords(v90_law_t law,
+                                  const vpcm_cp_frame_t *cp,
+                                  const v90_shaped_rx_state_t *initial_state,
+                                  const uint8_t plain_bits[],
+                                  int frames,
+                                  uint8_t codewords_out[],
+                                  int codewords_max)
+{
+    v90_state_t local;
+    v90_scrambler_t scrambler;
+    v90_shaper_state_t shaper;
+    int bits_per_frame;
+    int sign_bits;
+    int modulus_bits;
+    int output_frame = 0;
+    int input_frames;
+
+    if (!cp || !initial_state || !plain_bits || !codewords_out || frames <= 0
+        || codewords_max < frames * V90_FRAME_LEN
+        || cp->shaping_redundancy < 1
+        || cp->shaping_redundancy > 3
+        || cp->shaping_lookahead > 1)
+        return 0;
+    bits_per_frame = cp->drn + 8;
+    sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
+    modulus_bits = bits_per_frame - sign_bits;
+    if (modulus_bits < 0 || modulus_bits > 56)
+        return 0;
+    memset(&local, 0, sizeof(local));
+    memset(&shaper, 0, sizeof(shaper));
+    local.law = law;
+    shaper.prev_odd = initial_state->prev_odd;
+    memcpy(shaper.prev_t,
+           initial_state->prev_t,
+           sizeof(initial_state->prev_t));
+    shaper.trellis_state = initial_state->trellis_state;
+    v90_scrambler_init(&scrambler);
+    input_frames = frames + (cp->shaping_lookahead == 1 ? 1 : 0);
+    for (int input_frame = 0; input_frame < input_frames; input_frame++) {
+        uint8_t scrambled[64];
+
+        for (int bit = 0; bit < bits_per_frame; bit++) {
+            int source_frame = input_frame < frames
+                             ? input_frame : frames - 1;
+            int plain = plain_bits[source_frame * bits_per_frame + bit] & 1;
+
+            scrambled[bit] = (uint8_t)v90_scramble_bit(&scrambler, plain);
+        }
         if (!v90_map_shaped_scrambled_frame(
                 &local,
                 cp,

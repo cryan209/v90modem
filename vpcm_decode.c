@@ -9322,7 +9322,9 @@ static bool v90_cp4_recover_local_carrier(
             }
         }
     }
-    if (best.found && best.score <= 80) {
+    if (best.found && best.score <= 80
+        && (!accumulator
+            || getenv("VPCM_V34_CP_ALLOW_SINGLE_REPAIR"))) {
         int frame_phase = -1;
         int frame_count = 0;
 
@@ -10074,6 +10076,9 @@ enum {
     V90_PCM_EQ_TAPS = 65,
     V90_PCM_EQ_PRE = 32,
     V90_PCM_LABEL_TAPS = 65,
+    V90_PCM_KNN_TAPS = 17,
+    V90_PCM_KNN_PRE = 8,
+    V90_PCM_KNN_TRAIN = 1200,
     V90_PCM_MAX_LABELS = VPCM_CP_MASK_BITS,
     V90_TRN1D_SYMBOLS = 2046
 };
@@ -10095,6 +10100,17 @@ typedef struct {
     double coefficient[V90_PCM_MAX_LABELS][V90_PCM_LABEL_TAPS + 1];
     double validation_match;
 } v90_pcm_label_equalizer_t;
+
+typedef struct {
+    bool valid;
+    int training_start;
+    int label_classes;
+    int training_count;
+    float feature[V90_PCM_KNN_TRAIN][V90_PCM_KNN_TAPS];
+    uint8_t label[V90_PCM_KNN_TRAIN];
+    uint8_t interval[V90_PCM_KNN_TRAIN];
+    double validation_match;
+} v90_pcm_knn_slicer_t;
 
 typedef struct {
     bool valid;
@@ -10716,6 +10732,157 @@ static bool v90_pcm_label_equalizer_scores(
     return true;
 }
 
+static bool v90_pcm_knn_scores(const v90_pcm_knn_slicer_t *slicer,
+                               const v90_pcm_equalizer_t *sign_equalizer,
+                               const int16_t *samples,
+                               int total_samples,
+                               int sample_index,
+                               int interval,
+                               double scores[V90_PCM_MAX_LABELS])
+{
+    enum { NEIGHBOURS = 3 };
+    double nearest[V90_PCM_MAX_LABELS][NEIGHBOURS];
+    float query[V90_PCM_KNN_TAPS];
+
+    if (!slicer || !slicer->valid || !sign_equalizer || !samples || !scores
+        || sample_index < V90_PCM_KNN_PRE
+        || sample_index - V90_PCM_KNN_PRE + V90_PCM_KNN_TAPS
+           > total_samples) {
+        return false;
+    }
+    for (int tap = 0; tap < V90_PCM_KNN_TAPS; tap++) {
+        int at = sample_index - V90_PCM_KNN_PRE + tap;
+        double polarity = v90_pcm_equalizer_output(
+            sign_equalizer, samples, total_samples, at) >= 0.0 ? 1.0 : -1.0;
+
+        query[tap] = (float)(polarity * samples[at] / 32768.0);
+    }
+    for (int label = 0; label < slicer->label_classes; label++) {
+        scores[label] = -HUGE_VAL;
+        for (int k = 0; k < NEIGHBOURS; k++)
+            nearest[label][k] = HUGE_VAL;
+    }
+    for (int item = 0; item < slicer->training_count; item++) {
+        int label = slicer->label[item];
+        double distance = 0.0;
+
+        if (label >= slicer->label_classes
+            || slicer->interval[item] != interval) {
+            continue;
+        }
+        for (int tap = 0; tap < V90_PCM_KNN_TAPS; tap++) {
+            double error = query[tap] - slicer->feature[item][tap];
+
+            distance += error * error;
+        }
+        for (int k = 0; k < NEIGHBOURS; k++) {
+            if (distance < nearest[label][k]) {
+                for (int move = NEIGHBOURS - 1; move > k; move--)
+                    nearest[label][move] = nearest[label][move - 1];
+                nearest[label][k] = distance;
+                break;
+            }
+        }
+    }
+    for (int label = 0; label < slicer->label_classes; label++) {
+        double distance = 0.0;
+
+        if (!isfinite(nearest[label][0]))
+            continue;
+        for (int k = 0; k < NEIGHBOURS; k++)
+            distance += isfinite(nearest[label][k])
+                      ? nearest[label][k] : nearest[label][0];
+        scores[label] = -distance;
+    }
+    return true;
+}
+
+static bool v90_train_pcm_knn_slicer(
+                                    const int16_t *samples,
+                                    int total_samples,
+                                    int start_sample,
+                                    const v90_pcm_equalizer_t *sign_equalizer,
+                                    const uint8_t *expected_labels,
+                                    int label_count,
+                                    bool trailing,
+                                    v90_pcm_knn_slicer_t *out)
+{
+    int first_training = trailing
+        ? label_count - V90_PCM_KNN_PRE - V90_PCM_KNN_TRAIN
+        : V90_PCM_KNN_PRE;
+    int last_training = first_training + V90_PCM_KNN_TRAIN;
+
+    if (!samples || !sign_equalizer || !expected_labels || !out
+        || label_count <= last_training + V90_PCM_KNN_PRE
+        || start_sample < V90_PCM_KNN_PRE
+        || start_sample + label_count + V90_PCM_KNN_PRE > total_samples) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->training_start = start_sample;
+    for (int n = 0; n < label_count; n++) {
+        if (expected_labels[n] != 0xFF
+            && expected_labels[n] + 1 > out->label_classes) {
+            out->label_classes = expected_labels[n] + 1;
+        }
+    }
+    if (out->label_classes <= 0
+        || out->label_classes > V90_PCM_MAX_LABELS) {
+        return false;
+    }
+    for (int n = first_training; n < last_training; n++) {
+        int item = out->training_count++;
+
+        out->label[item] = expected_labels[n];
+        out->interval[item] = (uint8_t)(n % VPCM_CP_FRAME_INTERVALS);
+        for (int tap = 0; tap < V90_PCM_KNN_TAPS; tap++) {
+            int at = start_sample + n - V90_PCM_KNN_PRE + tap;
+            double polarity = v90_pcm_equalizer_output(
+                sign_equalizer, samples, total_samples, at) >= 0.0
+                              ? 1.0 : -1.0;
+
+            out->feature[item][tap] =
+                (float)(polarity * samples[at] / 32768.0);
+        }
+    }
+    out->valid = true;
+    {
+        int matches = 0;
+        int checks = 0;
+
+        int validation_first = trailing
+                             ? V90_PCM_KNN_PRE : last_training;
+        int validation_last = trailing
+                            ? first_training
+                            : label_count - V90_PCM_KNN_PRE;
+
+        for (int n = validation_first; n < validation_last; n++) {
+            double scores[V90_PCM_MAX_LABELS];
+            int best_label = -1;
+
+            if (!v90_pcm_knn_scores(out,
+                                    sign_equalizer,
+                                    samples,
+                                    total_samples,
+                                    start_sample + n,
+                                    n % VPCM_CP_FRAME_INTERVALS,
+                                    scores)) {
+                continue;
+            }
+            for (int label = 0; label < out->label_classes; label++) {
+                if (best_label < 0 || scores[label] > scores[best_label])
+                    best_label = label;
+            }
+            matches += best_label == expected_labels[n];
+            checks++;
+        }
+        out->validation_match = checks > 0
+                              ? (double)matches / checks : 0.0;
+    }
+    out->valid = out->validation_match >= 0.20;
+    return out->valid;
+}
+
 static bool v90_train_pcm_forward_equalizer(
                                     const int16_t *samples,
                                     int total_samples,
@@ -10730,15 +10897,17 @@ static bool v90_train_pcm_forward_equalizer(
     double matrix[SYSTEM_SIZE * SYSTEM_SIZE] = {0};
     double rhs[SYSTEM_SIZE] = {0};
     double solution[SYSTEM_SIZE];
-    double recovered[V90_TRN1D_SYMBOLS];
+    double *recovered;
 
     if (!samples || !cp || !expected_codewords || !out
-        || codeword_count > V90_TRN1D_SYMBOLS
         || codeword_count <= TRAIN_COUNT + V90_PCM_EQ_TAPS
         || start_sample < 0
         || start_sample + codeword_count > total_samples)
         return false;
     memset(out, 0, sizeof(*out));
+    recovered = malloc((size_t)codeword_count * sizeof(*recovered));
+    if (!recovered)
+        return false;
     for (int n = V90_PCM_EQ_TAPS - 1; n < TRAIN_COUNT; n++) {
         double feature[SYSTEM_SIZE];
         double target = samples[start_sample + n] / 32768.0;
@@ -10764,8 +10933,10 @@ static bool v90_train_pcm_forward_equalizer(
         for (int i = 0; i < SYSTEM_SIZE; i++)
             matrix[i * SYSTEM_SIZE + i] += trace * 1e-8;
     }
-    if (!v90_solve_linear_system(matrix, rhs, solution, SYSTEM_SIZE))
+    if (!v90_solve_linear_system(matrix, rhs, solution, SYSTEM_SIZE)) {
+        free(recovered);
         return false;
+    }
     memcpy(out->coefficient, solution, sizeof(solution));
     for (int n = 0; n < TRAIN_COUNT; n++) {
         recovered[n] = v91_codeword_to_linear(
@@ -10829,7 +11000,190 @@ static bool v90_train_pcm_forward_equalizer(
                                      ? (double)dfe_matches / checks : 0.0;
     }
     out->valid = out->decision_feedback_match >= 0.70;
+    free(recovered);
     return out->valid;
+}
+
+static bool v90_search_mp0_forward_waveform(
+                                    const int16_t *samples,
+                                    int total_samples,
+                                    int start_sample,
+                                    v91_law_t law,
+                                    const vpcm_cp_frame_t *cp,
+                                    const v90_pcm_forward_equalizer_t *channel,
+                                    v34_upstream_mp_recovery_t *out)
+{
+    enum { TRN_FRAMES = 340, MP_FRAMES = 6, MP_REPEATS = 8 };
+    int bits_per_frame;
+    int total_frames;
+    int total_codewords;
+    uint8_t *plain_bits;
+    uint8_t *codewords;
+    uint8_t candidate[102];
+    v90_shaped_rx_state_t initial = {0};
+    v34_upstream_mp_recovery_t best_result;
+    double best_score = HUGE_VAL;
+    double second_score = HUGE_VAL;
+    int best_offset = 0;
+    int best_rate = -1;
+    int best_trellis = -1;
+    int best_nonlinear = -1;
+    int best_expanded = -1;
+    int best_ack = -1;
+    unsigned mask;
+
+    if (!samples || !cp || !channel || !out || start_sample < 0)
+        return false;
+    bits_per_frame = cp->drn + 8;
+    if (bits_per_frame <= 0 || bits_per_frame > 64)
+        return false;
+    mask = cp->upstream_rate_mask & 0x1FFFU;
+    if (!mask)
+        return false;
+    total_frames = TRN_FRAMES + MP_FRAMES * MP_REPEATS;
+    total_codewords = total_frames * VPCM_CP_FRAME_INTERVALS;
+    plain_bits = malloc((size_t)total_frames * (size_t)bits_per_frame);
+    codewords = malloc((size_t)total_codewords);
+    if (!plain_bits || !codewords) {
+        free(plain_bits);
+        free(codewords);
+        return false;
+    }
+    memset(plain_bits,
+           1,
+           (size_t)TRN_FRAMES * (size_t)bits_per_frame);
+    for (int rate = 2; rate <= 14; rate++) {
+        if (!(mask & (1U << (rate - 2))))
+            continue;
+        for (int trellis = 0; trellis <= 2; trellis++) {
+            for (int nonlinear = 0; nonlinear < 2; nonlinear++) {
+                for (int expanded = 0; expanded < 2; expanded++) {
+                    for (int acknowledge = 0; acknowledge < 2;
+                         acknowledge++) {
+                        uint16_t crc;
+                        v34_upstream_mp_recovery_t decoded;
+
+                        memset(candidate, 0, sizeof(candidate));
+                        for (int bit = 0; bit <= 16; bit++)
+                            candidate[bit] = 1;
+                        for (int bit = 0; bit < 4; bit++)
+                            candidate[24 + bit] =
+                                (uint8_t)((rate >> bit) & 1);
+                        candidate[29] = (uint8_t)(trellis & 1);
+                        candidate[30] = (uint8_t)((trellis >> 1) & 1);
+                        candidate[31] = (uint8_t)nonlinear;
+                        candidate[32] = (uint8_t)expanded;
+                        candidate[33] = (uint8_t)acknowledge;
+                        for (int bit = 0; bit < 13; bit++)
+                            candidate[36 + bit] =
+                                (uint8_t)((mask >> bit) & 1U);
+                        crc = v90_mp_crc_information(candidate, 0);
+                        for (int bit = 0; bit < 16; bit++)
+                            candidate[69 + bit] =
+                                (uint8_t)((crc >> bit) & 1U);
+                        if (!v90_downstream_mp_decode_strict(
+                                candidate, (int)sizeof(candidate), &decoded)) {
+                            continue;
+                        }
+                        for (int frame = 0;
+                             frame < MP_FRAMES * MP_REPEATS; frame++) {
+                            for (int bit = 0; bit < bits_per_frame; bit++) {
+                                plain_bits[(TRN_FRAMES + frame)
+                                             * bits_per_frame + bit] =
+                                    candidate[(frame * bits_per_frame + bit)
+                                              % (MP_FRAMES * bits_per_frame)];
+                            }
+                        }
+                        if (v90_generate_phase4_codewords(
+                                law == V91_LAW_ALAW
+                                    ? V90_LAW_ALAW : V90_LAW_ULAW,
+                                cp,
+                                &initial,
+                                plain_bits,
+                                total_frames,
+                                codewords,
+                                total_codewords) != total_codewords) {
+                            continue;
+                        }
+                        for (int offset = -4; offset <= 4; offset++) {
+                            double error = 0.0;
+                            double power = 0.0;
+                            int checks = 0;
+
+                            for (int n = TRN_FRAMES
+                                         * VPCM_CP_FRAME_INTERVALS;
+                                 n < total_codewords; n++) {
+                                int observed = start_sample + n + offset;
+                                double predicted = channel->coefficient[
+                                    V90_PCM_EQ_TAPS];
+
+                                if (observed < 0 || observed >= total_samples)
+                                    break;
+                                for (int tap = 0;
+                                     tap < V90_PCM_EQ_TAPS; tap++) {
+                                    int input = n - tap;
+
+                                    if (input < 0)
+                                        break;
+                                    predicted += channel->coefficient[tap]
+                                        * v91_codeword_to_linear(
+                                            law, codewords[input]) / 32768.0;
+                                }
+                                {
+                                    double actual = samples[observed]
+                                                  / 32768.0;
+                                    double residual = actual - predicted;
+
+                                    error += residual * residual;
+                                    power += actual * actual;
+                                    checks++;
+                                }
+                            }
+                            if (checks == 0 || power <= 1e-12)
+                                continue;
+                            error /= power;
+                            if (error < best_score) {
+                                second_score = best_score;
+                                best_score = error;
+                                best_result = decoded;
+                                best_offset = offset;
+                                best_rate = rate;
+                                best_trellis = trellis;
+                                best_nonlinear = nonlinear;
+                                best_expanded = expanded;
+                                best_ack = acknowledge;
+                            } else if (error < second_score) {
+                                second_score = error;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    free(plain_bits);
+    free(codewords);
+    if (best_rate < 0)
+        return false;
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 MP0 forward waveform score=%.6f second=%.6f ratio=%.4f offset=%d rate=%d trellis=%d nonlinear=%d shaping=%d ack=%d\n",
+                best_score,
+                second_score,
+                second_score > 0.0 ? best_score / second_score : 1.0,
+                best_offset,
+                best_rate,
+                best_trellis,
+                best_nonlinear,
+                best_expanded,
+                best_ack);
+    }
+    best_result.crc_valid = false;
+    best_result.start_sample = start_sample
+                             + TRN_FRAMES * VPCM_CP_FRAME_INTERVALS
+                             + best_offset;
+    *out = best_result;
+    return true;
 }
 
 static bool v90_train_pcm_centroid_slicer(
@@ -11053,6 +11407,116 @@ static void v90_slice_cp_mapping_frame(v91_law_t law,
         codewords[i] = v90_slice_cp_codeword(law, cp, i, samples[i]);
 }
 
+static bool v90_recover_nearest_mp0(const uint8_t *observed,
+                                    int frame_bits,
+                                    unsigned expected_mask,
+                                    v34_upstream_mp_recovery_t *out,
+                                    int *corrections_out)
+{
+    uint8_t candidate[256];
+    uint8_t best_bits[256];
+    v34_upstream_mp_recovery_t best_result;
+    int best_tuple[32][5];
+    int best_tuple_count = 0;
+    int best_corrections = INT_MAX;
+    int best_solutions = 0;
+
+    if (!observed || !out || frame_bits < 86 || frame_bits > 256)
+        return false;
+    for (unsigned mask = expected_mask ? expected_mask : 1;
+         mask < (expected_mask ? expected_mask + 1 : (1U << 13));
+         mask++) {
+        for (int rate = 2; rate <= 14; rate++) {
+            if (!(mask & (1U << (rate - 2))))
+                continue;
+            for (int trellis = 0; trellis <= 2; trellis++) {
+                for (int nonlinear = 0; nonlinear < 2; nonlinear++) {
+                    for (int expanded = 0; expanded < 2; expanded++) {
+                        for (int acknowledge = 0; acknowledge < 2;
+                             acknowledge++) {
+                            uint16_t crc;
+                            int corrections = 0;
+                            memset(candidate, 0, (size_t)frame_bits);
+                            for (int bit = 0; bit <= 16; bit++)
+                                candidate[bit] = 1;
+                            for (int bit = 0; bit < 4; bit++)
+                                candidate[24 + bit] =
+                                    (uint8_t)((rate >> bit) & 1);
+                            candidate[29] = (uint8_t)(trellis & 1);
+                            candidate[30] = (uint8_t)((trellis >> 1) & 1);
+                            candidate[31] = (uint8_t)nonlinear;
+                            candidate[32] = (uint8_t)expanded;
+                            candidate[33] = (uint8_t)acknowledge;
+                            for (int bit = 0; bit < 13; bit++)
+                                candidate[36 + bit] =
+                                    (uint8_t)((mask >> bit) & 1U);
+                            crc = v90_mp_crc_information(candidate, 0);
+                            for (int bit = 0; bit < 16; bit++)
+                                candidate[69 + bit] =
+                                    (uint8_t)((crc >> bit) & 1U);
+                            for (int bit = 0; bit < frame_bits; bit++)
+                                corrections += candidate[bit]
+                                             != observed[bit];
+                            if (corrections > best_corrections)
+                                continue;
+                            if (corrections < best_corrections) {
+                                best_corrections = corrections;
+                                best_solutions = 1;
+                                best_tuple_count = 0;
+                                memcpy(best_bits,
+                                       candidate,
+                                       (size_t)frame_bits);
+                            } else {
+                                best_solutions++;
+                            }
+                            if (corrections == best_corrections
+                                && best_tuple_count
+                                   < (int)(sizeof(best_tuple)
+                                      / sizeof(best_tuple[0]))) {
+                                best_tuple[best_tuple_count][0] = (int)mask;
+                                best_tuple[best_tuple_count][1] = rate;
+                                best_tuple[best_tuple_count][2] = trellis;
+                                best_tuple[best_tuple_count][3] = nonlinear;
+                                best_tuple[best_tuple_count][4] = expanded;
+                                best_tuple_count++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 MP0 nearest corrections=%d solutions=%d\n",
+                best_corrections,
+                best_solutions);
+        for (int i = 0; i < best_tuple_count; i++) {
+            fprintf(stderr,
+                    "v90 MP0 nearest tuple mask=0x%04X rate=%d trellis=%d nonlinear=%d shaping=%d\n",
+                    best_tuple[i][0],
+                    best_tuple[i][1],
+                    best_tuple[i][2],
+                    best_tuple[i][3],
+                    best_tuple[i][4]);
+        }
+    }
+    if (best_solutions != 1 || best_corrections > 24
+        || !v90_downstream_mp_decode_strict(best_bits,
+                                             frame_bits,
+                                             &best_result)
+        || best_result.mp.type != 0) {
+        return false;
+    }
+    best_result.crc_valid = false;
+    best_result.best_trn_ber_pct = best_corrections;
+    best_result.accepted_trn_ber_pct = best_corrections;
+    *out = best_result;
+    if (corrections_out)
+        *corrections_out = best_corrections;
+    return true;
+}
+
 static bool v90_recover_repeated_mp1_at_boundary(
                                     const uint8_t *plain_bits,
                                     int bit_count,
@@ -11074,6 +11538,20 @@ static bool v90_recover_repeated_mp1_at_boundary(
     if (!plain_bits || !out || bits_per_frame <= 0 || trn_frames < 0
         || at < 0 || at + 3 * length > bit_count)
         return false;
+    if (getenv("VPCM_V90_MP_CORRECTION_DIAG")
+        && trn_frames == atoi(getenv("VPCM_V90_MP_CORRECTION_DIAG"))) {
+        int sync_errors = 0;
+
+        for (int bit = 0; bit <= 16; bit++)
+            sync_errors += plain_bits[at + bit] == 0;
+        fprintf(stderr,
+                "v90 MP correction entry frame=%d sync=%d start=%u type=%u bit_count=%d\n",
+                trn_frames,
+                sync_errors,
+                (unsigned)plain_bits[at + 17],
+                (unsigned)plain_bits[at + 18],
+                bit_count);
+    }
 
     if (getenv("VPCM_V90_MP_BIT_DUMP")) {
         for (int repeat = 0; repeat < MAX_REPEATS
@@ -11287,6 +11765,16 @@ static bool v90_recover_repeated_mp1_at_boundary(
                 }
             }
         }
+        if (getenv("VPCM_V90_MP_CORRECTION_DIAG")
+            && trn_frames
+               == atoi(getenv("VPCM_V90_MP_CORRECTION_DIAG"))) {
+            fprintf(stderr,
+                    "v90 MP correction frame=%d repeat=%d best=%d solutions=%d\n",
+                    trn_frames,
+                    repeat,
+                    repeat_best,
+                    repeat_solutions);
+        }
         if (repeat_solutions == 1 && repeat_best <= 12) {
             repeat_result[repeat] = repeat_candidate;
             repeat_corrections[repeat] = repeat_best;
@@ -11484,12 +11972,14 @@ static bool v90_recover_downstream_mp_pcm(
       int detected_trn_frames = 340;
       v90_pcm_equalizer_t trn_equalizer;
       v90_pcm_label_equalizer_t label_equalizer;
+      v90_pcm_knn_slicer_t knn_slicer;
       v90_pcm_forward_equalizer_t forward_equalizer;
       v90_pcm_centroid_slicer_t centroid_slicer;
 
       bits_per_frame = cpt->drn + 8;
       memset(&trn_equalizer, 0, sizeof(trn_equalizer));
       memset(&label_equalizer, 0, sizeof(label_equalizer));
+      memset(&knn_slicer, 0, sizeof(knn_slicer));
       memset(&forward_equalizer, 0, sizeof(forward_equalizer));
       memset(&centroid_slicer, 0, sizeof(centroid_slicer));
       if (getenv("VPCM_V90_MP_PROFILE")
@@ -11730,14 +12220,15 @@ static bool v90_recover_downstream_mp_pcm(
                   transition_run = 0;
               }
           }
-          acq_begin = search_start;
-          acq_end = search_end - 6 * 32;
-          if (acq_begin < search_start)
-              acq_begin = search_start;
-          if (acq_end > total_samples - 6 * 32)
-              acq_end = total_samples - 6 * 32;
-          for (int initial_state = 0; initial_state < 256;
-               initial_state++) {
+          if (!getenv("VPCM_V90_TRN_FORCE_START")) {
+            acq_begin = search_start;
+            acq_end = search_end - 6 * 32;
+            if (acq_begin < search_start)
+                acq_begin = search_start;
+            if (acq_end > total_samples - 6 * 32)
+                acq_end = total_samples - 6 * 32;
+            for (int initial_state = 0; initial_state < 256;
+                 initial_state++) {
               enum { ACQ_FRAMES = 32 };
               v90_shaped_rx_state_t initial = {0};
 
@@ -11815,6 +12306,7 @@ static bool v90_recover_downstream_mp_pcm(
                       }
                   }
               }
+            }
           }
           if (getenv("VPCM_V90_TRN_FORCE_START")) {
               acq_start = atoi(getenv("VPCM_V90_TRN_FORCE_START"));
@@ -11832,7 +12324,7 @@ static bool v90_recover_downstream_mp_pcm(
               v90_shaped_rx_state_t initial = {0};
               uint8_t expected_trn[TRN2D_MAX_CODEWORDS];
               int trn2d_frames = getenv("VPCM_V90_EQ_FRAMES")
-                                ? atoi(getenv("VPCM_V90_EQ_FRAMES")) : 1680;
+                                ? atoi(getenv("VPCM_V90_EQ_FRAMES")) : 340;
               int trn2d_codewords;
               int generated_trn;
 
@@ -11898,6 +12390,7 @@ static bool v90_recover_downstream_mp_pcm(
                        candidate_start < acq_start + 6;
                        candidate_start++) {
                       v90_pcm_label_equalizer_t trial_labels;
+                      v90_pcm_knn_slicer_t trial_knn;
 
                       (void)v90_train_pcm_label_equalizer(
                           digital_pcm,
@@ -11910,6 +12403,34 @@ static bool v90_recover_downstream_mp_pcm(
                       if (trial_labels.validation_match
                           > label_equalizer.validation_match) {
                           label_equalizer = trial_labels;
+                      }
+                      if (candidate_start == acq_start) {
+                          (void)v90_train_pcm_knn_slicer(
+                              digital_pcm,
+                              total_samples,
+                              candidate_start,
+                              &pcm_equalizer,
+                              expected_labels,
+                              trn2d_codewords,
+                              false,
+                              &trial_knn);
+                          if (trial_knn.validation_match
+                              > knn_slicer.validation_match) {
+                              knn_slicer = trial_knn;
+                          }
+                          (void)v90_train_pcm_knn_slicer(
+                              digital_pcm,
+                              total_samples,
+                              candidate_start,
+                              &pcm_equalizer,
+                              expected_labels,
+                              trn2d_codewords,
+                              true,
+                              &trial_knn);
+                          if (trial_knn.validation_match
+                              > knn_slicer.validation_match) {
+                              knn_slicer = trial_knn;
+                          }
                       }
                   }
 
@@ -12026,7 +12547,7 @@ static bool v90_recover_downstream_mp_pcm(
                               &pcm_equalizer,
                               digital_pcm,
                               total_samples,
-                              trn_equalizer.training_start + i) >= 0.0;
+                              acq_start + i) >= 0.0;
 
                           if (ucode >= 0) {
                               expected_trn[i] = v91_ucode_to_codeword(
@@ -12038,12 +12559,25 @@ static bool v90_recover_downstream_mp_pcm(
                       (void)v90_train_pcm_forward_equalizer(
                           digital_pcm,
                           total_samples,
-                          trn_equalizer.training_start,
+                          acq_start,
                           capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
                           &trn_cp,
                           expected_trn,
                           trn2d_codewords,
                           &forward_equalizer);
+                      if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                          v34_upstream_mp_recovery_t waveform_mp;
+
+                          (void)v90_search_mp0_forward_waveform(
+                              digital_pcm,
+                              total_samples,
+                              acq_start,
+                              capture_alaw
+                                  ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              &trn_cp,
+                              &forward_equalizer,
+                              &waveform_mp);
+                      }
                       (void)v90_train_pcm_centroid_slicer(
                           digital_pcm,
                           total_samples,
@@ -12187,6 +12721,11 @@ static bool v90_recover_downstream_mp_pcm(
                               label_equalizer.training_start,
                               label_equalizer.valid ? 1 : 0,
                               100.0 * label_equalizer.validation_match);
+                      fprintf(stderr,
+                              "v90 TRN2d label kNN start=%d valid=%d accuracy=%.1f%%\n",
+                              knn_slicer.training_start,
+                              knn_slicer.valid ? 1 : 0,
+                              100.0 * knn_slicer.validation_match);
                       fprintf(stderr,
                               "v90 TRN2d forward FIR valid=%d teacher=%.1f%% dfe=%.1f%%\n",
                               forward_equalizer.valid ? 1 : 0,
@@ -12579,7 +13118,7 @@ static bool v90_recover_downstream_mp_pcm(
             if (prefix_valid && recent_invalid)
                 initial_state_count = 256;
         }
-        {
+        if (getenv("VPCM_V90_MP_DIRECT_START")) {
             initial_state_count = getenv(
                 "VPCM_V90_MP_DIRECT_ALL_STATES") ? 256 : 1;
         }
@@ -12634,7 +13173,7 @@ static bool v90_recover_downstream_mp_pcm(
                         + capture_offset;
                 }
             }
-            if (label_equalizer.valid) {
+            if (label_equalizer.valid || knn_slicer.valid) {
                 double label_scores[VPCM_CP_FRAME_INTERVALS]
                                    [V90_PCM_MAX_LABELS];
                 int moduli[VPCM_CP_FRAME_INTERVALS];
@@ -12645,6 +13184,10 @@ static bool v90_recover_downstream_mp_pcm(
                 uint64_t states = modulus_bits >= 0 && modulus_bits <= 20
                                 ? 1ULL << modulus_bits : 0;
                 double best_score = -HUGE_VAL;
+                bool use_knn = knn_slicer.valid
+                             && (!label_equalizer.valid
+                                 || knn_slicer.validation_match
+                                    > label_equalizer.validation_match);
 
                 for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
                     int constellation = wire_cp.dfi[i];
@@ -12653,13 +13196,26 @@ static bool v90_recover_downstream_mp_pcm(
                               ? vpcm_cp_mask_population(
                                   wire_cp.masks[constellation]) : 0;
                     if (moduli[i] <= 0
-                        || !v90_pcm_label_equalizer_scores(
-                            &label_equalizer,
-                            &pcm_equalizer,
-                            digital_pcm,
-                            total_samples,
-                            start + 6 * frames + i,
-                            label_scores[i])) {
+                        || !(use_knn
+                            ? v90_pcm_knn_scores(
+                                &knn_slicer,
+                                &pcm_equalizer,
+                                digital_pcm,
+                                total_samples,
+                                start + 6 * frames + i,
+                                ((start + 6 * frames + i
+                                    - knn_slicer.training_start)
+                                   % VPCM_CP_FRAME_INTERVALS
+                                   + VPCM_CP_FRAME_INTERVALS)
+                                  % VPCM_CP_FRAME_INTERVALS,
+                                label_scores[i])
+                            : v90_pcm_label_equalizer_scores(
+                                &label_equalizer,
+                                &pcm_equalizer,
+                                digital_pcm,
+                                total_samples,
+                                start + 6 * frames + i,
+                                label_scores[i]))) {
                         states = 0;
                     }
                 }
@@ -12680,19 +13236,36 @@ static bool v90_recover_downstream_mp_pcm(
                     }
                 }
                 for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
-                    int label = states > 0 ? selected[i]
-                        : v90_pcm_label_equalizer_slice(
-                            &label_equalizer,
-                            &pcm_equalizer,
-                            digital_pcm,
-                            total_samples,
-                            start + 6 * frames + i);
+                    int label = states > 0 ? selected[i] : -1;
                     int ucode = v90_cp_ucode_for_label(&wire_cp, i, label);
                     bool positive = v90_pcm_equalizer_output(
                         &pcm_equalizer,
                         digital_pcm,
                         total_samples,
                         start + 6 * frames + i) >= 0.0;
+
+                    if (label < 0 && use_knn) {
+                        for (int candidate = 0;
+                             candidate < knn_slicer.label_classes;
+                             candidate++) {
+                            if (label < 0
+                                || label_scores[i][candidate]
+                                   > label_scores[i][label]) {
+                                label = candidate;
+                            }
+                        }
+                        ucode = v90_cp_ucode_for_label(
+                            &wire_cp, i, label);
+                    } else if (label < 0) {
+                        label = v90_pcm_label_equalizer_slice(
+                            &label_equalizer,
+                            &pcm_equalizer,
+                            digital_pcm,
+                            total_samples,
+                            start + 6 * frames + i);
+                        ucode = v90_cp_ucode_for_label(
+                            &wire_cp, i, label);
+                    }
 
                     if (ucode < 0)
                         ucode = 0;
@@ -12795,8 +13368,8 @@ static bool v90_recover_downstream_mp_pcm(
         }
         if (frames < 100)
             continue;
-        if (getenv("VPCM_V90_MP_DIRECT_START")) {
-            enum { DIRECT_CANDIDATES = 64 };
+        {
+            enum { DIRECT_CANDIDATES = 16 };
             int candidate_frame[DIRECT_CANDIDATES];
             int candidate_score[DIRECT_CANDIDATES];
             int candidate_count = 0;
@@ -12806,11 +13379,17 @@ static bool v90_recover_downstream_mp_pcm(
             for (int frame_at = 0;
                  frame_at + 3 * mp_frames <= frames;
                  frame_at++) {
-                int score = v90_mp_frame_prefilter_score(
+                int score0 = v90_mp_frame_prefilter_score(
+                    plain_bits,
+                    bit_count,
+                    frame_at * bits_per_frame,
+                    0);
+                int score1 = v90_mp_frame_prefilter_score(
                     plain_bits,
                     bit_count,
                     frame_at * bits_per_frame,
                     1);
+                int score = score0 < score1 ? score0 : score1;
                 int insert = candidate_count;
 
                 while (insert > 0
@@ -12846,6 +13425,69 @@ static bool v90_recover_downstream_mp_pcm(
              * self-synchronizing descrambler can settle.  Search every
              * mapping-frame-aligned candidate, then let repeated copies and
              * their CRC select the actual MP boundary. */
+            {
+                int mp0_length = ((86 + bits_per_frame - 1)
+                                  / bits_per_frame) * bits_per_frame;
+                int at = known_trn_frames * bits_per_frame;
+                v34_upstream_mp_recovery_t mp0;
+                int corrections = 0;
+
+                if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                    fprintf(stderr,
+                            "v90 MP0 normative boundary=%d sample=%d\n",
+                            known_trn_frames,
+                            start + 6 * known_trn_frames);
+                }
+                if (known_trn_frames >= 0
+                    && at + mp0_length <= bit_count
+                    && v90_recover_nearest_mp0(plain_bits + at,
+                                               mp0_length,
+                                               wire_cp.upstream_rate_mask
+                                                   & 0x1FFFU,
+                                               &mp0,
+                                               &corrections)) {
+                    mp0.start_sample = start + 6 * known_trn_frames;
+                    mp0.remote_ack_sample = -1;
+                    mp0.remote_last_mp_sample = -1;
+                    *out = mp0;
+                    free(plain_bits);
+                    return true;
+                }
+            }
+            for (int candidate = 0;
+                 candidate < candidate_count;
+                 candidate++) {
+                if (candidate_frame[candidate] == known_trn_frames)
+                    continue;
+                int mp0_length = ((86 + bits_per_frame - 1)
+                                  / bits_per_frame) * bits_per_frame;
+                int at = candidate_frame[candidate] * bits_per_frame;
+                v34_upstream_mp_recovery_t mp0;
+                int corrections = 0;
+
+                if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                    fprintf(stderr,
+                            "v90 MP0 boundary candidate=%d sample=%d score=%d\n",
+                            candidate_frame[candidate],
+                            start + 6 * candidate_frame[candidate],
+                            candidate_score[candidate]);
+                }
+                if (at + mp0_length <= bit_count
+                    && v90_recover_nearest_mp0(plain_bits + at,
+                                               mp0_length,
+                                               wire_cp.upstream_rate_mask
+                                                   & 0x1FFFU,
+                                               &mp0,
+                                               &corrections)) {
+                    mp0.start_sample = start
+                                     + 6 * candidate_frame[candidate];
+                    mp0.remote_ack_sample = -1;
+                    mp0.remote_last_mp_sample = -1;
+                    *out = mp0;
+                    free(plain_bits);
+                    return true;
+                }
+            }
             for (int candidate = 0;
                  candidate < candidate_count;
                  candidate++) {
@@ -25415,6 +26057,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 int cp_carrier = -1;
                 int cp_timing = -1;
                 int cp_reset_sample = -1;
+                int trn2d_start_sample = -1;
                 int data_cp_start_sample = -1;
                 int data_cp_last_sample = -1;
                 v34_p3_trn_fit_t blind_fit;
@@ -25556,7 +26199,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                      : P3_CARRIER_LOW;
                     int cp_timing_count = getenv("VPCM_V34_CP_TIMING_COUNT")
                                         ? atoi(getenv("VPCM_V34_CP_TIMING_COUNT"))
-                                        : 4;
+                                        : 16;
 
                     if (cp_lead < 800)
                         cp_lead = 800;
@@ -25656,8 +26299,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     carrier == P3_CARRIER_LOW && timing == 0
                                         ? 32 : 0,
                                     1000,
-                                    carrier == P3_CARRIER_LOW
-                                        ? &cp_vote_accumulator : NULL,
+                                    &cp_vote_accumulator,
                                     &cp_reset_sample,
                                     &trial_data_cp,
                                     &trial_data_cp_start,
@@ -25681,8 +26323,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     true,
                                     0,
                                     1000,
-                                    carrier == P3_CARRIER_LOW
-                                        ? &cp_vote_accumulator : NULL,
+                                    &cp_vote_accumulator,
                                     &cp_reset_sample,
                                     &trial_data_cp,
                                     &trial_data_cp_start,
@@ -25744,6 +26385,27 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             onset);
                 }
                 if (native_cp.valid) {
+                    int cp_bits_per_symbol = equalized_jd_valid
+                                           && equalized_jd.jd_trn16 ? 4 : 2;
+                    int baud_rate = v34_baud_code_to_rate(baud_code);
+
+                    if (cp_reset_sample >= 0 && native_cp.nbits > 0
+                        && baud_rate > 0) {
+                        int cp_samples = (native_cp.nbits * 8000
+                            + cp_bits_per_symbol * baud_rate - 1)
+                            / (cp_bits_per_symbol * baud_rate);
+
+                        /* cp_reset_sample is the first CPt frame-sync symbol.
+                         * TRN2d begins only after the complete CPt frame and
+                         * the required 24-symbol post-CP Ri interval. */
+                        trn2d_start_sample = cp_reset_sample
+                                           + cp_samples + 24;
+                    }
+                    if (getenv("VPCM_V90_UPSTREAM_CARRIER")) {
+                        cp_carrier = atoi(
+                            getenv("VPCM_V90_UPSTREAM_CARRIER"))
+                            ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
+                    }
                     printf("\n  V.90 %s%s: %s, upstream mask=0x%04X, downstream drn=%u, constellations=%u, Sr=%u, ld=%u, codec-mask=%s, carrier=%s%s",
                            native_cp.frame.v90_compatibility ? "CP" : "CPt",
                            native_cp.frame.acknowledge ? "'" : "",
@@ -25763,6 +26425,11 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         printf(", frame=%d (%.3f ms)",
                                cp_reset_sample,
                                cp_reset_sample * 1000.0 / 8000.0);
+                    }
+                    if (trn2d_start_sample >= 0) {
+                        printf(", TRN2d=%d (%.3f ms)",
+                               trn2d_start_sample,
+                               trn2d_start_sample * 1000.0 / 8000.0);
                     }
                     putchar('\n');
                     if (getenv("VPCM_V90_MP_PCM_DIAG")) {
@@ -25789,8 +26456,10 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             digital_pcm,
                             total_samples,
                             analog_info->info1_sample,
-                            cp_reset_sample >= 0
-                                ? cp_reset_sample : cpt_hint_sample,
+                            trn2d_start_sample >= 0
+                                ? trn2d_start_sample
+                                : (cp_reset_sample >= 0
+                                   ? cp_reset_sample : cpt_hint_sample),
                             &native_cp.frame,
                             analog_info->info1a.u_info,
                             &downstream_mp)) {
@@ -25877,6 +26546,50 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                downstream_mp.crc_valid
                                    ? "% TRN2d BER"
                                    : " CRC-field bit errors");
+                    }
+                }
+                if (native_cp.valid && !downstream_mp.valid
+                    && getenv("VPCM_V90_FORCE_TYPE0")) {
+                    int rate = 0;
+                    int trellis = 0;
+                    int nonlinear = 0;
+                    int expanded = 0;
+
+                    if (sscanf(getenv("VPCM_V90_FORCE_TYPE0"),
+                               "%d,%d,%d,%d",
+                               &rate,
+                               &trellis,
+                               &nonlinear,
+                               &expanded) == 4
+                        && rate >= 2 && rate <= 14
+                        && trellis >= 0 && trellis <= 2
+                        && (nonlinear == 0 || nonlinear == 1)
+                        && (expanded == 0 || expanded == 1)) {
+                        memset(&downstream_mp, 0, sizeof(downstream_mp));
+                        downstream_mp.valid = true;
+                        downstream_mp.crc_valid = false;
+                        downstream_mp.mp.type = 0;
+                        downstream_mp.mp.bit_rate_a_to_c = rate;
+                        downstream_mp.mp.bit_rate_c_to_a = rate;
+                        downstream_mp.mp.trellis_size = trellis;
+                        downstream_mp.mp.use_non_linear_encoder =
+                            nonlinear != 0;
+                        downstream_mp.mp.expanded_shaping = expanded != 0;
+                        downstream_mp.start_sample = cp_reset_sample >= 0
+                            ? (trn2d_start_sample >= 0
+                               ? trn2d_start_sample + 2040
+                               : cp_reset_sample + 2040)
+                            : cpt_hint_sample;
+                        downstream_mp.remote_ack_sample = -1;
+                        downstream_mp.remote_last_mp_sample = -1;
+                        v90_mp = downstream_mp;
+                        fprintf(stderr,
+                                "v90 forced Type0 diagnostic rate=%d trellis=%d nonlinear=%d shaping=%d start=%d\n",
+                                rate,
+                                trellis,
+                                nonlinear,
+                                expanded,
+                                downstream_mp.start_sample);
                     }
                 }
                 if (data_cp.valid) {
@@ -26091,7 +26804,9 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                            : downstream_mp.start_sample)
                         : (data_cp.valid ? data_cp_last_sample
                            : cp_reset_sample >= 0
-                             ? cp_reset_sample + 2040
+                             ? (trn2d_start_sample >= 0
+                                ? trn2d_start_sample + 2040
+                                : cp_reset_sample + 2040)
                              : cp_reset_sample);
                     int best_e_run = 0;
                     int best_e_sample = -1;
@@ -26134,6 +26849,91 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     ? sample_to_ms(direct_e_data_sample, 8000)
                                     : -1.0);
                     }
+                    if (getenv("VPCM_V90_LOCAL_E_SWEEP")
+                        && cp_reset_sample >= 0) {
+                        int local_start = cp_reset_sample > 1600
+                                        ? cp_reset_sample - 1600 : 0;
+                        int local_search_start = trn2d_start_sample >= 0
+                            ? trn2d_start_sample + 2040
+                            : cp_reset_sample + 2040;
+                        int local_best_window = best_e_window;
+                        int local_best_data = direct_e_data_sample;
+                        int local_best_carrier = cp_carrier;
+                        int local_best_timing = -1;
+
+                        for (int carrier = P3_CARRIER_LOW;
+                             carrier <= P3_CARRIER_HIGH; carrier++) {
+                            for (int timing = 0; timing < 8; timing++) {
+                                p3_result_t *local_e_symbols =
+                                    p3_demod_run_phase4_data_at_timing(
+                                        analog_pcm + local_start,
+                                        total_samples - local_start,
+                                        local_start,
+                                        baud_code,
+                                        carrier,
+                                        8000,
+                                        true,
+                                        timing,
+                                        8,
+                                        total_samples);
+                                int local_run = 0;
+                                int local_run_sample = -1;
+                                int local_window = 0;
+                                int local_window_sample = -1;
+                                int local_data = v34_find_v90_e_from_p3(
+                                    local_e_symbols,
+                                    local_search_start,
+                                    cp_capture_end,
+                                    &local_run,
+                                    &local_run_sample,
+                                    &local_window,
+                                    &local_window_sample);
+
+                                if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                                    fprintf(stderr,
+                                            "v90 local E carrier=%s timing=%d run=%d window=%d/20 end=%d data=%d\n",
+                                            carrier == P3_CARRIER_HIGH
+                                                ? "high" : "low",
+                                            timing,
+                                            local_run,
+                                            local_window,
+                                            local_window_sample,
+                                            local_data);
+                                }
+                                if (local_data >= 0
+                                    && (local_window > local_best_window
+                                        || (local_window
+                                              == local_best_window
+                                            && local_run > best_e_run))) {
+                                    local_best_window = local_window;
+                                    local_best_data = local_data;
+                                    local_best_carrier = carrier;
+                                    local_best_timing = timing;
+                                    best_e_run = local_run;
+                                }
+                                if (local_e_symbols)
+                                    p3_result_free(local_e_symbols);
+                            }
+                        }
+                        if (local_best_data >= 0) {
+                            direct_e_data_sample = local_best_data;
+                            cp_carrier = local_best_carrier;
+                        }
+                        if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                            fprintf(stderr,
+                                    "v90 local E selected carrier=%s timing=%d window=%d/20 data=%d ms=%.3f\n",
+                                    local_best_carrier == P3_CARRIER_HIGH
+                                        ? "high" : "low",
+                                    local_best_timing,
+                                    local_best_window,
+                                    local_best_data,
+                                    local_best_data >= 0
+                                        ? sample_to_ms(local_best_data, 8000)
+                                        : -1.0);
+                        }
+                    }
+                    if (getenv("VPCM_V90_IGNORE_E_CANDIDATE"))
+                        direct_e_data_sample = -1;
                 }
                 if (getenv("VPCM_V90_MP_ONLY"))
                     goto v90_upstream_cleanup;
@@ -27094,11 +27894,18 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                            : onset - 1600)
                         : known_data_sample - 1600;
 
+                    if (getenv("VPCM_V90_B1_LOCAL_LEAD"))
+                        local_start = known_data_sample
+                                    - atoi(getenv(
+                                        "VPCM_V90_B1_LOCAL_LEAD"));
                     if (local_start < 0)
                         local_start = 0;
                     for (int timing = 0; timing < 8; timing++) {
-                        p3_result_t *local_symbols =
-                            p3_demod_run_phase4_data_at_timing(
+                        p3_result_t *local_symbols;
+
+                        if (getenv("VPCM_V90_B1_BYPASS_EQUALIZER"))
+                            setenv("P3_BYPASS_EQUALIZER", "1", 1);
+                        local_symbols = p3_demod_run_phase4_data_at_timing(
                                 analog_pcm + local_start,
                                 total_samples - local_start,
                                 local_start,
@@ -27110,6 +27917,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 timing,
                                 8,
                                 known_data_sample);
+                        if (getenv("VPCM_V90_B1_BYPASS_EQUALIZER"))
+                            unsetenv("P3_BYPASS_EQUALIZER");
                         float local_match = 0.0f;
                         int local_first = -1;
                         int local_template = -1;

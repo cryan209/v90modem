@@ -877,8 +877,10 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         }
     }
     crc = 0xFFFF;
-    for (int i = 0; i < 69; i++)
-        crc = crc_itu16_bits(mp_bits[i], 1, crc);
+    for (int start = 17; start < 68; start += 17) {
+        for (int bit = start + 1; bit <= start + 16; bit++)
+            crc = crc_itu16_bits(mp_bits[bit], 1, crc);
+    }
     for (int i = 0; i < 16; i++) {
         if (mp_bits[69 + i] != ((crc >> i) & 1)) {
             fprintf(stderr, "V.90 Type-0 MP CRC field is invalid\n");
