@@ -5358,6 +5358,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    With new_phase = (phase + acquire_bauds) % 48 and dur=1:
                    pp_symbols[(1-1+new_phase)%48] = pp_symbols[(acquire_bauds+phase)%48]. ✓ */
                 s->phase3_pp_phase = (s->phase3_pp_phase + acquire_bauds) % PP_PERIOD_SYMBOLS;
+                if (getenv("VPCM_V90_PP_PHASE"))
+                {
+                    int forced_phase = atoi(getenv("VPCM_V90_PP_PHASE"));
+
+                    forced_phase %= PP_PERIOD_SYMBOLS;
+                    if (forced_phase < 0)
+                        forced_phase += PP_PERIOD_SYMBOLS;
+                    s->phase3_pp_phase = forced_phase;
+                }
+                /*endif*/
                 s->duration = 0;
                 memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
                 s->phase3_pp_obs = 0;
@@ -6290,13 +6300,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                We are receiving from the far end, so use the far end's scrambler:
                - If we are the answerer, far end is caller → tap=17 (GPC)
                - If we are the caller, far end is answerer → tap=4 (GPA)
+               V.90 reverses this assignment for its asymmetric upstream/downstream.
                TRN (all-ones) cannot distinguish between the two polynomials because
                a self-synchronizing descrambler produces all-ones output for either tap
                once it converges.  Force the correct tap here. */
             {
                 int correct_tap;
 
-                correct_tap = s->calling_party ? 4 : 17;
+                correct_tap = s->v90_mode
+                            ? (s->calling_party ? 17 : 4)
+                            : (s->calling_party ? 4 : 17);
                 if (s->scrambler_tap != correct_tap)
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
@@ -8151,6 +8164,28 @@ SPAN_DECLARE(int) v34_seed_rx_mp(v34_state_t *s,
        frame boundary. */
     s->rx.mp_seen = 1;
     s->rx.mp_accepted_baud = s->rx.duration;
+    if (s->rx.v90_mode && !s->calling_party)
+    {
+        /* In V.90 the externally decoded CPt replaces the ordinary V.34
+           J'/TRN/MP receive handoff.  Do not leave the native receiver parked
+           in PHASE4_TRN after the project layer has supplied the accepted MP
+           parameters; enter MP/E search while preserving the trained primary
+           equalizer and carrier/timing state. */
+        s->rx.stage = V34_RX_STAGE_PHASE4_MP;
+        s->rx.duration = 0;
+        s->rx.mp_accepted_baud = 0;
+        s->rx.bitstream = 0;
+        s->rx.bit_count = 0;
+        s->rx.mp_count = -1;
+        s->rx.mp_frame_pos = 0;
+        s->rx.mp_frame_target = 0;
+        s->rx.mp_early_rejects = 0;
+        s->rx.mp_hypothesis = -1;
+        s->rx.mp_phase4_default_scrambler_tap = 4;
+        s->rx.scrambler_tap = 4;
+        mp_reset_hypothesis_search(&s->rx);
+    }
+    /*endif*/
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

@@ -393,6 +393,11 @@ SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s);
     and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */
 SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
 
+/*! Force the primary-channel receiver into Phase 3 PP/TRN conditioning.
+    Intended for offline V.90 replay after INFO1 has already been decoded;
+    the trained equalizer is preserved by a later v34_force_phase4(). */
+SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s);
+
 /*! Seed the receive-side Phase 4 MP parameters when an external/offline
     detector has already validated the answer modem's MP frame.  The rate is
     the V.34 MP N value (rate = N * 2400 bit/s), and precoder_coeffs contains

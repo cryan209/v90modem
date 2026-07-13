@@ -5620,6 +5620,22 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s)
+{
+    if (!s)
+        return;
+    s_not_s_baud_init(s);
+    /* Offline replay has already decoded INFO1 outside this context.  The
+       normal V.90 answerer branch otherwise remains on the 600-baud control
+       channel because rx.info1a is intentionally empty here. */
+    s->primary_channel_active = true;
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+    s->rx.duration = 0;
+    s->rx.received_event = V34_EVENT_NONE;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
 {
     s->tx.v90_mode = true;
