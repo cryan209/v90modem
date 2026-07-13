@@ -5897,11 +5897,23 @@ typedef struct {
     float power;
 } v34_b1_template_t;
 
+enum { V34_B1_FIR_TAPS = 13, V34_B1_FIR_PRE = 6 };
+
+typedef struct {
+    bool valid;
+    int first_symbol;
+    bool conjugate;
+    double phase_step;
+    double coefficient[2 * V34_B1_FIR_TAPS];
+    float training_match;
+} v34_b1_fir_fit_t;
+
 typedef struct {
     bool valid;
     mp_t mp;
     int frame_bits;
     int start_sample;
+    int remote_ack_sample;
     int domain;
     int map;
     int order;
@@ -7278,7 +7290,7 @@ static float v34_match_b1_template_fir(const p3_result_t *detail,
                                        bool conjugate,
                                        int end_drift_symbols)
 {
-    enum { TAPS = 13, PRE = 6, SIZE = 2 * TAPS };
+    enum { TAPS = 31, PRE = 15, SIZE = 2 * TAPS };
     double matrix[SIZE * SIZE] = {0};
     double rhs[SIZE] = {0};
     double solution[SIZE];
@@ -7427,6 +7439,429 @@ static float v34_match_b1_template_fir(const p3_result_t *detail,
             return 0.0f;
         return (float)(1.0 - error / power);
     }
+}
+
+static bool v34_fit_b1_fir_full(const p3_result_t *detail,
+                                int first_symbol,
+                                const v34_b1_template_t *templ,
+                                bool conjugate,
+                                v34_b1_fir_fit_t *out)
+{
+    enum { SIZE = 2 * V34_B1_FIR_TAPS };
+    double matrix[SIZE * SIZE] = {0};
+    double rhs[SIZE] = {0};
+    double solution[SIZE];
+    double step_re = 0.0;
+    double step_im = 0.0;
+    double previous_re = 0.0;
+    double previous_im = 0.0;
+    double phase_step = 0.0;
+    double error = 0.0;
+    double power = 0.0;
+
+    if (!detail || !templ || !templ->valid || !out
+        || first_symbol < V34_B1_FIR_PRE
+        || first_symbol + templ->symbol_count
+             + (V34_B1_FIR_TAPS - V34_B1_FIR_PRE)
+           >= detail->symbol_count) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    for (int n = 0; n < templ->symbol_count; n++) {
+        double xr = detail->symbols[first_symbol + n].re;
+        double xi = detail->symbols[first_symbol + n].im;
+        double yr = templ->symbol[n][0];
+        double yi = templ->symbol[n][1];
+        double cross_re;
+        double cross_im;
+
+        if (conjugate)
+            xi = -xi;
+        cross_re = yr * xr + yi * xi;
+        cross_im = yi * xr - yr * xi;
+        if (n > 0) {
+            step_re += cross_re * previous_re + cross_im * previous_im;
+            step_im += cross_im * previous_re - cross_re * previous_im;
+        }
+        previous_re = cross_re;
+        previous_im = cross_im;
+    }
+    if (fabs(step_re) + fabs(step_im) > 1e-12)
+        phase_step = atan2(step_im, step_re);
+
+    for (int n = 0; n < templ->symbol_count; n++) {
+        double feature_re[SIZE];
+        double feature_im[SIZE];
+
+        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
+            int input = first_symbol + n - V34_B1_FIR_PRE + tap;
+            double xr = detail->symbols[input].re;
+            double xi = detail->symbols[input].im;
+            double angle = phase_step
+                         * (n - V34_B1_FIR_PRE + tap);
+            double rotated_re;
+            double rotated_im;
+
+            if (conjugate)
+                xi = -xi;
+            rotated_re = cos(angle) * xr - sin(angle) * xi;
+            rotated_im = sin(angle) * xr + cos(angle) * xi;
+            feature_re[2 * tap] = rotated_re;
+            feature_re[2 * tap + 1] = -rotated_im;
+            feature_im[2 * tap] = rotated_im;
+            feature_im[2 * tap + 1] = rotated_re;
+        }
+        for (int row = 0; row < SIZE; row++) {
+            rhs[row] += feature_re[row] * templ->symbol[n][0]
+                      + feature_im[row] * templ->symbol[n][1];
+            for (int column = 0; column < SIZE; column++) {
+                matrix[row * SIZE + column] +=
+                    feature_re[row] * feature_re[column]
+                  + feature_im[row] * feature_im[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SIZE; i++)
+            trace += matrix[i * SIZE + i];
+        for (int i = 0; i < SIZE; i++)
+            matrix[i * SIZE + i] += trace * 1e-5;
+    }
+    if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+        return false;
+
+    for (int n = 0; n < templ->symbol_count; n++) {
+        double predicted_re = 0.0;
+        double predicted_im = 0.0;
+
+        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
+            int input = first_symbol + n - V34_B1_FIR_PRE + tap;
+            double xr = detail->symbols[input].re;
+            double xi = detail->symbols[input].im;
+            double angle = phase_step
+                         * (n - V34_B1_FIR_PRE + tap);
+            double ar = solution[2 * tap];
+            double ai = solution[2 * tap + 1];
+            double rotated_re;
+            double rotated_im;
+
+            if (conjugate)
+                xi = -xi;
+            rotated_re = cos(angle) * xr - sin(angle) * xi;
+            rotated_im = sin(angle) * xr + cos(angle) * xi;
+            predicted_re += ar * rotated_re - ai * rotated_im;
+            predicted_im += ar * rotated_im + ai * rotated_re;
+        }
+        error += (predicted_re - templ->symbol[n][0])
+               * (predicted_re - templ->symbol[n][0])
+               + (predicted_im - templ->symbol[n][1])
+                 * (predicted_im - templ->symbol[n][1]);
+        power += templ->symbol[n][0] * templ->symbol[n][0]
+               + templ->symbol[n][1] * templ->symbol[n][1];
+    }
+    if (power <= 0.0 || error >= power)
+        return false;
+    out->valid = true;
+    out->first_symbol = first_symbol;
+    out->conjugate = conjugate;
+    out->phase_step = phase_step;
+    memcpy(out->coefficient, solution, sizeof(solution));
+    out->training_match = (float)(1.0 - error / power);
+    return true;
+}
+
+static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
+                                     const v34_b1_fir_fit_t *fit)
+{
+    p3_result_t *out;
+    int count;
+
+    if (!detail || !fit || !fit->valid)
+        return NULL;
+    count = detail->symbol_count - fit->first_symbol
+          - (V34_B1_FIR_TAPS - V34_B1_FIR_PRE);
+    if (count <= 8)
+        return NULL;
+    out = p3_result_alloc(count, 0);
+    if (!out)
+        return NULL;
+    for (int n = 0; n < count; n++) {
+        double predicted_re = 0.0;
+        double predicted_im = 0.0;
+
+        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
+            int input = fit->first_symbol + n - V34_B1_FIR_PRE + tap;
+            double xr = detail->symbols[input].re;
+            double xi = detail->symbols[input].im;
+            double angle = fit->phase_step
+                         * (n - V34_B1_FIR_PRE + tap);
+            double ar = fit->coefficient[2 * tap];
+            double ai = fit->coefficient[2 * tap + 1];
+            double rotated_re;
+            double rotated_im;
+
+            if (fit->conjugate)
+                xi = -xi;
+            rotated_re = cos(angle) * xr - sin(angle) * xi;
+            rotated_im = sin(angle) * xr + cos(angle) * xi;
+            predicted_re += ar * rotated_re - ai * rotated_im;
+            predicted_im += ar * rotated_im + ai * rotated_re;
+        }
+        out->symbols[n] = detail->symbols[fit->first_symbol + n];
+        out->symbols[n].re = (float)predicted_re;
+        out->symbols[n].im = (float)predicted_im;
+        out->symbols[n].magnitude = hypotf(out->symbols[n].re,
+                                          out->symbols[n].im);
+        out->symbols[n].phase = atan2f(out->symbols[n].im,
+                                      out->symbols[n].re);
+        out->symbol_count++;
+    }
+    out->locked = true;
+    out->baud_rate_estimate = detail->baud_rate_estimate;
+    return out;
+}
+
+static float v34_match_b1_raw_fir(const int16_t *samples,
+                                  int total_samples,
+                                  int first_sample,
+                                  double samples_per_symbol,
+                                  double carrier_hz,
+                                  bool conjugate,
+                                  const v34_b1_template_t *templ)
+{
+    enum { TAPS = 17, PRE = 8, SIZE = 2 * TAPS };
+    double matrix[SIZE * SIZE] = {0};
+    double rhs[SIZE] = {0};
+    double solution[SIZE];
+    int train_count;
+
+    if (!samples || !templ || !templ->valid || first_sample < PRE
+        || first_sample
+             + (int)ceil(templ->symbol_count * samples_per_symbol)
+             + (TAPS - PRE) + 2 >= total_samples) {
+        return 0.0f;
+    }
+    train_count = (2 * templ->symbol_count) / 3;
+    for (int n = 0; n < train_count; n++) {
+        double feature_re[SIZE];
+        double feature_im[SIZE];
+
+        for (int tap = 0; tap < TAPS; tap++) {
+            double position = first_sample + n * samples_per_symbol
+                            - PRE + tap;
+            int lower = (int)floor(position);
+            double fraction = position - lower;
+            double raw = samples[lower]
+                       + fraction * (samples[lower + 1] - samples[lower]);
+            double angle = -2.0 * M_PI * carrier_hz
+                         * position / 8000.0;
+            double xr = (raw / 32768.0) * cos(angle);
+            double xi = (raw / 32768.0) * sin(angle);
+
+            if (conjugate)
+                xi = -xi;
+
+            feature_re[2 * tap] = xr;
+            feature_re[2 * tap + 1] = -xi;
+            feature_im[2 * tap] = xi;
+            feature_im[2 * tap + 1] = xr;
+        }
+        for (int row = 0; row < SIZE; row++) {
+            rhs[row] += feature_re[row] * templ->symbol[n][0]
+                      + feature_im[row] * templ->symbol[n][1];
+            for (int column = 0; column < SIZE; column++) {
+                matrix[row * SIZE + column] +=
+                    feature_re[row] * feature_re[column]
+                  + feature_im[row] * feature_im[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SIZE; i++)
+            trace += matrix[i * SIZE + i];
+        for (int i = 0; i < SIZE; i++)
+            matrix[i * SIZE + i] += trace * 1e-4;
+    }
+    if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+        return 0.0f;
+    {
+        double error = 0.0;
+        double power = 0.0;
+
+        for (int n = train_count; n < templ->symbol_count; n++) {
+            double predicted_re = 0.0;
+            double predicted_im = 0.0;
+
+            for (int tap = 0; tap < TAPS; tap++) {
+                double position = first_sample + n * samples_per_symbol
+                                - PRE + tap;
+                int lower = (int)floor(position);
+                double fraction = position - lower;
+                double raw = samples[lower]
+                           + fraction
+                             * (samples[lower + 1] - samples[lower]);
+                double angle = -2.0 * M_PI * carrier_hz
+                             * position / 8000.0;
+                double xr = (raw / 32768.0) * cos(angle);
+                double xi = (raw / 32768.0) * sin(angle);
+                double ar = solution[2 * tap];
+                double ai = solution[2 * tap + 1];
+
+                if (conjugate)
+                    xi = -xi;
+
+                predicted_re += ar * xr - ai * xi;
+                predicted_im += ar * xi + ai * xr;
+            }
+            error += (predicted_re - templ->symbol[n][0])
+                   * (predicted_re - templ->symbol[n][0])
+                   + (predicted_im - templ->symbol[n][1])
+                     * (predicted_im - templ->symbol[n][1]);
+            power += templ->symbol[n][0] * templ->symbol[n][0]
+                   + templ->symbol[n][1] * templ->symbol[n][1];
+        }
+        if (power <= 0.0 || error >= power)
+            return 0.0f;
+        return (float)(1.0 - error / power);
+    }
+}
+
+/* V.90 8.5.3 carries E in the same scrambled, differentially encoded
+ * four-point upstream modulation as CP.  Once the CP orientation has been
+ * established, the 20 descrambled ones are a much stronger and more exact
+ * B1 boundary marker than a blind constellation/template scan.  A
+ * self-synchronizing descrambler has forgotten the arbitrary initial state
+ * after 23 input bits, so it is sufficient to run continuously from the
+ * beginning of the retained CP symbol stream. */
+static int v34_find_v90_e_from_p3(const p3_result_t *detail,
+                                  int search_start_sample,
+                                  int search_end_sample,
+                                  int *best_run_out,
+                                  int *best_sample_out,
+                                  int *best_window_out,
+                                  int *best_window_sample_out)
+{
+    static const uint8_t cp_map[4] = {0, 3, 2, 1};
+    uint32_t reg = 0;
+    int run = 0;
+    int best_run = 0;
+    int best_sample = -1;
+    uint32_t recent = 0;
+    int recent_count = 0;
+    int best_window = 0;
+    int best_window_sample = -1;
+    int first_exact_data_sample = -1;
+    int first_near_data_sample = -1;
+    int candidate_score[16] = {0};
+    int candidate_sample[16];
+    int candidate_count = 0;
+
+    if (!detail || !detail->symbols || detail->symbol_count <= 0)
+        return -1;
+    for (int sym = 0; sym < detail->symbol_count; sym++) {
+        int sample = detail->symbols[sym].sample_index;
+        int mapped = cp_map[detail->symbols[sym].dibit & 3];
+
+        for (int position = 0; position < 2; position++) {
+            int raw = (mapped >> position) & 1;
+            int plain = v34_upstream_descramble_bit(&reg, 4, raw);
+
+            if (plain)
+                run++;
+            else
+                run = 0;
+            recent = ((recent << 1) | (unsigned)plain) & 0xFFFFFU;
+            if (recent_count < 20)
+                recent_count++;
+            if (sample >= search_start_sample
+                && (search_end_sample < 0 || sample < search_end_sample)
+                && run > best_run) {
+                best_run = run;
+                best_sample = sample;
+            }
+            if (sample >= search_start_sample && recent_count >= 20
+                && (search_end_sample < 0 || sample < search_end_sample)) {
+                int window = __builtin_popcount(recent);
+
+                if (window > best_window) {
+                    best_window = window;
+                    best_window_sample = sample;
+                }
+                /* CP frame sync is only 17 ones and is followed by a required
+                 * zero.  A 19/20 window after the digital MP has begun is
+                 * therefore strong E evidence while tolerating the single
+                 * sliced-bit error seen in real analogue captures. */
+                if (window >= 19 && first_near_data_sample < 0) {
+                    first_near_data_sample = sym + 1 < detail->symbol_count
+                        ? detail->symbols[sym + 1].sample_index
+                        : sample + 3;
+                }
+                if (window == 20 && first_exact_data_sample < 0) {
+                    first_exact_data_sample = sym + 1 < detail->symbol_count
+                        ? detail->symbols[sym + 1].sample_index
+                        : sample + 3;
+                }
+                if (window >= 18) {
+                    int slot = -1;
+
+                    for (int i = 0; i < candidate_count; i++) {
+                        if (abs(candidate_sample[i] - sample) <= 40) {
+                            slot = i;
+                            break;
+                        }
+                    }
+                    if (slot < 0 && candidate_count < 16) {
+                        slot = candidate_count++;
+                        candidate_sample[slot] = sample;
+                    }
+                    if (slot >= 0 && window > candidate_score[slot]) {
+                        candidate_score[slot] = window;
+                        candidate_sample[slot] = sample;
+                    }
+                }
+            }
+            if (sample >= search_start_sample
+                && (search_end_sample < 0 || sample < search_end_sample)
+                && run >= 20) {
+                if (best_run_out)
+                    *best_run_out = best_run;
+                if (best_sample_out)
+                    *best_sample_out = sample;
+                if (best_window_out)
+                    *best_window_out = best_window;
+                if (best_window_sample_out)
+                    *best_window_sample_out = best_window_sample;
+                if (first_exact_data_sample < 0) {
+                    first_exact_data_sample = sym + 1 < detail->symbol_count
+                        ? detail->symbols[sym + 1].sample_index
+                        : sample + 3;
+                }
+            }
+        }
+    }
+    if (best_run_out)
+        *best_run_out = best_run;
+    if (best_sample_out)
+        *best_sample_out = best_sample;
+    if (best_window_out)
+        *best_window_out = best_window;
+    if (best_window_sample_out)
+        *best_window_sample_out = best_window_sample;
+    if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+        for (int i = 0; i < candidate_count; i++) {
+            fprintf(stderr,
+                    "v90 E candidate window=%d/20 end=%d ms=%.3f\n",
+                    candidate_score[i],
+                    candidate_sample[i],
+                    sample_to_ms(candidate_sample[i], 8000));
+        }
+    }
+    return first_exact_data_sample >= 0
+         ? first_exact_data_sample : first_near_data_sample;
 }
 
 typedef struct {
@@ -8338,6 +8773,7 @@ static bool v90_downstream_mp_decode_strict(
     out->valid = true;
     out->crc_valid = true;
     out->frame_bits = frame_bits;
+    out->remote_ack_sample = -1;
     out->mp.type = type;
     out->mp.bit_rate_c_to_a = upstream_rate;
     out->mp.bit_rate_a_to_c = upstream_rate;
@@ -9552,6 +9988,7 @@ static bool v90_recover_repeated_mp1_at_boundary(
             v34_upstream_mp_recovery_t modal;
             uint16_t crc = 0xFFFF;
             int crc_errors = 0;
+            int first_ack_repeat = -1;
 
             memcpy(reconstructed,
                    plain_bits + at + modal_repeat * length,
@@ -9567,10 +10004,96 @@ static bool v90_recover_repeated_mp1_at_boundary(
                                                  length,
                                                  &modal)
                 && modal.mp.type == 1) {
+                {
+                    int repeat_count = (bit_count - at) / length;
+
+                    if (repeat_count > 500)
+                        repeat_count = 500;
+                    for (int repeat = 0; repeat < repeat_count; repeat++) {
+                        int semantic_errors = 0;
+                        const uint8_t *observed =
+                            plain_bits + at + repeat * length;
+
+                        for (int bit = 0; bit <= 170; bit++) {
+                            if (bit != 33
+                                && observed[bit]
+                                   != reconstructed[bit]) {
+                                semantic_errors++;
+                            }
+                        }
+                        if (semantic_errors <= 8 && observed[33]) {
+                            first_ack_repeat = repeat;
+                            break;
+                        }
+                    }
+                }
+                if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                    int repeat_count = (bit_count - at) / length;
+                    int first_match = -1;
+                    int last_match = -1;
+                    int first_ack = -1;
+                    int match_count = 0;
+
+                    if (repeat_count > 500)
+                        repeat_count = 500;
+                    for (int repeat = 0; repeat < repeat_count; repeat++) {
+                        int semantic_errors = 0;
+                        const uint8_t *observed =
+                            plain_bits + at + repeat * length;
+
+                        for (int bit = 0; bit <= 170; bit++) {
+                            if (bit != 33
+                                && observed[bit]
+                                   != reconstructed[bit]) {
+                                semantic_errors++;
+                            }
+                        }
+                        if (semantic_errors <= 8) {
+                            if (first_match < 0)
+                                first_match = repeat;
+                            last_match = repeat;
+                            match_count++;
+                            if (observed[33] && first_ack < 0)
+                                first_ack = repeat;
+                        }
+                    }
+                    fprintf(stderr,
+                            "v90 MP timeline matches=%d first=%d@%.3fms last=%d@%.3fms first_ack=%d@%.3fms\n",
+                            match_count,
+                            first_match,
+                            first_match >= 0
+                                ? sample_to_ms(
+                                    pcm_start_sample
+                                      + (trn_frames
+                                         + (length / bits_per_frame)
+                                           * first_match) * 6,
+                                    8000) : -1.0,
+                            last_match,
+                            last_match >= 0
+                                ? sample_to_ms(
+                                    pcm_start_sample
+                                      + (trn_frames
+                                         + (length / bits_per_frame)
+                                           * last_match) * 6,
+                                    8000) : -1.0,
+                            first_ack,
+                            first_ack >= 0
+                                ? sample_to_ms(
+                                    pcm_start_sample
+                                      + (trn_frames
+                                         + (length / bits_per_frame)
+                                           * first_ack) * 6,
+                                    8000) : -1.0);
+                }
                 modal.crc_valid = false;
                 modal.start_sample = pcm_start_sample
                     + (trn_frames
                        + (length / bits_per_frame) * modal_repeat) * 6;
+                modal.remote_ack_sample = first_ack_repeat >= 0
+                    ? pcm_start_sample
+                      + (trn_frames
+                         + (length / bits_per_frame) * first_ack_repeat) * 6
+                    : -1;
                 modal.best_trn_ber_pct = crc_errors;
                 modal.accepted_trn_ber_pct = crc_errors;
                 modal.tuple_votes = modal_support;
@@ -21776,6 +22299,7 @@ static int v90_find_upstream_carrier_rise(const int16_t *samples,
 {
     const int window = 800; /* 100 ms */
     int best = -1;
+    double best_ratio = 0.0;
 
     if (!samples || total_samples < 8 * window)
         return -1;
@@ -21797,8 +22321,18 @@ static int v90_find_upstream_carrier_rise(const int16_t *samples,
         }
         before = sqrt(before / (5.0 * window));
         after = sqrt(after / (5.0 * window));
-        if (after > 200.0 && after > 8.0 * (before + 1.0))
+        /* Real Phase-3 callers do not always go fully silent before CPt;
+         * several connected captures rise from a few hundred counts to the
+         * sustained primary-channel carrier.  Rank the strongest sustained
+         * rise instead of requiring the reference clip's unusually clean
+         * 8:1 silence transition. */
+        double ratio = after / (before + 1.0);
+
+        if (after > 200.0 && after - before > 250.0
+            && ratio >= 2.0 && ratio > best_ratio) {
             best = start;
+            best_ratio = ratio;
+        }
     }
     return best;
 }
@@ -22411,6 +22945,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 total_samples,
                 analog_info->info1_sample + 4 * 8000);
 
+            if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                fprintf(stderr,
+                        "v90 upstream carrier onset=%d ms=%.3f\n",
+                        onset,
+                        onset >= 0 ? sample_to_ms(onset, 8000) : -1.0);
+            }
+
             if (onset >= 0) {
                 int baud_code = getenv("VPCM_V90_UPSTREAM_BAUD")
                               ? atoi(getenv("VPCM_V90_UPSTREAM_BAUD"))
@@ -22462,13 +23003,17 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 v34_upstream_replay_result_t trial;
                 v34_upstream_replay_result_t decoded;
                 v34_upstream_replay_result_t native_boundary;
+                int direct_e_data_sample = -1;
                 bool have_native_boundary = false;
                 bool using_native_equalized_symbols = false;
                 vpcm_cp_diag_t native_cp;
                 bool cp_reconstructed = false;
                 v90_cp_vote_accumulator_t cp_vote_accumulator;
                 v34_upstream_mp_recovery_t downstream_mp;
-                int cp_capture_end = onset + 16000;
+                /* Keep the complete caller Phase-4 stream.  CP recovery only
+                 * examines its bounded acquisition prefix, while the retained
+                 * symbols are also needed to locate the later E/B1 boundary. */
+                int cp_capture_end = total_samples;
 
                 if (p3_start < 0)
                     p3_start = 0;
@@ -22668,7 +23213,9 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             onset);
                 }
                 if (native_cp.valid) {
-                    printf("\n  V.90 CPt: %s, upstream mask=0x%04X, downstream drn=%u, constellations=%u, Sr=%u, ld=%u, codec-mask=%s, carrier=%s%s",
+                    printf("\n  V.90 %s%s: %s, upstream mask=0x%04X, downstream drn=%u, constellations=%u, Sr=%u, ld=%u, codec-mask=%s, carrier=%s%s",
+                           native_cp.frame.v90_compatibility ? "CP" : "CPt",
+                           native_cp.frame.acknowledge ? "'" : "",
                            cp_reconstructed
                                ? "CRC-guided repeated-frame candidate"
                                : "CRC valid",
@@ -22798,6 +23345,35 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                downstream_mp.crc_valid
                                    ? "% TRN2d BER"
                                    : " CRC-field bit errors");
+                    }
+                }
+                if (downstream_mp.valid && cp_symbols) {
+                    int best_e_run = 0;
+                    int best_e_sample = -1;
+                    int best_e_window = 0;
+                    int best_e_window_sample = -1;
+
+                    direct_e_data_sample = v34_find_v90_e_from_p3(
+                        cp_symbols,
+                        downstream_mp.remote_ack_sample >= 0
+                            ? downstream_mp.remote_ack_sample
+                            : downstream_mp.start_sample,
+                        cp_capture_end,
+                        &best_e_run,
+                        &best_e_sample,
+                        &best_e_window,
+                        &best_e_window_sample);
+                    if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                        fprintf(stderr,
+                                "v90 direct E run=%d end_sample=%d window=%d/20 window_end=%d data_sample=%d data_ms=%.3f\n",
+                                best_e_run,
+                                best_e_sample,
+                                best_e_window,
+                                best_e_window_sample,
+                                direct_e_data_sample,
+                                direct_e_data_sample >= 0
+                                    ? sample_to_ms(direct_e_data_sample, 8000)
+                                    : -1.0);
                     }
                 }
                 if (getenv("VPCM_V90_MP_ONLY"))
@@ -23053,7 +23629,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     symbols = cp_symbols;
                     cp_symbols = NULL;
                 }
-                if (native_equalized_symbols) {
+                if (native_equalized_symbols
+                    && getenv("VPCM_V90_USE_NATIVE_QAM")) {
                     if (symbols)
                         p3_result_free(symbols);
                     symbols = native_equalized_symbols;
@@ -23076,6 +23653,9 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         symbols->symbol_count - 1].sample_index
                                     : -1);
                     }
+                } else if (native_equalized_symbols) {
+                    p3_result_free(native_equalized_symbols);
+                    native_equalized_symbols = NULL;
                 }
                 if (downstream_mp.valid
                     && getenv("VPCM_V90_FORCE_CUSTOM_UPSTREAM")) {
@@ -23259,20 +23839,248 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         }
                     }
                 }
+                if (downstream_mp.valid && b1_template_count > 0
+                    && getenv("VPCM_V90_RAW_B1_DIAG")) {
+                    p3_baud_params_t bp;
+                    double best_raw_match = 0.0;
+                    int best_raw_sample = -1;
+                    double best_raw_frequency = 0.0;
+                    int best_raw_template = -1;
+                    double template_raw_match[V90_B1_MAX_TEMPLATES] = {0};
+                    double template_raw_frequency[V90_B1_MAX_TEMPLATES] = {0};
+                    int template_raw_sample[V90_B1_MAX_TEMPLATES];
+                    int search_centre = have_native_boundary
+                        && native_boundary.data_start_sample >= 0
+                        ? native_boundary.data_start_sample
+                        : (direct_e_data_sample >= 0
+                           ? direct_e_data_sample
+                           : downstream_mp.start_sample + 4000);
+                    int raw_search_start = search_centre - 2000;
+                    int raw_search_end = search_centre + 2000;
+
+                    if (direct_e_data_sample >= 0) {
+                        raw_search_start = direct_e_data_sample - 32;
+                        raw_search_end = direct_e_data_sample + 32;
+                    }
+
+                    if (getenv("VPCM_V90_RAW_B1_WIDE")) {
+                        raw_search_start = downstream_mp.start_sample;
+                        raw_search_end = total_samples - 512;
+                    }
+                    for (int t = 0; t < V90_B1_MAX_TEMPLATES; t++)
+                        template_raw_sample[t] = -1;
+
+                    if (p3_get_baud_params(baud_code, &bp)) {
+                        double nominal_frequency =
+                            cp_carrier == P3_CARRIER_HIGH
+                                ? bp.carrier_high_hz : bp.carrier_low_hz;
+                        double samples_per_symbol =
+                            (double)bp.samples_num / bp.samples_den;
+
+                        for (int half_hz = -20; half_hz <= 200;
+                             half_hz += 2) {
+                            double frequency = nominal_frequency
+                                             + 0.5 * half_hz;
+
+                            for (int first_sample = raw_search_start;
+                                 first_sample <= raw_search_end;
+                                 first_sample += 4) {
+                                double received_re[16 * 8];
+                                double received_im[16 * 8];
+                                double received_power[16 * 8 + 1] = {0};
+                                int max_symbols = 0;
+
+                                for (int t = 0; t < b1_template_count; t++) {
+                                    if (b1_templates[t].symbol_count
+                                        > max_symbols) {
+                                        max_symbols =
+                                            b1_templates[t].symbol_count;
+                                    }
+                                }
+
+                                for (int n = 0; n < max_symbols; n++) {
+                                    double position = first_sample
+                                                    + n * samples_per_symbol;
+                                    int lower = (int)floor(position);
+                                    double fraction = position - lower;
+                                    double raw;
+                                    double angle;
+                                    double xr;
+                                    double xi;
+
+                                    if (lower < 0 || lower + 1 >= total_samples)
+                                        break;
+                                    raw = analog_pcm[lower]
+                                        + fraction
+                                          * (analog_pcm[lower + 1]
+                                             - analog_pcm[lower]);
+                                    angle = -2.0 * M_PI * frequency
+                                          * position / 8000.0;
+                                    xr = raw * cos(angle);
+                                    xi = raw * sin(angle);
+                                    received_re[n] = xr;
+                                    received_im[n] = xi;
+                                    received_power[n + 1] =
+                                        received_power[n] + xr * xr + xi * xi;
+                                }
+                                for (int t = 0; t < b1_template_count; t++) {
+                                    const v34_b1_template_t *templ =
+                                        &b1_templates[t];
+                                    double cross_re = 0.0;
+                                    double cross_im = 0.0;
+
+                                    for (int n = 0;
+                                         n < templ->symbol_count; n++) {
+                                        double xr = received_re[n];
+                                        double xi = received_im[n];
+                                        double yr = templ->symbol[n][0];
+                                        double yi = templ->symbol[n][1];
+
+                                        cross_re += yr * xr + yi * xi;
+                                        cross_im += yi * xr - yr * xi;
+                                    }
+                                    if (received_power[templ->symbol_count]
+                                          <= 1e-9
+                                        || templ->power <= 0.0f) {
+                                        continue;
+                                    }
+                                    double match =
+                                        (cross_re * cross_re
+                                         + cross_im * cross_im)
+                                        / (received_power[templ->symbol_count]
+                                           * templ->power);
+
+                                    if (match > best_raw_match) {
+                                        best_raw_match = match;
+                                        best_raw_sample = first_sample;
+                                        best_raw_frequency = frequency;
+                                        best_raw_template = t;
+                                    }
+                                    if (match > template_raw_match[t]) {
+                                        template_raw_match[t] = match;
+                                        template_raw_sample[t] = first_sample;
+                                        template_raw_frequency[t] = frequency;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fprintf(stderr,
+                            "v90 B1 raw correlation=%.1f%% sample=%d ms=%.3f carrier=%.3fHz template=%d rate=%d trellis=%d nonlinear=%d shaping=%d xform=%d\n",
+                            100.0 * best_raw_match,
+                            best_raw_sample,
+                            best_raw_sample >= 0
+                                ? sample_to_ms(best_raw_sample, 8000) : -1.0,
+                            best_raw_frequency,
+                            best_raw_template,
+                            best_raw_template >= 0
+                                ? b1_templates[best_raw_template].rate_n : -1,
+                            best_raw_template >= 0
+                                ? b1_templates[best_raw_template].trellis_size
+                                : -1,
+                            best_raw_template >= 0
+                                ? b1_templates[best_raw_template].nonlinear
+                                : -1,
+                            best_raw_template >= 0
+                                ? b1_templates[best_raw_template].expanded
+                                : -1,
+                            best_raw_template >= 0
+                                ? b1_templates[best_raw_template]
+                                    .precoder_transform : -1);
+                    {
+                        float best_fir_match = 0.0f;
+                        int best_fir_sample = -1;
+                        double best_fir_frequency = 0.0;
+                        int best_fir_template = -1;
+                        bool best_fir_conjugate = false;
+                        double samples_per_symbol =
+                            p3_get_baud_params(baud_code, &bp)
+                                ? (double)bp.samples_num / bp.samples_den
+                                : 0.0;
+
+                        for (int t = 0; t < b1_template_count; t++) {
+                            if (template_raw_sample[t] < 0)
+                                continue;
+                            for (int sample = template_raw_sample[t] - 8;
+                                 sample <= template_raw_sample[t] + 8;
+                                 sample++) {
+                                for (int quarter_hz = -8;
+                                     quarter_hz <= 8; quarter_hz++) {
+                                    double frequency =
+                                        template_raw_frequency[t]
+                                        + 0.25 * quarter_hz;
+
+                                    for (int conjugate = 0;
+                                         conjugate < 2; conjugate++) {
+                                        float match = v34_match_b1_raw_fir(
+                                            analog_pcm,
+                                            total_samples,
+                                            sample,
+                                            samples_per_symbol,
+                                            frequency,
+                                            conjugate != 0,
+                                            &b1_templates[t]);
+
+                                        if (match > best_fir_match) {
+                                            best_fir_match = match;
+                                            best_fir_sample = sample;
+                                            best_fir_frequency = frequency;
+                                            best_fir_template = t;
+                                            best_fir_conjugate =
+                                                conjugate != 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        fprintf(stderr,
+                                "v90 B1 raw FIR heldout=%.1f%% sample=%d ms=%.3f carrier=%.3fHz conjugate=%d template=%d rate=%d trellis=%d nonlinear=%d shaping=%d xform=%d\n",
+                                100.0f * best_fir_match,
+                                best_fir_sample,
+                                best_fir_sample >= 0
+                                    ? sample_to_ms(best_fir_sample, 8000)
+                                    : -1.0,
+                                best_fir_frequency,
+                                best_fir_conjugate ? 1 : 0,
+                                best_fir_template,
+                                best_fir_template >= 0
+                                    ? b1_templates[best_fir_template].rate_n
+                                    : -1,
+                                best_fir_template >= 0
+                                    ? b1_templates[best_fir_template]
+                                        .trellis_size : -1,
+                                best_fir_template >= 0
+                                    ? b1_templates[best_fir_template].nonlinear
+                                    : -1,
+                                best_fir_template >= 0
+                                    ? b1_templates[best_fir_template].expanded
+                                    : -1,
+                                best_fir_template >= 0
+                                    ? b1_templates[best_fir_template]
+                                        .precoder_transform : -1);
+                    }
+                }
                 /* The lightweight P3 front end advances symbol timing
                  * open-loop.  Reusing a stream acquired at CP onset lets a
                  * small real sample-clock offset accumulate for ~2 seconds
                  * before B1.  Once native E detection gives an exact local
                  * boundary, restart close to B1 and let the complete known
                  * B1 frame select the initial timing phase. */
-                if (downstream_mp.valid && have_native_boundary
-                    && native_boundary.data_start_sample >= 0
+                if (downstream_mp.valid
+                    && ((have_native_boundary
+                         && native_boundary.data_start_sample >= 0)
+                        || direct_e_data_sample >= 0)
                     && b1_template_count > 0
                     && !using_native_equalized_symbols) {
                     p3_result_t *best_local_symbols = NULL;
                     float best_local_match = 0.0f;
                     int best_local_timing = -1;
-                    int local_start = native_boundary.data_start_sample - 1600;
+                    int known_data_sample = have_native_boundary
+                                         && native_boundary.data_start_sample >= 0
+                        ? native_boundary.data_start_sample
+                        : direct_e_data_sample;
+                    int local_start = direct_e_data_sample >= 0
+                        ? onset - 1600 : known_data_sample - 1600;
 
                     if (local_start < 0)
                         local_start = 0;
@@ -23289,7 +24097,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 true,
                                 timing,
                                 8,
-                                native_boundary.data_start_sample + 800);
+                                known_data_sample);
                         float local_match = 0.0f;
 
                         if (!local_symbols)
@@ -23302,10 +24110,12 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 local_symbols->symbols[first].sample_index;
 
                             if (sample
-                                < native_boundary.data_start_sample - 200)
+                                < known_data_sample
+                                  - (direct_e_data_sample >= 0 ? 40 : 200))
                                 continue;
                             if (sample
-                                > native_boundary.data_start_sample + 800)
+                                > known_data_sample
+                                  + (direct_e_data_sample >= 0 ? 40 : 800))
                                 break;
                             for (int t = 0; t < b1_template_count; t++) {
                                 for (int conjugate = 0; conjugate < 2;
@@ -23340,7 +24150,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         base_symbol = 0;
                         while (base_symbol < symbols->symbol_count
                                && symbols->symbols[base_symbol].sample_index
-                                  < native_boundary.data_start_sample - 400) {
+                                  < known_data_sample - 400) {
                             base_symbol++;
                         }
                         if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
@@ -23351,6 +24161,100 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     local_start,
                                     symbols->symbol_count);
                         }
+                    }
+                }
+                if (downstream_mp.valid && symbols
+                    && b1_template_count > 0) {
+                    v34_b1_fir_fit_t best_supervised;
+                    int best_supervised_template = -1;
+
+                    memset(&best_supervised, 0, sizeof(best_supervised));
+                    for (int t = 0; t < b1_template_count; t++) {
+                        if (b1_templates[t].precoder_transform != 0)
+                            continue;
+                        for (int first = base_symbol;
+                             first + b1_templates[t].symbol_count
+                                   + V34_B1_FIR_TAPS
+                               < symbols->symbol_count;
+                             first++) {
+                            int sample = symbols->symbols[first].sample_index;
+
+                            if (((have_native_boundary
+                                  && native_boundary.data_start_sample >= 0)
+                                 || direct_e_data_sample >= 0)
+                                && sample
+                                   < ((have_native_boundary
+                                       && native_boundary.data_start_sample >= 0)
+                                      ? native_boundary.data_start_sample
+                                      : direct_e_data_sample) - 800) {
+                                continue;
+                            }
+                            if (((have_native_boundary
+                                  && native_boundary.data_start_sample >= 0)
+                                 || direct_e_data_sample >= 0)
+                                && sample
+                                   > ((have_native_boundary
+                                       && native_boundary.data_start_sample >= 0)
+                                      ? native_boundary.data_start_sample
+                                      : direct_e_data_sample) + 1600) {
+                                break;
+                            }
+                            for (int conjugate = 0; conjugate < 2;
+                                 conjugate++) {
+                                v34_b1_fir_fit_t fit;
+
+                                if (v34_fit_b1_fir_full(
+                                        symbols,
+                                        first,
+                                        &b1_templates[t],
+                                        conjugate != 0,
+                                        &fit)
+                                    && (!best_supervised.valid
+                                        || fit.training_match
+                                           > best_supervised.training_match)) {
+                                    best_supervised = fit;
+                                    best_supervised_template = t;
+                                }
+                            }
+                        }
+                    }
+                    if (best_supervised.valid) {
+                        p3_result_t *equalized = v34_apply_b1_fir(
+                            symbols, &best_supervised);
+                        v34_upstream_replay_result_t supervised_decode;
+
+                        memset(&supervised_decode, 0,
+                               sizeof(supervised_decode));
+                        if (equalized
+                            && v34_decode_upstream_p3_symbols(
+                                equalized,
+                                0,
+                                baud_code,
+                                &downstream_mp,
+                                1.0f,
+                                0,
+                                false,
+                                downstream_mp.mp.type == 1,
+                                downstream_mp.mp.expanded_shaping,
+                                NULL,
+                                0,
+                                &supervised_decode)) {
+                            fprintf(stderr,
+                                    "v90 B1 supervised FIR train=%.1f%% sample=%d template=%d first64=%d tail=%d bits=%d hdlc=%d/%d\n",
+                                    100.0f
+                                      * best_supervised.training_match,
+                                    symbols->symbols[
+                                        best_supervised.first_symbol]
+                                        .sample_index,
+                                    best_supervised_template,
+                                    supervised_decode.first64_ones,
+                                    supervised_decode.b1_tail_ones,
+                                    supervised_decode.data_bits,
+                                    supervised_decode.hdlc_frames,
+                                    supervised_decode.hdlc_bytes);
+                        }
+                        if (equalized)
+                            p3_result_free(equalized);
                     }
                 }
                 if (downstream_mp.valid && b1_template_count > 0
