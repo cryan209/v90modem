@@ -463,3 +463,37 @@ found.
   The public modem-sound clip ends at 25.631 s and may not contain enough user
   payload to produce an HDLC frame, so connected live-call captures must be
   the final payload validation corpus.
+
+### 2026-07-13 CPt/MP qualification update
+
+- Table 14 CP length is not rounded to a six-, twelve-, or twenty-four-bit
+  boundary. It ends with exactly the three fill bits 289+d:291+d. Bit 128
+  adds one codec-output constellation mask for every transmitter
+  constellation, so a one-constellation CPt with separate codec mask is 428
+  bits. The shared CP encoder/decoder and streaming receiver now implement
+  that framing and have strict loopback vectors for bit 128.
+- Preserving the Phase-3 equalizer across the quiet V.90 gap exposes a stable
+  428-bit repeated-frame candidate on `Agere-Mars-HV90-bipbipbipbip.wav`.
+  Its carrier rise is sample 173440 (21680.000 ms); the selected repeated
+  frame is sample 174441 (21805.125 ms). The reconstructed fields are D=17,
+  Sr=1, ld=0, A-law, one transmitter constellation, and a separate codec
+  constellation.
+- This is **not** an untouched CRC frame. Majority-voted repetitions retain
+  roughly three to five CRC-syndrome bit errors, and the accepted candidate
+  comes from a unique CRC-guided correction supported by repeated timing
+  passes. Decoder output therefore labels it a "CRC-guided repeated-frame
+  candidate", not "CRC valid".
+- The digital WAV channel is amplitude-scaled: direct linear-to-G.711
+  requantization shifts known training Ucodes. A soft modulus-constrained
+  mapper and an Sr=1 sign-only inverse were added. The latter enumerates the
+  implementation-defined logical shaper state and checks the deterministic
+  scrambled-ones TRN2d sequence without using magnitude thresholds.
+- No legal D=12..30 hypothesis produces corroborating TRN2d signs in this
+  clip (the best exhaustive multiple-hypothesis result is 70.6%, consistent
+  with a random maximum), and no MP CRC is accepted. Consequently the CP
+  candidate is not promoted to negotiated state and the V.34 upstream
+  payload remains unclaimed.
+- `make test`, the default session suite, and `--primitive-tests` all pass
+  after these framing and shaped-demapper changes. The acceptance criterion
+  remains a strict downstream MP CRC followed by a V.34 B1 match and an
+  FCS-valid upstream HDLC/LAPM frame.

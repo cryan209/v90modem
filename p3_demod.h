@@ -128,6 +128,7 @@ typedef struct {
     int   timing_correction;
     bool  use_rrc_frontend;
     float rrc_agc_gain;
+    bool  rrc_signal_active;
 
     /* 127-tap T/2 fractionally-spaced equalizer (SpanDSP dimensions). */
     float eq_buf_re[128];

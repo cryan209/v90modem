@@ -6930,10 +6930,13 @@ static bool v34_make_b1_template(int baud_code,
                                  int trellis_size,
                                  int nonlinear,
                                  int expanded,
+                                 const v34_upstream_mp_recovery_t *rx_mp,
                                  v34_b1_template_t *out)
 {
     v34_state_t *v34;
     int16_t frame[16];
+    int16_t coeffs[6];
+    const int16_t *precoder = NULL;
     int baud_rate;
 
     if (!out)
@@ -6954,12 +6957,19 @@ static bool v34_make_b1_template(int baud_code,
     if (!v34)
         return false;
     v34->tx.baud_rate = baud_code;
+    if (rx_mp && rx_mp->valid && rx_mp->mp.type == 1) {
+        for (int i = 0; i < 3; i++) {
+            coeffs[2 * i] = rx_mp->mp.precoder_coeffs[i].re;
+            coeffs[2 * i + 1] = rx_mp->mp.precoder_coeffs[i].im;
+        }
+        precoder = coeffs;
+    }
     if (v34_seed_tx_data(v34,
                          rate_n,
                          trellis_size,
                          nonlinear,
                          expanded,
-                         NULL) != 0
+                         precoder) != 0
         ) {
         v34_free(v34);
         return false;
@@ -7280,12 +7290,3574 @@ static p3_result_t *v34_run_native_phase4_symbols(const int16_t *samples,
     return result;
 }
 
+typedef struct {
+    bool found;
+    int score;
+    int bit_offset;
+    int reset_shift;
+    int domain;
+    int order;
+    int tap;
+    int map;
+    int constellation_count;
+    int sync_errors;
+    int structure_errors;
+    int crc_syndrome_bits;
+    int drn;
+    int law;
+    uint16_t upstream_mask;
+} v90_cp_soft_probe_t;
+
+typedef struct {
+    uint16_t ones[VPCM_CP_MAX_CONSTELLATIONS][VPCM_CP_MAX_BITS];
+    uint16_t frames[VPCM_CP_MAX_CONSTELLATIONS];
+    int frame_sample[VPCM_CP_MAX_CONSTELLATIONS];
+} v90_cp_vote_accumulator_t;
+
+static bool v90_cp_soft_diag_done;
+
+static unsigned v90_cp_soft_get_bits(const uint8_t *bits,
+                                     int first,
+                                     int count)
+{
+    unsigned value = 0;
+
+    for (int i = 0; i < count; i++)
+        value |= (unsigned)(bits[first + i] & 1U) << i;
+    return value;
+}
+
+static void v90_cp_soft_probe_bits(const uint8_t *bits,
+                                   int bit_count,
+                                   int reset_shift,
+                                   v90_cp_soft_probe_t *best)
+{
+    static const int fixed_zero_bits[] = {
+        17, 18, 25, 26, 27, 28, 29, 30, 34, 51, 68, 85, 102,
+        119, 129, 130, 131, 132, 133, 134, 135
+    };
+
+    if (!bits || !best || bit_count < 289)
+        return;
+    for (int offset = 0; offset + 289 <= bit_count; offset++) {
+        int sync_errors = 0;
+
+        for (int i = 0; i < 17; i++)
+            sync_errors += bits[offset + i] == 0;
+        sync_errors += bits[offset + 17] != 0;
+        if (sync_errors > 3)
+            continue;
+        for (int count = 1; count <= VPCM_CP_MAX_CONSTELLATIONS; count++) {
+            int raw_bits = 136 + 136 * count + 17;
+            int structure_errors = 0;
+            int crc = 0xFFFF;
+            int drn;
+            int law;
+            unsigned upstream_mask;
+            int score;
+
+            if (offset + raw_bits > bit_count)
+                break;
+            for (size_t i = 0;
+                 i < sizeof(fixed_zero_bits) / sizeof(fixed_zero_bits[0]);
+                 i++) {
+                structure_errors += bits[offset + fixed_zero_bits[i]] != 0;
+            }
+            for (int c = 0; c < count; c++) {
+                int base = offset + 136 + 136 * c;
+
+                for (int chord = 0; chord < 8; chord++)
+                    structure_errors += bits[base + 17 * chord] != 0;
+            }
+            structure_errors += bits[offset + 136 + 136 * count] != 0;
+            drn = (int)v90_cp_soft_get_bits(bits + offset, 20, 5);
+            law = bits[offset + 35] != 0;
+            upstream_mask = v90_cp_soft_get_bits(bits + offset, 36, 13);
+            if (drn < 1 || drn > 22 || upstream_mask == 0)
+                structure_errors += 4;
+            score = 5 * sync_errors + 3 * structure_errors;
+            if (best->found && score > best->score)
+                continue;
+            for (int i = 0; i < raw_bits; i++)
+                crc = crc_itu16_bits(bits[offset + i], 1, (uint16_t)crc);
+            score += __builtin_popcount((unsigned)(crc & 0xFFFF));
+            if (!best->found || score < best->score) {
+                best->found = true;
+                best->score = score;
+                best->bit_offset = offset;
+                best->reset_shift = reset_shift;
+                best->constellation_count = count;
+                best->sync_errors = sync_errors;
+                best->structure_errors = structure_errors;
+                best->crc_syndrome_bits =
+                    __builtin_popcount((unsigned)(crc & 0xFFFF));
+                best->drn = drn;
+                best->law = law;
+                best->upstream_mask = (uint16_t)upstream_mask;
+            }
+        }
+    }
+}
+
+static int v90_cp_best_periodic_match(const uint8_t *bits,
+                                      int bit_count,
+                                      int constellation_points,
+                                      int *period_out)
+{
+    int best_pct = 0;
+    int best_period = 0;
+    int limit = bit_count;
+
+    (void)constellation_points;
+
+    /* On the reference call the digital answerer changes Ri state 126 ms
+     * after the analogue carrier rise.  Limit this discriminator to that
+     * initial CPt exchange so later SCR/CP/MP traffic cannot create a false
+     * periodic winner. */
+    if (limit > 1600)
+        limit = 1600;
+    for (int count = 1; count <= VPCM_CP_MAX_CONSTELLATIONS; count++) {
+        int raw_bits = 136 + 136 * count + 17;
+        int period = raw_bits + 3;
+        int matches = 0;
+        int checks = 0;
+
+        for (int i = 64; i + period < limit; i++) {
+            matches += bits[i] == bits[i + period];
+            checks++;
+        }
+        if (checks > 0) {
+            int pct = (100 * matches + checks / 2) / checks;
+
+            if (pct > best_pct) {
+                best_pct = pct;
+                best_period = period;
+            }
+        }
+    }
+    if (period_out)
+        *period_out = best_period;
+    return best_pct;
+}
+
+static bool v90_cp_recover_repeated(const uint8_t *bits,
+                                    const float *reliability,
+                                    int bit_count,
+                                    int constellation_points,
+                                    const v90_cp_soft_probe_t *candidate,
+                                    vpcm_cp_diag_t *out,
+                                    int *frame_phase_out,
+                                    int *frame_count_out)
+{
+    uint8_t voted[VPCM_CP_MAX_BITS];
+    uint8_t vote_ones[VPCM_CP_MAX_BITS];
+    float vote_score[VPCM_CP_MAX_BITS];
+    vpcm_cp_diag_t guided_solution;
+    int usable_bits = bit_count;
+    int guided_support = 0;
+    int guided_phase = 0;
+    int guided_frames = 0;
+    bool guided_ambiguous = false;
+
+    (void)constellation_points;
+
+    if (!bits || !reliability || !candidate || !candidate->found || !out
+        || candidate->bit_offset < 0)
+        return false;
+    if (usable_bits > 3200)
+        usable_bits = 3200;
+    /* A damaged DFI can make the soft frame appear to have the wrong number
+     * of constellations.  Test every legal Table-14 length at the candidate
+     * sync phase; only a complete CRC-valid decode can select the length. */
+    for (int count = 1; count <= VPCM_CP_MAX_CONSTELLATIONS; count++) {
+        int raw_bits = 136 + 136 * count + 17;
+        int period = raw_bits + 3;
+        int phase = candidate->bit_offset % period;
+        int frames = 0;
+
+        for (int start = phase;
+             start + period <= usable_bits;
+             start += period) {
+            frames++;
+        }
+        /* Early CP symbols can still contain equalizer convergence errors.
+         * Try every contiguous run of at least three repeated frames; the
+         * winner must independently satisfy the complete CRC and semantics. */
+        for (int use_frames = 3; use_frames <= frames; use_frames++) {
+            for (int first_frame = 0;
+                 first_frame + use_frames <= frames;
+                 first_frame++) {
+                memset(voted, 0, sizeof(voted));
+                memset(vote_ones, 0, sizeof(vote_ones));
+                memset(vote_score, 0, sizeof(vote_score));
+                for (int bit = 0; bit < period; bit++) {
+                    int ones = 0;
+
+                    for (int frame = 0; frame < use_frames; frame++) {
+                        int start = phase
+                                  + (first_frame + frame) * period;
+
+                        ones += bits[start + bit] != 0;
+                        vote_score[bit] += bits[start + bit]
+                                             ? reliability[start + bit]
+                                             : -reliability[start + bit];
+                    }
+                    vote_ones[bit] = (uint8_t)ones;
+                    voted[bit] = (uint8_t)(2 * ones >= use_frames);
+                }
+                if (getenv("VPCM_V34_CP_REPEAT_DIAG")) {
+                    v90_cp_soft_probe_t vote_probe;
+
+                    memset(&vote_probe, 0, sizeof(vote_probe));
+                    v90_cp_soft_probe_bits(voted,
+                                           period,
+                                           0,
+                                           &vote_probe);
+                    if (vote_probe.found) {
+                        fprintf(stderr,
+                                "cp repeat count=%d period=%d first=%d frames=%d score=%d sync=%d struct=%d crc=%d\n",
+                                count,
+                                period,
+                                first_frame,
+                                use_frames,
+                                vote_probe.score,
+                                vote_probe.sync_errors,
+                                vote_probe.structure_errors,
+                                vote_probe.crc_syndrome_bits);
+                    }
+                }
+                {
+                    static const int fixed_zero_bits[] = {
+                        17, 18, 25, 26, 27, 28, 29, 30, 34, 51, 68,
+                        85, 102, 119, 129, 130, 131, 132, 133,
+                        134, 135
+                    };
+                    int corrections = 0;
+
+                    for (int bit = 0; bit <= 16; bit++) {
+                        corrections += voted[bit] == 0;
+                        voted[bit] = 1;
+                    }
+                    for (size_t i = 0;
+                         i < sizeof(fixed_zero_bits)
+                             / sizeof(fixed_zero_bits[0]);
+                         i++) {
+                        int bit = fixed_zero_bits[i];
+
+                        corrections += voted[bit] != 0;
+                        voted[bit] = 0;
+                    }
+                    for (int constellation = 0;
+                         constellation < count;
+                         constellation++) {
+                        int base = 136 + 136 * constellation;
+
+                        for (int chord = 0; chord < 8; chord++) {
+                            int bit = base + 17 * chord;
+
+                            corrections += voted[bit] != 0;
+                            voted[bit] = 0;
+                        }
+                    }
+                    {
+                        int final_start = 136 + 136 * count;
+
+                        corrections += voted[final_start] != 0;
+                        voted[final_start] = 0;
+                    }
+                    for (int bit = raw_bits; bit < period; bit++) {
+                        corrections += voted[bit] != 0;
+                        voted[bit] = 0;
+                    }
+                    if (corrections > 3)
+                        continue;
+                }
+                if (vpcm_cp_decode_diag(voted, period, out)
+                    && out->valid
+                    && vpcm_cp_bit_length(&out->frame) == period
+                    && out->frame.drn >= 1 && out->frame.drn <= 22
+                    && out->bits[18] == 0 && out->bits[30] == 0
+                    && out->frame.upstream_rate_mask != 0) {
+                    if (frame_phase_out)
+                        *frame_phase_out = phase + first_frame * period;
+                    if (frame_count_out)
+                        *frame_count_out = use_frames;
+                    return true;
+                }
+                {
+                    int uncertain[VPCM_CP_MAX_BITS];
+                    int uncertain_count = 0;
+                    int local_solutions = 0;
+                    vpcm_cp_diag_t local_solution;
+
+                    for (int bit = 0; bit < period; bit++) {
+                        if (vote_ones[bit] > 0
+                            && vote_ones[bit] < use_frames) {
+                            uncertain[uncertain_count++] = bit;
+                        }
+                    }
+                    for (int i = 1; i < uncertain_count; i++) {
+                        int bit = uncertain[i];
+                        float confidence = fabsf(vote_score[bit]);
+                        int j = i;
+
+                        while (j > 0
+                               && fabsf(vote_score[uncertain[j - 1]])
+                                  > confidence) {
+                            uncertain[j] = uncertain[j - 1];
+                            j--;
+                        }
+                        uncertain[j] = bit;
+                    }
+                    if (uncertain_count > 32)
+                        uncertain_count = 32;
+                    /* CRC-16 is linear.  Test one- and two-bit corrections
+                     * only at positions on which the repeated frames
+                     * disagree, then require a complete strict CP decode. */
+                    for (int a = 0; a < uncertain_count; a++) {
+                        vpcm_cp_diag_t trial;
+                        int bit_a = uncertain[a];
+
+                        voted[bit_a] ^= 1;
+                        if (vpcm_cp_decode_diag(voted, period, &trial)
+                            && trial.valid
+                            && vpcm_cp_bit_length(&trial.frame) == period
+                            && trial.frame.drn >= 1
+                            && trial.frame.drn <= 22
+                            && trial.bits[18] == 0
+                            && trial.bits[30] == 0
+                            && trial.frame.upstream_rate_mask != 0) {
+                            local_solution = trial;
+                            local_solutions++;
+                        }
+                        for (int b = a + 1;
+                             b < uncertain_count;
+                             b++) {
+                            int bit_b = uncertain[b];
+
+                            voted[bit_b] ^= 1;
+                            if (vpcm_cp_decode_diag(voted,
+                                                    period,
+                                                    &trial)
+                                && trial.valid
+                                && vpcm_cp_bit_length(&trial.frame) == period
+                                && trial.frame.drn >= 1
+                                && trial.frame.drn <= 22
+                                && trial.bits[18] == 0
+                                && trial.bits[30] == 0
+                                && trial.frame.upstream_rate_mask != 0) {
+                                local_solution = trial;
+                                local_solutions++;
+                            }
+                            for (int c = b + 1;
+                                 c < uncertain_count;
+                                 c++) {
+                                int bit_c = uncertain[c];
+
+                                voted[bit_c] ^= 1;
+                                if (vpcm_cp_decode_diag(voted,
+                                                        period,
+                                                        &trial)
+                                    && trial.valid
+                                    && vpcm_cp_bit_length(&trial.frame) == period
+                                    && trial.frame.drn >= 1
+                                    && trial.frame.drn <= 22
+                                    && trial.bits[18] == 0
+                                    && trial.bits[30] == 0
+                                    && trial.frame.upstream_rate_mask != 0) {
+                                    local_solution = trial;
+                                    local_solutions++;
+                                }
+                                voted[bit_c] ^= 1;
+                            }
+                            voted[bit_b] ^= 1;
+                        }
+                        voted[bit_a] ^= 1;
+                    }
+                    if (getenv("VPCM_V34_CP_REPEAT_DIAG")
+                        && local_solutions > 0) {
+                        fprintf(stderr,
+                                "cp guided count=%d period=%d first=%d frames=%d uncertain=%d solutions=%d\n",
+                                count,
+                                period,
+                                first_frame,
+                                use_frames,
+                                uncertain_count,
+                                local_solutions);
+                    }
+                    if (local_solutions == 1) {
+                        if (guided_support == 0) {
+                            guided_solution = local_solution;
+                            guided_support = 1;
+                            guided_phase = phase + first_frame * period;
+                            guided_frames = use_frames;
+                        } else if (guided_solution.nbits
+                                      == local_solution.nbits
+                                   && memcmp(guided_solution.bits,
+                                             local_solution.bits,
+                                             (size_t)local_solution.nbits)
+                                      == 0) {
+                            guided_support++;
+                        } else {
+                            guided_ambiguous = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (guided_support >= 2 && !guided_ambiguous) {
+        *out = guided_solution;
+        if (frame_phase_out)
+            *frame_phase_out = guided_phase;
+        if (frame_count_out)
+            *frame_count_out = guided_frames;
+        return true;
+    }
+    if (getenv("VPCM_V34_CP_REPEAT_DIAG") && guided_support > 0) {
+        fprintf(stderr,
+                "cp guided rejected support=%d ambiguous=%d\n",
+                guided_support,
+                guided_ambiguous);
+    }
+    return false;
+}
+
+static void v90_cp_accumulate_repetitions(
+                                    v90_cp_vote_accumulator_t *accumulator,
+                                    const uint8_t *bits,
+                                    int bit_count,
+                                    const v90_cp_soft_probe_t *candidate,
+                                    const p3_result_t *detail,
+                                    int reset_symbol)
+{
+    int usable_bits = bit_count;
+
+    if (!accumulator || !bits || !candidate || !candidate->found)
+        return;
+    if (usable_bits > 3200)
+        usable_bits = 3200;
+    for (int count = 1; count <= VPCM_CP_MAX_CONSTELLATIONS; count++) {
+        int period = 156 + 136 * count;
+        int phase = candidate->bit_offset % period;
+
+        for (int start = phase;
+             start + period <= usable_bits;
+             start += period) {
+            int sync_errors = 0;
+
+            for (int bit = 0; bit <= 16; bit++)
+                sync_errors += bits[start + bit] == 0;
+            sync_errors += bits[start + 17] != 0;
+            if (sync_errors > 2)
+                continue;
+            for (int bit = 0; bit < period; bit++) {
+                accumulator->ones[count - 1][bit] +=
+                    bits[start + bit] != 0;
+            }
+            accumulator->frames[count - 1]++;
+            if (accumulator->frame_sample[count - 1] == 0) {
+                int signed_phase = phase;
+                int frame_symbol;
+
+                if (signed_phase > period / 2)
+                    signed_phase -= period;
+                frame_symbol = reset_symbol + signed_phase / 2;
+                if (frame_symbol >= 0
+                    && frame_symbol < detail->symbol_count) {
+                    accumulator->frame_sample[count - 1] =
+                        detail->symbols[frame_symbol].sample_index;
+                }
+            }
+        }
+    }
+}
+
+static bool v90_cp_finalize_repetitions(
+                                    const v90_cp_vote_accumulator_t *accumulator,
+                                    vpcm_cp_diag_t *out,
+                                    int *frame_sample_out)
+{
+    uint8_t voted[VPCM_CP_MAX_BITS];
+    int max_frames = 0;
+
+    if (!accumulator || !out)
+        return false;
+    for (int count = 0; count < VPCM_CP_MAX_CONSTELLATIONS; count++) {
+        if (accumulator->frames[count] > max_frames)
+            max_frames = accumulator->frames[count];
+    }
+    for (int count = 1; count <= VPCM_CP_MAX_CONSTELLATIONS; count++) {
+        int period = 156 + 136 * count;
+        int frames = accumulator->frames[count - 1];
+
+        if (frames < 3 || frames < max_frames)
+            continue;
+        for (int bit = 0; bit < period; bit++) {
+            voted[bit] = (uint8_t)(2 * accumulator->ones[count - 1][bit]
+                                   >= frames);
+        }
+        if (getenv("VPCM_V34_CP_AGGREGATE_DIAG")) {
+            v90_cp_soft_probe_t probe;
+            static const int dfi_pos[6] = {103, 107, 111, 115, 120, 124};
+
+            memset(&probe, 0, sizeof(probe));
+            v90_cp_soft_probe_bits(voted, period, 0, &probe);
+            fprintf(stderr,
+                    "cp aggregate count=%d frames=%d score=%d sync=%d struct=%d crc=%d\n",
+                    count,
+                    frames,
+                    probe.found ? probe.score : -1,
+                    probe.found ? probe.sync_errors : -1,
+                    probe.found ? probe.structure_errors : -1,
+                    probe.found ? probe.crc_syndrome_bits : -1);
+            fprintf(stderr,
+                    "cp aggregate bit128=%u dfi=",
+                    (unsigned)voted[128]);
+            for (int interval = 0; interval < 6; interval++) {
+                fprintf(stderr,
+                        "%s%u",
+                        interval ? "," : "",
+                        v90_cp_soft_get_bits(voted,
+                                             dfi_pos[interval],
+                                             4));
+            }
+            fputc('\n', stderr);
+        }
+        {
+            static const int fixed_zero_bits[] = {
+                17, 18, 25, 26, 27, 28, 29, 30, 34, 51, 68,
+                85, 102, 119, 129, 130, 131, 132, 133,
+                134, 135
+            };
+            int corrections = 0;
+            int raw_bits = period - 3;
+
+            for (int bit = 0; bit <= 16; bit++) {
+                corrections += voted[bit] == 0;
+                voted[bit] = 1;
+            }
+            for (size_t i = 0;
+                 i < sizeof(fixed_zero_bits) / sizeof(fixed_zero_bits[0]);
+                 i++) {
+                int bit = fixed_zero_bits[i];
+
+                corrections += voted[bit] != 0;
+                voted[bit] = 0;
+            }
+            for (int constellation = 0;
+                 constellation < count;
+                 constellation++) {
+                int base = 136 + 136 * constellation;
+
+                for (int chord = 0; chord < 8; chord++) {
+                    int bit = base + 17 * chord;
+
+                    corrections += voted[bit] != 0;
+                    voted[bit] = 0;
+                }
+            }
+            corrections += voted[136 + 136 * count] != 0;
+            voted[136 + 136 * count] = 0;
+            for (int bit = raw_bits; bit < period; bit++) {
+                corrections += voted[bit] != 0;
+                voted[bit] = 0;
+            }
+            if (getenv("VPCM_V34_CP_AGGREGATE_DIAG")) {
+                fprintf(stderr,
+                        "cp aggregate fixed count=%d corrections=%d\n",
+                        count,
+                        corrections);
+            }
+            if (corrections > 4)
+                continue;
+        }
+        if (vpcm_cp_decode_diag(voted, period, out)
+            && out->valid
+            && vpcm_cp_bit_length(&out->frame) == period
+            && out->frame.drn >= 1 && out->frame.drn <= 22
+            && out->bits[18] == 0 && out->bits[30] == 0
+            && out->frame.upstream_rate_mask != 0) {
+            if (frame_sample_out)
+                *frame_sample_out = accumulator->frame_sample[count - 1];
+            return true;
+        }
+        {
+            vpcm_cp_diag_t base_diag;
+            vpcm_cp_diag_t solution;
+            int uncertain[VPCM_CP_MAX_BITS];
+            int uncertain_count = 0;
+            int solutions = 0;
+            int raw_bits = period - 3;
+
+            if (!vpcm_cp_decode_diag(voted, period, &base_diag))
+                continue;
+            /* Keep the independently stable 136-bit header fixed.  Rank
+             * only constellation-mask/CRC decisions on which the repeated
+             * observations disagree, then use the CRC syndrome to test up
+             * to three least-confident flips. */
+            for (int bit = 136; bit < raw_bits; bit++) {
+                int ones = accumulator->ones[count - 1][bit];
+
+                if (ones > 0 && ones < frames)
+                    uncertain[uncertain_count++] = bit;
+            }
+            for (int i = 1; i < uncertain_count; i++) {
+                int bit = uncertain[i];
+                int margin = abs(2 * accumulator->ones[count - 1][bit]
+                                 - frames);
+                int j = i;
+
+                while (j > 0
+                       && abs(2 * accumulator->ones[count - 1]
+                                                   [uncertain[j - 1]]
+                              - frames) > margin) {
+                    uncertain[j] = uncertain[j - 1];
+                    j--;
+                }
+                uncertain[j] = bit;
+            }
+            if (uncertain_count > 48)
+                uncertain_count = 48;
+            for (int a = 0; a < uncertain_count; a++) {
+                int bit_a = uncertain[a];
+
+                voted[bit_a] ^= 1;
+                for (int b = a; b < uncertain_count; b++) {
+                    int bit_b = b == a ? -1 : uncertain[b];
+                    int first_c = b == a ? a + 1 : b + 1;
+
+                    if (bit_b >= 0)
+                        voted[bit_b] ^= 1;
+                    {
+                        vpcm_cp_diag_t trial;
+
+                        if (vpcm_cp_decode_diag(voted, period, &trial)
+                            && trial.valid
+                            && vpcm_cp_bit_length(&trial.frame) == period
+                            && trial.frame.drn == base_diag.frame.drn
+                            && trial.frame.codec_alaw
+                               == base_diag.frame.codec_alaw
+                            && trial.frame.upstream_rate_mask
+                               == base_diag.frame.upstream_rate_mask) {
+                            solution = trial;
+                            solutions++;
+                        }
+                    }
+                    for (int c = first_c; c < uncertain_count; c++) {
+                        vpcm_cp_diag_t trial;
+                        int bit_c = uncertain[c];
+
+                        voted[bit_c] ^= 1;
+                        if (vpcm_cp_decode_diag(voted, period, &trial)
+                            && trial.valid
+                            && vpcm_cp_bit_length(&trial.frame) == period
+                            && trial.frame.drn == base_diag.frame.drn
+                            && trial.frame.codec_alaw
+                               == base_diag.frame.codec_alaw
+                            && trial.frame.upstream_rate_mask
+                               == base_diag.frame.upstream_rate_mask) {
+                            solution = trial;
+                            solutions++;
+                        }
+                        voted[bit_c] ^= 1;
+                    }
+                    if (bit_b >= 0)
+                        voted[bit_b] ^= 1;
+                }
+                voted[bit_a] ^= 1;
+            }
+            if (getenv("VPCM_V34_CP_AGGREGATE_DIAG")) {
+                fprintf(stderr,
+                        "cp aggregate guided count=%d uncertain=%d solutions=%d\n",
+                        count,
+                        uncertain_count,
+                        solutions);
+            }
+            if (solutions == 1) {
+                *out = solution;
+                if (frame_sample_out) {
+                    *frame_sample_out =
+                        accumulator->frame_sample[count - 1];
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool v90_downstream_mp_decode_strict(
+                                    const uint8_t *bits,
+                                    int frame_bits,
+                                    v34_upstream_mp_recovery_t *out)
+{
+    uint16_t crc = 0xFFFF;
+    int type;
+    int crc_last;
+    int fill_first;
+    int upstream_rate;
+    int trellis;
+
+    if (!bits || !out || frame_bits < 86)
+        return false;
+    for (int bit = 0; bit <= 16; bit++) {
+        if (bits[bit] == 0)
+            return false;
+    }
+    type = bits[18] & 1;
+    if (bits[17] != 0 || bits[28] != 0 || bits[34] != 0
+        || bits[35] != 0 || bits[49] != 0 || bits[50] != 0
+        || bits[51] != 0 || bits[68] != 0)
+        return false;
+    for (int bit = 19; bit <= 23; bit++) {
+        if (bits[bit] != 0)
+            return false;
+    }
+    if (type == 0) {
+        for (int bit = 52; bit <= 67; bit++) {
+            if (bits[bit] != 0)
+                return false;
+        }
+        crc_last = 84;
+        fill_first = 85;
+    } else {
+        static const int start_bits[] = {85, 102, 119, 136, 153, 170};
+
+        if (frame_bits < 188)
+            return false;
+        for (size_t i = 0;
+             i < sizeof(start_bits) / sizeof(start_bits[0]); i++) {
+            if (bits[start_bits[i]] != 0)
+                return false;
+        }
+        for (int bit = 154; bit <= 169; bit++) {
+            if (bits[bit] != 0)
+                return false;
+        }
+        crc_last = 186;
+        fill_first = 187;
+    }
+    for (int bit = 0; bit <= crc_last; bit++)
+        crc = crc_itu16_bits(bits[bit] & 1U, 1, crc);
+    if (crc != 0)
+        return false;
+    for (int bit = fill_first; bit < frame_bits; bit++) {
+        if (bits[bit] != 0)
+            return false;
+    }
+    upstream_rate = (int)v90_cp_soft_get_bits(bits, 24, 4);
+    if (upstream_rate < 2 || upstream_rate > 14)
+        return false;
+    trellis = (int)v90_cp_soft_get_bits(bits, 29, 2);
+    if (trellis > 2)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->valid = true;
+    out->crc_valid = true;
+    out->frame_bits = frame_bits;
+    out->mp.type = type;
+    out->mp.bit_rate_c_to_a = upstream_rate;
+    out->mp.bit_rate_a_to_c = upstream_rate;
+    out->mp.trellis_size = trellis;
+    out->mp.use_non_linear_encoder = bits[31] != 0;
+    out->mp.expanded_shaping = bits[32] != 0;
+    out->mp.mp_acknowledged = bits[33] != 0;
+    out->mp.signalling_rate_mask =
+        (int)v90_cp_soft_get_bits(bits, 36, 13);
+    if (type == 1) {
+        static const int real_first[3] = {52, 86, 120};
+        static const int imag_first[3] = {69, 103, 137};
+
+        for (int i = 0; i < 3; i++) {
+            out->mp.precoder_coeffs[i].re = (int16_t)
+                v90_cp_soft_get_bits(bits, real_first[i], 16);
+            out->mp.precoder_coeffs[i].im = (int16_t)
+                v90_cp_soft_get_bits(bits, imag_first[i], 16);
+        }
+    }
+    out->best_sync = 17;
+    out->best_three_sync = 51;
+    out->best_mp0_structure = type == 0;
+    out->best_mp1_structure = type == 1;
+    return true;
+}
+
+static bool v90_mp_tuples_equal(const mp_t *a, const mp_t *b)
+{
+    if (!a || !b)
+        return false;
+    if (a->type != b->type
+        || a->bit_rate_c_to_a != b->bit_rate_c_to_a
+        || a->trellis_size != b->trellis_size
+        || a->use_non_linear_encoder != b->use_non_linear_encoder
+        || a->expanded_shaping != b->expanded_shaping
+        || a->signalling_rate_mask != b->signalling_rate_mask) {
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (a->precoder_coeffs[i].re != b->precoder_coeffs[i].re
+            || a->precoder_coeffs[i].im != b->precoder_coeffs[i].im) {
+            return false;
+        }
+    }
+    return true;
+}
+
+typedef struct {
+    uint8_t bits[256];
+    int frame_bits;
+    int positions[18];
+    int position_count;
+    int best_corrections;
+    v34_upstream_mp_recovery_t solution;
+} v90_mp_correction_search_t;
+
+static void v90_mp_correction_dfs(v90_mp_correction_search_t *search,
+                                  int index,
+                                  int corrections)
+{
+    if (!search || corrections >= search->best_corrections)
+        return;
+    if (index == search->position_count) {
+        v34_upstream_mp_recovery_t candidate;
+
+        if (v90_downstream_mp_decode_strict(search->bits,
+                                             search->frame_bits,
+                                             &candidate)
+            && candidate.mp.type == 1) {
+            search->best_corrections = corrections;
+            search->solution = candidate;
+        }
+        return;
+    }
+    v90_mp_correction_dfs(search, index + 1, corrections);
+    {
+        int position = search->positions[index];
+
+        search->bits[position] ^= 1;
+        if (position + 18 < search->frame_bits)
+            search->bits[position + 18] ^= 1;
+        if (position + 23 < search->frame_bits)
+            search->bits[position + 23] ^= 1;
+        v90_mp_correction_dfs(search, index + 1, corrections + 1);
+        search->bits[position] ^= 1;
+        if (position + 18 < search->frame_bits)
+            search->bits[position + 18] ^= 1;
+        if (position + 23 < search->frame_bits)
+            search->bits[position + 23] ^= 1;
+    }
+}
+
+static bool v90_try_mp1_scrambled_corrections(
+                                    const uint8_t *plain_bits,
+                                    int frame_bits,
+                                    int forced_rate,
+                                    int forced_trellis,
+                                    v34_upstream_mp_recovery_t *out,
+                                    int *corrections_out)
+{
+    static const int common_zero[] = {
+        17, 19, 20, 21, 22, 23, 28, 34, 35, 49, 50, 51, 68,
+        85, 102, 119, 136, 153, 170
+    };
+    bool fixed[256] = {0};
+    uint8_t expected[256] = {0};
+    struct { int position; int gain; } ranked[256];
+    v90_mp_correction_search_t search;
+
+    if (!plain_bits || !out || frame_bits < 188 || frame_bits > 256
+        || forced_rate < 2 || forced_rate > 14
+        || forced_trellis < 0 || forced_trellis > 2)
+        return false;
+    memset(&search, 0, sizeof(search));
+    memcpy(search.bits, plain_bits, (size_t)frame_bits);
+    search.frame_bits = frame_bits;
+    search.best_corrections = INT_MAX;
+    for (int bit = 0; bit <= 16; bit++) {
+        fixed[bit] = true;
+        expected[bit] = 1;
+    }
+    fixed[18] = true;
+    expected[18] = 1;
+    for (int bit = 24; bit <= 27; bit++) {
+        fixed[bit] = true;
+        expected[bit] = (uint8_t)((forced_rate >> (bit - 24)) & 1);
+    }
+    for (int bit = 29; bit <= 30; bit++) {
+        fixed[bit] = true;
+        expected[bit] =
+            (uint8_t)((forced_trellis >> (bit - 29)) & 1);
+    }
+    for (size_t i = 0;
+         i < sizeof(common_zero) / sizeof(common_zero[0]); i++) {
+        fixed[common_zero[i]] = true;
+    }
+    for (int bit = 154; bit <= 169; bit++)
+        fixed[bit] = true;
+    for (int bit = 187; bit < frame_bits; bit++)
+        fixed[bit] = true;
+    for (int position = 0; position < frame_bits; position++) {
+        int affected[3] = {position, position + 18, position + 23};
+        int gain = 0;
+
+        for (int i = 0; i < 3; i++) {
+            int bit = affected[i];
+
+            if (bit < frame_bits && fixed[bit]) {
+                gain += plain_bits[bit] != expected[bit] ? 1 : -1;
+            }
+        }
+        ranked[position].position = position;
+        ranked[position].gain = gain;
+    }
+    for (int i = 1; i < frame_bits; i++) {
+        int value_position = ranked[i].position;
+        int value_gain = ranked[i].gain;
+        int j = i;
+
+        while (j > 0 && ranked[j - 1].gain < value_gain) {
+            ranked[j] = ranked[j - 1];
+            j--;
+        }
+        ranked[j].position = value_position;
+        ranked[j].gain = value_gain;
+    }
+    search.position_count = 18;
+    for (int i = 0; i < search.position_count; i++)
+        search.positions[i] = ranked[i].position;
+    {
+        enum { WORDS = 4, MAX_ROWS = 128 };
+        uint64_t equation[MAX_ROWS][WORDS] = {{0}};
+        uint8_t equation_rhs[MAX_ROWS] = {0};
+        int pivot_column[MAX_ROWS];
+        uint8_t solution_bits[256] = {0};
+        uint16_t base_crc = 0xFFFF;
+        int rows = 0;
+        int rank = 0;
+
+        for (int bit = 0; bit < frame_bits; bit++) {
+            if (!fixed[bit])
+                continue;
+            for (int position = 0; position < frame_bits; position++) {
+                if (bit == position || bit == position + 18
+                    || bit == position + 23) {
+                    equation[rows][position / 64] |=
+                        1ULL << (position % 64);
+                }
+            }
+            equation_rhs[rows] = plain_bits[bit] ^ expected[bit];
+            rows++;
+        }
+        for (int bit = 0; bit <= 186; bit++) {
+            base_crc = crc_itu16_bits(plain_bits[bit] & 1U,
+                                      1,
+                                      base_crc);
+        }
+        for (int crc_bit = 0; crc_bit < 16; crc_bit++) {
+            equation_rhs[rows + crc_bit] =
+                (uint8_t)((base_crc >> crc_bit) & 1U);
+        }
+        for (int position = 0; position < frame_bits; position++) {
+            uint16_t trial_crc = 0xFFFF;
+
+            for (int bit = 0; bit <= 186; bit++) {
+                int delta = bit == position
+                         || bit == position + 18
+                         || bit == position + 23;
+
+                trial_crc = crc_itu16_bits(
+                    (plain_bits[bit] ^ delta) & 1U,
+                    1,
+                    trial_crc);
+            }
+            for (int crc_bit = 0; crc_bit < 16; crc_bit++) {
+                if (((base_crc ^ trial_crc) >> crc_bit) & 1U) {
+                    equation[rows + crc_bit][position / 64] |=
+                        1ULL << (position % 64);
+                }
+            }
+        }
+        rows += 16;
+        for (int order = 0; order < frame_bits && rank < rows; order++) {
+            int column = ranked[order].position;
+            int pivot = -1;
+
+            for (int row = rank; row < rows; row++) {
+                if ((equation[row][column / 64] >> (column % 64)) & 1U) {
+                    pivot = row;
+                    break;
+                }
+            }
+            if (pivot < 0)
+                continue;
+            if (pivot != rank) {
+                uint64_t temp[WORDS];
+                uint8_t temp_rhs;
+
+                memcpy(temp, equation[rank], sizeof(temp));
+                memcpy(equation[rank], equation[pivot], sizeof(temp));
+                memcpy(equation[pivot], temp, sizeof(temp));
+                temp_rhs = equation_rhs[rank];
+                equation_rhs[rank] = equation_rhs[pivot];
+                equation_rhs[pivot] = temp_rhs;
+            }
+            for (int row = 0; row < rows; row++) {
+                if (row == rank
+                    || !((equation[row][column / 64]
+                          >> (column % 64)) & 1U)) {
+                    continue;
+                }
+                for (int word = 0; word < WORDS; word++)
+                    equation[row][word] ^= equation[rank][word];
+                equation_rhs[row] ^= equation_rhs[rank];
+            }
+            pivot_column[rank] = column;
+            rank++;
+        }
+        for (int row = rank; row < rows; row++) {
+            bool any = false;
+
+            for (int word = 0; word < WORDS; word++)
+                any |= equation[row][word] != 0;
+            if (!any && equation_rhs[row])
+                return false;
+        }
+        for (int row = 0; row < rank; row++)
+            solution_bits[pivot_column[row]] = equation_rhs[row];
+        {
+            int corrections = 0;
+            v34_upstream_mp_recovery_t candidate;
+
+            memcpy(search.bits, plain_bits, (size_t)frame_bits);
+            for (int position = 0; position < frame_bits; position++) {
+                if (!solution_bits[position])
+                    continue;
+                corrections++;
+                search.bits[position] ^= 1;
+                if (position + 18 < frame_bits)
+                    search.bits[position + 18] ^= 1;
+                if (position + 23 < frame_bits)
+                    search.bits[position + 23] ^= 1;
+            }
+            if (corrections_out)
+                *corrections_out = corrections;
+            if (corrections > 20
+                || !v90_downstream_mp_decode_strict(search.bits,
+                                                     frame_bits,
+                                                     &candidate)
+                || candidate.mp.type != 1) {
+                return false;
+            }
+            *out = candidate;
+            return true;
+        }
+    }
+}
+
+enum {
+    V90_PCM_EQ_TAPS = 65,
+    V90_PCM_EQ_PRE = 32,
+    V90_PCM_LABEL_TAPS = 65,
+    V90_TRN1D_SYMBOLS = 2046
+};
+
+typedef struct {
+    bool valid;
+    int training_start;
+    double coefficient[V90_PCM_EQ_TAPS + 1];
+    double correlation;
+    double validation_match;
+    double validation_sign_match;
+    double validation_nrmse;
+} v90_pcm_equalizer_t;
+
+typedef struct {
+    bool valid;
+    int training_start;
+    double coefficient[7][V90_PCM_LABEL_TAPS + 1];
+    double validation_match;
+} v90_pcm_label_equalizer_t;
+
+typedef struct {
+    bool valid;
+    double coefficient[V90_PCM_EQ_TAPS + 1];
+    double teacher_match;
+    double decision_feedback_match;
+} v90_pcm_forward_equalizer_t;
+
+typedef struct {
+    bool valid;
+    double centroid[VPCM_CP_FRAME_INTERVALS][7];
+    int count[VPCM_CP_FRAME_INTERVALS][7];
+    double validation_match;
+} v90_pcm_centroid_slicer_t;
+
+static void v90_make_scrambled_ones(uint8_t *bits, int count)
+{
+    uint32_t reg = 0;
+
+    for (int i = 0; i < count; i++) {
+        int feedback = ((reg >> 22) ^ (reg >> 17)) & 1;
+        int scrambled = 1 ^ feedback;
+
+        reg = ((reg << 1) | (uint32_t)scrambled) & 0x7FFFFF;
+        bits[i] = (uint8_t)scrambled;
+    }
+}
+
+static bool v90_solve_linear_system(double *matrix,
+                                    double *rhs,
+                                    double *solution,
+                                    int size)
+{
+    for (int column = 0; column < size; column++) {
+        int pivot = column;
+
+        for (int row = column + 1; row < size; row++) {
+            if (fabs(matrix[row * size + column])
+                > fabs(matrix[pivot * size + column])) {
+                pivot = row;
+            }
+        }
+        if (fabs(matrix[pivot * size + column]) < 1e-12)
+            return false;
+        if (pivot != column) {
+            for (int k = column; k < size; k++) {
+                double tmp = matrix[column * size + k];
+
+                matrix[column * size + k] = matrix[pivot * size + k];
+                matrix[pivot * size + k] = tmp;
+            }
+            {
+                double tmp = rhs[column];
+
+                rhs[column] = rhs[pivot];
+                rhs[pivot] = tmp;
+            }
+        }
+        {
+            double divisor = matrix[column * size + column];
+
+            for (int k = column; k < size; k++)
+                matrix[column * size + k] /= divisor;
+            rhs[column] /= divisor;
+        }
+        for (int row = 0; row < size; row++) {
+            double factor;
+
+            if (row == column)
+                continue;
+            factor = matrix[row * size + column];
+            if (fabs(factor) < 1e-20)
+                continue;
+            for (int k = column; k < size; k++) {
+                matrix[row * size + k] -=
+                    factor * matrix[column * size + k];
+            }
+            rhs[row] -= factor * rhs[column];
+        }
+    }
+    memcpy(solution, rhs, (size_t)size * sizeof(*solution));
+    return true;
+}
+
+static double v90_pcm_equalizer_output(const v90_pcm_equalizer_t *equalizer,
+                                       const int16_t *samples,
+                                       int total_samples,
+                                       int sample)
+{
+    double output;
+
+    if (!equalizer || !equalizer->valid || !samples
+        || sample < V90_PCM_EQ_PRE
+        || sample - V90_PCM_EQ_PRE + V90_PCM_EQ_TAPS > total_samples) {
+        return sample >= 0 && sample < total_samples ? samples[sample] : 0.0;
+    }
+    output = equalizer->coefficient[V90_PCM_EQ_TAPS];
+    for (int tap = 0; tap < V90_PCM_EQ_TAPS; tap++)
+        output += equalizer->coefficient[tap]
+                * (samples[sample - V90_PCM_EQ_PRE + tap] / 32768.0);
+    return output;
+}
+
+static bool v90_train_pcm_equalizer(const int16_t *samples,
+                                    int total_samples,
+                                    int search_start,
+                                    int search_end,
+                                    v90_pcm_equalizer_t *out)
+{
+    enum {
+        CORRELATION_BITS = 512,
+        TRAIN_BITS = 1500,
+        SYSTEM_SIZE = V90_PCM_EQ_TAPS + 1
+    };
+    uint8_t expected[V90_TRN1D_SYMBOLS];
+    double matrix[SYSTEM_SIZE * SYSTEM_SIZE];
+    double rhs[SYSTEM_SIZE];
+    double solution[SYSTEM_SIZE];
+    double best_correlation = 0.0;
+    int best_start = -1;
+
+    if (!samples || !out || search_start < 0 || search_end <= search_start)
+        return false;
+    memset(out, 0, sizeof(*out));
+    v90_make_scrambled_ones(expected, V90_TRN1D_SYMBOLS);
+    if (search_start < V90_PCM_EQ_PRE)
+        search_start = V90_PCM_EQ_PRE;
+    if (search_end > total_samples - V90_TRN1D_SYMBOLS
+                     - (V90_PCM_EQ_TAPS - V90_PCM_EQ_PRE)) {
+        search_end = total_samples - V90_TRN1D_SYMBOLS
+                   - (V90_PCM_EQ_TAPS - V90_PCM_EQ_PRE);
+    }
+    for (int start = search_start; start < search_end; start++) {
+        double cross = 0.0;
+        double power = 0.0;
+
+        for (int i = 0; i < CORRELATION_BITS; i++) {
+            double x = samples[start + i];
+            double y = expected[i] ? 1.0 : -1.0;
+
+            cross += x * y;
+            power += x * x;
+        }
+        if (power > 1e-9) {
+            double correlation = fabs(cross) / sqrt(power * CORRELATION_BITS);
+
+            if (correlation > best_correlation) {
+                best_correlation = correlation;
+                best_start = start;
+            }
+        }
+    }
+    if (best_start < 0)
+        return false;
+    memset(matrix, 0, sizeof(matrix));
+    memset(rhs, 0, sizeof(rhs));
+    for (int n = 0; n < TRAIN_BITS; n++) {
+        double feature[SYSTEM_SIZE];
+        double target = expected[n] ? 1.0 : -1.0;
+
+        for (int tap = 0; tap < V90_PCM_EQ_TAPS; tap++)
+            feature[tap] = samples[best_start + n
+                                 - V90_PCM_EQ_PRE + tap] / 32768.0;
+        feature[V90_PCM_EQ_TAPS] = 1.0;
+        for (int row = 0; row < SYSTEM_SIZE; row++) {
+            rhs[row] += feature[row] * target;
+            for (int column = 0; column < SYSTEM_SIZE; column++) {
+                matrix[row * SYSTEM_SIZE + column] +=
+                    feature[row] * feature[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            trace += matrix[i * SYSTEM_SIZE + i];
+        for (int i = 0; i < V90_PCM_EQ_TAPS; i++)
+            matrix[i * SYSTEM_SIZE + i] += trace * 1e-8;
+    }
+    if (!v90_solve_linear_system(matrix,
+                                 rhs,
+                                 solution,
+                                 SYSTEM_SIZE)) {
+        return false;
+    }
+    memcpy(out->coefficient, solution, sizeof(solution));
+    out->valid = true;
+    out->training_start = best_start;
+    out->correlation = best_correlation;
+    {
+        int matches = 0;
+        int checks = 0;
+
+        for (int n = TRAIN_BITS;
+             n < V90_TRN1D_SYMBOLS - V90_PCM_EQ_TAPS;
+             n++) {
+            double value = v90_pcm_equalizer_output(
+                out, samples, total_samples, best_start + n);
+
+            matches += (value >= 0.0) == (expected[n] != 0);
+            checks++;
+        }
+        out->validation_match = checks > 0
+                              ? (double)matches / checks : 0.0;
+    }
+    if (out->validation_match < 0.80) {
+        out->valid = false;
+        return false;
+    }
+    return true;
+}
+
+static uint8_t v90_slice_cp_codeword(v91_law_t law,
+                                     const vpcm_cp_frame_t *cp,
+                                     int interval,
+                                     double sample);
+static int v90_cp_ucode_for_label(const vpcm_cp_frame_t *cp,
+                                  int interval,
+                                  int label);
+
+static bool v90_train_known_pcm_equalizer(const int16_t *samples,
+                                          int total_samples,
+                                          int start_sample,
+                                          v91_law_t law,
+                                          const vpcm_cp_frame_t *cp,
+                                          const uint8_t *expected_codewords,
+                                          int codeword_count,
+                                          v90_pcm_equalizer_t *out)
+{
+    enum { SYSTEM_SIZE = V90_PCM_EQ_TAPS + 1 };
+    double matrix[SYSTEM_SIZE * SYSTEM_SIZE];
+    double rhs[SYSTEM_SIZE];
+    double solution[SYSTEM_SIZE];
+    int train_count;
+
+    if (!samples || !expected_codewords || !out || start_sample < 0
+        || codeword_count < 512
+        || start_sample < V90_PCM_EQ_PRE
+        || start_sample + codeword_count
+             + (V90_PCM_EQ_TAPS - V90_PCM_EQ_PRE) > total_samples) {
+        return false;
+    }
+    train_count = codeword_count - 384;
+    if (train_count > 1500)
+        train_count = 1500;
+    memset(out, 0, sizeof(*out));
+    memset(matrix, 0, sizeof(matrix));
+    memset(rhs, 0, sizeof(rhs));
+    for (int n = 0; n < train_count; n++) {
+        double feature[SYSTEM_SIZE];
+        double target = v91_codeword_to_linear(
+                            law, expected_codewords[n]) / 32768.0;
+
+        for (int tap = 0; tap < V90_PCM_EQ_TAPS; tap++) {
+            feature[tap] = samples[start_sample + n
+                                 - V90_PCM_EQ_PRE + tap] / 32768.0;
+        }
+        feature[V90_PCM_EQ_TAPS] = 1.0;
+        for (int row = 0; row < SYSTEM_SIZE; row++) {
+            rhs[row] += feature[row] * target;
+            for (int column = 0; column < SYSTEM_SIZE; column++) {
+                matrix[row * SYSTEM_SIZE + column] +=
+                    feature[row] * feature[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            trace += matrix[i * SYSTEM_SIZE + i];
+        for (int i = 0; i < V90_PCM_EQ_TAPS; i++)
+            matrix[i * SYSTEM_SIZE + i] += trace * 1e-6;
+    }
+    if (!v90_solve_linear_system(matrix,
+                                 rhs,
+                                 solution,
+                                 SYSTEM_SIZE)) {
+        return false;
+    }
+    memcpy(out->coefficient, solution, sizeof(solution));
+    out->valid = true;
+    out->training_start = start_sample;
+    {
+        int matches = 0;
+        int sign_matches = 0;
+        int checks = 0;
+        double squared_error = 0.0;
+        double target_power = 0.0;
+
+        for (int n = train_count;
+             n < codeword_count - V90_PCM_EQ_TAPS;
+             n++) {
+            double value = v90_pcm_equalizer_output(
+                out, samples, total_samples, start_sample + n);
+            double scaled = value * 32768.0;
+            uint8_t recovered = v90_slice_cp_codeword(
+                law, cp, n % VPCM_CP_FRAME_INTERVALS, scaled);
+            double target = v91_codeword_to_linear(
+                                law, expected_codewords[n]) / 32768.0;
+            double error = value - target;
+
+            matches += recovered == expected_codewords[n];
+            sign_matches += (value >= 0.0) == (target >= 0.0);
+            squared_error += error * error;
+            target_power += target * target;
+            checks++;
+        }
+        out->validation_match = checks > 0
+                              ? (double)matches / checks : 0.0;
+        out->validation_sign_match = checks > 0
+                                   ? (double)sign_matches / checks : 0.0;
+        out->validation_nrmse = target_power > 0.0
+                              ? sqrt(squared_error / target_power) : 0.0;
+        if (getenv("VPCM_V90_MP_FIR_DETAIL")) {
+            fprintf(stderr,
+                    "v90 TRN2d FIR validation exact=%.1f%% sign=%.1f%% nrmse=%.3f\n",
+                    checks > 0 ? 100.0 * matches / checks : 0.0,
+                    checks > 0 ? 100.0 * sign_matches / checks : 0.0,
+                    out->validation_nrmse);
+        }
+    }
+    if (out->validation_match < 0.70) {
+        out->valid = false;
+        return false;
+    }
+    /* Track slow audio-path changes over the known tail of TRN2d.  Select
+     * the normalized-LMS step from pre-update held-out decisions, then carry
+     * that final inverse into MP. */
+    {
+        static const double step[] = {0.001, 0.003, 0.01, 0.03, 0.1};
+        double best_coefficient[SYSTEM_SIZE];
+        double best_match = out->validation_match;
+        double best_step = 0.0;
+
+        memcpy(best_coefficient, solution, sizeof(best_coefficient));
+        for (size_t trial_index = 0;
+             trial_index < sizeof(step) / sizeof(step[0]); trial_index++) {
+            double coefficient[SYSTEM_SIZE];
+            int matches = 0;
+            int checks = 0;
+
+            memcpy(coefficient, solution, sizeof(coefficient));
+            for (int n = train_count;
+                 n < codeword_count - V90_PCM_EQ_TAPS; n++) {
+                double feature[SYSTEM_SIZE];
+                double value;
+                double target = v91_codeword_to_linear(
+                                    law, expected_codewords[n]) / 32768.0;
+                double norm = 1e-6;
+                uint8_t recovered;
+
+                for (int tap = 0; tap < V90_PCM_EQ_TAPS; tap++) {
+                    feature[tap] = samples[start_sample + n
+                                         - V90_PCM_EQ_PRE + tap]
+                                 / 32768.0;
+                    norm += feature[tap] * feature[tap];
+                }
+                feature[V90_PCM_EQ_TAPS] = 1.0;
+                norm += 1.0;
+                value = 0.0;
+                for (int row = 0; row < SYSTEM_SIZE; row++)
+                    value += coefficient[row] * feature[row];
+                recovered = v90_slice_cp_codeword(
+                    law,
+                    cp,
+                    n % VPCM_CP_FRAME_INTERVALS,
+                    value * 32768.0);
+                matches += recovered == expected_codewords[n];
+                checks++;
+                for (int row = 0; row < SYSTEM_SIZE; row++) {
+                    coefficient[row] += step[trial_index]
+                        * (target - value) * feature[row] / norm;
+                }
+            }
+            if (checks > 0 && (double)matches / checks > best_match) {
+                best_match = (double)matches / checks;
+                best_step = step[trial_index];
+                memcpy(best_coefficient,
+                       coefficient,
+                       sizeof(best_coefficient));
+            }
+        }
+        memcpy(out->coefficient,
+               best_coefficient,
+               sizeof(best_coefficient));
+        if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+            fprintf(stderr,
+                    "v90 TRN2d adaptive step=%.3f pre-update=%.1f%%\n",
+                    best_step,
+                    100.0 * best_match);
+        }
+    }
+    return true;
+}
+
+static bool v90_train_pcm_label_equalizer(
+                                    const int16_t *samples,
+                                    int total_samples,
+                                    int start_sample,
+                                    const v90_pcm_equalizer_t *sign_equalizer,
+                                    const uint8_t *expected_labels,
+                                    int label_count,
+                                    v90_pcm_label_equalizer_t *out)
+{
+    enum { SYSTEM_SIZE = V90_PCM_LABEL_TAPS + 1, TRAIN_LABELS = 1200 };
+    double matrix[SYSTEM_SIZE * SYSTEM_SIZE];
+    double rhs[7][SYSTEM_SIZE];
+
+    if (!samples || !sign_equalizer || !expected_labels || !out
+        || label_count < TRAIN_LABELS + 128 || start_sample < 0
+        || start_sample + label_count + V90_PCM_LABEL_TAPS > total_samples)
+        return false;
+    memset(out, 0, sizeof(*out));
+    memset(matrix, 0, sizeof(matrix));
+    memset(rhs, 0, sizeof(rhs));
+    for (int n = 0; n < TRAIN_LABELS; n++) {
+        double feature[SYSTEM_SIZE];
+        for (int tap = 0; tap < V90_PCM_LABEL_TAPS; tap++) {
+            double polarity = v90_pcm_equalizer_output(
+                sign_equalizer,
+                samples,
+                total_samples,
+                start_sample + n + tap) >= 0.0 ? 1.0 : -1.0;
+
+            feature[tap] = polarity
+                         * samples[start_sample + n + tap] / 32768.0;
+        }
+        feature[V90_PCM_LABEL_TAPS] = 1.0;
+        for (int row = 0; row < SYSTEM_SIZE; row++) {
+            for (int label = 0; label < 7; label++) {
+                rhs[label][row] += feature[row]
+                                 * (expected_labels[n] == label ? 1.0 : 0.0);
+            }
+            for (int column = 0; column < SYSTEM_SIZE; column++) {
+                matrix[row * SYSTEM_SIZE + column] +=
+                    feature[row] * feature[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            trace += matrix[i * SYSTEM_SIZE + i];
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            matrix[i * SYSTEM_SIZE + i] += trace * 1e-7;
+    }
+    for (int label = 0; label < 7; label++) {
+        double trial_matrix[SYSTEM_SIZE * SYSTEM_SIZE];
+        double trial_rhs[SYSTEM_SIZE];
+
+        memcpy(trial_matrix, matrix, sizeof(trial_matrix));
+        memcpy(trial_rhs, rhs[label], sizeof(trial_rhs));
+        if (!v90_solve_linear_system(trial_matrix,
+                                     trial_rhs,
+                                     out->coefficient[label],
+                                     SYSTEM_SIZE)) {
+            return false;
+        }
+    }
+    out->training_start = start_sample;
+    {
+        int matches = 0;
+        int checks = 0;
+
+        for (int n = TRAIN_LABELS;
+             n < label_count - V90_PCM_LABEL_TAPS;
+             n++) {
+            double best_score = -HUGE_VAL;
+            int best_label = -1;
+
+            for (int label = 0; label < 7; label++) {
+                double score = out->coefficient[label][V90_PCM_LABEL_TAPS];
+
+                for (int tap = 0; tap < V90_PCM_LABEL_TAPS; tap++) {
+                    double polarity = v90_pcm_equalizer_output(
+                        sign_equalizer,
+                        samples,
+                        total_samples,
+                        start_sample + n + tap) >= 0.0 ? 1.0 : -1.0;
+
+                    score += out->coefficient[label][tap] * polarity
+                           * samples[start_sample + n + tap] / 32768.0;
+                }
+                if (score > best_score) {
+                    best_score = score;
+                    best_label = label;
+                }
+            }
+            matches += best_label == expected_labels[n];
+            checks++;
+        }
+        out->validation_match = checks > 0
+                              ? (double)matches / checks : 0.0;
+    }
+    out->valid = out->validation_match >= 0.50;
+    return out->valid;
+}
+
+static bool v90_train_pcm_forward_equalizer(
+                                    const int16_t *samples,
+                                    int total_samples,
+                                    int start_sample,
+                                    v91_law_t law,
+                                    const vpcm_cp_frame_t *cp,
+                                    const uint8_t *expected_codewords,
+                                    int codeword_count,
+                                    v90_pcm_forward_equalizer_t *out)
+{
+    enum { SYSTEM_SIZE = V90_PCM_EQ_TAPS + 1, TRAIN_COUNT = 1500 };
+    double matrix[SYSTEM_SIZE * SYSTEM_SIZE] = {0};
+    double rhs[SYSTEM_SIZE] = {0};
+    double solution[SYSTEM_SIZE];
+    double recovered[V90_TRN1D_SYMBOLS];
+
+    if (!samples || !cp || !expected_codewords || !out
+        || codeword_count > V90_TRN1D_SYMBOLS
+        || codeword_count <= TRAIN_COUNT + V90_PCM_EQ_TAPS
+        || start_sample < 0
+        || start_sample + codeword_count > total_samples)
+        return false;
+    memset(out, 0, sizeof(*out));
+    for (int n = V90_PCM_EQ_TAPS - 1; n < TRAIN_COUNT; n++) {
+        double feature[SYSTEM_SIZE];
+        double target = samples[start_sample + n] / 32768.0;
+
+        for (int tap = 0; tap < V90_PCM_EQ_TAPS; tap++) {
+            feature[tap] = v91_codeword_to_linear(
+                law, expected_codewords[n - tap]) / 32768.0;
+        }
+        feature[V90_PCM_EQ_TAPS] = 1.0;
+        for (int row = 0; row < SYSTEM_SIZE; row++) {
+            rhs[row] += feature[row] * target;
+            for (int column = 0; column < SYSTEM_SIZE; column++) {
+                matrix[row * SYSTEM_SIZE + column] +=
+                    feature[row] * feature[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            trace += matrix[i * SYSTEM_SIZE + i];
+        for (int i = 0; i < SYSTEM_SIZE; i++)
+            matrix[i * SYSTEM_SIZE + i] += trace * 1e-8;
+    }
+    if (!v90_solve_linear_system(matrix, rhs, solution, SYSTEM_SIZE))
+        return false;
+    memcpy(out->coefficient, solution, sizeof(solution));
+    for (int n = 0; n < TRAIN_COUNT; n++) {
+        recovered[n] = v91_codeword_to_linear(
+            law, expected_codewords[n]) / 32768.0;
+    }
+    {
+        int teacher_matches = 0;
+        int dfe_matches = 0;
+        int checks = 0;
+
+        for (int n = TRAIN_COUNT; n < codeword_count; n++) {
+            int interval = n % VPCM_CP_FRAME_INTERVALS;
+            bool positive = v91_codeword_to_linear(
+                law, expected_codewords[n]) >= 0;
+            double observation = samples[start_sample + n] / 32768.0;
+            double best_teacher_error = HUGE_VAL;
+            double best_dfe_error = HUGE_VAL;
+            uint8_t best_teacher = 0;
+            uint8_t best_dfe = 0;
+
+            for (int label = 0; ; label++) {
+                int ucode = v90_cp_ucode_for_label(cp, interval, label);
+                uint8_t candidate;
+                double level;
+                double teacher_prediction;
+                double dfe_prediction;
+
+                if (ucode < 0)
+                    break;
+                candidate = v91_ucode_to_codeword(law, ucode, positive);
+                level = v91_codeword_to_linear(law, candidate) / 32768.0;
+                teacher_prediction = out->coefficient[V90_PCM_EQ_TAPS]
+                                   + out->coefficient[0] * level;
+                dfe_prediction = teacher_prediction;
+                for (int tap = 1; tap < V90_PCM_EQ_TAPS; tap++) {
+                    teacher_prediction += out->coefficient[tap]
+                        * v91_codeword_to_linear(
+                            law, expected_codewords[n - tap]) / 32768.0;
+                    dfe_prediction += out->coefficient[tap]
+                                    * recovered[n - tap];
+                }
+                if (fabs(observation - teacher_prediction)
+                    < best_teacher_error) {
+                    best_teacher_error = fabs(observation
+                                              - teacher_prediction);
+                    best_teacher = candidate;
+                }
+                if (fabs(observation - dfe_prediction) < best_dfe_error) {
+                    best_dfe_error = fabs(observation - dfe_prediction);
+                    best_dfe = candidate;
+                }
+            }
+            recovered[n] = v91_codeword_to_linear(law, best_dfe) / 32768.0;
+            teacher_matches += best_teacher == expected_codewords[n];
+            dfe_matches += best_dfe == expected_codewords[n];
+            checks++;
+        }
+        out->teacher_match = checks > 0
+                           ? (double)teacher_matches / checks : 0.0;
+        out->decision_feedback_match = checks > 0
+                                     ? (double)dfe_matches / checks : 0.0;
+    }
+    out->valid = out->decision_feedback_match >= 0.70;
+    return out->valid;
+}
+
+static bool v90_train_pcm_centroid_slicer(
+                                    const int16_t *samples,
+                                    int total_samples,
+                                    int start_sample,
+                                    const v90_pcm_equalizer_t *equalizer,
+                                    const uint8_t *expected_labels,
+                                    int label_count,
+                                    v90_pcm_centroid_slicer_t *out)
+{
+    enum { TRAIN_COUNT = 1500 };
+
+    if (!samples || !equalizer || !equalizer->valid || !expected_labels
+        || !out || label_count <= TRAIN_COUNT + V90_PCM_EQ_TAPS)
+        return false;
+    memset(out, 0, sizeof(*out));
+    for (int n = 0; n < TRAIN_COUNT; n++) {
+        int interval = n % VPCM_CP_FRAME_INTERVALS;
+        int label = expected_labels[n];
+
+        if (label < 0 || label >= 7)
+            continue;
+        out->centroid[interval][label] += fabs(v90_pcm_equalizer_output(
+            equalizer, samples, total_samples, start_sample + n));
+        out->count[interval][label]++;
+    }
+    for (int interval = 0;
+         interval < VPCM_CP_FRAME_INTERVALS; interval++) {
+        for (int label = 0; label < 7; label++) {
+            if (out->count[interval][label] > 0) {
+                out->centroid[interval][label] /=
+                    out->count[interval][label];
+            }
+        }
+    }
+    {
+        int matches = 0;
+        int checks = 0;
+
+        for (int n = TRAIN_COUNT;
+             n < label_count - V90_PCM_EQ_TAPS; n++) {
+            int interval = n % VPCM_CP_FRAME_INTERVALS;
+            double value = fabs(v90_pcm_equalizer_output(
+                equalizer, samples, total_samples, start_sample + n));
+            double best_error = HUGE_VAL;
+            int best_label = -1;
+
+            for (int label = 0; label < 7; label++) {
+                double error;
+
+                if (out->count[interval][label] == 0)
+                    continue;
+                error = fabs(value - out->centroid[interval][label]);
+                if (error < best_error) {
+                    best_error = error;
+                    best_label = label;
+                }
+            }
+            matches += best_label == expected_labels[n];
+            checks++;
+        }
+        out->validation_match = checks > 0
+                              ? (double)matches / checks : 0.0;
+    }
+    out->valid = out->validation_match >= 0.70;
+    return out->valid;
+}
+
+static uint8_t v90_slice_cp_codeword(v91_law_t law,
+                                     const vpcm_cp_frame_t *cp,
+                                     int interval,
+                                     double sample)
+{
+    int constellation;
+    int best_ucode = -1;
+    double best_error = HUGE_VAL;
+    bool positive = sample >= 0.0;
+
+    if (!cp || interval < 0 || interval >= VPCM_CP_FRAME_INTERVALS)
+        return v91_ucode_to_codeword(law, 0, positive);
+    constellation = cp->dfi[interval];
+    if (constellation < 0 || constellation >= cp->constellation_count)
+        return v91_ucode_to_codeword(law, 0, positive);
+    for (int ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+        uint8_t codeword;
+        double level;
+        double error;
+
+        if (!vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            continue;
+        codeword = v91_ucode_to_codeword(law, ucode, positive);
+        level = v91_codeword_to_linear(law, codeword);
+        error = fabs(sample - level);
+        if (error < best_error) {
+            best_error = error;
+            best_ucode = ucode;
+        }
+    }
+    if (best_ucode < 0)
+        best_ucode = 0;
+    return v91_ucode_to_codeword(law, best_ucode, positive);
+}
+
+static int v90_cp_ucode_for_label(const vpcm_cp_frame_t *cp,
+                                  int interval,
+                                  int label)
+{
+    int constellation;
+
+    if (!cp || interval < 0 || interval >= VPCM_CP_FRAME_INTERVALS)
+        return -1;
+    constellation = cp->dfi[interval];
+    if (constellation < 0 || constellation >= cp->constellation_count)
+        return -1;
+    for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+        if (!vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            continue;
+        if (label-- == 0)
+            return ucode;
+    }
+    return -1;
+}
+
+static void v90_slice_cp_mapping_frame(v91_law_t law,
+                                       const vpcm_cp_frame_t *cp,
+                                       int bits_per_frame,
+                                       const double samples[6],
+                                       uint8_t codewords[6])
+{
+    int moduli[6];
+    bool seven_level_k12 = cp && cp->shaping_redundancy == 1
+                         && bits_per_frame == 17;
+
+    for (int i = 0; i < 6; i++) {
+        int constellation = cp ? cp->dfi[i] : -1;
+
+        moduli[i] = constellation >= 0
+                  && constellation < cp->constellation_count
+                  ? vpcm_cp_mask_population(cp->masks[constellation]) : 0;
+        if (moduli[i] != 7)
+            seven_level_k12 = false;
+    }
+    if (seven_level_k12) {
+        int labels[6] = {0};
+        int lower = 0;
+        int place = 1;
+
+        /* For R < 2^12 in radix seven, digits 0..3 are unrestricted,
+         * digit 4 is at most one, and digit 5 is always zero. */
+        for (int i = 0; i < 4; i++) {
+            double best_error = HUGE_VAL;
+
+            for (int label = 0; label < 7; label++) {
+                int ucode = v90_cp_ucode_for_label(cp, i, label);
+                bool positive = samples[i] >= 0.0;
+                uint8_t cw = v91_ucode_to_codeword(law, ucode, positive);
+                double level = v91_codeword_to_linear(law, cw);
+                double error = fabs(samples[i] - level);
+
+                if (error < best_error) {
+                    best_error = error;
+                    labels[i] = label;
+                }
+            }
+            lower += labels[i] * place;
+            place *= 7;
+        }
+        {
+            int max_label = (4095 - lower) / place;
+            double best_error = HUGE_VAL;
+
+            if (max_label > 1)
+                max_label = 1;
+            for (int label = 0; label <= max_label; label++) {
+                int ucode = v90_cp_ucode_for_label(cp, 4, label);
+                bool positive = samples[4] >= 0.0;
+                uint8_t cw = v91_ucode_to_codeword(law, ucode, positive);
+                double level = v91_codeword_to_linear(law, cw);
+                double error = fabs(samples[4] - level);
+
+                if (error < best_error) {
+                    best_error = error;
+                    labels[4] = label;
+                }
+            }
+        }
+        labels[5] = 0;
+        for (int i = 0; i < 6; i++) {
+            int ucode = v90_cp_ucode_for_label(cp, i, labels[i]);
+
+            codewords[i] = v91_ucode_to_codeword(
+                law, ucode, samples[i] >= 0.0);
+        }
+        return;
+    }
+    for (int i = 0; i < 6; i++)
+        codewords[i] = v90_slice_cp_codeword(law, cp, i, samples[i]);
+}
+
+static bool v90_recover_downstream_mp_pcm(
+                                    const int16_t *digital_pcm,
+                                    int total_samples,
+                                    int training_search_start,
+                                    int search_start,
+                                    const vpcm_cp_frame_t *cpt,
+                                    int u_info,
+                                    v34_upstream_mp_recovery_t *out)
+{
+    enum { MAX_FRAMES = 5000 };
+    vpcm_cp_frame_t wire_cp;
+    uint8_t *plain_bits;
+    int bits_per_frame;
+    int search_end;
+    int best_frames = 0;
+    int best_start = -1;
+    int best_ones = 0;
+    int best_profile = -1;
+    v90_pcm_equalizer_t pcm_equalizer;
+
+    if (!digital_pcm || !cpt || !out || search_start < 0
+        || search_start >= total_samples)
+        return false;
+    memset(&pcm_equalizer, 0, sizeof(pcm_equalizer));
+    if (training_search_start < 0)
+        training_search_start = 0;
+    (void)v90_train_pcm_equalizer(digital_pcm,
+                                  total_samples,
+                                  training_search_start,
+                                  search_start - V90_TRN1D_SYMBOLS,
+                                  &pcm_equalizer);
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 PCM equalizer valid=%d training=%d correlation=%.1f%% validation=%.1f%%\n",
+                pcm_equalizer.valid ? 1 : 0,
+                pcm_equalizer.training_start,
+                100.0 * pcm_equalizer.correlation,
+                100.0 * pcm_equalizer.validation_match);
+    }
+    bits_per_frame = cpt->drn + 8;
+    if (bits_per_frame < 6 || bits_per_frame > 64)
+        return false;
+    plain_bits = malloc((size_t)MAX_FRAMES * (size_t)bits_per_frame);
+    if (!plain_bits)
+        return false;
+    search_end = total_samples - 6;
+    /* The captured digital channel can be on either side of the robbed-bit
+     * transform and can have been expanded from either G.711 law by the WAV
+     * recorder.  Try all applicable wire profiles; the MP CRC, not a signal
+     * heuristic, selects the valid interpretation. */
+    for (int profile = 0; profile < 4; profile++) {
+      bool use_codec_masks = (profile & 1) != 0;
+      bool capture_alaw = cpt->codec_alaw ^ ((profile & 2) != 0);
+      double capture_gain = 1.0;
+      double capture_offset = 0.0;
+      int training_run_end = -1;
+      int profile_search_start = search_start;
+      int profile_search_end = search_end;
+      int profile_initial_state = 0;
+      v90_pcm_equalizer_t trn_equalizer;
+      v90_pcm_label_equalizer_t label_equalizer;
+      v90_pcm_forward_equalizer_t forward_equalizer;
+      v90_pcm_centroid_slicer_t centroid_slicer;
+
+      bits_per_frame = cpt->drn + 8;
+      memset(&trn_equalizer, 0, sizeof(trn_equalizer));
+      memset(&label_equalizer, 0, sizeof(label_equalizer));
+      memset(&forward_equalizer, 0, sizeof(forward_equalizer));
+      memset(&centroid_slicer, 0, sizeof(centroid_slicer));
+      if (getenv("VPCM_V90_MP_PROFILE")
+          && profile != atoi(getenv("VPCM_V90_MP_PROFILE")))
+          continue;
+      if (profile > 0 && getenv("VPCM_V90_MP_PRIMARY_ONLY"))
+          break;
+
+      if (use_codec_masks && !cpt->codec_constellations_differ)
+          continue;
+      wire_cp = *cpt;
+      if (use_codec_masks) {
+          memcpy(wire_cp.masks,
+                 wire_cp.codec_masks,
+                 sizeof(wire_cp.masks));
+      }
+      wire_cp.codec_constellations_differ = false;
+      memset(wire_cp.codec_masks, 0, sizeof(wire_cp.codec_masks));
+      if (u_info >= 0 && u_info < VPCM_CP_MASK_BITS) {
+          int training_end = search_start + 1400;
+          int histogram[VPCM_CP_MASK_BITS] = {0};
+          int mode = -1;
+          double observed_sum = 0.0;
+          int observed_count = 0;
+          double positive_sum = 0.0;
+          double negative_sum = 0.0;
+          int positive_count = 0;
+          int negative_count = 0;
+
+          if (training_end > total_samples)
+              training_end = total_samples;
+          for (int sample = search_start;
+               sample < training_end;
+               sample++) {
+              uint8_t cw = v91_linear_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  digital_pcm[sample]);
+              int ucode = v91_codeword_to_ucode(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  cw);
+
+              if (ucode > 0)
+                  histogram[ucode]++;
+          }
+          for (int u = 1; u < VPCM_CP_MASK_BITS; u++) {
+              if (mode < 0 || histogram[u] > histogram[mode])
+                  mode = u;
+          }
+          {
+              int run = 0;
+              int longest = 0;
+
+              for (int sample = search_start;
+                   mode >= 0 && sample < training_end;
+                   sample++) {
+                  uint8_t cw = v91_linear_to_codeword(
+                      capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                      digital_pcm[sample]);
+                  int ucode = v91_codeword_to_ucode(
+                      capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                      cw);
+
+                  if (ucode == mode) {
+                      run++;
+                      if (run > longest) {
+                          longest = run;
+                          training_run_end = sample + 1;
+                      }
+                  } else {
+                      run = 0;
+                  }
+              }
+          }
+          for (int sample = search_start;
+               mode >= 0 && sample < training_end;
+               sample++) {
+              uint8_t cw = v91_linear_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  digital_pcm[sample]);
+
+              if (v91_codeword_to_ucode(
+                      capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                      cw) == mode) {
+                  observed_sum += fabs((double)digital_pcm[sample]);
+                  observed_count++;
+                  if (digital_pcm[sample] >= 0) {
+                      positive_sum += digital_pcm[sample];
+                      positive_count++;
+                  } else {
+                      negative_sum += digital_pcm[sample];
+                      negative_count++;
+                  }
+              }
+          }
+          if (positive_count > 0 && negative_count > 0) {
+              uint8_t positive_cw = v91_ucode_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  u_info,
+                  true);
+              uint8_t negative_cw = v91_ucode_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  u_info,
+                  false);
+              double target_positive = v91_codeword_to_linear(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  positive_cw);
+              double target_negative = v91_codeword_to_linear(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  negative_cw);
+              double observed_positive = positive_sum / positive_count;
+              double observed_negative = negative_sum / negative_count;
+
+              capture_gain = (target_positive - target_negative)
+                           / (observed_positive - observed_negative);
+              capture_offset = target_positive
+                             - capture_gain * observed_positive;
+          } else if (observed_count > 0 && observed_sum > 0.0) {
+              uint8_t target_cw = v91_ucode_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  u_info,
+                  true);
+              double target = fabs((double)v91_codeword_to_linear(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  target_cw));
+
+              capture_gain = target
+                           / (observed_sum / (double)observed_count);
+          }
+          if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+              fprintf(stderr,
+                      "v90 MP PCM calibration=%s mode=%d target=%d gain=%.6f offset=%.3f\n",
+                      capture_alaw ? "alaw" : "ulaw",
+                      mode,
+                      u_info,
+                      capture_gain,
+                      capture_offset);
+          }
+      }
+      {
+          int fit_start = search_start + 1100;
+          int fit_end = search_start + 5000;
+          double seed_gain = capture_gain;
+          double best_gain = capture_gain;
+          int best_matches = -1;
+
+          if (fit_start < search_start)
+              fit_start = search_start;
+          if (fit_end > total_samples)
+              fit_end = total_samples;
+          for (int step = -128; step <= 128; step++) {
+              double gain = seed_gain * (1.0 + step / 512.0);
+              int matches = 0;
+
+              for (int sample = fit_start; sample < fit_end; sample++) {
+                  double adjusted = digital_pcm[sample] * gain
+                                  + capture_offset;
+                  uint8_t cw = v91_linear_to_codeword(
+                      capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                      (int16_t)(adjusted < -32768.0 ? -32768.0
+                                : adjusted > 32767.0 ? 32767.0
+                                : lrint(adjusted)));
+                  int ucode = v91_codeword_to_ucode(
+                      capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                      cw);
+
+                  if (ucode >= 0
+                      && vpcm_cp_mask_get(wire_cp.masks[0], ucode)) {
+                      matches++;
+                  }
+              }
+              if (matches > best_matches) {
+                  best_matches = matches;
+                  best_gain = gain;
+              }
+          }
+          capture_gain = best_gain;
+          if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+              fprintf(stderr,
+                      "v90 MP PCM constellation-fit=%s/%s gain=%.6f matches=%d/%d\n",
+                      capture_alaw ? "alaw" : "ulaw",
+                      use_codec_masks ? "codec-mask" : "primary-mask",
+                      capture_gain,
+                      best_matches,
+                      fit_end - fit_start);
+          }
+      }
+      if (training_run_end >= 0) {
+          int transition_end = -1;
+          int transition_longest = 0;
+          int transition_run = 0;
+          int transition_scan_end = search_start + 3500;
+          int acq_begin;
+          int acq_end;
+          double acq_gain = capture_gain;
+          double acq_offset = capture_offset;
+          double acq_match = -HUGE_VAL;
+          int acq_start = -1;
+          int acq_state = 0;
+          int acq_d = bits_per_frame;
+          int acq_d_min = bits_per_frame;
+          int acq_d_max = bits_per_frame;
+
+          if (getenv("VPCM_V90_MP_ALL_D")) {
+              acq_d_min = 12;
+              acq_d_max = 30;
+          }
+
+          if (transition_scan_end > total_samples)
+              transition_scan_end = total_samples;
+          for (int sample = search_start;
+               sample < transition_scan_end;
+               sample++) {
+              uint8_t cw = v91_linear_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  digital_pcm[sample]);
+              int ucode = v91_codeword_to_ucode(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  cw);
+
+              if (ucode >= 0
+                  && vpcm_cp_mask_get(cpt->masks[0], ucode)) {
+                  transition_run++;
+                  if (transition_run > transition_longest) {
+                      transition_longest = transition_run;
+                      transition_end = sample + 1;
+                  }
+              } else {
+                  transition_run = 0;
+              }
+          }
+          acq_begin = search_start;
+          acq_end = search_end - 6 * 32;
+          if (acq_begin < search_start)
+              acq_begin = search_start;
+          if (acq_end > total_samples - 6 * 32)
+              acq_end = total_samples - 6 * 32;
+          for (int initial_state = 0; initial_state < 256;
+               initial_state++) {
+              enum { ACQ_FRAMES = 32 };
+              v90_shaped_rx_state_t initial = {0};
+
+              initial.prev_odd = (uint8_t)(initial_state & 1);
+              for (int i = 0; i < 6; i++) {
+                  initial.prev_t[i] =
+                      (uint8_t)((initial_state >> (i + 1)) & 1);
+              }
+              initial.trellis_state =
+                  (uint8_t)((initial_state >> 7) & 1);
+              for (int start = acq_begin; start < acq_end; start++) {
+                  v90_shaped_rx_state_t trial = initial;
+                  uint32_t scrambler[19] = {0};
+                  int sign_matches[19] = {0};
+                  int sign_checks = 0;
+
+                  for (int frame = 0; frame < ACQ_FRAMES; frame++) {
+                      uint8_t signs[6];
+                      uint8_t recovered[5];
+
+                      for (int i = 0; i < 6; i++) {
+                          signs[i] = v90_pcm_equalizer_output(
+                              &pcm_equalizer,
+                              digital_pcm,
+                              total_samples,
+                              start + 6 * frame + i) >= 0.0;
+                      }
+                      if (v90_demap_shaped_sign_frame(
+                              &wire_cp,
+                              &trial,
+                              signs,
+                              recovered) != 5) {
+                          break;
+                      }
+                      for (int d = acq_d_min; d <= acq_d_max; d++) {
+                          int index = d - 12;
+
+                          for (int bit = 0; bit < d; bit++) {
+                              int feedback = ((scrambler[index] >> 22)
+                                            ^ (scrambler[index] >> 17)) & 1;
+                              int scrambled = 1 ^ feedback;
+
+                              scrambler[index] =
+                                  ((scrambler[index] << 1) | scrambled)
+                                  & 0x7FFFFF;
+                              if (bit < 5) {
+                                  sign_matches[index] +=
+                                      recovered[bit] == scrambled;
+                              }
+                          }
+                      }
+                      sign_checks += 5;
+                  }
+                  if (sign_checks == 0)
+                      continue;
+                  for (int d = acq_d_min; d <= acq_d_max; d++) {
+                      double match =
+                          (double)sign_matches[d - 12] / sign_checks;
+
+                      if (match > acq_match) {
+                          acq_match = match;
+                          acq_start = start;
+                          acq_state = initial_state;
+                          acq_d = d;
+                      }
+                  }
+              }
+          }
+          if (acq_start >= 0 && acq_match >= 0.80) {
+              enum { TRN2D_MAX_FRAMES = 3000,
+                     TRN2D_MAX_CODEWORDS = 6 * TRN2D_MAX_FRAMES };
+              vpcm_cp_frame_t trn_cp = wire_cp;
+              v90_shaped_rx_state_t initial = {0};
+              uint8_t expected_trn[TRN2D_MAX_CODEWORDS];
+              int trn2d_frames = getenv("VPCM_V90_EQ_FRAMES")
+                                ? atoi(getenv("VPCM_V90_EQ_FRAMES")) : 340;
+              int trn2d_codewords;
+              int generated_trn;
+
+              if (trn2d_frames < 340)
+                  trn2d_frames = 340;
+              if (trn2d_frames > TRN2D_MAX_FRAMES)
+                  trn2d_frames = TRN2D_MAX_FRAMES;
+              trn2d_codewords = 6 * trn2d_frames;
+
+              trn_cp.drn = (uint8_t)(acq_d - 8);
+              initial.prev_odd = (uint8_t)(acq_state & 1);
+              for (int i = 0; i < 6; i++) {
+                  initial.prev_t[i] =
+                      (uint8_t)((acq_state >> (i + 1)) & 1);
+              }
+              initial.trellis_state = (uint8_t)((acq_state >> 7) & 1);
+              generated_trn = v90_generate_trn2d_codewords(
+                      capture_alaw ? V90_LAW_ALAW : V90_LAW_ULAW,
+                      &trn_cp,
+                      &initial,
+                      TRN2D_MAX_FRAMES,
+                      expected_trn,
+                      TRN2D_MAX_CODEWORDS);
+              if (generated_trn >= trn2d_codewords) {
+                  /* The CP filter coefficients select the spectral-shaping
+                   * inversion rule, and a repeated-frame CP reconstruction
+                   * can still have an uncertain coefficient bit.  TRN2d's
+                   * modulus labels do not depend on that rule.  Preserve the
+                   * generated (known-PN) magnitude and take polarity from the
+                   * independently trained TRN1d sign equalizer. */
+                  double best_nrmse = HUGE_VAL;
+                  double best_label_accuracy = 0.0;
+                  uint8_t expected_labels[TRN2D_MAX_CODEWORDS];
+                  int first_start = transition_end - 80;
+                  int last_start = transition_end + 120;
+                  int best_label_start = -1;
+
+                  if (use_codec_masks) {
+                      first_start = acq_start;
+                      last_start = acq_start;
+                  }
+
+                  for (int i = 0; i < generated_trn; i++) {
+                      int ucode = v91_codeword_to_ucode(
+                          capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                          expected_trn[i]);
+
+                      expected_labels[i] = 0xFF;
+                      for (int label = 0; label < 7; label++) {
+                          if (v90_cp_ucode_for_label(
+                                  &trn_cp, i % 6, label) == ucode) {
+                              expected_labels[i] = (uint8_t)label;
+                              break;
+                          }
+                      }
+                  }
+                  for (int candidate_start = transition_end - 30;
+                       candidate_start <= transition_end + 120;
+                       candidate_start += 6) {
+                      v90_pcm_label_equalizer_t trial_labels;
+
+                      (void)v90_train_pcm_label_equalizer(
+                          digital_pcm,
+                          total_samples,
+                          candidate_start,
+                          &pcm_equalizer,
+                          expected_labels,
+                          trn2d_codewords,
+                          &trial_labels);
+                      if (trial_labels.validation_match
+                          > label_equalizer.validation_match) {
+                          label_equalizer = trial_labels;
+                      }
+                  }
+
+                  if (first_start < search_start)
+                      first_start = search_start;
+                  for (int candidate_start = first_start;
+                       candidate_start <= last_start;
+                       candidate_start++) {
+                      v90_pcm_equalizer_t trial_equalizer;
+                      double label_sum[7] = {0};
+                      int label_count[7] = {0};
+                      double label_centroid[7] = {0};
+                      int label_matches = 0;
+                      int label_checks = 0;
+
+                      for (int i = 0; i < trn2d_codewords; i++) {
+                          int ucode = v91_codeword_to_ucode(
+                              capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              expected_trn[i]);
+                          bool positive = v90_pcm_equalizer_output(
+                              &pcm_equalizer,
+                              digital_pcm,
+                              total_samples,
+                              candidate_start + i) >= 0.0;
+
+                          if (ucode >= 0) {
+                              expected_trn[i] = v91_ucode_to_codeword(
+                                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                  ucode,
+                                  positive);
+                          }
+                          if (i < 1200) {
+                              for (int label = 0; label < 7; label++) {
+                                  if (v90_cp_ucode_for_label(
+                                          &trn_cp, i % 6, label) == ucode) {
+                                      label_sum[label] +=
+                                          fabs((double)digital_pcm[
+                                              candidate_start + i]);
+                                      label_count[label]++;
+                                      break;
+                                  }
+                              }
+                          }
+                      }
+                      for (int label = 0; label < 7; label++) {
+                          if (label_count[label] > 0) {
+                              label_centroid[label] =
+                                  label_sum[label] / label_count[label];
+                          }
+                      }
+                      for (int i = 1200;
+                           i < trn2d_codewords - V90_PCM_EQ_TAPS;
+                           i++) {
+                          int ucode = v91_codeword_to_ucode(
+                              capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              expected_trn[i]);
+                          int expected_label = -1;
+                          int recovered_label = -1;
+                          double observation = fabs((double)digital_pcm[
+                              candidate_start + i]);
+                          double best_error = HUGE_VAL;
+
+                          for (int label = 0; label < 7; label++) {
+                              if (v90_cp_ucode_for_label(
+                                      &trn_cp, i % 6, label) == ucode) {
+                                  expected_label = label;
+                              }
+                              if (label_count[label] > 0
+                                  && fabs(observation
+                                          - label_centroid[label])
+                                     < best_error) {
+                                  best_error = fabs(observation
+                                                   - label_centroid[label]);
+                                  recovered_label = label;
+                              }
+                          }
+                          if (expected_label >= 0) {
+                              label_matches +=
+                                  recovered_label == expected_label;
+                              label_checks++;
+                          }
+                      }
+                      if (label_checks > 0
+                          && (double)label_matches / label_checks
+                             > best_label_accuracy) {
+                          best_label_accuracy =
+                              (double)label_matches / label_checks;
+                          best_label_start = candidate_start;
+                      }
+                      (void)v90_train_known_pcm_equalizer(
+                          digital_pcm,
+                          total_samples,
+                          candidate_start,
+                          capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                          &trn_cp,
+                          expected_trn,
+                          trn2d_codewords,
+                          &trial_equalizer);
+                      if (trial_equalizer.validation_nrmse > 0.0
+                          && trial_equalizer.validation_nrmse < best_nrmse) {
+                          best_nrmse = trial_equalizer.validation_nrmse;
+                          trn_equalizer = trial_equalizer;
+                      }
+                  }
+                  if (trn_equalizer.training_start >= 0) {
+                      for (int i = 0; i < trn2d_codewords; i++) {
+                          int ucode = v91_codeword_to_ucode(
+                              capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              expected_trn[i]);
+                          bool positive = v90_pcm_equalizer_output(
+                              &pcm_equalizer,
+                              digital_pcm,
+                              total_samples,
+                              trn_equalizer.training_start + i) >= 0.0;
+
+                          if (ucode >= 0) {
+                              expected_trn[i] = v91_ucode_to_codeword(
+                                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                  ucode,
+                                  positive);
+                          }
+                      }
+                      (void)v90_train_pcm_forward_equalizer(
+                          digital_pcm,
+                          total_samples,
+                          trn_equalizer.training_start,
+                          capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                          &trn_cp,
+                          expected_trn,
+                          trn2d_codewords,
+                          &forward_equalizer);
+                      (void)v90_train_pcm_centroid_slicer(
+                          digital_pcm,
+                          total_samples,
+                          trn_equalizer.training_start,
+                          &trn_equalizer,
+                          expected_labels,
+                          trn2d_codewords,
+                          &centroid_slicer);
+                  }
+                  if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                      fprintf(stderr,
+                              "v90 TRN2d timing best=%d nrmse=%.3f exact=%.1f%% sign=%.1f%%\n",
+                              trn_equalizer.training_start,
+                              trn_equalizer.validation_nrmse,
+                              100.0 * trn_equalizer.validation_match,
+                              100.0 * trn_equalizer.validation_sign_match);
+                      fprintf(stderr,
+                              "v90 TRN2d label timing best=%d accuracy=%.1f%%\n",
+                              best_label_start,
+                              100.0 * best_label_accuracy);
+                      fprintf(stderr,
+                              "v90 TRN2d label FIR start=%d valid=%d accuracy=%.1f%%\n",
+                              label_equalizer.training_start,
+                              label_equalizer.valid ? 1 : 0,
+                              100.0 * label_equalizer.validation_match);
+                      fprintf(stderr,
+                              "v90 TRN2d forward FIR valid=%d teacher=%.1f%% dfe=%.1f%%\n",
+                              forward_equalizer.valid ? 1 : 0,
+                              100.0 * forward_equalizer.teacher_match,
+                              100.0 * forward_equalizer.decision_feedback_match);
+                      fprintf(stderr,
+                              "v90 TRN2d centroid valid=%d accuracy=%.1f%%\n",
+                              centroid_slicer.valid ? 1 : 0,
+                              100.0 * centroid_slicer.validation_match);
+                      if (centroid_slicer.valid) {
+                          fprintf(stderr, "v90 TRN2d probe blocks=");
+                          for (int first_frame = 0;
+                               first_frame < generated_trn / 6;
+                               first_frame += 100) {
+                              int end_frame = first_frame + 100;
+                              int matches = 0;
+                              int checks = 0;
+
+                              if (end_frame > generated_trn / 6)
+                                  end_frame = generated_trn / 6;
+                              for (int n = first_frame * 6;
+                                   n < end_frame * 6
+                                   && trn_equalizer.training_start + n
+                                      + V90_PCM_EQ_TAPS
+                                      - V90_PCM_EQ_PRE < total_samples;
+                                   n++) {
+                                  int interval = n % 6;
+                                  double value = fabs(
+                                      v90_pcm_equalizer_output(
+                                          &trn_equalizer,
+                                          digital_pcm,
+                                          total_samples,
+                                          trn_equalizer.training_start + n));
+                                  double best_error = HUGE_VAL;
+                                  int best_label = -1;
+
+                                  for (int label = 0; label < 7; label++) {
+                                      double error;
+
+                                      if (!centroid_slicer.count
+                                              [interval][label]) {
+                                          continue;
+                                      }
+                                      error = fabs(value
+                                          - centroid_slicer.centroid
+                                              [interval][label]);
+                                      if (error < best_error) {
+                                          best_error = error;
+                                          best_label = label;
+                                      }
+                                  }
+                                  matches += best_label
+                                           == expected_labels[n];
+                                  checks++;
+                              }
+                              fprintf(stderr,
+                                      "%s%d:%d%%",
+                                      first_frame ? "," : "",
+                                      first_frame,
+                                      checks > 0
+                                          ? (100 * matches + checks / 2)
+                                            / checks : 0);
+                          }
+                          fputc('\n', stderr);
+                          fprintf(stderr, "v90 TRN2d probe fine=");
+                          for (int first_frame = 1550;
+                               first_frame < 1750;
+                               first_frame += 10) {
+                              int matches = 0;
+                              int checks = 0;
+
+                              for (int n = first_frame * 6;
+                                   n < (first_frame + 10) * 6;
+                                   n++) {
+                                  int interval = n % 6;
+                                  double value = fabs(
+                                      v90_pcm_equalizer_output(
+                                          &trn_equalizer,
+                                          digital_pcm,
+                                          total_samples,
+                                          trn_equalizer.training_start + n));
+                                  double best_error = HUGE_VAL;
+                                  int best_label = -1;
+
+                                  for (int label = 0; label < 7; label++) {
+                                      double error;
+
+                                      if (!centroid_slicer.count
+                                              [interval][label])
+                                          continue;
+                                      error = fabs(value
+                                          - centroid_slicer.centroid
+                                              [interval][label]);
+                                      if (error < best_error) {
+                                          best_error = error;
+                                          best_label = label;
+                                      }
+                                  }
+                                  matches += best_label
+                                           == expected_labels[n];
+                                  checks++;
+                              }
+                              fprintf(stderr,
+                                      "%s%d:%d%%",
+                                      first_frame == 1550 ? "" : ",",
+                                      first_frame,
+                                      checks > 0
+                                          ? (100 * matches + checks / 2)
+                                            / checks : 0);
+                          }
+                          fputc('\n', stderr);
+                          fprintf(stderr, "v90 TRN2d probe edge=");
+                          for (int frame = 1680; frame < 1710; frame++) {
+                              int matches = 0;
+
+                              for (int i = 0; i < 6; i++) {
+                                  int n = frame * 6 + i;
+                                  double value = fabs(
+                                      v90_pcm_equalizer_output(
+                                          &trn_equalizer,
+                                          digital_pcm,
+                                          total_samples,
+                                          trn_equalizer.training_start + n));
+                                  double best_error = HUGE_VAL;
+                                  int best_label = -1;
+
+                                  for (int label = 0; label < 7; label++) {
+                                      double error;
+
+                                      if (!centroid_slicer.count[i][label])
+                                          continue;
+                                      error = fabs(value
+                                          - centroid_slicer.centroid[i][label]);
+                                      if (error < best_error) {
+                                          best_error = error;
+                                          best_label = label;
+                                      }
+                                  }
+                                  matches += best_label
+                                           == expected_labels[n];
+                              }
+                              fprintf(stderr,
+                                      "%s%d:%d",
+                                      frame == 1680 ? "" : ",",
+                                      frame,
+                                      matches);
+                          }
+                          fputc('\n', stderr);
+                          for (int interval = 0;
+                               interval < VPCM_CP_FRAME_INTERVALS;
+                               interval++) {
+                              fprintf(stderr,
+                                      "v90 TRN2d centroid[%d]=",
+                                      interval);
+                              for (int label = 0; label < 7; label++) {
+                                  if (centroid_slicer.count[interval][label]) {
+                                      fprintf(stderr,
+                                              "%s%d:%.4f",
+                                              label ? "," : "",
+                                              label,
+                                              centroid_slicer.centroid
+                                                  [interval][label]);
+                                  }
+                              }
+                              fputc('\n', stderr);
+                          }
+                      }
+                  }
+              }
+              if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                  fprintf(stderr,
+                          "v90 TRN2d generator codewords=%d expected=%d\n",
+                          generated_trn,
+                          trn2d_codewords);
+              }
+          }
+          if (acq_start >= 0 && acq_match >= 0.80
+              && trn_equalizer.valid) {
+              capture_gain = acq_gain;
+              capture_offset = acq_offset;
+              profile_search_start = acq_start;
+              profile_search_end = acq_start + 1;
+              profile_initial_state = acq_state;
+              bits_per_frame = acq_d;
+          }
+          if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+              fprintf(stderr,
+                      "v90 MP PCM TRN2d-acq=%s/%s transition=%d start=%d state=%d D=%d gain=%.6f offset=%.3f match=%.1f%%\n",
+                      capture_alaw ? "alaw" : "ulaw",
+                      use_codec_masks ? "codec-mask" : "primary-mask",
+                      transition_end,
+                      acq_start,
+                      acq_state,
+                      acq_d,
+                      acq_gain,
+                      acq_offset,
+                      100.0 * acq_match);
+              fprintf(stderr,
+                      "v90 TRN2d equalizer valid=%d validation=%.1f%%\n",
+                      trn_equalizer.valid ? 1 : 0,
+                      100.0 * trn_equalizer.validation_match);
+          }
+          if (acq_match < 0.80 || !trn_equalizer.valid)
+              continue;
+      }
+      if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+          int diag_end = search_start + 8000;
+          int histogram[VPCM_CP_MASK_BITS] = {0};
+          int matches = 0;
+          int run = 0;
+          int longest = 0;
+          int longest_end = -1;
+
+          if (diag_end > total_samples)
+              diag_end = total_samples;
+          for (int sample = search_start; sample < diag_end; sample++) {
+              double adjusted = digital_pcm[sample] * capture_gain
+                              + capture_offset;
+              uint8_t cw = v91_linear_to_codeword(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  (int16_t)(adjusted < -32768.0 ? -32768.0
+                            : adjusted > 32767.0 ? 32767.0
+                            : lrint(adjusted)));
+              int ucode = v91_codeword_to_ucode(
+                  capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                  cw);
+
+              if (ucode >= 0)
+                  histogram[ucode]++;
+
+              if (ucode >= 0
+                  && vpcm_cp_mask_get(wire_cp.masks[0], ucode)) {
+                  matches++;
+                  run++;
+                  if (run > longest)
+                      longest = run, longest_end = sample + 1;
+              } else {
+                  run = 0;
+              }
+          }
+          fprintf(stderr,
+                  "v90 MP PCM profile=%s/%s magnitude-match=%d/%d longest=%d range=%d..%d\n",
+                  capture_alaw ? "alaw" : "ulaw",
+                  use_codec_masks ? "codec-mask" : "primary-mask",
+                  matches,
+                  diag_end - search_start,
+                  longest,
+                  longest_end >= 0 ? longest_end - longest : -1,
+                  longest_end);
+          if (profile == 0) {
+              fprintf(stderr, "v90 MP PCM top-ucodes=");
+              for (int rank = 0; rank < 16; rank++) {
+                  int best = -1;
+
+                  for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                      if (histogram[u] > 0
+                          && (best < 0 || histogram[u] > histogram[best])) {
+                          best = u;
+                      }
+                  }
+                  if (best < 0)
+                      break;
+                  fprintf(stderr,
+                          "%s%d:%d",
+                          rank ? "," : "",
+                          best,
+                          histogram[best]);
+                  histogram[best] = 0;
+              }
+              fputc('\n', stderr);
+          }
+          if (longest_end >= 0 && wire_cp.constellation_count == 1) {
+              int run_start = longest_end - longest;
+              int modulus_bits = bits_per_frame
+                               - (6 - wire_cp.shaping_redundancy);
+
+              for (int phase = 0; phase < 6; phase++) {
+                  int valid_frames = 0;
+
+                  for (int frame_start = run_start + phase;
+                       frame_start + 6 <= longest_end;
+                       frame_start += 6) {
+                      uint64_t r = 0;
+                      int labels[6];
+                      int moduli[6];
+                      bool valid = true;
+
+                      for (int i = 0; i < 6; i++) {
+                          uint8_t cw = v91_linear_to_codeword(
+                              capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              (int16_t)lrint(digital_pcm[frame_start + i]
+                                             * capture_gain
+                                             + capture_offset));
+                          int ucode = v91_codeword_to_ucode(
+                              capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                              cw);
+                          int label = 0;
+                          int modulus = 0;
+
+                          if (ucode < 0
+                              || !vpcm_cp_mask_get(wire_cp.masks[0], ucode)) {
+                              valid = false;
+                              break;
+                          }
+                          for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                              if (vpcm_cp_mask_get(wire_cp.masks[0], u)) {
+                                  if (u > ucode)
+                                      label++;
+                                  modulus++;
+                              }
+                          }
+                          labels[i] = label;
+                          moduli[i] = modulus;
+                      }
+                      if (!valid)
+                          break;
+                      for (int i = 5; i >= 0; i--)
+                          r = (uint64_t)moduli[i] * r
+                            + (uint64_t)labels[i];
+                      if (modulus_bits < 64 && (r >> modulus_bits) != 0)
+                          break;
+                      valid_frames++;
+                  }
+                  fprintf(stderr,
+                          "v90 MP PCM phase=%d mixed-radix-valid=%d\n",
+                          phase,
+                          valid_frames);
+              }
+          }
+      }
+      for (int start = profile_search_start;
+           start < profile_search_end;
+           start++) {
+        int initial_state_count = 1;
+
+        if (wire_cp.shaping_redundancy > 0
+            && wire_cp.constellation_count == 1) {
+            bool prefix_valid = true;
+            bool recent_invalid = start == search_start;
+
+            for (int i = 0; i < 60 && prefix_valid; i++) {
+                uint8_t cw = v91_linear_to_codeword(
+                    capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    (int16_t)lrint(digital_pcm[start + i] * capture_gain
+                                   + capture_offset));
+                int ucode = v91_codeword_to_ucode(
+                    capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    cw);
+
+                prefix_valid = ucode >= 0
+                            && vpcm_cp_mask_get(wire_cp.masks[0], ucode);
+            }
+            for (int i = 1; i <= 6 && start - i >= search_start; i++) {
+                uint8_t cw = v91_linear_to_codeword(
+                    capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    (int16_t)lrint(digital_pcm[start - i] * capture_gain
+                                   + capture_offset));
+                int ucode = v91_codeword_to_ucode(
+                    capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    cw);
+
+                if (ucode < 0
+                    || !vpcm_cp_mask_get(wire_cp.masks[0], ucode)) {
+                    recent_invalid = true;
+                    break;
+                }
+            }
+            if (prefix_valid && recent_invalid)
+                initial_state_count = 256;
+        }
+        for (int initial_state = 0;
+             initial_state < initial_state_count;
+             initial_state++) {
+        int state_value = profile_search_end == profile_search_start + 1
+                        ? profile_initial_state : initial_state;
+        uint32_t descramble_reg = 0;
+        uint32_t known_scramble_reg = 0;
+        int known_trn_frames = getenv("VPCM_V90_TRN_FRAMES")
+                             ? atoi(getenv("VPCM_V90_TRN_FRAMES")) : 340;
+        int prev_sign = 0;
+        v90_shaped_rx_state_t shaper;
+        int bit_count = 0;
+        int frames = 0;
+        int mp_frame_bits[2] = {
+            ((86 + bits_per_frame - 1) / bits_per_frame) * bits_per_frame,
+            ((188 + bits_per_frame - 1) / bits_per_frame) * bits_per_frame
+        };
+
+        memset(&shaper, 0, sizeof(shaper));
+        shaper.prev_odd = (uint8_t)(state_value & 1);
+        for (int i = 0; i < 6; i++)
+            shaper.prev_t[i] = (uint8_t)((state_value >> (i + 1)) & 1);
+        shaper.trellis_state = (uint8_t)((state_value >> 7) & 1);
+
+        while (start + 6 * (frames + 1) <= total_samples
+               && frames < MAX_FRAMES) {
+            uint8_t codewords[6];
+            uint8_t frame_bits[64];
+            double adjusted_samples[6];
+
+            for (int i = 0; i < 6; i++) {
+                if (trn_equalizer.valid) {
+                    adjusted_samples[i] = 32768.0
+                        * v90_pcm_equalizer_output(
+                            &trn_equalizer,
+                            digital_pcm,
+                            total_samples,
+                            start + 6 * frames + i);
+                } else {
+                    adjusted_samples[i] =
+                        digital_pcm[start + 6 * frames + i] * capture_gain
+                        + capture_offset;
+                }
+            }
+            if (centroid_slicer.valid) {
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                    double value = fabs(adjusted_samples[i] / 32768.0);
+                    double best_error = HUGE_VAL;
+                    int best_label = -1;
+
+                    for (int label = 0; label < 7; label++) {
+                        double error;
+
+                        if (centroid_slicer.count[i][label] == 0)
+                            continue;
+                        error = fabs(value
+                            - centroid_slicer.centroid[i][label]);
+                        if (error < best_error) {
+                            best_error = error;
+                            best_label = label;
+                        }
+                    }
+                    codewords[i] = v91_ucode_to_codeword(
+                        capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                        v90_cp_ucode_for_label(&wire_cp, i, best_label),
+                        adjusted_samples[i] >= 0.0);
+                }
+            } else {
+                v90_slice_cp_mapping_frame(
+                    capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                    &wire_cp,
+                    bits_per_frame,
+                    adjusted_samples,
+                    codewords);
+            }
+            if (frames < known_trn_frames
+                && wire_cp.shaping_redundancy > 0) {
+                uint8_t known_scrambled[64];
+                uint8_t observed_signs[6];
+                int sign_bits = 6 - wire_cp.shaping_redundancy;
+
+                for (int bit = 0; bit < bits_per_frame; bit++) {
+                    int feedback = ((known_scramble_reg >> 22)
+                                  ^ (known_scramble_reg >> 17)) & 1;
+                    int scrambled = 1 ^ feedback;
+
+                    known_scramble_reg = ((known_scramble_reg << 1)
+                                         | (uint32_t)scrambled)
+                                       & 0x7FFFFF;
+                    known_scrambled[bit] = (uint8_t)scrambled;
+                    frame_bits[bit] = 1;
+                }
+                for (int i = 0; i < 6; i++)
+                    observed_signs[i] = adjusted_samples[i] >= 0.0;
+                if (v90_track_known_shaped_sign_frame(
+                        &wire_cp,
+                        &shaper,
+                        known_scrambled,
+                        observed_signs) < 0) {
+                    break;
+                }
+                (void)sign_bits;
+                descramble_reg = known_scramble_reg;
+            } else {
+                if (frames == known_trn_frames
+                    && getenv("VPCM_V90_MP_TRELLIS")) {
+                    shaper.trellis_state = (uint8_t)
+                        (atoi(getenv("VPCM_V90_MP_TRELLIS")) & 1);
+                }
+                if ((wire_cp.shaping_redundancy == 0
+                 ? v90_demap_mapped_frame(
+                       capture_alaw ? V90_LAW_ALAW : V90_LAW_ULAW,
+                       &wire_cp,
+                       bits_per_frame,
+                       &descramble_reg,
+                       &prev_sign,
+                       codewords,
+                       frame_bits)
+                 : v90_demap_shaped_frame(
+                       capture_alaw ? V90_LAW_ALAW : V90_LAW_ULAW,
+                       &wire_cp,
+                       bits_per_frame,
+                       &descramble_reg,
+                       &shaper,
+                       codewords,
+                       frame_bits)) != bits_per_frame) {
+                    break;
+                }
+            }
+            memcpy(plain_bits + bit_count,
+                   frame_bits,
+                   (size_t)bits_per_frame);
+            bit_count += bits_per_frame;
+            frames++;
+        }
+        if (frames < 100)
+            continue;
+        {
+            int ones = 0;
+
+            for (int bit = 0; bit < bit_count; bit++)
+                ones += plain_bits[bit] != 0;
+            if (frames > best_frames
+                || (frames == best_frames && ones > best_ones)) {
+                best_frames = frames;
+                best_start = start;
+                best_ones = ones;
+                best_profile = profile;
+            }
+            if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                fprintf(stderr, "v90 MP PCM frame-block ones=");
+                for (int first_frame = 0;
+                     first_frame < frames;
+                     first_frame += 100) {
+                    int end_frame = first_frame + 100;
+                    int block_ones = 0;
+                    int block_bits;
+
+                    if (end_frame > frames)
+                        end_frame = frames;
+                    block_bits = (end_frame - first_frame) * bits_per_frame;
+                    for (int bit = first_frame * bits_per_frame;
+                         bit < end_frame * bits_per_frame; bit++) {
+                        block_ones += plain_bits[bit] != 0;
+                    }
+                    fprintf(stderr,
+                            "%s%d:%d%%",
+                            first_frame ? "," : "",
+                            first_frame,
+                            block_bits > 0
+                                ? (100 * block_ones + block_bits / 2)
+                                  / block_bits : 0);
+                }
+                fputc('\n', stderr);
+                for (int mp_type = 0; mp_type < 2; mp_type++) {
+                    int length = mp_frame_bits[mp_type];
+                    int crc_last = mp_type ? 186 : 84;
+                    int best_score = INT_MAX;
+                    int best_offset_diag = -1;
+                    int best_sync_diag = 0;
+                    int best_structure_diag = 0;
+                    int best_crc_diag = 0;
+
+                    for (int offset = 300 * bits_per_frame;
+                         offset + length <= bit_count;
+                         offset += bits_per_frame) {
+                        uint16_t crc = 0xFFFF;
+                        int sync_errors = 0;
+                        int structure_errors =
+                            plain_bits[offset + 18] != mp_type;
+
+                        for (int bit = 0; bit <= 16; bit++)
+                            sync_errors += plain_bits[offset + bit] == 0;
+                        {
+                            static const int common_zero[] = {
+                                17, 19, 20, 21, 22, 23, 28,
+                                34, 35, 49, 50, 51, 68
+                            };
+
+                            for (size_t i = 0;
+                                 i < sizeof(common_zero)
+                                     / sizeof(common_zero[0]); i++) {
+                                structure_errors += plain_bits[offset
+                                    + common_zero[i]] != 0;
+                            }
+                        }
+                        if (mp_type == 0) {
+                            for (int bit = 52; bit <= 67; bit++)
+                                structure_errors +=
+                                    plain_bits[offset + bit] != 0;
+                            for (int bit = 85; bit < length; bit++)
+                                structure_errors +=
+                                    plain_bits[offset + bit] != 0;
+                        } else {
+                            static const int starts[] = {
+                                85, 102, 119, 136, 153, 170
+                            };
+
+                            for (size_t i = 0;
+                                 i < sizeof(starts) / sizeof(starts[0]); i++) {
+                                structure_errors += plain_bits[offset
+                                    + starts[i]] != 0;
+                            }
+                            for (int bit = 154; bit <= 169; bit++)
+                                structure_errors +=
+                                    plain_bits[offset + bit] != 0;
+                            for (int bit = 187; bit < length; bit++)
+                                structure_errors +=
+                                    plain_bits[offset + bit] != 0;
+                        }
+                        for (int bit = 0; bit <= crc_last; bit++) {
+                            crc = crc_itu16_bits(plain_bits[offset + bit],
+                                                1,
+                                                crc);
+                        }
+                        {
+                            int crc_errors = __builtin_popcount(
+                                (unsigned)(crc & 0xFFFF));
+                            int score = 4 * sync_errors
+                                      + 2 * structure_errors + crc_errors;
+
+                            if (score < best_score) {
+                                best_score = score;
+                                best_offset_diag = offset;
+                                best_sync_diag = sync_errors;
+                                best_structure_diag = structure_errors;
+                                best_crc_diag = crc_errors;
+                            }
+                        }
+                    }
+                    fprintf(stderr,
+                            "v90 MP PCM soft type=%d offset=%d frame=%d sync=%d structure=%d crc-syndrome=%d score=%d\n",
+                            mp_type,
+                            best_offset_diag,
+                            best_offset_diag >= 0
+                                ? best_offset_diag / bits_per_frame : -1,
+                            best_sync_diag,
+                            best_structure_diag,
+                            best_crc_diag,
+                            best_score);
+                    {
+                        int at = known_trn_frames * bits_per_frame;
+
+                        if (at + length <= bit_count) {
+                            uint16_t crc = 0xFFFF;
+                            int sync_errors = 0;
+
+                            for (int bit = 0; bit <= 16; bit++)
+                                sync_errors += plain_bits[at + bit] == 0;
+                            for (int bit = 0; bit <= crc_last; bit++) {
+                                crc = crc_itu16_bits(plain_bits[at + bit],
+                                                    1,
+                                                    crc);
+                            }
+                            fprintf(stderr,
+                                    "v90 MP PCM boundary=%d type=%d sync=%d crc=%d observed-type=%u ack=%u rate=%u\n",
+                                    known_trn_frames,
+                                    mp_type,
+                                    sync_errors,
+                                    __builtin_popcount(
+                                        (unsigned)(crc & 0xFFFF)),
+                                    (unsigned)plain_bits[at + 18],
+                                    (unsigned)plain_bits[at + 33],
+                                    v90_cp_soft_get_bits(
+                                        plain_bits + at, 24, 4));
+                        }
+                    }
+                    if (best_offset_diag >= 0) {
+                        fprintf(stderr,
+                                "v90 MP PCM soft repeats type=%d:",
+                                mp_type);
+                        for (int repeat = 0; repeat < 10
+                             && best_offset_diag
+                                + (repeat + 1) * length <= bit_count;
+                             repeat++) {
+                            int at = best_offset_diag + repeat * length;
+                            int sync_errors = 0;
+                            uint16_t crc = 0xFFFF;
+
+                            for (int bit = 0; bit <= 16; bit++)
+                                sync_errors += plain_bits[at + bit] == 0;
+                            for (int bit = 0; bit <= crc_last; bit++) {
+                                crc = crc_itu16_bits(plain_bits[at + bit],
+                                                    1,
+                                                    crc);
+                            }
+                            fprintf(stderr,
+                                    "%s%d{s=%d,c=%d,t=%u,a=%u,r=%u}",
+                                    repeat ? "," : "",
+                                    repeat,
+                                    sync_errors,
+                                    __builtin_popcount(
+                                        (unsigned)(crc & 0xFFFF)),
+                                    (unsigned)plain_bits[at + 18],
+                                    (unsigned)plain_bits[at + 33],
+                                    v90_cp_soft_get_bits(
+                                        plain_bits + at, 24, 4));
+                        }
+                        fputc('\n', stderr);
+                        if (mp_type == 1) {
+                            v34_upstream_mp_recovery_t best_corrected;
+                            int best_corrections = INT_MAX;
+                            int best_corrected_rate = -1;
+                            int best_corrected_trellis = -1;
+                            int best_solution_count = 0;
+                            int minimum_linear_corrections = INT_MAX;
+                            int minimum_linear_rate = -1;
+                            int minimum_linear_trellis = -1;
+                            int at = known_trn_frames * bits_per_frame;
+
+                            for (int rate = 2; rate <= 14; rate++) {
+                              for (int trellis = 0; trellis <= 2; trellis++) {
+                                v34_upstream_mp_recovery_t corrected;
+                                int corrections = INT_MAX;
+
+                                bool valid_correction =
+                                    v90_try_mp1_scrambled_corrections(
+                                        plain_bits + at,
+                                        length,
+                                        rate,
+                                        trellis,
+                                        &corrected,
+                                        &corrections);
+
+                                if (valid_correction && corrections <= 10
+                                    && getenv("VPCM_V90_MP_PCM_DIAG")) {
+                                    fprintf(stderr,
+                                            "v90 MP PCM GF2 candidate rate=%d trellis=%d corrections=%d ack=%d nonlinear=%d shaping=%d mask=0x%04X h={%d,%d,%d,%d,%d,%d}\n",
+                                            rate,
+                                            trellis,
+                                            corrections,
+                                            corrected.mp.mp_acknowledged,
+                                            corrected.mp.use_non_linear_encoder,
+                                            corrected.mp.expanded_shaping,
+                                            corrected.mp.signalling_rate_mask,
+                                            corrected.mp.precoder_coeffs[0].re,
+                                            corrected.mp.precoder_coeffs[0].im,
+                                            corrected.mp.precoder_coeffs[1].re,
+                                            corrected.mp.precoder_coeffs[1].im,
+                                            corrected.mp.precoder_coeffs[2].re,
+                                            corrected.mp.precoder_coeffs[2].im);
+                                }
+
+                                if (corrections
+                                    < minimum_linear_corrections) {
+                                    minimum_linear_corrections = corrections;
+                                    minimum_linear_rate = rate;
+                                    minimum_linear_trellis = trellis;
+                                }
+                                if (valid_correction
+                                    && corrections < best_corrections) {
+                                    best_corrections = corrections;
+                                    best_corrected_rate = rate;
+                                    best_corrected_trellis = trellis;
+                                    best_corrected = corrected;
+                                    best_solution_count = 1;
+                                } else if (valid_correction
+                                           && corrections
+                                              == best_corrections) {
+                                    best_solution_count++;
+                                }
+                              }
+                            }
+                            fprintf(stderr,
+                                    "v90 MP PCM GF2 boundary=%d rate=%d trellis=%d corrections=%d solutions=%d linear-rate=%d linear-trellis=%d linear-corrections=%d\n",
+                                    known_trn_frames,
+                                    best_corrected_rate,
+                                    best_corrected_trellis,
+                                    best_corrections,
+                                    best_solution_count,
+                                    minimum_linear_rate,
+                                    minimum_linear_trellis,
+                                    minimum_linear_corrections);
+                            v34_upstream_mp_recovery_t repeat_result[10];
+                            int repeat_corrections[10] = {0};
+                            bool repeat_valid[10] = {0};
+                            fprintf(stderr, "v90 MP PCM GF2 repeats=");
+                            for (int repeat = 0; repeat < 10
+                                 && at + (repeat + 1) * length <= bit_count;
+                                 repeat++) {
+                                int repeat_best = INT_MAX;
+                                int repeat_rate = -1;
+                                int repeat_trellis = -1;
+                                int repeat_solutions = 0;
+                                v34_upstream_mp_recovery_t repeat_candidate;
+
+                                for (int rate = 2; rate <= 14; rate++) {
+                                  for (int trellis = 0; trellis <= 2;
+                                       trellis++) {
+                                    v34_upstream_mp_recovery_t corrected;
+                                    int corrections = INT_MAX;
+
+                                    if (!v90_try_mp1_scrambled_corrections(
+                                            plain_bits + at
+                                                + repeat * length,
+                                            length,
+                                            rate,
+                                            trellis,
+                                            &corrected,
+                                            &corrections)) {
+                                        continue;
+                                    }
+                                    if (corrections < repeat_best) {
+                                        repeat_best = corrections;
+                                        repeat_rate = rate;
+                                        repeat_trellis = trellis;
+                                        repeat_solutions = 1;
+                                        repeat_candidate = corrected;
+                                    } else if (corrections == repeat_best) {
+                                        repeat_solutions++;
+                                    }
+                                  }
+                                }
+                                if (repeat_rate >= 0
+                                    && repeat_solutions == 1
+                                    && repeat_best <= 12) {
+                                    repeat_result[repeat] = repeat_candidate;
+                                    repeat_corrections[repeat] = repeat_best;
+                                    repeat_valid[repeat] = true;
+                                }
+                                fprintf(stderr,
+                                        "%s%d{%d/%d,c=%d,n=%d,a=%d,q=%d,s=%d,m=%04X,h=%d/%d/%d/%d/%d/%d}",
+                                        repeat ? "," : "",
+                                        repeat,
+                                        repeat_rate,
+                                        repeat_trellis,
+                                        repeat_best,
+                                        repeat_solutions,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.mp_acknowledged
+                                            : -1,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.use_non_linear_encoder
+                                            : -1,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.expanded_shaping
+                                            : -1,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.signalling_rate_mask
+                                            : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[0].re : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[0].im : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[1].re : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[1].im : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[2].re : 0,
+                                        repeat_rate >= 0
+                                            ? repeat_candidate.mp.precoder_coeffs[2].im : 0);
+                            }
+                            fputc('\n', stderr);
+                            {
+                                int winner = -1;
+                                int winner_support = 0;
+
+                                for (int candidate = 0; candidate < 10;
+                                     candidate++) {
+                                    int support = 0;
+
+                                    if (!repeat_valid[candidate])
+                                        continue;
+                                    for (int other = 0; other < 10; other++) {
+                                        if (repeat_valid[other]
+                                            && v90_mp_tuples_equal(
+                                                &repeat_result[candidate].mp,
+                                                &repeat_result[other].mp)) {
+                                            support++;
+                                        }
+                                    }
+                                    if (support > winner_support) {
+                                        winner = candidate;
+                                        winner_support = support;
+                                    }
+                                }
+                                if (winner >= 0 && winner_support >= 3) {
+                                    v34_upstream_mp_recovery_t repeated =
+                                        repeat_result[winner];
+
+                                    repeated.start_sample = start
+                                        + (known_trn_frames
+                                           + 12 * winner) * 6;
+                                    repeated.best_trn_ber_pct =
+                                        repeat_corrections[winner];
+                                    repeated.accepted_trn_ber_pct =
+                                        repeat_corrections[winner];
+                                    repeated.tuple_votes = winner_support;
+                                    *out = repeated;
+                                    fprintf(stderr,
+                                            "v90 MP PCM repeated CRC frame=%d support=%d corrections=%d rate=%d trellis=%d\n",
+                                            known_trn_frames + 12 * winner,
+                                            winner_support,
+                                            repeat_corrections[winner],
+                                            repeated.mp.bit_rate_c_to_a,
+                                            repeated.mp.trellis_size);
+                                    free(plain_bits);
+                                    return true;
+                                }
+                            }
+                            if (best_corrected_rate >= 0
+                                && best_corrections <= 12
+                                && best_solution_count == 1) {
+                                best_corrected.start_sample = start
+                                    + known_trn_frames * 6;
+                                best_corrected.best_trn_ber_pct =
+                                    best_corrections;
+                                best_corrected.accepted_trn_ber_pct =
+                                    best_corrections;
+                                *out = best_corrected;
+                                fprintf(stderr,
+                                        "v90 MP PCM corrected CRC type=1 frame=%d rate=%d corrections=%d\n",
+                                        known_trn_frames,
+                                        best_corrected_rate,
+                                        best_corrections);
+                                free(plain_bits);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (int mp_type = 0; mp_type < 2; mp_type++) {
+        for (int offset = 0;
+             offset + mp_frame_bits[mp_type] <= bit_count;
+             offset++) {
+            int trn_start = offset > 2048 ? offset - 2048 : 0;
+            int trn_errors = 0;
+            int trn_checks = offset - trn_start;
+            v34_upstream_mp_recovery_t candidate;
+
+            if (!v90_downstream_mp_decode_strict(plain_bits + offset,
+                                                  mp_frame_bits[mp_type],
+                                                  &candidate)) {
+                continue;
+            }
+            if (candidate.mp.type != mp_type)
+                continue;
+            for (int bit = trn_start; bit < offset; bit++)
+                trn_errors += plain_bits[bit] == 0;
+            if (trn_checks < 512 || 100 * trn_errors > 3 * trn_checks)
+                continue;
+            candidate.start_sample = start
+                                   + (offset / bits_per_frame) * 6;
+            candidate.best_trn_ber_pct =
+                (100 * trn_errors + trn_checks / 2) / trn_checks;
+            candidate.accepted_trn_ber_pct =
+                candidate.best_trn_ber_pct;
+            *out = candidate;
+            if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                fprintf(stderr,
+                        "v90 MP PCM CRC profile=%s/%s start=%d state=%d frames=%d\n",
+                        capture_alaw ? "alaw" : "ulaw",
+                        use_codec_masks ? "codec-mask" : "primary-mask",
+                        start,
+                        state_value,
+                        frames);
+            }
+            free(plain_bits);
+            return true;
+        }
+        }
+        /* MP and MP' are sent as groups of identical mapping-frame-aligned
+         * sequences.  Audio-path symbol errors are expanded by the
+         * self-synchronizing descrambler, so reconstruct each repeated group
+         * before applying the same strict structure and CRC gate. */
+        for (int mp_type = 0; mp_type < 2; mp_type++) {
+            int length = mp_frame_bits[mp_type];
+            int first_offset = 300 * bits_per_frame;
+
+            for (int offset = first_offset;
+                 offset + 3 * length <= bit_count;
+                 offset += bits_per_frame) {
+                for (int repetitions = 3;
+                     repetitions <= 24
+                     && offset + repetitions * length <= bit_count;
+                     repetitions++) {
+                    uint8_t voted[256];
+                    int total_errors = 0;
+                    v34_upstream_mp_recovery_t candidate;
+
+                    for (int bit = 0; bit < length; bit++) {
+                        int ones = 0;
+
+                        for (int repeat = 0; repeat < repetitions; repeat++) {
+                            ones += plain_bits[offset
+                                            + repeat * length + bit] != 0;
+                        }
+                        voted[bit] = (uint8_t)(2 * ones >= repetitions);
+                    }
+                    if (!v90_downstream_mp_decode_strict(voted,
+                                                         length,
+                                                         &candidate)
+                        || candidate.mp.type != mp_type) {
+                        continue;
+                    }
+                    for (int repeat = 0; repeat < repetitions; repeat++) {
+                        for (int bit = 0; bit < length; bit++) {
+                            total_errors += plain_bits[offset
+                                + repeat * length + bit] != voted[bit];
+                        }
+                    }
+                    if (100 * total_errors
+                        > 45 * repetitions * length) {
+                        continue;
+                    }
+                    candidate.start_sample = start
+                                           + (offset / bits_per_frame) * 6;
+                    candidate.best_trn_ber_pct =
+                        (100 * total_errors
+                         + repetitions * length / 2)
+                        / (repetitions * length);
+                    candidate.accepted_trn_ber_pct =
+                        candidate.best_trn_ber_pct;
+                    candidate.tuple_votes = repetitions;
+                    *out = candidate;
+                    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                        fprintf(stderr,
+                                "v90 MP PCM repeated CRC profile=%s/%s type=%d start=%d bit=%d repeats=%d disagreement=%d%%\n",
+                                capture_alaw ? "alaw" : "ulaw",
+                                use_codec_masks ? "codec-mask" : "primary-mask",
+                                mp_type,
+                                start,
+                                offset,
+                                repetitions,
+                                candidate.best_trn_ber_pct);
+                    }
+                    free(plain_bits);
+                    return true;
+                }
+            }
+        }
+        }
+      }
+    }
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 MP PCM best profile=%d start=%d frames=%d bits=%d ones=%d (%.1f%%)\n",
+                best_profile,
+                best_start,
+                best_frames,
+                best_frames * bits_per_frame,
+                best_ones,
+                best_frames > 0
+                    ? 100.0 * best_ones
+                      / (best_frames * bits_per_frame)
+                    : 0.0);
+    }
+    free(plain_bits);
+    return false;
+}
+
 static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                                        int cp_start_sample,
                                        int baud_code,
                                        bool allow_16_point,
+                                       int reset_search_symbols,
+                                       int orientation_skip_symbols,
+                                       v90_cp_vote_accumulator_t *vote_accumulator,
+                                       int *reset_sample_out,
                                        vpcm_cp_diag_t *out)
 {
+    static int soft_diag_runs;
     static const uint8_t map_table[24][4] = {
         {0,1,2,3}, {1,0,3,2}, {2,3,0,1}, {3,2,1,0},
         {0,2,1,3}, {2,0,3,1}, {1,3,0,2}, {3,1,2,0},
@@ -7294,52 +10866,289 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
         {0,2,3,1}, {1,3,2,0}, {2,0,1,3}, {3,1,0,2},
         {0,3,1,2}, {1,2,0,3}, {2,1,3,0}, {3,0,2,1}
     };
+    v90_cp_soft_probe_t soft_best;
+    uint8_t *soft_bits;
+    float *soft_reliability;
+    int soft_capacity;
+    int soft_diag_target = 0;
+    int first_cp_symbol = 0;
+    int cp4_period_best = 0;
+    bool soft_diag_selected = false;
 
     if (!detail || !out || !detail->symbols || detail->symbol_count <= 0)
         return false;
-    for (int domain = 0; domain < 2; domain++) {
-        for (int order = 0; order < 2; order++) {
-            for (int tap_choice = 0; tap_choice < 2; tap_choice++) {
-                int tap = tap_choice ? 4 : 17;
+    while (first_cp_symbol < detail->symbol_count
+           && detail->symbols[first_cp_symbol].sample_index < cp_start_sample) {
+        first_cp_symbol++;
+    }
+    if (first_cp_symbol >= detail->symbol_count)
+        return false;
+    memset(&soft_best, 0, sizeof(soft_best));
+    if (getenv("VPCM_V34_CP_SOFT_DIAG_INDEX"))
+        soft_diag_target = atoi(getenv("VPCM_V34_CP_SOFT_DIAG_INDEX"));
+    soft_capacity = detail->symbol_count * 2;
+    if (getenv("VPCM_V34_CP_SOFT_DIAG")
+        || getenv("VPCM_V34_CP4_PERIOD_DIAG")) {
+        soft_diag_selected = getenv("VPCM_V34_CP_SOFT_DIAG_ALL")
+                          || soft_diag_runs == soft_diag_target;
+        soft_diag_runs++;
+    }
+    soft_bits = malloc((size_t)soft_capacity);
+    soft_reliability = malloc((size_t)soft_capacity
+                              * sizeof(*soft_reliability));
+    if (!soft_bits || !soft_reliability) {
+        free(soft_bits);
+        free(soft_reliability);
+        return false;
+    }
+    if (reset_search_symbols < 0)
+        reset_search_symbols = 0;
+    for (int reset_trial = 0;
+         reset_trial <= 2 * reset_search_symbols;
+         reset_trial++) {
+        int reset_shift = reset_trial == 0
+                        ? 0
+                        : ((reset_trial & 1)
+                           ? -(reset_trial + 1) / 2
+                           : reset_trial / 2);
+        int reset_symbol = first_cp_symbol + reset_shift;
+        int end_symbol;
 
-                for (int map = 0; map < 24; map++) {
-                    v34_native_cp_collector_t collector;
-                    uint32_t reg = 0;
+        if (reset_symbol < 0 || reset_symbol >= detail->symbol_count)
+            continue;
+        end_symbol = reset_symbol + 1600;
+        if (end_symbol > detail->symbol_count)
+            end_symbol = detail->symbol_count;
+        for (int domain = 0; domain < 3; domain++) {
+            for (int order = 0; order < 2; order++) {
+                for (int tap_choice = 0; tap_choice < 2; tap_choice++) {
+                    int tap = tap_choice ? 4 : 17;
 
-                    memset(&collector, 0, sizeof(collector));
-                    for (int points_idx = 0; points_idx < 2; points_idx++) {
-                        for (int law_idx = 0; law_idx < 2; law_idx++) {
-                            int index = 2 * points_idx + law_idx;
+                    for (int map = 0; map < 24; map++) {
+                        v34_native_cp_collector_t collector;
+                        uint32_t reg = 0;
+                        int soft_count = 0;
+                        int previous_absolute = 0;
 
-                            v90_cp_rx_init(&collector.rx[index],
-                                           points_idx ? 16 : 4,
-                                           law_idx != 0,
-                                           v34_collect_native_cp_frame,
-                                           &collector);
+                        if (getenv("VPCM_V34_CP4_PHYSICAL_ONLY")
+                            && (domain == 1
+                                || tap != 17
+                                || (map != 0 && map != 8))) {
+                            continue;
                         }
-                    }
-                    for (int sym = 0; sym < detail->symbol_count; sym++) {
-                        int raw = domain ? detail->symbols[sym].quadrant
-                                         : detail->symbols[sym].dibit;
-                        int mapped = map_table[map][raw & 3];
-                        int first = order ? ((mapped >> 1) & 1)
-                                          : (mapped & 1);
-                        int second = order ? (mapped & 1)
-                                           : ((mapped >> 1) & 1);
 
-                        first = v34_upstream_descramble_bit(&reg, tap, first);
-                        second = v34_upstream_descramble_bit(&reg, tap, second);
-                        v34_collect_native_cp_bit(&collector, first);
-                        v34_collect_native_cp_bit(&collector, second);
-                        if (collector.valid) {
-                            *out = collector.diag;
-                            return true;
+                        memset(&collector, 0, sizeof(collector));
+                        for (int points_idx = 0; points_idx < 2; points_idx++) {
+                            for (int law_idx = 0; law_idx < 2; law_idx++) {
+                                int index = 2 * points_idx + law_idx;
+
+                                v90_cp_rx_init(&collector.rx[index],
+                                               points_idx ? 16 : 4,
+                                               law_idx != 0,
+                                               v34_collect_native_cp_frame,
+                                               &collector);
+                            }
+                        }
+                        /* V.90 section 8.5.2 initializes both the scrambler
+                         * and differential encoder immediately before the
+                         * first CPt.  The envelope onset is only a coarse
+                         * estimate: search nearby symbol boundaries, but let
+                         * the complete CP CRC select the actual reset. */
+                        for (int sym = reset_symbol;
+                             sym < end_symbol;
+                             sym++) {
+                            int raw;
+
+                            if (domain == 0) {
+                                raw = detail->symbols[sym].dibit;
+                            } else if (domain == 1) {
+                                raw = detail->symbols[sym].quadrant;
+                            } else {
+                                int absolute = detail->symbols[sym].quadrant & 3;
+
+                                /* CP resets the modulo-4 differential encoder
+                                 * to zero.  Reconstruct the first CP symbol
+                                 * explicitly instead of differencing against
+                                 * the preceding waveform. */
+                                raw = (absolute - previous_absolute) & 3;
+                                previous_absolute = absolute;
+                            }
+                            int mapped = map_table[map][raw & 3];
+                            int first = order ? ((mapped >> 1) & 1)
+                                              : (mapped & 1);
+                            int second = order ? (mapped & 1)
+                                               : ((mapped >> 1) & 1);
+                            float reliability = 1.0f;
+
+                            if (sym > reset_symbol) {
+                                float re = detail->symbols[sym].re;
+                                float im = detail->symbols[sym].im;
+                                float prev_re = detail->symbols[sym - 1].re;
+                                float prev_im = detail->symbols[sym - 1].im;
+                                float measured = atan2f(im * prev_re
+                                                        - re * prev_im,
+                                                        re * prev_re
+                                                        + im * prev_im);
+                                float reference =
+                                    (float)(detail->symbols[sym].dibit & 3)
+                                    * (float)(M_PI / 2.0);
+                                float error = remainderf(measured - reference,
+                                                         (float)(2.0 * M_PI));
+
+                                reliability = 0.05f
+                                            + 0.95f
+                                              * (1.0f
+                                                 - fminf(fabsf(error),
+                                                         (float)(M_PI / 4.0))
+                                                   / (float)(M_PI / 4.0));
+                            }
+
+                            first = v34_upstream_descramble_bit(&reg, tap, first);
+                            second = v34_upstream_descramble_bit(&reg, tap, second);
+                            if (soft_bits && soft_count + 2 <= soft_capacity) {
+                                soft_bits[soft_count++] = (uint8_t)first;
+                                soft_bits[soft_count++] = (uint8_t)second;
+                                soft_reliability[soft_count - 2] = reliability;
+                                soft_reliability[soft_count - 1] = reliability;
+                            }
+                            v34_collect_native_cp_bit(&collector, first);
+                            v34_collect_native_cp_bit(&collector, second);
+                            if (collector.valid) {
+                                *out = collector.diag;
+                                if (reset_sample_out) {
+                                    *reset_sample_out =
+                                        detail->symbols[reset_symbol].sample_index;
+                                }
+                                free(soft_bits);
+                                free(soft_reliability);
+                                return true;
+                            }
+                        }
+                        if (soft_bits) {
+                            v90_cp_soft_probe_t local_best;
+                            int previous_score = soft_best.found
+                                               ? soft_best.score
+                                               : INT_MAX;
+                            int period = 0;
+                            int periodic_match = 0;
+
+                            if (soft_diag_selected
+                                && getenv("VPCM_V34_CP4_PERIOD_DIAG")) {
+                                periodic_match = v90_cp_best_periodic_match(
+                                    soft_bits,
+                                    soft_count,
+                                    4,
+                                    &period);
+                            }
+
+                            if (soft_diag_selected
+                                && getenv("VPCM_V34_CP4_PERIOD_DIAG")
+                                && periodic_match > cp4_period_best) {
+                                cp4_period_best = periodic_match;
+                                fprintf(stderr,
+                                        "cp4 periodic=%d%% period=%d reset_shift=%d domain=%d order=%d tap=%d map=%d\n",
+                                        periodic_match,
+                                        period,
+                                        reset_shift,
+                                        domain,
+                                        order,
+                                        tap,
+                                        map);
+                            }
+
+                            memset(&local_best, 0, sizeof(local_best));
+                            if (soft_diag_selected
+                                || collector.rx[0].rejected_frames > 0
+                                || collector.rx[1].rejected_frames > 0) {
+                                v90_cp_soft_probe_bits(soft_bits,
+                                                       soft_count,
+                                                       reset_shift,
+                                                       &local_best);
+                            }
+                            if (local_best.found && local_best.score <= 12) {
+                                vpcm_cp_diag_t repeated_diag;
+                                int frame_phase;
+                                int frame_count;
+
+                                if (reset_shift == 0) {
+                                    v90_cp_accumulate_repetitions(
+                                        vote_accumulator,
+                                        soft_bits,
+                                        soft_count,
+                                        &local_best,
+                                        detail,
+                                        reset_symbol);
+                                }
+
+                                if (v90_cp_recover_repeated(
+                                        soft_bits,
+                                        soft_reliability,
+                                        soft_count,
+                                        4,
+                                        &local_best,
+                                        &repeated_diag,
+                                        &frame_phase,
+                                        &frame_count)) {
+                                    *out = repeated_diag;
+                                    if (reset_sample_out) {
+                                        int frame_symbol = reset_symbol
+                                                         + frame_phase / 2;
+
+                                        *reset_sample_out =
+                                            detail->symbols[frame_symbol].sample_index;
+                                    }
+                                    if (getenv("VPCM_V34_CP_SOFT_DIAG")) {
+                                        fprintf(stderr,
+                                                "cp4 repeated recovery frames=%d phase=%d score=%d\n",
+                                                frame_count,
+                                                frame_phase,
+                                                local_best.score);
+                                    }
+                                    free(soft_bits);
+                                    free(soft_reliability);
+                                    return true;
+                                }
+                            }
+                            if (soft_diag_selected && local_best.found
+                                && (!soft_best.found
+                                    || local_best.score < soft_best.score)) {
+                                soft_best = local_best;
+                            }
+                            if (soft_best.found
+                                && soft_best.score < previous_score) {
+                                soft_best.domain = domain;
+                                soft_best.order = order;
+                                soft_best.tap = tap;
+                                soft_best.map = map;
+                            }
                         }
                     }
                 }
             }
         }
     }
+    if (soft_diag_selected && soft_best.found) {
+        fprintf(stderr,
+                "cp4 soft best score=%d bit=%d reset_shift=%d domain=%d order=%d tap=%d map=%d sync_err=%d struct_err=%d crc_syndrome_bits=%d constellations=%d drn=%d law=%s upstream_mask=0x%04X\n",
+                soft_best.score,
+                soft_best.bit_offset,
+                soft_best.reset_shift,
+                soft_best.domain,
+                soft_best.order,
+                soft_best.tap,
+                soft_best.map,
+                soft_best.sync_errors,
+                soft_best.structure_errors,
+                soft_best.crc_syndrome_bits,
+                soft_best.constellation_count,
+                soft_best.drn,
+                soft_best.law ? "A" : "u",
+                soft_best.upstream_mask);
+        if (!getenv("VPCM_V34_CP_SOFT_DIAG_ALL"))
+            v90_cp_soft_diag_done = true;
+    }
+    free(soft_bits);
+    free(soft_reliability);
     if (!allow_16_point)
         return false;
     /* CP may use the V.34 16-point Phase-4 constellation, which carries
@@ -7356,20 +11165,34 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
         double fourth_re = 0.0;
         double fourth_im = 0.0;
         double power = 0.0;
+        v90_cp_soft_probe_t cp16_soft_best;
+        uint8_t *cp16_soft_bits = NULL;
+        int cp16_period_best = 0;
         int first_symbol = 0;
+        int orient_symbol;
         int orient_count;
 
+        memset(&cp16_soft_best, 0, sizeof(cp16_soft_best));
         while (first_symbol < detail->symbol_count
                && detail->symbols[first_symbol].sample_index
                   < cp_start_sample) {
             first_symbol++;
         }
-        orient_count = detail->symbol_count - first_symbol;
+        /* The burst starts after a long silent interval.  Let blind CMA and
+         * AGC converge on CP before estimating the 16-QAM scale/orientation;
+         * the parser still consumes from first_symbol so descrambler timing
+         * and the returned reset boundary remain unchanged. */
+        if (orientation_skip_symbols < 0)
+            orientation_skip_symbols = 0;
+        orient_symbol = first_symbol + orientation_skip_symbols;
+        if (orient_symbol >= detail->symbol_count)
+            orient_symbol = first_symbol;
+        orient_count = detail->symbol_count - orient_symbol;
         if (orient_count > 512)
             orient_count = 512;
         for (int i = 0; i < orient_count; i++) {
-            double xr = detail->symbols[first_symbol + i].re;
-            double xi = detail->symbols[first_symbol + i].im;
+            double xr = detail->symbols[orient_symbol + i].re;
+            double xi = detail->symbols[orient_symbol + i].im;
 
             power += xr * xr + xi * xi;
         }
@@ -7381,7 +11204,7 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                 fprintf(stderr,
                         "cp16 symbols=%d first=%d orient=%d rms=%.4f carrier=%.3f baud=%d scale=%.4f\n",
                         detail->symbol_count,
-                        first_symbol,
+                        orient_symbol,
                         orient_count,
                         sqrt(power / orient_count),
                         detail->carrier_freq_estimate,
@@ -7391,6 +11214,11 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
 
             if (end_symbol > first_symbol + 6400)
                 end_symbol = first_symbol + 6400;
+            if (getenv("VPCM_V34_CP16_SOFT_DIAG")
+                || getenv("VPCM_V34_CP16_PERIOD_DIAG")) {
+                cp16_soft_bits = malloc(
+                    (size_t)(end_symbol - first_symbol) * 4U);
+            }
             /* The old adjacent fourth-power estimator mistook the changing
              * 16-QAM data symbols for a residual carrier of tens of hertz.
              * At this point the Phase-3 PLL is already locked and frozen, so
@@ -7398,16 +11226,19 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
              * trial, use the aggregate fourth moment to remove the remaining
              * absolute square-QAM orientation.  A frame is accepted only by
              * the full CP CRC and semantic checks below. */
-            for (int carrier_step = -16; carrier_step <= 16; carrier_step++) {
+            for (int carrier_step = -12;
+                 carrier_step <= 12;
+                 carrier_step += 2) {
                 float carrier_delta = carrier_step * (float)(M_PI / 4096.0);
                 float base_phase;
 
                 fourth_re = 0.0;
                 fourth_im = 0.0;
                 for (int i = 0; i < orient_count; i++) {
-                    double xr = detail->symbols[first_symbol + i].re;
-                    double xi = detail->symbols[first_symbol + i].im;
-                    double angle = -(double)carrier_delta * i;
+                    int relative_symbol = orient_symbol - first_symbol + i;
+                    double xr = detail->symbols[orient_symbol + i].re;
+                    double xi = detail->symbols[orient_symbol + i].im;
+                    double angle = -(double)carrier_delta * relative_symbol;
                     double zr = xr * cos(angle) - xi * sin(angle);
                     double zi = xr * sin(angle) + xi * cos(angle);
                     double z2r = zr * zr - zi * zi;
@@ -7428,10 +11259,14 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                     for (int scale_step = -2; scale_step <= 2; scale_step++) {
                         float scale = base_scale * (1.0f + 0.075f * scale_step);
 
+                        for (int pll_step = 0; pll_step < 2; pll_step++) {
+                          float pll_gain = pll_step == 0 ? 0.0f : 0.05f;
                         for (int bit_order = 0; bit_order < 4; bit_order++) {
                             v34_native_cp_collector_t collector;
                             uint32_t reg = 0;
                             int previous_z = -1;
+                            int cp16_soft_count = 0;
+                            float phase_correction = 0.0f;
 
                             memset(&collector, 0, sizeof(collector));
                             for (int law_idx = 0; law_idx < 2; law_idx++) {
@@ -7465,7 +11300,8 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                                 phase = static_phase
                                       - (conjugate ? -carrier_delta
                                                    : carrier_delta)
-                                        * (sym - first_symbol);
+                                        * (sym - first_symbol)
+                                      + phase_correction;
                                 cs = cosf(phase);
                                 sn = sinf(phase);
                                 zr = scale * (cs * xr - sn * xi);
@@ -7482,6 +11318,19 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                                 }
                                 z = best_index & 3;
                                 q = best_index >> 2;
+                                if (pll_gain > 0.0f) {
+                                    float target_re = constellation16[best_index][0];
+                                    float target_im = constellation16[best_index][1];
+                                    float phase_error = atan2f(
+                                        zi * target_re - zr * target_im,
+                                        zr * target_re + zi * target_im);
+
+                                    /* Decision-directed residual phase loop.
+                                     * The bounded frequency sweep handles a
+                                     * constant offset; this term follows the
+                                     * slower phase wander across a long CP. */
+                                    phase_correction -= pll_gain * phase_error;
+                                }
                                 input_i = previous_z < 0
                                         ? z
                                         : ((z - previous_z) & 3);
@@ -7503,19 +11352,91 @@ static bool v34_recover_v90_cp_from_p3(const p3_result_t *detail,
                                 for (int bit = 0; bit < 4; bit++) {
                                     int plain = v34_upstream_descramble_bit(
                                         &reg, 17, raw_bits[bit]);
-                                    v34_collect_native_cp_bit(&collector, plain);
+
+                                    if (cp16_soft_bits) {
+                                        cp16_soft_bits[cp16_soft_count++] =
+                                            (uint8_t)plain;
+                                    }
+
+                                    for (int law_idx = 0;
+                                         law_idx < 2;
+                                         law_idx++) {
+                                        v90_cp_rx_t *rx =
+                                            &collector.rx[2 + law_idx];
+
+                                        (void) v90_cp_rx_put_bit(rx, plain);
+                                    }
                                 }
                                 if (collector.valid) {
                                     *out = collector.diag;
+                                    if (reset_sample_out) {
+                                        *reset_sample_out =
+                                            detail->symbols[first_symbol].sample_index;
+                                    }
+                                    free(cp16_soft_bits);
                                     return true;
                                 }
                             }
+                            if (cp16_soft_bits) {
+                                int previous_score = cp16_soft_best.found
+                                                   ? cp16_soft_best.score
+                                                   : INT_MAX;
+                                int period = 0;
+                                int periodic_match =
+                                    v90_cp_best_periodic_match(
+                                        cp16_soft_bits,
+                                        cp16_soft_count,
+                                        16,
+                                        &period);
+
+                                if (getenv("VPCM_V34_CP16_PERIOD_DIAG")
+                                    && periodic_match > cp16_period_best) {
+                                    cp16_period_best = periodic_match;
+                                    fprintf(stderr,
+                                            "cp16 periodic=%d%% period=%d carrier_step=%d conjugate=%d diagonal=%d phase_step=%d scale_step=%d pll=%.3f order=%d\n",
+                                            periodic_match,
+                                            period,
+                                            carrier_step,
+                                            conjugate,
+                                            diagonal,
+                                            phase_step,
+                                            scale_step,
+                                            pll_gain,
+                                            bit_order);
+                                }
+
+                                if (getenv("VPCM_V34_CP16_SOFT_DIAG")) {
+                                    v90_cp_soft_probe_bits(cp16_soft_bits,
+                                                           cp16_soft_count,
+                                                           0,
+                                                           &cp16_soft_best);
+                                }
+                                if (cp16_soft_best.found
+                                    && cp16_soft_best.score < previous_score) {
+                                    fprintf(stderr,
+                                            "cp16 soft score=%d sync=%d struct=%d crc=%d carrier_step=%d conjugate=%d diagonal=%d phase_step=%d scale_step=%d pll=%.3f order=%d bit=%d\n",
+                                            cp16_soft_best.score,
+                                            cp16_soft_best.sync_errors,
+                                            cp16_soft_best.structure_errors,
+                                            cp16_soft_best.crc_syndrome_bits,
+                                            carrier_step,
+                                            conjugate,
+                                            diagonal,
+                                            phase_step,
+                                            scale_step,
+                                            pll_gain,
+                                            bit_order,
+                                            cp16_soft_best.bit_offset);
+                                }
+                            }
+                        }
                         }
                     }
                   }
                 }
               }
             }
+            free(cp16_soft_bits);
         }
     }
     return false;
@@ -17720,6 +21641,24 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                              ? &ctx->right_answerer : NULL);
         const int16_t *analog_pcm = ctx->analog_channel == 0
                                   ? left_samples : right_samples;
+        const int16_t *digital_pcm = ctx->digital_channel == 0
+                                   ? left_samples : right_samples;
+
+        if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+            fprintf(stderr,
+                    "v90 upstream gate roles=%d analog=%d info=%p seen=%d c=%d d=%d upstream_code=%d downstream_code=%d info_sample=%d\n",
+                    ctx->roles_assigned,
+                    ctx->analog_channel,
+                    (void *)analog_info,
+                    analog_info ? analog_info->info1_seen : -1,
+                    analog_info ? analog_info->info1_is_c : -1,
+                    analog_info ? analog_info->info1_is_d : -1,
+                    analog_info
+                        ? analog_info->info1a.upstream_symbol_rate_code : -1,
+                    analog_info
+                        ? analog_info->info1a.downstream_rate_code : -1,
+                    analog_info ? analog_info->info1_sample : -1);
+        }
 
         if (analog_info && analog_info->info1_seen
             && !analog_info->info1_is_c && !analog_info->info1_is_d
@@ -17773,11 +21712,15 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 p3_result_t *cp_symbols;
                 int cp_carrier = -1;
                 int cp_timing = -1;
+                int cp_reset_sample = -1;
                 v34_p3_trn_fit_t blind_fit;
                 v34_upstream_mp_recovery_t v90_mp;
                 v34_upstream_replay_result_t trial;
                 v34_upstream_replay_result_t decoded;
                 vpcm_cp_diag_t native_cp;
+                bool cp_reconstructed = false;
+                v90_cp_vote_accumulator_t cp_vote_accumulator;
+                v34_upstream_mp_recovery_t downstream_mp;
 
                 if (p3_start < 0)
                     p3_start = 0;
@@ -17796,6 +21739,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     rate_bps = 31200;
                 memset(&v90_mp, 0, sizeof(v90_mp));
                 memset(&native_cp, 0, sizeof(native_cp));
+                memset(&cp_vote_accumulator, 0, sizeof(cp_vote_accumulator));
+                memset(&downstream_mp, 0, sizeof(downstream_mp));
                 cp_symbols = NULL;
                 v90_mp.valid = true;
                 v90_mp.crc_valid = true;
@@ -17816,30 +21761,55 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 if (native_cp.valid)
                     cp_carrier = P3_CARRIER_LOW;
                 if (!native_cp.valid && symbols) {
-                    (void) v34_recover_v90_cp_from_p3(symbols,
+                    if (v34_recover_v90_cp_from_p3(symbols,
                                                      onset,
                                                      baud_code,
-                                                     false,
-                                                     &native_cp);
+                                                     getenv("VPCM_V34_NATIVE_CP16")
+                                                         != NULL,
+                                                     0,
+                                                     64,
+                                                     &cp_vote_accumulator,
+                                                     &cp_reset_sample,
+                                                     &native_cp)) {
+                        cp_reconstructed = true;
+                    }
                     if (native_cp.valid)
                         cp_carrier = P3_CARRIER_LOW;
                 }
-                if (!native_cp.valid) {
-                    int cp_start = onset > 4000 ? onset - 4000 : 0;
-                    int cp_end = onset + 16000;
+                if (!native_cp.valid
+                    && (!getenv("VPCM_V34_CP_SOFT_ONLY")
+                        || (getenv("VPCM_V34_CP_SOFT_DIAG_INDEX")
+                            && atoi(getenv("VPCM_V34_CP_SOFT_DIAG_INDEX")) > 0))) {
+                    int cp_start = p3_start;
+                    int cp_end = total_samples;
+                    int cp16_timing = getenv("VPCM_V34_CP16_TIMING")
+                                    ? atoi(getenv("VPCM_V34_CP16_TIMING"))
+                                    : 0;
+                    int cp16_carrier = getenv("VPCM_V34_CP16_CARRIER")
+                                     ? atoi(getenv("VPCM_V34_CP16_CARRIER"))
+                                     : P3_CARRIER_LOW;
+                    int cp_timing_count = getenv("VPCM_V34_CP_TIMING_COUNT")
+                                        ? atoi(getenv("VPCM_V34_CP_TIMING_COUNT"))
+                                        : 4;
 
-                    if (cp_end > total_samples)
-                        cp_end = total_samples;
+                    if (cp_timing_count < 1)
+                        cp_timing_count = 1;
+                    if (cp_timing_count > 32)
+                        cp_timing_count = 32;
 
                     /* Preserve every timing member until the CP CRC chooses
                      * one.  The general Phase-3 segment score is intentionally
                      * not used here: payload-like symbols can outscore the
                      * short, correct CP acquisition interval. */
                     for (int carrier = P3_CARRIER_LOW;
-                         carrier <= P3_CARRIER_HIGH && !native_cp.valid;
+                         carrier <= P3_CARRIER_HIGH && !native_cp.valid
+                         && !(getenv("VPCM_V34_CP_SOFT_ONLY")
+                              && v90_cp_soft_diag_done);
                          carrier++) {
                         for (int timing = 0;
-                             timing < 4 && !native_cp.valid;
+                             timing < cp_timing_count && !native_cp.valid
+                             && !(getenv("VPCM_V34_CP_SOFT_ONLY")
+                                  && v90_cp_soft_diag_done);
                              timing++) {
                             p3_result_t *trial_symbols =
                                 p3_demod_run_phase4_data_at_timing(
@@ -17851,25 +21821,90 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     8000,
                                     true,
                                     timing,
-                                    4,
-                                    onset);
+                                    cp_timing_count,
+                                    onset + 2400);
 
                             if (!trial_symbols)
                                 continue;
-                            if (v34_recover_v90_cp_from_p3(trial_symbols,
-                                                         onset,
-                                                         baud_code,
-                                                         carrier == P3_CARRIER_LOW
-                                                             && timing == 0,
-                                                         &native_cp)) {
+                            if (carrier == P3_CARRIER_LOW && timing == 0
+                                && getenv("VPCM_V34_CP_SYMBOL_CSV")) {
+                                FILE *csv = fopen(
+                                    getenv("VPCM_V34_CP_SYMBOL_CSV"), "w");
+
+                                if (csv) {
+                                    fprintf(csv,
+                                            "symbol,sample,re,im,magnitude,phase,quadrant,dibit\n");
+                                    for (int sym = 0;
+                                         sym < trial_symbols->symbol_count;
+                                         sym++) {
+                                        const p3_symbol_t *s =
+                                            &trial_symbols->symbols[sym];
+
+                                        fprintf(csv,
+                                                "%d,%d,%.9g,%.9g,%.9g,%.9g,%d,%d\n",
+                                                sym,
+                                                s->sample_index,
+                                                s->re,
+                                                s->im,
+                                                s->magnitude,
+                                                s->phase,
+                                                s->quadrant,
+                                                s->dibit);
+                                    }
+                                    fclose(csv);
+                                }
+                            }
+                            bool cp_found =
+                                v34_recover_v90_cp_from_p3(
+                                    trial_symbols,
+                                    onset,
+                                    baud_code,
+                                    false,
+                                    carrier == P3_CARRIER_LOW && timing == 0
+                                        ? 32 : 0,
+                                    1000,
+                                    carrier == P3_CARRIER_LOW
+                                        ? &cp_vote_accumulator : NULL,
+                                    &cp_reset_sample,
+                                    &native_cp);
+
+                            /* Keep the expensive 16-point recovery on the
+                             * best nominal carrier/timing member.  Its reset
+                             * search is independent of the four-point sweep
+                             * above, so the common case stays bounded. */
+                            if (!cp_found
+                                && carrier == cp16_carrier
+                                && timing == cp16_timing) {
+                                cp_found = v34_recover_v90_cp_from_p3(
+                                    trial_symbols,
+                                    onset,
+                                    baud_code,
+                                    true,
+                                    0,
+                                    1000,
+                                    carrier == P3_CARRIER_LOW
+                                        ? &cp_vote_accumulator : NULL,
+                                    &cp_reset_sample,
+                                    &native_cp);
+                            }
+                            if (cp_found) {
                                 cp_symbols = trial_symbols;
                                 cp_carrier = carrier;
                                 cp_timing = timing;
+                                cp_reconstructed = true;
                             } else {
                                 p3_result_free(trial_symbols);
                             }
                         }
                     }
+                }
+                if (!native_cp.valid
+                    && v90_cp_finalize_repetitions(&cp_vote_accumulator,
+                                                   &native_cp,
+                                                   &cp_reset_sample)) {
+                    cp_carrier = P3_CARRIER_LOW;
+                    cp_timing = -2;
+                    cp_reconstructed = true;
                 }
                 if (getenv("VPCM_V34_NATIVE_SYMBOLS") && symbols) {
                     fprintf(stderr,
@@ -17882,12 +21917,75 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             onset);
                 }
                 if (native_cp.valid) {
-                    printf("\n  V.90 CPt: CRC valid, upstream mask=0x%04X, downstream drn=%u, constellations=%u, carrier=%s%s\n",
+                    printf("\n  V.90 CPt: %s, upstream mask=0x%04X, downstream drn=%u, constellations=%u, Sr=%u, ld=%u, codec-mask=%s, carrier=%s%s",
+                           cp_reconstructed
+                               ? "CRC-guided repeated-frame candidate"
+                               : "CRC valid",
                            native_cp.frame.upstream_rate_mask,
                            (unsigned) native_cp.frame.drn,
                            (unsigned) native_cp.frame.constellation_count,
+                           (unsigned) native_cp.frame.shaping_redundancy,
+                           (unsigned) native_cp.frame.shaping_lookahead,
+                           native_cp.frame.codec_constellations_differ
+                               ? "separate" : "same",
                            cp_carrier == P3_CARRIER_HIGH ? "high" : "low",
                            cp_timing >= 0 ? " (CRC-selected timing)" : "");
+                    if (cp_reset_sample >= 0) {
+                        printf(", frame=%d (%.3f ms)",
+                               cp_reset_sample,
+                               cp_reset_sample * 1000.0 / 8000.0);
+                    }
+                    putchar('\n');
+                    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                        fprintf(stderr,
+                                "v90 CP wire law=%s primary-pop=%d codec-pop=%d primary-mask=",
+                                native_cp.frame.codec_alaw ? "alaw" : "ulaw",
+                                vpcm_cp_mask_population(native_cp.frame.masks[0]),
+                                vpcm_cp_mask_population(native_cp.frame.codec_masks[0]));
+                        for (int i = 0; i < VPCM_CP_MASK_BYTES; i++)
+                            fprintf(stderr, "%02x", native_cp.frame.masks[0][i]);
+                        fprintf(stderr, " codec-mask=");
+                        for (int i = 0; i < VPCM_CP_MASK_BYTES; i++)
+                            fprintf(stderr, "%02x", native_cp.frame.codec_masks[0][i]);
+                        fprintf(stderr,
+                                " coeffs={%d,%d,%d,%d} gain=%u\n",
+                                (int)(int8_t)native_cp.frame.shaping_a1_q1_6,
+                                (int)(int8_t)native_cp.frame.shaping_a2_q1_6,
+                                (int)(int8_t)native_cp.frame.shaping_b1_q1_6,
+                                (int)(int8_t)native_cp.frame.shaping_b2_q1_6,
+                                (unsigned)native_cp.frame.trn1d_gain_q3_13);
+                    }
+                    if (!getenv("VPCM_SKIP_V90_MP_PCM")
+                        && (!cp_reconstructed
+                            || getenv("VPCM_V90_MP_PCM_CANDIDATE"))
+                        && v90_recover_downstream_mp_pcm(
+                            digital_pcm,
+                            total_samples,
+                            analog_info->info1_sample,
+                            onset,
+                            &native_cp.frame,
+                            analog_info->info1a.u_info,
+                            &downstream_mp)) {
+                        v90_mp = downstream_mp;
+                        rate_bps = downstream_mp.mp.bit_rate_c_to_a * 2400;
+                        printf("  V.90 MP: CRC valid at %.3f ms, upstream=%d bps, trellis=%d, nonlinear=%s, shaping=%s, TRN2d BER=%d%%\n",
+                               sample_to_ms(downstream_mp.start_sample, 8000),
+                               rate_bps,
+                               downstream_mp.mp.trellis_size,
+                               downstream_mp.mp.use_non_linear_encoder
+                                   ? "yes" : "no",
+                               downstream_mp.mp.expanded_shaping
+                                   ? "expanded" : "minimum",
+                               downstream_mp.accepted_trn_ber_pct);
+                    }
+                }
+                if (getenv("VPCM_V34_CP_SOFT_ONLY"))
+                    goto v90_upstream_cleanup;
+                if (cp_symbols) {
+                    if (symbols)
+                        p3_result_free(symbols);
+                    symbols = cp_symbols;
+                    cp_symbols = NULL;
                 }
                 if (!symbols || symbols->symbol_count < 100) {
                     if (symbols)
@@ -17905,8 +22003,15 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 }
                 while (symbols && base_symbol < symbols->symbol_count
                        && symbols->symbols[base_symbol].sample_index
-                          < onset + 4800) {
+                          < onset - 160) {
                     base_symbol++;
+                }
+                if (downstream_mp.valid) {
+                    while (symbols && base_symbol < symbols->symbol_count
+                           && symbols->symbols[base_symbol].sample_index
+                              < downstream_mp.start_sample) {
+                        base_symbol++;
+                    }
                 }
                 /* The digital modem's V.90 MP selects the upstream V.34
                  * mapper.  Until that downstream PCM MP is decoded, search
@@ -17914,9 +22019,27 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                  * reset-state B1 mapping frame.  This uses constellation
                  * geometry, not a loose bit threshold. */
                 for (int rate_n = 2; rate_n <= 13; rate_n++) {
+                    if (downstream_mp.valid
+                        && rate_n != downstream_mp.mp.bit_rate_c_to_a) {
+                        continue;
+                    }
                     for (int trellis = 0; trellis < 3; trellis++) {
+                        if (downstream_mp.valid
+                            && trellis != downstream_mp.mp.trellis_size) {
+                            continue;
+                        }
                         for (int nonlinear = 0; nonlinear < 2; nonlinear++) {
+                            if (downstream_mp.valid
+                                && nonlinear
+                                   != downstream_mp.mp.use_non_linear_encoder) {
+                                continue;
+                            }
                             for (int expanded = 0; expanded < 2; expanded++) {
+                                if (downstream_mp.valid
+                                    && expanded
+                                       != downstream_mp.mp.expanded_shaping) {
+                                    continue;
+                                }
                                 if (b1_template_count < V90_B1_MAX_TEMPLATES
                                     && v34_make_b1_template(
                                         baud_code,
@@ -17924,6 +22047,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         trellis,
                                         nonlinear,
                                         expanded,
+                                        downstream_mp.valid
+                                            ? &downstream_mp : NULL,
                                         &b1_templates[b1_template_count])) {
                                     b1_template_count++;
                                 }
@@ -18053,7 +22178,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             1.0f,
                             0,
                             false,
-                            false,
+                            downstream_mp.valid
+                                && downstream_mp.mp.type == 1,
                             candidate->expanded,
                             &blind_fit,
                             512,
@@ -18109,7 +22235,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         best_scale,
                         best_rotation,
                         false,
-                        false,
+                        downstream_mp.valid
+                            && downstream_mp.mp.type == 1,
                         best_expanded,
                         &blind_fit,
                         0,
@@ -18141,14 +22268,15 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     printf("\n=== V.90 V.34 Upstream Recovery ===\n");
                     printf("  Carrier rise: %.3f ms; no validated B1/data boundary\n",
                            sample_to_ms(onset, 8000));
-                    printf("  Strongest Type-0 trial rejected: %.3f ms, geometry=%.1f%%, ones=%d/%d (requires >=50%% and >=80%%)\n",
+                    printf("  Strongest recovered-MP trial rejected: %.3f ms, geometry=%.1f%%, ones=%d/%d (requires >=50%% and >=80%%)\n",
                            sample_to_ms(symbols->symbols[best_symbol].sample_index,
                                         8000),
                            100.0f * best_template_match,
                            best_probe_ones,
                            best_probe_bits);
-                    printf("  Upstream payload: not decoded (digital MP/MP1 parameters still required)\n");
+                    printf("  Upstream payload: not decoded (no validated B1 boundary)\n");
                 }
+v90_upstream_cleanup:
                 if (symbols)
                     p3_result_free(symbols);
                 if (cp_symbols)
@@ -22425,7 +26553,8 @@ static void run_decode_stage_a(const char *label,
         }
     }
 
-    if ((opts->raw_output_enabled && (opts->do_v34 || opts->do_v90))) {
+    if ((ctx || opts->raw_output_enabled)
+        && (opts->do_v34 || opts->do_v90)) {
         v34_phase2_decode_pair_cached(&g_v34_phase2_engine,
                                       linear_samples,
                                       total_samples,

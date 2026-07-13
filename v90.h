@@ -347,6 +347,41 @@ int v90_demap_mapped_frame(v90_law_t law,
                            const uint8_t codewords[6],
                            uint8_t bits_out[]);
 
+typedef struct {
+    uint8_t prev_odd;
+    uint8_t prev_t[6];
+    uint8_t trellis_state;
+} v90_shaped_rx_state_t;
+
+/* Demap one Sr=1/2/3 shaped frame.  The shaping state and descrambler are
+ * reset to zero at the first TRN2d frame and carried across subsequent MP,
+ * Ed, B1d, and data frames. */
+int v90_demap_shaped_frame(v90_law_t law,
+                           const vpcm_cp_frame_t *cp,
+                           int bits_per_frame,
+                           uint32_t *descramble_reg,
+                           v90_shaped_rx_state_t *shaper,
+                           const uint8_t codewords[6],
+                           uint8_t bits_out[]);
+
+int v90_demap_shaped_sign_frame(const vpcm_cp_frame_t *cp,
+                                v90_shaped_rx_state_t *shaper,
+                                const uint8_t signs[6],
+                                uint8_t scrambled_sign_bits[5]);
+
+int v90_track_known_shaped_sign_frame(
+                                const vpcm_cp_frame_t *cp,
+                                v90_shaped_rx_state_t *shaper,
+                                const uint8_t scrambled_sign_bits[6],
+                                const uint8_t observed_signs[6]);
+
+int v90_generate_trn2d_codewords(v90_law_t law,
+                                 const vpcm_cp_frame_t *cp,
+                                 const v90_shaped_rx_state_t *initial_state,
+                                 int frames,
+                                 uint8_t codewords_out[],
+                                 int codewords_max);
+
 /* Reset the active negotiated or compatibility data mapper state. */
 void v90_reset_data_mode(v90_state_t *s);
 

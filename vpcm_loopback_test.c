@@ -767,12 +767,12 @@ done:
 static bool test_v90_strict_receiver_events(v91_law_t law)
 {
     enum { MAX_SYMBOLS = 20000 };
-    static const int first_trn_ucode[6] = {31, 120, 127, 127, 127, 127};
-    static const bool first_trn_positive[6] = {true, false, true, false, true, true};
-    static const int first_b1_ucode[6] = {31, 120, 99, 112, 127, 127};
-    static const bool first_b1_positive[6] = {true, false, true, false, true, true};
-    static const int first_data_ucode[6] = {59, 67, 83, 123, 127, 127};
-    static const bool first_data_positive[6] = {false, false, true, true, true, true};
+    static const int first_trn_ucode[6] = {1, 96, 127, 127, 127, 127};
+    static const bool first_trn_positive[6] = {true, false, true, false, true, false};
+    static const int first_b1_ucode[6] = {1, 64, 31, 112, 127, 127};
+    static const bool first_b1_positive[6] = {true, false, true, false, true, false};
+    static const int first_data_ucode[6] = {111, 91, 107, 113, 127, 127};
+    static const bool first_data_positive[6] = {true, true, true, true, false, false};
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
     v90_state_t *tx = NULL;
@@ -787,6 +787,8 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     uint16_t crc;
     int mp_nbits;
     int symbols = 0;
+    bool first_trn_mismatch = false;
+    bool first_b1_mismatch = false;
     bool ok = false;
 
     vpcm_log("Test: V.90 strict receiver-driven transitions (%s)", law_name);
@@ -903,7 +905,16 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             && codeword != v91_ucode_to_codeword(law,
                                                  first_trn_ucode[i],
                                                  first_trn_positive[i])) {
-            fprintf(stderr, "V.90 first TRN2d mapping frame mismatched the zero-state vector\n");
+            fprintf(stderr,
+                    "V.90 first TRN2d vector[%d] actual ucode=%d positive=%d\n",
+                    i,
+                    v91_codeword_to_ucode(law, codeword),
+                    (codeword & 0x80) != 0);
+            first_trn_mismatch = true;
+        }
+        if (i == 5 && first_trn_mismatch) {
+            fprintf(stderr,
+                    "V.90 first TRN2d mapping frame mismatched the zero-state vector\n");
             goto done;
         }
         ucode = v91_codeword_to_ucode(law, codeword);
@@ -995,7 +1006,16 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             && codeword != v91_ucode_to_codeword(law,
                                                  first_b1_ucode[i],
                                                  first_b1_positive[i])) {
-            fprintf(stderr, "V.90 first B1d frame mismatched the zero-state data vector\n");
+            fprintf(stderr,
+                    "V.90 first B1d vector[%d] actual ucode=%d positive=%d\n",
+                    i,
+                    v91_codeword_to_ucode(law, codeword),
+                    (codeword & 0x80) != 0);
+            first_b1_mismatch = true;
+        }
+        if (i == 5 && first_b1_mismatch) {
+            fprintf(stderr,
+                    "V.90 first B1d frame mismatched the zero-state data vector\n");
             goto done;
         }
         ucode = v91_codeword_to_ucode(law, codeword);
@@ -1015,6 +1035,7 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     }
     {
         int consumed = 0;
+        bool first_data_mismatch = false;
 
         if (v90_tx_data_frame_codewords(tx,
                                         data_codewords,
@@ -1035,14 +1056,23 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
                     != v91_ucode_to_codeword(law,
                                              first_data_ucode[i],
                                              first_data_positive[i])) {
-                fprintf(stderr, "V.90 first payload frame mismatched B1d-continuous vector\n");
-                goto done;
+                fprintf(stderr,
+                        "V.90 first payload vector[%d] actual ucode=%d positive=%d\n",
+                        i,
+                        ucode,
+                        (data_codewords[i] & 0x80) != 0);
+                first_data_mismatch = true;
             }
             if (ucode < 0
                 || !vpcm_cp_mask_get(data_cp.masks[constellation], ucode)) {
                 fprintf(stderr, "V.90 payload symbol escaped data-mode constellation\n");
                 goto done;
             }
+        }
+        if (first_data_mismatch) {
+            fprintf(stderr,
+                    "V.90 first payload frame mismatched B1d-continuous vector\n");
+            goto done;
         }
     }
     fill_pattern(long_data, (int)sizeof(long_data), 0x90DA7A11U);
@@ -1159,6 +1189,12 @@ static bool test_v90_shaped_phase4(v91_law_t law)
             vpcm_cp_frame_t data_cp;
             uint8_t mp_bits[256];
             uint8_t codeword = 0;
+            uint8_t mapped_frame[VPCM_CP_FRAME_INTERVALS];
+            uint8_t demapped_bits[32];
+            uint32_t demap_scrambler = 0;
+            v90_shaped_rx_state_t demap_shaper = {0};
+            uint32_t expected_sign_scrambler = 0;
+            v90_shaped_rx_state_t sign_shaper = {0};
             int symbols = 0;
             int mp_nbits;
             int ed_symbols = 0;
@@ -1214,6 +1250,7 @@ static bool test_v90_shaped_phase4(v91_law_t law)
                 int constellation;
 
                 v90_phase3_tx_codewords(tx, &codeword, 1);
+                mapped_frame[i % VPCM_CP_FRAME_INTERVALS] = codeword;
                 ucode = v91_codeword_to_ucode(law, codeword);
                 constellation = cpt.dfi[i % VPCM_CP_FRAME_INTERVALS];
                 if (ucode < 0
@@ -1233,6 +1270,85 @@ static bool test_v90_shaped_phase4(v91_law_t law)
                                 sr, i);
                         failed = true;
                         goto shaped_phase4_done;
+                    }
+                }
+                if (lookahead == 0
+                    && (i % VPCM_CP_FRAME_INTERVALS)
+                       == VPCM_CP_FRAME_INTERVALS - 1) {
+                    int got = v90_demap_shaped_frame(
+                        v90_law,
+                        &cpt,
+                        cpt.drn + 8,
+                        &demap_scrambler,
+                        &demap_shaper,
+                        mapped_frame,
+                        demapped_bits);
+
+                    if (got != cpt.drn + 8) {
+                        fprintf(stderr,
+                                "V.90 shaped TRN2d demap rejected frame Sr=%d frame=%d\n",
+                                sr, i / VPCM_CP_FRAME_INTERVALS);
+                        failed = true;
+                        goto shaped_phase4_done;
+                    }
+                    for (int bit = 0; bit < got; bit++) {
+                        if (demapped_bits[bit] != 1) {
+                            fprintf(stderr,
+                                    "V.90 shaped TRN2d demap bit mismatch Sr=%d frame=%d bit=%d\n",
+                                    sr, i / VPCM_CP_FRAME_INTERVALS, bit);
+                            failed = true;
+                            goto shaped_phase4_done;
+                        }
+                    }
+                    {
+                        uint8_t signs[VPCM_CP_FRAME_INTERVALS];
+                        uint8_t recovered_sign_bits[5];
+                        uint8_t expected_sign_bits[5];
+                        int sign_bits = VPCM_CP_FRAME_INTERVALS - sr;
+                        int expected_count = 0;
+
+                        for (int sym = 0;
+                             sym < VPCM_CP_FRAME_INTERVALS;
+                             sym++) {
+                            signs[sym] = mapped_frame[sym] >> 7;
+                        }
+                        if (v90_demap_shaped_sign_frame(
+                                &cpt,
+                                &sign_shaper,
+                                signs,
+                                recovered_sign_bits) != sign_bits) {
+                            fprintf(stderr,
+                                    "V.90 shaped TRN2d sign inverse rejected Sr=%d frame=%d\n",
+                                    sr,
+                                    i / VPCM_CP_FRAME_INTERVALS);
+                            failed = true;
+                            goto shaped_phase4_done;
+                        }
+                        for (int bit = 0; bit < cpt.drn + 8; bit++) {
+                            int feedback = ((expected_sign_scrambler >> 22)
+                                          ^ (expected_sign_scrambler >> 17))
+                                         & 1;
+                            int scrambled = 1 ^ feedback;
+
+                            expected_sign_scrambler =
+                                ((expected_sign_scrambler << 1) | scrambled)
+                                & 0x7FFFFF;
+                            if (bit < sign_bits)
+                                expected_sign_bits[expected_count++] =
+                                    (uint8_t)scrambled;
+                        }
+                        for (int bit = 0; bit < sign_bits; bit++) {
+                            if (recovered_sign_bits[bit]
+                                != expected_sign_bits[bit]) {
+                                fprintf(stderr,
+                                        "V.90 shaped TRN2d sign inverse mismatch Sr=%d frame=%d bit=%d\n",
+                                        sr,
+                                        i / VPCM_CP_FRAME_INTERVALS,
+                                        bit);
+                                failed = true;
+                                goto shaped_phase4_done;
+                            }
+                        }
                     }
                 }
             }
@@ -2503,7 +2619,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
     vpcm_cp_enable_all_ucodes(cp.masks[1]);
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits)
         || nbits != vpcm_cp_modulated_bit_length(&cp, 4)
-        || (nbits % 12) != 0
+        || nbits != 428
         || bits[19] != 0) {
         fprintf(stderr, "V.90 strict CP test could not build 4-point CPt\n");
         return false;
@@ -2611,6 +2727,27 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     }
 
+    cp.constellation_count = 1;
+    memset(cp.dfi, 0, sizeof(cp.dfi));
+    cp.codec_constellations_differ = true;
+    vpcm_cp_enable_all_ucodes(cp.masks[0]);
+    vpcm_cp_enable_odd_ucodes(cp.codec_masks[0]);
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits)
+        || nbits != 428 || bits[128] != 1) {
+        fprintf(stderr,
+                "V.90 strict CP test could not build bit-128 codec mask\n");
+        return false;
+    }
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, bits[i]);
+    if (capture.count != 4
+        || rx.valid_frames != 4
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr,
+                "V.90 strict CP receiver rejected bit-128 codec mask\n");
+        return false;
+    }
+
     vpcm_log("PASS: V.90 strict CP bitstream receiver (%s, bits=%d)",
              law_name, nbits);
     return true;
@@ -2714,32 +2851,33 @@ static bool test_v90_spectral_shaping(v91_law_t law)
     enum { FRAMES = 256, INPUT_BYTES = 1024 };
     static const uint8_t first_frame[2][3][6] = {
         {
-            {0x69, 0x95, 0x41, 0x06, 0x80, 0x80},
-            {0x53, 0xAB, 0x02, 0x0D, 0x80, 0x80},
-            {0x27, 0xD7, 0x84, 0x9A, 0x00, 0x80}
+            {0x54, 0xEF, 0x2A, 0x00, 0x80, 0x80},
+            {0x29, 0xDF, 0x55, 0x00, 0x80, 0x80},
+            {0x53, 0xBE, 0x2B, 0x01, 0x80, 0x80}
         },
         {
-            {0x4B, 0x2D, 0x07, 0xAC, 0xAA, 0x2A},
-            {0x69, 0x25, 0x70, 0xA6, 0x2A, 0x2A},
-            {0x2D, 0x35, 0x9E, 0xB3, 0x2A, 0x2A}
+            {0x77, 0x55, 0x78, 0xAC, 0xAA, 0x2A},
+            {0x11, 0x55, 0x0F, 0x27, 0xAA, 0xAA},
+            {0x5D, 0x54, 0xE1, 0xB0, 0x2A, 0x2A}
         }
     };
     static const uint8_t first_frame_ld1[2][3][6] = {
         {
-            {0x69, 0x95, 0x41, 0x06, 0x80, 0x80},
-            {0x53, 0xAB, 0x02, 0x0D, 0x80, 0x80},
-            {0x27, 0xD7, 0x04, 0x1A, 0x80, 0x80}
+            {0x54, 0xEF, 0x2A, 0x00, 0x80, 0x80},
+            {0xA9, 0x5F, 0xD5, 0x00, 0x00, 0x80},
+            {0xD3, 0x3E, 0x2B, 0x81, 0x80, 0x00}
         },
         {
-            {0x4B, 0x2D, 0x07, 0xAC, 0xAA, 0x2A},
-            {0xE9, 0xA5, 0xF0, 0x26, 0x2A, 0xAA},
-            {0x2D, 0x35, 0x9E, 0xB3, 0x2A, 0x2A}
+            {0x77, 0x55, 0x78, 0xAC, 0xAA, 0x2A},
+            {0x11, 0x55, 0x0F, 0x27, 0xAA, 0xAA},
+            {0x5D, 0x54, 0xE1, 0xB0, 0x2A, 0x2A}
         }
     };
     int law_index = (law == V91_LAW_ALAW) ? 1 : 0;
     const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
     uint8_t input[INPUT_BYTES];
     uint8_t codewords[6];
+    bool vector_mismatch = false;
 
     vpcm_log("Test: V.90 Sr=1/2/3 spectral shaping ld=0/1 (%s)", law_name);
     fill_pattern(input, INPUT_BYTES, 0x905A5100U ^ (uint32_t)law);
@@ -2782,20 +2920,22 @@ shaping_failure:
                 if (output_frames == 0 && lookahead == 0) {
                     if (memcmp(codewords, first_frame[law_index][sr - 1], 6) != 0) {
                         fprintf(stderr,
-                                "V.90 Sr=%d ld=0 first-frame vector mismatch (%s)\n",
-                                sr, law_name);
-                        v90_free(tx);
-                        return false;
+                                "V.90 Sr=%d ld=0 first-frame vector mismatch (%s): %02X %02X %02X %02X %02X %02X\n",
+                                sr, law_name,
+                                codewords[0], codewords[1], codewords[2],
+                                codewords[3], codewords[4], codewords[5]);
+                        vector_mismatch = true;
                     }
                 } else if (output_frames == 0
                            && memcmp(codewords,
                                      first_frame_ld1[law_index][sr - 1],
                                      6) != 0) {
                     fprintf(stderr,
-                            "V.90 Sr=%d ld=1 first-frame vector mismatch (%s)\n",
-                            sr, law_name);
-                    v90_free(tx);
-                    return false;
+                            "V.90 Sr=%d ld=1 first-frame vector mismatch (%s): %02X %02X %02X %02X %02X %02X\n",
+                            sr, law_name,
+                            codewords[0], codewords[1], codewords[2],
+                            codewords[3], codewords[4], codewords[5]);
+                    vector_mismatch = true;
                 }
                 output_frames++;
             }
@@ -2810,6 +2950,8 @@ shaping_failure:
             v90_free(tx);
         }
     }
+    if (vector_mismatch)
+        return false;
     if (v90_test_create_negotiated_mapper(law, 9, 1, 2) != NULL) {
         fprintf(stderr, "V.90 accepted unsupported spectral lookahead ld=2\n");
         return false;

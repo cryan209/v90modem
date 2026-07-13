@@ -72,8 +72,17 @@ bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
         && a->shaping_b2_q1_6 == b->shaping_b2_q1_6
         && a->upstream_rate_mask == b->upstream_rate_mask
         && a->constellation_count == b->constellation_count
+        && a->codec_constellations_differ
+           == b->codec_constellations_differ
         && memcmp(a->dfi, b->dfi, sizeof(a->dfi)) == 0
-        && memcmp(a->masks, b->masks, sizeof(a->masks)) == 0;
+        && memcmp(a->masks,
+                  b->masks,
+                  (size_t)a->constellation_count * VPCM_CP_MASK_BYTES) == 0
+        && (!a->codec_constellations_differ
+            || memcmp(a->codec_masks,
+                      b->codec_masks,
+                      (size_t)a->constellation_count
+                          * VPCM_CP_MASK_BYTES) == 0);
 }
 
 bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len)
@@ -108,7 +117,7 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
     return (msg == NULL);
 }
 
-static int vpcm_cp_bit_length_aligned(const vpcm_cp_frame_t *cp, int alignment)
+static int vpcm_cp_bit_length_fixed_fill(const vpcm_cp_frame_t *cp)
 {
     int nbits;
 
@@ -116,30 +125,28 @@ static int vpcm_cp_bit_length_aligned(const vpcm_cp_frame_t *cp, int alignment)
         return 0;
 
     nbits = 136 + 136 * cp->constellation_count;
+    if (cp->codec_constellations_differ)
+        nbits += 136 * cp->constellation_count;
     nbits += 17; /* CRC start bit + 16 CRC bits */
-    while ((nbits % alignment) != 0)
-        nbits++;
+    nbits += 3;  /* V.90 Table 14 bits 289+d through 291+d */
     return nbits;
 }
 
 int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp)
 {
-    return vpcm_cp_bit_length_aligned(cp, 6);
+    return vpcm_cp_bit_length_fixed_fill(cp);
 }
 
 int vpcm_cp_modulated_bit_length(const vpcm_cp_frame_t *cp, int constellation_points)
 {
-    if (constellation_points == 4)
-        return vpcm_cp_bit_length_aligned(cp, 12);
-    if (constellation_points == 16)
-        return vpcm_cp_bit_length_aligned(cp, 24);
-    return 0;
+    if (constellation_points != 4 && constellation_points != 16)
+        return 0;
+    return vpcm_cp_bit_length_fixed_fill(cp);
 }
 
-static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
-                                        int alignment,
-                                        uint8_t *bits_out,
-                                        int *nbits_out)
+static bool vpcm_cp_encode_bits_fixed_fill(const vpcm_cp_frame_t *cp,
+                                           uint8_t *bits_out,
+                                           int *nbits_out)
 {
     int nbits;
     int max_idx;
@@ -151,7 +158,7 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
     if (!cp || !bits_out || !nbits_out || !vpcm_cp_validate(cp, NULL, 0))
         return false;
 
-    nbits = vpcm_cp_bit_length_aligned(cp, alignment);
+    nbits = vpcm_cp_bit_length_fixed_fill(cp);
     if (nbits <= 0 || nbits > VPCM_CP_MAX_BITS)
         return false;
     memset(bits_out, 0, (size_t) nbits);
@@ -181,7 +188,9 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
     for (c = 0; c < VPCM_CP_FRAME_INTERVALS; c++)
         vpcm_cp_set_bits(bits_out, 103 + 4 * c + (c >= 4 ? 1 : 0), 4, cp->dfi[c]);
     vpcm_cp_set_bit(bits_out, 119, 0);
-    vpcm_cp_set_bit(bits_out, 128, 0);
+    vpcm_cp_set_bit(bits_out,
+                    128,
+                    cp->codec_constellations_differ ? 1 : 0);
 
     max_idx = cp->constellation_count - 1;
     pos = 136;
@@ -194,12 +203,28 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
                 vpcm_cp_set_bit(bits_out, pos++, vpcm_cp_mask_get(cp->masks[c], 16 * uchord + u) ? 1 : 0);
         }
     }
+    if (cp->codec_constellations_differ) {
+        for (c = 0; c <= max_idx; c++) {
+            int uchord;
+
+            for (uchord = 0; uchord < 8; uchord++) {
+                vpcm_cp_set_bit(bits_out, pos++, 0);
+                for (u = 0; u < 16; u++) {
+                    vpcm_cp_set_bit(
+                        bits_out,
+                        pos++,
+                        vpcm_cp_mask_get(cp->codec_masks[c],
+                                         16 * uchord + u) ? 1 : 0);
+                }
+            }
+        }
+    }
 
     vpcm_cp_set_bit(bits_out, pos++, 0);
     crc = vpcm_cp_crc_bits(bits_out, pos);
     vpcm_cp_set_bits(bits_out, pos, 16, crc);
     pos += 16;
-    while ((pos % alignment) != 0)
+    for (int fill = 0; fill < 3; fill++)
         bits_out[pos++] = 0;
 
     *nbits_out = pos;
@@ -209,7 +234,7 @@ static bool vpcm_cp_encode_bits_aligned(const vpcm_cp_frame_t *cp,
 
 bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out)
 {
-    return vpcm_cp_encode_bits_aligned(cp, 6, bits_out, nbits_out);
+    return vpcm_cp_encode_bits_fixed_fill(cp, bits_out, nbits_out);
 }
 
 bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
@@ -217,15 +242,9 @@ bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
                                    uint8_t *bits_out,
                                    int *nbits_out)
 {
-    int alignment;
-
-    if (constellation_points == 4)
-        alignment = 12;
-    else if (constellation_points == 16)
-        alignment = 24;
-    else
+    if (constellation_points != 4 && constellation_points != 16)
         return false;
-    return vpcm_cp_encode_bits_aligned(cp, alignment, bits_out, nbits_out);
+    return vpcm_cp_encode_bits_fixed_fill(cp, bits_out, nbits_out);
 }
 
 bool vpcm_cp_decode_bits(const uint8_t *bits, int nbits, vpcm_cp_frame_t *cp_out)
@@ -249,12 +268,14 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
     if (!vpcm_cp_encode_bits(cp, diag->bits, &diag->nbits))
         return false;
     diag->frame = *cp;
-    diag->crc_field = (uint16_t) vpcm_cp_get_bits(diag->bits, diag->nbits - 16 - ((diag->nbits % 6) ? 0 : 0) - ((diag->nbits > 0) ? ((6 - ((diag->nbits - 1) % 6 + 1)) % 6) : 0), 16);
     /* Recompute the variable fields explicitly for clarity. */
     {
         int crc_start;
 
-        crc_start = 136 + 136 * cp->constellation_count + 1;
+        crc_start = 136
+                  + 136 * cp->constellation_count
+                    * (cp->codec_constellations_differ ? 2 : 1)
+                  + 1;
         diag->crc_field = (uint16_t) vpcm_cp_get_bits(diag->bits, crc_start, 16);
         diag->crc_remainder = vpcm_cp_crc_bits(diag->bits, crc_start + 16);
     }
@@ -279,10 +300,9 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
     for (int i = 129; i <= 135; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
     diag->v90_compat_ok = (diag->bits[19] == 1
-                           && diag->bits[30] == 0
-                           && diag->bits[128] == 0);
+                           && diag->bits[30] == 0);
     diag->fill_ok = true;
-    for (int i = diag->nbits - 1; i >= 0 && (i % 6) != 5; i--) {
+    for (int i = diag->nbits - 3; i < diag->nbits; i++) {
         if (diag->bits[i] != 0) {
             diag->fill_ok = false;
             break;
@@ -303,7 +323,7 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     int max_idx;
     int pos;
 
-    if (!bits || !diag || nbits <= 0 || nbits > VPCM_CP_MAX_BITS || (nbits % 6) != 0)
+    if (!bits || !diag || nbits <= 0 || nbits > VPCM_CP_MAX_BITS)
         return false;
 
     memset(diag, 0, sizeof(*diag));
@@ -325,15 +345,13 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
                            && bits[68] == 0
                            && bits[85] == 0
                            && bits[102] == 0
-                           && bits[119] == 0
-                           && bits[128] == 0);
+                           && bits[119] == 0);
     diag->reserved_bits_ok = true;
     for (i = 25; i <= 29; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
     for (i = 129; i <= 135; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
-    diag->v90_compat_ok = (bits[30] == 0
-                           && bits[128] == 0);
+    diag->v90_compat_ok = (bits[30] == 0);
 
     diag->frame.transparent_mode_granted = (bits[18] != 0);
     diag->frame.v90_compatibility = (bits[19] != 0);
@@ -360,6 +378,11 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
             max_idx = diag->frame.dfi[i];
     }
     diag->frame.constellation_count = (uint8_t) (max_idx + 1);
+    diag->frame.codec_constellations_differ = bits[128] != 0;
+    if (nbits != 156
+                 + 136 * diag->frame.constellation_count
+                   * (diag->frame.codec_constellations_differ ? 2 : 1))
+        return false;
 
     pos = 136;
     for (i = 0; i <= max_idx; i++) {
@@ -371,6 +394,22 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
                 diag->start_bits_ok = false;
             for (u = 0; u < 16; u++)
                 vpcm_cp_mask_set(diag->frame.masks[i], 16 * uchord + u, bits[pos++] != 0);
+        }
+    }
+    if (diag->frame.codec_constellations_differ) {
+        for (i = 0; i <= max_idx; i++) {
+            int uchord;
+            int u;
+
+            for (uchord = 0; uchord < 8; uchord++) {
+                if (bits[pos++] != 0)
+                    diag->start_bits_ok = false;
+                for (u = 0; u < 16; u++) {
+                    vpcm_cp_mask_set(diag->frame.codec_masks[i],
+                                     16 * uchord + u,
+                                     bits[pos++] != 0);
+                }
+            }
         }
     }
     if (bits[pos++] != 0)

@@ -79,9 +79,9 @@ State machine: `ME_IDLE → ME_DIALING → ME_V8 → ME_TRAINING → ME_DATA →
 
 ## Key Implementation Status
 
-- **V.90 training (Phases 1–4, §8–9)** — stubbed with a fixed silence/tone period; full implementation needed for real interoperability
+- **V.90 training (Phases 1–4, §8–9)** — largely implemented, not a fixed silence/tone stub: Phase 3 generates real per-spec PCM codewords (Sd/S̄d/TRN1d/Jd/DIL), Phase 4 runs a negotiated modulus mapper with real MP/CP CRC framing. Real-world reliability against noisy line audio (vs. loopback/synthetic tests) is still being validated — see `docs/p3_demod_rrc_frontend_plan.md`.
 - **V.34 upstream** — SpanDSP V.22bis (2400 bps) is a working placeholder; V.34 upstream encoder not yet wired up
-- **Mi negotiation** — hardcoded to Mi=128 (7 magnitude bits per symbol); should be negotiated during training
+- **Mi negotiation** — the downstream consumption path (decoding a peer-supplied CP frame into per-interval Mi and running the §5.4.3 modulus encoder) is fully implemented and live-wired to the audio path, not hardcoded. The remaining gap is narrower: when this side originates a constellation offer (V.92 upstream CPd, and the coupled-training test harness's simulated CP) it always offers the maximal Ucode set instead of one derived from DIL/impairment analysis. See `docs/v90_mi_negotiation.md`.
 
 ## Dependencies
 

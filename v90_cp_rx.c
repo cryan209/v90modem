@@ -2,12 +2,15 @@
 
 #include <string.h>
 
-static int v90_cp_candidate_length(int constellation_count, int points)
+static int v90_cp_candidate_length(int constellation_count,
+                                   int points,
+                                   bool codec_constellations_differ)
 {
     vpcm_cp_frame_t cp;
 
     vpcm_cp_init(&cp);
     cp.constellation_count = (uint8_t)constellation_count;
+    cp.codec_constellations_differ = codec_constellations_differ;
     return vpcm_cp_modulated_bit_length(&cp, points);
 }
 
@@ -103,8 +106,10 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
             v90_cp_rx_reset(rx);
             return false;
         }
-        rx->target_bits = v90_cp_candidate_length(max_idx + 1,
-                                                   rx->constellation_points);
+        rx->target_bits = v90_cp_candidate_length(
+            max_idx + 1,
+            rx->constellation_points,
+            rx->bits[128] != 0);
     }
 
     if (rx->target_bits > 0 && rx->bit_count == rx->target_bits) {

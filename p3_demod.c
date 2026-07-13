@@ -213,6 +213,7 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     create_godard_coeffs(d, 0.99f);
     d->use_rrc_frontend = getenv("P3_LEGACY_FRONTEND") == NULL;
     d->rrc_agc_gain = 1.0f / 8000.0f;
+    d->rrc_signal_active = false;
     d->eq_coeff_re[63] = 1.0f;
     d->eq_delta = 0.21f / 127.0f;
     d->s_previous_dibit = -1;
@@ -261,6 +262,7 @@ void p3_demod_reset(p3_demod_t *d)
     d->ted_phase = 0.0f;
     d->timing_correction = 0;
     d->rrc_agc_gain = 1.0f / 8000.0f;
+    d->rrc_signal_active = false;
     memset(d->eq_buf_re, 0, sizeof(d->eq_buf_re));
     memset(d->eq_buf_im, 0, sizeof(d->eq_buf_im));
     memset(d->eq_coeff_re, 0, sizeof(d->eq_coeff_re));
@@ -435,8 +437,9 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
             if (conj_mag > 1e-10f)
                 err /= conj_mag;
 
-            if (d->cma_freeze_after_sample < 0
-                || sample_idx < d->cma_freeze_after_sample) {
+            if (d->rrc_signal_active
+                && (d->cma_freeze_after_sample < 0
+                    || sample_idx < d->cma_freeze_after_sample)) {
                 d->pll_freq_err += d->pll_beta * err;
                 d->nco_phase_inc = hz_to_phase_inc(d->carrier_hz + d->pll_freq_err,
                                                     d->sample_rate);
@@ -665,9 +668,11 @@ static int p3_rrc_demod_process(p3_demod_t *d,
             sym_re = ii * cos_val - qq * sin_val;
             sym_im = -ii * sin_val - qq * cos_val;
             raw_mag = hypotf(sym_re, sym_im);
-            if ((d->cma_freeze_after_sample < 0
-                 || sample_offset + i < d->cma_freeze_after_sample)
-                && raw_mag > 1.0f && isfinite(raw_mag)) {
+            d->rrc_signal_active = raw_mag > 100.0f;
+            if (d->rrc_signal_active
+                && (d->cma_freeze_after_sample < 0
+                    || sample_offset + i < d->cma_freeze_after_sample)
+                && isfinite(raw_mag)) {
                 float target_gain = 1.0f / raw_mag;
                 d->rrc_agc_gain = 0.995f * d->rrc_agc_gain + 0.005f * target_gain;
             }
@@ -677,11 +682,15 @@ static int p3_rrc_demod_process(p3_demod_t *d,
 
             if (d->rrc_half_baud) {
                 d->rrc_half_baud = 0;
-                godard_symbol_sync(d);
+                if (d->rrc_signal_active)
+                    godard_symbol_sync(d);
                 equalizer_get(d, &eq_re, &eq_im);
                 if (d->cma_freeze_after_sample >= 0
                     && sample_offset + i >= d->cma_freeze_after_sample) {
                     /* Preserve the TRN/MP-trained equalizer in data mode. */
+                } else if (!d->rrc_signal_active) {
+                    /* Preserve the Phase-3-trained equalizer and timing
+                     * state across the long V.90 half-duplex quiet gap. */
                 } else if (d->cma_freeze_symbols > 0)
                     d->cma_freeze_symbols--;
                 else

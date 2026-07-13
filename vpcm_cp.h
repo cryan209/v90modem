@@ -30,8 +30,10 @@ typedef struct {
     uint8_t shaping_b2_q1_6;
     uint16_t upstream_rate_mask;
     uint8_t constellation_count;
+    bool codec_constellations_differ;
     uint8_t dfi[VPCM_CP_FRAME_INTERVALS];
     uint8_t masks[VPCM_CP_MAX_CONSTELLATIONS][VPCM_CP_MASK_BYTES];
+    uint8_t codec_masks[VPCM_CP_MAX_CONSTELLATIONS][VPCM_CP_MASK_BYTES];
 } vpcm_cp_frame_t;
 
 typedef struct {

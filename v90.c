@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <limits.h>
 
 /* V.90 downstream encoder constants (ITU-T V.90 §5) */
 #define V90_MI          128     /* Default constellation points per frame interval */
@@ -100,7 +101,9 @@ static void v90_scrambler_init(v90_scrambler_t *sc)
 
 static int v90_scramble_bit(v90_scrambler_t *sc, int in_bit)
 {
-    int fb = ((sc->sr >> 22) ^ (sc->sr >> 4)) & 1;
+    /* V.90 5.3: the digital modem uses V.34 GPC,
+     * 1 + x^-18 + x^-23 (not the answer-modem GPA tap at x^-5). */
+    int fb = ((sc->sr >> 22) ^ (sc->sr >> 17)) & 1;
     int out_bit = in_bit ^ fb;
     sc->sr = ((sc->sr << 1) | out_bit) & 0x7FFFFF;
     return out_bit;
@@ -121,7 +124,8 @@ static int v90_descramble_reg_bit(uint32_t *reg, int in_bit)
 {
     int out_bit;
 
-    out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
+    out_bit = (in_bit ^ (int)(*reg >> 22)
+                      ^ (int)(*reg >> 17)) & 1;
     *reg = (*reg << 1) | (uint32_t) in_bit;
     return out_bit;
 }
@@ -2955,6 +2959,354 @@ int v90_demap_mapped_frame(v90_law_t law,
                                                       scrambled[i]);
     *prev_sign = sign_prev;
     return bits_per_frame;
+}
+
+int v90_demap_shaped_frame(v90_law_t law,
+                           const vpcm_cp_frame_t *cp,
+                           int bits_per_frame,
+                           uint32_t *descramble_reg,
+                           v90_shaped_rx_state_t *shaper,
+                           const uint8_t codewords[V90_FRAME_LEN],
+                           uint8_t bits_out[])
+{
+    int labels[V90_FRAME_LEN];
+    int moduli[V90_FRAME_LEN];
+    uint8_t observed_signs[V90_FRAME_LEN];
+    uint8_t scrambled[64];
+    uint64_t r;
+    int sr;
+    int sign_bits;
+    int modulus_bits;
+    int recovered_word = -1;
+    int recovered_trellis = 0;
+    uint8_t recovered_prev_odd = 0;
+    uint8_t recovered_prev_t[6] = {0};
+    int matches = 0;
+
+    if (!cp || !descramble_reg || !shaper || !codewords || !bits_out
+        || bits_per_frame < V90_FRAME_LEN
+        || bits_per_frame > (int)sizeof(scrambled))
+        return 0;
+    sr = cp->shaping_redundancy;
+    if (sr < 1 || sr > 3 || (V90_FRAME_LEN % sr) != 0)
+        return 0;
+    sign_bits = V90_FRAME_LEN - sr;
+    modulus_bits = bits_per_frame - sign_bits;
+    if (modulus_bits < 0 || modulus_bits > 56)
+        return 0;
+
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = cp->dfi[i];
+        int ucode = v90_codeword_to_ucode_law(law, codewords[i]);
+        int label = 0;
+        int m = 0;
+
+        if (ucode < 0 || constellation >= cp->constellation_count
+            || !vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            return 0;
+        for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+            if (vpcm_cp_mask_get(cp->masks[constellation], u)) {
+                if (u > ucode)
+                    label++;
+                m++;
+            }
+        }
+        labels[i] = label;
+        moduli[i] = m;
+        observed_signs[i] = (uint8_t)((codewords[i] >> 7) & 1U);
+    }
+    r = 0;
+    for (int i = V90_FRAME_LEN - 1; i >= 0; i--)
+        r = (uint64_t)moduli[i] * r + (uint64_t)labels[i];
+    if (modulus_bits < 64 && (r >> modulus_bits) != 0)
+        return 0;
+
+    for (int word = 0; word < (1 << sign_bits); word++) {
+        v90_shaper_state_t trial;
+        uint8_t input[V90_FRAME_LEN] = {0};
+        uint8_t initial[V90_FRAME_LEN];
+
+        memset(&trial, 0, sizeof(trial));
+        trial.prev_odd = shaper->prev_odd;
+        memcpy(trial.prev_t, shaper->prev_t, sizeof(shaper->prev_t));
+        trial.trellis_state = shaper->trellis_state;
+        for (int bit = 0; bit < sign_bits; bit++)
+            input[bit] = (uint8_t)((word >> bit) & 1);
+        v90_build_initial_shaping_signs(&trial, sr, input, initial);
+        for (int choices = 0; choices < (1 << sr); choices++) {
+            int trellis = shaper->trellis_state;
+            int frame_length = V90_FRAME_LEN / sr;
+            bool match = true;
+
+            for (int frame = 0; frame < sr && match; frame++) {
+                int rule = trellis == 0
+                         ? ((choices >> frame) & 1)
+                         : (2 + ((choices >> frame) & 1));
+
+                for (int k = 0; k < frame_length; k++) {
+                    int pos = frame * frame_length + k;
+                    int sign = initial[pos]
+                             ^ v90_shaper_rule_inverts(rule, k);
+
+                    if (sign != observed_signs[pos]) {
+                        match = false;
+                        break;
+                    }
+                }
+                trellis = (rule == 1 || rule == 3) ? 1 : 0;
+            }
+            if (match) {
+                recovered_word = word;
+                recovered_trellis = trellis;
+                recovered_prev_odd = trial.prev_odd;
+                memcpy(recovered_prev_t,
+                       trial.prev_t,
+                       sizeof(recovered_prev_t));
+                matches++;
+            }
+        }
+        if (matches > 1)
+            return 0;
+    }
+    if (matches != 1)
+        return 0;
+    shaper->prev_odd = recovered_prev_odd;
+    memcpy(shaper->prev_t,
+           recovered_prev_t,
+           sizeof(shaper->prev_t));
+    shaper->trellis_state = (uint8_t)recovered_trellis;
+    for (int bit = 0; bit < sign_bits; bit++)
+        scrambled[bit] = (uint8_t)((recovered_word >> bit) & 1);
+    for (int bit = 0; bit < modulus_bits; bit++)
+        scrambled[sign_bits + bit] = (uint8_t)((r >> bit) & 1);
+    for (int bit = 0; bit < bits_per_frame; bit++) {
+        bits_out[bit] = (uint8_t)v90_descramble_reg_bit(
+            descramble_reg,
+            scrambled[bit]);
+    }
+    return bits_per_frame;
+}
+
+int v90_demap_shaped_sign_frame(const vpcm_cp_frame_t *cp,
+                                v90_shaped_rx_state_t *shaper,
+                                const uint8_t signs[6],
+                                uint8_t scrambled_sign_bits[5])
+{
+    int sr;
+    int sign_bits;
+    int recovered_word = -1;
+    int recovered_trellis = 0;
+    uint8_t recovered_prev_odd = 0;
+    uint8_t recovered_prev_t[6] = {0};
+    int matches = 0;
+
+    if (!cp || !shaper || !signs || !scrambled_sign_bits)
+        return 0;
+    sr = cp->shaping_redundancy;
+    if (sr < 1 || sr > 3 || V90_FRAME_LEN % sr != 0)
+        return 0;
+    sign_bits = V90_FRAME_LEN - sr;
+    if (sr == 1) {
+        uint8_t recovered[5] = {0};
+        uint8_t recovered_t[6] = {0};
+        uint8_t recovered_odd = 0;
+
+        for (int choice = 0; choice < 2; choice++) {
+            int rule = shaper->trellis_state == 0
+                     ? choice : 2 + choice;
+            uint8_t t[6];
+            uint8_t p_prime[6];
+            uint8_t bits[5];
+
+            for (int k = 0; k < 6; k++) {
+                t[k] = (uint8_t)((signs[k] & 1U)
+                     ^ v90_shaper_rule_inverts(rule, k));
+                p_prime[k] = t[k] ^ shaper->prev_t[k];
+            }
+            if (p_prime[0] != 0)
+                continue;
+            bits[0] = p_prime[1] ^ shaper->prev_odd;
+            bits[1] = p_prime[2];
+            bits[2] = p_prime[3] ^ p_prime[1];
+            bits[3] = p_prime[4];
+            bits[4] = p_prime[5] ^ p_prime[3];
+            memcpy(recovered, bits, sizeof(recovered));
+            memcpy(recovered_t, t, sizeof(recovered_t));
+            recovered_odd = p_prime[5];
+            recovered_trellis = (rule == 1 || rule == 3) ? 1 : 0;
+            matches++;
+        }
+        if (matches != 1)
+            return 0;
+        memcpy(scrambled_sign_bits, recovered, sizeof(recovered));
+        memcpy(shaper->prev_t, recovered_t, sizeof(shaper->prev_t));
+        shaper->prev_odd = recovered_odd;
+        shaper->trellis_state = (uint8_t)recovered_trellis;
+        return sign_bits;
+    }
+    for (int word = 0; word < (1 << sign_bits); word++) {
+        v90_shaper_state_t trial;
+        uint8_t input[V90_FRAME_LEN] = {0};
+        uint8_t initial[V90_FRAME_LEN];
+
+        memset(&trial, 0, sizeof(trial));
+        trial.prev_odd = shaper->prev_odd;
+        memcpy(trial.prev_t, shaper->prev_t, sizeof(shaper->prev_t));
+        trial.trellis_state = shaper->trellis_state;
+        for (int bit = 0; bit < sign_bits; bit++)
+            input[bit] = (uint8_t)((word >> bit) & 1);
+        v90_build_initial_shaping_signs(&trial, sr, input, initial);
+        for (int choices = 0; choices < (1 << sr); choices++) {
+            int trellis = shaper->trellis_state;
+            int frame_length = V90_FRAME_LEN / sr;
+            bool match = true;
+
+            for (int frame = 0; frame < sr && match; frame++) {
+                int rule = trellis == 0
+                         ? ((choices >> frame) & 1)
+                         : (2 + ((choices >> frame) & 1));
+
+                for (int k = 0; k < frame_length; k++) {
+                    int pos = frame * frame_length + k;
+                    int sign = initial[pos]
+                             ^ v90_shaper_rule_inverts(rule, k);
+
+                    if (sign != (signs[pos] & 1U)) {
+                        match = false;
+                        break;
+                    }
+                }
+                trellis = (rule == 1 || rule == 3) ? 1 : 0;
+            }
+            if (match) {
+                recovered_word = word;
+                recovered_trellis = trellis;
+                recovered_prev_odd = trial.prev_odd;
+                memcpy(recovered_prev_t,
+                       trial.prev_t,
+                       sizeof(recovered_prev_t));
+                matches++;
+            }
+        }
+    }
+    if (matches != 1)
+        return 0;
+    shaper->prev_odd = recovered_prev_odd;
+    memcpy(shaper->prev_t, recovered_prev_t, sizeof(shaper->prev_t));
+    shaper->trellis_state = (uint8_t)recovered_trellis;
+    for (int bit = 0; bit < sign_bits; bit++)
+        scrambled_sign_bits[bit] = (uint8_t)((recovered_word >> bit) & 1);
+    return sign_bits;
+}
+
+int v90_track_known_shaped_sign_frame(
+                                const vpcm_cp_frame_t *cp,
+                                v90_shaped_rx_state_t *shaper,
+                                const uint8_t scrambled_sign_bits[6],
+                                const uint8_t observed_signs[6])
+{
+    v90_shaper_state_t trial;
+    uint8_t initial[V90_FRAME_LEN];
+    int sr;
+    int frame_length;
+    int best_errors = INT_MAX;
+    int best_trellis = 0;
+
+    if (!cp || !shaper || !scrambled_sign_bits || !observed_signs)
+        return -1;
+    sr = cp->shaping_redundancy;
+    if (sr < 1 || sr > 3 || V90_FRAME_LEN % sr != 0)
+        return -1;
+    frame_length = V90_FRAME_LEN / sr;
+    memset(&trial, 0, sizeof(trial));
+    trial.prev_odd = shaper->prev_odd;
+    memcpy(trial.prev_t, shaper->prev_t, sizeof(trial.prev_t));
+    trial.trellis_state = shaper->trellis_state;
+    v90_build_initial_shaping_signs(&trial,
+                                    sr,
+                                    scrambled_sign_bits,
+                                    initial);
+    for (int choices = 0; choices < (1 << sr); choices++) {
+        int trellis = shaper->trellis_state;
+        int errors = 0;
+
+        for (int frame = 0; frame < sr; frame++) {
+            int rule = trellis == 0
+                     ? ((choices >> frame) & 1)
+                     : (2 + ((choices >> frame) & 1));
+
+            for (int k = 0; k < frame_length; k++) {
+                int pos = frame * frame_length + k;
+                int sign = initial[pos]
+                         ^ v90_shaper_rule_inverts(rule, k);
+
+                errors += sign != (observed_signs[pos] & 1U);
+            }
+            trellis = (rule == 1 || rule == 3) ? 1 : 0;
+        }
+        if (errors < best_errors) {
+            best_errors = errors;
+            best_trellis = trellis;
+        }
+    }
+    shaper->prev_odd = (uint8_t)trial.prev_odd;
+    memcpy(shaper->prev_t, trial.prev_t, sizeof(shaper->prev_t));
+    shaper->trellis_state = (uint8_t)best_trellis;
+    return best_errors;
+}
+
+int v90_generate_trn2d_codewords(v90_law_t law,
+                                 const vpcm_cp_frame_t *cp,
+                                 const v90_shaped_rx_state_t *initial_state,
+                                 int frames,
+                                 uint8_t codewords_out[],
+                                 int codewords_max)
+{
+    v90_state_t local;
+    v90_scrambler_t scrambler;
+    v90_shaper_state_t shaper;
+    int bits_per_frame;
+    int sign_bits;
+    int modulus_bits;
+
+    if (!cp || !initial_state || !codewords_out || frames <= 0
+        || codewords_max < frames * V90_FRAME_LEN
+        || cp->shaping_redundancy < 1
+        || cp->shaping_redundancy > 3
+        || cp->shaping_lookahead != 0)
+        return 0;
+    bits_per_frame = cp->drn + 8;
+    sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
+    modulus_bits = bits_per_frame - sign_bits;
+    if (modulus_bits < 0 || modulus_bits > 56)
+        return 0;
+    memset(&local, 0, sizeof(local));
+    memset(&shaper, 0, sizeof(shaper));
+    local.law = law;
+    shaper.prev_odd = initial_state->prev_odd;
+    memcpy(shaper.prev_t,
+           initial_state->prev_t,
+           sizeof(initial_state->prev_t));
+    shaper.trellis_state = initial_state->trellis_state;
+    v90_scrambler_init(&scrambler);
+    for (int frame = 0; frame < frames; frame++) {
+        uint8_t scrambled[64];
+
+        for (int bit = 0; bit < bits_per_frame; bit++)
+            scrambled[bit] = (uint8_t)v90_scramble_bit(&scrambler, 1);
+        if (!v90_map_shaped_scrambled_frame(
+                &local,
+                cp,
+                cp->shaping_redundancy,
+                sign_bits,
+                modulus_bits,
+                scrambled,
+                &shaper,
+                codewords_out + frame * V90_FRAME_LEN)) {
+            return 0;
+        }
+    }
+    return frames * V90_FRAME_LEN;
 }
 
 void v90_enable_v92_mode(v90_state_t *s)
