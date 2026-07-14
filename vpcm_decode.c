@@ -33122,6 +33122,107 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
     }
 }
 
+/*
+ * Offline V.90 CP/CPt scan.  The digital modem transmits each CP bit
+ * scrambled (GPC, V.90 5.3) and differentially encoded into the sign of
+ * consecutive PCM codewords (see V90_TX_CP in v90.c).  Recover the plain
+ * bitstream with the inverse recipe and let the strict Table 14 receiver
+ * hunt for frames.  TRN2d descrambles to continuous binary ones, which
+ * doubles as the 17-ones frame sync preamble, and differential decoding
+ * makes the scan invariant to capture polarity inversion, so the scan is
+ * safe to run over the whole capture without a Phase 4 anchor.
+ */
+typedef struct {
+    int current_index;
+    int accepted;
+    int first_end_index;
+    vpcm_cp_diag_t first;
+} offline_v90_cp_scan_t;
+
+static void offline_v90_cp_frame_cb(void *user_data, const vpcm_cp_diag_t *diag)
+{
+    offline_v90_cp_scan_t *scan = (offline_v90_cp_scan_t *) user_data;
+
+    if (scan->accepted == 0) {
+        scan->first = *diag;
+        scan->first_end_index = scan->current_index;
+    }
+    scan->accepted++;
+}
+
+static void collect_v90_cp_events(call_log_t *log,
+                                  const uint8_t *codewords,
+                                  int total_codewords,
+                                  const int16_t *linear_samples,
+                                  int linear_sample_count)
+{
+    v90_cp_rx_t rx[2];
+    offline_v90_cp_scan_t hits[2];
+    uint32_t descramble_reg = 0;
+    int prev_sign = 0;
+    char detail[192];
+
+    if (!log || !codewords || total_codewords <= 0)
+        return;
+
+    /* One receiver per expected law: the strict check requires the frame's
+     * codec-law bit (bit 35) to match. */
+    for (int law = 0; law < 2; law++) {
+        memset(&hits[law], 0, sizeof(hits[law]));
+        v90_cp_rx_init(&rx[law], 4, law == 1, offline_v90_cp_frame_cb, &hits[law]);
+    }
+
+    for (int i = 0; i < total_codewords; i++) {
+        int sign;
+        int scrambled;
+        int plain;
+
+        /* Prefer linear polarity: amplitude distortion in consumer captures
+         * corrupts G.711 MSBs but rarely flips the waveform sign. */
+        if (linear_samples && i < linear_sample_count)
+            sign = (linear_samples[i] >= 0) ? 1 : 0;
+        else
+            sign = (codewords[i] & 0x80) ? 1 : 0;
+        scrambled = sign ^ prev_sign;
+        prev_sign = sign;
+        plain = offline_v90_descramble_reg_bit(&descramble_reg, scrambled);
+        for (int law = 0; law < 2; law++) {
+            hits[law].current_index = i;
+            (void) v90_cp_rx_put_bit(&rx[law], plain);
+        }
+    }
+
+    if (getenv("VPCM_V90_CP_SCAN_DIAG")) {
+        fprintf(stderr,
+                "v90 cp scan: codewords=%d linear=%d ulaw valid=%u rejected=%u alaw valid=%u rejected=%u\n",
+                total_codewords,
+                linear_samples ? linear_sample_count : 0,
+                rx[0].valid_frames, rx[0].rejected_frames,
+                rx[1].valid_frames, rx[1].rejected_frames);
+    }
+
+    for (int law = 0; law < 2; law++) {
+        int start;
+
+        if (hits[law].accepted <= 0)
+            continue;
+        start = hits[law].first_end_index - hits[law].first.nbits + 1;
+        if (start < 0)
+            start = 0;
+        format_cp_summary(detail, sizeof(detail), &hits[law].first.frame);
+        appendf(detail, sizeof(detail), " kind=%s law=%s frames=%d",
+                hits[law].first.frame.v90_compatibility ? "CP" : "CPt",
+                law ? "alaw" : "ulaw",
+                hits[law].accepted);
+        call_log_append(log,
+                        start,
+                        hits[law].first.nbits,
+                        "V.90",
+                        "CP decoded",
+                        detail);
+    }
+}
+
 static void collect_post_phase3_stage_events(call_log_t *log,
                                              const uint8_t *codewords,
                                              int total_codewords,
@@ -33149,6 +33250,16 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                                           src->info0_raw.raw_26_27);
 
     memset(&jd_stage, 0, sizeof(jd_stage));
+
+    /*
+     * Scan for Phase 4 CP/CPt frames up front.  The scan self-synchronises
+     * and is CRC-gated, so it must not depend on the Jd/DIL anchors below,
+     * which frequently fail on real line audio, nor on the coupled V.34
+     * engine reaching Phase 4.
+     */
+    if (!is_v92)
+        collect_v90_cp_events(log, codewords, total_codewords,
+                              linear_samples, linear_sample_count);
 
     if (!is_v92) {
         /*
@@ -33210,106 +33321,6 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                         detail);
     }
 
-    /*
-     * After Phase 3, the digital modem transmits the downstream data stream.
-     * The first G.711 codewords are the CP (control parameter) frame, which
-     * carries the negotiated data rate, constellation count, and
-     * transparency mode.  Use the stereo-resolved Phase 4 anchor as a
-     * starting point for the CP frame search.
-     */
-    if (!is_v92) {
-        bool cp_found = false;
-        const decode_v34_result_t *digital =
-            pick_post_phase3_source(answerer, caller, NULL);
-
-        if (digital && digital->phase4_seen && digital->phase4_sample >= 0) {
-            int cp_search_start = digital->phase4_sample;
-            int search_limit = total_codewords;
-
-            /* V.90 downstream starts with CPt (6 codewords of binary-1
-             * ramp), then the CP frame proper.  Search a generous window
-             * around the Phase 4 anchor (up to 120 ms = 960 codewords). */
-            if (cp_search_start + 960 <= search_limit)
-                search_limit = cp_search_start + 960;
-
-            /* CP frame is at most 102 bits for 128 constellations.  At 6
-             * bits per codeword (V.90 binary CP framing), that's 17
-             * codewords.  Include CPt ramp overhead. */
-            for (int offset = cp_search_start;
-                 offset + 32 <= search_limit && !cp_found;
-                 offset++) {
-                /* Try each constellation count, largest first */
-                for (int nc = VPCM_CP_MAX_CONSTELLATIONS; nc >= 1; nc--) {
-                    vpcm_cp_frame_t trial;
-                    vpcm_cp_diag_t cp_diag;
-                    int nbits;
-                    uint8_t cp_bits[128];
-
-                    vpcm_cp_init(&trial);
-                    trial.constellation_count = (uint8_t)nc;
-                    /* V.90 binary CP framing carries exactly one bit per
-                     * G.711 codeword in the sign bit (bit 7).  A minimal CP
-                     * frame (1 constellation) is 156 bits; 6 constellations
-                     * needs up to 156 + 136*12 = 1788 bits.  Search with
-                     * enough bits for the current constellation count. */
-                    nbits = 156 + 136 * (nc * 2);  /* 2 codec slots per constellation */
-                    if (nbits > (int)sizeof(cp_bits))
-                        nbits = (int)sizeof(cp_bits);
-                    if (nbits <= 0 || offset + nbits > search_limit)
-                        continue;
-
-                    /* Extract sign bit (bit 7) from each G.711 codeword */
-                    for (int b = 0; b < nbits; b++) {
-                        cp_bits[b] = (codewords[offset + b] >> 7) & 1;
-                    }
-                    if (vpcm_cp_decode_diag(cp_bits, nbits, &cp_diag)) {
-                        cp_found = true;
-                        format_cp_summary(detail, sizeof(detail),
-                                          &cp_diag.frame);
-                        call_log_append(log,
-                                        offset,
-                                        nbits,
-                                        "V.90",
-                                        "CP decoded (from Phase 4 anchor)",
-                                        detail);
-                        break;
-                    }
-                    /* Try complement bits (sign inversion) */
-                    for (int b = 0; b < nbits; b++)
-                        cp_bits[b] ^= 1;
-                    if (vpcm_cp_decode_diag(cp_bits, nbits, &cp_diag)) {
-                        cp_found = true;
-                        snprintf(detail, sizeof(detail),
-                                 "drn=%u rate=%.0f_bps constellations=%u ack=%s crc=ok inv_sign",
-                                 (unsigned)cp_diag.frame.drn,
-                                 vpcm_cp_drn_to_bps(cp_diag.frame.drn),
-                                 (unsigned)cp_diag.frame.constellation_count,
-                                 cp_diag.frame.acknowledge ? "yes" : "no");
-                        call_log_append(log,
-                                        offset,
-                                        nbits,
-                                        "V.90",
-                                        "CP decoded (from Phase 4 anchor)",
-                                        detail);
-                        break;
-                    }
-                }
-            }
-        }
-        if (!cp_found && digital && digital->phase4_seen) {
-            snprintf(detail, sizeof(detail),
-                     "anchor=%d range=%d-%d",
-                     digital->phase4_sample,
-                     digital->phase4_sample,
-                     digital->phase4_sample + 960);
-            call_log_append(log,
-                            digital->phase4_sample,
-                            0,
-                            "V.90",
-                            "CP frame search (no CRC match)",
-                            detail);
-        }
-    }
 }
 
 static int v90_sequence_score(const uint8_t *codewords, int total, v91_law_t law)
