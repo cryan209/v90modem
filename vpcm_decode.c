@@ -34548,7 +34548,7 @@ static void print_codeword_stats(const uint8_t *codewords, int total,
  * survive this; analog recordings fall through to the structural pass.
  */
 static bool print_dil_codeword_scan(const uint8_t *codewords, int total,
-                                    v91_law_t law)
+                                    v91_law_t law, int *run_len_out)
 {
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     v90_dil_rx_result_t rx;
@@ -34560,6 +34560,8 @@ static bool print_dil_codeword_scan(const uint8_t *codewords, int total,
 
     if (!v90_dil_rx_scan(codewords, total, v90_law, &rx))
         return false;
+    if (run_len_out)
+        *run_len_out = rx.run_len;
 
     printf("  Codeword-exact DIL run: %.1f - %.1f ms (%d symbols, %d cycles of %d)\n",
            sample_to_ms(rx.run_start, 8000),
@@ -34632,14 +34634,19 @@ typedef struct {
     double seg_r;
     int cycle_lag;      /* strongest longer repeat (full DIL cycle) */
     double cycle_r;
+    double fold_gain_db; /* signal-to-residual after folding at the cycle */
 } dil_analog_region_t;
 
 static void dil_analyse_window(const int16_t *samples, int start, int len,
                                dil_analog_region_t *region)
 {
-    enum { DIL_ANALOG_MAX_SEG_LAG = 1560 };  /* (255+1)*6 */
+    enum {
+        DIL_ANALOG_MAX_SEG_LAG = 1560,  /* (255+1)*6 */
+        DIL_ENV_HALF = 200              /* 50 ms envelope window */
+    };
     float *x;
     double mean = 0.0;
+    double env_floor;
     int i;
     int best_lag = 0;
     double best_r = 0.0;
@@ -34650,6 +34657,7 @@ static void dil_analyse_window(const int16_t *samples, int start, int len,
     region->seg_r = 0.0;
     region->cycle_lag = 0;
     region->cycle_r = 0.0;
+    region->fold_gain_db = 0.0;
 
     x = malloc(sizeof(*x) * (size_t) len);
     if (!x)
@@ -34657,8 +34665,47 @@ static void dil_analyse_window(const int16_t *samples, int start, int len,
     for (i = 0; i < len; i++)
         mean += samples[start + i];
     mean /= (double) len;
-    for (i = 0; i < len; i++)
-        x[i] = (float) ((double) samples[start + i] - mean);
+
+    /* Normalise by a sliding RMS envelope: recorder AGC and fade ramps
+     * otherwise decorrelate cycles that are really identical. */
+    {
+        double acc = 0.0;
+        int lo = 0;
+        int hi = 0;
+
+        env_floor = 0.0;
+        for (i = 0; i < len; i++) {
+            double d = (double) samples[start + i] - mean;
+
+            env_floor += d * d;
+        }
+        env_floor = sqrt(env_floor / (double) len) * 0.05 + 1.0;
+        for (i = 0; i < len; i++) {
+            int nlo = i - DIL_ENV_HALF;
+            int nhi = i + DIL_ENV_HALF;
+            double d;
+            double env;
+
+            if (nlo < 0)
+                nlo = 0;
+            if (nhi > len)
+                nhi = len;
+            while (hi < nhi) {
+                d = (double) samples[start + hi] - mean;
+                acc += d * d;
+                hi++;
+            }
+            while (lo < nlo) {
+                d = (double) samples[start + lo] - mean;
+                acc -= d * d;
+                lo++;
+            }
+            env = sqrt(acc > 0.0 ? acc / (double) (hi - lo) : 0.0);
+            if (env < env_floor)
+                env = env_floor;
+            x[i] = (float) (((double) samples[start + i] - mean) / env);
+        }
+    }
 
     for (i = 6; i <= DIL_ANALOG_MAX_SEG_LAG && i * 2 < len; i += 6) {
         double r = dil_norm_autocorr(x, len, i);
@@ -34686,20 +34733,48 @@ static void dil_analyse_window(const int16_t *samples, int start, int len,
     region->seg_lag = best_lag;
     region->seg_r = best_r;
 
-    /* Full cycle: strongest multiple of the segment quantum. */
+    /* Full cycle: strongest lag at or above the segment quantum. Mixed
+     * per-chord segment lengths make the cycle a multiple of 6 but not
+     * necessarily of the quantum, so search every multiple of 6. */
     if (best_lag > 0) {
-        int mult;
-
         region->cycle_lag = best_lag;
         region->cycle_r = best_r;
-        for (mult = 2; mult * best_lag * 2 < len && mult <= 300; mult++) {
-            double r = dil_norm_autocorr(x, len, mult * best_lag);
+        for (i = best_lag + 6; i * 2 < len; i += 6) {
+            double r = dil_norm_autocorr(x, len, i);
 
             if (r >= region->cycle_r * 0.98) {
-                region->cycle_lag = mult * best_lag;
+                region->cycle_lag = i;
                 region->cycle_r = r;
             }
         }
+    }
+
+    /* Fold at the cycle and measure how much of the energy is coherent:
+     * periodic DIL adds up, aperiodic interference (e.g. upstream SCR on
+     * a 2-wire tap) averages out; the ratio is the recoverable margin. */
+    if (region->cycle_lag > 0 && len / region->cycle_lag >= 2) {
+        int C = region->cycle_lag;
+        int K = len / C;
+        double sig = 0.0;
+        double res = 0.0;
+        int k;
+
+        for (i = 0; i < C; i++) {
+            double avg = 0.0;
+
+            for (k = 0; k < K; k++)
+                avg += x[k * C + i];
+            avg /= (double) K;
+            sig += avg * avg;
+            for (k = 0; k < K; k++) {
+                double d = x[k * C + i] - avg;
+
+                res += d * d;
+            }
+        }
+        res /= (double) (K > 1 ? K - 1 : 1);
+        if (res > 0.0 && sig > 0.0)
+            region->fold_gain_db = 10.0 * log10(sig / res);
     }
     free(x);
 }
@@ -34707,8 +34782,8 @@ static void dil_analyse_window(const int16_t *samples, int start, int len,
 static void print_dil_analog_scan(const int16_t *samples, int total, int rate)
 {
     enum {
-        DIL_WIN = 16000,        /* 2 s analysis windows */
-        DIL_HOP = 8000,
+        DIL_WIN = 8000,         /* 1 s analysis windows */
+        DIL_HOP = 4000,
         DIL_ENV_FRAME = 80      /* 10 ms envelope frames */
     };
     double peak_rms = 0.0;
@@ -34724,7 +34799,7 @@ static void print_dil_analog_scan(const int16_t *samples, int total, int rate)
             peak_rms = db;
     }
 
-    printf("  Structural scan (2 s windows): dominant repeat lags\n");
+    printf("  Structural scan (1 s windows, envelope-normalised): dominant repeat lags\n");
     printf("    %-19s %-22s %-24s\n", "window", "segment quantum", "cycle estimate");
     for (offset = 0; offset + DIL_WIN <= total; offset += DIL_HOP) {
         dil_analog_region_t region;
@@ -34742,10 +34817,11 @@ static void print_dil_analog_scan(const int16_t *samples, int total, int rate)
                region.seg_lag / 6 - 1,
                region.seg_r);
         if (region.cycle_lag > region.seg_lag)
-            printf("  cycle=%5dT (n~%d) r=%.2f",
+            printf("  cycle=%5dT r=%.2f",
                    region.cycle_lag,
-                   region.cycle_lag / region.seg_lag,
                    region.cycle_r);
+        if (region.fold_gain_db != 0.0)
+            printf("  fold=%+.0fdB", region.fold_gain_db);
         printf("\n");
     }
 }
@@ -34758,10 +34834,16 @@ static void print_dil_scan(const char *label,
                            int rate,
                            v91_law_t law)
 {
+    int exact_run_len = 0;
+
     printf("\n=== V.90 DIL Scan: %s ===\n", label);
-    if (!print_dil_codeword_scan(codewords, total_codewords, law)) {
+    if (!print_dil_codeword_scan(codewords, total_codewords, law, &exact_run_len)) {
         printf("  No codeword-exact DIL run (expected for analog recordings;\n"
                "  a DS0 .g711 capture decodes to a full descriptor).\n");
+        print_dil_analog_scan(samples, total_samples, rate);
+    } else if (exact_run_len < total_codewords / 4) {
+        /* A short exact hit (Sd and other periodic PCM patterns qualify)
+         * may not be the whole story: scan the rest structurally too. */
         print_dil_analog_scan(samples, total_samples, rate);
     }
 }
