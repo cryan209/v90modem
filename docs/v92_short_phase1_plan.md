@@ -879,3 +879,43 @@ evaluator changes don't rebuild the test (verified by mutation).
 
 - A real capture of a successful quick connect for the truth set.
 - ODP/ADP transmission-side behavior (decode-side verdict landed earlier).
+
+## First-Stage QC2 Chain Recovery + Call-Log Story (2026-07-14, commit 438c944)
+
+### The Agere claim was wrong
+
+The earlier "their QC2 stage aborted before any chain ran" verification
+note is corrected: `Agere-SV92-QC`'s digital modem DID transmit its chain
+— QTS at 2997.4 ms (128+8 exactly) and 1655.5 ms of ANSpcm at -12 dBm0,
+matching the level the QCA2d frame advertised.  The QTS could not be a
+V.8bis tone artifact: 1375 Hz drifts off the 6-sample sign pattern within
+~30 samples, while 128 clean reps require exactly 1333.3 Hz.  It was
+missed because **V.8bis frame stamps trail the actual transmission** — the
+QCA2d is stamped at 3093.2 ms, after the QTS.  The family-2 waveform
+search now scans backward from the stamp, and the evaluator records a QTS
+shortly before the trailing stamp as observed-in-order (9.2.4.2).
+
+### Two-stage first-stage chains (Motorola)
+
+The Motorola QC/NC prologue (CRe -> QC2a -> QCA2d) also ran its own
+digital chain (QTS 128+8 at ~3195 ms + ANSpcm that blends into the ANSam
+restart).  A new scan around the QCA2d stamp stores it in
+`v92_stage1_*` fields; the clause 9.2 trace gains first-stage 9.2.4.2
+QTS/ANSpcm steps; outcome and operative story unchanged.
+
+### Call-log integration
+
+`phase12_merge_to_call_log` now emits the full V.92 story: strict
+QC1a/QCA1d signals with UQTS/LM/LAPM detail (deduped against the richer
+V.8bis id_field emitter for family-2), QTS/QTS\ with rep counts, phase12
+ANSpcm, first-stage chain events, and a "Clause 9.2 outcome" event.  New
+`phase12_v92_digital_span()` gives the V.90 Sd sign-pattern scans a
+suppression range covering both chains and the stereo partner's chain
+(QTS is sign-identical to 128 Sd + 8 S~d reps).  Removing the
+misattribution unmasked the genuine post-fallback V.90 Sd later in the
+same calls (e.g. USR-QC left at 13105 ms, Motorola QC at 13271 ms) that
+the first-match scan had been swallowing.
+
+Known cosmetic leftover: family-2 QC2a/QCA2d appear twice in the call log
+(once from the V.8bis id_field emitter, once from call_initiation) — this
+duplication predates these changes.
