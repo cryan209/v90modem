@@ -364,6 +364,55 @@ static void call_log_prune_v8_after_phase2(call_log_t *log)
     log->count = out;
 }
 
+/*
+ * The same physical signal can be reported by two emitters (e.g. QC2a from
+ * both the V.8bis id_field decoder and the phase12 call_initiation merge).
+ * Collapse events with identical protocol/summary/offset, keeping the one
+ * with the richer detail.
+ */
+static void call_log_dedupe_same_signal(call_log_t *log)
+{
+    size_t out = 0;
+
+    if (!log || log->count < 2)
+        return;
+
+    for (size_t i = 0; i < log->count; i++) {
+        call_log_event_t *event = &log->events[i];
+        bool drop = false;
+
+        /* Only the V.92 QC/QCA signals are known to be double-reported;
+         * other summaries can legitimately repeat at one offset with
+         * different detail (e.g. per-role diagnostics). */
+        if (strcmp(event->protocol, "V.92") != 0
+            || strncmp(event->summary, "QC", 2) != 0) {
+            if (out != i)
+                log->events[out] = log->events[i];
+            out++;
+            continue;
+        }
+
+        for (size_t j = 0; j < log->count && !drop; j++) {
+            const call_log_event_t *other = &log->events[j];
+
+            if (j == i
+                || other->sample_offset != event->sample_offset
+                || strcmp(other->protocol, event->protocol) != 0
+                || strcmp(other->summary, event->summary) != 0)
+                continue;
+            if (strlen(other->detail) > strlen(event->detail)
+                || (strlen(other->detail) == strlen(event->detail) && j < i))
+                drop = true;
+        }
+        if (drop)
+            continue;
+        if (out != i)
+            log->events[out] = log->events[i];
+        out++;
+    }
+    log->count = out;
+}
+
 static void format_v91_info_summary(char *buf, size_t len, const v91_info_diag_t *diag)
 {
     if (!buf || len == 0 || !diag) {
@@ -31503,6 +31552,7 @@ static void collect_stream_call_log(call_log_t *log,
 
     call_log_sort(log);
     call_log_prune_v8_after_phase2(log);
+    call_log_dedupe_same_signal(log);
     call_log_sort(log);
     phase12_result_reset(&phase12);
 }
