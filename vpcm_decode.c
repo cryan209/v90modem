@@ -33247,19 +33247,20 @@ static void collect_post_phase3_stage_events(call_log_t *log,
 
                     vpcm_cp_init(&trial);
                     trial.constellation_count = (uint8_t)nc;
-                    /* V.90 CP frame with binary framing: v34_tx_phase4_bit
-                     * writes one bit per codeword, 6 codewords per frame
-                     * interval.  effective bits = 6*dil.n entries.
-                     * Use upper bound. */
-                    nbits = 6 * 24;
+                    /* V.90 binary CP framing carries exactly one bit per
+                     * G.711 codeword in the sign bit (bit 7).  A minimal CP
+                     * frame (1 constellation) is 156 bits; 6 constellations
+                     * needs up to 156 + 136*12 = 1788 bits.  Search with
+                     * enough bits for the current constellation count. */
+                    nbits = 156 + 136 * (nc * 2);  /* 2 codec slots per constellation */
                     if (nbits > (int)sizeof(cp_bits))
                         nbits = (int)sizeof(cp_bits);
-                    if (nbits <= 0 || offset + nbits / 6 > search_limit)
+                    if (nbits <= 0 || offset + nbits > search_limit)
                         continue;
 
-                    /* Collect bits from G.711 codewords */
+                    /* Extract sign bit (bit 7) from each G.711 codeword */
                     for (int b = 0; b < nbits; b++) {
-                        cp_bits[b] = (codewords[offset + b / 6] >> (b % 6)) & 1;
+                        cp_bits[b] = (codewords[offset + b] >> 7) & 1;
                     }
                     if (vpcm_cp_decode_diag(cp_bits, nbits, &cp_diag)) {
                         cp_found = true;
