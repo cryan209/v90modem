@@ -1245,10 +1245,178 @@ static bool detect_j_pattern(const p3_symbol_t *syms, int start, int len,
     return true;
 }
 
+/* Quadrant-based J detection: extract bits from absolute received quadrant
+ * (like symbol_trn_scrambled_bit for TRN) instead of the differentially-decoded
+ * descrambled bit0/bit1.  This recovers the J pattern from sign-only WAV
+ * captures where differential decode degrades under amplitude distortion. */
+static bool detect_j_pattern_quadrant(const p3_symbol_t *syms, int start,
+                                      int len, uint16_t *trn16,
+                                      int *transform_out, int *match_pct_out)
+{
+    int total_bits = len * 2;
+    int best_transform = 0;
+    uint16_t best_pat = 0;
+    int best_matches = 0;
+    int best_checks = 0;
+
+    if (len < 16 || total_bits < 64)
+        return false;
+
+    /* Try all 8 quadrant transforms (4 rotations x 2 conjugations). */
+    for (int transform = 0; transform < 8; transform++) {
+        for (int phase = 0; phase < 16; phase++) {
+            uint16_t pat = 0;
+            int matches = 0;
+            int checks = 0;
+
+            if (phase + 16 > total_bits)
+                break;
+            for (int b = 0; b < 16; b++) {
+                int bit = symbol_trn_scrambled_bit(syms, start, phase + b,
+                                                   transform);
+                pat |= (uint16_t)(bit & 1) << b;
+            }
+
+            for (int b = phase; b < total_bits; b++) {
+                int bit = symbol_trn_scrambled_bit(syms, start, b, transform);
+                int expected = (int)((pat >> ((b - phase) % 16)) & 1);
+                checks++;
+                if (bit == expected)
+                    matches++;
+            }
+            if (checks > 0 && (matches > best_matches
+                               || (matches == best_matches
+                                   && checks > best_checks))) {
+                best_transform = transform;
+                best_pat = pat;
+                best_matches = matches;
+                best_checks = checks;
+            }
+        }
+    }
+
+    if (best_checks == 0)
+        return false;
+    /* Identical threshold to descrambled-bit path. */
+    if (best_matches * 100 < best_checks * 82)
+        return false;
+
+    /* Reject degenerate patterns (same heuristics as detect_j_pattern). */
+    {
+        int ones = 0;
+        for (int b = 0; b < 16; b++)
+            ones += (best_pat >> b) & 1;
+        if (ones < 3 || ones > 13)
+            return false;
+    }
+    for (int p = 1; p <= 8; p <<= 1) {
+        bool repeats = true;
+        for (int b = p; b < 16; b++) {
+            int bit = (best_pat >> b) & 1;
+            int prev = (best_pat >> (b - p)) & 1;
+            if (bit != prev) {
+                repeats = false;
+                break;
+            }
+        }
+        if (repeats)
+            return false;
+    }
+
+    if (trn16) *trn16 = best_pat;
+    if (transform_out) *transform_out = best_transform;
+    if (match_pct_out)
+        *match_pct_out = (best_matches * 100 + best_checks / 2) / best_checks;
+    return true;
+}
+
 /* Table 18 / Table 19 canonical bit patterns (left-most bit is first in time). */
 static const uint8_t j_table18_4pt_bits[16]  = {0,0,0,0,1,0,0,1,1,0,0,1,0,0,0,1};
 static const uint8_t j_table18_16pt_bits[16] = {0,0,0,0,1,1,0,1,1,0,0,1,0,0,0,1};
 static const uint8_t j_table19_prime_bits[16] = {1,1,1,1,1,0,0,1,1,0,0,1,0,0,0,1};
+
+/* Quadrant-based bit extraction for J pattern matching against Table 18/19.
+ * Mirrors j_transformed_bit but reads from absolute quadrant instead of
+ * the differentially descrambled bit0/bit1. */
+static int j_quadrant_transformed_bit(const p3_symbol_t *syms, int start,
+                                      int bit_pos, int transform)
+{
+    /* map absolute quadrant through the same I/Q swap+invert as j_transformed_bit */
+    return symbol_trn_scrambled_bit(syms, start, bit_pos, transform);
+}
+
+static int j_match_periodic_pattern_quadrant_pct(const p3_symbol_t *syms,
+                                                 int start, int len_symbols,
+                                                 const uint8_t pattern[16],
+                                                 int phase, int transform)
+{
+    int bit_count = len_symbols * 2;
+    int matches = 0;
+
+    if (!syms || len_symbols <= 0)
+        return 0;
+    for (int b = 0; b < bit_count; b++) {
+        int got = j_quadrant_transformed_bit(syms, start, b, transform);
+        int exp = pattern[(phase + b) & 15];
+        if (got == exp)
+            matches++;
+    }
+    return (matches * 100 + bit_count / 2) / bit_count;
+}
+
+static int j_match_single_block_quadrant_pct(const p3_symbol_t *syms,
+                                             int start,
+                                             const uint8_t pattern[16],
+                                             int phase, int transform)
+{
+    int matches = 0;
+
+    if (!syms)
+        return 0;
+    for (int b = 0; b < 16; b++) {
+        int got = j_quadrant_transformed_bit(syms, start, b, transform);
+        int exp = pattern[(phase + b) & 15];
+        if (got == exp)
+            matches++;
+    }
+    return (matches * 100 + 8) / 16;
+}
+
+/* Classify a J segment via quadrant-based bit extraction (for sign-only
+ * WAV captures where differential decode is unreliable). */
+static void classify_j_table18_quadrant(const p3_symbol_t *syms,
+                                        int start, int len_symbols,
+                                        int *bits_out, int *phase_out,
+                                        int *transform_out, int *match_pct_out)
+{
+    int best_match = 0;
+    int best_transform = 0;
+    int best_phase = 0;
+    int best_bits = 0;
+
+    /* Try both 4-bit and 16-bit Table 18 patterns, all transforms & phases. */
+    for (int transform = 0; transform < 8; transform++) {
+        for (int try_bits = 0; try_bits <= 1; try_bits++) {
+            const uint8_t *expected = try_bits
+                ? j_table18_16pt_bits : j_table18_4pt_bits;
+            for (int phase = 0; phase < 16; phase++) {
+                int pct = j_match_periodic_pattern_quadrant_pct(
+                    syms, start, len_symbols, expected, phase, transform);
+                if (pct > best_match) {
+                    best_match = pct;
+                    best_transform = transform;
+                    best_phase = phase;
+                    best_bits = try_bits ? 16 : 4;
+                }
+            }
+        }
+    }
+
+    if (bits_out) *bits_out = best_bits;
+    if (phase_out) *phase_out = best_phase;
+    if (transform_out) *transform_out = best_transform;
+    if (match_pct_out) *match_pct_out = best_match;
+}
 
 static int j_transformed_bit(const p3_symbol_t *syms, int start, int bit_pos, int transform)
 {
@@ -1622,10 +1790,12 @@ int p3_segment_symbols(p3_result_t *result)
             continue;
         }
 
-        /* Check for J frame (16-bit repeating descrambled pattern) */
-        if (remaining >= 48
-            && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp,
-                                &j_periodic_match_pct)) {
+        /* Check for J frame (16-bit repeating descrambled pattern).  If the
+         * descrambled-bit path fails, fall back to quadrant-based detection for
+         * sign-only WAV captures where differential decode is unreliable. */
+        {
+            bool j_detected = false;
+            bool j_quadrant = false;
             int j_table_bits = 0;
             int j_table_phase = 0;
             int j_table_transform = 0;
@@ -1635,64 +1805,135 @@ int p3_segment_symbols(p3_result_t *result)
             int jprime_pct = 0;
             bool have_jprime = false;
 
-            /* Extend incrementally: verify new bits match the 16-bit pattern */
-            seg_len = 48;
-            while (pos + seg_len + 8 <= n) {
-                int ext_matches = 0;
-                int ext_total = 16;
-                for (int ei = 0; ei < 8; ei++) {
-                    int b0 = symbol_descrambled_bit(syms, pos, (seg_len + ei) * 2);
-                    int b1 = symbol_descrambled_bit(syms, pos, (seg_len + ei) * 2 + 1);
-                    int e0 = (int)((j_trn16 >> (((seg_len + ei) * 2 - j_hyp) % 16)) & 1);
-                    int e1 = (int)((j_trn16 >> (((seg_len + ei) * 2 + 1 - j_hyp) % 16)) & 1);
-                    if (b0 == e0) ext_matches++;
-                    if (b1 == e1) ext_matches++;
-                }
-                if (ext_matches * 100 < ext_total * 70)
-                    break;
-                seg_len += 8;
-            }
-            {
-                p3_segment_t *seg;
-                add_segment(result, P3_SIGNAL_J, pos, seg_len, syms);
-                seg = &result->segments[result->segment_count - 1];
-                seg->j_trn16 = j_trn16;
-                seg->j_hypothesis = j_hyp;
-                seg->j_periodic_match_pct = j_periodic_match_pct;
-                classify_j_table18(syms,
-                                   pos,
-                                   seg_len,
-                                   &j_table_bits,
-                                   &j_table_phase,
-                                   &j_table_transform,
-                                   &j_table_match_pct);
-                seg->j_table_bits = j_table_bits;
-                seg->j_table_phase = j_table_phase;
-                seg->j_table_transform = j_table_transform;
-                seg->j_table_match_pct = j_table_match_pct;
-                seg->confidence = 0.78f;
+            if (remaining >= 48
+                && detect_j_pattern(syms, pos, 48, &j_trn16, &j_hyp,
+                                    &j_periodic_match_pct)) {
+                j_detected = true;
+            } else if (remaining >= 48) {
+                int q_transform;
 
-                if (pos + seg_len + 8 <= n
-                    && detect_j_prime_after_j(syms,
-                                              pos + seg_len,
-                                              n - (pos + seg_len),
-                                              j_table_transform,
-                                              &jprime_offset,
-                                              &jprime_phase,
-                                              &jprime_pct)) {
-                    p3_segment_t *jp;
-                    add_segment(result, P3_SIGNAL_J_PRIME, pos + seg_len + jprime_offset, 8, syms);
-                    jp = &result->segments[result->segment_count - 1];
-                    jp->j_table_phase = jprime_phase;
-                    jp->j_table_transform = j_table_transform;
-                    jp->jprime_match_pct = jprime_pct;
-                    jp->confidence = (float) jprime_pct / 100.0f;
-                    have_jprime = true;
-                    seg->jprime_match_pct = jprime_pct;
+                if (detect_j_pattern_quadrant(syms, pos, 48, &j_trn16,
+                                              &q_transform,
+                                              &j_periodic_match_pct)) {
+                    j_detected = true;
+                    j_quadrant = true;
+                    j_table_transform = q_transform;
+                    j_hyp = 0;
                 }
             }
-            pos += seg_len + (have_jprime ? (jprime_offset + 8) : 0);
-            continue;
+
+            if (!j_detected) {
+                /* fall through to unknown */
+            } else {
+                /* Extend incrementally: verify new bits match the 16-bit pattern */
+                seg_len = 48;
+                while (pos + seg_len + 8 <= n) {
+                    int ext_matches = 0;
+                    int ext_total = 16;
+                    for (int ei = 0; ei < 8; ei++) {
+                        int b0, b1, e0, e1;
+                        if (j_quadrant) {
+                            b0 = symbol_trn_scrambled_bit(syms, pos,
+                                                          (seg_len + ei) * 2,
+                                                          j_table_transform);
+                            b1 = symbol_trn_scrambled_bit(syms, pos,
+                                                          (seg_len + ei) * 2 + 1,
+                                                          j_table_transform);
+                        } else {
+                            b0 = symbol_descrambled_bit(syms, pos,
+                                                        (seg_len + ei) * 2);
+                            b1 = symbol_descrambled_bit(syms, pos,
+                                                        (seg_len + ei) * 2 + 1);
+                        }
+                        e0 = (int)((j_trn16 >> (((seg_len + ei) * 2 - j_hyp) % 16)) & 1);
+                        e1 = (int)((j_trn16 >> (((seg_len + ei) * 2 + 1 - j_hyp) % 16)) & 1);
+                        if (b0 == e0) ext_matches++;
+                        if (b1 == e1) ext_matches++;
+                    }
+                    if (ext_matches * 100 < ext_total * 70)
+                        break;
+                    seg_len += 8;
+                }
+                {
+                    p3_segment_t *seg;
+                    add_segment(result, P3_SIGNAL_J, pos, seg_len, syms);
+                    seg = &result->segments[result->segment_count - 1];
+                    seg->j_trn16 = j_trn16;
+                    seg->j_hypothesis = j_hyp;
+                    seg->j_periodic_match_pct = j_periodic_match_pct;
+                    if (j_quadrant) {
+                        classify_j_table18_quadrant(syms,
+                                                    pos,
+                                                    seg_len,
+                                                    &j_table_bits,
+                                                    &j_table_phase,
+                                                    &j_table_transform,
+                                                    &j_table_match_pct);
+                        seg->j_table_bits = j_table_bits;
+                        seg->j_table_phase = j_table_phase;
+                        seg->j_table_transform = j_table_transform;
+                        seg->j_table_match_pct = j_table_match_pct;
+                        seg->confidence = 0.70f;
+                        if (pos + seg_len + 8 <= n
+                            && j_match_single_block_quadrant_pct(
+                                syms, pos + seg_len,
+                                j_table19_prime_bits, 0,
+                                j_table_transform) >= 75) {
+                            have_jprime = true;
+                            jprime_offset = 0;
+                            jprime_pct = j_match_single_block_quadrant_pct(
+                                syms, pos + seg_len,
+                                j_table19_prime_bits, 0,
+                                j_table_transform);
+                            {
+                                p3_segment_t *jp;
+                                add_segment(result, P3_SIGNAL_J_PRIME,
+                                            pos + seg_len, 8, syms);
+                                jp = &result->segments[result->segment_count - 1];
+                                jp->j_table_phase = 0;
+                                jp->j_table_transform = j_table_transform;
+                                jp->jprime_match_pct = jprime_pct;
+                                jp->confidence = (float) jprime_pct / 100.0f;
+                                seg->jprime_match_pct = jprime_pct;
+                            }
+                        }
+                    } else {
+                        classify_j_table18(syms,
+                                           pos,
+                                           seg_len,
+                                           &j_table_bits,
+                                           &j_table_phase,
+                                           &j_table_transform,
+                                           &j_table_match_pct);
+                        seg->j_table_bits = j_table_bits;
+                        seg->j_table_phase = j_table_phase;
+                        seg->j_table_transform = j_table_transform;
+                        seg->j_table_match_pct = j_table_match_pct;
+                        seg->confidence = 0.78f;
+                        if (pos + seg_len + 8 <= n
+                            && detect_j_prime_after_j(syms,
+                                                      pos + seg_len,
+                                                      n - (pos + seg_len),
+                                                      j_table_transform,
+                                                      &jprime_offset,
+                                                      &jprime_phase,
+                                                      &jprime_pct)) {
+                            p3_segment_t *jp;
+                            add_segment(result, P3_SIGNAL_J_PRIME,
+                                        pos + seg_len + jprime_offset, 8, syms);
+                            jp = &result->segments[result->segment_count - 1];
+                            jp->j_table_phase = jprime_phase;
+                            jp->j_table_transform = j_table_transform;
+                            jp->jprime_match_pct = jprime_pct;
+                            jp->confidence = (float) jprime_pct / 100.0f;
+                            have_jprime = true;
+                            seg->jprime_match_pct = jprime_pct;
+                        }
+                    }
+                }
+                pos += seg_len + (have_jprime ? (jprime_offset + 8) : 0);
+                continue;
+            }
         }
 
         /* Unknown: advance by a small window */
