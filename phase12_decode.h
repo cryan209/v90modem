@@ -294,6 +294,19 @@ typedef struct {
     int v92_anspcm_score;
     int v92_anspcm_avg_abs_error;
 
+    /* First-stage (QC2 prologue) digital chain of a two-stage short
+     * Phase 1: QTS/QTS\ + ANSpcm transmitted after the QCA2d (9.2.4.2)
+     * and aborted before the ANSam that restarts the procedure at
+     * 9.2.1.1.  Single-stage family-2 chains use the main fields. */
+    bool v92_stage1_qts_seen;
+    int v92_stage1_qts_sample;
+    int v92_stage1_qts_reps;
+    int v92_stage1_qts_bar_reps;
+    int v92_stage1_qts_symbol_count;
+    bool v92_stage1_anspcm_seen;
+    int v92_stage1_anspcm_sample;
+    int v92_stage1_anspcm_duration_symbols;
+
     bool v92_toneq_seen;
     int v92_toneq_sample;
     int v92_toneq_duration_samples;
@@ -580,6 +593,17 @@ bool phase12_decode_phase2(const int16_t *samples,
 void phase12_merge_to_call_log(const phase12_result_t *result,
                                call_log_t *log,
                                int sample_rate);
+
+/*
+ * Span of the V.92 digital follow-up transmission (QTS through ANSpcm) on
+ * this channel, falling back to the stereo partner's chain when the local
+ * side did not carry it.  QTS is sign-pattern-identical to 128 Sd + 8 S~d
+ * repetitions, so V.90 Sd scans must skip this region.  Returns false when
+ * no chain is known.
+ */
+bool phase12_v92_digital_span(const phase12_result_t *result,
+                              int *start_out,
+                              int *end_out);
 
 /* Debug output control — override VPCM_P12_DEBUG / VPCM_P12_DUMP_V8 env vars.
  * Call p12_set_debug(0) and p12_set_dump_v8(0) at startup to suppress all

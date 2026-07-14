@@ -282,6 +282,84 @@ static void test_both_analog_v34_phase2(void)
     printf("PASS: both-analog TONEq path resolves to v34-phase2\n");
 }
 
+/* Two-stage short Phase 1 (Motorola-style): the QC2 prologue ran its own
+ * digital chain before the ANSam restart; the evaluator must record it as
+ * first-stage 9.2.4.2 steps without disturbing the operative story. */
+static void test_two_stage_prologue_chain(void)
+{
+    phase12_result_t r;
+    const p12_v92_proc_step_t *s1_qts;
+    const p12_v92_proc_step_t *s1_ans;
+
+    setup_figure3_chain(&r);
+    add_event(&r, "CRe", 1100, 500);
+    add_event(&r, "QC2a", 2100, 0);
+    add_event(&r, "QCA2d", 3400, 0);
+    r.call_init.v92_qca2_seen = true;
+    r.call_init.v92_qca2_sample = ms_to_samples(3400);
+    r.call_init.v92_qca2_digital = true;
+    r.call_init.v92_stage1_qts_seen = true;
+    r.call_init.v92_stage1_qts_sample = ms_to_samples(3200);
+    r.call_init.v92_stage1_qts_reps = 128;
+    r.call_init.v92_stage1_qts_bar_reps = 8;
+    r.call_init.v92_stage1_qts_symbol_count = 816;
+    r.call_init.v92_stage1_anspcm_seen = true;
+    r.call_init.v92_stage1_anspcm_sample = ms_to_samples(3300);
+    r.call_init.v92_stage1_anspcm_duration_symbols = ms_to_samples(300);
+    r.call_init.v92_toneq_seen = true;
+    r.call_init.v92_toneq_sample = ms_to_samples(6600);
+    r.call_init.v92_toneq_duration_samples = ms_to_samples(100);
+
+    p12_eval_v92_clause92_procedure(&r, SR);
+    assert(r.v92_proc.family == 1);
+    s1_qts = find_step(&r.v92_proc, "9.2.4.2", "QTS");
+    assert(s1_qts != NULL);
+    assert(s1_qts->status == P12_V92_PROC_STEP_OBSERVED);
+    assert(s1_qts->sample_offset == ms_to_samples(3200));
+    s1_ans = find_step(&r.v92_proc, "9.2.4.2", "ANSpcm");
+    assert(s1_ans != NULL);
+    assert(s1_ans->sample_offset == ms_to_samples(3300));
+    /* the operative family-1 story is untouched */
+    assert(find_step(&r.v92_proc, "9.2.4.1", "QTS") != NULL);
+    assert(r.v92_proc.outcome == P12_V92_PROC_OUTCOME_SHORT_PHASE2);
+
+    printf("PASS: two-stage prologue chain recorded as 9.2.4.2 steps\n");
+}
+
+/* Family-2 (Agere-style): the QCA2 stamp comes from a V.8bis frame decode
+ * that trails the actual transmission, so a QTS shortly before the stamp
+ * is observed in spec order, not flagged late. */
+static void test_family2_qts_before_qca_stamp(void)
+{
+    phase12_result_t r;
+    const p12_v92_proc_step_t *qts;
+
+    phase12_result_init(&r);
+    add_event(&r, "CRe", 1100, 500);
+    add_event(&r, "QC2a", 2200, 0);
+    add_event(&r, "QCA2d", 3100, 0);
+    r.call_init.v92_qts_seen = true;
+    r.call_init.v92_qts_sample = ms_to_samples(3000);
+    r.call_init.v92_qts_reps = 128;
+    r.call_init.v92_qts_bar_reps = 8;
+    r.call_init.v92_qts_symbol_count = 816;
+    r.call_init.v92_anspcm_seen = true;
+    r.call_init.v92_anspcm_sample = ms_to_samples(3100);
+    r.call_init.v92_anspcm_duration_symbols = ms_to_samples(1600);
+    /* V.8 retry CM after the ANSpcm ends */
+    add_event(&r, "CM", 4900, 130);
+
+    p12_eval_v92_clause92_procedure(&r, SR);
+    assert(r.v92_proc.family == 2);
+    qts = find_step(&r.v92_proc, "9.2.4.2", "QTS");
+    assert(qts != NULL);
+    assert(qts->status == P12_V92_PROC_STEP_OBSERVED);
+    assert(r.v92_proc.late_count == 0);
+    assert(r.v92_proc.outcome == P12_V92_PROC_OUTCOME_V8_FALLBACK);
+
+    printf("PASS: family-2 QTS before trailing QCA2 stamp not flagged late\n");
+}
+
 /* A fallback outcome must clear stale chain/handoff summary flags. */
 static void test_reconcile_clears_stale_flags(void)
 {
@@ -539,6 +617,8 @@ int main(void)
     test_partner_anspcm_end_anchor();
     test_incomplete_without_retry();
     test_both_analog_v34_phase2();
+    test_two_stage_prologue_chain();
+    test_family2_qts_before_qca_stamp();
     test_reconcile_clears_stale_flags();
     printf("All V.92 clause 9.2 evaluator tests passed\n");
     return 0;

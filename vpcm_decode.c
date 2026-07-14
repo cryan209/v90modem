@@ -31375,12 +31375,13 @@ static void collect_stream_call_log(call_log_t *log,
     if (do_v91)
         collect_v91_events(log, g711_codewords, total_codewords, law);
     if (do_v90 && !suppress_v90_phase2) {
-        int anspcm_start = (have_phase12 && phase12.call_init.v92_anspcm_seen)
-                           ? phase12.call_init.v92_anspcm_sample : -1;
-        int anspcm_end   = (anspcm_start >= 0)
-                           ? anspcm_start + phase12.call_init.v92_anspcm_duration_symbols : -1;
+        int v92_start = -1;
+        int v92_end = -1;
+
+        if (have_phase12)
+            phase12_v92_digital_span(&phase12, &v92_start, &v92_end);
         collect_v90_events(log, g711_codewords, total_codewords, law,
-                           anspcm_start, anspcm_end);
+                           v92_start, v92_end);
     }
 
     /*
@@ -36218,15 +36219,14 @@ static void run_decode_stage_b(const char *label,
 
     if ((opts->raw_output_enabled || opts->emit_dil_prefix) && opts->do_v90) {
         {
-            int anspcm_start = (have_phase12 && p12_ptr
-                                && p12_ptr->call_init.v92_anspcm_seen)
-                               ? p12_ptr->call_init.v92_anspcm_sample : -1;
-            int anspcm_end   = (anspcm_start >= 0)
-                               ? anspcm_start
-                                 + p12_ptr->call_init.v92_anspcm_duration_symbols : -1;
+            int v92_start = -1;
+            int v92_end = -1;
+
+            if (have_phase12 && p12_ptr)
+                phase12_v92_digital_span(p12_ptr, &v92_start, &v92_end);
             if (opts->raw_output_enabled) {
                 decode_v90_signals(g711_codewords, total_codewords, law,
-                                   effective_u_info, anspcm_start, anspcm_end);
+                                   effective_u_info, v92_start, v92_end);
             }
         }
 

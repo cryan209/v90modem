@@ -2289,6 +2289,11 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
         int wstart = qts_sequence_start;
         int wend = qts_sequence_start + 3600;
 
+        /* V.8bis frame stamps can trail the actual QCA2d transmission by
+         * hundreds of ms, so a family-2 chain may physically precede the
+         * stamped anchor: search backward too. */
+        if (branch.family == 2)
+            wstart -= (sample_rate * 1200) / 1000;
         if (wstart < 0)
             wstart = 0;
         if (wend > total_samples)
@@ -2402,6 +2407,64 @@ static void detect_v92_short_phase1_followup(const int16_t *samples,
                         (double) wave_ans.start_sample * 1000.0 / (double) sample_rate,
                         (double) wave_ans.duration_symbols * 1000.0 / (double) sample_rate,
                         v92_anspcm_level_to_str(wave_ans.level));
+            }
+        }
+    }
+
+    /* Two-stage short Phase 1: the QC2-stage prologue can have run its own
+     * digital chain (9.2.4.2 QTS/QTS\/ANSpcm after QCA2d) before the ANSam
+     * restart moved the procedure to 9.2.1.1.  The operative family-1
+     * search above never covers that region, so scan around the QCA2d
+     * stamp (backward too — the V.8bis frame stamp trails transmission). */
+    if (branch.family == 1
+        && result->call_init.v92_qca2_seen
+        && result->call_init.v92_qca2_digital) {
+        v92_qts_hit_t s1_qts;
+        int s1_start = result->call_init.v92_qca2_sample
+                     - (sample_rate * 1200) / 1000;
+        int s1_end = result->call_init.v92_qca2_sample
+                   + (sample_rate * 1500) / 1000;
+
+        if (s1_start < 0)
+            s1_start = 0;
+        if (s1_end > total_samples)
+            s1_end = total_samples;
+        memset(&s1_qts, 0, sizeof(s1_qts));
+        if (v92_detect_qts_waveform(samples, total_samples,
+                                    s1_start, s1_end, &s1_qts)
+            && (!result->call_init.v92_qts_seen
+                || s1_qts.start_sample != result->call_init.v92_qts_sample)) {
+            v92_anspcm_hit_t s1_ans;
+            int astart = s1_qts.start_sample + s1_qts.symbol_count - 48;
+            int aend = astart + 20000;
+
+            result->call_init.v92_stage1_qts_seen = true;
+            result->call_init.v92_stage1_qts_sample = s1_qts.start_sample;
+            result->call_init.v92_stage1_qts_reps = s1_qts.qts_reps;
+            result->call_init.v92_stage1_qts_bar_reps = s1_qts.qts_bar_reps;
+            result->call_init.v92_stage1_qts_symbol_count = s1_qts.symbol_count;
+            if (astart < 0)
+                astart = 0;
+            if (aend > total_samples)
+                aend = total_samples;
+            memset(&s1_ans, 0, sizeof(s1_ans));
+            if (v92_detect_anspcm_waveform(samples, total_samples,
+                                           astart, aend,
+                                           effective_lm_level,
+                                           &s1_ans)) {
+                result->call_init.v92_stage1_anspcm_seen = true;
+                result->call_init.v92_stage1_anspcm_sample = s1_ans.start_sample;
+                result->call_init.v92_stage1_anspcm_duration_symbols =
+                    s1_ans.duration_symbols;
+            }
+            if (p12_debug_enabled()) {
+                fprintf(stderr,
+                        "[p12] V.92 first-stage chain: QTS at %.1fms reps=%d qts_bar=%d"
+                        " anspcm=%s\n",
+                        (double) s1_qts.start_sample * 1000.0 / (double) sample_rate,
+                        s1_qts.qts_reps,
+                        s1_qts.qts_bar_reps,
+                        result->call_init.v92_stage1_anspcm_seen ? "yes" : "no");
             }
         }
     }
@@ -3277,6 +3340,25 @@ static void p12_build_phase1_timeline(phase12_result_t *result,
                                 "QTS",
                                 detail);
     }
+    if (result->call_init.v92_stage1_qts_seen) {
+        snprintf(detail, sizeof(detail), "first stage; reps=%d qts_bar=%d",
+                 result->call_init.v92_stage1_qts_reps,
+                 result->call_init.v92_stage1_qts_bar_reps);
+        p12_append_phase1_event(result,
+                                result->call_init.v92_stage1_qts_sample,
+                                result->call_init.v92_stage1_qts_symbol_count,
+                                "V.92",
+                                "QTS",
+                                detail);
+    }
+    if (result->call_init.v92_stage1_anspcm_seen) {
+        p12_append_phase1_event(result,
+                                result->call_init.v92_stage1_anspcm_sample,
+                                result->call_init.v92_stage1_anspcm_duration_symbols,
+                                "V.92",
+                                "ANSpcm",
+                                "first stage");
+    }
     if (result->call_init.v92_anspcm_seen) {
         snprintf(detail, sizeof(detail), "level=%s score=%d",
                  v92_anspcm_level_to_str(result->call_init.v92_anspcm_level),
@@ -3547,7 +3629,9 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                ? (answer_is_digital ? "9.2.4.2" : "9.2.3.2")
                : (answer_is_digital ? "9.2.4.1" : "9.2.3.1");
     analog_side_clause3 = call_is_digital ? "9.2.3.3" : "9.2.1.3";
-    digital_side_clause = answer_is_digital ? "9.2.4.1" : "9.2.2.1";
+    digital_side_clause = (proc->family == 2)
+                        ? (answer_is_digital ? "9.2.4.2" : "9.2.2.2")
+                        : (answer_is_digital ? "9.2.4.1" : "9.2.2.1");
 
     ansam_seen = result->answer_tone.detected
               && (result->answer_tone.type == P12_TONE_ANSAM
@@ -3574,6 +3658,22 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
                               P12_V92_PROC_STEP_OBSERVED,
                               qca2_ev->sample_offset,
                               "first stage; ANSam then moves to 9.2.1.1");
+        }
+        /* The first-stage digital chain that ran after the QCA2d and was
+         * aborted by the ANSam restart (9.2.4.2). */
+        if (result->call_init.v92_stage1_qts_seen) {
+            snprintf(note, sizeof(note), "first stage; reps=%d qts_bar=%d",
+                     result->call_init.v92_stage1_qts_reps,
+                     result->call_init.v92_stage1_qts_bar_reps);
+            p12_proc_add_step(proc, "9.2.4.2", "QTS",
+                              P12_V92_PROC_STEP_OBSERVED,
+                              result->call_init.v92_stage1_qts_sample, note);
+        }
+        if (result->call_init.v92_stage1_anspcm_seen) {
+            p12_proc_add_step(proc, "9.2.4.2", "ANSpcm",
+                              P12_V92_PROC_STEP_OBSERVED,
+                              result->call_init.v92_stage1_anspcm_sample,
+                              "first stage; aborted by ANSam restart");
         }
     }
 
@@ -3703,7 +3803,17 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
             int gap_max = (sample_rate * (P12_V92_SHORT_P1_TO_PHASE2_MS
                                           + P12_V92_SILENCE_GAP_TOL_MS)) / 1000;
 
-            if (qca_end >= 0
+            if (proc->family == 2 && qca_end >= 0 && qts_start < qca_end) {
+                /* Family-2 QCA stamps come from V.8bis frame decodes that
+                 * can trail the actual transmission; a chain shortly before
+                 * the stamp is in spec order, not early. */
+                snprintf(note, sizeof(note),
+                         "reps=%d qts_bar=%d; precedes trailing QCA2 frame stamp",
+                         result->call_init.v92_qts_reps,
+                         result->call_init.v92_qts_bar_reps);
+                p12_proc_add_step(proc, digital_side_clause, "QTS",
+                                  P12_V92_PROC_STEP_OBSERVED, qts_start, note);
+            } else if (qca_end >= 0
                 && (qts_start < qca_end || qts_start > qca_end + gap_max)) {
                 ms = (int)(((double)(qts_start - qca_end) * 1000.0) / (double)sample_rate);
                 snprintf(note, sizeof(note), "QTS %d ms after QCA end (75 +/- 5 expected)", ms);
@@ -7931,6 +8041,8 @@ void phase12_result_init(phase12_result_t *r)
     r->call_init.v92_short_p1_strict_analog_lapm = -1;
     r->call_init.v92_short_p1_strict_digital_lapm = -1;
     r->call_init.v92_phase2_handoff_sample = -1;
+    r->call_init.v92_stage1_qts_sample = -1;
+    r->call_init.v92_stage1_anspcm_sample = -1;
     r->v92_proc.phase2_handoff_sample = -1;
     r->v92_proc.call_lapm = -1;
     r->v92_proc.answer_lapm = -1;
@@ -8071,6 +8183,63 @@ bool phase12_decode_with_codewords(const int16_t *samples,
     return p1 || p2;
 }
 
+bool phase12_v92_digital_span(const phase12_result_t *result,
+                              int *start_out,
+                              int *end_out)
+{
+    int start = -1;
+    int end = -1;
+
+    if (!result)
+        return false;
+    if (result->call_init.v92_qts_seen)
+        start = result->call_init.v92_qts_sample;
+    if (result->call_init.v92_anspcm_seen) {
+        if (start < 0)
+            start = result->call_init.v92_anspcm_sample;
+        end = result->call_init.v92_anspcm_sample
+            + result->call_init.v92_anspcm_duration_symbols;
+    } else if (result->call_init.v92_qts_seen) {
+        end = result->call_init.v92_qts_sample
+            + result->call_init.v92_qts_symbol_count;
+    }
+    /* Union in the first-stage (QC2 prologue) chain of a two-stage story.
+     * The span between the two chains only holds ANSam and short-P1 frames
+     * — nothing a V.90 Sd scan should claim — so one covering range is
+     * safe. */
+    if (result->call_init.v92_stage1_qts_seen) {
+        int s1_start = result->call_init.v92_stage1_qts_sample;
+        int s1_end = result->call_init.v92_stage1_anspcm_seen
+                   ? result->call_init.v92_stage1_anspcm_sample
+                     + result->call_init.v92_stage1_anspcm_duration_symbols
+                   : s1_start + result->call_init.v92_stage1_qts_symbol_count;
+
+        if (start < 0 || s1_start < start)
+            start = s1_start;
+        if (s1_end > end)
+            end = s1_end;
+    }
+
+    /* A stereo split leaves the chain on the digital channel only, but its
+     * crosstalk on the analog channel can still fool sign-pattern scans:
+     * cover [partner QCA .. partner ANSpcm end] from the arbitration hint. */
+    if (start < 0
+        && result->stereo_short_p1_hint_valid
+        && result->stereo_short_p1_partner_qca
+        && result->stereo_short_p1_partner_sample >= 0
+        && result->stereo_short_p1_partner_anspcm_end >= 0) {
+        start = result->stereo_short_p1_partner_sample;
+        end = result->stereo_short_p1_partner_anspcm_end;
+    }
+    if (start < 0 || end <= start)
+        return false;
+    if (start_out)
+        *start_out = start;
+    if (end_out)
+        *end_out = end;
+    return true;
+}
+
 void phase12_merge_to_call_log(const phase12_result_t *result,
                                call_log_t *log,
                                int sample_rate)
@@ -8164,6 +8333,128 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                         qca2_detail);
     }
 
+    /* Strict short-Phase-1 signals (QC1a/QC1d/QCA1a/QCA1d).  The strict
+     * slots can also hold the family-2 identification frames, which the
+     * QC2/QCA2 blocks above already emitted — skip those duplicates. */
+    if (result->call_init.v92_short_p1_strict_analog_seen
+        && !(result->call_init.v92_qc2_seen
+             && result->call_init.v92_short_p1_strict_analog_sample
+                == result->call_init.v92_qc2_sample)
+        && !(result->call_init.v92_qca2_seen
+             && result->call_init.v92_short_p1_strict_analog_sample
+                == result->call_init.v92_qca2_sample)) {
+        char sp1_detail[128];
+
+        snprintf(sp1_detail, sizeof(sp1_detail),
+                 "source=strict uqts_ucode=%d lapm=%d",
+                 result->call_init.v92_short_p1_strict_analog_uqts_ucode,
+                 result->call_init.v92_short_p1_strict_analog_lapm);
+        call_log_append(log,
+                        result->call_init.v92_short_p1_strict_analog_sample,
+                        0,
+                        "V.92",
+                        result->call_init.v92_short_p1_strict_analog_name,
+                        sp1_detail);
+    }
+    if (result->call_init.v92_short_p1_strict_digital_seen
+        && !(result->call_init.v92_qc2_seen
+             && result->call_init.v92_short_p1_strict_digital_sample
+                == result->call_init.v92_qc2_sample)
+        && !(result->call_init.v92_qca2_seen
+             && result->call_init.v92_short_p1_strict_digital_sample
+                == result->call_init.v92_qca2_sample)) {
+        char sp1_detail[128];
+
+        snprintf(sp1_detail, sizeof(sp1_detail),
+                 "source=strict lm=%d lapm=%d",
+                 result->call_init.v92_short_p1_strict_digital_lm_level,
+                 result->call_init.v92_short_p1_strict_digital_lapm);
+        call_log_append(log,
+                        result->call_init.v92_short_p1_strict_digital_sample,
+                        0,
+                        "V.92",
+                        result->call_init.v92_short_p1_strict_digital_name,
+                        sp1_detail);
+    }
+    if (!result->call_init.v92_short_p1_strict_analog_seen
+        && !result->call_init.v92_short_p1_strict_digital_seen
+        && result->call_init.v92_short_p1_seen) {
+        char sp1_detail[128];
+
+        snprintf(sp1_detail, sizeof(sp1_detail),
+                 "source=soft uqts_ucode=%d lm=%d",
+                 result->call_init.v92_short_p1_uqts_ucode,
+                 result->call_init.v92_short_p1_lm_level);
+        call_log_append(log,
+                        result->call_init.v92_short_p1_sample,
+                        0,
+                        "V.92",
+                        result->call_init.v92_short_p1_name,
+                        sp1_detail);
+    }
+
+    /* Digital-side follow-up chain: QTS/QTS\ and ANSpcm */
+    if (result->call_init.v92_qts_seen) {
+        char qts_detail[128];
+
+        snprintf(qts_detail, sizeof(qts_detail),
+                 "qts_reps=%d qts_bar_reps=%d symbols=%d",
+                 result->call_init.v92_qts_reps,
+                 result->call_init.v92_qts_bar_reps,
+                 result->call_init.v92_qts_symbol_count);
+        call_log_append(log,
+                        result->call_init.v92_qts_sample,
+                        result->call_init.v92_qts_symbol_count,
+                        "V.92",
+                        result->call_init.v92_qts_bar_reps > 0
+                            ? "QTS + QTS\\" : "QTS",
+                        qts_detail);
+    }
+    if (result->call_init.v92_anspcm_seen) {
+        char anspcm_detail[128];
+
+        snprintf(anspcm_detail, sizeof(anspcm_detail),
+                 "source=phase12 duration=%.1fms level=%s",
+                 (double) result->call_init.v92_anspcm_duration_symbols * 1000.0
+                 / (double) sample_rate,
+                 v92_anspcm_level_to_str(result->call_init.v92_anspcm_level));
+        call_log_append(log,
+                        result->call_init.v92_anspcm_sample,
+                        result->call_init.v92_anspcm_duration_symbols,
+                        "V.92",
+                        "ANSpcm",
+                        anspcm_detail);
+    }
+    if (result->call_init.v92_stage1_qts_seen) {
+        char s1_detail[128];
+
+        snprintf(s1_detail, sizeof(s1_detail),
+                 "first stage; qts_reps=%d qts_bar_reps=%d",
+                 result->call_init.v92_stage1_qts_reps,
+                 result->call_init.v92_stage1_qts_bar_reps);
+        call_log_append(log,
+                        result->call_init.v92_stage1_qts_sample,
+                        result->call_init.v92_stage1_qts_symbol_count,
+                        "V.92",
+                        result->call_init.v92_stage1_qts_bar_reps > 0
+                            ? "QTS + QTS\\ (first stage)" : "QTS (first stage)",
+                        s1_detail);
+    }
+    if (result->call_init.v92_stage1_anspcm_seen) {
+        char s1_detail[128];
+
+        snprintf(s1_detail, sizeof(s1_detail),
+                 "first stage; duration=%.1fms",
+                 (double) result->call_init.v92_stage1_anspcm_duration_symbols
+                 * 1000.0 / (double) sample_rate);
+        call_log_append(log,
+                        result->call_init.v92_stage1_anspcm_sample,
+                        result->call_init.v92_stage1_anspcm_duration_symbols,
+                        "V.92",
+                        "ANSpcm (first stage)",
+                        s1_detail);
+    }
+
     if (result->call_init.v92_toneq_seen) {
         char toneq_detail[64];
         snprintf(toneq_detail, sizeof(toneq_detail),
@@ -8176,6 +8467,44 @@ void phase12_merge_to_call_log(const phase12_result_t *result,
                         "V.92",
                         "TONEq (980 Hz)",
                         toneq_detail);
+    }
+
+    /* Clause 9.2 procedure verdict */
+    if (result->v92_proc.evaluated) {
+        const p12_v92_proc_result_t *proc = &result->v92_proc;
+        char proc_summary[96];
+        char proc_detail[256];
+        int anchor = -1;
+
+        for (int i = 0; i < proc->step_count && anchor < 0; i++)
+            if (proc->steps[i].sample_offset >= 0)
+                anchor = proc->steps[i].sample_offset;
+        snprintf(proc_summary, sizeof(proc_summary),
+                 "Clause 9.2 outcome: %s",
+                 phase12_v92_proc_outcome_name(proc->outcome));
+        if (proc->phase2_handoff_sample >= 0) {
+            snprintf(proc_detail, sizeof(proc_detail),
+                     "figure=%s steps=%d missing=%d late=%d handoff=%.1fms",
+                     phase12_v92_proc_figure_name(proc->figure),
+                     proc->step_count,
+                     proc->missing_count,
+                     proc->late_count,
+                     (double) proc->phase2_handoff_sample * 1000.0
+                     / (double) sample_rate);
+        } else {
+            snprintf(proc_detail, sizeof(proc_detail),
+                     "figure=%s steps=%d missing=%d late=%d",
+                     phase12_v92_proc_figure_name(proc->figure),
+                     proc->step_count,
+                     proc->missing_count,
+                     proc->late_count);
+        }
+        call_log_append(log,
+                        anchor >= 0 ? anchor : 0,
+                        0,
+                        "V.92",
+                        proc_summary,
+                        proc_detail);
     }
 
     /* Phase 1 V.8 messages */
