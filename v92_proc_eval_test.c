@@ -23,15 +23,36 @@ double window_energy(const int16_t *samples, int len)
     return e;
 }
 
+/* Mirrors vpcm_decode.c's single-bin DFT so the audio-level detectors
+ * (detect_tone and friends) behave as in the real decoder. */
 double tone_energy_ratio(const int16_t *samples, int len,
-                         int sample_rate, double freq_hz, double energy)
+                         int sample_rate, double freq_hz, double total_energy)
 {
-    (void) samples;
-    (void) len;
-    (void) sample_rate;
-    (void) freq_hz;
-    (void) energy;
-    return 0.0;
+    double w;
+    double cos_w;
+    double sin_w;
+    double osc_re = 1.0;
+    double osc_im = 0.0;
+    double re = 0.0;
+    double im = 0.0;
+
+    if (!samples || len <= 0 || sample_rate <= 0 || freq_hz <= 0.0 || total_energy <= 0.0)
+        return 0.0;
+
+    w = 2.0 * M_PI * freq_hz / (double) sample_rate;
+    cos_w = cos(w);
+    sin_w = sin(w);
+    for (int i = 0; i < len; i++) {
+        double sample = (double) samples[i];
+        double next_re = osc_re * cos_w - osc_im * sin_w;
+        double next_im = osc_im * cos_w + osc_re * sin_w;
+
+        re += sample * osc_re;
+        im -= sample * osc_im;
+        osc_re = next_re;
+        osc_im = next_im;
+    }
+    return (re * re + im * im) / (total_energy * (double) len);
 }
 
 bool call_log_append(call_log_t *log,
@@ -68,6 +89,9 @@ static void add_event(phase12_result_t *r, const char *label, int ms, int dur_ms
     ev->sample_offset = ms_to_samples(ms);
     ev->duration_samples = ms_to_samples(dur_ms);
     snprintf(ev->label, sizeof(ev->label), "%s", label);
+    /* the short-P1 branch selector only considers source "V.92" events */
+    snprintf(ev->source, sizeof(ev->source), "%s",
+             (strncmp(label, "QC", 2) == 0) ? "V.92" : "V.8");
 }
 
 static void add_ansam(phase12_result_t *r, int ms, int dur_ms)
@@ -356,10 +380,159 @@ static void test_qts_waveform_no_bar(void)
     printf("PASS: QTS waveform without QTS\\ reports qts_bar=0\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* Audio-level digital follow-up chain (QTS -> ANSpcm -> TONEq)        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * End-to-end success path with real audio: fabricate the QCA1d timeline
+ * anchor, synthesize the digital-side QTS/QTS\ + ANSpcm chain and the
+ * analogue TONEq answer as waveform samples (through the FIR channel for
+ * the QTS), run detect_v92_short_phase1_followup(), and evaluate the
+ * clause 9.2 story on the detected observations.  No line capture of a
+ * successful quick connect exists, so this is the only end-to-end
+ * exercise of TONEq detection and the short-phase2 handoff.
+ */
+static void test_followup_audio_success_chain(void)
+{
+    enum {
+        TOTAL = 40000,               /* 5 s at 8 kHz */
+        QCA_SAMPLE = 8000,           /* fabricated QCA1d at 1000 ms */
+        QTS_START = 10000,           /* inside both the follow-up search
+                                        window (QCA+75 ms..) and the
+                                        evaluator's post-QCA gap check */
+        V = 2000,
+        ANS_A = 2500,
+        ANS_PERIODS = 20,            /* 301-sample periods */
+        TONEQ_START = 17000,
+        TONEQ_SAMPLES = 800          /* 100 ms of 980 Hz */
+    };
+    static const double fir[4] = { 0.7, 0.25, -0.1, 0.05 };
+    static double clean[TOTAL];
+    static int16_t buf[TOTAL];
+    const int pattern[6] = { V, 0, V, -V, 0, -V };
+    phase12_result_t r;
+    int pos = QTS_START;
+    int anspcm_start;
+    int toneq_end;
+
+    memset(clean, 0, sizeof(clean));
+    for (int rep = 0; rep < 128; rep++)
+        for (int k = 0; k < 6; k++)
+            clean[pos++] = pattern[k];
+    for (int rep = 0; rep < 8; rep++)
+        for (int k = 0; k < 6; k++)
+            clean[pos++] = -pattern[k];
+    anspcm_start = pos + 4;
+    /* 79 cycles per 301 samples = 2099.668 Hz: exactly 301-periodic */
+    for (int i = 0; i < ANS_PERIODS * 301; i++)
+        clean[anspcm_start + i] = ANS_A * sin(2.0 * M_PI * 79.0 * i / 301.0);
+    for (int i = 0; i < TONEQ_SAMPLES; i++)
+        clean[TONEQ_START + i] = ANS_A * sin(2.0 * M_PI * 980.0 * i / SR);
+    for (int i = 0; i < TOTAL; i++) {
+        double acc = 0.0;
+
+        for (int t = 0; t < 4; t++)
+            if (i - t >= 0)
+                acc += fir[t] * clean[i - t];
+        buf[i] = (int16_t) lround(acc);
+    }
+
+    phase12_result_init(&r);
+    add_ansam(&r, 100, 1100);
+    add_event(&r, "QC1a", 920, 0);
+    add_event(&r, "CM", 1150, 50);
+    add_event(&r, "QCA1d", 1000, 0);
+    assert(r.phase1_events[2].sample_offset == QCA_SAMPLE);
+
+    detect_v92_short_phase1_followup(buf, NULL, TOTAL, 0, V91_LAW_ULAW, SR, &r);
+
+    assert(r.call_init.v92_qts_seen);
+    assert(r.call_init.v92_qts_bar_reps >= 7 && r.call_init.v92_qts_bar_reps <= 9);
+    assert(r.call_init.v92_anspcm_seen);
+    assert(r.call_init.v92_anspcm_sample >= anspcm_start - 310
+           && r.call_init.v92_anspcm_sample <= anspcm_start + 310);
+    assert(r.call_init.v92_toneq_seen);
+    assert(r.call_init.v92_toneq_sample >= TONEQ_START - 200
+           && r.call_init.v92_toneq_sample <= TONEQ_START + 200);
+    toneq_end = r.call_init.v92_toneq_sample
+              + r.call_init.v92_toneq_duration_samples;
+    assert(toneq_end >= TONEQ_START + TONEQ_SAMPLES - 300
+           && toneq_end <= TONEQ_START + TONEQ_SAMPLES + 300);
+    assert(r.call_init.v92_digital_chain_valid);
+    assert(r.call_init.v92_phase2_handoff_known);
+    assert(r.call_init.v92_phase2_handoff_sample
+           == toneq_end + (SR * P12_V92_SHORT_P1_TO_PHASE2_MS) / 1000);
+
+    /* the detected observations must carry the clause 9.2 story to a
+     * short-phase2 outcome */
+    p12_eval_v92_clause92_procedure(&r, SR);
+    assert(r.v92_proc.outcome == P12_V92_PROC_OUTCOME_SHORT_PHASE2);
+    assert(r.v92_proc.missing_count == 0);
+    p12_reconcile_v92_proc(&r, SR);
+    assert(r.call_init.v92_phase2_handoff_known);
+
+    printf("PASS: audio-level QTS/ANSpcm/TONEq chain resolves to short-phase2\n");
+}
+
+/* Without the TONEq answer the same audio chain must NOT validate the
+ * digital chain or produce a handoff. */
+static void test_followup_audio_no_toneq(void)
+{
+    enum { TOTAL = 40000, QTS_START = 10000, V = 2000, ANS_A = 2500 };
+    static const double fir[4] = { 0.7, 0.25, -0.1, 0.05 };
+    static double clean[TOTAL];
+    static int16_t buf[TOTAL];
+    const int pattern[6] = { V, 0, V, -V, 0, -V };
+    phase12_result_t r;
+    int pos = QTS_START;
+    int anspcm_start;
+
+    memset(clean, 0, sizeof(clean));
+    for (int rep = 0; rep < 128; rep++)
+        for (int k = 0; k < 6; k++)
+            clean[pos++] = pattern[k];
+    for (int rep = 0; rep < 8; rep++)
+        for (int k = 0; k < 6; k++)
+            clean[pos++] = -pattern[k];
+    anspcm_start = pos + 4;
+    for (int i = 0; i < 20 * 301; i++)
+        clean[anspcm_start + i] = ANS_A * sin(2.0 * M_PI * 79.0 * i / 301.0);
+    for (int i = 0; i < TOTAL; i++) {
+        double acc = 0.0;
+
+        for (int t = 0; t < 4; t++)
+            if (i - t >= 0)
+                acc += fir[t] * clean[i - t];
+        buf[i] = (int16_t) lround(acc);
+    }
+
+    phase12_result_init(&r);
+    add_ansam(&r, 100, 1100);
+    add_event(&r, "QC1a", 920, 0);
+    add_event(&r, "CM", 1150, 50);
+    add_event(&r, "QCA1d", 1000, 0);
+
+    detect_v92_short_phase1_followup(buf, NULL, TOTAL, 0, V91_LAW_ULAW, SR, &r);
+
+    assert(r.call_init.v92_qts_seen);
+    assert(r.call_init.v92_anspcm_seen);
+    assert(!r.call_init.v92_toneq_seen);
+    assert(!r.call_init.v92_digital_chain_valid);
+    assert(!r.call_init.v92_phase2_handoff_known);
+
+    p12_eval_v92_clause92_procedure(&r, SR);
+    assert(r.v92_proc.outcome == P12_V92_PROC_OUTCOME_INCOMPLETE);
+
+    printf("PASS: audio-level chain without TONEq stays unvalidated\n");
+}
+
 int main(void)
 {
     test_qts_waveform_split();
     test_qts_waveform_no_bar();
+    test_followup_audio_success_chain();
+    test_followup_audio_no_toneq();
     test_short_phase2_success();
     test_v8_retry_anchored_at_anspcm_end();
     test_cm_during_anspcm_not_retry();
