@@ -796,3 +796,42 @@ per-symbol ucode tolerance.  What survives an LTI channel is structure:
   still has no capture in the truth set; the short-phase2 outcome remains
   verified by synthetic tests only.
 - ODP/ADP bypass (9.2.5) not yet modeled.
+
+## ANSpcm-Anchored V.8 Retry Search (2026-07-14)
+
+### The bug
+
+The clause 9.2 terminal-outcome branch searched for the post-timeout V.8
+retry CM/JM starting at a fixed `qca_end + 1500 ms` guard.  On
+`USR-Message-V92QC` the digital channel's retry CM lands at 8421.8 ms while
+the guard computed 8445 ms — missed by 23 ms — so the channel's outcome
+degraded to `incomplete` while the analog channel (whose own retry CM at
+8465.2 ms cleared the same guard by just 20 ms) said `v8-fallback`: two
+contradictory stories for one call.
+
+### What changed
+
+- The retry search anchor is now derived from the observed signal instead
+  of a fixed offset: a CM cannot be the V.8 retry while the digital side is
+  still transmitting its continuous ANSpcm (9.2.4.3), so when the ANSpcm
+  was observed on this channel the search starts exactly at its end.  The
+  `qca_end + 1500 ms` guard remains the fallback when no ANSpcm is visible.
+- The stereo hint now carries the digital side's ANSpcm end sample
+  (`digital_anspcm_end` -> `stereo_short_p1_partner_anspcm_end`) so the
+  analog channel — which never sees the ANSpcm itself — anchors its retry
+  search at the same place and both channels identify the same physical
+  retry burst.
+
+### Verification
+
+- `USR-Message-V92QC` left/digital channel: retry CM at 8421.8 ms now
+  recorded as the 9.2.4.3 step; outcome `incomplete` -> `v8-fallback`,
+  agreeing with the right channel.  Every channel of the six-capture V.92
+  truth set now resolves to a terminal outcome.
+- `USR-Message-V92NC`: both channels now pick the same retry burst
+  (7461.9/7477.9 ms — the caller's first CM after ANSpcm ends at 7377 ms).
+  The old guard skipped it and reported the *second* retry (9851.8/9949.2).
+- Motorola QC/NC, both Agere captures, and three non-V.92 captures
+  (USR-Sportster, Motorola-SM56, xircom-v90) are byte-identical.
+- `make test` (data stack, V.42 link, V.34 Phase 2 decode, full PCM-modem
+  loopback suite) passes.

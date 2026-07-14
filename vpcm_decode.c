@@ -27114,6 +27114,7 @@ typedef struct {
     int right_partner_sample;
     int analog_uqts_ucode;
     int digital_lm_level;
+    int digital_anspcm_end;         /* digital side's ANSpcm end sample: -1 unknown */
     int analog_lapm;                /* analog side's P bit: -1 unknown */
     int digital_lapm;               /* digital side's P bit: -1 unknown */
     bool analog_ready;
@@ -34882,6 +34883,7 @@ typedef struct {
     int uqts_ucode;
     int lm_level;
     int lapm;                       /* P bit: -1 unknown, 0, 1 */
+    int anspcm_end;                 /* ANSpcm end sample: -1 unknown */
     const char *name;
 } phase12_short_p1_signal_t;
 
@@ -34908,6 +34910,12 @@ static bool phase12_extract_short_p1_signal(const phase12_result_t *p12,
     out->uqts_ucode = -1;
     out->lm_level = -1;
     out->lapm = -1;
+    out->anspcm_end = -1;
+    if (expect_digital
+        && p12->call_init.v92_anspcm_seen
+        && p12->call_init.v92_anspcm_duration_symbols > 0)
+        out->anspcm_end = p12->call_init.v92_anspcm_sample
+                        + p12->call_init.v92_anspcm_duration_symbols;
 
     if (expect_digital && p12->call_init.v92_short_p1_strict_digital_seen) {
         out->seen = true;
@@ -35011,6 +35019,7 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
     out->right_expected_form = P12_SHORT_P1_FORM_UNKNOWN;
     out->analog_uqts_ucode = -1;
     out->digital_lm_level = -1;
+    out->digital_anspcm_end = -1;
     out->analog_lapm = -1;
     out->digital_lapm = -1;
 
@@ -35078,6 +35087,7 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->left_partner_sample = right_analog_sig.sample;
             out->right_partner_sample = left_digital_sig.sample;
             out->digital_lm_level = left_digital_sig.lm_level;
+            out->digital_anspcm_end = left_digital_sig.anspcm_end;
             out->analog_uqts_ucode = right_analog_sig.uqts_ucode;
             out->digital_lapm = left_digital_sig.lapm;
             out->analog_lapm = right_analog_sig.lapm;
@@ -35097,6 +35107,7 @@ static bool phase12_build_stereo_short_p1_hint(const int16_t *left_linear_sample
             out->left_partner_sample = right_digital_sig.sample;
             out->right_partner_sample = left_analog_sig.sample;
             out->digital_lm_level = right_digital_sig.lm_level;
+            out->digital_anspcm_end = right_digital_sig.anspcm_end;
             out->analog_uqts_ucode = left_analog_sig.uqts_ucode;
             out->digital_lapm = right_digital_sig.lapm;
             out->analog_lapm = left_analog_sig.lapm;
@@ -35143,6 +35154,7 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_partner_uqts_ucode = -1;
     p12->stereo_short_p1_partner_lm_level = -1;
     p12->stereo_short_p1_partner_lapm = -1;
+    p12->stereo_short_p1_partner_anspcm_end = -1;
 
     if (!hint || !hint->valid)
         return;
@@ -35160,6 +35172,7 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
     p12->stereo_short_p1_partner_sample = is_left ? hint->left_partner_sample : hint->right_partner_sample;
     p12->stereo_short_p1_partner_uqts_ucode = hint->analog_uqts_ucode;
     p12->stereo_short_p1_partner_lm_level = hint->digital_lm_level;
+    p12->stereo_short_p1_partner_anspcm_end = hint->digital_anspcm_end;
     /* the partner is the complement of this side's expected form */
     p12->stereo_short_p1_partner_lapm = (expected_form == P12_SHORT_P1_FORM_ANALOG)
                                       ? hint->digital_lapm : hint->analog_lapm;

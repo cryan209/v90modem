@@ -3775,13 +3775,23 @@ static void p12_eval_v92_clause92_procedure(phase12_result_t *result,
         /* 9.2.3.3/9.2.4.3: no TONEq within the 2 s following the QCA — even
          * when the digital side did transmit its QTS/ANSpcm chain, a missing
          * TONEq answer aborts the quick connect.  A CM or JM restarting well
-         * after the QCA is the V.8 retry that follows the timeout. */
+         * after the QCA is the V.8 retry that follows the timeout.  When the
+         * digital-side ANSpcm was observed, the retry cannot begin until that
+         * continuously transmitted ANSpcm ends, which anchors the search
+         * exactly; otherwise fall back to a fixed post-QCA guard wide enough
+         * to skip the CM that immediately follows QC1. */
+        int retry_from = qca_end + (sample_rate * 1500) / 1000;
+
+        if (result->call_init.v92_anspcm_seen
+            && result->call_init.v92_anspcm_duration_symbols > 0)
+            retry_from = result->call_init.v92_anspcm_sample
+                       + result->call_init.v92_anspcm_duration_symbols;
+        else if (result->stereo_short_p1_partner_anspcm_end >= 0)
+            retry_from = result->stereo_short_p1_partner_anspcm_end;
         const p12_phase1_event_t *retry_cm =
-            p12_proc_find_earliest(result, cm_labels, 1,
-                                   qca_end + (sample_rate * 1500) / 1000);
+            p12_proc_find_earliest(result, cm_labels, 1, retry_from);
         const p12_phase1_event_t *retry_jm =
-            p12_proc_find_earliest(result, jm_labels, 1,
-                                   qca_end + (sample_rate * 1500) / 1000);
+            p12_proc_find_earliest(result, jm_labels, 1, retry_from);
 
         if (retry_cm || retry_jm) {
             const p12_phase1_event_t *retry =
@@ -7908,6 +7918,7 @@ void phase12_result_init(phase12_result_t *r)
     r->stereo_short_p1_partner_uqts_ucode = -1;
     r->stereo_short_p1_partner_lm_level = -1;
     r->stereo_short_p1_partner_lapm = -1;
+    r->stereo_short_p1_partner_anspcm_end = -1;
     r->call_init.v92_qc2_uqts_ucode = -1;
     r->call_init.v92_qc2_lm_level = -1;
     r->call_init.v92_qc2_lapm = -1;

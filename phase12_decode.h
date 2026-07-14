@@ -485,6 +485,7 @@ typedef struct {
     int stereo_short_p1_partner_uqts_ucode;
     int stereo_short_p1_partner_lm_level;
     int stereo_short_p1_partner_lapm;
+    int stereo_short_p1_partner_anspcm_end; /* digital side's ANSpcm end sample: -1 unknown */
 
     /* V.21 FSK bursts detected */
     int ch1_burst_count;
