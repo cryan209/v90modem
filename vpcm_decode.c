@@ -33209,6 +33209,106 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                         "Ja/DIL descriptor decoded",
                         detail);
     }
+
+    /*
+     * After Phase 3, the digital modem transmits the downstream data stream.
+     * The first G.711 codewords are the CP (control parameter) frame, which
+     * carries the negotiated data rate, constellation count, and
+     * transparency mode.  Use the stereo-resolved Phase 4 anchor as a
+     * starting point for the CP frame search.
+     */
+    if (!is_v92) {
+        bool cp_found = false;
+        const decode_v34_result_t *digital =
+            pick_post_phase3_source(answerer, caller, NULL);
+
+        if (digital && digital->phase4_seen && digital->phase4_sample >= 0) {
+            int cp_search_start = digital->phase4_sample;
+            int search_limit = total_codewords;
+
+            /* V.90 downstream starts with CPt (6 codewords of binary-1
+             * ramp), then the CP frame proper.  Search a generous window
+             * around the Phase 4 anchor (up to 120 ms = 960 codewords). */
+            if (cp_search_start + 960 <= search_limit)
+                search_limit = cp_search_start + 960;
+
+            /* CP frame is at most 102 bits for 128 constellations.  At 6
+             * bits per codeword (V.90 binary CP framing), that's 17
+             * codewords.  Include CPt ramp overhead. */
+            for (int offset = cp_search_start;
+                 offset + 32 <= search_limit && !cp_found;
+                 offset++) {
+                /* Try each constellation count, largest first */
+                for (int nc = VPCM_CP_MAX_CONSTELLATIONS; nc >= 1; nc--) {
+                    vpcm_cp_frame_t trial;
+                    vpcm_cp_diag_t cp_diag;
+                    int nbits;
+                    uint8_t cp_bits[128];
+
+                    vpcm_cp_init(&trial);
+                    trial.constellation_count = (uint8_t)nc;
+                    /* V.90 CP frame with binary framing: v34_tx_phase4_bit
+                     * writes one bit per codeword, 6 codewords per frame
+                     * interval.  effective bits = 6*dil.n entries.
+                     * Use upper bound. */
+                    nbits = 6 * 24;
+                    if (nbits > (int)sizeof(cp_bits))
+                        nbits = (int)sizeof(cp_bits);
+                    if (nbits <= 0 || offset + nbits / 6 > search_limit)
+                        continue;
+
+                    /* Collect bits from G.711 codewords */
+                    for (int b = 0; b < nbits; b++) {
+                        cp_bits[b] = (codewords[offset + b / 6] >> (b % 6)) & 1;
+                    }
+                    if (vpcm_cp_decode_diag(cp_bits, nbits, &cp_diag)) {
+                        cp_found = true;
+                        format_cp_summary(detail, sizeof(detail),
+                                          &cp_diag.frame);
+                        call_log_append(log,
+                                        offset,
+                                        nbits,
+                                        "V.90",
+                                        "CP decoded (from Phase 4 anchor)",
+                                        detail);
+                        break;
+                    }
+                    /* Try complement bits (sign inversion) */
+                    for (int b = 0; b < nbits; b++)
+                        cp_bits[b] ^= 1;
+                    if (vpcm_cp_decode_diag(cp_bits, nbits, &cp_diag)) {
+                        cp_found = true;
+                        snprintf(detail, sizeof(detail),
+                                 "drn=%u rate=%.0f_bps constellations=%u ack=%s crc=ok inv_sign",
+                                 (unsigned)cp_diag.frame.drn,
+                                 vpcm_cp_drn_to_bps(cp_diag.frame.drn),
+                                 (unsigned)cp_diag.frame.constellation_count,
+                                 cp_diag.frame.acknowledge ? "yes" : "no");
+                        call_log_append(log,
+                                        offset,
+                                        nbits,
+                                        "V.90",
+                                        "CP decoded (from Phase 4 anchor)",
+                                        detail);
+                        break;
+                    }
+                }
+            }
+        }
+        if (!cp_found && digital && digital->phase4_seen) {
+            snprintf(detail, sizeof(detail),
+                     "anchor=%d range=%d-%d",
+                     digital->phase4_sample,
+                     digital->phase4_sample,
+                     digital->phase4_sample + 960);
+            call_log_append(log,
+                            digital->phase4_sample,
+                            0,
+                            "V.90",
+                            "CP frame search (no CRC match)",
+                            detail);
+        }
+    }
 }
 
 static int v90_sequence_score(const uint8_t *codewords, int total, v91_law_t law)
