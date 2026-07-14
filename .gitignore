@@ -97,5 +97,6 @@ pjproject/**/.libs/
 core.3194
 core.3478
 vpcm_decode
+vpcm_encode
 left_neg_test.wav
 /artifacts/v90-hardware/

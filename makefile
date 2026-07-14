@@ -140,9 +140,10 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = vpcm_loopback_test vpcm_decode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v92_proc_eval_test
+TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v92_proc_eval_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o
+ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o
 V92_REPLAY_OBJS = tools/v92_trn2u_replay.o v92_trn2u.o v92_cp_rx.o vpcm_cp.o
 DATA_STACK_TEST_OBJS = data_stack_test.o data_stack.o
 V42_LINK_TEST_OBJS = v42_link_test.o
@@ -186,6 +187,9 @@ vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 
 vpcm_decode: $(DECODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(DECODE_OBJS) -o $@ $(LDFLAGS)
+
+vpcm_encode: $(ENCODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(ENCODE_OBJS) -o $@ $(LDFLAGS)
 
 v92_trn2u_replay: $(V92_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V92_REPLAY_OBJS) -o $@ $(LDFLAGS)
