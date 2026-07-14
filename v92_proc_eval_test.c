@@ -279,8 +279,87 @@ static void test_reconcile_clears_stale_flags(void)
     printf("PASS: reconcile clears stale chain flags on fallback\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* Waveform QTS/QTS\ detector (v92_short_phase1_decode.c)              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Synthesize silence + QTS (128 reps) [+ QTS\ (8 reps)] + a 2099.7 Hz
+ * ANSpcm-like tone, passed through a short FIR to mimic the channel
+ * smearing that defeats sample-exact boundary tests on line captures.
+ */
+static int synth_qts_signal(int16_t *buf, int cap, bool with_bar, int *qts_start)
+{
+    static const double fir[4] = { 0.7, 0.25, -0.1, 0.05 };
+    enum { LEAD = 400, V = 2000, ANS_SAMPLES = 1200 };
+    double clean[LEAD + 136 * 6 + ANS_SAMPLES];
+    const int pattern[6] = { V, 0, V, -V, 0, -V };
+    int total = 0;
+
+    memset(clean, 0, sizeof(clean));
+    total = LEAD;
+    for (int rep = 0; rep < 128; rep++)
+        for (int k = 0; k < 6; k++)
+            clean[total++] = pattern[k];
+    if (with_bar)
+        for (int rep = 0; rep < 8; rep++)
+            for (int k = 0; k < 6; k++)
+                clean[total++] = -pattern[k];
+    for (int i = 0; i < ANS_SAMPLES; i++)
+        clean[total++] = 2500.0 * sin(2.0 * M_PI * 2099.7 * i / SR);
+
+    assert(total <= cap && total <= (int) (sizeof(clean) / sizeof(clean[0])));
+    for (int i = 0; i < total; i++) {
+        double acc = 0.0;
+
+        for (int t = 0; t < 4; t++)
+            if (i - t >= 0)
+                acc += fir[t] * clean[i - t];
+        buf[i] = (int16_t) lround(acc);
+    }
+    *qts_start = LEAD;
+    return total;
+}
+
+static void test_qts_waveform_split(void)
+{
+    int16_t buf[4096];
+    v92_qts_hit_t hit;
+    int qts_start;
+    int total = synth_qts_signal(buf, 4096, true, &qts_start);
+
+    assert(v92_detect_qts_waveform(buf, total, 0, total, &hit));
+    assert(hit.seen);
+    /* the probe locks a few samples early: leading silence is trivially
+     * antisymmetric, so the run start precedes the physical QTS onset */
+    assert(hit.start_sample >= qts_start - 36 && hit.start_sample <= qts_start + 6);
+    /* nominal 128 + 8, plus up to a few leading silence/smear periods on
+     * the QTS side; the boundary block may migrate one period */
+    assert(hit.qts_reps >= 126 && hit.qts_reps <= 134);
+    assert(hit.qts_bar_reps >= 7 && hit.qts_bar_reps <= 9);
+
+    printf("PASS: QTS waveform split (128 QTS + 8 QTS\\ through FIR channel)\n");
+}
+
+static void test_qts_waveform_no_bar(void)
+{
+    int16_t buf[4096];
+    v92_qts_hit_t hit;
+    int qts_start;
+    int total = synth_qts_signal(buf, 4096, false, &qts_start);
+
+    assert(v92_detect_qts_waveform(buf, total, 0, total, &hit));
+    assert(hit.seen);
+    assert(hit.qts_reps >= 126 && hit.qts_reps <= 134);
+    assert(hit.qts_bar_reps == 0);
+
+    printf("PASS: QTS waveform without QTS\\ reports qts_bar=0\n");
+}
+
 int main(void)
 {
+    test_qts_waveform_split();
+    test_qts_waveform_no_bar();
     test_short_phase2_success();
     test_v8_retry_anchored_at_anspcm_end();
     test_cm_during_anspcm_not_retry();
