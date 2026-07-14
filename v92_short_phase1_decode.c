@@ -821,17 +821,18 @@ bool v92_detect_qts_waveform(const int16_t *samples,
          offset++) {
         long amp = 0;
         int pos;
-        int flip_pos = -1;
         int run_end;
+        int run_blocks;
 
         if (!v92_qts_antisym_ok(samples, offset, QTS_PROBE_WIN, &amp))
             continue;
         if (amp < (long) QTS_PROBE_WIN * QTS_AMP_FLOOR)
             continue;
 
-        /* Extend forward in 3-sample steps.  The QTS -> QTS\ boundary is a
-         * polarity flip: for exactly one 3-sample stretch x[k+3] equals
-         * +x[k]; tolerate one such flip and keep extending. */
+        /* Extend forward in 3-sample steps while the antisymmetry holds.
+         * The run ends at the QTS -> QTS\ polarity flip (or at ANSpcm):
+         * the channel smears the flip transient across several samples,
+         * so no 3-sample boundary test is reliable there. */
         pos = offset + QTS_PROBE_WIN;
         while (pos + 6 <= search_end) {
             long a2 = 0;
@@ -841,31 +842,84 @@ bool v92_detect_qts_waveform(const int16_t *samples,
                 pos += 3;
                 continue;
             }
-            if (flip_pos < 0 && a2 >= 3 * QTS_AMP_FLOOR) {
-                long esame = 0;
-
-                for (int k = 0; k < 3; k++)
-                    esame += labs((long) samples[pos + k] - samples[pos + k + 3]);
-                if (esame * 4 < a2) {
-                    flip_pos = pos + 3;
-                    pos += 3;
-                    continue;
-                }
-            }
             break;
         }
         run_end = pos + 3;
         if (run_end - offset < QTS_MIN_RUN)
             continue;
+        run_blocks = (run_end - offset) / 6;
 
-        out->seen = true;
-        out->start_sample = offset;
-        if (flip_pos > offset) {
-            out->qts_reps = (flip_pos - offset) / 6;
-            out->qts_bar_reps = (run_end - flip_pos) / 6;
-        } else {
-            out->qts_reps = (run_end - offset) / 6;
-            out->qts_bar_reps = 0;
+        /* Separate QTS from QTS\ by per-period correlation against a
+         * template folded from the early periods: QTS\ is -QTS, so its
+         * periods correlate at -1 while ANSpcm falls below the +/-0.75
+         * gate.  The scan runs past the antisymmetric run end (QTS\ is
+         * internally antisymmetric too; only the smeared flip boundary
+         * broke the run), tolerating one junk block at the boundary. */
+        {
+            enum { QTS_FOLD_BLOCKS_MAX = 16, QTS_SCAN_BLOCKS_MAX = 160 };
+            double tpl[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+            double tpl_energy = 0.0;
+            int fold_blocks = run_blocks - 2;
+            int last_pos = -1;
+            int first_bar = -1;
+            int last_bar = -1;
+
+            if (fold_blocks > QTS_FOLD_BLOCKS_MAX)
+                fold_blocks = QTS_FOLD_BLOCKS_MAX;
+            for (int j = 0; j < fold_blocks; j++)
+                for (int k = 0; k < 6; k++)
+                    tpl[k] += samples[offset + 12 + 6 * j + k] / (double) fold_blocks;
+            for (int k = 0; k < 6; k++)
+                tpl_energy += tpl[k] * tpl[k];
+
+            for (int j = 0;
+                 tpl_energy > 0.0
+                 && j < QTS_SCAN_BLOCKS_MAX
+                 && offset + 6 * (j + 1) <= search_end;
+                 j++) {
+                double xx = 0.0;
+                double xy = 0.0;
+                double c = 0.0;
+
+                for (int k = 0; k < 6; k++) {
+                    double x = samples[offset + 6 * j + k];
+
+                    xx += x * x;
+                    xy += x * tpl[k];
+                }
+                if (xx > 0.0)
+                    c = xy / sqrt(xx * tpl_energy);
+                if (c >= 0.75) {
+                    if (first_bar >= 0)
+                        break;
+                    last_pos = j;
+                } else if (c <= -0.75) {
+                    if (first_bar < 0) {
+                        if (last_pos < 0)
+                            break;
+                        first_bar = j;
+                    }
+                    last_bar = j;
+                } else {
+                    if (first_bar >= 0)
+                        break;
+                    if (last_pos >= 0 && j - last_pos > 1)
+                        break;
+                }
+            }
+
+            out->seen = true;
+            out->start_sample = offset;
+            if (last_bar >= 0) {
+                /* Charge the smeared boundary block to the QTS\ side: the
+                 * nominal split is 128 QTS + 8 QTS\ periods. */
+                out->qts_reps = last_pos + 1;
+                out->qts_bar_reps = last_bar - last_pos;
+                run_end = offset + 6 * (last_bar + 1);
+            } else {
+                out->qts_reps = run_blocks;
+                out->qts_bar_reps = 0;
+            }
         }
         out->alignment_phase = offset % 6;
         out->symbol_count = run_end - offset;
