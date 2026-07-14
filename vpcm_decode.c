@@ -1663,6 +1663,12 @@ static bool decode_ja_dil_stage(const uint8_t *codewords,
                                 const int16_t *linear_samples,
                                 int linear_sample_count,
                                 ja_dil_decode_t *out);
+static void collect_v90_cp_events(call_log_t *log,
+                                  const uint8_t *codewords,
+                                  int total_codewords,
+                                  v91_law_t stream_law,
+                                  const int16_t *linear_samples,
+                                  int linear_sample_count);
 static void collect_v91_events(call_log_t *log,
                                const uint8_t *codewords,
                                int total,
@@ -31449,6 +31455,29 @@ static void collect_stream_call_log(call_log_t *log,
     }
 
     /*
+     * Scan for sign-modulated V.90 CP/CPt frames.  The scan
+     * self-synchronises and is CRC-gated, so it runs whenever V.90 decode
+     * is in scope — it must not depend on V.34 Phase 2 results (absent on
+     * downstream-only DS0 captures), the Jd/DIL anchors (which frequently
+     * fail on real line audio), or the coupled V.34 engine reaching
+     * Phase 4.  Skipped only when INFO0 positively identifies V.92, whose
+     * CPd uses the Table 30 format instead.
+     */
+    if (!suppress_v90_phase2 && (do_v34 || do_v90)) {
+        const decode_v34_result_t *cp_src =
+            pick_post_phase3_source(have_answerer ? &answerer : NULL,
+                                    have_caller ? &caller : NULL,
+                                    NULL);
+        bool cp_is_v92 = cp_src && cp_src->info0_seen
+            && v92_short_phase2_v92_cap_from_info0_bits(cp_src->info0_is_d,
+                                                        cp_src->info0_raw.raw_26_27);
+
+        if (!cp_is_v92)
+            collect_v90_cp_events(log, g711_codewords, total_codewords,
+                                  law, linear_samples, total_samples);
+    }
+
+    /*
      * Fallback Ja search when Phase 1 detected V.90/V.92 capability but
      * SpanDSP V.34 Phase 2 decode failed (no answerer/caller results).
      * Use phase2_end_sample as a rough anchor and scan a wide window.
@@ -32089,10 +32118,11 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
         uint8_t pos_w = v91_ucode_to_codeword(law, w_ucode, true);
         uint8_t neg_w = v91_ucode_to_codeword(law, w_ucode, false);
 
-        /* Sd pattern: +W, +0, +W, -W, -0, -W */
+        /* Sd pattern: +W, +0, +W, -W, -0, -W.  Scan every sample offset —
+         * the capture start is not aligned to the 6T pattern period. */
         uint8_t sd_pat[6] = { pos_w, pos_zero, pos_w, neg_w, neg_zero, neg_w };
 
-        for (int offset = 0; offset + 6 * 4 <= total; offset += 6) {
+        for (int offset = 0; offset + 6 * 4 <= total; offset++) {
             /* Quick check: first codeword must match */
             if (codewords[offset] != sd_pat[0])
                 continue;
@@ -32556,31 +32586,69 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                 if (region_len > 80000)
                     region_len = 80000;
 
-                uint32_t descramble_reg = 0;
-                int prev_sign = (region_start > 0)
-                    ? ((codewords[region_start - 1] & 0x80) ? 1 : 0)
-                    : 0;
-
                 /* Descramble the region */
                 uint8_t *plain_bits = malloc((size_t) region_len);
                 if (plain_bits) {
-                    for (int i = 0; i < region_len; i++) {
-                        int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
-                        int scrambled = sign ^ prev_sign;
-                        prev_sign = sign;
-                        plain_bits[i] = (uint8_t) offline_v90_descramble_reg_bit(
-                            &descramble_reg, scrambled);
+                    /* §8.4.5: TRN1d transmits scrambled ones directly as
+                     * signs — there is no differential encoding until Jd
+                     * (§8.4.2), whose differential encoder seeds from
+                     * TRN1d's final sign and whose scrambler continues
+                     * across the boundary.  Stage 1: descramble raw signs
+                     * until the run of ones ends. */
+                    uint32_t descramble_reg = 0;
+                    int trn1d_len = 0;
+
+                    while (trn1d_len < region_len) {
+                        int sign = (codewords[region_start + trn1d_len] & 0x80) ? 1 : 0;
+
+                        if (offline_v90_descramble_reg_bit(&descramble_reg, sign) != 1)
+                            break;
+                        trn1d_len++;
+                    }
+                    for (int i = 0; i < trn1d_len; i++)
+                        plain_bits[i] = 1;
+
+                    /* Stage 2 (Jd onward): differential + descramble.
+                     * Re-seed the self-synchronising descrambler from the
+                     * last raw TRN1d signs — they are the transmit
+                     * scrambler's output history at the boundary.  (Stage 1
+                     * already pushed the first Jd sign into its register,
+                     * which is why a fresh register is seeded here.) */
+                    descramble_reg = 0;
+                    {
+                        int seed_from = trn1d_len - OFFLINE_V90_SCRAMBLER_HISTORY;
+
+                        if (seed_from < 0)
+                            seed_from = 0;
+                        for (int i = seed_from; i < trn1d_len; i++) {
+                            int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
+
+                            (void) offline_v90_descramble_reg_bit(&descramble_reg, sign);
+                        }
+                    }
+                    {
+                        int prev_sign;
+
+                        if (trn1d_len > 0)
+                            prev_sign = (codewords[region_start + trn1d_len - 1] & 0x80) ? 1 : 0;
+                        else if (region_start > 0)
+                            prev_sign = (codewords[region_start - 1] & 0x80) ? 1 : 0;
+                        else
+                            prev_sign = 0;
+                        for (int i = trn1d_len; i < region_len; i++) {
+                            int sign = (codewords[region_start + i] & 0x80) ? 1 : 0;
+                            int scrambled = sign ^ prev_sign;
+
+                            prev_sign = sign;
+                            plain_bits[i] = (uint8_t) offline_v90_descramble_reg_bit(
+                                &descramble_reg, scrambled);
+                        }
                     }
 
-                    /* TRN1d: run of all-1 descrambled bits.
-                     * Per §8.4.5, TRN1d is scrambled all-1s with scrambler
-                     * initialized to zero.  If we get a clean run of ≥ 48
-                     * descrambled 1s, the sign bits are clean (DS0 capture).
-                     * If not, this is likely a mixed recording where both
-                     * modems' signals overlap and corrupt the sign bits. */
-                    int trn1d_len = 0;
-                    while (trn1d_len < region_len && plain_bits[trn1d_len] == 1)
-                        trn1d_len++;
+                    /* If we get a clean run of ≥ 48 descrambled TRN1d 1s,
+                     * the sign bits are clean (DS0 capture).  If not, this
+                     * is likely a mixed recording where both modems'
+                     * signals overlap and corrupt the sign bits. */
 
                     bool clean_signs = (trn1d_len >= 48);
 
@@ -32783,7 +32851,8 @@ static void collect_v90_events(call_log_t *log, const uint8_t *codewords, int to
         sd_pat[4] = neg_zero;
         sd_pat[5] = neg_w;
 
-        for (int offset = 0; offset + 24 <= total && !found_sequence; offset += 6) {
+        /* Scan every sample offset — capture start is not 6T-aligned. */
+        for (int offset = 0; offset + 24 <= total && !found_sequence; offset++) {
             int sd_reps = 0;
             int pos;
             char detail[192];
@@ -33153,6 +33222,7 @@ static void offline_v90_cp_frame_cb(void *user_data, const vpcm_cp_diag_t *diag)
 static void collect_v90_cp_events(call_log_t *log,
                                   const uint8_t *codewords,
                                   int total_codewords,
+                                  v91_law_t stream_law,
                                   const int16_t *linear_samples,
                                   int linear_sample_count)
 {
@@ -33160,6 +33230,8 @@ static void collect_v90_cp_events(call_log_t *log,
     offline_v90_cp_scan_t hits[2];
     uint32_t descramble_reg = 0;
     int prev_sign = 0;
+    uint8_t idle_pos;
+    uint8_t idle_neg;
     char detail[192];
 
     if (!log || !codewords || total_codewords <= 0)
@@ -33172,11 +33244,23 @@ static void collect_v90_cp_events(call_log_t *log,
         v90_cp_rx_init(&rx[law], 4, law == 1, offline_v90_cp_frame_cb, &hits[law]);
     }
 
+    /* The transmitter freezes its scrambler and differential encoder when
+     * it emits idle codewords as inter-phase filler (see the
+     * v90_pcm_idle() returns in v90.c's TX state machine), so idle
+     * codewords must be skipped here too or a single filler symbol
+     * desynchronises the descrambler across a frame boundary.  Sign-
+     * modulated Phase 3/4 payloads ride at the U_INFO magnitude and can
+     * never be an idle (Ucode 0) codeword, so this drops no payload bits. */
+    idle_pos = v91_idle_codeword(stream_law);
+    idle_neg = (uint8_t) (idle_pos ^ 0x80);
+
     for (int i = 0; i < total_codewords; i++) {
         int sign;
         int scrambled;
         int plain;
 
+        if (codewords[i] == idle_pos || codewords[i] == idle_neg)
+            continue;
         /* Prefer linear polarity: amplitude distortion in consumer captures
          * corrupts G.711 MSBs but rarely flips the waveform sign. */
         if (linear_samples && i < linear_sample_count)
@@ -33250,16 +33334,6 @@ static void collect_post_phase3_stage_events(call_log_t *log,
                                                           src->info0_raw.raw_26_27);
 
     memset(&jd_stage, 0, sizeof(jd_stage));
-
-    /*
-     * Scan for Phase 4 CP/CPt frames up front.  The scan self-synchronises
-     * and is CRC-gated, so it must not depend on the Jd/DIL anchors below,
-     * which frequently fail on real line audio, nor on the coupled V.34
-     * engine reaching Phase 4.
-     */
-    if (!is_v92)
-        collect_v90_cp_events(log, codewords, total_codewords,
-                              linear_samples, linear_sample_count);
 
     if (!is_v92) {
         /*
@@ -33353,7 +33427,8 @@ static int v90_sequence_score(const uint8_t *codewords, int total, v91_law_t law
         sd_pat[4] = neg_zero;
         sd_pat[5] = neg_w;
 
-        for (int offset = 0; offset + 24 <= total; offset += 6) {
+        /* Scan every sample offset — capture start is not 6T-aligned. */
+        for (int offset = 0; offset + 24 <= total; offset++) {
             int sd_reps = 0;
             int pos;
             int sbar_reps = 0;
