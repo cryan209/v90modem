@@ -835,3 +835,47 @@ contradictory stories for one call.
   (USR-Sportster, Motorola-SM56, xircom-v90) are byte-identical.
 - `make test` (data stack, V.42 link, V.34 Phase 2 decode, full PCM-modem
   loopback suite) passes.
+
+## QTS/QTS\ Separation + Committed Test Suite (2026-07-14)
+
+### QTS\ separation (commit 37aa040)
+
+The waveform QTS detector's 3-sample boundary tests (antisymmetry /
+sameness) never fired on real captures because the channel smears the
+QTS -> QTS\ flip transient across several samples.  Key identity: QTS\ is
+-QTS, and since QTS is 3-sample antisymmetric, -QTS equals QTS shifted by
+3 samples — so per-period **correlation sign** against a template folded
+from the early periods separates them robustly: QTS periods correlate at
++1, QTS\ at -1, ANSpcm falls inside the +/-0.75 gate.  All four
+QTS-bearing captures (Motorola QC/NC, USR QC/NC) now report
+`reps=130 qts_bar=8` — the nominal 128+8 with two leading smear blocks on
+the QTS side.  Empirically the Motorola boundary block measures corr
+-0.33 (junk) with 7 clean -1.000 blocks after it.
+
+### Committed regression tests (commits cc6f3c5, 5b6275d, a6dd55b)
+
+`v92_proc_eval_test` (in `make test`) includes `phase12_decode.c` directly
+(the evaluator is static) with real `window_energy`/`tone_energy_ratio`
+implementations mirroring vpcm_decode.c.  Covers:
+
+- clause 9.2 evaluator with fabricated timelines: figure-3 short-phase2
+  success + handoff sample, V.8 retry anchored at ANSpcm end (local and
+  partner-hint), CM-during-ANSpcm rejection, incomplete, both-analog
+  V.34-Phase-2, stale-flag reconciliation;
+- waveform QTS/QTS\ splitting on FIR-filtered synthetic signals;
+- **audio-level follow-up chain**: fabricated QCA1d anchor + synthesized
+  QTS/QTS\/ANSpcm/TONEq waveforms through
+  `detect_v92_short_phase1_followup()`, asserting TONEq detection,
+  digital-chain validation, handoff, and the short-phase2 evaluator
+  outcome (plus a no-TONEq negative).  TONEq has never fired on a line
+  capture, so this is its only end-to-end coverage.
+
+Gotchas encoded in the test: fabricated timeline events need
+`source="V.92"` (the branch selector filters on it), and the makefile
+needs an explicit `v92_proc_eval_test.o: phase12_decode.c` dependency or
+evaluator changes don't rebuild the test (verified by mutation).
+
+### Remaining after this step
+
+- A real capture of a successful quick connect for the truth set.
+- ODP/ADP transmission-side behavior (decode-side verdict landed earlier).
