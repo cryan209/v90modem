@@ -53,9 +53,6 @@
  * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
 #define V90_TRN1D_LEN   2046
 
-#define V90_DIL_MAX_PAT_BITS 128
-#define V90_DIL_MAX_SEGMENTS 255
-
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
 static const uint8_t v90_ucode_to_alaw[128] = {
@@ -271,6 +268,23 @@ static inline uint8_t v90_pcm_signed_codeword(v90_law_t law, int ucode, int sign
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
     pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
     return pcm;
+}
+
+uint8_t v90_codeword_compose(v90_law_t law, int ucode, int sign)
+{
+    return v90_pcm_signed_codeword(law, ucode & 0x7F, sign ? 1 : 0);
+}
+
+void v90_codeword_decompose(v90_law_t law, uint8_t codeword, int *ucode_out, int *sign_out)
+{
+    if (sign_out)
+        *sign_out = (codeword & 0x80) ? 1 : 0;
+    if (ucode_out) {
+        if (law == V90_LAW_ALAW)
+            *ucode_out = (codeword ^ 0x55) & 0x7F;
+        else
+            *ucode_out = 0x7F - (codeword & 0x7F);
+    }
 }
 
 static void v90_bits_put(uint8_t *buf, int *bit_pos, uint32_t value, int bits)
@@ -1757,19 +1771,78 @@ static void v90_dil_reset_tx(v90_state_t *s)
     s->dil_terminate_requested = false;
 }
 
+/* Length in symbols of DIL-segment seg_idx (§8.4.1: Lc = (Hc + 1) * 6). */
+static int v90_dil_segment_len(const v90_dil_desc_t *desc, int seg_idx)
+{
+    int training_ucode = desc->train_u[seg_idx] & 0x7F;
+    int uchord_idx = v90_dil_uchord_index(training_ucode);
+
+    return (int)(desc->h[uchord_idx] + 1) * 6;
+}
+
+/* Pure §8.4.1 DIL symbol: segment seg_idx, position pos within the segment. */
+static uint8_t v90_dil_symbol_codeword(v90_law_t law,
+                                       const v90_dil_desc_t *desc,
+                                       int seg_idx,
+                                       int pos)
+{
+    int training_ucode = desc->train_u[seg_idx] & 0x7F;
+    int uchord_idx = v90_dil_uchord_index(training_ucode);
+    int lsp = v90_clamp_positive(desc->lsp, V90_DIL_MAX_PAT_BITS);
+    int ltp = v90_clamp_positive(desc->ltp, V90_DIL_MAX_PAT_BITS);
+    int sp_bit = desc->sp[pos % lsp] ? 1 : 0;
+    int tp_bit = desc->tp[pos % ltp] ? 1 : 0;
+    int ucode = tp_bit ? training_ucode : (desc->ref[uchord_idx] & 0x7F);
+
+    return v90_pcm_signed_codeword(law, ucode, sp_bit);
+}
+
+int v90_dil_cycle_len(const v90_dil_desc_t *desc)
+{
+    int total;
+    int i;
+
+    if (!desc || desc->n <= 0)
+        return 0;
+    total = 0;
+    for (i = 0; i < desc->n; i++)
+        total += v90_dil_segment_len(desc, i);
+    return total;
+}
+
+int v90_dil_generate_codewords(v90_law_t law,
+                               const v90_dil_desc_t *desc,
+                               uint8_t *out,
+                               int len)
+{
+    int seg_idx;
+    int pos;
+    int seg_len;
+    int i;
+
+    if (!desc || desc->n <= 0 || !out || len <= 0)
+        return 0;
+
+    seg_idx = 0;
+    pos = 0;
+    seg_len = v90_dil_segment_len(desc, 0);
+    for (i = 0; i < len; i++) {
+        out[i] = v90_dil_symbol_codeword(law, desc, seg_idx, pos);
+        if (++pos >= seg_len) {
+            pos = 0;
+            seg_idx = (seg_idx + 1) % desc->n;
+            seg_len = v90_dil_segment_len(desc, seg_idx);
+        }
+    }
+    return len;
+}
+
 static uint8_t v90_dil_codeword(v90_state_t *s)
 {
     int seg_idx;
     int n;
-    int training_ucode;
-    int uchord_idx;
-    int lsp;
-    int ltp;
     int seg_len;
-    int pos;
-    int sp_bit;
-    int tp_bit;
-    int ucode;
+    uint8_t codeword;
 
     n = s->dil.n;
     if (n <= 0) {
@@ -1780,16 +1853,8 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
     }
 
     seg_idx = s->dil_segment_index % n;
-    training_ucode = s->dil.train_u[seg_idx] & 0x7F;
-    uchord_idx = v90_dil_uchord_index(training_ucode);
-    lsp = v90_clamp_positive(s->dil.lsp, V90_DIL_MAX_PAT_BITS);
-    ltp = v90_clamp_positive(s->dil.ltp, V90_DIL_MAX_PAT_BITS);
-    seg_len = (int)(s->dil.h[uchord_idx] + 1) * 6;
-    pos = s->dil_pos_in_segment;
-
-    sp_bit = s->dil.sp[pos % lsp] ? 1 : 0;
-    tp_bit = s->dil.tp[pos % ltp] ? 1 : 0;
-    ucode = tp_bit ? training_ucode : (s->dil.ref[uchord_idx] & 0x7F);
+    seg_len = v90_dil_segment_len(&s->dil, seg_idx);
+    codeword = v90_dil_symbol_codeword(s->law, &s->dil, seg_idx, s->dil_pos_in_segment);
 
     s->sample_count++;
     s->dil_pos_in_segment++;
@@ -1807,7 +1872,7 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
         }
     }
 
-    return v90_pcm_signed_codeword(s->law, ucode, sp_bit);
+    return codeword;
 }
 
 bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len)

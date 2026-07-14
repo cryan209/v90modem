@@ -20,6 +20,7 @@
 #include "vpcm_v90_session.h"
 #include "vpcm_v91_loopback.h"
 #include "v90_cp_rx.h"
+#include "v90_dil_rx.h"
 #include "v92_cp_rx.h"
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
@@ -371,6 +372,7 @@ static void vpcm_bytes_to_hex(char *out, size_t out_len, const uint8_t *buf, int
 static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int len);
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
+static bool test_v90_dil_rx_roundtrip(v91_law_t law);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
@@ -618,6 +620,236 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
     free(expected);
     free(actual);
     v90_free(tx);
+    return true;
+}
+
+/*
+ * Compare two DIL descriptors by their §8.4.1 expansion (waveform
+ * equivalence), which is the fidelity contract of v90_dil_rx.
+ */
+static bool vpcm_test_dil_desc_equivalent(v90_law_t law,
+                                          const v90_dil_desc_t *a,
+                                          const v90_dil_desc_t *b,
+                                          const char *what)
+{
+    int cycle_a = v90_dil_cycle_len(a);
+    int cycle_b = v90_dil_cycle_len(b);
+    int span;
+    uint8_t *wave_a;
+    uint8_t *wave_b;
+    bool same = true;
+
+    if (cycle_a <= 0 || cycle_b <= 0) {
+        fprintf(stderr, "%s: bad cycle lengths %d/%d\n", what, cycle_a, cycle_b);
+        return false;
+    }
+    /* Compare over a whole number of both cycles. */
+    span = cycle_a * ((cycle_b + cycle_a - 1) / cycle_a);
+    if (span % cycle_b != 0)
+        span = cycle_a * cycle_b;
+    wave_a = malloc((size_t) span);
+    wave_b = malloc((size_t) span);
+    if (!wave_a || !wave_b) {
+        free(wave_a);
+        free(wave_b);
+        return false;
+    }
+    v90_dil_generate_codewords(law, a, wave_a, span);
+    v90_dil_generate_codewords(law, b, wave_b, span);
+    for (int i = 0; i < span; i++) {
+        if (wave_a[i] != wave_b[i]) {
+            fprintf(stderr, "%s: expansion differs at symbol %d (0x%02X vs 0x%02X)\n",
+                    what, i, wave_a[i], wave_b[i]);
+            same = false;
+            break;
+        }
+    }
+    free(wave_a);
+    free(wave_b);
+    return same;
+}
+
+static bool vpcm_test_dil_roundtrip_case(v90_law_t law,
+                                         const v90_dil_desc_t *desc,
+                                         const char *name,
+                                         bool expect_field_equality)
+{
+    int cycle = v90_dil_cycle_len(desc);
+    int lead = 400;
+    int tail = 400;
+    int body = cycle * 2 + cycle / 2;
+    int total;
+
+    /* Short cycles need more repetitions to clear the decoder's minimum
+     * run length (real DILs run for seconds regardless of cycle size). */
+    while (body < 600)
+        body += cycle;
+    total = lead + body + tail;
+    uint8_t *stream;
+    v90_dil_rx_result_t rx;
+    bool ok = false;
+
+    stream = malloc((size_t) total);
+    if (!stream)
+        return false;
+    /* Idle before, pseudo-random sign-modulated UINFO codewords after
+     * (Jd-flavoured junk) so the decoder must find its own boundaries. */
+    memset(stream, (law == V90_LAW_ALAW) ? 0xD5 : 0xFF, (size_t) lead);
+    v90_dil_generate_codewords(law, desc, stream + lead, body);
+    {
+        uint32_t lcg = 0x2545F491u;
+
+        for (int i = 0; i < tail; i++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            stream[lead + body + i] =
+                v90_codeword_compose(law, 27, (int) ((lcg >> 16) & 1U));
+        }
+    }
+
+    if (!v90_dil_rx_decode(stream, total, law, &rx)) {
+        fprintf(stderr, "DIL roundtrip %s: decode failed\n", name);
+        goto out;
+    }
+    if (!rx.exact) {
+        fprintf(stderr, "DIL roundtrip %s: decode not exact\n", name);
+        goto out;
+    }
+    if (rx.cycle_len != cycle) {
+        fprintf(stderr, "DIL roundtrip %s: cycle %d, expected %d\n",
+                name, rx.cycle_len, cycle);
+        goto out;
+    }
+    if (rx.first_segment_at < lead - 6 || rx.first_segment_at >= lead + cycle) {
+        fprintf(stderr, "DIL roundtrip %s: first segment at %d, DIL starts at %d\n",
+                name, rx.first_segment_at, lead);
+        goto out;
+    }
+    if (!vpcm_test_dil_desc_equivalent(law, desc, &rx.desc, name))
+        goto out;
+    /* SP/TP come back expanded to their observable extent (the longest
+     * segment), which only matches the request when the requested period
+     * equals that extent; pattern fidelity itself is guaranteed by the
+     * expansion-equivalence check above, so only the structural fields
+     * are compared literally here. */
+    if (expect_field_equality) {
+        if (rx.desc.n != desc->n
+            || memcmp(rx.desc.h, desc->h, 8) != 0
+            || memcmp(rx.desc.ref, desc->ref, 8) != 0
+            || memcmp(rx.desc.train_u, desc->train_u, desc->n) != 0) {
+            fprintf(stderr,
+                    "DIL roundtrip %s: field mismatch (n=%d/%d lsp=%d/%d ltp=%d/%d)\n",
+                    name, rx.desc.n, desc->n, rx.desc.lsp, desc->lsp,
+                    rx.desc.ltp, desc->ltp);
+            goto out;
+        }
+    }
+    ok = true;
+
+out:
+    free(stream);
+    return ok;
+}
+
+static bool test_v90_dil_rx_roundtrip(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_dil_desc_t desc;
+
+    vpcm_log("Test: V.90 DIL waveform decoder roundtrip (%s)", law_name);
+
+    /* Case 1: the clean-line Ja profile (125 segments x 12T, all chords). */
+    vpcm_test_init_default_ja_profile(&desc);
+    if (!vpcm_test_dil_roundtrip_case(v90_law, &desc, "default-125x12", true))
+        return false;
+
+    /* Case 2: laserbeam-style sweep, long segments (h=20 -> 126T), the
+     * shape seen in real capture autocorrelation. */
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 120;
+    desc.lsp = 2;
+    desc.ltp = 6;
+    desc.sp[0] = 1;
+    desc.sp[1] = 0;
+    for (int i = 0; i < 6; i++)
+        desc.tp[i] = (i != 3);
+    for (int i = 0; i < 8; i++) {
+        desc.h[i] = 20;
+        desc.ref[i] = 0;
+    }
+    for (int i = 0; i < desc.n; i++)
+        desc.train_u[i] = (uint8_t) (8 + i);
+    if (!vpcm_test_dil_roundtrip_case(v90_law, &desc, "laserbeam-sweep", true))
+        return false;
+
+    /* Case 3: mixed per-chord segment lengths and non-zero references. */
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 6;
+    desc.lsp = 12;
+    desc.ltp = 12;
+    for (int i = 0; i < 12; i++) {
+        desc.sp[i] = (uint8_t) ((0x0A6D >> i) & 1);
+        desc.tp[i] = (uint8_t) ((0x0DB7 >> i) & 1);
+    }
+    for (int i = 0; i < 8; i++) {
+        desc.h[i] = 1;
+        desc.ref[i] = 0;
+    }
+    desc.h[1] = 1;
+    desc.h[3] = 3;
+    desc.h[5] = 2;
+    desc.ref[1] = 2;
+    desc.ref[3] = 1;
+    desc.ref[5] = 0;
+    desc.train_u[0] = 0x12;
+    desc.train_u[1] = 0x35;
+    desc.train_u[2] = 0x51;
+    desc.train_u[3] = 0x13;
+    desc.train_u[4] = 0x36;
+    desc.train_u[5] = 0x52;
+    if (!vpcm_test_dil_roundtrip_case(v90_law, &desc, "mixed-chords", true))
+        return false;
+
+    /* Case 4: adjacent segments sharing a training Ucode; a third
+     * same-chord segment pins the length so the merge gets split. */
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 4;
+    desc.lsp = 12;
+    desc.ltp = 12;
+    for (int i = 0; i < 12; i++) {
+        desc.sp[i] = (uint8_t) ((0x0A6D >> i) & 1);
+        desc.tp[i] = (uint8_t) ((0x0DB7 >> i) & 1);
+    }
+    for (int i = 0; i < 8; i++) {
+        desc.h[i] = 1;
+        desc.ref[i] = 0;
+    }
+    desc.train_u[0] = 0x22;
+    desc.train_u[1] = 0x22;
+    desc.train_u[2] = 0x25;
+    desc.train_u[3] = 0x35;
+    if (!vpcm_test_dil_roundtrip_case(v90_law, &desc, "merged-twins", true))
+        return false;
+
+    /* Case 5: single segment (waveform-equivalence only: a lone segment
+     * has no unique canonical form). */
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 1;
+    desc.lsp = 12;
+    desc.ltp = 12;
+    for (int i = 0; i < 12; i++) {
+        desc.sp[i] = (uint8_t) ((0x09B3 >> i) & 1);
+        desc.tp[i] = (uint8_t) ((0x0DB7 >> i) & 1);
+    }
+    for (int i = 0; i < 8; i++) {
+        desc.h[i] = 1;
+        desc.ref[i] = 0;
+    }
+    desc.train_u[0] = 0x35;
+    if (!vpcm_test_dil_roundtrip_case(v90_law, &desc, "single-segment", false))
+        return false;
+
+    vpcm_log("PASS: V.90 DIL waveform decoder roundtrip (%s)", law_name);
     return true;
 }
 
@@ -8244,6 +8476,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
+        && test_v90_dil_rx_roundtrip(V91_LAW_ULAW)
+        && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v90_data_codeword_state(V91_LAW_ULAW)

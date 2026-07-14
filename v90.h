@@ -22,6 +22,9 @@
 /* V.90 downstream encoder state */
 typedef struct v90_state_s v90_state_t;
 
+#define V90_DIL_MAX_PAT_BITS 128
+#define V90_DIL_MAX_SEGMENTS 255
+
 typedef struct {
     uint8_t n;
     uint8_t lsp;
@@ -230,6 +233,26 @@ bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t 
  * into a DIL descriptor. Returns true on success.
  */
 bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len);
+
+/*
+ * G.711 codeword <-> (Ucode, sign) helpers (Table 1/V.90 mapping).
+ * sign: 1 = positive, 0 = negative.
+ */
+uint8_t v90_codeword_compose(v90_law_t law, int ucode, int sign);
+void v90_codeword_decompose(v90_law_t law, uint8_t codeword, int *ucode_out, int *sign_out);
+
+/*
+ * Stateless §8.4.1 DIL generation from a descriptor.
+ * v90_dil_cycle_len() returns the symbols in one full N-segment cycle
+ * (0 when the descriptor disables DIL). v90_dil_generate_codewords()
+ * fills out[] with len codewords, repeating the cycle as needed, and
+ * returns the count written.
+ */
+int v90_dil_cycle_len(const v90_dil_desc_t *desc);
+int v90_dil_generate_codewords(v90_law_t law,
+                               const v90_dil_desc_t *desc,
+                               uint8_t *out,
+                               int len);
 int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc);
 bool v90_build_dil_descriptor_bits(uint8_t *buf,
                                    int buf_len,

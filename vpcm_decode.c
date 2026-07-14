@@ -12,6 +12,7 @@
  */
 
 #include "v90.h"
+#include "v90_dil_rx.h"
 #include "v91.h"
 #include "vpcm_cp.h"
 #include "v90_cp_rx.h"
@@ -34538,6 +34539,234 @@ static void print_codeword_stats(const uint8_t *codewords, int total,
 }
 
 /* ------------------------------------------------------------------ */
+/* V.90 DIL scan (--dil-scan)                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Codeword-exact pass: recover the full DIL descriptor with v90_dil_rx.
+ * Only DS0-clean streams (raw .g711 captures, synthetic truth captures)
+ * survive this; analog recordings fall through to the structural pass.
+ */
+static bool print_dil_codeword_scan(const uint8_t *codewords, int total,
+                                    v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v90_dil_rx_result_t rx;
+    v90_dil_analysis_t analysis;
+    char summary[256];
+    int unique;
+    bool seen[128];
+    int i;
+
+    if (!v90_dil_rx_scan(codewords, total, v90_law, &rx))
+        return false;
+
+    printf("  Codeword-exact DIL run: %.1f - %.1f ms (%d symbols, %d cycles of %d)\n",
+           sample_to_ms(rx.run_start, 8000),
+           sample_to_ms(rx.run_start + rx.run_len, 8000),
+           rx.run_len, rx.cycles_seen, rx.cycle_len);
+    printf("  Descriptor: N=%u LSP=%u LTP=%u (SP/TP at observable extent)\n",
+           (unsigned) rx.desc.n, (unsigned) rx.desc.lsp, (unsigned) rx.desc.ltp);
+    printf("    SP=");
+    for (i = 0; i < rx.desc.lsp; i++)
+        printf("%d", rx.desc.sp[i] ? 1 : 0);
+    printf(" TP=");
+    for (i = 0; i < rx.desc.ltp; i++)
+        printf("%d", rx.desc.tp[i] ? 1 : 0);
+    printf("\n    per-chord: ");
+    for (i = 0; i < 8; i++)
+        printf("H%d=%u/ref%d=%u ", i + 1, (unsigned) rx.desc.h[i],
+               i + 1, (unsigned) rx.desc.ref[i]);
+    printf("\n");
+
+    memset(seen, 0, sizeof(seen));
+    unique = 0;
+    for (i = 0; i < rx.desc.n; i++) {
+        if (!seen[rx.desc.train_u[i] & 0x7F]) {
+            seen[rx.desc.train_u[i] & 0x7F] = true;
+            unique++;
+        }
+    }
+    printf("    training Ucodes: %d unique across %u segments (first:",
+           unique, (unsigned) rx.desc.n);
+    for (i = 0; i < rx.desc.n && i < 8; i++)
+        printf(" %u", (unsigned) rx.desc.train_u[i]);
+    printf("%s)\n", rx.desc.n > 8 ? " ..." : "");
+
+    if (v90_analyse_dil_descriptor(&rx.desc, &analysis)) {
+        format_v90_dil_summary(summary, sizeof(summary), &analysis);
+        printf("    analysis: %s\n", summary);
+    }
+    return true;
+}
+
+/*
+ * Structural pass for analog captures: DIL-segments are (Hc+1)*6 symbols
+ * and SP/TP restart on every segment boundary, so a DIL region shows a
+ * dominant autocorrelation lag that is a multiple of 6 even after the
+ * waveform has been through a bandpass channel. Reports per-region
+ * segment quantum and full-cycle estimates.
+ */
+static double dil_norm_autocorr(const float *x, int len, int lag)
+{
+    double num = 0.0;
+    double den = 0.0;
+    int i;
+
+    if (lag <= 0 || lag >= len)
+        return 0.0;
+    for (i = 0; i + lag < len; i++)
+        num += (double) x[i] * (double) x[i + lag];
+    for (i = 0; i < len; i++)
+        den += (double) x[i] * (double) x[i];
+    if (den <= 0.0)
+        return 0.0;
+    /* scale for the shorter overlap */
+    return num / den * ((double) len / (double) (len - lag));
+}
+
+typedef struct {
+    int start;          /* samples */
+    int end;
+    int seg_lag;        /* dominant multiple-of-6 lag (segment quantum) */
+    double seg_r;
+    int cycle_lag;      /* strongest longer repeat (full DIL cycle) */
+    double cycle_r;
+} dil_analog_region_t;
+
+static void dil_analyse_window(const int16_t *samples, int start, int len,
+                               dil_analog_region_t *region)
+{
+    enum { DIL_ANALOG_MAX_SEG_LAG = 1560 };  /* (255+1)*6 */
+    float *x;
+    double mean = 0.0;
+    int i;
+    int best_lag = 0;
+    double best_r = 0.0;
+
+    region->start = start;
+    region->end = start + len;
+    region->seg_lag = 0;
+    region->seg_r = 0.0;
+    region->cycle_lag = 0;
+    region->cycle_r = 0.0;
+
+    x = malloc(sizeof(*x) * (size_t) len);
+    if (!x)
+        return;
+    for (i = 0; i < len; i++)
+        mean += samples[start + i];
+    mean /= (double) len;
+    for (i = 0; i < len; i++)
+        x[i] = (float) ((double) samples[start + i] - mean);
+
+    for (i = 6; i <= DIL_ANALOG_MAX_SEG_LAG && i * 2 < len; i += 6) {
+        double r = dil_norm_autocorr(x, len, i);
+
+        if (r > best_r) {
+            best_r = r;
+            best_lag = i;
+        }
+    }
+
+    /* The strongest lag is often a small multiple of the true segment
+     * quantum (consecutive segments cycling through a group of training
+     * Ucodes correlate best at the group period). Reduce to the smallest
+     * divisor that still carries most of the correlation. */
+    if (best_lag > 0) {
+        for (i = 6; i < best_lag; i += 6) {
+            if (best_lag % i == 0
+                && dil_norm_autocorr(x, len, i) >= 0.80 * best_r) {
+                best_lag = i;
+                best_r = dil_norm_autocorr(x, len, i);
+                break;
+            }
+        }
+    }
+    region->seg_lag = best_lag;
+    region->seg_r = best_r;
+
+    /* Full cycle: strongest multiple of the segment quantum. */
+    if (best_lag > 0) {
+        int mult;
+
+        region->cycle_lag = best_lag;
+        region->cycle_r = best_r;
+        for (mult = 2; mult * best_lag * 2 < len && mult <= 300; mult++) {
+            double r = dil_norm_autocorr(x, len, mult * best_lag);
+
+            if (r >= region->cycle_r * 0.98) {
+                region->cycle_lag = mult * best_lag;
+                region->cycle_r = r;
+            }
+        }
+    }
+    free(x);
+}
+
+static void print_dil_analog_scan(const int16_t *samples, int total, int rate)
+{
+    enum {
+        DIL_WIN = 16000,        /* 2 s analysis windows */
+        DIL_HOP = 8000,
+        DIL_ENV_FRAME = 80      /* 10 ms envelope frames */
+    };
+    double peak_rms = 0.0;
+    int offset;
+
+    if (total < DIL_WIN)
+        return;
+
+    for (offset = 0; offset + DIL_ENV_FRAME <= total; offset += DIL_ENV_FRAME) {
+        double db = rms_energy_db(samples + offset, DIL_ENV_FRAME);
+
+        if (db > peak_rms)
+            peak_rms = db;
+    }
+
+    printf("  Structural scan (2 s windows): dominant repeat lags\n");
+    printf("    %-19s %-22s %-24s\n", "window", "segment quantum", "cycle estimate");
+    for (offset = 0; offset + DIL_WIN <= total; offset += DIL_HOP) {
+        dil_analog_region_t region;
+        double db = rms_energy_db(samples + offset, DIL_WIN);
+
+        if (db < peak_rms - 30.0)
+            continue;   /* silence */
+        dil_analyse_window(samples, offset, DIL_WIN, &region);
+        if (region.seg_lag <= 0 || region.seg_r < 0.35)
+            continue;
+        printf("    %7.1f-%7.1f ms  lag=%4dT (h=%3d) r=%.2f",
+               sample_to_ms(region.start, rate),
+               sample_to_ms(region.end, rate),
+               region.seg_lag,
+               region.seg_lag / 6 - 1,
+               region.seg_r);
+        if (region.cycle_lag > region.seg_lag)
+            printf("  cycle=%5dT (n~%d) r=%.2f",
+                   region.cycle_lag,
+                   region.cycle_lag / region.seg_lag,
+                   region.cycle_r);
+        printf("\n");
+    }
+}
+
+static void print_dil_scan(const char *label,
+                           const int16_t *samples,
+                           const uint8_t *codewords,
+                           int total_samples,
+                           int total_codewords,
+                           int rate,
+                           v91_law_t law)
+{
+    printf("\n=== V.90 DIL Scan: %s ===\n", label);
+    if (!print_dil_codeword_scan(codewords, total_codewords, law)) {
+        printf("  No codeword-exact DIL run (expected for analog recordings;\n"
+               "  a DS0 .g711 capture decodes to a full descriptor).\n");
+        print_dil_analog_scan(samples, total_samples, rate);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -34564,6 +34793,7 @@ typedef struct {
     bool do_stats;
     bool do_call_log;
     bool do_phase12;
+    bool do_dil_scan;
     bool raw_output_enabled;
     const char *emit_dil_prefix;
     double tone_probe_start_ms;
@@ -36032,6 +36262,10 @@ static void run_decode_stage_a(const char *label,
     if (opts->raw_output_enabled && opts->do_energy)
         print_energy_profile(linear_samples, total_samples, sample_rate);
 
+    if (opts->raw_output_enabled && opts->do_dil_scan)
+        print_dil_scan(label, linear_samples, g711_codewords,
+                       total_samples, total_codewords, sample_rate, law);
+
     if (opts->do_tone_probe) {
         print_tone_probe(label,
                          linear_samples,
@@ -36659,6 +36893,7 @@ int main(int argc, char **argv)
     bool do_energy = false;
     bool do_tone_probe = false;
     bool do_stats = false;
+    bool do_dil_scan = false;
     bool do_call_log = false;
     bool do_all = false;
     bool do_visualize_html = false;
@@ -36721,6 +36956,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--stats") == 0) {
             do_stats = true;
             explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--dil-scan") == 0) {
+            do_dil_scan = true;
+            explicit_decode_output = true;
         } else if (strcmp(argv[i], "--call-log") == 0) {
             do_call_log = true;
         } else if (strcmp(argv[i], "--emit-dil") == 0 && i + 1 < argc) {
@@ -36754,6 +36992,9 @@ int main(int argc, char **argv)
                    "  --energy           Print RMS energy profile\n"
                    "  --tone-probe a b   Print tone ratios in window a..a+b ms\n"
                    "  --stats            Print codeword histogram/statistics\n"
+                   "  --dil-scan         Recover the V.90 DIL descriptor from the\n"
+                   "                     waveform (codeword-exact on DS0 captures,\n"
+                   "                     structural report on analog recordings)\n"
                    "  --call-log         Print a best-effort chronological call log\n"
                    "  --emit-dil PREFIX  Write descriptor bits, summary, and generated DIL CSV\n"
                    "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
@@ -36776,7 +37017,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_tone_probe && !do_stats && !do_call_log && !do_visualize_html && !do_phase12)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_tone_probe && !do_stats && !do_call_log && !do_visualize_html && !do_phase12 && !do_dil_scan)
         do_all = true;
 
     if (do_all) {
@@ -36972,6 +37213,7 @@ int main(int argc, char **argv)
         opts.do_energy = do_energy;
         opts.do_tone_probe = do_tone_probe;
         opts.do_stats = do_stats;
+        opts.do_dil_scan = do_dil_scan;
         opts.do_call_log = do_call_log;
         opts.do_phase12 = do_phase12;
         opts.raw_output_enabled = explicit_decode_output || !do_call_log;
