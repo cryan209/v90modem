@@ -115,12 +115,25 @@ bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len
     int i;
 
     msg = NULL;
-    if (cp->drn > 28) {
+    if (!cp) {
+        msg = "null CP frame";
+    } else if (cp->drn > 28) {
         msg = "drn exceeds 28";
     } else if (cp->shaping_redundancy > 3) {
         msg = "shaping_redundancy out of range";
     } else if (cp->shaping_lookahead > 3) {
         msg = "shaping_lookahead out of range";
+    } else if ((int8_t)cp->shaping_a1_q1_6 < -64
+               || (int8_t)cp->shaping_a1_q1_6 > 64
+               || (int8_t)cp->shaping_a2_q1_6 < -64
+               || (int8_t)cp->shaping_a2_q1_6 > 64
+               || (int8_t)cp->shaping_b1_q1_6 < -64
+               || (int8_t)cp->shaping_b1_q1_6 > 64
+               || (int8_t)cp->shaping_b2_q1_6 < -64
+               || (int8_t)cp->shaping_b2_q1_6 > 64) {
+        /* V.90 5.4.5.6 limits every signed-Q1.6 spectral-shape
+         * coefficient to an absolute value no greater than one. */
+        msg = "spectral shaping coefficient exceeds unity";
     } else if (cp->constellation_count < 1 || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS) {
         msg = "constellation_count out of range";
     } else {

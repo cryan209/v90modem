@@ -129,6 +129,8 @@ typedef struct {
     bool  use_rrc_frontend;
     bool  bypass_equalizer;
     float rrc_agc_gain;
+    float rrc_input_power;
+    bool  use_instant_rrc_agc;
     bool  rrc_signal_active;
 
     /* 127-tap T/2 fractionally-spaced equalizer (SpanDSP dimensions). */

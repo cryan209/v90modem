@@ -10,10 +10,14 @@
 #include <stdint.h>
 
 #define VPCM_CP_MAX_CONSTELLATIONS 6
+#define VPCM_CP_MAX_MASK_BLOCKS (2 * VPCM_CP_MAX_CONSTELLATIONS)
 #define VPCM_CP_FRAME_INTERVALS 6
 #define VPCM_CP_MASK_BITS 128
 #define VPCM_CP_MASK_BYTES (VPCM_CP_MASK_BITS / 8)
-#define VPCM_CP_MAX_BITS 972
+/* Table 14 permits six transmit masks plus six corresponding codec-output
+ * masks when bit 128 is set: 156 + 136 * 12 = 1788 bits. */
+#define VPCM_CP_MAX_BITS \
+    (156 + 136 * VPCM_CP_MAX_MASK_BLOCKS)
 
 typedef struct {
     bool transparent_mode_granted;

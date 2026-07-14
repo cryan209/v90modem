@@ -213,10 +213,18 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     create_godard_coeffs(d, 0.99f);
     d->use_rrc_frontend = getenv("P3_LEGACY_FRONTEND") == NULL;
     d->bypass_equalizer = getenv("P3_BYPASS_EQUALIZER") != NULL;
-    d->rrc_agc_gain = 1.0f / 8000.0f;
+    d->rrc_agc_gain = 0.0017f;
+    d->rrc_input_power = 0.0f;
+    d->use_instant_rrc_agc = getenv("P3_INSTANT_RRC_AGC") != NULL;
     d->rrc_signal_active = false;
     d->eq_coeff_re[63] = 1.0f;
     d->eq_delta = 0.21f / 127.0f;
+    if (getenv("P3_EQ_DELTA_SCALE")) {
+        float scale = strtof(getenv("P3_EQ_DELTA_SCALE"), NULL);
+
+        if (isfinite(scale) && scale > 0.0f && scale <= 32.0f)
+            d->eq_delta *= scale;
+    }
     d->s_previous_dibit = -1;
 
     /* AGC */
@@ -262,7 +270,8 @@ void p3_demod_reset(p3_demod_t *d)
     memset(d->ted_dc, 0, sizeof(d->ted_dc));
     d->ted_phase = 0.0f;
     d->timing_correction = 0;
-    d->rrc_agc_gain = 1.0f / 8000.0f;
+    d->rrc_agc_gain = 0.0017f;
+    d->rrc_input_power = 0.0f;
     d->rrc_signal_active = false;
     memset(d->eq_buf_re, 0, sizeof(d->eq_buf_re));
     memset(d->eq_buf_im, 0, sizeof(d->eq_buf_im));
@@ -271,6 +280,12 @@ void p3_demod_reset(p3_demod_t *d)
     d->eq_coeff_re[63] = 1.0f;
     d->eq_buf_pos = 0;
     d->eq_delta = 0.21f / 127.0f;
+    if (getenv("P3_EQ_DELTA_SCALE")) {
+        float scale = strtof(getenv("P3_EQ_DELTA_SCALE"), NULL);
+
+        if (isfinite(scale) && scale > 0.0f && scale <= 32.0f)
+            d->eq_delta *= scale;
+    }
     d->cma_freeze_symbols = 0;
     d->cma_freeze_after_sample = -1;
     d->s_alternating_run = 0;
@@ -639,6 +654,17 @@ static int p3_rrc_demod_process(p3_demod_t *d,
         float ii;
         int phase;
 
+        /* SpanDSP's primary-channel receiver drives AGC from a power meter
+         * over the real input samples.  Keep the same 1/16 damping here.
+         * In particular, do not estimate gain independently from each QAM
+         * symbol: that erases the amplitude information needed by the
+         * equalizer and by the later V.34 data constellations. */
+        {
+            float amp = (float)samples[i];
+
+            d->rrc_input_power +=
+                (amp * amp - d->rrc_input_power) * (1.0f / 16.0f);
+        }
         d->rrc_hist[d->rrc_hist_pos] = (float)samples[i];
         if (++d->rrc_hist_pos >= P3_RRC_TAPS)
             d->rrc_hist_pos = 0;
@@ -674,8 +700,22 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                 && (d->cma_freeze_after_sample < 0
                     || sample_offset + i < d->cma_freeze_after_sample)
                 && isfinite(raw_mag)) {
-                float target_gain = 1.0f / raw_mag;
-                d->rrc_agc_gain = 0.995f * d->rrc_agc_gain + 0.005f * target_gain;
+                float target_gain;
+
+                if (d->use_instant_rrc_agc) {
+                    /* Diagnostic compatibility with the original front end. */
+                    target_gain = 1.0f / raw_mag;
+                    d->rrc_agc_gain =
+                        0.995f * d->rrc_agc_gain + 0.005f * target_gain;
+                } else if (d->rrc_input_power > 100000.0f
+                           && isfinite(d->rrc_input_power)) {
+                    target_gain = 2.17f / sqrtf(d->rrc_input_power);
+                    if (target_gain < 0.00001f)
+                        target_gain = 0.00001f;
+                    else if (target_gain > 0.01f)
+                        target_gain = 0.01f;
+                    d->rrc_agc_gain = target_gain;
+                }
             }
             sym_re *= d->rrc_agc_gain;
             sym_im *= d->rrc_agc_gain;

@@ -2749,6 +2749,40 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     }
 
+    /* Table 14 allows six transmitter constellations and, when bit 128 is
+     * set, six additional codec-output masks.  This is the longest legal
+     * CP/CP' frame and guards the receiver capacity used by live captures. */
+    cp.constellation_count = VPCM_CP_MAX_CONSTELLATIONS;
+    cp.codec_constellations_differ = true;
+    for (int c = 0; c < VPCM_CP_MAX_CONSTELLATIONS; c++) {
+        cp.dfi[c] = (uint8_t)c;
+        memset(cp.masks[c], 0, sizeof(cp.masks[c]));
+        memset(cp.codec_masks[c], 0, sizeof(cp.codec_masks[c]));
+        for (int ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+            vpcm_cp_mask_set(cp.masks[c], ucode,
+                             (ucode % VPCM_CP_MAX_CONSTELLATIONS) <= c);
+            vpcm_cp_mask_set(cp.codec_masks[c], ucode,
+                             (ucode % VPCM_CP_MAX_CONSTELLATIONS) >= c);
+        }
+    }
+    if (!vpcm_cp_encode_modulated_bits(&cp, 4, bits, &nbits)
+        || nbits != VPCM_CP_MAX_BITS
+        || nbits != 1788
+        || bits[128] != 1) {
+        fprintf(stderr,
+                "V.90 strict CP test could not build maximum Table-14 frame\n");
+        return false;
+    }
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, bits[i]);
+    if (capture.count != 5
+        || rx.valid_frames != 5
+        || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
+        fprintf(stderr,
+                "V.90 strict CP receiver rejected maximum Table-14 frame\n");
+        return false;
+    }
+
     vpcm_log("PASS: V.90 strict CP bitstream receiver (%s, bits=%d)",
              law_name, nbits);
     return true;
