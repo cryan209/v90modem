@@ -1832,8 +1832,15 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
                 /*endif*/
             }
             /* Table 11/V.34 step 9, 9.6.3.1/V.34 and 9.6.3.2/V.34 */
-            s->y0 = s->state & 1;
+            /* The convolutional encoder has one 4D-symbol interval of
+               inherent delay (V.34 9.6.3.2).  The state transition consumes
+               the subset labels from the pair just transmitted; the output
+               cached for the next pair must therefore come from the updated
+               state.  Caching the old state's output here adds a second
+               interval of delay and rotates only the odd 2D point in every
+               subsequent pair. */
             s->state = s->conv_encode_table[s->state][y4321];
+            s->y0 = s->state & 1;
 //printf("Y4321 %d %d - %d %d %d\n", subsets[0], subsets[1], y4321, s->y0, s->state);
 //printf("WWW 0x%x 0x%x -> 0x%x\n", v0, y4321, s->state);
         }

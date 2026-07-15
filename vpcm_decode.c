@@ -5987,6 +5987,7 @@ typedef struct {
     bool conjugate;
     double phase_step;
     double coefficient[2 * V34_B1_FIR_MAX_TAPS];
+    double radial_coefficient[3];
     float training_match;
 } v34_b1_fir_fit_t;
 
@@ -6094,11 +6095,26 @@ static int v34_upstream_descramble_bit(uint32_t *reg, int tap, int input)
  * frame counters wrap this state to superframe zero at the end of B1. */
 static void v34_prepare_rx_b1(v34_state_t *v34)
 {
+    int prior;
+
     if (!v34 || v34->rx.parms.j <= 0)
         return;
     v34->rx.data_frame = 0;
     v34->rx.super_frame = v34->rx.parms.j - 1;
     v34->rx.v0_pattern = (uint16_t)(2 * (v34->rx.parms.j - 1));
+    v34->rx.input_4d = (v34->rx.parms.j - 1)
+                     * 4 * v34->rx.parms.p;
+    /* B1 also resets the convolutional encoder to state zero.  SpanDSP's
+     * generic data-mode Viterbi initialization gives every state metric
+     * zero, which throws away that unusually strong startup constraint and
+     * lets noise select a false path during the short captured B1 frame. */
+    prior = (v34->rx.viterbi.ptr - 1) & 0xF;
+    for (int state = 0;
+         state < v34->rx.viterbi.state_count;
+         state++) {
+        v34->rx.viterbi.vit[prior].cumulative_path_metric[state] =
+            state == 0 ? 0U : 0x3FFFFFFFU;
+    }
 }
 
 static bool v34_mp_recovered_frame_valid(uint8_t frame[188],
@@ -7695,7 +7711,7 @@ static bool v90_solve_linear_system(double *matrix,
                                     double *solution,
                                     int size);
 
-enum { V34_B1_FSE_TAPS = 31, V34_B1_FSE_PRE = 15 };
+enum { V34_B1_FSE_TAPS = 63, V34_B1_FSE_PRE = 31 };
 
 typedef struct {
     bool valid;
@@ -7897,11 +7913,13 @@ enum {
 typedef struct {
     bool valid;
     int first_half_symbol;
+    int sample_index_adjust;
     int parity_count;
     int tap_count;
     int pre;
     bool widely_linear;
     bool conjugate;
+    int peak_tap;
     double coefficient[2][4 * V90_CP_FSE_MAX_TAPS];
     float training_match;
     float holdout_match;
@@ -7921,14 +7939,27 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
     float target[2 * VPCM_CP_MAX_BITS][2];
     int sequence_symbols;
     int base_half = 0;
+    int anchor_half = getenv("VPCM_V90_CP_FSE_ANCHOR")
+                    ? atoi(getenv("VPCM_V90_CP_FSE_ANCHOR")) : 0;
     bool widely_linear = getenv("VPCM_V90_CP_FSE_LINEAR") == NULL;
     int parity_count = getenv("VPCM_V90_CP_FSE_PARITY") ? 2 : 1;
     int taps = parity_count == 1
              ? V90_CP_FSE_SINGLE_TAPS : V90_CP_FSE_PARITY_TAPS;
-    int pre = taps / 2;
+    int pre;
     int parameters_per_tap = widely_linear ? 4 : 2;
-    int size = parameters_per_tap * taps;
+    int size;
     v90_cp_fse_fit_t best;
+
+    if (getenv("VPCM_V90_CP_FSE_TAPS"))
+        taps = atoi(getenv("VPCM_V90_CP_FSE_TAPS"));
+    if (taps < 3)
+        taps = 3;
+    if (taps > V90_CP_FSE_MAX_TAPS)
+        taps = V90_CP_FSE_MAX_TAPS;
+    if ((taps & 1) == 0)
+        taps--;
+    pre = taps / 2;
+    size = parameters_per_tap * taps;
 
     if (!half_baud || !cp || !cp->valid || !out
         || cp->scrambled_bits < 256
@@ -7959,7 +7990,7 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
     }
     memset(&best, 0, sizeof(best));
     for (int shift = -2; shift <= 2; shift++) {
-      int first_half = base_half + shift;
+      int first_half = base_half + anchor_half + shift;
 
       for (int conjugate = 0;
            conjugate < (widely_linear ? 1 : 2);
@@ -8086,6 +8117,9 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
             memset(&trial, 0, sizeof(trial));
             trial.valid = true;
             trial.first_half_symbol = first_half;
+            trial.sample_index_adjust =
+                half_baud->symbols[base_half].sample_index
+              - half_baud->symbols[first_half].sample_index;
             trial.parity_count = parity_count;
             trial.tap_count = taps;
             trial.pre = pre;
@@ -8098,6 +8132,22 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
             memcpy(trial.coefficient,
                    solutions,
                    sizeof(trial.coefficient));
+            {
+                double peak_power = -1.0;
+
+                for (int tap = 0; tap < taps; tap++) {
+                    int base = parameters_per_tap * tap;
+                    double tap_power = solutions[0][base]
+                                     * solutions[0][base]
+                                     + solutions[0][base + 1]
+                                       * solutions[0][base + 1];
+
+                    if (tap_power > peak_power) {
+                        peak_power = tap_power;
+                        trial.peak_tap = tap;
+                    }
+                }
+            }
             if (!best.valid || trial.holdout_match > best.holdout_match)
                 best = trial;
         }
@@ -8161,6 +8211,8 @@ static p3_result_t *v90_apply_cp_fse(const p3_result_t *half_baud,
             }
         }
         out->symbols[out->symbol_count] = half_baud->symbols[centre];
+        out->symbols[out->symbol_count].sample_index +=
+            fit->sample_index_adjust;
         out->symbols[out->symbol_count].re = (float)predicted_re;
         out->symbols[out->symbol_count].im = (float)predicted_im;
         out->symbols[out->symbol_count].magnitude =
@@ -8373,6 +8425,7 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
     float selected_phase_step = 0.0f;
     double error = 0.0;
     double power = 0.0;
+    double linear_symbol[16 * 8][2];
     int taps = getenv("VPCM_V90_B1_FIR_TAPS")
              ? atoi(getenv("VPCM_V90_B1_FIR_TAPS")) : 13;
     int pre;
@@ -8501,6 +8554,8 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
                  * (predicted_im - templ->symbol[n][1]);
         power += templ->symbol[n][0] * templ->symbol[n][0]
                + templ->symbol[n][1] * templ->symbol[n][1];
+        linear_symbol[n][0] = predicted_re;
+        linear_symbol[n][1] = predicted_im;
     }
     if (power <= 0.0 || error >= power)
         return false;
@@ -8513,6 +8568,70 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
     memcpy(out->coefficient,
            solution,
            (size_t)size * sizeof(solution[0]));
+    out->radial_coefficient[0] = 1.0;
+    /* V.34's optional non-linear encoder is a radial odd polynomial.  A
+     * three-term inverse fitted on the known B1 frame removes both that
+     * projection and mild radial analogue-path compression without changing
+     * point phase or learning payload data. */
+    {
+        double radial_matrix[3 * 3] = {0};
+        double radial_rhs[3] = {0};
+        double radial_solution[3];
+
+        for (int n = 0; n < templ->symbol_count; n++) {
+            double xr = linear_symbol[n][0];
+            double xi = linear_symbol[n][1];
+            double r2 = xr * xr + xi * xi;
+            double basis[3] = {1.0, r2, r2 * r2};
+
+            for (int row = 0; row < 3; row++) {
+                radial_rhs[row] += basis[row]
+                    * (xr * templ->symbol[n][0]
+                       + xi * templ->symbol[n][1]);
+                for (int column = 0; column < 3; column++) {
+                    radial_matrix[3 * row + column] += basis[row]
+                        * basis[column] * r2;
+                }
+            }
+        }
+        {
+            double trace = radial_matrix[0]
+                         + radial_matrix[4]
+                         + radial_matrix[8];
+
+            radial_matrix[0] += trace * 1e-8;
+            radial_matrix[4] += trace * 1e-8;
+            radial_matrix[8] += trace * 1e-8;
+        }
+        if (v90_solve_linear_system(radial_matrix,
+                                    radial_rhs,
+                                    radial_solution,
+                                    3)) {
+            double radial_error = 0.0;
+
+            for (int n = 0; n < templ->symbol_count; n++) {
+                double xr = linear_symbol[n][0];
+                double xi = linear_symbol[n][1];
+                double r2 = xr * xr + xi * xi;
+                double factor = radial_solution[0]
+                              + radial_solution[1] * r2
+                              + radial_solution[2] * r2 * r2;
+                double yr = factor * xr;
+                double yi = factor * xi;
+
+                radial_error += (yr - templ->symbol[n][0])
+                              * (yr - templ->symbol[n][0])
+                              + (yi - templ->symbol[n][1])
+                                * (yi - templ->symbol[n][1]);
+            }
+            if (radial_error < error) {
+                memcpy(out->radial_coefficient,
+                       radial_solution,
+                       sizeof(radial_solution));
+                error = radial_error;
+            }
+        }
+    }
     out->training_match = (float)(1.0 - error / power);
     return true;
 }
@@ -8553,6 +8672,16 @@ static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
             rotated_im = sin(angle) * xr + cos(angle) * xi;
             predicted_re += ar * rotated_re - ai * rotated_im;
             predicted_im += ar * rotated_im + ai * rotated_re;
+        }
+        {
+            double r2 = predicted_re * predicted_re
+                      + predicted_im * predicted_im;
+            double factor = fit->radial_coefficient[0]
+                          + fit->radial_coefficient[1] * r2
+                          + fit->radial_coefficient[2] * r2 * r2;
+
+            predicted_re *= factor;
+            predicted_im *= factor;
         }
         out->symbols[n] = detail->symbols[fit->first_symbol + n];
         out->symbols[n].re = (float)predicted_re;
@@ -18988,7 +19117,7 @@ static void v34_search_supervised_b1_fcs(
                 if (decoded_ok && getenv("VPCM_V34_UPSTREAM_DIAG")
                     && fit.training_match >= 0.50f) {
                     fprintf(stderr,
-                            "v90 B1 finalist sample=%d scalar=%.1f%% train=%.1f%% template=%d shift=%d first64=%d tail=%d bits=%d hdlc=%d/%d\n",
+                            "v90 B1 finalist sample=%d scalar=%.1f%% train=%.1f%% template=%d shift=%d first64=%d tail=%d bits=%d hdlc=%d/%d radial=%.6g,%.6g,%.6g\n",
                             symbols->symbols[first].sample_index,
                             100.0f * best_match[hypothesis],
                             100.0f * fit.training_match,
@@ -18998,7 +19127,20 @@ static void v34_search_supervised_b1_fcs(
                             decoded.b1_tail_ones,
                             decoded.data_bits,
                             decoded.hdlc_frames,
-                            decoded.hdlc_bytes);
+                            decoded.hdlc_bytes,
+                            fit.radial_coefficient[0],
+                            fit.radial_coefficient[1],
+                            fit.radial_coefficient[2]);
+                    if (fit.training_match >= 0.90f
+                        && decoded.stored_bytes > 0) {
+                        int preview = decoded.stored_bytes < 16
+                                    ? decoded.stored_bytes : 16;
+
+                        fprintf(stderr, "v90 B1 finalist bytes=");
+                        for (int i = 0; i < preview; i++)
+                            fprintf(stderr, "%02x", decoded.bytes[i]);
+                        fprintf(stderr, "\n");
+                    }
                 }
                 if (decoded_ok && decoded.hdlc_frames > 0) {
                     if (!out->fcs_valid
@@ -32089,11 +32231,14 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         }
                                     }
                                     fprintf(stderr,
-                                            "v90 CP' T/2 FSE timing=%d sample=%d train=%.1f%% holdout=%.1f%% B1=%.1f%% sample=%d template=%d v0=%d state=%d iperm=%d yperm=%d hdlc=%d/%d\n",
+                                            "v90 CP' T/2 FSE timing=%d sample=%d taps=%d peak=%d offset=%d train=%.1f%% holdout=%.1f%% B1=%.1f%% sample=%d template=%d v0=%d state=%d iperm=%d yperm=%d hdlc=%d/%d\n",
                                             timing,
                                             half_baud->symbols[
                                                 cp_fse.first_half_symbol]
                                                 .sample_index,
+                                            cp_fse.tap_count,
+                                            cp_fse.peak_tap,
+                                            cp_fse.peak_tap - cp_fse.pre,
                                             100.0f
                                               * cp_fse.training_match,
                                             100.0f

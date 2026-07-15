@@ -687,6 +687,10 @@ typedef struct
     int mjk[8];
 
     int step_2d;
+    /*! Absolute incoming 4D-symbol position within the superframe.  This is
+        separate from step_2d, which advances only when delayed Viterbi
+        decisions emerge. */
+    int input_4d;
 
     /*! \brief Buffer to accumulate 8 equalized 2D symbols (as Q9.7 re,im pairs)
                before calling v34_put_mapping_frame() */

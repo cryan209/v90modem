@@ -1954,6 +1954,16 @@ static int16_t get_binary_subset_label(complexi16_t *pos)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int16_t get_binary_subset_label_q9_7(const complexi16_t *pos)
+{
+    complexi16_t integer;
+
+    integer.re = pos->re >> 7;
+    integer.im = pos->im >> 7;
+    return get_binary_subset_label(&integer);
+}
+/*- End of function --------------------------------------------------------*/
+
 static complexi16_t quantize_rx(v34_rx_state_t *s, complexi16_t *x)
 {
     complexi16_t y;
@@ -2185,8 +2195,17 @@ static void viterbi_calculate_branch_errors(viterbi_t *s, complexi16_t xy[2][4],
 }
 /*- End of function --------------------------------------------------------*/
 
-static void viterbi_update_path_metrics(viterbi_t *s, complexi16_t xy[2][4])
+static void viterbi_update_path_metrics(viterbi_t *s,
+                                        complexi16_t xy[2][4],
+                                        int invert)
 {
+    static const int8_t geometric_branch[4][4] =
+    {
+        {0, 1, 2, 3},
+        {7, 4, 5, 6},
+        {2, 3, 0, 1},
+        {5, 6, 7, 4}
+    };
     int16_t state;
     int16_t k0;
     int16_t k1;
@@ -2194,6 +2213,45 @@ static void viterbi_update_path_metrics(viterbi_t *s, complexi16_t xy[2][4])
     uint32_t min_metric;
     uint32_t metric;
     int prev_ptr;
+
+    if (getenv("SPANDSP_V34_DIAG_VITERBI"))
+    {
+        static int diag_state = 0;
+        static int diag_count = 0;
+        int dk0 = -1;
+        int dk1 = -1;
+
+        for (k0 = 0; k0 < 4; k0++)
+        {
+            if (s->error[0][k0] == 0)
+                dk0 = k0;
+            if (s->error[1][k0] == 0)
+                dk1 = k0;
+        }
+        if (dk0 >= 0 && dk1 >= 0)
+        {
+            int subset0 = get_binary_subset_label_q9_7(&xy[0][dk0]) & 7;
+            int subset1 = get_binary_subset_label_q9_7(&xy[1][dk1]) & 7;
+            int input = conv_encode_input[subset0][subset1];
+            int expected = (((input & 3) << 1) | (diag_state & 1))
+                         ^ (invert ? 1 : 0);
+
+            fprintf(stderr,
+                    "V34VIT n=%d state=%d y0=%d input=%x k=%d,%d geom=%d expected=%d invert=%d next=%d\n",
+                    diag_count,
+                    diag_state,
+                    diag_state & 1,
+                    input,
+                    dk0,
+                    dk1,
+                    geometric_branch[dk0][dk1],
+                    expected,
+                    invert,
+                    s->encode_table[diag_state][input]);
+            diag_state = s->encode_table[diag_state][input];
+            diag_count++;
+        }
+    }
 
     curr_min_metric = UINT32_MAX;
     /* Build the full 4D candidate set.  The old dormant decoder collapsed
@@ -2225,14 +2283,28 @@ static void viterbi_update_path_metrics(viterbi_t *s, complexi16_t xy[2][4])
     {
         for (k0 = 0; k0 < 4; k0++)
         {
-            int subset0 = get_binary_subset_label(&xy[0][k0]) & 7;
+            int subset0 = get_binary_subset_label_q9_7(&xy[0][k0]) & 7;
 
             for (k1 = 0; k1 < 4; k1++)
             {
-                int subset1 = get_binary_subset_label(&xy[1][k1]) & 7;
+                int subset1 = get_binary_subset_label_q9_7(&xy[1][k1]) & 7;
                 int input = conv_encode_input[subset0][subset1];
                 int next_state = s->encode_table[state][input];
                 int branch = 4*k0 + k1;
+
+                /* For the 16-state rate-2/3 encoder, Y1/Y2 and the old
+                   state's Y0 select one of the eight 4D branches.  The
+                   previous full-candidate update used Y1/Y2 only for the
+                   state transition and allowed geometrically impossible Y0
+                   branches, making the decoder collapse under tiny noise.
+                   V0 flips the Y0 branch bit at the two half-frame
+                   boundaries. */
+                if (s->state_count == 16
+                    && geometric_branch[k0][k1]
+                       != ((((input & 3) << 1) | (state & 1))
+                           ^ (invert ? 1 : 0))) {
+                    continue;
+                }
 
                 metric = s->vit[prev_ptr].cumulative_path_metric[state]
                        + s->vit[s->ptr].branch_error_x[branch];
@@ -7922,13 +7994,23 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
 #endif
         if ((i & 1))
         {
-            /* Deal with super-frame sync inversion */
-            if ((s->data_frame*8 + s->step_2d)%(4*s->parms.p) == 0)
-                invert = (0x5FEE >> s->v0_pattern++) & 1;
+            /* Deal with super-frame sync inversion at the time the 4D pair
+               enters the Viterbi decoder.  step_2d is the delayed output
+               position and remains zero during windup, so using it here
+               repeatedly consumed V0 bits at the start of B1. */
+            if (s->parms.p > 0 && s->parms.j > 0
+                && s->input_4d % (2*s->parms.p) == 0) {
+                int pattern = (s->input_4d / (2*s->parms.p))
+                            % (2*s->parms.j);
+
+                invert = (0x5FEE >> pattern) & 1;
+            }
             else
                 invert = false;
             /*endif*/
-            viterbi_update_path_metrics(&s->viterbi, s->xy);
+            viterbi_update_path_metrics(&s->viterbi, s->xy, invert);
+            if (++s->input_4d >= 4*s->parms.p*s->parms.j)
+                s->input_4d = 0;
 //printf("EEE %p %4d %4d %4d %4d %4d %4d %4d %4d (%d)\n",
 //       s,
 //       s->viterbi.branch_error[0],
@@ -8210,6 +8292,7 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     if (!s)
         return -1;
     s->rx.step_2d = 0;
+    s->rx.input_4d = 0;
     s->rx.data_frame = 0;
     s->rx.super_frame = 0;
     s->rx.v0_pattern = 0;
