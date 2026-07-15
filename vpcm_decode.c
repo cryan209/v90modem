@@ -5945,6 +5945,7 @@ typedef struct {
     int nonlinear;
     int expanded;
     int auxiliary;
+    int i_permutation;
     bool conjugate;
     float fit_re;
     float fit_im;
@@ -5960,8 +5961,11 @@ typedef struct {
     int nonlinear;
     int expanded;
     int auxiliary;
+    int i_permutation;
+    int y_permutation;
     int precoder_transform;
     int v0_pattern;
+    int initial_state;
     int symbol_count;
     float symbol[16 * 8][2];
     float power;
@@ -7341,6 +7345,8 @@ static bool v34_make_b1_template(int baud_code,
         v34_free(v34);
         return false;
     }
+    if (getenv("SPANDSP_V34_DIAG_INITIAL_STATE"))
+        v34->tx.state = atoi(getenv("SPANDSP_V34_DIAG_INITIAL_STATE"));
     if (getenv("VPCM_V90_B1_AUXILIARY")) {
         /* MP advertises the 2400-bit/s primary rate code separately from
          * auxiliary-channel enablement.  The aggregate mapper index is the
@@ -7359,6 +7365,11 @@ static bool v34_make_b1_template(int baud_code,
     out->nonlinear = nonlinear;
     out->expanded = expanded;
     out->auxiliary = getenv("VPCM_V90_B1_AUXILIARY") != NULL;
+    out->i_permutation = getenv("SPANDSP_V34_DIAG_I_PERM")
+                       ? atoi(getenv("SPANDSP_V34_DIAG_I_PERM")) : 0;
+    out->y_permutation = getenv("SPANDSP_V34_DIAG_Y_PERM")
+                       ? atoi(getenv("SPANDSP_V34_DIAG_Y_PERM")) : 0;
+    out->initial_state = v34->tx.state;
     /* V.34 10.1.3.1: B1 is one complete data frame, and its
      * superframe-sync inversions are those of the final data frame in a
      * superframe.  There are two V0 opportunities per data frame. */
@@ -7877,13 +7888,21 @@ typedef struct {
     v34_b1_fir_fit_t fir;
 } v90_cp4_fir_fit_t;
 
-enum { V90_CP_FSE_TAPS = 127, V90_CP_FSE_PRE = 63 };
+enum {
+    V90_CP_FSE_MAX_TAPS = 127,
+    V90_CP_FSE_SINGLE_TAPS = 127,
+    V90_CP_FSE_PARITY_TAPS = 119
+};
 
 typedef struct {
     bool valid;
     int first_half_symbol;
+    int parity_count;
+    int tap_count;
+    int pre;
+    bool widely_linear;
     bool conjugate;
-    double coefficient[2 * V90_CP_FSE_TAPS];
+    double coefficient[2][4 * V90_CP_FSE_MAX_TAPS];
     float training_match;
     float holdout_match;
 } v90_cp_fse_fit_t;
@@ -7898,10 +7917,17 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
         { 0.7071068f,  0.7071068f},
         { 0.7071068f, -0.7071068f}
     };
-    enum { SIZE = 2 * V90_CP_FSE_TAPS };
+    enum { MAX_SIZE = 4 * V90_CP_FSE_MAX_TAPS };
     float target[2 * VPCM_CP_MAX_BITS][2];
     int sequence_symbols;
     int base_half = 0;
+    bool widely_linear = getenv("VPCM_V90_CP_FSE_LINEAR") == NULL;
+    int parity_count = getenv("VPCM_V90_CP_FSE_PARITY") ? 2 : 1;
+    int taps = parity_count == 1
+             ? V90_CP_FSE_SINGLE_TAPS : V90_CP_FSE_PARITY_TAPS;
+    int pre = taps / 2;
+    int parameters_per_tap = widely_linear ? 4 : 2;
+    int size = parameters_per_tap * taps;
     v90_cp_fse_fit_t best;
 
     if (!half_baud || !cp || !cp->valid || !out
@@ -7935,55 +7961,76 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
     for (int shift = -2; shift <= 2; shift++) {
       int first_half = base_half + shift;
 
-      for (int conjugate = 0; conjugate < 2; conjugate++) {
-        double matrix[SIZE * SIZE] = {0};
-        double rhs[SIZE] = {0};
-        double solution[SIZE];
+      for (int conjugate = 0;
+           conjugate < (widely_linear ? 1 : 2);
+           conjugate++) {
+        double solutions[2][MAX_SIZE] = {{0}};
         int train_count = sequence_symbols - 96;
+        bool solved = true;
 
-        if (train_count < 2 * V90_CP_FSE_TAPS
-            || first_half < V90_CP_FSE_PRE
+        /* A conventional complex tap has two real parameters; a widely
+         * linear tap also filters the conjugated input and has four. */
+        if (2 * ((train_count + parity_count - 1) / parity_count) < size
+            || first_half < pre
             || first_half + 2 * (sequence_symbols - 1)
-                 + (V90_CP_FSE_TAPS - V90_CP_FSE_PRE)
+                 + (taps - pre)
                >= half_baud->symbol_count) {
             continue;
         }
-        for (int n = 0; n < train_count; n++) {
-            double feature_re[SIZE];
-            double feature_im[SIZE];
+        for (int parity = 0; parity < parity_count; parity++) {
+            double matrix[MAX_SIZE * MAX_SIZE] = {0};
+            double rhs[MAX_SIZE] = {0};
 
-            for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
-                int input = first_half + 2 * n
-                          - V90_CP_FSE_PRE + tap;
-                double xr = half_baud->symbols[input].re;
-                double xi = half_baud->symbols[input].im;
+            for (int n = parity; n < train_count; n += parity_count) {
+                double feature_re[MAX_SIZE];
+                double feature_im[MAX_SIZE];
 
-                if (conjugate)
-                    xi = -xi;
-                feature_re[2 * tap] = xr;
-                feature_re[2 * tap + 1] = -xi;
-                feature_im[2 * tap] = xi;
-                feature_im[2 * tap + 1] = xr;
-            }
-            for (int row = 0; row < SIZE; row++) {
-                rhs[row] += feature_re[row] * target[n][0]
-                          + feature_im[row] * target[n][1];
-                for (int column = 0; column < SIZE; column++) {
-                    matrix[row * SIZE + column] +=
-                        feature_re[row] * feature_re[column]
-                      + feature_im[row] * feature_im[column];
+                for (int tap = 0; tap < taps; tap++) {
+                    int input = first_half + 2 * n - pre + tap;
+                    double xr = half_baud->symbols[input].re;
+                    double xi = half_baud->symbols[input].im;
+
+                    if (conjugate)
+                        xi = -xi;
+                    feature_re[parameters_per_tap * tap] = xr;
+                    feature_re[parameters_per_tap * tap + 1] = -xi;
+                    feature_im[parameters_per_tap * tap] = xi;
+                    feature_im[parameters_per_tap * tap + 1] = xr;
+                    if (widely_linear) {
+                        /* b*conj(x), alongside the ordinary a*x branch. */
+                        feature_re[4 * tap + 2] = xr;
+                        feature_re[4 * tap + 3] = xi;
+                        feature_im[4 * tap + 2] = -xi;
+                        feature_im[4 * tap + 3] = xr;
+                    }
+                }
+                for (int row = 0; row < size; row++) {
+                    rhs[row] += feature_re[row] * target[n][0]
+                              + feature_im[row] * target[n][1];
+                    for (int column = 0; column < size; column++) {
+                        matrix[row * size + column] +=
+                            feature_re[row] * feature_re[column]
+                          + feature_im[row] * feature_im[column];
+                    }
                 }
             }
-        }
-        {
-            double trace = 0.0;
+            {
+                double trace = 0.0;
 
-            for (int i = 0; i < SIZE; i++)
-                trace += matrix[i * SIZE + i];
-            for (int i = 0; i < SIZE; i++)
-                matrix[i * SIZE + i] += trace * 1e-5;
+                for (int i = 0; i < size; i++)
+                    trace += matrix[i * size + i];
+                for (int i = 0; i < size; i++)
+                    matrix[i * size + i] += trace * 1e-5;
+            }
+            if (!v90_solve_linear_system(matrix,
+                                         rhs,
+                                         solutions[parity],
+                                         size)) {
+                solved = false;
+                break;
+            }
         }
-        if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+        if (!solved)
             continue;
         {
             double training_error = 0.0;
@@ -7994,19 +8041,28 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
             for (int n = 0; n < sequence_symbols; n++) {
                 double predicted_re = 0.0;
                 double predicted_im = 0.0;
+                int parity = n % parity_count;
 
-                for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
+                for (int tap = 0; tap < taps; tap++) {
                     int input = first_half + 2 * n
-                              - V90_CP_FSE_PRE + tap;
+                              - pre + tap;
                     double xr = half_baud->symbols[input].re;
                     double xi = half_baud->symbols[input].im;
-                    double ar = solution[2 * tap];
-                    double ai = solution[2 * tap + 1];
+                    int base = parameters_per_tap * tap;
+                    double ar = solutions[parity][base];
+                    double ai = solutions[parity][base + 1];
 
                     if (conjugate)
                         xi = -xi;
                     predicted_re += ar * xr - ai * xi;
                     predicted_im += ar * xi + ai * xr;
+                    if (widely_linear) {
+                        double br = solutions[parity][base + 2];
+                        double bi = solutions[parity][base + 3];
+
+                        predicted_re += br * xr + bi * xi;
+                        predicted_im += bi * xr - br * xi;
+                    }
                 }
                 double error = (predicted_re - target[n][0])
                              * (predicted_re - target[n][0])
@@ -8030,12 +8086,18 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
             memset(&trial, 0, sizeof(trial));
             trial.valid = true;
             trial.first_half_symbol = first_half;
+            trial.parity_count = parity_count;
+            trial.tap_count = taps;
+            trial.pre = pre;
+            trial.widely_linear = widely_linear;
             trial.conjugate = conjugate != 0;
             trial.training_match = (float)(1.0
                 - training_error / training_power);
             trial.holdout_match = (float)(1.0
                 - holdout_error / holdout_power);
-            memcpy(trial.coefficient, solution, sizeof(solution));
+            memcpy(trial.coefficient,
+                   solutions,
+                   sizeof(trial.coefficient));
             if (!best.valid || trial.holdout_match > best.holdout_match)
                 best = trial;
         }
@@ -8048,7 +8110,8 @@ static bool v90_fit_cp_fse(const p3_result_t *half_baud,
 }
 
 static p3_result_t *v90_apply_cp_fse(const p3_result_t *half_baud,
-                                     const v90_cp_fse_fit_t *fit)
+                                     const v90_cp_fse_fit_t *fit,
+                                     int output_half_shift)
 {
     int capacity;
     p3_result_t *out;
@@ -8056,19 +8119,24 @@ static p3_result_t *v90_apply_cp_fse(const p3_result_t *half_baud,
     if (!half_baud || !fit || !fit->valid)
         return NULL;
     capacity = (half_baud->symbol_count - fit->first_half_symbol
-                - (V90_CP_FSE_TAPS - V90_CP_FSE_PRE)) / 2;
+                - output_half_shift
+                - (fit->tap_count - fit->pre)) / 2;
     if (capacity <= 8)
         return NULL;
     out = p3_result_alloc(capacity, 0);
     if (!out)
         return NULL;
     for (int n = 0; n < capacity; n++) {
-        int centre = fit->first_half_symbol + 2 * n;
+        int centre = fit->first_half_symbol + 2 * n
+                   + output_half_shift;
+        int parity = n % fit->parity_count;
         double predicted_re = 0.0;
         double predicted_im = 0.0;
 
-        for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
-            int input = centre - V90_CP_FSE_PRE + tap;
+        for (int tap = 0; tap < fit->tap_count; tap++) {
+            int input = centre - fit->pre + tap;
+            int stride = fit->widely_linear ? 4 : 2;
+            int base = stride * tap;
             double xr;
             double xi;
             double ar;
@@ -8080,10 +8148,17 @@ static p3_result_t *v90_apply_cp_fse(const p3_result_t *half_baud,
             xi = half_baud->symbols[input].im;
             if (fit->conjugate)
                 xi = -xi;
-            ar = fit->coefficient[2 * tap];
-            ai = fit->coefficient[2 * tap + 1];
+            ar = fit->coefficient[parity][base];
+            ai = fit->coefficient[parity][base + 1];
             predicted_re += ar * xr - ai * xi;
             predicted_im += ar * xi + ai * xr;
+            if (fit->widely_linear) {
+                double br = fit->coefficient[parity][base + 2];
+                double bi = fit->coefficient[parity][base + 3];
+
+                predicted_re += br * xr + bi * xi;
+                predicted_im += bi * xr - br * xi;
+            }
         }
         out->symbols[out->symbol_count] = half_baud->symbols[centre];
         out->symbols[out->symbol_count].re = (float)predicted_re;
@@ -29148,7 +29223,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 enum {
                     V90_B1_SEARCH_SYMBOLS = 12000,
                     V90_B1_BIN_SYMBOLS = 500,
-                    V90_B1_MAX_TEMPLATES = 13 * 3 * 2 * 2 + 32,
+                    V90_B1_MAX_TEMPLATES = 256,
                     V90_B1_CANDIDATES_PER_BIN =
                         V90_B1_MAX_TEMPLATES * 2,
                     V90_B1_BIN_COUNT =
@@ -29725,11 +29800,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             v90_mp = downstream_mp;
                         }
                         rate_bps = downstream_mp.mp.bit_rate_c_to_a * 2400;
-                        printf("  V.90 MP: %s at %.3f ms, upstream=%d bps, trellis=%d, nonlinear=%s, shaping=%s, evidence=%d%s\n",
+                        printf("  V.90 MP: %s at %.3f ms, type=%d, aux=%d, upstream=%d bps, trellis=%d, nonlinear=%s, shaping=%s, evidence=%d%s\n",
                                downstream_mp.crc_valid
                                    ? "CRC valid"
                                    : "repeated semantic recovery",
                                sample_to_ms(downstream_mp.start_sample, 8000),
+                               downstream_mp.mp.type,
+                               downstream_mp.mp.aux_channel_supported,
                                rate_bps,
                                downstream_mp.mp.trellis_size,
                                downstream_mp.mp.use_non_linear_encoder
@@ -30673,12 +30750,22 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         continue;
                     }
                     for (int trellis = 0; trellis < 3; trellis++) {
+                        if (getenv("VPCM_V90_B1_TEST_TRELLIS")
+                            && trellis != atoi(getenv(
+                                "VPCM_V90_B1_TEST_TRELLIS"))) {
+                            continue;
+                        }
                         if (downstream_mp.valid
                             && !getenv("VPCM_V90_B1_BLIND_FLAGS")
                             && trellis != downstream_mp.mp.trellis_size) {
                             continue;
                         }
                         for (int nonlinear = 0; nonlinear < 2; nonlinear++) {
+                            if (getenv("VPCM_V90_B1_TEST_NONLINEAR")
+                                && nonlinear != atoi(getenv(
+                                    "VPCM_V90_B1_TEST_NONLINEAR"))) {
+                                continue;
+                            }
                             if (downstream_mp.valid
                                 && !getenv("VPCM_V90_B1_BLIND_FLAGS")
                                 && nonlinear
@@ -30686,6 +30773,11 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 continue;
                             }
                             for (int expanded = 0; expanded < 2; expanded++) {
+                                if (getenv("VPCM_V90_B1_TEST_EXPANDED")
+                                    && expanded != atoi(getenv(
+                                        "VPCM_V90_B1_TEST_EXPANDED"))) {
+                                    continue;
+                                }
                                 if (downstream_mp.valid
                                     && !getenv("VPCM_V90_B1_BLIND_FLAGS")
                                     && expanded
@@ -30765,6 +30857,98 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         }
                     }
                 }
+                if (getenv("VPCM_V90_B1_I_PERM_SWEEP")
+                    && b1_template_count > 0) {
+                    int base_templates = b1_template_count;
+
+                    for (int perm = 1; perm < 6; perm++) {
+                        char value[4];
+
+                        snprintf(value, sizeof(value), "%d", perm);
+                        setenv("SPANDSP_V34_DIAG_I_PERM", value, 1);
+                        for (int t = 0; t < base_templates
+                             && b1_template_count
+                                < V90_B1_MAX_TEMPLATES;
+                             t++) {
+                            if (v34_make_b1_template(
+                                    baud_code,
+                                    b1_templates[t].rate_n,
+                                    b1_templates[t].trellis_size,
+                                    b1_templates[t].nonlinear,
+                                    b1_templates[t].expanded,
+                                    -1,
+                                    NULL,
+                                    &b1_templates[b1_template_count])) {
+                                b1_template_count++;
+                            }
+                        }
+                    }
+                    unsetenv("SPANDSP_V34_DIAG_I_PERM");
+                }
+                if (getenv("VPCM_V90_B1_Y_PERM_SWEEP")
+                    && b1_template_count > 0) {
+                    int base_templates = b1_template_count;
+
+                    for (int perm = 1; perm < 24; perm++) {
+                        char value[4];
+
+                        snprintf(value, sizeof(value), "%d", perm);
+                        setenv("SPANDSP_V34_DIAG_Y_PERM", value, 1);
+                        for (int t = 0; t < base_templates
+                             && b1_template_count
+                                < V90_B1_MAX_TEMPLATES;
+                             t++) {
+                            if (v34_make_b1_template(
+                                    baud_code,
+                                    b1_templates[t].rate_n,
+                                    b1_templates[t].trellis_size,
+                                    b1_templates[t].nonlinear,
+                                    b1_templates[t].expanded,
+                                    -1,
+                                    NULL,
+                                    &b1_templates[b1_template_count])) {
+                                b1_template_count++;
+                            }
+                        }
+                    }
+                    unsetenv("SPANDSP_V34_DIAG_Y_PERM");
+                }
+                if (getenv("VPCM_V90_B1_STATE_SWEEP")
+                    && b1_template_count > 0) {
+                    int base_templates = b1_template_count;
+
+                    for (int t = 0; t < base_templates; t++) {
+                        int state_count = b1_templates[t].trellis_size == 0
+                                        ? 16
+                                        : (b1_templates[t].trellis_size == 1
+                                           ? 32 : 64);
+
+                        for (int state = 1;
+                             state < state_count
+                             && b1_template_count
+                                < V90_B1_MAX_TEMPLATES;
+                             state++) {
+                            char value[4];
+
+                            snprintf(value, sizeof(value), "%d", state);
+                            setenv("SPANDSP_V34_DIAG_INITIAL_STATE",
+                                   value,
+                                   1);
+                            if (v34_make_b1_template(
+                                    baud_code,
+                                    b1_templates[t].rate_n,
+                                    b1_templates[t].trellis_size,
+                                    b1_templates[t].nonlinear,
+                                    b1_templates[t].expanded,
+                                    -1,
+                                    NULL,
+                                    &b1_templates[b1_template_count])) {
+                                b1_template_count++;
+                            }
+                        }
+                    }
+                    unsetenv("SPANDSP_V34_DIAG_INITIAL_STATE");
+                }
                 if (downstream_mp.valid
                     && getenv("VPCM_V90_B1_V0_SWEEP")
                     && b1_template_count > 0) {
@@ -30786,6 +30970,33 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     ? NULL : &downstream_mp,
                                 &b1_templates[b1_template_count])) {
                             b1_template_count++;
+                        }
+                    }
+                }
+                if (getenv("VPCM_V90_B1_V0_SWEEP_ALL")
+                    && b1_template_count > 0) {
+                    int base_templates = b1_template_count;
+
+                    for (int t = 0; t < base_templates; t++) {
+                        int standard_v0 = b1_templates[t].v0_pattern;
+
+                        for (int v0 = 0; v0 < 16
+                             && b1_template_count
+                                < V90_B1_MAX_TEMPLATES;
+                             v0++) {
+                            if (v0 == standard_v0)
+                                continue;
+                            if (v34_make_b1_template(
+                                    baud_code,
+                                    b1_templates[t].rate_n,
+                                    b1_templates[t].trellis_size,
+                                    b1_templates[t].nonlinear,
+                                    b1_templates[t].expanded,
+                                    v0,
+                                    NULL,
+                                    &b1_templates[b1_template_count])) {
+                                b1_template_count++;
+                            }
                         }
                     }
                 }
@@ -31778,8 +31989,51 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         &cp_fse)) {
                                     p3_result_t *cp_fse_equalized =
                                         v90_apply_cp_fse(
-                                            half_baud, &cp_fse);
+                                            half_baud, &cp_fse, 0);
                                     v34_supervised_b1_search_t cp_fse_search;
+
+                                    if (getenv(
+                                            "VPCM_V90_CP_FSE_SHIFT_SWEEP")) {
+                                        for (int half_shift = -3;
+                                             half_shift <= 3;
+                                             half_shift++) {
+                                            p3_result_t *shifted =
+                                                v90_apply_cp_fse(
+                                                    half_baud,
+                                                    &cp_fse,
+                                                    half_shift);
+                                            v34_supervised_b1_search_t
+                                                shift_search;
+
+                                            memset(&shift_search,
+                                                   0,
+                                                   sizeof(shift_search));
+                                            if (shifted) {
+                                                v34_search_supervised_b1_fcs(
+                                                    shifted,
+                                                    b1_templates,
+                                                    b1_template_count,
+                                                    baud_code,
+                                                    known_data_sample,
+                                                    &shift_search);
+                                            }
+                                            fprintf(stderr,
+                                                    "v90 CP' FSE output half-shift=%d B1=%.1f%% sample=%d template=%d\n",
+                                                    half_shift,
+                                                    100.0f * shift_search
+                                                        .best_holdout_match,
+                                                    shift_search.first_symbol
+                                                      >= 0 && shifted
+                                                      ? shifted->symbols[
+                                                          shift_search
+                                                            .first_symbol]
+                                                          .sample_index : -1,
+                                                    shift_search
+                                                        .template_index);
+                                            if (shifted)
+                                                p3_result_free(shifted);
+                                        }
+                                    }
 
                                     memset(&cp_fse_search,
                                            0,
@@ -31835,7 +32089,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         }
                                     }
                                     fprintf(stderr,
-                                            "v90 CP' T/2 FSE timing=%d sample=%d train=%.1f%% holdout=%.1f%% B1=%.1f%% sample=%d template=%d hdlc=%d/%d\n",
+                                            "v90 CP' T/2 FSE timing=%d sample=%d train=%.1f%% holdout=%.1f%% B1=%.1f%% sample=%d template=%d v0=%d state=%d iperm=%d yperm=%d hdlc=%d/%d\n",
                                             timing,
                                             half_baud->symbols[
                                                 cp_fse.first_half_symbol]
@@ -31851,6 +32105,22 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                                   cp_fse_search.first_symbol]
                                                   .sample_index : -1,
                                             cp_fse_search.template_index,
+                                            cp_fse_search.template_index >= 0
+                                              ? b1_templates[cp_fse_search
+                                                  .template_index]
+                                                  .v0_pattern : -1,
+                                            cp_fse_search.template_index >= 0
+                                              ? b1_templates[cp_fse_search
+                                                  .template_index]
+                                                  .initial_state : -1,
+                                            cp_fse_search.template_index >= 0
+                                              ? b1_templates[cp_fse_search
+                                                  .template_index]
+                                                  .i_permutation : -1,
+                                            cp_fse_search.template_index >= 0
+                                              ? b1_templates[cp_fse_search
+                                                  .template_index]
+                                                  .y_permutation : -1,
                                             cp_fse_search.decoded.hdlc_frames,
                                             cp_fse_search.decoded.hdlc_bytes);
                                     if (cp_fse_equalized
@@ -32190,7 +32460,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         }
                         if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
                             fprintf(stderr,
-                                    "v90 B1 local frontend timing=%d match=%.1f%% start=%d symbols=%d first=%d sample=%d template=%d rate=%d trellis=%d nonlinear=%d shaping=%d conjugate=%d\n",
+                                    "v90 B1 local frontend timing=%d match=%.1f%% start=%d symbols=%d first=%d sample=%d template=%d rate=%d trellis=%d nonlinear=%d shaping=%d state=%d conjugate=%d\n",
                                     best_local_timing,
                                     100.0f * best_local_match,
                                     local_start,
@@ -32212,6 +32482,9 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     best_local_template >= 0
                                         ? b1_templates[best_local_template]
                                             .expanded : -1,
+                                    best_local_template >= 0
+                                        ? b1_templates[best_local_template]
+                                            .initial_state : -1,
                                     best_local_conjugate ? 1 : 0);
                         }
                         if (best_local_first >= 0

@@ -1333,6 +1333,33 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
         /*endfor*/
     }
     /*endif*/
+    /* Offline interoperability diagnostic: preserve the shell/Q bits while
+       testing the six possible I1/I2/I3 serialization conventions against a
+       captured reset-state B1 frame.  Zero (and an unset variable) is the
+       normative I1,I2,I3 order. */
+    {
+        const char *perm_env = getenv("SPANDSP_V34_DIAG_I_PERM");
+        static const uint8_t permutation[6][3] =
+        {
+            {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+            {1, 2, 0}, {2, 0, 1}, {2, 1, 0}
+        };
+        int perm = perm_env ? atoi(perm_env) : 0;
+
+        if (perm > 0  &&  perm < 6)
+        {
+            for (i = 0;  i < 4;  i++)
+            {
+                int original = s->ibits[i];
+
+                s->ibits[i] = ((original >> permutation[perm][0]) & 1)
+                            | (((original >> permutation[perm][1]) & 1) << 1)
+                            | (((original >> permutation[perm][2]) & 1) << 2);
+            }
+            /*endfor*/
+        }
+        /*endif*/
+    }
     span_log(tx_log_state(s),
              SPAN_LOG_FLOW,
              "Tx - Parsed %p %8X - %X %X %X %X - %2X %2X %2X %2X %2X %2X %2X %2X\n",
@@ -1773,6 +1800,37 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
         else
         {
             y4321 = conv_encode_input[subsets[0]][subsets[1]];
+            {
+                const char *perm_env =
+                    getenv("SPANDSP_V34_DIAG_Y_PERM");
+                int perm = perm_env ? atoi(perm_env) : 0;
+
+                if (perm > 0  &&  perm < 24)
+                {
+                    int source[4] = {0, 1, 2, 3};
+                    int source_count = 4;
+                    int original = y4321;
+                    int remapped = 0;
+
+                    for (int dst = 0;  dst < 4;  dst++)
+                    {
+                        int choice = perm % source_count;
+                        int src = source[choice];
+
+                        perm /= source_count;
+                        remapped |= ((original >> src) & 1) << dst;
+                        for (int move = choice;
+                             move + 1 < source_count;
+                             move++)
+                            source[move] = source[move + 1];
+                        /*endfor*/
+                        source_count--;
+                    }
+                    /*endfor*/
+                    y4321 = remapped;
+                }
+                /*endif*/
+            }
             /* Table 11/V.34 step 9, 9.6.3.1/V.34 and 9.6.3.2/V.34 */
             s->y0 = s->state & 1;
             s->state = s->conv_encode_table[s->state][y4321];
