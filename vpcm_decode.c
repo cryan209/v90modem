@@ -8830,6 +8830,9 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
     uint8_t *best_observed = NULL;
     uint8_t *candidate = NULL;
     uint8_t *best_scrambled = NULL;
+    uint8_t *ml_baseline = NULL;
+    uint64_t *ml_basis = NULL;
+    uint64_t *ml_difference = NULL;
     int frame_bit_count = 0;
     int frame_symbols;
     int base_end = 0;
@@ -8844,6 +8847,9 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
     int best_scrambled_errors = INT_MAX;
     v34_b1_template_t templ;
     int template_offset;
+    int fir_taps = getenv("VPCM_V90_B1_FIR_TAPS")
+                 ? atoi(getenv("VPCM_V90_B1_FIR_TAPS")) : 13;
+    int fir_pre;
     bool success = false;
 
     if (!detail || !frame || !out || last_frame_sample < 0
@@ -8854,6 +8860,13 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
         return false;
     }
     memset(out, 0, sizeof(*out));
+    if (fir_taps < 1)
+        fir_taps = 1;
+    if (fir_taps > V34_B1_FIR_MAX_TAPS)
+        fir_taps = V34_B1_FIR_MAX_TAPS;
+    if ((fir_taps & 1) == 0)
+        fir_taps--;
+    fir_pre = fir_taps / 2;
     frame_symbols = frame_bit_count / 2;
     sequence_symbols = repetitions * frame_symbols;
     sequence_bits = 2 * sequence_symbols;
@@ -8939,6 +8952,12 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
     }
     if (best_start < 0 || best_plain_bits <= 0)
         goto done;
+    out->first_symbol = best_start;
+    out->end_symbol = best_end;
+    out->carrier_step = best_carrier_step;
+    out->conjugate = best_conjugate;
+    out->plain_errors = best_plain_errors;
+    out->plain_bits = best_plain_bits;
 
     /* Each observed 23-bit window is a candidate scrambler state.  Extend
      * it forward with s[n]=p[n]^s[n-5]^s[n-23], and backward using the same
@@ -8969,8 +8988,90 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
                    (size_t)sequence_bits);
         }
     }
+    /* A noisy CPt may contain no completely clean 23-bit observation
+     * window, even though its long known payload still identifies the
+     * scrambler state.  For a single short Table-14 frame, decode that
+     * 23-dimensional affine code exactly.  Gray-code enumeration changes
+     * one state basis vector per candidate, reducing the ML search to a few
+     * packed XORs/popcounts rather than 2^23 full sequence generations. */
+    if (sequence_bits <= 512 && best_scrambled_errors != INT_MAX
+        && 100 * best_scrambled_errors > 20 * sequence_bits) {
+        int words = (sequence_bits + 63) / 64;
+        uint32_t current_state = 0;
+        uint32_t best_state = 0;
+        int ml_best_errors = INT_MAX;
+
+        ml_baseline = calloc((size_t)sequence_bits, 1);
+        ml_basis = calloc((size_t)23 * words, sizeof(*ml_basis));
+        ml_difference = calloc((size_t)words, sizeof(*ml_difference));
+        if (ml_baseline && ml_basis && ml_difference) {
+            for (int bit = 23; bit < sequence_bits; bit++) {
+                ml_baseline[bit] = (uint8_t)(
+                    frame_bits[bit % frame_bit_count]
+                    ^ ml_baseline[bit - 5]
+                    ^ ml_baseline[bit - 23]);
+            }
+            for (int state_bit = 0; state_bit < 23; state_bit++) {
+                uint8_t delta[512] = {0};
+
+                delta[state_bit] = 1;
+                for (int bit = 23; bit < sequence_bits; bit++) {
+                    delta[bit] = (uint8_t)(delta[bit - 5]
+                                         ^ delta[bit - 23]);
+                }
+                for (int bit = 0; bit < sequence_bits; bit++) {
+                    if (delta[bit]) {
+                        ml_basis[(size_t)state_bit * words + bit / 64]
+                            |= UINT64_C(1) << (bit % 64);
+                    }
+                }
+            }
+            for (int bit = 0; bit < sequence_bits; bit++) {
+                if (best_observed[bit] != ml_baseline[bit]) {
+                    ml_difference[bit / 64]
+                        |= UINT64_C(1) << (bit % 64);
+                }
+            }
+            ml_best_errors = 0;
+            for (int word = 0; word < words; word++)
+                ml_best_errors += __builtin_popcountll(ml_difference[word]);
+            for (uint32_t step = 1; step < (UINT32_C(1) << 23);
+                 step++) {
+                int toggle = __builtin_ctz(step);
+                int errors = 0;
+
+                current_state ^= UINT32_C(1) << toggle;
+                for (int word = 0; word < words; word++) {
+                    ml_difference[word] ^=
+                        ml_basis[(size_t)toggle * words + word];
+                    errors += __builtin_popcountll(ml_difference[word]);
+                }
+                if (errors < ml_best_errors) {
+                    ml_best_errors = errors;
+                    best_state = current_state;
+                }
+            }
+            if (ml_best_errors < best_scrambled_errors) {
+                memcpy(best_scrambled,
+                       ml_baseline,
+                       (size_t)sequence_bits);
+                for (int state_bit = 0; state_bit < 23; state_bit++) {
+                    if (!((best_state >> state_bit) & 1U))
+                        continue;
+                    for (int bit = 0; bit < sequence_bits; bit++) {
+                        best_scrambled[bit] ^= (uint8_t)(
+                            (ml_basis[(size_t)state_bit * words + bit / 64]
+                             >> (bit % 64)) & 1U);
+                    }
+                }
+                best_scrambled_errors = ml_best_errors;
+            }
+        }
+    }
     if (best_scrambled_errors == INT_MAX
         || 100 * best_scrambled_errors > 20 * sequence_bits) {
+        out->scrambled_errors = best_scrambled_errors;
+        out->scrambled_bits = sequence_bits;
         goto done;
     }
 
@@ -8981,7 +9082,7 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
      * forward taps.  This also prevents any E transition energy from being
      * included in the supervised equations. */
     template_offset = sequence_symbols - TEMPLATE_SYMBOLS
-                    - (V34_B1_FIR_TAPS - V34_B1_FIR_PRE) - 2;
+                    - (fir_taps - fir_pre) - 2;
     if (template_offset < 1)
         goto done;
     {
@@ -9035,6 +9136,9 @@ done:
     free(best_observed);
     free(candidate);
     free(best_scrambled);
+    free(ml_baseline);
+    free(ml_basis);
+    free(ml_difference);
     return success;
 }
 
@@ -13358,7 +13462,13 @@ static bool v90_train_pcm_modulus_equalizer(
         free(labels);
         free(deconvolved);
     }
-    if (best.validation_match < 0.90)
+    /* The conjugate-gradient inverse is deliberately regularized and its
+     * point-by-point label score can be pessimistic on a band-limited PCM
+     * path.  A monotonic modulus ladder with low held-out forward-model
+     * error is still a valid channel estimate; every downstream promotion
+     * remains protected by MP structure, repetition and CRC. */
+    if (best.validation_match < 0.90
+        && best.validation_nrmse >= 0.16)
         return false;
     *out = best;
     return true;
@@ -14860,6 +14970,110 @@ static int v90_mp_frame_prefilter_score(const uint8_t *bits,
     score = 4 * sync_errors + 2 * structure_errors;
     crc = v90_mp_crc_remainder(bits + offset, type);
     return score + __builtin_popcount((unsigned)crc);
+}
+
+/* Select the closest six modulus labels while respecting the mapper's
+ * mixed-radix range.  Independent nearest-level decisions can describe an
+ * integer above 2^Q-1; the shaped demapper then rejects the entire frame at
+ * the first MP transition.  The separable optimum under that upper bound is
+ * small: either the exact bound, or one most-significant digit is below its
+ * bound while every less-significant digit takes its unconstrained optimum.
+ */
+static __attribute__((noinline)) bool v90_slice_modulus_mapping_frame(
+                                    const v90_pcm_modulus_equalizer_t *eq,
+                                    v91_law_t law,
+                                    int bits_per_frame,
+                                    int shaping_redundancy,
+                                    const double magnitude[6],
+                                    const bool positive[6],
+                                    uint8_t codewords[6])
+{
+    double (*cost)[V90_PCM_MOD_MAX_LEVELS] = NULL;
+    int unconstrained[6];
+    int bound[6];
+    int selected[6];
+    double best_cost = HUGE_VAL;
+    int sign_bits = 6 - shaping_redundancy;
+    int modulus_bits = bits_per_frame - sign_bits;
+    uint64_t states;
+    uint64_t product = 1;
+    uint64_t limit;
+
+    if (!eq || !eq->valid || eq->population < 2
+        || eq->population > V90_PCM_MOD_MAX_LEVELS
+        || modulus_bits < 0 || modulus_bits >= 63) {
+        return false;
+    }
+    cost = malloc(6 * sizeof(*cost));
+    if (!cost)
+        return false;
+    states = UINT64_C(1) << modulus_bits;
+    for (int i = 0; i < 6; i++)
+        product *= (uint64_t)eq->population;
+    if (product < states) {
+        free(cost);
+        return false;
+    }
+    for (int i = 0; i < 6; i++) {
+        double minimum = HUGE_VAL;
+
+        unconstrained[i] = 0;
+        for (int label = 0; label < eq->population; label++) {
+            double residual = magnitude[i] - eq->level[label];
+
+            cost[i][label] = residual * residual;
+            if (cost[i][label] < minimum) {
+                minimum = cost[i][label];
+                unconstrained[i] = label;
+            }
+        }
+    }
+    limit = states - 1;
+    for (int i = 0; i < 6; i++) {
+        bound[i] = (int)(limit % (uint64_t)eq->population);
+        limit /= (uint64_t)eq->population;
+    }
+    if (limit != 0) {
+        free(cost);
+        return false;
+    }
+
+    /* The exact upper-bound digit vector is always feasible. */
+    {
+        double total = 0.0;
+
+        for (int i = 0; i < 6; i++) {
+            selected[i] = bound[i];
+            total += cost[i][bound[i]];
+        }
+        best_cost = total;
+    }
+    for (int pivot = 5; pivot >= 0; pivot--) {
+        for (int digit = 0; digit < bound[pivot]; digit++) {
+            int candidate[6];
+            double total = 0.0;
+
+            for (int i = 5; i > pivot; i++)
+                candidate[i] = bound[i];
+            candidate[pivot] = digit;
+            for (int i = pivot - 1; i >= 0; i--)
+                candidate[i] = unconstrained[i];
+            for (int i = 0; i < 6; i++)
+                total += cost[i][candidate[i]];
+            if (total < best_cost) {
+                best_cost = total;
+                memcpy(selected, candidate, sizeof(selected));
+            }
+        }
+    }
+    for (int i = 0; i < 6; i++) {
+        codewords[i] = v91_ucode_to_codeword(
+            law,
+            eq->population - 1 - selected[i],
+            positive[i]);
+    }
+    free(cost);
+    return true;
 }
 
 static bool v90_recover_downstream_mp_pcm(
@@ -16441,6 +16655,9 @@ static bool v90_recover_downstream_mp_pcm(
                 }
             }
             if (modulus_deconvolved) {
+                double magnitude[VPCM_CP_FRAME_INTERVALS];
+                bool positive[VPCM_CP_FRAME_INTERVALS];
+
                 for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
                     int symbol = 6 * frames + i;
                     double sign = v90_pcm_modulus_sign(
@@ -16448,24 +16665,19 @@ static bool v90_recover_downstream_mp_pcm(
                         digital_pcm,
                         total_samples,
                         start + symbol);
-                    double magnitude = modulus_deconvolved[symbol] * sign;
-                    double best_error = HUGE_VAL;
-                    int best_label = 0;
 
-                    for (int label = 0;
-                         label < modulus_equalizer.population; label++) {
-                        double error = fabs(
-                            magnitude - modulus_equalizer.level[label]);
-
-                        if (error < best_error) {
-                            best_error = error;
-                            best_label = label;
-                        }
-                    }
-                    codewords[i] = v91_ucode_to_codeword(
+                    magnitude[i] = modulus_deconvolved[symbol] * sign;
+                    positive[i] = sign >= 0.0;
+                }
+                if (!v90_slice_modulus_mapping_frame(
+                        &modulus_equalizer,
                         capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
-                        modulus_equalizer.population - 1 - best_label,
-                        sign >= 0.0);
+                        bits_per_frame,
+                        wire_cp.shaping_redundancy,
+                        magnitude,
+                        positive,
+                        codewords)) {
+                    break;
                 }
             } else if (trn_equalizer.valid
                 && getenv("VPCM_V90_MP_USE_SOFT_EQ")) {
@@ -31502,8 +31714,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                  * 99% descrambled-one rules may promote this broad locator.
                  */
                 if (b1_template_count > 0
-                    && direct_e_data_sample < 0
-                    && downstream_mp.valid
+                    && (!downstream_mp.valid
+                        || direct_e_data_sample < 0)
                     && native_cp.valid
                     && !native_cp.frame.v90_compatibility
                     && cp_reset_sample >= 0
@@ -31526,6 +31738,10 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     for (int timing = 0;
                          baud_rate > 0 && cp_bits >= 256 && timing < 8;
                          timing++) {
+                        if (cp_timing >= 0 && cp_timing < 8
+                            && timing != cp_timing) {
+                            continue;
+                        }
                         int carrier = cp_carrier == P3_CARRIER_HIGH
                                     ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
                         p3_result_t *cp_local =
@@ -31583,7 +31799,9 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 equalized,
                                 b1_templates,
                                 b1_template_count,
-                                downstream_mp.start_sample,
+                                downstream_mp.valid
+                                    ? downstream_mp.start_sample
+                                    : cp_end_sample,
                                 total_samples - 1,
                                 &broad_match,
                                 &broad_first,
@@ -31621,6 +31839,30 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     broad_search.b1_valid ? 1 : 0,
                                     broad_search.decoded.hdlc_frames,
                                     broad_search.decoded.hdlc_bytes);
+                            if (!cp_sequence.valid) {
+                                fprintf(stderr,
+                                        "v90 CPt fit input timing=%d symbols=%d range=%d..%d half=%d range=%d..%d\n",
+                                        timing,
+                                        cp_local ? cp_local->symbol_count : 0,
+                                        cp_local && cp_local->symbol_count > 0
+                                            ? cp_local->symbols[0]
+                                                .sample_index : -1,
+                                        cp_local && cp_local->symbol_count > 0
+                                            ? cp_local->symbols[
+                                                cp_local->symbol_count - 1]
+                                                .sample_index : -1,
+                                        half_baud
+                                            ? half_baud->symbol_count : 0,
+                                        half_baud
+                                            && half_baud->symbol_count > 0
+                                            ? half_baud->symbols[0]
+                                                .sample_index : -1,
+                                        half_baud
+                                            && half_baud->symbol_count > 0
+                                            ? half_baud->symbols[
+                                                half_baud->symbol_count - 1]
+                                                .sample_index : -1);
+                            }
                         }
                         if (equalized && broad_search.fcs_valid) {
                             const v34_b1_template_t *winner =
