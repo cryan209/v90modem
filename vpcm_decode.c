@@ -36,6 +36,7 @@
 #include <spandsp/private/modem_connect_tones.h>
 #include <spandsp/private/logging.h>
 #include <spandsp/private/v34.h>
+#include "v34_local.h"
 #include <spandsp/private/v8.h>
 #include <spandsp/tone_detect.h>
 
@@ -160,6 +161,8 @@ static void sanitize_detail_value(char *dst, size_t dst_len, const char *src)
         dst[i] = (src[i] == ' ') ? '_' : src[i];
     dst[i] = '\0';
 }
+
+enum { V34_RAW_B1_FIR_TAPS = 17, V34_RAW_B1_FIR_PRE = 8 };
 
 typedef struct {
     int saved_stderr_fd;
@@ -5941,6 +5944,7 @@ typedef struct {
     int trellis_size;
     int nonlinear;
     int expanded;
+    int auxiliary;
     bool conjugate;
     float fit_re;
     float fit_im;
@@ -5955,6 +5959,7 @@ typedef struct {
     int trellis_size;
     int nonlinear;
     int expanded;
+    int auxiliary;
     int precoder_transform;
     int v0_pattern;
     int symbol_count;
@@ -5962,14 +5967,22 @@ typedef struct {
     float power;
 } v34_b1_template_t;
 
-enum { V34_B1_FIR_TAPS = 13, V34_B1_FIR_PRE = 6 };
+enum {
+    V34_B1_FIR_MAX_TAPS = 63,
+    /* Conservative bounds used by acquisition loops which must be safe for
+     * every diagnostic tap count.  The actual fit stores its own tap/pre. */
+    V34_B1_FIR_TAPS = V34_B1_FIR_MAX_TAPS,
+    V34_B1_FIR_PRE = V34_B1_FIR_MAX_TAPS / 2
+};
 
 typedef struct {
     bool valid;
     int first_symbol;
+    int tap_count;
+    int pre;
     bool conjugate;
     double phase_step;
-    double coefficient[2 * V34_B1_FIR_TAPS];
+    double coefficient[2 * V34_B1_FIR_MAX_TAPS];
     float training_match;
 } v34_b1_fir_fit_t;
 
@@ -7328,11 +7341,24 @@ static bool v34_make_b1_template(int baud_code,
         v34_free(v34);
         return false;
     }
+    if (getenv("VPCM_V90_B1_AUXILIARY")) {
+        /* MP advertises the 2400-bit/s primary rate code separately from
+         * auxiliary-channel enablement.  The aggregate mapper index is the
+         * adjacent +200 bit/s Table-8/Table-10 entry. */
+        v34->tx.bit_rate = (rate_n - 1) * 2 + 1;
+        v34_set_working_parameters(&v34->tx.parms,
+                                   v34->tx.baud_rate,
+                                   v34->tx.bit_rate,
+                                   expanded);
+        v34->tx.s_bit_cnt = 0;
+        v34->tx.aux_bit_cnt = 0;
+    }
     out->valid = true;
     out->rate_n = rate_n;
     out->trellis_size = trellis_size;
     out->nonlinear = nonlinear;
     out->expanded = expanded;
+    out->auxiliary = getenv("VPCM_V90_B1_AUXILIARY") != NULL;
     /* V.34 10.1.3.1: B1 is one complete data frame, and its
      * superframe-sync inversions are those of the final data frame in a
      * superframe.  There are two V0 opportunities per data frame. */
@@ -7379,12 +7405,15 @@ static float v34_match_b1_template(const p3_result_t *detail,
     double cross_im = 0.0;
     double input_power = 0.0;
     double error = 0.0;
+    double constant_error = 0.0;
     double step_re = 0.0;
     double step_im = 0.0;
     double previous_cross_re = 0.0;
     double previous_cross_im = 0.0;
     float gain_re;
     float gain_im;
+    float constant_gain_re;
+    float constant_gain_im;
     float phase_step = 0.0f;
     int count;
 
@@ -7426,11 +7455,29 @@ static float v34_match_b1_template(const p3_result_t *detail,
     }
     if (input_power < 1e-9 || templ->power < 1e-9f)
         return 0.0f;
+    constant_gain_re = (float)(cross_re / input_power);
+    constant_gain_im = (float)(cross_im / input_power);
+    for (int i = 0; i < count; i++) {
+        double xr = detail->symbols[first_symbol + i].re;
+        double xi = detail->symbols[first_symbol + i].im;
+        double yr;
+        double yi;
+
+        if (conjugate)
+            xi = -xi;
+        yr = constant_gain_re * xr - constant_gain_im * xi;
+        yi = constant_gain_re * xi + constant_gain_im * xr;
+        constant_error += (yr - templ->symbol[i][0])
+                        * (yr - templ->symbol[i][0])
+                        + (yi - templ->symbol[i][1])
+                          * (yi - templ->symbol[i][1]);
+    }
     /* Over a full 35/40-ms B1 frame, even a small residual carrier offset
      * invalidates a constant-phase correlation.  Estimate the linear phase
      * walk from the reference/receive cross product, then refit its initial
      * complex gain.  Keep the eight-symbol coarse scan constant-phase. */
-    if (count > 8 && fabs(step_re) + fabs(step_im) > 1e-12) {
+    if (count > 8 && fabs(step_re) + fabs(step_im) > 1e-12
+        && !getenv("VPCM_V90_B1_SCALAR_ONLY")) {
         phase_step = (float) atan2(step_im, step_re);
         cross_re = 0.0;
         cross_im = 0.0;
@@ -7477,6 +7524,16 @@ static float v34_match_b1_template(const p3_result_t *detail,
                + (yi - templ->symbol[i][1])
                  * (yi - templ->symbol[i][1]);
     }
+    /* Adjacent B1 points are data-dependent, so their individual
+     * reference/receive cross-products are not a reliable carrier detector
+     * when the channel is still imperfect.  Never let that phase-walk
+     * estimate replace a stronger constant-phase complete-frame fit. */
+    if (constant_error < error) {
+        error = constant_error;
+        gain_re = constant_gain_re;
+        gain_im = constant_gain_im;
+        phase_step = 0.0f;
+    }
     if (gain_re_out)
         *gain_re_out = gain_re;
     if (gain_im_out)
@@ -7501,10 +7558,547 @@ static float v34_match_b1_template(const p3_result_t *detail,
     return (float)(1.0 - error);
 }
 
+static float v34_match_b1_constant(const p3_result_t *detail,
+                                   int first_symbol,
+                                   const v34_b1_template_t *templ,
+                                   bool conjugate)
+{
+    double cross_re = 0.0;
+    double cross_im = 0.0;
+    double input_power = 0.0;
+
+    if (!detail || !templ || !templ->valid || first_symbol < 0
+        || first_symbol + templ->symbol_count > detail->symbol_count
+        || templ->power <= 0.0f) {
+        return 0.0f;
+    }
+    for (int i = 0; i < templ->symbol_count; i++) {
+        double xr = detail->symbols[first_symbol + i].re;
+        double xi = detail->symbols[first_symbol + i].im;
+        double yr = templ->symbol[i][0];
+        double yi = templ->symbol[i][1];
+
+        if (conjugate)
+            xi = -xi;
+        cross_re += yr * xr + yi * xi;
+        cross_im += yi * xr - yr * xi;
+        input_power += xr * xr + xi * xi;
+    }
+    if (input_power <= 1e-12)
+        return 0.0f;
+    return (float)((cross_re * cross_re + cross_im * cross_im)
+                   / (input_power * templ->power));
+}
+
+static void v34_diagnose_b1_modes(
+                            const p3_result_t *symbols,
+                            int baud_code,
+                            int boundary_sample,
+                            const v34_upstream_mp_recovery_t *rx_mp)
+{
+    float best_match = 0.0f;
+    float negotiated_match = 0.0f;
+    int best_rate = -1;
+    int best_trellis = -1;
+    int best_nonlinear = -1;
+    int best_expanded = -1;
+    int best_sample = -1;
+    int negotiated_sample = -1;
+
+    if (!symbols || boundary_sample < 0)
+        return;
+    for (int rate = 2; rate <= 13; rate++) {
+      for (int trellis = 0; trellis < 3; trellis++) {
+       for (int nonlinear = 0; nonlinear < 2; nonlinear++) {
+        for (int expanded = 0; expanded < 2; expanded++) {
+            v34_b1_template_t templ;
+            float mode_match = 0.0f;
+            int mode_sample = -1;
+
+            if (!v34_make_b1_template(baud_code,
+                                      rate,
+                                      trellis,
+                                      nonlinear,
+                                      expanded,
+                                      -1,
+                                      rx_mp,
+                                      &templ)) {
+                continue;
+            }
+            for (int first = 0; first < symbols->symbol_count; first++) {
+                int sample = symbols->symbols[first].sample_index;
+
+                if (sample < boundary_sample - 24)
+                    continue;
+                if (sample > boundary_sample + 80)
+                    break;
+                for (int conjugate = 0; conjugate < 2; conjugate++) {
+                    float match = v34_match_b1_constant(
+                        symbols, first, &templ, conjugate != 0);
+
+                    if (match > mode_match) {
+                        mode_match = match;
+                        mode_sample = sample;
+                    }
+                }
+            }
+            if (mode_match > best_match) {
+                best_match = mode_match;
+                best_rate = rate;
+                best_trellis = trellis;
+                best_nonlinear = nonlinear;
+                best_expanded = expanded;
+                best_sample = mode_sample;
+            }
+            if (rx_mp && rx_mp->valid
+                && rate == rx_mp->mp.bit_rate_c_to_a
+                && trellis == rx_mp->mp.trellis_size
+                && nonlinear == rx_mp->mp.use_non_linear_encoder
+                && expanded == rx_mp->mp.expanded_shaping) {
+                negotiated_match = mode_match;
+                negotiated_sample = mode_sample;
+            }
+        }
+       }
+      }
+    }
+    fprintf(stderr,
+            "v90 B1 mode sweep best=%.1f%% sample=%d rate=%d trellis=%d nonlinear=%d shaping=%d negotiated=%.1f%% sample=%d rate=%d trellis=%d nonlinear=%d shaping=%d\n",
+            100.0f * best_match,
+            best_sample,
+            best_rate,
+            best_trellis,
+            best_nonlinear,
+            best_expanded,
+            100.0f * negotiated_match,
+            negotiated_sample,
+            rx_mp && rx_mp->valid ? rx_mp->mp.bit_rate_c_to_a : -1,
+            rx_mp && rx_mp->valid ? rx_mp->mp.trellis_size : -1,
+            rx_mp && rx_mp->valid
+                ? rx_mp->mp.use_non_linear_encoder : -1,
+            rx_mp && rx_mp->valid ? rx_mp->mp.expanded_shaping : -1);
+}
+
 static bool v90_solve_linear_system(double *matrix,
                                     double *rhs,
                                     double *solution,
                                     int size);
+
+enum { V34_B1_FSE_TAPS = 31, V34_B1_FSE_PRE = 15 };
+
+typedef struct {
+    bool valid;
+    int first_half_symbol;
+    bool conjugate;
+    double coefficient[2 * V34_B1_FSE_TAPS];
+    float training_match;
+    float holdout_match;
+} v34_b1_fse_fit_t;
+
+static bool v34_fit_b1_fse(const p3_result_t *half_baud,
+                           int first_half_symbol,
+                           const v34_b1_template_t *templ,
+                           bool conjugate,
+                           v34_b1_fse_fit_t *out)
+{
+    enum { SIZE = 2 * V34_B1_FSE_TAPS };
+    double matrix[SIZE * SIZE] = {0};
+    double rhs[SIZE] = {0};
+    double solution[SIZE];
+    int train_count;
+
+    if (!half_baud || !templ || !templ->valid || !out
+        || first_half_symbol < V34_B1_FSE_PRE
+        || first_half_symbol + 2 * (templ->symbol_count - 1)
+             + (V34_B1_FSE_TAPS - V34_B1_FSE_PRE)
+           >= half_baud->symbol_count) {
+        return false;
+    }
+    train_count = (2 * templ->symbol_count) / 3;
+    memset(out, 0, sizeof(*out));
+    for (int n = 0; n < train_count; n++) {
+        double feature_re[SIZE];
+        double feature_im[SIZE];
+
+        for (int tap = 0; tap < V34_B1_FSE_TAPS; tap++) {
+            int input = first_half_symbol + 2 * n
+                      - V34_B1_FSE_PRE + tap;
+            double xr = half_baud->symbols[input].re;
+            double xi = half_baud->symbols[input].im;
+
+            if (conjugate)
+                xi = -xi;
+            feature_re[2 * tap] = xr;
+            feature_re[2 * tap + 1] = -xi;
+            feature_im[2 * tap] = xi;
+            feature_im[2 * tap + 1] = xr;
+        }
+        for (int row = 0; row < SIZE; row++) {
+            rhs[row] += feature_re[row] * templ->symbol[n][0]
+                      + feature_im[row] * templ->symbol[n][1];
+            for (int column = 0; column < SIZE; column++) {
+                matrix[row * SIZE + column] +=
+                    feature_re[row] * feature_re[column]
+                  + feature_im[row] * feature_im[column];
+            }
+        }
+    }
+    {
+        double trace = 0.0;
+
+        for (int i = 0; i < SIZE; i++)
+            trace += matrix[i * SIZE + i];
+        for (int i = 0; i < SIZE; i++)
+            matrix[i * SIZE + i] += trace * 1e-4;
+    }
+    if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+        return false;
+    {
+        double training_error = 0.0;
+        double training_power = 0.0;
+        double holdout_error = 0.0;
+        double holdout_power = 0.0;
+
+        for (int n = 0; n < templ->symbol_count; n++) {
+            double predicted_re = 0.0;
+            double predicted_im = 0.0;
+
+            for (int tap = 0; tap < V34_B1_FSE_TAPS; tap++) {
+                int input = first_half_symbol + 2 * n
+                          - V34_B1_FSE_PRE + tap;
+                double xr = half_baud->symbols[input].re;
+                double xi = half_baud->symbols[input].im;
+                double ar = solution[2 * tap];
+                double ai = solution[2 * tap + 1];
+
+                if (conjugate)
+                    xi = -xi;
+                predicted_re += ar * xr - ai * xi;
+                predicted_im += ar * xi + ai * xr;
+            }
+            double error = (predicted_re - templ->symbol[n][0])
+                         * (predicted_re - templ->symbol[n][0])
+                         + (predicted_im - templ->symbol[n][1])
+                           * (predicted_im - templ->symbol[n][1]);
+            double power = templ->symbol[n][0] * templ->symbol[n][0]
+                         + templ->symbol[n][1] * templ->symbol[n][1];
+
+            if (n < train_count) {
+                training_error += error;
+                training_power += power;
+            } else {
+                holdout_error += error;
+                holdout_power += power;
+            }
+        }
+        if (training_power <= 0.0 || holdout_power <= 0.0
+            || training_error >= training_power) {
+            return false;
+        }
+        out->training_match = (float)(1.0
+            - training_error / training_power);
+        out->holdout_match = (float)(1.0
+            - holdout_error / holdout_power);
+    }
+    out->valid = true;
+    out->first_half_symbol = first_half_symbol;
+    out->conjugate = conjugate;
+    memcpy(out->coefficient, solution, sizeof(solution));
+    return true;
+}
+
+static p3_result_t *v34_apply_b1_fse(const p3_result_t *half_baud,
+                                     const v34_b1_fse_fit_t *fit)
+{
+    int capacity;
+    p3_result_t *out;
+
+    if (!half_baud || !fit || !fit->valid)
+        return NULL;
+    capacity = (half_baud->symbol_count - fit->first_half_symbol
+                - (V34_B1_FSE_TAPS - V34_B1_FSE_PRE)) / 2;
+    if (capacity <= 8)
+        return NULL;
+    out = p3_result_alloc(capacity, 0);
+    if (!out)
+        return NULL;
+    for (int n = 0; n < capacity; n++) {
+        double predicted_re = 0.0;
+        double predicted_im = 0.0;
+        int centre = fit->first_half_symbol + 2 * n;
+
+        for (int tap = 0; tap < V34_B1_FSE_TAPS; tap++) {
+            int input = centre - V34_B1_FSE_PRE + tap;
+            double xr;
+            double xi;
+            double ar;
+            double ai;
+
+            if (input < 0 || input >= half_baud->symbol_count)
+                goto done;
+            xr = half_baud->symbols[input].re;
+            xi = half_baud->symbols[input].im;
+            if (fit->conjugate)
+                xi = -xi;
+            ar = fit->coefficient[2 * tap];
+            ai = fit->coefficient[2 * tap + 1];
+            predicted_re += ar * xr - ai * xi;
+            predicted_im += ar * xi + ai * xr;
+        }
+        out->symbols[out->symbol_count] = half_baud->symbols[centre];
+        out->symbols[out->symbol_count].re = (float)predicted_re;
+        out->symbols[out->symbol_count].im = (float)predicted_im;
+        out->symbols[out->symbol_count].magnitude =
+            hypotf((float)predicted_re, (float)predicted_im);
+        out->symbols[out->symbol_count].phase =
+            atan2f((float)predicted_im, (float)predicted_re);
+        out->symbol_count++;
+    }
+done:
+    out->locked = out->symbol_count > 8;
+    out->baud_rate_estimate = half_baud->baud_rate_estimate;
+    return out;
+}
+
+typedef struct {
+    bool valid;
+    int first_symbol;
+    int end_symbol;
+    int first_sample;
+    int end_sample;
+    int carrier_step;
+    bool conjugate;
+    int plain_errors;
+    int plain_bits;
+    int scrambled_errors;
+    int scrambled_bits;
+    uint8_t scrambled[4 * VPCM_CP_MAX_BITS];
+    float holdout_match;
+    v34_b1_fir_fit_t fir;
+} v90_cp4_fir_fit_t;
+
+enum { V90_CP_FSE_TAPS = 127, V90_CP_FSE_PRE = 63 };
+
+typedef struct {
+    bool valid;
+    int first_half_symbol;
+    bool conjugate;
+    double coefficient[2 * V90_CP_FSE_TAPS];
+    float training_match;
+    float holdout_match;
+} v90_cp_fse_fit_t;
+
+static bool v90_fit_cp_fse(const p3_result_t *half_baud,
+                           const v90_cp4_fir_fit_t *cp,
+                           v90_cp_fse_fit_t *out)
+{
+    static const float constellation4[4][2] = {
+        {-0.7071068f, -0.7071068f},
+        {-0.7071068f,  0.7071068f},
+        { 0.7071068f,  0.7071068f},
+        { 0.7071068f, -0.7071068f}
+    };
+    enum { SIZE = 2 * V90_CP_FSE_TAPS };
+    float target[2 * VPCM_CP_MAX_BITS][2];
+    int sequence_symbols;
+    int base_half = 0;
+    v90_cp_fse_fit_t best;
+
+    if (!half_baud || !cp || !cp->valid || !out
+        || cp->scrambled_bits < 256
+        || cp->scrambled_bits > 4 * VPCM_CP_MAX_BITS
+        || (cp->scrambled_bits & 1) != 0) {
+        return false;
+    }
+    sequence_symbols = cp->scrambled_bits / 2;
+    if (sequence_symbols > 2 * VPCM_CP_MAX_BITS)
+        return false;
+    {
+        int differential = 0;
+
+        for (int n = 0; n < sequence_symbols; n++) {
+            if (n > 0) {
+                int dibit = cp->scrambled[2 * n]
+                          | (cp->scrambled[2 * n + 1] << 1);
+
+                differential = (differential + dibit) & 3;
+            }
+            target[n][0] = constellation4[differential][0];
+            target[n][1] = constellation4[differential][1];
+        }
+    }
+    while (base_half < half_baud->symbol_count
+           && half_baud->symbols[base_half].sample_index < cp->first_sample) {
+        base_half++;
+    }
+    memset(&best, 0, sizeof(best));
+    for (int shift = -2; shift <= 2; shift++) {
+      int first_half = base_half + shift;
+
+      for (int conjugate = 0; conjugate < 2; conjugate++) {
+        double matrix[SIZE * SIZE] = {0};
+        double rhs[SIZE] = {0};
+        double solution[SIZE];
+        int train_count = sequence_symbols - 96;
+
+        if (train_count < 2 * V90_CP_FSE_TAPS
+            || first_half < V90_CP_FSE_PRE
+            || first_half + 2 * (sequence_symbols - 1)
+                 + (V90_CP_FSE_TAPS - V90_CP_FSE_PRE)
+               >= half_baud->symbol_count) {
+            continue;
+        }
+        for (int n = 0; n < train_count; n++) {
+            double feature_re[SIZE];
+            double feature_im[SIZE];
+
+            for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
+                int input = first_half + 2 * n
+                          - V90_CP_FSE_PRE + tap;
+                double xr = half_baud->symbols[input].re;
+                double xi = half_baud->symbols[input].im;
+
+                if (conjugate)
+                    xi = -xi;
+                feature_re[2 * tap] = xr;
+                feature_re[2 * tap + 1] = -xi;
+                feature_im[2 * tap] = xi;
+                feature_im[2 * tap + 1] = xr;
+            }
+            for (int row = 0; row < SIZE; row++) {
+                rhs[row] += feature_re[row] * target[n][0]
+                          + feature_im[row] * target[n][1];
+                for (int column = 0; column < SIZE; column++) {
+                    matrix[row * SIZE + column] +=
+                        feature_re[row] * feature_re[column]
+                      + feature_im[row] * feature_im[column];
+                }
+            }
+        }
+        {
+            double trace = 0.0;
+
+            for (int i = 0; i < SIZE; i++)
+                trace += matrix[i * SIZE + i];
+            for (int i = 0; i < SIZE; i++)
+                matrix[i * SIZE + i] += trace * 1e-5;
+        }
+        if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+            continue;
+        {
+            double training_error = 0.0;
+            double training_power = 0.0;
+            double holdout_error = 0.0;
+            double holdout_power = 0.0;
+
+            for (int n = 0; n < sequence_symbols; n++) {
+                double predicted_re = 0.0;
+                double predicted_im = 0.0;
+
+                for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
+                    int input = first_half + 2 * n
+                              - V90_CP_FSE_PRE + tap;
+                    double xr = half_baud->symbols[input].re;
+                    double xi = half_baud->symbols[input].im;
+                    double ar = solution[2 * tap];
+                    double ai = solution[2 * tap + 1];
+
+                    if (conjugate)
+                        xi = -xi;
+                    predicted_re += ar * xr - ai * xi;
+                    predicted_im += ar * xi + ai * xr;
+                }
+                double error = (predicted_re - target[n][0])
+                             * (predicted_re - target[n][0])
+                             + (predicted_im - target[n][1])
+                               * (predicted_im - target[n][1]);
+                double power = target[n][0] * target[n][0]
+                             + target[n][1] * target[n][1];
+
+                if (n < train_count) {
+                    training_error += error;
+                    training_power += power;
+                } else {
+                    holdout_error += error;
+                    holdout_power += power;
+                }
+            }
+            if (training_power <= 0.0 || holdout_power <= 0.0)
+                continue;
+            v90_cp_fse_fit_t trial;
+
+            memset(&trial, 0, sizeof(trial));
+            trial.valid = true;
+            trial.first_half_symbol = first_half;
+            trial.conjugate = conjugate != 0;
+            trial.training_match = (float)(1.0
+                - training_error / training_power);
+            trial.holdout_match = (float)(1.0
+                - holdout_error / holdout_power);
+            memcpy(trial.coefficient, solution, sizeof(solution));
+            if (!best.valid || trial.holdout_match > best.holdout_match)
+                best = trial;
+        }
+      }
+    }
+    if (!best.valid)
+        return false;
+    *out = best;
+    return true;
+}
+
+static p3_result_t *v90_apply_cp_fse(const p3_result_t *half_baud,
+                                     const v90_cp_fse_fit_t *fit)
+{
+    int capacity;
+    p3_result_t *out;
+
+    if (!half_baud || !fit || !fit->valid)
+        return NULL;
+    capacity = (half_baud->symbol_count - fit->first_half_symbol
+                - (V90_CP_FSE_TAPS - V90_CP_FSE_PRE)) / 2;
+    if (capacity <= 8)
+        return NULL;
+    out = p3_result_alloc(capacity, 0);
+    if (!out)
+        return NULL;
+    for (int n = 0; n < capacity; n++) {
+        int centre = fit->first_half_symbol + 2 * n;
+        double predicted_re = 0.0;
+        double predicted_im = 0.0;
+
+        for (int tap = 0; tap < V90_CP_FSE_TAPS; tap++) {
+            int input = centre - V90_CP_FSE_PRE + tap;
+            double xr;
+            double xi;
+            double ar;
+            double ai;
+
+            if (input < 0 || input >= half_baud->symbol_count)
+                goto done;
+            xr = half_baud->symbols[input].re;
+            xi = half_baud->symbols[input].im;
+            if (fit->conjugate)
+                xi = -xi;
+            ar = fit->coefficient[2 * tap];
+            ai = fit->coefficient[2 * tap + 1];
+            predicted_re += ar * xr - ai * xi;
+            predicted_im += ar * xi + ai * xr;
+        }
+        out->symbols[out->symbol_count] = half_baud->symbols[centre];
+        out->symbols[out->symbol_count].re = (float)predicted_re;
+        out->symbols[out->symbol_count].im = (float)predicted_im;
+        out->symbols[out->symbol_count].magnitude =
+            hypotf((float)predicted_re, (float)predicted_im);
+        out->symbols[out->symbol_count].phase =
+            atan2f((float)predicted_im, (float)predicted_re);
+        out->symbol_count++;
+    }
+done:
+    out->locked = out->symbol_count > 8;
+    out->baud_rate_estimate = half_baud->baud_rate_estimate;
+    return out;
+}
 
 static bool v34_b1_interpolated_symbol(const p3_result_t *detail,
                                        int first_symbol,
@@ -7692,22 +8286,36 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
                                 bool conjugate,
                                 v34_b1_fir_fit_t *out)
 {
-    enum { SIZE = 2 * V34_B1_FIR_TAPS };
-    double matrix[SIZE * SIZE] = {0};
-    double rhs[SIZE] = {0};
-    double solution[SIZE];
+    enum { MAX_SIZE = 2 * V34_B1_FIR_MAX_TAPS };
+    double matrix[MAX_SIZE * MAX_SIZE] = {0};
+    double rhs[MAX_SIZE] = {0};
+    double solution[MAX_SIZE];
     double step_re = 0.0;
     double step_im = 0.0;
     double previous_re = 0.0;
     double previous_im = 0.0;
     double phase_step = 0.0;
+    float selected_phase_step = 0.0f;
     double error = 0.0;
     double power = 0.0;
+    int taps = getenv("VPCM_V90_B1_FIR_TAPS")
+             ? atoi(getenv("VPCM_V90_B1_FIR_TAPS")) : 13;
+    int pre;
+    int size;
+
+    if (taps < 1)
+        taps = 1;
+    if (taps > V34_B1_FIR_MAX_TAPS)
+        taps = V34_B1_FIR_MAX_TAPS;
+    if ((taps & 1) == 0)
+        taps--;
+    pre = taps / 2;
+    size = 2 * taps;
 
     if (!detail || !templ || !templ->valid || !out
-        || first_symbol < V34_B1_FIR_PRE
+        || first_symbol < pre
         || first_symbol + templ->symbol_count
-             + (V34_B1_FIR_TAPS - V34_B1_FIR_PRE)
+             + (taps - pre)
            >= detail->symbol_count) {
         return false;
     }
@@ -7733,17 +8341,30 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
     }
     if (fabs(step_re) + fabs(step_im) > 1e-12)
         phase_step = atan2(step_im, step_re);
+    /* Use the phase model selected by the complete-frame scalar fit.  For a
+     * data-dependent B1 constellation, adjacent point cross-products can
+     * report a large fictitious phase walk and rotate an otherwise strong
+     * channel fit out of the FIR feature space. */
+    (void)v34_match_b1_template(detail,
+                                first_symbol,
+                                templ,
+                                conjugate,
+                                0,
+                                NULL,
+                                NULL,
+                                &selected_phase_step);
+    phase_step = selected_phase_step;
 
     for (int n = 0; n < templ->symbol_count; n++) {
-        double feature_re[SIZE];
-        double feature_im[SIZE];
+        double feature_re[MAX_SIZE];
+        double feature_im[MAX_SIZE];
 
-        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
-            int input = first_symbol + n - V34_B1_FIR_PRE + tap;
+        for (int tap = 0; tap < taps; tap++) {
+            int input = first_symbol + n - pre + tap;
             double xr = detail->symbols[input].re;
             double xi = detail->symbols[input].im;
             double angle = phase_step
-                         * (n - V34_B1_FIR_PRE + tap);
+                         * (n - pre + tap);
             double rotated_re;
             double rotated_im;
 
@@ -7756,11 +8377,11 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
             feature_im[2 * tap] = rotated_im;
             feature_im[2 * tap + 1] = rotated_re;
         }
-        for (int row = 0; row < SIZE; row++) {
+        for (int row = 0; row < size; row++) {
             rhs[row] += feature_re[row] * templ->symbol[n][0]
                       + feature_im[row] * templ->symbol[n][1];
-            for (int column = 0; column < SIZE; column++) {
-                matrix[row * SIZE + column] +=
+            for (int column = 0; column < size; column++) {
+                matrix[row * size + column] +=
                     feature_re[row] * feature_re[column]
                   + feature_im[row] * feature_im[column];
             }
@@ -7769,24 +8390,24 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
     {
         double trace = 0.0;
 
-        for (int i = 0; i < SIZE; i++)
-            trace += matrix[i * SIZE + i];
-        for (int i = 0; i < SIZE; i++)
-            matrix[i * SIZE + i] += trace * 1e-5;
+        for (int i = 0; i < size; i++)
+            trace += matrix[i * size + i];
+        for (int i = 0; i < size; i++)
+            matrix[i * size + i] += trace * 1e-5;
     }
-    if (!v90_solve_linear_system(matrix, rhs, solution, SIZE))
+    if (!v90_solve_linear_system(matrix, rhs, solution, size))
         return false;
 
     for (int n = 0; n < templ->symbol_count; n++) {
         double predicted_re = 0.0;
         double predicted_im = 0.0;
 
-        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
-            int input = first_symbol + n - V34_B1_FIR_PRE + tap;
+        for (int tap = 0; tap < taps; tap++) {
+            int input = first_symbol + n - pre + tap;
             double xr = detail->symbols[input].re;
             double xi = detail->symbols[input].im;
             double angle = phase_step
-                         * (n - V34_B1_FIR_PRE + tap);
+                         * (n - pre + tap);
             double ar = solution[2 * tap];
             double ai = solution[2 * tap + 1];
             double rotated_re;
@@ -7810,9 +8431,13 @@ static bool v34_fit_b1_fir_full(const p3_result_t *detail,
         return false;
     out->valid = true;
     out->first_symbol = first_symbol;
+    out->tap_count = taps;
+    out->pre = pre;
     out->conjugate = conjugate;
     out->phase_step = phase_step;
-    memcpy(out->coefficient, solution, sizeof(solution));
+    memcpy(out->coefficient,
+           solution,
+           (size_t)size * sizeof(solution[0]));
     out->training_match = (float)(1.0 - error / power);
     return true;
 }
@@ -7826,7 +8451,7 @@ static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
     if (!detail || !fit || !fit->valid)
         return NULL;
     count = detail->symbol_count - fit->first_symbol
-          - (V34_B1_FIR_TAPS - V34_B1_FIR_PRE);
+          - (fit->tap_count - fit->pre);
     if (count <= 8)
         return NULL;
     out = p3_result_alloc(count, 0);
@@ -7836,12 +8461,12 @@ static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
         double predicted_re = 0.0;
         double predicted_im = 0.0;
 
-        for (int tap = 0; tap < V34_B1_FIR_TAPS; tap++) {
-            int input = fit->first_symbol + n - V34_B1_FIR_PRE + tap;
+        for (int tap = 0; tap < fit->tap_count; tap++) {
+            int input = fit->first_symbol + n - fit->pre + tap;
             double xr = detail->symbols[input].re;
             double xi = detail->symbols[input].im;
             double angle = fit->phase_step
-                         * (n - V34_B1_FIR_PRE + tap);
+                         * (n - fit->pre + tap);
             double ar = fit->coefficient[2 * tap];
             double ai = fit->coefficient[2 * tap + 1];
             double rotated_re;
@@ -7866,6 +8491,240 @@ static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
     out->locked = true;
     out->baud_rate_estimate = detail->baud_rate_estimate;
     return out;
+}
+
+/* Recover the exact scrambled CP' sequence from its known, repeated
+ * Table-14 payload and use it as channel training immediately ahead of E.
+ *
+ * The GPA scrambler is self-synchronizing at the receiver, but its
+ * transmitted state cannot be obtained by simply restarting the scrambler
+ * at a CP' frame boundary.  Infer that 23-bit state from the observed
+ * differential decisions instead.  A clean 23-bit window determines the
+ * complete sequence in both directions; the long known CP' interval then
+ * makes a wrong/noisy seed overwhelmingly worse than the true one. */
+static bool v90_fit_cp4_fir(const p3_result_t *detail,
+                            const vpcm_cp_frame_t *frame,
+                            int last_frame_sample,
+                            v90_cp4_fir_fit_t *out)
+{
+    static const uint8_t q_to_dibit[4] = {0, 3, 2, 1};
+    static const float constellation4[4][2] = {
+        {-0.7071068f, -0.7071068f},
+        {-0.7071068f,  0.7071068f},
+        { 0.7071068f,  0.7071068f},
+        { 0.7071068f, -0.7071068f}
+    };
+    enum { REPETITIONS = 4, TEMPLATE_SYMBOLS = 120 };
+    uint8_t frame_bits[VPCM_CP_MAX_BITS];
+    uint8_t *observed = NULL;
+    uint8_t *best_observed = NULL;
+    uint8_t *candidate = NULL;
+    uint8_t *best_scrambled = NULL;
+    int frame_bit_count = 0;
+    int frame_symbols;
+    int base_end = 0;
+    int sequence_symbols;
+    int sequence_bits;
+    int best_plain_errors = INT_MAX;
+    int best_plain_bits = 0;
+    int best_start = -1;
+    int best_end = -1;
+    int best_carrier_step = 0;
+    bool best_conjugate = false;
+    int best_scrambled_errors = INT_MAX;
+    v34_b1_template_t templ;
+    int template_offset;
+    bool success = false;
+
+    if (!detail || !frame || !out || last_frame_sample < 0
+        || !vpcm_cp_encode_modulated_bits(
+            frame, 4, frame_bits, &frame_bit_count)
+        || frame_bit_count < 2 || (frame_bit_count & 1) != 0) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    frame_symbols = frame_bit_count / 2;
+    sequence_symbols = REPETITIONS * frame_symbols;
+    sequence_bits = 2 * sequence_symbols;
+    while (base_end < detail->symbol_count
+           && detail->symbols[base_end].sample_index < last_frame_sample) {
+        base_end++;
+    }
+    if (base_end < sequence_symbols + V34_B1_FIR_PRE
+        || base_end >= detail->symbol_count) {
+        return false;
+    }
+    observed = malloc((size_t)sequence_bits);
+    best_observed = malloc((size_t)sequence_bits);
+    candidate = malloc((size_t)sequence_bits);
+    best_scrambled = malloc((size_t)sequence_bits);
+    if (!observed || !best_observed || !candidate || !best_scrambled)
+        goto done;
+
+    /* The independently recovered CP' boundary is accurate to a few sample
+     * phases, not necessarily to this local symbol stream's integer index.
+     * Jointly search that small alignment uncertainty and the residual
+     * carrier walk.  Comparing descrambled bits after the first 23 makes the
+     * statistic independent of the arbitrary receiver restart state. */
+    for (int end_shift = -8; end_shift <= 8; end_shift++) {
+        int end_symbol = base_end + end_shift;
+        int start_symbol = end_symbol - sequence_symbols;
+
+        if (start_symbol < 1 || end_symbol >= detail->symbol_count)
+            continue;
+        for (int conjugate = 0; conjugate < 2; conjugate++) {
+            for (int carrier_step = -96; carrier_step <= 96;
+                 carrier_step += 2) {
+                uint32_t reg = 0;
+                int plain_errors = 0;
+                int plain_count = 0;
+                float carrier_delta = carrier_step
+                                    * (float)(M_PI / 2048.0);
+
+                for (int n = 0; n < sequence_symbols; n++) {
+                    int symbol = start_symbol + n;
+                    float re = detail->symbols[symbol].re;
+                    float im = detail->symbols[symbol].im;
+                    float previous_re = detail->symbols[symbol - 1].re;
+                    float previous_im = detail->symbols[symbol - 1].im;
+                    float angle = atan2f(im * previous_re
+                                           - re * previous_im,
+                                         re * previous_re
+                                           + im * previous_im);
+                    int q;
+                    int dibit;
+
+                    if (conjugate)
+                        angle = -angle;
+                    q = (int)floorf((angle - carrier_delta)
+                                     / (float)(M_PI / 2.0) + 0.5f) & 3;
+                    dibit = q_to_dibit[q];
+                    observed[2 * n] = (uint8_t)(dibit & 1);
+                    observed[2 * n + 1] = (uint8_t)((dibit >> 1) & 1);
+                }
+                for (int bit = 0; bit < sequence_bits; bit++) {
+                    int plain = v34_upstream_descramble_bit(
+                        &reg, 4, observed[bit]);
+
+                    if (bit >= 23) {
+                        plain_errors += plain
+                                     != frame_bits[bit % frame_bit_count];
+                        plain_count++;
+                    }
+                }
+                if (plain_errors < best_plain_errors) {
+                    best_plain_errors = plain_errors;
+                    best_plain_bits = plain_count;
+                    best_start = start_symbol;
+                    best_end = end_symbol;
+                    best_carrier_step = carrier_step;
+                    best_conjugate = conjugate != 0;
+                    memcpy(best_observed,
+                           observed,
+                           (size_t)sequence_bits);
+                }
+            }
+        }
+    }
+    if (best_start < 0 || best_plain_bits <= 0)
+        goto done;
+
+    /* Each observed 23-bit window is a candidate scrambler state.  Extend
+     * it forward with s[n]=p[n]^s[n-5]^s[n-23], and backward using the same
+     * recurrence.  The candidate with the fewest disagreements supplies a
+     * corrected, phase-continuous target for the equalizer. */
+    for (int window = 0; window + 23 <= sequence_bits; window++) {
+        int errors = 0;
+
+        memset(candidate, 0, (size_t)sequence_bits);
+        memcpy(candidate + window, best_observed + window, 23);
+        for (int bit = window + 23; bit < sequence_bits; bit++) {
+            candidate[bit] = (uint8_t)(
+                frame_bits[bit % frame_bit_count]
+                ^ candidate[bit - 5] ^ candidate[bit - 23]);
+        }
+        for (int bit = window + 22; bit >= 23; bit--) {
+            candidate[bit - 23] = (uint8_t)(
+                candidate[bit]
+                ^ frame_bits[bit % frame_bit_count]
+                ^ candidate[bit - 5]);
+        }
+        for (int bit = 0; bit < sequence_bits; bit++)
+            errors += candidate[bit] != best_observed[bit];
+        if (errors < best_scrambled_errors) {
+            best_scrambled_errors = errors;
+            memcpy(best_scrambled,
+                   candidate,
+                   (size_t)sequence_bits);
+        }
+    }
+    if (best_scrambled_errors == INT_MAX
+        || 100 * best_scrambled_errors > 20 * sequence_bits) {
+        goto done;
+    }
+
+    memset(&templ, 0, sizeof(templ));
+    templ.valid = true;
+    templ.symbol_count = TEMPLATE_SYMBOLS;
+    /* Leave enough known CP' symbols after the fit window for the FIR's
+     * forward taps.  This also prevents any E transition energy from being
+     * included in the supervised equations. */
+    template_offset = sequence_symbols - TEMPLATE_SYMBOLS
+                    - (V34_B1_FIR_TAPS - V34_B1_FIR_PRE) - 2;
+    if (template_offset < 1)
+        goto done;
+    {
+        int differential = 0;
+
+        for (int n = 0; n < TEMPLATE_SYMBOLS; n++) {
+            int sequence_symbol = template_offset + n;
+
+            if (n > 0) {
+                int dibit = best_scrambled[2 * sequence_symbol]
+                          | (best_scrambled[2 * sequence_symbol + 1] << 1);
+
+                differential = (differential + dibit) & 3;
+            }
+            templ.symbol[n][0] = constellation4[differential][0];
+            templ.symbol[n][1] = constellation4[differential][1];
+            templ.power += 1.0f;
+        }
+    }
+    out->holdout_match = v34_match_b1_template_fir(
+        detail,
+        best_start + template_offset,
+        &templ,
+        best_conjugate,
+        0);
+    if (!v34_fit_b1_fir_full(detail,
+                             best_start + template_offset,
+                             &templ,
+                             best_conjugate,
+                             &out->fir)) {
+        goto done;
+    }
+    out->valid = true;
+    out->first_symbol = best_start + template_offset;
+    out->end_symbol = best_end;
+    out->first_sample = detail->symbols[best_start].sample_index;
+    out->end_sample = detail->symbols[best_end].sample_index;
+    out->carrier_step = best_carrier_step;
+    out->conjugate = best_conjugate;
+    out->plain_errors = best_plain_errors;
+    out->plain_bits = best_plain_bits;
+    out->scrambled_errors = best_scrambled_errors;
+    out->scrambled_bits = sequence_bits;
+    memcpy(out->scrambled,
+           best_scrambled,
+           (size_t)sequence_bits);
+    success = true;
+
+done:
+    free(observed);
+    free(best_observed);
+    free(candidate);
+    free(best_scrambled);
+    return success;
 }
 
 typedef struct {
@@ -7979,7 +8838,7 @@ typedef struct {
     double samples_per_symbol;
     double carrier_hz;
     bool conjugate;
-    double coefficient[34];
+    double coefficient[2 * V34_RAW_B1_FIR_TAPS];
     float heldout_match;
 } v34_raw_b1_fir_fit_t;
 
@@ -7992,7 +8851,11 @@ static float v34_match_b1_raw_fir(const int16_t *samples,
                                   const v34_b1_template_t *templ,
                                   v34_raw_b1_fir_fit_t *fit_out)
 {
-    enum { TAPS = 17, PRE = 8, SIZE = 2 * TAPS };
+    enum {
+        TAPS = V34_RAW_B1_FIR_TAPS,
+        PRE = V34_RAW_B1_FIR_PRE,
+        SIZE = 2 * TAPS
+    };
     double matrix[SIZE * SIZE] = {0};
     double rhs[SIZE] = {0};
     double solution[SIZE];
@@ -8111,7 +8974,7 @@ static p3_result_t *v34_apply_b1_raw_fir(
                                     int total_samples,
                                     const v34_raw_b1_fir_fit_t *fit)
 {
-    enum { TAPS = 17, PRE = 8 };
+    enum { TAPS = V34_RAW_B1_FIR_TAPS, PRE = V34_RAW_B1_FIR_PRE };
     int capacity;
     p3_result_t *out;
 
@@ -10136,11 +10999,44 @@ static bool v90_cp4_recover_local_carrier(
                 out,
                 &frame_phase,
                 &frame_count)) {
+            int last_aligned_bit = frame_phase + frame_count * out->nbits;
+
+            /* The strict vote establishes the complete CP/CP' template and
+             * its bit phase, but the seven copies used for that vote need
+             * not be the final copies on the wire.  Follow the same aligned
+             * frame phase through the remaining capture.  This is essential
+             * for E timing: sync-like runs recur once per CP' frame and are
+             * not E until the final repeated CP' has completed. */
+            for (int start = frame_phase;
+                 start + out->nbits <= bit_capacity;
+                 start += out->nbits) {
+                int errors = 0;
+
+                for (int bit = 0; bit < out->nbits; bit++)
+                    errors += best_bits[start + bit] != out->bits[bit];
+                if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                    fprintf(stderr,
+                            "v90 CP' aligned copy bit=%d errors=%d/%d end_sample=%.3fms\n",
+                            start,
+                            errors,
+                            out->nbits,
+                            first_symbol + (start + out->nbits) / 2
+                                < detail->symbol_count
+                              ? sample_to_ms(detail->symbols[
+                                    first_symbol
+                                      + (start + out->nbits) / 2]
+                                    .sample_index,
+                                    8000)
+                              : -1.0);
+                }
+                if (100 * errors <= 30 * out->nbits)
+                    last_aligned_bit = start + out->nbits;
+            }
             if (frame_symbol_out)
                 *frame_symbol_out = first_symbol + frame_phase / 2;
             if (last_frame_symbol_out) {
                 *last_frame_symbol_out = first_symbol
-                    + (frame_phase + frame_count * out->nbits) / 2;
+                                       + last_aligned_bit / 2;
             }
             if (strict_observed_out)
                 *strict_observed_out = true;
@@ -17809,6 +18705,79 @@ static bool v34_decode_upstream_p3_symbols(const p3_result_t *detail,
     return true;
 }
 
+/* Exercise the mapper/decoder handoff without any channel, carrier, timing,
+ * or equalizer uncertainty.  B1 is generated by the same transmit mapper
+ * used for template acquisition, then passed at exact Q9.7 constellation
+ * coordinates to a freshly reset receive mapper.  A failure here means the
+ * E->B1 reset/counter state is wrong; it cannot be blamed on captured audio. */
+static void v34_diagnose_exact_b1_decode(
+                            const v34_b1_template_t *templates,
+                            int template_count,
+                            int baud_code,
+                            const v34_upstream_mp_recovery_t *rx_mp)
+{
+    for (int t = 0; t < template_count; t++) {
+        const v34_b1_template_t *templ = &templates[t];
+        v34_upstream_mp_recovery_t exact_mp;
+        v34_upstream_replay_result_t decoded;
+        p3_result_t *symbols;
+
+        if (!templ->valid)
+            continue;
+        symbols = p3_result_alloc(templ->symbol_count, 0);
+        if (!symbols)
+            return;
+        symbols->symbol_count = templ->symbol_count;
+        for (int i = 0; i < templ->symbol_count; i++) {
+            symbols->symbols[i].sample_index = i;
+            symbols->symbols[i].re = templ->symbol[i][0];
+            symbols->symbols[i].im = templ->symbol[i][1];
+            symbols->symbols[i].magnitude = hypotf(
+                templ->symbol[i][0], templ->symbol[i][1]);
+        }
+        if (rx_mp)
+            exact_mp = *rx_mp;
+        else
+            memset(&exact_mp, 0, sizeof(exact_mp));
+        exact_mp.valid = true;
+        exact_mp.mp.type = 0;
+        exact_mp.mp.bit_rate_c_to_a = templ->rate_n;
+        exact_mp.mp.trellis_size = templ->trellis_size;
+        exact_mp.mp.use_non_linear_encoder = templ->nonlinear;
+        exact_mp.mp.expanded_shaping = templ->expanded;
+        memset(exact_mp.mp.precoder_coeffs,
+               0,
+               sizeof(exact_mp.mp.precoder_coeffs));
+        memset(&decoded, 0, sizeof(decoded));
+        if (v34_decode_upstream_p3_symbols(
+                symbols,
+                0,
+                baud_code,
+                &exact_mp,
+                1.0f,
+                0,
+                false,
+                false,
+                templ->expanded,
+                NULL,
+                0,
+                &decoded)) {
+            fprintf(stderr,
+                    "v90 exact B1 decode template=%d rate=%d trellis=%d nonlinear=%d shaping=%d symbols=%d bits=%d first64=%d tail=%d\n",
+                    t,
+                    templ->rate_n,
+                    templ->trellis_size,
+                    templ->nonlinear,
+                    templ->expanded,
+                    templ->symbol_count,
+                    decoded.data_bits,
+                    decoded.first64_ones,
+                    decoded.b1_tail_ones);
+        }
+        p3_result_free(symbols);
+    }
+}
+
 typedef struct {
     float best_holdout_match;
     float training_match;
@@ -17858,12 +18827,21 @@ static void v34_search_supervised_b1_fcs(
         for (int t = 0; t < template_count; t++) {
             for (int conjugate = 0; conjugate < 2; conjugate++) {
                 int hypothesis = 2 * t + conjugate;
-                float match = v34_match_b1_template_fir(
+                /* Locate B1 with its complete-frame normalized correlation.
+                 * Solving a high-order FIR independently at every possible
+                 * start can prefer a shifted overfit at the CP'/E transition
+                 * and becomes prohibitive during mapper diagnostics.  Only
+                 * the resulting complete-sequence finalists receive the
+                 * supervised FIR fit below. */
+                float match = v34_match_b1_template(
                     symbols,
                     first,
                     &templates[t],
                     conjugate != 0,
-                    0);
+                    0,
+                    NULL,
+                    NULL,
+                    NULL);
 
                 if (match > best_match[hypothesis]) {
                     best_match[hypothesis] = match;
@@ -17878,6 +18856,8 @@ static void v34_search_supervised_b1_fcs(
             }
         }
     }
+    if (getenv("VPCM_V90_B1_SCALAR_ONLY"))
+        return;
     for (int finalist = 0; finalist < FINALISTS; finalist++) {
         int hypothesis = -1;
 
@@ -17893,13 +18873,15 @@ static void v34_search_supervised_b1_fcs(
         {
             int t = hypothesis / 2;
             bool conjugate = (hypothesis & 1) != 0;
-            v34_b1_fir_fit_t fit;
+            for (int shift = -2; shift <= 2; shift++) {
+              int first = best_first[hypothesis] + shift;
+              v34_b1_fir_fit_t fit;
 
-            if (v34_fit_b1_fir_full(symbols,
-                                    best_first[hypothesis],
-                                    &templates[t],
-                                    conjugate,
-                                    &fit)) {
+              if (v34_fit_b1_fir_full(symbols,
+                                      first,
+                                      &templates[t],
+                                      conjugate,
+                                      &fit)) {
                 p3_result_t *equalized = v34_apply_b1_fir(symbols, &fit);
                 v34_upstream_mp_recovery_t mp;
                 v34_upstream_replay_result_t decoded;
@@ -17914,7 +18896,7 @@ static void v34_search_supervised_b1_fcs(
                 mp.mp.use_non_linear_encoder = templates[t].nonlinear;
                 mp.mp.expanded_shaping = templates[t].expanded;
                 memset(&decoded, 0, sizeof(decoded));
-                if (equalized
+                bool decoded_ok = equalized
                     && v34_decode_upstream_p3_symbols(
                         equalized,
                         0,
@@ -17927,8 +18909,23 @@ static void v34_search_supervised_b1_fcs(
                         mp.mp.expanded_shaping,
                         NULL,
                         0,
-                        &decoded)
-                    && decoded.hdlc_frames > 0) {
+                        &decoded);
+                if (decoded_ok && getenv("VPCM_V34_UPSTREAM_DIAG")
+                    && fit.training_match >= 0.50f) {
+                    fprintf(stderr,
+                            "v90 B1 finalist sample=%d scalar=%.1f%% train=%.1f%% template=%d shift=%d first64=%d tail=%d bits=%d hdlc=%d/%d\n",
+                            symbols->symbols[first].sample_index,
+                            100.0f * best_match[hypothesis],
+                            100.0f * fit.training_match,
+                            t,
+                            shift,
+                            decoded.first64_ones,
+                            decoded.b1_tail_ones,
+                            decoded.data_bits,
+                            decoded.hdlc_frames,
+                            decoded.hdlc_bytes);
+                }
+                if (decoded_ok && decoded.hdlc_frames > 0) {
                     if (!out->fcs_valid
                         || decoded.hdlc_frames > out->decoded.hdlc_frames
                         || (decoded.hdlc_frames
@@ -17938,7 +18935,7 @@ static void v34_search_supervised_b1_fcs(
                         out->fcs_valid = true;
                         out->best_holdout_match = best_match[hypothesis];
                         out->training_match = fit.training_match;
-                        out->first_symbol = best_first[hypothesis];
+                        out->first_symbol = first;
                         out->template_index = t;
                         out->conjugate = conjugate;
                         out->decoded = decoded;
@@ -17946,6 +18943,7 @@ static void v34_search_supervised_b1_fcs(
                 }
                 if (equalized)
                     p3_result_free(equalized);
+              }
             }
         }
     }
@@ -29176,7 +30174,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     ? sample_to_ms(direct_e_data_sample, 8000)
                                     : -1.0);
                     }
-                    if (getenv("VPCM_V90_LOCAL_E_SWEEP")
+                    if ((getenv("VPCM_V90_LOCAL_E_SWEEP")
+                         || (data_cp.valid && best_e_window < 20))
                         && cp_reset_sample >= 0) {
                         int local_start = cp_reset_sample > 1600
                                         ? cp_reset_sample - 1600 : 0;
@@ -29812,6 +30811,14 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     }
                 }
                 if (b1_template_count > 0
+                    && getenv("VPCM_V90_B1_EXACT_DIAG")) {
+                    v34_diagnose_exact_b1_decode(
+                        b1_templates,
+                        b1_template_count,
+                        baud_code,
+                        downstream_mp.valid ? &downstream_mp : NULL);
+                }
+                if (b1_template_count > 0
                     && direct_e_data_sample >= 0
                     && getenv("VPCM_V90_FULL_P3_B1_DIAG")) {
                     for (int carrier = P3_CARRIER_LOW;
@@ -30360,8 +31367,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             template_fir_sample[t][1] = -1;
                             if (template_raw_sample[t] < 0)
                                 continue;
-                            for (int sample = template_raw_sample[t] - 8;
-                                 sample <= template_raw_sample[t] + 8;
+                            for (int sample = template_raw_sample[t] - 32;
+                                 sample <= template_raw_sample[t] + 32;
                                  sample++) {
                                 for (int quarter_hz = -8;
                                      quarter_hz <= 8; quarter_hz++) {
@@ -30700,6 +31707,12 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     for (int timing = 0; timing < 8; timing++) {
                         p3_result_t *local_symbols;
 
+                        if (getenv("VPCM_V90_B1_LOCAL_TIMING")
+                            && timing != atoi(getenv(
+                                "VPCM_V90_B1_LOCAL_TIMING"))) {
+                            continue;
+                        }
+
                         if (getenv("VPCM_V90_B1_BYPASS_EQUALIZER"))
                             setenv("P3_BYPASS_EQUALIZER", "1", 1);
                         local_symbols = p3_demod_run_phase4_data_at_timing(
@@ -30727,6 +31740,294 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
 
                         if (!local_symbols)
                             continue;
+                        if (getenv("VPCM_V90_B1_FSE_DIAG")) {
+                            p3_result_t *half_baud =
+                                p3_demod_run_half_baud_at_timing(
+                                    analog_pcm + local_start,
+                                    total_samples - local_start,
+                                    local_start,
+                                    baud_code,
+                                    getenv("VPCM_V90_B1_CARRIER")
+                                        ? atoi(getenv(
+                                            "VPCM_V90_B1_CARRIER"))
+                                        : (cp_carrier == P3_CARRIER_HIGH
+                                           ? P3_CARRIER_HIGH
+                                           : P3_CARRIER_LOW),
+                                    8000,
+                                    true,
+                                    timing,
+                                    8,
+                                    known_data_sample);
+                            v34_b1_fse_fit_t best_fse;
+                            int best_fse_template = -1;
+
+                            memset(&best_fse, 0, sizeof(best_fse));
+                            if (half_baud && data_cp.valid
+                                && data_cp_last_sample >= 0) {
+                                v90_cp4_fir_fit_t cp_sequence;
+                                v90_cp_fse_fit_t cp_fse;
+
+                                if (v90_fit_cp4_fir(
+                                        local_symbols,
+                                        &data_cp.frame,
+                                        data_cp_last_sample,
+                                        &cp_sequence)
+                                    && v90_fit_cp_fse(
+                                        half_baud,
+                                        &cp_sequence,
+                                        &cp_fse)) {
+                                    p3_result_t *cp_fse_equalized =
+                                        v90_apply_cp_fse(
+                                            half_baud, &cp_fse);
+                                    v34_supervised_b1_search_t cp_fse_search;
+
+                                    memset(&cp_fse_search,
+                                           0,
+                                           sizeof(cp_fse_search));
+                                    if (cp_fse_equalized) {
+                                        v34_search_supervised_b1_fcs(
+                                            cp_fse_equalized,
+                                            b1_templates,
+                                            b1_template_count,
+                                            baud_code,
+                                            known_data_sample,
+                                            &cp_fse_search);
+                                        if (getenv(
+                                                "VPCM_V90_CP_FSE_B1_CSV")
+                                            && cp_fse_search.first_symbol >= 0
+                                            && cp_fse_search.template_index >= 0) {
+                                            FILE *csv = fopen(
+                                                getenv(
+                                                    "VPCM_V90_CP_FSE_B1_CSV"),
+                                                "w");
+                                            const v34_b1_template_t *paired =
+                                                &b1_templates[cp_fse_search
+                                                    .template_index];
+
+                                            if (csv) {
+                                                fprintf(csv,
+                                                        "symbol,sample,re,im,target_re,target_im\n");
+                                                for (int n = 0;
+                                                     n < paired->symbol_count
+                                                     && cp_fse_search
+                                                            .first_symbol + n
+                                                        < cp_fse_equalized
+                                                            ->symbol_count;
+                                                     n++) {
+                                                    const p3_symbol_t *got =
+                                                        &cp_fse_equalized
+                                                          ->symbols[
+                                                            cp_fse_search
+                                                              .first_symbol
+                                                            + n];
+
+                                                    fprintf(csv,
+                                                            "%d,%d,%.9g,%.9g,%.9g,%.9g\n",
+                                                            n,
+                                                            got->sample_index,
+                                                            got->re,
+                                                            got->im,
+                                                            paired->symbol[n][0],
+                                                            paired->symbol[n][1]);
+                                                }
+                                                fclose(csv);
+                                            }
+                                        }
+                                    }
+                                    fprintf(stderr,
+                                            "v90 CP' T/2 FSE timing=%d sample=%d train=%.1f%% holdout=%.1f%% B1=%.1f%% sample=%d template=%d hdlc=%d/%d\n",
+                                            timing,
+                                            half_baud->symbols[
+                                                cp_fse.first_half_symbol]
+                                                .sample_index,
+                                            100.0f
+                                              * cp_fse.training_match,
+                                            100.0f
+                                              * cp_fse.holdout_match,
+                                            100.0f * cp_fse_search
+                                                .best_holdout_match,
+                                            cp_fse_search.first_symbol >= 0
+                                              ? cp_fse_equalized->symbols[
+                                                  cp_fse_search.first_symbol]
+                                                  .sample_index : -1,
+                                            cp_fse_search.template_index,
+                                            cp_fse_search.decoded.hdlc_frames,
+                                            cp_fse_search.decoded.hdlc_bytes);
+                                    if (cp_fse_equalized
+                                        && cp_fse_search.fcs_valid) {
+                                        const v34_b1_template_t *winner =
+                                            &b1_templates[cp_fse_search
+                                                .template_index];
+
+                                        printf("\n=== V.90 V.34 Upstream Recovery ===\n");
+                                        printf("  CP'/E boundary: %.3f ms; B1: %.3f ms\n",
+                                               sample_to_ms(
+                                                   direct_e_data_sample,
+                                                   8000),
+                                               sample_to_ms(
+                                                   cp_fse_search.decoded
+                                                       .data_start_sample,
+                                                   8000));
+                                        printf("  Mode: %d baud, %d bps, trellis=%d, nonlinear=%d, shaping=%s\n",
+                                               v34_baud_code_to_rate(
+                                                   baud_code),
+                                               winner->rate_n * 2400,
+                                               winner->trellis_size,
+                                               winner->nonlinear,
+                                               winner->expanded
+                                                   ? "expanded"
+                                                   : "minimum");
+                                        printf("  B1 evidence: %.1f%% correlation after %.1f%% held-out CP' FSE\n",
+                                               100.0f * cp_fse_search
+                                                   .best_holdout_match,
+                                               100.0f
+                                                 * cp_fse.holdout_match);
+                                        printf("  Payload: %d bits; HDLC FCS valid=%d frames/%d bytes\n",
+                                               cp_fse_search.decoded
+                                                   .data_bits,
+                                               cp_fse_search.decoded
+                                                   .hdlc_frames,
+                                               cp_fse_search.decoded
+                                                   .hdlc_bytes);
+                                        p3_result_free(cp_fse_equalized);
+                                        p3_result_free(half_baud);
+                                        p3_result_free(local_symbols);
+                                        if (best_local_symbols)
+                                            p3_result_free(
+                                                best_local_symbols);
+                                        goto v90_upstream_cleanup;
+                                    }
+                                    if (cp_fse_equalized)
+                                        p3_result_free(cp_fse_equalized);
+                                }
+                            }
+                            if (half_baud) {
+                                int base_half = 0;
+
+                                while (base_half < half_baud->symbol_count
+                                       && half_baud->symbols[base_half]
+                                           .sample_index
+                                          < known_data_sample) {
+                                    base_half++;
+                                }
+                                for (int t = 0; t < b1_template_count; t++) {
+                                  for (int shift = -6; shift <= 6; shift++) {
+                                    int first_half = base_half + shift;
+
+                                    for (int conjugate = 0;
+                                         conjugate < 2; conjugate++) {
+                                        v34_b1_fse_fit_t fit;
+
+                                        if (v34_fit_b1_fse(
+                                                half_baud,
+                                                first_half,
+                                                &b1_templates[t],
+                                                conjugate != 0,
+                                                &fit)
+                                            && (!best_fse.valid
+                                                || fit.holdout_match
+                                                   > best_fse
+                                                       .holdout_match)) {
+                                            best_fse = fit;
+                                            best_fse_template = t;
+                                        }
+                                    }
+                                  }
+                                }
+                            }
+                            if (half_baud && best_fse.valid
+                                && best_fse_template >= 0) {
+                                p3_result_t *fse_equalized =
+                                    v34_apply_b1_fse(
+                                        half_baud, &best_fse);
+                                v34_upstream_mp_recovery_t fse_mp = v90_mp;
+                                v34_upstream_replay_result_t fse_decode;
+                                const v34_b1_template_t *fse_template =
+                                    &b1_templates[best_fse_template];
+
+                                fse_mp.mp.type = 0;
+                                fse_mp.mp.bit_rate_a_to_c =
+                                    fse_template->rate_n;
+                                fse_mp.mp.bit_rate_c_to_a =
+                                    fse_template->rate_n;
+                                fse_mp.mp.trellis_size =
+                                    fse_template->trellis_size;
+                                fse_mp.mp.use_non_linear_encoder =
+                                    fse_template->nonlinear;
+                                fse_mp.mp.expanded_shaping =
+                                    fse_template->expanded;
+                                memset(&fse_decode, 0, sizeof(fse_decode));
+                                bool fse_decoded = fse_equalized
+                                    && v34_decode_upstream_p3_symbols(
+                                        fse_equalized,
+                                        0,
+                                        baud_code,
+                                        &fse_mp,
+                                        1.0f,
+                                        0,
+                                        false,
+                                        false,
+                                        fse_mp.mp.expanded_shaping,
+                                        NULL,
+                                        0,
+                                        &fse_decode);
+
+                                fprintf(stderr,
+                                        "v90 B1 FSE timing=%d sample=%d train=%.1f%% holdout=%.1f%% template=%d rate=%d trellis=%d nonlinear=%d shaping=%d first64=%d tail=%d bits=%d hdlc=%d/%d\n",
+                                        timing,
+                                        half_baud->symbols[
+                                            best_fse.first_half_symbol]
+                                            .sample_index,
+                                        100.0f
+                                          * best_fse.training_match,
+                                        100.0f * best_fse.holdout_match,
+                                        best_fse_template,
+                                        fse_template->rate_n,
+                                        fse_template->trellis_size,
+                                        fse_template->nonlinear,
+                                        fse_template->expanded,
+                                        fse_decode.first64_ones,
+                                        fse_decode.b1_tail_ones,
+                                        fse_decode.data_bits,
+                                        fse_decode.hdlc_frames,
+                                        fse_decode.hdlc_bytes);
+                                if (fse_decoded
+                                    && fse_decode.hdlc_frames > 0) {
+                                    printf("\n=== V.90 V.34 Upstream Recovery ===\n");
+                                    printf("  CP'/E boundary: %.3f ms; B1: %.3f ms\n",
+                                           sample_to_ms(
+                                               direct_e_data_sample, 8000),
+                                           sample_to_ms(
+                                               fse_decode.data_start_sample,
+                                               8000));
+                                    printf("  Mode: %d baud, %d bps, trellis=%d, nonlinear=%d, shaping=%s\n",
+                                           v34_baud_code_to_rate(baud_code),
+                                           fse_mp.mp.bit_rate_c_to_a * 2400,
+                                           fse_mp.mp.trellis_size,
+                                           fse_mp.mp
+                                               .use_non_linear_encoder,
+                                           fse_mp.mp.expanded_shaping
+                                               ? "expanded" : "minimum");
+                                    printf("  B1 evidence: %.1f%% held-out T/2 FSE geometry\n",
+                                           100.0f
+                                             * best_fse.holdout_match);
+                                    printf("  Payload: %d bits; HDLC FCS valid=%d frames/%d bytes\n",
+                                           fse_decode.data_bits,
+                                           fse_decode.hdlc_frames,
+                                           fse_decode.hdlc_bytes);
+                                    p3_result_free(fse_equalized);
+                                    p3_result_free(half_baud);
+                                    p3_result_free(local_symbols);
+                                    if (best_local_symbols)
+                                        p3_result_free(best_local_symbols);
+                                    goto v90_upstream_cleanup;
+                                }
+                                if (fse_equalized)
+                                    p3_result_free(fse_equalized);
+                            }
+                            if (half_baud)
+                                p3_result_free(half_baud);
+                        }
                         v34_search_supervised_b1_fcs(
                             local_symbols,
                             b1_templates,
@@ -30734,6 +32035,74 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             baud_code,
                             known_data_sample,
                             &supervised_search);
+                        if (data_cp.valid && data_cp_last_sample >= 0) {
+                            v90_cp4_fir_fit_t cp_fit;
+
+                            if (v90_fit_cp4_fir(
+                                    local_symbols,
+                                    &data_cp.frame,
+                                    data_cp_last_sample,
+                                    &cp_fit)) {
+                                p3_result_t *cp_equalized =
+                                    v34_apply_b1_fir(
+                                        local_symbols, &cp_fit.fir);
+                                v34_supervised_b1_search_t cp_search;
+
+                                memset(&cp_search, 0, sizeof(cp_search));
+                                if (cp_equalized) {
+                                    if (getenv("VPCM_V90_B1_MODE_DIAG")) {
+                                        v34_diagnose_b1_modes(
+                                            cp_equalized,
+                                            baud_code,
+                                            known_data_sample,
+                                            downstream_mp.valid
+                                                ? &downstream_mp : NULL);
+                                    }
+                                    v34_search_supervised_b1_fcs(
+                                        cp_equalized,
+                                        b1_templates,
+                                        b1_template_count,
+                                        baud_code,
+                                        known_data_sample,
+                                        &cp_search);
+                                }
+                                if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                                    fprintf(stderr,
+                                            "v90 CP'-trained timing=%d plain=%d/%d scrambled=%d/%d carrier-step=%d conjugate=%d holdout=%.1f%% train=%.1f%% B1=%.1f%% sample=%d template=%d hdlc=%d/%d\n",
+                                            timing,
+                                            cp_fit.plain_errors,
+                                            cp_fit.plain_bits,
+                                            cp_fit.scrambled_errors,
+                                            cp_fit.scrambled_bits,
+                                            cp_fit.carrier_step,
+                                            cp_fit.conjugate ? 1 : 0,
+                                            100.0f * cp_fit.holdout_match,
+                                            100.0f
+                                              * cp_fit.fir.training_match,
+                                            100.0f
+                                              * cp_search.best_holdout_match,
+                                            cp_search.first_symbol >= 0
+                                                ? cp_equalized->symbols[
+                                                    cp_search.first_symbol]
+                                                    .sample_index : -1,
+                                            cp_search.template_index,
+                                            cp_search.decoded.hdlc_frames,
+                                            cp_search.decoded.hdlc_bytes);
+                                }
+                                if (cp_equalized
+                                    && (cp_search.fcs_valid
+                                        || cp_search.best_holdout_match
+                                           > supervised_search
+                                               .best_holdout_match)) {
+                                    p3_result_free(local_symbols);
+                                    local_symbols = cp_equalized;
+                                    cp_equalized = NULL;
+                                    supervised_search = cp_search;
+                                }
+                                if (cp_equalized)
+                                    p3_result_free(cp_equalized);
+                            }
+                        }
                         local_match =
                             supervised_search.best_holdout_match;
                         local_first = supervised_search.first_symbol;

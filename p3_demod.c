@@ -674,6 +674,28 @@ static void equalizer_tune_qpsk(p3_demod_t *d,
     }
 }
 
+static void store_half_baud_sample(p3_demod_t *d,
+                                   float re,
+                                   float im,
+                                   int sample_index,
+                                   p3_result_t *result)
+{
+    p3_symbol_t *symbol;
+
+    if (!d || !result || result->symbol_count >= result->symbol_capacity)
+        return;
+    symbol = &result->symbols[result->symbol_count++];
+    symbol->sample_index = sample_index;
+    symbol->re = re;
+    symbol->im = im;
+    symbol->magnitude = hypotf(re, im);
+    symbol->phase = atan2f(im, re);
+    symbol->quadrant = phase_to_dibit(re, im, 1.0f, 0.0f);
+    d->total_symbols++;
+    d->magnitude_sum += symbol->magnitude;
+    d->magnitude_count++;
+}
+
 static int p3_rrc_demod_process(p3_demod_t *d,
                                 const int16_t *samples,
                                 int sample_count,
@@ -756,6 +778,15 @@ static int p3_rrc_demod_process(p3_demod_t *d,
             sym_re *= d->rrc_agc_gain;
             sym_im *= d->rrc_agc_gain;
             equalizer_push(d, sym_re, sym_im);
+            if (d->emit_half_baud) {
+                store_half_baud_sample(
+                    d,
+                    sym_re,
+                    sym_im,
+                    sample_offset + i
+                      - (int)(32.0f * d->samples_per_symbol + 0.5f),
+                    result);
+            }
 
             if (d->rrc_half_baud) {
                 d->rrc_half_baud = 0;
@@ -778,12 +809,16 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                     equalizer_tune_qpsk(d, eq_re, eq_im);
                 else
                     equalizer_tune_cma(d, eq_re, eq_im);
-                emit_symbol(d,
-                            eq_re,
-                            eq_im,
-                            sample_offset + i - (int)(32.0f * d->samples_per_symbol + 0.5f),
-                            true,
-                            result);
+                if (!d->emit_half_baud) {
+                    emit_symbol(d,
+                                eq_re,
+                                eq_im,
+                                sample_offset + i
+                                  - (int)(32.0f * d->samples_per_symbol
+                                          + 0.5f),
+                                true,
+                                result);
+                }
             } else {
                 d->rrc_half_baud = 1;
             }
@@ -2657,7 +2692,8 @@ static p3_result_t *p3_demod_run_internal(const int16_t *samples,
                                           int preferred_phase4_role,
                                           int trials_override,
                                           int cma_freeze_after_sample,
-                                          int forced_trial)
+                                          int forced_trial,
+                                          bool emit_half_baud)
 {
     p3_result_t *best_result = NULL;
     float best_score = -FLT_MAX;
@@ -2701,12 +2737,14 @@ static p3_result_t *p3_demod_run_internal(const int16_t *samples,
             continue;
 
         p3_demod_init(&demod, baud_code, carrier_sel, sample_rate);
+        demod.emit_half_baud = emit_half_baud;
         demod.cma_freeze_after_sample = cma_freeze_after_sample;
         /* Sweep initial strobe phase to reduce aliasing to a bad symbol cut. */
         demod.baud_phase = ((float) t / (float) trials) * demod.samples_per_symbol;
         demod.rrc_step = (t * P3_RRC_PHASES) / trials;
         p3_demod_process(&demod, samples, sample_count, sample_offset, result);
-        p3_segment_symbols(result);
+        if (!emit_half_baud)
+            p3_segment_symbols(result);
 
         result->carrier_freq_estimate = demod.carrier_hz + demod.pll_freq_err;
         result->baud_rate_estimate = demod.baud_rate;
@@ -2783,7 +2821,8 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                                  0,
                                  0,
                                  -1,
-                                 -1);
+                                 -1,
+                                 false);
 }
 
 p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,
@@ -2802,7 +2841,8 @@ p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,
                                  1,
                                  0,
                                  -1,
-                                 -1);
+                                 -1,
+                                 false);
 }
 
 p3_result_t *p3_demod_run_call_phase4(const int16_t *samples,
@@ -2821,7 +2861,8 @@ p3_result_t *p3_demod_run_call_phase4(const int16_t *samples,
                                  2,
                                  0,
                                  -1,
-                                 -1);
+                                 -1,
+                                 false);
 }
 
 p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
@@ -2842,7 +2883,8 @@ p3_result_t *p3_demod_run_phase4_trials(const int16_t *samples,
                                  source_calling_party ? 2 : 1,
                                  timing_trials,
                                  -1,
-                                 -1);
+                                 -1,
+                                 false);
 }
 
 p3_result_t *p3_demod_run_phase4_data(const int16_t *samples,
@@ -2864,7 +2906,8 @@ p3_result_t *p3_demod_run_phase4_data(const int16_t *samples,
                                  source_calling_party ? 2 : 1,
                                  timing_trials,
                                  cma_freeze_after_sample,
-                                 -1);
+                                 -1,
+                                 false);
 }
 
 p3_result_t *p3_demod_run_phase4_data_at_timing(
@@ -2890,7 +2933,35 @@ p3_result_t *p3_demod_run_phase4_data_at_timing(
                                  source_calling_party ? 2 : 1,
                                  timing_count,
                                  cma_freeze_after_sample,
-                                 timing_index);
+                                 timing_index,
+                                 false);
+}
+
+p3_result_t *p3_demod_run_half_baud_at_timing(
+                                      const int16_t *samples,
+                                      int sample_count,
+                                      int sample_offset,
+                                      int baud_code,
+                                      int carrier_sel,
+                                      int sample_rate,
+                                      bool source_calling_party,
+                                      int timing_index,
+                                      int timing_count,
+                                      int cma_freeze_after_sample)
+{
+    if (timing_count <= 0 || timing_index < 0 || timing_index >= timing_count)
+        return NULL;
+    return p3_demod_run_internal(samples,
+                                 sample_count,
+                                 sample_offset,
+                                 baud_code,
+                                 carrier_sel,
+                                 sample_rate,
+                                 source_calling_party ? 2 : 1,
+                                 timing_count,
+                                 cma_freeze_after_sample,
+                                 timing_index,
+                                 true);
 }
 
 /* ------------------------------------------------------------------ */
