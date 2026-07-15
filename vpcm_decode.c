@@ -13175,6 +13175,11 @@ static bool v90_recover_nearest_mp0(const uint8_t *observed,
     return true;
 }
 
+static int v90_mp_frame_prefilter_score(const uint8_t *bits,
+                                        int bit_count,
+                                        int offset,
+                                        int type);
+
 static bool v90_recover_repeated_mp1_at_boundary(
                                     const uint8_t *plain_bits,
                                     int bit_count,
@@ -13250,7 +13255,28 @@ static bool v90_recover_repeated_mp1_at_boundary(
              at + (later + 1) * length <= bit_count && later < 500;
              later++) {
             v34_upstream_mp_recovery_t observed;
-            int sample;
+            int sample = pcm_start_sample
+                       + (trn_frames
+                          + (length / bits_per_frame) * later) * 6;
+
+            if (getenv("VPCM_V90_MP_TIMELINE_DIAG")) {
+                const uint8_t *frame = plain_bits + at + later * length;
+                int type = frame[18] & 1;
+                int score = v90_mp_frame_prefilter_score(
+                    plain_bits,
+                    bit_count,
+                    at + later * length,
+                    type);
+
+                fprintf(stderr,
+                        "v90 MP timeline repeat=%d sample=%d type=%d ack=%d score=%d crc=0x%04X\n",
+                        later,
+                        sample,
+                        type,
+                        frame[33] != 0,
+                        score,
+                        (unsigned)v90_mp_crc_remainder(frame, type));
+            }
 
             if (!v90_downstream_mp_decode_strict(
                     plain_bits + at + later * length,
@@ -13260,9 +13286,6 @@ static bool v90_recover_repeated_mp1_at_boundary(
                 || !v90_mp_tuples_equal(&strict.mp, &observed.mp)) {
                 continue;
             }
-            sample = pcm_start_sample
-                   + (trn_frames
-                      + (length / bits_per_frame) * later) * 6;
             strict.remote_last_mp_sample = sample;
             if (strict.remote_ack_sample < 0
                 && observed.mp.mp_acknowledged) {
@@ -13992,8 +14015,10 @@ static bool v90_recover_downstream_mp_pcm(
                     WAVE_CODEWORDS);
                 double best_signed = 0.0;
                 double best_magnitude = 0.0;
+                double best_centered_magnitude = 0.0;
                 int best_signed_start = -1;
                 int best_magnitude_start = -1;
+                int best_centered_magnitude_start = -1;
 
                 if (generated_wave == WAVE_CODEWORDS) {
                     for (int start = acq_begin;
@@ -14005,6 +14030,8 @@ static bool v90_recover_downstream_mp_pcm(
                         double mag_xy = 0.0;
                         double mag_xx = 0.0;
                         double mag_yy = 0.0;
+                        double mag_x = 0.0;
+                        double mag_y = 0.0;
 
                         for (int i = 0; i < WAVE_CODEWORDS; i++) {
                             double x = digital_pcm[start + i] / 32768.0;
@@ -14019,6 +14046,8 @@ static bool v90_recover_downstream_mp_pcm(
                             mag_xy += fabs(x) * fabs(y);
                             mag_xx += x * x;
                             mag_yy += y * y;
+                            mag_x += fabs(x);
+                            mag_y += fabs(y);
                         }
                         if (xx > 0.0 && yy > 0.0) {
                             double correlation = fabs(xy)
@@ -14038,14 +14067,35 @@ static bool v90_recover_downstream_mp_pcm(
                                 best_magnitude_start = start;
                             }
                         }
+                        {
+                            double count = WAVE_CODEWORDS;
+                            double covariance = count * mag_xy
+                                              - mag_x * mag_y;
+                            double variance_x = count * mag_xx
+                                              - mag_x * mag_x;
+                            double variance_y = count * mag_yy
+                                              - mag_y * mag_y;
+
+                            if (variance_x > 0.0 && variance_y > 0.0) {
+                                double correlation = fabs(covariance)
+                                    / sqrt(variance_x * variance_y);
+
+                                if (correlation > best_centered_magnitude) {
+                                    best_centered_magnitude = correlation;
+                                    best_centered_magnitude_start = start;
+                                }
+                            }
+                        }
                     }
                 }
                 fprintf(stderr,
-                        "v90 TRN2d known-wave signed=%d/%.1f%% magnitude=%d/%.1f%% window=%d:%d\n",
+                        "v90 TRN2d known-wave signed=%d/%.1f%% magnitude=%d/%.1f%% centered=%d/%.1f%% window=%d:%d\n",
                         best_signed_start,
                         100.0 * best_signed,
                         best_magnitude_start,
                         100.0 * best_magnitude,
+                        best_centered_magnitude_start,
+                        100.0 * best_centered_magnitude,
                         acq_begin,
                         acq_end);
             }
@@ -28573,12 +28623,29 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         for (int i = 0; i < VPCM_CP_MASK_BYTES; i++)
                             fprintf(stderr, "%02x", native_cp.frame.codec_masks[0][i]);
                         fprintf(stderr,
-                                " coeffs={%d,%d,%d,%d} gain=%u\n",
+                                " coeffs={%d,%d,%d,%d} gain=%u dfi={%u,%u,%u,%u,%u,%u} populations=",
                                 (int)(int8_t)native_cp.frame.shaping_a1_q1_6,
                                 (int)(int8_t)native_cp.frame.shaping_a2_q1_6,
                                 (int)(int8_t)native_cp.frame.shaping_b1_q1_6,
                                 (int)(int8_t)native_cp.frame.shaping_b2_q1_6,
-                                (unsigned)native_cp.frame.trn1d_gain_q3_13);
+                                (unsigned)native_cp.frame.trn1d_gain_q3_13,
+                                (unsigned)native_cp.frame.dfi[0],
+                                (unsigned)native_cp.frame.dfi[1],
+                                (unsigned)native_cp.frame.dfi[2],
+                                (unsigned)native_cp.frame.dfi[3],
+                                (unsigned)native_cp.frame.dfi[4],
+                                (unsigned)native_cp.frame.dfi[5]);
+                        for (int c = 0;
+                             c < native_cp.frame.constellation_count; c++) {
+                            fprintf(stderr,
+                                    "%s%d/%d",
+                                    c ? "," : "",
+                                    vpcm_cp_mask_population(
+                                        native_cp.frame.masks[c]),
+                                    vpcm_cp_mask_population(
+                                        native_cp.frame.codec_masks[c]));
+                        }
+                        fputc('\n', stderr);
                     }
                     if (!getenv("VPCM_SKIP_V90_MP_PCM")
                         && v90_recover_downstream_mp_pcm(
@@ -30105,6 +30172,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                     int best_raw_sample = -1;
                     double best_raw_frequency = 0.0;
                     int best_raw_template = -1;
+                    double raw_samples_per_symbol = 0.0;
                     double template_raw_match[V90_B1_MAX_TEMPLATES] = {0};
                     double template_raw_frequency[V90_B1_MAX_TEMPLATES] = {0};
                     int template_raw_sample[V90_B1_MAX_TEMPLATES];
@@ -30122,6 +30190,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         raw_search_end = direct_e_data_sample + 32;
                     }
 
+                    if (getenv("VPCM_V90_RAW_B1_START"))
+                        raw_search_start = atoi(
+                            getenv("VPCM_V90_RAW_B1_START"));
+                    if (getenv("VPCM_V90_RAW_B1_END"))
+                        raw_search_end = atoi(
+                            getenv("VPCM_V90_RAW_B1_END"));
+
                     if (getenv("VPCM_V90_RAW_B1_WIDE")) {
                         raw_search_start = downstream_mp.start_sample;
                         raw_search_end = total_samples - 512;
@@ -30133,8 +30208,11 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         double nominal_frequency =
                             cp_carrier == P3_CARRIER_HIGH
                                 ? bp.carrier_high_hz : bp.carrier_low_hz;
-                        double samples_per_symbol =
-                            (double)bp.samples_num / bp.samples_den;
+                        double samples_per_symbol = getenv(
+                            "VPCM_V90_RAW_SAMPLES_PER_SYMBOL")
+                            ? atof(getenv(
+                                "VPCM_V90_RAW_SAMPLES_PER_SYMBOL"))
+                            : (double)bp.samples_num / bp.samples_den;
                         int carrier_span_hz =
                             getenv("VPCM_V90_RAW_CARRIER_SPAN_HZ")
                                 ? atoi(getenv(
@@ -30145,6 +30223,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                             carrier_span_hz = 1;
                         if (carrier_span_hz > 400)
                             carrier_span_hz = 400;
+                        raw_samples_per_symbol = samples_per_symbol;
 
                         for (int half_hz = -2 * carrier_span_hz;
                              half_hz <= 2 * carrier_span_hz;
@@ -30236,12 +30315,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         }
                     }
                     fprintf(stderr,
-                            "v90 B1 raw correlation=%.1f%% sample=%d ms=%.3f carrier=%.3fHz template=%d rate=%d trellis=%d nonlinear=%d shaping=%d xform=%d v0=%d\n",
+                            "v90 B1 raw correlation=%.1f%% sample=%d ms=%.3f carrier=%.3fHz sps=%.9f template=%d rate=%d trellis=%d nonlinear=%d shaping=%d xform=%d v0=%d\n",
                             100.0 * best_raw_match,
                             best_raw_sample,
                             best_raw_sample >= 0
                                 ? sample_to_ms(best_raw_sample, 8000) : -1.0,
                             best_raw_frequency,
+                            raw_samples_per_symbol,
                             best_raw_template,
                             best_raw_template >= 0
                                 ? b1_templates[best_raw_template].rate_n : -1,
@@ -30273,9 +30353,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         double template_fir_frequency[
                             V90_B1_MAX_TEMPLATES][2] = {{0}};
                         double samples_per_symbol =
-                            p3_get_baud_params(baud_code, &bp)
-                                ? (double)bp.samples_num / bp.samples_den
-                                : 0.0;
+                            raw_samples_per_symbol;
 
                         for (int t = 0; t < b1_template_count; t++) {
                             template_fir_sample[t][0] = -1;
@@ -30629,8 +30707,11 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 total_samples - local_start,
                                 local_start,
                                 baud_code,
-                                cp_carrier == P3_CARRIER_HIGH
-                                    ? P3_CARRIER_HIGH : P3_CARRIER_LOW,
+                                getenv("VPCM_V90_B1_CARRIER")
+                                    ? atoi(getenv("VPCM_V90_B1_CARRIER"))
+                                    : (cp_carrier == P3_CARRIER_HIGH
+                                       ? P3_CARRIER_HIGH
+                                       : P3_CARRIER_LOW),
                                 8000,
                                 true,
                                 timing,

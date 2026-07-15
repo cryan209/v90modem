@@ -86,10 +86,18 @@ typedef struct {
     double x1;
     double y1;
     double v1;
-    bool pending_valid;
-    int pending_ucodes[V90_FRAME_LEN];
-    uint8_t pending_signs[V90_FRAME_LEN];
+    int pending_count;
+    int pending_ucodes[4][V90_FRAME_LEN];
+    uint8_t pending_signs[4][V90_FRAME_LEN];
 } v90_shaper_state_t;
+
+static int v90_shaper_delay_frames(const vpcm_cp_frame_t *cp)
+{
+    if (!cp || cp->shaping_redundancy == 0)
+        return 0;
+    return (cp->shaping_lookahead + cp->shaping_redundancy - 1)
+         / cp->shaping_redundancy;
+}
 
 static void v90_scrambler_init(v90_scrambler_t *sc)
 {
@@ -601,7 +609,7 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
         || cp->acknowledge
         || cp->codec_alaw != (s->law == V90_LAW_ALAW)
         || cp->shaping_redundancy > 3
-        || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 1)
+        || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 3)
         || cp->drn < 4 || cp->drn > 22)
         return false;
 
@@ -664,7 +672,7 @@ static bool v90_configure_data_mapper(v90_state_t *s,
         || cp->acknowledge
         || cp->codec_alaw != (s->law == V90_LAW_ALAW)
         || cp->shaping_redundancy > 3
-        || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 1)
+        || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 3)
         || cp->drn < 1 || cp->drn > 22)
         return false;
 
@@ -795,11 +803,12 @@ static bool v90_phase4_fill_frame(v90_state_t *s, v90_phase4_input_t input)
 static uint8_t v90_phase4_codeword(v90_state_t *s, v90_phase4_input_t input)
 {
     if (s->phase4_frame_pos >= V90_FRAME_LEN) {
+        int delay_frames = v90_shaper_delay_frames(&s->cp_frame);
         int attempts = 0;
 
         while (!v90_phase4_fill_frame(s, input)) {
             attempts++;
-            if (s->cp_frame.shaping_lookahead != 1 || attempts >= 2)
+            if (attempts > delay_frames)
                 return v90_pcm_idle(s->law);
         }
     }
@@ -881,14 +890,54 @@ static void v90_build_initial_shaping_signs(v90_shaper_state_t *shaper,
     }
 }
 
+static double v90_preview_shaper_rules(v90_state_t *s,
+                                       const vpcm_cp_frame_t *cp,
+                                       const int *ucodes,
+                                       const uint8_t *initial,
+                                       int frame_length,
+                                       int frame_count,
+                                       int trellis_state,
+                                       v90_shaper_filter_state_t filter)
+{
+    double best_metric = HUGE_VAL;
+    int rules[2] = {
+        trellis_state == 0 ? 0 : 2,
+        trellis_state == 0 ? 1 : 3
+    };
+
+    if (frame_count <= 0)
+        return 0.0;
+    for (int choice = 0; choice < 2; choice++) {
+        int rule = rules[choice];
+        int next_state = (rule == 1 || rule == 3) ? 1 : 0;
+        v90_shaper_filter_state_t next = v90_evaluate_shaper_rule(
+            s, cp, ucodes, initial, frame_length, rule, filter);
+        double metric = next.metric;
+
+        if (frame_count > 1) {
+            metric += v90_preview_shaper_rules(
+                s,
+                cp,
+                ucodes + frame_length,
+                initial + frame_length,
+                frame_length,
+                frame_count - 1,
+                next_state,
+                next);
+        }
+        if (metric < best_metric)
+            best_metric = metric;
+    }
+    return best_metric;
+}
+
 static int v90_select_shaper_rule(v90_state_t *s,
                                   const vpcm_cp_frame_t *cp,
                                   const v90_shaper_state_t *shaper,
                                   const int *ucodes,
                                   const uint8_t *initial,
-                                  const int *next_ucodes,
-                                  const uint8_t *next_initial,
                                   int frame_length,
+                                  int lookahead,
                                   v90_shaper_filter_state_t *selected_filter)
 {
     v90_shaper_filter_state_t base = {
@@ -917,28 +966,15 @@ static int v90_select_shaper_rule(v90_state_t *s,
                                            first_rule,
                                            base);
         metric = current.metric;
-        if (next_ucodes && next_initial) {
-            int next_rules[2] = {
-                next_state == 0 ? 0 : 2,
-                next_state == 0 ? 1 : 3
-            };
-            double next_best = HUGE_VAL;
-
-            for (int next_idx = 0; next_idx < 2; next_idx++) {
-                v90_shaper_filter_state_t preview;
-
-                preview = v90_evaluate_shaper_rule(s,
-                                                   cp,
-                                                   next_ucodes,
-                                                   next_initial,
-                                                   frame_length,
-                                                   next_rules[next_idx],
-                                                   current);
-                if (preview.metric < next_best)
-                    next_best = preview.metric;
-            }
-            metric += next_best;
-        }
+        if (lookahead > 0)
+            metric += v90_preview_shaper_rules(s,
+                                               cp,
+                                               ucodes + frame_length,
+                                               initial + frame_length,
+                                               frame_length,
+                                               lookahead,
+                                               next_state,
+                                               current);
         if (metric < best_metric) {
             best_metric = metric;
             best_rule = first_rule;
@@ -952,10 +988,8 @@ static void v90_shape_data_signs(v90_state_t *s,
                                  const vpcm_cp_frame_t *cp,
                                  int shaping_redundancy,
                                  v90_shaper_state_t *shaper,
-                                 const int ucodes[V90_FRAME_LEN],
-                                 const uint8_t initial[V90_FRAME_LEN],
-                                 const int lookahead_ucodes[V90_FRAME_LEN],
-                                 const uint8_t lookahead_initial[V90_FRAME_LEN],
+                                 const int *ucodes,
+                                 const uint8_t *initial,
                                  uint8_t signs[V90_FRAME_LEN])
 {
     int frame_length = V90_FRAME_LEN / shaping_redundancy;
@@ -963,27 +997,15 @@ static void v90_shape_data_signs(v90_state_t *s,
     for (int frame = 0; frame < shaping_redundancy; frame++) {
         int offset = frame * frame_length;
         v90_shaper_filter_state_t selected;
-        const int *next_ucodes = NULL;
-        const uint8_t *next_initial = NULL;
         int rule;
 
-        if (cp->shaping_lookahead == 1) {
-            if (frame + 1 < shaping_redundancy) {
-                next_ucodes = ucodes + offset + frame_length;
-                next_initial = initial + offset + frame_length;
-            } else {
-                next_ucodes = lookahead_ucodes;
-                next_initial = lookahead_initial;
-            }
-        }
         rule = v90_select_shaper_rule(s,
                                       cp,
                                       shaper,
                                       ucodes + offset,
                                       initial + offset,
-                                      next_ucodes,
-                                      next_initial,
                                       frame_length,
+                                      cp->shaping_lookahead,
                                       &selected);
         for (int k = 0; k < frame_length; k++)
             signs[offset + k] = initial[offset + k]
@@ -1008,6 +1030,7 @@ static bool v90_map_shaped_scrambled_frame(
     uint8_t initial_signs[V90_FRAME_LEN];
     uint8_t shaped_signs[V90_FRAME_LEN];
     int ucodes[V90_FRAME_LEN];
+    int delay_frames;
     uint64_t r = 0;
 
     if (!s || !cp || !scrambled || !shaper || !frame
@@ -1033,48 +1056,42 @@ static bool v90_map_shaped_scrambled_frame(
                                     shaping_redundancy,
                                     scrambled,
                                     initial_signs);
-    if (cp->shaping_lookahead == 1) {
-        if (!shaper->pending_valid) {
-            memcpy(shaper->pending_ucodes, ucodes,
-                   sizeof(shaper->pending_ucodes));
-            memcpy(shaper->pending_signs, initial_signs,
-                   sizeof(shaper->pending_signs));
-            shaper->pending_valid = true;
-            return false;
-        }
-        v90_shape_data_signs(s,
-                             cp,
-                             shaping_redundancy,
-                             shaper,
-                             shaper->pending_ucodes,
-                             shaper->pending_signs,
-                             ucodes,
-                             initial_signs,
-                             shaped_signs);
-        for (int i = 0; i < V90_FRAME_LEN; i++) {
-            frame[i] = v90_pcm_signed_codeword(s->law,
-                                                shaper->pending_ucodes[i],
-                                                shaped_signs[i]);
-        }
-        memcpy(shaper->pending_ucodes, ucodes,
-               sizeof(shaper->pending_ucodes));
-        memcpy(shaper->pending_signs, initial_signs,
-               sizeof(shaper->pending_signs));
-    } else {
-        v90_shape_data_signs(s,
-                             cp,
-                             shaping_redundancy,
-                             shaper,
-                             ucodes,
-                             initial_signs,
-                             NULL,
-                             NULL,
-                             shaped_signs);
-        for (int i = 0; i < V90_FRAME_LEN; i++) {
-            frame[i] = v90_pcm_signed_codeword(s->law,
-                                                ucodes[i],
-                                                shaped_signs[i]);
-        }
+    delay_frames = v90_shaper_delay_frames(cp);
+    if (shaper->pending_count >= (int)(sizeof(shaper->pending_ucodes)
+                                      / sizeof(shaper->pending_ucodes[0])))
+        return false;
+    memcpy(shaper->pending_ucodes[shaper->pending_count],
+           ucodes,
+           sizeof(ucodes));
+    memcpy(shaper->pending_signs[shaper->pending_count],
+           initial_signs,
+           sizeof(initial_signs));
+    shaper->pending_count++;
+    if (shaper->pending_count <= delay_frames)
+        return false;
+
+    v90_shape_data_signs(s,
+                         cp,
+                         shaping_redundancy,
+                         shaper,
+                         &shaper->pending_ucodes[0][0],
+                         &shaper->pending_signs[0][0],
+                         shaped_signs);
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        frame[i] = v90_pcm_signed_codeword(s->law,
+                                            shaper->pending_ucodes[0][i],
+                                            shaped_signs[i]);
+    }
+    shaper->pending_count--;
+    if (shaper->pending_count > 0) {
+        memmove(shaper->pending_ucodes[0],
+                shaper->pending_ucodes[1],
+                (size_t)shaper->pending_count
+                    * sizeof(shaper->pending_ucodes[0]));
+        memmove(shaper->pending_signs[0],
+                shaper->pending_signs[1],
+                (size_t)shaper->pending_count
+                    * sizeof(shaper->pending_signs[0]));
     }
     return true;
 }
@@ -1118,12 +1135,12 @@ static uint8_t v90_data_mapper_ones_codeword(v90_state_t *s)
 {
     if (s->data_mapper_frame_pos >= V90_FRAME_LEN) {
         uint64_t ones = (1ULL << s->data_mapper_d) - 1ULL;
-
+        int delay_frames = v90_shaper_delay_frames(&s->data_cp_frame);
         int attempts = 0;
 
         while (!v90_data_mapper_fill_frame(s, ones)) {
             attempts++;
-            if (s->data_cp_frame.shaping_lookahead != 1 || attempts >= 2)
+            if (attempts > delay_frames)
                 return v90_pcm_idle(s->law);
         }
     }
@@ -2462,25 +2479,24 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
         {
             uint8_t codeword;
-            int tx_symbols = V90_ED_SYMBOLS;
+            int tx_symbols = V90_ED_SYMBOLS
+                           + v90_shaper_delay_frames(&s->cp_frame)
+                           * V90_FRAME_LEN;
 
             if (s->v92_mode && s->v92_native_cpu_rx) {
                 /* §8.8.2/V.92: Ed uses the corresponding TRN2d modulation. */
-                if (s->cp_frame.shaping_lookahead == 1)
-                    tx_symbols += V90_FRAME_LEN;
                 codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ZEROS);
             } else if (s->v92_mode) {
                 int zero_bit = v90_scramble_bit(&s->scrambler, 0);
 
+                tx_symbols = V90_ED_SYMBOLS;
                 s->diff_enc ^= zero_bit;
                 codeword = v90_pcm_signed_codeword(s->law, s->u_info, s->diff_enc);
             } else {
-                /* ld=1 keeps the final MP frame pending. Feed one additional
-                 * zero frame so the wire sees that MP frame followed by both
-                 * required Ed frames before switching to the independent B1d
-                 * mapper. */
-                if (s->cp_frame.shaping_lookahead == 1)
-                    tx_symbols += V90_FRAME_LEN;
+                /* Lookahead keeps ceil(ld/Sr) final MP frames pending. Feed
+                 * that many additional zero frames so the wire sees every MP
+                 * frame followed by both required Ed frames before switching
+                 * to the independent B1d mapper. */
                 codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ZEROS);
             }
             s->sample_count++;
@@ -3342,7 +3358,7 @@ int v90_generate_trn2d_codewords(v90_law_t law,
         || codewords_max < frames * V90_FRAME_LEN
         || cp->shaping_redundancy < 1
         || cp->shaping_redundancy > 3
-        || cp->shaping_lookahead > 1)
+        || cp->shaping_lookahead > 3)
         return 0;
     bits_per_frame = cp->drn + 8;
     sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
@@ -3358,10 +3374,10 @@ int v90_generate_trn2d_codewords(v90_law_t law,
            sizeof(initial_state->prev_t));
     shaper.trellis_state = initial_state->trellis_state;
     v90_scrambler_init(&scrambler);
-    /* ld=1 buffers one frame so its magnitudes and initial signs can be
-     * included when selecting the current frame's shaping rule.  Feed one
-     * extra all-ones frame to emit the requested final TRN2d frame. */
-    input_frames = frames + (cp->shaping_lookahead == 1 ? 1 : 0);
+    /* ld is measured in shaping frames. Buffer enough six-symbol PCM frames
+     * to expose ld future shaping frames, then feed the same number of extra
+     * all-ones frames to emit the requested final TRN2d frame. */
+    input_frames = frames + v90_shaper_delay_frames(cp);
     for (int input_frame = 0; input_frame < input_frames; input_frame++) {
         uint8_t scrambled[64];
 
@@ -3376,8 +3392,8 @@ int v90_generate_trn2d_codewords(v90_law_t law,
                 scrambled,
                 &shaper,
                 codewords_out + output_frame * V90_FRAME_LEN)) {
-            if (cp->shaping_lookahead == 1 && shaper.pending_valid
-                && input_frame == 0) {
+            if (shaper.pending_count > 0
+                && shaper.pending_count <= v90_shaper_delay_frames(cp)) {
                 continue;
             }
             return 0;
@@ -3408,7 +3424,7 @@ int v90_generate_phase4_codewords(v90_law_t law,
         || codewords_max < frames * V90_FRAME_LEN
         || cp->shaping_redundancy < 1
         || cp->shaping_redundancy > 3
-        || cp->shaping_lookahead > 1)
+        || cp->shaping_lookahead > 3)
         return 0;
     bits_per_frame = cp->drn + 8;
     sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
@@ -3424,7 +3440,7 @@ int v90_generate_phase4_codewords(v90_law_t law,
            sizeof(initial_state->prev_t));
     shaper.trellis_state = initial_state->trellis_state;
     v90_scrambler_init(&scrambler);
-    input_frames = frames + (cp->shaping_lookahead == 1 ? 1 : 0);
+    input_frames = frames + v90_shaper_delay_frames(cp);
     for (int input_frame = 0; input_frame < input_frames; input_frame++) {
         uint8_t scrambled[64];
 
@@ -3444,8 +3460,8 @@ int v90_generate_phase4_codewords(v90_law_t law,
                 scrambled,
                 &shaper,
                 codewords_out + output_frame * V90_FRAME_LEN)) {
-            if (cp->shaping_lookahead == 1 && shaper.pending_valid
-                && input_frame == 0) {
+            if (shaper.pending_count > 0
+                && shaper.pending_count <= v90_shaper_delay_frames(cp)) {
                 continue;
             }
             return 0;

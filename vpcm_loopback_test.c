@@ -1376,9 +1376,9 @@ static bool test_v90_shaped_phase4(v91_law_t law)
     const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
     int first_magnitudes[3][VPCM_CP_FRAME_INTERVALS] = {{0}};
 
-    vpcm_log("Test: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0/1 (%s)", law_name);
+    vpcm_log("Test: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0..3 (%s)", law_name);
     for (int sr = 1; sr <= 3; sr++) {
-        for (int lookahead = 0; lookahead <= 1; lookahead++) {
+        for (int lookahead = 0; lookahead <= 3; lookahead++) {
             for (int drn = 4; drn <= 22 - sr; drn++) {
                 vpcm_cp_frame_t cpt;
                 v90_state_t *tx = v90_init_data_pump(v90_law);
@@ -1417,7 +1417,7 @@ static bool test_v90_shaped_phase4(v91_law_t law)
         }
     }
     for (int sr = 1; sr <= 3; sr++) {
-        for (int lookahead = 0; lookahead <= 1; lookahead++) {
+        for (int lookahead = 0; lookahead <= 3; lookahead++) {
             v90_state_t *tx = v90_init_data_pump(v90_law);
             vpcm_cp_frame_t cpt;
             vpcm_cp_frame_t data_cp;
@@ -1432,6 +1432,7 @@ static bool test_v90_shaped_phase4(v91_law_t law)
             int symbols = 0;
             int mp_nbits;
             int ed_symbols = 0;
+            int delay_frames = (lookahead + sr - 1) / sr;
             bool failed = false;
 
             if (!tx)
@@ -1632,7 +1633,8 @@ static bool test_v90_shaped_phase4(v91_law_t law)
                 ed_symbols++;
             }
             if (v90_get_tx_phase(tx) != V90_TX_B1D
-                || ed_symbols != 12 + lookahead * VPCM_CP_FRAME_INTERVALS) {
+                || ed_symbols != 12
+                              + delay_frames * VPCM_CP_FRAME_INTERVALS) {
                 fprintf(stderr,
                         "V.90 shaped Ed drain length wrong Sr=%d ld=%d symbols=%d\n",
                         sr, lookahead, ed_symbols);
@@ -1683,28 +1685,7 @@ shaped_phase4_done:
         v90_free(valid);
         v90_free(invalid);
     }
-    {
-        vpcm_cp_frame_t cpt;
-        v90_state_t *tx = v90_init_data_pump(v90_law);
-
-        if (!tx)
-            return false;
-        vpcm_cp_init(&cpt);
-        cpt.v90_compatibility = false;
-        cpt.codec_alaw = (law == V91_LAW_ALAW);
-        cpt.upstream_rate_mask = 0x1FFF;
-        cpt.drn = 9;
-        cpt.shaping_redundancy = 1;
-        cpt.shaping_lookahead = 2;
-        vpcm_cp_enable_all_ucodes(cpt.masks[0]);
-        if (v90_set_phase4_cp(tx, &cpt)) {
-            fprintf(stderr, "V.90 accepted optional unsupported CPt ld=2\n");
-            v90_free(tx);
-            return false;
-        }
-        v90_free(tx);
-    }
-    vpcm_log("PASS: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0/1 (%s)", law_name);
+    vpcm_log("PASS: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0..3 (%s)", law_name);
     return true;
 }
 
@@ -3146,14 +3127,15 @@ static bool test_v90_spectral_shaping(v91_law_t law)
     uint8_t codewords[6];
     bool vector_mismatch = false;
 
-    vpcm_log("Test: V.90 Sr=1/2/3 spectral shaping ld=0/1 (%s)", law_name);
+    vpcm_log("Test: V.90 Sr=1/2/3 spectral shaping ld=0..3 (%s)", law_name);
     fill_pattern(input, INPUT_BYTES, 0x905A5100U ^ (uint32_t)law);
-    for (int lookahead = 0; lookahead <= 1; lookahead++) {
+    for (int lookahead = 0; lookahead <= 3; lookahead++) {
         for (int sr = 1; sr <= 3; sr++) {
             v90_state_t *tx = v90_test_create_negotiated_mapper(law, 9, sr, lookahead);
             int total_consumed = 0;
             int output_frames = 0;
-            int submissions = FRAMES + lookahead;
+            int delay_frames = (lookahead + sr - 1) / sr;
+            int submissions = FRAMES + delay_frames;
 
             if (!tx) {
                 fprintf(stderr, "V.90 could not configure Sr=%d ld=%d\n",
@@ -3171,7 +3153,7 @@ static bool test_v90_spectral_shaping(v91_law_t law)
                                                         &consumed,
                                                         false);
                 total_consumed += consumed;
-                if (lookahead == 1 && submission == 0) {
+                if (submission < delay_frames) {
                     if (produced != 0)
                         goto shaping_failure;
                     continue;
@@ -3193,7 +3175,7 @@ shaping_failure:
                                 codewords[3], codewords[4], codewords[5]);
                         vector_mismatch = true;
                     }
-                } else if (output_frames == 0
+                } else if (output_frames == 0 && lookahead == 1
                            && memcmp(codewords,
                                      first_frame_ld1[law_index][sr - 1],
                                      6) != 0) {
@@ -3219,11 +3201,7 @@ shaping_failure:
     }
     if (vector_mismatch)
         return false;
-    if (v90_test_create_negotiated_mapper(law, 9, 1, 2) != NULL) {
-        fprintf(stderr, "V.90 accepted unsupported spectral lookahead ld=2\n");
-        return false;
-    }
-    vpcm_log("PASS: V.90 Sr=1/2/3 spectral shaping ld=0/1 (%s)", law_name);
+    vpcm_log("PASS: V.90 Sr=1/2/3 spectral shaping ld=0..3 (%s)", law_name);
     return true;
 }
 

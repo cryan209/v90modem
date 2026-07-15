@@ -217,6 +217,7 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->rrc_input_power = 0.0f;
     d->use_instant_rrc_agc = getenv("P3_INSTANT_RRC_AGC") != NULL;
     d->rrc_signal_active = false;
+    d->use_dd_equalizer = getenv("P3_DD_EQUALIZER") != NULL;
     d->eq_coeff_re[63] = 1.0f;
     d->eq_delta = 0.21f / 127.0f;
     if (getenv("P3_EQ_DELTA_SCALE")) {
@@ -638,6 +639,41 @@ static void equalizer_tune_cma(p3_demod_t *d, float out_re, float out_im)
     }
 }
 
+/* Once a four-point Phase-4 signal has been acquired, nearest-QPSK
+ * decision-directed LMS supplies phase as well as modulus information.
+ * This is deliberately opt-in while it is evaluated on the CP'/E handoff:
+ * unlike CMA it can converge to bad decisions when acquisition BER is high. */
+static void equalizer_tune_qpsk(p3_demod_t *d,
+                                float out_re,
+                                float out_im)
+{
+    const float level = 0.7071067812f;
+    float error_re;
+    float error_im;
+    int p;
+
+    if (!isfinite(out_re) || !isfinite(out_im)
+        || out_re * out_re + out_im * out_im > 100.0f) {
+        return;
+    }
+    error_re = ((out_re >= 0.0f) ? level : -level) - out_re;
+    error_im = ((out_im >= 0.0f) ? level : -level) - out_im;
+    error_re *= d->eq_delta;
+    error_im *= d->eq_delta;
+
+    p = d->eq_buf_pos - 1;
+    for (int i = 0; i < 127; i++) {
+        float xr;
+        float xi;
+
+        p = (p - 1) & 127;
+        xr = d->eq_buf_re[p];
+        xi = d->eq_buf_im[p];
+        d->eq_coeff_re[i] += error_re * xr + error_im * xi;
+        d->eq_coeff_im[i] += error_im * xr - error_re * xi;
+    }
+}
+
 static int p3_rrc_demod_process(p3_demod_t *d,
                                 const int16_t *samples,
                                 int sample_count,
@@ -738,6 +774,8 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                      * state across the long V.90 half-duplex quiet gap. */
                 } else if (d->cma_freeze_symbols > 0)
                     d->cma_freeze_symbols--;
+                else if (d->use_dd_equalizer)
+                    equalizer_tune_qpsk(d, eq_re, eq_im);
                 else
                     equalizer_tune_cma(d, eq_re, eq_im);
                 emit_symbol(d,
