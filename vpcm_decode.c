@@ -5974,6 +5974,8 @@ typedef struct {
     int i_permutation;
     int y_permutation;
     int precoder_transform;
+    int mp_type;
+    int16_t precoder_coeffs[6];
     int v0_pattern;
     int initial_state;
     int symbol_count;
@@ -7469,6 +7471,12 @@ static bool v34_make_b1_template(int baud_code,
     out->trellis_size = trellis_size;
     out->nonlinear = nonlinear;
     out->expanded = expanded;
+    out->mp_type = precoder ? 1 : 0;
+    if (precoder) {
+        memcpy(out->precoder_coeffs,
+               precoder,
+               sizeof(out->precoder_coeffs));
+    }
     out->auxiliary = getenv("VPCM_V90_B1_AUXILIARY") != NULL;
     out->i_permutation = getenv("SPANDSP_V34_DIAG_I_PERM")
                        ? atoi(getenv("SPANDSP_V34_DIAG_I_PERM")) : 0;
@@ -8806,6 +8814,7 @@ static p3_result_t *v34_apply_b1_fir(const p3_result_t *detail,
 static bool v90_fit_cp4_fir(const p3_result_t *detail,
                             const vpcm_cp_frame_t *frame,
                             int last_frame_sample,
+                            int repetitions,
                             v90_cp4_fir_fit_t *out)
 {
     static const uint8_t q_to_dibit[4] = {0, 3, 2, 1};
@@ -8815,7 +8824,7 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
         { 0.7071068f,  0.7071068f},
         { 0.7071068f, -0.7071068f}
     };
-    enum { REPETITIONS = 4, TEMPLATE_SYMBOLS = 120 };
+    enum { TEMPLATE_SYMBOLS = 120 };
     uint8_t frame_bits[VPCM_CP_MAX_BITS];
     uint8_t *observed = NULL;
     uint8_t *best_observed = NULL;
@@ -8838,6 +8847,7 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
     bool success = false;
 
     if (!detail || !frame || !out || last_frame_sample < 0
+        || repetitions < 1
         || !vpcm_cp_encode_modulated_bits(
             frame, 4, frame_bits, &frame_bit_count)
         || frame_bit_count < 2 || (frame_bit_count & 1) != 0) {
@@ -8845,7 +8855,7 @@ static bool v90_fit_cp4_fir(const p3_result_t *detail,
     }
     memset(out, 0, sizeof(*out));
     frame_symbols = frame_bit_count / 2;
-    sequence_symbols = REPETITIONS * frame_symbols;
+    sequence_symbols = repetitions * frame_symbols;
     sequence_bits = 2 * sequence_symbols;
     while (base_end < detail->symbol_count
            && detail->symbols[base_end].sample_index < last_frame_sample) {
@@ -19044,19 +19054,20 @@ static void v34_diagnose_exact_b1_decode(
             symbols->symbols[i].magnitude = hypotf(
                 templ->symbol[i][0], templ->symbol[i][1]);
         }
-        if (rx_mp)
-            exact_mp = *rx_mp;
-        else
-            memset(&exact_mp, 0, sizeof(exact_mp));
+        (void)rx_mp;
+        memset(&exact_mp, 0, sizeof(exact_mp));
         exact_mp.valid = true;
-        exact_mp.mp.type = 0;
+        exact_mp.mp.type = templ->mp_type;
         exact_mp.mp.bit_rate_c_to_a = templ->rate_n;
         exact_mp.mp.trellis_size = templ->trellis_size;
         exact_mp.mp.use_non_linear_encoder = templ->nonlinear;
         exact_mp.mp.expanded_shaping = templ->expanded;
-        memset(exact_mp.mp.precoder_coeffs,
-               0,
-               sizeof(exact_mp.mp.precoder_coeffs));
+        for (int coefficient = 0; coefficient < 3; coefficient++) {
+            exact_mp.mp.precoder_coeffs[coefficient].re =
+                templ->precoder_coeffs[2 * coefficient];
+            exact_mp.mp.precoder_coeffs[coefficient].im =
+                templ->precoder_coeffs[2 * coefficient + 1];
+        }
         memset(&decoded, 0, sizeof(decoded));
         if (v34_decode_upstream_p3_symbols(
                 symbols,
@@ -19066,7 +19077,7 @@ static void v34_diagnose_exact_b1_decode(
                 1.0f,
                 0,
                 false,
-                false,
+                exact_mp.mp.type != 0,
                 templ->expanded,
                 NULL,
                 0,
@@ -19098,6 +19109,136 @@ typedef struct {
     bool fcs_valid;
     v34_upstream_replay_result_t decoded;
 } v34_supervised_b1_search_t;
+
+/* Locate a complete B1 frame over a long post-MP interval without paying
+ * for a full 128-symbol, phase-walk fit at every possible symbol.  Preserve
+ * the strongest eight-symbol correlation for every template/conjugation in
+ * each small time bin, then score those bin winners with the complete frame.
+ * Binning matters here: ordinary payload will produce isolated excellent
+ * short matches, and a single global short-list can otherwise crowd out the
+ * real B1 interval before the full-frame statistic gets to examine it. */
+static bool v34_find_best_b1_window(
+                                    const p3_result_t *symbols,
+                                    const v34_b1_template_t *templates,
+                                    int template_count,
+                                    int min_sample,
+                                    int max_sample,
+                                    float *match_out,
+                                    int *first_out,
+                                    int *template_out,
+                                    bool *conjugate_out)
+{
+    enum { BIN_SYMBOLS = 256, MAX_HYPOTHESES = 512 };
+    float *coarse_match = NULL;
+    int *coarse_first = NULL;
+    int first_min = 0;
+    int first_max;
+    int bin_count;
+    int hypothesis_count;
+    float best_match = 0.0f;
+    int best_first = -1;
+    int best_template = -1;
+    bool best_conjugate = false;
+
+    if (!symbols || !templates || template_count <= 0
+        || min_sample < 0 || max_sample <= min_sample
+        || 2 * template_count > MAX_HYPOTHESES) {
+        return false;
+    }
+    while (first_min < symbols->symbol_count
+           && symbols->symbols[first_min].sample_index < min_sample) {
+        first_min++;
+    }
+    first_max = first_min;
+    while (first_max < symbols->symbol_count
+           && symbols->symbols[first_max].sample_index <= max_sample) {
+        first_max++;
+    }
+    if (first_max <= first_min)
+        return false;
+    hypothesis_count = 2 * template_count;
+    bin_count = (first_max - first_min + BIN_SYMBOLS - 1) / BIN_SYMBOLS;
+    coarse_match = calloc((size_t)hypothesis_count * bin_count,
+                          sizeof(*coarse_match));
+    coarse_first = malloc((size_t)hypothesis_count * bin_count
+                          * sizeof(*coarse_first));
+    if (!coarse_match || !coarse_first)
+        goto done;
+    for (int i = 0; i < hypothesis_count * bin_count; i++)
+        coarse_first[i] = -1;
+
+    for (int first = first_min; first < first_max; first++) {
+        int bin = (first - first_min) / BIN_SYMBOLS;
+
+        for (int t = 0; t < template_count; t++) {
+            for (int conjugate = 0; conjugate < 2; conjugate++) {
+                int hypothesis = 2 * t + conjugate;
+                int slot = hypothesis * bin_count + bin;
+                float match = v34_match_b1_template(
+                    symbols,
+                    first,
+                    &templates[t],
+                    conjugate != 0,
+                    8,
+                    NULL,
+                    NULL,
+                    NULL);
+
+                if (coarse_first[slot] < 0
+                    || match > coarse_match[slot]) {
+                    coarse_match[slot] = match;
+                    coarse_first[slot] = first;
+                }
+            }
+        }
+    }
+    for (int hypothesis = 0; hypothesis < hypothesis_count; hypothesis++) {
+        int t = hypothesis / 2;
+        bool conjugate = (hypothesis & 1) != 0;
+
+        for (int bin = 0; bin < bin_count; bin++) {
+            int slot = hypothesis * bin_count + bin;
+
+            if (coarse_first[slot] < 0)
+                continue;
+            for (int shift = -3; shift <= 3; shift++) {
+                int first = coarse_first[slot] + shift;
+                float match;
+
+                if (first < first_min || first >= first_max)
+                    continue;
+                match = v34_match_b1_template(
+                    symbols,
+                    first,
+                    &templates[t],
+                    conjugate,
+                    0,
+                    NULL,
+                    NULL,
+                    NULL);
+                if (match > best_match) {
+                    best_match = match;
+                    best_first = first;
+                    best_template = t;
+                    best_conjugate = conjugate;
+                }
+            }
+        }
+    }
+
+done:
+    free(coarse_match);
+    free(coarse_first);
+    if (match_out)
+        *match_out = best_match;
+    if (first_out)
+        *first_out = best_first;
+    if (template_out)
+        *template_out = best_template;
+    if (conjugate_out)
+        *conjugate_out = best_conjugate;
+    return best_first >= 0;
+}
 
 static void v34_search_supervised_b1_fcs(
                                     const p3_result_t *symbols,
@@ -19200,12 +19341,19 @@ static void v34_search_supervised_b1_fcs(
                 memset(&mp, 0, sizeof(mp));
                 mp.valid = true;
                 mp.crc_valid = true;
-                mp.mp.type = 0;
+                mp.mp.type = templates[t].mp_type;
                 mp.mp.bit_rate_a_to_c = templates[t].rate_n;
                 mp.mp.bit_rate_c_to_a = templates[t].rate_n;
                 mp.mp.trellis_size = templates[t].trellis_size;
                 mp.mp.use_non_linear_encoder = templates[t].nonlinear;
                 mp.mp.expanded_shaping = templates[t].expanded;
+                for (int coefficient = 0; coefficient < 3;
+                     coefficient++) {
+                    mp.mp.precoder_coeffs[coefficient].re =
+                        templates[t].precoder_coeffs[2 * coefficient];
+                    mp.mp.precoder_coeffs[coefficient].im =
+                        templates[t].precoder_coeffs[2 * coefficient + 1];
+                }
                 memset(&decoded, 0, sizeof(decoded));
                 if (equalized
                     && best_match[hypothesis] >= 0.90f
@@ -19241,7 +19389,7 @@ static void v34_search_supervised_b1_fcs(
                         1.0f,
                         0,
                         false,
-                        false,
+                        mp.mp.type != 0,
                         mp.mp.expanded_shaping,
                         NULL,
                         0,
@@ -31344,6 +31492,189 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         baud_code,
                         downstream_mp.valid ? &downstream_mp : NULL);
                 }
+                /* Some real calls provide a clean CPt and a CRC-valid
+                 * downstream MP, but no trustworthy final E observation in
+                 * the crude symbol slicer.  CPt itself is a complete known
+                 * Table-14 frame.  Train a T/2 channel estimate on that one
+                 * frame, keep the estimate fixed through the following
+                 * Phase-4 exchange, and locate B1 by its entire reset-state
+                 * mapping frame.  Only the existing >=90% geometry/FIR plus
+                 * 99% descrambled-one rules may promote this broad locator.
+                 */
+                if (b1_template_count > 0
+                    && direct_e_data_sample < 0
+                    && downstream_mp.valid
+                    && native_cp.valid
+                    && !native_cp.frame.v90_compatibility
+                    && cp_reset_sample >= 0
+                    && (!equalized_jd_valid || !equalized_jd.jd_trn16)) {
+                    int baud_rate = v34_baud_code_to_rate(baud_code);
+                    int cp_bits = vpcm_cp_bit_length(&native_cp.frame);
+                    int cp_end_sample = cp_reset_sample;
+                    int local_start = cp_reset_sample > 800
+                                    ? cp_reset_sample - 800 : 0;
+                    int fallback_boundary = -1;
+                    bool fallback_valid = false;
+
+                    if (baud_rate > 0 && cp_bits > 0) {
+                        int cp_symbols_count = (cp_bits + 1) / 2;
+
+                        cp_end_sample +=
+                            (cp_symbols_count * 8000 + baud_rate - 1)
+                            / baud_rate;
+                    }
+                    for (int timing = 0;
+                         baud_rate > 0 && cp_bits >= 256 && timing < 8;
+                         timing++) {
+                        int carrier = cp_carrier == P3_CARRIER_HIGH
+                                    ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
+                        p3_result_t *cp_local =
+                            p3_demod_run_phase4_data_at_timing(
+                                analog_pcm + local_start,
+                                total_samples - local_start,
+                                local_start,
+                                baud_code,
+                                carrier,
+                                8000,
+                                true,
+                                timing,
+                                8,
+                                cp_end_sample);
+                        p3_result_t *half_baud =
+                            p3_demod_run_half_baud_at_timing(
+                                analog_pcm + local_start,
+                                total_samples - local_start,
+                                local_start,
+                                baud_code,
+                                carrier,
+                                8000,
+                                true,
+                                timing,
+                                8,
+                                cp_end_sample);
+                        v90_cp4_fir_fit_t cp_sequence;
+                        v90_cp_fse_fit_t cp_fse;
+                        p3_result_t *equalized = NULL;
+                        float broad_match = 0.0f;
+                        int broad_first = -1;
+                        int broad_template = -1;
+                        bool broad_conjugate = false;
+                        v34_supervised_b1_search_t broad_search;
+
+                        memset(&cp_sequence, 0, sizeof(cp_sequence));
+                        memset(&cp_fse, 0, sizeof(cp_fse));
+                        memset(&broad_search, 0, sizeof(broad_search));
+                        if (cp_local && half_baud
+                            && v90_fit_cp4_fir(
+                                cp_local,
+                                &native_cp.frame,
+                                cp_end_sample,
+                                1,
+                                &cp_sequence)
+                            && v90_fit_cp_fse(
+                                half_baud,
+                                &cp_sequence,
+                                &cp_fse)) {
+                            equalized = v90_apply_cp_fse(
+                                half_baud, &cp_fse, 0);
+                        }
+                        if (equalized
+                            && v34_find_best_b1_window(
+                                equalized,
+                                b1_templates,
+                                b1_template_count,
+                                downstream_mp.start_sample,
+                                total_samples - 1,
+                                &broad_match,
+                                &broad_first,
+                                &broad_template,
+                                &broad_conjugate)) {
+                            int boundary = equalized->symbols[broad_first]
+                                .sample_index;
+
+                            v34_search_supervised_b1_fcs(
+                                equalized,
+                                b1_templates,
+                                b1_template_count,
+                                baud_code,
+                                boundary,
+                                &broad_search);
+                        }
+                        if (getenv("VPCM_V34_UPSTREAM_DIAG")) {
+                            fprintf(stderr,
+                                    "v90 CPt T/2 FSE timing=%d cp=%d..%d plain=%d/%d scrambled=%d/%d train=%.1f%% holdout=%.1f%% broad-B1=%.1f%% sample=%d template=%d conjugate=%d strict=%d hdlc=%d/%d\n",
+                                    timing,
+                                    cp_reset_sample,
+                                    cp_end_sample,
+                                    cp_sequence.plain_errors,
+                                    cp_sequence.plain_bits,
+                                    cp_sequence.scrambled_errors,
+                                    cp_sequence.scrambled_bits,
+                                    100.0f * cp_fse.training_match,
+                                    100.0f * cp_fse.holdout_match,
+                                    100.0f * broad_match,
+                                    broad_first >= 0 && equalized
+                                        ? equalized->symbols[broad_first]
+                                            .sample_index : -1,
+                                    broad_template,
+                                    broad_conjugate ? 1 : 0,
+                                    broad_search.b1_valid ? 1 : 0,
+                                    broad_search.decoded.hdlc_frames,
+                                    broad_search.decoded.hdlc_bytes);
+                        }
+                        if (equalized && broad_search.fcs_valid) {
+                            const v34_b1_template_t *winner =
+                                &b1_templates[broad_search.template_index];
+
+                            printf("\n=== V.90 V.34 Upstream Recovery ===\n");
+                            printf("  CPt-trained B1 boundary: %.3f ms (timing phase %d)\n",
+                                   sample_to_ms(
+                                       broad_search.decoded
+                                           .data_start_sample,
+                                       8000),
+                                   timing);
+                            printf("  Mode: %d baud, %d bps, trellis=%d, nonlinear=%d, shaping=%s\n",
+                                   baud_rate,
+                                   winner->rate_n * 2400,
+                                   winner->trellis_size,
+                                   winner->nonlinear,
+                                   winner->expanded
+                                       ? "expanded" : "minimum");
+                            printf("  Payload: %d post-B1 bits; HDLC FCS valid=%d frames/%d bytes\n",
+                                   broad_search.decoded.post_b1_bits,
+                                   broad_search.decoded.hdlc_frames,
+                                   broad_search.decoded.hdlc_bytes);
+                            p3_result_free(equalized);
+                            p3_result_free(half_baud);
+                            p3_result_free(cp_local);
+                            goto v90_upstream_cleanup;
+                        }
+                        if (equalized && broad_search.b1_valid
+                            && (!fallback_valid
+                                || broad_search.decoded_score
+                                   > validated_b1.decoded_score)) {
+                            fallback_valid = true;
+                            fallback_boundary = broad_search.decoded
+                                .data_start_sample;
+                            have_validated_b1 = true;
+                            validated_b1 = broad_search;
+                            validated_b1_cp_holdout = cp_fse.holdout_match;
+                            validated_b1_timing = timing;
+                        }
+                        if (equalized)
+                            p3_result_free(equalized);
+                        if (half_baud)
+                            p3_result_free(half_baud);
+                        if (cp_local)
+                            p3_result_free(cp_local);
+                    }
+                    if (fallback_valid) {
+                        /* The complete B1 frame pins the same E/B1 handoff
+                         * more strongly than the rejected run detector and
+                         * lets the existing local payload pass refine it. */
+                        direct_e_data_sample = fallback_boundary;
+                    }
+                }
                 if (b1_template_count > 0
                     && direct_e_data_sample >= 0
                     && getenv("VPCM_V90_FULL_P3_B1_DIAG")) {
@@ -32304,6 +32635,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         local_symbols,
                                         &data_cp.frame,
                                         data_cp_last_sample,
+                                        4,
                                         &cp_sequence)
                                     && v90_fit_cp_fse(
                                         half_baud,
@@ -32664,6 +32996,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     local_symbols,
                                     &data_cp.frame,
                                     data_cp_last_sample,
+                                    4,
                                     &cp_fit)) {
                                 p3_result_t *cp_equalized =
                                     v34_apply_b1_fir(
