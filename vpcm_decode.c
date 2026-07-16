@@ -6113,6 +6113,11 @@ typedef struct {
     int data_ones;
     int hdlc_exact_flags;
     int hdlc_flag_run;
+    int hdlc_valid_frames;
+    int hdlc_valid_bytes;
+    int hdlc_bad_frames;
+    int first_frame_len;
+    uint8_t first_frame[64];
     int preview_len;
     uint8_t preview[32];
 } v90_downstream_data_recovery_t;
@@ -16096,6 +16101,35 @@ static int v90_post_mp_demap_frame(bool capture_alaw,
                                   bits_out);
 }
 
+/* Collect deframed downstream V.42 traffic: spandsp performs the flag
+ * hunting, bit destuffing, and FCS-16 validation; this handler just
+ * tallies the outcome and keeps the first FCS-clean frame for display. */
+static void v90_post_mp_hdlc_handler(void *user_data,
+                                     const uint8_t *msg,
+                                     int len,
+                                     int ok)
+{
+    v90_downstream_data_recovery_t *post =
+        (v90_downstream_data_recovery_t *) user_data;
+
+    if (!post || len <= 0)
+        return;
+    if (!ok) {
+        post->hdlc_bad_frames++;
+        return;
+    }
+    post->hdlc_valid_frames++;
+    post->hdlc_valid_bytes += len;
+    if (post->first_frame_len == 0 && msg) {
+        int copy = len;
+
+        if (copy > (int) sizeof(post->first_frame))
+            copy = (int) sizeof(post->first_frame);
+        memcpy(post->first_frame, msg, (size_t) copy);
+        post->first_frame_len = copy;
+    }
+}
+
 /* Nearest-level label selection for one data frame under the mixed-radix
  * bound 2^modulus_bits - 1, mirroring v90_slice_modulus_mapping_frame for
  * a single-constellation digit alphabet supplied as a plain level table. */
@@ -16915,6 +16949,21 @@ static void v90_probe_downstream_post_mp(
             out->post_mp.data_frames = data_frames;
             out->post_mp.data_bits = data_bit_count;
             out->post_mp.data_ones = data_ones;
+            {
+                hdlc_rx_state_t *hdlc = hdlc_rx_init(
+                    NULL,
+                    false,
+                    true,
+                    1,
+                    v90_post_mp_hdlc_handler,
+                    &out->post_mp);
+
+                if (hdlc) {
+                    for (int bit = 0; bit < data_bit_count; bit++)
+                        hdlc_rx_put_bit(hdlc, data_bits[bit] & 1);
+                    hdlc_rx_free(hdlc);
+                }
+            }
             /* HDLC flag probe: exact 0x7E octets at any bit offset plus
              * the longest 8-bit-stride run of consecutive flags. */
             {
@@ -33253,6 +33302,18 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                    : 0.0,
                                post->hdlc_exact_flags,
                                post->hdlc_flag_run);
+                        printf("  V.90 downstream HDLC: %d FCS-valid frame%s (%d bytes), %d bad\n",
+                               post->hdlc_valid_frames,
+                               post->hdlc_valid_frames == 1 ? "" : "s",
+                               post->hdlc_valid_bytes,
+                               post->hdlc_bad_frames);
+                        if (post->first_frame_len > 0) {
+                            printf("  V.90 downstream first frame:");
+                            for (int byte = 0;
+                                 byte < post->first_frame_len; byte++)
+                                printf(" %02X", post->first_frame[byte]);
+                            putchar('\n');
+                        }
                         if (post->preview_len > 0) {
                             printf("  V.90 downstream preview:");
                             for (int byte = 0;
