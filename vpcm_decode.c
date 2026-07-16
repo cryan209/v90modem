@@ -6003,6 +6003,34 @@ typedef struct {
     float training_match;
 } v34_b1_fir_fit_t;
 
+/* Downstream continuation past the recovered MP/MP' repetitions: Ed,
+ * then B1d (48 data frames of scrambled ones from zeroed data-mode
+ * scrambler/shaper state, ITU-T V.90 9.4.1.5), then data mode.  The data
+ * CP normally travels upstream inside V.34 modulation and is rarely
+ * recoverable from these captures, so the data-mode rate is selected by
+ * sweeping drn and letting the deterministic B1d pattern arbitrate. */
+typedef struct {
+    bool valid;               /* full B1d + data decode succeeded */
+    bool boundary_valid;      /* Ed->B1d constellation boundary located */
+    int boundary_sample;
+    int est_population;       /* clustered data-constellation size */
+    int data_drn;
+    int bits_per_frame;
+    int b1d_start_sample;
+    int b1d_ones;
+    int b1d_bits;
+    int ed_zero_bits;
+    int ed_bits;
+    int data_start_sample;
+    int data_frames;
+    int data_bits;
+    int data_ones;
+    int hdlc_exact_flags;
+    int hdlc_flag_run;
+    int preview_len;
+    uint8_t preview[32];
+} v90_downstream_data_recovery_t;
+
 typedef struct {
     bool valid;
     mp_t mp;
@@ -6022,6 +6050,7 @@ typedef struct {
     int tuple_votes;
     int best_trn_ber_pct;
     int accepted_trn_ber_pct;
+    v90_downstream_data_recovery_t post_mp;
 } v34_upstream_mp_recovery_t;
 
 static void v34_collect_upstream_bit(void *user_data, int bit)
@@ -15092,6 +15121,963 @@ v90_slice_modulus_mapping_frame(
     return true;
 }
 
+static bool v90_post_mp_slice_frame(
+                                    const int16_t *digital_pcm,
+                                    int total_samples,
+                                    const v90_pcm_equalizer_t *sign_equalizer,
+                                    const v90_pcm_modulus_equalizer_t *eq,
+                                    v91_law_t law,
+                                    const vpcm_cp_frame_t *cp,
+                                    int bits_per_frame,
+                                    const double *deconv,
+                                    int deconv_base,
+                                    int deconv_count,
+                                    int frame_sample,
+                                    uint8_t codewords[6])
+{
+    double magnitude[VPCM_CP_FRAME_INTERVALS];
+    bool positive[VPCM_CP_FRAME_INTERVALS];
+
+    if (frame_sample < deconv_base
+        || frame_sample + VPCM_CP_FRAME_INTERVALS > deconv_base + deconv_count)
+        return false;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        double sign = v90_pcm_modulus_sign(sign_equalizer,
+                                           digital_pcm,
+                                           total_samples,
+                                           frame_sample + i);
+
+        magnitude[i] = deconv[frame_sample - deconv_base + i] * sign;
+        positive[i] = sign >= 0.0;
+    }
+    return v90_slice_modulus_mapping_frame(eq,
+                                           law,
+                                           cp,
+                                           bits_per_frame,
+                                           cp->shaping_redundancy,
+                                           magnitude,
+                                           positive,
+                                           codewords);
+}
+
+/* Decode one frame with either demapper, carrying receiver state. */
+static int v90_post_mp_demap_frame(bool capture_alaw,
+                                   const vpcm_cp_frame_t *cp,
+                                   int bits_per_frame,
+                                   uint32_t *descramble_reg,
+                                   int *prev_sign,
+                                   v90_shaped_rx_state_t *shaper,
+                                   const uint8_t codewords[6],
+                                   uint8_t bits_out[])
+{
+    v90_law_t law = capture_alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
+
+    if (cp->shaping_redundancy == 0)
+        return v90_demap_mapped_frame(law,
+                                      cp,
+                                      bits_per_frame,
+                                      descramble_reg,
+                                      prev_sign,
+                                      codewords,
+                                      bits_out);
+    return v90_demap_shaped_frame(law,
+                                  cp,
+                                  bits_per_frame,
+                                  descramble_reg,
+                                  shaper,
+                                  codewords,
+                                  bits_out);
+}
+
+/* Nearest-level label selection for one data frame under the mixed-radix
+ * bound 2^modulus_bits - 1, mirroring v90_slice_modulus_mapping_frame for
+ * a single-constellation digit alphabet supplied as a plain level table. */
+static bool v90_post_mp_lean_slice(const double *level,
+                                   int population,
+                                   int modulus_bits,
+                                   const double magnitude[6],
+                                   int labels_out[6])
+{
+    double cost[6][VPCM_CP_MASK_BITS];
+    int unconstrained[6];
+    int bound[6];
+    int candidate[6];
+    double best_cost = HUGE_VAL;
+    uint64_t limit;
+
+    if (!level || population < 2 || population > VPCM_CP_MASK_BITS
+        || modulus_bits < 0 || modulus_bits >= 63)
+        return false;
+    for (int i = 0; i < 6; i++) {
+        double minimum = HUGE_VAL;
+
+        unconstrained[i] = 0;
+        for (int l = 0; l < population; l++) {
+            double residual = magnitude[i] - level[l];
+
+            cost[i][l] = residual * residual;
+            if (cost[i][l] < minimum) {
+                minimum = cost[i][l];
+                unconstrained[i] = l;
+            }
+        }
+    }
+    limit = (UINT64_C(1) << modulus_bits) - 1;
+    for (int i = 0; i < 6; i++) {
+        bound[i] = (int)(limit % (uint64_t)population);
+        limit /= (uint64_t)population;
+    }
+    if (limit != 0)
+        return false;
+    {
+        double total = 0.0;
+
+        for (int i = 0; i < 6; i++) {
+            labels_out[i] = bound[i];
+            total += cost[i][bound[i]];
+        }
+        best_cost = total;
+    }
+    for (int pivot = 5; pivot >= 0; pivot--) {
+        for (int digit = 0; digit < bound[pivot]; digit++) {
+            double total = 0.0;
+
+            for (int i = 5; i > pivot; i--)
+                candidate[i] = bound[i];
+            candidate[pivot] = digit;
+            for (int i = pivot - 1; i >= 0; i--)
+                candidate[i] = unconstrained[i];
+            for (int i = 0; i < 6; i++)
+                total += cost[i][candidate[i]];
+            if (total < best_cost) {
+                best_cost = total;
+                memcpy(labels_out, candidate, sizeof(candidate));
+            }
+        }
+    }
+    return true;
+}
+
+/* Continue the equalized downstream decode past the recovered MP/MP'
+ * repetitions.  The digital modem follows MP' with Ed (Phase-4 mapped
+ * frames of scrambled zeros plus shaper flush), then B1d — 48 data-mode
+ * frames of scrambled ones transmitted from zeroed data-mode scrambler,
+ * differential, and shaper state (ITU-T V.90 9.4.1.5) — then data mode.
+ *
+ * The data-mode constellation comes from the data CP, which travels
+ * upstream inside V.34 modulation and is rarely recoverable from these
+ * captures.  Two facts still pin the downstream timeline: MP'/Ed use the
+ * sparse CPt (TRN2d) constellation the modulus equalizer was trained on,
+ * while B1d and data use the much denser data constellation, so the
+ * boundary is visible as the sample where the deconvolved magnitudes
+ * abandon the fitted CPt levels; and B1d is 48*d bits of known plaintext,
+ * so a blindly clustered data constellation can be validated exactly. */
+static void v90_probe_downstream_post_mp(
+                                    const int16_t *digital_pcm,
+                                    int total_samples,
+                                    int grid_start,
+                                    const v90_pcm_equalizer_t *sign_equalizer,
+                                    const v90_pcm_modulus_equalizer_t *eq,
+                                    bool capture_alaw,
+                                    const vpcm_cp_frame_t *phase4_cp,
+                                    int phase4_bits_per_frame,
+                                    v34_upstream_mp_recovery_t *out)
+{
+    enum {
+        B1D_FRAMES = 48,
+        B1D_SYMBOLS = 6 * B1D_FRAMES,
+        MAX_DATA_FRAMES = 4000,
+        SEARCH_SAMPLES = 8 * 8000,
+        TAIL_SAMPLES = 4 * 8000,
+        FIT_WINDOW = 12,
+        SUSTAIN_SAMPLES = 24,
+        ED_SETTLE_FRAMES = 5,
+        ED_CHECK_FRAMES = 2
+    };
+    v91_law_t slice_law = capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW;
+    int window_start;
+    int window_end;
+    int deconv_count;
+    double *deconv;
+    double *value = NULL;
+    double *dist = NULL;
+    double spacing = 0.0;
+    double baseline = 0.0;
+    int boundary = -1;
+    int b1d_start = -1;
+    vpcm_cp_frame_t data_cp;
+    bool oracle_found = false;
+    uint32_t oracle_reg = 0;
+    int oracle_prev_sign = 0;
+    v90_shaped_rx_state_t oracle_shaper;
+    int oracle_ones = 0;
+    int oracle_bits = 0;
+    int oracle_drn = -1;
+    int oracle_start = -1;
+    int oracle_m = 0;
+    int oracle_k = 0;
+    double oracle_level[VPCM_CP_MASK_BITS];
+
+    memset(&out->post_mp, 0, sizeof(out->post_mp));
+    memset(&oracle_shaper, 0, sizeof(oracle_shaper));
+    if (!digital_pcm || !sign_equalizer || !eq || !eq->valid
+        || !phase4_cp || phase4_cp->constellation_count < 1)
+        return;
+    window_start = out->remote_last_mp_sample >= 0
+                 ? out->remote_last_mp_sample
+                 : out->start_sample;
+    if (window_start < grid_start)
+        window_start = grid_start;
+    window_start = grid_start
+                 + ((window_start - grid_start + 5) / 6) * 6;
+    window_end = window_start + SEARCH_SAMPLES;
+    if (window_end > total_samples - FIT_WINDOW)
+        window_end = total_samples - FIT_WINDOW;
+    if (window_end <= window_start + 12 * FIT_WINDOW)
+        return;
+    deconv_count = (window_end - window_start) + B1D_SYMBOLS + TAIL_SAMPLES;
+    if (deconv_count > total_samples - window_start)
+        deconv_count = total_samples - window_start;
+    deconv = malloc((size_t)deconv_count * sizeof(*deconv));
+    if (!deconv
+        || !v90_pcm_modulus_deconvolve(eq,
+                                       digital_pcm,
+                                       window_start,
+                                       deconv_count,
+                                       deconv)) {
+        free(deconv);
+        return;
+    }
+
+    /* ---- Phase A: locate the CPt-constellation boundary ---- */
+    value = malloc((size_t)deconv_count * sizeof(*value));
+    dist = malloc((size_t)deconv_count * sizeof(*dist));
+    if (!value || !dist) {
+        free(value);
+        free(dist);
+        free(deconv);
+        return;
+    }
+    {
+        double level_min = HUGE_VAL;
+        double level_max = -HUGE_VAL;
+        int level_total = 0;
+
+        for (int c = 0; c < eq->constellation_count; c++) {
+            for (int l = 0; l < eq->population[c]; l++) {
+                if (eq->level[c][l] < level_min)
+                    level_min = eq->level[c][l];
+                if (eq->level[c][l] > level_max)
+                    level_max = eq->level[c][l];
+                level_total++;
+            }
+        }
+        if (level_total < 2) {
+            free(value);
+            free(dist);
+            free(deconv);
+            return;
+        }
+        spacing = (level_max - level_min) / (level_total - 1);
+        if (spacing <= 0.0)
+            spacing = 1.0;
+    }
+    for (int i = 0; i < deconv_count; i++) {
+        double sign = v90_pcm_modulus_sign(sign_equalizer,
+                                           digital_pcm,
+                                           total_samples,
+                                           window_start + i);
+        double best = HUGE_VAL;
+
+        value[i] = deconv[i] * sign;
+        for (int c = 0; c < eq->constellation_count; c++) {
+            for (int l = 0; l < eq->population[c]; l++) {
+                double error = fabs(value[i] - eq->level[c][l]);
+
+                if (error < best)
+                    best = error;
+            }
+        }
+        dist[i] = best;
+    }
+    {
+        double window_sum = 0.0;
+        double *fitw = malloc((size_t)deconv_count * sizeof(*fitw));
+        int fit_count = deconv_count - FIT_WINDOW;
+        int baseline_count;
+
+        if (!fitw) {
+            free(value);
+            free(dist);
+            free(deconv);
+            return;
+        }
+        for (int i = 0; i < FIT_WINDOW && i < deconv_count; i++)
+            window_sum += dist[i];
+        for (int i = 0; i < fit_count; i++) {
+            fitw[i] = window_sum / FIT_WINDOW;
+            window_sum += dist[i + FIT_WINDOW] - dist[i];
+        }
+        baseline_count = fit_count < 2000 ? fit_count / 2 : 2000;
+        for (int i = 0; i < baseline_count; i++)
+            baseline += fitw[i];
+        if (baseline_count > 0)
+            baseline /= baseline_count;
+        {
+            double threshold = baseline * 3.0 + 0.15 * spacing;
+            int sustained = 0;
+
+            for (int i = 60; i < fit_count; i++) {
+                if (fitw[i] > threshold) {
+                    if (++sustained >= SUSTAIN_SAMPLES) {
+                        boundary = window_start + i - sustained + 1;
+                        break;
+                    }
+                } else {
+                    sustained = 0;
+                }
+            }
+        }
+        free(fitw);
+    }
+    if (boundary < 0) {
+        if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+            fprintf(stderr,
+                    "v90 post-MP boundary not found window=%d..%d baseline=%.4f spacing=%.4f\n",
+                    window_start,
+                    window_end,
+                    baseline,
+                    spacing);
+        }
+        free(value);
+        free(dist);
+        free(deconv);
+        return;
+    }
+    out->post_mp.boundary_valid = true;
+    out->post_mp.boundary_sample = boundary;
+    b1d_start = boundary;
+
+    /* ---- Ed confirmation and boundary refinement: the last Phase-4
+     * mapped frames before B1d carry scrambled zeros. ---- */
+    {
+        int best_zero_bits = -1;
+        int best_bits = 0;
+        int best_end = -1;
+
+        for (int end = boundary - 8; end <= boundary + 8; end++) {
+            int frames_total = ED_SETTLE_FRAMES + ED_CHECK_FRAMES;
+            int ed_start = end - 6 * frames_total;
+            uint32_t reg = 0;
+            int prev_sign = 0;
+            v90_shaped_rx_state_t shaper;
+            int zero_bits = 0;
+            int bits = 0;
+            bool ok = true;
+
+            if (ed_start < window_start)
+                continue;
+            memset(&shaper, 0, sizeof(shaper));
+            for (int frame = 0; frame < frames_total; frame++) {
+                uint8_t codewords[6];
+                uint8_t frame_bits[64];
+
+                if (!v90_post_mp_slice_frame(digital_pcm,
+                                             total_samples,
+                                             sign_equalizer,
+                                             eq,
+                                             slice_law,
+                                             phase4_cp,
+                                             phase4_bits_per_frame,
+                                             deconv,
+                                             window_start,
+                                             deconv_count,
+                                             ed_start + 6 * frame,
+                                             codewords)
+                    || v90_post_mp_demap_frame(capture_alaw,
+                                               phase4_cp,
+                                               phase4_bits_per_frame,
+                                               &reg,
+                                               &prev_sign,
+                                               &shaper,
+                                               codewords,
+                                               frame_bits)
+                       != phase4_bits_per_frame) {
+                    ok = false;
+                    break;
+                }
+                if (frame >= ED_SETTLE_FRAMES) {
+                    for (int bit = 0; bit < phase4_bits_per_frame; bit++) {
+                        bits++;
+                        zero_bits += !(frame_bits[bit] & 1);
+                    }
+                }
+            }
+            if (!ok || bits == 0)
+                continue;
+            if (zero_bits > best_zero_bits) {
+                best_zero_bits = zero_bits;
+                best_bits = bits;
+                best_end = end;
+            }
+        }
+        if (best_end >= 0) {
+            out->post_mp.ed_zero_bits = best_zero_bits;
+            out->post_mp.ed_bits = best_bits;
+            b1d_start = best_end;
+        }
+    }
+    out->post_mp.b1d_start_sample = b1d_start;
+    out->post_mp.data_start_sample = b1d_start + B1D_SYMBOLS;
+
+    /* ---- Phase B: supervised B1d rate/constellation search ----
+     *
+     * B1d is 48 data frames of scrambled ones from zeroed data-mode
+     * scrambler state, so for a hypothesized (start, drn, population)
+     * every transmitted modulus digit is known in advance.  Fitting one
+     * level per digit over the rectified deconvolved magnitudes turns
+     * the hypothesis test into a supervised regression: the correct
+     * tuple explains almost all the variance, every wrong tuple groups
+     * the samples pseudorandomly and explains none.  The winning digit
+     * alphabet is then decoded through a synthetic top-population Ucode
+     * mask — an internal relabeling, so the true constellation mask
+     * never needs to be recovered — and accepted only when the 48*d
+     * descrambled B1d bits come back as ones. */
+    {
+        double sx = 0.0;
+        double sy = 0.0;
+        double sxx = 0.0;
+        double sxy = 0.0;
+        double det;
+        double gain = 0.0;
+        double offset = 0.0;
+        int points = 0;
+        int sign_bits = 6 - phase4_cp->shaping_redundancy;
+        double best_r2 = 0.35;
+        int best_m = -1;
+        int best_hyp_drn = -1;
+        int best_hyp_start = -1;
+        double best_level[VPCM_CP_MASK_BITS];
+        int best_count[VPCM_CP_MASK_BITS];
+
+        /* Cluster-count estimate for the boundary-tier report: extend the
+         * fitted CPt levels to every Ucode via a linear fit against the
+         * ideal G.711 magnitudes, then count occupied predictions. */
+        for (int c = 0; c < eq->constellation_count; c++) {
+            int label = 0;
+
+            for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+                double ideal;
+
+                if (!vpcm_cp_mask_get(phase4_cp->masks[c], ucode))
+                    continue;
+                if (label >= eq->population[c])
+                    break;
+                ideal = (double)v91_codeword_to_linear(
+                    slice_law,
+                    v91_ucode_to_codeword(slice_law, ucode, true));
+                sx += ideal;
+                sy += eq->level[c][label];
+                sxx += ideal * ideal;
+                sxy += ideal * eq->level[c][label];
+                points++;
+                label++;
+            }
+        }
+        det = points * sxx - sx * sx;
+        if (points >= 2 && fabs(det) > 1e-9) {
+            gain = (points * sxy - sx * sy) / det;
+            offset = (sy - gain * sx) / points;
+        } else {
+            points = 0;
+        }
+        if (points > 0 && b1d_start + B1D_SYMBOLS
+            <= window_start + deconv_count) {
+            double pred[VPCM_CP_MASK_BITS];
+            int occupancy[VPCM_CP_MASK_BITS] = {0};
+            int occupied = 0;
+
+            for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                double ideal = (double)v91_codeword_to_linear(
+                    slice_law,
+                    v91_ucode_to_codeword(slice_law, u, true));
+
+                pred[u] = gain * ideal + offset;
+            }
+            for (int i = b1d_start; i < b1d_start + B1D_SYMBOLS; i++) {
+                double v = value[i - window_start];
+                double best = HUGE_VAL;
+                int best_u = -1;
+
+                for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                    double error = fabs(pred[u] - v);
+
+                    if (error < best) {
+                        best = error;
+                        best_u = u;
+                    }
+                }
+                if (best_u >= 0 && occupancy[best_u]++ == 0)
+                    occupied++;
+            }
+            out->post_mp.est_population = occupied;
+        }
+        for (int drn = 1; drn <= 22; drn++) {
+            int d = drn + 20;
+            int k = d - sign_bits;
+            uint64_t frame_r[B1D_FRAMES];
+            uint32_t scramble_reg = 0;
+
+            if (k < 1 || k > 56)
+                continue;
+            for (int frame = 0; frame < B1D_FRAMES; frame++) {
+                uint64_t r = 0;
+
+                for (int bit = 0; bit < d; bit++) {
+                    int feedback = ((scramble_reg >> 22)
+                                  ^ (scramble_reg >> 17)) & 1;
+                    int scrambled = 1 ^ feedback;
+
+                    scramble_reg = ((scramble_reg << 1)
+                                   | (uint32_t)scrambled) & 0x7FFFFF;
+                    if (bit >= sign_bits && bit < sign_bits + k)
+                        r |= (uint64_t)scrambled << (bit - sign_bits);
+                }
+                frame_r[frame] = r;
+            }
+            for (int m = 2; m < VPCM_CP_MASK_BITS; m++) {
+                uint64_t product = 1;
+
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+                    product *= (uint64_t)m;
+                if (k < 64 && product < (1ULL << k))
+                    continue;
+                for (int s = b1d_start - 6; s <= b1d_start + 6; s++) {
+                    double sum[VPCM_CP_MASK_BITS] = {0};
+                    double sumsq[VPCM_CP_MASK_BITS] = {0};
+                    int cnt[VPCM_CP_MASK_BITS] = {0};
+                    double total_sum = 0.0;
+                    double total_sumsq = 0.0;
+                    double within = 0.0;
+                    double total;
+                    double r2;
+                    int seen = 0;
+                    bool monotonic = true;
+                    double previous_mean = HUGE_VAL;
+
+                    if (s < window_start
+                        || s + B1D_SYMBOLS
+                           > window_start + deconv_count)
+                        continue;
+                    for (int frame = 0; frame < B1D_FRAMES; frame++) {
+                        uint64_t r = frame_r[frame];
+
+                        for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                            int digit = (int)(r % (uint64_t)m);
+                            double v = value[s - window_start
+                                             + 6 * frame + i];
+
+                            r /= (uint64_t)m;
+                            sum[digit] += v;
+                            sumsq[digit] += v * v;
+                            cnt[digit]++;
+                            total_sum += v;
+                            total_sumsq += v * v;
+                        }
+                    }
+                    for (int digit = 0; digit < m; digit++) {
+                        if (cnt[digit] == 0)
+                            continue;
+                        seen++;
+                        within += sumsq[digit]
+                                - sum[digit] * sum[digit] / cnt[digit];
+                        if (sum[digit] / cnt[digit] >= previous_mean)
+                            monotonic = false;
+                        previous_mean = sum[digit] / cnt[digit];
+                    }
+                    total = total_sumsq
+                          - total_sum * total_sum / (6 * B1D_FRAMES);
+                    if (!monotonic || total <= 0.0 || 3 * seen < 2 * m)
+                        continue;
+                    r2 = 1.0 - within / total;
+                    if (r2 > best_r2) {
+                        best_r2 = r2;
+                        best_m = m;
+                        best_hyp_drn = drn;
+                        best_hyp_start = s;
+                        for (int digit = 0; digit < m; digit++) {
+                            best_count[digit] = cnt[digit];
+                            best_level[digit] = cnt[digit] > 0
+                                              ? sum[digit] / cnt[digit]
+                                              : HUGE_VAL;
+                        }
+                    }
+                }
+            }
+        }
+        if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+            fprintf(stderr,
+                    "v90 post-MP supervised fit r2=%.4f m=%d drn=%d start=%d\n",
+                    best_r2,
+                    best_m,
+                    best_hyp_drn,
+                    best_hyp_start);
+        }
+        if (best_m > 0) {
+            /* Interpolate any digit the 288 B1d symbols never exercised. */
+            for (int digit = 0; digit < best_m; digit++) {
+                if (best_count[digit] > 0)
+                    continue;
+                {
+                    int lower = digit - 1;
+                    int upper = digit + 1;
+
+                    while (lower >= 0 && best_count[lower] == 0)
+                        lower--;
+                    while (upper < best_m && best_count[upper] == 0)
+                        upper++;
+                    if (lower >= 0 && upper < best_m) {
+                        best_level[digit] = best_level[lower]
+                            + (best_level[upper] - best_level[lower])
+                              * (digit - lower) / (upper - lower);
+                    } else if (lower >= 0) {
+                        best_level[digit] = best_level[lower];
+                    } else if (upper < best_m) {
+                        best_level[digit] = best_level[upper];
+                    } else {
+                        best_level[digit] = 0.0;
+                    }
+                }
+            }
+            memset(&data_cp, 0, sizeof(data_cp));
+            data_cp = *phase4_cp;
+            memset(data_cp.masks[0], 0, VPCM_CP_MASK_BYTES);
+            for (int label = 0; label < best_m; label++) {
+                vpcm_cp_mask_set(data_cp.masks[0],
+                                 VPCM_CP_MASK_BITS - 1 - label,
+                                 true);
+            }
+            data_cp.constellation_count = 1;
+            for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+                data_cp.dfi[i] = 0;
+            memcpy(data_cp.codec_masks[0],
+                   data_cp.masks[0],
+                   VPCM_CP_MASK_BYTES);
+            data_cp.codec_constellations_differ = 0;
+            data_cp.v90_compatibility = 1;
+            data_cp.acknowledge = 0;
+            data_cp.drn = (uint8_t)best_hyp_drn;
+            {
+                /* Sign errors or a single adjacent-level slip make the
+                 * strict demapper reject a whole frame, so the acceptance
+                 * oracle compares sliced labels directly against the known
+                 * B1d digit sequence: sign-independent and per-symbol. */
+                int d = best_hyp_drn + 20;
+                int k = d - sign_bits;
+                uint32_t scramble_reg = 0;
+                int label_matches = 0;
+                int label_total = 0;
+                int demap_frames = 0;
+                uint32_t reg = 0;
+                int prev_sign = 0;
+                v90_shaped_rx_state_t shaper;
+                uint8_t frame_mismatch[B1D_FRAMES] = {0};
+                int confusion[VPCM_CP_MASK_BITS * 2] = {0};
+
+                memset(&shaper, 0, sizeof(shaper));
+                for (int frame = 0; frame < B1D_FRAMES; frame++) {
+                    uint8_t codewords[6];
+                    uint8_t frame_bits[64];
+                    int labels[6];
+                    double magnitude[6];
+                    bool positive[6];
+                    uint64_t r = 0;
+                    bool sliced;
+
+                    for (int bit = 0; bit < d; bit++) {
+                        int feedback = ((scramble_reg >> 22)
+                                      ^ (scramble_reg >> 17)) & 1;
+                        int scrambled = 1 ^ feedback;
+
+                        scramble_reg = ((scramble_reg << 1)
+                                       | (uint32_t)scrambled) & 0x7FFFFF;
+                        if (bit >= sign_bits && bit < sign_bits + k)
+                            r |= (uint64_t)scrambled << (bit - sign_bits);
+                    }
+                    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                        int sample = best_hyp_start + 6 * frame + i;
+                        double sign = v90_pcm_modulus_sign(
+                            sign_equalizer,
+                            digital_pcm,
+                            total_samples,
+                            sample);
+
+                        magnitude[i] = value[sample - window_start];
+                        positive[i] = sign >= 0.0;
+                    }
+                    sliced = v90_post_mp_lean_slice(best_level,
+                                                    best_m,
+                                                    k,
+                                                    magnitude,
+                                                    labels);
+                    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                        int expected = (int)(r % (uint64_t)best_m);
+
+                        r /= (uint64_t)best_m;
+                        label_total++;
+                        if (sliced && labels[i] == expected) {
+                            label_matches++;
+                        } else {
+                            frame_mismatch[frame]++;
+                            if (sliced && labels[i] == expected - 1)
+                                confusion[expected * 2]++;
+                            else if (sliced && labels[i] == expected + 1)
+                                confusion[expected * 2 + 1]++;
+                        }
+                    }
+                    if (!sliced)
+                        continue;
+                    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                        codewords[i] = v91_ucode_to_codeword(
+                            slice_law,
+                            VPCM_CP_MASK_BITS - 1 - labels[i],
+                            positive[i]);
+                    }
+                    if (v90_post_mp_demap_frame(capture_alaw,
+                                                &data_cp,
+                                                d,
+                                                &reg,
+                                                &prev_sign,
+                                                &shaper,
+                                                codewords,
+                                                frame_bits) == d)
+                        demap_frames++;
+                }
+                if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                    fprintf(stderr,
+                            "v90 post-MP B1d oracle labels=%d/%d demap_frames=%d/%d\n",
+                            label_matches,
+                            label_total,
+                            demap_frames,
+                            B1D_FRAMES);
+                    fprintf(stderr, "v90 post-MP B1d frame mismatches=");
+                    for (int frame = 0; frame < B1D_FRAMES; frame++)
+                        fputc('0' + frame_mismatch[frame], stderr);
+                    fputc('\n', stderr);
+                    fprintf(stderr, "v90 post-MP B1d digit confusion:");
+                    for (int rank = 0; rank < 8; rank++) {
+                        int best = -1;
+
+                        for (int pair = 0;
+                             pair < VPCM_CP_MASK_BITS * 2; pair++) {
+                            if (confusion[pair] > 0
+                                && (best < 0
+                                    || confusion[pair] > confusion[best]))
+                                best = pair;
+                        }
+                        if (best < 0)
+                            break;
+                        fprintf(stderr,
+                                " %d->%d:%d",
+                                best / 2,
+                                best / 2 + (best % 2 ? 1 : -1),
+                                confusion[best]);
+                        confusion[best] = 0;
+                    }
+                    fprintf(stderr, " (adjacent only)\n");
+                }
+                /* Mixed recordings carry upstream bursts that wipe out
+                 * whole frames, so demand decisive evidence from the
+                 * clean stretches instead of a uniform match: a frame
+                 * whose six labels all equal the known plaintext has
+                 * probability ~m^-6 under a wrong hypothesis. */
+                {
+                    int clean_frames = 0;
+
+                    for (int frame = 0; frame < B1D_FRAMES; frame++)
+                        clean_frames += frame_mismatch[frame] == 0;
+                    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+                        fprintf(stderr,
+                                "v90 post-MP B1d clean_frames=%d/%d\n",
+                                clean_frames,
+                                B1D_FRAMES);
+                    }
+                    if (clean_frames < 12
+                        || 2 * label_matches < label_total)
+                        label_matches = -1;
+                }
+                if (label_matches >= 0) {
+                    oracle_found = true;
+                    oracle_reg = reg;
+                    oracle_prev_sign = prev_sign;
+                    oracle_shaper = shaper;
+                    oracle_ones = label_matches;
+                    oracle_bits = label_total;
+                    oracle_drn = best_hyp_drn;
+                    oracle_start = best_hyp_start;
+                    oracle_m = best_m;
+                    oracle_k = k;
+                    memcpy(oracle_level,
+                           best_level,
+                           sizeof(oracle_level));
+                }
+            }
+        }
+    }
+    if (oracle_found) {
+        int d = oracle_drn + 20;
+        uint32_t reg = oracle_reg;
+        int prev_sign = oracle_prev_sign;
+        v90_shaped_rx_state_t shaper = oracle_shaper;
+        uint8_t *data_bits;
+        int data_bit_count = 0;
+        int data_frames = 0;
+        int data_ones = 0;
+        int consecutive_failures = 0;
+
+        out->post_mp.valid = true;
+        out->post_mp.data_drn = oracle_drn;
+        out->post_mp.bits_per_frame = d;
+        out->post_mp.est_population = oracle_m;
+        out->post_mp.b1d_start_sample = oracle_start;
+        out->post_mp.b1d_ones = oracle_ones;
+        out->post_mp.b1d_bits = oracle_bits;
+        out->post_mp.data_start_sample = oracle_start + B1D_SYMBOLS;
+        data_bits = malloc((size_t)MAX_DATA_FRAMES * 64);
+        if (data_bits) {
+            for (int frame = 0; frame < MAX_DATA_FRAMES; frame++) {
+                uint8_t codewords[6];
+                uint8_t frame_bits[64];
+                int labels[6];
+                double magnitude[6];
+                bool positive[6];
+                int first = out->post_mp.data_start_sample + 6 * frame;
+
+                if (first < window_start
+                    || first + VPCM_CP_FRAME_INTERVALS
+                       > window_start + deconv_count)
+                    break;
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                    double sign = v90_pcm_modulus_sign(sign_equalizer,
+                                                       digital_pcm,
+                                                       total_samples,
+                                                       first + i);
+
+                    magnitude[i] = value[first + i - window_start];
+                    positive[i] = sign >= 0.0;
+                }
+                /* A frame the strict demapper rejects (sign flip or
+                 * adjacent-level slip) is skipped rather than fatal: the
+                 * self-synchronizing descrambler recovers within 23 bits
+                 * of the next clean frame.  Give up only when the signal
+                 * has clearly left the fitted alphabet. */
+                if (!v90_post_mp_lean_slice(oracle_level,
+                                            oracle_m,
+                                            oracle_k,
+                                            magnitude,
+                                            labels)) {
+                    if (++consecutive_failures > 8)
+                        break;
+                    continue;
+                }
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                    codewords[i] = v91_ucode_to_codeword(
+                        slice_law,
+                        VPCM_CP_MASK_BITS - 1 - labels[i],
+                        positive[i]);
+                }
+                if (v90_post_mp_demap_frame(capture_alaw,
+                                            &data_cp,
+                                            d,
+                                            &reg,
+                                            &prev_sign,
+                                            &shaper,
+                                            codewords,
+                                            frame_bits) != d) {
+                    if (++consecutive_failures > 8)
+                        break;
+                    continue;
+                }
+                consecutive_failures = 0;
+                memcpy(data_bits + data_bit_count, frame_bits, (size_t)d);
+                data_bit_count += d;
+                data_frames++;
+            }
+            for (int bit = 0; bit < data_bit_count; bit++)
+                data_ones += data_bits[bit] & 1;
+            out->post_mp.data_frames = data_frames;
+            out->post_mp.data_bits = data_bit_count;
+            out->post_mp.data_ones = data_ones;
+            /* HDLC flag probe: exact 0x7E octets at any bit offset plus
+             * the longest 8-bit-stride run of consecutive flags. */
+            {
+                static const uint8_t flag[8] = {0, 1, 1, 1, 1, 1, 1, 0};
+
+                for (int bit = 0; bit + 8 <= data_bit_count; bit++) {
+                    int errors = 0;
+
+                    for (int i = 0; i < 8; i++)
+                        errors += (data_bits[bit + i] & 1) != flag[i];
+                    if (errors != 0)
+                        continue;
+                    out->post_mp.hdlc_exact_flags++;
+                    {
+                        int run = 0;
+
+                        for (int pos = bit; pos + 8 <= data_bit_count;
+                             pos += 8) {
+                            int next_errors = 0;
+
+                            for (int i = 0; i < 8; i++) {
+                                next_errors += (data_bits[pos + i] & 1)
+                                             != flag[i];
+                            }
+                            if (next_errors != 0)
+                                break;
+                            run++;
+                        }
+                        if (run > out->post_mp.hdlc_flag_run)
+                            out->post_mp.hdlc_flag_run = run;
+                    }
+                }
+            }
+            out->post_mp.preview_len = data_bit_count / 8;
+            if (out->post_mp.preview_len
+                > (int)sizeof(out->post_mp.preview)) {
+                out->post_mp.preview_len =
+                    (int)sizeof(out->post_mp.preview);
+            }
+            for (int byte = 0; byte < out->post_mp.preview_len; byte++) {
+                uint8_t packed = 0;
+
+                for (int i = 0; i < 8; i++)
+                    packed |= (uint8_t)((data_bits[8 * byte + i] & 1) << i);
+                out->post_mp.preview[byte] = packed;
+            }
+            free(data_bits);
+        }
+    }
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 post-MP boundary=%d b1d=%d ed=%d/%d pop=%d oracle=%d drn=%d ones=%d/%d data_frames=%d flags=%d run=%d\n",
+                boundary,
+                out->post_mp.b1d_start_sample,
+                out->post_mp.ed_zero_bits,
+                out->post_mp.ed_bits,
+                out->post_mp.est_population,
+                oracle_found ? 1 : 0,
+                oracle_drn,
+                oracle_ones,
+                oracle_bits,
+                out->post_mp.data_frames,
+                out->post_mp.hdlc_exact_flags,
+                out->post_mp.hdlc_flag_run);
+    }
+    free(value);
+    free(dist);
+    free(deconv);
+}
+
 static bool v90_recover_downstream_mp_pcm(
                                     const int16_t *digital_pcm,
                                     int total_samples,
@@ -16981,6 +17967,15 @@ static bool v90_recover_downstream_mp_pcm(
                     mp0.remote_ack_sample = -1;
                     mp0.remote_last_mp_sample = -1;
                     *out = mp0;
+                    v90_probe_downstream_post_mp(digital_pcm,
+                                                 total_samples,
+                                                 start,
+                                                 &pcm_equalizer,
+                                                 &modulus_equalizer,
+                                                 capture_alaw,
+                                                 &wire_cp,
+                                                 bits_per_frame,
+                                                 out);
                     free(modulus_deconvolved);
                     free(plain_bits);
                     return true;
@@ -17016,6 +18011,15 @@ static bool v90_recover_downstream_mp_pcm(
                     mp0.remote_ack_sample = -1;
                     mp0.remote_last_mp_sample = -1;
                     *out = mp0;
+                    v90_probe_downstream_post_mp(digital_pcm,
+                                                 total_samples,
+                                                 start,
+                                                 &pcm_equalizer,
+                                                 &modulus_equalizer,
+                                                 capture_alaw,
+                                                 &wire_cp,
+                                                 bits_per_frame,
+                                                 out);
                     free(modulus_deconvolved);
                     free(plain_bits);
                     return true;
@@ -17031,6 +18035,15 @@ static bool v90_recover_downstream_mp_pcm(
                         candidate_frame[candidate],
                         start,
                         out)) {
+                    v90_probe_downstream_post_mp(digital_pcm,
+                                                 total_samples,
+                                                 start,
+                                                 &pcm_equalizer,
+                                                 &modulus_equalizer,
+                                                 capture_alaw,
+                                                 &wire_cp,
+                                                 bits_per_frame,
+                                                 out);
                     free(modulus_deconvolved);
                     free(plain_bits);
                     return true;
@@ -17060,6 +18073,15 @@ static bool v90_recover_downstream_mp_pcm(
                     known_trn_frames,
                     start,
                     out)) {
+                v90_probe_downstream_post_mp(digital_pcm,
+                                             total_samples,
+                                             start,
+                                             &pcm_equalizer,
+                                             &modulus_equalizer,
+                                             capture_alaw,
+                                             &wire_cp,
+                                             bits_per_frame,
+                                             out);
                 free(modulus_deconvolved);
                 free(plain_bits);
                 return true;
@@ -17467,6 +18489,15 @@ static bool v90_recover_downstream_mp_pcm(
                                             repeat_corrections[winner],
                                             repeated.mp.bit_rate_c_to_a,
                                             repeated.mp.trellis_size);
+                                    v90_probe_downstream_post_mp(digital_pcm,
+                                                                 total_samples,
+                                                                 start,
+                                                                 &pcm_equalizer,
+                                                                 &modulus_equalizer,
+                                                                 capture_alaw,
+                                                                 &wire_cp,
+                                                                 bits_per_frame,
+                                                                 out);
                                     free(modulus_deconvolved);
                                     free(plain_bits);
                                     return true;
@@ -17487,6 +18518,15 @@ static bool v90_recover_downstream_mp_pcm(
                                         known_trn_frames,
                                         best_corrected_rate,
                                         best_corrections);
+                                v90_probe_downstream_post_mp(digital_pcm,
+                                                             total_samples,
+                                                             start,
+                                                             &pcm_equalizer,
+                                                             &modulus_equalizer,
+                                                             capture_alaw,
+                                                             &wire_cp,
+                                                             bits_per_frame,
+                                                             out);
                                 free(modulus_deconvolved);
                                 free(plain_bits);
                                 return true;
@@ -17532,6 +18572,15 @@ static bool v90_recover_downstream_mp_pcm(
                         state_value,
                         frames);
             }
+            v90_probe_downstream_post_mp(digital_pcm,
+                                         total_samples,
+                                         start,
+                                         &pcm_equalizer,
+                                         &modulus_equalizer,
+                                         capture_alaw,
+                                         &wire_cp,
+                                         bits_per_frame,
+                                         out);
             free(modulus_deconvolved);
             free(plain_bits);
             return true;
@@ -17602,6 +18651,15 @@ static bool v90_recover_downstream_mp_pcm(
                                 repetitions,
                                 candidate.best_trn_ber_pct);
                     }
+                    v90_probe_downstream_post_mp(digital_pcm,
+                                                 total_samples,
+                                                 start,
+                                                 &pcm_equalizer,
+                                                 &modulus_equalizer,
+                                                 capture_alaw,
+                                                 &wire_cp,
+                                                 bits_per_frame,
+                                                 out);
                     free(modulus_deconvolved);
                     free(plain_bits);
                     return true;
@@ -30758,6 +31816,58 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                        ? "expanded" : "minimum");
                         }
                     }
+                }
+                if (downstream_mp.valid
+                    && downstream_mp.post_mp.boundary_valid) {
+                    const v90_downstream_data_recovery_t *post =
+                        &downstream_mp.post_mp;
+
+                    printf("  V.90 Ed/B1d boundary: CPt constellation ends at %.3f ms",
+                           sample_to_ms(post->boundary_sample, 8000));
+                    if (post->ed_bits > 0) {
+                        printf(", Ed zeros=%d%% (%d bits)",
+                               100 * post->ed_zero_bits / post->ed_bits,
+                               post->ed_bits);
+                    }
+                    if (post->est_population > 0) {
+                        printf(", data constellation ~%d points",
+                               post->est_population);
+                    }
+                    putchar('\n');
+                    if (post->valid) {
+                        printf("  V.90 B1d: %d/%d known-plaintext labels at %.3f ms, data drn=%d (%d bits/frame, %d bps, %d-point constellation)\n",
+                               post->b1d_ones,
+                               post->b1d_bits,
+                               sample_to_ms(post->b1d_start_sample, 8000),
+                               post->data_drn,
+                               post->bits_per_frame,
+                               post->bits_per_frame * 8000 / 6,
+                               post->est_population);
+                        printf("  V.90 downstream data: start=%.3f ms, %d frames (%d bits), ones=%.1f%%, HDLC flags=%d (best run %d)\n",
+                               sample_to_ms(post->data_start_sample, 8000),
+                               post->data_frames,
+                               post->data_bits,
+                               post->data_bits > 0
+                                   ? 100.0 * post->data_ones
+                                     / post->data_bits
+                                   : 0.0,
+                               post->hdlc_exact_flags,
+                               post->hdlc_flag_run);
+                        if (post->preview_len > 0) {
+                            printf("  V.90 downstream preview:");
+                            for (int byte = 0;
+                                 byte < post->preview_len; byte++)
+                                printf(" %02X", post->preview[byte]);
+                            putchar('\n');
+                        }
+                    } else {
+                        printf("  V.90 B1d: boundary at %.3f ms but blind data-constellation decode did not validate; downstream data starts ~%.3f ms\n",
+                               sample_to_ms(post->b1d_start_sample, 8000),
+                               sample_to_ms(post->b1d_start_sample
+                                            + 288, 8000));
+                    }
+                } else if (downstream_mp.valid) {
+                    printf("  V.90 Ed/B1d boundary: not found within 8 s after MP\n");
                 }
                 if (downstream_mp.valid && cp_symbols && !data_cp.valid) {
                     int data_cp_search = downstream_mp.start_sample - 10000;
