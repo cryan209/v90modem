@@ -8033,6 +8033,28 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
             else
             {
                 viterbi_trace_back(&s->viterbi, y);
+                /* The public QAM report callback normally observes the
+                   equalizer input.  A non-NULL target reports the delayed
+                   lattice points selected by the Viterbi traceback as well.
+                   Offline receivers can use these decisions for a bounded
+                   decision-directed refinement without duplicating the
+                   trellis implementation. */
+                if (s->qam_report)
+                {
+                    complexf_t decided;
+
+                    for (j = 0;  j < 2;  j++)
+                    {
+                        decided.re = FP_Q9_7_TO_F(y[j].re);
+                        decided.im = FP_Q9_7_TO_F(y[j].im);
+                        s->qam_report(s->qam_user_data,
+                                      NULL,
+                                      &decided,
+                                      s->qam_sample_time);
+                    }
+                    /*endfor*/
+                }
+                /*endif*/
 #endif
                 /* We now have two points in y to be decoded. They are in Q9.7 format. */
 //printf("AAA %p [%8.3f, %8.3f] [%8.3f, %8.3f]\n",

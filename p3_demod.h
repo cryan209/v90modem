@@ -144,6 +144,7 @@ typedef struct {
     float eq_delta;
     int   cma_freeze_symbols;
     int   cma_freeze_after_sample;
+    int   pll_freeze_after_sample;
     int   s_alternating_run;
     int   s_previous_dibit;
 

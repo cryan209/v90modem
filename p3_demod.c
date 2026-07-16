@@ -289,6 +289,7 @@ void p3_demod_reset(p3_demod_t *d)
     }
     d->cma_freeze_symbols = 0;
     d->cma_freeze_after_sample = -1;
+    d->pll_freeze_after_sample = -1;
     d->s_alternating_run = 0;
     d->s_previous_dibit = -1;
     d->prev_re = 0.0f;
@@ -455,8 +456,8 @@ static void emit_symbol(p3_demod_t *d, float bb_re, float bb_im,
                 err /= conj_mag;
 
             if (d->rrc_signal_active
-                && (d->cma_freeze_after_sample < 0
-                    || sample_idx < d->cma_freeze_after_sample)) {
+                && (d->pll_freeze_after_sample < 0
+                    || sample_idx < d->pll_freeze_after_sample)) {
                 d->pll_freq_err += d->pll_beta * err;
                 d->nco_phase_inc = hz_to_phase_inc(d->carrier_hz + d->pll_freq_err,
                                                     d->sample_rate);
