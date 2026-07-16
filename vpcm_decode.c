@@ -12544,8 +12544,11 @@ typedef struct {
 
 typedef struct {
     bool valid;
-    int population;
-    double level[V90_PCM_MOD_MAX_LEVELS];
+    int constellation_count;
+    uint8_t dfi[VPCM_CP_FRAME_INTERVALS];
+    int population[VPCM_CP_MAX_CONSTELLATIONS];
+    double level[VPCM_CP_MAX_CONSTELLATIONS]
+                [V90_PCM_MOD_MAX_LEVELS];
     double channel[V90_PCM_MOD_EQ_TAPS];
     double bias;
     double validation_nrmse;
@@ -12980,46 +12983,6 @@ static bool v90_train_known_pcm_equalizer(const int16_t *samples,
     return true;
 }
 
-static bool v90_make_trn_modulus_labels(int bits_per_frame,
-                                        int shaping_redundancy,
-                                        int population,
-                                        int frames,
-                                        uint8_t *labels)
-{
-    uint32_t scrambler = 0;
-    int sign_bits = VPCM_CP_FRAME_INTERVALS - shaping_redundancy;
-    int modulus_bits = bits_per_frame - sign_bits;
-
-    if (!labels || population < 2
-        || bits_per_frame <= sign_bits || bits_per_frame > 64
-        || modulus_bits > 56 || frames <= 0) {
-        return false;
-    }
-    for (int frame = 0; frame < frames; frame++) {
-        uint64_t remainder = 0;
-
-        for (int bit = 0; bit < bits_per_frame; bit++) {
-            int feedback = ((scrambler >> 22) ^ (scrambler >> 17)) & 1;
-            int scrambled = 1 ^ feedback;
-
-            scrambler = ((scrambler << 1) | (uint32_t)scrambled)
-                      & 0x7FFFFF;
-            if (bit >= sign_bits) {
-                remainder |= (uint64_t)scrambled << (bit - sign_bits);
-            }
-        }
-        for (int interval = 0;
-             interval < VPCM_CP_FRAME_INTERVALS; interval++) {
-            labels[frame * VPCM_CP_FRAME_INTERVALS + interval] =
-                (uint8_t)(remainder % (uint64_t)population);
-            remainder /= (uint64_t)population;
-        }
-        if (remainder != 0)
-            return false;
-    }
-    return true;
-}
-
 static double v90_pcm_modulus_sign(const v90_pcm_equalizer_t *sign_equalizer,
                                    const int16_t *samples,
                                    int total_samples,
@@ -13036,9 +12999,8 @@ static bool v90_fit_pcm_modulus_candidate(
                                     int total_samples,
                                     int start_sample,
                                     const v90_pcm_equalizer_t *sign_equalizer,
-                                    int bits_per_frame,
-                                    int shaping_redundancy,
-                                    int population,
+                                    const vpcm_cp_frame_t *cp,
+                                    const uint8_t *labels,
                                     int frames,
                                     v90_pcm_modulus_equalizer_t *out,
                                     int *inversions_out)
@@ -13049,14 +13011,16 @@ static bool v90_fit_pcm_modulus_candidate(
     int train_end = 1200;
     int validation_begin = 1300;
     int validation_end = 1900;
-    uint8_t *labels;
-    double level[V90_PCM_MOD_MAX_LEVELS];
+    int level_offset[VPCM_CP_MAX_CONSTELLATIONS];
+    int level_count = 0;
+    double level[VPCM_CP_MAX_CONSTELLATIONS]
+                [V90_PCM_MOD_MAX_LEVELS] = {{0}};
     double channel[V90_PCM_MOD_EQ_TAPS] = {0};
     double bias = 0.0;
-    bool valid = false;
 
-    if (!samples || !sign_equalizer || !out
-        || population < 2 || population > V90_PCM_MOD_MAX_LEVELS
+    if (!samples || !sign_equalizer || !cp || !labels || !out
+        || cp->constellation_count < 1
+        || cp->constellation_count > VPCM_CP_MAX_CONSTELLATIONS
         || frames < 320 || start_sample < V90_PCM_MOD_EQ_PRE
         || start_sample + codewords + V90_PCM_MOD_EQ_PRE > total_samples) {
         return false;
@@ -13067,29 +13031,32 @@ static bool v90_fit_pcm_modulus_candidate(
         validation_end = codewords - V90_PCM_MOD_EQ_PRE;
     if (validation_begin >= validation_end || train_begin >= train_end)
         return false;
-    labels = malloc((size_t)codewords);
-    if (!labels)
-        return false;
-    if (!v90_make_trn_modulus_labels(bits_per_frame,
-                                     shaping_redundancy,
-                                     population,
-                                     frames,
-                                     labels)) {
-        free(labels);
-        return false;
-    }
-    for (int label = 0; label < population; label++) {
-        level[label] = population == 1 ? 1.0
-                     : 1.75 - 1.5 * label / (population - 1.0);
+    for (int constellation = 0;
+         constellation < cp->constellation_count; constellation++) {
+        int population = vpcm_cp_mask_population(
+            cp->masks[constellation]);
+
+        if (population < 2 || population > V90_PCM_MOD_MAX_LEVELS)
+            return false;
+        level_offset[constellation] = level_count;
+        level_count += population;
+        for (int label = 0; label < population; label++) {
+            level[constellation][label] = population == 1 ? 1.0
+                : 1.75 - 1.5 * label / (population - 1.0);
+        }
     }
     for (int iteration = 0; iteration < 30; iteration++) {
         double matrix[CHANNEL_SYSTEM * CHANNEL_SYSTEM] = {0};
         double rhs[CHANNEL_SYSTEM] = {0};
         double solution[CHANNEL_SYSTEM];
-        double level_matrix[V90_PCM_MOD_MAX_LEVELS
-                          * V90_PCM_MOD_MAX_LEVELS] = {0};
-        double level_rhs[V90_PCM_MOD_MAX_LEVELS] = {0};
-        double level_solution[V90_PCM_MOD_MAX_LEVELS];
+        double level_matrix[(VPCM_CP_MAX_CONSTELLATIONS
+                            * V90_PCM_MOD_MAX_LEVELS)
+                          * (VPCM_CP_MAX_CONSTELLATIONS
+                            * V90_PCM_MOD_MAX_LEVELS)] = {0};
+        double level_rhs[VPCM_CP_MAX_CONSTELLATIONS
+                       * V90_PCM_MOD_MAX_LEVELS] = {0};
+        double level_solution[VPCM_CP_MAX_CONSTELLATIONS
+                            * V90_PCM_MOD_MAX_LEVELS];
 
         for (int n = train_begin; n < train_end; n++) {
             double feature[CHANNEL_SYSTEM];
@@ -13097,12 +13064,14 @@ static bool v90_fit_pcm_modulus_candidate(
 
             for (int tap = 0; tap < V90_PCM_MOD_EQ_TAPS; tap++) {
                 int symbol = n - V90_PCM_MOD_EQ_PRE + tap;
+                int constellation = cp->dfi[symbol % 6];
 
                 feature[tap] = v90_pcm_modulus_sign(
                     sign_equalizer,
                     samples,
                     total_samples,
-                    start_sample + symbol) * level[labels[symbol]];
+                    start_sample + symbol)
+                    * level[constellation][labels[symbol]];
             }
             feature[V90_PCM_MOD_EQ_TAPS] = 1.0;
             for (int row = 0; row < CHANNEL_SYSTEM; row++) {
@@ -13125,7 +13094,7 @@ static bool v90_fit_pcm_modulus_candidate(
                                      rhs,
                                      solution,
                                      CHANNEL_SYSTEM)) {
-            goto done;
+            return false;
         }
         memcpy(channel,
                solution,
@@ -13133,23 +13102,26 @@ static bool v90_fit_pcm_modulus_candidate(
         bias = solution[V90_PCM_MOD_EQ_TAPS];
 
         for (int n = train_begin; n < train_end; n++) {
-            double feature[V90_PCM_MOD_MAX_LEVELS] = {0};
+            double feature[VPCM_CP_MAX_CONSTELLATIONS
+                         * V90_PCM_MOD_MAX_LEVELS] = {0};
             double target = samples[start_sample + n] / 32768.0 - bias;
 
             for (int tap = 0; tap < V90_PCM_MOD_EQ_TAPS; tap++) {
                 int symbol = n - V90_PCM_MOD_EQ_PRE + tap;
+                int constellation = cp->dfi[symbol % 6];
                 int label = labels[symbol];
+                int parameter = level_offset[constellation] + label;
 
-                feature[label] += channel[tap] * v90_pcm_modulus_sign(
+                feature[parameter] += channel[tap] * v90_pcm_modulus_sign(
                     sign_equalizer,
                     samples,
                     total_samples,
                     start_sample + symbol);
             }
-            for (int row = 0; row < population; row++) {
+            for (int row = 0; row < level_count; row++) {
                 level_rhs[row] += feature[row] * target;
-                for (int column = 0; column < population; column++) {
-                    level_matrix[row * population + column] +=
+                for (int column = 0; column < level_count; column++) {
+                    level_matrix[row * level_count + column] +=
                         feature[row] * feature[column];
                 }
             }
@@ -13157,36 +13129,49 @@ static bool v90_fit_pcm_modulus_candidate(
         {
             double trace = 0.0;
 
-            for (int i = 0; i < population; i++)
-                trace += level_matrix[i * population + i];
-            for (int i = 0; i < population; i++)
-                level_matrix[i * population + i] += trace * 1e-5;
+            for (int i = 0; i < level_count; i++)
+                trace += level_matrix[i * level_count + i];
+            for (int i = 0; i < level_count; i++)
+                level_matrix[i * level_count + i] += trace * 1e-5;
         }
         if (!v90_solve_linear_system(level_matrix,
                                      level_rhs,
                                      level_solution,
-                                     population)) {
-            goto done;
+                                     level_count)) {
+            return false;
         }
         {
             double mean = 0.0;
 
-            for (int label = 0; label < population; label++)
-                mean += level_solution[label];
-            mean /= population;
+            for (int parameter = 0; parameter < level_count; parameter++)
+                mean += level_solution[parameter];
+            mean /= level_count;
             if (mean < 0.0) {
                 mean = -mean;
-                for (int label = 0; label < population; label++)
-                    level_solution[label] = -level_solution[label];
+                for (int parameter = 0; parameter < level_count;
+                     parameter++) {
+                    level_solution[parameter] =
+                        -level_solution[parameter];
+                }
                 for (int tap = 0; tap < V90_PCM_MOD_EQ_TAPS; tap++)
                     channel[tap] = -channel[tap];
             }
             if (mean < 1e-9)
-                goto done;
-            for (int label = 0; label < population; label++) {
-                level_solution[label] /= mean;
-                level[label] = 0.5 * level[label]
-                             + 0.5 * level_solution[label];
+                return false;
+            for (int constellation = 0;
+                 constellation < cp->constellation_count;
+                 constellation++) {
+                int population = vpcm_cp_mask_population(
+                    cp->masks[constellation]);
+
+                for (int label = 0; label < population; label++) {
+                    int parameter = level_offset[constellation] + label;
+
+                    level_solution[parameter] /= mean;
+                    level[constellation][label] =
+                        0.5 * level[constellation][label]
+                      + 0.5 * level_solution[parameter];
+                }
             }
             for (int tap = 0; tap < V90_PCM_MOD_EQ_TAPS; tap++)
                 channel[tap] *= mean;
@@ -13203,36 +13188,51 @@ static bool v90_fit_pcm_modulus_candidate(
 
             for (int tap = 0; tap < V90_PCM_MOD_EQ_TAPS; tap++) {
                 int symbol = n - V90_PCM_MOD_EQ_PRE + tap;
+                int constellation = cp->dfi[symbol % 6];
 
                 predicted += channel[tap] * v90_pcm_modulus_sign(
                     sign_equalizer,
                     samples,
                     total_samples,
-                    start_sample + symbol) * level[labels[symbol]];
+                    start_sample + symbol)
+                    * level[constellation][labels[symbol]];
             }
             error += (predicted - target) * (predicted - target);
             power += target * target;
         }
-        for (int label = 0; label + 1 < population; label++) {
-            if (level[label] <= level[label + 1]
-                || level[label + 1] <= 0.0) {
-                inversions++;
+        for (int constellation = 0;
+             constellation < cp->constellation_count; constellation++) {
+            int population = vpcm_cp_mask_population(
+                cp->masks[constellation]);
+
+            for (int label = 0; label + 1 < population; label++) {
+                if (level[constellation][label]
+                        <= level[constellation][label + 1]
+                    || level[constellation][label + 1] <= 0.0) {
+                    inversions++;
+                }
             }
         }
         memset(out, 0, sizeof(*out));
-        out->population = population;
-        memcpy(out->level, level, sizeof(double) * population);
+        out->constellation_count = cp->constellation_count;
+        memcpy(out->dfi, cp->dfi, sizeof(out->dfi));
+        for (int constellation = 0;
+             constellation < cp->constellation_count; constellation++) {
+            out->population[constellation] = vpcm_cp_mask_population(
+                cp->masks[constellation]);
+            memcpy(out->level[constellation],
+                   level[constellation],
+                   (size_t)out->population[constellation]
+                     * sizeof(out->level[constellation][0]));
+        }
         memcpy(out->channel, channel, sizeof(channel));
         out->bias = bias;
         out->validation_nrmse = power > 0.0 ? sqrt(error / power)
                                                 : HUGE_VAL;
         if (inversions_out)
             *inversions_out = inversions;
-        valid = isfinite(out->validation_nrmse);
+        return isfinite(out->validation_nrmse);
     }
-done:
-    free(labels);
-    return valid;
 }
 
 static void v90_pcm_modulus_forward(const v90_pcm_modulus_equalizer_t *eq,
@@ -13275,7 +13275,9 @@ static bool v90_pcm_modulus_deconvolve(
                                     int count,
                                     double *output)
 {
-    const double regularization = 1e-6;
+    double regularization = getenv("VPCM_V90_MOD_DECONV_RIDGE")
+                          ? atof(getenv("VPCM_V90_MOD_DECONV_RIDGE"))
+                          : 1e-6;
     double *rhs;
     double *residual;
     double *direction;
@@ -13286,6 +13288,8 @@ static bool v90_pcm_modulus_deconvolve(
 
     if (!eq || !eq->valid || !samples || !output || count <= 0)
         return false;
+    if (!isfinite(regularization) || regularization < 0.0)
+        regularization = 1e-6;
     rhs = calloc((size_t)count, sizeof(*rhs));
     residual = calloc((size_t)count, sizeof(*residual));
     direction = calloc((size_t)count, sizeof(*direction));
@@ -13345,75 +13349,53 @@ static bool v90_train_pcm_modulus_equalizer(
                                     int total_samples,
                                     int start_sample,
                                     const v90_pcm_equalizer_t *sign_equalizer,
-                                    int bits_per_frame,
-                                    int shaping_redundancy,
+                                    const vpcm_cp_frame_t *cp,
+                                    const uint8_t *labels,
                                     int frames,
                                     v90_pcm_modulus_equalizer_t *out)
 {
-    v90_pcm_modulus_equalizer_t best;
-    double best_score = HUGE_VAL;
-    bool found = false;
+    v90_pcm_modulus_equalizer_t candidate;
+    int inversions = 0;
 
-    if (!out)
+    if (!out || !cp || !labels)
         return false;
     memset(out, 0, sizeof(*out));
-    memset(&best, 0, sizeof(best));
-    for (int population = 2;
-         population <= V90_PCM_MOD_MAX_LEVELS; population++) {
-        v90_pcm_modulus_equalizer_t candidate;
-        uint64_t product = 1;
-        int inversions = 0;
-        double score;
-
-        for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
-            product *= (uint64_t)population;
-        if (bits_per_frame - (6 - shaping_redundancy) >= 64
-            || product < (1ULL << (bits_per_frame
-                                   - (6 - shaping_redundancy)))) {
-            continue;
-        }
-        if (!v90_fit_pcm_modulus_candidate(samples,
-                                           total_samples,
-                                           start_sample,
-                                           sign_equalizer,
-                                           bits_per_frame,
-                                           shaping_redundancy,
-                                           population,
-                                           frames,
-                                           &candidate,
-                                           &inversions)) {
-            continue;
-        }
-        score = candidate.validation_nrmse + 0.10 * inversions;
-        if (getenv("VPCM_V90_MP_PCM_DIAG")) {
-            fprintf(stderr,
-                    "v90 TRN2d modulus M=%d nrmse=%.4f inversions=%d\n",
-                    population,
-                    candidate.validation_nrmse,
-                    inversions);
-        }
-        if (score < best_score) {
-            best_score = score;
-            best = candidate;
-            found = true;
-        }
-    }
-    if (!found || best.validation_nrmse > 0.20)
+    memset(&candidate, 0, sizeof(candidate));
+    if (!v90_fit_pcm_modulus_candidate(samples,
+                                       total_samples,
+                                       start_sample,
+                                       sign_equalizer,
+                                       cp,
+                                       labels,
+                                       frames,
+                                       &candidate,
+                                       &inversions)
+        || candidate.validation_nrmse > 0.20) {
         return false;
-    best.valid = true;
+    }
+    if (getenv("VPCM_V90_MP_PCM_DIAG")) {
+        fprintf(stderr,
+                "v90 TRN2d modulus mixed nrmse=%.4f inversions=%d populations=",
+                candidate.validation_nrmse,
+                inversions);
+        for (int constellation = 0;
+             constellation < candidate.constellation_count;
+             constellation++) {
+            fprintf(stderr,
+                    "%s%d",
+                    constellation ? "/" : "",
+                    candidate.population[constellation]);
+        }
+        fputc('\n', stderr);
+    }
+    candidate.valid = true;
     {
         int codewords = frames * VPCM_CP_FRAME_INTERVALS;
-        uint8_t *labels = malloc((size_t)codewords);
         double *deconvolved = malloc((size_t)codewords
                                    * sizeof(*deconvolved));
 
-        if (labels && deconvolved
-            && v90_make_trn_modulus_labels(bits_per_frame,
-                                           shaping_redundancy,
-                                           best.population,
-                                           frames,
-                                           labels)
-            && v90_pcm_modulus_deconvolve(&best,
+        if (deconvolved
+            && v90_pcm_modulus_deconvolve(&candidate,
                                           samples,
                                           start_sample,
                                           codewords,
@@ -13422,11 +13404,11 @@ static bool v90_train_pcm_modulus_equalizer(
             int checks = 0;
             int bit_errors = 0;
             int bit_checks = 0;
-            int bits_per_label = 0;
 
-            while ((1 << bits_per_label) < best.population)
-                bits_per_label++;
             for (int n = 100; n < codewords - 100; n++) {
+                int constellation = candidate.dfi[n % 6];
+                int population = candidate.population[constellation];
+                int bits_per_label = 0;
                 double magnitude = deconvolved[n]
                                  * v90_pcm_modulus_sign(sign_equalizer,
                                                        samples,
@@ -13435,8 +13417,12 @@ static bool v90_train_pcm_modulus_equalizer(
                 double error = HUGE_VAL;
                 int recovered = -1;
 
-                for (int label = 0; label < best.population; label++) {
-                    double trial = fabs(magnitude - best.level[label]);
+                while ((1 << bits_per_label) < population)
+                    bits_per_label++;
+                for (int label = 0; label < population; label++) {
+                    double trial = fabs(
+                        magnitude
+                          - candidate.level[constellation][label]);
 
                     if (trial < error) {
                         error = trial;
@@ -13445,7 +13431,7 @@ static bool v90_train_pcm_modulus_equalizer(
                 }
                 matches += recovered == labels[n];
                 checks++;
-                if ((1 << bits_per_label) == best.population) {
+                if ((1 << bits_per_label) == population) {
                     for (int bit = 0; bit < bits_per_label; bit++) {
                         bit_errors += ((recovered >> bit) & 1)
                                     != ((labels[n] >> bit) & 1);
@@ -13453,13 +13439,12 @@ static bool v90_train_pcm_modulus_equalizer(
                     }
                 }
             }
-            best.validation_match = checks > 0
-                                  ? (double)matches / checks : 0.0;
-            best.validation_bit_error = bit_checks > 0
-                                      ? (double)bit_errors / bit_checks
-                                      : 0.0;
+            candidate.validation_match = checks > 0
+                                       ? (double)matches / checks : 0.0;
+            candidate.validation_bit_error = bit_checks > 0
+                                           ? (double)bit_errors / bit_checks
+                                           : 0.0;
         }
-        free(labels);
         free(deconvolved);
     }
     /* The conjugate-gradient inverse is deliberately regularized and its
@@ -13467,10 +13452,10 @@ static bool v90_train_pcm_modulus_equalizer(
      * path.  A monotonic modulus ladder with low held-out forward-model
      * error is still a valid channel estimate; every downstream promotion
      * remains protected by MP structure, repetition and CRC. */
-    if (best.validation_match < 0.90
-        && best.validation_nrmse >= 0.16)
+    if (candidate.validation_match < 0.90
+        && candidate.validation_nrmse >= 0.16)
         return false;
-    *out = best;
+    *out = candidate;
     return true;
 }
 
@@ -14979,19 +14964,24 @@ static int v90_mp_frame_prefilter_score(const uint8_t *bits,
  * small: either the exact bound, or one most-significant digit is below its
  * bound while every less-significant digit takes its unconstrained optimum.
  */
-static __attribute__((noinline)) bool v90_slice_modulus_mapping_frame(
+static bool
+v90_slice_modulus_mapping_frame(
                                     const v90_pcm_modulus_equalizer_t *eq,
                                     v91_law_t law,
+                                    const vpcm_cp_frame_t *cp,
                                     int bits_per_frame,
                                     int shaping_redundancy,
                                     const double magnitude[6],
                                     const bool positive[6],
                                     uint8_t codewords[6])
 {
-    double (*cost)[V90_PCM_MOD_MAX_LEVELS] = NULL;
-    int unconstrained[6];
-    int bound[6];
-    int selected[6];
+    struct {
+        double cost[6][V90_PCM_MOD_MAX_LEVELS];
+        int unconstrained[6];
+        int bound[6];
+        int selected[6];
+        int candidate[6];
+    } *work = NULL;
     double best_cost = HUGE_VAL;
     int sign_bits = 6 - shaping_redundancy;
     int modulus_bits = bits_per_frame - sign_bits;
@@ -14999,42 +14989,59 @@ static __attribute__((noinline)) bool v90_slice_modulus_mapping_frame(
     uint64_t product = 1;
     uint64_t limit;
 
-    if (!eq || !eq->valid || eq->population < 2
-        || eq->population > V90_PCM_MOD_MAX_LEVELS
+    if (!eq || !eq->valid || !cp
+        || eq->constellation_count != cp->constellation_count
         || modulus_bits < 0 || modulus_bits >= 63) {
         return false;
     }
-    cost = malloc(6 * sizeof(*cost));
-    if (!cost)
+    work = malloc(sizeof(*work));
+    if (!work)
         return false;
     states = UINT64_C(1) << modulus_bits;
-    for (int i = 0; i < 6; i++)
-        product *= (uint64_t)eq->population;
+    for (int i = 0; i < 6; i++) {
+        int constellation = cp->dfi[i];
+
+        if (constellation < 0
+            || constellation >= eq->constellation_count
+            || eq->dfi[i] != constellation
+            || eq->population[constellation] < 2
+            || eq->population[constellation] > V90_PCM_MOD_MAX_LEVELS) {
+            free(work);
+            return false;
+        }
+        product *= (uint64_t)eq->population[constellation];
+    }
     if (product < states) {
-        free(cost);
+        free(work);
         return false;
     }
     for (int i = 0; i < 6; i++) {
+        int constellation = cp->dfi[i];
+        int population = eq->population[constellation];
         double minimum = HUGE_VAL;
 
-        unconstrained[i] = 0;
-        for (int label = 0; label < eq->population; label++) {
-            double residual = magnitude[i] - eq->level[label];
+        work->unconstrained[i] = 0;
+        for (int label = 0; label < population; label++) {
+            double residual = magnitude[i]
+                            - eq->level[constellation][label];
 
-            cost[i][label] = residual * residual;
-            if (cost[i][label] < minimum) {
-                minimum = cost[i][label];
-                unconstrained[i] = label;
+            work->cost[i][label] = residual * residual;
+            if (work->cost[i][label] < minimum) {
+                minimum = work->cost[i][label];
+                work->unconstrained[i] = label;
             }
         }
     }
     limit = states - 1;
     for (int i = 0; i < 6; i++) {
-        bound[i] = (int)(limit % (uint64_t)eq->population);
-        limit /= (uint64_t)eq->population;
+        int constellation = cp->dfi[i];
+        int population = eq->population[constellation];
+
+        work->bound[i] = (int)(limit % (uint64_t)population);
+        limit /= (uint64_t)population;
     }
     if (limit != 0) {
-        free(cost);
+        free(work);
         return false;
     }
 
@@ -15043,36 +15050,45 @@ static __attribute__((noinline)) bool v90_slice_modulus_mapping_frame(
         double total = 0.0;
 
         for (int i = 0; i < 6; i++) {
-            selected[i] = bound[i];
-            total += cost[i][bound[i]];
+            work->selected[i] = work->bound[i];
+            total += work->cost[i][work->bound[i]];
         }
         best_cost = total;
     }
     for (int pivot = 5; pivot >= 0; pivot--) {
-        for (int digit = 0; digit < bound[pivot]; digit++) {
-            int candidate[6];
+        for (int digit = 0; digit < work->bound[pivot]; digit++) {
             double total = 0.0;
 
-            for (int i = 5; i > pivot; i++)
-                candidate[i] = bound[i];
-            candidate[pivot] = digit;
+            for (int i = 5; i > pivot; i--)
+                work->candidate[i] = work->bound[i];
+            work->candidate[pivot] = digit;
             for (int i = pivot - 1; i >= 0; i--)
-                candidate[i] = unconstrained[i];
+                work->candidate[i] = work->unconstrained[i];
             for (int i = 0; i < 6; i++)
-                total += cost[i][candidate[i]];
+                total += work->cost[i][work->candidate[i]];
             if (total < best_cost) {
                 best_cost = total;
-                memcpy(selected, candidate, sizeof(selected));
+                memcpy(work->selected,
+                       work->candidate,
+                       sizeof(work->selected));
             }
         }
     }
     for (int i = 0; i < 6; i++) {
+        int ucode = v90_cp_ucode_for_label(cp,
+                                           i,
+                                           work->selected[i]);
+
+        if (ucode < 0) {
+            free(work);
+            return false;
+        }
         codewords[i] = v91_ucode_to_codeword(
             law,
-            eq->population - 1 - selected[i],
+            ucode,
             positive[i]);
     }
-    free(cost);
+    free(work);
     return true;
 }
 
@@ -15790,24 +15806,36 @@ static bool v90_recover_downstream_mp_pcm(
                           total_samples,
                           acq_start,
                           &pcm_equalizer,
-                          bits_per_frame,
-                          trn_cp.shaping_redundancy,
+                          &trn_cp,
+                          expected_labels,
                           340,
                           &modulus_equalizer)
                       && getenv("VPCM_V90_MP_PCM_DIAG")) {
                       fprintf(stderr,
-                              "v90 TRN2d modulus selected M=%d nrmse=%.4f exact=%.2f%% bit-BER=%.3f%% levels=",
-                              modulus_equalizer.population,
+                              "v90 TRN2d modulus selected mixed nrmse=%.4f exact=%.2f%% bit-BER=%.3f%% levels=",
                               modulus_equalizer.validation_nrmse,
                               100.0 * modulus_equalizer.validation_match,
                               100.0 * modulus_equalizer
                                     .validation_bit_error);
-                      for (int label = 0;
-                           label < modulus_equalizer.population; label++) {
+                      for (int constellation = 0;
+                           constellation
+                             < modulus_equalizer.constellation_count;
+                           constellation++) {
                           fprintf(stderr,
-                                  "%s%.4f",
-                                  label ? "," : "",
-                                  modulus_equalizer.level[label]);
+                                  "%sc%d{",
+                                  constellation ? "," : "",
+                                  constellation);
+                          for (int label = 0;
+                               label < modulus_equalizer
+                                         .population[constellation];
+                               label++) {
+                              fprintf(stderr,
+                                      "%s%.4f",
+                                      label ? "," : "",
+                                      modulus_equalizer
+                                        .level[constellation][label]);
+                          }
+                          fputc('}', stderr);
                       }
                       fputc('\n', stderr);
                   }
@@ -16397,18 +16425,6 @@ static bool v90_recover_downstream_mp_pcm(
               profile_search_start = total_samples - 606;
           profile_search_end = profile_search_start + 6;
       }
-      if (modulus_equalizer.valid) {
-          memset(wire_cp.masks, 0, sizeof(wire_cp.masks));
-          memset(wire_cp.codec_masks, 0, sizeof(wire_cp.codec_masks));
-          wire_cp.constellation_count = 1;
-          wire_cp.codec_constellations_differ = false;
-          memset(wire_cp.dfi, 0, sizeof(wire_cp.dfi));
-          for (int ucode = 0;
-               ucode < modulus_equalizer.population; ucode++) {
-              vpcm_cp_mask_set(wire_cp.masks[0], ucode, true);
-              vpcm_cp_mask_set(wire_cp.codec_masks[0], ucode, true);
-          }
-      }
       if (getenv("VPCM_V90_MP_PCM_DIAG")) {
           int diag_end = search_start + 8000;
           int histogram[VPCM_CP_MASK_BITS] = {0};
@@ -16672,6 +16688,7 @@ static bool v90_recover_downstream_mp_pcm(
                 if (!v90_slice_modulus_mapping_frame(
                         &modulus_equalizer,
                         capture_alaw ? V91_LAW_ALAW : V91_LAW_ULAW,
+                        &wire_cp,
                         bits_per_frame,
                         wire_cp.shaping_redundancy,
                         magnitude,
@@ -19568,13 +19585,15 @@ static void v34_search_supervised_b1_fcs(
                 }
                 memset(&decoded, 0, sizeof(decoded));
                 if (equalized
-                    && best_match[hypothesis] >= 0.90f
-                    && fit.training_match >= 0.90f) {
+                    && best_match[hypothesis] >= 0.85f
+                    && fit.training_match >= 0.85f) {
                     /* B1 is a protocol-defined reset-state frame.  Once the
-                     * complete captured frame has independently matched its
-                     * mode template, feed exact B1 decisions to the mapper so
-                     * trellis, shell-unmapper and descrambler state enter the
-                     * unknown payload without carrying B1 channel errors. */
+                     * complete captured frame has strongly matched its mode
+                     * template, feed exact B1 decisions to the mapper so the
+                     * unknown payload can independently validate the
+                     * hypothesis with HDLC FCS.  The strict B1-only promotion
+                     * below remains at 90%; an 85-90% candidate can succeed
+                     * only by producing a valid payload FCS. */
                     int known = templates[t].symbol_count;
 
                     if (known > equalized->symbol_count)
@@ -31712,7 +31731,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                  * Phase-4 exchange, and locate B1 by its entire reset-state
                  * mapping frame.  Only the existing >=90% geometry/FIR plus
                  * 99% descrambled-one rules may promote this broad locator.
-                 */
+                */
                 if (b1_template_count > 0
                     && (!downstream_mp.valid
                         || direct_e_data_sample < 0)
@@ -32791,10 +32810,23 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                      * are frozen at the high-order B1 boundary. */
                     int local_start = known_data_sample - 1600;
 
-                    if (data_cp.valid && !downstream_mp.valid
-                        && data_cp_start_sample >= 0
-                        && data_cp_start_sample - 1600 < local_start) {
-                        local_start = data_cp_start_sample - 1600;
+                    if (data_cp.valid && downstream_mp.crc_valid
+                        && data_cp_last_sample >= 0) {
+                        int cp_bits = vpcm_cp_modulated_bit_length(
+                            &data_cp.frame, 4);
+                        int baud_rate = v34_baud_code_to_rate(baud_code);
+
+                        if (cp_bits > 0 && baud_rate > 0) {
+                            int training_symbols = 4 * ((cp_bits + 1) / 2);
+                            int training_samples = (int)(
+                                ((int64_t)training_symbols * 8000
+                                   + baud_rate - 1) / baud_rate);
+                            int training_start = data_cp_last_sample
+                                               - training_samples - 160;
+
+                            if (training_start < local_start)
+                                local_start = training_start;
+                        }
                     }
 
                     if (getenv("VPCM_V90_B1_LOCAL_LEAD"))
@@ -33141,7 +33173,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 const v34_b1_template_t *fse_template =
                                     &b1_templates[best_fse_template];
 
-                                fse_mp.mp.type = 0;
+                                fse_mp.mp.type = fse_template->mp_type;
                                 fse_mp.mp.bit_rate_a_to_c =
                                     fse_template->rate_n;
                                 fse_mp.mp.bit_rate_c_to_a =
@@ -33152,6 +33184,17 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     fse_template->nonlinear;
                                 fse_mp.mp.expanded_shaping =
                                     fse_template->expanded;
+                                for (int coefficient = 0;
+                                     coefficient < 3; coefficient++) {
+                                    fse_mp.mp.precoder_coeffs[coefficient]
+                                        .re = fse_template
+                                            ->precoder_coeffs[
+                                                2 * coefficient];
+                                    fse_mp.mp.precoder_coeffs[coefficient]
+                                        .im = fse_template
+                                            ->precoder_coeffs[
+                                                2 * coefficient + 1];
+                                }
                                 memset(&fse_decode, 0, sizeof(fse_decode));
                                 bool fse_decoded = fse_equalized
                                     && v34_decode_upstream_p3_symbols(
@@ -33162,7 +33205,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         1.0f,
                                         0,
                                         false,
-                                        false,
+                                        fse_mp.mp.type != 0,
                                         fse_mp.mp.expanded_shaping,
                                         NULL,
                                         0,
@@ -33444,6 +33487,22 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                 supervised_mp.mp.expanded_shaping =
                                     b1_templates[best_local_template]
                                         .expanded;
+                                supervised_mp.mp.type =
+                                    b1_templates[best_local_template]
+                                        .mp_type;
+                                for (int coefficient = 0;
+                                     coefficient < 3; coefficient++) {
+                                    supervised_mp.mp.precoder_coeffs[
+                                        coefficient].re =
+                                        b1_templates[best_local_template]
+                                            .precoder_coeffs[
+                                                2 * coefficient];
+                                    supervised_mp.mp.precoder_coeffs[
+                                        coefficient].im =
+                                        b1_templates[best_local_template]
+                                            .precoder_coeffs[
+                                                2 * coefficient + 1];
+                                }
                                 memset(&supervised_decode, 0,
                                        sizeof(supervised_decode));
                                 if (equalized
@@ -33455,7 +33514,7 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         1.0f,
                                         0,
                                         false,
-                                        false,
+                                        supervised_mp.mp.type != 0,
                                         supervised_mp.mp.expanded_shaping,
                                         NULL,
                                         0,
