@@ -45,19 +45,22 @@
 /* Ed: 2 downstream data frames × 6 symbols/frame = 12 codewords (§8.8.2/V.92) */
 #define V90_ED_SYMBOLS   12
 
-/* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
-#define V90_SD_REPS     512  /* SmartLink acquisition experiment; normative value is 64 */
+/* ITU-T V.90 §9.3.1.2: 64 repetitions.  SmartLink detects the six-sample
+ * periodicity after 150 samples, leaving enough of Sd for confirmation before
+ * the required S-bar transition.  Extending Sd makes SmartLink time out while
+ * waiting for S-bar after it has already accepted Sd. */
+#define V90_SD_REPS     64
 #define V90_SD_BAR_REPS 8
 
 /* TRN1d: multiple of 6 symbols; spec requires ≥2040T (§9.3.1.4).
  * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
 #define V90_TRN1D_LEN   2046
 
-/* SmartLink's analogue Phase 3 transmitter can leave Ja below the reliable
- * decode threshold after a long TRN. It enables its downstream V.90 receiver
- * about 1.76 seconds after Phase 2 completion. Keep the standards-driven Ja
- * event as the primary trigger, with this bounded interop fallback. */
-#define V90_WAIT_JA_FALLBACK_SAMPLES 14400
+/* The decoded Ja event is the standards-driven trigger for downstream Sd.
+ * Retain a deliberately late 3 s fallback only as a last-resort guard against
+ * an undecodable Ja; it is later than SmartLink's normal Ja timing so it must
+ * not race the real protocol transition. */
+#define V90_WAIT_JA_FALLBACK_SAMPLES 24000
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
