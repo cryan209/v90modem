@@ -104,6 +104,31 @@ static int v90_jd_autoterminate_symbols(void)
     return (value && *value && strcmp(value, "0") != 0) ? 19296 : 0;
 }
 
+/* Symbols of Jd to transmit without seeing the peer's S before falling back
+ * to the silent WAIT_JA state (interop resync).  0 = disabled (default).
+ *
+ * Enabling this stops us pouring stale Jd/Phase-4 audio over the peer's
+ * retrain — verified live to change the SmartLink client's bulk-delay
+ * estimate from wild swings (2440 then 13112 samples) to a stable ~0.
+ * But WAIT_JA-only resync is not sufficient on its own: when the peer does
+ * a full Phase-2 retrain it then waits for us to rejoin Phase 2 (re-send
+ * INFO0d, tones, L1/L2), which this path does not do, so the peer stalls in
+ * Phase 1.  Left off by default until the matching "peer retrained ->
+ * restart from Phase 2" path is implemented (see docs). */
+static int v90_jd_resync_symbols(void)
+{
+    const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    return 0;
+}
+
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
 static const uint8_t v90_ucode_to_alaw[128] = {
@@ -2277,6 +2302,29 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
+            /* Interop resync: Jd is meant to run until the analogue modem
+             * detects our Sd->S-bar transition and answers with S.  If no S
+             * arrives within ~1 s, the peer did not lock our Sd and will
+             * retrain.  Continuing to transmit Jd (and then Phase 4) here
+             * pours a modem-like signal over the peer's fresh Phase 1/2,
+             * corrupting its bulk-delay/RTD estimate so its next Sd search
+             * window is mis-placed.  Instead fall back to the silent WAIT_JA
+             * state, re-arming the Ja detector so we re-emit Sd cleanly when
+             * the peer next reaches Ja.  Bounded by the same env knob used
+             * elsewhere; default 8000 symbols (1 s). */
+            if (!s->jd_terminate_requested
+                && v90_jd_resync_symbols() > 0
+                && s->sample_count >= v90_jd_resync_symbols()) {
+                fprintf(stderr,
+                        "[V90] Phase 3: no S after %d Jd symbols; resyncing to WAIT_JA (peer likely retrained)\n",
+                        s->sample_count);
+                s->tx_phase = V90_TX_WAIT_JA;
+                s->sample_count = 0;
+                s->rep_count = 0;
+                s->jd_bit_pos = 0;
+                s->jd_terminate_requested = false;
+                return v90_pcm_idle(s->law);
+            }
             if (!s->jd_terminate_requested
                 && v90_jd_autoterminate_symbols() > 0
                 && s->sample_count >= v90_jd_autoterminate_symbols()) {
