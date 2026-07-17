@@ -2715,6 +2715,8 @@ void me_rx_audio(const int16_t *amp, int len)
                 {
                     bool new_e_event = (rx_event == V34_EVENT_E
                                         && g_last_v90_bridge_rx_event != V34_EVENT_E);
+                    bool new_j_event = (rx_event == V34_EVENT_J
+                                        && g_last_v90_bridge_rx_event != V34_EVENT_J);
 
                     fprintf(stderr,
                             "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d s_events=%d\n",
@@ -2734,6 +2736,15 @@ void me_rx_audio(const int16_t *amp, int len)
                                 "[ME] V.90 strict RX event=E tx_phase=%d accepted=%d\n",
                                 (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0);
                         trace_phase("V90 strict RX event=E accepted=%d",
+                                    accepted ? 1 : 0);
+                    }
+                    if (new_j_event && g_v90) {
+                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+
+                        fprintf(stderr,
+                                "[ME] V.90 strict RX event=J tx_phase=%d accepted=%d\n",
+                                (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0);
+                        trace_phase("V90 strict RX event=J accepted=%d",
                                     accepted ? 1 : 0);
                     }
                 }
@@ -2806,12 +2817,13 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
     info->downstream_rate_code = (uint8_t)received.downstream_rate_code;
     info->freq_offset = (int16_t)received.freq_offset;
 
-    /* V.90 Table 10: reserved fields are zero, upstream is one of the
-     * specified 3000/3200/3429 codes, and downstream PCM is code 6 (8000). */
+    /* V.90 Table 10: reserved fields are zero, upstream is one of the six
+     * V.34 symbol-rate codes (0=2400 through 5=3429), and downstream PCM is
+     * code 6 (8000). A 2400-symbol/s upstream remains a valid V.90 call. */
     return received.raw_12_17 == 0
         && received.raw_32_33 == 0
         && received.u_info > 0
-        && received.upstream_symbol_rate_code >= 3
+        && received.upstream_symbol_rate_code >= 0
         && received.upstream_symbol_rate_code <= 5
         && received.downstream_rate_code == 6
         && v90_info1a_validate(info);

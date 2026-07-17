@@ -740,6 +740,12 @@ int main(int argc, char *argv[])
             }
         }
 
+        /* Answering a call can synchronously activate media and move the
+         * modem engine from a previous HANGUP state into V8.  Do not act on
+         * the snapshot taken before pjsua_call_answer(), or the newly
+         * answered call is torn down immediately by the HANGUP check below. */
+        state_now = me_get_state();
+
         /* Check if ATD has put us into DIALING state */
         if (state_now == ME_DIALING && g_call_id == PJSUA_INVALID_ID) {
             const char *uri = me_get_dial_uri();

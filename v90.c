@@ -46,12 +46,18 @@
 #define V90_ED_SYMBOLS   12
 
 /* Sd: 64 repetitions of 6-symbol pattern = 384 symbols */
-#define V90_SD_REPS     64
+#define V90_SD_REPS     512  /* SmartLink acquisition experiment; normative value is 64 */
 #define V90_SD_BAR_REPS 8
 
 /* TRN1d: multiple of 6 symbols; spec requires ≥2040T (§9.3.1.4).
  * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
 #define V90_TRN1D_LEN   2046
+
+/* SmartLink's analogue Phase 3 transmitter can leave Ja below the reliable
+ * decode threshold after a long TRN. It enables its downstream V.90 receiver
+ * about 1.76 seconds after Phase 2 completion. Keep the standards-driven Ja
+ * event as the primary trigger, with this bounded interop fallback. */
+#define V90_WAIT_JA_FALLBACK_SAMPLES 14400
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
@@ -2126,6 +2132,17 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     int sign;
 
     switch (s->tx_phase) {
+    case V90_TX_WAIT_JA:
+        if (++s->sample_count >= V90_WAIT_JA_FALLBACK_SAMPLES) {
+            fprintf(stderr,
+                    "[V90] Phase 3: Ja decode timeout after %.1f ms, starting Sd via interop fallback\n",
+                    1000.0 * s->sample_count / 8000.0);
+            s->tx_phase = V90_TX_SD;
+            s->sample_count = 0;
+            s->rep_count = 0;
+        }
+        return v90_pcm_idle(s->law);
+
     case V90_TX_SD:
         /* §8.4.4: Sd = 64 reps of {+W, +0, +W, -W, -0, -W}
          * W = Ucode(16 + U_INFO), 0 = Ucode 0
@@ -2645,7 +2662,7 @@ v90_tx_phase_t v90_get_tx_phase(v90_state_t *s)
 
 bool v90_phase3_active(v90_state_t *s)
 {
-    return s->tx_phase >= V90_TX_SD && s->tx_phase <= V90_TX_JD_PRIME;
+    return s->tx_phase >= V90_TX_WAIT_JA && s->tx_phase <= V90_TX_JD_PRIME;
 }
 
 bool v90_using_internal_v34_tx(v90_state_t *s)
@@ -2706,7 +2723,9 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     v90_reset_data_pump_state(s);
     v90_dil_reset_tx(s);
 
-    s->tx_phase = V90_TX_SD;
+    /* V.90 §9.3.1.1-.3: remain silent while the analogue modem sends
+     * S/S-bar, PP, TRN and Ja. Ja detection is the trigger for Sd. */
+    s->tx_phase = V90_TX_WAIT_JA;
 }
 
 void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
@@ -2760,6 +2779,16 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     switch (event) {
+    case V90_RX_EVENT_J:
+        if (s->tx_phase == V90_TX_WAIT_JA) {
+            fprintf(stderr, "[V90] Phase 3: analogue Ja detected, starting Sd\n");
+            s->tx_phase = V90_TX_SD;
+            s->sample_count = 0;
+            s->rep_count = 0;
+            return true;
+        }
+        return false;
+
     case V90_RX_EVENT_S:
         if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
             fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");

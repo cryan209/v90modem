@@ -661,23 +661,18 @@ static void prepare_info1c(v34_state_t *s)
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {
-        /* In V.90, INFO1d bit 25 tells the analog modem which carrier to use for its
-           upstream TX. Since we (digital modem/answerer) RX on high carrier, set
-           use_high_carrier=true so the analog modem transmits on high carrier.
-           In standard V.34, INFO1c bit 25 tells the answerer which carrier to use;
-           the answerer TX=low in duplex, so use_high_carrier=false was for that case.
-           V.90 §8.2.3.2 Table 9 redefined this bit for the analog→digital direction. */
+        /* In V.90, INFO1d tells the analogue modem which carrier to use for
+           its upstream transmitter. The digital modem receives that signal
+           on the high carrier. */
         s->tx.info1c.rate_data[i].use_high_carrier = s->tx.v90_mode ? true : false;
         if (s->tx.v90_mode)
         {
             int rate_cap;
 
-            /* Keep V.90 INFO1d conservative until the peer proves it accepts a
-               richer probing profile: advertise no TX pre-emphasis and cap each
-               row to the actual maximum rate supported by that symbol rate. */
             rate_cap = (baud_rate_parameters[i].max_bit_rate_code >> 1) + 1;
             s->tx.info1c.rate_data[i].pre_emphasis = 0;
-            s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  ((max_n < rate_cap)  ?  max_n  :  rate_cap)  :  0;
+            s->tx.info1c.rate_data[i].max_bit_rate =
+                (s->tx.baud_rate >= i) ? ((max_n < rate_cap) ? max_n : rate_cap) : 0;
         }
         else
         {
@@ -2940,8 +2935,24 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                         info1_baud_init(s);
                     else if (s->tx.v90_mode)
                     {
-                        /* V.90 §9.2.1.1.7: L1/L2 done, wait for Tone A then send INFO1d */
-                        v90_wait_tone_a_init(s, false);
+                        /* V.90 §9.2.1.1.7: Tone A normally arrives while the
+                           digital modem is still transmitting L1/L2.  Preserve
+                           that indication and start INFO1d immediately at the
+                           L2 boundary.  Inserting a fresh Tone A guard here
+                           creates a non-standard carrier gap which causes
+                           strict analogue modems to lose the INFO1d sync. */
+                        if (s->rx.received_event == V34_EVENT_TONE_SEEN
+                            || s->rx.received_event == V34_EVENT_REVERSAL_1
+                            || s->rx.signal_present)
+                        {
+                            span_log(&s->logging, SPAN_LOG_FLOW,
+                                     "Tx - V.90: Tone A already present at end of L2; sending INFO1d without a carrier gap\n");
+                            info1_baud_init(s);
+                        }
+                        else
+                        {
+                            v90_wait_tone_a_init(s, false);
+                        }
                     }
                     else
                     {
@@ -3011,7 +3022,20 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                     if (s->tx.calling_party)
                         info1_baud_init(s);
                     else if (s->tx.v90_mode)
-                        v90_wait_tone_a_init(s, false);
+                    {
+                        if (s->rx.received_event == V34_EVENT_TONE_SEEN
+                            || s->rx.received_event == V34_EVENT_REVERSAL_1
+                            || s->rx.signal_present)
+                        {
+                            span_log(&s->logging, SPAN_LOG_FLOW,
+                                     "Tx - V.90: Tone A already present at end of PCM L2; sending INFO1d without a carrier gap\n");
+                            info1_baud_init(s);
+                        }
+                        else
+                        {
+                            v90_wait_tone_a_init(s, false);
+                        }
+                    }
                     else
                         second_a_baud_init(s);
                 }
@@ -3551,12 +3575,9 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
 {
     int bit;
 
-    /* V.34 §10.1.2.3.1: "Each INFO sequence is preceded by a point at an
-       arbitrary carrier phase." Send a preamble of unmodulated carrier to
-       let the remote demodulator lock before the DPSK data begins. For V.90
-       INFO1d this is essential — there is no Tone B→INFO transition like
-       INFO0d has, so the demodulator has no carrier reference otherwise. */
-    if (s->tx.v90_mode && s->tx.tone_duration < 16)
+    /* V.90 §8.2.3.1: precede the INFO sequence with one point at an
+       arbitrary carrier phase. */
+    if (s->tx.v90_mode && s->tx.tone_duration < 1)
     {
         s->tx.tone_duration++;
         return s->tx.lastbit;
@@ -3582,8 +3603,22 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
                shall transmit silence and condition its receiver to receive
                INFO1a.  Do NOT call s_not_s_baud_init() which would start
                Phase 3 S/S̄ and overwrite RX state. */
-            if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
+            if (s->tx.tone_duration < 4)
             {
+                /* V.90 §8.2.3.1 explicitly permits multiple INFO sequences
+                   as a group, with only the first preceded by an arbitrary
+                   point.  Repeating INFO1d contiguously gives a receiver that
+                   switches from its L2 detector on the first boundary a full
+                   subsequent sync word to acquire. */
+                s->tx.tone_duration++;
+                s->tx.txptr = 0;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeating INFO1d contiguously (%d/4)\n",
+                         s->tx.tone_duration);
+            }
+            else if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
+            {
+                s->tx.tone_duration = 0;
                 v90_wait_info1a_init(s);
             }
         }
@@ -3658,7 +3693,7 @@ static void info1_baud_init(v34_state_t *s)
     if (s->tx.v90_mode)
     {
         s->tx.tone_duration = 0;
-        span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with 16-baud carrier preamble\n");
+        span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with one arbitrary-phase point\n");
     }
 }
 /*- End of function --------------------------------------------------------*/
@@ -3899,6 +3934,11 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
+    s->rx.phase3_j_candidate_hyp = -1;
+    s->rx.phase3_j_candidate_phase = -1;
+    s->rx.phase3_j_candidate_pat = -1;
+    s->rx.phase3_j_candidate_count = 0;
+    s->rx.phase3_j_candidate_last_bits = 0;
     memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
     memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
     s->rx.phase3_trn_bits = 0;
@@ -4104,6 +4144,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 s->rx.phase3_j_bits = 0;
                 s->rx.phase3_j_lock_hyp = -1;
                 s->rx.phase3_j_trn16 = -1;
+                s->rx.phase3_j_candidate_hyp = -1;
+                s->rx.phase3_j_candidate_phase = -1;
+                s->rx.phase3_j_candidate_pat = -1;
+                s->rx.phase3_j_candidate_count = 0;
+                s->rx.phase3_j_candidate_last_bits = 0;
                 memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
                 memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
                 s->rx.phase3_trn_bits = 0;
@@ -4230,6 +4275,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.phase3_j_bits = 0;
                         s->rx.phase3_j_lock_hyp = -1;
                         s->rx.phase3_j_trn16 = -1;
+                        s->rx.phase3_j_candidate_hyp = -1;
+                        s->rx.phase3_j_candidate_phase = -1;
+                        s->rx.phase3_j_candidate_pat = -1;
+                        s->rx.phase3_j_candidate_count = 0;
+                        s->rx.phase3_j_candidate_last_bits = 0;
                         memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
                         memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
                         s->rx.phase3_trn_bits = 0;
@@ -4280,6 +4330,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     phase4_wait_init(s);
                 }
                 else if (!s->tx.calling_party
+                         &&
+                         !s->tx.v90_mode
                          &&
                          s->tx.baud_rate >= 0
                          &&
@@ -4544,6 +4596,11 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
     memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
     memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
     s->rx.phase3_j_bits = 0;
+    s->rx.phase3_j_candidate_hyp = -1;
+    s->rx.phase3_j_candidate_phase = -1;
+    s->rx.phase3_j_candidate_pat = -1;
+    s->rx.phase3_j_candidate_count = 0;
+    s->rx.phase3_j_candidate_last_bits = 0;
     memset(s->rx.phase3_trn_scramble, 0, sizeof(s->rx.phase3_trn_scramble));
     memset(s->rx.phase3_trn_one_count, 0, sizeof(s->rx.phase3_trn_one_count));
     s->rx.phase3_trn_bits = 0;
