@@ -676,8 +676,23 @@ static void put_bit(void *user_data, int bit)
         /* Special conditions */
         switch (bit)
         {
-        case SIG_STATUS_CARRIER_UP:
         case SIG_STATUS_CARRIER_DOWN:
+            /* V.8: the calling DCE drops the V.21 carrier immediately after
+               sending CJ, before starting Phase 2.  CJ is only three zero
+               octets, sent once, so a single bit error loses it for good.
+               If CM/JM has already been exchanged and the carrier now drops
+               while we are still waiting for CJ, the peer has clearly moved
+               on - treat the drop as CJ so marginal analogue paths don't
+               stall the whole negotiation. */
+            if (s->state == V8_JM_ON  &&  !s->calling_party  &&  s->got_cm_jm)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Carrier drop while waiting for CJ - treating as CJ\n");
+                s->got_cj = true;
+            }
+            /*endif*/
+            break;
+        case SIG_STATUS_CARRIER_UP:
         case SIG_STATUS_TRAINING_SUCCEEDED:
         case SIG_STATUS_TRAINING_FAILED:
             break;
@@ -776,10 +791,12 @@ static void put_bit(void *user_data, int bit)
         {
             /* Store the available data */
             data = (uint8_t) ((s->bit_stream >> 11) & 0xFF);
-            /* CJ (3 successive zero octets) detection */
+            /* CJ (3 successive zero octets) detection.  Accept two of the
+               three: CJ is sent exactly once and a single corrupted octet
+               on a marginal analogue path must not lose the negotiation. */
             if (data == 0)
             {
-                if (++s->zero_byte_count == 3)
+                if (++s->zero_byte_count == 2)
                     s->got_cj = true;
                 /*endif*/
             }

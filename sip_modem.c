@@ -560,6 +560,13 @@ int main(int argc, char *argv[])
     pjsua_logging_config log_cfg;
     pjsua_logging_config_default(&log_cfg);
     log_cfg.console_level = 3;
+    {
+        /* SIP_LOG_LEVEL=5 exposes SIP message traces and spandsp FLOW logs
+           without a rebuild — used by the interop debugging workflow. */
+        const char *lvl = getenv("SIP_LOG_LEVEL");
+        if (lvl && *lvl)
+            log_cfg.console_level = atoi(lvl);
+    }
 
     /* Media config — disable all AEC, AGC, NR (modem signals must be clean) */
     pjsua_media_config media_cfg;
