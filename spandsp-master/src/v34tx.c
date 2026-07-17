@@ -1963,6 +1963,28 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
         {
             if (s->rx.received_event == V34_EVENT_INFO0_OK)
             {
+                if (!s->tx.info0_acknowledgement
+                    &&  s->tx.stage == V34_TX_STAGE_INFO0)
+                {
+                    /* V.90 9.2.1.1.1-9.2.1.1.2 error-free path: INFO0d is
+                       transmitted once, followed by Tone B.  The ack'd
+                       INFO0d repeat belongs to the 9.2.1.2.1 recovery
+                       procedure (Tone A before INFO0a, or repeated INFO0a)
+                       only.  Repeating INFO0d after a clean first exchange
+                       makes spec-following analogue modems treat the repeat
+                       itself as a recovery trigger, restart Phase 2, and
+                       deadlock the INFO exchange. */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: INFO0a received OK, proceeding to Tone B (9.2.1.1.2)\n");
+                    v90_arm_tone_a_detection(s, "INFO0a received error-free");
+                    s->rx.received_event = V34_EVENT_NONE;
+                    v90_wait_rx_l2_init(s, "INFO0a received error-free");
+                    if (bit)
+                        s->tx.lastbit.re = -s->tx.lastbit.re;
+                    /*endif*/
+                    return s->tx.lastbit;
+                }
+                /*endif*/
                 if (!s->tx.info0_acknowledgement)
                 {
                     span_log(&s->logging, SPAN_LOG_FLOW,
