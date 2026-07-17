@@ -5200,8 +5200,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /* Require a sustained canonical sequence near the
                                complete Ja signature on the normal path.  Test
                                rigs that need latency compensation use the
-                               explicit ME_V90_J_LOOKAHEAD_BITS path above. */
-                            if (s->phase3_j_bits < 6000)
+                               explicit ME_V90_J_LOOKAHEAD_BITS path above.
+                               The sustained path additionally demands
+                               near-perfect windows (dmin <= 1, score >= 28):
+                               scrambled TRN payload transiently matches the J
+                               pattern within 2-3 bit errors across the many
+                               hypothesis/phase alignments searched, and eight
+                               such weak hits in a row happen in practice -
+                               live captures show a false "confirmed J" firing
+                               mid-TRN (score 25/32, d4=2..3) which launched Sd
+                               ~900 ms before the analogue modem was listening. */
+                            if (s->phase3_j_bits < 6000
+                                ||  dmin > 1
+                                ||  best_score < 28)
                             {
                                 s->phase3_j_candidate_count = 0;
                             }

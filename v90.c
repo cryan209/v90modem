@@ -61,7 +61,11 @@
  * Retain a deliberately late 3 s fallback only as a last-resort guard against
  * an undecodable Ja; it is later than SmartLink's normal Ja timing so it must
  * not race the real protocol transition. */
-#define V90_WAIT_JA_FALLBACK_SAMPLES 24000
+/* Interop fallback: start Sd even without a decoded Ja.  Must comfortably
+ * exceed the analogue modem's whole Phase 3 upstream (S/PP/TRN ~2.2 s +
+ * ~0.6 s silent gap before Ja) so it cannot pre-empt the energy-gap Ja
+ * detector, which fires right when the peer starts listening for Sd. */
+#define V90_WAIT_JA_FALLBACK_SAMPLES 48000
 
 /* The explicit SmartLink Ja look-ahead starts the digital sequence before the
  * analogue modem has completed its fixed Phase 3 training study.  Suppress S
