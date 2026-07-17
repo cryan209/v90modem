@@ -150,11 +150,11 @@ static int phase3_rx_dump_count = 0;
 #define MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES 4
 #define MP_HINT_STRICT_REJECTS          2
 #define MP_HINT_MAX_NOLOCKS             3
-#define PHASE3_PP_TRAIN_BAUDS           PP_TOTAL_SYMBOLS
-#define PHASE3_TRN_REFINE_BAUDS         512
-#define PHASE3_PP_ACQUIRE_MIN_BAUDS     160
-#define PHASE3_PP_ACQUIRE_HOLD_BAUDS    24
-#define PHASE3_PP_ACQUIRE_SCORE_MIN     28
+#define PHASE3_PP_TRAIN_BAUDS           232
+#define PHASE3_TRN_REFINE_BAUDS         256
+#define PHASE3_PP_ACQUIRE_MIN_BAUDS     48
+#define PHASE3_PP_ACQUIRE_HOLD_BAUDS    12
+#define PHASE3_PP_ACQUIRE_SCORE_MIN     650
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
 #define V34_AGC_POWER_MIN               100000
 #define V34_AGC_SCALING_MIN             0.00001f
@@ -579,6 +579,11 @@ static void phase3_pp_reset(v34_rx_state_t *s)
     s->phase3_pp_obs = 0;
     s->phase3_pp_match = 0;
     memset(s->phase3_pp_error, 0, sizeof(s->phase3_pp_error));
+    memset(s->phase3_pp_corr, 0, sizeof(s->phase3_pp_corr));
+    s->phase3_pp_corr_energy = 0.0f;
+    s->phase3_pp_corr_weight = 0.0f;
+    s->phase3_pp_rotation.re = 1.0f;
+    s->phase3_pp_rotation.im = 0.0f;
     s->phase3_pp_phase = -1;
     s->phase3_pp_phase_score = -1;
     s->phase3_pp_acquire_hits = 0;
@@ -2761,6 +2766,41 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
 }
 /*- End of function --------------------------------------------------------*/
 
+static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
+{
+    v34_state_t *owner;
+
+    /* INFO1a can finish part-way through an RTP media frame.  Merely changing
+       current_demodulator here lets the uninitialised primary-channel frontend
+       consume the residue of that frame before the TX state machine gets its
+       next callback and performs the normal Phase 3 reset.  That shifted the
+       live PP acquisition by 24 bauds relative to replay and destroyed the TRN
+       lock.  Enter Phase 3 synchronously so the first primary-channel sample is
+       processed with the same clean frontend used by offline replay. */
+    owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, rx));
+
+    /* V.90 §9 uses the analog-modem upstream scrambler
+       1 + x^-5 + x^-23.  SpanDSP's ordinary V.34 answerer initialisation
+       selects tap 17 for the far-end caller, which makes SmartLink TRN look
+       random (~52% ones).  The captured upstream resolves at 96-99% with the
+       V.90 tap value 4, so select it before Phase 3 resets its hypothesis
+       banks. */
+    s->scrambler_tap = 4;
+    s->mp_phase4_default_scrambler_tap = 4;
+    v34_force_phase3_rx(owner);
+
+    if (!phase3_rx_dump_fp)
+    {
+        phase3_rx_dump_fp = fopen("/tmp/v90_phase3_rx.raw", "wb");
+        phase3_rx_dump_count = 0;
+        if (phase3_rx_dump_fp)
+            fprintf(stderr, "[V34 RX] Phase 3 RX audio dump started -> /tmp/v90_phase3_rx.raw\n");
+        /*endif*/
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static int process_rx_infoh(v34_rx_state_t *s, infoh_t *infoh, uint8_t buf[])
 {
     bitstream_state_t bs;
@@ -3491,22 +3531,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     if (v90_info1a_search)
                     {
                         process_rx_info1a(s, &s->info1a, s->info_buf);
-                        s->received_event = V34_EVENT_INFO1_OK;
                         if (s->v90_mode)
                         {
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
-                            s->current_demodulator = V34_MODULATION_V34;
-                            s->stage = V34_RX_STAGE_PHASE3_TRAINING;
-                            /* Start Phase 3 RX audio dump */
-                            if (!phase3_rx_dump_fp)
-                            {
-                                phase3_rx_dump_fp = fopen("/tmp/v90_phase3_rx.raw", "wb");
-                                phase3_rx_dump_count = 0;
-                                if (phase3_rx_dump_fp)
-                                    fprintf(stderr, "[V34 RX] Phase 3 RX audio dump started -> /tmp/v90_phase3_rx.raw\n");
-                            }
+                            v90_enter_phase3_from_info1a(s);
                         }
+                        /* v34_force_phase3_rx() has already consumed the
+                           INFO1a transition on the TX side.  Do not leave a
+                           stale INFO1_OK event blocking Phase 3 J detection. */
+                        s->received_event = V34_EVENT_NONE;
                     }
                     else
                     {
@@ -3557,7 +3591,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     break;
                 case V34_RX_STAGE_INFO1A:
                     process_rx_info1a(s, &s->info1a, s->info_buf);
-                    s->received_event = V34_EVENT_INFO1_OK;
                     if (s->v90_mode)
                     {
                         /* V.90 §9.2.1.1.8: INFO1a received — now proceed to Phase 3.
@@ -3565,8 +3598,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                            upstream V.34 reception. */
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
-                        s->current_demodulator = V34_MODULATION_V34;
-                        s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                        v90_enter_phase3_from_info1a(s);
+                        s->received_event = V34_EVENT_NONE;
+                    }
+                    else
+                    {
+                        s->received_event = V34_EVENT_INFO1_OK;
                     }
                     break;
                 }
@@ -3605,11 +3642,10 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              "Rx - INFO1a boundary recovery succeeded with %d-bit shift\n",
                              recovery_shift);
                     process_rx_info1a(s, &s->info1a, recovered_info);
-                    s->received_event = V34_EVENT_INFO1_OK;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a, switching to Phase 3 primary channel RX\n");
-                    s->current_demodulator = V34_MODULATION_V34;
-                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    v90_enter_phase3_from_info1a(s);
+                    s->received_event = V34_EVENT_NONE;
                     s->bit_count = 0;
                     return;
                 }
@@ -3622,11 +3658,10 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              recovery_pivot,
                              recovery_shift);
                     process_rx_info1a(s, &s->info1a, recovered_info);
-                    s->received_event = V34_EVENT_INFO1_OK;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a via local-slip recovery, switching to Phase 3 primary channel RX\n");
-                    s->current_demodulator = V34_MODULATION_V34;
-                    s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                    v90_enter_phase3_from_info1a(s);
+                    s->received_event = V34_EVENT_NONE;
                     s->bit_count = 0;
                     return;
                 }
@@ -4275,14 +4310,6 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 }
 /*- End of function --------------------------------------------------------*/
 
-static int phase3_equalizer_refine_active(const v34_rx_state_t *s)
-{
-    return (s->stage == V34_RX_STAGE_PHASE3_TRAINING
-            && s->duration > PHASE3_PP_TRAIN_BAUDS
-            && s->duration <= (PHASE3_PP_TRAIN_BAUDS + PHASE3_TRN_REFINE_BAUDS));
-}
-/*- End of function --------------------------------------------------------*/
-
 #if 0  /* Disabled functions - track_carrier reimplemented inline, others unused */
 static void track_carrier(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target)
 {
@@ -4829,6 +4856,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     uint32_t ang2;
     uint32_t ang3;
     int data_bits;
+    int phase3_abs_bits;
     int bits[4];
     int i;
     mp_t mp;
@@ -4886,6 +4914,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
+        phase3_abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
 
             if (V34_TRACE_DIAGNOSTICS
@@ -4911,7 +4940,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
             /* Explicit Phase 3 J/J' detector:
                - apply all dibit mapping hypotheses
-               - undo differential encoding (Z_n -> I_n)
+               - map the phase-difference slicer output I_n
                - descramble
                - correlate against J/J' 16-bit templates
 
@@ -4924,9 +4953,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int best_score;
                 int best_h;
                 int best_p;
-                int cap_bit0[8];
-                int cap_bit1[8];
-                uint8_t cap_valid[8];
+                int cap_bit0[MP_HYPOTHESIS_COUNT];
+                int cap_bit1[MP_HYPOTHESIS_COUNT];
+                uint8_t cap_valid[MP_HYPOTHESIS_COUNT];
 
                 best_score = 0;
                 best_h = -1;
@@ -4934,7 +4963,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 memset(cap_bit0, 0, sizeof(cap_bit0));
                 memset(cap_bit1, 0, sizeof(cap_bit1));
                 memset(cap_valid, 0, sizeof(cap_valid));
-                for (h = 0;  h < 8;  h++)
+                for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
                 {
                     int raw_sym;
 
@@ -4946,7 +4975,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         int dbit[2];
                         int b;
 
-                        in_sym = (raw_sym - s->phase3_j_prev_z[h]) & 0x3;
+                        in_sym = raw_sym;
                         reg = s->phase3_j_scramble[h];
                         dbit[0] = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                         dbit[1] = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
@@ -5012,6 +5041,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_j_bits += 2;
                 if (!s->calling_party
                     && s->v90_mode
+                    && s->phase3_j_trn16 < 0
                     && v90_phase3_j_lookahead_bits() > 0
                     && s->phase3_j_bits >= v90_phase3_j_lookahead_bits()
                     && (s->received_event == V34_EVENT_NONE
@@ -5035,25 +5065,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                     capture_h = -1;
                     if (s->phase3_j_lock_hyp >= 0
-                        && s->phase3_j_lock_hyp < 8
+                        && s->phase3_j_lock_hyp < MP_HYPOTHESIS_COUNT
                         && cap_valid[s->phase3_j_lock_hyp])
                     {
                         capture_h = s->phase3_j_lock_hyp;
                     }
                     else if (s->phase3_ja_hyp >= 0
-                             && s->phase3_ja_hyp < 8
+                             && s->phase3_ja_hyp < MP_HYPOTHESIS_COUNT
                              && cap_valid[s->phase3_ja_hyp])
                     {
                         capture_h = s->phase3_ja_hyp;
                     }
                     else if (s->phase3_trn_lock_hyp >= 0
-                             && s->phase3_trn_lock_hyp < 8
+                             && s->phase3_trn_lock_hyp < MP_HYPOTHESIS_COUNT
                              && cap_valid[s->phase3_trn_lock_hyp])
                     {
                         capture_h = s->phase3_trn_lock_hyp;
                     }
                     else if (best_h >= 0
-                             && best_h < 8
+                             && best_h < MP_HYPOTHESIS_COUNT
                              && cap_valid[best_h])
                     {
                         capture_h = best_h;
@@ -5197,9 +5227,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             }
                             if (s->phase3_j_candidate_count >= 8)
                             {
+                                int v90_ja_already_consumed;
+
+                                /* The V.90 digital answerer consumes Ja before
+                                   the analogue modem later transmits S.  The
+                                   canonical detector continues observing the
+                                   buffered Ja symbols after the application has
+                                   cleared received_event; do not publish that
+                                   same Ja a second time and let the TX state
+                                   machine mistake it for a Phase 4 transition. */
+                                v90_ja_already_consumed = (!s->calling_party
+                                                          && s->v90_mode
+                                                          && s->phase3_j_trn16 >= 0);
                                 s->phase3_j_lock_hyp = best_h;
                                 s->phase3_j_trn16 = pat;
-                                if (!s->calling_party)
+                                if (!s->calling_party && !v90_ja_already_consumed)
                                 {
                                     s->received_event = V34_EVENT_J;
                                     span_log(s->logging, SPAN_LOG_FLOW,
@@ -5207,7 +5249,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                              best_h, best_p, s->phase3_j_candidate_count,
                                              s->phase3_j_bits, pat ? "16-point" : "4-point");
                                 }
-                                else
+                                else if (s->calling_party)
                                 {
                                     span_log(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 3: confirmed far-end J for caller (hyp=%d phase=%d hits=%d bits=%d, trn=%s)\n",
@@ -5254,7 +5296,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         int d0;
                         int d1;
 
-                        raw_sym = map_phase4_raw_bits(data_bits, h);
+                        /* TRN is mapped directly onto the constellation; only
+                           J/Ja passes through the differential encoder. */
+                        raw_sym = map_phase4_raw_bits(phase3_abs_bits, h);
                         reg = s->phase3_trn_scramble[h];
                         d0 = descramble_reg(&reg, s->scrambler_tap, raw_sym & 1);
                         d1 = descramble_reg(&reg, s->scrambler_tap, (raw_sym >> 1) & 1);
@@ -5349,23 +5393,23 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             && s->phase3_j_trn16 >= 0
             && !s->phase3_s_present
             && s->duration >= 64
-            && s->bit_count >= 24)
+            && s->s_detect_count >= 24)
         {
             s->phase3_s_present = true;
             s->phase3_s_event_count++;
             s->received_event = V34_EVENT_S;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: distinct far-end S detected after J decode (count=%d role=%s rev=%d/32 bits=%d trn=%s)\n",
+                     "Rx - Phase 3: distinct far-end S detected after J decode (count=%d role=%s dom=%d/32 rev=%d/32 bits=%d trn=%s)\n",
                      s->phase3_s_event_count,
                      s->calling_party ? "caller" : "V.90 digital answerer",
-                     s->bit_count, s->phase3_j_bits,
+                     s->s_detect_count, s->bit_count, s->phase3_j_bits,
                      s->phase3_j_trn16 ? "16-point" : "4-point");
         }
 
         /* Rearm only after the S reversal pattern has genuinely disappeared;
            this lets V.90 distinguish the later DIL-termination S transition
            without counting one long S signal more than once. */
-        if (s->phase3_s_present && s->duration >= 96 && s->bit_count <= 8)
+        if (s->phase3_s_present && s->duration >= 96 && s->s_detect_count <= 12)
         {
             s->phase3_s_present = false;
             span_log(s->logging, SPAN_LOG_FLOW,
@@ -5373,9 +5417,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                      s->phase3_s_event_count);
         }
 
-        /* In this path detection is armed only after local J starts (Phase 3),
-           so we can use a less strict threshold than earlier TRN-safe values.
-           Reversal count is the most robust indicator across phase ambiguity. */
+        /* Keep the decoded Ja/J state while renewing only the S observation
+           window.  S is defined as alternating points separated by 90 degrees,
+           so its differential dibit is dominant; scrambled Ja has no such
+           dominant dibit even when it happens to contain many 180-degree
+           reversals. */
         if (s->duration >= 6000)
         {
             /* Don't force a false S event; keep searching for a real pattern. */
@@ -5392,32 +5438,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
             memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
             s->phase3_s_pos = 0;
-            memset(s->phase3_j_scramble, 0, sizeof(s->phase3_j_scramble));
-            memset(s->phase3_j_stream, 0, sizeof(s->phase3_j_stream));
-            memset(s->phase3_j_prev_z, 0, sizeof(s->phase3_j_prev_z));
-            memset(s->phase3_j_prev_valid, 0, sizeof(s->phase3_j_prev_valid));
-            memset(s->phase3_j_win, 0, sizeof(s->phase3_j_win));
-            s->phase3_j_bits = 0;
-            s->phase3_j_lock_hyp = -1;
-            s->phase3_j_trn16 = -1;
-            s->phase3_j_candidate_hyp = -1;
-            s->phase3_j_candidate_phase = -1;
-            s->phase3_j_candidate_pat = -1;
-            s->phase3_j_candidate_count = 0;
-            s->phase3_j_candidate_last_bits = 0;
-            memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
-            memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
-            memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
-            s->phase3_ja_bits = s->phase3_ja_capture_len;
-            s->phase3_ja_hyp = -1;
-            phase3_trn_hyp_reset(s);
-            s->phase3_trn_mag_sum = 0.0f;
-            s->phase3_trn_mag_count = 0;
-            s->phase4_j_seen = 0;
-            s->phase4_j_lock_hyp = -1;
-            s->phase4_trn_after_j = 0;
-            phase4_j_detector_reset(s);
-            phase4_trn_hyp_reset(s);
         }
         }
         break;
@@ -5432,43 +5452,63 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         v34_state_t *t;
 
         t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-        ang1 = arctan2(sample->im, sample->re);
+        /* Differential symbols must be measured in one consistent domain.
+           last_sample is the previous equalizer output, so using the newest
+           raw T/2 input here compared unrelated points and made TRN/Ja bits
+           random even when the equalizer itself was usable. */
+        ang1 = arctan2(sym->im, sym->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
+        phase3_abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         s->duration++;
         if (!s->phase3_pp_started)
         {
             int phase;
             int best_phase;
-            float best_err;
-            float next_err;
+            float best_score;
+            float next_score;
             float mag;
 
             mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
+            s->phase3_pp_corr_energy =
+                PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_corr_energy + mag*mag;
+            s->phase3_pp_corr_weight =
+                PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_corr_weight + 1.0f;
             best_phase = 0;
-            best_err = 0.0f;
-            next_err = 0.0f;
+            best_score = 0.0f;
+            next_score = 0.0f;
             for (phase = 0;  phase < PP_PERIOD_SYMBOLS;  phase++)
             {
                 complexf_t cand;
-                float err;
+                float corr_mag;
+                float denom;
+                float score;
 
                 cand = pp_symbols[(s->duration - 1 + phase)%PP_PERIOD_SYMBOLS];
-                cand.re *= TRAINING_AMP;
-                cand.im *= TRAINING_AMP;
-                err = (sym->re - cand.re)*(sym->re - cand.re)
-                    + (sym->im - cand.im)*(sym->im - cand.im);
-                s->phase3_pp_error[phase] = PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_error[phase] + err;
-                if (phase == 0 || s->phase3_pp_error[phase] < best_err)
+                /* Correlate y with the conjugate of the known unit-magnitude
+                   PP reference.  |correlation| is invariant to the arbitrary
+                   carrier phase present when the primary demodulator starts. */
+                s->phase3_pp_corr[phase].re =
+                    PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_corr[phase].re
+                    + sym->re*cand.re + sym->im*cand.im;
+                s->phase3_pp_corr[phase].im =
+                    PHASE3_PP_ACQUIRE_DECAY*s->phase3_pp_corr[phase].im
+                    + sym->im*cand.re - sym->re*cand.im;
+                corr_mag = sqrtf(s->phase3_pp_corr[phase].re*s->phase3_pp_corr[phase].re
+                               + s->phase3_pp_corr[phase].im*s->phase3_pp_corr[phase].im);
+                denom = sqrtf(s->phase3_pp_corr_energy*s->phase3_pp_corr_weight);
+                score = (denom > 0.0001f) ? corr_mag/denom : 0.0f;
+                s->phase3_pp_error[phase] = score;
+                if (phase == 0 || score > best_score)
                 {
-                    next_err = best_err;
-                    best_err = s->phase3_pp_error[phase];
+                    next_score = best_score;
+                    best_score = score;
                     best_phase = phase;
                 }
-                else if (next_err == 0.0f || s->phase3_pp_error[phase] < next_err)
+                else if (score > next_score)
                 {
-                    next_err = s->phase3_pp_error[phase];
+                    next_score = score;
                 }
                 /*endif*/
             }
@@ -5480,11 +5520,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_pp_acquire_hits = 1;
             /*endif*/
             s->phase3_pp_phase = best_phase;
-            if (next_err > best_err)
-                s->phase3_pp_phase_score = (int) lrintf(next_err - best_err);
-            else
-                s->phase3_pp_phase_score = 0;
-            /*endif*/
+            s->phase3_pp_phase_score = (int) lrintf(1000.0f*best_score);
 
             if (s->duration <= 4 || (s->duration % PHASE3_PP_ACQUIRE_LOG_INTERVAL) == 0)
             {
@@ -5516,6 +5552,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                 acquire_bauds = s->duration;
                 s->phase3_pp_started = 1;
+                {
+                    float corr_mag;
+
+                    corr_mag = sqrtf(s->phase3_pp_corr[s->phase3_pp_phase].re
+                                   * s->phase3_pp_corr[s->phase3_pp_phase].re
+                                   + s->phase3_pp_corr[s->phase3_pp_phase].im
+                                   * s->phase3_pp_corr[s->phase3_pp_phase].im);
+                    if (corr_mag > 0.0001f)
+                    {
+                        s->phase3_pp_rotation.re =
+                            s->phase3_pp_corr[s->phase3_pp_phase].re/corr_mag;
+                        s->phase3_pp_rotation.im =
+                            s->phase3_pp_corr[s->phase3_pp_phase].im/corr_mag;
+                    }
+                    /*endif*/
+                }
                 /* Absorb the acquisition baud count into the phase offset so that
                    when duration resets to 0 the PP target index remains continuous:
                    during acquisition baud N, target = pp_symbols[(N-1+phase)%48].
@@ -5551,7 +5603,6 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         else if (s->duration <= PHASE3_PP_TRAIN_BAUDS)
         {
             complexf_t pp_target;
-            float target_mag;
             int idx;
             int prev;
             int pp_baud;
@@ -5594,9 +5645,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 /*endif*/
                 scale = (s->eq_target_mag > 0.01f) ? s->eq_target_mag : 1.0f;
                 pp_target = pp_symbols[(pp_baud - 1 + s->phase3_pp_phase)%PP_PERIOD_SYMBOLS];
+                {
+                    float re;
+
+                    re = pp_target.re*s->phase3_pp_rotation.re
+                       - pp_target.im*s->phase3_pp_rotation.im;
+                    pp_target.im = pp_target.re*s->phase3_pp_rotation.im
+                                 + pp_target.im*s->phase3_pp_rotation.re;
+                    pp_target.re = re;
+                }
                 pp_target.re *= scale;
                 pp_target.im *= scale;
-                target_mag = scale;
                 tune_equalizer(s, sym, &pp_target);
             }
 
@@ -5649,7 +5708,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int d0;
                 int d1;
 
-                raw_sym = map_phase4_raw_bits(data_bits, h);
+                /* V.34 10.1.3.8 TRN uses direct (absolute) mapping. */
+                raw_sym = map_phase4_raw_bits(phase3_abs_bits, h);
                 reg = s->phase3_trn_scramble[h];
                 d0 = descramble_reg(&reg, s->scrambler_tap, raw_sym & 1);
                 d1 = descramble_reg(&reg, s->scrambler_tap, (raw_sym >> 1) & 1);
@@ -5768,7 +5828,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int b0;
                 int b1;
 
-                in_sym = (raw_sym - s->phase3_ja_prev_z[h]) & 0x3;
+                in_sym = raw_sym;
                 reg = s->phase3_ja_scramble[h];
                 b0 = descramble_reg(&reg, s->scrambler_tap, in_sym & 1);
                 b1 = descramble_reg(&reg, s->scrambler_tap, (in_sym >> 1) & 1);
@@ -7863,8 +7923,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             eq_target.re = (sym->re >= 0.0f)  ?  s2  :  -s2;
             eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
 
-            if (phase3_equalizer_refine_active(s)
-                || s->stage == V34_RX_STAGE_PHASE4_TRN
+            if (s->stage == V34_RX_STAGE_PHASE4_TRN
                 || s->stage == V34_RX_STAGE_PHASE4_MP)
             {
                 /* CMA (blind) equalizer — during Phase 3 TRN refinement and
@@ -7881,7 +7940,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /* Re-enabled carrier tracking — test 4 showed MP detection worked
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
-            if (!phase4_trn_should_freeze_tracking(s))
+            if (s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+                && !phase4_trn_should_freeze_tracking(s))
             {
                 error = sym->im*eq_target.re - sym->re*eq_target.im;
                 s->v34_carrier_phase_rate += (int32_t)(s->carrier_track_i*error);
@@ -8334,6 +8394,68 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s)
 {
     return s ? s->rx.phase3_s_event_count : 0;
+}
+
+SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
+{
+    if (!s)
+        return;
+
+    /* Ja has already been delivered to the external V.90 digital-side state
+       machine.  Clear the shared V.34 event before v34_tx() can interpret it
+       as its own far-end J and call phase4_wait_init().  Preserve the decoded
+       Ja constellation choice, but start the S/S-bar detector with a clean
+       32-baud window so the later analogue S transition is unambiguous. */
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
+    s->rx.duration = 0;
+    s->rx.bit_count = 0;
+    s->rx.s_detect_count = 0;
+    s->rx.s_window = 0;
+    s->rx.phase3_s_present = false;
+    memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
+    memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
+    memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
+
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90: analogue Ja consumed; armed clean Phase 3 S detector (trn=%s)\n",
+             s->rx.phase3_j_trn16 ? "16-point" : "4-point");
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
+                                               int hypothesis,
+                                               uint8_t bits[],
+                                               int max_bits)
+{
+    int len;
+
+    if (!s || !bits || max_bits <= 0
+        || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
+        return 0;
+    len = s->rx.phase3_ja_capture_hyp_len[hypothesis];
+    if (len > max_bits)
+        len = max_bits;
+    memcpy(bits, s->rx.phase3_ja_capture_hyp[hypothesis], (size_t) len);
+    return len;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_raw_bits(v34_state_t *s,
+                                                   int hypothesis,
+                                                   uint8_t bits[],
+                                                   int max_bits)
+{
+    int len;
+
+    if (!s || !bits || max_bits <= 0
+        || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
+        return 0;
+    len = s->rx.phase3_ja_capture_hyp_raw_len[hypothesis];
+    if (len > max_bits)
+        len = max_bits;
+    memcpy(bits, s->rx.phase3_ja_capture_hyp_raw[hypothesis], (size_t) len);
+    return len;
 }
 /*- End of function --------------------------------------------------------*/
 

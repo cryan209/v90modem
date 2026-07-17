@@ -3922,6 +3922,11 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.phase3_pp_obs = 0;
     s->rx.phase3_pp_match = 0;
     memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+    memset(s->rx.phase3_pp_corr, 0, sizeof(s->rx.phase3_pp_corr));
+    s->rx.phase3_pp_corr_energy = 0.0f;
+    s->rx.phase3_pp_corr_weight = 0.0f;
+    s->rx.phase3_pp_rotation.re = 1.0f;
+    s->rx.phase3_pp_rotation.im = 0.0f;
     s->rx.phase3_pp_phase = -1;
     s->rx.phase3_pp_phase_score = -1;
     s->rx.phase3_pp_acquire_hits = 0;
@@ -4132,6 +4137,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 s->rx.phase3_pp_obs = 0;
                 s->rx.phase3_pp_match = 0;
                 memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+                memset(s->rx.phase3_pp_corr, 0, sizeof(s->rx.phase3_pp_corr));
+                s->rx.phase3_pp_corr_energy = 0.0f;
+                s->rx.phase3_pp_corr_weight = 0.0f;
+                s->rx.phase3_pp_rotation.re = 1.0f;
+                s->rx.phase3_pp_rotation.im = 0.0f;
                 s->rx.phase3_pp_phase = -1;
                 s->rx.phase3_pp_phase_score = -1;
                 s->rx.phase3_pp_acquire_hits = 0;
