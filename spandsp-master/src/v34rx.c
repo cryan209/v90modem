@@ -3562,10 +3562,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     info_log_candidate_diag(s, s->info_buf, s->target_bits, s->crc);
                 /*endif*/
                 /* Try INFO1a boundary/slip recovery before the INFO0a prefix check.
-                   Once INFO1d has been sent, the analog modem should be sending INFO1a,
-                   so prioritise INFO1a decoding.  The INFO0a prefix check is only a
-                   fallback when we haven't yet sent INFO1d (analog modem still in the
-                   INFO0a phase). */
+                   Once INFO1d has been sent, the normal path is INFO1a, so
+                   prioritise INFO1a decoding.  A peer in Phase 2 error recovery,
+                   however, deliberately resumes INFO0a at this point to request an
+                   acknowledged INFO0d.  Keep the valid-prefix fallback active after
+                   INFO1d as well; otherwise the shorter INFO0a is padded with Tone A
+                   bits to the INFO1a target length and reported forever as INFO1_BAD. */
                 if (v90_info1a_search
                     && try_info_boundary_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_shift, NULL))
                 {
@@ -3600,7 +3602,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 }
                 /*endif*/
                 if (v90_info1a_search
-                    && !s->v90_info1d_sent
                     && info_has_valid_prefix_crc(s->info_buf, s->target_bits, 33, &prefix_crc))
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
@@ -5116,22 +5117,60 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         else
                         {
-                            s->phase3_j_lock_hyp = best_h;
-                            s->phase3_j_trn16 = pat;
-                            if (!s->calling_party)
+                            /* TRN is scrambled ones and can occasionally
+                               produce one near-perfect 32-bit J correlation
+                               across the mapping hypotheses. Ja/J is a
+                               repeating 16-bit sequence, so require three
+                               consistent canonical hits before changing
+                               phases. This prevents the short V.90 Sd burst
+                               from being sent while the analogue modem is
+                               still transmitting its long TRN. */
+                            if (s->phase3_j_candidate_hyp == best_h
+                                && s->phase3_j_candidate_phase == best_p
+                                && s->phase3_j_candidate_pat == pat
+                                && s->phase3_j_bits - s->phase3_j_candidate_last_bits >= 14
+                                && s->phase3_j_bits - s->phase3_j_candidate_last_bits <= 18)
                             {
-                                s->received_event = V34_EVENT_J;
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 3: explicit J detected (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
-                                         best_h, best_p, best_score, s->phase3_j_bits,
-                                         pat ? "16-point" : "4-point");
+                                s->phase3_j_candidate_count++;
+                                s->phase3_j_candidate_last_bits = s->phase3_j_bits;
+                            }
+                            else if (s->phase3_j_candidate_hyp != best_h
+                                     || s->phase3_j_candidate_phase != best_p
+                                     || s->phase3_j_candidate_pat != pat
+                                     || s->phase3_j_bits - s->phase3_j_candidate_last_bits > 18)
+                            {
+                                s->phase3_j_candidate_hyp = best_h;
+                                s->phase3_j_candidate_phase = best_p;
+                                s->phase3_j_candidate_pat = pat;
+                                s->phase3_j_candidate_count = 1;
+                                s->phase3_j_candidate_last_bits = s->phase3_j_bits;
+                            }
+                            if (s->phase3_j_candidate_count >= 3)
+                            {
+                                s->phase3_j_lock_hyp = best_h;
+                                s->phase3_j_trn16 = pat;
+                                if (!s->calling_party)
+                                {
+                                    s->received_event = V34_EVENT_J;
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 3: confirmed repeating J/Ja (hyp=%d phase=%d hits=%d bits=%d, trn=%s)\n",
+                                             best_h, best_p, s->phase3_j_candidate_count,
+                                             s->phase3_j_bits, pat ? "16-point" : "4-point");
+                                }
+                                else
+                                {
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 3: confirmed far-end J for caller (hyp=%d phase=%d hits=%d bits=%d, trn=%s)\n",
+                                             best_h, best_p, s->phase3_j_candidate_count,
+                                             s->phase3_j_bits, pat ? "16-point" : "4-point");
+                                }
                             }
                             else
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 3: far-end J decoded for caller (hyp=%d phase=%d score=%d/32 bits=%d, trn=%s)\n",
-                                         best_h, best_p, best_score, s->phase3_j_bits,
-                                         pat ? "16-point" : "4-point");
+                                         "Rx - Phase 3: canonical J/Ja candidate %d/3 (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                                         s->phase3_j_candidate_count, best_h, best_p,
+                                         best_score, s->phase3_j_bits);
                             }
                         }
                     }
@@ -5311,6 +5350,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_j_bits = 0;
             s->phase3_j_lock_hyp = -1;
             s->phase3_j_trn16 = -1;
+            s->phase3_j_candidate_hyp = -1;
+            s->phase3_j_candidate_phase = -1;
+            s->phase3_j_candidate_pat = -1;
+            s->phase3_j_candidate_count = 0;
+            s->phase3_j_candidate_last_bits = 0;
             memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
             memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
             memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
@@ -5631,6 +5675,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_j_bits = 0;
                 s->phase3_j_lock_hyp = -1;
                 s->phase3_j_trn16 = -1;
+                s->phase3_j_candidate_hyp = -1;
+                s->phase3_j_candidate_phase = -1;
+                s->phase3_j_candidate_pat = -1;
+                s->phase3_j_candidate_count = 0;
+                s->phase3_j_candidate_last_bits = 0;
                 memset(s->phase3_ja_scramble, 0, sizeof(s->phase3_ja_scramble));
                 memset(s->phase3_ja_prev_z, 0, sizeof(s->phase3_ja_prev_z));
                 memset(s->phase3_ja_prev_valid, 0, sizeof(s->phase3_ja_prev_valid));
@@ -8451,6 +8500,11 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_j_bits = 0;
     s->rx.phase3_j_lock_hyp = -1;
     s->rx.phase3_j_trn16 = -1;
+    s->rx.phase3_j_candidate_hyp = -1;
+    s->rx.phase3_j_candidate_phase = -1;
+    s->rx.phase3_j_candidate_pat = -1;
+    s->rx.phase3_j_candidate_count = 0;
+    s->rx.phase3_j_candidate_last_bits = 0;
     memset(s->rx.phase3_ja_scramble, 0, sizeof(s->rx.phase3_ja_scramble));
     memset(s->rx.phase3_ja_prev_z, 0, sizeof(s->rx.phase3_ja_prev_z));
     memset(s->rx.phase3_ja_prev_valid, 0, sizeof(s->rx.phase3_ja_prev_valid));

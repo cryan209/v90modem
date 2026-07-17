@@ -885,6 +885,11 @@ typedef struct
     int phase3_j_bits;
     int phase3_j_lock_hyp;
     int phase3_j_trn16;
+    int phase3_j_candidate_hyp;
+    int phase3_j_candidate_phase;
+    int phase3_j_candidate_pat;
+    int phase3_j_candidate_count;
+    int phase3_j_candidate_last_bits;
     uint32_t phase3_trn_scramble[24];
     uint16_t phase3_trn_one_count[24];
     int phase3_trn_bits;

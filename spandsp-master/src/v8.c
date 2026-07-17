@@ -1348,6 +1348,19 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             residual_samples = fsk_rx(&s->v21rx, amp, len);
             if (s->got_cm_jm)
             {
+                /* SmartLink's V.8 receiver reports CM before its ANSam echo
+                   gate is fully open.  An immediate ANSam-to-JM handoff is
+                   repeatably demodulated as "... 47 6D" at its 9.6 kHz DSP
+                   input.  Hold ANSam long enough to open that gate, but keep
+                   600 ms of this timer in reserve.  This reproduces the
+                   4.5-second answer-tone window accepted by this receiver and
+                   still leaves time to validate several clean repetitions. */
+                if (s->negotiation_timer > milliseconds_to_samples(600))
+                {
+                    s->negotiation_timer -= len;
+                    break;
+                }
+                /*endif*/
                 span_log(&s->logging, SPAN_LOG_FLOW, "CM recognised\n");
 
                 s->result.status = V8_STATUS_V8_OFFERED;
