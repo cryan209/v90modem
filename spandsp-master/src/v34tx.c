@@ -2158,14 +2158,20 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
     {
         /* Keep the live Phase 2 tone frontend warm across the INFO0d -> Tone A
            crossover. Resetting the power meter / RRC history here can miss a
-           peer that starts INFO0a or Tone A immediately after our INFO0d. */
-        s->rx.bit_count = 0;
-        s->rx.bitstream = 0;
+           peer that starts INFO0a or Tone A immediately after our INFO0d.
+           Critically, if an INFO frame is mid-accumulation (sync already
+           matched, bit_count > 0), keep the accumulator, bitstream and CRC
+           intact: this crossover fires while the peer is part-way through an
+           INFO0a repetition, and zeroing bit_count here discards a
+           nearly-complete frame, desynchronising the whole Phase 2 exchange
+           (peer sees our INFO0d continue, enters error recovery, and we end
+           up framing its INFO0a resends as INFO1a). */
     }
     /*endif*/
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.stage = V34_RX_STAGE_TONE_A;
-    s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+    if (s->rx.bit_count == 0)
+        s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
     if (!preserve_active_search)
     {
         s->rx.received_event = V34_EVENT_NONE;
