@@ -6,10 +6,7 @@ analogue-modem peer without physical hardware.
 
 ## `d-modem/d-modem.c`
 
-Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs on
-`tower.net.cryan.nz` in the `d-modem` container. The canonical location is
-`/mnt/user/appdata/d-modem/D-Modem/d-modem.c` on tower; this copy is checked in
-for preservation and reproducibility. Key changes over upstream:
+Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in the `d-modem` container. Key changes over upstream:
 
 - **8000↔9600 rational (6/5) resampler.** slmodemd's DSP runs at 9600 Hz;
   the SIP/RTP path is 8000 Hz G.711. The conversion must preserve *both* exact
@@ -28,8 +25,6 @@ for preservation and reproducibility. Key changes over upstream:
 - Debug taps: `/tmp/dm_to_dsp.raw` (9600 Hz, what the DSP receives) and
   `/tmp/dm_from_dsp.raw` (8000 Hz, the DSP's transmit after downsampling).
 
-Also patched on tower (not copied here): `slmodemd/modem_cmdline.c` (`-e` option
+Also patched (not copied here): `slmodemd/modem_cmdline.c` (`-e` option
 declared `MANDATORY,STRING` to fix an upstream arg-parsing bug).
 
-See the session memory `slmodem-dmodem-interop-rig` for the full rig
-description, dial recipe, and the current Phase-3 blocker analysis.
