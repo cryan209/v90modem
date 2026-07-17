@@ -2377,22 +2377,29 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         ++s->tx.tone_duration;
         if (s->rx.received_event == V34_EVENT_REVERSAL_1
             ||
-            (s->rx.received_event == V34_EVENT_TONE_SEEN && s->tx.tone_duration >= 30)
-            ||
             s->tx.tone_duration >= 600)
         {
+            /* V.90 9.2.1.1.6: the B reversal must be timed from the RECEIVED
+               Tone A reversal edge.  The analogue modem sends only 50 ms of
+               Tone A before reversing (9.2.2.1.6), and it arms its own Tone B
+               reversal detector only after its reversal completes and it goes
+               silent.  Committing early on mere tone presence used to place
+               our B reversal inside the peer's Tone A window, where its
+               detector was not yet listening - it then retrained instead of
+               sending INFO1a.  Tone presence alone must never trigger this
+               transition; the >=600 baud timeout is the 9.2.1.2.4 recovery. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
-                     (s->tx.tone_duration >= 600) ? "timeout"
-                     : (s->rx.received_event == V34_EVENT_REVERSAL_1) ? "reversal detected"
-                     : "detected (reversal likely missed during L1/L2)",
+                     (s->rx.received_event == V34_EVENT_REVERSAL_1) ? "reversal detected"
+                     : "reversal timeout (9.2.1.2.4 recovery)",
                      s->rx.received_event, s->tx.tone_duration);
+            s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_V90_B_REV_DELAY;
         }
         else if (s->rx.received_event == V34_EVENT_TONE_SEEN)
         {
-            /* Tone A present but guard period not yet met — clear and keep waiting */
+            /* Tone A present - the reversal is still to come; keep waiting */
             s->rx.received_event = V34_EVENT_NONE;
         }
         /*endif*/
