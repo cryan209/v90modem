@@ -407,11 +407,15 @@ static void restrict_to_g711(void)
 {
     pj_str_t pcmu = pj_str("PCMU/8000");
     pj_str_t pcma = pj_str("PCMA/8000");
+    const char *force_pcmu = getenv("SIP_FORCE_PCMU");
 
     /* Raise PCMU to highest priority */
     pjsua_codec_set_priority(&pcmu, PJMEDIA_CODEC_PRIO_HIGHEST);
     /* Allow PCMA as second choice (some ATAs only offer A-law) */
-    pjsua_codec_set_priority(&pcma, PJMEDIA_CODEC_PRIO_NEXT_HIGHER);
+    pjsua_codec_set_priority(&pcma,
+                             (force_pcmu && force_pcmu[0] && strcmp(force_pcmu, "0") != 0)
+                                 ? PJMEDIA_CODEC_PRIO_DISABLED
+                                 : PJMEDIA_CODEC_PRIO_NEXT_HIGHER);
 
     /* Disable all other codecs */
     const char *disable[] = {

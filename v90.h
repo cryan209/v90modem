@@ -132,7 +132,7 @@ typedef enum {
 typedef enum {
     V90_TX_PHASE2,        /* SpanDSP V.34 handles INFO exchange */
     V90_TX_WAIT_JA,       /* Phase 3: silent until the analogue modem's Ja */
-    V90_TX_SD,            /* Sending Sd — 64 reps of {+W,+0,+W,-W,-0,-W} */
+    V90_TX_SD,            /* Sending Sd — repeated {+W,+0,+W,-W,-0,-W} */
     V90_TX_SD_BAR,        /* Sending S̄d — 8 reps of {-W,-0,-W,+W,+0,+W} */
     V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
     V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */

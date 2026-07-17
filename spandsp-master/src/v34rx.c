@@ -173,6 +173,36 @@ static int phase3_rx_dump_count = 0;
 #define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
 #define PHASE3_PP_BAUD_LOG_INTERVAL     192
 
+static int v90_phase3_j_lookahead_bits(void)
+{
+    static int initialized = 0;
+    static int lookahead_bits = 0;
+
+    if (!initialized)
+    {
+        const char *value;
+        char *end;
+        long parsed;
+
+        value = getenv("ME_V90_J_LOOKAHEAD_BITS");
+        if (value  &&  value[0] != '\0')
+        {
+            end = NULL;
+            parsed = strtol(value, &end, 10);
+            if (end != value  &&  end  &&  *end == '\0'
+                && parsed >= 256  &&  parsed <= 20000)
+            {
+                lookahead_bits = (int) parsed;
+            }
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return lookahead_bits;
+}
+
 enum
 {
     TRAINING_TX_STAGE_NORMAL_OPERATION_V34 = 0,
@@ -4980,6 +5010,26 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 }
                 /*endfor*/
                 s->phase3_j_bits += 2;
+                if (!s->calling_party
+                    && s->v90_mode
+                    && v90_phase3_j_lookahead_bits() > 0
+                    && s->phase3_j_bits >= v90_phase3_j_lookahead_bits()
+                    && (s->received_event == V34_EVENT_NONE
+                        || s->received_event == V34_EVENT_S))
+                {
+                    /* The SmartLink test rig has roughly one media frame more
+                       receive latency than its downstream-Sd wait permits.  An
+                       explicitly configured recovered-bit threshold starts the
+                       digital side early enough to compensate.  SmartLink uses
+                       the 4-point TRN path in this rig; pin it so the later S
+                       transition remains detectable after this synthetic J. */
+                    s->phase3_j_trn16 = 0;
+                    s->received_event = V34_EVENT_J;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: configured V.90 J look-ahead fired at bits=%d (ME_V90_J_LOOKAHEAD_BITS=%d, trn=4-point)\n",
+                             s->phase3_j_bits, v90_phase3_j_lookahead_bits());
+                }
+                /*endif*/
                 {
                     int capture_h;
 
@@ -5117,19 +5167,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         }
                         else
                         {
-                            /* TRN is scrambled ones and can occasionally
-                               produce one near-perfect 32-bit J correlation
-                               across the mapping hypotheses. Ja/J is a
-                               repeating 16-bit sequence, so require three
-                               consistent canonical hits before changing
-                               phases. This prevents the short V.90 Sd burst
-                               from being sent while the analogue modem is
-                               still transmitting its long TRN. */
-                            if (s->phase3_j_candidate_hyp == best_h
+                            /* Require a sustained canonical sequence near the
+                               complete Ja signature on the normal path.  Test
+                               rigs that need latency compensation use the
+                               explicit ME_V90_J_LOOKAHEAD_BITS path above. */
+                            if (s->phase3_j_bits < 6000)
+                            {
+                                s->phase3_j_candidate_count = 0;
+                            }
+                            else if (s->phase3_j_candidate_hyp == best_h
                                 && s->phase3_j_candidate_phase == best_p
                                 && s->phase3_j_candidate_pat == pat
-                                && s->phase3_j_bits - s->phase3_j_candidate_last_bits >= 14
-                                && s->phase3_j_bits - s->phase3_j_candidate_last_bits <= 18)
+                                && s->phase3_j_bits > s->phase3_j_candidate_last_bits
+                                && s->phase3_j_bits - s->phase3_j_candidate_last_bits <= 4)
                             {
                                 s->phase3_j_candidate_count++;
                                 s->phase3_j_candidate_last_bits = s->phase3_j_bits;
@@ -5137,7 +5187,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             else if (s->phase3_j_candidate_hyp != best_h
                                      || s->phase3_j_candidate_phase != best_p
                                      || s->phase3_j_candidate_pat != pat
-                                     || s->phase3_j_bits - s->phase3_j_candidate_last_bits > 18)
+                                     || s->phase3_j_bits - s->phase3_j_candidate_last_bits > 4)
                             {
                                 s->phase3_j_candidate_hyp = best_h;
                                 s->phase3_j_candidate_phase = best_p;
@@ -5145,7 +5195,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                 s->phase3_j_candidate_count = 1;
                                 s->phase3_j_candidate_last_bits = s->phase3_j_bits;
                             }
-                            if (s->phase3_j_candidate_count >= 3)
+                            if (s->phase3_j_candidate_count >= 8)
                             {
                                 s->phase3_j_lock_hyp = best_h;
                                 s->phase3_j_trn16 = pat;
@@ -5168,7 +5218,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             else
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 3: canonical J/Ja candidate %d/3 (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                                         "Rx - Phase 3: canonical J/Ja candidate %d/8 (hyp=%d phase=%d score=%d/32 bits=%d)\n",
                                          s->phase3_j_candidate_count, best_h, best_p,
                                          best_score, s->phase3_j_bits);
                             }
