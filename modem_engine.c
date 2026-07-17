@@ -2562,6 +2562,101 @@ void me_on_sip_disconnected(void)
 /* Audio I/O — called from PJSIP media thread (real-time)             */
 /* ------------------------------------------------------------------ */
 
+/* V.90 WAIT_JA energy-gap Ja detector.
+ *
+ * The analogue modem's Phase 3 upstream is S/PP/TRN, then a silent gap
+ * (observed ~600 ms on SmartLink), then Ja — and it enters its Sd search
+ * window (WaitForSd) at the exact moment Ja starts.  Bit-level Ja decode
+ * from the 4-point sliced stream is unreliable (scores ~22/32 on live
+ * captures) and scrambled TRN payload can fake the J pattern, so instead
+ * key on the unmissable physical marker: sustained Phase 3 energy, then
+ * a silent gap, then energy returning.  Fire the Ja event shortly after
+ * the energy returns so Sd lands inside the analogue modem's window.
+ * Runs with g_state_mtx held. */
+static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
+{
+    /* 10 ms energy windows at 8000 Hz */
+    enum { JA_GATE_WIN = 80 };
+    static int64_t acc;
+    static int     acc_n;
+    static int     state;          /* 0=await signal, 1=in signal, 2=in gap, 3=fired */
+    static int     ms_in_state;
+
+    if (!g_v90 || v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
+        acc = 0;
+        acc_n = 0;
+        state = 0;
+        ms_in_state = 0;
+        return;
+    }
+
+    for (int i = 0; i < len; i++) {
+        acc += (int64_t)amp[i] * amp[i];
+        if (++acc_n < JA_GATE_WIN)
+            continue;
+
+        {
+            double rms = sqrt((double)acc / acc_n);
+            /* Phase 3 upstream runs ~-21 dBFS (rms ~2900); the gap sits at
+               or below ~-40 dBFS (rms ~330). */
+            int signal_now = (rms > 1000.0);
+            int silent_now = (rms < 400.0);
+
+            acc = 0;
+            acc_n = 0;
+            ms_in_state += 10;
+
+            switch (state) {
+            case 0:                     /* wait for sustained Phase 3 energy */
+                if (signal_now) {
+                    if (ms_in_state >= 300) {
+                        state = 1;
+                        ms_in_state = 0;
+                    }
+                } else {
+                    ms_in_state = 0;
+                }
+                break;
+            case 1:                     /* in S/PP/TRN — wait for the gap */
+                if (silent_now) {
+                    /* SmartLink's TRN-to-Ja gap is as short as 80 ms on
+                       some attempts (600 ms on others) — trigger fast. */
+                    if (ms_in_state >= 50) {
+                        ME_LOG("[ME] V.90 WAIT_JA: TRN-to-Ja silence gap detected (%d ms)\n",
+                               ms_in_state);
+                        state = 2;
+                        ms_in_state = 0;
+                    }
+                } else {
+                    ms_in_state = 0;
+                }
+                break;
+            case 2:                     /* in gap — energy return means Ja */
+                if (signal_now) {
+                    if (ms_in_state >= 30) {
+                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+
+                        ME_LOG("[ME] V.90 WAIT_JA: energy returned after gap; treating as Ja start (accepted=%d)\n",
+                               accepted ? 1 : 0);
+                        if (accepted) {
+                            (void)v90_dil_capture_try_v34_hypotheses();
+                            if (g_v34)
+                                v34_v90_arm_phase3_s_detector(g_v34);
+                        }
+                        state = 3;
+                        ms_in_state = 0;
+                    }
+                } else {
+                    ms_in_state = 0;
+                }
+                break;
+            default:                    /* fired — phase change resets us */
+                break;
+            }
+        }
+    }
+}
+
 void me_rx_audio(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
@@ -2792,6 +2887,7 @@ void me_rx_audio(const int16_t *amp, int len)
                 } else if (notch_active) {
                     notch_filter_apply(&g_notch, filtered, len);
                 }
+                v90_wait_ja_energy_gate_locked(filtered, len);
                 v34_rx(g_v34, filtered, len);
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;
