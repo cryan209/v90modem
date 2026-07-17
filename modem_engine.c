@@ -1373,10 +1373,12 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
 }
 static bool           g_v90_dil_parse_logged = false;
 
-#define V90_DIL_CAPTURE_MAX_BITS 8192
+#define V90_DIL_CAPTURE_MAX_BITS 65536
 static uint8_t        g_v90_dil_capture[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
 static int            g_v90_dil_capture_bits = 0;
 static int            g_v90_dil_capture_search = 0;
+static int            g_v90_dil_hyp_last_bits = 0;
+static bool           g_v90_dil_hyp_dumped = false;
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -1691,6 +1693,8 @@ static void v90_dil_capture_reset(void)
     memset(g_v90_dil_capture, 0, sizeof(g_v90_dil_capture));
     g_v90_dil_capture_bits = 0;
     g_v90_dil_capture_search = 0;
+    g_v90_dil_hyp_last_bits = 0;
+    g_v90_dil_hyp_dumped = false;
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
     g_v90_phase3_s_events = 0;
@@ -1862,6 +1866,101 @@ static bool v90_dil_capture_try_parse_at(int start)
                 desc.n, desc.lsp, desc.ltp);
     g_v90_dil_parse_logged = true;
     return true;
+}
+
+static bool v90_dil_capture_try_v34_hypotheses(void)
+{
+    uint8_t unpacked[V90_DIL_CAPTURE_MAX_BITS];
+    int first_bits;
+
+    if (!g_v34 || g_v90_pending_dil_valid)
+        return g_v90_pending_dil_valid;
+
+    first_bits = v34_v90_copy_phase3_ja_bits(g_v34,
+                                             0,
+                                             unpacked,
+                                             V90_DIL_CAPTURE_MAX_BITS);
+    if (first_bits < 206)
+        return false;
+    if (first_bits < V90_DIL_CAPTURE_MAX_BITS
+        && first_bits < g_v90_dil_hyp_last_bits + 512)
+        return false;
+    g_v90_dil_hyp_last_bits = first_bits;
+
+    for (int hypothesis = 0; hypothesis < 24; hypothesis++) {
+        int bits;
+
+        if (hypothesis == 0) {
+            bits = first_bits;
+        } else {
+            bits = v34_v90_copy_phase3_ja_bits(g_v34,
+                                               hypothesis,
+                                               unpacked,
+                                               V90_DIL_CAPTURE_MAX_BITS);
+        }
+
+        if (bits < 206)
+            continue;
+
+        memset(g_v90_dil_capture, 0, sizeof(g_v90_dil_capture));
+        for (int i = 0; i < bits; i++)
+            v90_dil_capture_set_bit(i, unpacked[i] & 1);
+        g_v90_dil_capture_bits = bits;
+        g_v90_dil_capture_search = 0;
+
+        while (g_v90_dil_capture_search + 206 <= g_v90_dil_capture_bits) {
+            int start = g_v90_dil_capture_search++;
+
+            if (v90_dil_capture_has_preamble(start)
+                && v90_dil_capture_try_parse_at(start)) {
+                ME_LOG("[ME] V.90: Ja descriptor recovered with V.34 hypothesis %d\n",
+                       hypothesis);
+                trace_phase("V90 Ja descriptor recovered with V.34 hypothesis %d",
+                            hypothesis);
+                return true;
+            }
+        }
+    }
+
+    if (!g_v90_dil_hyp_dumped && first_bits >= 32000) {
+        const char *prefix = getenv("ME_V90_JA_DUMP_PREFIX");
+
+        if (prefix && *prefix) {
+            char path[1024];
+
+            for (int hypothesis = 0; hypothesis < 24; hypothesis++) {
+                FILE *fp;
+                int bits;
+
+                bits = v34_v90_copy_phase3_ja_bits(g_v34,
+                                                    hypothesis,
+                                                    unpacked,
+                                                    V90_DIL_CAPTURE_MAX_BITS);
+                snprintf(path, sizeof(path), "%s-hyp%d.bits", prefix, hypothesis);
+                fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(unpacked, 1, (size_t)bits, fp);
+                    fclose(fp);
+                }
+
+                bits = v34_v90_copy_phase3_ja_raw_bits(g_v34,
+                                                        hypothesis,
+                                                        unpacked,
+                                                        V90_DIL_CAPTURE_MAX_BITS);
+                snprintf(path, sizeof(path), "%s-hyp%d.rawbits", prefix, hypothesis);
+                fp = fopen(path, "wb");
+                if (fp) {
+                    fwrite(unpacked, 1, (size_t)bits, fp);
+                    fclose(fp);
+                }
+            }
+            ME_LOG("[ME] V.90: dumped %d Ja hypothesis bits to %s-*\n",
+                   first_bits, prefix);
+        }
+        g_v90_dil_hyp_dumped = true;
+    }
+
+    return false;
 }
 
 static int v34_get_bit_cb(void *user_data)
@@ -2741,6 +2840,11 @@ void me_rx_audio(const int16_t *amp, int len)
                     if (new_j_event && g_v90) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
 
+                        if (accepted) {
+                            (void)v90_dil_capture_try_v34_hypotheses();
+                            v34_v90_arm_phase3_s_detector(g_v34);
+                        }
+
                         fprintf(stderr,
                                 "[ME] V.90 strict RX event=J tx_phase=%d accepted=%d\n",
                                 (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0);
@@ -2765,6 +2869,9 @@ void me_rx_audio(const int16_t *amp, int len)
                         trace_phase("V90 strict RX event=S count=%d accepted=%d",
                                     g_v90_phase3_s_events, accepted ? 1 : 0);
                     }
+
+                    if (!g_v90_pending_dil_valid)
+                        (void)v90_dil_capture_try_v34_hypotheses();
                 }
                 /* RX PCM dump during training */
                 {

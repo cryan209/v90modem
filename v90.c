@@ -63,6 +63,43 @@
  * not race the real protocol transition. */
 #define V90_WAIT_JA_FALLBACK_SAMPLES 24000
 
+/* The explicit SmartLink Ja look-ahead starts the digital sequence before the
+ * analogue modem has completed its fixed Phase 3 training study.  Suppress S
+ * candidates until enough Jd has been presented for that study to finish.
+ * Normal standards-driven Ja decoding has no artificial guard; an explicit
+ * value can override either behaviour for other interoperability rigs. */
+static int v90_min_jd_symbols(void)
+{
+    const char *value;
+    char *end;
+    long parsed;
+
+    value = getenv("ME_V90_MIN_JD_SYMBOLS");
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    value = getenv("ME_V90_J_LOOKAHEAD_BITS");
+    return (value && *value && strcmp(value, "0") != 0) ? 10000 : 0;
+}
+
+static int v90_jd_autoterminate_symbols(void)
+{
+    const char *value;
+    char *end;
+    long parsed;
+
+    value = getenv("ME_V90_JD_AUTOTERMINATE_SYMBOLS");
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    value = getenv("ME_V90_J_LOOKAHEAD_BITS");
+    return (value && *value && strcmp(value, "0") != 0) ? 19296 : 0;
+}
+
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
 static const uint8_t v90_ucode_to_alaw[128] = {
@@ -2236,6 +2273,14 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
+            if (!s->jd_terminate_requested
+                && v90_jd_autoterminate_symbols() > 0
+                && s->sample_count >= v90_jd_autoterminate_symbols()) {
+                fprintf(stderr,
+                        "[V90] Phase 3: Jd interop timeout after %d symbols, terminating at the next frame boundary\n",
+                        s->sample_count);
+                s->jd_terminate_requested = true;
+            }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
                 fprintf(stderr, "[V90] Phase 3: S detected, completed current Jd repetition after %d symbols, starting J'd\n",
                         s->sample_count);
@@ -2794,7 +2839,9 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_S:
-        if (s->tx_phase == V90_TX_JD && !s->jd_terminate_requested) {
+        if (s->tx_phase == V90_TX_JD
+            && s->sample_count >= v90_min_jd_symbols()
+            && !s->jd_terminate_requested) {
             fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
             s->jd_terminate_requested = true;
             return true;

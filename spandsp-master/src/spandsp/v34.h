@@ -351,9 +351,27 @@ SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
 
 /*! Get the number of distinct, strictly detected Phase 3 S transitions.
-    param s The modem context.
-    eturn A monotonically increasing count for the current training attempt. */
+    \param s The modem context.
+    \return A monotonically increasing count for the current training attempt. */
 SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s);
+
+/* Keep the V.34 upstream receiver in the V.90 Phase 3 S-detection path after
+   the digital-side application has consumed analogue Ja.  The V.90 digital
+   transmitter is external to SpanDSP, so the ordinary V.34 transmitter must
+   not consume Ja by advancing both halves of the modem into Phase 4. */
+SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s);
+
+/*! Copy one continuously decoded Phase 3 Ja hypothesis as unpacked bits. */
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
+                                               int hypothesis,
+                                               uint8_t bits[],
+                                               int max_bits);
+
+/*! Copy one Phase 3 Ja hypothesis before descrambling, as unpacked bits. */
+SPAN_DECLARE(int) v34_v90_copy_phase3_ja_raw_bits(v34_state_t *s,
+                                                   int hypothesis,
+                                                   uint8_t bits[],
+                                                   int max_bits);
 
 /*! Get the number of Phase 3 J-detector bits accumulated so far.
     \param s The modem context.
