@@ -1,0 +1,2760 @@
+INTERNATIONAL TELECOMMUNICATION UNION
+
+
+
+
+ITU-T                                           V.90
+TELECOMMUNICATION                                     (09/98)
+STANDARDIZATION SECTOR
+OF ITU
+
+
+
+
+SERIES V: DATA COMMUNICATION OVER THE
+TELEPHONE NETWORK
+Simultaneous transmission of data and other signals
+
+
+
+A digital modem and analogue modem pair
+for use on the Public Switched Telephone
+Network (PSTN) at data signalling rates of
+up to 56 000 bit/s downstream and up to
+33 600 bit/s upstream
+
+
+
+
+ITU-T Recommendation V.90
+(Previously CCITT Recommendation)
+                                     ITU-T V-SERIES RECOMMENDATIONS
+                       DATA COMMUNICATION OVER THE TELEPHONE NETWORK
+
+
+
+ General                                                               V.1–V.9
+ Interfaces and voiceband modems                                       V.10–V.34
+ Wideband modems                                                       V.35–V.39
+ Error control                                                         V.40–V.49
+ Transmission quality and maintenance                                  V.50–V.59
+ Simultaneous transmission of data and other signals                   V.60–V.99
+ Interworking with other networks                                      V.100–V.199
+ Interface layer specifications for data communication                 V.200–V.249
+ Control procedures                                                    V.250–V.299
+ Modems on digital circuits                                            V.300–V.399
+
+
+For further details, please refer to ITU-T List of Recommendations.
+                    ITU-T RECOMMENDATIONS SERIES
+
+Series A   Organization of the work of the ITU-T
+Series B   Means of expression: definitions, symbols, classification
+Series C   General telecommunication statistics
+Series D   General tariff principles
+Series E   Overall network operation, telephone service, service operation and human factors
+Series F   Non-telephone telecommunication services
+Series G   Transmission systems and media, digital systems and networks
+Series H   Audiovisual and multimedia systems
+Series I   Integrated services digital network
+Series J   Transmission of television, sound programme and other multimedia signals
+Series K   Protection against interference
+Series L   Construction, installation and protection of cables and other elements of outside plant
+Series M   TMN and network maintenance: international transmission systems, telephone circuits,
+           telegraphy, facsimile and leased circuits
+Series N   Maintenance: international sound programme and television transmission circuits
+Series O   Specifications of measuring equipment
+Series P   Telephone transmission quality, telephone installations, local line networks
+Series Q   Switching and signalling
+Series R   Telegraph transmission
+Series S   Telegraph services terminal equipment
+Series T   Terminals for telematic services
+Series U   Telegraph switching
+
+Series V   Data communication over the telephone network
+Series X   Data networks and open system communications
+Series Y   Global information infrastructure
+Series Z   Programming languages
+
+
+
+
+                                                                                    
+                                                                                   Printed in Switzerland
+                                                                                           Geneva, 1999
+ITU-T RECOMMENDATION V.90
+
+             A DIGITAL MODEM AND ANALOGUE MODEM PAIR FOR USE
+              ON THE PUBLIC SWITCHED TELEPHONE NETWORK (PSTN)
+                 AT DATA SIGNALLING RATES OF UP TO 56 000 bit/s
+                  DOWNSTREAM AND UP TO 33 600 bit/s UPSTREAM
+
+
+
+
+Summary
+This Recommendation specifies the operation of a digital modem and analogue modem pair for use on the Public
+Switched Telephone Network (PSTN) at data signalling rates of up to 56 000 bit/s in the downstream direction and up
+to 33 600 bit/s in the upstream direction. The two modems are specified herein in terms of coding, start-up signals and
+sequences, operating procedures and DTE-DCE interface functionalities. The network interface of the digital modem
+and the signalling rate that is used to connect the digital modem locally to a digital switched network are considered to
+be national matters and are hence not specified herein.
+
+
+
+
+Source
+ITU-T Recommendation V.90 was prepared by ITU-T Study Group 16 (1997-2000) and was approved under the
+WTSC Resolution No. 1 procedure on the 25th of September 1998.
+
+
+
+
+                                                                          Recommendation V.90        (09/98)            i
+                                                   FOREWORD
+
+ITU (International Telecommunication Union) is the United Nations Specialized Agency in the field of telecommuni-
+cations. The ITU Telecommunication Standardization Sector (ITU-T) is a permanent organ of the ITU. The ITU-T is
+responsible for studying technical, operating and tariff questions and issuing Recommendations on them with a view to
+standardizing telecommunications on a worldwide basis.
+
+The World Telecommunication Standardization Conference (WTSC), which meets every four years, establishes the
+topics for study by the ITU-T Study Groups which, in their turn, produce Recommendations on these topics.
+
+The approval of Recommendations by the Members of the ITU-T is covered by the procedure laid down in WTSC
+Resolution No. 1.
+
+In some areas of information technology which fall within ITU-T’s purview, the necessary standards are prepared on a
+collaborative basis with ISO and IEC.
+
+
+
+
+                                                         NOTE
+
+In this Recommendation the term recognized operating agency (ROA) includes any individual, company, corporation or
+governmental organization that operates a public correspondence service. The terms Administration, ROA and public
+correspondence are defined in the Constitution of the ITU (Geneva, 1992).
+
+
+
+
+                                     INTELLECTUAL PROPERTY RIGHTS
+
+The ITU draws attention to the possibility that the practice or implementation of this Recommendation may involve the
+use of a claimed Intellectual Property Right. The ITU takes no position concerning the evidence, validity or applicability
+of claimed Intellectual Property Rights, whether asserted by ITU members or others outside of the Recommendation
+development process.
+
+As of the date of approval of this Recommendation, the ITU had received notice of intellectual property, protected by
+patents, which may be required to implement this Recommendation. However, implementors are cautioned that this may
+not represent the latest information and are therefore strongly urged to consult the TSB patent database.
+
+
+
+
+                                                       ITU 1999
+
+All rights reserved. No part of this publication may be reproduced or utilized in any form or by any means, electronic or
+mechanical, including photocopying and microfilm, without permission in writing from the ITU.
+
+
+
+ii         Recommendation V.90        (09/98)
+                                                                          CONTENTS
+                                                                                                                                                                            Page
+1   Scope ..............................................................................................................................................................       1
+2   References ......................................................................................................................................................          1
+3   Definitions ......................................................................................................................................................         2
+4   Abbreviations .................................................................................................................................................            4
+5   Digital modem ................................................................................................................................................             5
+    5.1     Data signalling rates..........................................................................................................................                    5
+    5.2     Symbol rate .......................................................................................................................................                5
+    5.3     Scrambler ..........................................................................................................................................               5
+    5.4     Encoder .............................................................................................................................................              5
+            5.4.1      Mapping parameters ..........................................................................................................                           5
+            5.4.2      Input bit parsing ................................................................................................................                      6
+            5.4.3      Modulus encoder ...............................................................................................................                         6
+            5.4.4      Mapper ..............................................................................................................................                   7
+            5.4.5      Spectral shaping ................................................................................................................                       7
+            5.4.6      Sign assignment.................................................................................................................                       10
+            5.4.7      Mux ...................................................................................................................................                10
+6   Analogue modem............................................................................................................................................                10
+    6.1    Data signalling rates..........................................................................................................................                    11
+    6.2    Symbol rates......................................................................................................................................                 11
+    6.3    Carrier frequencies ............................................................................................................................                   11
+    6.4    Pre-emphasis .....................................................................................................................................                 11
+    6.5    Scrambler ..........................................................................................................................................               11
+    6.6    Framing .............................................................................................................................................              11
+    6.7    Encoder .............................................................................................................................................              11
+7   Interchange circuits.........................................................................................................................................             11
+    7.1     List of interchange circuits................................................................................................................                      11
+    7.2     Asynchronous character-mode interfacing........................................................................................                                   11
+8   Start-up signals and sequences .......................................................................................................................                    11
+    8.1      Phase 1 ..............................................................................................................................................           12
+    8.2      Phase 2 ..............................................................................................................................................           12
+             8.2.1      A........................................................................................................................................             12
+             8.2.2      B ........................................................................................................................................            12
+             8.2.3      INFO sequences ................................................................................................................                       12
+             8.2.4      Line probing signals ..........................................................................................................                       16
+    8.3      Phase 3 signals for the analogue modem ..........................................................................................                                16
+             8.3.1      Ja .......................................................................................................................................            17
+             8.3.2      MD ....................................................................................................................................               20
+             8.3.3      PP ......................................................................................................................................             20
+             8.3.4      S.........................................................................................................................................            20
+             8.3.5      SCR ...................................................................................................................................               20
+             8.3.6      TRN...................................................................................................................................                20
+    8.4      Phase 3 signals for the digital modem...............................................................................................                             20
+             8.4.1      DIL ....................................................................................................................................              20
+             8.4.2      Jd .......................................................................................................................................            21
+             8.4.3      Jd′ ......................................................................................................................................            21
+                 8.4.4          Sd.......................................................................................................................................     21
+                 8.4.5          TRN1d ...............................................................................................................................         22
+
+
+                                                                                                             Recommendation V.90                        (09/98)               iii
+                                                                                                                                                                               Page
+          8.5     Phase 4 signals for the analogue modem ..........................................................................................                              22
+                  8.5.1      B1 ......................................................................................................................................           22
+                  8.5.2      CP ......................................................................................................................................           22
+                  8.5.3      E ........................................................................................................................................          25
+          8.6     Phase 4 signals for the digital modem...............................................................................................                           25
+                  8.6.1      B1d ....................................................................................................................................            26
+                  8.6.2      Ed ......................................................................................................................................           26
+                  8.6.3      MP .....................................................................................................................................            26
+                  8.6.4      R ........................................................................................................................................          27
+                  8.6.5      TRN2d ...............................................................................................................................               28
+9         Operating procedures......................................................................................................................................             28
+          9.1     Phase 1 – Network interaction ..........................................................................................................                       28
+                  9.1.1      Use of bits in Recommendation V.8..................................................................................                                 28
+                  9.1.2      Call modem .......................................................................................................................                  29
+                  9.1.3      Answer modem..................................................................................................................                      29
+          9.2     Phase 2 – Probing/ranging ................................................................................................................                     29
+                  9.2.1      Digital modem...................................................................................................................                    30
+                  9.2.2      Analogue modem ..............................................................................................................                       31
+          9.3     Phase 3 – Equaliser and echo canceller training and digital impairment learning ............................                                                   32
+                  9.3.1      Digital modem...................................................................................................................                    32
+                  9.3.2      Analogue modem ..............................................................................................................                       34
+          9.4     Phase 4 – Final training.....................................................................................................................                  34
+                  9.4.1      Digital modem...................................................................................................................                    35
+                  9.4.2      Analogue modem ..............................................................................................................                       36
+          9.5     Retrains .............................................................................................................................................         36
+                  9.5.1      Digital modem...................................................................................................................                    36
+                  9.5.2      Analogue modem ..............................................................................................................                       36
+          9.6     Rate renegotiation .............................................................................................................................               37
+                  9.6.1      Digital modem...................................................................................................................                    37
+                  9.6.2      Analogue modem ..............................................................................................................                       38
+          9.7     Cleardown .........................................................................................................................................            39
+10        Testing facilities .............................................................................................................................................       39
+11        Glossary..........................................................................................................................................................     40
+Appendix I – Overview ............................................................................................................................................               41
+
+
+
+
+iv              Recommendation V.90                       (09/98)
+Recommendation V.90
+Recommendation V.90   (09/98)
+
+
+
+
+                           A DIGITAL MODEM AND ANALOGUE MODEM PAIR FOR USE
+                            ON THE PUBLIC SWITCHED TELEPHONE NETWORK (PSTN)
+                               AT DATA SIGNALLING RATES OF UP TO 56 000 bit/s
+                                DOWNSTREAM AND UP TO 33 600 bit/s UPSTREAM
+                                                          (Geneva, 1998)
+
+
+
+1                     Scope
+This Recommendation specifies the operation between two different modems, one a digital modem and the other an
+analogue modem, both as defined in clause 3. The two modems are specified herein in terms of coding, start-up signals
+and sequences, operating procedures and DTE-DCE interface functionalities. The network interface of the digital
+modem and the signalling rate that is used to connect the digital modem locally to a digital switched network are
+considered to be national matters and are hence not specified herein. The principal characteristics of these modems are as
+follows:
+a)       duplex mode of operation on the PSTN;
+b)       channel separation by echo cancellation techniques;
+c)       PCM modulation in the downstream direction at a symbol rate of 8000;
+d)       synchronous channel data signalling rates in the downstream direction from 28 000 bit/s to 56 000 bit/s in
+         increments of 8000/6 bit/s;
+e)       V.34 modulation in the upstream direction;
+f)       synchronous channel data signalling rates in the upstream direction from 4800 bit/s to 28 800 bit/s in increments of
+         2400 bit/s, with optional support for 31 200 bit/s and 33 600 bit/s;
+g)       adaptive techniques that enable the modems to achieve close to the maximum data signalling rates the channel can
+         support on each connection;
+h)       negotiate full duplex V.34 operation if a connection will not support V.90 operation;
+i)       exchange of rate sequences during start-up to establish the data signalling rate;
+j)       automoding to V-series modems supported by V.32 bis automode procedures and group 3 facsimile machines;
+k)       use of V.8, and optionally V.8 bis, procedures during modem start-up or selection.
+
+
+
+2                     References
+The following Recommendations contain provisions which, through reference in this text, constitute provisions of this
+Recommendation. At the time of publication, the editions indicated were valid. All Recommendations are subject to
+revision; all users of this Recommendation are therefore encouraged to investigate the possibility of applying the most
+recent editions of the Recommendations listed below. A list of currently valid ITU-T Recommendations is regularly
+published.
+–        CCITT Recommendation G.711 (1988), Pulse Code Modulation (PCM) of voice frequencies.
+–        ITU-T Recommendation T.30 (1996), Procedures for document facsimile transmission in the general switched
+         telephone network.
+–        ITU-T Recommendation V.8 (1998), Procedures for starting sessions of data transmission over the public switched
+         telephone network.
+–        ITU-T Recommendation V.8 bis (1996), Procedures for the identification and selection of common modes of
+         operation between Data Circuit-terminating Equipments (DCEs) and between Data Terminal Equipments (DTEs)
+         over the public switched telephone network and on leased point-to-point telephone-type circuits.
+
+
+                                                                                Recommendation V.90      (09/98)           1
+–     ITU-T Recommendation V.14 (1993), Transmission of start-stop characters over synchronous bearer channels.
+
+
+–     ITU-T Recommendation V.24 (1998), List of definitions for interchange circuits between Data Terminal
+      Equipment (DTE) and Data Circuit-terminating Equipment (DCE).
+
+
+–     ITU-T Recommendation V.25 (1996), Automatic answering equipment and general procedures for automatic
+      calling equipment on the general switched telephone network including procedures for disabling of echo control
+      devices for both manually and automatically established calls.
+
+
+–     CCITT Recommendation V.32 bis (1991), A duplex modem operating at data signalling rates of up to 14 400 bit/s
+      for use on the general switched telephone network and on leased point-to-point 2-wire telephone-type circuits.
+
+
+–     ITU-T Recommendation V.34 (1998), A modem operating at data signalling rates of up to 33 600 bit/s for use on
+      the general switched telephone network and on leased point-to-point 2-wire telephone-type circuits.
+
+
+–     ITU-T Recommendation V.42 (1996), Error-correcting procedures for DCEs using asynchronous-to-synchronous
+      conversion.
+
+
+–     ITU-T Recommendation V.43 (1998), Data flow control.
+
+
+–     ITU-T Recommendation V.80 (1996), In-band DCE control and synchronous data modes for asynchronous DTE .
+
+
+
+
+3         Definitions
+
+This Recommendation defines the following terms:
+
+
+3.1       analogue modem: The analogue modem is the modem of the pair that, when in data mode, generates V.34
+signals and receives G.711 signals that have been passed through a G.711 decoder. The modem is typically connected to
+a PSTN.
+
+
+3.2       digital modem: The digital modem is the modem of the pair that, when in data mode, generates G.711 signals
+and receives V.34 signals that have been passed through a G.711 encoder. The modem is connected to a digital switched
+network through a digital interface, e.g. a Basic Rate Interface (BRI) or a Primary Rate Interface (PRI).
+
+
+3.3       downstream: Transmission in the direction from the digital modem towards the analogue modem.
+
+
+3.4       nominal transmit power: Reference transmit power that is configured by the user.
+
+
+3.5       Uchord: Ucodes are grouped into eight Uchords. Uchord1 contains Ucodes 0 to 15; Uchord2 contains Ucodes
+16 to 31; …; and Uchord 8 contains Ucodes 112 to 127.
+
+
+3.6        Ucode: The universal code used to describe both a µ-law and an A-law PCM codeword. All universal codes
+are given in decimal notation in Table 1. The µ-law and A-law codewords are the octets to be passed to the digital
+interface by the digital modem and are given in hexadecimal notation. All modifications defined in Recommen-
+dation G.711 have already been made. The MSB in the µ-law PCM and A-law PCM columns in Table 1 corresponds to
+the polarity bit of the G.711 character signals. A linear representation of each PCM codeword is also given.
+
+
+3.7       upstream: Transmission in the direction from the analogue modem towards the digital modem.
+
+
+
+2           Recommendation V.90      (09/98)
+                         Table 1/V.90 – The universal set of PCM codewords
+
+        µ-law   µ-law        A-law      A-law                µ-law      µ-law      A-law       A-law
+Ucode                                              Ucode
+        PCM     linear       PCM        linear               PCM        linear     PCM         linear
+
+  0      FF         0          D5           8        64       BF         1980       95          2112
+  1      FE         8          D4          24        65       BE         2108       94          2240
+  2      FD        16          D7          40        66       BD         2236       97          2368
+  3      FC        24          D6          56        67       BC         2364       96          2496
+  4      FB        32          D1          72        68       BB         2492       91          2624
+  5      FA        40          D0          88        69       BA         2620       90          2752
+  6      F9        48          D3         104        70       B9         2748       93          2880
+  7      F8        56          D2         120        71       B8         2876       92          3008
+  8      F7        64          DD         136        72       B7         3004       9D          3136
+  9      F6        72          DC         152        73       B6         3132       9C          3264
+ 10      F5        80          DF         168        74       B5         3260       9F          3392
+ 11      F4        88          DE         184        75       B4         3388       9E          3520
+ 12      F3        96          D9         200        76       B3         3516       99          3648
+ 13      F2      104           D8         216        77       B2         3644       98          3776
+ 14      F1      112           DB         232        78       B1         3772       9B          3904
+ 15      F0      120           DA         248        79       B0         3900       9A          4032
+ 16      EF      132           C5         264        80       AF         4092       85          4224
+ 17      EE      148           C4         280        81       AE         4348       84          4480
+ 18      ED      164           C7         296        82       AD         4604       87          4736
+ 19      EC      180           C6         312        83       AC         4860       86          4992
+ 20      EB      196           C1         328        84       AB         5116       81          5248
+ 21      EA      212           C0         344        85       AA         5372       80          5504
+ 22      E9      228           C3         360        86       A9         5628       83          5760
+ 23      E8      244           C2         376        87       A8         5884       82          6016
+ 24      E7      260           CD         392        88       A7         6140       8D          6272
+ 25      E6      276           CC         408        89       A6         6396       8C          6528
+ 26      E5      292           CF         424        90       A5         6652       8F          6784
+ 27      E4      308           CE         440        91       A4         6908       8E          7040
+ 28      E3      324           C9         456        92       A3         7164       89          7296
+ 29      E2      340           C8         472        93       A2         7420       88          7552
+ 30      E1      356           CB         488        94       A1         7676       8B          7808
+ 31      E0      372           CA         504        95       A0         7932       8A          8064
+ 32      DF      396           F5         528        96       9F         8316       B5          8448
+ 33      DE      428           F4         560        97       9E         8828       B4          8960
+ 34      DD      460           F7         592        98       9D         9340       B7          9472
+ 35      DC      492           F6         624        99       9C         9852       B6          9984
+ 36      DB      524           F1         656       100       9B        10364       B1         10496
+ 37      DA      556           F0         688       101       9A        10876       B0         11008
+ 38      D9      588           F3         720       102        99       11388       B3         11520
+ 39      D8      620           F2         752       103        98       11900       B2         12032
+
+
+
+
+                                                             Recommendation V.90     (09/98)            3
+                           Table 1/V.90 – The universal set of PCM codewords (concluded)
+
+              µ-law        µ-law      A-law        A-law             µ-law      µ-law      A-law   A-law
+    Ucode                                                   Ucode
+              PCM          linear     PCM          linear            PCM        linear     PCM     linear
+
+      40        D7           652       FD           784      104       97       12412       BD     12544
+      41        D6           684       FC           816      105       96       12924       BC     13056
+      42        D5           716        FF          848      106       95       13436       BF     13568
+      43        D4           748        FE          880      107       94       13948       BE     14080
+      44        D3           780        F9          912      108       93       14460       B9     14592
+      45        D2           812        F8          944      109       92       14972       B8     15104
+      46        D1           844       FB           976      110       91       15484       BB     15616
+      47        D0           876       FA          1008      111       90       15996       BA     16128
+      48        CF           924        E5         1056      112       8F       16764       A5     16896
+      49        CE           988        E4         1120      113       8E       17788       A4     17920
+      50        CD         1052         E7         1184      114      8D        18812       A7     18944
+      51        CC         1116         E6         1248      115      8C        19836       A6     19968
+      52        CB         1180         E1         1312      116      8B        20860       A1     20992
+      53        CA         1244         E0         1376      117      8A        21884       A0     22016
+      54        C9         1308         E3         1440      118       89       22908       A3     23040
+      55        C8         1372         E2         1504      119       88       23932       A2     24064
+      56        C7         1436        ED          1568      120       87       24956       AD     25088
+      57        C6         1500        EC          1632      121       86       25980       AC     26112
+      58        C5         1564         EF         1696      122       85       27004       AF     27136
+      59        C4         1628        EE          1760      123       84       28028       AE     28160
+      60        C3         1692         E9         1824      124       83       29052       A9     29184
+      61        C2         1756         E8         1888      125       82       30076       A8     30208
+      62        C1         1820        EB          1952      126       81       31100       AB     31232
+      63        C0         1884        EA          2016      127       80       32124       AA     32256
+
+
+
+
+4           Abbreviations
+This Recommendation uses the following abbreviations:
+
+BRI         Basic Rate Interface
+
+DCE         Data Circuit-terminating Equipment
+
+DIL         Digital Impairment Learning sequence
+
+DTE         Data Terminal Equipment
+
+PRI         Primary Rate Interface
+
+PSTN        Public Switched Telephone Network
+
+RMS         Root Mean Square
+
+RTDEa       Round-Trip Delay Estimate – Analogue modem
+
+RTDEd       Round-Trip Delay Estimate – Digital modem
+
+UINFO       The Ucode given by bits 25:31 of INFO 1a
+
+
+4            Recommendation V.90      (09/98)
+5          Digital modem
+
+5.1        Data signalling rates
+
+Synchronous channel data signalling rates from 28 000 bit/s to 56 000 bit/s in increments of 8000/6 bit/s shall be
+supported. The data signalling rate shall be determined during Phase 4 of modem start-up according to the procedures
+described in 9.4.
+
+
+5.2        Symbol rate
+
+The downstream symbol rate shall be 8000 established by timing from the digital network interface. The digital modem
+shall support the upstream symbol rates 3000 and 3200. It may also support the optional upstream symbol rate 3429 as
+defined in Recommendation V.34.
+
+
+5.3        Scrambler
+
+The digital modem shall include a self-synchronizing scrambler as specified in clause 7/V.34, using the generating
+polynomial, GPC, in equation 7-1/V.34.
+
+
+5.4        Encoder
+
+The block diagram in Figure 1 is an overview of the encoder and represents one data frame. Data frames in the digital
+modem have a six-symbol structure. Each symbol position within the data frame is called a data frame interval and is
+indicated by a time index, i = 0, …, 5, where i = 0 is the first in time. Frame synchronization between the digital modem
+transmitter and analogue modem receiver is established during training procedures.
+
+
+
+                                                    Mi                 Ci
+
+
+
+                                    b0 : bK–1                Ki                   Ui                PCMi
+                                                                                                                             Serial
+                                                 Modulus            Mi-point            Assign
+                                                                                                           Mux               PCM
+                                                 encoder             map                signs
+                                                                                                                             octets
+               d0 : dD–1
+                             Bit
+                                                                                  Ui             $0 : $5
+                           parser
+
+                                    s0 : sS–1
+                                                parse to
+                                                           pj(n)                  tj(n) Spectral
+                                                                   Differential         shaper
+                                                shaping
+                                                                    encoder
+                                                 frames
+
+                                                                                                   Sr      T1604730-98/d01
+
+
+
+
+                      Figure 1/V.90 – Digital modem encoder block diagram
+
+FIGURE 1/V.90...[D01] = 3 CM
+
+5.4.1      Mapping parameters
+
+Mapping parameters, established during training or rate renegotiation procedures, are:
+
+–     six PCM code sets, one for each data frame interval 0 to 5, where data frame interval i has Mi members;
+
+–     K, the number of modulus encoder input data bits per data frame;
+
+–     Sr, the number of PCM code sign bits per data frame used as redundancy for spectral shaping; and
+
+–     S, the number of spectral shaper input data bits per data frame, where S + Sr = 6.
+
+
+                                                                                            Recommendation V.90               (09/98)   5
+Table 2 shows the data signalling rates achieved by the valid combinations of K and S during data mode. Table 17
+shows the valid combinations of K and S used during Phase 4 and rate renegotiation procedures.
+
+
+                              Table 2/V.90 – Data signalling rates for different K and S
+
+                        K, bits entering             S, sign bits used         Data Signalling Rate,
+                        modulus encoder               for user data                   kbit/s
+
+                                                   From            To           From           To
+
+                               15                    6              6          28             28
+                               16                    5              6          28             29 1/3
+                               17                    4              6          28             30 2/3
+                               18                    3              6          28             32
+                               19                    3              6          29 1/3         33 1/3
+                               20                    3              6          30 2/3         34 2/3
+                               21                    3              6          32             36
+                               22                    3              6          33 1/3         37 1/3
+                               23                    3              6          34 2/3         38 2/3
+                               24                    3              6          36             40
+                               25                    3              6          37 1/3         41 1/3
+                               26                    3              6          38 2/3         42 2/3
+                               27                    3              6          40             44
+                               28                    3              6          41 1/3         45 1/3
+                               29                    3              6          42 2/3         46 2/3
+                               30                    3              6          44             48
+                               31                    3              6          45 1/3         49 1/3
+                               32                    3              6          46 2/3         50 2/3
+                               33                    3              6          48             52
+                               34                    3              6          49 1/3         53 1/3
+                               35                    3              6          50 2/3         54 2/3
+                               36                    3              6          52             56
+                               37                    3              5          53 1/3         56
+                               38                    3              4          54 2/3         56
+                               39                    3              3          56             56
+
+
+
+5.4.2     Input bit parsing
+
+D (equal to S + K) serial input data bits, d0 to dD–1 where d0 is first in time, are parsed into S sign input bits and
+K modulus encoder bits. d0 to dS–1 form s0 to sS–1 and dS to dD–1 form b0 to bK–1.
+
+The K modulus encoder bits and the S sign bits are used as specified in 5.4.3 and 5.4.5 respectively.
+
+5.4.3     Modulus encoder
+
+K bits enter the modulus encoder. The data signalling rates associated with each value of K are tabulated in Table 2.
+There are six independent mapping moduli, M0 to M5, which are the number of members in the PCM code sets defined
+for data frame interval 0 to data frame interval 5, respectively. Mi is equal to the number of positive levels in the
+constellation to be used in data frame interval i as signalled by the analogue modem using the CP sequences defined
+in 8.5.2.
+
+
+6          Recommendation V.90         (09/98)
+                                                               5
+The values of Mi and K shall satisfy the inequality 2 K ≤    ∏ Mi
+                                                             i=0
+
+
+The modulus encoder converts K bits into six numbers, K 0 to K5, using the following algorithm.
+NOTE – Other implementations are possible but the mapping function must be identical to that given in the algorithm described
+below.
+
+1)   Represent the incoming K bits as an integer, R 0:
+
+
+                                     R0 = b0 + b1*21 + b2*22 + ... + bK–1*2K–1
+
+
+2)   Divide R0 by M0. The remainder of this division gives K0, the quotient becomes R1 for use in the calculation for the next data
+     frame interval. Continue for the remaining five data frame intervals. This gives K 0 to K5 as:
+
+
+                          Ki = Ri modulo Mi, where 0 ≤ Ki < Mi; Ri+1 = (Ri – Ki) / Mi
+
+
+3)   The numbers K0, …, K5 are the output of the modulus encoder, where K0 corresponds to data frame interval 0 and K5
+     corresponds to data frame interval 5.
+
+
+5.4.4     Mapper
+
+There are six independent mappers associated with the six data frame intervals. Each mapper uses a tabulation of Mi
+PCM codes that make up the positive constellation points of data frame interval i denoted Ci. The PCM codes to be used
+in each data frame interval are specified by the analogue modem during training procedures. The PCM code that is
+denoted by the largest (smallest) Ucode is herein called the largest (smallest) PCM code. The members of Ci shall be
+labelled in descending order so that label 0 corresponds to the largest PCM code in Ci, label Mi – 1 corresponds to the
+smallest PCM code in Ci. Each mapper takes Ki and forms Ui by choosing the constellation point in Ci labelled by Ki.
+
+5.4.5     Spectral shaping
+
+The digital modem output line signal spectrum shall be shaped, if spectral shaping is enabled. Spectral shaping only
+affects the sign bits of transmitted PCM symbols. In every data frame of 6 symbol intervals, Sr sign bits are used as
+redundancy for spectral shaping while the remaining S sign bits carry user information. The redundancy, Sr, is specified
+by the analogue modem during training procedures and can be 0, 1, 2 or 3. When Sr = 0, spectral shaping is disabled.
+
+NOTE – The initial state of the spectral shaper does not affect the performance of the analogue modem and is therefore left to the
+implementor.
+
+
+5.4.5.1   Sr = 0, S = 6
+
+The PCM code sign bits, $0 to $5 shall be assigned using input sign bits s0 to s5 and a differential coding rule:
+
+                                     $0 = s0 ⊕ ($5 of the previous data frame); and
+
+                                       $i = si ⊕ $i–1 for i = 1, ..., 5
+
+
+where "⊕" stands for modulus-2 addition.
+
+5.4.5.2   Sr = 1, S = 5
+
+Sign bits s0 to s4 shall be parsed to one six-bit shaping frame per data frame according to Table 3.
+
+The odd bits shall be differentially encoded to produce the output p j′ according to Table 4.
+
+
+
+                                                                                Recommendation V.90           (09/98)            7
+                                Table 3/V.90 – Parsing input sign bits to shaping frames
+
+          Data frame
+                                    Sr = 1, S = 5                          Sr = 2, S = 4                     Sr = 3, S = 3
+           interval
+
+              0                       pj(0) = 0                              pj(0) = 0                          pj(0) = 0
+              1                       pj(1) = s0                             pj(1) = s0                        pj(1) = s0
+              2                       pj(2) = s1                             pj(2) = s1                        pj+1(0) = 0
+              3                       pj(3) = s2                            pj+1(0) = 0                       pj+1(1) = s1
+              4                       pj(4) = s3                            pj+1(1) = s2                       pj+2(0) = 0
+              5                       pj(5) = s4                            pj+1(2) = s3                      pj+2(1) = s2
+
+
+
+                                          Table 4/V.90 – Odd bit differential coding
+
+          Data frame
+                                    Sr = 1, S = 5                          Sr = 2, S = 4                     Sr = 3, S = 3
+           interval
+
+              0                       p j′ (0) = 0                           p j′ (0) = 0                       p j′ (0) = 0
+              1              p j′ (1) = p j (1) ⊕ p ′j–1(5)         p j′ (1) = p j (1) ⊕ p ′j–1(1)    p j′ (1) = p j (1) ⊕ p ′j–1(1)
+              2                     p j′ (2) = pj (2)                      p j′ (2) = pj (2)                  p ′j+1(0) = 0
+              3               p j′(3) = p j(3) ⊕ p j′(1)                    p ′j+1(0) = 0             p ′j+1(1) = p j+1(1) ⊕ p ′j (1)
+              4                     p j′(4) = pj (4)               p ′j+1(1) = p j+1(1) ⊕ p ′j(1)             p ′j+2 (0) = 0
+              5               p j′(5) = p j(5) ⊕ p ′j(3)                p ′j+1(2) = p j+1(2)         p ′j+2 (1) = pj+2(1) ⊕ p j+1
+                                                                                                                              ′ (1)
+
+
+Finally, a second differential encoding shall be performed to produce the initial shaping sign bit assignment, tj(0) to tj(5)
+using the rule:
+
+                                                        t j (k) = p ′j (k) ⊕ t j–1(k)
+
+
+The spectral shaper converts each bit tj(k), to a PCM code sign bit $k as described in 5.4.5.5.
+
+5.4.5.3   Sr = 2, S = 4
+
+Sign bits s0 to s3 shall be parsed to two three-bit shaping frames per data frame as shown in Table 3.
+
+The odd bit in each shaping frame shall be differentially encoded to produce differentially encoded outputs p j′
+      ′ according to Table 4.
+and p j+1
+
+Finally, a second differential encoding shall be performed on each shaping frame to produce the initial shaping sign bit
+assignments tj(0) to tj(2) and tj+1(0) to tj+1(2) using the differential encoding rule:
+
+                                                        tj(k) = p j′ (k) ⊕ t j–1(k)
+
+
+                                                        t j+1(k) = p ′j+1(k) ⊕ t j(k)
+
+
+The spectral shaper converts each bit tj(k), to PCM code sign bit $k and each bit tj+1(k), to PCM code sign bit $k+3 as
+described in 5.4.5.5.
+
+5.4.5.4   Sr = 3, S = 3
+
+Sign bits s0 to s2 shall be parsed to three two-bit shaping frames per data frame as shown in Table 3.
+
+The odd bit in each shaping frame shall be differentially encoded to produce differentially encoded outputs p j′ , p ′j+1,
+      ′ as shown in Table 4.
+and p j+2
+
+
+8          Recommendation V.90             (09/98)
+Finally, a second differential encoding shall be performed on each shaping frame to produce the initial shaping sign bit
+assignments tj(0) to tj(1), tj+1(0) to tj+1(1), and tj+2(0) to tj+2(1) using the differential encoding rule:
+
+                                                   tj(k) = p j′(k) ⊕ t j–1(k)
+
+
+                                                 tj+1(k) = p ′j+1(k) ⊕ t j(k)
+
+
+                                                 tj+2(k) = p ′j+2(k) ⊕ t j+1(k)
+
+The spectral shaper converts each bit tj(k), to PCM code sign bit $k, each bit tj+1(k), to PCM code sign bit $k+2, and each
+bit tj+2(k), to PCM code sign bit $k+4 as described in 5.4.5.5.
+
+5.4.5.5   Spectral shaper
+The spectral shaper operates on a spectral shaper frame basis. For the cases Sr = 2 and Sr = 3, there are multiple shaper
+frames per six-symbol data frame. Spectral shaper operation for each shaper frame within a data frame (called shaping
+frame j in this subclause) is identical except that they affect different data frame PCM sign bits as shown in Table 5.
+
+                             Table 5/V.90 – Shaping frame to data frame sign relationship
+
+             Data frame                                                                           Data frame
+                                 Sr = 1, S = 5           Sr = 2, S = 4          Sr = 3, S = 3
+              interval                                                                           PCM sign bit
+
+                  0                  tj(0)                     tj(0)                tj(0)                 $0
+                  1                  tj(1)                     tj(1)                tj(1)                 $1
+                  2                  tj(2)                     tj(2)               tj+1(0)                $2
+                  3                  tj(3)                    tj+1(0)              tj+1(1)                $3
+                  4                  tj(4)                    tj+1(1)              tj+2(0)                $4
+                  5                  tj(5)                    tj+1(2)              tj+2(1)                $5
+
+
+The spectral shaper shall modify the initial sign bits [tj(0), tj(1), …] to corresponding PCM code sign bits ($0, $1 …)
+without violating the constraint described below, so as to optimize a spectral metric.
+The constraint of the spectral shaper is described using the 2-state trellis diagram shown in Figure 2.
+
+
+                                                                        A
+                                     state 0
+                                                              B
+
+
+
+                                                          C
+
+                                     state 1
+                                                                        D   T1604740-98/d02
+
+
+
+                                   Figure 2/V.90 – Trellis diagram used to constrain
+                                                  the spectral shaper
+FIGURE 2/V.90...[D02] = 3 CM
+In a given spectral shaping frame j, the spectral shaper shall modify the initial sign sequence, tj(k), according to one of
+the following four sign inversion rules:
+–    Rule A: Do nothing;
+–    Rule B: Invert all sign bits in spectral shaping frame j;
+–    Rule C: Invert even-numbered [tj(0), tj(2), etc.] sign bits in spectral shaping frame j;
+–    Rule D: Invert odd-numbered [tj(1), tj(3), etc.] sign bits in spectral shaping frame j.
+
+
+                                                                                Recommendation V.90        (09/98)       9
+The trellis diagram describes the sequence of sign inversion rules that are allowable. For example, when the spectral
+shaper is in state Qj = 0 at the beginning of frame j, only rules A and B are allowable in frame j. The current state Qj
+together with the sign inversion rule selected for frame j determine the next state Qj+1 according to the trellis diagram.
+
+The look-ahead depth parameter, ld, is an integer between 0 and 3 selected by the analogue modem during training
+procedures. Id of 0 and 1 are mandatory in the digital modem. Id of 2 and 3 are optional.
+
+To select the sign inversion rule for the jth spectral shaping frame, the spectral shaper shall use the PCM symbol
+magnitudes produced by the mapper for spectral shaping frames j, j+1, ..., j+ld. It shall compute the spectral metric that
+would result if each of the allowable sequences of sign inversion rules for frames j through j+ld, starting from the current
+state Qj in frame j, were to be used. The shaper shall select the sign inversion rule for frame j that minimizes the spectral
+metric, w[n], defined in 5.4.5.6 up to and including the final symbol of spectral shaping frame j+ld. The selection
+determines the next state Qj+1.
+
+The shaper shall then set PCM code signs $i for shaping frame j according to the selected sign inversion rule for shaper
+frame j.
+
+5.4.5.6   Spectral shape filter
+
+The analogue modem determines the spectral shape filter function used in the digital modem by selecting parameters of
+the following transfer function:
+
+                                                         (1 − a1z –1 )(1 − a2 z −1 )
+                                             T ( z) =
+                                                         (1 − b1z −1 )(1 − b2 z −1 )
+
+
+where a1, a2, b1 and b2 are parameters having absolute values less than or equal to 1. The parameters, a1, a2, b1 and b2
+are specified by the analogue modem during training procedures and are represented in the 8-bit two’s-complement
+format with 6 bits after the binary point. The digital modem shall perform the spectral shaping according to the spectral
+shaping metric, w[n], characterised by the filter:
+
+                                                      1      (1 − b1z –1 )(1 − b2 z −1 )
+                                         F ( z) =          =
+                                                    T ( z)   (1 − a1z −1 )(1 − a2 z −1 )
+
+
+The filter input, x[n], shall be a signed signal proportional to the linear value corresponding to PCM codes being
+transmitted. The relationship between PCM codes and corresponding linear values is given in Table 1. w[n] shall be
+computed as:
+
+1)   y[n] = x[n] – b1x[n–1] + a1y[n–1]
+
+2)   v[n] = y[n] – b2y[n–1] + a2v[n–1]
+
+3)   w[n] = v2[n] + w[n–1]
+
+5.4.6     Sign assignment
+
+Six sign bits, generated by 5.4.5, are attached to the six unsigned mapper outputs U0 – U5 to complete the mapping of
+the data frame intervals. A sign bit of 0 means the transmitted PCM codeword will represent a negative voltage and a
+sign bit of 1 means it will represent a positive voltage.
+
+5.4.7     Mux
+
+The signed PCM codewords, PCMi, are transmitted from the digital modem sequentially with PCM0 being first in time.
+
+
+
+6         Analogue modem
+The characteristics of the analogue modem described herein apply when in V.90 mode. After fallback to V.34 mode, the
+analogue modem shall have characteristics as defined in Recommendation V.34.
+
+
+10         Recommendation V.90         (09/98)
+6.1      Data signalling rates
+The modem shall support synchronous data signalling rates of 4800 bit/s to 28 800 bit/s in increments of 2400 bit/s, with
+optional support for 31 200 bit/s and 33 600 bit/s. The 200 bit/s V.34 auxiliary channel is not supported. The data
+signalling rate shall be determined during Phase 4 of modem start-up according to the procedures described in 9.4.
+
+
+6.2      Symbol rates
+The analogue modem shall support the symbol rate 3200. It may also support 3000 and the optional symbol rate 3429 as
+defined in Recommendation V.34. The other V.34 symbol rates, 2400, 2743 and 2800, shall not be supported. The
+symbol rate shall be selected by the analogue modem during Phase 2 of modem start-up according to the procedures
+described in 9.2.
+
+
+6.3      Carrier frequencies
+The analogue modem shall support the carrier frequencies specified in 5.3/V.34 for the appropriate symbol rate. The
+carrier frequency shall be determined during Phase 2 of modem start-up according to the procedures specified in 9.2.
+
+
+6.4      Pre-emphasis
+The analogue modem shall support the pre-emphasis filter characteristics specified in 5.4/V.34. The filter selection shall
+be provided by the digital modem during Phase 2 of modem start-up according to the procedures specified in 9.2.
+
+
+6.5      Scrambler
+The analogue modem shall include a self-synchronizing scrambler as specified in clause 7/V.34, using the generating
+polynomial, GPA, in equation 7-2/V.34.
+
+
+6.6      Framing
+The analogue modem shall use the framing method specified for the V.34 primary channel in clause 8/V.34.
+
+
+6.7      Encoder
+The analogue modem shall use the encoder specified for the V.34 primary channel in clause 9/V.34.
+
+
+
+7        Interchange circuits
+The requirements of this clause apply to both modems.
+
+
+7.1      List of interchange circuits
+References in this Recommendation to V.24 interchange circuit numbers are intended to refer to the functional
+equivalent of such circuits and are not intended to imply the physical implementation of such circuits. For example,
+references to circuit 103 should be understood to refer to the functional equivalent of circuit 103 (see Table 6).
+
+
+7.2      Asynchronous character-mode interfacing
+The modem may include an asynchronous-to-synchronous converter interfacing to the DTE in an asynchronous (or
+start-stop character) mode. The protocol for the conversion shall be in accordance with Recommendation(s) V.14, V.42
+or V.80. Data compression may also be employed.
+
+
+
+8        Start-up signals and sequences
+All PCM codewords transferred in training sequences are described using the universal codes as specified in Table 1.
+
+
+                                                                           Recommendation V.90        (09/98)          11
+                                            Table 6/V.90 – Interchange circuits
+
+                                            Interchange circuit
+                                                                                                   Notes
+                     No.                                  Description
+
+                    102             Signal ground or common return
+                    103             Transmitted data
+                    104             Received data
+                    105             Request to send
+                    106             Ready for sending
+                    107             Data set ready
+                    108/1 or        Connect data set to line
+                    108/2           Data terminal ready
+                    109             Data channel received line signal detector                       1
+                    125             Calling indicator
+                    133             Ready for receiving                                              2
+               NOTE 1 – Thresholds and response times are not applicable because a line signal detector cannot
+               be expected to distinguish received signals from talker echoes.
+               NOTE 2 – Operation of circuit 133 shall be in accordance with 4.2.1.1/V.43.
+
+
+
+
+8.1       Phase 1
+Recommendation V.8, and optionally Recommendation V.8 bis, is used in Phase 1. All signals in 9.1 are defined in
+either Recommendation V.25 or Recommendation V.8 and shall be transmitted at the nominal transmit power level.
+
+
+8.2       Phase 2
+During Phase 2, all signals except L1 shall be transmitted at the nominal transmit power level. If a recovery mechanism
+returns the modem to Phase 2 from a later phase, the transmit level shall revert to the nominal transmit power from the
+previously negotiated transmit power level.
+
+8.2.1     A
+
+As defined in 10.1.2.1/V.34.
+
+8.2.2     B
+
+As defined in 10.1.2.2/V.34.
+
+8.2.3     INFO sequences
+
+INFO sequences are used to exchange modem capabilities, results of line probing, and data mode modulation
+parameters.
+
+8.2.3.1   Modulation
+
+All INFO sequences are transmitted using binary DPSK modulation at 600 bit/s ± 0.01%. The transmit point is rotated
+180 degrees from the previous point if the transmit bit is a 1, and the transmit point is rotated 0 degrees from the
+previous point if the transmit bit is a 0. Each INFO sequence is preceded by a point at an arbitrary carrier phase. When
+multiple INFO sequences are transmitted as a group, only the first sequence is preceded by a point at an arbitrary carrier
+phase.
+
+INFO sequences are transmitted by the analogue modem with a carrier frequency of 2400 Hz ± 0.01%, at 1 dB below the
+nominal transmit power, plus an 1800 Hz ± 0.01% guard tone 7 dB below the nominal transmit power. INFO sequences
+are transmitted by the digital modem with a carrier frequency of 1200 Hz ± 0.01% at the nominal transmit power.
+
+The transmitted line signal shall have a magnitude spectrum within the limits shown in Figure 13/V.34.
+
+
+12         Recommendation V.90          (09/98)
+NOTE – It is highly desirable to design linear phase transmitter channel separation and shaping filters since there are no provisions for
+adaptive equaliser training.
+
+
+8.2.3.2     INFO information bits
+
+The CRC generator used is described in 10.1.2.3.2/V.34.
+
+Table 7 defines the bits in the INFO0d sequence. Bit 0 is transmitted first in time.
+
+
+                                          Table 7/V.90 – Definition of bits in INFO 0d
+
+
+   INFO0d bits
+                                                                          Definition
+    LSB:MSB
+
+          0:3        Fill bits: 1111
+          4:11       Frame sync: 01110010, where the left-most bit is first in time
+          12         Set to 1 indicates symbol rate 2743 is supported in V.34 mode
+          13         Set to 1 indicates symbol rate 2800 is supported in V.34 mode
+          14         Set to 1 indicates symbol rate 3429 is supported in V.34 mode
+          15         Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3000
+          16         Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3000
+          17         Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3200
+          18         Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200
+          19         Set to 0 indicates that transmission with a symbol rate of 3429 is disallowed
+          20         Set to 1 indicates the ability to reduce transmit power to a value lower than the nominal setting in V.34 mode
+       21:23         Maximum allowed difference in symbol rates in the transmit and receive directions in V.34 mode. With the
+                     symbol rates labelled in increasing order, where 0 represents 2400 and 5 represents 3429, an integer between 0
+                     and 5 indicates the difference allowed in number of symbol rate steps
+          24         Set to 1 in an INFO0d sequence transmitted from a CME modem
+          25         Set to 1 indicates the ability to support up to 1664 point signal constellations
+       26:27         Reserved for the ITU: These bits are set to 0 by the digital modem and are not interpreted by the analogue
+                     modem
+          28         Set to 1 to acknowledge correct reception of an INFO 0a frame during error recovery
+       29:32         Digital modem nominal transmit power for Phase 2. This is represented in –1 dBm0 steps where 0 represents
+                     −6 dBm0 and 15 represents –21 dBm0
+       33:37         Maximum digital modem transmit power. This is represented in –0.5 dBm0 steps where 0 represents
+                     −0.5 dBm0 and 31 represents –16 dBm0
+          38         Set to 1 indicates the digital modem’s power shall be measured at the output of the codec. Otherwise the digital
+                     modem’s power shall be measured at its terminals
+          39         PCM coding in use by digital modem: 0 = µ-law, 1 = A-law
+          40         Set to 1 indicates ability to operate V.90 with an upstream symbol rate of 3429
+          41         Reserved for the ITU: This bit is set to 0 by the digital modem and is not interpreted by the analogue modem
+       42:57         CRC
+       58:61         Fill bits: 1111
+ NOTE 1 – Bits 12, 13, 14 and 40 are used to indicate the modem’s capabilities and/or configuration. The values of bits 15 to 20
+ depend upon regulatory requirements and apply only to the modem’s transmitter.
+ NOTE 2 – Bit 24 may be used in conjunction with the PSTN access category octet defined in Recommendation V.8 to determine
+ the optimum parameters for the signal convertors and error-control functions in the analogue and digital modem and any
+ intervening CME.
+
+
+
+
+                                                                                       Recommendation V.90          (09/98)           13
+Table 8 defines the bits in the INFO0a sequence. Bit 0 is transmitted first in time.
+
+
+
+                                          Table 8/V.90 – Definition of bits in INFO 0a
+
+
+
+     INFO0a bits
+                                                                          Definition
+      LSB:MSB
+
+         0:3         Fill bits: 1111
+        4:11         Frame sync: 01110010, where the left-most bit is first in time
+         12          Set to 1 indicates symbol rate 2743 is supported in V.34 mode
+         13          Set to 1 indicates symbol rate 2800 is supported in V.34 mode
+         14          Set to 1 indicates symbol rate 3429 is supported in V.34 mode
+         15          Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3000
+         16          Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3000
+         17          Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3200
+         18          Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200
+         19          Set to 0 indicates that transmission with a symbol rate of 3429 is disallowed
+         20          Set to 1 indicates the ability to reduce transmit power to a value lower than the nominal setting
+        21:23        Maximum allowed difference in symbol rates in the transmit and receive directions in V.34 mode. With the
+                     symbol rates labelled in increasing order, where 0 represents 2400 and 5 represents 3429, an integer between 0
+                     and 5 indicates the difference allowed in number of symbol rate steps
+         24          Set to 1 in an INFO0a sequence transmitted from a CME modem
+         25          Set to 1 indicates the ability to support up to 1664 point signal constellations
+        26:27        Reserved for the ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+                     modem
+         28          Set to 1 to acknowledge correct reception of an INFO 0d frame during error recovery
+        29:44        CRC
+        45:48        Fill bits: 1111
+ NOTE 1 – Bits 12 to 14 are used to indicate the modem’s capabilities and/or configuration. The values of bits 15 to 20 depend
+ upon regulatory requirements and apply only to the modem’s transmitter.
+ NOTE 2 – Bit 24 may be used in conjunction with the PSTN access category octet defined in Recommendation V.8 to determine
+ the optimum parameters for the signal convertors and error-control functions in the analogue and digital modem and any
+ intervening CME.
+
+
+
+
+14             Recommendation V.90         (09/98)
+Table 9 defines the bits in the INFO1d sequence. The bit definitions are identical to those of INFO1c in Recommenda-
+tion V.34 and are given here for convenience. Bit 0 is transmitted first in time.
+
+
+
+
+                                       Table 9/V.90 – Definition of bits in INFO 1d
+
+
+
+
+   INFO1d bits
+                                                                      Definition
+    LSB:MSB
+
+       0:3         Fill bits: 1111
+      4:11         Frame sync: 01110010, where the left-most bit is first in time
+      12:14        Minimum power reduction to be implemented by the analogue modem transmitter. An integer between 0 and 7
+                   gives the recommended power reduction in dB. These bits shall indicate 0 if INFO0a indicated that the analogue
+                   modem transmitter cannot reduce its power
+      15:17        Additional power reduction, below that indicated by bits 12:14, which can be tolerated by the digital modem
+                   receiver. An integer between 0 and 7 gives the additional power reduction in dB. These bits shall indicate 0 if
+                   INFO0a indicated that the analogue modem transmitter cannot reduce its power
+      18:24        Length of MD to be transmitted by the digital modem during Phase 3. An integer between 0 and 127 gives the
+                   length of this sequence in 35 ms increments
+       25          Set to 1 indicates that the high carrier frequency is to be used in transmitting from the analogue modem to the
+                   digital modem for a symbol rate of 2400
+      26:29        Pre-emphasis filter to be used in transmitting from the analogue modem to the digital modem for a symbol rate
+                   of 2400. These bits form an integer between 0 and 10 which represents the pre-emphasis filter index (see
+                   Tables 3/V.34 and 4/V.34)
+      30:33        Projected maximum data rate for a symbol rate of 2400. These bits form an integer between 0 and 14 which
+                   gives the projected data rate as a multiple of 2400 bits/s. A 0 indicates the symbol rate cannot be used
+      34:42        Probing results pertaining to a final symbol rate selection of 2743 symbols per second. The coding of these
+                   9 bits is identical to that for bits 25-33
+      43:51        Probing results pertaining to a final symbol rate selection of 2800 symbols per second. The coding of these
+                   9 bits is identical to that for bits 25-33
+      52:60        Probing results pertaining to a final symbol rate selection of 3000 symbols per second. The coding of these
+                   9 bits is identical to that for bits 25-33. Information in this field shall be consistent with the analogue modem
+                   capabilities indicated in INFO 0a
+      61:69        Probing results pertaining to a final symbol rate selection of 3200 symbols per second. The coding of these 9
+                   bits is identical to that for bits 25-33. Information in this field shall be consistent with the analogue modem
+                   capabilities indicated in INFO 0a
+      70:78        Probing results pertaining to a final symbol rate selection of 3429 symbols per second. The coding of these
+                   9 bits is identical to that for bits 25-33. Information in this field shall be consistent with the analogue modem
+                   capabilities indicated in INFO 0a
+      79:88        Frequency offset of the probing tones as measured by the digital modem receiver. The frequency offset number
+                   shall be the difference between the nominal 1050 Hz line probing signal tone received and the 1050 Hz tone
+                   transmitted, f(received) – f(transmitted). A two’s complement signed integer between –511 and 511 gives the
+                   measured offset in 0.02 Hz increments. Bit 88 is the sign bit of this integer. The frequency offset measurement
+                   shall be accurate to 0.25 Hz. Under conditions where this accuracy cannot be achieved, the integer shall be set
+                   to –512 indicating that this field is to be ignored
+     89:104        CRC
+     105:108       Fill bits: 1111
+ NOTE 1 – Projected maximum data rates greater than 12 in bits 30:33 shall only be indicated when the analogue modem supports
+ up to 1664 point signal constellations.
+ NOTE 2 – The analogue modem may be able to achieve a higher downstream data signalling rate in V.90 mode if the digital
+ modem indicates that the analogue modem may transmit at a lower power in bits 15:17.
+
+
+
+
+                                                                                    Recommendation V.90        (09/98)            15
+Table 10 defines the bits in the INFO1a sequence that an analogue modem uses to request Phase 3 of this
+Recommendation. Bits 37:39 represent the integer 6, indicating that V.90 operation is desired. Bit 0 is transmitted first in
+time.
+
+
+                              Table 10/V.90 – Definition of bits in INFO 1a when V.90 is selected
+
+
+     INFO1a bits
+                                                                          Definition
+      LSB:MSB
+
+          0:3          Fill bits: 1111
+          4:11         Frame sync: 01110010, where the left-most bit is first in time
+        12:17          Reserved for the ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+                       modem
+        18:24          Length of MD to be transmitted by the analogue modem during Phase 3. An integer between 0 and 127 gives
+                       the length of this sequence in 35 ms increments
+        25:31          UINFO: Ucode of the PCM codeword to be used by the digital modem for the 2 point train. The power of this
+                       point shall not exceed the maximum digital modem transmit power. U INFO shall be greater than 66
+        32:33          Reserved for the ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+                       modem
+        34:36          Symbol rate to be used in transmitting from the analogue modem to the digital modem. An integer between 3
+                       and 5 gives the symbol rate, where 3 represents 3000 and 5 represents 3429. The symbol rate selected shall be
+                       consistent with information in INFO1d. The carrier frequency and pre-emphasis filter to be used are those
+                       already indicated for this symbol rate in INFO 1d
+        37:39          Symbol rate of 8000 to be used by the digital modem: The integer 6
+        40:49          Frequency offset of the probing tones as measured by the analogue modem receiver. The frequency offset
+                       number shall be the difference between the nominal 1050 Hz line probing signal tone received and the 1050 Hz
+                       tone transmitted, f(received) – f(transmitted). A two’s complement signed integer between –511 and 511 gives
+                       the measured offset in 0.02 Hz increments. Bit 9 is the sign bit of this integer. The frequency offset
+                       measurement shall be accurate to 0.25 Hz. Under conditions where this accuracy cannot be achieved, the
+                       integer shall be set to –512 indicating that this field is to be ignored
+        50:65          CRC
+        66:69          Fill bits: 1111
+
+
+
+
+Table 11 defines the bits in the INFO1a sequence that an analogue modem uses to request Phase 3 of Recommen-
+dation V.34. The bit definitions are identical to those of INFO1a in Recommendation V.34 and are given here for
+convenience. Bits 37:39 represent an integer between 0 and 5, indicating that V.34 operation is desired. Bit 0 is
+transmitted first in time.
+
+
+8.2.3.3     INFOMARKS
+
+INFOMARKSd is created by the digital modem applying binary ones to the DPSK modulator described in 8.2.3.1.
+
+INFOMARKSa is created by the analogue modem applying binary ones to the DPSK modulator described in 8.2.3.1.
+
+
+8.2.4       Line probing signals
+
+As defined in 10.1.2.4/V.34.
+
+
+8.3         Phase 3 signals for the analogue modem
+
+The analogue modem shall use the polynomial, GPA, in equation 7-2/V.34 when generating signals Ja, TRN and SCR.
+
+
+16               Recommendation V.90        (09/98)
+                          Table 11/V.90 – Definition of bits in INFO 1a when V.34 is selected
+
+
+   INFO1a bits
+                                                                      Definition
+    LSB:MSB
+
+         0:3       Fill bits: 1111
+        4:11       Frame sync: 01110010, where the left-most bit is first in time
+        12:14      Minimum power reduction to be implemented by the digital modem transmitter. An integer between 0 and 7
+                   gives the recommended power reduction in dB. These bits shall indicate 0 if INFO0d indicated that the digital
+                   modem transmitter cannot reduce its power
+        15:17      Additional power reduction, below that indicated by bits 12:14, which can be tolerated by the analogue modem
+                   receiver. An integer between 0 and 7 gives the additional power reduction in dB. These bits shall indicate 0 if
+                   INFO0d indicated that the digital modem transmitter cannot reduce its power
+        18:24      Length of MD to be transmitted by the analogue modem during Phase 3. An integer between 0 and 127 gives
+                   the length of this sequence in 35 ms increments
+         25        Set to 1 indicates that the high carrier frequency is to be used in transmitting from the digital modem to the
+                   analogue modem. This shall be consistent with the capabilities of the digital modem indicated in INFO 0d
+        26:29      Pre-emphasis filter to be used in transmitting from the digital modem to the analogue modem. These bits form
+                   an integer between 0 and 10 which represents the pre-emphasis filter index (see Tables 3/V.34 and 4/V.34)
+        30:33      Projected maximum data rate for the selected symbol rate from the digital modem to the analogue modem.
+                   These bits form an integer between 0 and 14 which gives the projected data rate as a multiple of 2400 bits/s
+        34:36      Symbol rate to be used in transmitting from the analogue modem to the digital modem. An integer between 0
+                   and 5 gives the symbol rate, where 0 represents 2400 and a 5 represents 3429. The symbol rate selected shall be
+                   consistent with information in INFO1d and consistent with the symbol rate asymmetry allowed as indicated in
+                   INFO0a and INFO0d. The carrier frequency and pre-emphasis filter to be used are those already indicated for
+                   this symbol rate in INFO1d
+        37:39      Symbol rate to be used in transmitting from the digital modem to the analogue modem. An integer between 0
+                   and 5 gives the symbol rate, where 0 represents 2400 and a 5 represents 3429. The symbol rate selected shall be
+                   consistent with the capabilities indicated in INFO0a and consistent with the symbol rate asymmetry allowed as
+                   indicated in INFO0a and INFO0d
+        40:49      Frequency offset of the probing tones as measured by the analogue modem receiver. The frequency offset
+                   number shall be the difference between the nominal 1050 Hz line probing signal tone received and the 1050 Hz
+                   tone transmitted, f(received) – f(transmitted). A two’s complement signed integer between –511 and 511 gives
+                   the measured offset in 0.02 Hz increments. Bit 49 is the sign bit of this integer. The frequency offset
+                   measurement shall be accurate to 0.25 Hz. Under conditions where this accuracy cannot be achieved, the
+                   integer shall be set to –512 indicating that this field is to be ignored
+        50:65      CRC
+        66:69      Fill bits: 1111
+ NOTE – Projected maximum data rates greater than 12 in bits 30:33 shall only be indicated when the digital modem supports up to
+ 1664 point signal constellations.
+
+
+
+
+8.3.1      Ja
+
+
+Sequence Ja consists of repetitions of the DIL descriptor detailed below. The modulation used for transmitting Ja is as
+defined in 10.1.3.3/V.34. Transmission of sequence J a may be terminated without completing the final DIL descriptor.
+
+
+The DIL descriptor tells the digital modem what parameters to use when transmitting DIL. The bit fields in the DIL
+descriptor are given in Table 12. Definitions and interpretation of the parameters are given in 8.4.1. Due to the
+variability in the length of the sequences SP and TP the bit numbers are given using α = (LSP)/16*17 and β = α
++ (LTP)/16*17, where x is the smallest integer higher than or equal to x. When LSP is not a multiple of 16, zeroes
+shall be used to pad SP to the next multiple of 16 bits so that the format of the Ja sequence is preserved. Similarly, when
+LTP is not a multiple of 16, zeroes shall be used to pad TP to the next multiple of 16 bits. LSP – 1 = LTP – 1 = 0 when
+N = 0. The values for SP and TP have no significance when N = 0.
+
+
+The CRC generator used is described in 10.1.2.3.2/V.34.
+
+
+
+                                                                                    Recommendation V.90       (09/98)           17
+                             Table 12/V.90 – Definition of bits in the DIL descriptor
+
+
+
+      LSB:MSB                                                        Definition
+
+        0:16       Frame sync: 11111111111111111
+         17        Start bit: 0
+        18:25      N
+        26:33      Reserved for ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+                   modem
+         34        Start bit: 0
+        35:41      LSP – 1
+         42        Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+        43:49      LTP – 1
+         50        Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+         51        Start bit: 0
+        52:67      SP
+         68        Start bit: 0
+                   Possible continuation of SP with a start bit (0) every 16 bits
+        51+α       Start bit: 0
+     52+α:67+α     TP
+        68+α       Start bit: 0
+                   Possible continuation of TP with a start bit (0) every 16 bits
+        51+β       Start bit: 0
+      52+β:58+β    H1
+        59+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+      60+β:66+β    H2
+        67+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+        68+β       Start bit: 0
+      69+β:75+β    H3
+        76+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+      77+β:83+β    H4
+        84+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+        85+β       Start bit: 0
+      86+β:92+β    H5
+        93+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+     94+β:100+β    H6
+       101+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+       102+β       Start bit: 0
+     103+β:109+β   H7
+       110+β       Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+
+
+
+
+18         Recommendation V.90       (09/98)
+                    Table 12/V.90 – Definition of bits in the DIL descriptor (concluded)
+
+
+
+
+  LSB:MSB                                                          Definition
+
+ 111+β:117+β      H8
+    118+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    119+β         Start bit: 0
+ 120+β:126+β      REF1
+    127+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+ 128+β:134+β      REF2
+    135+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    136+β         Start bit: 0
+ 137+β:143+β      REF3
+    144+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+ 145+β:151+β      REF4
+    152+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    153+β         Start bit: 0
+ 154+β:160+β      REF5
+    161+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+ 162+β:168+β      REF6
+    169+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    170+β         Start bit: 0
+ 171+β:177+β      REF7
+    178+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+ 179+β:185+β      REF8
+    186+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    187+β         Start bit: 0
+ 188+β:194+β      The Ucode of the training symbol used for the 1 st DIL segment
+    195+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+ 196+β:202+β      The Ucode of the training symbol used for the 2 nd DIL segment
+    203+β         Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+    204+β         Start bit: 0
+                  Remaining Ucodes of training symbols with a start bit (0) every 16 bits and appropriate reserved bits
+                  including 9 reserved bits to fill the final 16 bits if N is odd
+187+β+N/2*17    Start bit: 0
+188+β+N/2*17:   CRC
+203+β+N/2*17
+204+β+N/2*17    Fill bit: 0
+205+β+N/2*17    Fill bit: 0 may be necessary to ensure that the descriptor has an even number of bits.
+
+
+
+
+                                                                             Recommendation V.90           (09/98)           19
+NOTE – It is highly desirable that the analogue modem requests a DIL that does not allow echo control devices in the switched digital
+network to re-enable. The analogue modem may also continuously transmit SCR during the reception of DIL to maintain line energy.
+
+8.3.2     MD
+As defined in 10.1.3.5/V.34.
+
+8.3.3     PP
+As defined in 10.1.3.6/V.34.
+
+8.3.4     S
+As defined in 10.1.3.7/V.34.
+
+8.3.5     SCR
+Signal SCR is defined as binary ones modulated according to 10.1.3.9/V.34 except that neither the scrambler nor the
+differential encoder need be initialized at the beginning of its transmission. During Phase 3 and Phase 4 start-up
+procedures the constellation size depends on bit 47 of Jd. During rate renegotiation procedures the constellation size
+depends on bit 48 of J d.
+
+8.3.6     TRN
+As defined in 10.1.3.8/V.34 using a 4-point 2D constellation.
+
+8.4       Phase 3 signals for the digital modem
+The digital modem shall use the polynomial, GPC, in equation 7-1/V.34 when generating signals Jd, Jd′ and TRN1d.
+Signals transmitted by the digital modem during Phase 3 are not spectrally shaped.
+
+8.4.1     DIL
+The parameters necessary for the digital modem to form the DIL are sent to it by the analogue modem using the
+DIL descriptor defined in 8.3.1.
+The DIL consists of N DIL-segments of length Lc where:
+
+                                                         0 ≤ N ≤ 255;
+
+
+                                                        1 ≤ c ≤ 8; and
+
+
+                                               Lc = (Hc + 1) * 6 symbols.
+
+Eight Hc values are used to calculate the length of the DIL-segments containing training symbols from each Uchord.
+H1 shall be used to calculate the length of the DIL-segments containing training symbols from Uchord1, H8 shall be used
+to calculate the length of the DIL-segments containing training symbols from Uchord8.
+Eight Ucodes, REFc, define the PCM codeword used as a reference symbol in DIL-segments containing training
+symbols from each Uchord. The PCM codeword given by the Ucode REF1 shall be used as a reference symbol in
+DIL-segments containing training symbols from Uchord1, the PCM codeword given by the Ucode REF8 shall be used as
+a reference symbol in DIL-segments containing training symbols from Uchord8.
+A single Sign Pattern (SP) and Training Pattern (TP) is used for the entire DIL. An SP bit determines the sign of a
+transmitted symbol. 0 shall represent negative and 1 shall represent positive. A TP bit determines whether the reference
+symbol (REFc) or a training symbol is transmitted. 0 shall represent REFc and 1 shall represent a training symbol. The
+LSB of each pattern applies to the first symbol of a DIL-segment. The lengths of these patterns are:
+
+                                                     1 ≤ LSP ≤ 128; and
+
+                                                       1 ≤ LTP ≤ 128.
+
+
+
+20            Recommendation V.90         (09/98)
+The patterns are restarted at the beginning of each DIL-segment. The patterns are repeated independently within
+DIL-segments whose lengths exceed that of LSP or LTP.
+
+The entire sequence, not just the last DIL-segment, is repeated until either the analogue modem causes it to be
+terminated or a timeout occurs. The sequence shall be terminated on a DIL-segment boundary.
+
+A set of N Ucodes determine the training symbol that is assigned to each DIL-segment. The first of the N Ucodes
+specifies the training symbol assigned to the first DIL-segment and so on.
+
+When N = 0, DIL is not transmitted.
+
+8.4.2      Jd
+
+Sequence Jd consists of a whole number of repetitions of the bit pattern given in Table 13. Bit 0 is transmitted first. The
+bits are scrambled and differentially encoded and then transmitted as the sign of the PCM codeword whose Ucode
+is UINFO. A sign of 0 represents a negative voltage, a sign of 1 represents a positive voltage. The differential encoder
+shall be initialized with the final symbol of the transmitted TRN1d.
+
+The CRC generator used is described in 10.1.2.3.2/V.34.
+
+                                           Table 13/V.90 – Definition of bits in J d
+
+     Jd bits
+                                                                      Definition
+    LSB:MSB
+
+        0:16        Frame Sync: 11111111111111111
+         17         Start bit: 0
+        18:33       Data signalling rate capability mask.
+                    Bit 18:28 000; bit 19:29 333; bit 20:30 666; …; bit 33:48 000. Bits set to 1 indicate data signalling rates
+                    supported and enabled in the transmitter of the digital modem
+         34         Start bit: 0
+        35:46       Data signalling rate capability mask (contd.).
+                    Bit 35:49 333; bit 36:50 666; …; bit 39:54 666; bit 40:56 000; bits 41 to 46: Reserved for ITU. (These bits are
+                    set to 0 by the digital modem and are not interpreted by the analogue modem.) Bits set to 1 indicate data
+                    signalling rates supported and enabled in the transmitter of the digital modem
+         47         Size of constellation used to transmit CP, E and SCR during training sequences: 0 = 4-point constellation;
+                    1 = 16-point constellation
+         48         Size of constellation used to transmit CP, E and SCR during rate renegotiation procedures: 0 = 4-point
+                    constellation; 1 = 16-point constellation
+        49:50       A number between 1 and 3 indicating the digital modem’s maximum lookahead for spectral shaping
+         51         Start bit: 0
+        52:67       CRC
+        68:71       Fill bits: 0000
+
+
+
+8.4.3         Jd′
+
+ Jd′ is used to terminate Jd. Jd′ consists of 12 binary zeroes. The bits are scrambled and differentially encoded and then
+transmitted as the sign of the PCM codeword whose Ucode is UINFO. A sign of 0 represents a negative voltage, a sign of
+1 represents a positive voltage. The differential encoder shall be initialized with the final symbol of the transmitted Jd.
+
+8.4.4      Sd
+
+Sd consists of 64 repetitions of the sequence {+W, +0, +W, –W, –0, –W} where W is defined to be the PCM codeword
+whose Ucode is 16 + UINFO and 0 is the PCM codeword with Ucode 0. Sd consists of 8 repetitions of the sequence
+{−W, –0, –W, +W, +0, +W}.
+
+The first symbol of Sd is defined to be transmitted in data frame interval 0. The digital modem shall keep data frame
+alignment from this point on.
+
+
+                                                                                   Recommendation V.90         (09/98)           21
+8.4.5     TRN1d
+
+Signal TRN1d is a sequence of the PCM codeword whose Ucode is UINFO with signs generated by applying binary ones
+to the input of the scrambler described in 5.3. A sign of 0 represents a negative voltage, a sign of 1 represents a positive
+voltage. The scrambler is initialized to zero prior to the transmission of TRN1d. TRN1d shall be an integer multiple of
+6 symbols long.
+
+
+8.5       Phase 4 signals for the analogue modem
+
+8.5.1     B1
+
+As defined in 10.1.3.1/V.34.
+
+8.5.2     CP
+
+CP sequences consist of symbols chosen from a 4- or 16-point 2D constellation. During Phase 4 start-up procedures the
+constellation size depends on bit 47 of Jd. During rate renegotiation procedures the constellation size depends on bit 48
+of Jd. CP is used by the analogue modem to pass constellation parameters to the digital modem. A CPt sequence is sent
+to pass the parameters used by the digital modem in Phase 4 training. A CP sequence with the acknowledge bit set to 1 is
+denoted by CP′. A CP sequence with the request for silence bit set is denoted CPs. Due to the nature of the procedures
+that use CPs, the constellation parameters contained in CPs are not used. The average power of the constellations that the
+analogue modem requests the digital modem to use during data mode shall not be greater than 3 dB above the average
+power of the constellations it requests the digital modem to use during Phase 4.
+
+CP sequences are modulated according to 10.1.3.9/V.34. The scrambler and differential encoder are initialized to zero
+prior to the transmission of the first CPt sequence. Bit fields for CP sequences are defined in Table 14. Bit 0 is
+transmitted first.
+
+The CRC generator used is described in 10.1.2.3.2/V.34.
+
+CP sequences are defined to be of variable length. A constellation mask consists of 128 bits where a bit set to 1 indicates
+that the constellation includes the PCM code represented by the corresponding Ucode. Only the number of different
+constellations need to be sent. The constellations that are sent are indexed from 0 (in bits 136:271) to a maximum of 5
+(in bits 816:951). If the constellations at the digital modem’s transmitter differ from those at the output to the codec’s
+D/A convertor, then bit 128 shall be set and the constellation at the output to the codec’s D/A convertor corresponding to
+each transmit constellation shall be sent. Due to the variability in the number of constellations, a parameter γ is defined
+to be 136* (the maximum constellation index given in bits 103:127) and a parameter δ is defined to be (2*γ)+136 if
+bit 128 is set and γ if bit 128 is clear.
+
+When multiple CP and CP′ sequences are transmitted as a group, they shall all contain identical modulation and spectral
+shaping parameter information.
+
+
+
+
+22         Recommendation V.90         (09/98)
+                              Table 14/V.90 – Definition of bits in CP
+
+
+
+
+ CP bits
+                                                             Definition
+LSB:MSB
+
+  0:16     Frame Sync: 11111111111111111
+   17      Start bit: 0
+   18      Reserved for ITU: This bit is set to 0 by the analogue modem and is not interpreted by the digital modem
+   19      0 indicates CPt; 1 indicates CP
+ 20:24     Selected digital modem to analogue modem data signalling rate, an integer, drn, between 0 and 22. drn = 0
+           indicates cleardown.
+           Data signalling rate = (drn+20)*8000/6 in CP and (drn+8)*8000/6 in CPt.
+ 25:29     Reserved for ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+           modem
+   30      Set to 1 indicates a silent period is requested. This may be used during rate renegotiation (see 9.6)
+ 31:32     Sr: The number of sign bits used as redundancy for spectral shaping
+   33      Acknowledge bit: 0 = modem has not received MP from far end; 1 = received MP from far end
+   34      Start bit: 0
+   35      Codec type: 0 = µ-law; 1 = A-law
+ 36:48     Analogue modem to digital modem data signalling rate capability mask:
+           Bit 36:4800; …; bit 47:31 200; bit 48:33 600. Bits set to 1 indicate data signalling rates supported and
+           enabled in analogue modem transmitter
+ 49:50     ld: Number of look-ahead frames requested during spectral shaping. This shall be consistent with the
+           capabilities of the digital modem indicated in J d
+   51      Start bit: 0
+ 52:67     The RMS value of TRN1d at the transmitter output divided by the RMS value of TRN1d at the output to the
+           codec’s D/A convertor expressed in unsigned Q3.13 format (xxx.xxxxxxxxxxxxx)
+   68      Start bit: 0
+ 69:76     Parameter a1 of the spectral shaping filter in signed Q1.6 format (sx.xxxxxx)
+ 77:84     Parameter a2 of the spectral shaping filter in signed Q1.6 format (sx.xxxxxx)
+   85      Start bit: 0
+ 86:93     Parameter b1 of the spectral shaping filter in signed Q1.6 format (sx.xxxxxx)
+ 94:101    Parameter b2 of the spectral shaping filter in signed Q1.6 format (sx.xxxxxx)
+  102      Start bit: 0
+103:106    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 0
+107:110    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 1
+111:114    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 2
+115:118    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 3
+  119      Start bit: 0
+120:123    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 4
+124:127    An integer between 0 and 5 denoting the index of the constellation to be used in data frame interval 5
+  128      Set to 1 if the constellations at the transmitter differ from those at the output to the codec’s D/A convertor
+
+
+
+
+                                                                       Recommendation V.90            (09/98)               23
+                                         Table 14/V.90 – Definition of bits in CP (concluded)
+
+       CP bits
+                                                                          Definition
+      LSB:MSB
+
+       129:135            Reserved for ITU: These bits are set to 0 by the analogue modem and are not interpreted by the digital
+                          modem
+         136              Start bit: 0
+       137:152            Constellation mask for Uchord1 (bit 137 corresponds to Ucode 0)
+         153              Start bit: 0
+       154:169            Constellation mask for Uchord2 (bit 154 corresponds to Ucode 16)
+         170              Start bit: 0
+       171:186            Constellation mask for Uchord3 (bit 171 corresponds to Ucode 32)
+         187              Start bit: 0
+       188:203            Constellation mask for Uchord4 (bit 188 corresponds to Ucode 48)
+         204              Start bit: 0
+       205:220            Constellation mask for Uchord5 (bit 205 corresponds to Ucode 64)
+         221              Start bit: 0
+       222:237            Constellation mask for Uchord6 (bit 222 corresponds to Ucode 80)
+         238              Start bit: 0
+       239:254            Constellation mask for Uchord7 (bit 239 corresponds to Ucode 96)
+         255              Start bit: 0
+       256:271            Constellation mask for Uchord8 (bit 256 corresponds to Ucode 112)
+      272:271+γ           Possibly more constellations in same format as bits 136:271
+     272+γ:271+δ          Corresponding codec constellations in same format as bits 136:271
+        272+δ             Start bit: 0
+     273+δ:288+δ          CRC
+     289+δ:291+δ          Fill bits: 000
+
+
+The analogue modem shall design constellations such that their average power, when calculated using the formula
+below, does not exceed the limit given in Table 15 corresponding to the maximum digital modem transmit power
+specified in INFO0d, assuming the calculation is performed using infinite precision arithmetic.
+
+                                                             5 Mi − 1
+                                                           ∑ ∑ p i, j ⋅ n i, j
+                                                           i=0    j= 0
+          Average power of constellation set =
+                                                                  6 ⋅ 2K
+
+where K is defined in 5.4.1;
+Mi is defined in 5.4.3;
+
+pi,j is the square of the linear value in Table 1 corresponding to the level labelled j in the ith constellation at the
+measurement point specified by bit 38 of INFO0d; and
+
+                                                        ni,j = Ai(Ri+1 + 1)             if j < Ki
+
+                                                    ni,j = 2K – Ai(Ri – Ri+1) if j = Ki
+
+                                                          ni,j = Ai(Ri+1)               if j > Ki
+
+where A0 = 1; Ai+1 = AiMi; and Ri and Ki are the outputs of the modulus encoder when R 0 = 2K – 1 in 5.4.3.
+
+
+24         Recommendation V.90                (09/98)
+                                  Table 15/V.90 – Limits for the average power calculation
+
+                              Maximum digital modem                               Limit of average
+                               transmit power, dBm0                               power calculation
+                                       –0.5                                            (15124)2
+                                       –1                                              (14276)2
+                                       –1.5                                            (13480)2
+                                       –2                                              (12724)2
+                                       –2.5                                            (12012)2
+                                       –3                                              (11340)2
+                                       –3.5                                            (10708)2
+                                       –4                                              (10108)2
+                                       –4.5                                              (9544)2
+                                       –5                                                (9008)2
+                                       –5.5                                              (8504)2
+                                       –6                                                (8028)2
+                                       –6.5                                              (7580)2
+                                       –7                                                (7156)2
+                                       –7.5                                              (6756)2
+                                       –8                                                (6380)2
+                                       –8.5                                              (6020)2
+                                       –9                                                (5684)2
+                                       –9.5                                              (5368)2
+                                      –10                                                (5068)2
+                                      –10.5                                              (4784)2
+                                      –11                                                (4516)2
+                                      –11.5                                              (4264)2
+                                      –12                                                (4024)2
+                                      –12.5                                              (3800)2
+                                      –13                                                (3588)2
+                                      –13.5                                              (3388)2
+                                      –14                                                (3196)2
+                                      –14.5                                              (3020)2
+                                      –15                                                (2852)2
+                                      –15.5                                              (2692)2
+                                      –16                                                (2540)2
+
+
+NOTE – Since modems use finite precision arithmetic, the digital modem should ensure that its calculations give results greater than
+or equal to the results that would be calculated using infinite precision arithmetic. Similarly, the analogue modem should ensure that
+its calculations give results less than or equal to the results that would be calculated using infinite precision arithmetic. The actions
+that a digital modem takes when a constellation set is found to have an average power above the appropriate limit are a national matter
+and are beyond the scope of this Recommendation.
+
+8.5.3      E
+
+As defined in 10.1.3.2/V.34.
+
+
+8.6        Phase 4 signals for the digital modem
+
+Signals transmitted by the digital modem during Phase 4 may be spectrally shaped. During initial train or retrain, signals
+TRN2d, MP and Ed use the spectral shaping parameters defined by CPt. During rate renegotiation, TRN2d, MP and Ed
+use the spectral shaping parameters as used in the preceding data mode along with the K previously derived from CPt.
+B1d and the following data mode signals shall use the spectral shaping parameters defined by CP.
+
+
+                                                                                    Recommendation V.90            (09/98)            25
+8.6.1      B1d
+
+B1d consists of 48 data frames of scrambled ones transmitted at the end of start-up using the selected data mode
+constellation parameters. The scrambler, differential encoder and spectral shape filter memory are initialized to zero
+prior to transmitting B1d. The symbols in the first data frame of B1d shall have the magnitudes resulting from mapping
+the first D scrambled ones after initializing the scrambler to zero, and shall be identical for all values of ld. Permitted
+values of K and S are given in Table 2.
+
+8.6.2      Ed
+
+Ed consists of 2 data frames of scrambled binary zeroes used to signal the end of MP. It is mapped using the same
+constellation parameters used to send TRN2d.
+
+8.6.3      MP
+
+Modulation parameters for the analogue modem are sent in an MP sequence. MP is transmitted using the constellation
+parameters used to send TRN2d. An MP with the acknowledge bit set is denoted MP′. Bit fields for MP sequences are
+defined in Table 16. Bit 0 is transmitted first.
+
+Two types of MP sequences are used. Type 1 is the same as Type 0 with the addition of precoding coefficients. The
+CRC generator used is described in 10.1.2.3.2/V.34.
+
+When multiple MP and MP′ sequences are transmitted as a group, they shall all contain identical modulation parameter
+information.
+
+
+                                           Table 16/V.90 – Definition of bits in MP
+
+      MP bits
+                                                                       Definition
+     LSB:MSB
+
+        0:16         Frame Sync: 11111111111111111
+         17          Start bit: 0
+         18          MP Type bit: 0 = Type 0 without precoder coefficients; 1 = Type 1 with precoder coefficients
+        19:23        Reserved for ITU: These bits are set to 0 by the digital modem and are not interpreted by the analogue modem
+        24:27        Maximum analogue modem to digital modem data signalling rate, drn.
+                     Data rate = drn*2400 where drn is an integer between 2 and 14. drn = 0 indicates cleardown
+         28          Reserved for ITU: This bit is set to 0 by the digital modem and is not interpreted by the analogue modem
+        29:30        Trellis encoder select bits in analogue modem to digital modem direction:
+                     0 = 16 state; 1 = 32 state; 2 = 64 state; 3 = reserved
+                     The digital modem receiver requires the analogue modem transmitter to use the selected trellis encoder
+         31          Nonlinear encoder parameter select bit for the analogue modem transmitter.
+                     0: Θ = 0; 1: Θ = 0.3125
+         32          Constellation shaping select bit for the analogue modem transmitter.
+                     0: minimum; 1: expanded (see Table 10/V.34)
+         33          Acknowledge bit: 0 = modem has not received CP from far end; 1 = received CP from far end
+         34          Start bit: 0
+         35          Reserved for ITU: This bit is set to 0 by the digital modem and is not interpreted by the analogue modem
+        36:49        Analogue modem to digital modem data signalling rate capability mask:
+                     Bit 36:4800; ...; bit 47:31 200; bit 48:33 600; 49: Reserved for ITU. (This bit is set to 0 by the digital modem
+                     and is not interpreted by the analogue modem.) Bits set to 1 indicate data signalling rates supported and
+                     enabled in digital modem
+         50          Reserved for ITU: This bit is set to 0 by the digital modem and is not interpreted by the analogue modem
+         51          Start bit: 0
+
+
+
+
+26             Recommendation V.90        (09/98)
+                                   Table 16/V.90 – Definition of bits in MP (concluded)
+
+
+     MP bits
+                                                                       Definition
+    LSB:MSB
+
+                                            Continuation for MP Type 0 (without precoder coefficients)
+
+         52:67      Reserved for ITU: These bits are set to 0 by the digital modem and are not interpreted by the analogue modem
+          68        Start bit: 0
+         69:84      CRC
+          85        Fill bit: 0
+         86:…       Fill bits: 0s to extend the MP sequence length to the next multiple of 6 symbols
+
+                                              Continuation for MP Type 1 (with precoder coefficients)
+
+         52:67      Precoding coefficient h(1) real
+          68        Start bit: 0
+         69:84      Precoding coefficient h(1) imaginary
+          85        Start bit: 0
+        86:101      Precoding coefficient h(2) real
+         102        Start bit: 0
+        103:118     Precoding coefficient h(2) imaginary
+         119        Start bit: 0
+        120:135     Precoding coefficient h(3) real
+         136        Start bit: 0
+        137:152     Precoding coefficient h(3) imaginary
+         153        Start bit: 0
+        154:169     Reserved for ITU: These bits are set to 0 by the digital modem and are not interpreted by the analogue modem
+         170        Start bit: 0
+        171:186     CRC
+         187        Fill bit: 0
+        188:…       Fill bits: 0s to extend the MP sequence length to the next multiple of 6 symbols
+
+
+
+
+8.6.4       R
+
+Signal R is transmitted by repeating the 6 symbol sequence containing PCM codewords with the sign pattern + + + – – –
+where the left-most sign is transmitted first. R consists of 4 repetitions of the 6-symbol sequence containing the same
+PCM codewords with the sign pattern – – – + + + where the left-most sign is transmitted first.
+
+NOTE – Neither R nor R are differentially encoded. This imposes a requirement on the receiver to be able to detect these sequences
+regardless of their polarity.
+
+
+ Rd denotes signal R using the highest power PCM codeword from the data mode constellation of each data frame
+interval as passed in CP.
+
+Ri denotes signal R using the single PCM codeword whose Ucode is U INFO for all data frame intervals.
+
+
+R t denotes signal R using the highest power PCM codeword from the training constellation of each data frame interval
+as passed in CPt.
+
+
+
+                                                                                    Recommendation V.90       (09/98)              27
+8.6.5      TRN2d
+
+TRN2d is generated by applying scrambled binary ones to the encoder of 5.4. The constellation set to be used is passed
+in CPt. The scrambler, differential encoder and spectral shape filter memory shall be initialized to zero prior to
+transmitting TRN2d. The symbols in the first data frame of TRN2d shall have the magnitudes resulting from mapping the
+first D scrambled ones after initializing the scrambler to zero, and shall be identical for all values of ld. Permitted values
+of K and S are given in Table 17. TRN 2d shall be an integer multiple of 6 symbols long.
+
+                                 Table 17/V.90 – Phase 4 signalling rate for different K and S
+
+                  K, bits entering                      S, sign bits used                  Data Signalling
+                  modulus encoder                       for Phase 4 data                    Rate, kbit/s
+
+                                                 From                   To          From                     To
+
+                          6                         3                       6     12                   16
+                          7                         3                       6     13 1/3               17 1/3
+                          8                         3                       6     14 2/3               18 2/3
+                          9                         3                       6     16                   20
+                         10                         3                       6     17 1/3               21 1/3
+                         11                         3                       6     18 2/3               22 2/3
+                         12                         3                       6     20                   24
+                         13                         3                       6     21 1/3               25 1/3
+                         14                         3                       6     22 2/3               26 2/3
+                         15                         3                       6     24                   28
+                         16                         3                       6     25 1/3               29 1/3
+                         17                         3                       6     26 2/3               30 2/3
+                         18                         3                       6     28                   32
+                         19                         3                       6     29 1/3               33 1/3
+                         20                         3                       6     30 2/3               34 2/3
+                         21                         3                       6     32                   36
+                         22                         3                       6     33 1/3               37 1/3
+                         23                         3                       6     34 2/3               38 2/3
+                         24                         3                       6     36                   40
+
+
+
+
+9          Operating procedures
+The start-up procedure carried out after establishing a dialled connection between the two modems consists of four
+distinct phases:
+–     Phase 1: Network interaction;
+–     Phase 2: Channel probing and ranging;
+–     Phase 3: Equaliser and echo canceller training and digital impairment learning;
+–     Phase 4: Final training.
+
+
+9.1        Phase 1 – Network interaction
+
+9.1.1      Use of bits in Recommendation V.8
+
+Bit b5 in the "modn0" octet of Recommendation V.8 shall be set to indicate that a modem is capable of V.90 operation.
+This also indicates that at least one bit shall be set in the V.90 availability category. A modem that indicates V.90
+capability shall indicate its PSTN access type using a bit in the PSTN access category. The operation defined in this
+Recommendation is only possible when two V.90 capable modems are connected and one or both of the modems is
+
+
+28          Recommendation V.90           (09/98)
+accessing the PSTN digitally. If both modems are accessing the PSTN over analogue connections they shall proceed in
+accordance with Recommendation V.8 as if V.90 capability had not been indicated. Similarly, if the information in
+the V.90 availability category does not indicate the presence of an analogue and digital modem pair, the modems shall
+proceed in accordance with Recommendation V.8 as if V.90 capability had not been indicated. In the case where both
+modems are digitally connected to the PSTN and both modems indicate the ability to be an analogue and a digital
+modem, the call modem shall become the analogue modem and the answer modem shall become the digital modem.
+
+9.1.2    Call modem
+
+9.1.2.1 Initially, the call modem shall condition its receiver to detect either signal ANS or ANSam as defined in
+Recommendation V.8, and the modem shall either transmit CI, CT, CNG or no signal as defined in Recommen-
+dation V.8. If signal ANSam is detected, the modem shall transmit silence for the period Te as specified in
+Recommendation V.8. The modem shall then condition its receiver to detect JM and shall send CM with the appropriate
+bits set to indicate that V.90 operation is desired. When a minimum of two identical JM sequences have been received,
+the modem shall complete the current CM octet and send CJ. After sending CJ, the modem shall transmit silence for
+75 ± 5 ms and proceed with Phase 2. This procedure is shown in Figure 3.
+
+
+                                              Te                       75 ± 5 ms
+
+
+                   Call
+                             CI, CI, ...                 CM, CM, ...   CJ
+                   modem
+
+
+
+
+                   Answer
+                                            ANSam             JM, JM, ...
+                   modem
+
+                                                                                         T1604750-98/d03
+                                 ≥ 200 ms                               75 ± 5 ms
+
+
+                               Figure 3/V.90 – Phase 1 – Network interaction
+
+FIGURE 3/V.90...[D03] = 3 CM
+
+9.1.2.2 If signal ANS (rather than ANSam) is detected, the modem shall proceed in accordance with
+Annex A/V.32 bis, Recommendation T.30, or other appropriate Recommendations.
+
+9.1.3    Answer modem
+
+9.1.3.1 Upon connection to line, the modem shall initially remain silent for a minimum of 200 ms and then transmit
+signal ANSam according to the procedure specified in Recommendation V.8. This signal shall include phase reversals as
+specified in Recommendation V.8. The modem shall condition its receiver to detect CM and, possibly, calling modem
+responses specified in other appropriate Recommendations.
+
+9.1.3.2 If a minimum of 2 identical CM sequences are received and the appropriate bits are set to indicate
+V.90 operation, the modem shall send JM and condition its receiver to detect CJ. After receiving all 3 octets of CJ, the
+modem shall transmit silence for 75 ± 5 ms, and proceed with Phase 2 of start-up. This procedure is shown in Figure 3.
+
+9.1.3.3 If a call modem response specified in some other appropriate Recommendation is detected, the modem shall
+proceed in accordance with the appropriate Recommendation.
+
+9.1.3.4 If neither CM nor a suitable call modem response is detected for the allowed ANSam transmission period as
+specified in Recommendation V.8, the modem shall transmit silence for 75 ± 5 ms, and then proceed in accordance with
+Annex A/V.32 bis, Recommendation T.30, or other appropriate Recommendations.
+
+
+9.2      Phase 2 – Probing/ranging
+Channel probing and ranging are performed in Phase 2 of the start-up procedure. The description below details both the
+error-free and recovery procedures in the digital and analogue modems. Capabilities information and modulation
+parameters are sent in the INFO sequences detailed in 8.2.3.
+
+
+                                                                            Recommendation V.90            (09/98)   29
+                                                                             10 160
+                                         10 ms     ≤ 670 ms                  ms ms
+
+
+ Digital
+ modem         INFO0d            B        B                          B       B L1      L2   INFO1d
+                  40 ± 1 ms                                                     40 ± 1 ms
+
+
+
+
+                                                                10
+                                                    40 ± 1 ms   ms
+ Analogue
+ modem           INFO0a      A       A           A L1      L2    A       A                  A        INFO1a
+                                                                                                                      T1604760-98/d04
+
+
+
+                          ≥ 50 ms                10 160         50 ms           ≤ 670 ms                  70 ± 5 ms
+                                                 ms ms
+
+
+                                              Figure 4/V.90 – Phase 2 – Probing/ranging
+
+FIGURE 4/V.90...[D04] = 3 CM
+
+9.2.1       Digital modem
+
+9.2.1.1     Error-free procedures
+
+9.2.1.1.1 During the 75 ± 5 ms silent period ending Phase 1, the digital modem shall condition its receiver to receive
+INFO0a and detect Tone A. After the 75 ± 5 ms silent period, the digital modem shall send INFO0d with bit 28 set to 0,
+followed by Tone B.
+
+9.2.1.1.2 After receiving INFO0a, the digital modem shall condition its receiver to detect Tone A, receive INFO0a (see
+9.2.1.2 Recovery procedures) and detect the subsequent Tone A phase reversal.
+
+9.2.1.1.3 After detecting the Tone A phase reversal, the digital modem shall transmit a Tone B phase reversal. The
+Tone B phase reversal shall be delayed so that the time duration between receiving the Tone A phase reversal at the line
+terminals and the appearance of the Tone B phase reversal at the line terminals is 40 ± 1 ms. Tone B shall be transmitted
+for another 10 ms after the phase reversal. The digital modem shall then transmit silence and condition its receiver to
+detect a second Tone A phase reversal.
+
+9.2.1.1.4 After detecting the second Tone A phase reversal, the digital modem has the information required to calculate
+the round-trip delay. The round-trip delay estimate, RTDEd, is the time interval between the appearance of the Tone B
+phase reversal at the digital modem line terminals and receiving the second Tone A phase reversal at the line terminals
+minus 40 ms. The modem shall then condition its receiver to receive the probing signals L1 and L2.
+
+9.2.1.1.5 The digital modem shall receive signal L1 for its 160 ms duration. The digital modem may then receive signal
+L2 for a period of time not to exceed 500 ms. The digital modem shall then transmit Tone B and condition its receiver to
+detect Tone A and the subsequent Tone A phase reversal.
+
+9.2.1.1.6 After detecting Tone A and the subsequent Tone A phase reversal, the digital modem shall transmit a Tone B
+phase reversal. The Tone B phase reversal shall be delayed so that the time duration between receiving the Tone A phase
+reversal at the line terminals and the appearance of the Tone B phase reversal at the line terminals is 40 ± 1 ms. Tone B
+shall be transmitted for an additional 10 ms after the phase reversal. The modem shall then transmit signal L1 followed
+by signal L2 and condition its receiver to detect Tone A.
+
+9.2.1.1.7 After the digital modem detects Tone A and has received the local echo of L2 for a period of time not to
+exceed 550 ms plus a round-trip delay, the digital modem shall send INFO1d.
+
+9.2.1.1.8 After sending INFO1d, the digital modem shall transmit silence and condition its receiver to receive INFO1a.
+After receiving INFO1a, the digital modem shall proceed to Phase 3 of the start-up procedure if bits 37:39 of INFO1a
+indicate the integer 6. If bits 37:39 of INFO1a indicate an integer between 0 and 5, the digital modem shall proceed in
+accordance with 11.3.1.1/V.34 assuming the role of a call modem. Any subsequent retrains shall use Phase 2 of V.90
+regardless of the analogue modem’s choice of operating mode.
+
+
+30           Recommendation V.90                 (09/98)
+9.2.1.2   Recovery procedures
+
+9.2.1.2.1 If, in 9.2.1.1.2 or 9.2.1.1.3, the digital modem detects Tone A before receiving INFO0a, or if it receives
+repeated INFO0a sequences, the digital modem shall repeatedly send INFO0d sequences. The digital modem shall set
+bit 28 of the INFO0d sequence to 1 after correctly receiving INFO0a. If the digital modem receives INFO0a with bit 28
+set to 1, it shall condition its receiver to detect Tone A and the subsequent Tone A phase reversal, complete sending the
+current INFO0d sequence, and then transmit Tone B. Alternatively, if the digital modem detects Tone A and has received
+INFO0a, it shall condition its receiver to detect a Tone A phase reversal, complete sending the current INFO0d sequence,
+and transmit Tone B. In both cases, the digital modem shall then proceed according to 9.2.1.1.3.
+
+9.2.1.2.2 If, in 9.2.1.1.3, the digital modem does not detect the Tone A phase reversal, the digital modem shall continue
+transmitting Tone B until it does detect a Tone A phase reversal.
+
+9.2.1.2.3 If, in 9.2.1.1.4, the digital modem does not detect a Tone A phase reversal within 2000 ms from the phase
+reversal detected during the procedure in 9.2.1.1.3, the digital modem shall transmit silence and condition its receiver to
+detect Tone A. After detecting Tone A, the digital modem shall transmit Tone B and condition its receiver to detect a
+Tone A phase reversal and proceed in accordance with 9.2.1.1.3.
+
+9.2.1.2.4 If, in 9.2.1.1.6, the digital modem does not detect the Tone A phase reversal within 900 ms plus a round-trip
+delay from the phase reversal detected during the procedure defined in 9.2.1.1.4, the modem waits 40 ms, then transmits
+a Tone B phase reversal. Tone B shall be transmitted for an additional 10 ms after the phase reversal. The modem shall
+then transmit signal L1 followed by signal L2, condition its receiver to detect Tone A, and proceed in accordance
+with 9.2.1.1.7.
+
+9.2.1.2.5 If, in 9.2.1.1.7, the digital modem does not detect Tone A within 650 ms plus a round-trip delay from the
+beginning of L2, the digital modem shall initiate a retrain according to 9.5.1.1.
+
+9.2.1.2.6 If, in 9.2.1.1.8, the digital modem does not receive INFO1a within 700 ms plus a round-trip delay from the
+end of INFO1d transmission, the digital modem shall condition its receiver to detect either Tone A or INFOMARKSa.
+Upon detection of INFOMARKSa, the digital modem shall either initiate a retrain according to 9.5.1.1 or send INFO1d
+and proceed in accordance with 9.2.1.1.8. Upon detection of Tone A, the digital modem shall respond to a retrain and
+proceed according to 9.5.1.2.
+
+9.2.2     Analogue modem
+
+9.2.2.1   Error-free procedures
+
+9.2.2.1.1 During the 75 ± 5 ms silent period ending Phase 1, the analogue modem shall condition its receiver to receive
+INFO0d and detect Tone B. After the 75 ± 5 ms silent period, the analogue modem shall send INFO0a with bit 28 set
+to 0, followed by Tone A.
+
+9.2.2.1.2 After receiving INFO0d, the analogue modem shall condition its receiver to detect Tone B and receive
+INFO0d (see 9.2.2.2 Recovery procedures).
+
+9.2.2.1.3 After Tone B is detected and Tone A has been transmitted for at least 50 ms, the analogue modem shall
+transmit a Tone A phase reversal, and condition its receiver to detect a Tone B phase reversal.
+
+9.2.2.1.4 After detecting the Tone B phase reversal, the analogue modem has the information required to calculate the
+round-trip delay. The round-trip delay estimate, RTDEa, is the time interval between sending the Tone A phase reversal
+at the line terminals and receiving the Tone B phase reversal at the line terminals minus 40 ms.
+
+9.2.2.1.5 The analogue modem shall then transmit a Tone A phase reversal. The Tone A phase reversal shall be
+delayed so that the time duration between receiving the Tone B phase reversal at the line terminals and the appearance of
+the Tone A phase reversal at the line terminals is 40 ± 1 ms. Tone A shall be transmitted for 10 ms after the phase
+reversal. Then the analogue modem shall transmit signal L1 followed by signal L2 and condition its receiver to detect
+Tone B.
+
+9.2.2.1.6 When Tone B is detected and the analogue modem has received the local echo of L2 for a period of time not
+to exceed 550 ms plus a round-trip delay, the analogue modem shall transmit Tone A for 50 ms followed by a Tone A
+phase reversal. Tone A shall be transmitted for an additional 10 ms after the phase reversal. Then the analogue modem
+shall transmit silence and condition its receiver to detect a Tone B phase reversal.
+
+
+                                                                           Recommendation V.90         (09/98)          31
+9.2.2.1.7 After detecting the Tone B phase reversal, the analogue modem shall condition its receiver to receive the
+probing signals L1 and L2.
+
+9.2.2.1.8 The analogue modem shall receive signal L1 for its 160 ms duration. The analogue modem may then receive
+signal L2 for a period of time not to exceed 500 ms. The analogue modem shall then transmit Tone A and condition its
+receiver to receive INFO1d.
+
+9.2.2.1.9 After receiving INFO1d, the analogue modem shall send INFO1a using bits 37:39 to indicate its choice of
+V.90 mode or V.34 mode. After sending INFO1a, the analogue modem shall proceed to either Phase 3 of the start-up
+procedure or 11.3.1.2/V.34 assuming the role of an answer modem. Any subsequent retrains shall use Phase 2 of V.90
+regardless of the analogue modem’s choice of operating mode.
+
+9.2.2.2   Recovery procedures
+
+9.2.2.2.1 If, in 9.2.2.1.2, 9.2.2.1.3, or 9.2.2.1.4, the analogue modem detects Tone B before correctly receiving
+INFO0d, or if it receives repeated INFO0d sequences, the analogue modem shall repeatedly send INFO0a. The analogue
+modem shall set bit 28 of the INFO0a sequence to 1 after correctly receiving INFO0d. If the analogue modem receives
+INFO0d with bit 28 set to 1, it shall condition its receiver to detect Tone B, complete the current INFO0a, and then
+transmit Tone A. Alternatively, if the analogue modem detects Tone B and has received INFO0d, it shall complete the
+current INFO0a, and transmit Tone A. In both cases, the analogue modem shall then proceed according to 9.2.2.1.3.
+
+9.2.2.2.2 If, in 9.2.2.1.4, the analogue modem does not detect the Tone B phase reversal within 2000 ms, the analogue
+modem shall condition its receiver to detect Tone B and then proceed according to 9.2.2.1.3.
+
+9.2.2.2.3 If, in 9.2.2.1.6, the analogue modem does not detect Tone B within 600 ms plus a round-trip delay from the
+beginning of L2, it shall condition its receiver to detect Tone B and transmit Tone A. It shall then proceed according
+to 9.2.2.1.3.
+
+9.2.2.2.4 If, in 9.2.2.1.9, the analogue modem does not receive INFO1d within 2000 ms plus two round-trip delays
+from the detection of Tone B during the procedure defined in 9.2.2.1.6, the modem shall either initiate a retrain
+according to 9.5.2.1 or send INFOMARKSa until it receives INFO1d or detects Tone B. If Tone B is detected, the
+analogue modem shall proceed according to 9.2.2.1.3. If INFO1d is received, the analogue modem shall then proceed
+according to 9.2.2.1.9.
+
+
+9.3       Phase 3 – Equaliser and echo canceller training and digital impairment learning
+
+Equaliser and echo canceller training and digital impairment learning are performed in Phase 3 of the start-up procedure.
+The description below (see Figures 5 and 6) details the procedures in the digital and analogue modems.
+
+9.3.1     Digital modem
+
+The digital modem may initiate a retrain during Phase 3 according to 9.5.1.1. If Tone A is detected during Phase 3, the
+digital modem shall respond to retrain according to 9.5.1.2.
+
+9.3.1.1 The digital modem shall be initially silent and condition its receiver to detect S and the subsequent S . If the
+duration of signal MD indicated by INFO1a is zero, the digital modem shall proceed according to 9.3.1.2. Otherwise,
+after detecting the S- to - S transition, the digital modem shall wait for the duration of signal MD as indicated by INFO1a
+and then shall condition its receiver to receive signal S and the S- to - S transition.
+
+9.3.1.2 After detecting signal S and the S- to - S transition, the digital modem shall condition its receiver to begin
+training its equaliser using signal PP. After receiving signal PP, the digital modem may further refine its equaliser using
+the first 512T of signal TRN.
+
+9.3.1.3 After receiving the first 512T of signal TRN, the digital modem shall condition its receiver to receive sequence
+Ja. After receiving Ja, the digital modem may wait for up to 500 ms and shall then transmit signal Sd for 384T and
+signal Sd for 48T.
+
+9.3.1.4 The digital modem shall then transmit TRN1d for a minimum of 2040T. Within 4000 ms of starting to transmit
+TRN1d the digital modem shall transmit Jd and condition its receiver to detect signal S and the S- to - S transition.
+
+
+32         Recommendation V.90         (09/98)
+                                                                                 107
+
+                                                         384T ≤ 2040T        12T
+
+
+
+           Digital
+                                                             Sd SdTRN1d Jd Jd′          DIL
+           modem
+
+                                            ≤ 500 ms
+                                                                48T
+
+
+                         128T                                                     16T      128T
+
+
+           Analogue
+           modem          S S MD S S PP TRN             Ja                    S S       SCR     S S
+
+
+                                                                                                              T1604770-98/d05
+                           16T               ≥ 512T               ≤ 5s                  ≤ 5s         16T
+
+
+                                                                                  107
+
+
+                                Figure 5/V.90 – Phase 3 – Equaliser and echo canceller
+                                       training and digital impairment learning
+
+
+FIGURE 5/V.90...[D05] = 3 CM
+
+
+
+
+                                                                                          107
+
+                                                                   384T     ≤ 2040T       12T
+
+
+
+              Digital
+              modem                                                    Sd Sd TRN1d Jd J d′
+
+
+                                                      ≤ 500 ms
+                                                                           48T
+
+
+
+                           128T                                                                16T
+
+
+              Analogue
+              modem          S S MD      S S   PP     TRN         Ja                      S     S
+
+
+
+
+                                 16T                ≥ 512T                       ≤ 5s
+
+
+                                                                                               107         T1604780-98/d06
+
+
+
+                         Figure 6/V.90 – Phase 3 – Equaliser and echo canceller training
+                                        when no DIL has been requested
+
+
+FIGURE 6/V.90...[D06] = 3 CM
+
+
+
+
+                                                                                 Recommendation V.90                  (09/98)   33
+9.3.1.5 The digital modem shall continue to repeat the Jd sequence until it detects S. It shall then complete the current
+Jd sequence and then transmit Jd′. If the digital modem does not detect S within 5100 ms plus a round-trip delay from
+the start of TRN1d, it shall initiate a retrain according to 9.5.1.1. If the analogue modem has requested a DIL of length
+zero, the digital modem shall proceed to Phase 4 of the start-up procedure. Otherwise, the digital modem shall proceed
+according to 9.3.1.6.
+
+9.3.1.6 The digital modem shall send the DIL requested by the analogue modem. After receiving a subsequent
+S- to - S transition, the digital modem shall complete sending the current segment of the DIL and proceed to Phase 4 of
+the start-up procedure.
+
+NOTE – Since this Recommendation does not specify the turnaround time in the analogue modem from the Jd to Jd′ transition to the
+S -to -S transition, failure by the digital modem to detect both S -to -S transitions may result in the premature termination of DIL.
+
+
+9.3.2     Analogue modem
+
+The analogue modem may initiate a retrain during Phase 3 according to 9.5.2.1. If Tone B is detected during Phase 3, the
+analogue modem shall respond to retrain according to 9.5.2.2.
+
+9.3.2.1 After sending sequence INFO1a, the analogue modem shall transmit silence for 70 ± 5 ms, signal S for 128T
+and signal S for 16T. If the duration of the analogue modem’s MD signal, as indicated in the INFO1a, is zero, the
+modem shall proceed according to 9.3.2.2. Otherwise, the modem shall transmit signal MD for the duration indicated in
+INFO1a, signal S for 128T, and signal S for 16T.
+
+9.3.2.2   The analogue modem shall then transmit signal PP.
+
+9.3.2.3 After transmitting signal PP, the modem shall transmit signal TRN. Signal TRN consists of four constellation
+points and shall be transmitted for at least 512T. The total time from the beginning of transmission of signal MD to the
+end of signal TRN shall not exceed one round-trip delay plus 4000 ms.
+
+9.3.2.4 After transmitting signal TRN, the modem shall send sequence Ja and condition its receiver to detect
+signal Sd and the Sd - to - Sd transition. After detecting the Sd - to - Sd transition, the modem shall terminate Ja and
+transmit silence. If the analogue modem does not detect the Sd - to - Sd transition within 1500 ms from the start of Ja,
+the analogue modem shall initiate a retrain according to 9.5.2.1.
+
+9.3.2.5 The modem shall condition its receiver to begin its equaliser training using signal the first 2040T of
+signal TRN1d.
+
+9.3.2.6   After receiving the first 2040T of signal TRN 1d, the modem shall condition its receiver to receive sequence Jd.
+
+9.3.2.7 After receiving Jd, the analogue modem may wait for up to 5000 ms from having begun to transmit silence as
+required in the procedure in 9.3.2.4 and shall then begin transmitting signal S and condition its receiver to detect Jd′ . If
+the analogue modem does not receive Jd within 4500 ms from the end of Ja, the analogue modem shall initiate a retrain
+according to 9.5.2.1.
+
+9.3.2.8 After detecting Jd′ , the analogue modem shall transmit S for 16T. If the analogue modem requested a DIL of
+zero length it shall proceed with Phase 4 of the start-up procedure. Otherwise it shall proceed in accordance with 9.3.2.9.
+
+9.3.2.9 The analogue modem shall receive the DIL sequence it requested in Ja. During the reception of DIL the
+analogue modem shall transmit either silence or SCR at its discretion.
+
+9.3.2.10 Within 5000 ms of transmitting S in 9.3.2.8 the analogue modem shall again transmit signal S for 128T
+followed by S for 16T. This indicates to the digital modem that the analogue modem has received enough of the DIL
+sequence. The analogue modem shall then proceed to Phase 4 of the start-up procedure.
+
+
+9.4       Phase 4 – Final training
+
+See Figure 7.
+
+
+34          Recommendation V.90            (09/98)
+                                                                              106 enable
+
+                                                                                104 unclamp
+
+
+                                                                               109
+                                                ≥ 2040T             48 Data frames
+
+
+                      Digital          Ri   Ri TRN2d MP MP MP′ MP′ Ed B1d            DATA
+                      modem
+
+
+                                                24T
+
+
+
+
+                     Analogue         CPt CPt    SCR CP CP CP′ CP′ E B1              DATA
+                     modem
+
+
+                                                 ≤ 4s
+
+                                                                               109
+
+                                                                                104 unclamp
+
+
+                                                                              106 enable
+                                                                 Start of
+                                                                 superframe            T1604790-98/d07
+
+
+
+
+                                       Figure 7/V.90 – Phase 4 – Final training
+
+FIGURE 7/V.90...[D07] = 3 CM
+
+9.4.1    Digital modem
+
+The digital modem shall initiate a retrain during Phase 4 according to 9.5.1.1 if it does not receive B1 within 15 s plus
+5 round-trip delays after receiving INFO1a in 9.2.1.1.8. The digital modem may initiate a retrain at any time during
+Phase 4 according to 9.5.1.1. If Tone A is detected during Phase 4, the digital modem shall respond to retrain according
+to 9.5.1.2.
+
+9.4.1.1 The digital modem shall send signal Ri for a minimum of 192T and condition its receiver to receive a
+CPt sequence.
+
+9.4.1.2 After receiving a CPt sequence, the digital modem shall send signal Ri for 24T followed by TRN2d for a
+minimum of 2040T.
+
+9.4.1.3 Within 2000 ms of beginning to transmit TRN2d, the digital modem shall send MP sequences. After receiving
+the analogue modem’s CP sequence, the digital modem shall complete sending the current MP sequence, and then send
+MP′ sequences (MP sequences with the acknowledge bit set).
+
+9.4.1.4 The digital modem shall continue sending MP sequences until it has sent an MP′ sequence and received a CP′
+or a 20-bit E from the analogue modem. The digital modem shall then complete the current MP′ sequence and send a
+single Ed sequence.
+
+9.4.1.5 After sending the Ed sequence, the digital modem shall send B1d at the negotiated data signalling rate using the
+data mode constellation parameters it received in CP. The modem shall then enable circuit 106 to respond to the
+condition of circuit 105 and begin data transmission using the modulation procedures of 5.4.
+
+9.4.1.6 After receiving a 20-bit E sequence, the digital modem shall condition its receiver to receive B1. After
+receiving B1, the digital modem shall unclamp circuit 104, turn on circuit 109, and begin demodulating data.
+
+
+                                                                          Recommendation V.90            (09/98)      35
+9.4.2     Analogue modem
+
+The analogue modem shall initiate a retrain during Phase 4 according to 9.5.2.1 if it does not receive B1d within 15 s
+plus 5 round-trip delays after sending INFO1a in 9.2.2.1.9. The analogue modem may initiate a retrain at any time during
+Phase 4 according to 9.5.2.1. If Tone B is detected during Phase 4, the analogue modem shall respond to retrain
+according to 9.5.2.2.
+
+9.4.2.1 The analogue modem shall send CPt sequences containing the constellation parameters that the digital modem
+shall use during Phase 4 training and rate renegotiations. The analogue modem shall also condition its receiver to detect
+an R i - to - R i transition.
+
+9.4.2.2 After detecting an R i - to - R i transition, the analogue modem completes the current CPt sequence and
+optionally transmits SCR for no more than 4000 ms.
+
+9.4.2.3 The analogue modem shall send CP sequences containing the constellation parameters that the digital modem
+shall use during data mode. After receiving the digital modem’s MP sequence, the analogue modem shall complete
+sending the current CP sequence, and then send CP′ sequences (CP sequences with the acknowledge bit set).
+
+9.4.2.4 The analogue modem shall continue sending CP sequences until it has sent a CP′ sequence and received
+an MP′ or Ed from the digital modem. The analogue modem shall then complete the current CP′ sequence and send the
+20-bit E sequence. The analogue modem shall condition its transmitter to transmit at a data signalling rate that is the
+maximum rate enabled in both modems that is less than or equal to the maximum analogue to digital modem data
+signalling rate specified in the MP sequence.
+
+9.4.2.5 After sending the 20-bit E sequence, the analogue modem shall send B1 at the negotiated data signalling rate
+using the data mode modulation parameters. The analogue modem shall then enable circuit 106 to respond to the
+condition of circuit 105, start a new superframe, and begin data transmission using the modulation procedures of
+clause 6.
+
+9.4.2.6 After receiving an Ed sequence, the analogue modem conditions its receiver to receive B1d. After
+receiving B1d, the analogue modem shall unclamp circuit 104, turn on circuit 109, and begin demodulating data.
+
+
+9.5       Retrains
+
+9.5.1     Digital modem
+
+9.5.1.1   Initiating retrain
+
+To initiate a retrain, the digital modem shall turn OFF circuit 106, clamp circuit 104 to binary one and transmit silence
+for 70 ± 5 ms. The digital modem shall then transmit Tone B and condition its receiver to detect Tone A. After detecting
+Tone A, the digital modem shall condition its receiver to detect a Tone A phase reversal and proceed in accordance
+with 9.2.1.1.3.
+
+9.5.1.2   Responding to retrain
+
+After detecting Tone A for more than 50 ms, the digital modem shall turn OFF circuit 106, clamp circuit 104 to binary
+one and transmit silence for 70 ± 5 ms. The digital modem shall then transmit Tone B, condition its receiver to detect a
+Tone A phase reversal, and proceed in accordance with 9.2.1.1.3.
+
+9.5.2     Analogue modem
+
+9.5.2.1   Initiating retrain
+
+To initiate a retrain, the analogue modem shall turn OFF circuit 106, clamp circuit 104 to binary one and transmit silence
+for 70 ± 5 ms. The analogue modem shall then transmit Tone A and condition its receiver to detect Tone B. After
+detecting Tone B and when Tone A has been transmitted for at least 50 ms, the analogue modem shall transmit a Tone A
+phase reversal, condition its receiver to detect a Tone B phase reversal and proceed according to 9.2.2.1.4.
+
+
+36         Recommendation V.90        (09/98)
+9.5.2.2   Responding to retrain
+
+After detecting Tone B for more than 50 ms, the analogue modem shall turn OFF circuit 106, clamp circuit 104 to binary
+one and transmit silence for 70 ± 5 ms. The analogue modem shall then transmit Tone A and proceed in accordance
+with 9.2.2.1.3.
+
+
+9.6       Rate renegotiation
+
+The rate renegotiation procedure can be initiated at any time during data mode. Data signalling rate and spectral shaping
+parameters may change as a result of rate renegotiation. This procedure can also be used to retrain the analogue
+modem’s echo canceller without going through a complete retrain. Only the analogue modem can request this second
+procedure.
+
+The digital modem’s transmitter and the analogue modem’s receiver shall maintain data frame synchronization during
+rate renegotiation. Rate renegotiation shall be initiated by the digital modem’s transmitter only on the boundary of a data
+frame. Similarly, a digital modem’s transmitter shall only respond to a rate renegotiation on the boundary of a data
+frame.
+
+9.6.1     Digital modem
+
+The digital modem shall initiate a retrain according to 9.5.1.1 if it does not receive an E sequence within 5000 ms plus
+2 round-trip delays after transmitting the Rd - to - Rd transition. The digital modem may initiate a retrain at any time
+during a rate renegotiation according to 9.5.1.1. If Tone A is detected during a rate renegotiation, the digital modem
+shall respond to retrain according to 9.5.1.2 (see Figure 8).
+
+
+
+                                        384T               ≤ 2s
+
+
+              Digital
+              modem          DATA         Rd   Rd      TRN2d       MP MP MP′ MP′ Ed B1d        DATA
+
+
+
+                                                24T
+
+                                                     16T
+
+              Analogue
+              modem          DATA                S     S    SCR    CP CP CP′ CP′ E B1          DATA
+
+                                                                                                 T1604800-98/d08
+
+                                                128T        ≤ 2s
+
+
+                    Figure 8/V.90 – Rate renegotiation procedure initiated by the digital modem
+
+FIGURE 8/V.90...[D08] = 3 CM
+
+9.6.1.1   Initiating a rate renegotiation
+
+9.6.1.1.1 The digital modem shall turn OFF circuit 106, condition its receiver to detect S , S , and CP, and transmit
+signal Rd for 384T and Rd for 24T. The signal Rd shall begin on the boundary of a data frame. After transmitting Rd ,
+the digital modem shall optionally transmit TRN2d for no more than 2000 ms followed by MP sequences and shall
+condition its receiver to receive CP sequences. The digital modem shall then proceed in accordance with 9.6.1.2.3.
+
+9.6.1.2   Responding to a rate renegotiation
+
+9.6.1.2.1 After detecting S, the digital modem shall clamp circuit 104 to binary one and condition its receiver to detect
+the S-to- S transition.
+
+
+                                                                             Recommendation V.90        (09/98)         37
+9.6.1.2.2 After detecting the S-to- S transition, the digital modem shall transmit signal Rd for 384T and Rd , for 24T
+and condition its receiver to receive CP. The signal Rd shall begin on the boundary of a data frame. After
+transmitting Rd , the digital modem shall optionally transmit TRN2d for no more than 2000 ms followed by
+MP sequences.
+
+9.6.1.2.3 After receiving a CP sequence, the digital modem shall send MP′ sequences and proceed in accordance
+with 9.4.1.4, unless bit 30 of the CP sequence is set (a CPs sequence), in which case it proceeds in accordance
+with 9.6.1.2.4.
+
+9.6.1.2.4 The digital modem shall transmit MP′ sequences until it receives a CPs′ sequence.
+
+9.6.1.2.5 After receiving a CPs′ sequence, the digital modem shall complete sending the current MP′ and transmit Ed
+followed by silence. The digital modem shall generate silence by sending PCM codewords with magnitudes represented
+by Ucode 0. It shall retain data frame alignment during this period of silence.
+
+9.6.1.2.6 After receiving a CP sequence with bit 30 clear, the digital modem shall transmit signal Rt for 384T and Rt
+for 24T. The signal Rt shall begin on the boundary of a data frame. The digital modem shall then start sending
+MP sequences and proceed in accordance with 9.4.1.4.
+
+9.6.2     Analogue modem
+
+The analogue modem shall initiate a retrain according to 9.5.2.1 if it does not receive Ed within 5000 ms plus
+2 round-trip delays after sending the S - to -S transition. The analogue modem may initiate a retrain at any time during a
+rate renegotiation according to 9.5.2.1. If Tone B is detected during a rate renegotiation, the analogue modem shall
+respond to retrain according to 9.5.2.2 (see Figure 9).
+
+
+
+                                            384T         ≤ 2s
+
+
+             Digital          DATA           Rd Rd TRN2d        MP MP MP′ MP′ Ed B1d        DATA
+             modem
+
+
+                                                   24T
+
+
+                                                   16T
+              Analogue       DATA      S S          SCR         CP CP CP′ CP′ E   B1        DATA
+              modem
+
+                                                                                                T1604810-98/d09
+
+                                     128T           ≤ 2s
+
+
+                         Figure 9/V.90 – Rate renegotiation initiated by the analogue modem
+
+FIGURE 9/V.90...[D09] = 3 CM
+
+9.6.2.1   Initiating a rate renegotiation
+
+9.6.2.1.1 The analogue modem shall turn OFF circuit 106, transmit signal S for 128T and condition its receiver to
+detect signal Rd and the Rd - to - Rd transition.
+
+9.6.2.1.2 The analogue modem shall transmit signal S for 16T followed by an optional signal SCR for no more than
+2000 ms.
+
+9.6.2.1.3 The analogue modem shall then send CP sequences. If the analogue modem wishes to recondition its echo
+canceller, it shall send CPs sequences.
+
+9.6.2.1.4 After detecting the Rd - to - R d transition, the analogue modem shall condition its receiver to receive
+MP sequences, continue transmitting CP and proceed in accordance with 9.4.2.3, unless it is sending a CPs sequence, in
+which case it shall proceed in accordance with 9.6.2.1.5.
+
+
+38         Recommendation V.90        (09/98)
+9.6.2.1.5 After receiving the digital modem’s MP sequence, the analogue modem shall complete sending the current
+CPs sequence, and then send CPs′ sequences (CPs sequences with the acknowledge bit set).
+
+9.6.2.1.6 After detecting Ed, the analogue modem shall complete sending the current CPs′ and send signal SCR until it
+has reconditioned its echo canceller, but for no more than 1000 ms.
+
+9.6.2.1.7 The analogue modem shall send CP sequences with bit 30 clear and condition its receiver to detect signal Rt
+and the Rt - t o - R t transition.
+
+9.6.2.1.8 After detecting the Rt - t o - R t transition, the analogue modem shall condition its receiver to receive
+MP sequences, continue transmitting CP and proceed in accordance with 9.4.2.3. (See Figure 10).
+
+
+
+                                   24T     ≤ 2s                                     24T
+                        384T                                              384T
+
+ Digital
+ modem          DATA             Rd Rd TRN2d      MP MP′ MP′ Ed                   Rt Rt MP MP′ MP′ Ed B1d               DATA
+
+
+
+
+                                    16T
+ Analogue
+                DATA        S S     SCR      CPs CPs CP s′ CP s′ CP s′ SCR CP    CP CP     CP CP′ CP′ E      B1         DATA
+ modem
+
+                                                                                                                    T1604820-98/d10
+
+                          128T      ≤ 2s                             ≤ 1s
+
+
+
+                  Figure 10/V.90 – Rate renegotiation initiated by the analogue modem with silence requested
+
+FIGURE 10/V.90...[D10] = 3 CM
+
+9.6.2.2     Responding to a rate renegotiation
+
+9.6.2.2.1 After receiving Rd , the analogue modem shall clamp circuit 104 to binary one and shall condition its receiver
+to detect the Rd - to - Rd transition.
+
+9.6.2.2.2 After receiving the Rd - to - Rd transition, the analogue modem shall condition its receiver to receive MP,
+and transmit S for 128T.
+
+9.6.2.2.3 The analogue modem shall then transmit S for 16T followed by an optional signal SCR for no more than
+2000 ms.
+
+9.6.2.2.4 The analogue modem shall then proceed in accordance with 9.6.2.1.3.
+
+
+9.7         Cleardown
+The cleardown procedure shall be used to terminate a connection. Cleardown is indicated by setting drn to 0 in either CP
+by the analogue modem or MP by the digital modem. This may be signalled at any time that a modem sends a rate
+sequence. To cleardown from data mode, a modem shall initiate a rate renegotiation according to 9.6 in order to send a
+rate sequence with drn = 0.
+NOTE – The transmit and receive constellation fields of a CP sequence with drn = 0 should be ignored in the digital modem.
+
+
+
+10          Testing facilities
+Testing facilities as specified in other V-series modem Recommendations cannot be used for this Recommendation.
+Appropriate testing facilities are for further study.
+
+
+                                                                                 Recommendation V.90          (09/98)             39
+11           Glossary
+$i              Sign bits output from the spectral shaper
+
+α, β, γ, δ      Variables used to define bit positions in Ja and CP
+
+a1, a2          Parameters in the spectral shape filter
+Ai              A parameter used to calculate ni,j
+b0-bK–1         The bits input to the modulus encoder
+b1, b 2         Parameters in the spectral shape filter
+
+c               An index to each G.711 A-law or µ-law code segment
+
+Ci              Mi PCM codes that make up the positive constellation points of data frame interval I
+
+D               Total number of input data bits (K + S)
+
+d0-dD–1         The input data bits
+drn             A parameter used in determining the downstream data signalling rate
+F(z)            The characteristic of the spectral shape filter
+h()             A precoding coefficient
+Hc              A parameter used in determining the length of a DIL-segment
+i               The time index of the data frame interval, from 0 to 5
+j               An index to a spectral shaping frame
+j               A general index
+K               The number of modulus encoder input data bits per data frame
+k               A general index
+Ki              The output of the modulus encoder used in data frame interval i
+Lc              The length of a DIL-segment
+ld              The look-ahead depth
+LSP             The length of SP
+LTP             The length of TP
+Mi              Number of members of the PCM code set used in data frame interval i
+n               A general index
+N               The number of DIL-segments
+ni,j            A parameter related to the number of occurrences of a particular PCM code
+
+p j′(k)         A differentially encoded intermediate bit in the spectral shaper
+
+PCMi            A signed PCM codeword
+pi(k)           An input bit to the spectral shaper
+pi,j            A parameter related to the power of a particular PCM code
+Qj              The state of the trellis used in the spectral shaper
+R0              The integer formed for input to the modulus encoder
+REFc            A reference PCM codeword
+Ri+1            Quotients Remainders generated during modulus encoding
+
+
+40           Recommendation V.90          (09/98)
+S                 The number of spectral shaper input data bits per data frame
+
+s0-sS–1           The bits input to the spectral shaper
+
+SP                A sign pattern
+
+Sr                The number of PCM code sign bits per data frame used as redundancy for spectral shaping
+
+T(z)              The transfer function of the spectral shape filter
+
+tj(k)             An intermediate bit in the spectral shaper
+
+TP                A training pattern
+
+Ui                The constellation point labelled by Ki
+
+v[n]              The output of the spectral shape filter
+
+W                 A PCM codeword used in signal Sd
+
+w[n]              The spectral shaping metric
+
+x[n]              The spectral shape filter input
+
+y[n]              An intermediate value in the spectral shaping metric calculation
+
+z                 A general index
+
+
+
+
+                                                            Appendix I
+
+                                                            Overview
+
+
+Unlike previous modem Recommendations, this Recommendation defines a method for signalling between a modem
+connected to an analogue loop (the analogue modem) and a modem connected to a digital trunk (the digital modem).
+Although analogue modem Recommendations, such as V.34, have been implemented in this fashion for many years, this
+Recommendation takes advantage of this particular arrangement to increase the data signalling rate from the digital
+modem towards the analogue modem. The signalling method in this direction is a newly defined baseband scheme that
+utilizes the frequency band from 0 to 4 kHz. This Recommendation allows for spectral shaping to be employed to help
+the analogue modem combat the effects of the transformers and filters used in the digital-to-analogue conversion. Since
+this is for the benefit of the analogue modem, it is the analogue modem that requests the spectral shaping parameters to
+be used and so the optimum spectral shape is implementation dependent. In the direction from the analogue modem
+towards the digital modem, standard V.34 techniques are employed with the usual transmit and receive level
+considerations. An example network configuration is shown in Figure I.1.
+
+
+
+
+                         ISDN
+
+        Digital                                                                  Linecard     Local loop        Analogue
+                                          Digital                      Digital     with                           PCM
+         PCM
+                                        transport                      switch     codecs                         modem
+        modem
+                         T1/E1                                                                                   T1604830-99/d11
+
+
+
+                                       Figure I.1/V.90 – Example network configuration
+
+FIGURE I.1/V.90...[D11] = 3 CM
+
+
+                                                                                 Recommendation V.90       (09/98)           41
+

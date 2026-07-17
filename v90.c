@@ -52,9 +52,10 @@
 #define V90_SD_REPS     64
 #define V90_SD_BAR_REPS 8
 
-/* TRN1d: multiple of 6 symbols; spec requires ≥2040T (§9.3.1.4).
- * Use 2046 = 341×6, nearest multiple of 6 above 2040. */
-#define V90_TRN1D_LEN   2046
+/* TRN1d: the spec requires ≥2040T (§9.3.1.4), and 2040 is already
+ * exactly 340 six-symbol data frames.  Start Jd immediately afterward so
+ * the receiver's reference-Ucode acquisition is not fed extra TRN1d signs. */
+#define V90_TRN1D_LEN   2040
 
 /* The decoded Ja event is the standards-driven trigger for downstream Sd.
  * Retain a deliberately late 3 s fallback only as a last-resort guard against
