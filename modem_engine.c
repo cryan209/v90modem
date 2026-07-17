@@ -1398,7 +1398,9 @@ static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 
 /* Handshake timeouts (in milliseconds) */
-#define V8_TIMEOUT_MS       10000   /* V.8 negotiation: 10 seconds */
+#define V8_TIMEOUT_MS       15000   /* V.8 negotiation: 15 s (2003-era
+                                       SmartLink DSPs need ~6 s just to
+                                       validate JM before sending CJ) */
 #define TRAINING_TIMEOUT_MS 30000   /* V.34 training (Phase 2-4): 30 seconds */
 
 /* V.34 RX stage tracking — used for notch filter activation and diagnostics */
@@ -1556,11 +1558,17 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     if (g_advertise_v90) {
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL
-                                               | V8_PSTN_PCM_MODEM_V91;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+        /* Advertising V8_PSTN_PCM_MODEM_V91 here makes 2003-era SmartLink
+           V.8 parsers (slmodemd dsplibs) discard the whole JM; keep the
+           interop-safe subset unless ME_V8_ADVERTISE_V91 is set. */
+        if (getenv("ME_V8_ADVERTISE_V91"))
+            v8_parms.jm_cm.pcm_modem_availability |= V8_PSTN_PCM_MODEM_V91;
     } else {
         v8_parms.jm_cm.pstn_access            = 0;
-        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V91;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
+        if (getenv("ME_V8_ADVERTISE_V91"))
+            v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V91;
     }
     v8_parms.jm_cm.nsf                = -1;
     v8_parms.jm_cm.t66                = -1;

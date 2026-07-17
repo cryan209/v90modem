@@ -956,11 +956,14 @@ static void send_cm_jm(v8_state_t *s)
     if (protocols)
         buf[ptr++] = (protocols << 5) | V8_PROTOCOLS_TAG;
     /*endif*/
-    if (s->parms.jm_cm.pstn_access)
-        buf[ptr++] = (s->parms.jm_cm.pstn_access << 5) | V8_PSTN_ACCESS_TAG;
-    /*endif*/
+    /* Real-world RAS gear (and the strict 2003-era SmartLink V.8 parser)
+       sends/expects the PCM-modem-availability octet before the GSTN-access
+       octet; captured field JMs are "... 47 8D", not "... 8D 47". */
     if (s->parms.jm_cm.pcm_modem_availability)
         buf[ptr++] = (s->parms.jm_cm.pcm_modem_availability << 5) | V8_PCM_MODEM_AVAILABILITY_TAG;
+    /*endif*/
+    if (s->parms.jm_cm.pstn_access)
+        buf[ptr++] = (s->parms.jm_cm.pstn_access << 5) | V8_PSTN_ACCESS_TAG;
     /*endif*/
     if (s->parms.jm_cm.t66 >= 0)
         buf[ptr++] = (s->parms.jm_cm.t66 << 5) | V8_T66_TAG;
@@ -1344,8 +1347,10 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 {
                     /* Stop sending ANSam or ANSam/ and send JM instead */
                     fsk_tx_init(&s->v21tx, &preset_fsk_specs[FSK_V21CH2], get_bit, s);
-                    /* Set the timeout for JM */
-                    s->negotiation_timer = milliseconds_to_samples(5000);
+                    /* Set the timeout for JM.  Older analogue softmodem DSPs
+                       (2003-era SmartLink) can take 5-6s to validate JM before
+                       they answer with CJ; 5s loses the race, so allow 10s. */
+                    s->negotiation_timer = milliseconds_to_samples(10000);
                     s->state = V8_JM_ON;
                     conditionally_send_v92(s);
                     send_cm_jm(s);
