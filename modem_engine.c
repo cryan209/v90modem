@@ -25,6 +25,7 @@
 #include "clock_recovery.h"
 #include "v90.h"
 #include "v91.h"
+#include "v90_cp_live.h"
 #include "v90_cp_rx.h"
 #include "v92_cp_rx.h"
 #include "v92_trn2u.h"
@@ -622,6 +623,25 @@ static int            g_last_v90_bridge_rx_event = -1;
 static v90_dil_desc_t g_v90_pending_dil;
 static bool           g_v90_pending_dil_valid = false;
 static uint64_t       g_phase_start_ms = 0;
+
+/* Independent strict V.90 CP receiver.  SpanDSP remains the primary live
+ * path; this worker snapshots the unfiltered upstream PCM and runs the same
+ * CRC-selected front end that recovered the hardware capture offline.  It
+ * never runs on the PJSIP media callback. */
+#define V90_CP_LIVE_MAX_SAMPLES (40 * 8000)
+static pthread_mutex_t g_v90_cp_live_mtx;
+static pthread_cond_t  g_v90_cp_live_cond;
+static pthread_t       g_v90_cp_live_thread;
+static bool            g_v90_cp_live_thread_started = false;
+static bool            g_v90_cp_live_shutdown = false;
+static bool            g_v90_cp_live_pending = false;
+static bool            g_v90_cp_live_running = false;
+static int16_t         g_v90_cp_live_samples[V90_CP_LIVE_MAX_SAMPLES];
+static int             g_v90_cp_live_sample_count = 0;
+static int             g_v90_cp_live_phase4_hint = -1;
+static int             g_v90_cp_live_next_request = -1;
+static int             g_v90_cp_live_expected_compatibility = 0;
+static unsigned        g_v90_cp_live_generation = 0;
 
 /* V.91 symmetric raw-G.711 startup and data path.
  *
@@ -1688,7 +1708,81 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 /* Forward declarations */
 static void start_v22bis_training(void);
 static void v34_put_aux_bit_cb(void *user_data, int bit);
+static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
+                                      const char *source);
 void me_hangup(void);
+
+static void v90_cp_live_capture_reset_locked(void)
+{
+    pthread_mutex_lock(&g_v90_cp_live_mtx);
+    g_v90_cp_live_generation++;
+    g_v90_cp_live_sample_count = 0;
+    g_v90_cp_live_phase4_hint = -1;
+    g_v90_cp_live_next_request = -1;
+    g_v90_cp_live_expected_compatibility = 0;
+    g_v90_cp_live_pending = false;
+    pthread_mutex_unlock(&g_v90_cp_live_mtx);
+}
+
+static void v90_cp_live_capture_append(const int16_t *samples, int count)
+{
+    int available;
+
+    if (!samples || count <= 0 || !g_v90_cp_live_thread_started)
+        return;
+    pthread_mutex_lock(&g_v90_cp_live_mtx);
+    available = V90_CP_LIVE_MAX_SAMPLES - g_v90_cp_live_sample_count;
+    if (count > available)
+        count = available;
+    if (count > 0) {
+        memcpy(g_v90_cp_live_samples + g_v90_cp_live_sample_count,
+               samples,
+               (size_t)count * sizeof(*samples));
+        g_v90_cp_live_sample_count += count;
+    }
+    if (!g_v90_cp_live_shutdown
+        && g_v90_cp_live_phase4_hint >= 0
+        && g_v90_cp_live_next_request >= 0
+        && g_v90_cp_live_sample_count >= g_v90_cp_live_next_request
+        && !g_v90_cp_live_pending
+        && !g_v90_cp_live_running) {
+        g_v90_cp_live_pending = true;
+        g_v90_cp_live_next_request = -1;
+        pthread_cond_signal(&g_v90_cp_live_cond);
+    }
+    pthread_mutex_unlock(&g_v90_cp_live_mtx);
+}
+
+/* Called at the exact downstream DIL->Ri transition with g_state_mtx held. */
+static void v90_cp_live_note_phase4_hint_locked(void)
+{
+    pthread_mutex_lock(&g_v90_cp_live_mtx);
+    g_v90_cp_live_phase4_hint = g_v90_cp_live_sample_count;
+    g_v90_cp_live_expected_compatibility = 0;
+    /* Wait 400 ms.  The reference SmartLink repeats CPt across this window,
+     * leaving a complete frame in the snapshot even with callback skew. */
+    g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 3200;
+    pthread_mutex_unlock(&g_v90_cp_live_mtx);
+    ME_LOG("[ME] V.90 strict batch CP receiver armed at upstream sample %d\n",
+           g_v90_cp_live_phase4_hint);
+}
+
+/* Called after an actually accepted strict frame with g_state_mtx held. */
+static void v90_cp_live_mark_accepted_locked(const vpcm_cp_diag_t *diag)
+{
+    if (!diag)
+        return;
+    pthread_mutex_lock(&g_v90_cp_live_mtx);
+    if (diag->frame.v90_compatibility
+        && diag->frame.acknowledge) {
+        /* CP' is the last Table-14 frame needed during startup. */
+        g_v90_cp_live_next_request = -1;
+    } else {
+        g_v90_cp_live_expected_compatibility = 1;
+        g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 3200;
+    }
+    pthread_mutex_unlock(&g_v90_cp_live_mtx);
+}
 
 static void v90_dil_capture_reset(void)
 {
@@ -1706,26 +1800,39 @@ static void v90_dil_capture_reset(void)
     memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
 }
 
-/* Runs synchronously inside v34_rx() while g_state_mtx is already held. */
-static void v90_live_cp_frame(void *user_data, const vpcm_cp_diag_t *diag)
+/* Runs with g_state_mtx held, either synchronously inside v34_rx() or from
+ * the independent strict batch receiver after its worker reacquires state. */
+static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
+                                      const char *source)
 {
     bool accepted;
 
-    (void)user_data;
     if (!diag || !g_v90 || g_mod != ME_MOD_V90)
-        return;
+        return false;
     accepted = v90_set_phase4_cp(g_v90, &diag->frame)
         && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
-    ME_LOG("[ME] V.90 strict RX event=CP_VALID kind=%s bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
+    ME_LOG("[ME] V.90 strict RX event=CP_VALID source=%s kind=%s bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
+           source ? source : "unknown",
            diag->frame.v90_compatibility ? "CP" : "CPt",
            diag->nbits,
            (unsigned)diag->frame.drn,
            diag->frame.acknowledge ? 1 : 0,
            (unsigned)diag->frame.constellation_count,
            accepted ? 1 : 0);
-    trace_phase("V90 strict RX event=CP_VALID kind=%s bits=%d drn=%u accepted=%d",
+    trace_phase("V90 strict RX event=CP_VALID source=%s kind=%s bits=%d drn=%u accepted=%d",
+                source ? source : "unknown",
                 diag->frame.v90_compatibility ? "CP" : "CPt",
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
+    if (accepted)
+        v90_cp_live_mark_accepted_locked(diag);
+    return accepted;
+}
+
+/* Runs synchronously inside v34_rx() while g_state_mtx is already held. */
+static void v90_live_cp_frame(void *user_data, const vpcm_cp_diag_t *diag)
+{
+    (void)user_data;
+    (void)v90_accept_cp_diag_locked(diag, "spandsp");
 }
 
 static void v90_live_cp_bit(void *user_data, int bit)
