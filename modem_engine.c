@@ -604,6 +604,7 @@ static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
+static bool           g_v90_fallback_v34_logged = false;
 static int            g_v90_phase3_s_events = 0;
 static unsigned        g_v90_phase2_restarts = 0;
 static v90_cp_rx_t    g_v90_cp_rx;
@@ -2050,6 +2051,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
+    g_v90_fallback_v34_logged = false;
     g_v90_phase2_restarts = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
@@ -2102,6 +2104,7 @@ static bool restart_v90_phase2_locked(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
+    g_v90_fallback_v34_logged = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     g_v92_trn2u_active = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
@@ -3665,12 +3668,25 @@ void me_tx_audio(int16_t *amp, int len)
                     }
                 } else if (g_mod == ME_MOD_V90
                            && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
-                    /* V.90 §9.2.1.1.8: send silence while waiting for INFO1a.
-                       V.34 TX still runs into discard to keep RX advancing.
-                       Protect RX stage from V.34 TX overwrites. */
-                    memset(amp, 0, sizeof(int16_t) * (size_t)len);
-                    int16_t discard[len];
-                    v34_tx(g_v34, discard, len);
+                    /* tx_stage only reaches FIRST_S after SpanDSP has accepted
+                       a CRC-valid INFO1a and called s_not_s_baud_init(); the
+                       only way g_v90_phase3_started can still be false here is
+                       that our own strict validator (get_strict_v90_info1a_locked)
+                       rejected that same INFO1a — i.e. the analogue modem's
+                       Table 10 downstream code was not 6, meaning it declined
+                       V.90 PCM and committed to plain V.34 at the negotiated
+                       baud (V.90 §9.2.1.1.8). SpanDSP is already generating a
+                       genuine V.34 Phase 3/4 waveform for this; previously we
+                       discarded it and sent silence instead, so the analogue
+                       modem never received anything back and every call in
+                       this state ran out the clock to NO CARRIER (observed
+                       live with a CX93001, 2026-07-19). Transmit it for real. */
+                    if (!g_v90_fallback_v34_logged) {
+                        ME_LOG("[ME] V.90 declined by peer INFO1a; continuing as plain V.34 (transmitting Phase 3/4 waveform instead of muting)\n");
+                        trace_phase("V90 declined -> V34 fallback: transmitting Phase3/4");
+                        g_v90_fallback_v34_logged = true;
+                    }
+                    v34_tx(g_v34, amp, len);
                 } else {
                     v34_tx(g_v34, amp, len);
                 }
