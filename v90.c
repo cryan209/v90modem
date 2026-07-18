@@ -104,17 +104,16 @@ static int v90_jd_autoterminate_symbols(void)
     return (value && *value && strcmp(value, "0") != 0) ? 19296 : 0;
 }
 
-/* Symbols of Jd to transmit without seeing the peer's S before falling back
- * to the silent WAIT_JA state (interop resync).  0 = disabled (default).
+/* Symbols of Jd to transmit without seeing the peer's S before requesting a
+ * Phase-2 restart from the live modem engine.  Set to 0 to disable recovery.
  *
  * Enabling this stops us pouring stale Jd/Phase-4 audio over the peer's
  * retrain — verified live to change the SmartLink client's bulk-delay
  * estimate from wild swings (2440 then 13112 samples) to a stable ~0.
- * But WAIT_JA-only resync is not sufficient on its own: when the peer does
- * a full Phase-2 retrain it then waits for us to rejoin Phase 2 (re-send
- * INFO0d, tones, L1/L2), which this path does not do, so the peer stalls in
- * Phase 1.  Left off by default until the matching "peer retrained ->
- * restart from Phase 2" path is implemented (see docs). */
+ * The engine detects the JD -> WAIT_JA transition and restarts its V.34
+ * control-channel state, so the default protects the SmartLink retrain path.
+ * One and a half seconds is comfortably longer than the normal Jd-to-S
+ * response, while avoiding a stale PCM transmitter over the peer's retrain. */
 static int v90_jd_resync_symbols(void)
 {
     const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
@@ -126,7 +125,7 @@ static int v90_jd_resync_symbols(void)
         if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
             return (int) parsed;
     }
-    return 0;
+    return 12000;
 }
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */

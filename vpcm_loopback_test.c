@@ -374,6 +374,7 @@ static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool test_v90_dil_rx_roundtrip(v91_law_t law);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
+static bool test_v90_jd_resync_request(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool test_v90_shaped_phase4(v91_law_t law);
@@ -574,6 +575,15 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
 
     v90_start_phase3(tx, 66);
     v90_set_dil_descriptor(tx, &profile);
+    /* Phase 3 is entered in WAIT_JA.  Model the analogue modem's Ja before
+       expecting the digital transmitter to send Sd through Jd. */
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J)) {
+        fprintf(stderr, "8.4.1 DIL test could not accept Ja\n");
+        free(expected);
+        free(actual);
+        v90_free(tx);
+        return false;
+    }
 
     while (v90_get_tx_phase(tx) != V90_TX_JD && phase_spin < 10000) {
         v90_phase3_tx(tx, &throwaway, 1);
@@ -880,6 +890,11 @@ static bool test_v90_phase3_raw_codeword_parity(v91_law_t law)
 
     v90_start_phase3(raw_tx, U_INFO);
     v90_start_phase3(linear_tx, U_INFO);
+    if (!v90_handle_rx_event(raw_tx, V90_RX_EVENT_J)
+        || !v90_handle_rx_event(linear_tx, V90_RX_EVENT_J)) {
+        fprintf(stderr, "V.90 raw parity test could not accept Ja\n");
+        goto done;
+    }
     if (v90_phase3_tx_codewords(raw_tx, raw, SYMBOLS) != SYMBOLS
         || v90_phase3_tx(linear_tx, linear, SYMBOLS) != SYMBOLS) {
         fprintf(stderr, "V.90 raw parity generation failed\n");
@@ -921,6 +936,72 @@ done:
         v90_free(raw_tx);
     if (linear_tx)
         v90_free(linear_tx);
+    return ok;
+}
+
+/* A no-S Jd run is the marker consumed by modem_engine to restart the
+ * V.90 Phase-2 control channel.  Keep this bounded and explicit so a change
+ * to Phase-3 generation cannot silently restore the old 30-second stale-Jd
+ * behaviour. */
+static bool test_v90_jd_resync_request(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    const char *configured_symbols;
+    char *saved_symbols = NULL;
+    v90_state_t *tx = NULL;
+    uint8_t codeword;
+    int symbols = 0;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 Jd no-S resync request (%s)", law_name);
+    /* Keep this test deterministic even when it is run from a live-modem
+       shell that has an interop override configured. */
+    configured_symbols = getenv("ME_V90_JD_RESYNC_SYMBOLS");
+    if (configured_symbols) {
+        saved_symbols = strdup(configured_symbols);
+        if (!saved_symbols) {
+            perror("strdup ME_V90_JD_RESYNC_SYMBOLS");
+            return false;
+        }
+    }
+    if (unsetenv("ME_V90_JD_RESYNC_SYMBOLS") != 0) {
+        perror("unsetenv ME_V90_JD_RESYNC_SYMBOLS");
+        free(saved_symbols);
+        return false;
+    }
+
+    tx = v90_init_data_pump(v90_law);
+    if (!tx)
+        goto done;
+    v90_start_phase3(tx, 66);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
+        goto done;
+
+    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < 20000)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JD) {
+        fprintf(stderr, "V.90 Jd resync test did not reach Jd\n");
+        goto done;
+    }
+
+    for (int i = 0; i < 12000; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_WAIT_JA) {
+        fprintf(stderr, "V.90 Jd no-S resync did not return to WAIT_JA\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: V.90 Jd no-S resync request (%s)", law_name);
+    ok = true;
+
+done:
+    if (saved_symbols) {
+        setenv("ME_V90_JD_RESYNC_SYMBOLS", saved_symbols, 1);
+        free(saved_symbols);
+    }
+    if (tx)
+        v90_free(tx);
     return ok;
 }
 
@@ -1042,6 +1123,10 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     idle = v91_idle_codeword(law);
 
     v90_start_phase3(tx, 66);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J)) {
+        fprintf(stderr, "V.90 strict event test could not accept Ja\n");
+        goto done;
+    }
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD) {
@@ -1459,6 +1544,10 @@ static bool test_v90_shaped_phase4(v91_law_t law)
             data_cp.shaping_lookahead = 0;
 
             v90_start_phase3(tx, 66);
+            if (!v90_handle_rx_event(tx, V90_RX_EVENT_J)) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
             while (v90_get_tx_phase(tx) != V90_TX_JD
                    && symbols++ < MAX_SYMBOLS) {
                 v90_phase3_tx_codewords(tx, &codeword, 1);
@@ -2504,6 +2593,8 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     v92_trn2u_demod_feed(&udemod, seed_cw, (int)sizeof(seed_cw));
 
     v90_start_phase3(tx, 66);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
+        goto done;
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD
@@ -8458,6 +8549,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
+        && test_v90_jd_resync_request(V91_LAW_ULAW)
+        && test_v90_jd_resync_request(V91_LAW_ALAW)
         && test_v90_data_codeword_state(V91_LAW_ULAW)
         && test_v90_data_codeword_state(V91_LAW_ALAW)
         && test_v90_strict_receiver_events(V91_LAW_ULAW)
