@@ -31829,7 +31829,8 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
          * therefore stronger role evidence than leaving the stereo pair
          * unresolved.  This also preserves the direction of the later
          * 8 kHz PCM stream and the V.34 upstream carrier. */
-        if (!ctx->roles_assigned && best_source >= 0) {
+        if ((!ctx->roles_assigned || getenv("VPCM_FORCE_V90"))
+            && best_source >= 0) {
             ctx->analog_channel = best_source;
             ctx->digital_channel = 1 - best_source;
             ctx->roles_assigned = true;
@@ -37136,6 +37137,8 @@ static void collect_stream_call_log(call_log_t *log,
                                                             &capability_probe);
         suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
     }
+    if (getenv("VPCM_FORCE_V90"))
+        suppress_v90_phase2 = false;
 
     if (do_v34 || do_v90) {
         v34_phase2_decode_pair_cached(&g_v34_phase2_engine,
@@ -42134,6 +42137,8 @@ static void run_decode_stage_a(const char *label,
                                                             &capability_probe);
         suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
     }
+    if (getenv("VPCM_FORCE_V90"))
+        suppress_v90_phase2 = false;
     if (suppress_v90_phase2 && opts->raw_output_enabled && (opts->do_v34 || opts->do_v90)) {
         char modbuf[256];
 

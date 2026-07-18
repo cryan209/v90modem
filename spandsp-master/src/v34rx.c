@@ -7019,8 +7019,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                             replay_len = s->mp_frame_pos;
                             for (int replay = 0; replay < replay_len; replay++)
+                            {
+                                int replay_bit;
+
+                                /* The hypothesis lock permits up to two errors
+                                   in the fixed 17-one/start-zero preamble.  The
+                                   project CP framer quite properly requires an
+                                   exact sync word, so repair only those fixed
+                                   acquisition bits after the hypothesis has
+                                   passed the preamble gate.  Type and all
+                                   variable/CRC-protected bits remain observed
+                                   data and are never corrected here. */
+                                replay_bit = (replay < 17)
+                                           ? 1
+                                           : ((replay == 17)
+                                              ? 0
+                                              : (s->mp_frame_bits[replay] & 1));
                                 s->put_phase4_bit(s->put_phase4_bit_user_data,
-                                                  s->mp_frame_bits[replay] & 1);
+                                                  replay_bit);
+                            }
                             /* The project-owned Table 14 framer owns CP length,
                                CRC, fill and semantics from this boundary on. */
                             s->mp_frame_pos = 0;
@@ -8497,8 +8514,10 @@ SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
     if (!s || !s->rx.v90_mode || s->rx.calling_party
         || s->rx.stage != V34_RX_STAGE_PHASE4_MP)
         return;
-    s->rx.mp_phase4_reject_streak++;
-    mp_reset_hypothesis_search(&s->rx);
+    /* A strict Table 14 CRC rejection invalidates more than the current phase
+       seed.  Advance the existing domain/tap/bit-order retry state as well;
+       merely clearing mp_hypothesis retries the same decode mode forever. */
+    mp_unlock_after_reject(&s->rx, true);
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 Phase 4: strict CP framer rejected hypothesis; resuming preamble search\n");
 }

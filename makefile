@@ -137,7 +137,7 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v92_proc_eval_test
