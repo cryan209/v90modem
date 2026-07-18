@@ -8438,6 +8438,60 @@ SPAN_DECLARE(void) v34_set_put_phase4_bit(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
+{
+    if (!s || !s->rx.v90_mode || s->rx.calling_party || !s->rx.put_phase4_bit)
+        return;
+
+    /* A V.90 analogue modem begins repeated CPt immediately after DIL.  The
+       ordinary V.34 Phase 4 receiver waits for J'/TRN before scanning for MP;
+       applying that gate here consumes several complete CPt repetitions.  The
+       external downstream implementation has already established the phase
+       boundary, so retain the freshly conditioned primary-channel frontend
+       and begin the CP preamble/hypothesis search immediately. */
+    s->primary_channel_active = true;
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = V34_RX_STAGE_PHASE4_MP;
+    s->rx.duration = 0;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.bitstream = 0;
+    s->rx.bit_count = 0;
+    s->rx.mp_seen = 0;
+    s->rx.mp_remote_ack_seen = 0;
+    s->rx.mp_count = -1;
+    s->rx.mp_frame_pos = 0;
+    s->rx.mp_frame_target = 0;
+    s->rx.mp_early_rejects = 0;
+    s->rx.phase3_j_lock_hyp = -1;
+    s->rx.phase4_trn_lock_hyp = -1;
+    s->rx.phase4_trn_lock_score = -1;
+
+    /* V.90 upstream uses the analogue-modem scrambler polynomial (tap 4 in
+       SpanDSP's zero-based representation).  Retry rotation still explores
+       alternate order/domain/tap choices after rejected CP hypotheses. */
+    s->rx.scrambler_tap = 4;
+    s->rx.mp_phase4_default_scrambler_tap = 4;
+    s->rx.mp_phase4_default_bit_order = 0;
+    s->rx.mp_phase4_default_domain = 0;
+    s->rx.mp_phase4_reject_streak = 0;
+    s->rx.mp_phase4_nolock_count = 0;
+    s->rx.mp_phase4_alt_tap_active = 0;
+    s->rx.mp_phase4_alt_order_active = 0;
+    s->rx.mp_phase4_alt_domain_active = 0;
+    s->rx.mp_phase4_retry_mode = 0;
+    s->rx.mp_phase4_bit_order = 0;
+    s->rx.mp_phase4_domain = 0;
+    s->rx.mp_phase4_force_abs_active = 0;
+    s->rx.mp_phase4_diff_collapse_streak = 0;
+    s->rx.mp_phase4_diff_recover_streak = 0;
+    mp_reset_hypothesis_search(&s->rx);
+    mp_vote_reset(&s->rx);
+
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 Phase 4: immediate CPt acquisition armed (tap=4, domain=diff, order=b0,b1)\n");
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
 {
     if (!s || !s->rx.v90_mode || s->rx.calling_party
