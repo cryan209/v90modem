@@ -12,12 +12,12 @@ Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in t
   the SIP/RTP path is 8000 Hz G.711. The conversion must preserve *both* exact
   8 kHz symbol timing *and* near-Nyquist energy — V.90's `Sd` signal
   (`{+W,+0,+W,-W,-0,-W}`) carries most of its energy at 4 kHz.
-  - `dmodem_put_frame` (net→DSP): 12-tap windowed-sinc polyphase interpolator,
-    cutoff at 3950 Hz, six output phases, with a one-frame pipeline delay for
-    inter-frame FIR continuity. Verified offline: 4 kHz line preserved at
-    −23 dB and the round-trip Sd sign pattern is recovered cleanly (30/30),
-    vs. zero-order-hold (keeps 4 kHz but 8/12 pattern, timing jitter) and
-    pjmedia's polyphase (clean timing but 4 kHz nuked to −53 dB).
+  - `dmodem_put_frame` (net→DSP): 257-tap windowed-sinc polyphase interpolator,
+    cutoff at the exact 4 kHz input Nyquist, six output phases, with a
+    one-frame pipeline delay for inter-frame FIR continuity. The long
+    fractional-delay kernel preserves the near-Nyquist content required by
+    both Sd detection and SmartLink's Phase-4 TRN2d PDSNR check; the earlier
+    12-tap kernel passed Sd but added excessive TRN2d interpolation error.
   - `dmodem_get_frame` (DSP→net): linear interpolation (upstream V.34 is band
     limited well below 3.4 kHz).
 - **u-law preferred** codec ordering (the SmartLink blob is a US-market u-law
@@ -27,4 +27,3 @@ Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in t
 
 Also patched (not copied here): `slmodemd/modem_cmdline.c` (`-e` option
 declared `MANDATORY,STRING` to fix an upstream arg-parsing bug).
-

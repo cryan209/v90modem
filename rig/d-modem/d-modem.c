@@ -62,19 +62,22 @@ static FILE *dm_tap_tx, *dm_tap_rx;
  *     comes out as +W,0,+W,0,-W,-W (corrupted);
  *   - pjmedia's polyphase keeps timing but its ~3.4 kHz voice cutoff nukes
  *     the 4 kHz line to -53 dB.
- * A windowed-sinc polyphase interpolator with the cutoff placed right at
- * 4 kHz preserves both.  fc = 3950 Hz, 12 taps, six output phases (k*5 mod
- * 6).  A one-frame pipeline delay supplies the "future" samples the FIR
- * needs across the 20 ms frame boundary without edge glitches. */
-#define RS_TAPS   12
-#define RS_HALF   5           /* taps span offsets [-5 .. +6] */
+ * A windowed-sinc polyphase interpolator with the cutoff placed at 4 kHz
+ * preserves both.  The long kernel matters for TRN2d: the old 12-tap kernel
+ * left enough fractional-delay error to trip SmartLink's Phase-4 PDSNR gate.
+ * Six output phases implement k*5 mod 6.  A one-frame pipeline delay supplies
+ * the "future" samples the symmetric FIR needs without edge glitches. */
+#define RS_TAPS   257
+#define RS_HALF   128         /* taps span offsets [-128 .. +128] */
+#define RS_PAST   RS_HALF
+#define RS_FUTURE (RS_TAPS - RS_HALF - 1)
 #define RS_PHASES 6
 static float rs_ker[RS_PHASES][RS_TAPS];
 static int   rs_ker_ready;
 
 static void rs_build_kernel(void) {
-	const double fs_in = 8000.0, fc = 3950.0;
-	const double wc = fc/(fs_in/2.0);   /* normalised cutoff (~0.9875) */
+	const double fs_in = 8000.0, fc = 4000.0;
+	const double wc = fc/(fs_in/2.0);   /* exact input Nyquist */
 	int p, t;
 	if (rs_ker_ready) return;
 	for (p = 0; p < RS_PHASES; p++) {
@@ -97,8 +100,8 @@ static void rs_build_kernel(void) {
 
 static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *frame) {
 	struct dmodem *sm = (struct dmodem *)this_port;
-	/* pipeline: hist_tail[RS_TAPS] = tail of frame N-2, prev[] = frame N-1 */
-	static pj_int16_t hist[RS_TAPS];
+	/* pipeline: hist[] = tail of frame N-2, prev[] = frame N-1 */
+	static pj_int16_t hist[RS_PAST];
 	static pj_int16_t prev[1024];
 	static int prev_n = -1;      /* -1 until first frame seen */
 	int len;
@@ -107,12 +110,14 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		const pj_int16_t *in = (const pj_int16_t *)frame->buf;
 		int in_n = (int)(frame->size / 2);
 		pj_int16_t out[1152];
-		pj_int16_t work[RS_TAPS + 1024 + RS_TAPS];
+		pj_int16_t work[RS_PAST + 1024 + RS_FUTURE];
 		int out_n, k, i;
 
 		rs_build_kernel();
 		if (in_n > 1024)
 			return PJ_ETOOBIG;
+		if (prev_n >= 0 && (prev_n < RS_PAST || in_n < RS_FUTURE))
+			return PJ_EINVAL;
 
 		if (prev_n < 0) {
 			/* Prime the pipeline: emit one frame of silence (20 ms latency). */
@@ -124,18 +129,18 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		} else {
 			/* Render prev[] with hist before it and this frame's head after. */
 			out_n = prev_n * 6 / 5;
-			for (i = 0; i < RS_TAPS; i++)
+			for (i = 0; i < RS_PAST; i++)
 				work[i] = hist[i];
 			for (i = 0; i < prev_n; i++)
-				work[RS_TAPS + i] = prev[i];
-			for (i = 0; i < RS_TAPS; i++)
-				work[RS_TAPS + prev_n + i] = (i < in_n) ? in[i] : prev[prev_n-1];
+				work[RS_PAST + i] = prev[i];
+			for (i = 0; i < RS_FUTURE; i++)
+				work[RS_PAST + prev_n + i] = in[i];
 			for (k = 0; k < out_n; k++) {
 				int num = k * 5;
 				int ic = num / 6;           /* integer input index in prev */
 				int ph = num % 6;           /* output phase */
 				const float *h = rs_ker[ph];
-				int base = RS_TAPS + ic - RS_HALF;   /* work index of tap 0 */
+				int base = RS_PAST + ic - RS_HALF;   /* work index of tap 0 */
 				float acc = 0.0f;
 				int t;
 				for (t = 0; t < RS_TAPS; t++)
@@ -145,8 +150,8 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				out[k] = (pj_int16_t)(acc >= 0 ? acc + 0.5f : acc - 0.5f);
 			}
 			/* advance pipeline */
-			for (i = 0; i < RS_TAPS; i++)
-				hist[i] = prev[prev_n - RS_TAPS + i];
+			for (i = 0; i < RS_PAST; i++)
+				hist[i] = prev[prev_n - RS_PAST + i];
 			memcpy(prev, in, (size_t)in_n * 2);
 			prev_n = in_n;
 		}
