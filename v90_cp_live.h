@@ -23,6 +23,8 @@ typedef struct {
     int carrier_step;
     float pll_gain;
     bool conjugate;
+    int map_index;
+    int bit_order;
     int voted_frames;
     int agreement_pct;
 } v90_cp_live_meta_t;

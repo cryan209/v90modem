@@ -24,7 +24,6 @@ static int v90_cp_live_find_carrier_rise(const int16_t *samples,
 {
     const int window = V90_CP_LIVE_SAMPLE_RATE / 10; /* 100 ms */
     int best = -1;
-    double best_ratio = 0.0;
 
     if (!samples || search_end - search_start < 8 * window)
         return -1;
@@ -48,10 +47,10 @@ static int v90_cp_live_find_carrier_rise(const int16_t *samples,
         after = sqrt(after / (5.0 * window));
         double ratio = after / (before + 1.0);
 
-        if (after > 200.0 && after - before > 250.0
-            && ratio >= 2.0 && ratio > best_ratio) {
+        if (after > 200.0 && after - before > 250.0 && ratio >= 2.0) {
+            /* Phase 3 contains an earlier J/primary-channel rise.  CPt is
+             * the latest sustained rise near the local Ri marker. */
             best = start;
-            best_ratio = ratio;
         }
     }
     return best;
@@ -251,10 +250,19 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                                     int *carrier_step_out,
                                     float *pll_gain_out,
                                     bool *conjugate_out,
+                                    int *map_index_out,
+                                    int *bit_order_out,
                                     int *voted_frames_out,
                                     int *agreement_pct_out)
 {
-    static const uint8_t cp_map[4] = {0, 3, 2, 1};
+    static const uint8_t map_table[24][4] = {
+        {0,1,2,3}, {1,0,3,2}, {2,3,0,1}, {3,2,1,0},
+        {0,2,1,3}, {2,0,3,1}, {1,3,0,2}, {3,1,2,0},
+        {0,3,2,1}, {1,2,3,0}, {2,1,0,3}, {3,0,1,2},
+        {0,1,3,2}, {1,0,2,3}, {2,3,1,0}, {3,2,0,1},
+        {0,2,3,1}, {1,3,2,0}, {2,0,1,3}, {3,1,0,2},
+        {0,3,1,2}, {1,2,0,3}, {2,1,3,0}, {3,0,2,1}
+    };
     static const float pll_gains[] = {0.01f, 0.0f, 0.05f};
     uint8_t *bits;
     int bit_capacity;
@@ -262,6 +270,12 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
     bool found_ack = false;
     bool found_voted = false;
     int found_offset = -1;
+    int map_begin = 8;
+    int map_end = 8;
+    int order_begin = 0;
+    int order_end = 0;
+    int carrier_step_begin = -256;
+    int carrier_step_end = 256;
 
     if (!detail || !detail->symbols || !out || first_symbol < 1
         || end_symbol <= first_symbol || end_symbol > detail->symbol_count) {
@@ -273,17 +287,41 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
     bits = malloc((size_t)bit_capacity);
     if (!bits)
         return false;
+    if (getenv("ME_V90_CP_BROAD_MAP")) {
+        map_begin = 0;
+        map_end = 23;
+        order_end = 1;
+    }
+    if (getenv("ME_V90_CP_MAP")) {
+        map_begin = atoi(getenv("ME_V90_CP_MAP"));
+        if (map_begin < 0)
+            map_begin = 0;
+        if (map_begin > 23)
+            map_begin = 23;
+        map_end = map_begin;
+    }
+    if (getenv("ME_V90_CP_ORDER")) {
+        order_begin = atoi(getenv("ME_V90_CP_ORDER")) ? 1 : 0;
+        order_end = order_begin;
+    }
+    if (getenv("ME_V90_CP_CARRIER_STEP")) {
+        carrier_step_begin = atoi(getenv("ME_V90_CP_CARRIER_STEP"));
+        carrier_step_end = carrier_step_begin;
+    }
 
     /* The offline capture's strict winner is -80.  Search a wider residual
      * carrier range so clock offsets do not pin acquisition to a boundary. */
     for (int conjugate = 0; conjugate < 2; conjugate++) {
-        for (int carrier_step = -256; carrier_step <= 256;
+        for (int carrier_step = carrier_step_begin;
+             carrier_step <= carrier_step_end;
              carrier_step += 2) {
             float carrier_delta = carrier_step * (float)(M_PI / 2048.0);
 
             for (size_t pll_index = 0;
                  pll_index < sizeof(pll_gains) / sizeof(pll_gains[0]);
                  pll_index++) {
+              for (int map = map_begin; map <= map_end; map++) {
+               for (int order = order_begin; order <= order_end; order++) {
                 uint32_t reg = 0;
                 float tracked_delta = carrier_delta;
                 int bit_count = 0;
@@ -315,11 +353,11 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                     error = remainderf(corrected - ideal,
                                        (float)(2.0 * M_PI));
                     tracked_delta += pll_gains[pll_index] * error;
-                    mapped = cp_map[quadrant];
+                    mapped = map_table[map][quadrant];
                     bits[bit_count++] = (uint8_t)v90_cp_live_descramble(
-                        &reg, mapped & 1);
+                        &reg, order ? (mapped >> 1) & 1 : mapped & 1);
                     bits[bit_count++] = (uint8_t)v90_cp_live_descramble(
-                        &reg, (mapped >> 1) & 1);
+                        &reg, order ? mapped & 1 : (mapped >> 1) & 1);
                 }
 
                 memset(&candidate, 0, sizeof(candidate));
@@ -366,6 +404,10 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                             *pll_gain_out = pll_gains[pll_index];
                         if (conjugate_out)
                             *conjugate_out = conjugate != 0;
+                        if (map_index_out)
+                            *map_index_out = map;
+                        if (bit_order_out)
+                            *bit_order_out = order;
                         if (voted_frames_out)
                             *voted_frames_out = candidate_frames;
                         if (agreement_pct_out)
@@ -374,6 +416,8 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                     if (!expected_compatibility)
                         goto done;
                 }
+               }
+              }
             }
         }
     }
@@ -399,6 +443,7 @@ bool v90_cp_live_recover(const int16_t *samples,
     int timing_begin = 0;
     int timing_end = V90_CP_LIVE_TIMINGS;
     int carrier_onset = -1;
+    int baud_code = V90_CP_LIVE_BAUD_CODE;
 
     if (!samples || !out || sample_count <= 0
         || phase4_hint_sample < 0
@@ -438,11 +483,14 @@ bool v90_cp_live_recover(const int16_t *samples,
              * the CMA relative to the late local marker then freezes it in
              * the middle of CPt.  Anchor it just before the caller's own
              * sustained carrier rise instead. */
-            equalizer_freeze_sample = carrier_onset - 4000;
             search_start = carrier_onset - 800;
             if (search_start < capture_start)
                 search_start = capture_start;
-            search_end = carrier_onset + 2 * V90_CP_LIVE_SAMPLE_RATE;
+            /* Some SmartLink captures need several seconds of repeated CPt
+             * before the equalizer yields an untouched frame.  Keep a
+             * bounded eight-second train; live retries naturally provide a
+             * shorter prefix until that much waveform exists. */
+            search_end = carrier_onset + 8 * V90_CP_LIVE_SAMPLE_RATE;
             if (search_end > sample_count)
                 search_end = sample_count;
         }
@@ -467,6 +515,11 @@ bool v90_cp_live_recover(const int16_t *samples,
             timing_begin = V90_CP_LIVE_TIMINGS - 1;
         timing_end = timing_begin + 1;
     }
+    if (getenv("ME_V90_CP_BAUD_CODE")) {
+        baud_code = atoi(getenv("ME_V90_CP_BAUD_CODE"));
+        if (baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT)
+            baud_code = V90_CP_LIVE_BAUD_CODE;
+    }
     if (getenv("ME_V90_CP_DIAG")) {
         fprintf(stderr,
                 "v90 CP live window capture=%d search=%d..%d hint=%d freeze=%d carrier=%d..%d timing=%d..%d\n",
@@ -482,7 +535,7 @@ bool v90_cp_live_recover(const int16_t *samples,
                 samples + capture_start,
                 sample_count - capture_start,
                 capture_start,
-                V90_CP_LIVE_BAUD_CODE,
+                baud_code,
                 carrier,
                 V90_CP_LIVE_SAMPLE_RATE,
                 true,
@@ -496,6 +549,8 @@ bool v90_cp_live_recover(const int16_t *samples,
             int carrier_step = 0;
             float pll_gain = 0.0f;
             bool conjugate = false;
+            int map_index = 8;
+            int bit_order = 0;
             int voted_frames = 0;
             int agreement_pct = 100;
             bool found;
@@ -523,6 +578,8 @@ bool v90_cp_live_recover(const int16_t *samples,
                                              &carrier_step,
                                              &pll_gain,
                                              &conjugate,
+                                             &map_index,
+                                             &bit_order,
                                              &voted_frames,
                                              &agreement_pct);
             if (found) {
@@ -536,6 +593,8 @@ bool v90_cp_live_recover(const int16_t *samples,
                     meta->carrier_step = carrier_step;
                     meta->pll_gain = pll_gain;
                     meta->conjugate = conjugate;
+                    meta->map_index = map_index;
+                    meta->bit_order = bit_order;
                     meta->voted_frames = voted_frames;
                     meta->agreement_pct = agreement_pct;
                 }
