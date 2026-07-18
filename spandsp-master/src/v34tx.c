@@ -3294,17 +3294,24 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (timeout_bauds < 1)
         timeout_bauds = 1;
     /*endif*/
-    if (s->rx.far_capabilities.tx_clock_source == 0)
-    {
-        max_fast_retries = V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES;
-        max_total_retries = V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES;
-    }
-    else
-    {
-        max_fast_retries = V90_INFO1A_MAX_FAST_RETRIES;
-        max_total_retries = V90_INFO1A_MAX_TOTAL_RETRIES;
-    }
-    /*endif*/
+    /* far_capabilities.tx_clock_source was being used here as an "is the
+       peer's TX clock free-running" signal to cut the retry budget from
+       3/6 down to 1/2. But this project always runs as the V.90 digital
+       modem/answerer (calling_party is always false -- see v34_init() in
+       modem_engine.c), so process_rx_info0() never takes the branch that
+       gives this field a real meaning (that branch requires v90_mode &&
+       calling_party, populating it from INFO0d's genuine PCM-law bit).
+       On the branch we always take, it's populated straight from INFO0a
+       bits 26:27, which V.90 Table 8 defines as "Reserved for the ITU...
+       not interpreted by the digital modem" -- i.e. spec-undefined for our
+       role. Live interop showed this mattering: a USR Courier that was
+       still actively cycling Tone A/reversal (working, just needed more
+       time) got cut off after ~2 total retries (~1.4s) because its INFO0a
+       happened to carry 0 in those reserved bits, while a different
+       analogue modem that carried a nonzero value there got the full
+       budget for no more legitimate reason. Always use the full budget. */
+    max_fast_retries = V90_INFO1A_MAX_FAST_RETRIES;
+    max_total_retries = V90_INFO1A_MAX_TOTAL_RETRIES;
 
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
@@ -3510,12 +3517,6 @@ static void v90_wait_info1a_init(v34_state_t *s)
 {
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with Tone A recovery armed\n");
-    if (s->rx.far_capabilities.tx_clock_source == 0)
-    {
-        span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: peer INFO0a advertises internal TX clock; using reduced INFO1a retry budget\n");
-    }
-    /*endif*/
     s->tx.tone_duration = 0;
     /* Use CC modulation so we get a per-baud callback while transmitting silence. */
     s->tx.current_modulator = V34_MODULATION_CC;
