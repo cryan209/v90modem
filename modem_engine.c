@@ -604,6 +604,7 @@ static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
 static int            g_v90_phase3_s_events = 0;
+static unsigned        g_v90_phase2_restarts = 0;
 static v90_cp_rx_t    g_v90_cp_rx;
 static bool           g_v92_active = false;
 static bool           g_v92_trn2u_active = false;
@@ -1686,6 +1687,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 
 /* Forward declarations */
 static void start_v22bis_training(void);
+static void v34_put_aux_bit_cb(void *user_data, int bit);
 void me_hangup(void);
 
 static void v90_dil_capture_reset(void)
@@ -1800,6 +1802,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
+    g_v90_phase2_restarts = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
@@ -1811,6 +1814,67 @@ static void cleanup_v34_v90_training_locked(void)
     g_notch.active = false;
     g_last_rx_stage = 0;
     g_last_tx_stage = 0;
+}
+
+/*
+ * The SmartLink analogue peer goes back to V.90 Phase 2 when it does not
+ * acquire our Sd/S-bar sequence.  In that case it expects a fresh INFO0d,
+ * Tone B, and L1/L2 exchange.  Merely going quiet at the end of Jd leaves the
+ * peer in its Phase-1/2 retrain, while continuing Jd contaminates its RTD
+ * estimate.  Reinitialise the existing V.34 context as a V.90 digital
+ * answerer and let its normal Phase-2 transmitter rejoin the peer.
+ *
+ * This is called only from the TX media callback with g_state_mtx held.  It
+ * intentionally preserves the overall training timeout: a broken bearer
+ * still falls back rather than retrying indefinitely.
+ */
+static bool restart_v90_phase2_locked(void)
+{
+    int bps;
+
+    if (g_mod != ME_MOD_V90 || !g_v34)
+        return false;
+
+    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(3200);
+    if (v34_restart(g_v34, 3200, bps, true) != 0) {
+        ME_LOG("[ME] V.90 Phase 2 restart failed (%d baud, %d bps)\n", 3200, bps);
+        trace_phase("V90 Phase2 restart failed");
+        return false;
+    }
+
+    /* The old PCM-side state belongs to the failed Phase-3 attempt.  The
+       restarted V.34 receiver will create a new state only after a new,
+       CRC-valid INFO1a. */
+    if (g_v90) {
+        v90_free(g_v90);
+        g_v90 = NULL;
+    }
+    g_v90_phase3_started = false;
+    g_v90_completion_deferred_logged = false;
+    g_v90_wait_info1_logged = false;
+    g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    g_v92_trn2u_active = false;
+    memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
+    v90_cp_rx_reset(&g_v90_cp_rx);
+    v92_cp_rx_reset(&g_v92_cp_rx);
+    v90_dil_capture_reset();
+
+    /* v34_restart preserves the selected V.90 mode, but reapply the mode and
+       receiver callbacks explicitly because this is also where the modified
+       SpanDSP tree re-primes INFO0a framing for the answerer. */
+    v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+    v34_tx_power(g_v34, -10.0f);
+    v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
+    if (!g_v92_active)
+        v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
+    notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
+
+    g_v90_phase2_restarts++;
+    trace_phase("V90 restart Phase2: attempt=%u profile=3200/%d",
+                g_v90_phase2_restarts, bps);
+    ME_LOG("[ME] V.90: no S after Jd; restarting Phase 2 (%u, 3200 baud / %d bps)\n",
+           g_v90_phase2_restarts, bps);
+    return true;
 }
 
 static int v90_dil_capture_get_bit(int pos)
@@ -3178,9 +3242,21 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             return false;
 
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
+            v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
+
             if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                 return false;
             pos++;
+
+            /* v90.c returns to WAIT_JA after a bounded Jd-without-S interval.
+               That state change is the recovery request for the live engine:
+               re-enter the V.34/V.90 Phase-2 control exchange immediately,
+               instead of sending silence while the peer expects INFO0d. */
+            if (phase_before == V90_TX_JD
+                && v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA) {
+                (void) restart_v90_phase2_locked();
+                return false;
+            }
         }
 
         /* Keep the wrapped V.34 state machine advancing while its waveform is
