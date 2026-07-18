@@ -1903,7 +1903,7 @@ static void *v90_cp_live_worker(void *user_data)
                 fprintf(stderr,
                         "[ME] V.90 strict batch recovered %s%s: bits=%d "
                         "frame=%d carrier=%s timing=%d step=%d pll=%.3f "
-                        "drn=%u mask=0x%04X crc=%u\n",
+                        "drn=%u mask=0x%04X crc=%u vote=%d/%d%%\n",
                         diag.frame.v90_compatibility ? "CP" : "CPt",
                         diag.frame.acknowledge ? "'" : "",
                         diag.nbits,
@@ -1914,7 +1914,9 @@ static void *v90_cp_live_worker(void *user_data)
                         meta.pll_gain,
                         (unsigned)diag.frame.drn,
                         diag.frame.upstream_rate_mask,
-                        (unsigned)diag.crc_remainder);
+                        (unsigned)diag.crc_remainder,
+                        meta.voted_frames,
+                        meta.agreement_pct);
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
             }
             pthread_mutex_unlock(&g_state_mtx);
