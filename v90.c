@@ -31,7 +31,11 @@
 /* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
 #define V90_RI_SYMBOLS   192  /* Ri duration: at least 192T (§9.4.1.1) */
 #define V90_RI_POST_CP_SYMBOLS 24
-#define V90_TRN2D_SYMBOLS 2040
+/* SmartLink's full ADI path studies 7200 TRN2d symbols and then uses an
+ * additional settling window before it enables MP demapping.  The V.90
+ * requirement is a minimum of 2040T and MP within 2000 ms, so 12000T keeps
+ * the transmitter standards-compliant while satisfying that receiver. */
+#define V90_TRN2D_SYMBOLS 12000
 #define V90_B1D_FRAMES    48
 #define V90_B1D_SYMBOLS   (V90_B1D_FRAMES * V90_FRAME_LEN)
 #define V90_MP_MAX_BITS  256
@@ -265,6 +269,7 @@ struct v90_state_s {
     int              sample_count;  /* Sample counter within current sub-state */
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
     bool             phase4_hold_logged;
+    int              phase4_ri_align_remaining;
     bool             jd_terminate_requested;
     bool             training_complete;
     bool             dil_requested;
@@ -394,6 +399,33 @@ static inline uint8_t v90_pcm_signed_codeword(v90_law_t law, int ucode, int sign
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
     pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
     return pcm;
+}
+
+/*
+ * CP/CPt describes constellations in the codec law selected by the analogue
+ * modem.  A misclassified or externally fixed SIP bearer can use the other
+ * G.711 law.  Preserve the requested analogue level in that case instead of
+ * reinterpreting the same Ucode in the bearer law (which produces a wholly
+ * different magnitude).  The unavoidable quantisation is to the closest
+ * codeword selected by the SpanDSP G.711 encoder.
+ */
+static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
+                                                const vpcm_cp_frame_t *cp,
+                                                int ucode,
+                                                int sign)
+{
+    v90_law_t cp_law;
+    uint8_t requested;
+    int16_t linear;
+
+    cp_law = cp->codec_alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
+    requested = v90_pcm_signed_codeword(cp_law, ucode, sign);
+    if (cp_law == s->law)
+        return requested;
+    linear = v90_pcm_to_linear(cp_law, requested);
+    if (s->law == V90_LAW_ALAW)
+        return linear_to_alaw(linear);
+    return linear_to_ulaw(linear);
 }
 
 /* V.90 §8.6.4: R is the six-symbol sign pattern +++--- repeated at the
@@ -740,7 +772,6 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
     if (!s || !cp || !vpcm_cp_validate(cp, NULL, 0)
         || cp->v90_compatibility
         || cp->acknowledge
-        || cp->codec_alaw != (s->law == V90_LAW_ALAW)
         || cp->shaping_redundancy > 3
         || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 3)
         || cp->drn < 4 || cp->drn > 22)
@@ -803,7 +834,6 @@ static bool v90_configure_data_mapper(v90_state_t *s,
     if (!s || !cp || !vpcm_cp_validate(cp, NULL, 0)
         || !cp->v90_compatibility
         || cp->acknowledge
-        || cp->codec_alaw != (s->law == V90_LAW_ALAW)
         || cp->shaping_redundancy > 3
         || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 3)
         || cp->drn < 1 || cp->drn > 22)
@@ -862,7 +892,7 @@ static bool v90_map_scrambled_frame(v90_state_t *s,
         if (ucode < 0)
             return false;
         sign = (scrambled[i] & 1) ^ sign;
-        frame[i] = v90_pcm_signed_codeword(s->law, ucode, sign);
+        frame[i] = v90_cp_transport_codeword(s, cp, ucode, sign);
     }
     if (r != 0)
         return false;
@@ -983,7 +1013,7 @@ static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
     for (int i = 0; i < length; i++) {
         int sign = initial_signs[i] ^ v90_shaper_rule_inverts(rule, i);
         double x = (double)v90_pcm_to_linear(
-            s->law, v90_pcm_signed_codeword(s->law, ucodes[i], sign));
+            s->law, v90_cp_transport_codeword(s, cp, ucodes[i], sign));
         double y = x - b1 * filter.x1 + a1 * filter.y1;
         double v = y - b2 * filter.y1 + a2 * filter.v1;
 
@@ -1211,9 +1241,10 @@ static bool v90_map_shaped_scrambled_frame(
                          &shaper->pending_signs[0][0],
                          shaped_signs);
     for (int i = 0; i < V90_FRAME_LEN; i++) {
-        frame[i] = v90_pcm_signed_codeword(s->law,
-                                            shaper->pending_ucodes[0][i],
-                                            shaped_signs[i]);
+        frame[i] = v90_cp_transport_codeword(s,
+                                             cp,
+                                             shaper->pending_ucodes[0][i],
+                                             shaped_signs[i]);
     }
     shaper->pending_count--;
     if (shaper->pending_count > 0) {
@@ -2559,7 +2590,22 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             return v90_pcm_idle(s->law);
         }
 
+        /* CPt reception is asynchronous to our six-symbol Ri period.  Finish
+         * the current Ri period before beginning barred Ri; resetting the
+         * sign phase at the receive callback produces a partial period that
+         * an analogue modem cannot recognize as the Ri-to-barred-Ri event. */
+        if (s->phase4_ri_align_remaining > 0) {
+            int ri_pos = V90_FRAME_LEN - s->phase4_ri_align_remaining;
+            uint8_t codeword = v90_ri_codeword(s, ri_pos, false);
+
+            s->phase4_ri_align_remaining--;
+            return codeword;
+        }
+
         if (s->sample_count < V90_RI_POST_CP_SYMBOLS) {
+            /* Ri is defined by U_INFO and the negotiated bearer law, not by
+             * the CPt constellation law.  Its barred form must retain the
+             * exact magnitude of the preceding unbarred Ri. */
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, true);
 
             s->sample_count++;
@@ -2839,6 +2885,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->diff_enc = 0;
     v90_reset_data_pump_state(s);
     s->phase4_hold_logged = false;
+    s->phase4_ri_align_remaining = 0;
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_requested = false;
@@ -2943,6 +2990,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->diff_enc = 0;
     s->jd_bit_pos = 0;
     s->phase4_hold_logged = false;
+    s->phase4_ri_align_remaining = 0;
     s->jd_terminate_requested = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
@@ -3098,6 +3146,14 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             && !s->cp_ready) {
             fprintf(stderr, "[V90] Phase 4: valid far-end CPt received\n");
             s->cp_ready = true;
+            s->phase4_ri_align_remaining =
+                (V90_FRAME_LEN - (s->sample_count % V90_FRAME_LEN))
+                % V90_FRAME_LEN;
+            if (s->phase4_ri_align_remaining > 0) {
+                fprintf(stderr,
+                        "[V90] Phase 4: completing %d Ri symbols before barred Ri\n",
+                        s->phase4_ri_align_remaining);
+            }
             s->sample_count = 0;
             return true;
         }

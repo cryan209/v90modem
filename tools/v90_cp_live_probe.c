@@ -54,7 +54,7 @@ int main(int argc, char **argv)
     }
     printf("strict %s%s bits=%d frame=%d last=%d carrier=%s timing=%d "
            "step=%d pll=%.3f conjugate=%d drn=%u mask=0x%04x "
-           "constellations=%u codec-diff=%d crc=%u map=%d order=%d vote=%d/%d%%\n",
+           "constellations=%u alaw=%d codec-diff=%d crc=%u map=%d order=%d vote=%d/%d%%\n",
            diag.frame.v90_compatibility ? "CP" : "CPt",
            diag.frame.acknowledge ? "'" : "",
            diag.nbits,
@@ -68,12 +68,42 @@ int main(int argc, char **argv)
            (unsigned)diag.frame.drn,
            diag.frame.upstream_rate_mask,
            (unsigned)diag.frame.constellation_count,
+           diag.frame.codec_alaw ? 1 : 0,
            diag.frame.codec_constellations_differ ? 1 : 0,
            (unsigned)diag.crc_remainder,
            meta.map_index,
            meta.bit_order,
            meta.voted_frames,
            meta.agreement_pct);
+    printf("CP fields: sr=%u ld=%u gain=0x%04x filter=%02x,%02x,%02x,%02x "
+           "dfi=%u,%u,%u,%u,%u,%u codec-diff=%d\n",
+           (unsigned)diag.frame.shaping_redundancy,
+           (unsigned)diag.frame.shaping_lookahead,
+           (unsigned)diag.frame.trn1d_gain_q3_13,
+           (unsigned)diag.frame.shaping_a1_q1_6,
+           (unsigned)diag.frame.shaping_a2_q1_6,
+           (unsigned)diag.frame.shaping_b1_q1_6,
+           (unsigned)diag.frame.shaping_b2_q1_6,
+           (unsigned)diag.frame.dfi[0],
+           (unsigned)diag.frame.dfi[1],
+           (unsigned)diag.frame.dfi[2],
+           (unsigned)diag.frame.dfi[3],
+           (unsigned)diag.frame.dfi[4],
+           (unsigned)diag.frame.dfi[5],
+           diag.frame.codec_constellations_differ ? 1 : 0);
+    for (int constellation = 0;
+         constellation < diag.frame.constellation_count;
+         constellation++) {
+        printf("mask[%d]=", constellation);
+        for (int byte = 15; byte >= 0; byte--)
+            printf("%02x", diag.frame.masks[constellation][byte]);
+        if (diag.frame.codec_constellations_differ) {
+            printf(" codec=");
+            for (int byte = 15; byte >= 0; byte--)
+                printf("%02x", diag.frame.codec_masks[constellation][byte]);
+        }
+        putchar('\n');
+    }
     free(samples);
     return 0;
 }
