@@ -2781,14 +2781,35 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
        processed with the same clean frontend used by offline replay. */
     owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, rx));
 
-    /* V.90 §9 uses the analog-modem upstream scrambler
-       1 + x^-5 + x^-23.  SpanDSP's ordinary V.34 answerer initialisation
-       selects tap 17 for the far-end caller, which makes SmartLink TRN look
-       random (~52% ones).  The captured upstream resolves at 96-99% with the
-       V.90 tap value 4, so select it before Phase 3 resets its hypothesis
-       banks. */
-    s->scrambler_tap = 4;
-    s->mp_phase4_default_scrambler_tap = 4;
+    /* Table 10 bits 37:39 confirm which protocol the analogue modem actually
+       committed to: the integer 6 means genuine V.90 PCM downstream; 0-5
+       means it declined V.90 and is falling back to plain V.34 at that
+       symbol rate (V.90 9.2.1.1.8). The two cases need different upstream
+       scrambler polynomials. Forcing the V.90 tap onto a real V.34-fallback
+       signal corrupts every descrambled bit from here on — live interop
+       with a CX93001 that declined V.90 showed exactly this: an MP
+       hypothesis would lock, then every subsequent frame failed CRC and got
+       rejected, forever (2026-07-19). */
+    if (s->info1a.baud_rate_c_to_a == 6)
+    {
+        /* V.90 §9 uses the analog-modem upstream scrambler 1 + x^-5 + x^-23.
+           SpanDSP's ordinary V.34 answerer initialisation selects tap 17 for
+           the far-end caller, which makes SmartLink TRN look random (~52%
+           ones). The captured upstream resolves at 96-99% with the V.90 tap
+           value 4, so select it before Phase 3 resets its hypothesis banks. */
+        s->scrambler_tap = 4;
+        s->mp_phase4_default_scrambler_tap = 4;
+    }
+    else
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90: INFO1a declined PCM (downstream code=%d, not 6); "
+                 "using standard V.34 answerer scrambler tap 17\n",
+                 s->info1a.baud_rate_c_to_a);
+        s->scrambler_tap = 17;
+        s->mp_phase4_default_scrambler_tap = 17;
+    }
+    /*endif*/
     v34_force_phase3_rx(owner);
 
     if (!phase3_rx_dump_fp)
