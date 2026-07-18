@@ -3,7 +3,9 @@
  *
  * The live SpanDSP V.34 receiver normally supplies these bits.  This helper
  * keeps an independent path over the received PCM and returns a frame only
- * when the untouched Table 14 CRC and every fixed field validate.
+ * when the Table 14 CRC and every fixed field validate.  When no individual
+ * copy survives intact, a high-agreement vote across repeated copies may be
+ * used before applying that same CRC gate.
  */
 #ifndef V90_CP_LIVE_H
 #define V90_CP_LIVE_H
@@ -21,6 +23,8 @@ typedef struct {
     int carrier_step;
     float pll_gain;
     bool conjugate;
+    int voted_frames;
+    int agreement_pct;
 } v90_cp_live_meta_t;
 
 /*

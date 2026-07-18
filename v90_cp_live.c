@@ -18,6 +18,45 @@
 #define V90_CP_LIVE_TIMINGS 16
 #define V90_CP_LIVE_MIN_BITS 292
 
+static int v90_cp_live_find_carrier_rise(const int16_t *samples,
+                                         int search_start,
+                                         int search_end)
+{
+    const int window = V90_CP_LIVE_SAMPLE_RATE / 10; /* 100 ms */
+    int best = -1;
+    double best_ratio = 0.0;
+
+    if (!samples || search_end - search_start < 8 * window)
+        return -1;
+    if (search_start < 5 * window)
+        search_start = 5 * window;
+    for (int start = search_start;
+         start + 5 * window <= search_end;
+         start += window / 4) {
+        double before = 0.0;
+        double after = 0.0;
+
+        for (int i = start - 5 * window; i < start; i++) {
+            double sample = samples[i];
+            before += sample * sample;
+        }
+        for (int i = start; i < start + 5 * window; i++) {
+            double sample = samples[i];
+            after += sample * sample;
+        }
+        before = sqrt(before / (5.0 * window));
+        after = sqrt(after / (5.0 * window));
+        double ratio = after / (before + 1.0);
+
+        if (after > 200.0 && after - before > 250.0
+            && ratio >= 2.0 && ratio > best_ratio) {
+            best = start;
+            best_ratio = ratio;
+        }
+    }
+    return best;
+}
+
 static int v90_cp_live_descramble(uint32_t *reg, int input)
 {
     int output = (input ^ (*reg >> 4) ^ (*reg >> 22)) & 1;
@@ -92,6 +131,115 @@ static bool v90_cp_live_decode_bits(const uint8_t *bits,
     return found;
 }
 
+/* CP/CP' is repeated until the other modem acknowledges it.  The GPA
+ * scrambler is self-synchronising, so after its 23-bit memory the decoded
+ * copies are periodic even when capture starts mid-stream.  Majority-vote a
+ * bounded odd number of copies, then require a complete, semantically sane
+ * Table-14 decode with its CRC intact.  The agreement gate makes an
+ * accidental CRC hit under a wrong carrier/timing hypothesis vanishingly
+ * unlikely. */
+static bool v90_cp_live_decode_repeated(const uint8_t *bits,
+                                        int bit_count,
+                                        int expected_compatibility,
+                                        bool expected_alaw,
+                                        vpcm_cp_diag_t *best,
+                                        int *best_offset,
+                                        int *best_frames,
+                                        int *best_agreement)
+{
+    uint8_t voted[VPCM_CP_MAX_BITS];
+    bool found = false;
+    bool found_ack = false;
+
+    if (!bits || !best || !best_offset || !best_frames || !best_agreement)
+        return false;
+    for (int mask_blocks = 1;
+         mask_blocks <= VPCM_CP_MAX_MASK_BLOCKS; mask_blocks++) {
+        int period = 156 + 136 * mask_blocks;
+
+        if (5 * period > bit_count)
+            break;
+        for (int phase = 0;
+             phase < period && phase + 5 * period <= bit_count; phase++) {
+            int available = (bit_count - phase) / period;
+
+            for (int skip = 0; skip <= 4 && skip + 5 <= available; skip++) {
+                int frames = available - skip;
+                int sync_errors = 0;
+                int disagreements = 0;
+                int agreement;
+                vpcm_cp_diag_t candidate;
+
+                if (frames > 9)
+                    frames = 9;
+                if ((frames & 1) == 0)
+                    frames--;
+                for (int bit = 0; bit <= 17; bit++) {
+                    int ones = 0;
+
+                    for (int frame = 0; frame < frames; frame++) {
+                        ones += bits[phase
+                                  + (skip + frame) * period + bit] != 0;
+                    }
+                    if (bit <= 16)
+                        sync_errors += 2 * ones < frames;
+                    else
+                        sync_errors += 2 * ones >= frames;
+                }
+                if (sync_errors != 0)
+                    continue;
+                {
+                    int ones = 0;
+
+                    for (int frame = 0; frame < frames; frame++) {
+                        ones += bits[phase
+                                  + (skip + frame) * period + 19] != 0;
+                    }
+                    if ((2 * ones >= frames ? 1 : 0)
+                        != expected_compatibility) {
+                        continue;
+                    }
+                }
+                for (int bit = 0; bit < period; bit++) {
+                    int ones = 0;
+
+                    for (int frame = 0; frame < frames; frame++) {
+                        ones += bits[phase
+                                  + (skip + frame) * period + bit] != 0;
+                    }
+                    voted[bit] = (uint8_t)(2 * ones >= frames);
+                    disagreements += ones < frames - ones
+                                   ? ones : frames - ones;
+                }
+                agreement = 100
+                          - (100 * disagreements + frames * period / 2)
+                            / (frames * period);
+                if (agreement < 75)
+                    continue;
+                memset(&candidate, 0, sizeof(candidate));
+                if (!vpcm_cp_decode_diag(voted, period, &candidate)
+                    || !v90_cp_live_frame_sane(&candidate,
+                                                expected_compatibility,
+                                                expected_alaw)) {
+                    continue;
+                }
+                if (!found
+                    || (candidate.frame.acknowledge && !found_ack)
+                    || (candidate.frame.acknowledge == found_ack
+                        && agreement > *best_agreement)) {
+                    *best = candidate;
+                    *best_offset = phase + skip * period;
+                    *best_frames = frames;
+                    *best_agreement = agreement;
+                    found_ack = candidate.frame.acknowledge;
+                    found = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                                     int first_symbol,
                                     int end_symbol,
@@ -102,7 +250,9 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                                     int *last_symbol,
                                     int *carrier_step_out,
                                     float *pll_gain_out,
-                                    bool *conjugate_out)
+                                    bool *conjugate_out,
+                                    int *voted_frames_out,
+                                    int *agreement_pct_out)
 {
     static const uint8_t cp_map[4] = {0, 3, 2, 1};
     static const float pll_gains[] = {0.01f, 0.0f, 0.05f};
@@ -110,6 +260,7 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
     int bit_capacity;
     bool found = false;
     bool found_ack = false;
+    bool found_voted = false;
     int found_offset = -1;
 
     if (!detail || !detail->symbols || !out || first_symbol < 1
@@ -138,6 +289,9 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                 int bit_count = 0;
                 vpcm_cp_diag_t candidate;
                 int candidate_offset = -1;
+                int candidate_frames = 0;
+                int candidate_agreement = 100;
+                bool candidate_voted = false;
 
                 for (int sym = first_symbol; sym < end_symbol; sym++) {
                     float re = detail->symbols[sym].re;
@@ -169,21 +323,35 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                 }
 
                 memset(&candidate, 0, sizeof(candidate));
-                if (v90_cp_live_decode_bits(bits,
-                                            bit_count,
-                                            expected_compatibility,
-                                            expected_alaw,
-                                            &candidate,
-                                            &candidate_offset)) {
+                if (!v90_cp_live_decode_bits(bits,
+                                             bit_count,
+                                             expected_compatibility,
+                                             expected_alaw,
+                                             &candidate,
+                                             &candidate_offset)) {
+                    candidate_voted = v90_cp_live_decode_repeated(
+                        bits,
+                        bit_count,
+                        expected_compatibility,
+                        expected_alaw,
+                        &candidate,
+                        &candidate_offset,
+                        &candidate_frames,
+                        &candidate_agreement);
+                }
+                if (candidate.valid) {
                     bool candidate_ack = candidate.frame.acknowledge;
 
                     if (!found
+                        || (found_voted && !candidate_voted)
                         || (candidate_ack && !found_ack)
-                        || (candidate_ack == found_ack
+                        || (candidate_voted == found_voted
+                            && candidate_ack == found_ack
                             && candidate_offset > found_offset)) {
                         *out = candidate;
                         found = true;
                         found_ack = candidate_ack;
+                        found_voted = candidate_voted;
                         found_offset = candidate_offset;
                         if (frame_symbol)
                             *frame_symbol = first_symbol
@@ -198,11 +366,18 @@ static bool v90_cp_live_slice_trial(const p3_result_t *detail,
                             *pll_gain_out = pll_gains[pll_index];
                         if (conjugate_out)
                             *conjugate_out = conjugate != 0;
+                        if (voted_frames_out)
+                            *voted_frames_out = candidate_frames;
+                        if (agreement_pct_out)
+                            *agreement_pct_out = candidate_agreement;
                     }
+                    if (!expected_compatibility)
+                        goto done;
                 }
             }
         }
     }
+done:
     free(bits);
     return found;
 }
@@ -218,6 +393,12 @@ bool v90_cp_live_recover(const int16_t *samples,
     int capture_start;
     int search_start;
     int search_end;
+    int equalizer_freeze_sample;
+    int carrier_begin = P3_CARRIER_LOW;
+    int carrier_end = P3_CARRIER_HIGH;
+    int timing_begin = 0;
+    int timing_end = V90_CP_LIVE_TIMINGS;
+    int carrier_onset = -1;
 
     if (!samples || !out || sample_count <= 0
         || phase4_hint_sample < 0
@@ -243,11 +424,60 @@ bool v90_cp_live_recover(const int16_t *samples,
     if (search_start < capture_start)
         search_start = capture_start;
     search_end = sample_count;
+    equalizer_freeze_sample = phase4_hint_sample - 4000;
+    if (!expected_compatibility) {
+        int rise_end = phase4_hint_sample + V90_CP_LIVE_SAMPLE_RATE;
+        if (rise_end > sample_count)
+            rise_end = sample_count;
+        carrier_onset = v90_cp_live_find_carrier_rise(samples,
+                                                      search_start,
+                                                      rise_end);
+        if (carrier_onset >= 0) {
+            /* SmartLink may start CPt several seconds before our Ri when the
+             * two Phase-2 directions finish at different times.  Freezing
+             * the CMA relative to the late local marker then freezes it in
+             * the middle of CPt.  Anchor it just before the caller's own
+             * sustained carrier rise instead. */
+            equalizer_freeze_sample = carrier_onset - 4000;
+            search_start = carrier_onset - 800;
+            if (search_start < capture_start)
+                search_start = capture_start;
+            search_end = carrier_onset + 2 * V90_CP_LIVE_SAMPLE_RATE;
+            if (search_end > sample_count)
+                search_end = sample_count;
+        }
+    }
+    if (equalizer_freeze_sample < capture_start)
+        equalizer_freeze_sample = capture_start;
 
-    for (int carrier_pass = 0; carrier_pass < 2; carrier_pass++) {
-        int carrier = carrier_pass == 0 ? P3_CARRIER_LOW : P3_CARRIER_HIGH;
+    /* Diagnostic overrides keep offline waveform sweeps bounded.  Production
+     * uses both carriers and all timing phases unless explicitly requested. */
+    if (getenv("ME_V90_CP_FREEZE_SAMPLE"))
+        equalizer_freeze_sample = atoi(getenv("ME_V90_CP_FREEZE_SAMPLE"));
+    if (getenv("ME_V90_CP_CARRIER")) {
+        carrier_begin = atoi(getenv("ME_V90_CP_CARRIER"))
+                      ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
+        carrier_end = carrier_begin;
+    }
+    if (getenv("ME_V90_CP_TIMING")) {
+        timing_begin = atoi(getenv("ME_V90_CP_TIMING"));
+        if (timing_begin < 0)
+            timing_begin = 0;
+        if (timing_begin >= V90_CP_LIVE_TIMINGS)
+            timing_begin = V90_CP_LIVE_TIMINGS - 1;
+        timing_end = timing_begin + 1;
+    }
+    if (getenv("ME_V90_CP_DIAG")) {
+        fprintf(stderr,
+                "v90 CP live window capture=%d search=%d..%d hint=%d freeze=%d carrier=%d..%d timing=%d..%d\n",
+                capture_start, search_start, search_end,
+                phase4_hint_sample, equalizer_freeze_sample,
+                carrier_begin, carrier_end, timing_begin, timing_end - 1);
+    }
 
-        for (int timing = 0; timing < V90_CP_LIVE_TIMINGS; timing++) {
+    for (int carrier = carrier_begin; carrier <= carrier_end; carrier++) {
+
+        for (int timing = timing_begin; timing < timing_end; timing++) {
             p3_result_t *detail = p3_demod_run_phase4_data_at_timing(
                 samples + capture_start,
                 sample_count - capture_start,
@@ -258,7 +488,7 @@ bool v90_cp_live_recover(const int16_t *samples,
                 true,
                 timing,
                 V90_CP_LIVE_TIMINGS,
-                phase4_hint_sample - 4000);
+                equalizer_freeze_sample);
             int first_symbol = 1;
             int end_symbol;
             int frame_symbol = -1;
@@ -266,6 +496,8 @@ bool v90_cp_live_recover(const int16_t *samples,
             int carrier_step = 0;
             float pll_gain = 0.0f;
             bool conjugate = false;
+            int voted_frames = 0;
+            int agreement_pct = 100;
             bool found;
 
             if (!detail)
@@ -290,7 +522,9 @@ bool v90_cp_live_recover(const int16_t *samples,
                                              &last_symbol,
                                              &carrier_step,
                                              &pll_gain,
-                                             &conjugate);
+                                             &conjugate,
+                                             &voted_frames,
+                                             &agreement_pct);
             if (found) {
                 if (meta) {
                     meta->frame_sample = detail->symbols[frame_symbol]
@@ -302,6 +536,8 @@ bool v90_cp_live_recover(const int16_t *samples,
                     meta->carrier_step = carrier_step;
                     meta->pll_gain = pll_gain;
                     meta->conjugate = conjugate;
+                    meta->voted_frames = voted_frames;
+                    meta->agreement_pct = agreement_pct;
                 }
                 p3_result_free(detail);
                 return true;

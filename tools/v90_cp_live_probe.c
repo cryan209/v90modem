@@ -54,7 +54,7 @@ int main(int argc, char **argv)
     }
     printf("strict %s%s bits=%d frame=%d last=%d carrier=%s timing=%d "
            "step=%d pll=%.3f conjugate=%d drn=%u mask=0x%04x "
-           "constellations=%u codec-diff=%d crc=%u\n",
+           "constellations=%u codec-diff=%d crc=%u vote=%d/%d%%\n",
            diag.frame.v90_compatibility ? "CP" : "CPt",
            diag.frame.acknowledge ? "'" : "",
            diag.nbits,
@@ -69,7 +69,9 @@ int main(int argc, char **argv)
            diag.frame.upstream_rate_mask,
            (unsigned)diag.frame.constellation_count,
            diag.frame.codec_constellations_differ ? 1 : 0,
-           (unsigned)diag.crc_remainder);
+           (unsigned)diag.crc_remainder,
+           meta.voted_frames,
+           meta.agreement_pct);
     free(samples);
     return 0;
 }
