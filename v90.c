@@ -3063,6 +3063,26 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
                     s->sample_count, v90_min_jd_symbols());
         }
         if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
+            int cycle_limit = v90_dil_autoterminate_cycles();
+            int minimum_segments = cycle_limit * s->dil.n;
+
+            /* The SmartLink interop descriptors require one complete DIL
+             * cycle.  A primary-channel S detector can momentarily match the
+             * changing PCM training levels themselves; accepting that early
+             * match truncated a 144-segment ADI-QC cycle after only six
+             * segments on hardware.  Do not let a physical event contradict
+             * the explicit minimum-cycle contract. */
+            if (cycle_limit > 0
+                && s->dil_segment_index < minimum_segments) {
+                fprintf(stderr,
+                        "[V90] Phase 3: ignored early far-end S during DIL "
+                        "at segment %d/%d (minimum %d complete cycle%s)\n",
+                        s->dil_segment_index + 1,
+                        s->dil.n,
+                        cycle_limit,
+                        cycle_limit == 1 ? "" : "s");
+                return false;
+            }
             fprintf(stderr, "[V90] Phase 3: subsequent far-end S detected during DIL, terminating at the next segment boundary\n");
             s->dil_terminate_requested = true;
             return true;

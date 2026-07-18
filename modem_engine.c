@@ -1424,7 +1424,8 @@ static int        g_training_tx_samples = 0; /* Sample counter for TX silencing 
 #define V8_TIMEOUT_MS       15000   /* V.8 negotiation: 15 s (2003-era
                                        SmartLink DSPs need ~6 s just to
                                        validate JM before sending CJ) */
-#define TRAINING_TIMEOUT_MS 30000   /* V.34 training (Phase 2-4): 30 seconds */
+#define TRAINING_TIMEOUT_MS 60000   /* V.90 hardware may spend ~10 seconds
+                                       retrying INFO before Phases 3/4. */
 
 /* V.34 RX stage tracking — used for notch filter activation and diagnostics */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
@@ -1846,6 +1847,128 @@ static void v90_live_cp_bit(void *user_data, int bit)
         v34_reject_v90_phase4_hypothesis(g_v34);
 }
 
+static void *v90_cp_live_worker(void *user_data)
+{
+    (void)user_data;
+    for (;;) {
+        int16_t *snapshot;
+        int sample_count;
+        int phase4_hint;
+        int expected_compatibility;
+        unsigned generation;
+        vpcm_cp_diag_t diag;
+        v90_cp_live_meta_t meta;
+        bool found;
+        bool accepted = false;
+
+        pthread_mutex_lock(&g_v90_cp_live_mtx);
+        while (!g_v90_cp_live_pending && !g_v90_cp_live_shutdown)
+            pthread_cond_wait(&g_v90_cp_live_cond, &g_v90_cp_live_mtx);
+        if (g_v90_cp_live_shutdown) {
+            pthread_mutex_unlock(&g_v90_cp_live_mtx);
+            break;
+        }
+        sample_count = g_v90_cp_live_sample_count;
+        phase4_hint = g_v90_cp_live_phase4_hint;
+        expected_compatibility =
+            g_v90_cp_live_expected_compatibility;
+        generation = g_v90_cp_live_generation;
+        snapshot = malloc((size_t)sample_count * sizeof(*snapshot));
+        if (snapshot) {
+            memcpy(snapshot,
+                   g_v90_cp_live_samples,
+                   (size_t)sample_count * sizeof(*snapshot));
+        }
+        g_v90_cp_live_pending = false;
+        g_v90_cp_live_running = true;
+        pthread_mutex_unlock(&g_v90_cp_live_mtx);
+
+        memset(&diag, 0, sizeof(diag));
+        memset(&meta, 0, sizeof(meta));
+        found = snapshot
+             && v90_cp_live_recover(snapshot,
+                                    sample_count,
+                                    phase4_hint,
+                                    expected_compatibility,
+                                    g_law == ME_LAW_ALAW,
+                                    &diag,
+                                    &meta);
+        if (found) {
+            pthread_mutex_lock(&g_state_mtx);
+            pthread_mutex_lock(&g_v90_cp_live_mtx);
+            bool current = generation == g_v90_cp_live_generation;
+            pthread_mutex_unlock(&g_v90_cp_live_mtx);
+            if (current && g_state == ME_TRAINING
+                && g_mod == ME_MOD_V90 && g_v90) {
+                fprintf(stderr,
+                        "[ME] V.90 strict batch recovered %s%s: bits=%d "
+                        "frame=%d carrier=%s timing=%d step=%d pll=%.3f "
+                        "drn=%u mask=0x%04X crc=%u\n",
+                        diag.frame.v90_compatibility ? "CP" : "CPt",
+                        diag.frame.acknowledge ? "'" : "",
+                        diag.nbits,
+                        meta.frame_sample,
+                        meta.carrier_sel ? "high" : "low",
+                        meta.timing_index,
+                        meta.carrier_step,
+                        meta.pll_gain,
+                        (unsigned)diag.frame.drn,
+                        diag.frame.upstream_rate_mask,
+                        (unsigned)diag.crc_remainder);
+                accepted = v90_accept_cp_diag_locked(&diag, "batch");
+            }
+            pthread_mutex_unlock(&g_state_mtx);
+        }
+        free(snapshot);
+
+        pthread_mutex_lock(&g_v90_cp_live_mtx);
+        g_v90_cp_live_running = false;
+        if (!accepted
+            && generation == g_v90_cp_live_generation
+            && expected_compatibility
+                 == g_v90_cp_live_expected_compatibility
+            && g_v90_cp_live_phase4_hint >= 0) {
+            /* Retry on a fresh 500 ms of waveform.  A failed snapshot is not
+             * evidence for a frame; only a complete CRC-valid observation
+             * can advance the modem state. */
+            g_v90_cp_live_next_request =
+                g_v90_cp_live_sample_count + 4000;
+        }
+        pthread_mutex_unlock(&g_v90_cp_live_mtx);
+    }
+    return NULL;
+}
+
+static void v90_cp_live_worker_start(void)
+{
+    pthread_mutex_init(&g_v90_cp_live_mtx, NULL);
+    pthread_cond_init(&g_v90_cp_live_cond, NULL);
+    g_v90_cp_live_shutdown = false;
+    if (pthread_create(&g_v90_cp_live_thread,
+                       NULL,
+                       v90_cp_live_worker,
+                       NULL) == 0) {
+        g_v90_cp_live_thread_started = true;
+    } else {
+        fprintf(stderr,
+                "[ME] WARNING: unable to start strict V.90 CP worker\n");
+    }
+}
+
+static void v90_cp_live_worker_stop(void)
+{
+    if (g_v90_cp_live_thread_started) {
+        pthread_mutex_lock(&g_v90_cp_live_mtx);
+        g_v90_cp_live_shutdown = true;
+        pthread_cond_signal(&g_v90_cp_live_cond);
+        pthread_mutex_unlock(&g_v90_cp_live_mtx);
+        pthread_join(g_v90_cp_live_thread, NULL);
+        g_v90_cp_live_thread_started = false;
+    }
+    pthread_cond_destroy(&g_v90_cp_live_cond);
+    pthread_mutex_destroy(&g_v90_cp_live_mtx);
+}
+
 /* Runs synchronously inside me_rx_g711() while g_state_mtx is held. */
 static void v92_live_p4u_frame(void *user_data,
                                v92_p4u_kind_t kind,
@@ -1918,6 +2041,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_fallback_to_v22bis_pending = false;
     g_v34_fallback_status = 0;
     v90_dil_capture_reset();
+    if (g_v90_cp_live_thread_started)
+        v90_cp_live_capture_reset_locked();
     g_notch.active = false;
     g_last_rx_stage = 0;
     g_last_tx_stage = 0;
@@ -2512,6 +2637,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         g_v34_start_baud = saved_baud;
         /* start_v34_training sets g_mod = ME_MOD_V34; override back to V90 */
         g_mod = ME_MOD_V90;
+        v90_cp_live_capture_reset_locked();
         /* Enable V.90 INFO0d frame generation and carrier swap in SpanDSP V.34.
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
         if (g_v34)
@@ -2564,6 +2690,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
+    v90_cp_live_worker_start();
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
     {
@@ -2628,6 +2755,7 @@ void me_init(void)
 
 void me_destroy(void)
 {
+    v90_cp_live_worker_stop();
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     cleanup_v34_v90_training_locked();
@@ -2929,6 +3057,8 @@ void me_rx_audio(const int16_t *amp, int len)
 
     case ME_TRAINING:
     case ME_DATA:
+        if (state == ME_TRAINING && mod == ME_MOD_V90)
+            v90_cp_live_capture_append(amp, len);
         /* RX energy diagnostic — log every second during training */
         if (state == ME_TRAINING) {
             for (int i = 0; i < len; i++)
@@ -3399,6 +3529,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             if (phase_before < V90_TX_RI
                 && v90_get_tx_phase(g_v90) >= V90_TX_RI) {
                 ME_LOG("[ME] V.90 Phase 3 complete; enabling native upstream Phase 4 receiver\n");
+                v90_cp_live_note_phase4_hint_locked();
                 v34_force_phase4(g_v34);
                 v34_force_v90_phase4_cp_rx(g_v34);
             }
