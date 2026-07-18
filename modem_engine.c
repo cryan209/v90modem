@@ -1760,9 +1760,10 @@ static void v90_cp_live_note_phase4_hint_locked(void)
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     g_v90_cp_live_phase4_hint = g_v90_cp_live_sample_count;
     g_v90_cp_live_expected_compatibility = 0;
-    /* Wait 400 ms.  The reference SmartLink repeats CPt across this window,
-     * leaving a complete frame in the snapshot even with callback skew. */
-    g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 3200;
+    /* SmartLink can enter Phase 4 roughly 300 ms after our downstream Ri
+     * marker.  Wait 800 ms so the first batch contains several complete
+     * 89-ms CPt copies even with callback and RTP framing skew. */
+    g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 6400;
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
     ME_LOG("[ME] V.90 strict batch CP receiver armed at upstream sample %d\n",
            g_v90_cp_live_phase4_hint);
@@ -1810,6 +1811,12 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
 
     if (!diag || !g_v90 || g_mod != ME_MOD_V90)
         return false;
+    if (diag->frame.codec_alaw != (g_law == ME_LAW_ALAW)) {
+        ME_LOG("[ME] V.90 %s codec-law bridge: peer=%s SIP=%s; translating requested analogue levels\n",
+               diag->frame.v90_compatibility ? "CP" : "CPt",
+               diag->frame.codec_alaw ? "A-law" : "mu-law",
+               g_law == ME_LAW_ALAW ? "A-law" : "mu-law");
+    }
     accepted = v90_set_phase4_cp(g_v90, &diag->frame)
         && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
     ME_LOG("[ME] V.90 strict RX event=CP_VALID source=%s kind=%s bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",

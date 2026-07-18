@@ -17,6 +17,8 @@
 #define V90_CP_LIVE_BAUD_CODE P3_BAUD_2400
 #define V90_CP_LIVE_TIMINGS 16
 #define V90_CP_LIVE_MIN_BITS 292
+#define V90_CP_DIRECT_RRC_HALF 27
+#define V90_CP_DIRECT_RRC_ALPHA 0.10f
 
 static int v90_cp_live_find_carrier_rise(const int16_t *samples,
                                          int search_start,
@@ -68,11 +70,15 @@ static bool v90_cp_live_frame_sane(const vpcm_cp_diag_t *diag,
                                    int expected_compatibility,
                                    bool expected_alaw)
 {
+    /* The analogue modem reports the codec law it inferred during DIL.  A
+     * SmartLink SL8200 occasionally reports A-law on an otherwise verified
+     * PCMU call; keep the CRC-valid frame and let the engine reconcile that
+     * field with the negotiated SIP law before configuring its mapper. */
+    (void)expected_alaw;
     return diag
         && diag->valid
         && (diag->frame.v90_compatibility ? 1 : 0)
              == expected_compatibility
-        && diag->frame.codec_alaw == expected_alaw
         && diag->frame.drn >= 1
         && diag->frame.drn <= 22
         && diag->frame.upstream_rate_mask != 0;
@@ -236,6 +242,232 @@ static bool v90_cp_live_decode_repeated(const uint8_t *bits,
             }
         }
     }
+    return found;
+}
+
+/* SmartLink's long-startup CPt is ordinary 2400-baud, 1800-Hz differential
+ * QPSK with a 0.1-rolloff pulse shape.  The general Phase-3 front end below
+ * is useful when the preceding training can seed its adaptive equalizer, but
+ * it can freeze on the pre-CP Phase-4 signal and miss a subsequently perfect
+ * CPt stream.  This small fixed matched-filter path has no adaptive state and
+ * therefore provides a deterministic first attempt over a buffered capture. */
+static float v90_cp_direct_rrc(float t)
+{
+    const float alpha = V90_CP_DIRECT_RRC_ALPHA;
+    float denominator;
+
+    if (fabsf(t) < 1.0e-6f)
+        return 1.0f + alpha * (4.0f / (float)M_PI - 1.0f);
+    if (fabsf(fabsf(t) - 1.0f / (4.0f * alpha)) < 1.0e-5f) {
+        return alpha / sqrtf(2.0f)
+             * ((1.0f + 2.0f / (float)M_PI)
+                    * sinf((float)M_PI / (4.0f * alpha))
+                + (1.0f - 2.0f / (float)M_PI)
+                    * cosf((float)M_PI / (4.0f * alpha)));
+    }
+    denominator = (float)M_PI * t
+                * (1.0f - 16.0f * alpha * alpha * t * t);
+    return (sinf((float)M_PI * t * (1.0f - alpha))
+            + 4.0f * alpha * t
+                * cosf((float)M_PI * t * (1.0f + alpha)))
+         / denominator;
+}
+
+static bool v90_cp_live_direct_recover(const int16_t *samples,
+                                       int segment_start,
+                                       int segment_end,
+                                       float carrier_hz,
+                                       int expected_compatibility,
+                                       bool expected_alaw,
+                                       vpcm_cp_diag_t *out,
+                                       v90_cp_live_meta_t *meta,
+                                       int carrier_sel)
+{
+    static const uint8_t quadrant_map[4] = {0, 3, 2, 1};
+    const float samples_per_symbol = 10.0f / 3.0f;
+    const int half = V90_CP_DIRECT_RRC_HALF;
+    int sample_count;
+    int max_symbols;
+    float taps[2 * V90_CP_DIRECT_RRC_HALF + 1];
+    float *mixed_re = NULL;
+    float *mixed_im = NULL;
+    float *filtered_re = NULL;
+    float *filtered_im = NULL;
+    uint8_t *bits = NULL;
+    int *bit_samples = NULL;
+    bool found = false;
+
+    if (!samples || !out || segment_start < 0
+        || segment_end <= segment_start + 4 * half) {
+        return false;
+    }
+    sample_count = segment_end - segment_start;
+    max_symbols = (int)((sample_count - 2 * half - 2)
+                        / samples_per_symbol) + 1;
+    if (max_symbols < V90_CP_LIVE_MIN_BITS / 2 + 2)
+        return false;
+
+    mixed_re = calloc((size_t)sample_count, sizeof(*mixed_re));
+    mixed_im = calloc((size_t)sample_count, sizeof(*mixed_im));
+    filtered_re = calloc((size_t)sample_count, sizeof(*filtered_re));
+    filtered_im = calloc((size_t)sample_count, sizeof(*filtered_im));
+    bits = malloc((size_t)(2 * max_symbols));
+    bit_samples = malloc((size_t)(2 * max_symbols) * sizeof(*bit_samples));
+    if (!mixed_re || !mixed_im || !filtered_re || !filtered_im
+        || !bits || !bit_samples) {
+        goto done;
+    }
+
+    {
+        float norm = 0.0f;
+
+        for (int tap = -half; tap <= half; tap++) {
+            float t = tap / samples_per_symbol;
+            float value = v90_cp_direct_rrc(t);
+
+            taps[tap + half] = value;
+            norm += value * value;
+        }
+        norm = sqrtf(norm);
+        if (norm > 0.0f) {
+            for (int tap = 0; tap <= 2 * half; tap++)
+                taps[tap] /= norm;
+        }
+    }
+
+    {
+        double phase = 2.0 * M_PI * carrier_hz
+                     * segment_start / V90_CP_LIVE_SAMPLE_RATE;
+        double step = 2.0 * M_PI * carrier_hz
+                    / V90_CP_LIVE_SAMPLE_RATE;
+        float osc_re = (float)cos(phase);
+        float osc_im = (float)-sin(phase);
+        float step_re = (float)cos(step);
+        float step_im = (float)-sin(step);
+
+        for (int i = 0; i < sample_count; i++) {
+            float sample = samples[segment_start + i];
+            float next_re;
+
+            mixed_re[i] = sample * osc_re;
+            mixed_im[i] = sample * osc_im;
+            next_re = osc_re * step_re - osc_im * step_im;
+            osc_im = osc_re * step_im + osc_im * step_re;
+            osc_re = next_re;
+            if ((i & 1023) == 1023) {
+                float magnitude = hypotf(osc_re, osc_im);
+
+                if (magnitude > 0.0f) {
+                    osc_re /= magnitude;
+                    osc_im /= magnitude;
+                }
+            }
+        }
+    }
+
+    for (int i = half; i < sample_count - half; i++) {
+        float re = 0.0f;
+        float im = 0.0f;
+
+        for (int tap = -half; tap <= half; tap++) {
+            re += taps[tap + half] * mixed_re[i + tap];
+            im += taps[tap + half] * mixed_im[i + tap];
+        }
+        filtered_re[i] = re;
+        filtered_im[i] = im;
+    }
+
+    for (int timing = 0; timing < V90_CP_LIVE_TIMINGS; timing++) {
+        float position = half
+                       + timing * samples_per_symbol / V90_CP_LIVE_TIMINGS;
+        float previous_re = 0.0f;
+        float previous_im = 0.0f;
+        bool have_previous = false;
+        uint32_t descrambler = 0;
+        int bit_count = 0;
+        vpcm_cp_diag_t candidate;
+        int candidate_offset = -1;
+        int candidate_frames = 0;
+        int candidate_agreement = 100;
+        bool candidate_voted = false;
+
+        while (position + 1.0f < sample_count - half) {
+            int index = (int)floorf(position);
+            float fraction = position - index;
+            float re = filtered_re[index]
+                     + fraction * (filtered_re[index + 1]
+                                   - filtered_re[index]);
+            float im = filtered_im[index]
+                     + fraction * (filtered_im[index + 1]
+                                   - filtered_im[index]);
+
+            if (have_previous) {
+                float angle = atan2f(im * previous_re - re * previous_im,
+                                     re * previous_re + im * previous_im);
+                int quadrant = (int)floorf(
+                    angle / (float)(M_PI / 2.0) + 0.5f) & 3;
+                int mapped = quadrant_map[quadrant];
+                int sample_index = segment_start + (int)(position + 0.5f);
+
+                bits[bit_count] = (uint8_t)v90_cp_live_descramble(
+                    &descrambler, mapped & 1);
+                bit_samples[bit_count++] = sample_index;
+                bits[bit_count] = (uint8_t)v90_cp_live_descramble(
+                    &descrambler, (mapped >> 1) & 1);
+                bit_samples[bit_count++] = sample_index;
+            }
+            previous_re = re;
+            previous_im = im;
+            have_previous = true;
+            position += samples_per_symbol;
+        }
+
+        memset(&candidate, 0, sizeof(candidate));
+        if (!v90_cp_live_decode_bits(bits,
+                                     bit_count,
+                                     expected_compatibility,
+                                     expected_alaw,
+                                     &candidate,
+                                     &candidate_offset)) {
+            candidate_voted = v90_cp_live_decode_repeated(
+                bits,
+                bit_count,
+                expected_compatibility,
+                expected_alaw,
+                &candidate,
+                &candidate_offset,
+                &candidate_frames,
+                &candidate_agreement);
+        }
+        if (candidate.valid) {
+            int last_offset = candidate_offset + candidate.nbits - 1;
+
+            *out = candidate;
+            if (meta) {
+                meta->frame_sample = bit_samples[candidate_offset];
+                meta->last_sample = bit_samples[last_offset];
+                meta->carrier_sel = carrier_sel;
+                meta->timing_index = timing;
+                meta->carrier_step = 0;
+                meta->pll_gain = 0.0f;
+                meta->conjugate = false;
+                meta->map_index = 8;
+                meta->bit_order = 0;
+                meta->voted_frames = candidate_voted ? candidate_frames : 0;
+                meta->agreement_pct = candidate_agreement;
+            }
+            found = true;
+            break;
+        }
+    }
+
+done:
+    free(bit_samples);
+    free(bits);
+    free(filtered_im);
+    free(filtered_re);
+    free(mixed_im);
+    free(mixed_re);
     return found;
 }
 
@@ -527,6 +759,51 @@ bool v90_cp_live_recover(const int16_t *samples,
                 phase4_hint_sample, equalizer_freeze_sample,
                 carrier_begin, carrier_end, timing_begin, timing_end - 1);
     }
+
+    if (!getenv("ME_V90_CP_DISABLE_DIRECT")
+        && baud_code == P3_BAUD_2400) {
+        p3_baud_params_t bp;
+
+        if (p3_get_baud_params(baud_code, &bp)) {
+            /* The SL8200 calling modem uses the high (1800-Hz) carrier.  Try
+             * it first, then retain the low carrier for other V.90 peers. */
+            for (int pass = 0; pass < 2; pass++) {
+                int carrier = pass == 0 ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
+                float carrier_hz;
+
+                if (carrier < carrier_begin || carrier > carrier_end)
+                    continue;
+                carrier_hz = carrier == P3_CARRIER_HIGH
+                           ? bp.carrier_high_hz : bp.carrier_low_hz;
+                if (v90_cp_live_direct_recover(samples,
+                                               search_start,
+                                               search_end,
+                                               carrier_hz,
+                                               expected_compatibility,
+                                               expected_alaw,
+                                               out,
+                                               meta,
+                                               carrier)) {
+                    if (getenv("ME_V90_CP_DIAG")) {
+                        fprintf(stderr,
+                                "v90 CP direct matched-filter hit carrier=%.0f timing=%d frame=%d\n",
+                                carrier_hz,
+                                meta ? meta->timing_index : -1,
+                                meta ? meta->frame_sample : -1);
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
+    /* A live worker retries this fixed receiver on each fresh 500-ms PCM
+     * block.  Do not let an early, incomplete snapshot fall into the much
+     * slower adaptive hypothesis sweep and monopolize that worker while the
+     * peer times out.  The adaptive path remains opt-in for offline analysis
+     * and unusual channels. */
+    if (!getenv("ME_V90_CP_ENABLE_ADAPTIVE_FALLBACK"))
+        return false;
 
     for (int carrier = carrier_begin; carrier <= carrier_end; carrier++) {
 
