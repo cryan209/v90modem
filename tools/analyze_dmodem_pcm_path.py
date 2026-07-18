@@ -18,8 +18,10 @@ import numpy as np
 
 INPUT_FRAME = 160
 OUTPUT_FRAME = 192
-RS_TAPS = 12
-RS_HALF = 5
+RS_TAPS = 257
+RS_HALF = 128
+RS_PAST = RS_HALF
+RS_FUTURE = RS_TAPS - RS_HALF - 1
 RS_PHASES = 6
 
 
@@ -35,7 +37,7 @@ def ulaw_decode(codewords: bytes) -> np.ndarray:
 
 def build_kernel() -> np.ndarray:
     kernel = np.empty((RS_PHASES, RS_TAPS), dtype=np.float32)
-    cutoff = 3950.0 / (8000.0 / 2.0)
+    cutoff = 4000.0 / (8000.0 / 2.0)
 
     for phase in range(RS_PHASES):
         fraction = phase / RS_PHASES
@@ -54,19 +56,19 @@ def dmodem_resample(samples: np.ndarray) -> np.ndarray:
     kernel = build_kernel()
     frame_count = len(samples) // INPUT_FRAME
     output = np.zeros(frame_count * OUTPUT_FRAME, dtype=np.int16)
-    history = np.zeros(RS_TAPS, dtype=np.int16)
+    history = np.zeros(RS_PAST, dtype=np.int16)
     previous: np.ndarray | None = None
 
     for frame_index in range(frame_count):
         current = samples[frame_index * INPUT_FRAME:(frame_index + 1) * INPUT_FRAME]
         if previous is not None:
-            work = np.concatenate((history, previous, current[:RS_TAPS]))
+            work = np.concatenate((history, previous, current[:RS_FUTURE]))
             frame_output = output[frame_index * OUTPUT_FRAME:(frame_index + 1) * OUTPUT_FRAME]
             for k in range(OUTPUT_FRAME):
                 numerator = k * 5
                 center = numerator // 6
                 phase = numerator % 6
-                base = RS_TAPS + center - RS_HALF
+                base = RS_PAST + center - RS_HALF
                 accumulator = np.float32(0.0)
                 for tap in range(RS_TAPS):
                     accumulator = np.float32(
@@ -79,7 +81,7 @@ def dmodem_resample(samples: np.ndarray) -> np.ndarray:
                     if accumulator >= 0
                     else accumulator - np.float32(0.5)
                 )
-            history = previous[-RS_TAPS:].copy()
+            history = previous[-RS_PAST:].copy()
         previous = current.copy()
     return output
 
