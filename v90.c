@@ -122,6 +122,31 @@ static int v90_jd_prime_symbols(void)
     return 12;
 }
 
+/* Some analogue implementations stop DIL after a known number of complete
+ * descriptor cycles, but our upstream S/S-bar detector may not yet recover
+ * their second turnaround reliably.  Keep the standards-driven default
+ * (repeat until the peer's S event), while allowing a bounded interop
+ * fallback.  SmartLink's ADI/ADI-QC profiles both request one complete cycle
+ * before they enter Phase 4 and start CPt. */
+static int v90_dil_autoterminate_cycles(void)
+{
+    const char *value;
+    char *end;
+    long parsed;
+
+    value = getenv("ME_V90_DIL_AUTOTERMINATE_CYCLES");
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    value = getenv("ME_V90_DIL_PROFILE");
+    if (value && (strcmp(value, "smartlink-adi-qc") == 0
+                  || strcmp(value, "smartlink-adi") == 0))
+        return 1;
+    return 0;
+}
+
 /* Symbols of Jd to transmit without seeing the peer's S before requesting a
  * Phase-2 restart from the live modem engine.  Set to 0 to disable recovery.
  *
@@ -1566,11 +1591,12 @@ static void v90_build_jd(v90_state_t *s)
     pos++;
 
     /* Bits 35:46 — continued rate mask + reserved.
-     * Bits 35:40 = rates 49333-56000. Enable all.
-     * Bits 41:46 = reserved (0) */
-    for (int i = 35; i <= 40; i++)
+     * Bits 35:41 are the final seven bits of the 23-bit downstream-rate
+     * capability mask.  Bits 42:46 are reserved.  SmartLink's
+     * V90Jd::setRatesMask(0x7fffff) produces this exact layout. */
+    for (int i = 35; i <= 41; i++)
         s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
-    pos += 6; /* bits 41:46 reserved = 0 */
+    pos += 5; /* bits 42:46 reserved = 0 */
 
     /* Bit 47 — constellation size for training: 0=4-point */
     pos++;
@@ -1993,7 +2019,21 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
             s->sample_count = 0;
             s->phase4_hold_logged = false;
         } else if ((s->dil_segment_index % n) == 0) {
-            fprintf(stderr, "[V90] Phase 3: completed one full DIL cycle (%d segments), repeating\n", n);
+            int cycles = s->dil_segment_index / n;
+            int cycle_limit = v90_dil_autoterminate_cycles();
+
+            if (cycle_limit > 0 && cycles >= cycle_limit) {
+                fprintf(stderr,
+                        "[V90] Phase 3: completed %d full DIL cycle%s; interop fallback entering Phase 4\n",
+                        cycles, cycles == 1 ? "" : "s");
+                s->tx_phase = V90_TX_RI;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+            } else {
+                fprintf(stderr,
+                        "[V90] Phase 3: completed one full DIL cycle (%d segments), repeating\n",
+                        n);
+            }
         }
     }
 

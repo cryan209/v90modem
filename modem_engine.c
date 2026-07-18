@@ -2385,7 +2385,15 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
          * upstream = V.34 modulation.  Training uses V.34 Phases 2-4; after
          * training completes, TX switches from V.34 to direct PCM injection.
          */
-        g_v92_active = result->v92 >= 0;
+        /* A V.92 capability octet does not guarantee that the caller selected
+         * a V.92 data pump for this call.  In particular, SmartLink still
+         * advertises V.92 QC while AT+MS=90 forces its long start-up down the
+         * V.90 CPt path.  Permit the interop rig (and deployments that need a
+         * strict V.90 answer) to suppress native V.92 Phase 4 explicitly. */
+        g_v92_active = result->v92 >= 0
+                    && parse_env_int("ME_V92_ENABLE", 1) != 0;
+        if (result->v92 >= 0 && !g_v92_active)
+            ME_LOG("[ME] V.92 capability present, but ME_V92_ENABLE=0; using V.90 Phase 4\n");
         ME_LOG("[ME] V.8 negotiated %s (PCM downstream + V.34 upstream)\n",
                g_v92_active ? "V.92" : "V.90");
         trace_phase("V8 selected %s", g_v92_active ? "V92" : "V90");
@@ -3274,6 +3282,19 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                 return false;
             pos++;
+
+            /* The project-owned V.90 transmitter replaces SpanDSP's Phase 3
+               waveform, so SpanDSP cannot observe the downstream DIL -> Ri
+               boundary itself.  Hand its primary-channel receiver into the
+               native Phase 4 path at that exact boundary; otherwise it stays
+               parked in PHASE3_WAIT_S and never delivers the peer's CPt bits
+               to v90_live_cp_bit(). */
+            if (phase_before < V90_TX_RI
+                && v90_get_tx_phase(g_v90) >= V90_TX_RI) {
+                ME_LOG("[ME] V.90 Phase 3 complete; enabling native upstream Phase 4 receiver\n");
+                v34_force_phase4(g_v34);
+                v34_force_v90_phase4_cp_rx(g_v34);
+            }
 
             /* v90.c returns to WAIT_JA after a bounded Jd-without-S interval.
                That state change is the recovery request for the live engine:

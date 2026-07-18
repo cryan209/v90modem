@@ -411,6 +411,12 @@ SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s);
     and then hand control back to SpanDSP for native V.34/V.90 Phase 4. */
 SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
 
+/*! Start immediate V.90 CPt acquisition on the primary-channel receiver.
+    This is the digital-answerer companion to v34_force_phase4() when an
+    external V.90 implementation owns Ri and the project-owned CP framer owns
+    the variable-length Table 14 message. */
+SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s);
+
 /*! Force the primary-channel receiver into Phase 3 PP/TRN conditioning.
     Intended for offline V.90 replay after INFO1 has already been decoded;
     the trained equalizer is preserved by a later v34_force_phase4(). */
