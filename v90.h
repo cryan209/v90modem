@@ -235,6 +235,12 @@ bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t 
  */
 bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_len);
 
+/* Load the SmartLink SL8200/SLModem ADI-QC Ja descriptor captured from the
+ * peer DSP.  This is an explicit interoperability fallback for live testing;
+ * normal operation should decode the descriptor received in Ja. */
+bool v90_dil_load_smartlink_adi_qc(v90_dil_desc_t *out);
+bool v90_dil_load_smartlink_adi(v90_dil_desc_t *out);
+
 /*
  * G.711 codeword <-> (Ucode, sign) helpers (Table 1/V.90 mapping).
  * sign: 1 = positive, 0 = negative.

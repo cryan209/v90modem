@@ -373,6 +373,7 @@ static uint64_t vpcm_count_bit_errors(const uint8_t *a, const uint8_t *b, int le
 static bool test_vpcm_cp_robbed_bit_safe_profile(void);
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law);
 static bool test_v90_dil_rx_roundtrip(v91_law_t law);
+static bool test_v90_smartlink_dil_profile(void);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_jd_resync_request(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
@@ -415,11 +416,13 @@ static uint16_t vpcm_test_crc16_bits(const uint8_t *bits, int bit_count)
 
     for (i = 0; i < bit_count; i++) {
         int b = vpcm_test_get_bit(bits, i);
-        int fb = ((int) (crc >> 15) ^ b) & 1;
 
-        crc = (uint16_t) (crc << 1);
-        if (fb)
-            crc ^= 0x8005u;
+        if (i < 18 || i == 34 || (i >= 51 && ((i - 51) % 17) == 0))
+            continue;
+        if (((int)crc ^ b) & 1)
+            crc = (uint16_t)((crc >> 1) ^ 0x8408u);
+        else
+            crc = (uint16_t)(crc >> 1);
     }
     return crc;
 }
@@ -432,17 +435,22 @@ static bool vpcm_build_v92_table20_bits(const v90_dil_desc_t *desc,
                                         int *bit_len_out)
 {
     uint8_t v90_bits[512];
-    int v90_bit_len;
     int bit_pos;
+    int alpha;
+    int beta;
+    int crc_start;
     uint16_t crc;
 
     if (!desc || !buf || buf_len <= 0)
         return false;
-    if (!v90_build_dil_descriptor_bits(v90_bits, (int) sizeof(v90_bits), &v90_bit_len, desc))
+    if (!v90_build_dil_descriptor_bits(v90_bits, (int) sizeof(v90_bits), NULL, desc))
         return false;
 
     memset(buf, 0, (size_t) buf_len);
-    bit_pos = v90_bit_len - 17; /* copy through the V.90 CRC start bit */
+    alpha = ((int)desc->lsp + 15) / 16 * 17;
+    beta = alpha + (((int)desc->ltp + 15) / 16) * 17;
+    crc_start = 187 + beta + (((int)desc->n + 1) / 2) * 17;
+    bit_pos = crc_start + 1; /* copy through the V.90 CRC start bit */
     if (((bit_pos + 52 + 11) + 7) / 8 > buf_len)
         return false;
     memcpy(buf, v90_bits, (size_t) ((bit_pos + 7) / 8));
@@ -513,6 +521,51 @@ static int vpcm_test_dil_cycle_len(const v90_dil_desc_t *desc)
         total += ((int) (desc->h[uchord_idx] & 0x7F) + 1) * 6;
     }
     return total;
+}
+
+static bool test_v90_smartlink_dil_profile(void)
+{
+    v90_dil_desc_t desc;
+    v90_dil_desc_t reparsed;
+    uint8_t packed[256];
+    int bit_len = 0;
+
+    memset(&desc, 0, sizeof(desc));
+    memset(&reparsed, 0, sizeof(reparsed));
+    if (!v90_dil_load_smartlink_adi_qc(&desc)) {
+        fprintf(stderr, "SmartLink ADI-QC DIL profile did not pass strict parsing\n");
+        return false;
+    }
+    if (desc.n != 144 || desc.lsp != 120 || desc.ltp != 120
+        || v90_dil_cycle_len(&desc) != 32280) {
+        fprintf(stderr,
+                "SmartLink ADI-QC DIL profile mismatch: N=%u LSP=%u LTP=%u cycle=%d\n",
+                (unsigned)desc.n, (unsigned)desc.lsp, (unsigned)desc.ltp,
+                v90_dil_cycle_len(&desc));
+        return false;
+    }
+    if (!v90_build_dil_descriptor_bits(packed, sizeof(packed), &bit_len, &desc)
+        || bit_len != 1702
+        || !v90_parse_dil_descriptor(&reparsed, packed, bit_len)
+        || memcmp(&desc, &reparsed, sizeof(desc)) != 0) {
+        fprintf(stderr, "SmartLink ADI-QC DIL profile did not round-trip\n");
+        return false;
+    }
+
+    vpcm_log("PASS: SmartLink ADI-QC DIL fallback (N=144, cycle=32280 symbols)");
+
+    memset(&desc, 0, sizeof(desc));
+    if (!v90_dil_load_smartlink_adi(&desc)
+        || desc.n != 144 || desc.lsp != 60 || desc.ltp != 60
+        || v90_dil_cycle_len(&desc) != 16140) {
+        fprintf(stderr,
+                "SmartLink ADI DIL profile mismatch: N=%u LSP=%u LTP=%u cycle=%d\n",
+                (unsigned)desc.n, (unsigned)desc.lsp, (unsigned)desc.ltp,
+                v90_dil_cycle_len(&desc));
+        return false;
+    }
+    vpcm_log("PASS: SmartLink ADI DIL fallback (N=144, cycle=16140 symbols)");
+    return true;
 }
 
 static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
@@ -1096,7 +1149,6 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     const uint8_t data_bytes[4] = {0xA5, 0x5A, 0xC3, 0x3C};
     uint8_t long_data[400];
     uint8_t codeword;
-    uint8_t idle;
     uint16_t crc;
     int mp_nbits;
     int symbols = 0;
@@ -1120,8 +1172,6 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
     vpcm_cp_enable_all_ucodes(cp.masks[1]);
     data_cp = cp;
     data_cp.v90_compatibility = true; /* Table 14 bit 19: data-mode CP */
-    idle = v91_idle_codeword(law);
-
     v90_start_phase3(tx, 66);
     if (!v90_handle_rx_event(tx, V90_RX_EVENT_J)) {
         fprintf(stderr, "V.90 strict event test could not accept Ja\n");
@@ -1150,8 +1200,23 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         goto done;
     }
 
-    while (v90_get_tx_phase(tx) != V90_TX_TRN2D && symbols++ < MAX_SYMBOLS)
+    while (v90_get_tx_phase(tx) != V90_TX_RI && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_RI) {
+        fprintf(stderr, "V.90 strict event test did not reach Ri\n");
+        goto done;
+    }
+    for (int i = 0; i < 192; i++) {
+        bool positive = (i % 6) < 3;
+
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (codeword != v90_codeword_compose(v90_law, 66, positive)) {
+            fprintf(stderr,
+                    "V.90 initial Ri mismatch at symbol %d (0x%02X)\n",
+                    i, codeword);
+            goto done;
+        }
+    }
     if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
         fprintf(stderr, "V.90 strict event test did not reach TRN2d\n");
         goto done;
@@ -1161,8 +1226,17 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         fprintf(stderr, "V.90 strict event test accepted an invalid Phase 4 event\n");
         goto done;
     }
-    for (int i = 0; i < 256; i++)
+    for (int i = 0; i < 256; i++) {
+        bool positive = (i % 6) < 3;
+
         v90_phase3_tx_codewords(tx, &codeword, 1);
+        if (codeword != v90_codeword_compose(v90_law, 66, positive)) {
+            fprintf(stderr,
+                    "V.90 continued Ri mismatch at symbol %d (0x%02X)\n",
+                    i, codeword);
+            goto done;
+        }
+    }
     if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
         fprintf(stderr, "V.90 TRN2d advanced without a valid CP event\n");
         goto done;
@@ -1209,9 +1283,13 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         goto done;
     }
     for (int i = 0; i < 24; i++) {
+        bool positive = (i % 6) >= 3;
+
         v90_phase3_tx_codewords(tx, &codeword, 1);
-        if (codeword != idle) {
-            fprintf(stderr, "V.90 post-CP Ri was not 24 idle symbols\n");
+        if (codeword != v90_codeword_compose(v90_law, 66, positive)) {
+            fprintf(stderr,
+                    "V.90 post-CP barred Ri mismatch at symbol %d (0x%02X)\n",
+                    i, codeword);
             goto done;
         }
     }
@@ -2625,7 +2703,7 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
         goto done;
     ds.d = cpt.drn + 8;
 
-    /* 24 Ri idle symbols, then 2040T of mapped TRN2d (scrambled ones). */
+    /* 24T barred Ri symbols, then 2040T of mapped TRN2d (scrambled ones). */
     for (int i = 0; i < RI_POST_CP; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     for (int i = 0; i < TRN2D_LEN; i++) {
@@ -8545,6 +8623,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
+        && test_v90_smartlink_dil_profile()
         && test_v90_dil_rx_roundtrip(V91_LAW_ULAW)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)

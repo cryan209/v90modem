@@ -81,11 +81,16 @@ static uint16_t ja_crc16_bits(const uint8_t *bits, int bit_count)
 
     for (i = 0; i < bit_count; i++) {
         int b = ja_get_packed_bit(bits, i);
-        int fb = ((int) (crc >> 15) ^ b) & 1;
 
-        crc = (uint16_t) (crc << 1);
-        if (fb)
-            crc ^= 0x8005u;
+        /* V.34 §10.1.2.3.2 excludes frame-sync and start bits.  Table 12
+         * and Table 20 place every later start bit on the 17-bit cadence
+         * beginning at bit 51. */
+        if (i < 18 || i == 34 || (i >= 51 && ((i - 51) % 17) == 0))
+            continue;
+        if (((int)crc ^ b) & 1)
+            crc = (uint16_t)((crc >> 1) ^ 0x8408u);
+        else
+            crc = (uint16_t)(crc >> 1);
     }
     return crc;
 }

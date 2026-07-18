@@ -3105,11 +3105,38 @@ static void prepare_v90_phase3_locked(void)
         return;
 
     if (get_strict_v90_info1a_locked(&info1a)) {
+        const char *dil_profile = getenv("ME_V90_DIL_PROFILE");
+
         ME_LOG("[ME] V.90 strict RX event: valid INFO1a U_INFO=%u MD=%u upstream_code=%u downstream_code=%u\n",
                (unsigned)info1a.u_info,
                (unsigned)info1a.md,
                (unsigned)info1a.upstream_symbol_rate_code,
                (unsigned)info1a.downstream_rate_code);
+        if (!g_v90_pending_dil_valid && dil_profile) {
+            bool loaded = false;
+
+            if (strcmp(dil_profile, "smartlink-adi-qc") == 0)
+                loaded = v90_dil_load_smartlink_adi_qc(&g_v90_pending_dil);
+            else if (strcmp(dil_profile, "smartlink-adi") == 0)
+                loaded = v90_dil_load_smartlink_adi(&g_v90_pending_dil);
+            if (loaded) {
+                g_v90_pending_dil_valid = true;
+                ME_LOG("[ME] V.90: installed %s DIL fallback "
+                       "(N=%u LSP=%u LTP=%u)\n",
+                       dil_profile,
+                       (unsigned)g_v90_pending_dil.n,
+                       (unsigned)g_v90_pending_dil.lsp,
+                       (unsigned)g_v90_pending_dil.ltp);
+                trace_phase("V90 %s DIL fallback installed: N=%u LSP=%u LTP=%u",
+                            dil_profile,
+                            (unsigned)g_v90_pending_dil.n,
+                            (unsigned)g_v90_pending_dil.lsp,
+                            (unsigned)g_v90_pending_dil.ltp);
+            } else if (strcmp(dil_profile, "smartlink-adi-qc") == 0
+                       || strcmp(dil_profile, "smartlink-adi") == 0) {
+                ME_LOG("[ME] V.90: %s DIL fallback failed validation\n", dil_profile);
+            }
+        }
         if (!g_v90) {
             v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
             g_v90 = v90_init_with_v34(g_v34, law);

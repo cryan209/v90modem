@@ -865,6 +865,9 @@ typedef struct
     int phase3_s_hits;
     int phase3_s_event_count;
     bool phase3_s_present;
+    uint32_t phase3_s_alt_window;
+    int phase3_s_alt_count;
+    int phase3_s_stable_windows;
     uint8_t phase3_s_ring[32];
     float phase3_s_mag_ring[32];
     int phase3_s_counts[4];

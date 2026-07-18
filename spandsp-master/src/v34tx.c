@@ -3913,6 +3913,9 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.bit_count = 0;
     s->rx.s_detect_count = 0;
     s->rx.s_window = 0;
+    s->rx.phase3_s_alt_window = 0;
+    s->rx.phase3_s_alt_count = 0;
+    s->rx.phase3_s_stable_windows = 0;
     s->rx.phase3_s_guard_samples = 4000;
     s->rx.phase3_s_hits = 0;
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
@@ -4128,6 +4131,9 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 s->rx.bit_count = 0;
                 s->rx.s_detect_count = 0;
                 s->rx.s_window = 0;
+                s->rx.phase3_s_alt_window = 0;
+                s->rx.phase3_s_alt_count = 0;
+                s->rx.phase3_s_stable_windows = 0;
                 s->rx.phase3_s_guard_samples = 4000;
                 s->rx.phase3_s_hits = 0;
                 memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));

@@ -66,9 +66,9 @@ just receives and acts on it:
 ```
 Digital modem (this software)          Analogue modem (real peer)
 ------------------------------          ---------------------------
-Ri (idle codewords) ------------------>
+Ri (U_INFO, +++---) ------------------>
                      <------------------ CPt (Phase-4 training constellation)
-Ri, then TRN2d ------------------------>
+barred Ri (U_INFO, ---+++), then TRN2d ->
 MP (modulation params) ---------------->
                      <------------------ CP (data-mode constellation)
 MP′ (ack) ------------------------------>
