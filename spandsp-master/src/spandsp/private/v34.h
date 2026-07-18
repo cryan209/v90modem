@@ -199,7 +199,13 @@ enum v34_tx_stages_e
     /*! \brief MPh is being transmitted */
     V34_TX_STAGE_HDX_MPH,
     /*! \brief E is being transmitted */
-    V34_TX_STAGE_HDX_E
+    V34_TX_STAGE_HDX_E,
+
+    /*! \brief V.90 §9.5.1.2: 70 ms silence before Tone B in response to an
+               analog-modem retrain request (Tone A while waiting for INFO1a).
+               Kept at the end of the enum so earlier stage numbers stay
+               stable for external mirrors of this enum. */
+    V34_TX_STAGE_V90_RETRAIN_SILENCE
 };
 
 enum v34_events_e
@@ -496,6 +502,10 @@ typedef struct
                repeated stale INFO0a before INFO1a. Used to stop peers from
                trapping us in endless INFO0d/Tone A recovery cycles. */
     int v90_phase2_info0_recovery_loops;
+    /*! \brief V.90 answerer: number of §9.5.1.2 retrain responses performed
+               after the peer asserted Tone A instead of INFO1a. Bounded so a
+               peer that retrains forever cannot trap the start-up. */
+    int v90_info1a_retrain_responses;
     union
     {
         info1a_t info1a;
