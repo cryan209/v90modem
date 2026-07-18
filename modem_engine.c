@@ -605,6 +605,7 @@ static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
 static bool           g_v90_fallback_v34_logged = false;
+static bool           g_v90_fallback_phase4_released = false;
 static int            g_v90_phase3_s_events = 0;
 static unsigned        g_v90_phase2_restarts = 0;
 static v90_cp_rx_t    g_v90_cp_rx;
@@ -2052,6 +2053,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_fallback_v34_logged = false;
+    g_v90_fallback_phase4_released = false;
     g_v90_phase2_restarts = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
@@ -2105,6 +2107,7 @@ static bool restart_v90_phase2_locked(void)
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
     g_v90_fallback_v34_logged = false;
+    g_v90_fallback_phase4_released = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     g_v92_trn2u_active = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
@@ -3434,21 +3437,56 @@ static void prepare_v90_phase3_locked(void)
             trace_phase("V90 strict RX event=INFO1A_VALID u_info=%u -> Phase3",
                         (unsigned)info1a.u_info);
         }
-    } else if (!g_v90_wait_info1_logged) {
+    } else {
         v34_v90_info1a_t received;
 
+        /* This runs every tick while we wait, so the "still waiting" message
+           is gated behind the log-once flag -- but a genuinely decoded,
+           CRC-valid-but-declined INFO1a is a one-time event that must be
+           acted on the instant it appears, regardless of whether "still
+           waiting" already logged on an earlier tick (it almost always
+           has, since Phase 2 takes many ticks). Gate that action on its own
+           flag instead of reusing the "waiting" log-once flag. */
         if (v34_get_v90_received_info1a(g_v34, &received)) {
-            ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d\n",
-                   received.raw_12_17,
-                   received.raw_32_33,
-                   received.u_info,
-                   received.upstream_symbol_rate_code,
-                   received.downstream_rate_code);
-            trace_phase("V90 strict RX event=INFO1A_INVALID -> remain Phase2");
-        } else {
+            if (!g_v90_wait_info1_logged) {
+                ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d\n",
+                       received.raw_12_17,
+                       received.raw_32_33,
+                       received.u_info,
+                       received.upstream_symbol_rate_code,
+                       received.downstream_rate_code);
+                trace_phase("V90 strict RX event=INFO1A_INVALID -> remain Phase2");
+                g_v90_wait_info1_logged = true;
+            }
+            if (!g_v90_fallback_phase4_released
+                && received.downstream_rate_code >= 0 && received.downstream_rate_code <= 5
+                && g_v34) {
+                /* Declined V.90: SpanDSP hands Phase 4 frame ownership
+                   entirely to our put_phase4_bit callback the instant one is
+                   registered (v34rx.c: "the project-owned Table 14 framer
+                   owns CP length, CRC, fill and semantics from this boundary
+                   on"), bypassing its own native MP-frame CRC/semantic
+                   checks. Our CP/Table-14 framer only understands V.90's CP
+                   frame layout, so it rejects every genuine V.34 MP frame
+                   the peer sends here -- and each rejection also drops
+                   SpanDSP's own MP hypothesis lock via
+                   v34_reject_v90_phase4_hypothesis(), even though SpanDSP's
+                   native semantics might have accepted the same frame. Live
+                   interop showed exactly this: TRN converged cleanly (70%
+                   ones-lock) and MP hypotheses kept locking, but every one
+                   was rejected in a loop. Unregistering the callback lets
+                   SpanDSP decode Phase 4 MP frames the standard V.34 way.
+                   Gated on its own flag (not the "waiting" log-once flag)
+                   since that flag is set on the very first tick, long
+                   before INFO1a actually arrives. */
+                v34_set_put_phase4_bit(g_v34, NULL, NULL);
+                ME_LOG("[ME] V.90 declined by peer; releasing Phase 4 MP frame decode to standard V.34 (was routed to the V.90 CP framer)\n");
+                g_v90_fallback_phase4_released = true;
+            }
+        } else if (!g_v90_wait_info1_logged) {
             ME_LOG("[ME] V.90: waiting for CRC-valid INFO1a before Phase 3 TX\n");
+            g_v90_wait_info1_logged = true;
         }
-        g_v90_wait_info1_logged = true;
     }
 }
 
