@@ -31,6 +31,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -499,12 +502,45 @@ static void sig_handler(int sig)
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
+/* On a multihomed host pjsua's default-IP guess can pick an interface
+ * that does not route to the SIP server, so the SDP c= line advertises
+ * an address the peer never sends to (and strict-RTP peers then drop
+ * our media as well).  Resolve the outbound interface the kernel would
+ * use to reach the server and bind SIP+RTP to it. */
+static int detect_local_ip_for_host(const char *host, char *buf, size_t buflen)
+{
+    struct addrinfo hints, *res = NULL;
+    int fd, rc = -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, "5060", &hints, &res) != 0 || !res)
+        return -1;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        if (connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen) == 0) {
+            struct sockaddr_in local;
+            socklen_t len = sizeof(local);
+            if (getsockname(fd, (struct sockaddr *)&local, &len) == 0 &&
+                inet_ntop(AF_INET, &local.sin_addr, buf, (socklen_t)buflen))
+                rc = 0;
+        }
+        close(fd);
+    }
+    freeaddrinfo(res);
+    return rc;
+}
+
 int main(int argc, char *argv[])
 {
     const char *sip_server  = NULL;
     const char *username    = NULL;
     const char *password    = NULL;
     const char *pty_link    = "/tmp/modem0";
+    const char *bind_addr   = NULL;
+    char        bind_addr_buf[64];
     int         local_port  = 5060;
     pj_bool_t   aud_subsys_inited = PJ_FALSE;
 
@@ -520,14 +556,23 @@ int main(int argc, char *argv[])
             pty_link = argv[++i];
         else if (!strcmp(argv[i], "--local-port") && i+1 < argc)
             local_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bind-addr") && i+1 < argc)
+            bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
             me_set_verbose(1);
         else if (!strcmp(argv[i], "--help")) {
             fprintf(stderr,
                 "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-                "          [--pty-link path] [--local-port port] [--verbose]\n", argv[0]);
+                "          [--pty-link path] [--local-port port]\n"
+                "          [--bind-addr ip] [--verbose]\n", argv[0]);
             return 0;
         }
+    }
+
+    if (!bind_addr && sip_server &&
+        detect_local_ip_for_host(sip_server, bind_addr_buf,
+                                 sizeof(bind_addr_buf)) == 0) {
+        bind_addr = bind_addr_buf;
     }
 
     signal(SIGINT,  sig_handler);
@@ -605,6 +650,11 @@ int main(int argc, char *argv[])
     pjsua_transport_config trans_cfg;
     pjsua_transport_config_default(&trans_cfg);
     trans_cfg.port = (unsigned)local_port;
+    if (bind_addr) {
+        trans_cfg.bound_addr = pj_str((char *)bind_addr);
+        PJ_LOG(3, ("sip_modem", "Binding SIP/RTP to local address %s",
+                   bind_addr));
+    }
     status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &trans_cfg, NULL);
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "Transport create failed"));
@@ -661,6 +711,8 @@ int main(int argc, char *argv[])
 
         acc_cfg.id            = pj_str(id_buf);
         acc_cfg.reg_uri       = pj_str(reg_buf);
+        if (bind_addr)
+            acc_cfg.rtp_cfg.bound_addr = pj_str((char *)bind_addr);
         acc_cfg.cred_count    = 1;
         acc_cfg.cred_info[0].realm  = pj_str("*");
         acc_cfg.cred_info[0].scheme = pj_str("digest");
@@ -678,6 +730,8 @@ int main(int argc, char *argv[])
         char id_buf[64];
         snprintf(id_buf, sizeof(id_buf), "sip:modem@127.0.0.1:%d", local_port);
         acc_cfg.id = pj_str(id_buf);
+        if (bind_addr)
+            acc_cfg.rtp_cfg.bound_addr = pj_str((char *)bind_addr);
         pjsua_acc_add(&acc_cfg, PJ_TRUE, &g_acc_id);
     }
 

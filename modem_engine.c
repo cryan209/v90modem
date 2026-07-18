@@ -1573,8 +1573,15 @@ static int me_start_or_restart_v8_locked(int answer_tone)
                                                   : answer_tone;
     v8_parms.send_ci            = g_calling_party;
     /* V.92 Table 5 QC/QCA: this endpoint is always the digital modem.
-       The current Jp profile selects the mandatory 4-point TRN2u channel. */
-    v8_parms.v92                = g_calling_party ? 0x45 : 0x47;
+       The current Jp profile selects the mandatory 4-point TRN2u channel.
+       When ME_V92_ENABLE=0, omit the V.92 octet entirely: peers such as the
+       Conexant CX93001 commit to V.92 start-up procedures on seeing it in JM
+       and then wait silently for V.92 short-phase signals instead of sending
+       V.90 INFO0a (observed live 2026-07-19). */
+    if (parse_env_int("ME_V92_ENABLE", 1) != 0)
+        v8_parms.v92            = g_calling_party ? 0x45 : 0x47;
+    else
+        v8_parms.v92            = -1;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
     if (g_advertise_v90)
