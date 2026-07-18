@@ -170,6 +170,8 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_MP_DIBIT_LOG_INTERVAL    1600
 #define PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL 3200
 #define PHASE3_S_BAUD_LOG_INTERVAL      1000
+#define PHASE3_S_ALTERNATING_MIN        24
+#define PHASE3_S_STABLE_WINDOWS         64
 #define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
 #define PHASE3_PP_BAUD_LOG_INTERVAL     192
 
@@ -4907,6 +4909,12 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             float mag_prev;
             float dot;
             int idx;
+            int dominant_symbol;
+            int dominant_count;
+            int previous_symbol;
+            int prior2_symbol;
+            int old_alt;
+            int new_alt;
             int old_rev;
             int new_rev;
 
@@ -5362,6 +5370,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
             idx = (s->duration - 1) & 31;
             int old_sym = s->phase3_s_ring[idx] & 3;
+            previous_symbol = (s->duration > 1) ? s->phase3_s_ring[(idx + 31) & 31] & 3 : -1;
+            prior2_symbol = (s->duration > 2) ? s->phase3_s_ring[(idx + 30) & 31] & 3 : -1;
 
             if (s->duration > 32)
                 s->phase3_s_counts[old_sym]--;
@@ -5369,20 +5379,52 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_s_ring[idx] = (uint8_t) (data_bits & 3);
             s->phase3_s_mag_ring[idx] = sqrtf(sym->re*sym->re + sym->im*sym->im);
             s->phase3_s_counts[data_bits & 3]++;
-            s->s_detect_count = s->phase3_s_counts[0];
-            if (s->phase3_s_counts[1] > s->s_detect_count)
-                s->s_detect_count = s->phase3_s_counts[1];
-            if (s->phase3_s_counts[2] > s->s_detect_count)
-                s->s_detect_count = s->phase3_s_counts[2];
-            if (s->phase3_s_counts[3] > s->s_detect_count)
-                s->s_detect_count = s->phase3_s_counts[3];
+            dominant_symbol = 0;
+            dominant_count = s->phase3_s_counts[0];
+            if (s->phase3_s_counts[1] > dominant_count)
+            {
+                dominant_count = s->phase3_s_counts[1];
+                dominant_symbol = 1;
+            }
+            if (s->phase3_s_counts[2] > dominant_count)
+            {
+                dominant_count = s->phase3_s_counts[2];
+                dominant_symbol = 2;
+            }
+            if (s->phase3_s_counts[3] > dominant_count)
+            {
+                dominant_count = s->phase3_s_counts[3];
+                dominant_symbol = 3;
+            }
+
+            /* V.34 section 10.1.3.7 defines S as alternating between point 0
+               and that point rotated by 90 degrees.  Carrier/equalizer phase
+               ambiguity can relabel the two decoded quadrants, but it cannot
+               change the invariant A,B,A,B pattern with A != B.  Ja can
+               contain a long run of one differential dibit, so a dominant-
+               symbol detector is not a valid S detector. */
+            old_alt = (s->duration > 32) ? ((s->phase3_s_alt_window >> idx) & 1) : 0;
+            new_alt = (prior2_symbol >= 0
+                       && data_bits != previous_symbol
+                       && data_bits == prior2_symbol) ? 1 : 0;
+            if (new_alt)
+                s->phase3_s_alt_window |= (1u << idx);
+            else
+                s->phase3_s_alt_window &= ~(1u << idx);
+            s->phase3_s_alt_count += new_alt - old_alt;
+            s->s_detect_count = s->phase3_s_alt_count;
+
+            if (s->duration >= 32  &&  s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN)
+                s->phase3_s_stable_windows++;
+            else
+                s->phase3_s_stable_windows = 0;
 
             /* Independent reversal detector:
                count bauds where current symbol is close to 180° from previous. */
-            mag_now = sqrtf(sample->re * sample->re + sample->im * sample->im);
+            mag_now = sqrtf(sym->re * sym->re + sym->im * sym->im);
             mag_prev = sqrtf(s->last_sample.re * s->last_sample.re
                              + s->last_sample.im * s->last_sample.im);
-            dot = sample->re*s->last_sample.re + sample->im*s->last_sample.im;
+            dot = sym->re*s->last_sample.re + sym->im*s->last_sample.im;
             old_rev = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
             new_rev = (mag_now > 0.2f  &&  mag_prev > 0.2f  &&  dot < -0.15f*mag_now*mag_prev) ? 1 : 0;
             if (new_rev)
@@ -5394,8 +5436,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         if (s->duration <= 4 || (s->duration % PHASE3_S_BAUD_LOG_INTERVAL) == 0)
         {
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d dom=%d/32 rev=%d/32 counts=%d,%d,%d,%d\n",
-                     s->duration, mag_now, data_bits, s->s_detect_count, s->bit_count,
+                     "Rx - Phase 3 S baud %d: mag=%.3f data_bits=%d alt=%d/32 stable=%d dom=%d:%d/32 rev=%d/32 counts=%d,%d,%d,%d\n",
+                     s->duration, mag_now, data_bits,
+                     s->phase3_s_alt_count, s->phase3_s_stable_windows,
+                     dominant_symbol, dominant_count, s->bit_count,
                      s->phase3_s_counts[0], s->phase3_s_counts[1],
                      s->phase3_s_counts[2], s->phase3_s_counts[3]);
         }
@@ -5404,25 +5448,29 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             && s->phase3_j_trn16 >= 0
             && !s->phase3_s_present
             && s->duration >= 64
-            && s->s_detect_count >= 24)
+            && s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
+            && s->phase3_s_stable_windows >= PHASE3_S_STABLE_WINDOWS)
         {
             s->phase3_s_present = true;
             s->phase3_s_event_count++;
             s->received_event = V34_EVENT_S;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: distinct far-end S detected after J decode (count=%d role=%s dom=%d/32 rev=%d/32 bits=%d trn=%s)\n",
+                     "Rx - Phase 3: specified far-end S alternation detected after J decode (count=%d role=%s alt=%d/32 stable=%d dom=%d:%d/32 rev=%d/32 bits=%d trn=%s)\n",
                      s->phase3_s_event_count,
                      s->calling_party ? "caller" : "V.90 digital answerer",
-                     s->s_detect_count, s->bit_count, s->phase3_j_bits,
+                     s->phase3_s_alt_count, s->phase3_s_stable_windows,
+                     dominant_symbol, dominant_count,
+                     s->bit_count, s->phase3_j_bits,
                      s->phase3_j_trn16 ? "16-point" : "4-point");
         }
 
         /* Rearm only after the S reversal pattern has genuinely disappeared;
            this lets V.90 distinguish the later DIL-termination S transition
            without counting one long S signal more than once. */
-        if (s->phase3_s_present && s->duration >= 96 && s->s_detect_count <= 12)
+        if (s->phase3_s_present && s->duration >= 96 && s->phase3_s_alt_count <= 12)
         {
             s->phase3_s_present = false;
+            s->phase3_s_stable_windows = 0;
             span_log(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 3: S detector rearmed after transition %d\n",
                      s->phase3_s_event_count);
@@ -5437,14 +5485,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         {
             /* Don't force a false S event; keep searching for a real pattern. */
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: S detect timeout (%d bauds, dom=%d/32 rev=%d/32, j_bits=%d trn_bits=%d trn_hint=%d/%d%%), continuing search\n",
-                     s->duration, s->s_detect_count, s->bit_count,
+                     "Rx - Phase 3: S detect timeout (%d bauds, alt=%d/32 rev=%d/32, j_bits=%d trn_bits=%d trn_hint=%d/%d%%), continuing search\n",
+                     s->duration, s->phase3_s_alt_count, s->bit_count,
                      s->phase3_j_bits, s->phase3_trn_bits,
                      s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
             s->duration = 0;
             s->s_detect_count = 0;
             s->bit_count = 0;
             s->s_window = 0;
+            s->phase3_s_alt_window = 0;
+            s->phase3_s_alt_count = 0;
+            s->phase3_s_stable_windows = 0;
             memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
             memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
             memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
@@ -5784,6 +5835,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->s_detect_count = 0;
                 s->bit_count = 0;
                 s->s_window = 0;
+                s->phase3_s_alt_window = 0;
+                s->phase3_s_alt_count = 0;
+                s->phase3_s_stable_windows = 0;
                 memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
                 memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
                 memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
@@ -8424,6 +8478,9 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
     s->rx.s_detect_count = 0;
     s->rx.s_window = 0;
     s->rx.phase3_s_present = false;
+    s->rx.phase3_s_alt_window = 0;
+    s->rx.phase3_s_alt_count = 0;
+    s->rx.phase3_s_stable_windows = 0;
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
@@ -8670,6 +8727,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_s_hits = 0;
     s->rx.phase3_s_event_count = 0;
     s->rx.phase3_s_present = false;
+    s->rx.phase3_s_alt_window = 0;
+    s->rx.phase3_s_alt_count = 0;
+    s->rx.phase3_s_stable_windows = 0;
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));

@@ -104,6 +104,24 @@ static int v90_jd_autoterminate_symbols(void)
     return (value && *value && strcmp(value, "0") != 0) ? 19296 : 0;
 }
 
+/* Jd' is exactly 12 symbols in V.90 §8.4.3.  Keep that interoperable
+ * default, while allowing a longer all-zero diagnostic window to distinguish
+ * a receiver decision/alignment miss from a wrong Jd' bit stream on live
+ * hardware. */
+static int v90_jd_prime_symbols(void)
+{
+    const char *value = getenv("ME_V90_JD_PRIME_SYMBOLS");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 12 && parsed <= 720)
+            return (int) parsed;
+    }
+    return 12;
+}
+
 /* Symbols of Jd to transmit without seeing the peer's S before requesting a
  * Phase-2 restart from the live modem engine.  Set to 0 to disable recovery.
  *
@@ -351,6 +369,21 @@ static inline uint8_t v90_pcm_signed_codeword(v90_law_t law, int ucode, int sign
     uint8_t pcm = ucode_to_pcm_positive(law, ucode);
     pcm = (uint8_t) ((pcm & 0x7F) | (sign ? 0x80 : 0x00));  /* bit7 = polarity */
     return pcm;
+}
+
+/* V.90 §8.6.4: R is the six-symbol sign pattern +++--- repeated at the
+ * selected magnitude.  The barred R that terminates it is four repetitions
+ * of ---+++.  Ri uses U_INFO for every data-frame interval and neither
+ * sequence is scrambled or differentially encoded. */
+static inline uint8_t v90_ri_codeword(v90_state_t *s,
+                                      int symbol_pos,
+                                      bool barred)
+{
+    int positive = (symbol_pos % V90_FRAME_LEN) < 3;
+
+    if (barred)
+        positive = !positive;
+    return v90_pcm_signed_codeword(s->law, s->u_info, positive);
 }
 
 uint8_t v90_codeword_compose(v90_law_t law, int ucode, int sign)
@@ -1728,17 +1761,17 @@ static bool v90_parse_table12_training_ucodes(v90_dil_desc_t *out,
     return true;
 }
 
-static uint16_t v90_crc16_bits(const uint8_t *bits, int bit_count)
+/* V.34 §10.1.2.3.2 CRC used by the Ja/DIL descriptor.  Frame-sync,
+ * start, and final fill bits do not enter the generator.  From Table 12,
+ * every seventeenth bit beginning at bit 51 is a start bit. */
+static uint16_t v90_dil_crc16_bits(const uint8_t *bits, int crc_start)
 {
     uint16_t crc = 0xFFFF;
 
-    for (int i = 0; i < bit_count; i++) {
-        int bit = v90_get_packed_bit(bits, i);
-        int fb = ((crc >> 15) ^ bit) & 1;
-        crc <<= 1;
-        if (fb)
-            crc ^= 0x8005;
-        crc &= 0xFFFF;
+    for (int i = 0; i < crc_start; i++) {
+        if (i < 18 || i == 34 || (i >= 51 && ((i - 51) % 17) == 0))
+            continue;
+        crc = crc_itu16_bits((uint8_t)v90_get_packed_bit(bits, i), 1, crc);
     }
     return crc;
 }
@@ -2030,19 +2063,75 @@ bool v90_parse_dil_descriptor(v90_dil_desc_t *out, const uint8_t *bits, int bit_
         return false;
 
     expected_crc = (uint16_t)v90_get_packed_bits(bits, crc_start + 1, 16);
-    actual_crc = v90_crc16_bits(bits, crc_start);
+    actual_crc = v90_dil_crc16_bits(bits, crc_start);
     if (expected_crc != actual_crc)
         return false;
 
     if (!v90_expect_zero_bit(bits, bit_len, crc_start + 17))
         return false;
     /*
-     * V.90 Table 12 ends after this fill bit, but V.92 Table 20 extends the
-     * DIL descriptor with additional capability fields after the base V.90
-     * descriptor. Do not require the next bit to be zero here.
+     * A standalone V.90 descriptor may add a zero to make its length even,
+     * while V.92 Table 20 extends the base descriptor at this point.  Do not
+     * constrain or require a following bit here.
      */
 
     return true;
+}
+
+bool v90_dil_load_smartlink_adi_qc(v90_dil_desc_t *out)
+{
+    /* SLModem 2.9.11 setDilDescriptor(ADI_QC), captured before Ja packing.
+     * The packed Table 12 descriptor is 1702 bits, LSB first.  Keeping the
+     * peer's CRC-protected descriptor intact lets the strict parser validate
+     * this fallback exactly as it validates a descriptor recovered from Ja. */
+    static const uint8_t descriptor_bits[] = {
+        0xff, 0xff, 0x41, 0x02, 0xb8, 0xbb, 0x13, 0x5f, 0x80, 0xc6, 0x97, 0x66,
+        0x14, 0xb3, 0x3b, 0x8a, 0x09, 0x78, 0x77, 0xd4, 0x0a, 0xea, 0x04, 0x60,
+        0xad, 0x80, 0x3f, 0x90, 0x52, 0x01, 0xdf, 0x1e, 0xd4, 0x4a, 0x8c, 0x35,
+        0x65, 0xb5, 0xa2, 0x07, 0x30, 0x71, 0xe2, 0xe4, 0xc4, 0xc9, 0x89, 0x93,
+        0x09, 0x4e, 0x4e, 0x9c, 0x9c, 0x38, 0x39, 0x71, 0xca, 0xf0, 0xe4, 0xa4,
+        0x89, 0xc9, 0x92, 0x92, 0x24, 0x24, 0x47, 0x46, 0x8a, 0x88, 0x0c, 0x09,
+        0x09, 0x02, 0xf2, 0xd3, 0x63, 0x27, 0xc7, 0x4d, 0x8d, 0x99, 0x18, 0x2f,
+        0x2d, 0x56, 0x52, 0x9c, 0x94, 0x18, 0x09, 0xf1, 0xd1, 0x61, 0x23, 0xc3,
+        0x45, 0x85, 0x89, 0x08, 0x0f, 0x0d, 0x16, 0x12, 0x1c, 0x14, 0x18, 0x10,
+        0x40, 0x60, 0x00, 0x41, 0x01, 0x83, 0x03, 0x08, 0x09, 0x14, 0x16, 0x30,
+        0x34, 0x70, 0x78, 0x00, 0x11, 0x41, 0x62, 0x02, 0x45, 0x05, 0x8b, 0x0b,
+        0x18, 0x19, 0x34, 0x36, 0x70, 0x74, 0xf0, 0xf8, 0x00, 0x0a, 0x22, 0x34,
+        0x84, 0xa8, 0x88, 0xd1, 0x11, 0xa4, 0x24, 0x4a, 0x4b, 0x98, 0x9a, 0x38,
+        0x3d, 0x81, 0x8a, 0x22, 0x35, 0x85, 0xaa, 0x8a, 0xd5, 0x15, 0xac, 0x2c,
+        0x5a, 0x5b, 0xb8, 0xba, 0x78, 0x7d, 0x01, 0x0b, 0x23, 0x36, 0x86, 0xac,
+        0x8c, 0xd9, 0x19, 0xb4, 0x34, 0x6a, 0x6b, 0xd8, 0xda, 0xb8, 0xbd, 0x81,
+        0x8b, 0x23, 0x37, 0x87, 0x8e, 0x8c, 0x16, 0x94, 0x27, 0x27, 0x4d, 0x4c,
+        0x96, 0x94, 0x24, 0x21, 0x39, 0x32, 0x42, 0x2a, 0x0c,
+    };
+
+    return v90_parse_dil_descriptor(out, descriptor_bits, 1702);
+}
+
+bool v90_dil_load_smartlink_adi(v90_dil_desc_t *out)
+{
+    /* Alternate SLModem 2.9.11 setDilDescriptor(ADI) profile. */
+    static const uint8_t descriptor_bits[] = {
+        0xff, 0xff, 0x41, 0x02, 0xd8, 0xd9, 0xb1, 0x13, 0xe8, 0x72, 0x53, 0xe4,
+        0x96, 0x95, 0x00, 0xd6, 0x8a, 0xf8, 0x03, 0x29, 0x15, 0xf0, 0x6b, 0x90,
+        0x30, 0x61, 0x62, 0xc2, 0xc4, 0x84, 0x89, 0x04, 0x4e, 0x4e, 0x9c, 0x9c,
+        0x38, 0x39, 0x71, 0xca, 0xf0, 0xe4, 0xa4, 0x89, 0xc9, 0x92, 0x92, 0x24,
+        0x24, 0x47, 0x46, 0x8a, 0x88, 0x0c, 0x09, 0x09, 0x02, 0xf2, 0xd3, 0x63,
+        0x27, 0xc7, 0x4d, 0x8d, 0x99, 0x18, 0x2f, 0x2d, 0x56, 0x52, 0x9c, 0x94,
+        0x18, 0x09, 0xf1, 0xd1, 0x61, 0x23, 0xc3, 0x45, 0x85, 0x89, 0x08, 0x0f,
+        0x0d, 0x16, 0x12, 0x1c, 0x14, 0x18, 0x10, 0x40, 0x60, 0x00, 0x41, 0x01,
+        0x83, 0x03, 0x08, 0x09, 0x14, 0x16, 0x30, 0x34, 0x70, 0x78, 0x00, 0x11,
+        0x41, 0x62, 0x02, 0x45, 0x05, 0x8b, 0x0b, 0x18, 0x19, 0x34, 0x36, 0x70,
+        0x74, 0xf0, 0xf8, 0x00, 0x0a, 0x22, 0x34, 0x84, 0xa8, 0x88, 0xd1, 0x11,
+        0xa4, 0x24, 0x4a, 0x4b, 0x98, 0x9a, 0x38, 0x3d, 0x81, 0x8a, 0x22, 0x35,
+        0x85, 0xaa, 0x8a, 0xd5, 0x15, 0xac, 0x2c, 0x5a, 0x5b, 0xb8, 0xba, 0x78,
+        0x7d, 0x01, 0x0b, 0x23, 0x36, 0x86, 0xac, 0x8c, 0xd9, 0x19, 0xb4, 0x34,
+        0x6a, 0x6b, 0xd8, 0xda, 0xb8, 0xbd, 0x81, 0x8b, 0x23, 0x37, 0x87, 0x8e,
+        0x8c, 0x16, 0x94, 0x27, 0x27, 0x4d, 0x4c, 0x96, 0x94, 0x24, 0x21, 0x39,
+        0x32, 0xc2, 0x14, 0x03,
+    };
+
+    return v90_parse_dil_descriptor(out, descriptor_bits, 1566);
 }
 
 int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc)
@@ -2063,7 +2152,13 @@ int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc)
     alpha = ((int) desc->lsp + 15) / 16 * 17;
     beta = ((int) desc->ltp + 15) / 16 * 17;
     training_bits = (((int) desc->n + 1) / 2) * 17;
-    return 187 + alpha + beta + training_bits + 18;
+    {
+        int bit_len = 187 + alpha + beta + training_bits + 18;
+
+        if (bit_len & 1)
+            bit_len++;
+        return bit_len;
+    }
 }
 
 bool v90_build_dil_descriptor_bits(uint8_t *buf,
@@ -2101,9 +2196,11 @@ bool v90_build_dil_descriptor_bits(uint8_t *buf,
     v90_put_framed_training_ucodes(buf, &bit_pos, desc);
     crc_start = bit_pos;
     v90_bits_put(buf, &bit_pos, 0, 1);
-    crc = v90_crc16_bits(buf, crc_start);
+    crc = v90_dil_crc16_bits(buf, crc_start);
     v90_bits_put(buf, &bit_pos, crc, 16);
     v90_bits_put(buf, &bit_pos, 0, 1);
+    if (bit_pos < bit_len)
+        v90_put_zero_range(buf, &bit_pos, bit_len - bit_pos);
 
     if (bit_pos != bit_len) {
         return false;
@@ -2344,11 +2441,17 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     case V90_TX_JD_PRIME:
         /* §8.4.3: J'd = 12 scrambled zeros as sign of U_INFO */
         {
+            int jd_prime_symbols = v90_jd_prime_symbols();
             int scrambled = v90_scramble_bit(&s->scrambler, 0);
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
-            if (s->sample_count >= 12) {
+            if (s->sample_count >= jd_prime_symbols) {
+                if (jd_prime_symbols != 12) {
+                    fprintf(stderr,
+                            "[V90] Phase 3: diagnostic extended J'd complete (%d symbols)\n",
+                            jd_prime_symbols);
+                }
                 if (s->dil_requested) {
                     fprintf(stderr, "[V90] Phase 3: J'd complete, entering DIL placeholder state\n");
                     s->tx_phase = V90_TX_DIL;
@@ -2371,30 +2474,39 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         return v90_dil_codeword(s);
 
     case V90_TX_RI:
-        /* §9.4.1.1 Ri: retrain init — send idle codewords for V90_RI_SYMBOLS */
+        /* §8.6.4/§9.4.1.1: Ri is U_INFO with +++--- signs, not idle.
+         * Send at least 192T before allowing the analogue modem's CPt. */
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] Phase 4: Ri (%d symbols)\n", V90_RI_SYMBOLS);
             s->phase4_hold_logged = true;
         }
-        s->sample_count++;
-        if (s->sample_count >= V90_RI_SYMBOLS) {
-            s->tx_phase = V90_TX_TRN2D;
-            s->sample_count = 0;
-            s->phase4_hold_logged = false;
+        {
+            uint8_t codeword = v90_ri_codeword(s, s->sample_count, false);
+
+            s->sample_count++;
+            if (s->sample_count >= V90_RI_SYMBOLS) {
+                s->tx_phase = V90_TX_TRN2D;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+            }
+            return codeword;
         }
-        return v90_pcm_idle(s->law);
 
     case V90_TX_TRN2D:
         /* §9.4.1.1/§9.4.1.2: remain in Ri while acquiring CPt.  After
-         * accepting CPt, send 24T more Ri followed by at least 2040T of
+         * accepting CPt, send 24T of barred Ri followed by at least 2040T of
          * TRN2d using the negotiated six-interval modulus mapper. */
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] Phase 4: waiting for valid CPt%s\n",
                     s->v92_mode ? " (V.92 compatibility path)" : "");
             s->phase4_hold_logged = true;
         }
-        if (!s->cp_ready)
-            return v90_pcm_idle(s->law);
+        if (!s->cp_ready) {
+            uint8_t codeword = v90_ri_codeword(s, s->sample_count, false);
+
+            s->sample_count++;
+            return codeword;
+        }
 
         if (s->v92_mode && !s->v92_native_cpu_rx) {
             /* Compatibility path: no negotiated Phase 4 mapper; jump
@@ -2408,8 +2520,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
 
         if (s->sample_count < V90_RI_POST_CP_SYMBOLS) {
+            uint8_t codeword = v90_ri_codeword(s, s->sample_count, true);
+
             s->sample_count++;
-            return v90_pcm_idle(s->law);
+            return codeword;
         }
         if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
             fprintf(stderr,
@@ -2893,9 +3007,20 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         if (s->tx_phase == V90_TX_JD
             && s->sample_count >= v90_min_jd_symbols()
             && !s->jd_terminate_requested) {
-            fprintf(stderr, "[V90] Phase 3: far-end S detected, terminating Jd at the next frame boundary\n");
+            fprintf(stderr,
+                    "[V90] Phase 3: far-end S detected after %d Jd symbols, "
+                    "terminating at the next frame boundary\n",
+                    s->sample_count);
             s->jd_terminate_requested = true;
             return true;
+        }
+        if (s->tx_phase == V90_TX_JD
+            && !s->jd_terminate_requested
+            && s->sample_count < v90_min_jd_symbols()) {
+            fprintf(stderr,
+                    "[V90] Phase 3: ignored early far-end S after %d Jd symbols "
+                    "(minimum %d)\n",
+                    s->sample_count, v90_min_jd_symbols());
         }
         if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
             fprintf(stderr, "[V90] Phase 3: subsequent far-end S detected during DIL, terminating at the next segment boundary\n");
