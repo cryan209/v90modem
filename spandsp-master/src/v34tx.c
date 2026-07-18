@@ -123,6 +123,16 @@
 
 #define TRAINING_AMP                    10.0f
 
+/* Empirical TX level trims, calibrated against the wire (live G.711 taps,
+   2026-07-19). With v34_tx_power(-10 dBm0), the CC tone/INFO path measured
+   -2.8 dBm0 and the L1/L2 probe measured L2 at -3.6 dBm0, leaving L1 hard
+   clipped at 100% of full scale (3.8% of samples) — an analog V.90 peer
+   judges the downstream PCM path from these exact signals and falls back to
+   V.34 at minimum baud when they arrive hot and clipped. Trim the CC path to
+   the INFO0d-declared nominal power and L2 to nominal (L1 tracks at +6 dB). */
+#define V34_CC_LEVEL_TRIM               0.438f
+#define V34_LINE_PROBE_LEVEL_TRIM       0.478f
+
 enum
 {
     TRAINING_TX_STAGE_NORMAL_OPERATION_V34 = 0,
@@ -155,6 +165,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_V90_B_REV_10MS: return "V90_B_REV_10MS";
     case V34_TX_STAGE_V90_PHASE2_B: return "V90_PHASE2_B";
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN: return "V90_PHASE2_B_INFO0_SEEN";
+    case V34_TX_STAGE_V90_RETRAIN_SILENCE: return "V90_RETRAIN_SILENCE";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -3059,7 +3070,7 @@ static void l1_l2_signal_init(v34_state_t *s)
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - l2_l2_signal_init()\n");
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
-    s->tx.line_probe_scaling = 0.0008f*s->tx.gain;
+    s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
     s->tx.state = V34_TX_STAGE_L1;
 }
@@ -3230,7 +3241,8 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         V90_INFO1A_MAX_FAST_RETRIES = 3,
         V90_INFO1A_MAX_TOTAL_RETRIES = 6,
         V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES = 1,
-        V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES = 2
+        V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES = 2,
+        V90_INFO1A_MAX_RETRAIN_RESPONSES = 2
     };
     int baud_rate;
     int rtd_bauds;
@@ -3238,6 +3250,29 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     int max_fast_retries;
     int max_total_retries;
 
+    if (s->tx.stage == V34_TX_STAGE_V90_RETRAIN_SILENCE)
+    {
+        /* V.90 §9.5.1.2: after 70 ± 5 ms of silence, transmit Tone B,
+           condition the receiver to detect a Tone A phase reversal, and
+           proceed per §9.2.1.1.3 (the PHASE2_B_INFO0_SEEN handler). */
+        if (++s->tx.tone_duration >= 42)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: retrain-response silence complete; transmitting Tone B and awaiting Tone A reversal\n");
+            s->tx.tone_duration = 0;
+            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+            s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+            s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            s->rx.current_demodulator = V34_MODULATION_TONES;
+            s->rx.stage = V34_RX_STAGE_TONE_A;
+        }
+        /*endif*/
+        return zero;
+    }
+    /*endif*/
     if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
         return zero;
     /*endif*/
@@ -3247,10 +3282,15 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     else
         baud_rate = 3200;
     /*endif*/
+    (void) baud_rate;
+    /* This getbaud runs at the 600 baud CC rate, so the §9.2.1.2.6 deadline
+       of 700 ms + RTD is measured in 600ths of a second, not in symbol-rate
+       bauds (the previous use of the 3200-ish symbol rate stretched the
+       "700 ms" deadline to ~3.7 s of wall clock). */
     rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
-                ? (s->rx.round_trip_delay_estimate*baud_rate + 4000)/8000
+                ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
                 : 0;
-    timeout_bauds = (baud_rate*700 + 500)/1000 + rtd_bauds;
+    timeout_bauds = (600*700 + 500)/1000 + rtd_bauds;
     if (timeout_bauds < 1)
         timeout_bauds = 1;
     /*endif*/
@@ -3274,6 +3314,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.v90_phase2_info0_recovery_loops = 0;
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
+        s->tx.v90_info1a_retrain_responses = 0;
         s_not_s_baud_init(s);
         s->rx.received_event = V34_EVENT_NONE;
         return zero;
@@ -3308,6 +3349,29 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
+        if (s->tx.tone_duration >= timeout_bauds
+            &&  s->tx.v90_info1a_retrain_responses < V90_INFO1A_MAX_RETRAIN_RESPONSES)
+        {
+            /* §9.2.1.2.6: Tone A after the INFO1a deadline is the analog
+               modem initiating a retrain; respond per §9.5.1.2 (70 ms
+               silence, then Tone B and the §9.2.1.1.3 ranging exchange)
+               instead of ignoring it until the peer gives up. */
+            s->tx.v90_info1a_retrain_responses++;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: Tone A after INFO1a deadline (event=%d at %d bauds); responding to retrain per 9.5.1.2 (response %d)\n",
+                     s->rx.received_event,
+                     s->tx.tone_duration,
+                     s->tx.v90_info1a_retrain_responses);
+            s->tx.tone_duration = 0;
+            s->tx.v90_info1a_fast_retries = 0;
+            s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
+            s->rx.v90_info1d_sent = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            return zero;
+        }
+        /*endif*/
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %signoring Tone A/reversal while waiting for INFO1a (event=%d) at %d bauds; continuing to wait for INFO1a until timeout\n",
                  (s->tx.tone_duration < V90_INFO1A_TONE_GUARD_BAUDS) ? "early " : "",
@@ -5378,7 +5442,7 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
             iamp += dds_mod(&s->tx.guard_phase, s->tx.guard_phase_rate, s->tx.cjo, 0);
         }
         /*endif*/
-        amp[sample] = (int16_t) (((int32_t) iamp*s->tx.gain) >> 15);
+        amp[sample] = (int16_t) ((((int32_t) (iamp*V34_CC_LEVEL_TRIM))*s->tx.gain) >> 15);
 #else
         x.re = vec_circular_dot_prodf(s->tx.rrc_filter_re, tx_pulseshaper[TX_PULSESHAPER_COEFF_SETS - 1 - s->tx.baud_phase], V34_INFO_TX_FILTER_STEPS, s->tx.rrc_filter_step);
         x.im = vec_circular_dot_prodf(s->tx.rrc_filter_im, tx_pulseshaper[TX_PULSESHAPER_COEFF_SETS - 1 - s->tx.baud_phase], V34_INFO_TX_FILTER_STEPS, s->tx.rrc_filter_step);
@@ -5392,7 +5456,7 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
         }
         /*endif*/
         /* Don't bother saturating. We should never clip. */
-        amp[sample] = (int16_t) lfastrintf(famp*s->tx.gain);
+        amp[sample] = (int16_t) lfastrintf(famp*s->tx.gain*V34_CC_LEVEL_TRIM);
 #endif
     }
     return sample;
@@ -5814,6 +5878,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     s->tx.v90_mode = true;
     s->tx.v90_pcm_law = pcm_law;
     s->tx.v90_l2_count = 0;
+    s->tx.v90_info1a_retrain_responses = 0;
     s->rx.v90_mode = true;
 
     if (s->calling_party)
@@ -6018,7 +6083,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
 
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
-    s->tx.line_probe_scaling = 0.0008f*s->tx.gain;
+    s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
 
     s->tx.training_stage = 0x100;
     tx_silence_init(s, 75);

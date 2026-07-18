@@ -411,14 +411,24 @@ static void restrict_to_g711(void)
     pj_str_t pcmu = pj_str("PCMU/8000");
     pj_str_t pcma = pj_str("PCMA/8000");
     const char *force_pcmu = getenv("SIP_FORCE_PCMU");
+    const char *force_pcma = getenv("SIP_FORCE_PCMA");
+    pj_bool_t pcmu_only = (force_pcmu && force_pcmu[0] && strcmp(force_pcmu, "0") != 0);
+    pj_bool_t pcma_only = (force_pcma && force_pcma[0] && strcmp(force_pcma, "0") != 0);
 
-    /* Raise PCMU to highest priority */
-    pjsua_codec_set_priority(&pcmu, PJMEDIA_CODEC_PRIO_HIGHEST);
-    /* Allow PCMA as second choice (some ATAs only offer A-law) */
-    pjsua_codec_set_priority(&pcma,
-                             (force_pcmu && force_pcmu[0] && strcmp(force_pcmu, "0") != 0)
-                                 ? PJMEDIA_CODEC_PRIO_DISABLED
-                                 : PJMEDIA_CODEC_PRIO_NEXT_HIGHER);
+    /* The negotiated law must match the far-end D/A converter's law with no
+       transcoding anywhere in the path; SIP_FORCE_PCMA pins A-law for ATAs
+       whose FXS codec runs A-law (e.g. AudioCodes in A-law countries). */
+    if (pcma_only) {
+        pjsua_codec_set_priority(&pcma, PJMEDIA_CODEC_PRIO_HIGHEST);
+        pjsua_codec_set_priority(&pcmu, PJMEDIA_CODEC_PRIO_DISABLED);
+    } else {
+        /* Raise PCMU to highest priority */
+        pjsua_codec_set_priority(&pcmu, PJMEDIA_CODEC_PRIO_HIGHEST);
+        /* Allow PCMA as second choice (some ATAs only offer A-law) */
+        pjsua_codec_set_priority(&pcma,
+                                 pcmu_only ? PJMEDIA_CODEC_PRIO_DISABLED
+                                           : PJMEDIA_CODEC_PRIO_NEXT_HIGHER);
+    }
 
     /* Disable all other codecs */
     const char *disable[] = {
