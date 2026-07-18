@@ -235,7 +235,11 @@ bool v90_cp_live_recover(const int16_t *samples,
     capture_start = phase4_hint_sample - 14 * V90_CP_LIVE_SAMPLE_RATE;
     if (capture_start < 0)
         capture_start = 0;
-    search_start = phase4_hint_sample - 4000;
+    /* The two Phase-2 directions can finish several seconds apart after an
+     * INFO retry.  SmartLink may therefore begin repeating CPt before our
+     * downstream DIL->Ri marker.  Keep the marker as the training/freezing
+     * anchor, but search the preceding eight seconds as well. */
+    search_start = phase4_hint_sample - 8 * V90_CP_LIVE_SAMPLE_RATE;
     if (search_start < capture_start)
         search_start = capture_start;
     search_end = sample_count;
