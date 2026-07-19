@@ -2282,8 +2282,20 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                                              V90_DIL_CAPTURE_MAX_BITS);
     if (first_bits < 206)
         return false;
+    /* This is called every RX audio frame (~20ms), but the 24-hypothesis x
+       sliding-window search below is expensive, so re-attempts are
+       throttled to once per this many newly-captured bits. Measured live
+       against the d-modem/slmodemd rig: successful decode needed ~16 of
+       these throttle cycles (~1.7s at the default 512) after the first
+       206-bit-eligible window, even though the winning hypothesis (8) was
+       consistent across repeated calls -- i.e. most of that time was spent
+       waiting for the next throttled attempt, not for more real signal.
+       Env-tunable for measurement; default kept at 512. */
+    int retry_bits = parse_env_int("ME_V90_DIL_HYP_RETRY_BITS", 512);
+    if (retry_bits < 0)
+        retry_bits = 512;
     if (first_bits < V90_DIL_CAPTURE_MAX_BITS
-        && first_bits < g_v90_dil_hyp_last_bits + 512)
+        && first_bits < g_v90_dil_hyp_last_bits + retry_bits)
         return false;
     g_v90_dil_hyp_last_bits = first_bits;
 
