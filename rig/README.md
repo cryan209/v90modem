@@ -93,7 +93,67 @@ The shutdown-time SIGSEGV (`process_return_code: -11` in `manifest.json`,
 whenever the interop harness's SIGINT lands after a call) is a separate,
 still-open bug, not caused by any of these env vars.
 
-## Phase 4 MP frame CRC failure (open, not yet root-caused)
+## Phase 4 MP frame CRC failure — ROOT-CAUSED
+
+**Root cause found (2026-07-19): this is not a V.34 MP decode bug at all.**
+d-modem genuinely reaches real Phase 4 and transmits real downstream CP
+data (`End of CP #1 tx`), but its own `V90TRN2Designer::V90TRN2Design()`
+constellation design then fails against the DIL/impairment data it
+measured from our transmission (`findPadGain()` report showing high
+per-Ucode error at every candidate gain) — confirmed directly from
+d-modem's own `-d9` log for a live call:
+
+```
+<428.215831> V90TRN2Designer::V90TRN2Design()  constelation design failed !!!
+<428.215840> V90Demodulator::exitPhase3() delayedRetrainRequest !!!
+<428.236175> V90Demodulator: enter Phase 4
+<428.355820> End of CP #1 tx.... (terminateCp=0, terminateCpNot=0)
+<428.376037> VPcmV34Main: retrain requested !!
+<428.376047> VPcmV34Main: Initiating retrain, requested DP is 90
+<428.376187> V34HSHAKE: txstate JaTXMIT=>SILENCERETRAIN(...)
+<428.455462> V34HSHAKE: txstate SILENCERETRAIN=>TONE_AB(...)
+<431.535775> vpcm: Link Error
+```
+
+Because its own constellation design fails, d-modem abandons V.90 PCM
+entirely and falls back to a **V.34 retrain** — a completely different
+signal (silence → `TONE_AB` → `RX_PHASE1_ANS`, i.e. a fresh V.34 Phase
+1/2-style negotiation), not a V.34 Phase 4 MP0 frame. Our own RX is
+still parked in `V34_RX_STAGE_PHASE4_MP` expecting a genuine MP0 frame,
+so it tries to decode the retrain tone/preamble as one — which is
+exactly the "silence, then a noisy but structurally-plausible-looking
+signal that always fails CRC" pattern chased through most of this
+session (see "Deeper investigation" below for that full trail; all of
+it was investigating a real, reproducible symptom, just not the true
+cause). d-modem gives up with a `Link Error` ~3.2s after the retrain
+starts.
+
+**The actual fix is architectural, not a decode-logic fix**: our own
+downstream constellation offer (CPt, transmitted during V.90 Phase 4)
+needs to be derived from DIL/impairment analysis instead of always
+offering the maximal Ucode set — this is the exact gap already flagged
+in `CLAUDE.md` ("Mi negotiation") and `docs/v90_mi_negotiation.md`. Not
+attempted this session (substantially bigger scope than the rest of
+this investigation); flagged as the real next step.
+
+Two small, genuinely-useful improvements landed from this investigation
+and are kept even though they don't fix the underlying issue:
+- `spandsp-master/src/v34rx.c`: an MP preamble-lock energy/settle gate
+  (`MP_LOCK_MIN_SIGNAL_MAG2`, `MP_LOCK_SETTLE_BAUDS`) that refuses to
+  attempt a lock against near-zero-energy or still-settling samples.
+  This is correct defensive behavior in general (don't lock onto
+  silence/transients) but — now that the root cause is known — cannot
+  fix this specific failure, since the eventual "signal" isn't a real
+  MP0 frame at all. Left in at a conservative `MP_LOCK_SETTLE_BAUDS=400`.
+- `sip_modem.c`: `setvbuf(stdout, ..., _IOLBF, ...)` — stdout was fully
+  block-buffered under the test harness (always redirected to a file),
+  so `PJ_LOG` output for any short/quiet run never reached the log file.
+  This is what made a real startup issue take several live-test cycles
+  to diagnose this session before the actual cause turned out to be a
+  wrong CLI invocation, not a code bug — genuinely load-bearing for all
+  future live debugging on this rig.
+
+### Deeper investigation trail (superseded by the finding above, kept for the record)
 
 With all three Phase 3 env vars above set, calls reliably reach real
 Phase 4: `Ri`, `TRN` (95-100% ones-lock), explicit `J'` confirmation, and
@@ -178,8 +238,12 @@ dibit values themselves — i.e. in symbol demodulation: the equalizer
 output or carrier/baud-timing reference feeding `ang1`/`ang2`/`ang3` in
 `process_primary_half_baud()`, not in anything downstream of that.
 
-**Next step** is inspecting the raw constellation points (`sym->re`/
+**Next step** was inspecting the raw constellation points (`sym->re`/
 `sym->im`, or the equalizer output feeding them) across the TRN→MP
-handoff directly — this is a fundamentally different kind of
-investigation than everything above (all of which was bit/frame-level
-and is now exhausted) and wasn't attempted this session.
+handoff directly — done in a later pass the same day: added `coefmag=`/
+`rawmag=` fields to the dibit dump and found the raw *input* samples are
+genuinely, exactly zero (not a decode/equalizer bug) for ~5500 bauds
+after entering MP search, then ramp smoothly to real amplitude. That
+real signal turned out to be d-modem's V.34 retrain tone, not an MP0
+frame — see "ROOT-CAUSED" above for the full story and the real fix
+needed.

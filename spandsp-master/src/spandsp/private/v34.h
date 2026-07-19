@@ -967,6 +967,13 @@ typedef struct
     mp_t last_rx_mp;
     /*! \brief Baud count when mp_seen was first set to 1 (for E-detect timeout) */
     int mp_accepted_baud;
+    /*! \brief Consecutive bauds of above-threshold equalizer output seen
+        since entering Phase 4 MP search, used to require the CMA
+        equalizer time to re-adapt after a post-TRN silence/ramp-up gap
+        before a preamble lock is attempted (see MP_LOCK_MIN_SIGNAL_MAG2
+        and MP_LOCK_SETTLE_BAUDS in v34rx.c). Reset to 0 whenever the
+        signal drops back below threshold. */
+    int mp_signal_settle_bauds;
     int mp_remote_ack_seen;
     int mp_hypothesis;
     uint32_t mp_hyp_scramble[24];
