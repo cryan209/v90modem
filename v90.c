@@ -175,6 +175,24 @@ static int v90_jd_resync_symbols(void)
     return 12000;
 }
 
+/* Milliseconds of silence to hold after detecting Ja before starting to
+ * transmit Sd (§9.3.1.3 permits up to 500ms here). Default 0 preserves the
+ * original immediate-Sd behaviour. See ME_V90_SD_DELAY_MS callers for the
+ * value measured against the d-modem/slmodemd rig. */
+static int v90_sd_delay_samples(void)
+{
+    const char *value = getenv("ME_V90_SD_DELAY_MS");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 5000)
+            return (int) (parsed * 8);   /* ms -> samples at 8000 Hz */
+    }
+    return 0;
+}
+
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
 static const uint8_t v90_ucode_to_alaw[128] = {
@@ -2380,6 +2398,23 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         }
         return v90_pcm_idle(s->law);
 
+    case V90_TX_SD_DELAY:
+        /* §9.3.1.3: "After receiving Ja, the digital modem may wait for up
+         * to 500ms and then transmit signal Sd." Measured live against the
+         * d-modem/slmodemd rig: with immediate (0ms) Sd, we were sending
+         * Sd/S-bar-d (54ms total) ~763ms before SmartLink's own
+         * Phase3Demodulator armed its WaitForSd receiver (its own JaTXMIT
+         * start + arm is not instantaneous either) -- so it never saw any
+         * of it and retrained after its own ~3.1s local timeout, every
+         * time. Default 0 preserves prior (immediate) behaviour for
+         * everything else; env-tunable per peer. */
+        if (++s->sample_count >= v90_sd_delay_samples()) {
+            s->tx_phase = V90_TX_SD;
+            s->sample_count = 0;
+            s->rep_count = 0;
+        }
+        return v90_pcm_idle(s->law);
+
     case V90_TX_SD:
         /* §8.4.4: Sd = 64 reps of {+W, +0, +W, -W, -0, -W}
          * W = Ucode(16 + U_INFO), 0 = Ucode 0
@@ -3083,8 +3118,17 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
     switch (event) {
     case V90_RX_EVENT_J:
         if (s->tx_phase == V90_TX_WAIT_JA) {
-            fprintf(stderr, "[V90] Phase 3: analogue Ja detected, starting Sd\n");
-            s->tx_phase = V90_TX_SD;
+            int delay_samples = v90_sd_delay_samples();
+
+            if (delay_samples > 0) {
+                fprintf(stderr,
+                        "[V90] Phase 3: analogue Ja detected, delaying Sd by %d ms (ME_V90_SD_DELAY_MS)\n",
+                        delay_samples / 8);
+                s->tx_phase = V90_TX_SD_DELAY;
+            } else {
+                fprintf(stderr, "[V90] Phase 3: analogue Ja detected, starting Sd\n");
+                s->tx_phase = V90_TX_SD;
+            }
             s->sample_count = 0;
             s->rep_count = 0;
             return true;
