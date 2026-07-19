@@ -3285,6 +3285,41 @@ static bool info_has_valid_prefix_crc(const uint8_t in[25], int total_bits, int 
 
 static int put_info_bit_count = 0;
 
+/* V34_RX_STAGE_TONE_A's bit-persistence counters (below) drive Tone A /
+   reversal detection purely off bit polarity, gated only by the generic
+   signal_present hysteresis — which is tuned to catch weak-but-real
+   carriers and so also passes ordinary line noise. On a real analog line
+   with an old/noisy modem, background noise sits a consistent order of
+   magnitude below a genuine Tone A carrier (observed ~4-5M vs ~14-25M in
+   this codebase's own power units on a noisy line), but is still loud
+   enough to occasionally produce a run of same-polarity bit decisions by
+   chance, falsely tripping "Tone A detected"/reversal events. This
+   threshold requires real carrier-level power, not just "louder than the
+   off/on hysteresis", before letting persistence2 accumulate at all. */
+static int32_t tone_a_min_power(void)
+{
+    static int initialized = 0;
+    static int32_t threshold = 13000000;
+
+    if (!initialized)
+    {
+        const char *value = getenv("V34_TONE_A_MIN_POWER");
+        if (value  &&  value[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 0)
+                threshold = (int32_t) parsed;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return threshold;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     int info_search_enabled;
@@ -3301,6 +3336,15 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /* Calling side */
         if (++s->persistence1 < 10)
             break;
+        /*endif*/
+        if (s->last_info_rx_power < tone_a_min_power())
+        {
+            /* Not a real carrier — just line noise clearing the coarser
+               signal_present hysteresis. Don't let it accumulate toward a
+               false Tone A / reversal declaration. */
+            s->persistence2 = 0;
+            break;
+        }
         /*endif*/
         if (bit == 0)
         {

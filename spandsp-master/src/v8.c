@@ -998,6 +998,16 @@ SPAN_DECLARE(int) v8_tx(v8_state_t *s, int16_t *amp, int max_len)
 
     //span_log(&s->logging, SPAN_LOG_FLOW, "v8_tx state %d\n", s->state);
     len = 0;
+    if (s->ansam_start_delay_timer > 0)
+    {
+        /* Hold silence so a leading calling tone from the peer isn't
+           immediately overlapped by our own echoed ANSam (see v8_restart()). */
+        vec_zeroi16(amp, max_len);
+        s->ansam_start_delay_timer = (s->ansam_start_delay_timer > max_len)
+                                    ? (s->ansam_start_delay_timer - max_len) : 0;
+        return max_len;
+    }
+    /*endif*/
     if (s->modem_connect_tone_tx_timer)
     {
         if (s->modem_connect_tone_tx_timer == (milliseconds_to_samples(75) + 2))
@@ -1137,9 +1147,13 @@ static void handle_answering_modem_connect_tone(v8_state_t *s, int tone)
     span_log(&s->logging, SPAN_LOG_FLOW, "'%s' recognised\n", modem_connect_tone_to_str(tone));
     if (tone == MODEM_CONNECT_TONES_CALLING_TONE)
     {
-        s->state = V8_PARKED;
-        s->result.status = V8_STATUS_CALLING_TONE_RECEIVED;
-        report_event(s);
+        /* Unlike CNG (which specifically means "this is a fax machine, not
+           a V.8 modem"), ITU-T V.25's calling tone (1300 Hz) is a generic
+           "automatic calling device" indicator that real V.8 modems can
+           send as a preliminary signal before still proceeding with normal
+           CM/JM negotiation. Parking V8 here would abandon a negotiation
+           the calling modem fully intends to continue — just note it and
+           keep waiting for CM. */
     }
     else if (tone == MODEM_CONNECT_TONES_FAX_CNG)
     {
@@ -1521,6 +1535,30 @@ SPAN_DECLARE(logging_state_t *) v8_get_logging_state(v8_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int v8_ansam_start_delay_ms(void)
+{
+    static int initialized = 0;
+    static int delay_ms = 750;
+
+    if (!initialized)
+    {
+        const char *value = getenv("V8_ANSAM_START_DELAY_MS");
+        if (value  &&  value[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if (end != value  &&  end  &&  *end == '\0'  &&  parsed >= 0)
+                delay_ms = (int) parsed;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return delay_ms;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parms)
 {
     memcpy(&s->parms, parms, sizeof(s->parms));
@@ -1562,9 +1600,15 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
     }
     else
     {
-        /* Send the ANSam or ANSam/ tone */
+        /* Send the ANSam or ANSam/ tone, after an initial silent hold so a
+           leading V.25 calling tone from the calling modem (1300 Hz,
+           0.5-0.7s ON) has room to finish before our own tone starts
+           overlapping it on a line with no echo cancellation. */
         s->state = V8_CM_WAIT;
-        s->negotiation_timer = milliseconds_to_samples(200 + 5000);
+        s->ansam_start_delay_timer = milliseconds_to_samples(v8_ansam_start_delay_ms());
+        /* Extend the CM-wait budget by the delay, so it doesn't eat into
+           the time actually available for ANSam/CM once it starts. */
+        s->negotiation_timer = milliseconds_to_samples(200 + 5000) + s->ansam_start_delay_timer;
         modem_connect_tones_tx_init(&s->ansam_tx, s->parms.modem_connect_tone);
         s->modem_connect_tone_tx_timer = milliseconds_to_samples(75) + 1;
     }
