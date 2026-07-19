@@ -159,12 +159,14 @@ static int phase3_rx_dump_count = 0;
    observed real symbol while still comfortably clearing float noise on
    true silence. NOTE: this and MP_LOCK_SETTLE_BAUDS below do not fix the
    live MP CRC failure against d-modem/slmodemd -- that failure's actual
-   root cause turned out to be d-modem abandoning V.90 for a V.34 retrain
-   after its own constellation designer rejects our CPt (see "Phase 4 MP
-   frame CRC failure" in rig/README.md), so the "signal" these gates wait
-   for is d-modem's retrain tone, not a real MP0 frame. Kept anyway as
-   correct, generally-useful defensive behavior (don't lock onto silence
-   or a still-settling equalizer), not because it resolves this bug. */
+   root cause turned out to be d-modem discarding its Phase 3/4 state and
+   restarting the whole handshake (Phase 1/2 tones) to retry V.90 after
+   its own constellation designer rejects our CPt (see "Phase 4 MP frame
+   CRC failure" in rig/README.md), so the "signal" these gates wait for
+   is d-modem's handshake-retrain tone, not a real MP0 frame. Kept anyway
+   as correct, generally-useful defensive behavior (don't lock onto
+   silence or a still-settling equalizer), not because it resolves this
+   bug. */
 #define MP_LOCK_MIN_SIGNAL_MAG2         0.0001f
 /* Consecutive above-threshold bauds required before a preamble lock is
    attempted, once real signal has appeared. Live measurement showed the
