@@ -34,6 +34,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <pthread.h>
 #include <math.h>
@@ -111,6 +112,10 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_MP,
 };
 
+/* MUST stay in sync, value for value, with enum v34_events_e in
+ * spandsp-master/src/spandsp/private/v34.h -- these are compared against
+ * values produced inside spandsp, so any drift silently misroutes events
+ * rather than failing to build. Append only, and append in both places. */
 enum v34_events_e {
     V34_EVENT_NONE = 0,
     V34_EVENT_TONE_SEEN,
@@ -130,6 +135,7 @@ enum v34_events_e {
     V34_EVENT_PHASE4_TRN_READY,
     V34_EVENT_TRAINING_FAILED,
     V34_EVENT_E,
+    V34_EVENT_PEER_RETRAIN,
 };
 
 /* Current G.711 law (set by sip_modem.c after codec negotiation). */
@@ -2352,6 +2358,20 @@ static bool v90_dil_capture_try_parse_at(int start)
     return true;
 }
 
+static int v90_ja_dump_min_bits(void)
+{
+    const char *value = getenv("ME_V90_JA_DUMP_MIN_BITS");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 206 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    return 32000;
+}
+
 static bool v90_dil_capture_try_v34_hypotheses(void)
 {
     uint8_t unpacked[V90_DIL_CAPTURE_MAX_BITS];
@@ -2418,7 +2438,11 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
         }
     }
 
-    if (!g_v90_dil_hyp_dumped && first_bits >= 32000) {
+    /* The dump threshold used to be a hard 32000 bits.  Live calls against the
+     * d-modem rig only ever accumulate ~19000 Ja bits before the peer gives up,
+     * so the dump never fired on exactly the runs worth investigating.  Keep
+     * 32000 as the default and let ME_V90_JA_DUMP_MIN_BITS lower it. */
+    if (!g_v90_dil_hyp_dumped && first_bits >= v90_ja_dump_min_bits()) {
         const char *prefix = getenv("ME_V90_JA_DUMP_PREFIX");
 
         if (prefix && *prefix) {
@@ -3465,6 +3489,8 @@ void me_rx_audio(const int16_t *amp, int len)
                                         && g_last_v90_bridge_rx_event != V34_EVENT_E);
                     bool new_j_event = (rx_event == V34_EVENT_J
                                         && g_last_v90_bridge_rx_event != V34_EVENT_J);
+                    bool new_retrain_event = (rx_event == V34_EVENT_PEER_RETRAIN
+                                              && g_last_v90_bridge_rx_event != V34_EVENT_PEER_RETRAIN);
 
                     fprintf(stderr,
                             "[ME] V.90 bridge: phase3_started=%d v90=%d rx=%s(%d) tx=%s(%d) event=%d s_events=%d\n",
@@ -3477,6 +3503,25 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_v90_bridge_rx_stage = rx_stage;
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
+                    if (new_retrain_event && g_v90) {
+                        /* The peer gave up on Phase 3/4 and is restarting its
+                         * handshake.  Follow it: drop our Phase 3/4 state and
+                         * go back to waiting for Ja, so the next attempt runs
+                         * cleanly instead of us pouring Phase 4 over the
+                         * peer's fresh Phase 1/2 (which also corrupts its
+                         * bulk-delay/RTD estimate -- see rig/README.md). */
+                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_RETRAIN);
+
+                        g_v90_phase3_s_events = 0;
+                        g_v90_pending_dil_valid = false;
+                        g_v90_dil_capture_bits = 0;
+                        g_v90_dil_capture_search = 0;
+                        g_v90_dil_hyp_last_bits = 0;
+                        ME_LOG("[ME] V.90: peer retrain detected; following it back to Phase 2 "
+                               "(accepted=%d)\n", accepted ? 1 : 0);
+                        trace_phase("V90 peer retrain detected, following (accepted=%d)",
+                                    accepted ? 1 : 0);
+                    }
                     if (new_e_event && g_v90) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
 
