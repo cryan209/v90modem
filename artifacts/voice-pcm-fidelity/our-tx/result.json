@@ -1,0 +1,9 @@
+{
+  "aligned_octets": 96000,
+  "byte_exact_match_rate": 0.000125,
+  "captured_octets": 287922,
+  "gain_scale": -1.3309567725482084e-07,
+  "lag_samples": 0,
+  "reference_octets": 96000,
+  "snr_db": -75.12498318675524
+}

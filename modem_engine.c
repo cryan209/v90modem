@@ -1605,6 +1605,90 @@ static void g711_taps_init(void)
     ME_LOG("[ME] Live G.711 taps: RX=%s TX=%s\n", rx_path, tx_path);
 }
 
+/* Voice-mode PCM fidelity testing (tools/voice_pcm_fidelity.py).
+ *
+ * ME_VOICE_CAPTURE_HOLD=1 keeps a call up past V.8 timeout instead of hanging
+ * up, so we can capture a peer that answered in AT+FCLASS=8 voice mode (no
+ * V.8 CM will ever arrive). ME_VOICE_TEST_TX_FILE=<path> replaces our own TX
+ * (ANSam/V.8 tones) with raw G.711 codewords read verbatim from a file, so
+ * the far end's AT+VRX capture sees a byte-exact known signal instead of our
+ * negotiation tones. Both are no-ops unless their env var is set. */
+static bool     g_voice_capture_hold;
+static bool     g_voice_capture_hold_checked;
+static uint8_t *g_voice_tx_buf;
+static long     g_voice_tx_len;
+static long     g_voice_tx_pos;
+static bool     g_voice_tx_checked;
+
+static bool voice_capture_hold_enabled(void)
+{
+    if (!g_voice_capture_hold_checked) {
+        const char *v = getenv("ME_VOICE_CAPTURE_HOLD");
+        g_voice_capture_hold = (v && v[0] && strcmp(v, "0") != 0);
+        g_voice_capture_hold_checked = true;
+    }
+    return g_voice_capture_hold;
+}
+
+static void voice_tx_test_file_load(void)
+{
+    const char *path;
+    FILE *f;
+    long len;
+
+    g_voice_tx_checked = true;
+    path = getenv("ME_VOICE_TEST_TX_FILE");
+    if (!path || !path[0])
+        return;
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[ME] ME_VOICE_TEST_TX_FILE: unable to open %s\n", path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) {
+        fclose(f);
+        return;
+    }
+    g_voice_tx_buf = malloc((size_t)len);
+    if (!g_voice_tx_buf) {
+        fclose(f);
+        return;
+    }
+    if (fread(g_voice_tx_buf, 1, (size_t)len, f) != (size_t)len) {
+        free(g_voice_tx_buf);
+        g_voice_tx_buf = NULL;
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    g_voice_tx_len = len;
+    g_voice_tx_pos = 0;
+    ME_LOG("[ME] ME_VOICE_TEST_TX_FILE loaded: %s (%ld raw G.711 octets)\n", path, len);
+}
+
+/* Fills codewords[0..count) from the loaded test file (single pass, then
+ * pads with G.711 mu-law silence 0xFF). Returns true if it handled the
+ * request (file loaded), false if the caller should fall back to normal TX. */
+static bool voice_tx_test_fill(uint8_t *codewords, int count)
+{
+    int i;
+
+    if (!g_voice_tx_checked)
+        voice_tx_test_file_load();
+    if (!g_voice_tx_buf)
+        return false;
+    for (i = 0; i < count; i++) {
+        if (g_voice_tx_pos < g_voice_tx_len)
+            codewords[i] = g_voice_tx_buf[g_voice_tx_pos++];
+        else
+            codewords[i] = 0xFF;
+    }
+    return true;
+}
+
 static const char *me_v92_anspcm_level_to_str(int level)
 {
     switch (level & 0x03)
@@ -2710,6 +2794,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             return;
         }
         pthread_mutex_unlock(&g_state_mtx);
+        if (voice_capture_hold_enabled()) {
+            ME_LOG("[ME] V.8 failed (status=%d), ME_VOICE_CAPTURE_HOLD set: holding call open\n",
+                    result->status);
+            g_phase_start_ms = 0;
+            return;
+        }
         ME_LOG("[ME] V.8 failed (status=%d), hanging up\n", result->status);
         me_hangup();
         return;
@@ -3155,6 +3245,10 @@ void me_rx_audio(const int16_t *amp, int len)
             }
             pthread_mutex_unlock(&g_state_mtx);
             g_phase_start_ms = 0;
+            if (voice_capture_hold_enabled()) {
+                ME_LOG("[ME] ME_VOICE_CAPTURE_HOLD set: holding call open past V.8 timeout for voice-mode capture\n");
+                return;
+            }
             me_hangup();
             return;
         }
@@ -3177,6 +3271,10 @@ void me_rx_audio(const int16_t *amp, int len)
                 return;
             }
             /* V.22bis timeout — give up */
+            if (voice_capture_hold_enabled()) {
+                ME_LOG("[ME] ME_VOICE_CAPTURE_HOLD set: holding call open past V.22bis timeout for voice-mode capture\n");
+                return;
+            }
             me_hangup();
             return;
         }
@@ -3979,6 +4077,15 @@ int me_tx_g711(uint8_t *codewords, int count)
 
     if (!codewords || count <= 0)
         return 0;
+
+    if (voice_tx_test_fill(codewords, count)) {
+        pthread_mutex_lock(&g_state_mtx);
+        g_g711_tx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_tx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        return count;
+    }
 
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
