@@ -418,6 +418,27 @@ static int descramble(v34_rx_state_t *s, int in_bit)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Whether the receiver keeps adapting through Phase 3 once TRN is locked.
+   Default on; ME_V34_TRACK_PHASE3=0 restores the old frozen behaviour for A/B. */
+static int phase3_tracking_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 1;
+
+    if (!initialized)
+    {
+        const char *value = getenv("ME_V34_TRACK_PHASE3");
+
+        if (value  &&  value[0] != '\0'  &&  strcmp(value, "0") == 0)
+            enabled = 0;
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return enabled;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 {
     int out_bit;
@@ -8303,8 +8324,28 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             eq_target.re = (sym->re >= 0.0f)  ?  s2  :  -s2;
             eq_target.im = (sym->im >= 0.0f)  ?  s2  :  -s2;
 
+            /* Keep the receiver adapting through Phase 3 once TRN is locked.
+             *
+             * V34_RX_STAGE_PHASE3_WAIT_S spans the peer's whole Phase 3 -- its
+             * TRN *and* its Ja -- and both adaptation loops used to be off for
+             * the entire stage.  That is sample-and-hold: freeze the receiver,
+             * accumulate bits, and batch-search them afterwards.  It is good
+             * enough to spot a periodic TRN (measured live, TRN locks at 93%)
+             * but not to decode Ja, which is data -- every symbol has to be
+             * right, and nothing is correcting residual carrier/gain error
+             * over the ~1.5 s of TRN that precedes it.  Live captures show
+             * exactly that split: real structure through TRN, then ~50% ones
+             * on all 24 hypotheses once Ja starts.
+             *
+             * Gated on phase3_trn_lock_hyp >= 0 so this only switches on once
+             * TRN is locked, i.e. well past the S detector -- S is carried as
+             * phase reversals and must not be tracked out.  Set
+             * ME_V34_TRACK_PHASE3=0 to restore the frozen behaviour. */
             if (s->stage == V34_RX_STAGE_PHASE4_TRN
-                || s->stage == V34_RX_STAGE_PHASE4_MP)
+                || s->stage == V34_RX_STAGE_PHASE4_MP
+                || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
+                    && s->phase3_trn_lock_hyp >= 0
+                    && phase3_tracking_enabled()))
             {
                 /* CMA (blind) equalizer — during Phase 3 TRN refinement and
                    Phase 4.  Phase 4 needs CMA to adapt equalizer gain for
@@ -8335,7 +8376,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /* Re-enabled carrier tracking — test 4 showed MP detection worked
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
-            if (s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+            if ((s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+                 || (s->phase3_trn_lock_hyp >= 0 && phase3_tracking_enabled()))
                 && !phase4_trn_should_freeze_tracking(s))
             {
                 error = sym->im*eq_target.re - sym->re*eq_target.im;
