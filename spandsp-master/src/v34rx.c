@@ -779,6 +779,8 @@ static void phase3_trn_hyp_reset(v34_rx_state_t *s)
     s->phase3_trn_bits = 0;
     s->phase3_trn_lock_hyp = -1;
     s->phase3_trn_lock_score = -1;
+    s->phase3_trn_rescore_bits = 0;
+    s->phase3_tracking_armed = false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5589,6 +5591,38 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endfor*/
                     s->phase3_trn_bits += 2;
+                    /* Re-score once the Phase 3 tracking loops have settled.
+                     *
+                     * phase3_trn_one_count[] is cumulative over the whole TRN
+                     * and the lock is a monotonic "best ever" latch, so a score
+                     * measured across the tracking transient averages two
+                     * different regimes.  Enabling tracking moved this peer's
+                     * lock to the correct hypothesis but dropped its reported
+                     * confidence 93% -> 72%, purely because the correct
+                     * hypothesis carries the pre-convergence stretch where it
+                     * was still wrong.  Clear the counters and the latch once,
+                     * a little after tracking engages, so the lock is retaken
+                     * on post-convergence data only. */
+                    if (phase3_tracking_enabled()
+                        &&
+                        s->phase3_tracking_armed
+                        &&
+                        s->phase3_trn_rescore_bits == 0
+                        &&
+                        s->phase3_trn_bits >= 512)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 3 TRN: rescoring after tracking settled "
+                                 "(was hyp=%d %d%% over %d bits)\n",
+                                 s->phase3_trn_lock_hyp, s->phase3_trn_lock_score,
+                                 s->phase3_trn_bits);
+                        memset(s->phase3_trn_one_count, 0, sizeof(s->phase3_trn_one_count));
+                        s->phase3_trn_rescore_bits = s->phase3_trn_bits;
+                        s->phase3_trn_bits = 0;
+                        s->phase3_trn_lock_hyp = -1;
+                        s->phase3_trn_lock_score = -1;
+                    }
+                    /*endif*/
                     {
                         float trn_mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
                         if (isfinite(trn_mag) && trn_mag > 0.0f) {
@@ -5608,6 +5642,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             s->phase3_trn_lock_hyp = best_trn_h;
                             s->phase3_trn_lock_score = score_pct;
                             s->phase3_j_lock_hyp = best_trn_h;
+                            s->phase3_tracking_armed = true;
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 3 TRN: lock hint hyp=%d ones=%d/%d (%d%%)\n",
                                      best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
@@ -8344,7 +8379,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->stage == V34_RX_STAGE_PHASE4_TRN
                 || s->stage == V34_RX_STAGE_PHASE4_MP
                 || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
-                    && s->phase3_trn_lock_hyp >= 0
+                    && s->phase3_tracking_armed
                     && phase3_tracking_enabled()))
             {
                 /* CMA (blind) equalizer — during Phase 3 TRN refinement and
@@ -8377,7 +8412,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
             if ((s->stage != V34_RX_STAGE_PHASE3_WAIT_S
-                 || (s->phase3_trn_lock_hyp >= 0 && phase3_tracking_enabled()))
+                 || (s->phase3_tracking_armed && phase3_tracking_enabled()))
                 && !phase4_trn_should_freeze_tracking(s))
             {
                 error = sym->im*eq_target.re - sym->re*eq_target.im;
