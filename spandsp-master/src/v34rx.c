@@ -1258,12 +1258,22 @@ static bool mp_try_slip_recovery(uint8_t bits[188], int type, int target, int *s
 
         slip = slips[sidx];
         memcpy(trial, bits, sizeof(trial));
-        for (i = 19;  i < target;  i++)
+        /* Start at 17 (the first start bit, right after the 17-bit sync
+           run), not 19: a lock that is off by one right at the sync/start17
+           boundary -- confirmed live against d-modem/slmodemd, where the
+           preamble scorer accepted a 17/18 match with bit 16 (last sync bit)
+           actually holding what should be bit 17's value -- was structurally
+           unreachable by every recovery path here, since all four started
+           their earliest correctable boundary at 19, leaving positions
+           17-18 (start bit, type bit) permanently excluded from correction.
+           Bits 0-16 are a uniform run of 1s, so there is nothing to gain
+           shifting from earlier than 17. */
+        for (i = 17;  i < target;  i++)
         {
             int src;
 
             src = i + slip;
-            trial[i] = (src >= 19 && src < target)  ?  bits[src]  :  0;
+            trial[i] = (src >= 17 && src < target)  ?  bits[src]  :  0;
         }
         /*endfor*/
         crc_ok = mp_crc_ok(trial, type, &rx_crc, &residual_crc);
@@ -1500,12 +1510,14 @@ static bool mp_try_boundary_bruteforce_recovery(uint8_t bits[188], int type, int
         {
             int i;
 
-            for (i = 19;  i < target;  i++)
+            /* See mp_try_slip_recovery(): start at 17, not 19, so a slip
+               right at the sync/start17 boundary is reachable here too. */
+            for (i = 17;  i < target;  i++)
             {
                 int src;
 
                 src = i + base_slip;
-                base_trial[i] = (src >= 19  &&  src < target)  ?  bits[src]  :  0;
+                base_trial[i] = (src >= 17  &&  src < target)  ?  bits[src]  :  0;
             }
             /*endfor*/
         }
