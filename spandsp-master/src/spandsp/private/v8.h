@@ -39,6 +39,13 @@ struct v8_state_s
     /*! \brief The current state of the V.8 protocol */
     int state;
     bool fsk_tx_on;
+    /*! \brief Silence held before the answerer starts ANSam, so a leading
+               V.25 calling tone (1300 Hz, 0.5-0.7s ON) from the calling
+               modem has room to finish before our own tone starts
+               overlapping it (no echo cancellation on analogue-modem
+               calls means our echoed ANSam can otherwise pollute the
+               calling tone's detection window on both ends). */
+    span_sample_timer_t ansam_start_delay_timer;
     span_sample_timer_t modem_connect_tone_tx_timer;
     span_sample_timer_t negotiation_timer;
     span_sample_timer_t ci_timer;

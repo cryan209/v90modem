@@ -1460,6 +1460,83 @@ typedef struct {
 
 static notch_filter_t g_notch = {0};
 
+/* V.22bis guard tone (ITU-T V.22bis §2.1/2.2): an 1800 Hz (or, as a national
+   option, 550 Hz) tone transmitted continuously alongside the "high
+   channel" carrier, 6 dB (1800 Hz) or 3 dB (550 Hz) below the data signal
+   level, to stop PSTN loading-coil relays from mis-triggering on the
+   carrier. spandsp's own V.8/V.34 code never generates it (v34tx.c
+   explicitly disables it, on the assumption only the analogue modem needs
+   to send it), but at least one NZ-market USR modem transmits its own
+   1800 Hz guard tone throughout V.8 and never proceeds past CM/JM without
+   apparently expecting one back from us. Mixed continuously into our own
+   V.8 TX (ANSam/JM) at a fixed level; tunable for interop testing without
+   a rebuild. */
+static double g_guard_tone_phase = 0.0;
+
+static double v8_guard_tone_hz(void)
+{
+    static int initialized = 0;
+    static double hz = 1800.0;
+    if (!initialized) {
+        const char *value = getenv("V8_GUARD_TONE_HZ");
+        if (value && value[0] != '\0') {
+            char *end = NULL;
+            double parsed = strtod(value, &end);
+            if (end != value && end && *end == '\0' && parsed > 0.0)
+                hz = parsed;
+        }
+        initialized = 1;
+    }
+    return hz;
+}
+
+static int32_t v8_guard_tone_amplitude(void)
+{
+    /* Disabled by default: live testing against an NZ-market USR modem
+       that itself transmits a continuous 1800 Hz guard tone showed no
+       change in its behaviour when we also added one on our own TX (the
+       guard tone is a one-side signal, not something both ends send —
+       the fix belongs on our RX side: tolerate/ignore the peer's guard
+       tone while still finding the real CM signal, not mirror it back).
+       Left available via env var for future experiments. ANSam's own
+       reference level runs ~4100 RMS (~5800 peak); a national 1800 Hz
+       guard tone at -6 dB below that would be ~2900 peak. */
+    static int initialized = 0;
+    static int32_t amplitude = 0;
+    if (!initialized) {
+        const char *value = getenv("V8_GUARD_TONE_LEVEL");
+        if (value && value[0] != '\0') {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if (end != value && end && *end == '\0' && parsed >= 0)
+                amplitude = (int32_t) parsed;
+        }
+        initialized = 1;
+    }
+    return amplitude;
+}
+
+static void mix_v8_guard_tone(int16_t *amp, int len)
+{
+    int32_t amplitude = v8_guard_tone_amplitude();
+    double phase_inc;
+    int i;
+
+    if (amplitude <= 0)
+        return;
+    phase_inc = 2.0 * M_PI * v8_guard_tone_hz() / 8000.0;
+    for (i = 0; i < len; i++) {
+        int32_t mixed = (int32_t) amp[i]
+                       + (int32_t) lround(amplitude * sin(g_guard_tone_phase));
+        if (mixed > 32767) mixed = 32767;
+        if (mixed < -32768) mixed = -32768;
+        amp[i] = (int16_t) mixed;
+        g_guard_tone_phase += phase_inc;
+        if (g_guard_tone_phase >= 2.0 * M_PI)
+            g_guard_tone_phase -= 2.0 * M_PI;
+    }
+}
+
 /* Clock recovery. cr_update() runs on the SIP/RTP transport thread (each
    incoming RTP packet); cr_get_adjustment() runs on the PJSIP media thread
    (each pulled audio frame) — these are different threads, hence the mutex. */
@@ -3689,6 +3766,7 @@ void me_tx_audio(int16_t *amp, int len)
         /* Generate V.8 negotiation audio */
         if (g_v8)
             v8_tx(g_v8, amp, len);
+        mix_v8_guard_tone(amp, len);
         for (int i = 0; i < len; i++)
             g_v8_tx_energy += (int64_t)amp[i] * amp[i];
         g_v8_tx_count += len;
