@@ -8996,6 +8996,33 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
        as its own far-end J and call phase4_wait_init().  Preserve the decoded
        Ja constellation choice, but start the S/S-bar detector with a clean
        32-baud window so the later analogue S transition is unambiguous. */
+    /* Pin the TRN constellation from the TRN lock rather than trusting
+     * phase3_j_trn16 as left by the canonical J matcher.
+     *
+     * That matcher sets trn16 from whichever 16-bit pattern it last matched,
+     * and it gets it wrong: measured live against a peer whose own log says
+     * TRNSEG4 (4-point), the S detector was being armed "16-point", and the
+     * J look-ahead then pinned 4-point a moment later -- the two disagreeing
+     * about the same signal. Arming the S detector for the wrong constellation
+     * is why the analogue S was never seen, which left Jd to expire on its
+     * interop timeout and dragged the rest of Phase 3 onto timers.
+     *
+     * phase3_trn_lock_score is scored through a 4-point mapping, so a high
+     * score is positive evidence the far end really is 4-point -- far better
+     * evidence than the pattern matcher's guess. */
+    if (s->rx.phase3_trn_lock_hyp >= 0  &&  s->rx.phase3_trn_lock_score >= 80)
+    {
+        if (s->rx.phase3_j_trn16)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Rx - V.90: TRN lock (hyp=%d %d%%, 4-point mapping) overrides "
+                     "canonical-J trn16=1; arming S detector as 4-point\n",
+                     s->rx.phase3_trn_lock_hyp, s->rx.phase3_trn_lock_score);
+        }
+        /*endif*/
+        s->rx.phase3_j_trn16 = 0;
+    }
+    /*endif*/
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.stage = V34_RX_STAGE_PHASE3_WAIT_S;
     s->rx.duration = 0;

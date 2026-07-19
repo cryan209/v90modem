@@ -2329,6 +2329,8 @@ static bool v90_dil_capture_has_preamble(int start)
     return v90_dil_capture_get_bit(start + 17) == 0;
 }
 
+static void v90_note_ja_confirmed_by_descriptor(void);
+
 static bool v90_dil_capture_try_parse_at(int start)
 {
     uint8_t shifted[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
@@ -2355,7 +2357,34 @@ static bool v90_dil_capture_try_parse_at(int start)
     trace_phase("V90 parsed Ja DIL descriptor: N=%u LSP=%u LTP=%u",
                 desc.n, desc.lsp, desc.ltp);
     g_v90_dil_parse_logged = true;
+    v90_note_ja_confirmed_by_descriptor();
     return true;
+}
+
+/* A CRC-valid DIL descriptor is proof the peer is transmitting Ja right now --
+ * strictly better evidence than the energy-gap heuristic or the J look-ahead
+ * timer that currently drive the Ja event. Use it as soon as we have it.
+ *
+ * Measured live, the descriptor parses well before either of those fire (in one
+ * run the parse landed ~670 log lines ahead of "analogue Ja detected", and the
+ * look-ahead configured for 3000 bits did not actually trigger until bit
+ * 22484). Waiting for them after we already know the answer is what makes the
+ * whole of Phase 3 run late and on timers rather than in step with the peer. */
+static void v90_note_ja_confirmed_by_descriptor(void)
+{
+    bool accepted;
+
+    if (!g_v90 || !g_v34)
+        return;
+    if (v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA)
+        return;
+    accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+    ME_LOG("[ME] V.90: Ja confirmed by CRC-valid DIL descriptor; starting Phase 3 "
+           "without waiting for the energy gap or look-ahead (accepted=%d)\n",
+           accepted ? 1 : 0);
+    trace_phase("V90 Ja confirmed by descriptor (accepted=%d)", accepted ? 1 : 0);
+    if (accepted)
+        v34_v90_arm_phase3_s_detector(g_v34);
 }
 
 static int v90_ja_dump_min_bits(void)
@@ -2479,6 +2508,7 @@ static bool v90_dil_vote_and_parse(const uint8_t *bits,
             trace_phase("V90 Ja descriptor via voting: repeats=%d period=%d N=%u",
                         start_count, period, desc.n);
             g_v90_dil_parse_logged = true;
+            v90_note_ja_confirmed_by_descriptor();
             return true;
         }
     }
