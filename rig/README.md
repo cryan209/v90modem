@@ -142,13 +142,106 @@ d-modem gives up with a `Link Error` ~3.2s after the retrain starts —
 not enough time to complete a second full V.8/Phase1/2/3 cycle within
 its own patience budget.
 
-**The actual fix is architectural, not a decode-logic fix**: our own
-downstream constellation offer (CPt, transmitted during V.90 Phase 4)
-needs to be derived from DIL/impairment analysis instead of always
-offering the maximal Ucode set — this is the exact gap already flagged
-in `CLAUDE.md` ("Mi negotiation") and `docs/v90_mi_negotiation.md`. Not
-attempted this session (substantially bigger scope than the rest of
-this investigation); flagged as the real next step.
+**Superseded (2026-07-20): the fix is in this rig's resampler, and the
+"our CPt offer" framing below was wrong on direction.**
+
+The earlier conclusion here read: "our own downstream constellation
+offer (CPt, transmitted during V.90 Phase 4) needs to be derived from
+DIL/impairment analysis instead of always offering the maximal Ucode
+set ... flagged as the real next step." **We never transmit CPt.**
+There is no `V90_TX_CPT` in `v90_tx_phase_t` (`v90.h`), and `v90.c`
+~line 2584 says so explicitly ("Send at least 192T before allowing *the
+analogue modem's* CPt"). Per V.90 §5.4.3 the analogue modem measures the
+line and signals Mi to the digital modem — we are the *consumer* of
+CPt/CP, never the party that offers one. `docs/v90_mi_negotiation.md`
+already documented this direction correctly; that Mi work (test-harness
+mask, and the V.92 **CPd** upstream offer) is real but is a *different
+feature* and was never on the path to this failure. Same class of
+direction misreading as the `VPcmV34Main` one corrected above.
+
+**Actual root cause: d-modem's 8 kHz → 9.6 kHz interpolator saturates
+int16, and the clipping alone is sufficient to make `findPadGain()`
+fail at every candidate gain.**
+
+The polyphase kernel in `dmodem_put_frame` is a Hann-windowed sinc with
+its cutoff at *exactly* the 4 kHz input Nyquist, which makes it very
+ringy: its per-phase L1 norms are `1.000 2.432 3.447 3.814 3.447 2.432`,
+so a full-scale input can overshoot to **3.81x int16 full scale**.
+V.90 downstream PCM is precisely the pathological input — full-scale
+codewords whose sign flips sample to sample — so the interpolated 9.6 kHz
+waveform overshoots and clips against the `int16` DSP interface.
+
+Measured with `tools/v90_pad_gain.py`, which reproduces the analogue
+modem's pad-gain fit offline (group DIL symbols by transmitted Ucode,
+fit a single gain g so received ≈ g × level(Ucode), report the per-Ucode
+residual). Input is a truth capture with a known DIL from
+`./vpcm_encode --law ulaw --out /tmp/truth.g711` (DIL at ~7000-7560 ms):
+
+| transport | interpolator peak | clipped | best-fit gain | per-Ucode err (rms / max) |
+|---|---|---|---|---|
+| ideal DS0 (control) | — | — | `1.000000` | `0.000%` / `0.000%` |
+| rig, as it is today | 71900 (2.19x FS) | 4757 | `0.952100` | **`120.44%` / `875.45%`** |
+| rig, 0.45 pre-scale | 32355 (0.99x FS) | 0 | `0.999989` | `0.689%` / `5.14%` |
+
+The middle row *is* the reported symptom: no gain fits, at any gain.
+The control row proves the measurement pipeline and our transmitted
+codewords are exact — the error is entirely introduced in transport.
+
+Clipping is not confined to synthetic input. Real committed TX taps
+pushed through the same converter clip too: `live-goal-run50` peaks at
+41479 (3120 samples clipped, 0.82% of active), `live-goal-run67` at
+51249 (1560, 0.62%), `live-goal-run39` at 33181 (32, 0.011%).
+
+**Fix (applied, `rig/d-modem/d-modem.c`):** `RS_HEADROOM_DEFAULT 0.25`,
+folded into the kernel in `rs_build_kernel()` so it costs nothing at
+runtime, with `DM_RS_HEADROOM` to sweep it without rebuilding the image.
+Nothing is lost: a fixed downstream attenuation is exactly a digital pad,
+and recovering it is what the peer's `findPadGain()` exists to do — the
+sweep shows it recovered to within 1e-5.
+
+**The value comes from the L1 bound, not from measurement**, and that
+distinction matters. Worst-case output is `L1 × full scale`, so any
+headroom `≤ 1/3.8143 = 0.2622` provably cannot clip for *any* input;
+0.25 takes that with margin (`0.25 × 3.8143 = 0.954`). Verified by
+extracting and running the real `rs_build_kernel()`: per-phase L1 comes
+out `0.250 0.608 0.862 0.954 0.862 0.608`, DC gain exactly 0.250000.
+
+Choosing by measurement alone would have been a trap. 0.45 clipped
+nothing on every capture available — but only because it was already
+using **98.7%** of full scale on the truth capture. No margin at all; a
+slightly different signal clips again. Utilisation of int16 full scale
+at the worst observed peak: `0.45`→98.7%, `0.40`→87.8%, `0.35`→76.8%,
+`0.30`→65.8%, `0.25`→55%.
+
+The extra attenuation is free in accuracy terms — per-Ucode residual is
+essentially flat from 0.45 down to 0.25, and the bands a real
+constellation uses stay negligible throughout:
+
+| headroom | clipped | fitted gain | rms (all) | Ucode 16-63 | 64-95 | 96-127 |
+|---|---|---|---|---|---|---|
+| `1.00` | 4757 | `0.952100` | `120.44%` | `5.11%` | `5.01%` | `4.29%` |
+| `0.45` | 0 | `0.999989` | `0.689%` | `0.091%` | `0.009%` | `0.0016%` |
+| `0.35` | 0 | `0.999991` | `0.582%` | `0.100%` | `0.009%` | `0.0027%` |
+| `0.30` | 0 | `0.999988` | `0.980%` | `0.141%` | `0.012%` | `0.0024%` |
+| **`0.25`** | **0** | **`0.999991`** | **`0.332%`** | **`0.114%`** | **`0.011%`** | **`0.0022%`** |
+
+Only Ucode 0-15 degrades (int16 rounding on levels of ~2), and no real
+V.90 constellation uses those.
+
+The patch also counts clipped samples and logs at `PJ_LOG` level 2 with
+the worst overshoot and a pointer to `DM_RS_HEADROOM`. Clipping being
+completely silent is what made this take as long as it did.
+
+**Still to confirm live:** the chain is (a) the rig provably clips,
+(b) clipping provably breaks a pad-gain fit with exactly the reported
+signature, (c) d-modem reported a `findPadGain()` failure. The specific
+failing call was never captured with a matched TX tap + `dm_to_dsp.raw`
+pair, so (a)+(b)⇒(c) is inference, not direct observation. Confirm by
+applying the headroom fix on tower and re-running: `V90TRN2Design()`
+should stop reporting "constelation design failed". Capture both taps
+on that run so the fit can be re-measured against real received audio
+(`--transport rig` models a best-case receiver; a real capture would
+also fold in the DSP's own timing recovery).
 
 Two small, genuinely-useful improvements landed from this investigation
 and are kept even though they don't fix the underlying issue:

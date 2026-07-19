@@ -227,7 +227,12 @@ enum v34_events_e
     V34_EVENT_J_DASHED,
     V34_EVENT_PHASE4_TRN_READY,
     V34_EVENT_TRAINING_FAILED,
-    V34_EVENT_E
+    V34_EVENT_E,
+    /*! The far end abandoned Phase 3/4 and restarted its handshake (V.90
+        SILENCERETRAIN -> TONE_AB -> Phase 1).  Reported so the application can
+        follow it back to Phase 2 instead of continuing to transmit Phase 3/4
+        signals over a peer that is no longer listening for them. */
+    V34_EVENT_PEER_RETRAIN
 };
 
 typedef struct
@@ -836,6 +841,18 @@ typedef struct
     int32_t last_info_rx_power_peak;
     /*! \brief Sample time of the last info_rx() power-peak reset. */
     span_sample_timer_t last_info_rx_power_peak_reset;
+    /*! \brief Fast-attack/slow-decay peak tracker for the level of a real
+               carrier, so the Tone A gate scales with the actual line level
+               instead of an absolute constant that only suits one
+               peer/gateway combination. */
+    int32_t info_rx_carrier_ref;
+    /*! \brief Consecutive near-silent baseband samples seen while in a
+               Phase 3/4 stage, used to spot a peer that has given up and
+               restarted its handshake. */
+    int phase34_silence_samples;
+    /*! \brief Set once a peer retrain has been reported, so it is announced
+               only once per Phase 3/4 attempt. */
+    bool phase34_retrain_reported;
 
     bool info0_acknowledgement;
     uint8_t info0_raw_26_27;

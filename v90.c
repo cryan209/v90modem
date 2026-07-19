@@ -291,6 +291,7 @@ struct v90_state_s {
     bool             jd_terminate_requested;
     bool             training_complete;
     bool             dil_requested;
+    bool             jd_terminated_by_s;
     bool             dil_terminate_requested;
     bool             use_internal_v34_tx;
 
@@ -2525,6 +2526,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->rep_count = 0;
                 s->jd_bit_pos = 0;
                 s->jd_terminate_requested = false;
+                s->jd_terminated_by_s = false;
                 return v90_pcm_idle(s->law);
             }
             if (!s->jd_terminate_requested
@@ -2536,7 +2538,16 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_terminate_requested = true;
             }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
-                fprintf(stderr, "[V90] Phase 3: S detected, completed current Jd repetition after %d symbols, starting J'd\n",
+                /* Say which one actually terminated Jd.  This used to print
+                 * "S detected" unconditionally, including when the interop
+                 * timeout above set jd_terminate_requested with no S ever
+                 * arriving -- which reads in the log as real progress and
+                 * cost a full investigation before the timeout was spotted
+                 * on the preceding line. */
+                fprintf(stderr,
+                        "[V90] Phase 3: %s, completed current Jd repetition after %d symbols, starting J'd\n",
+                        s->jd_terminated_by_s ? "S detected"
+                                              : "NO S RECEIVED (terminated by interop timeout)",
                         s->sample_count);
                 s->tx_phase = V90_TX_JD_PRIME;
                 s->sample_count = 0;
@@ -2922,6 +2933,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->phase4_hold_logged = false;
     s->phase4_ri_align_remaining = 0;
     s->jd_terminate_requested = false;
+    s->jd_terminated_by_s = false;
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
@@ -2956,6 +2968,7 @@ v90_state_t *v90_init(int baud_rate,
     s->diff_enc = 0;
     v90_reset_data_pump_state(s);
     s->jd_terminate_requested = false;
+    s->jd_terminated_by_s = false;
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
@@ -3027,6 +3040,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->phase4_hold_logged = false;
     s->phase4_ri_align_remaining = 0;
     s->jd_terminate_requested = false;
+    s->jd_terminated_by_s = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
     s->use_internal_v34_tx = false;
@@ -3144,6 +3158,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
                     "terminating at the next frame boundary\n",
                     s->sample_count);
             s->jd_terminate_requested = true;
+            s->jd_terminated_by_s = true;
             return true;
         }
         if (s->tx_phase == V90_TX_JD
@@ -3236,6 +3251,39 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->b1_received = true;
             return true;
         }
+        return false;
+
+    case V90_RX_EVENT_RETRAIN:
+        /* The analogue modem abandoned Phase 3/4 and restarted its handshake.
+         * Tear our Phase 3/4 state down and fall back to the silent WAIT_JA
+         * state so we re-emit Sd cleanly when it next reaches Ja.  Continuing
+         * to transmit Phase 3/4 here is actively harmful: it pours a
+         * modem-like signal over the peer's fresh Phase 1/2 and corrupts the
+         * bulk-delay/RTD estimate that places its next Sd search window. */
+        if (s->tx_phase >= V90_TX_SD && s->tx_phase <= V90_TX_DATA) {
+            fprintf(stderr,
+                    "[V90] Peer retrained during tx_phase=%d; dropping to WAIT_JA\n",
+                    (int) s->tx_phase);
+            s->tx_phase = V90_TX_WAIT_JA;
+            s->sample_count = 0;
+            s->rep_count = 0;
+            s->jd_bit_pos = 0;
+            s->jd_terminate_requested = false;
+            s->jd_terminated_by_s = false;
+            s->dil_terminate_requested = false;
+            s->dil_requested = false;
+            s->dil_segment_index = 0;
+            s->phase4_hold_logged = false;
+            s->cp_ready = false;
+            s->cp_ack_received = false;
+            s->phase4_mapper_ready = false;
+            s->data_cp_received = false;
+            s->data_mapper_ready = false;
+            s->e_received = false;
+            s->b1_received = false;
+            return true;
+        }
+        /*endif*/
         return false;
 
     default:

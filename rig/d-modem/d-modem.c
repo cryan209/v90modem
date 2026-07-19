@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdlib.h>        /* getenv/strtod for DM_RS_HEADROOM */
 #include <signal.h>
 #include <errno.h>
 #define _USE_MATH_DEFINES
@@ -72,17 +73,78 @@ static FILE *dm_tap_tx, *dm_tap_rx;
 #define RS_PAST   RS_HALF
 #define RS_FUTURE (RS_TAPS - RS_HALF - 1)
 #define RS_PHASES 6
+
+/* Headroom, folded into the kernel (see the clipping analysis below).
+ *
+ * Placing the cutoff at the exact input Nyquist makes this kernel very ringy:
+ * its per-phase L1 norms are 1.000 2.432 3.447 3.814 3.447 2.432, so a
+ * full-scale input can overshoot to 3.81x int16 full scale.  V.90 downstream
+ * PCM is exactly the pathological input -- full-scale codewords whose sign
+ * flips sample to sample -- so without attenuation the interpolated 9.6 kHz
+ * signal saturates the int16 DSP interface.
+ *
+ * That clipping is not a cosmetic loss.  It is nonlinear, so it breaks the
+ * analogue modem's pad-gain estimate: SmartLink's findPadGain() fits a single
+ * gain g with received ~= g * level(Ucode) across the DIL sweep, and clipped
+ * samples make every candidate g fit badly.  V90TRN2Design() then reports
+ * "constelation design failed" and the modem retrains -- the long-standing
+ * Phase 4 failure on this rig.  Measured offline with tools/v90_pad_gain.py
+ * against a ./vpcm_encode truth capture (DIL at 7000-7560 ms):
+ *
+ *   transport            interp peak    clipped   fitted gain   per-Ucode err
+ *   ideal DS0 (control)          --          --      1.000000     0.000% rms
+ *   this kernel, no headroom  71900 (2.19x)    4757    0.952100   120.441% rms
+ *   this kernel, 0.45         32355 (0.99x)       0    0.999989     0.689% rms
+ *
+ * Attenuating costs nothing: a fixed downstream gain is just a digital pad,
+ * and recovering it is precisely what findPadGain() is for -- it comes back to
+ * within 1e-5 above.
+ *
+ * The default is set from the L1 bound rather than from measurement.  Worst-
+ * case output is L1 * full scale, so any headroom <= 1/3.8143 = 0.2622 cannot
+ * clip for *any* input; 0.25 takes that with a little margin (0.25 * 3.8143 =
+ * 0.954).  Measuring alone would have been a trap: 0.45 clipped nothing on
+ * every capture available, but only because it was already using 98.7% of full
+ * scale on the truth capture -- no margin at all, and a slightly different
+ * signal would have clipped again.
+ *
+ * The extra attenuation is free in accuracy terms.  Per-Ucode residual over
+ * the DIL sweep is essentially flat from 0.45 down to 0.25 (0.69% -> 0.33%
+ * rms overall), and the bands a real constellation actually uses stay far
+ * below anything that matters: at 0.25, Ucode 16-63 is 0.114% rms, 64-95 is
+ * 0.011%, and 96-127 is 0.0022% against a 512-unit adjacent-Ucode step.  The
+ * only band that degrades is Ucode 0-15 (int16 rounding on levels of ~2),
+ * which no real V.90 constellation uses.
+ *
+ * DM_RS_HEADROOM overrides it for sweeps without rebuilding the image. */
+#define RS_HEADROOM_DEFAULT 0.25
 static float rs_ker[RS_PHASES][RS_TAPS];
 static int   rs_ker_ready;
+static double rs_headroom = RS_HEADROOM_DEFAULT;
+static unsigned long rs_clip_count, rs_out_count, rs_clip_logged;
+static double rs_clip_worst;
 
 static void rs_build_kernel(void) {
 	const double fs_in = 8000.0, fc = 4000.0;
 	const double wc = fc/(fs_in/2.0);   /* exact input Nyquist */
+	const char *env;
 	int p, t;
 	if (rs_ker_ready) return;
+	env = getenv("DM_RS_HEADROOM");
+	if (env && *env) {
+		char *end;
+		double parsed = strtod(env, &end);
+		/* Reject junk and values that cannot help: >1.0 amplifies into the
+		 * clamp, <=0 would mute the DSP feed entirely. */
+		if (end != env && *end == '\0' && parsed > 0.0 && parsed <= 1.0)
+			rs_headroom = parsed;
+		else
+			PJ_LOG(2,(__FILE__, "DM_RS_HEADROOM='%s' ignored (want 0 < h <= 1), "
+			                    "using %.3f", env, rs_headroom));
+	}
 	for (p = 0; p < RS_PHASES; p++) {
 		double f = (double)p/(double)RS_PHASES;   /* fractional output pos */
-		double sum = 0.0;
+		double sum = 0.0, l1 = 0.0;
 		for (t = 0; t < RS_TAPS; t++) {
 			double x = (double)(t - RS_HALF) - f;  /* input samples from output pt */
 			double s, w, y = wc*x;
@@ -92,9 +154,16 @@ static void rs_build_kernel(void) {
 			rs_ker[p][t] = (float)(s*w);
 			sum += rs_ker[p][t];
 		}
-		for (t = 0; t < RS_TAPS; t++)
-			rs_ker[p][t] /= (float)sum;   /* unity DC gain */
+		for (t = 0; t < RS_TAPS; t++) {
+			/* Unity DC gain, then headroom. */
+			rs_ker[p][t] = (float)(rs_ker[p][t]/sum*rs_headroom);
+			l1 += fabs((double)rs_ker[p][t]);
+		}
+		PJ_LOG(4,(__FILE__, "resampler phase %d: L1=%.3f (worst-case %.2fx "
+		                    "int16 FS)", p, l1, l1));
 	}
+	PJ_LOG(3,(__FILE__, "resampler headroom %.3f (%.2f dB) folded into kernel",
+	          rs_headroom, 20.0*log10(rs_headroom)));
 	rs_ker_ready = 1;
 }
 
@@ -145,9 +214,28 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				int t;
 				for (t = 0; t < RS_TAPS; t++)
 					acc += (float)work[base + t] * h[t];
+				/* Clipping here is nonlinear and silently destroys the peer's
+				 * pad-gain fit (see RS_HEADROOM_DEFAULT).  It cost a long
+				 * investigation precisely because nothing ever reported it,
+				 * so count it and say so. */
+				if (acc > 32767.0f || acc < -32768.0f) {
+					double over = fabs((double)acc)/32767.0;
+					if (over > rs_clip_worst) rs_clip_worst = over;
+					rs_clip_count++;
+				}
 				if (acc > 32767.0f) acc = 32767.0f;
 				else if (acc < -32768.0f) acc = -32768.0f;
 				out[k] = (pj_int16_t)(acc >= 0 ? acc + 0.5f : acc - 0.5f);
+			}
+			rs_out_count += out_n;
+			if (rs_clip_count && rs_out_count - rs_clip_logged >= 9600) {
+				PJ_LOG(2,(__FILE__, "resampler CLIPPING %lu/%lu samples (%.3f%%), "
+				          "worst %.2fx int16 FS -- this breaks the peer's "
+				          "findPadGain(); lower DM_RS_HEADROOM (now %.3f)",
+				          rs_clip_count, rs_out_count,
+				          100.0*(double)rs_clip_count/(double)rs_out_count,
+				          rs_clip_worst, rs_headroom));
+				rs_clip_logged = rs_out_count;
 			}
 			/* advance pipeline */
 			for (i = 0; i < RS_PAST; i++)

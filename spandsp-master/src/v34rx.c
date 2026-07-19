@@ -3335,10 +3335,12 @@ static int put_info_bit_count = 0;
    chance, falsely tripping "Tone A detected"/reversal events. This
    threshold requires real carrier-level power, not just "louder than the
    off/on hysteresis", before letting persistence2 accumulate at all. */
-static int32_t tone_a_min_power(void)
+/* Absolute override for the Tone A carrier gate.  Returns 0 when unset, which
+   selects the adaptive SNR gate in tone_a_carrier_present() below. */
+static int32_t tone_a_min_power_override(void)
 {
     static int initialized = 0;
-    static int32_t threshold = 13000000;
+    static int32_t threshold = 0;
 
     if (!initialized)
     {
@@ -3359,6 +3361,78 @@ static int32_t tone_a_min_power(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* How far below the measured carrier reference still counts as a real
+   carrier.  The original absolute gate sat at 13000000 against a peer whose
+   real carrier measured ~185000000 -- a ratio of ~14 -- so 8 reproduces that
+   intent while being slightly more permissive. */
+static int32_t tone_a_carrier_divisor(void)
+{
+    static int initialized = 0;
+    static int32_t divisor = 8;         /* ~9 dB below the carrier reference */
+
+    if (!initialized)
+    {
+        const char *value = getenv("V34_TONE_A_CARRIER_DIVISOR");
+        if (value  &&  value[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 1)
+                divisor = (int32_t) parsed;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return divisor;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Is info_rx() currently looking at a real carrier rather than line noise?
+ *
+ * This used to be an absolute power threshold (13000000), calibrated against
+ * one hardware modem.  That cannot generalise: the received level depends on
+ * the peer's transmit power, the FXS gateway, and every digital pad in the
+ * SIP path, none of which we control.  Worse, it was calibrated to within
+ * about 1 dB of the signal it had to pass, so it was never a threshold so
+ * much as a coin toss.  Measured on the d-modem rig, peak received power over
+ * a 0.5 s window was 16411569 on 2026-07-17 (clears 13000000 by 1.0 dB) and
+ * 12664417 on 2026-07-20 (misses it by 0.1 dB) -- ordinary run-to-run
+ * variation of about 2 dB, no protocol change at all.
+ *
+ * On the losing side of that coin toss the failure is total, not degraded:
+ * persistence2 is reset on every sample, Tone A is never declared, the third
+ * reversal never arrives, and the receiver never advances to
+ * V34_RX_STAGE_INFO1A.  The peer sends INFO1a perfectly well; we are
+ * structurally unable to go and listen for it, and every call dies at
+ * "aborting after 6 INFO1a timeouts".
+ *
+ * Gate relative to a measured carrier reference instead, so the same relative
+ * discrimination applies at any absolute level.  V34_TONE_A_MIN_POWER still
+ * forces the old absolute behaviour if a specific peer ever needs it. */
+static int tone_a_carrier_present(v34_rx_state_t *s)
+{
+    int32_t absolute;
+    int32_t reference;
+
+    absolute = tone_a_min_power_override();
+    if (absolute > 0)
+        return s->last_info_rx_power >= absolute;
+    /*endif*/
+    reference = s->info_rx_carrier_ref;
+    if (reference <= 0)
+    {
+        /* Nothing measured yet (first window of the call).  Fail open -- the
+           coarse signal_present hysteresis still applies, and refusing
+           everything here is exactly the failure mode being fixed. */
+        return true;
+    }
+    /*endif*/
+    return s->last_info_rx_power >= reference/tone_a_carrier_divisor();
+}
+/*- End of function --------------------------------------------------------*/
+
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     int info_search_enabled;
@@ -3376,7 +3450,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         if (++s->persistence1 < 10)
             break;
         /*endif*/
-        if (s->last_info_rx_power < tone_a_min_power())
+        if (!tone_a_carrier_present(s))
         {
             /* Not a real carrier — just line noise clearing the coarser
                signal_present hysteresis. Don't let it accumulate toward a
@@ -3888,6 +3962,19 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             s->last_info_rx_power_peak = power;
         }
         /*endif*/
+        /* Carrier-level reference feeding the Tone A gate: instant attack,
+           slow decay (~4096-sample time constant, so roughly -17 dB/s with no
+           signal).  Deliberately not windowed against s->sample_time -- the
+           V.90 Phase 2 flow reconditions this receiver repeatedly, resetting
+           that clock, so a 2 s window never completed and the reference stayed
+           at 0.  A minimum tracker is wrong here too: Phase 2 contains genuine
+           silent gaps, so a minimum collapses to ~0 and the gate degenerates
+           to always-open. */
+        if (power > s->info_rx_carrier_ref)
+            s->info_rx_carrier_ref = power;
+        else
+            s->info_rx_carrier_ref -= s->info_rx_carrier_ref >> 12;
+        /*endif*/
         if (s->v90_mode
             && !s->calling_party
             && !s->signal_present
@@ -4010,7 +4097,11 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         && s->duration % 8000 < (unsigned)len)
     {
         span_log(s->logging, SPAN_LOG_FLOW,
-                 "Rx info_rx diag: stage=%d sig=%d pwr=%d bits=%d\n",
+                 "Rx info_rx diag: ref=%d gate=%d carrier=%d "
+                 "stage=%d sig=%d pwr=%d bits=%d\n",
+                 s->info_rx_carrier_ref,
+                 s->info_rx_carrier_ref/tone_a_carrier_divisor(),
+                 tone_a_carrier_present(s),
                  s->stage, s->signal_present, power, s->bit_count);
     }
     return 0;
@@ -8309,6 +8400,68 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                  s->baud_rate, s->high_carrier, dds_frequencyf(s->v34_carrier_phase_rate),
                  (double)s->agc_scaling, (long)power_meter_current(&s->power), s->shaper_sets);
     }
+    /* Follow the far end when it abandons Phase 3/4 and restarts.
+     *
+     * A V.90 analogue modem that gives up (constellation design failure, an
+     * unanswered DIL request, a Phase 3 timeout) goes SILENCERETRAIN ->
+     * TONE_AB -> Phase 1.  Measured on the d-modem rig, that silence is about
+     * 80 ms.  Without noticing it we keep transmitting Phase 3/4 at a peer
+     * that is no longer listening, and our own receiver stays parked in a
+     * Phase 3/4 stage decoding the peer's Phase 1/2 tones as though they were
+     * Phase 4 frames -- which is what the long MP-CRC investigation was
+     * actually chasing (see rig/README.md).  Report it so the application can
+     * follow the peer back to Phase 2 and get another attempt, rather than
+     * hanging until the call dies.
+     *
+     * Deliberately keyed on sustained near-silence rather than on tone
+     * detection: the tone detectors live in info_rx(), which is not the
+     * demodulator running during Phase 3/4, and silence is the unambiguous
+     * first half of every retrain the peer can start. */
+    if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING
+        &&
+        s->stage <= V34_RX_STAGE_PHASE4_MP)
+    {
+        int32_t retrain_floor = (s->info_rx_carrier_ref > 0)
+                                ? s->info_rx_carrier_ref/64
+                                : 0;
+
+        for (i = 0;  i < len;  i++)
+        {
+            int32_t mag = (int32_t) amp[i]*amp[i];
+
+            if (retrain_floor > 0  &&  mag < retrain_floor)
+            {
+                s->phase34_silence_samples++;
+            }
+            else
+            {
+                s->phase34_silence_samples = 0;
+                /* Energy is back.  Re-arm so a later retrain is reported too. */
+                s->phase34_retrain_reported = false;
+            }
+            /*endif*/
+            /* 480 samples = 60 ms, comfortably inside the ~80 ms the peer
+               spends in SILENCERETRAIN but far longer than any gap inside a
+               live Phase 3/4 signal. */
+            if (s->phase34_silence_samples >= 480  &&  !s->phase34_retrain_reported)
+            {
+                s->phase34_retrain_reported = true;
+                s->received_event = V34_EVENT_PEER_RETRAIN;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - far end abandoned Phase 3/4 (%d ms silence in stage %s); "
+                         "reporting peer retrain\n",
+                         s->phase34_silence_samples/8, v34_rx_stage_to_str(s->stage));
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    else
+    {
+        s->phase34_silence_samples = 0;
+        s->phase34_retrain_reported = false;
+    }
+    /*endif*/
     /* Dump raw Phase 3 RX audio for offline analysis */
     if (phase3_rx_dump_fp && phase3_rx_dump_count < PHASE3_RX_DUMP_SAMPLES)
     {
