@@ -927,6 +927,14 @@ typedef struct
     uint32_t phase3_trn_scramble[24];
     uint16_t phase3_trn_one_count[24];
     int phase3_trn_bits;
+    /*! \brief Bit count at which the TRN hypothesis scores were last rescored,
+               so the lock can be retaken on post-convergence data once the
+               Phase 3 tracking loops have settled. 0 = not yet rescored. */
+    int phase3_trn_rescore_bits;
+    /*! \brief Latched once TRN first locks: keeps the Phase 3 tracking loops
+               engaged even while the lock itself is being retaken, so a
+               rescore does not disengage tracking mid-convergence. */
+    bool phase3_tracking_armed;
     int phase3_trn_lock_hyp;
     int phase3_trn_lock_score;
     float phase3_trn_mag_sum;
