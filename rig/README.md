@@ -51,10 +51,44 @@ declared `MANDATORY,STRING` to fix an upstream arg-parsing bug).
   us to `WAIT_JA` before that `S` ever arrives, undoing the lookahead fix.
   24000 (3s) gives headroom above the observed 19296 without being
   needlessly long.
+- `ME_V90_SD_DELAY_MS=750` — **required in addition to the two above**, not
+  optional. With only the two above, our side's own state machine does
+  reach `S detected`/`J'd`/DIL cycling — but that is a false positive: cross-
+  checked against SmartLink's own `-d9` log for the same calls, its
+  `V90Demodulator: Error Energy` stays exactly `-0.000` (not noisy-small,
+  literally unchanging) for the *entire* `WaitForSd` window, meaning it
+  never actually received our `Sd` at all. Root cause, measured via wall-
+  clock-synchronized timestamps on both sides: with `ME_V90_J_LOOKAHEAD_BITS`
+  making our response fast, we start transmitting `Sd` (which only lasts
+  54ms) about 763ms *before* SmartLink's own `V34HSHAKE: txstate
+  JTXMIT=>JaTXMIT` / `WaitForSd`-arm sequence has even happened — its
+  receiver was never listening yet. What we detected as "S" afterward was
+  most likely SmartLink's own post-timeout `SILENCERETRAIN`→`TONE_AB`
+  signal (a real V.34 phase-reversal tone, structurally similar to `S`),
+  not real progress. §9.3.1.3 explicitly permits the digital modem to hold
+  up to 500ms after detecting Ja before sending `Sd`; 750ms was measured
+  live to align correctly with this specific peer.
+  **Verified as real** (not another false positive) via SmartLink's own
+  log: `Error Energy` shows a genuine equalizer-convergence curve (large
+  initial error decaying to a small residual, e.g. `+2749`→`+3272`→
+  `+1638`→...→`+3` over ~7s), `Agc Gain low > Setting DIL overflow
+  protection`, a new `V90Phase3Demodulator: waitForJd` state transition,
+  and — on the best run — SmartLink actually transmitting its own `End of
+  CP #1 tx` (a genuine Phase 4 signal), matching our own log reaching
+  `Phase 4: Ri` / `waiting for valid CPt`.
 
-With both set, a call reliably reaches `Sd`→`S̄d`→`TRN1d`→`Jd`→(`S`
-detected)→`J'd`→ DIL, and cycles DIL segments steadily (confirmed
-reproducible across repeated live calls). The shutdown-time SIGSEGV
-(`process_return_code: -11` in `manifest.json`, whenever the interop
-harness's SIGINT lands after a call) is a separate, still-open bug, not
-caused by these env vars.
+With all three set, a call has been confirmed (once, cleanly, with
+multi-source verification on both sides) to progress genuinely through
+`Sd`→`S̄d`→`TRN1d`→`Jd`→`S`(real)→`J'd`→Phase 4 `Ri`→CP exchange, well past
+every prior stall point. A second immediate repeat attempt was
+inconclusive — SmartLink's own log stopped abruptly ~160ms into that call's
+`WaitForSd` window with no further output, looking like a rig-side hiccup
+rather than a protocol failure, but not yet independently confirmed. This
+session made 30+ back-to-back calls against the rig, well past the ~17-call
+fatigue point noted from a prior session — pace further live verification
+accordingly (a few calls at a time, not a rapid batch) and don't over-read
+a single inconclusive run either way.
+
+The shutdown-time SIGSEGV (`process_return_code: -11` in `manifest.json`,
+whenever the interop harness's SIGINT lands after a call) is a separate,
+still-open bug, not caused by any of these env vars.
