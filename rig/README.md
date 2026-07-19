@@ -115,18 +115,32 @@ d-modem's own `-d9` log for a live call:
 <431.535775> vpcm: Link Error
 ```
 
-Because its own constellation design fails, d-modem abandons V.90 PCM
-entirely and falls back to a **V.34 retrain** — a completely different
-signal (silence → `TONE_AB` → `RX_PHASE1_ANS`, i.e. a fresh V.34 Phase
-1/2-style negotiation), not a V.34 Phase 4 MP0 frame. Our own RX is
-still parked in `V34_RX_STAGE_PHASE4_MP` expecting a genuine MP0 frame,
-so it tries to decode the retrain tone/preamble as one — which is
-exactly the "silence, then a noisy but structurally-plausible-looking
-signal that always fails CRC" pattern chased through most of this
-session (see "Deeper investigation" below for that full trail; all of
-it was investigating a real, reproducible symptom, just not the true
-cause). d-modem gives up with a `Link Error` ~3.2s after the retrain
-starts.
+**Correction (caught by user review): this is not a fallback to plain
+V.34.** `VPcmV34Main` is d-modem's shared V.34/V.90 handshake driver —
+V.90 negotiation is layered on top of V.34's Phase 1/2 tone substrate,
+so that module name doesn't imply "giving up on V.90". `requested DP is
+90` is explicit: the retrain is requesting **Data Pump 90 again**, i.e.
+d-modem is retrying V.90 from scratch, not abandoning it. The
+`V34SetupModulator: ... V90=0` lines right after are just the Phase 1/2
+tone generators being reset as part of restarting the *whole handshake*
+(SILENCERETRAIN → `TONE_AB` → `RX_PHASE1_ANS`) — V.90 always goes
+through this same V.34-derived Phase 1/2 substrate before Phase 3/4, so
+seeing `V90=0` there doesn't mean the target mode changed.
+
+What's still solid: because its own constellation design failed,
+d-modem discards its Phase 3/4 state and restarts the *entire*
+handshake from Phase 1/2 tones to attempt V.90 again — this is a
+completely different signal from a V.34 Phase 4 MP0 frame regardless of
+what the retry eventually negotiates. Our own RX is still parked in
+`V34_RX_STAGE_PHASE4_MP` expecting a genuine MP0 frame, so it tries to
+decode the retrain's Phase 1/2 tone/preamble as one — which is exactly
+the "silence, then a noisy but structurally-plausible-looking signal
+that always fails CRC" pattern chased through most of this session (see
+"Deeper investigation" below for that full trail; all of it was
+investigating a real, reproducible symptom, just not the true cause).
+d-modem gives up with a `Link Error` ~3.2s after the retrain starts —
+not enough time to complete a second full V.8/Phase1/2/3 cycle within
+its own patience budget.
 
 **The actual fix is architectural, not a decode-logic fix**: our own
 downstream constellation offer (CPt, transmitted during V.90 Phase 4)
@@ -244,6 +258,7 @@ handoff directly — done in a later pass the same day: added `coefmag=`/
 `rawmag=` fields to the dibit dump and found the raw *input* samples are
 genuinely, exactly zero (not a decode/equalizer bug) for ~5500 bauds
 after entering MP search, then ramp smoothly to real amplitude. That
-real signal turned out to be d-modem's V.34 retrain tone, not an MP0
-frame — see "ROOT-CAUSED" above for the full story and the real fix
-needed.
+real signal turned out to be d-modem's Phase 1/2 handshake-retrain
+tone (restarting to attempt V.90 again, not falling back to plain
+V.34), not an MP0 frame — see "ROOT-CAUSED" above for the full story
+and the real fix needed.
