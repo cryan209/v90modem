@@ -143,6 +143,22 @@ into MP (§10.1.3.9/V.34's MP sequence uses the same scrambled-bit mapping
 as TRN, differentially encoded; the encoder is meant to initialize from
 TRN's final symbol). The log's own `"diff dibits collapsed"` fallback
 message before falling back to absolute decode is consistent with this.
+
+4. **Scrambler polynomial/tap selection.** Checked this specifically
+   since V.90 §5.3/§6.5 *reverses* the plain-V.34 call/answer scrambler
+   assignment (digital modem always uses GPC, analog modem always uses
+   GPA, regardless of who actually originated the SIP call) — confirmed
+   the code already accounts for this correctly (`v34rx.c` ~line 6690,
+   "V.90 reverses this assignment" comment, computes `correct_tap=4` for
+   our role and correctly carries it into
+   `mp_phase4_default_scrambler_tap`). The very first, highest-confidence
+   MP lock attempt (score 17-18/18) already uses this correct tap and
+   still fails CRC, so this isn't it either — the retry-mode cycling
+   through tap=17 seen in the logs is just defensive fallback search, not
+   evidence the default is wrong.
+
 Next step would be comparing raw constellation points across the TRN→MP
-handoff against the expected differential/scrambler state, not another
-env-var experiment.
+handoff against the expected differential-decode sequence symbol-by-
+symbol (a reference-decoder comparison), not another env-var experiment
+or spec-citation check — everything checkable from the spec text and
+existing code structure has now been verified correct.
