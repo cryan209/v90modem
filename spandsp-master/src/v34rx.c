@@ -4097,7 +4097,8 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     /* A little integration will now filter away much of the HF noise */
     s->pri_ted.baud_phase -= p;
     v = abs(s->pri_ted.baud_phase);
-    if (v > 100*FP_FACTOR)
+    if (v > 100*FP_FACTOR
+        && !(getenv("ME_V34_FREEZE_TIMING_DURING_MP") && phase4_trn_should_freeze_tracking(s)))
     {
         i = (v > 1000*FP_FACTOR)  ?  15  :  1;
         if (s->pri_ted.baud_phase < 0)
@@ -4132,12 +4133,29 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     else if (s->pri_ted.baud_phase < -ted_phase_clip)
         s->pri_ted.baud_phase = -ted_phase_clip;
     v = fabsf(s->pri_ted.baud_phase);
-    if (v > ted_fine_trigger)
+    if (v > ted_fine_trigger
+        && !(getenv("ME_V34_FREEZE_TIMING_DURING_MP") && phase4_trn_should_freeze_tracking(s)))
     {
         i = (v > ted_coarse_trigger)  ?  2  :  1;
         if (s->pri_ted.baud_phase < 0.0f)
             i = -i;
         /*endif*/
+        /* ME_V34_FREEZE_TIMING_DURING_MP (experimental, 2026-07-19): live
+           interop showed the Godard symbol-timing loop, which is NOT frozen
+           during Phase 4 MP the way carrier tracking already is
+           (phase4_trn_should_freeze_tracking()), holding baud_phase steady
+           at exactly 0.0 for the entire preceding TRN period, then firing
+           one large, sustained eq_put_step correction right at the TRN->MP
+           boundary and settling into a new equilibrium it never recovers
+           from. Looked like a plausible cause of MP frames failing CRC with
+           errors that get worse later in the frame -- but verified live
+           with this flag set (confirmed via V34_TRACE_DIAGNOSTICS that
+           eq_put_step genuinely stayed frozen through the transition) that
+           the decoded MP frame bits come out byte-for-byte identical to the
+           unfrozen case anyway. Ruled out as the cause; left available
+           (default off) since it's a real, harmless option and the negative
+           result is worth being able to reproduce rather than silently losing
+           the finding. See rig/README.md for the fuller elimination list. */
         //printf("v = %10.5f %5d - %f %f %d\n", v, i, p, s->pri_ted.baud_phase, s->total_baud_timing_correction);
         s->eq_put_step += i;
         s->total_baud_timing_correction += i;
