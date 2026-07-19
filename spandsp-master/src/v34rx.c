@@ -6837,6 +6837,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         mp_decode_domain = s->mp_phase4_force_abs_active ? 1 : s->mp_phase4_domain;
 
+        /* ME_V34_DUMP_MP_DIBITS (diagnostic, 2026-07-19): dumps the raw
+           diff/abs dibit per baud for offline replay -- e.g. brute-forcing
+           every (hypothesis, domain, tap, order) combination against the
+           actual captured stream with a properly continuous self-
+           synchronizing scrambler, independent of this file's own
+           hypothesis-search state machine. Used to rule out a demapping/
+           descrambling logic bug for a live MP CRC failure against
+           d-modem/slmodemd: none of the 24*2*2*2=192 combinations, at any
+           frame-start offset, produced a valid frame from the captured
+           dibits, which points upstream at symbol demodulation (equalizer/
+           carrier/timing feeding the angle computation below) rather than
+           this file's bit-level decode logic. See rig/README.md. */
+        if (getenv("ME_V34_DUMP_MP_DIBITS") && s->mp_seen == 0 && s->duration < 6000)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - MP raw dibit dump: baud=%d diff=%d abs=%d\n",
+                     s->duration, data_bits, abs_bits);
+        }
+
         /* Dibit distribution diagnostic */
         {
             static int dibit_hist[4] = {0,0,0,0};

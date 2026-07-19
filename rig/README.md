@@ -135,15 +135,6 @@ these without new evidence:
    transition, but the decoded MP frame bits came out byte-for-byte
    identical anyway. Ruled out.
 
-Because the corruption is unaffected by freezing any of the adaptive/
-tracking loops and is perfectly deterministic, it looks like a **logic-
-level bug**, not a signal-quality or convergence issue — most likely in
-how the differential decoder or scrambler state carries over from TRN
-into MP (§10.1.3.9/V.34's MP sequence uses the same scrambled-bit mapping
-as TRN, differentially encoded; the encoder is meant to initialize from
-TRN's final symbol). The log's own `"diff dibits collapsed"` fallback
-message before falling back to absolute decode is consistent with this.
-
 4. **Scrambler polynomial/tap selection.** Checked this specifically
    since V.90 §5.3/§6.5 *reverses* the plain-V.34 call/answer scrambler
    assignment (digital modem always uses GPC, analog modem always uses
@@ -157,8 +148,38 @@ message before falling back to absolute decode is consistent with this.
    through tap=17 seen in the logs is just defensive fallback search, not
    evidence the default is wrong.
 
-Next step would be comparing raw constellation points across the TRN→MP
-handoff against the expected differential-decode sequence symbol-by-
-symbol (a reference-decoder comparison), not another env-var experiment
-or spec-citation check — everything checkable from the spec text and
-existing code structure has now been verified correct.
+### Decisive result: it's not a demapping/descrambling logic bug at all
+
+Added `ME_V34_DUMP_MP_DIBITS=1` (diagnostic, kept, default off) to dump
+the raw per-baud `diff`/`abs` dibit (the output of the differential/
+absolute angle quantization, before any hypothesis remapping or
+descrambling) around the observed MP lock point. Captured the real
+stream for baud 5400-5620 (spans the whole failing frame with 120 bauds
+of scrambler warm-up) and replayed it in Python, independently
+implementing `map_phase4_raw_bits` (the 24-entry hypothesis table),
+`phase4_unpack_ordered_bits`, and a properly continuous self-
+synchronizing descrambler (`out = in ^ (reg>>tap) ^ (reg>>22)`) matching
+`v34rx.c` exactly.
+
+Brute-forced **all 192 combinations** (24 hypotheses × 2 domains × 2
+taps × 2 orders) with the frame-start position slid across the entire
+captured bitstream (not just the one offset the live decoder locked
+onto) — a strict superset of everything the live retry-mode cycling in
+`v34rx.c` ever tries. **Zero combinations produced a valid frame**
+(17-ones sync + correct start bits + valid fill + valid CRC).
+
+This is decisive: if no bit-level reinterpretation of the *actual
+captured dibits* — under any hypothesis, domain, tap, order, or frame
+alignment — produces a valid MP frame, the bug cannot be in the
+demapping/descrambling logic itself (item 1's slip/bit-flip elimination,
+and items 2-4, are now superseded by this broader result, not just
+consistent with it). The corruption has to be upstream, in the raw
+dibit values themselves — i.e. in symbol demodulation: the equalizer
+output or carrier/baud-timing reference feeding `ang1`/`ang2`/`ang3` in
+`process_primary_half_baud()`, not in anything downstream of that.
+
+**Next step** is inspecting the raw constellation points (`sym->re`/
+`sym->im`, or the equalizer output feeding them) across the TRN→MP
+handoff directly — this is a fundamentally different kind of
+investigation than everything above (all of which was bit/frame-level
+and is now exhausted) and wasn't attempted this session.
