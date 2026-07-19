@@ -92,3 +92,57 @@ a single inconclusive run either way.
 The shutdown-time SIGSEGV (`process_return_code: -11` in `manifest.json`,
 whenever the interop harness's SIGINT lands after a call) is a separate,
 still-open bug, not caused by any of these env vars.
+
+## Phase 4 MP frame CRC failure (open, not yet root-caused)
+
+With all three Phase 3 env vars above set, calls reliably reach real
+Phase 4: `Ri`, `TRN` (95-100% ones-lock), explicit `J'` confirmation, and
+an MP preamble lock at 17-18/18 score — but every MP0 frame then fails
+CRC (`crc_ok=0 fill_ok=0`), cycling through all 8 domain/tap/order
+hypothesis combinations without ever validating one, and the call
+eventually retrains/hangs up. The failure is **perfectly deterministic**
+— identical received frame bits every single call.
+
+Three plausible causes were tested live and eliminated; don't retest
+these without new evidence:
+
+1. **Frame boundary slip / bit-level corruption.** Hand-decoding the
+   actual received bits against Table 20/V.34 shows all structural
+   checks pass early (`start17/type18/reserved19/start34/start51/start68`
+   all correct) but errors accumulate later in the frame (`fill85..87`
+   wrong, CRC wrong) — ruled out a slip or 1-2 bit flip via Python
+   simulation against the real captured frame (no slip in ±1/±2, no
+   single- or double-bit flip over the full payload+CRC region, produces
+   a valid CRC). Also found and fixed a real but insufficient gap while
+   investigating this: all four MP slip-recovery paths in `v34rx.c`
+   structurally excluded bits 17-18 from correction (started at bit 19)
+   — widened to start at 17, verified via the same simulation and live
+   that it does not change the outcome.
+2. **CMA equalizer drift during MP** (`ME_V34_FREEZE_CMA_DURING_MP=1`,
+   built for a similar-looking symptom on the USR Courier in an earlier
+   session). Tested live: changes which hypothesis gets tried but the
+   decoded frame still fails CRC.
+3. **Symbol-timing (Godard TED) drift during MP**
+   (`ME_V34_FREEZE_TIMING_DURING_MP=1`, new). `V34_TRACE_DIAGNOSTICS=1`
+   (temporarily flipped in `v34rx.c`, reverted after) showed
+   `pri_symbol_sync`'s `baud_phase`/`ted_corr` sitting rock steady at
+   exactly `0.0`/`0` for the entire preceding TRN period, then firing one
+   large, sustained `eq_put_step` correction right at the TRN→MP boundary
+   and settling into a new equilibrium — a very plausible-looking cause,
+   since carrier tracking is already frozen during MP for the same class
+   of risk but this timing loop wasn't. Tested live with the freeze
+   applied: confirmed `eq_put_step` genuinely stayed frozen through the
+   transition, but the decoded MP frame bits came out byte-for-byte
+   identical anyway. Ruled out.
+
+Because the corruption is unaffected by freezing any of the adaptive/
+tracking loops and is perfectly deterministic, it looks like a **logic-
+level bug**, not a signal-quality or convergence issue — most likely in
+how the differential decoder or scrambler state carries over from TRN
+into MP (§10.1.3.9/V.34's MP sequence uses the same scrambled-bit mapping
+as TRN, differentially encoded; the encoder is meant to initialize from
+TRN's final symbol). The log's own `"diff dibits collapsed"` fallback
+message before falling back to absolute decode is consistent with this.
+Next step would be comparing raw constellation points across the TRN→MP
+handoff against the expected differential/scrambler state, not another
+env-var experiment.
