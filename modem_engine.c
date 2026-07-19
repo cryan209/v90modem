@@ -1460,8 +1460,11 @@ typedef struct {
 
 static notch_filter_t g_notch = {0};
 
-/* Clock recovery */
+/* Clock recovery. cr_update() runs on the SIP/RTP transport thread (each
+   incoming RTP packet); cr_get_adjustment() runs on the PJSIP media thread
+   (each pulled audio frame) — these are different threads, hence the mutex. */
 static cr_state_t     g_cr;
+static pthread_mutex_t g_cr_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 /* Raw G.711 bearer diagnostics and optional live taps. */
 static uint64_t       g_g711_rx_octets = 0;
@@ -2986,6 +2989,36 @@ static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
             }
         }
     }
+}
+
+/* Fed by sip_modem.c's RTP transport tap on packet arrival (transport
+   thread). Updates the DPLL's estimate of the remote sender's sample-clock
+   rate relative to our own wall clock. */
+void me_cr_update(uint32_t rtp_ts, int64_t local_ns)
+{
+    static int calls = 0;
+    pthread_mutex_lock(&g_cr_mtx);
+    cr_update(&g_cr, rtp_ts, local_ns);
+    if (calls == 0)
+        ME_LOG("[ME] DIAG: cr_update first call rtp_ts=%u local_ns=%lld\n",
+               rtp_ts, (long long) local_ns);
+    if (++calls % 100 == 0)
+        ME_LOG("[ME] DIAG: cr_update calls=%d phase_err=%.3f samples\n",
+               calls, cr_get_phase_error(&g_cr));
+    pthread_mutex_unlock(&g_cr_mtx);
+}
+
+/* Called once per RX audio frame (media thread), before feeding samples to
+   me_rx_audio()/me_rx_g711(). Returns +1/-1/0 per clock_recovery.h. */
+int me_cr_get_adjustment(void)
+{
+    int adj;
+    pthread_mutex_lock(&g_cr_mtx);
+    adj = cr_get_adjustment(&g_cr);
+    pthread_mutex_unlock(&g_cr_mtx);
+    if (adj != 0)
+        ME_LOG("[ME] DIAG: cr_get_adjustment returned %d\n", adj);
+    return adj;
 }
 
 void me_rx_audio(const int16_t *amp, int len)

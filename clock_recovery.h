@@ -21,9 +21,17 @@ typedef struct {
     double freq_offset;     /* Frequency offset estimate (samples/frame) */
     double phase_err_int;   /* Integral error term */
 
-    /* RTP tracking */
+    /* RTP tracking. A single packet-to-packet arrival delta is dominated by
+       ordinary network/OS jitter (often several ms — tens of samples), which
+       swamps a genuine oscillator mismatch (typically well under 1
+       sample/sec). window_start_* anchor a longer baseline (see
+       CR_WINDOW_NS in clock_recovery.c) so the PI controller only reacts to
+       drift averaged over ~1 s, not per-packet noise. last_rtp_ts/
+       last_local_ns just track the most recent packet for bookkeeping. */
     uint32_t last_rtp_ts;   /* Last observed RTP timestamp */
     int64_t  last_local_ns; /* Wall-clock time of last packet (nanoseconds) */
+    uint32_t window_start_rtp_ts;
+    int64_t  window_start_local_ns;
 
     /* PI controller gains */
     double Kp;   /* Proportional gain */

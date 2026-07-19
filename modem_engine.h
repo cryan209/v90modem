@@ -128,6 +128,16 @@ int  me_tx_g711(uint8_t *codewords, int count);
 void me_on_sip_connected(void);
 
 /*
+ * Clock recovery: fed by sip_modem.c's RTP transport tap (see clock_recovery.h).
+ * me_cr_update() is called once per received RTP packet (transport thread);
+ * me_cr_get_adjustment() is called once per RX audio frame (media thread),
+ * before the frame is handed to me_rx_audio()/me_rx_g711(), to decide whether
+ * to insert or drop one sample to stay locked to the remote sample clock.
+ */
+void me_cr_update(uint32_t rtp_ts, int64_t local_ns);
+int  me_cr_get_adjustment(void);
+
+/*
  * Set the G.711 encoding law for V.90 downstream codeword generation.
  * Must be called before or at the same time as me_on_sip_connected().
  * V.90 uses different codeword tables for µ-law and A-law networks.
