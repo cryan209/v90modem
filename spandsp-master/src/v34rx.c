@@ -3959,6 +3959,23 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         zz.im = -sample.re*z.im - sample.im*z.re;
         angle = arctan2(zz.im, zz.re);
         phase_delta = (int32_t) (angle - s->last_angles[1]);
+        /* V34_DUMP_INFO_RX (diagnostic, 2026-07-19): dumps the info_rx
+           demod chain -- pre-AGC matched-filter output, post-mix baseband,
+           angle, and phase_delta -- to find why put_info_bit() never sees
+           a reversal (bitstream stuck at 0x000) against a real remote
+           modem despite signal_present staying true and the raw carrier
+           measuring correct in an offline capture. */
+        if (getenv("V34_DUMP_INFO_RX")
+            && s->stage == V34_RX_STAGE_INFO0 && (s->duration % 400) == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - info_rx sample: t=%d ii=%.4f qq=%.4f agc=%.5f zz=(%.4f,%.4f) angdeg=%.2f pdeltadeg=%.2f blip=%d\n",
+                     s->duration, (double) ii, (double) qq, (double) s->agc_scaling,
+                     (double) zz.re, (double) zz.im,
+                     (double) (angle * 360.0 / 4294967296.0),
+                     (double) (phase_delta * 360.0 / 4294967296.0),
+                     s->blip_duration);
+        }
         if ((phase_delta > (int32_t) DDS_PHASE(90.0f)
              || phase_delta < -(int32_t) DDS_PHASE(90.0f))
             &&
