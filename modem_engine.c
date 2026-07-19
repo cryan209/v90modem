@@ -2372,6 +2372,175 @@ static int v90_ja_dump_min_bits(void)
     return 32000;
 }
 
+/* Recover a DIL descriptor from repeated Ja transmissions.
+ *
+ * The analogue modem repeats its Ja descriptor continuously; measured on the
+ * d-modem rig the period is 1702 bits and two clean repeats differed in only
+ * 6 of 562 descriptor bits, all in one burst. So rather than needing any
+ * single repeat to arrive perfect, combine them: where the repeats agree take
+ * the agreed bit, and where they disagree brute-force the (few) combinations
+ * against v90_parse_dil_descriptor(), which CRC-checks. That is the same
+ * CRC-guided repeated-frame idea already used for CP frames.
+ *
+ * Deliberately keyed on two repeats rather than a three-way majority vote:
+ * the peer's Ja window is only ~1.62 s (~7800 bits), and two repeats cost
+ * ~0.71 s against ~1.06 s for three -- majority voting would eat most of the
+ * budget for no benefit when the disagreement count is this small.
+ * V90_JA_VOTE_MAX_DIFFS bounds the brute force at 2^n parses. */
+#define V90_JA_VOTE_MAX_REPEATS  6
+#define V90_JA_VOTE_MAX_DIFFS    12
+
+static bool v90_dil_vote_and_parse(const uint8_t *bits,
+                                   int total_bits,
+                                   const int *starts,
+                                   int start_count,
+                                   int period)
+{
+    uint8_t voted[V90_DIL_CAPTURE_MAX_BITS];
+    uint8_t packed[(V90_DIL_CAPTURE_MAX_BITS + 7) / 8];
+    int diff_pos[V90_JA_VOTE_MAX_DIFFS];
+    v90_dil_desc_t desc;
+    int diff_count = 0;
+    int span;
+    int i;
+
+    if (start_count < 2 || period < 206)
+        return false;
+    /* Vote over a whole period. Do NOT clamp to what the last repeat has
+     * left: a full descriptor is up to ~1701 bits (N=144 on this peer) and
+     * the final repeat is usually truncated by the end of the capture, so
+     * clamping to it silently produces a short buffer that fails the
+     * bit_len < descriptor_bits check and looks like a decode failure. */
+    span = period;
+    if (starts[0] + span > total_bits)
+        span = total_bits - starts[0];
+    if (span < 206)
+        return false;
+
+    for (i = 0; i < span; i++) {
+        int ones = 0;
+        int available = 0;
+        int k;
+
+        /* Only count repeats that actually reach this offset, so early
+         * repeats still carry the tail of the descriptor. */
+        for (k = 0; k < start_count; k++) {
+            if (starts[k] + i >= total_bits)
+                continue;
+            ones += bits[starts[k] + i] & 1;
+            available++;
+        }
+        if (available == 0) {
+            span = i;
+            break;
+        }
+        if (ones == 0) {
+            voted[i] = 0;
+        } else if (ones == available) {
+            voted[i] = 1;
+        } else if (ones * 2 > available) {
+            voted[i] = 1;                     /* clear majority */
+        } else if (ones * 2 < available) {
+            voted[i] = 0;
+        } else {
+            /* Genuine tie (only possible with an even repeat count). Record
+             * it for the brute force rather than guessing. */
+            voted[i] = 0;
+            if (diff_count < V90_JA_VOTE_MAX_DIFFS)
+                diff_pos[diff_count] = i;
+            diff_count++;
+        }
+    }
+
+    if (diff_count > V90_JA_VOTE_MAX_DIFFS)
+        return false;
+
+    for (unsigned int combo = 0; combo < (1u << diff_count); combo++) {
+        memset(packed, 0, sizeof(packed));
+        for (i = 0; i < diff_count; i++)
+            voted[diff_pos[i]] = (uint8_t) ((combo >> i) & 1u);
+        /* LSB-first within each byte, matching v90_get_packed_bit() and the
+         * rest of the capture path. Packing this MSB-first silently reverses
+         * every multi-bit field -- N=144 reads back as 9 -- while leaving
+         * palindromic fields like LSP/LTP=120 looking correct, so it fails in
+         * a way that looks like bit errors rather than a format bug. */
+        for (i = 0; i < span; i++)
+            if (voted[i] & 1)
+                packed[i >> 3] |= (uint8_t) (1U << (i & 7));
+        if (v90_parse_dil_descriptor(&desc, packed, span)) {
+            g_v90_pending_dil = desc;
+            g_v90_pending_dil_valid = true;
+            if (g_v90)
+                v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+            ME_LOG("[ME] V.90: Ja DIL descriptor recovered by repeated-frame voting "
+                   "(%d repeats, period=%d, %d tie bits, combo=%u): N=%u LSP=%u LTP=%u\n",
+                   start_count, period, diff_count, combo,
+                   desc.n, desc.lsp, desc.ltp);
+            trace_phase("V90 Ja descriptor via voting: repeats=%d period=%d N=%u",
+                        start_count, period, desc.n);
+            g_v90_dil_parse_logged = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Find repeated descriptor preambles in one hypothesis' bitstream and try to
+ * combine them. Returns true if a descriptor was recovered. */
+static bool v90_dil_try_repeated_frames(const uint8_t *bits, int total_bits)
+{
+    int starts[V90_JA_VOTE_MAX_REPEATS * 4];
+    int count = 0;
+    int i;
+    int a;
+
+    if (total_bits < 2 * 206)
+        return false;
+    for (i = 0; i + 206 <= total_bits && count < (int) (sizeof(starts)/sizeof(starts[0])); i++) {
+        int k;
+        int ok = 1;
+
+        for (k = 0; k < 17; k++) {
+            if ((bits[i + k] & 1) == 0) {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok || (bits[i + 17] & 1))
+            continue;
+        starts[count++] = i;
+        i += 205;                    /* a descriptor cannot start inside itself */
+    }
+    if (count < 2)
+        return false;
+
+    /* Group starts sharing a consistent period, largest group first. */
+    for (a = 0; a < count - 1; a++) {
+        int b;
+
+        for (b = a + 1; b < count; b++) {
+            int period = starts[b] - starts[a];
+            int group[V90_JA_VOTE_MAX_REPEATS];
+            int gcount = 0;
+            int c;
+
+            if (period < 206)
+                continue;
+            for (c = a; c < count && gcount < V90_JA_VOTE_MAX_REPEATS; c++) {
+                int delta = starts[c] - starts[a];
+
+                if (delta % period == 0)
+                    group[gcount++] = starts[c];
+            }
+            if (gcount >= 2
+                && v90_dil_vote_and_parse(bits, total_bits, group, gcount, period)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool v90_dil_capture_try_v34_hypotheses(void)
 {
     uint8_t unpacked[V90_DIL_CAPTURE_MAX_BITS];
@@ -2435,6 +2604,17 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                             hypothesis);
                 return true;
             }
+        }
+
+        /* No single repeat parsed cleanly. Combine repeats before moving on --
+         * measured live, individual Ja repeats carry ~1% residual bit errors
+         * in short bursts, which is exactly what repeated-frame recovery is
+         * for. Runs per hypothesis, right after its single-frame attempt, so
+         * it costs nothing extra in captured signal. */
+        if (v90_dil_try_repeated_frames(unpacked, bits)) {
+            ME_LOG("[ME] V.90: Ja descriptor recovered by voting on V.34 hypothesis %d\n",
+                   hypothesis);
+            return true;
         }
     }
 
