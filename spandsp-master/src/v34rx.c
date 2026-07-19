@@ -150,6 +150,31 @@ static int phase3_rx_dump_count = 0;
 #define MP_BOUNDARY_BRUTEFORCE_MAX_CHANGES 4
 #define MP_HINT_STRICT_REJECTS          2
 #define MP_HINT_MAX_NOLOCKS             3
+/* Minimum equalizer-output |y|^2 required before attempting a new MP
+   preamble lock (squared magnitude, so no sqrt needed at the call site).
+   Prevents locking onto near-zero-energy/silent samples: real in-lock MP
+   symbols measured live against d-modem/slmodemd sit around |y|~0.03-2.9
+   (median ~1.1), while true silence reads as an exact 0.0 (bit-identical,
+   not just small). 0.01^2 sits two orders of magnitude below the weakest
+   observed real symbol while still comfortably clearing float noise on
+   true silence. NOTE: this and MP_LOCK_SETTLE_BAUDS below do not fix the
+   live MP CRC failure against d-modem/slmodemd -- that failure's actual
+   root cause turned out to be d-modem abandoning V.90 for a V.34 retrain
+   after its own constellation designer rejects our CPt (see "Phase 4 MP
+   frame CRC failure" in rig/README.md), so the "signal" these gates wait
+   for is d-modem's retrain tone, not a real MP0 frame. Kept anyway as
+   correct, generally-useful defensive behavior (don't lock onto silence
+   or a still-settling equalizer), not because it resolves this bug. */
+#define MP_LOCK_MIN_SIGNAL_MAG2         0.0001f
+/* Consecutive above-threshold bauds required before a preamble lock is
+   attempted, once real signal has appeared. Live measurement showed the
+   CMA equalizer is still actively re-adapting its gain well past 100
+   bauds after the initial silence->signal transition (coefmag kept
+   climbing through baud 5537-5600 with no clear plateau); 200 bauds
+   still let a lock land mid-readaptation. 400 (~167ms at 2400 baud) is
+   a conservative middle ground -- see the note on MP_LOCK_MIN_SIGNAL_MAG2
+   above for why this does not actually fix the live CRC failure. */
+#define MP_LOCK_SETTLE_BAUDS            400
 #define PHASE3_PP_TRAIN_BAUDS           232
 #define PHASE3_TRN_REFINE_BAUDS         256
 #define PHASE3_PP_ACQUIRE_MIN_BAUDS     48
@@ -4303,6 +4328,12 @@ static complexf_t equalizer_get(v34_rx_state_t *s)
        center tap if the equalizer has blown up. */
     if (!isfinite(z.re) || !isfinite(z.im))
     {
+        if (getenv("ME_V34_DUMP_MP_DIBITS"))
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - EQUALIZER DIVERGED (NaN/Inf) at duration=%d stage=%d; resetting to identity coeffs\n",
+                     s->duration, s->stage);
+        }
         cvec_zerof(s->eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
         s->eq_coeff[V34_EQUALIZER_PRE_LEN] = complex_sig_set(TRAINING_SCALE(1.0f), TRAINING_SCALE(0.0f));
         z.re = 0.0f;
@@ -6725,6 +6756,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                will overwrite with TRAINING_FAILED if MP decoding fails. */
             s->eq_target_mag = 0.0f;  /* Reset so CMA re-seeds with minimum clamp (1.0) */
             s->mp_remote_ack_seen = 0;
+            s->mp_signal_settle_bauds = 0;
             s->mp_count = -1;
             s->mp_frame_pos = 0;
             s->mp_frame_target = 0;
@@ -6851,9 +6883,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            this file's bit-level decode logic. See rig/README.md. */
         if (getenv("ME_V34_DUMP_MP_DIBITS") && s->mp_seen == 0 && s->duration < 6000)
         {
+            /* coefmag/rawmag (diagnostic, 2026-07-19): distinguishes a
+               zeroed-coefficient equalizer from a genuinely-silent input —
+               coefmag is the summed tap magnitude of s->eq_coeff, rawmag is
+               the magnitude of the most recently inserted raw eq_buf sample
+               (same index tune_equalizer_cma() reads as its newest tap). */
+            float coefmag = 0.0f;
+            int ci;
+            int rawp;
+            for (ci = 0;  ci < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  ci++)
+                coefmag += sqrtf(s->eq_coeff[ci].re*s->eq_coeff[ci].re + s->eq_coeff[ci].im*s->eq_coeff[ci].im);
+            rawp = (s->eq_step - 1) & V34_EQUALIZER_MASK;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - MP raw dibit dump: baud=%d diff=%d abs=%d\n",
-                     s->duration, data_bits, abs_bits);
+                     "Rx - MP raw dibit dump: baud=%d diff=%d abs=%d re=%.4f im=%.4f mag=%.4f ang1deg=%.2f coefmag=%.4f rawmag=%.4f\n",
+                     s->duration, data_bits, abs_bits,
+                     (double) sym->re, (double) sym->im,
+                     (double) sqrtf(sym->re*sym->re + sym->im*sym->im),
+                     (double) (ang1 * 360.0f / 4294967296.0f),
+                     (double) coefmag,
+                     (double) sqrtf(s->eq_buf[rawp].re*s->eq_buf[rawp].re + s->eq_buf[rawp].im*s->eq_buf[rawp].im));
         }
 
         /* Dibit distribution diagnostic */
@@ -6907,6 +6955,32 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 phase4_unpack_ordered_bits(raw_bits, s->mp_phase4_bit_order, &in0, &in1);
                 bits[0] = descramble(s, in0);
                 bits[1] = descramble(s, in1);
+            }
+            else if ((sym->re*sym->re + sym->im*sym->im) < MP_LOCK_MIN_SIGNAL_MAG2)
+            {
+                /* No real signal yet -- don't attempt a preamble lock
+                   against near-zero-energy samples. Measured live: after
+                   "far-end J' + TRN confirmed" our RX enters MP search
+                   immediately, but d-modem/slmodemd doesn't actually start
+                   transmitting real MP data until ~5500 bauds (~2.3s)
+                   later, ramping from exactly 0.0 to full amplitude over
+                   ~20 bauds. Without this gate, the hypothesis search
+                   deterministically locks onto a frame straddling that
+                   ramp -- structurally plausible (correct start bits) but
+                   with corrupted payload bits from the still-settling
+                   samples, failing CRC every time. See rig/README.md. */
+                s->mp_signal_settle_bauds = 0;
+                bits[0] = bits[1] = 0;
+            }
+            else if (s->mp_signal_settle_bauds++ < MP_LOCK_SETTLE_BAUDS)
+            {
+                /* Signal is present but the CMA equalizer is still
+                   re-adapting its gain from the silence-era near-zero
+                   coefficients to the real signal's amplitude -- locking
+                   here still produces structurally-plausible but corrupt
+                   frames (start-bit/CRC failures). Wait for a sustained
+                   settle window. See rig/README.md. */
+                bits[0] = bits[1] = 0;
             }
             else
             {
