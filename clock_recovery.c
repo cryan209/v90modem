@@ -8,11 +8,25 @@
  * PI controller gains are conservative: modems tolerate very few slips per
  * second, so we react slowly and only act when phase error exceeds ±0.5
  * samples.
+ *
+ * A single packet-to-packet arrival delta is a bad error signal: ordinary
+ * network/OS scheduling jitter is commonly 1-5 ms (8-40 samples at 8 kHz),
+ * while a genuine oscillator mismatch between two independent 8 kHz clocks
+ * is typically well under 1 sample/sec. Feeding raw per-packet deltas into
+ * the PI loop lets jitter completely dominate the "drift" signal, producing
+ * a slip on nearly every frame instead of the rare, gentle corrections this
+ * module is meant to make. To fix that, cr_update() only runs the PI step
+ * once per CR_WINDOW_NS of accumulated wall-clock time, using the RTP-vs-wall
+ * delta over that whole window. Jitter's contribution to a ~1 s baseline is
+ * a small fraction of a sample; genuine drift accumulates linearly with the
+ * window, so the signal-to-noise ratio improves with window length.
  */
 
 #include "clock_recovery.h"
 #include <string.h>
 #include <time.h>
+
+#define CR_WINDOW_NS (1000000000LL)  /* Batch drift measurement over ~1 s */
 
 /* ------------------------------------------------------------------ */
 
@@ -38,36 +52,51 @@ void cr_reset(cr_state_t *s)
 
 void cr_update(cr_state_t *s, uint32_t rtp_ts, int64_t local_ns)
 {
+    int64_t window_ns;
+    int32_t rtp_delta;
+    double  wall_samples;
+    double  err;
+    double  correction;
+
     if (!s->initialized) {
-        s->last_rtp_ts  = rtp_ts;
+        s->last_rtp_ts   = rtp_ts;
         s->last_local_ns = local_ns;
-        s->initialized  = 1;
+        s->window_start_rtp_ts   = rtp_ts;
+        s->window_start_local_ns = local_ns;
+        s->initialized   = 1;
         return;
     }
 
-    /* Elapsed RTP samples (handle 32-bit wrap) */
-    int32_t rtp_delta = (int32_t)(rtp_ts - s->last_rtp_ts);
+    s->last_rtp_ts   = rtp_ts;
+    s->last_local_ns = local_ns;
 
-    /* Elapsed local samples */
-    int64_t wall_ns_delta = local_ns - s->last_local_ns;
-    double  wall_samples  = (double)wall_ns_delta * s->sample_rate / 1e9;
+    window_ns = local_ns - s->window_start_local_ns;
+    if (window_ns < CR_WINDOW_NS)
+        return;  /* Still accumulating this window's baseline. */
+
+    /* Elapsed RTP samples over the whole window (handles 32-bit wrap) */
+    rtp_delta = (int32_t)(rtp_ts - s->window_start_rtp_ts);
+
+    /* Elapsed local samples over the same window */
+    wall_samples = (double) window_ns * s->sample_rate / 1e9;
 
     /* Phase error: positive = remote is ahead (we should insert a sample) */
-    double err = (double)rtp_delta - wall_samples;
+    err = (double) rtp_delta - wall_samples;
 
-    /* Clamp to avoid wild swings on packet loss */
-    if (err >  160.0) err =  160.0;
-    if (err < -160.0) err = -160.0;
+    /* Clamp to avoid wild swings on packet loss/reordering within a window;
+       a window this far off is not plausible as genuine clock drift. */
+    if (err >  400.0) err =  400.0;
+    if (err < -400.0) err = -400.0;
 
     /* PI controller */
     s->phase_err_int += err * s->Ki;
-    double correction = err * s->Kp + s->phase_err_int;
+    correction = err * s->Kp + s->phase_err_int;
 
     s->phase_acc += correction;
-    s->phase_error_samples = (float)s->phase_acc;
+    s->phase_error_samples = (float) s->phase_acc;
 
-    s->last_rtp_ts   = rtp_ts;
-    s->last_local_ns = local_ns;
+    s->window_start_rtp_ts   = rtp_ts;
+    s->window_start_local_ns = local_ns;
 }
 
 /* ------------------------------------------------------------------ */

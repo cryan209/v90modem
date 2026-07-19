@@ -8033,9 +8033,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    Phase 4.  Phase 4 needs CMA to adapt equalizer gain for
                    variable signal levels on analog/SIP channels.
                    Stop CMA once TX enters data mode — echo from the high-power
-                   data constellation would cause CMA to diverge. */
+                   data constellation would cause CMA to diverge.
+
+                   ME_V34_FREEZE_CMA_DURING_MP (experimental, 2026-07-19): live
+                   interop showed MP0 frames consistently correct for their
+                   first ~35-50 bits, then close to 50% wrong on every
+                   should-be-0 structural bit afterward -- the signature of a
+                   clean signal whose equalizer has drifted away from its
+                   TRN-converged state, not of noise or a framing bug (carrier
+                   tracking is already frozen during MP for the same class of
+                   risk; CMA is not). Gated behind an env var rather than
+                   flipped outright since the existing comment states MP-time
+                   CMA adaptation was a deliberate, tested choice for gain
+                   variability -- freezing it needs live A/B verification
+                   before it can safely become the default. */
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                if (!t_cma->tx.tx_data_mode)
+                bool freeze_mp_cma = (s->stage == V34_RX_STAGE_PHASE4_MP)
+                                  && getenv("ME_V34_FREEZE_CMA_DURING_MP");
+                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma)
                     tune_equalizer_cma(s, sym);
             }
             /*endif*/

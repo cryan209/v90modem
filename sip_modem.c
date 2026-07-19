@@ -26,6 +26,9 @@
 #include <pjmedia-audiodev/audiodev.h>
 #include <pjmedia/frame.h>
 
+#include <pjmedia/rtp.h>
+#include <pjmedia/transport.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +37,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -141,6 +145,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
         pjmedia_frame audio_in;
         unsigned byte_count;
         unsigned sample_count;
+        static int16_t adj_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
 
         pj_bzero(&audio_in, sizeof(audio_in));
         audio_in.type = PJMEDIA_FRAME_TYPE_AUDIO;
@@ -150,12 +155,29 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
         st = pjmedia_port_get_frame(port->downstream_port, &audio_in);
         if (st == PJ_SUCCESS && audio_in.type == PJMEDIA_FRAME_TYPE_AUDIO
             && audio_in.buf && audio_in.size >= sizeof(int16_t)) {
+            int adj = me_cr_get_adjustment();
+
             byte_count = (unsigned) audio_in.size;
             if (byte_count > sizeof(g_tx_linear))
                 byte_count = sizeof(g_tx_linear);
             sample_count = byte_count / sizeof(int16_t);
-            if (sample_count > 0)
-                me_rx_audio((const int16_t *) audio_in.buf, (int) sample_count);
+            if (sample_count > 0) {
+                const int16_t *samples = (const int16_t *) audio_in.buf;
+
+                /* Clock recovery: insert/drop one sample to keep our sample
+                   clock locked to the remote modem's, since the jitter
+                   buffer below is deliberately near-zero (see media_cfg.jb_*)
+                   and cannot absorb long-term clock-rate drift on its own. */
+                if (adj > 0 && sample_count < PJ_ARRAY_SIZE(adj_buf)) {
+                    memcpy(adj_buf, samples, sample_count * sizeof(int16_t));
+                    adj_buf[sample_count] = samples[sample_count - 1];
+                    me_rx_audio(adj_buf, (int) sample_count + 1);
+                } else if (adj < 0 && sample_count > 1) {
+                    me_rx_audio(samples, (int) sample_count - 1);
+                } else {
+                    me_rx_audio(samples, (int) sample_count);
+                }
+            }
         }
 
         frame->type = PJMEDIA_FRAME_TYPE_NONE;
@@ -168,6 +190,9 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 
     st = pjmedia_port_get_frame(port->downstream_port, (pjmedia_frame *) rx_ext);
     if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_EXTENDED) {
+        int adj = me_cr_get_adjustment();
+        static uint8_t adj_g711_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
+
         for (i = 0; i < rx_ext->subframe_cnt; i++) {
             pjmedia_frame_ext_subframe *sf = pjmedia_frame_ext_get_subframe(rx_ext, i);
             unsigned sf_bytes;
@@ -176,14 +201,37 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             sf_bytes = ((unsigned) sf->bitlen + 7U) >> 3;
             if (sf_bytes == 0 || sf_bytes > PJ_ARRAY_SIZE(g_tx_linear))
                 continue;
-            me_rx_g711((const uint8_t *)sf->data, (int)sf_bytes);
+
+            /* Apply at most one slip per pulled frame, on the first
+               subframe (there is normally exactly one). */
+            if (i == 0 && adj > 0 && sf_bytes < PJ_ARRAY_SIZE(adj_g711_buf)) {
+                memcpy(adj_g711_buf, sf->data, sf_bytes);
+                adj_g711_buf[sf_bytes] = ((const uint8_t *) sf->data)[sf_bytes - 1];
+                me_rx_g711(adj_g711_buf, (int) sf_bytes + 1);
+            } else if (i == 0 && adj < 0 && sf_bytes > 1) {
+                me_rx_g711((const uint8_t *)sf->data, (int) sf_bytes - 1);
+            } else {
+                me_rx_g711((const uint8_t *)sf->data, (int)sf_bytes);
+            }
         }
     } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
                && rx_ext->base.buf && rx_ext->base.size > 0) {
+        int adj = me_cr_get_adjustment();
+        static uint8_t adj_g711_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
         unsigned sz = (unsigned) rx_ext->base.size;
+
         if (sz > PJ_ARRAY_SIZE(g_tx_linear))
             sz = PJ_ARRAY_SIZE(g_tx_linear);
-        me_rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
+
+        if (adj > 0 && sz < PJ_ARRAY_SIZE(adj_g711_buf) && sz > 0) {
+            memcpy(adj_g711_buf, rx_ext->base.buf, sz);
+            adj_g711_buf[sz] = ((const uint8_t *) rx_ext->base.buf)[sz - 1];
+            me_rx_g711(adj_g711_buf, (int) sz + 1);
+        } else if (adj < 0 && sz > 1) {
+            me_rx_g711((const uint8_t *)rx_ext->base.buf, (int) sz - 1);
+        } else {
+            me_rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
+        }
     }
 
     frame->type = PJMEDIA_FRAME_TYPE_NONE;
@@ -226,6 +274,257 @@ static pj_status_t modem_passthrough_port_create(const pjmedia_port *source_port
     port->base.on_destroy = &modem_passthrough_on_destroy;
     *p_port = &port->base;
     return PJ_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* RTP timing tap — feeds clock_recovery.c's DPLL                     */
+/*                                                                      */
+/* modem_passthrough_get_frame() pulls audio through PJSIP's own       */
+/* jitter buffer, which we've deliberately shrunk to near-zero         */
+/* (see media_cfg.jb_* below) because adaptive jitter buffering        */
+/* disrupts V.34/V.90 phase continuity. But two independent 8 kHz      */
+/* clocks (ours and the far modem's) will always drift apart, and      */
+/* nothing was compensating for that drift. This transport wraps the   */
+/* real UDP transport purely to observe each inbound RTP packet's      */
+/* timestamp against our wall clock, feeding modem_engine's DPLL       */
+/* (me_cr_update). It never modifies the packet stream.                */
+/* ------------------------------------------------------------------ */
+
+typedef struct rtp_tap_transport_s {
+    pjmedia_transport base;
+    pj_pool_t *pool;
+    pjmedia_transport *slave_tp;
+
+    void *stream_user_data;
+    void (*stream_rtp_cb)(void *user_data, void *pkt, pj_ssize_t size);
+    void (*stream_rtp_cb2)(pjmedia_tp_cb_param *param);
+    void (*stream_rtcp_cb)(void *user_data, void *pkt, pj_ssize_t size);
+} rtp_tap_transport_t;
+
+static int64_t rtp_tap_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000000LL + (int64_t) ts.tv_nsec;
+}
+
+static void rtp_tap_observe(const void *pkt, pj_ssize_t size)
+{
+    const pjmedia_rtp_hdr *hdr;
+
+    if (size < (pj_ssize_t) sizeof(pjmedia_rtp_hdr))
+        return;
+    hdr = (const pjmedia_rtp_hdr *) pkt;
+    me_cr_update(pj_ntohl(hdr->ts), rtp_tap_now_ns());
+}
+
+static void rtp_tap_rtp_cb2(pjmedia_tp_cb_param *param)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) param->user_data;
+
+    rtp_tap_observe(param->pkt, param->size);
+
+    if (tap->stream_rtp_cb2) {
+        pjmedia_tp_cb_param cbparam;
+        pj_memcpy(&cbparam, param, sizeof(cbparam));
+        cbparam.user_data = tap->stream_user_data;
+        tap->stream_rtp_cb2(&cbparam);
+    } else if (tap->stream_rtp_cb) {
+        tap->stream_rtp_cb(tap->stream_user_data, param->pkt, param->size);
+    }
+}
+
+static void rtp_tap_rtcp_cb(void *user_data, void *pkt, pj_ssize_t size)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) user_data;
+    if (tap->stream_rtcp_cb)
+        tap->stream_rtcp_cb(tap->stream_user_data, pkt, size);
+}
+
+static pj_status_t rtp_tap_get_info(pjmedia_transport *tp,
+                                    pjmedia_transport_info *info)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_get_info(tap->slave_tp, info);
+}
+
+static pj_status_t rtp_tap_attach2(pjmedia_transport *tp,
+                                   pjmedia_transport_attach_param *att_param)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    pj_status_t status;
+
+    tap->stream_user_data = att_param->user_data;
+    tap->stream_rtp_cb2 = att_param->rtp_cb2;
+    tap->stream_rtp_cb = att_param->rtp_cb;
+    tap->stream_rtcp_cb = att_param->rtcp_cb;
+
+    att_param->rtp_cb2 = &rtp_tap_rtp_cb2;
+    att_param->rtp_cb = NULL;
+    att_param->rtcp_cb = &rtp_tap_rtcp_cb;
+    att_param->user_data = tap;
+
+    status = pjmedia_transport_attach2(tap->slave_tp, att_param);
+    if (status != PJ_SUCCESS) {
+        tap->stream_user_data = NULL;
+        tap->stream_rtp_cb = NULL;
+        tap->stream_rtp_cb2 = NULL;
+        tap->stream_rtcp_cb = NULL;
+    }
+    return status;
+}
+
+static void rtp_tap_detach(pjmedia_transport *tp, void *strm)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    PJ_UNUSED_ARG(strm);
+    if (tap->stream_user_data) {
+        pjmedia_transport_detach(tap->slave_tp, tap);
+        tap->stream_user_data = NULL;
+        tap->stream_rtp_cb = NULL;
+        tap->stream_rtp_cb2 = NULL;
+        tap->stream_rtcp_cb = NULL;
+    }
+}
+
+static pj_status_t rtp_tap_send_rtp(pjmedia_transport *tp, const void *pkt,
+                                    pj_size_t size)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_send_rtp(tap->slave_tp, pkt, size);
+}
+
+static pj_status_t rtp_tap_send_rtcp(pjmedia_transport *tp, const void *pkt,
+                                     pj_size_t size)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_send_rtcp(tap->slave_tp, pkt, size);
+}
+
+static pj_status_t rtp_tap_send_rtcp2(pjmedia_transport *tp,
+                                      const pj_sockaddr_t *addr,
+                                      unsigned addr_len, const void *pkt,
+                                      pj_size_t size)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_send_rtcp2(tap->slave_tp, addr, addr_len, pkt, size);
+}
+
+static pj_status_t rtp_tap_media_create(pjmedia_transport *tp,
+                                        pj_pool_t *sdp_pool, unsigned options,
+                                        const pjmedia_sdp_session *rem_sdp,
+                                        unsigned media_index)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_media_create(tap->slave_tp, sdp_pool, options,
+                                          rem_sdp, media_index);
+}
+
+static pj_status_t rtp_tap_encode_sdp(pjmedia_transport *tp,
+                                      pj_pool_t *sdp_pool,
+                                      pjmedia_sdp_session *local_sdp,
+                                      const pjmedia_sdp_session *rem_sdp,
+                                      unsigned media_index)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_encode_sdp(tap->slave_tp, sdp_pool, local_sdp,
+                                        rem_sdp, media_index);
+}
+
+static pj_status_t rtp_tap_media_start(pjmedia_transport *tp, pj_pool_t *pool,
+                                       const pjmedia_sdp_session *local_sdp,
+                                       const pjmedia_sdp_session *rem_sdp,
+                                       unsigned media_index)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_media_start(tap->slave_tp, pool, local_sdp,
+                                         rem_sdp, media_index);
+}
+
+static pj_status_t rtp_tap_media_stop(pjmedia_transport *tp)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_media_stop(tap->slave_tp);
+}
+
+static pj_status_t rtp_tap_simulate_lost(pjmedia_transport *tp,
+                                         pjmedia_dir dir, unsigned pct_lost)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    return pjmedia_transport_simulate_lost(tap->slave_tp, dir, pct_lost);
+}
+
+static void rtp_tap_on_destroy(void *arg)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) arg;
+    if (tap->pool)
+        pj_pool_release(tap->pool);
+}
+
+static pj_status_t rtp_tap_destroy(pjmedia_transport *tp)
+{
+    rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    /* Slave transport (base_tp from on_create_media_transport) is owned
+       and destroyed by pjsua itself; we only release our own wrapper. Actual
+       pool release happens in rtp_tap_on_destroy(), invoked by the group
+       lock once every ref (including the one we added below) is gone. */
+    if (tap->base.grp_lock)
+        pj_grp_lock_dec_ref(tap->base.grp_lock);
+    else
+        rtp_tap_on_destroy(tap);
+    return PJ_SUCCESS;
+}
+
+static pjmedia_transport_op rtp_tap_op = {
+    &rtp_tap_get_info,
+    NULL,
+    &rtp_tap_detach,
+    &rtp_tap_send_rtp,
+    &rtp_tap_send_rtcp,
+    &rtp_tap_send_rtcp2,
+    &rtp_tap_media_create,
+    &rtp_tap_encode_sdp,
+    &rtp_tap_media_start,
+    &rtp_tap_media_stop,
+    &rtp_tap_simulate_lost,
+    &rtp_tap_destroy,
+    &rtp_tap_attach2,
+};
+
+static pjmedia_transport *on_create_media_transport(pjsua_call_id call_id,
+                                                    unsigned media_idx,
+                                                    pjmedia_transport *base_tp,
+                                                    unsigned flags)
+{
+    pj_pool_t *pool;
+    rtp_tap_transport_t *tap;
+
+    PJ_UNUSED_ARG(flags);
+
+    if (!base_tp)
+        return base_tp;
+
+    pool = pjmedia_endpt_create_pool(pjsua_get_pjmedia_endpt(),
+                                     "rtp-tap", 512, 512);
+    if (!pool)
+        return base_tp;
+
+    tap = PJ_POOL_ZALLOC_T(pool, rtp_tap_transport_t);
+    tap->pool = pool;
+    pj_ansi_strxcpy(tap->base.name, pool->obj_name, sizeof(tap->base.name));
+    tap->base.type = base_tp->type;
+    tap->base.op = &rtp_tap_op;
+    tap->slave_tp = base_tp;
+
+    if (base_tp->grp_lock) {
+        tap->base.grp_lock = base_tp->grp_lock;
+        pj_grp_lock_add_ref(base_tp->grp_lock);
+        pj_grp_lock_add_handler(base_tp->grp_lock, pool, tap, &rtp_tap_on_destroy);
+    }
+
+    PJ_LOG(3, ("sip_modem", "RTP clock-recovery tap installed on call %d media %d",
+               call_id, media_idx));
+    return &tap->base;
 }
 
 static void on_stream_created2(pjsua_call_id call_id,
@@ -613,6 +912,7 @@ int main(int argc, char *argv[])
     ua_cfg.cb.on_call_media_state = on_call_media_state;
     ua_cfg.cb.on_incoming_call    = on_incoming_call;
     ua_cfg.cb.on_stream_created2  = on_stream_created2;
+    ua_cfg.cb.on_create_media_transport = on_create_media_transport;
     ua_cfg.max_calls              = 1;
 
     /* Logging */
