@@ -844,6 +844,14 @@ static int detect_local_ip_for_host(const char *host, char *buf, size_t buflen)
 
 int main(int argc, char *argv[])
 {
+    /* stdout is fully block-buffered (not line-buffered) whenever it's
+       redirected to a file/pipe, as the interop test harness always does —
+       PJ_LOG output then sits in a ~4KB buffer and never reaches the log
+       file for short/quiet runs (e.g. a call that never connects), even
+       though the process is running fine. Force line buffering so live
+       debugging actually sees output as it happens. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     const char *sip_server  = NULL;
     const char *username    = NULL;
     const char *password    = NULL;
