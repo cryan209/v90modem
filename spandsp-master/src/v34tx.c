@@ -2508,17 +2508,26 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:
         /* Continue sending pure tone. For the V.90 digital answerer, repeated
            INFO0a during this Tone B window triggers INFO0d recovery with
-           acknowledgement set (§9.2.1.2.1). */
+           acknowledgement set (§9.2.1.2.1).
+           received_event==INFO0_OK only fires for the *first* INFO0a (see
+           v34rx.c put_info_bit()); every repeat after that sets the sticky
+           v90_repeated_info0a_pending flag instead so it doesn't clobber a
+           REVERSAL_1 event. This case was only checking the one-shot event,
+           so once the far end had sent its first INFO0a, every subsequent
+           repeat here was silently ignored and we never re-sent an
+           acknowledged INFO0d -- leaving the far end retrying forever. */
         if (s->tx.v90_mode
             && !s->tx.calling_party
             && s->tx.duplex
-            && s->rx.received_event == V34_EVENT_INFO0_OK)
+            && (s->rx.received_event == V34_EVENT_INFO0_OK
+                || s->rx.v90_repeated_info0a_pending))
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: repeated INFO0a during Tone B, repeating INFO0d with acknowledgement\n");
             s->tx.info0_acknowledgement = true;
             info0_baud_init(s);
             s->rx.received_event = V34_EVENT_NONE;
+            s->rx.v90_repeated_info0a_pending = false;
         }
         else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
