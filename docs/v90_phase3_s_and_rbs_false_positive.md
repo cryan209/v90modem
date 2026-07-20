@@ -5,10 +5,12 @@ against the softmodem interop rig, the spec reading that reframes it, and the
 resampler defect that turned out to be the actual blocker.
 
 Status: the *failure* is well characterised and reproducible (sections 1-5, 8).
-The *mechanism* proposed in section 6 has since been *disproved* -- see section 6a.
-The fix built on it (zero-order hold + loop lowpass) is also a measured regression
-(section 8). `DM_RESAMPLER=sinc` is the working default. **The cause of the RBS
-false-positive is currently unknown.**
+The *mechanism* proposed in section 6 has been *disproved* (section 6a), and the
+transport has since been *exonerated by direct measurement* (section 6b): the
+signal arriving at the far-end DSP is recoverable to 1% per-DS0-phase uniformity,
+while the peer computes 3.56x from it. **The spread is generated inside the peer's
+own DSP.** The fix built on the old mechanism (zero-order hold + loop lowpass) is a
+measured regression (section 8); `DM_RESAMPLER=sinc` is the working default.
 
 ## 1. The S signals are Phase 3, not Phase 4
 
@@ -202,6 +204,52 @@ The interpolator is no longer a supported explanation for what.
 Anything measuring "per-phase" behaviour from here must group by **DS0 index mod
 6**, after reconstructing the 8 kHz stream, not by 9600-domain output phase.
 
+## 6b. The transport is clean: measured in the correct domain
+
+Section 6a said any future per-phase analysis must group by DS0 index mod 6 after
+reconstructing the 8 kHz stream. Done, on the one call for which both halves of the
+evidence exist -- the 9600 Hz DSP-side tap and the peer's own `initail var (Trn1)`
+array from that same call.
+
+Method: band-limited interpolation of the captured 9600 Hz stream at DS0 positions
+`n * 6/5`, over the constant-magnitude TRN1d/Jd region, grouped by `n mod 6`.
+
+| source | per-DS0-phase variance | ratio |
+|---|---|---|
+| our transmitted signal | flat at 889249 | 1.000 |
+| recovered from the DSP-side tap | 884822 888971 885499 888807 880329 888143 | **1.010** |
+| what the peer computed | 1020376 1365889 502571 475060 383165 1072410 | **3.56** |
+
+Two things to note. The recovered variances match our transmitted 889249 to within
+0.5%, so the transport is not attenuating or colouring anything per phase. And the
+result holds over both TRN1d proper (2040 symbols, ratio 1.010) and the longer
+~830 ms window the peer appears to analyse (6640 symbols, ratio 1.004).
+
+**Conclusion: the signal arriving at the far-end DSP carries no per-DS0-phase
+structure. The 3.56x spread is manufactured inside the peer's own processing.**
+
+That closes off the entire transport chain -- our encoder (section 5), the rig
+resampler (section 6a and here), and the rate (0 ppm, section 5). None of them can
+be the cause.
+
+### Where that points
+
+The peer's own numbers are the remaining suspect, and two are visibly wrong:
+
+- `Timing Offset [ppm]` reported as +7505, then +10417, then +10972, on a transport
+  measured at **0 ppm**.
+- `rtd = 13592`, which recurs across runs and is a known-bad bulk-delay estimate.
+
+A misaligned or drifting DS0 sample grid on the peer side would sample the
+staircase at the wrong instants and produce exactly this: per-phase variance
+structure conjured from a clean signal.
+
+If the rtd estimate is the root, this may still be our problem, but by a completely
+different route than the resampler -- prior notes attribute the bad bulk-delay to
+our own stale Phase 3/4 audio landing over the peer's retrain and Phase 1. The
+energy-based retrain detector in section 3 reduces that pollution, so it is worth
+re-measuring the per-phase spread on calls where `rtd` comes out sane.
+
 ## 7. Fix: model the physical path instead of ideal reconstruction
 
 The interpolator implements mathematically ideal reconstruction, which is
@@ -367,21 +415,18 @@ V.90 mode — not a live path.
 
 ## 12. Next steps
 
-1. **Re-measure in the right domain.** Reconstruct the 8 kHz DS0 stream from a
-   captured 9600 Hz DSP-side tap and compute per-DS0-phase (`n mod 6`) variance of
-   the recovery error. Compare against the peer's reported `initail var (Trn1)`
-   array from the same call. Until a model reproduces those six numbers, any
-   proposed fix is speculation.
-2. Keep `DM_RESAMPLER=sinc` as the default. ZOH is measurably worse -- it trades a
-   detectable-but-rejected line for an undetectable one.
-3. Characterise the detector's trigger. Two control runs gave per-DS0-phase ratios
-   of 3.57 and 1.84 and flagged different phases, against an `AltRbsVarThresh` that
-   also moved (680398, then 1412991). The threshold appears to be derived from the
-   data rather than fixed, which needs understanding before predicting a pass.
-4. Consider whether the peer's own timing recovery is the source. It reports
-   `Timing Offset [ppm]` of +7505 to +10972 on a transport measured at 0 ppm, and
-   `rtd = 13592` recurs and is known-bad. A misaligned DS0 sample grid on the peer
-   side would produce per-phase structure from a clean signal.
+1. **Correlate `rtd` with the spread.** Capture several calls recording both the
+   peer's `rtd`/`Timing Offset` and its `initail var (Trn1)` array. If the spread
+   tracks a bad `rtd`, the RBS false-positive is a downstream symptom of the
+   bulk-delay problem and should be attacked there, not in the signal path.
+2. Establish whether we can influence the peer's timing estimate at all. It derives
+   `rtd` during Phase 2; prior notes attribute the garbage value to our stale
+   Phase 3/4 audio overlapping its retrain. The section 3 energy detector should
+   reduce that -- verify it does, on calls that reach the detector.
+3. Keep `DM_RESAMPLER=sinc`. ZOH is measurably worse and its rationale is gone.
+4. Understand `AltRbsVarThresh`. It moved between runs (680398, then 1412991),
+   so it is derived from the data rather than fixed; without knowing how, we cannot
+   predict what would pass.
 5. Only then revisit the DIL-termination issue: `v90.c` `V90_RX_EVENT_S` currently
    refuses the peer's S during DIL until a full cycle completes. At N=144 that
    cycle is longer than the 5000 ms 9.3.2.10 allows the peer, so the genuine
