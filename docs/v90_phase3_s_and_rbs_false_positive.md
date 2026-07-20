@@ -4,8 +4,9 @@ Investigation notes, 2026-07-20. Covers the long-standing `NO S RECEIVED` failur
 against the softmodem interop rig, the spec reading that reframes it, and the
 resampler defect that turned out to be the actual blocker.
 
-Status: root cause identified and a fix implemented, **not yet confirmed by a
-clean live run**. Read the "What is not yet proven" section before relying on it.
+Status: root cause identified and confirmed by a live A/B. The first attempted fix
+(zero-order hold + loop lowpass) is a **regression** and is not the answer -- see
+section 8. `DM_RESAMPLER=sinc` is the working default until something better lands.
 
 ## 1. The S signals are Phase 3, not Phase 4
 
@@ -195,37 +196,68 @@ is the limit and is known to fail: its `floor()` edge quantisation puts up to
 104 µs of jitter on a 125 µs symbol, which is what broke the Sd detector when ZOH
 was tried alone. Some smoothing is required; how little is an empirical question.
 
-## 8. Live results so far
+## 8. Live A/B result: ZOH as implemented is a regression
 
-One call at ZOH + 97-tap + 4400 Hz:
+Two calls run back to back under an identical protocol, each with the active path
+proved by the `ACTIVE downstream path:` log line, both entering Phase 3 with the
+same `rtd = 13592` and both given ~3 s there:
 
-- **Sd survives.** 4 kHz line at the far-end DSP measured **−25.58 dB** against an
-  ideal of −24.7 dB. Earlier aggressive band-limiting killed it to −56 dB, so this
-  approach does not reproduce that failure.
-- **The RBS false-positive did not occur.** Zero `initail var`, zero
-  `alternate rbs`, zero `drop to V34` in the whole call. The peer stayed in V.90
-  (`requested DP is 90`, not 34).
+| | peer's Error Energy | impairment detector | outcome |
+|---|---|---|---|
+| `sinc` (control) | converges 3516 -> 446, **sees our Sd** | runs, false-positives | `drop to V34 requested`, `DP is 34` |
+| `zoh`, 97 taps, 4400 Hz | **-0.000 throughout, sees nothing** | never runs | stays V.90 (`DP is 90`), but blind |
 
-## 9. What is not yet proven
+The control reproduces the original failure, twice:
 
-Be careful here — the above is suggestive, not conclusive.
+```
+initail var (Trn1):  819254 981294 1510889 1025434 1141075 1241807   (ratio 1.84)
+alternate rbs false detection on phase 2 !!!
+trn1Sigma = -1968526677
+VPcmFloModem (V90): drop to V34 requested !!
+```
 
-- The call that showed no RBS false-positive **failed earlier for an unrelated
-  reason** (`Error Energy = -0.000` in WaitForSd, never locked Sd), so the
-  impairment detector may simply not have been reached rather than having been
-  satisfied.
-- A follow-up run at 33 taps failed at the known garbage bulk-delay confound
-  (`rtd = 13592`), which mis-places the peer's Sd search window. Also unrelated to
-  the resampler.
-- Three consecutive runs on the new path have now shown `Error Energy = -0.000`.
-  A control run with `DM_RESAMPLER=sinc` is needed to separate "ZOH regressed Sd
-  detection" from "the pre-existing rtd confound", and that has not been done.
-- The "distinguishable levels" figures come from a deliberately crude metric — how
+**The RBS false-positive "disappearing" under ZOH is not a fix.** It disappears
+because the peer never locks Sd, so the detector has nothing to analyse. Absence
+of the complaint was mistaken for absence of the problem.
+
+This is a *timing* failure, not an amplitude one: the 4 kHz Sd line measured
+-25.58 dB at the far-end DSP against an ideal of -24.7, so the spectral content is
+intact and the peer still cannot lock. The zero-order hold quantises each DS0 edge
+to the 9.6 kHz grid -- up to 104 us of error on a 125 us symbol -- and a lowpass
+cannot recover edge positions the hold has already destroyed. The assumption that
+adding the loop filter would fix the timing problem recorded against earlier ZOH
+attempts was simply wrong.
+
+So the two options as implemented are a straight trade:
+
+- **sinc** -- correct symbol timing, non-uniform per-phase level resolution; peer
+  locks Sd, then rejects the line as impaired.
+- **ZOH + LPF** -- uniform per-phase level resolution, wrong edge timing; peer
+  never locks Sd at all.
+
+### Candidate that gets both: hold on the LCM grid
+
+8000 and 9600 have LCM 48000 (= 6 x 8000 = 5 x 9600). Holding to 48 kHz places
+every DS0 edge **exactly** on a sample boundary -- the hold becomes lossless rather
+than a 104 us quantisation -- and decimating 48 kHz -> 9.6 kHz by 5 through one
+shared filter still treats every output phase identically. That should keep the
+per-phase uniformity that motivated the ZOH change while restoring the edge timing
+the Sd detector needs. Not yet implemented or measured.
+
+## 9. What is still not proven
+
+- The "distinguishable levels" figures come from a deliberately crude metric -- how
   well an output sample predicts its source codeword. The absolute numbers should
   not be read as a fidelity spec; only the *ratio* between phases is meaningful,
   and that ratio is what the detector keys on.
-- The peer's specific 3.57× has not been reproduced from first principles. The
-  mechanism is matched; the number is not.
+- The peer's specific per-phase variance ratio has not been reproduced from first
+  principles. The mechanism is matched; the number is not. The two control runs
+  reported different ratios (3.57 and 1.84) and flagged different phases (1 and 5,
+  then 2), so the detector's exact trigger is not fully characterised.
+- `rtd = 13592` recurs across runs and is a known bad bulk-delay estimate. It did
+  **not** prevent the impairment detector from running in the control, so it is not
+  the blocker here, but it remains unexplained.
+- Whether the LCM-grid variant above actually works is untested.
 
 ## 10. Test-methodology gotcha that invalidated earlier negatives
 
@@ -280,15 +312,18 @@ V.90 mode — not a live path.
 
 ## 12. Next steps
 
-1. Control run with `DM_RESAMPLER=sinc` on a freshly restarted rig, to establish
-   whether Sd lock is affected by the ZOH change at all.
-2. If Sd lock is unaffected, sweep toward the high-level end (33 and 9 taps at
-   4400 Hz) — level resolution is what matters, and those give 2.37× and 3.6× the
-   codeword level.
-3. Get one clean run that actually reaches `V90AutoDigitalImpDetector` with the new
-   path, and confirm the per-phase variances it reports have tightened.
+1. Implement and measure the LCM-grid variant in section 8: hold to 48 kHz (exact
+   DS0 edges), then decimate by 5 to 9.6 kHz through one shared filter. This is the
+   only candidate so far that could give per-phase uniformity *and* correct edge
+   timing.
+2. Keep `DM_RESAMPLER=sinc` as the default meanwhile. ZOH is strictly worse: it
+   trades a detectable-but-rejected line for an undetectable one.
+3. Characterise the impairment detector's actual trigger. Two control runs gave
+   per-phase ratios of 3.57 and 1.84 and flagged different phases, so the threshold
+   relationship to `AltRbsVarThresh` is not yet understood well enough to predict
+   whether a given uniformity ratio will pass.
 4. Only then revisit the DIL-termination issue: `v90.c` `V90_RX_EVENT_S` currently
    refuses the peer's S during DIL until a full cycle completes. At N=144 that
-   cycle is longer than the 5000 ms §9.3.2.10 allows the peer, so the genuine
-   Phase-4 trigger is logged as "ignored early far-end S". §9.3.1.6 wants the
+   cycle is longer than the 5000 ms 9.3.2.10 allows the peer, so the genuine
+   Phase-4 trigger is logged as "ignored early far-end S". 9.3.1.6 wants the
    current *segment* completed, not the cycle.
