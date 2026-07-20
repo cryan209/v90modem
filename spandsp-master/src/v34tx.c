@@ -4223,15 +4223,21 @@ static void s_not_s_baud_init(v34_state_t *s)
 
     /* Apply power reduction requested by the caller in INFO1c before Phase 3 TX.
        If INFO1c was not received (CRC fail), use a safe default of 3 dB to avoid
-       overdriving the remote modem's receiver. */
-    power_reduction = s->rx.info1c.power_reduction;
-    if (power_reduction <= 0)
+       overdriving the remote modem's receiver.
+       Gate on info1c_received, not on the value: 0 dB is a legitimate request
+       (§11.2.1.2.9 bits 12:14 are an integer 0-7), and treating it as "no data"
+       transmitted 3 dB below what the peer asked for on every call where INFO1c
+       actually decoded. */
+    if (s->rx.info1c_received)
+        power_reduction = s->rx.info1c.power_reduction;
+    else
         power_reduction = 3;  /* Safe default when INFO1c was not received */
     /*endif*/
     v34_tx_power(s, -14.0f - (float)power_reduction);
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0)\n",
-             power_reduction, -14.0f - (float)power_reduction);
+             "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [INFO1c %s]\n",
+             power_reduction, -14.0f - (float)power_reduction,
+             s->rx.info1c_received ? "received" : "not received, using default");
 
     /* Initialize pre-emphasis filter from caller's INFO1c.
        The caller specifies what pre-emphasis WE should use for our TX.
@@ -5456,6 +5462,10 @@ static void data_baud_init(v34_state_t *s)
     s->tx.p.re = 0;
     s->tx.p.im = 0;
     s->tx.z = 0;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - data_baud_init(): trellis state on entry state=%d y0=%d "
+             "(V.34/9.6 requires 0; forcing)\n",
+             s->tx.state, s->tx.y0);
     s->tx.y0 = 0;
     s->tx.state = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
