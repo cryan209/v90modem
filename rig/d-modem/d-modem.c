@@ -124,6 +124,66 @@ static double rs_headroom = RS_HEADROOM_DEFAULT;
 static unsigned long rs_clip_count, rs_out_count, rs_clip_logged;
 static double rs_clip_worst;
 
+/* ---------------------------------------------------------------------------
+ * Loop model: DS0 staircase + local-loop lowpass (DM_RESAMPLER=zoh, default).
+ *
+ * The interpolator above is mathematically "ideal reconstruction" and is
+ * physically wrong, in a way that breaks V.90 specifically.  With the cutoff at
+ * the exact input Nyquist, phase 0's kernel collapses to a SINGLE TAP: output
+ * samples on that phase are the input codeword passed through bit-exactly,
+ * while the other five phases are 249-tap interpolations of a signal that
+ * changes every sample.  Measured on a real downstream capture, distinguishable
+ * levels per output phase come out:
+ *
+ *     phase      0     1     2     3     4     5
+ *     levels   inf   5.6   3.2   2.0   1.6   1.5
+ *
+ * One phase resolves every codeword perfectly and the rest resolve almost
+ * nothing.  That is exactly the signature of robbed-bit signalling -- per-phase
+ * differences in how many levels survive -- so SmartLink's
+ * V90AutoDigitalImpDetector reports "alternate rbs false detection on phase
+ * 1/5", computes a nonsense trn1Sigma, and issues "drop to V34 requested".
+ * The peer then leaves V.90 in JaTXMIT and never sends the S that terminates
+ * our Jd.  No amount of patience on our side can fix that; the signal has to
+ * stop looking impaired.
+ *
+ * The real path is a CO D/A emitting a 125 us staircase into 1-3 km of copper
+ * into the far end's sound card.  Modelling that -- zero-order hold to 9600
+ * then one lowpass -- makes every output sample derive from exactly one
+ * codeword through the same filter, so per-phase uniformity is structural
+ * rather than tuned.  Same capture, ZOH + 97-tap 4400 Hz:
+ *
+ *     phase      0     1     2     3     4     5
+ *     levels  13.6  13.3  13.4  13.4  13.6  13.2      (ratio 1.02)
+ *
+ * Two knobs, because the tradeoff is empirical and has to be swept on the rig:
+ *   DM_LOOP_FC    lowpass cutoff in Hz (default 4400).  Higher = less level
+ *                 information destroyed; the cutoff is not doing spectral
+ *                 shaping here, it is just how much of the codeword survives.
+ *   DM_LOOP_TAPS  kernel length (default 97, odd, <= LOOP_TAPS_MAX).  Shorter
+ *                 kernels ring less, so the L1 bound allows much more headroom
+ *                 -- N=9 permits 0.90 against N=97's 0.44, i.e. +6 dB more
+ *                 codeword level -- at some cost in per-phase uniformity
+ *                 (ratio 1.58 vs 1.02).  Pure ZOH (no filter) is the limit and
+ *                 is known to fail: its floor() edge quantisation puts up to
+ *                 104 us of jitter on a 125 us symbol, which is what broke the
+ *                 Sd detector when ZOH was tried alone.  Some smoothing is
+ *                 required; how little is what the sweep answers.
+ *
+ * Headroom is again derived from the L1 bound (worst-case output = L1 * FS) so
+ * it provably cannot clip, and it is much less punishing here than for the
+ * ringy interpolator: L1 falls from 3.81 to ~2.26 (97 taps) or ~1.11 (9 taps),
+ * so the codewords arrive 1.8x to 3.6x larger than under the old 0.25.  That
+ * is the point -- level resolution is what the peer's detectors actually use.
+ * DM_RESAMPLER=sinc restores the old interpolator for A/B. */
+#define LOOP_TAPS_MAX 129
+static float  loop_ker[LOOP_TAPS_MAX];
+static int    loop_ker_ready;
+static int    loop_taps = 97;
+static double loop_fc = 4400.0;
+static double loop_headroom;
+static int    use_zoh_loop = 1;
+
 static void rs_build_kernel(void) {
 	const double fs_in = 8000.0, fc = 4000.0;
 	const double wc = fc/(fs_in/2.0);   /* exact input Nyquist */
@@ -167,6 +227,70 @@ static void rs_build_kernel(void) {
 	rs_ker_ready = 1;
 }
 
+/* floor division, needed because output index k runs negative into history */
+static int loop_fdiv(int a, int b) {
+	int q = a/b;
+	if ((a % b) != 0 && ((a < 0) != (b < 0))) q--;
+	return q;
+}
+
+static void loop_build_kernel(void) {
+	const double fs = 9600.0;
+	const char *env;
+	double wc, sum = 0.0, l1 = 0.0;
+	int t, H;
+
+	if (loop_ker_ready) return;
+
+	if ((env = getenv("DM_RESAMPLER")) && *env)
+		use_zoh_loop = (strcmp(env, "sinc") != 0);
+	if ((env = getenv("DM_LOOP_FC")) && *env) {
+		char *end; double v = strtod(env, &end);
+		if (end != env && *end == '\0' && v > 300.0 && v <= fs/2.0) loop_fc = v;
+		else PJ_LOG(2,(__FILE__,"DM_LOOP_FC='%s' ignored, using %.0f", env, loop_fc));
+	}
+	if ((env = getenv("DM_LOOP_TAPS")) && *env) {
+		char *end; long v = strtol(env, &end, 10);
+		if (end != env && *end == '\0' && v >= 3 && v <= LOOP_TAPS_MAX && (v & 1))
+			loop_taps = (int)v;
+		else PJ_LOG(2,(__FILE__,"DM_LOOP_TAPS='%s' ignored (odd, 3..%d), using %d",
+		               env, LOOP_TAPS_MAX, loop_taps));
+	}
+
+	H = loop_taps/2;
+	wc = loop_fc/(fs/2.0);
+	for (t = 0; t < loop_taps; t++) {
+		double x = (double)(t - H), y = wc*x, s, w;
+		if (fabs(y) < 1e-9) s = wc;
+		else s = wc*sin(M_PI*y)/(M_PI*y);
+		/* Blackman: lower sidelobes than Hann for a given length, which keeps
+		 * L1 (and therefore the headroom penalty) down. */
+		w = 0.42 - 0.5*cos(2.0*M_PI*t/(loop_taps-1))
+		         + 0.08*cos(4.0*M_PI*t/(loop_taps-1));
+		loop_ker[t] = (float)(s*w);
+		sum += loop_ker[t];
+	}
+	for (t = 0; t < loop_taps; t++) {
+		loop_ker[t] = (float)(loop_ker[t]/sum);          /* unity DC */
+		l1 += fabs((double)loop_ker[t]);
+	}
+	/* Provably cannot clip for any input, same argument as RS_HEADROOM_DEFAULT.
+	 * DM_RS_HEADROOM still overrides, for sweeping below the safe bound. */
+	loop_headroom = 1.0/l1;
+	if ((env = getenv("DM_RS_HEADROOM")) && *env) {
+		char *end; double v = strtod(env, &end);
+		if (end != env && *end == '\0' && v > 0.0 && v <= 1.0) loop_headroom = v;
+	}
+	for (t = 0; t < loop_taps; t++)
+		loop_ker[t] = (float)(loop_ker[t]*loop_headroom);
+
+	PJ_LOG(3,(__FILE__,"loop model: ZOH staircase + %d-tap %.0f Hz lowpass, "
+	                   "L1=%.3f headroom=%.3f (%.2f dB, %.2fx vs old 0.25)",
+	                   loop_taps, loop_fc, l1, loop_headroom,
+	                   20.0*log10(loop_headroom), loop_headroom/0.25));
+	loop_ker_ready = 1;
+}
+
 static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *frame) {
 	struct dmodem *sm = (struct dmodem *)this_port;
 	/* pipeline: hist[] = tail of frame N-2, prev[] = frame N-1 */
@@ -183,6 +307,7 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		int out_n, k, i;
 
 		rs_build_kernel();
+		loop_build_kernel();
 		if (in_n > 1024)
 			return PJ_ETOOBIG;
 		if (prev_n >= 0 && (prev_n < RS_PAST || in_n < RS_FUTURE))
@@ -204,6 +329,7 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				work[RS_PAST + i] = prev[i];
 			for (i = 0; i < RS_FUTURE; i++)
 				work[RS_PAST + prev_n + i] = in[i];
+			int loop_h = loop_taps/2;
 			for (k = 0; k < out_n; k++) {
 				int num = k * 5;
 				int ic = num / 6;           /* integer input index in prev */
@@ -212,6 +338,18 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				int base = RS_PAST + ic - RS_HALF;   /* work index of tap 0 */
 				float acc = 0.0f;
 				int t;
+				if (use_zoh_loop) {
+					/* Staircase: output sample m takes the codeword of the DS0
+					 * interval it falls in, floor(m*5/6).  Every output on
+					 * every phase therefore comes from exactly one codeword
+					 * through the same filter -- that is what makes the
+					 * per-phase level resolution uniform. */
+					for (t = 0; t < loop_taps; t++) {
+						int m = k - loop_h + t;
+						int si = RS_PAST + loop_fdiv(m*5, 6);
+						acc += (float)work[si] * loop_ker[t];
+					}
+				} else
 				for (t = 0; t < RS_TAPS; t++)
 					acc += (float)work[base + t] * h[t];
 				/* Clipping here is nonlinear and silently destroys the peer's
