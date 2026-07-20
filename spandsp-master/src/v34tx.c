@@ -5459,9 +5459,14 @@ static complex_sig_t get_data_baud(v34_state_t *s)
     /*endif*/
 
     /* Return one 2D symbol from the current mapping frame.
-       tx_mapping_frame_buf is Q9.7: convert to float for the modulator. */
-    v.re = (float)s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step];
-    v.im = (float)s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1];
+       tx_mapping_frame_buf holds the precoded signal x(n) in Q9.7, as written by
+       v34_get_mapping_frame() ("(y.re << 7) - p.re"). It has to be scaled back by
+       128 before it reaches the modulator - the plain cast that used to be here
+       handed the modulator symbols 128x too large. v34_get_mapping_frame() keeps
+       its Q9.7 output contract, since v34_get_mapping_frame_state() callers and
+       the spandsp v34 tests read those raw values. */
+    v.re = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step]);
+    v.im = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1]);
     if (++s->tx.tx_mapping_frame_step >= 8)
         s->tx.tx_mapping_frame_step = 0;
     /*endif*/
