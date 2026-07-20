@@ -338,7 +338,6 @@ struct v90_state_s {
     bool             dil_requested;
     bool             jd_terminated_by_s;
     bool             dil_terminate_requested;
-    bool             use_internal_v34_tx;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
@@ -3062,11 +3061,6 @@ bool v90_phase3_active(v90_state_t *s)
     return s->tx_phase >= V90_TX_WAIT_JA && s->tx_phase <= V90_TX_JD_PRIME;
 }
 
-bool v90_using_internal_v34_tx(v90_state_t *s)
-{
-    return s ? s->use_internal_v34_tx : false;
-}
-
 void v90_start_phase3(v90_state_t *s, int u_info)
 {
     if (u_info > 0 && u_info < 128)
@@ -3091,7 +3085,6 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->jd_terminated_by_s = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
-    s->use_internal_v34_tx = false;
     s->cp_ready = false;
     s->cp_ack_received = false;
     s->e_received = false;
