@@ -4220,6 +4220,79 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Scale a pre-emphasis coefficient set to unity average power gain.
+
+    V.34/5.4 defines the pre-emphasis filters as *shape* templates: Tables 3 and 4
+    give only the tilt across the band (index 0 is flat, index 5 is a 10 dB ramp,
+    indices 6 to 10 add beta at the low end rising to beta+gamma at the high end),
+    and 10.1.3 then lists "symbol rate, carrier frequency, pre-emphasis filter and
+    power level" as four separate attributes of the transmitted signal. Selecting a
+    filter therefore must not move the average transmitted power - pre-emphasis
+    redistributes energy across the band, it does not add any. The same clause's
+    NOTE states the general principle, that the transmitter compensates for
+    processing gain so the average signal power is maintained.
+
+    The generated sets in v34_tx_pre_emphasis_filters.h implement the templates
+    literally, and because every template has gain >= 1 everywhere in band, each
+    one is a pure boost: measured against a flat in-band input, index 5 adds about
+    6.5 dB of power and index 10 about 3.2 dB. Left uncompensated that lands on the
+    wire on top of the level v34_tx_power() was asked for, and index 5 clipped.
+
+    Normalise over exactly the band 5.4.1 defines the template on,
+    S*(d/e - 0.45) to S*(d/e + 0.45), assuming a flat input across it - which is
+    what the RRC-shaped V.34 signal approximates. The tables themselves are left
+    alone: they are the correct *shape*, and the shape is what the peer asked for. */
+static void pre_emphasis_normalise(float out[16],
+                                   const float in[16],
+                                   int baud_idx,
+                                   int carrier_idx)
+{
+#define PRE_EMPHASIS_NORM_STEPS     256
+    double baud;
+    double d_over_e;
+    double lo;
+    double hi;
+    double f;
+    double w;
+    double re;
+    double im;
+    double sum;
+    double scale;
+    int i;
+    int k;
+
+    baud = baud_rate_parameters[baud_idx].baud_rate;
+    d_over_e = (double) baud_rate_parameters[baud_idx].low_high[carrier_idx].d
+             / (double) baud_rate_parameters[baud_idx].low_high[carrier_idx].e;
+    lo = baud*(d_over_e - 0.45);
+    hi = baud*(d_over_e + 0.45);
+    sum = 0.0;
+    for (i = 0;  i <= PRE_EMPHASIS_NORM_STEPS;  i++)
+    {
+        f = lo + (hi - lo)*i/PRE_EMPHASIS_NORM_STEPS;
+        re = 0.0;
+        im = 0.0;
+        for (k = 0;  k < 16;  k++)
+        {
+            w = 2.0*M_PI*f*k/SAMPLE_RATE;
+            re += in[k]*cos(w);
+            im -= in[k]*sin(w);
+        }
+        /*endfor*/
+        sum += re*re + im*im;
+    }
+    /*endfor*/
+    sum /= (PRE_EMPHASIS_NORM_STEPS + 1);
+    /* sum is the mean power gain across the band. A degenerate set would leave it
+       at zero; fall back to the unscaled coefficients rather than divide by it. */
+    scale = (sum > 0.0)  ?  1.0/sqrt(sum)  :  1.0;
+    for (k = 0;  k < 16;  k++)
+        out[k] = (float) (in[k]*scale);
+    /*endfor*/
+#undef PRE_EMPHASIS_NORM_STEPS
+}
+/*- End of function --------------------------------------------------------*/
+
 static void s_not_s_baud_init(v34_state_t *s)
 {
     const char *info1_source;
@@ -4309,9 +4382,14 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->tx.pre_emphasis_idx = 0;
     if (preemp_idx >= 1  &&  preemp_idx <= 10)
     {
-        s->tx.pre_emphasis_coeffs = v34_tx_pre_emphasis_filters[baud_idx][carrier_idx][preemp_idx - 1];
+        pre_emphasis_normalise(s->tx.pre_emphasis_norm_coeffs,
+                               v34_tx_pre_emphasis_filters[baud_idx][carrier_idx][preemp_idx - 1],
+                               baud_idx,
+                               carrier_idx);
+        s->tx.pre_emphasis_coeffs = s->tx.pre_emphasis_norm_coeffs;
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - Phase 3: applying pre-emphasis filter %d (baud %d, %s carrier)\n",
+                 "Tx - Phase 3: applying pre-emphasis filter %d (baud %d, %s carrier), "
+                 "normalised to unity band power\n",
                  preemp_idx, baud_rate_parameters[baud_idx].baud_rate,
                  carrier_idx ? "high" : "low");
     }
