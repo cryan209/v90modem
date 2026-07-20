@@ -4,9 +4,11 @@ Investigation notes, 2026-07-20. Covers the long-standing `NO S RECEIVED` failur
 against the softmodem interop rig, the spec reading that reframes it, and the
 resampler defect that turned out to be the actual blocker.
 
-Status: root cause identified and confirmed by a live A/B. The first attempted fix
-(zero-order hold + loop lowpass) is a **regression** and is not the answer -- see
-section 8. `DM_RESAMPLER=sinc` is the working default until something better lands.
+Status: the *failure* is well characterised and reproducible (sections 1-5, 8).
+The *mechanism* proposed in section 6 has since been *disproved* -- see section 6a.
+The fix built on it (zero-order hold + loop lowpass) is also a measured regression
+(section 8). `DM_RESAMPLER=sinc` is the working default. **The cause of the RBS
+false-positive is currently unknown.**
 
 ## 1. The S signals are Phase 3, not Phase 4
 
@@ -157,6 +159,49 @@ Two things that are easy to get wrong here:
   from ∞ to 9.0 at 3900 Hz and 3.8 at 3400 Hz, because the asymmetry is structural
   rather than a tuning error.
 
+## 6a. CORRECTION: the section 6 mechanism is disproved
+
+Section 6 is kept because the observation is real and the measurements are sound,
+but **the causal story is wrong** and should not be built on again.
+
+The claim was: phase 0 of the interpolator is a single tap, so one output phase
+recovers codewords perfectly while the others do not, and the peer's detector reads
+that as per-phase robbed-bit impairment.
+
+The flaw is a domain confusion. "Phase" in section 6 means the **9600-domain output
+phase**, `(5k) mod 6`. The detector's phases are **DS0 phases**, `n mod 6` at
+8 kHz. Those are not the same thing, and the mapping between them is benign:
+
+- An output sample is an exact copy of its input codeword when `(5k) mod 6 == 0`,
+  i.e. `k = 6j`, which corresponds to DS0 index `n = 5j`.
+- So the perfectly-represented DS0 samples are exactly those with `n = 0 mod 5`.
+- `gcd(5, 6) = 1`, so `n mod 5` and `n mod 6` are independent. Over any period of
+  30 samples **every DS0 phase receives exactly the same share** (one in five) of
+  perfectly-represented samples.
+
+Verified by direct enumeration: across n = 0..299, each RBS phase gets 10 exact
+samples out of 50. The interpolator's per-output-phase asymmetry therefore averages
+out completely in the domain the detector actually measures, and cannot produce the
+1.84x-3.57x per-DS0-phase spread observed in section 8.
+
+Two consequences:
+
+1. The "distinguishable levels per phase" table in section 6, and every level/
+   uniformity number derived from it (including the tables in section 7), is
+   measured in the **wrong domain**. Those figures do not describe what the
+   detector sees.
+2. The motivation for the zero-order-hold change evaporates. It was independently
+   measured to be a regression, so the conclusion does not change, but it was
+   pursued for a reason that does not hold.
+
+**What we still know for certain:** our own transmit path is flat across DS0 phases
+to 0.013% (section 5), and the peer reliably computes a 1.84x-3.57x spread and
+rejects the line (section 8). Something between those two points introduces it.
+The interpolator is no longer a supported explanation for what.
+
+Anything measuring "per-phase" behaviour from here must group by **DS0 index mod
+6**, after reconstructing the 8 kHz stream, not by 9600-domain output phase.
+
 ## 7. Fix: model the physical path instead of ideal reconstruction
 
 The interpolator implements mathematically ideal reconstruction, which is
@@ -235,14 +280,24 @@ So the two options as implemented are a straight trade:
 - **ZOH + LPF** -- uniform per-phase level resolution, wrong edge timing; peer
   never locks Sd at all.
 
-### Candidate that gets both: hold on the LCM grid
+### Candidate that was tried and abandoned: hold on the LCM grid
 
-8000 and 9600 have LCM 48000 (= 6 x 8000 = 5 x 9600). Holding to 48 kHz places
-every DS0 edge **exactly** on a sample boundary -- the hold becomes lossless rather
-than a 104 us quantisation -- and decimating 48 kHz -> 9.6 kHz by 5 through one
-shared filter still treats every output phase identically. That should keep the
-per-phase uniformity that motivated the ZOH change while restoring the edge timing
-the Sd detector needs. Not yet implemented or measured.
+8000 and 9600 have LCM 48000 (= 6 x 8000 = 5 x 9600), so holding to 48 kHz places
+every DS0 edge exactly on a sample boundary -- a lossless hold rather than a 104 us
+quantisation -- and decimating by 5 through one shared filter keeps every output
+phase symmetric. Modelled offline before implementing.
+
+It was **not** built, for two reasons:
+
+1. On the same (9600-domain) metric used to justify the ZOH change it scored
+   *worse*, not better: per-phase ratio 4.70 against the direct-9600 hold's 1.02.
+   Proper anti-alias filtering before a 5:1 decimation has to be narrow at 48 kHz,
+   which smooths across most of a DS0 interval, so output samples near an interval
+   edge blend two codewords.
+2. Chasing that number is what exposed section 6a. The metric is in the wrong
+   domain, so neither the 4.70 nor the 1.02 describes what the detector sees, and
+   there is no longer a reason to believe per-9600-phase uniformity is the property
+   worth optimising.
 
 ## 9. What is still not proven
 
@@ -312,17 +367,22 @@ V.90 mode — not a live path.
 
 ## 12. Next steps
 
-1. Implement and measure the LCM-grid variant in section 8: hold to 48 kHz (exact
-   DS0 edges), then decimate by 5 to 9.6 kHz through one shared filter. This is the
-   only candidate so far that could give per-phase uniformity *and* correct edge
-   timing.
-2. Keep `DM_RESAMPLER=sinc` as the default meanwhile. ZOH is strictly worse: it
-   trades a detectable-but-rejected line for an undetectable one.
-3. Characterise the impairment detector's actual trigger. Two control runs gave
-   per-phase ratios of 3.57 and 1.84 and flagged different phases, so the threshold
-   relationship to `AltRbsVarThresh` is not yet understood well enough to predict
-   whether a given uniformity ratio will pass.
-4. Only then revisit the DIL-termination issue: `v90.c` `V90_RX_EVENT_S` currently
+1. **Re-measure in the right domain.** Reconstruct the 8 kHz DS0 stream from a
+   captured 9600 Hz DSP-side tap and compute per-DS0-phase (`n mod 6`) variance of
+   the recovery error. Compare against the peer's reported `initail var (Trn1)`
+   array from the same call. Until a model reproduces those six numbers, any
+   proposed fix is speculation.
+2. Keep `DM_RESAMPLER=sinc` as the default. ZOH is measurably worse -- it trades a
+   detectable-but-rejected line for an undetectable one.
+3. Characterise the detector's trigger. Two control runs gave per-DS0-phase ratios
+   of 3.57 and 1.84 and flagged different phases, against an `AltRbsVarThresh` that
+   also moved (680398, then 1412991). The threshold appears to be derived from the
+   data rather than fixed, which needs understanding before predicting a pass.
+4. Consider whether the peer's own timing recovery is the source. It reports
+   `Timing Offset [ppm]` of +7505 to +10972 on a transport measured at 0 ppm, and
+   `rtd = 13592` recurs and is known-bad. A misaligned DS0 sample grid on the peer
+   side would produce per-phase structure from a clean signal.
+5. Only then revisit the DIL-termination issue: `v90.c` `V90_RX_EVENT_S` currently
    refuses the peer's S during DIL until a full cycle completes. At N=144 that
    cycle is longer than the 5000 ms 9.3.2.10 allows the peer, so the genuine
    Phase-4 trigger is logged as "ignored early far-end S". 9.3.1.6 wants the
