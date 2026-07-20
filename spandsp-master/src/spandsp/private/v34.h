@@ -547,6 +547,14 @@ typedef struct
     /*! \brief Last values emitted by debug stage-change logging. */
     int last_logged_stage;
     int last_logged_modulator;
+    /*! \brief sample_time at which the currently logged stage was entered, so
+               stage-change logging can report how long each stage actually ran.
+               Negative means no stage has been timed yet. */
+    span_sample_timer_t stage_entry_sample_time;
+    /*! \brief sample_time at which Phase 2 (the first INFO0) began, so the
+               stage timeline can be read as an elapsed-time budget. Negative
+               means Phase 2 has not started (or has already been summarised). */
+    span_sample_timer_t phase2_entry_sample_time;
 
     logging_state_t *logging;
 } v34_tx_state_t;
