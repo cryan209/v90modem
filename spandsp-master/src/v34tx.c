@@ -4206,6 +4206,7 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 
 static void s_not_s_baud_init(v34_state_t *s)
 {
+    const char *info1_source;
     int power_reduction;
     int preemp_idx;
     int baud_idx;
@@ -4221,31 +4222,72 @@ static void s_not_s_baud_init(v34_state_t *s)
     }
     /*endif*/
 
-    /* Apply power reduction requested by the caller in INFO1c before Phase 3 TX.
-       If INFO1c was not received (CRC fail), use a safe default of 3 dB to avoid
-       overdriving the remote modem's receiver.
-       Gate on info1c_received, not on the value: 0 dB is a legitimate request
-       (§11.2.1.2.9 bits 12:14 are an integer 0-7), and treating it as "no data"
-       transmitted 3 dB below what the peer asked for on every call where INFO1c
-       actually decoded. */
-    if (s->rx.info1c_received)
-        power_reduction = s->rx.info1c.power_reduction;
+    /* Phase 3 transmit power and pre-emphasis are dictated by the *remote* modem,
+       in whichever INFO1 message describes this side's transmitter:
+
+         - We are the answerer -> INFO1c (Table 15/V.34, §10.1.2.3.4).  Bits 12:14
+           are the "minimum power reduction to be implemented by the answer modem
+           transmitter"; the per-symbol-rate 9-bit probing blocks carry the
+           pre-emphasis index for the answer->call direction (bits 26:29 for 2400,
+           and identically coded fields for the other symbol rates).  §11.2.1.2.9
+           is the matching procedure step.
+
+         - We are the caller -> INFO1a (Table 16/V.34, §10.1.2.3.5).  Bits 12:14
+           are the "minimum power reduction to be implemented by the call modem
+           transmitter" and bits 26:29 the pre-emphasis index for the call->answer
+           direction.  §11.2.1.1.8 is the matching procedure step.  Note INFO1a
+           carries a single pre-emphasis index, for the already-selected symbol
+           rate, rather than one per candidate rate as INFO1c does.
+
+       V.90 is excluded on the calling side: Table 10/V.90 reserves INFO1a bits
+       12:17 and 26:29, and process_rx_info1a() parses them as zero, so there is
+       nothing to honour and we keep the conservative default instead of reading a
+       0 dB reduction out of reserved bits.
+
+       Gate on the *_received flag, not on the value: 0 dB is a legitimate request
+       (bits 12:14 are an integer 0-7), and treating it as "no data" transmitted
+       3 dB below what the peer asked for on every call where the INFO1 actually
+       decoded.  Both flags are only set on a CRC-valid frame — including via the
+       boundary/local-slip recovery paths, which re-check the CRC of the recovered
+       bits before accepting them. */
+    baud_idx = s->tx.baud_rate;
+    carrier_idx = s->tx.high_carrier ? 1 : 0;
+    if (s->tx.calling_party)
+    {
+        info1_source = (s->rx.info1a_received  &&  !s->tx.v90_mode)  ?  "INFO1a"  :  NULL;
+        if (info1_source)
+        {
+            power_reduction = s->rx.info1a.power_reduction;
+            preemp_idx = s->rx.info1a.preemphasis_filter;
+        }
+        /*endif*/
+    }
     else
-        power_reduction = 3;  /* Safe default when INFO1c was not received */
+    {
+        info1_source = (s->rx.info1c_received)  ?  "INFO1c"  :  NULL;
+        if (info1_source)
+        {
+            power_reduction = s->rx.info1c.power_reduction;
+            preemp_idx = s->rx.info1c.rate_data[baud_idx].pre_emphasis;
+        }
+        /*endif*/
+    }
+    /*endif*/
+    if (info1_source == NULL)
+    {
+        /* Safe default when the governing INFO1 was not received: back off 3 dB
+           rather than risk overdriving the remote receiver, and do not pre-emphasise. */
+        power_reduction = 3;
+        preemp_idx = 0;
+    }
     /*endif*/
     v34_tx_power(s, -14.0f - (float)power_reduction);
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [INFO1c %s]\n",
+             "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [from %s]\n",
              power_reduction, -14.0f - (float)power_reduction,
-             s->rx.info1c_received ? "received" : "not received, using default");
+             (info1_source)  ?  info1_source  :  "default, no INFO1 received");
 
-    /* Initialize pre-emphasis filter from caller's INFO1c.
-       The caller specifies what pre-emphasis WE should use for our TX.
-       V.34/5.4, Table 15 bits 26:29 (for 2400 baud) or probing results
-       for the selected baud rate. Index 0 = no pre-emphasis, 1-10 = filter. */
-    baud_idx = s->tx.baud_rate;
-    carrier_idx = s->tx.high_carrier ? 1 : 0;
-    preemp_idx = s->rx.info1c.rate_data[baud_idx].pre_emphasis;
+    /* Pre-emphasis filter (V.34/5.4). Index 0 = no pre-emphasis, 1-10 = filter. */
     s->tx.pre_emphasis_coeffs = NULL;
     memset(s->tx.pre_emphasis_buf, 0, sizeof(s->tx.pre_emphasis_buf));
     s->tx.pre_emphasis_idx = 0;
