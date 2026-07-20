@@ -121,7 +121,6 @@ static int phase3_rx_dump_count = 0;
 #define FP_Q9_7_TO_F(x)                 ((float) x/128.0f)
 
 #define CARRIER_NOMINAL_FREQ            1800.0f
-#define TRAINING_AMP                    10.0f
 #define EQUALIZER_DELTA                 0.21f
 #define EQUALIZER_SLOW_ADAPT_RATIO      0.1f
 
@@ -8332,8 +8331,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /* V.34 data mode: collect equalized symbols into mapping frames (8 x 2D symbols)
            and run the full decode pipeline.
            The CMA equalizer (frozen from training) normalizes to unit magnitude.
-           Training DQPSK had magnitude TRAINING_AMP=10, so the frozen equalizer
-           divides by the training amplitude.  The live equalizer output requires
+           Training DQPSK is constant modulus, so the frozen equalizer divides by
+           whatever the training amplitude was - the AGC below has already taken
+           the absolute level out, so no TX-side amplitude constant applies here.  The live equalizer output requires
            a data-mode gain calibration before slicing; 70 is the measured bridge
            from its unit-radius training normalization to the Q9.7 constellation
            used by the mapper on the reference 31.2 kbit/s calls.
@@ -8719,8 +8719,9 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         if (s->eq_put_step <= 0)
         {
             /* AGC: adapt scaling until locked down.
-               This normalizes equalizer input so that TRAINING_AMP-scaled PP
-               symbols and CMA can operate at the expected magnitude. */
+               This normalizes equalizer input from the received power, so the
+               constant-modulus PP symbols and CMA operate at the expected
+               magnitude whatever level the peer transmitted at. */
             if (s->agc_scaling_save == 0.0f  &&  power > 10)
             {
                 if (power > V34_AGC_POWER_MIN)

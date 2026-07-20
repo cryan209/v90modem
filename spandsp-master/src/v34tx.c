@@ -121,16 +121,32 @@
 #define TRAINING_SCALE(x)               (x)
 #endif
 
-#define TRAINING_AMP                    10.0f
+/* v34_tx_power() turns a dBm0 request into tx.gain on the assumption that the
+   symbols reaching the RRC filter have this modulus RMS. Anything handed to
+   either modulator has to be scaled to it, or the wire level misses the
+   requested dBm0 by exactly the ratio. */
+#define V34_NOMINAL_SYMBOL_RMS          4.4843f
 
-/* Empirical TX level trims, calibrated against the wire (live G.711 taps,
-   2026-07-19). With v34_tx_power(-10 dBm0), the CC tone/INFO path measured
-   -2.8 dBm0 and the L1/L2 probe measured L2 at -3.6 dBm0, leaving L1 hard
-   clipped at 100% of full scale (3.8% of samples) — an analog V.90 peer
-   judges the downstream PCM path from these exact signals and falls back to
-   V.34 at minimum baud when they arrive hot and clipped. Trim the CC path to
-   the INFO0d-declared nominal power and L2 to nominal (L1 tracks at +6 dB). */
-#define V34_CC_LEVEL_TRIM               0.438f
+/* Constant-modulus amplitude of the training and tone signals - the Phase 2
+   tones and INFO carriers on the CC modulator, and S/!S, PP and TRN on the
+   primary channel.
+
+   This was 10.0f, i.e. +6.97 dB over V34_NOMINAL_SYMBOL_RMS. The CC path
+   carried a separate empirical trim of 0.438f which cancelled almost exactly
+   that error (10*0.438 = 4.38, within 0.2 dB of 4.4843) - the wire calibration
+   of 2026-07-19 was, without knowing it, measuring this mismatch. The Phase 3/4
+   primary-channel modulator had no equivalent trim, which is why it transmitted
+   6.7 dB hot. Correcting the amplitude at source fixes both paths, so the CC
+   trim is gone; adding one back now would double-correct. */
+#define TRAINING_AMP                    V34_NOMINAL_SYMBOL_RMS
+
+/* Empirical TX level trim for the L1/L2 probe, calibrated against the wire
+   (live G.711 taps, 2026-07-19): with v34_tx_power(-10 dBm0) the probe measured
+   L2 at -3.6 dBm0, leaving L1 hard clipped at 100% of full scale (3.8% of
+   samples) - an analog V.90 peer judges the downstream PCM path from these
+   exact signals and falls back to V.34 at minimum baud when they arrive hot and
+   clipped. The probe scales its own tables through line_probe_scaling rather
+   than going through TRAINING_AMP, so it keeps its own trim. */
 #define V34_LINE_PROBE_LEVEL_TRIM       0.478f
 
 enum
@@ -5871,7 +5887,7 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
             iamp += dds_mod(&s->tx.guard_phase, s->tx.guard_phase_rate, s->tx.cjo, 0);
         }
         /*endif*/
-        amp[sample] = (int16_t) ((((int32_t) (iamp*V34_CC_LEVEL_TRIM))*s->tx.gain) >> 15);
+        amp[sample] = (int16_t) (((int32_t) iamp*s->tx.gain) >> 15);
 #else
         x.re = vec_circular_dot_prodf(s->tx.rrc_filter_re, tx_pulseshaper[TX_PULSESHAPER_COEFF_SETS - 1 - s->tx.baud_phase], V34_INFO_TX_FILTER_STEPS, s->tx.rrc_filter_step);
         x.im = vec_circular_dot_prodf(s->tx.rrc_filter_im, tx_pulseshaper[TX_PULSESHAPER_COEFF_SETS - 1 - s->tx.baud_phase], V34_INFO_TX_FILTER_STEPS, s->tx.rrc_filter_step);
@@ -5885,7 +5901,7 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
         }
         /*endif*/
         /* Don't bother saturating. We should never clip. */
-        amp[sample] = (int16_t) lfastrintf(famp*s->tx.gain*V34_CC_LEVEL_TRIM);
+        amp[sample] = (int16_t) lfastrintf(famp*s->tx.gain);
 #endif
     }
     return sample;
@@ -5967,11 +5983,16 @@ SPAN_DECLARE(int) v34_tx(v34_state_t *s, int16_t amp[], int max_len)
 SPAN_DECLARE(void) v34_tx_power(v34_state_t *s, float power)
 {
     /* The constellation design seems to keep the average power the same, regardless
-       of which bit rate is in use. */
+       of which bit rate is in use.
+       The leading factor is 1/V34_NOMINAL_SYMBOL_RMS: it only yields the requested
+       dBm0 if the symbols reaching the RRC filter really do have that modulus RMS.
+       It was previously the bare literal 0.223f, which let the training amplitude
+       drift 6.97 dB away from it unnoticed - keep the two expressed in terms of
+       each other. */
 #if defined(SPANDSP_USE_FIXED_POINT)
-    s->tx.gain = 0.223f*db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*16.0f*(32767.0f/30672.52f)*32768.0f/TX_PULSESHAPER_GAIN;
+    s->tx.gain = (1.0f/V34_NOMINAL_SYMBOL_RMS)*db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*16.0f*(32767.0f/30672.52f)*32768.0f/TX_PULSESHAPER_GAIN;
 #else
-    s->tx.gain = 0.223f*db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*32768.0f/TX_PULSESHAPER_GAIN;
+    s->tx.gain = (1.0f/V34_NOMINAL_SYMBOL_RMS)*db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*32768.0f/TX_PULSESHAPER_GAIN;
 #endif
 }
 /*- End of function --------------------------------------------------------*/
