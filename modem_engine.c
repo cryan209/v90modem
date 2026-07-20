@@ -4207,6 +4207,35 @@ void me_tx_audio(int16_t *amp, int len)
                         ME_LOG("[ME] V.90 declined by peer INFO1a; continuing as plain V.34 (transmitting Phase 3/4 waveform instead of muting)\n");
                         trace_phase("V90 declined -> V34 fallback: transmitting Phase3/4");
                         g_v90_fallback_v34_logged = true;
+
+                        /* Commit the modulation, not just the waveform.  Emitting
+                           the V.34 Phase 3/4 signal while g_mod stayed V90 could
+                           never complete: v34_put_bit_cb() gates ME_DATA entry on
+                           v90_training_complete(), which can only be true if V.90
+                           startup ran — so training success logged "remaining in
+                           TRAINING" and the call ran out TRAINING_TIMEOUT_MS into
+                           the V.22bis fallback.  Had it entered ME_DATA anyway,
+                           the tx dispatch keys on g_mod and would have put V.90
+                           PCM codewords on a V.34 link.  Switching here routes
+                           both through the plain-V.34 paths that already work
+                           when V.8 selects V.34 outright.  Every other V.90-only
+                           site is Phase 3/4 machinery we no longer want or a
+                           diagnostic, and each is guarded on g_mod == ME_MOD_V90,
+                           so this one assignment retires them all — including
+                           prepare_v90_phase3_locked(), which no-ops from the next
+                           call on. */
+                        g_mod = ME_MOD_V34;
+
+                        /* The 1200 Hz notch belongs to V.90's Phase 2 CC echo
+                           removal.  For plain V.34 at 3200 baud it sits at
+                           neither carrier (1829/1920 Hz), so it is pure loss in
+                           the RX path.  start_v34_training() disables the notch
+                           at this baud because the 91 Hz separation is too narrow
+                           to filter; restore that decision.  The NLMS echo
+                           canceller stays — it is wideband and still earns its
+                           keep against the FXS hybrid. */
+                        g_notch.active = false;
+                        ME_LOG("[ME] Notch filter disabled: V.90 Phase 2 CC notch does not apply to plain V.34\n");
                     }
                     v34_tx(g_v34, amp, len);
                 } else {
