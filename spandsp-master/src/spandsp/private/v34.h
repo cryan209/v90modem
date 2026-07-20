@@ -551,6 +551,8 @@ typedef struct
     float pre_emphasis_buf[16];
     int pre_emphasis_idx;
     const float *pre_emphasis_coeffs;
+    /*! \brief The selected pre-emphasis set, scaled to unity band power gain. */
+    float pre_emphasis_norm_coeffs[16];
 
     /*! \brief Last values emitted by debug stage-change logging. */
     int last_logged_stage;
