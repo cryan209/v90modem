@@ -226,6 +226,32 @@ static const char *v34_modulation_to_str(int mod)
     }
 }
 
+/* True for any Tone A/B phase reversal, whatever its position in the sequence.
+
+   The receiver numbers reversals by sequence position: v34rx.c keeps
+   phase2_reversal_count and emits REVERSAL_1, REVERSAL_2 then REVERSAL_3,
+   seeding the count to 2 once L2 has been seen (Phase 2 is past the first two
+   reversals by then, whatever the counter says). The transmitter only ever
+   tested REVERSAL_1 -- REVERSAL_2 appears nowhere and REVERSAL_3 is tested
+   nowhere -- so a stage waiting for a reversal after the first waits on a value
+   the receiver can no longer produce.
+
+   Applied deliberately narrowly, to V90_WAIT_TONE_A_REV only. The same
+   mismatch exists in FIRST_B_SILENCE and SECOND_B, but those are on the V.34
+   fallback branch, and "fixing" them measured *worse* against the live rig
+   (Phase 2 4580 ms -> 13520 ms): accepting the reversal in FIRST_B_SILENCE
+   commits to that branch, which then parks in SECOND_B's 7 s timeout and falls
+   back to the V.90 path anyway. Leaving them mismatched keeps the call on the
+   V.90 path via INFO0 recovery, which is cheaper. Do not widen this without
+   re-measuring on the rig. */
+static bool v34_event_is_reversal(int event)
+{
+    return event == V34_EVENT_REVERSAL_1
+           ||  event == V34_EVENT_REVERSAL_2
+           ||  event == V34_EVENT_REVERSAL_3;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Split a sample count into whole milliseconds plus a tenths digit, so stage
    timings can be logged at sub-millisecond resolution without pulling floating
    point into the log path. Done as two divisions rather than samples*10/8 so
@@ -2492,7 +2518,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         }
         /*endif*/
         ++s->tx.tone_duration;
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1
+        if (v34_event_is_reversal(s->rx.received_event)
             ||
             s->tx.tone_duration >= 600)
         {
@@ -2507,7 +2533,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                transition; the >=600 baud timeout is the 9.2.1.2.4 recovery. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
-                     (s->rx.received_event == V34_EVENT_REVERSAL_1) ? "reversal detected"
+                     v34_event_is_reversal(s->rx.received_event) ? "reversal detected"
                      : "reversal timeout (9.2.1.2.4 recovery)",
                      s->rx.received_event, s->tx.tone_duration);
             s->rx.received_event = V34_EVENT_NONE;
