@@ -118,6 +118,9 @@ enum v34_tx_stages_e
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
     V34_TX_STAGE_PRE_INFO1_A,
+    /*! \brief V.34 §11.2.2.2.4: answer modem sending INFOMARKSa after the
+               INFO1c wait expired, until INFO1c arrives or Tone B is seen */
+    V34_TX_STAGE_INFOMARKSA,
     /*! \brief V.90: waiting for Tone A after L2 before sending INFO1d */
     V34_TX_STAGE_V90_WAIT_TONE_A,
     /*! \brief V.90: waiting for INFO1a after sending INFO1d */

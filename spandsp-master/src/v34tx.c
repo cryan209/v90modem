@@ -157,6 +157,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE: return "A_SILENCE";
     case V34_TX_STAGE_PRE_INFO1_A: return "PRE_INFO1_A";
+    case V34_TX_STAGE_INFOMARKSA: return "INFOMARKSA";
     case V34_TX_STAGE_V90_WAIT_TONE_A: return "V90_WAIT_TONE_A";
     case V34_TX_STAGE_V90_WAIT_INFO1A: return "V90_WAIT_INFO1A";
     case V34_TX_STAGE_V90_WAIT_RX_L2: return "V90_WAIT_RX_L2";
@@ -624,6 +625,8 @@ static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
+static void infomarksa_baud_init(v34_state_t *s);
+static int info1c_wait_bauds(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
 static void s_not_s_baud_init(v34_state_t *s);
 static void pp_baud_init(v34_state_t *s);
@@ -3281,6 +3284,63 @@ static void l1_l2_signal_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int info1c_wait_bauds(v34_state_t *s)
+{
+    int rtd_bauds;
+    int timeout_bauds;
+
+    /* V.34/11.2.2.2.4 allows 2000 ms plus two round trip delays.  The
+       deadline is specified from the Tone B detection of 11.2.1.2.6, which is
+       a little before this stage begins; counting from stage entry is
+       deliberately on the generous side.  This getbaud runs at the 600 baud
+       CC rate, so express the budget in 600ths of a second (same convention
+       as the V.90 INFO1a wait). */
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
+                : 0;
+    timeout_bauds = (600*2000 + 500)/1000 + 2*rtd_bauds;
+    if (timeout_bauds < 1)
+        timeout_bauds = 1;
+    /*endif*/
+    return timeout_bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_infomarksa_baud(v34_state_t *s)
+{
+    /* V.34/10.1.2.3.6: INFOMARKSa is binary ones applied to the DPSK
+       modulator, i.e. a phase reversal every baud. */
+    if (s->rx.received_event == V34_EVENT_INFO1_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - INFO1c received after %d bauds of INFOMARKSa, sending INFO1a (11.2.2.2.4)\n",
+                 s->tx.tone_duration);
+        s->rx.received_event = V34_EVENT_NONE;
+        s->tx.tone_duration = 0;
+        info1_baud_init(s);
+        return s->tx.lastbit;
+    }
+    /*endif*/
+    if (s->rx.received_event == V34_EVENT_INFO1_BAD)
+        s->rx.received_event = V34_EVENT_NONE;
+    /*endif*/
+    s->tx.tone_duration++;
+    s->tx.lastbit.re = -s->tx.lastbit.re;
+    return s->tx.lastbit;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void infomarksa_baud_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - infomarksa_baud_init()\n");
+    s->tx.tone_duration = 0;
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.stage = V34_TX_STAGE_INFOMARKSA;
+    s->tx.current_getbaud = get_infomarksa_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_second_a_baud(v34_state_t *s)
 {
     switch (s->tx.stage)
@@ -3320,21 +3380,46 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
         /*endif*/
         return zero;
     case V34_TX_STAGE_PRE_INFO1_A:
-        //if (s->rx.received_event == V34_EVENT_INFO1_OK)
-        if (++s->tx.tone_duration == 180)
+        /* V.34/11.2.1.2.8-9: transmit Tone A and condition the receiver to
+           receive INFO1c.  Only *after* receiving INFO1c may we send INFO1a
+           and proceed to Phase 3.  This used to fire off a fixed 180 baud
+           (300 ms) timer with the INFO1c check commented out, so we sent
+           INFO1a while the call modem was still in the INFO exchange, then
+           left for Phase 3 without ever reading its line-probe results. */
+        if (s->rx.received_event == V34_EVENT_INFO1_OK)
         {
-            /* INFO1c received - send INFO1a */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - INFO1c received after %d bauds of Tone A, sending INFO1a (11.2.1.2.9)\n",
+                     s->tx.tone_duration);
+            s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 0;
             info1_baud_init(s);
         }
-        else if (s->rx.received_event == V34_EVENT_INFO1_BAD
-                 ||
-                 s->rx.received_event == V34_EVENT_TONE_SEEN)
+        else
         {
-        }
-        else if (s->tx.tone_duration == 1200)
-        {
-            /* Timeout, as we have not received INFO1c after 2s */
+            if (s->rx.received_event == V34_EVENT_INFO1_BAD)
+            {
+                /* A corrupt INFO1c is not a handshake failure - the call
+                   modem repeats it.  Drop the event so it cannot be mistaken
+                   for a later one, and keep waiting. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - INFO1c received with bad CRC at baud %d; continuing to wait\n",
+                         s->tx.tone_duration);
+                s->rx.received_event = V34_EVENT_NONE;
+            }
+            /*endif*/
+            if (++s->tx.tone_duration >= info1c_wait_bauds(s))
+            {
+                /* V.34/11.2.2.2.4: no INFO1c within 2000 ms + two round trip
+                   delays.  Of the two permitted responses (retrain per
+                   11.5.2.1, or INFOMARKSa) take INFOMARKSa, which keeps the
+                   handshake alive and lets the call modem resend INFO1c. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - no INFO1c within %d bauds; sending INFOMARKSa (11.2.2.2.4)\n",
+                         s->tx.tone_duration);
+                infomarksa_baud_init(s);
+            }
+            /*endif*/
         }
         /*endif*/
         break;
