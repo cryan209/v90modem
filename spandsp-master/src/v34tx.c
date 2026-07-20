@@ -226,18 +226,129 @@ static const char *v34_modulation_to_str(int mod)
     }
 }
 
+/* Split a sample count into whole milliseconds plus a tenths digit, so stage
+   timings can be logged at sub-millisecond resolution without pulling floating
+   point into the log path. Done as two divisions rather than samples*10/8 so
+   the intermediate cannot overflow on a long-running state. */
+static void samples_to_ms_tenths(span_sample_timer_t samples, int *ms, int *tenths)
+{
+    if (samples < 0)
+        samples = 0;
+    /*endif*/
+    *ms = samples/(SAMPLE_RATE/1000);
+    *tenths = ((samples%(SAMPLE_RATE/1000))*10)/(SAMPLE_RATE/1000);
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Log every TX stage transition with the time actually spent in the stage being
+   left, plus the elapsed time since Phase 2 began. Phase 2 is a chain of
+   "exit on event, else exit on timeout" waits, so the interesting question on a
+   slow handshake is which stages ran to their full timeout. Reading that off the
+   raw stage log means hand-converting baud counts, so report it directly.
+
+   sample_offset lets a caller inside a modulator report the position within the
+   block it is currently filling, since s->tx.sample_time is only advanced once
+   the whole block has been generated. */
+static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
+{
+    span_sample_timer_t now;
+    span_sample_timer_t dwell;
+    const char *role;
+    int dwell_ms;
+    int dwell_tenths;
+    int total_ms;
+    int total_tenths;
+
+    if (s->tx.last_logged_stage == s->tx.stage
+        &&  s->tx.last_logged_modulator == s->tx.current_modulator)
+    {
+        return;
+    }
+    /*endif*/
+    now = s->tx.sample_time + sample_offset;
+    /* Name the side in the message rather than relying on the log tag: this
+       logging module deliberately prints tag/protocol as pointers rather than
+       dereferencing them, so a tag would not be readable. Coupled tests run
+       both modems into one log stream and need them told apart. */
+    role = s->tx.calling_party ? "analogue" : "digital";
+
+    /* Phase 2 starts at the first INFO0 (or the preamble ahead of it) and ends
+       when we hand off to the Phase 3 S/!S sequence. A retrain drops back to
+       INFO0, which re-arms the window for a fresh measurement. */
+    if (s->tx.phase2_entry_sample_time < 0
+        &&
+        (s->tx.stage == V34_TX_STAGE_INITIAL_PREAMBLE
+         ||
+         s->tx.stage == V34_TX_STAGE_INFO0))
+    {
+        s->tx.phase2_entry_sample_time = now;
+    }
+    /*endif*/
+
+    /* Time the (stage, modulator) pair rather than the stage alone. The L1/L2
+       probe swaps the modulator without touching the stage, so timing stage
+       changes only would silently fold the whole ~560 ms probe into whichever
+       stage happened to launch it. The modulator is also what is actually
+       audible, which is the thing being diagnosed. */
+    if (s->tx.stage_entry_sample_time >= 0)
+    {
+        dwell = now - s->tx.stage_entry_sample_time;
+        samples_to_ms_tenths(dwell, &dwell_ms, &dwell_tenths);
+        if (s->tx.phase2_entry_sample_time >= 0)
+        {
+            samples_to_ms_tenths(now - s->tx.phase2_entry_sample_time,
+                                 &total_ms,
+                                 &total_tenths);
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - timing [%s]: %s/%s took %d.%01d ms (phase 2 t=%d.%01d ms)\n",
+                     role,
+                     v34_tx_stage_to_str(s->tx.last_logged_stage),
+                     v34_modulation_to_str(s->tx.last_logged_modulator),
+                     dwell_ms, dwell_tenths,
+                     total_ms, total_tenths);
+        }
+        else
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - timing [%s]: %s/%s took %d.%01d ms\n",
+                     role,
+                     v34_tx_stage_to_str(s->tx.last_logged_stage),
+                     v34_modulation_to_str(s->tx.last_logged_modulator),
+                     dwell_ms, dwell_tenths);
+        }
+        /*endif*/
+    }
+    /*endif*/
+
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - [%s] stage=%s (%d) mod=%s (%d)\n",
+             role,
+             v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
+             v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator);
+
+    if (s->tx.stage == V34_TX_STAGE_FIRST_S
+        &&
+        s->tx.phase2_entry_sample_time >= 0)
+    {
+        samples_to_ms_tenths(now - s->tx.phase2_entry_sample_time,
+                             &total_ms,
+                             &total_tenths);
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - timing [%s]: Phase 2 complete in %d.%01d ms, handing off to Phase 3\n",
+                 role, total_ms, total_tenths);
+        s->tx.phase2_entry_sample_time = -1;
+    }
+    /*endif*/
+
+    s->tx.stage_entry_sample_time = now;
+    s->tx.last_logged_stage = s->tx.stage;
+    s->tx.last_logged_modulator = s->tx.current_modulator;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_tx_log_state_change(v34_state_t *s)
 {
-    if (s->tx.last_logged_stage != s->tx.stage
-        || s->tx.last_logged_modulator != s->tx.current_modulator)
-    {
-        span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - stage=%s (%d) mod=%s (%d)\n",
-                 v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
-                 v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator);
-        s->tx.last_logged_stage = s->tx.stage;
-        s->tx.last_logged_modulator = s->tx.current_modulator;
-    }
+    v34_tx_log_state_change_at(s, 0);
 }
 
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -2942,9 +3053,10 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
             s->tx.line_probe_step = 0;
             if (++s->tx.line_probe_cycles == 8)
             {
-                /* Move to the L2 stage, by dropping 6dB */
+                /* Move to the L2 stage, by dropping 6dB. No stage is recorded:
+                   s->tx.state is the trellis encoder state, not a pipeline
+                   stage -- see the note in l1_l2_signal_init(). */
                 s->tx.line_probe_scaling *= 0.5f;
-                s->tx.state = V34_TX_STAGE_L2;
             }
             else if (s->tx.line_probe_cycles == (8 + 20))
             {
@@ -3032,8 +3144,10 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
             s->tx.line_probe_step = 0;
             if (++s->tx.line_probe_cycles == 8)
             {
+                /* Drop 6dB for L2. No stage is recorded: s->tx.state is the
+                   trellis encoder state, not a pipeline stage -- see the note
+                   in l1_l2_signal_init(). */
                 s->tx.line_probe_scaling *= 0.5f;
-                s->tx.state = V34_TX_STAGE_L2;
             }
             else if (s->tx.line_probe_cycles == (8 + 20))
             {
@@ -3081,7 +3195,12 @@ static void l1_l2_signal_init(v34_state_t *s)
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
-    s->tx.state = V34_TX_STAGE_L1;
+    /* Deliberately does NOT record an L1 stage. s->tx.state is the trellis
+       encoder state (see qam_mod(): state = conv_encode_table[state][y4321]),
+       not a pipeline stage -- the two fields are one character apart. Writing
+       V34_TX_STAGE_L1 here used to corrupt the encoder for the rest of the
+       call. The probe is identified by current_modulator, which is what the
+       stage-change logging reports. */
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5099,12 +5218,18 @@ static void data_baud_init(v34_state_t *s)
     s->tx.s_bit_cnt = 0;
     s->tx.aux_bit_cnt = 0;
     s->tx.v0_pattern = 0;
-    /* Initialize precoder and trellis state for data mode */
+    /* Initialize precoder and trellis state for data mode. V.34/9.6 starts the
+       convolutional encoder from the all-zero state, so reset state/y0 here
+       rather than relying on nothing having disturbed them since v34_init() --
+       the Phase 2 line probe used to do exactly that. v34_seed_tx_data() zeroes
+       the same set for the offline harness. */
     s->tx.c.re = 0;
     s->tx.c.im = 0;
     s->tx.p.re = 0;
     s->tx.p.im = 0;
     s->tx.z = 0;
+    s->tx.y0 = 0;
+    s->tx.state = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
     s->tx.current_getbaud = get_data_baud;
@@ -5325,6 +5450,9 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
             else
             {
                 v = s->tx.current_getbaud(s);
+                /* Same per-baud stage-change check as the CC modulator, so the
+                   Phase 3/4 stages are timed on the same basis. */
+                v34_tx_log_state_change_at(s, sample);
             }
             /*endif*/
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
@@ -5429,6 +5557,12 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
             else
             {
                 v = s->tx.current_getbaud(s);
+                /* The Phase 2 getbaud handlers change stage at baud boundaries,
+                   and several of those stages (the 10 ms !B windows) are shorter
+                   than one v34_tx() block. Sampling for a stage change only at
+                   the top of v34_tx() would drop them from the timeline, so
+                   check here too, at the exact baud where the change happened. */
+                v34_tx_log_state_change_at(s, sample);
             }
             /*endif*/
             s->tx.rrc_filter_re[s->tx.rrc_filter_step] = v.re;
@@ -6043,6 +6177,11 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
     s->tx.v90_phase2_info0_recovery_loops = 0;
+    /* -1, not 0, so stage-change logging can tell "not started yet" from
+       "started at sample 0" and does not report a Phase 2 elapsed time before
+       Phase 2 has actually begun. */
+    s->tx.stage_entry_sample_time = -1;
+    s->tx.phase2_entry_sample_time = -1;
 
     s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
     if (s->calling_party && s->tx.v90_mode)
