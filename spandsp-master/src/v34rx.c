@@ -3505,31 +3505,40 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             s->persistence2 = 0;
         /*endif*/
         /* We have a reversal, but we should only recognise it if it has been
-           a little while since the last one */
+           a little while since the last one.
+
+           Progress is counted in phase2_reversal_count, which only this
+           detector writes. It used to be inferred from received_event, but
+           v34tx.c clears that field in 39 places as it consumes events, so a
+           reversal sequence could silently reset between reversals: live
+           captures show runs with 10 "reversal 1" and 2 "reversal 2" that
+           never reach the third and therefore never advance to INFO1A, which
+           is the "aborting after 6 INFO1a timeouts" failure. received_event is
+           still published for consumers -- it is just no longer the memory. */
         if (s->persistence2 > 20)
         {
-            switch (s->received_event)
+            /* L2 having been seen means Phase 2 is already past the first two
+               reversals, whatever the counter says. */
+            if (s->received_event == V34_EVENT_L2_SEEN  &&  s->phase2_reversal_count < 2)
+                s->phase2_reversal_count = 2;
+            /*endif*/
+            if (s->phase2_reversal_count < 3)
+                s->phase2_reversal_count++;
+            /*endif*/
+            s->tone_ab_hop_time = s->sample_time + time_offset;
+            switch (s->phase2_reversal_count)
             {
-            case V34_EVENT_REVERSAL_1:
-            case V34_EVENT_TONE_SEEN:
-                if (s->received_event == V34_EVENT_REVERSAL_1)
-                {
-                    span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
-                    s->tone_ab_hop_time = s->sample_time + time_offset;
-                    s->received_event = V34_EVENT_REVERSAL_2;
-                    l1_l2_analysis_init(s);
-                }
-                else
-                {
-                    span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
-                    s->tone_ab_hop_time = s->sample_time + time_offset;
-                    s->received_event = V34_EVENT_REVERSAL_1;
-                }
+            case 1:
+                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
+                s->received_event = V34_EVENT_REVERSAL_1;
                 break;
-            case V34_EVENT_REVERSAL_2:
-            case V34_EVENT_L2_SEEN:
+            case 2:
+                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
+                s->received_event = V34_EVENT_REVERSAL_2;
+                l1_l2_analysis_init(s);
+                break;
+            default:
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone A\n");
-                s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_3;
                 if (s->v90_mode && s->calling_party)
                 {
@@ -3547,11 +3556,6 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     s->stage = V34_RX_STAGE_INFO1A;
                 }
                 /*endif*/
-                break;
-            default:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
-                s->tone_ab_hop_time = s->sample_time + time_offset;
-                s->received_event = V34_EVENT_REVERSAL_1;
                 break;
             }
             /*endswitch*/
@@ -3760,6 +3764,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                instead of falling back to Tone B on every repeated
                                INFO0a. */
                             s->stage = V34_RX_STAGE_TONE_A;
+                            s->phase2_reversal_count = 0;   /* fresh Phase 2 attempt */
                             s->persistence1 = 0;
                             s->persistence2 = 0;
                         }
@@ -4813,10 +4818,19 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
                 s->received_event = V34_EVENT_L2_SEEN;
                 s->current_demodulator = V34_MODULATION_TONES;
                 if (s->calling_party)
+                {
                     s->stage = V34_RX_STAGE_TONE_A;
+                    /* L2 has been seen, so Phase 2 is demonstrably past the
+                       first two reversals. Seed the durable counter with that
+                       rather than zeroing it: received_event carries the same
+                       fact today, but v34tx.c clears it as it consumes events,
+                       which is exactly how this progress used to get lost. */
+                    s->phase2_reversal_count = 2;
+                }
                 else if (s->v90_mode)
                 {
-                    s->stage = V34_RX_STAGE_TONE_A;  /* V.90 §9.2.1.1.7: detect Tone A before INFO1d */
+                    s->stage = V34_RX_STAGE_TONE_A;
+                    s->phase2_reversal_count = 2;   /* see above: L2 seen */
                     s->persistence1 = 0;
                     s->persistence2 = 0;
                 }
@@ -9312,6 +9326,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase3_ja_capture_hyp_raw, 0, sizeof(s->rx.phase3_ja_capture_hyp_raw));
     memset(s->rx.phase3_ja_capture_hyp_raw_len, 0, sizeof(s->rx.phase3_ja_capture_hyp_raw_len));
     phase3_trn_hyp_reset(&s->rx);
+    s->rx.phase2_reversal_count = 0;
     s->rx.phase3_trn_mag_sum = 0.0f;
     s->rx.phase3_trn_mag_count = 0;
     s->rx.phase4_j_seen = 0;
