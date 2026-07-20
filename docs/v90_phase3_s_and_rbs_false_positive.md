@@ -4,13 +4,14 @@ Investigation notes, 2026-07-20. Covers the long-standing `NO S RECEIVED` failur
 against the softmodem interop rig, the spec reading that reframes it, and the
 resampler defect that turned out to be the actual blocker.
 
-Status: the *failure* is well characterised and reproducible (sections 1-5, 8).
-The *mechanism* proposed in section 6 has been *disproved* (section 6a), and the
-transport has since been *exonerated by direct measurement* (section 6b): the
-signal arriving at the far-end DSP is recoverable to 1% per-DS0-phase uniformity,
-while the peer computes 3.56x from it. **The spread is generated inside the peer's
-own DSP.** The fix built on the old mechanism (zero-order hold + loop lowpass) is a
-measured regression (section 8); `DM_RESAMPLER=sinc` is the working default.
+Status: **the RBS false-positive is solved** -- `ME_V90_SD_DELAY_MS=1` removes it
+reproducibly (section 6c). It was never a signal-quality problem: the transport is
+clean to 1% (section 6b) and the mechanism first proposed in section 6 is disproved
+(section 6a). The zero-order-hold change built on that old mechanism is a measured
+regression (section 8); `DM_RESAMPLER=sinc` remains the working default.
+
+**Still blocked**: with the abort gone, the peer stays in V.90 but does not lock Sd
+(`Error Energy` ~0) and retrains, so the analogue S still never arrives.
 
 ## 1. The S signals are Phase 3, not Phase 4
 
@@ -250,6 +251,47 @@ our own stale Phase 3/4 audio landing over the peer's retrain and Phase 1. The
 energy-based retrain detector in section 3 reduces that pollution, so it is worth
 re-measuring the per-phase spread on calls where `rtd` comes out sane.
 
+## 6c. SOLVED: a 1 ms pre-Sd delay removes the false-positive
+
+Section 6b pointed at the peer's own timing rather than the signal. Tested directly
+with the existing `ME_V90_SD_DELAY_MS` knob (V.90 9.3.1.3 permits the digital modem
+to wait before starting Sd). One millisecond is 8 samples at 8 kHz.
+
+| `ME_V90_SD_DELAY_MS` | peer's `initail var (Trn1)` | ratio | `AltRbsVarThresh` | outcome |
+|---|---|---|---|---|
+| 0 (default) | 819254 981294 1510889 1025434 1141075 1241807 | **3.56** | 1412991 | `alternate rbs false detection`, `drop to V34 requested`, `DP is 34` |
+| **1** | 159232 161628 154588 160067 163429 149694 | **1.09** | 228212 | no false detection, **no drop**, `DP is 90` |
+
+Both rows reproduce **bit-identically** across repeated calls, so this is
+deterministic, not run-to-run variance -- which has been the main hazard in every
+other measurement here.
+
+With the delay applied the spread collapses to 1.09 and every value falls well
+under the threshold, so the detector no longer fires and **the peer stops
+abandoning V.90**. That removes the blocker described in section 4.
+
+Note the absolute variances also drop about 6x. Only the ratio matters for the RBS
+test, but the magnitude change is a reminder that this knob is shifting how the peer
+acquires timing, not how much signal it receives.
+
+The specific prediction that motivated the test -- that a shift of 8 DS0 intervals
+would *rotate* the per-phase array by `8 mod 6 = 2` positions -- was **wrong**. The
+array flattens instead. Eight samples is an integer number of DS0 intervals and
+changes no sub-sample alignment; what it changes is when Sd arrives relative to the
+peer's rtd-derived search window. So the sensitivity is in the peer's timing
+*acquisition*, not in DS0 phase mapping.
+
+### What this does not fix
+
+The peer stays in V.90 but still reports `Error Energy` of ~0 through its Sd wait
+and then `retrain requested` with `DP is 90`. Our side runs a full clean Phase 3 --
+Ja descriptor parsed, Sd, S-bar, TRN1d, Jd -- and still times out with no S.
+
+The prime suspect remains `rtd = 13592`, which recurs on every call. That is about
+1.7 s of claimed round-trip delay, and V.90 uses rtd to place the Sd search window,
+so a value that wrong plausibly prevents Sd lock regardless of any millisecond-scale
+transmit delay.
+
 ## 7. Fix: model the physical path instead of ideal reconstruction
 
 The interpolator implements mathematically ideal reconstruction, which is
@@ -415,20 +457,26 @@ V.90 mode — not a live path.
 
 ## 12. Next steps
 
-1. **Correlate `rtd` with the spread.** Capture several calls recording both the
-   peer's `rtd`/`Timing Offset` and its `initail var (Trn1)` array. If the spread
-   tracks a bad `rtd`, the RBS false-positive is a downstream symptom of the
-   bulk-delay problem and should be attacked there, not in the signal path.
-2. Establish whether we can influence the peer's timing estimate at all. It derives
-   `rtd` during Phase 2; prior notes attribute the garbage value to our stale
-   Phase 3/4 audio overlapping its retrain. The section 3 energy detector should
-   reduce that -- verify it does, on calls that reach the detector.
-3. Keep `DM_RESAMPLER=sinc`. ZOH is measurably worse and its rationale is gone.
-4. Understand `AltRbsVarThresh`. It moved between runs (680398, then 1412991),
-   so it is derived from the data rather than fixed; without knowing how, we cannot
-   predict what would pass.
+1. **Decide whether `ME_V90_SD_DELAY_MS=1` should become the default.** It removes
+   the V.90 abort reproducibly. Confirm against a second peer implementation before
+   changing the default, since the value may be tuned to this one.
+2. **Attack `rtd = 13592`.** It recurs on every call and is the prime suspect for
+   the remaining Sd-lock failure. Prior notes attribute the bad bulk-delay estimate
+   to our own stale Phase 3/4 audio landing over the peer's retrain and Phase 1;
+   the section 3 energy detector should reduce that, so check whether rtd improves
+   on calls where it fires.
+3. Sweep `ME_V90_SD_DELAY_MS` further (2-10 ms) to see whether any value also
+   restores Sd lock, not just the variance ratio.
+4. Keep `DM_RESAMPLER=sinc`. ZOH is measurably worse and its rationale is gone.
 5. Only then revisit the DIL-termination issue: `v90.c` `V90_RX_EVENT_S` currently
    refuses the peer's S during DIL until a full cycle completes. At N=144 that
    cycle is longer than the 5000 ms 9.3.2.10 allows the peer, so the genuine
    Phase-4 trigger is logged as "ignored early far-end S". 9.3.1.6 wants the
    current *segment* completed, not the cycle.
+
+## 13. Unrelated defect found in passing
+
+`sip_v90_modem` segfaults on exit: `main` -> `pjmedia_aud_subsys_shutdown` ->
+`pjmedia_aud_driver_deinit`, `EXC_BAD_ACCESS` at address 0x8. It happens after the
+call has finished and does not affect results, and crash reports predate the changes
+in this document, so it is pre-existing. Worth fixing separately.
