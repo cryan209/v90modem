@@ -226,6 +226,57 @@ static const char *v34_modulation_to_str(int mod)
     }
 }
 
+/* How long V90_WAIT_TONE_A_REV waits for the peer's Tone A reversal before
+   invoking the 9.2.1.2.4 recovery and reversing Tone B anyway, in 600-baud CC
+   symbols (600 = 1000 ms).
+
+   Measured against a live SmartLink peer: while we sit here, the peer is parked
+   in its own RX_PHASE1_ANS waiting for *our* Tone B reversal, and it advances
+   ~320 ms after our recovery fires. Both sides wait; this timeout is what breaks
+   it, so its length is ~1 s of dead air in the middle of every Phase 2. The peer
+   had already entered RX_PHASE1_ANS before we entered this stage, so a shorter
+   value should be safe.
+
+   Swept against that peer, Phase 2 total: 600 -> 4580 ms (4 calls), 200 ->
+   3920 ms (2 calls), 100 -> 3740 ms (1 call). 200 is the default because it
+   takes 660 ms of the ~840 ms available while still leaving roughly 5x margin
+   over the 40+10 ms reversal windows of 9.2.1.1.6, so a genuine late reversal
+   is still honoured; 100 bought only 180 ms more for noticeably less margin.
+   The peer reached INFODONE and the Ja descriptor still decoded at both values.
+
+   Overridable to allow sweeping against a real peer without a rebuild, and to
+   restore the old 1 s behaviour if some peer needs it. Do NOT retune this on
+   harness evidence alone -- the loopback harness and the rig have already
+   disagreed in opposite directions on Phase 2 sequencing. Reversing too early
+   is a known failure mode (see the comment in the stage itself: committing on
+   mere tone presence puts our reversal inside the peer's Tone A window and it
+   retrains), so this bounds a wait, it does not remove one. */
+static int v90_tone_a_rev_timeout_bauds(void)
+{
+    static int timeout_bauds = 200;
+    static int initialized = 0;
+
+    if (!initialized)
+    {
+        const char *value = getenv("ME_V90_TONE_A_REV_BAUDS");
+
+        if (value  &&  value[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+
+            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 0)
+                timeout_bauds = (int) parsed;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return timeout_bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* True for any Tone A/B phase reversal, whatever its position in the sequence.
 
    The receiver numbers reversals by sequence position: v34rx.c keeps
@@ -2520,7 +2571,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         ++s->tx.tone_duration;
         if (v34_event_is_reversal(s->rx.received_event)
             ||
-            s->tx.tone_duration >= 600)
+            s->tx.tone_duration >= v90_tone_a_rev_timeout_bauds())
         {
             /* V.90 9.2.1.1.6: the B reversal must be timed from the RECEIVED
                Tone A reversal edge.  The analogue modem sends only 50 ms of
