@@ -3456,6 +3456,15 @@ static int tone_a_carrier_present(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int info0_target_bits(v34_rx_state_t *s)
+{
+    /* Payload+CRC length of an INFO0 sequence, excluding the sync code, the
+       fill bits and the postamble.  Matches the value v34_rx_restart() picks
+       when the receiver is first conditioned for INFO0. */
+    return (s->duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+}
+/*- End of function --------------------------------------------------------*/
+
 static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 {
     int info_search_enabled;
@@ -3695,6 +3704,32 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             s->info_buf[(s->bit_count >> 3) - 1] = bit_reverse8(s->bitstream & 0xFF);
         /*endif*/
         s->crc = crc_itu16_bits(bit, 1, s->crc);
+        /* V.34/11.2.2.1.1: while we sit in the INFO1c wait the call modem may
+           instead be repeatedly sending INFO0c, which is shorter than INFO1c.
+           Without this the repeats are read as malformed 93 bit frames (the
+           first bytes match the genuine INFO0c, then we run off the end and
+           the CRC always fails), the recovery is never noticed, and both
+           sides wait for each other until the peer's train timeout. Test the
+           CRC as we pass the INFO0 length so a repeat is recognised. */
+        if (!s->v90_mode
+            &&  !s->calling_party
+            &&  s->stage == V34_RX_STAGE_INFO1C
+            &&  s->bit_count == info0_target_bits(s)
+            &&  s->crc == 0)
+        {
+            int tail = s->bit_count & 0x07;
+
+            if (tail != 0)
+                s->info_buf[(s->bit_count >> 3)] = bit_reverse8(s->bitstream & 0xFF);
+            /*endif*/
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - repeated INFO0c during INFO1c wait (11.2.2.1.1 recovery)\n");
+            process_rx_info0(s, s->info_buf);
+            s->received_event = V34_EVENT_INFO0_OK;
+            s->bit_count = 0;
+            return;
+        }
+        /*endif*/
         if (s->bit_count++ == s->target_bits)
         {
             /* Flush any remaining bits in the last partial byte into info_buf.

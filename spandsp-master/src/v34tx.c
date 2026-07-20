@@ -2433,7 +2433,24 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_A:
         /* Continue sending pure tone until we see an INFO0c message (V.34/11.2.1.2.3) */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        if (s->tx.phase2_reranging)
+        {
+            /* Re-ranging out of the §11.2.2.1.1 INFO0 recovery.  The call
+               modem accepted our acknowledged INFO0a, stopped repeating
+               INFO0c and is now transmitting Tone B waiting for our reversal,
+               so waiting for another INFO0c here would deadlock both sides.
+               §11.2.1.2.3 gates this on Tone B being detected and Tone A
+               having run for 50 ms, both of which already hold: INITIAL_A
+               served the 50 ms and the recovery handshake established that
+               the peer is in Tone B. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: re-ranging after INFO0 recovery, sending !A without waiting for INFO0c\n");
+            s->tx.phase2_reranging = false;
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+        }
+        else if (s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A\n");
             /* First reversal seen - send a phase reversal back */
@@ -3088,6 +3105,27 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
             {
                 s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
                 s->tx.stage = V34_TX_STAGE_INITIAL_A;
+                if (s->rx.stage == V34_RX_STAGE_INFO1C)
+                {
+                    /* Re-entering the ranging sequence from the §11.2.2.1.1
+                       INFO0 recovery.  The receiver is still conditioned for
+                       INFO1c, so it would never report the Tone B reversal
+                       that FIRST_NOT_A waits on and we would hold Tone A
+                       forever.  §11.2.1.2.2: condition the receiver to detect
+                       Tone B and receive INFO0c.  Restricted to the recovery
+                       case so the ordinary first pass, where the receiver is
+                       already conditioned coming out of INFO0, is untouched. */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - re-ranging after INFO0 recovery; conditioning RX for Tone B + INFO0 (11.2.1.2.2)\n");
+                    s->rx.stage = V34_RX_STAGE_TONE_B;
+                    s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+                    s->rx.bit_count = 0;
+                    s->rx.persistence1 = 0;
+                    s->rx.persistence2 = 0;
+                    s->rx.received_event = V34_EVENT_NONE;
+                    s->tx.phase2_reranging = true;
+                }
+                /*endif*/
             }
         }
         /*endif*/
@@ -3321,6 +3359,19 @@ static complex_sig_t get_infomarksa_baud(v34_state_t *s)
         return s->tx.lastbit;
     }
     /*endif*/
+    if (s->rx.received_event == V34_EVENT_INFO0_OK)
+    {
+        /* Same §11.2.2.1.1 recovery as in PRE_INFO1_A - the call modem is
+           repeating INFO0c and needs an acknowledged INFO0a to move on. */
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - repeated INFO0c during INFOMARKSa; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s->tx.info0_acknowledgement = true;
+        s->tx.tone_duration = 0;
+        info0_baud_init(s);
+        return s->tx.lastbit;
+    }
+    /*endif*/
     if (s->rx.received_event == V34_EVENT_INFO1_BAD)
         s->rx.received_event = V34_EVENT_NONE;
     /*endif*/
@@ -3394,6 +3445,21 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
             s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 0;
             info1_baud_init(s);
+        }
+        else if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            /* The call modem is repeating INFO0c instead of sending INFO1c,
+               i.e. it is in the §11.2.2.1.1 recovery loop.  It leaves that
+               loop on receiving INFO0a with bit 28 set, so acknowledge and
+               resend.  info0_baud_init() parks us in INFO0_RETRY, whose
+               existing handler returns to Tone A when the next INFO0c
+               arrives - §11.2.2.1.1's "proceed according to 11.2.1.1.3". */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - repeated INFO0c during INFO1c wait; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
+            s->rx.received_event = V34_EVENT_NONE;
+            s->tx.info0_acknowledgement = true;
+            s->tx.tone_duration = 0;
+            info0_baud_init(s);
         }
         else
         {
