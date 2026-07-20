@@ -2745,7 +2745,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
             if (g_state == ME_TRAINING) {
                 int rate = v34_get_current_bit_rate(g_v34);
                 if (g_mod == ME_MOD_V90) {
-                    if (g_v90 && (v90_training_complete(g_v90) || v90_using_internal_v34_tx(g_v90))) {
+                    if (g_v90 && v90_training_complete(g_v90)) {
                         int downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
 
                         if (downstream_rate <= 0)
@@ -4044,7 +4044,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         int pos = 0;
 
         prepare_v90_phase3_locked();
-        if (!g_v90_phase3_started || !g_v90 || v90_using_internal_v34_tx(g_v90))
+        if (!g_v90_phase3_started || !g_v90)
             return false;
 
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
@@ -4175,19 +4175,15 @@ void me_tx_audio(int16_t *amp, int len)
                 prepare_v90_phase3_locked();
 
                 if (g_v90_phase3_started && g_v90) {
-                    if (v90_using_internal_v34_tx(g_v90)) {
-                        v34_tx(g_v34, amp, len);
-                    } else {
-                        /* V.90 Phase 3: generate PCM codewords for actual RTP output */
-                        v90_phase3_tx(g_v90, amp, len);
-                        /* Run v34_tx into discard but protect RX state from being
-                           overwritten by V.34 TX Phase 3/4 transitions */
-                        int16_t discard[len];
-                        v34_tx(g_v34, discard, len);
-                        /* V.34 TX may have clobbered RX stage — don't let it;
-                           the V.90 RX flow controls its own stage transitions. */
-                        /* (RX stage restoration handled by v34rx directly) */
-                    }
+                    /* V.90 Phase 3: generate PCM codewords for actual RTP output */
+                    v90_phase3_tx(g_v90, amp, len);
+                    /* Run v34_tx into discard but protect RX state from being
+                       overwritten by V.34 TX Phase 3/4 transitions */
+                    int16_t discard[len];
+                    v34_tx(g_v34, discard, len);
+                    /* V.34 TX may have clobbered RX stage — don't let it;
+                       the V.90 RX flow controls its own stage transitions. */
+                    /* (RX stage restoration handled by v34rx directly) */
                 } else if (g_mod == ME_MOD_V90
                            && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
                     /* tx_stage only reaches FIRST_S after SpanDSP has accepted

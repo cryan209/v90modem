@@ -717,8 +717,7 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
         }
 
         /* E. Exit conditions. */
-        if (v90_using_internal_v34_tx(digital)
-            || v90_training_complete(digital)) {
+        if (v90_training_complete(digital)) {
             ok = true;
             break;
         }
