@@ -100,3 +100,4 @@ vpcm_decode
 vpcm_encode
 left_neg_test.wav
 /artifacts/v90-hardware/
+tools/__pycache__/v90_pad_gain.cpython-313.pyc
