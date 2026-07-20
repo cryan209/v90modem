@@ -1049,6 +1049,12 @@ typedef struct
 
     /*! \brief Phase 4 S signal detection: count of data_bits=2 in sliding window */
     int s_detect_count;
+    /*! \brief How many Tone A phase reversals have been recognised so far.
+               Owned solely by the Tone A detector. This progress used to live
+               in received_event, which the TX state machine clears in 39
+               places, so a reversal sequence could be reset to zero between
+               reversals and never reach the third. */
+    int phase2_reversal_count;
     /*! \brief Phase 4 S signal detection: 32-bit circular window of data_bits==2 flags */
     uint32_t s_window;
 
