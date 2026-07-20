@@ -92,6 +92,40 @@ static int v90_min_jd_symbols(void)
     return (value && *value && strcmp(value, "0") != 0) ? 10000 : 0;
 }
 
+/* How long Jd may run without the analogue modem's S, in Jd symbols.
+ *
+ * §9.3.1.5 gives the digital modem 5100 ms plus a round-trip delay measured
+ * from the *start of TRN1d* before it must retrain.  Jd begins exactly
+ * V90_TRN1D_LEN symbols after that reference point, so the Jd-relative budget
+ * is 5100 ms - TRN1d + rtd.
+ *
+ * This matters because the peer is entitled to take nearly all of it: §9.3.2.7
+ * lets the analogue modem wait up to 5000 ms from the start of its post-Ja
+ * silence before it begins transmitting S.  The previous defaults here (12000
+ * symbols = 1.5 s to resync, 19296 = 2.4 s to auto-terminate) expired roughly
+ * 3 s before a *compliant* peer's own deadline, so we tore Phase 3 down or
+ * pushed on to J'd/DIL while the peer was still legitimately silent and
+ * counting.  That is the "NO S RECEIVED" seen on every live d-modem call. */
+static int v90_jd_s_wait_symbols(void)
+{
+    const char *value;
+    char *end;
+    long parsed;
+    /* §9.3.1.5 does not bound the "round-trip delay" term, and we do not
+     * measure rtd anywhere yet.  The d-modem rig reports rtd of 484-1808
+     * samples; 500 ms is comfortably above that and still spec-legal, since
+     * the allowance only ever makes us more patient than the minimum. */
+    int rtd_allowance = 4000;
+
+    value = getenv("ME_V90_JD_RTD_SYMBOLS");
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            rtd_allowance = (int) parsed;
+    }
+    return 5100*8 - V90_TRN1D_LEN + rtd_allowance;
+}
+
 static int v90_jd_autoterminate_symbols(void)
 {
     const char *value;
@@ -104,8 +138,13 @@ static int v90_jd_autoterminate_symbols(void)
         if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
             return (int) parsed;
     }
+    /* Interop fallback: push on to J'd/DIL rather than retraining, for peers
+     * whose S we cannot detect.  Only ever after the full §9.3.1.5 wait --
+     * cutting it short is what stopped the peer from ever getting to send S. */
     value = getenv("ME_V90_J_LOOKAHEAD_BITS");
-    return (value && *value && strcmp(value, "0") != 0) ? 19296 : 0;
+    return (value && *value && strcmp(value, "0") != 0)
+           ? v90_jd_s_wait_symbols()
+           : 0;
 }
 
 /* Jd' is exactly 12 symbols in V.90 §8.4.3.  Keep that interoperable
@@ -159,8 +198,14 @@ static int v90_dil_autoterminate_cycles(void)
  * estimate from wild swings (2440 then 13112 samples) to a stable ~0.
  * The engine detects the JD -> WAIT_JA transition and restarts its V.34
  * control-channel state, so the default protects the SmartLink retrain path.
- * One and a half seconds is comfortably longer than the normal Jd-to-S
- * response, while avoiding a stale PCM transmitter over the peer's retrain. */
+ *
+ * The window is the §9.3.1.5 S deadline, not a shorter guess.  It was 12000
+ * symbols (1.5 s), which cannot distinguish "the peer retrained" from "the
+ * peer is silent because §9.3.2.4 told it to be" -- and the latter is the
+ * normal case for the whole Jd wait.  A peer that really did retrain now costs
+ * us the full deadline before we resync; the durable fix is to notice energy
+ * returning as something other than S, since §9.3.2.4/§9.3.2.9 make silence
+ * here expected rather than diagnostic. */
 static int v90_jd_resync_symbols(void)
 {
     const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
@@ -172,7 +217,7 @@ static int v90_jd_resync_symbols(void)
         if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
             return (int) parsed;
     }
-    return 12000;
+    return v90_jd_s_wait_symbols();
 }
 
 /* Milliseconds of silence to hold after detecting Ja before starting to
@@ -2505,16 +2550,27 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
             s->sample_count++;
-            /* Interop resync: Jd is meant to run until the analogue modem
-             * detects our Sd->S-bar transition and answers with S.  If no S
-             * arrives within ~1 s, the peer did not lock our Sd and will
-             * retrain.  Continuing to transmit Jd (and then Phase 4) here
-             * pours a modem-like signal over the peer's fresh Phase 1/2,
-             * corrupting its bulk-delay/RTD estimate so its next Sd search
-             * window is mis-placed.  Instead fall back to the silent WAIT_JA
+            /* Jd runs until the analogue modem answers our Sd->S-bar
+             * transition with S (§9.3.1.5).  Both expiries below are the same
+             * §9.3.1.5 deadline by default, so check the interop fallback
+             * first: pushing on to J'd/DIL is strictly more useful than tearing
+             * Phase 3 down, and if the fallback is disabled the resync still
+             * fires on the same symbol. */
+            if (!s->jd_terminate_requested
+                && v90_jd_autoterminate_symbols() > 0
+                && s->sample_count >= v90_jd_autoterminate_symbols()) {
+                fprintf(stderr,
+                        "[V90] Phase 3: Jd interop timeout after %d symbols, terminating at the next frame boundary\n",
+                        s->sample_count);
+                s->jd_terminate_requested = true;
+            }
+            /* Interop resync: with no S and no fallback, the peer did not lock
+             * our Sd and will retrain.  Continuing to transmit Jd (and then
+             * Phase 4) here pours a modem-like signal over the peer's fresh
+             * Phase 1/2, corrupting its bulk-delay/RTD estimate so its next Sd
+             * search window is mis-placed.  Fall back to the silent WAIT_JA
              * state, re-arming the Ja detector so we re-emit Sd cleanly when
-             * the peer next reaches Ja.  Bounded by the same env knob used
-             * elsewhere; default 8000 symbols (1 s). */
+             * the peer next reaches Ja. */
             if (!s->jd_terminate_requested
                 && v90_jd_resync_symbols() > 0
                 && s->sample_count >= v90_jd_resync_symbols()) {
@@ -2528,14 +2584,6 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_terminate_requested = false;
                 s->jd_terminated_by_s = false;
                 return v90_pcm_idle(s->law);
-            }
-            if (!s->jd_terminate_requested
-                && v90_jd_autoterminate_symbols() > 0
-                && s->sample_count >= v90_jd_autoterminate_symbols()) {
-                fprintf(stderr,
-                        "[V90] Phase 3: Jd interop timeout after %d symbols, terminating at the next frame boundary\n",
-                        s->sample_count);
-                s->jd_terminate_requested = true;
             }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
                 /* Say which one actually terminated Jd.  This used to print
