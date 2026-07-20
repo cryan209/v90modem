@@ -288,6 +288,12 @@ static void loop_build_kernel(void) {
 	                   "L1=%.3f headroom=%.3f (%.2f dB, %.2fx vs old 0.25)",
 	                   loop_taps, loop_fc, l1, loop_headroom,
 	                   20.0*log10(loop_headroom), loop_headroom/0.25));
+	/* Both kernels are always built, so the two lines above say nothing about
+	 * which one is actually in the signal path.  State it explicitly -- a
+	 * control run is worthless if you cannot prove the control was applied. */
+	PJ_LOG(3,(__FILE__,"ACTIVE downstream path: %s",
+	          use_zoh_loop ? "ZOH staircase + loop lowpass (DM_RESAMPLER=zoh)"
+	                       : "windowed-sinc polyphase interpolator (DM_RESAMPLER=sinc)"));
 	loop_ker_ready = 1;
 }
 
