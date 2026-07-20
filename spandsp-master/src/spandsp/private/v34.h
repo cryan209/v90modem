@@ -891,6 +891,25 @@ typedef struct
     int phase3_s_guard_samples;
     int phase3_s_hits;
     int phase3_s_event_count;
+    /* Dedicated enable for the Phase 3 S detector.  This used to be inferred
+       from phase3_j_trn16 >= 0, which is a constellation hint that doubles as
+       a "Ja already consumed" latch and is cleared to -1 from several places.
+       Any such clear silently switched the S detector off for the rest of the
+       call, and the analogue S is what terminates Jd (9.3.1.5) and DIL
+       (9.3.1.6) -- so losing it drags all of Phase 3 onto timers.  Same defect
+       class as the TRN lock (2bd09c2) and the Tone A reversal count (f90f030):
+       do not keep sequencing progress in a shared slot. */
+    bool phase3_s_detect_armed;
+    /* Set while we are transmitting Jd and the analogue modem is required to
+       be silent (§9.3.2.4 "terminate Ja and transmit silence", until §9.3.2.7
+       starts S).  Energy arriving in that window is the far end having left
+       V.90 altogether -- measured on the d-modem rig, a
+       "V90AutoDigitalImpDetector -> drop to V34 requested" abort shows up as
+       SILENCERETRAIN then Phase 1 tones, ~2 s before our Jd budget expires.
+       Not set during DIL: §9.3.2.9 lets the peer send SCR there. */
+    bool phase3_expect_silence;
+    int phase3_energy_samples;
+    bool phase3_energy_retrain_reported;
     bool phase3_s_present;
     uint32_t phase3_s_alt_window;
     int phase3_s_alt_count;

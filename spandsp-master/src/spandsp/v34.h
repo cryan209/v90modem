@@ -361,6 +361,14 @@ SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s);
    not consume Ja by advancing both halves of the modem into Phase 4. */
 SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s);
 
+/*! Tell the receiver whether the analogue modem is currently required to be
+    silent (true while we transmit Jd, per V.90 §9.3.2.4/§9.3.2.7; false during
+    DIL, where §9.3.2.9 permits SCR).  While set, sustained energy that does not
+    resolve into S is reported as a peer retrain.
+    \param s The V.34 context.
+    \param expect Non-zero while the far end must be silent. */
+SPAN_DECLARE(void) v34_v90_set_phase3_expect_silence(v34_state_t *s, int expect);
+
 /*! Copy one continuously decoded Phase 3 Ja hypothesis as unpacked bits. */
 SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
                                                int hypothesis,

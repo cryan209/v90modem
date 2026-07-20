@@ -5335,6 +5335,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                        the 4-point TRN path in this rig; pin it so the later S
                        transition remains detectable after this synthetic J. */
                     s->phase3_j_trn16 = 0;
+                    s->phase3_s_detect_armed = true;
                     s->received_event = V34_EVENT_J;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3: configured V.90 J look-ahead fired at bits=%d (ME_V90_J_LOOKAHEAD_BITS=%d, trn=4-point)\n",
@@ -5533,6 +5534,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                                           && s->phase3_j_trn16 >= 0);
                                 s->phase3_j_lock_hyp = best_h;
                                 s->phase3_j_trn16 = pat;
+                                s->phase3_s_detect_armed = true;
                                 if (!s->calling_party && !v90_ja_already_consumed)
                                 {
                                     s->received_event = V34_EVENT_J;
@@ -5766,7 +5768,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         }
 
         if ((s->calling_party || (s->v90_mode && !s->calling_party))
-            && s->phase3_j_trn16 >= 0
+            && s->phase3_s_detect_armed
             && !s->phase3_s_present
             && s->duration >= 64
             && s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
@@ -6159,6 +6161,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase3_s_alt_window = 0;
                 s->phase3_s_alt_count = 0;
                 s->phase3_s_stable_windows = 0;
+                s->phase3_s_detect_armed = false;
                 memset(s->phase3_s_ring, 0, sizeof(s->phase3_s_ring));
                 memset(s->phase3_s_mag_ring, 0, sizeof(s->phase3_s_mag_ring));
                 memset(s->phase3_s_counts, 0, sizeof(s->phase3_s_counts));
@@ -8568,6 +8571,61 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         s->phase34_retrain_reported = false;
     }
     /*endif*/
+    /* The mirror image of the check above, for the Jd wait.
+     *
+     * PHASE3_WAIT_S sits *below* PHASE3_TRAINING in the stage enum, so it is
+     * deliberately outside the silence check -- and rightly so: §9.3.2.4 makes
+     * the analogue modem silent for this whole window, so silence here is the
+     * normal case and carries no information.  What does carry information is
+     * energy: until §9.3.2.7 starts S the peer must not be transmitting at all,
+     * so sustained energy that never resolves into S means it has abandoned
+     * V.90.  Verified on the d-modem rig: its V90AutoDigitalImpDetector raises
+     * "drop to V34 requested", goes JaTXMIT -> SILENCERETRAIN, and comes back
+     * with Phase 1 tones while we still had ~2 s of Jd budget left -- which we
+     * spent transmitting Phase 3 over its fresh Phase 1, corrupting exactly the
+     * bulk-delay estimate its next attempt depends on. */
+    if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
+        &&
+        s->phase3_expect_silence
+        &&
+        !s->phase3_s_present)
+    {
+        int32_t energy_floor = (s->info_rx_carrier_ref > 0)
+                               ? s->info_rx_carrier_ref/64
+                               : 0;
+
+        for (i = 0;  i < len;  i++)
+        {
+            int32_t mag = (int32_t) amp[i]*amp[i];
+
+            if (energy_floor > 0  &&  mag >= energy_floor)
+                s->phase3_energy_samples++;
+            else
+                s->phase3_energy_samples = 0;
+            /*endif*/
+            /* 1600 samples = 200 ms.  Long enough that a burst of line noise
+               or the leading edge of a real S cannot trip it (S is confirmed
+               well inside that, and phase3_s_present gates this off), short
+               enough to stop us long before the Jd budget runs out. */
+            if (s->phase3_energy_samples >= 1600  &&  !s->phase3_energy_retrain_reported)
+            {
+                s->phase3_energy_retrain_reported = true;
+                s->received_event = V34_EVENT_PEER_RETRAIN;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: %d ms of energy during the Jd wait with no S; "
+                         "far end has left V.90, reporting peer retrain\n",
+                         s->phase3_energy_samples/8);
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    else
+    {
+        s->phase3_energy_samples = 0;
+        s->phase3_energy_retrain_reported = false;
+    }
+    /*endif*/
     /* Dump raw Phase 3 RX audio for offline analysis */
     if (phase3_rx_dump_fp && phase3_rx_dump_count < PHASE3_RX_DUMP_SAMPLES)
     {
@@ -9015,6 +9073,19 @@ SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s)
     return s ? s->rx.phase3_s_event_count : 0;
 }
 
+SPAN_DECLARE(void) v34_v90_set_phase3_expect_silence(v34_state_t *s, int expect)
+{
+    if (!s)
+        return;
+    if (s->rx.phase3_expect_silence == (bool) expect)
+        return;
+    /*endif*/
+    s->rx.phase3_expect_silence = (bool) expect;
+    s->rx.phase3_energy_samples = 0;
+    s->rx.phase3_energy_retrain_reported = false;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
 {
     if (!s)
@@ -9069,10 +9140,20 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
+    /* Arm unconditionally: this call *is* the statement that Ja has been
+       consumed and the analogue S is the next thing to expect.  It used to arm
+       only as a side effect of phase3_j_trn16 >= 0, so a call that reached Ja
+       by the energy-gap heuristic or by v90_note_ja_confirmed_by_descriptor()
+       -- neither of which runs the canonical J matcher -- left the detector off
+       whenever there was also no TRN lock.  The constellation hint below is
+       informational; the S detector does not use it. */
+    s->rx.phase3_s_detect_armed = true;
 
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90: analogue Ja consumed; armed clean Phase 3 S detector (trn=%s)\n",
-             s->rx.phase3_j_trn16 ? "16-point" : "4-point");
+             (s->rx.phase3_j_trn16 < 0)
+                ? "unknown"
+                : (s->rx.phase3_j_trn16 ? "16-point" : "4-point"));
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -9315,6 +9396,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase3_s_alt_window = 0;
     s->rx.phase3_s_alt_count = 0;
     s->rx.phase3_s_stable_windows = 0;
+    s->rx.phase3_s_detect_armed = false;
     memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
     memset(s->rx.phase3_s_mag_ring, 0, sizeof(s->rx.phase3_s_mag_ring));
     memset(s->rx.phase3_s_counts, 0, sizeof(s->rx.phase3_s_counts));

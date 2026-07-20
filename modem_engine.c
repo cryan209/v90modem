@@ -4054,6 +4054,14 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 return false;
             pos++;
 
+            /* §9.3.2.4/§9.3.2.7 make the analogue modem silent for exactly as
+               long as we are sending Jd, so energy there means it has left
+               V.90.  DIL is excluded: §9.3.2.9 lets it send SCR. */
+            if (phase_before != v90_get_tx_phase(g_v90))
+                v34_v90_set_phase3_expect_silence(
+                    g_v34, v90_get_tx_phase(g_v90) == V90_TX_JD);
+            /*endif*/
+
             /* The project-owned V.90 transmitter replaces SpanDSP's Phase 3
                waveform, so SpanDSP cannot observe the downstream DIL -> Ri
                boundary itself.  Hand its primary-channel receiver into the
