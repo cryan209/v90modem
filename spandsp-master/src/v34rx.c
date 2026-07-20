@@ -5571,9 +5571,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 /*endif*/
 
                 /* Phase 3 TRN ones-based lock hint (4-point path):
-                   score hypotheses by descrambled ones ratio. This runs before
-                   explicit J is decoded and helps stabilize later phase search. */
-                if (s->phase3_j_trn16 < 0  &&  s->duration >= 256)
+                   score hypotheses by descrambled ones ratio. TRN descrambles
+                   to all-ones, so the correct hypothesis stands out.
+
+                   This used to be gated on phase3_j_trn16 < 0, which made the
+                   whole TRN lock hostage to a shared field: the canonical J
+                   matcher writes its matched pattern there, and v34tx.c clears
+                   it to -1 in three more places. The moment anything wrote it,
+                   TRN scoring stopped dead. That is why the lock was a lottery
+                   -- some calls reached 93%, others produced no lock line at
+                   all -- and everything downstream (S-detector constellation,
+                   Ja capture anchoring, the rescore) inherited that.
+
+                   The latch below is already self-protecting: it only accepts
+                   a hypothesis at >=70% and only ever improves on its best, so
+                   letting this run on is harmless. Once TRN gives way to Ja the
+                   ones ratio falls to ~50% and simply stops improving the
+                   latch, rather than corrupting it. */
+                if (s->duration >= 256)
                 {
                     int h;
                     int best_trn_h;
@@ -9024,7 +9039,11 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
      * phase3_trn_lock_score is scored through a 4-point mapping, so a high
      * score is positive evidence the far end really is 4-point -- far better
      * evidence than the pattern matcher's guess. */
-    if (s->rx.phase3_trn_lock_hyp >= 0  &&  s->rx.phase3_trn_lock_score >= 80)
+    /* Any latched TRN lock is 4-point evidence: the latch only ever accepts a
+     * hypothesis scoring >=70% through a 4-point mapping, so there is no need
+     * for a second, higher threshold here (an earlier 80% cut simply missed
+     * legitimate 75% locks). */
+    if (s->rx.phase3_trn_lock_hyp >= 0)
     {
         if (s->rx.phase3_j_trn16)
         {
