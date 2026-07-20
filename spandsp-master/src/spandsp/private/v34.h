@@ -491,6 +491,11 @@ typedef struct
 
     bool info0_acknowledgement;
     int info0_retry_count;
+    /*! \brief Set when the ranging sequence is re-entered from the V.34
+        §11.2.2.1.1 INFO0 recovery.  The call modem has left its recovery loop
+        and is transmitting Tone B, so FIRST_A must not wait for another
+        INFO0c before sending the Tone A phase reversal. */
+    bool phase2_reranging;
 
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */
