@@ -2636,6 +2636,13 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
         s->info0_raw_26_27 = raw_26_27;
         s->far_capabilities.tx_clock_source = raw_26_27;
         s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
+        if (s->v90_mode)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx INFO0a V.92 flags: capability(bit26)=%d, short-phase2(bit27)=%d\n",
+                     (raw_26_27 & 0x01U) != 0,
+                     (raw_26_27 & 0x02U) != 0);
+        }
     }
     /*endif*/
 
@@ -2737,7 +2744,8 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         info1a->max_data_rate = bitstream_get(&bs, &t, 7);  /* U_INFO */
         info1a->use_high_carrier = false;
         info1a->preemphasis_filter = 0;
-        /* 32:33    Reserved for ITU */
+        /* V.90 Table 10 reserves 32:33.  V.92 Table 19 retains bit 32 as
+           reserved and uses bit 33 to select the high upstream carrier. */
         s->info1a_raw_32_33 = bitstream_get(&bs, &t, 2);
         /* 34:36    Symbol rate for analog→digital (upstream). 3=3000, 4=3200, 5=3429 */
         info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
@@ -2766,6 +2774,8 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
         {
             s->baud_rate = info1a->baud_rate_a_to_c;
+            if (s->info1a_raw_32_33 & 0x2)
+                s->high_carrier = true;
             s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
             create_godard_coeffs(&s->pri_ted,
                                  carrier_frequency(s->baud_rate, s->high_carrier),

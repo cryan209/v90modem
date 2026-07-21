@@ -44,10 +44,13 @@ static bool v92_cp_bits_binary(const uint8_t *bits, int count)
     return true;
 }
 
-/* Bits per symbol for the 4- or 8-point TRN2u constellations (Tables 28/29);
- * frames are filled to the next multiple of 12 symbols. */
+/* Frames are filled to the next multiple of 12 symbols.  Phase 3 CPt uses
+ * the 2-point TRN1u modulation, while Phase 4 CPu/SUVu uses 4 or 8 point
+ * TRN2u (V.92 Tables 23, 28 and 29). */
 static int v92_cp_fill_alignment(int constellation_points)
 {
+    if (constellation_points == 2)
+        return 12;
     if (constellation_points == 4)
         return 24;
     if (constellation_points == 8)

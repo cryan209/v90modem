@@ -47,6 +47,8 @@ static inline int v92_trn2u_descramble(v92_trn2u_demod_t *demod, int in_bit)
 
 int v92_trn2u_bits_per_symbol(int constellation_points)
 {
+    if (constellation_points == 2)
+        return 1;
     if (constellation_points == 4)
         return 2;
     if (constellation_points == 8)
@@ -54,9 +56,12 @@ int v92_trn2u_bits_per_symbol(int constellation_points)
     return 0;
 }
 
-/* Table 28/29 magnitude: label 0..1 → (1,3)/sqrt(5), 0..3 → (1..7)/sqrt(21). */
+/* Phase-3 TRN1u uses ±L_U.  Table 28/29 magnitudes are
+ * (1,3)/sqrt(5) and (1..7)/sqrt(21). */
 static double v92_trn2u_level(int constellation_points, int label, double lu)
 {
+    if (constellation_points == 2)
+        return lu;
     if (constellation_points == 4)
         return ((double)(2 * label + 1) / sqrt(5.0)) * lu;
     return ((double)(2 * label + 1) / sqrt(21.0)) * lu;
@@ -234,6 +239,10 @@ static int v92_trn2u_slice_label(const v92_trn2u_demod_t *demod,
 {
     int labels = demod->constellation_points / 2;
     int label = labels - 1;
+
+    (void)magnitude;
+    if (demod->constellation_points == 2)
+        return 0;
 
     for (int i = 0; i < labels - 1; i++) {
         double threshold = ((double)(2 * i + 2)

@@ -781,8 +781,18 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, v34_capabilities.from_cme_modem, 1);
         /* 25       1664-point signal constellations supported */
         bitstream_put(&bs, &t, (v34_capabilities.support_1664_point_constellation)  ?  1  :  0, 1);
-        /* 26:27    Reserved for ITU — set to 0 by digital modem */
-        bitstream_put(&bs, &t, 0, 2);
+        /* 26:27    V.92 Table 15 extensions.  Bit 26 asks for short Phase 2;
+           bit 27 advertises V.92 capability.  Keep both clear by default so
+           a V.90 application cannot accidentally select a procedure it has
+           not enabled explicitly. */
+        span_log(tx_log_state(s), SPAN_LOG_FLOW,
+                 "Tx INFO0d V.92 flags: short-phase2(bit26)=%d, capability(bit27)=%d\n",
+                 s->v92_short_phase2_requested ? 1 : 0,
+                 s->v92_info0_capable ? 1 : 0);
+        bitstream_put(&bs, &t,
+                      (s->v92_short_phase2_requested ? 1 : 0)
+                    | (s->v92_info0_capable ? 2 : 0),
+                      2);
         /* 28       Acknowledge correct reception of INFO0a during error recovery */
         bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
         /* 29:32    Digital modem nominal transmit power for Phase 2.
@@ -870,12 +880,21 @@ static void prepare_info1c(v34_state_t *s)
 {
     int i;
     int max_n;
+    bool v92_info1d;
 
     s->tx.info1c.power_reduction = 0;
     s->tx.info1c.additional_power_reduction = 0;
     s->tx.info1c.md = 0;
     s->tx.info1c.freq_offset = 0;
     max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+    /* V.92 §9.3 switches INFO1d to Table 17 only after the two INFO0
+       capability bits agree.  Table 17 keeps the V.34 probing fields, but
+       repurposes bit 70 as PCM-upstream support.  This digital endpoint only
+       implements V.34 upstream, so it must emit a zero there. */
+    v92_info1d = s->tx.v90_mode
+              && s->tx.v92_info0_capable
+              && (s->rx.info0_raw_26_27 & 0x01U) != 0
+              && (s->rx.info0_raw_26_27 & 0x02U) == 0;
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {
@@ -898,6 +917,15 @@ static void prepare_info1c(v34_state_t *s)
             s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  max_n  :  0;
         }
     }
+    if (v92_info1d)
+    {
+        /* The 3429-HI carrier selector that occupied bit 70 in V.34/V.90
+           becomes the PCM-upstream capability bit in V.92 Table 17. */
+        s->tx.info1c.rate_data[V34_BAUD_RATE_3429].use_high_carrier = false;
+        span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                 "Tx INFO1d V.92 Table 17 selected (bit70 PCM-upstream=0)\n");
+    }
+    s->tx.v92_info1d_mode = v92_info1d;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -959,8 +987,10 @@ static int info1c_sequence_tx(v34_tx_state_t *s, info1c_t *info1c)
     uint16_t crc;
     bitstream_state_t bs;
     int i;
+    bool v92_info1d;
 
     log_info1c(tx_log_state(s), true, info1c);
+    v92_info1d = s->v92_info1d_mode;
     bitstream_init(&bs, true);
     t = s->txbuf;
     /* 0:3      Fill bits: 1111. */
@@ -999,14 +1029,24 @@ static int info1c_sequence_tx(v34_tx_state_t *s, info1c_t *info1c)
                 9 bits is identical to that for bits 25-33. Information in this field shall be consistent with the answer modem
                 capabilities indicated in INFO0a. */
 
-    /* 70:78    Probing results pertaining to a final symbol rate selection of 3429 symbols per second. The coding of these
-                9 bits is identical to that for bits 25-33. Information in this field shall be consistent with the answer modem
-                capabilities indicated in INFO0a. */
-    for (i = 0;  i <= 5;  i++)
+    /* 70:78 are the normal 3429 probing result in V.34/V.90.  In V.92
+       Table 17, bit 70 instead advertises PCM upstream, followed by the
+       eight 3429 pre-emphasis/rate bits. */
+    for (i = 0;  i < (v92_info1d ? 5 : 6);  i++)
     {
         bitstream_put(&bs, &t, info1c->rate_data[i].use_high_carrier, 1);
         bitstream_put(&bs, &t, info1c->rate_data[i].pre_emphasis, 4);
         bitstream_put(&bs, &t, info1c->rate_data[i].max_bit_rate, 4);
+    }
+    if (v92_info1d)
+    {
+        bitstream_put(&bs, &t, 0, 1); /* bit 70: no PCM upstream */
+        bitstream_put(&bs, &t,
+                      info1c->rate_data[V34_BAUD_RATE_3429].pre_emphasis,
+                      4);
+        bitstream_put(&bs, &t,
+                      info1c->rate_data[V34_BAUD_RATE_3429].max_bit_rate,
+                      4);
     }
     /*endfor*/
     /* 79:88    Frequency offset of the probing tones as measured by the call modem receiver. The frequency offset number
@@ -4089,7 +4129,10 @@ static void info1_baud_init(v34_state_t *s)
            V.90 §8.2.3.2 Table 9: digital modem (answerer) sends INFO1d
            which is identical to V.34 INFO1c. */
         if (s->tx.v90_mode)
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d (V.90 Table 9, same format as V.34 INFO1c):\n");
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx INFO1d (%s):\n",
+                     s->tx.v92_info1d_mode
+                         ? "V.92 Table 17" : "V.90 Table 9");
         prepare_info1c(s);
         s->tx.txbits = info1c_sequence_tx(&s->tx, &s->tx.info1c);
         s->tx.txbits += 8;
@@ -6516,6 +6559,16 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
              "V.90 mode enabled (%s, PCM law: %s)\n",
              s->calling_party ? "caller/analog" : "answerer/digital",
              pcm_law ? "A-law" : "u-law");
+}
+
+SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
+                                                   int v92_capable,
+                                                   int short_phase2_requested)
+{
+    if (!s)
+        return;
+    s->tx.v92_info0_capable = v92_capable != 0;
+    s->tx.v92_short_phase2_requested = short_phase2_requested != 0;
 }
 /*- End of function --------------------------------------------------------*/
 

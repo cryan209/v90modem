@@ -502,6 +502,12 @@ typedef struct
     bool v90_mode;
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
+    /*! \brief V.92 INFO0d extensions.  Table 15 bit 27 advertises V.92
+        capability; bit 26 requests the short Phase 2 procedure.  The
+        application currently implements the long procedure only. */
+    bool v92_info0_capable;
+    bool v92_short_phase2_requested;
+    bool v92_info1d_mode;
     /*! \brief V.90: count of L1/L2 rounds sent (need 2 before INFO1d) */
     int v90_l2_count;
     /*! \brief V.90 answerer: consecutive fast Tone-A recoveries while waiting

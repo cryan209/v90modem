@@ -12,9 +12,9 @@
  * All frames share the 17-ones frame sync and start-bit prefix; bit 18
  * distinguishes SUVu (1) from the CP family (0), and CP bits 19:20 select
  * CPt (0), CPu (1), or CPus (2).  Bits arrive already descrambled and
- * differentially decoded from the TRN2u-modulated upstream (4- or 8-point
- * constellations, Tables 28/29), so fill extends each frame to the next
- * multiple of 12 symbols = 24 or 36 bits.
+ * differentially decoded from the upstream training modulation. CPt in
+ * Phase 3 uses 2-point TRN1u (12-bit fill); Phase-4 CPu/SUVu use 4- or
+ * 8-point TRN2u (24- or 36-bit fill).
  *
  * CPu supplies the real downstream rate (drn, d = drn + 20), TRN1d gain,
  * spectral shaping parameters, and data-mode constellations the digital
@@ -134,8 +134,9 @@ typedef struct {
 } v92_suvu_diag_t;
 
 /* ---- Frame codecs ----
- * constellation_points selects the TRN2u modulation (4 or 8 point,
- * Tables 28/29) and therefore the 12-symbol fill alignment. */
+ * constellation_points selects the upstream modulation (2-point TRN1u for
+ * Phase-3 CPt, or 4/8-point TRN2u for Phase 4) and its 12-symbol fill
+ * alignment. */
 
 int v92_cp_bit_length(const v92_cp_frame_t *cp, int constellation_points);
 bool v92_cp_encode(const v92_cp_frame_t *cp,
@@ -187,7 +188,7 @@ typedef void (*v92_cp_rx_handler_t)(void *user_data,
                                     const v92_suvu_diag_t *suvu);
 
 typedef struct {
-    int constellation_points;       /* 4 or 8 (TRN2u) */
+    int constellation_points;       /* 2 (TRN1u), 4 or 8 (TRN2u) */
     bool expected_alaw;             /* CPt/CPu bit 35 must match */
     v92_cp_rx_handler_t handler;
     void *user_data;
