@@ -154,6 +154,9 @@ typedef struct {
      * then with live TRN1u/Ja codewords so v92_ja_dil_search has a proper
      * GPA seed window before the search region.
      */
+    /* MD length from INFO1a, in symbols.  0 selects the V.92 9.5.1.1.1
+       short flow: no MD wait and no second Ru/uR pair. */
+    int      md_symbols;
     uint8_t  ja_buf[V92_P3_RX_JA_BUF];
     int      ja_buf_base;    /* sample index corresponding to ja_buf[0] */
     int      ja_buf_fill;    /* number of valid codewords in ja_buf */
@@ -183,6 +186,12 @@ void v92_p3_rx_init(v92_p3_rx_t *rx);
  * (e.g. after TONEq / INFO0 exchange).
  */
 void v92_p3_rx_start(v92_p3_rx_t *rx, int first_sample_index);
+
+/* Set the MD duration the peer signalled in INFO1a, in symbols (T).
+   Call after v92_p3_rx_init/start.  Zero is the common case and is
+   NOT a default-to-max: V.92 9.5.1.1.1 makes it skip the MD wait
+   entirely and train on TRN1u after the first Ru-to-Ru-bar. */
+void v92_p3_rx_set_md_length(v92_p3_rx_t *rx, int md_symbols);
 
 /*
  * Feed one raw G.711 codeword (µ-law or A-law; sign bit is MSB in both).
