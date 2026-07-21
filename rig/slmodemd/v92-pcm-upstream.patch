@@ -1,0 +1,32 @@
+--- a/slmodemd/modem.c
++++ b/slmodemd/modem.c
+@@ -1138,6 +1138,29 @@
+ 		goto error;
+ 	}
+ 
++	/* V.92 PCM upstream enable (rig patch, not upstream).
++	 *
++	 * dp_runtime byte 2 is a flags bitfield: bit 4 = V.92 mode (set by
++	 * vpcm_create when the requested DP is 92), bit 6 = DSPINFO[8]&1, and
++	 * bit 7 = PCM upstream permitted.  V34GiveINFO1dBits tests bit 7 as the
++	 * sign of that byte: negative accepts a peer's PCM-upstream offer,
++	 * non-negative logs "we got PCM upstream under V.92Lite ..." and forces
++	 * a retrain to V.34 upstream.  dp_runtime_create clears bit 7
++	 * unconditionally and nothing in the blob ever sets it, so the DSP's
++	 * PCM-upstream path (V34SetINFO1aBits' "PCM Upstream is selected
++	 * (info1)") is complete but unreachable.  Setting the bit here is the
++	 * only way to reach it.
++	 *
++	 * Off unless SLM_V92_PCM_UPSTREAM is set: this enables code that has
++	 * plausibly never executed in this build, so it must stay opt-in and
++	 * A/B-able against an unpatched run. */
++	if (getenv("SLM_V92_PCM_UPSTREAM")) {
++		unsigned char *rt = (unsigned char *)m->dp_runtime;
++		rt[2] |= 0x80;
++		MODEM_DBG("V.92 PCM upstream force-enabled: dp_runtime flags[2] = 0x%02x\n",
++			  rt[2]);
++	}
++
+ 	if ( m->cfg.ec && m->cfg.comp &&
+ 	     (ret = modem_comp_init(m)) )
+ 		goto error;

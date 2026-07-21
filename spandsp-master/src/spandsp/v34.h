@@ -488,6 +488,15 @@ SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
                                                    int v92_capable,
                                                    int short_phase2_requested);
 
+/*! Advertise PCM upstream support in V.92 Table 17 INFO1d bit 70.
+    PCM upstream is V.92's only data-pump feature over V.90, so an analogue
+    peer that sees a zero here selects V.90 even when both INFO0 capability
+    bits agree.  Defaults to off: the upstream data path is still V.34, so
+    setting this claims a data-mode receiver that does not exist.  Enable it
+    to drive a peer into the V.92 Phase 3/4 upstream procedures. */
+SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
+                                                        int pcm_upstream_capable);
+
 #if defined(__cplusplus)
 }
 #endif
