@@ -28,6 +28,7 @@
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
 #include "v92_cp_rx.h"
+#include "v92_p3_rx.h"
 #include "v92_trn2u.h"
 
 #include <spandsp.h>
@@ -615,7 +616,33 @@ static bool           g_v90_fallback_phase4_released = false;
 static int            g_v90_phase3_s_events = 0;
 static unsigned        g_v90_phase2_restarts = 0;
 static v90_cp_rx_t    g_v90_cp_rx;
+/* V.92 is only selected after both INFO0 frames explicitly advertise it.
+ * V.8's QC packet is a hint, not a data-pump selection. */
+static bool           g_v92_v8_offered = false;
+static bool           g_v92_info0_local_advertised = false;
+static bool           g_v92_info0_peer_capable = false;
+static bool           g_v92_info0_peer_short_phase2 = false;
+static bool           g_v92_info0_mutual = false;
+static bool           g_v92_info0_peer_logged = false;
 static bool           g_v92_active = false;
+static v92_p3_rx_t    g_v92_p3_rx;
+static bool           g_v92_p3_rx_active = false;
+static bool           g_v92_p3_rx_result_applied = false;
+static bool           g_v92_p3_rx_failure_logged = false;
+static v92_cp_rx_t    g_v92_p3_cpt_rx;
+static v92_trn2u_demod_t g_v92_p3_cpt_demod;
+static bool           g_v92_p3_cpt_active = false;
+
+/* Strict raw-codeword Su/S-bar-u recogniser (V.92 §8.5.6).  It is armed
+ * only after a strict Ja decode; twelve hypotheses cover phase and polarity. */
+typedef struct {
+    int run[12];
+    int last_polarity;
+    int transitions;
+} v92_su_rx_t;
+static v92_su_rx_t    g_v92_su_rx;
+static bool           g_v92_su_rx_active = false;
+static bool           g_v92_su_final_pending = false;
 static bool           g_v92_trn2u_active = false;
 static int            g_v92_trn2u_points = 4;
 static double         g_v92_trn2u_lu = 8000.0;
@@ -1890,6 +1917,7 @@ static void start_v22bis_training(void);
 static void v34_put_aux_bit_cb(void *user_data, int bit);
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                                       const char *source);
+static void v92_su_rx_reset_locked(void);
 void me_hangup(void);
 
 static void v90_cp_live_capture_reset_locked(void)
@@ -2228,8 +2256,23 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
+    v92_p3_rx_init(&g_v92_p3_rx);
+    v92_cp_rx_reset(&g_v92_p3_cpt_rx);
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
+    memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
+    g_v92_p3_rx_active = false;
+    g_v92_p3_rx_result_applied = false;
+    g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_cpt_active = false;
+    v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
+    g_v92_active = false;
+    g_v92_v8_offered = false;
+    g_v92_info0_local_advertised = false;
+    g_v92_info0_peer_capable = false;
+    g_v92_info0_peer_short_phase2 = false;
+    g_v92_info0_mutual = false;
+    g_v92_info0_peer_logged = false;
     g_v34_fallback_to_v22bis_pending = false;
     g_v34_fallback_status = 0;
     v90_dil_capture_reset();
@@ -2279,8 +2322,21 @@ static bool restart_v90_phase2_locked(void)
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    g_v92_active = false;
+    g_v92_info0_peer_capable = false;
+    g_v92_info0_peer_short_phase2 = false;
+    g_v92_info0_mutual = false;
+    g_v92_info0_peer_logged = false;
     g_v92_trn2u_active = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
+    v92_p3_rx_init(&g_v92_p3_rx);
+    v92_cp_rx_reset(&g_v92_p3_cpt_rx);
+    memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
+    g_v92_p3_rx_active = false;
+    g_v92_p3_rx_result_applied = false;
+    g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_cpt_active = false;
+    v92_su_rx_reset_locked();
     v90_cp_rx_reset(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
     v90_dil_capture_reset();
@@ -2289,10 +2345,12 @@ static bool restart_v90_phase2_locked(void)
        receiver callbacks explicitly because this is also where the modified
        SpanDSP tree re-primes INFO0a framing for the answerer. */
     v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+    v34_set_v92_info0_capabilities(g_v34,
+                                    g_v92_info0_local_advertised ? 1 : 0,
+                                    0);
     v34_tx_power(g_v34, -10.0f);
     v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
-    if (!g_v92_active)
-        v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
+    v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
     notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
 
     g_v90_phase2_restarts++;
@@ -2708,7 +2766,7 @@ static void v34_put_aux_bit_cb(void *user_data, int bit)
 
     if (bit < 0 || bit > 1)
         return;
-    if (g_mod != ME_MOD_V90 || g_v90_pending_dil_valid)
+    if (g_mod != ME_MOD_V90 || g_v92_active || g_v90_pending_dil_valid)
         return;
     if (g_v90_dil_capture_bits >= V90_DIL_CAPTURE_MAX_BITS)
         return;
@@ -3057,18 +3115,32 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
          * upstream = V.34 modulation.  Training uses V.34 Phases 2-4; after
          * training completes, TX switches from V.34 to direct PCM injection.
          */
-        /* A V.92 capability octet does not guarantee that the caller selected
-         * a V.92 data pump for this call.  In particular, SmartLink still
-         * advertises V.92 QC while AT+MS=90 forces its long start-up down the
-         * V.90 CPt path.  Permit the interop rig (and deployments that need a
-         * strict V.90 answer) to suppress native V.92 Phase 4 explicitly. */
-        g_v92_active = result->v92 >= 0
-                    && parse_env_int("ME_V92_ENABLE", 1) != 0;
-        if (result->v92 >= 0 && !g_v92_active)
+        /* V.8 QC only says V.92 is available.  The actual data-pump choice
+         * follows the INFO0d/INFO0a capability exchange in Phase 2. */
+        /* Some V.8 peers, including d-modem, complete the CM/JM exchange
+           before SpanDSP delivers their trailing QC/QCA V.92 octet to this
+           callback.  The negotiated PCM-availability field is already
+           authoritative at this point: its analogue bit means the peer
+           offers the V.90/V.92 analogue role.  INFO0 remains the actual
+           V.92 selector below, so this merely enables our INFO0d bit 27. */
+        g_v92_v8_offered = (result->v92 >= 0
+                          || (result->jm_cm.pcm_modem_availability
+                              & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0)
+                        && parse_env_int("ME_V92_ENABLE", 1) != 0;
+        g_v92_info0_local_advertised = g_v92_v8_offered;
+        g_v92_info0_peer_capable = false;
+        g_v92_info0_peer_short_phase2 = false;
+        g_v92_info0_mutual = false;
+        g_v92_info0_peer_logged = false;
+        g_v92_active = false;
+        if ((result->v92 >= 0
+             || (result->jm_cm.pcm_modem_availability
+                 & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0)
+            && !g_v92_v8_offered)
             ME_LOG("[ME] V.92 capability present, but ME_V92_ENABLE=0; using V.90 Phase 4\n");
-        ME_LOG("[ME] V.8 negotiated %s (PCM downstream + V.34 upstream)\n",
-               g_v92_active ? "V.92" : "V.90");
-        trace_phase("V8 selected %s", g_v92_active ? "V92" : "V90");
+        ME_LOG("[ME] V.8 negotiated V.90 PCM downstream + V.34 upstream%s\n",
+               g_v92_v8_offered ? "; V.92 pending INFO0 confirmation" : "");
+        trace_phase("V8 selected V90%s", g_v92_v8_offered ? "; V92 INFO0 pending" : "");
         g_mod = ME_MOD_V90;
         /* V.90 §6.2: analog modem only supports 3200 baud (mandatory) */
         int saved_baud = g_v34_start_baud;
@@ -3080,14 +3152,18 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         v90_cp_live_capture_reset_locked();
         /* Enable V.90 INFO0d frame generation and carrier swap in SpanDSP V.34.
            v34_set_v90_mode also updates CC carrier frequencies (§8.2.3.1). */
-        if (g_v34)
+        if (g_v34) {
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+            v34_set_v92_info0_capabilities(g_v34,
+                                            g_v92_info0_local_advertised ? 1 : 0,
+                                            0);
+        }
         v90_cp_rx_init(&g_v90_cp_rx,
                        4,
                        g_law == ME_LAW_ALAW,
                        v90_live_cp_frame,
                        NULL);
-        if (g_v34 && !g_v92_active)
+        if (g_v34)
             v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
         if (g_v34)
             v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
@@ -3250,6 +3326,19 @@ void me_on_sip_connected(void)
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
     g_v92_active = false;
+    g_v92_v8_offered = false;
+    g_v92_info0_local_advertised = false;
+    g_v92_info0_peer_capable = false;
+    g_v92_info0_peer_short_phase2 = false;
+    g_v92_info0_mutual = false;
+    v92_p3_rx_init(&g_v92_p3_rx);
+    v92_cp_rx_reset(&g_v92_p3_cpt_rx);
+    memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
+    g_v92_p3_rx_active = false;
+    g_v92_p3_rx_result_applied = false;
+    g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_cpt_active = false;
+    v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
     g_data_link_failed = false;
     g_data_connect_reported = false;
@@ -3713,7 +3802,7 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_v90_bridge_rx_stage = rx_stage;
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
-                    if (new_retrain_event && g_v90) {
+                    if (new_retrain_event && g_v90 && !g_v92_active) {
                         /* The peer gave up on Phase 3/4 and is restarting its
                          * handshake.  Follow it: drop our Phase 3/4 state and
                          * go back to waiting for Ja, so the next attempt runs
@@ -3732,7 +3821,7 @@ void me_rx_audio(const int16_t *amp, int len)
                         trace_phase("V90 peer retrain detected, following (accepted=%d)",
                                     accepted ? 1 : 0);
                     }
-                    if (new_e_event && g_v90) {
+                    if (new_e_event && g_v90 && !g_v92_active) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
 
                         fprintf(stderr,
@@ -3741,7 +3830,7 @@ void me_rx_audio(const int16_t *amp, int len)
                         trace_phase("V90 strict RX event=E accepted=%d",
                                     accepted ? 1 : 0);
                     }
-                    if (new_j_event && g_v90) {
+                    if (new_j_event && g_v90 && !g_v92_active) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
 
                         if (accepted) {
@@ -3757,7 +3846,7 @@ void me_rx_audio(const int16_t *amp, int len)
                     }
                 }
 
-                if (g_mod == ME_MOD_V90 && g_v90) {
+                if (g_mod == ME_MOD_V90 && g_v90 && !g_v92_active) {
                     int s_events = v34_get_phase3_s_event_count(g_v34);
 
                     while (g_v90_phase3_s_events < s_events) {
@@ -3817,6 +3906,7 @@ void me_rx_audio(const int16_t *amp, int len)
 static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
 {
     v34_v90_info1a_t received;
+    bool v92_contract;
 
     if (!info || !g_v34
         || !v34_get_v90_received_info1a(g_v34, &received))
@@ -3828,9 +3918,19 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
     info->downstream_rate_code = (uint8_t)received.downstream_rate_code;
     info->freq_offset = (int16_t)received.freq_offset;
 
-    /* V.90 Table 10: reserved fields are zero, upstream is one of the six
-     * V.34 symbol-rate codes (0=2400 through 5=3429), and downstream PCM is
-     * code 6 (8000). A 2400-symbol/s upstream remains a valid V.90 call. */
+    v92_contract = g_v92_info0_mutual;
+    /* V.90 Table 10 permits any V.34 upstream rate code and reserves 32:33.
+     * V.92 Table 19 instead requires 3000/3200/3429 upstream, U_INFO > 66,
+     * and sets bit 33 to select the high carrier (raw value 0b10). */
+    if (v92_contract) {
+        return received.raw_12_17 == 0
+            && received.raw_32_33 == 0x2
+            && received.u_info > 66
+            && received.upstream_symbol_rate_code >= 3
+            && received.upstream_symbol_rate_code <= 5
+            && received.downstream_rate_code == 6
+            && v90_info1a_validate(info);
+    }
     return received.raw_12_17 == 0
         && received.raw_32_33 == 0
         && received.u_info > 0
@@ -3838,6 +3938,169 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
         && received.upstream_symbol_rate_code <= 5
         && received.downstream_rate_code == 6
         && v90_info1a_validate(info);
+}
+
+/* Read the CRC-validated INFO0a captured by SpanDSP.  Table 16 bit 26 is
+ * the analogue V.92 capability and bit 27 requests short Phase 2.  We only
+ * implement the long procedure, so a short-Phase-2 request is a deliberate
+ * V.90 fallback rather than a partial V.92 start-up. */
+static void v92_refresh_info0_confirmation_locked(void)
+{
+    v34_v90_info0a_t info0a;
+    bool old_mutual = g_v92_info0_mutual;
+
+    g_v92_info0_peer_capable = false;
+    g_v92_info0_peer_short_phase2 = false;
+    if (g_v92_info0_local_advertised
+        && g_v34
+        && v34_get_v90_received_info0a(g_v34, &info0a)) {
+        g_v92_info0_peer_capable = (info0a.raw_26_27 & 0x1) != 0;
+        g_v92_info0_peer_short_phase2 = (info0a.raw_26_27 & 0x2) != 0;
+        if (!g_v92_info0_peer_logged) {
+            ME_LOG("[ME] V.92 INFO0a flags: raw26_27=0x%X, capability(bit26)=%d, short-phase2(bit27)=%d\n",
+                   info0a.raw_26_27,
+                   g_v92_info0_peer_capable ? 1 : 0,
+                   g_v92_info0_peer_short_phase2 ? 1 : 0);
+            g_v92_info0_peer_logged = true;
+        }
+    }
+    g_v92_info0_mutual = g_v92_info0_local_advertised
+                      && g_v92_info0_peer_capable
+                      && !g_v92_info0_peer_short_phase2;
+    if (!old_mutual && g_v92_info0_mutual) {
+        ME_LOG("[ME] V.92 INFO0 confirmed mutually (INFO0d bit27=1, INFO0a bit26=1); selecting long Phase 2/3\n");
+        trace_phase("V92 INFO0 mutual confirmation: long Phase2 selected");
+    } else if (g_v92_info0_local_advertised
+               && g_v92_info0_peer_short_phase2) {
+        ME_LOG("[ME] V.92 INFO0a requested short Phase 2; not implemented, retaining V.90 long-startup path\n");
+    }
+}
+
+static void v92_su_rx_reset_locked(void)
+{
+    memset(&g_v92_su_rx, 0, sizeof(g_v92_su_rx));
+    g_v92_su_rx.last_polarity = -1;
+    g_v92_su_rx_active = false;
+    g_v92_su_final_pending = false;
+}
+
+/* Return the expected Su class for phase p: +1, 0, or -1.  The inverse
+ * polarity is S-bar-u. */
+static int v92_su_expected_class(int phase, int polarity)
+{
+    static const int pattern[6] = {1, 0, 1, -1, 0, -1};
+    int value = pattern[phase % 6];
+
+    return polarity ? -value : value;
+}
+
+static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
+{
+    int sample;
+    int observed;
+
+    if (!g_v92_su_rx_active || !g_v92_active || !g_v90)
+        return;
+    sample = pcm_to_linear(codeword);
+    if (sample > -900 && sample < 900)
+        observed = 0;
+    else
+        observed = sample > 0 ? 1 : -1;
+
+    for (int h = 0; h < 12; h++) {
+        int polarity = h / 6;
+        int phase_offset = h % 6;
+        int phase = (int)((sample_index + (uint64_t)phase_offset) % 6U);
+        int expected = v92_su_expected_class(phase, polarity);
+
+        if (observed == expected)
+            g_v92_su_rx.run[h]++;
+        else
+            g_v92_su_rx.run[h] = 0;
+        if (g_v92_su_rx.run[h] < 24 || polarity == g_v92_su_rx.last_polarity)
+            continue;
+
+        g_v92_su_rx.last_polarity = polarity;
+        if (g_v92_su_rx.transitions == 0) {
+            if (v90_handle_rx_event(g_v90, V90_RX_EVENT_SU))
+                g_v92_su_rx.transitions++;
+        } else if (g_v92_su_rx.transitions == 1) {
+            if (v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_BAR))
+                g_v92_su_rx.transitions++;
+        } else {
+            g_v92_su_final_pending = true;
+            (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_FINAL);
+            g_v92_su_rx.transitions++;
+        }
+        break;
+    }
+}
+
+static void v92_start_phase3_cpt_rx_locked(void)
+{
+    if (!g_v92_active || !g_v90 || g_v92_p3_cpt_active)
+        return;
+    v92_cp_rx_init(&g_v92_p3_cpt_rx,
+                   2,
+                   g_law == ME_LAW_ALAW,
+                   v92_live_p4u_frame,
+                   NULL);
+    v92_trn2u_demod_init(&g_v92_p3_cpt_demod,
+                         2,
+                         g_v92_trn2u_lu,
+                         g_law == ME_LAW_ALAW,
+                         &g_v92_p3_cpt_rx);
+    g_v92_p3_cpt_active = true;
+    ME_LOG("[ME] V.92 Phase 3: armed 2-point TRN1u/CPt receiver after Jp'\n");
+    trace_phase("V92 Phase3 CPt receiver armed (2-point TRN1u)");
+}
+
+static void v92_apply_p3_ja_locked(void)
+{
+    const ja_dil_decode_t *ja;
+
+    if (!g_v92_p3_rx_active || !g_v90)
+        return;
+    if (!v92_p3_rx_ja_ok(&g_v92_p3_rx)) {
+        if (v92_p3_rx_get_state(&g_v92_p3_rx) == V92_P3_RX_FAILED
+            && !g_v92_p3_rx_failure_logged) {
+            int sample = -1;
+            int metric0 = 0;
+            int metric1 = 0;
+            v92_p3_rx_reject_t reason =
+                v92_p3_rx_last_reject(&g_v92_p3_rx, &sample, &metric0, &metric1);
+
+            g_v92_p3_rx_failure_logged = true;
+            ME_LOG("[ME] V.92 Phase 3 receiver rejected before Ja: reason=%s sample=%d m0=%d m1=%d\n",
+                   v92_p3_rx_reject_name(reason), sample, metric0, metric1);
+            trace_phase("V92 Phase3 receive rejected: %s", v92_p3_rx_reject_name(reason));
+        }
+        return;
+    }
+    if (g_v92_p3_rx_result_applied)
+        return;
+    ja = v92_p3_rx_get_ja(&g_v92_p3_rx);
+    if (!ja || !ja->ok || !ja->parsed_v92) {
+        ME_LOG("[ME] V.92 Phase 3 receiver produced non-strict Ja; refusing V.90 fallback handoff\n");
+        g_v92_p3_rx_failure_logged = true;
+        return;
+    }
+
+    g_v90_pending_dil = ja->desc;
+    g_v90_pending_dil_valid = true;
+    v90_set_dil_descriptor(g_v90, &ja->desc);
+    g_v92_p3_rx_result_applied = true;
+    g_v92_p3_rx_active = false;
+    v92_su_rx_reset_locked();
+    g_v92_su_rx_active = true;
+    ME_LOG("[ME] V.92 Phase 3 strict Ja accepted: sample=%d bits=%d N=%u LSP=%u LTP=%u; starting Sd\n",
+           ja->start_sample, ja->descriptor_bits,
+           (unsigned)ja->desc.n, (unsigned)ja->desc.lsp, (unsigned)ja->desc.ltp);
+    trace_phase("V92 Phase3 Ja valid -> project-owned TX: N=%u LSP=%u LTP=%u",
+                (unsigned)ja->desc.n, (unsigned)ja->desc.lsp,
+                (unsigned)ja->desc.ltp);
+    if (!v90_handle_rx_event(g_v90, V90_RX_EVENT_J))
+        ME_LOG("[ME] V.92 Phase 3: strict Ja arrived outside WAIT_JA\n");
 }
 
 /* Called with g_state_mtx held. */
@@ -3848,10 +4111,13 @@ static void prepare_v90_phase3_locked(void)
     if (g_mod != ME_MOD_V90 || !g_v34 || g_v90_phase3_started)
         return;
 
+    v92_refresh_info0_confirmation_locked();
     if (get_strict_v90_info1a_locked(&info1a)) {
         const char *dil_profile = getenv("ME_V90_DIL_PROFILE");
 
-        ME_LOG("[ME] V.90 strict RX event: valid INFO1a U_INFO=%u MD=%u upstream_code=%u downstream_code=%u\n",
+        g_v92_active = g_v92_info0_mutual;
+        ME_LOG("[ME] %s strict RX event: valid INFO1a U_INFO=%u MD=%u upstream_code=%u downstream_code=%u\n",
+               g_v92_active ? "V.92" : "V.90",
                (unsigned)info1a.u_info,
                (unsigned)info1a.md,
                (unsigned)info1a.upstream_symbol_rate_code,
@@ -3889,6 +4155,7 @@ static void prepare_v90_phase3_locked(void)
         }
         if (g_v90) {
             if (g_v92_active) {
+                v90_enable_v92_phase3(g_v90);
                 v90_enable_v92_mode(g_v90);
                 v90_enable_v92_native_cpu_rx(g_v90);
                 v92_cp_rx_init(&g_v92_cp_rx,
@@ -3909,8 +4176,24 @@ static void prepare_v90_phase3_locked(void)
             g_v90_phase3_started = true;
             g_v90_completion_deferred_logged = false;
             g_v90_wait_info1_logged = false;
-            trace_phase("V90 strict RX event=INFO1A_VALID u_info=%u -> Phase3",
-                        (unsigned)info1a.u_info);
+            if (g_v92_active) {
+                v92_p3_rx_init(&g_v92_p3_rx);
+                v92_p3_rx_start(&g_v92_p3_rx, (int)g_g711_rx_octets);
+                g_v92_p3_rx_active = true;
+                g_v92_p3_rx_result_applied = false;
+                g_v92_p3_rx_failure_logged = false;
+                g_v92_p3_cpt_active = false;
+                memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
+                v92_cp_rx_reset(&g_v92_p3_cpt_rx);
+                v92_su_rx_reset_locked();
+                trace_phase("V92 strict RX event=INFO1A_VALID u_info=%u -> Phase3 Ru/TRN1u/Ja",
+                            (unsigned)info1a.u_info);
+                ME_LOG("[ME] V.92 Phase 3 raw receiver armed at G.711 sample %llu\n",
+                       (unsigned long long)g_g711_rx_octets);
+            } else {
+                trace_phase("V90 strict RX event=INFO1A_VALID u_info=%u -> Phase3",
+                            (unsigned)info1a.u_info);
+            }
         }
     } else {
         v34_v90_info1a_t received;
@@ -3922,7 +4205,11 @@ static void prepare_v90_phase3_locked(void)
            waiting" already logged on an earlier tick (it almost always
            has, since Phase 2 takes many ticks). Gate that action on its own
            flag instead of reusing the "waiting" log-once flag. */
-        if (v34_get_v90_received_info1a(g_v34, &received)) {
+        /* SpanDSP exposes the INFO1a snapshot as soon as V.90 mode is
+           enabled, before a CRC-valid INFO1a has populated it.  A zero
+           U_INFO is that reset snapshot, not a peer selecting plain V.34. */
+        if (v34_get_v90_received_info1a(g_v34, &received)
+            && received.u_info > 0) {
             if (!g_v90_wait_info1_logged) {
                 ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d\n",
                        received.raw_12_17,
@@ -4062,6 +4349,21 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                     g_v34, v90_get_tx_phase(g_v90) == V90_TX_JD);
             /*endif*/
 
+            if (v90_get_tx_phase(g_v90) == V90_TX_JP
+                && g_v92_su_final_pending) {
+                /* The final S-bar-u transition can arrive during the last
+                 * Jd frame.  Preserve it until Jp is live, then terminate
+                 * Jp at its next frame boundary as §9.5.1.1.9 requires. */
+                if (v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_FINAL))
+                    g_v92_su_final_pending = false;
+            }
+
+            if (phase_before == V90_TX_JP_PRIME
+                && (v90_get_tx_phase(g_v90) == V90_TX_DIL
+                    || v90_get_tx_phase(g_v90) == V90_TX_SCR)) {
+                v92_start_phase3_cpt_rx_locked();
+            }
+
             /* The project-owned V.90 transmitter replaces SpanDSP's Phase 3
                waveform, so SpanDSP cannot observe the downstream DIL -> Ri
                boundary itself.  Hand its primary-channel receiver into the
@@ -4070,10 +4372,13 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                to v90_live_cp_bit(). */
             if (phase_before < V90_TX_RI
                 && v90_get_tx_phase(g_v90) >= V90_TX_RI) {
-                ME_LOG("[ME] V.90 Phase 3 complete; enabling native upstream Phase 4 receiver\n");
-                v90_cp_live_note_phase4_hint_locked();
+                ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
+                       g_v92_active ? "V.92" : "V.90");
+                if (!g_v92_active)
+                    v90_cp_live_note_phase4_hint_locked();
                 v34_force_phase4(g_v34);
-                v34_force_v90_phase4_cp_rx(g_v34);
+                if (!g_v92_active)
+                    v34_force_v90_phase4_cp_rx(g_v34);
             }
 
             /* v90.c returns to WAIT_JA after a bounded Jd-without-S interval.
@@ -4315,16 +4620,35 @@ void me_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
     bool raw_v91;
+    uint64_t first_sample;
 
     if (!codewords || count <= 0)
         return;
 
     pthread_mutex_lock(&g_state_mtx);
+    first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
     raw_v91 = (g_mod == ME_MOD_V91
                && (g_state == ME_TRAINING || g_state == ME_DATA));
     if (raw_v91)
         v91_live_receive_codewords_locked(codewords, count);
+    if (g_v92_p3_rx_active && g_v92_active && g_state == ME_TRAINING) {
+        for (int i = 0; i < count; i++) {
+            (void)v92_p3_rx_feed(&g_v92_p3_rx,
+                                 codewords[i],
+                                 (int)(first_sample + (uint64_t)i));
+            v92_apply_p3_ja_locked();
+            if (!g_v92_p3_rx_active)
+                break;
+        }
+    }
+    if (g_v92_su_rx_active && g_v92_active && g_state == ME_TRAINING) {
+        for (int i = 0; i < count; i++)
+            v92_su_rx_feed_locked(codewords[i], first_sample + (uint64_t)i);
+    }
+    if (g_v92_p3_cpt_active && g_v92_active && g_state == ME_TRAINING) {
+        (void)v92_trn2u_demod_feed(&g_v92_p3_cpt_demod, codewords, count);
+    }
     if (g_v92_trn2u_active && g_v92_active && g_v90
         && g_state == ME_TRAINING
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D

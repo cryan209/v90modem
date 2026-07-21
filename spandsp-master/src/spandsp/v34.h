@@ -480,6 +480,14 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
+/*! Configure the V.92 capability bits carried in a V.90-format INFO0d.
+    V.92 Table 15 assigns bit 26 to short-Phase-2 request and bit 27 to
+    V.92 capability.  This only changes the transmitted INFO0d; callers must
+    still confirm the peer's INFO0a capability before selecting V.92. */
+SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
+                                                   int v92_capable,
+                                                   int short_phase2_requested);
+
 #if defined(__cplusplus)
 }
 #endif

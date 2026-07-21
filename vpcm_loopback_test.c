@@ -383,6 +383,8 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
 static bool test_v92_suvd_codec_and_phase4(void);
+static bool test_v92_phase3_transitions(void);
+static bool test_v92_native_cpu_receiver(void);
 static bool run_vpcm_session_suite(void);
 static bool run_vpcm_primitive_suite(void);
 
@@ -1018,8 +1020,8 @@ static bool test_v90_jd_resync_request(v91_law_t law)
             return false;
         }
     }
-    if (unsetenv("ME_V90_JD_RESYNC_SYMBOLS") != 0) {
-        perror("unsetenv ME_V90_JD_RESYNC_SYMBOLS");
+    if (setenv("ME_V90_JD_RESYNC_SYMBOLS", "12000", 1) != 0) {
+        perror("setenv ME_V90_JD_RESYNC_SYMBOLS");
         free(saved_symbols);
         return false;
     }
@@ -1052,6 +1054,8 @@ done:
     if (saved_symbols) {
         setenv("ME_V90_JD_RESYNC_SYMBOLS", saved_symbols, 1);
         free(saved_symbols);
+    } else {
+        unsetenv("ME_V90_JD_RESYNC_SYMBOLS");
     }
     if (tx)
         v90_free(tx);
@@ -2160,6 +2164,52 @@ static bool test_v92_native_cpu_receiver(void)
         }
     }
 
+    /* Phase-3 CPt is carried by the two-point TRN1u source, so its Table 23
+     * frame is filled to 12 bits and must survive the GPA/differential raw
+     * G.711 path before Phase 4 begins. */
+    {
+        v92_cp_frame_t cpt;
+        v92_cp_rx_t p3_rx;
+        v92_trn2u_tx_t p3_tx;
+        v92_trn2u_demod_t p3_demod;
+        v92_p4u_capture_t p3_capture;
+        uint8_t codewords[1024];
+        int nsymbols;
+
+        memset(&cpt, 0, sizeof(cpt));
+        memset(&p3_capture, 0, sizeof(p3_capture));
+        cpt.type = V92_CP_TYPE_CPT;
+        cpt.drn = 9;
+        cpt.codec_alaw = false;
+        cpt.constellation_count = 1;
+        vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+        if (v92_cp_bit_length(&cpt, 2) != 300
+            || !v92_cp_encode(&cpt, 2, bits, (int)sizeof(bits), &nbits)) {
+            fprintf(stderr, "V.92 two-point CPt encoding failed\n");
+            return false;
+        }
+        v92_cp_rx_init(&p3_rx, 2, false, v92_p4u_test_handler, &p3_capture);
+        v92_trn2u_tx_init(&p3_tx, 2, 8000.0, false);
+        v92_trn2u_tx_start(&p3_tx, 0);
+        v92_trn2u_demod_init(&p3_demod, 2, 8000.0, false, &p3_rx);
+        nsymbols = v92_trn2u_tx_ones(&p3_tx, codewords, 96);
+        if (nsymbols != 96
+            || v92_trn2u_demod_feed(&p3_demod, codewords, nsymbols) != 0) {
+            fprintf(stderr, "V.92 two-point TRN1u seed failed\n");
+            return false;
+        }
+        nsymbols = v92_trn2u_tx_bits(&p3_tx, bits, nbits,
+                                      codewords, (int)sizeof(codewords));
+        if (nsymbols != nbits
+            || v92_trn2u_demod_feed(&p3_demod, codewords, nsymbols) != 1
+            || p3_capture.cp_count != 1
+            || p3_capture.last_kind != V92_P4U_KIND_CPT
+            || p3_capture.last_cp.drn != cpt.drn) {
+            fprintf(stderr, "V.92 two-point TRN1u CPt receiver failed\n");
+            return false;
+        }
+    }
+
     /* Strict rejections. */
     v92_test_build_cpu(&cpu, false, false);
     if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
@@ -2309,6 +2359,77 @@ static bool test_v92_native_cpu_receiver(void)
 
     vpcm_log("PASS: V.92 Table 23/24/27 CPu/CPus/SUVu codecs and bitstream receiver");
     return true;
+}
+
+static bool test_v92_phase3_transitions(void)
+{
+    enum { MAX_SYMBOLS = 20000 };
+    v90_state_t *tx = NULL;
+    vpcm_cp_frame_t cpt;
+    uint8_t codeword = 0;
+    int symbols = 0;
+    bool ok = false;
+
+    vpcm_log("Test: V.92 Phase 3 Jd -> Jp -> Jp' -> SCR/CPt transitions");
+    tx = v90_init_data_pump(V90_LAW_ULAW);
+    if (!tx)
+        goto done;
+    v90_enable_v92_phase3(tx);
+    v90_enable_v92_mode(tx);
+    v90_enable_v92_native_cpu_rx(tx);
+    v90_start_phase3(tx, 66);
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_J)) {
+        fprintf(stderr, "V.92 Phase 3 test did not accept strict Ja\n");
+        goto done;
+    }
+    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JD) {
+        fprintf(stderr, "V.92 Phase 3 test did not reach Jd\n");
+        goto done;
+    }
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_SU)
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_SU_BAR)) {
+        fprintf(stderr, "V.92 Phase 3 test rejected Su transitions during Jd\n");
+        goto done;
+    }
+    while (v90_get_tx_phase(tx) != V90_TX_JP && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_JP) {
+        fprintf(stderr, "V.92 Phase 3 test did not enter Jp\n");
+        goto done;
+    }
+    if (!v90_handle_rx_event(tx, V90_RX_EVENT_SU_FINAL)) {
+        fprintf(stderr, "V.92 Phase 3 test rejected final Su transition during Jp\n");
+        goto done;
+    }
+    while (v90_get_tx_phase(tx) != V90_TX_SCR && symbols++ < MAX_SYMBOLS)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_SCR) {
+        fprintf(stderr, "V.92 Phase 3 test did not enter SCR after Jp'\n");
+        goto done;
+    }
+
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 9;
+    cpt.codec_alaw = false;
+    cpt.upstream_rate_mask = 0x1FFF;
+    cpt.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    if (!v90_set_phase4_cp(tx, &cpt)
+        || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)
+        || v90_get_tx_phase(tx) != V90_TX_RI) {
+        fprintf(stderr, "V.92 Phase 3 test did not turn strict CPt into Ri\n");
+        goto done;
+    }
+    ok = true;
+    vpcm_log("PASS: V.92 Phase 3 Jp/Jp'/CPt state path");
+
+done:
+    if (tx)
+        v90_free(tx);
+    return ok;
 }
 
 static bool test_v92_cpd_full_codec(void)
@@ -8628,6 +8749,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
+        && test_v92_phase3_transitions()
+        && test_v92_native_cpu_receiver()
         && test_v90_jd_resync_request(V91_LAW_ULAW)
         && test_v90_jd_resync_request(V91_LAW_ALAW)
         && test_v90_data_codeword_state(V91_LAW_ULAW)
@@ -8644,7 +8767,6 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_spectral_shaping(V91_LAW_ALAW)
         && test_v92_suvd_codec_and_phase4()
         && test_v92_cpd_full_codec()
-        && test_v92_native_cpu_receiver()
         && test_v92_trn2u_loopback()
         && test_v92_native_cpu_phase4(V91_LAW_ULAW)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)

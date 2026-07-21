@@ -115,6 +115,9 @@ typedef enum {
     V90_RX_EVENT_TRN_LOCK,
     V90_RX_EVENT_J,
     V90_RX_EVENT_J_PRIME,
+    V90_RX_EVENT_SU,
+    V90_RX_EVENT_SU_BAR,
+    V90_RX_EVENT_SU_FINAL,
     V90_RX_EVENT_CP_VALID,
     V90_RX_EVENT_CP_INVALID,
     V90_RX_EVENT_E,
@@ -127,6 +130,9 @@ typedef enum {
 /* V.90 Phase 3/4 TX sub-states for the digital modem.
  * V.90 order (§9.3.1/§9.4.1):
  *   Sd → S̄d → TRN1d → Jd → J'd → DIL → Ri → TRN2d → MP/MP' → Ed → B1d → Data
+ * V.92 Phase 3 replaces J'd with Jp → Jp' and sends DIL or SCR while
+ * receiving the 2-point CPt stream:
+ *   Sd → S̄d → TRN1d → Jd → Jp → Jp' → DIL/SCR → Ri → TRN2d …
  * V.92 Phase 4 extension (§9.6.1/V.92):
  *   … → TRN2d → SUVd → CPd → SUVd' → Ed → B1d → Data */
 typedef enum {
@@ -138,7 +144,10 @@ typedef enum {
     V90_TX_TRN1D,         /* Sending TRN1d — scrambled ones on U_INFO */
     V90_TX_JD,            /* Sending Jd (Table 13) — capabilities frame */
     V90_TX_JD_PRIME,      /* Sending J'd — 12 zeros to terminate Jd */
+    V90_TX_JP,            /* V.92 Jp (Table 22) */
+    V90_TX_JP_PRIME,      /* V.92 Jp' — 12 scrambled zeros */
     V90_TX_DIL,           /* Sending DIL descriptor symbols */
+    V90_TX_SCR,           /* V.92 SCR while waiting for CPt */
     V90_TX_RI,            /* Phase 4: Ri — retrain init (idle codewords, §9.4.1.1) */
     V90_TX_TRN2D,         /* Phase 4: post-CP Ri plus negotiated mapped TRN2d */
     V90_TX_MP,            /* V.90 Phase 4: MP/MP' modulation-parameter frames */
@@ -201,6 +210,11 @@ bool v90_phase3_active(v90_state_t *s);
  * u_info is the U_INFO Ucode from the analog modem's INFO1a.
  */
 void v90_start_phase3(v90_state_t *s, int u_info);
+
+/* Select the V.92 §9.5 Phase-3 state path before v90_start_phase3().
+ * This is separate from v90_enable_v92_mode(): callers should only enable it
+ * after mutual INFO0 capability confirmation. */
+void v90_enable_v92_phase3(v90_state_t *s);
 
 /*
  * Configure the DIL descriptor requested by the far-end analogue modem.

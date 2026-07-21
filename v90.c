@@ -334,14 +334,21 @@ struct v90_state_s {
     bool             phase4_hold_logged;
     int              phase4_ri_align_remaining;
     bool             jd_terminate_requested;
+    bool             jp_terminate_requested;
     bool             training_complete;
     bool             dil_requested;
     bool             jd_terminated_by_s;
+    bool             jd_terminated_by_su;
     bool             dil_terminate_requested;
+    bool             v92_phase3;
+    bool             v92_su_seen;
+    bool             v92_su_bar_seen;
 
     /* Jd frame data */
     uint8_t          jd_bits[16];   /* Jd frame packed into bytes (72 bits) */
     int              jd_bit_pos;    /* Current bit position in Jd frame */
+    uint8_t          jp_bits[16];   /* V.92 Jp frame packed into bytes (72 bits) */
+    int              jp_bit_pos;    /* Current bit position in Jp frame */
 
     /* DIL descriptor/state */
     v90_dil_desc_t   dil;
@@ -1725,6 +1732,38 @@ static void v90_build_jd(v90_state_t *s)
     /* Bits 68:71 — fill (0000), already zero */
 }
 
+/* V.92 Table 22.  Jp has the same framing and CRC coverage as Jd, but
+ * replaces the downstream-rate mask with a fractional Su extension and
+ * advertises the 4-point TRN2u choice used by this implementation. */
+static void v90_build_jp(v90_state_t *s)
+{
+    int pos = 0;
+    uint16_t crc = 0xFFFF;
+
+    memset(s->jp_bits, 0, sizeof(s->jp_bits));
+    for (int i = 0; i < 17; i++)
+        s->jp_bits[pos / 8] |= (uint8_t)(1U << (pos % 8)), pos++;
+    pos++; /* start bit 17 */
+    pos += 16; /* 18:33 fractional Su extension: zero */
+    pos++; /* start bit 34 */
+    pos += 12; /* 35:46 reserved */
+    s->jp_bits[pos / 8] |= (uint8_t)(1U << (pos % 8));
+    pos++; /* 47: Jd/Jp identifier = Jp */
+    pos++; /* 48: 4-point training constellation */
+    pos++; /* 49: 4-point renegotiation constellation */
+    pos++; /* 50 reserved */
+    pos++; /* start bit 51 */
+
+    for (int i = 18; i <= 33; i++)
+        crc = crc_itu16_bits((s->jp_bits[i / 8] >> (i % 8)) & 1, 1, crc);
+    for (int i = 35; i <= 50; i++)
+        crc = crc_itu16_bits((s->jp_bits[i / 8] >> (i % 8)) & 1, 1, crc);
+    for (int i = 0; i < 16; i++) {
+        if ((crc >> i) & 1)
+            s->jp_bits[(52 + i) / 8] |= (uint8_t)(1U << ((52 + i) % 8));
+    }
+}
+
 /* ---- Phase 3 TX sample generation ---- */
 
 /* Get next Jd bit, wrap around for continuous repetition */
@@ -1734,6 +1773,16 @@ static int v90_get_jd_bit(v90_state_t *s)
     s->jd_bit_pos++;
     if (s->jd_bit_pos >= V90_JD_BITS)
         s->jd_bit_pos = 0;
+    return bit;
+}
+
+static int v90_get_jp_bit(v90_state_t *s)
+{
+    int bit = (s->jp_bits[s->jp_bit_pos / 8] >> (s->jp_bit_pos % 8)) & 1;
+
+    s->jp_bit_pos++;
+    if (s->jp_bit_pos >= V90_JD_BITS)
+        s->jp_bit_pos = 0;
     return bit;
 }
 
@@ -2433,7 +2482,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
 
     switch (s->tx_phase) {
     case V90_TX_WAIT_JA:
-        if (++s->sample_count >= V90_WAIT_JA_FALLBACK_SAMPLES) {
+        if (!s->v92_phase3 && ++s->sample_count >= V90_WAIT_JA_FALLBACK_SAMPLES) {
             fprintf(stderr,
                     "[V90] Phase 3: Ja decode timeout after %.1f ms, starting Sd via interop fallback\n",
                     1000.0 * s->sample_count / 8000.0);
@@ -2555,7 +2604,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
              * first: pushing on to J'd/DIL is strictly more useful than tearing
              * Phase 3 down, and if the fallback is disabled the resync still
              * fires on the same symbol. */
-            if (!s->jd_terminate_requested
+            if (!s->v92_phase3
+                && !s->jd_terminate_requested
                 && v90_jd_autoterminate_symbols() > 0
                 && s->sample_count >= v90_jd_autoterminate_symbols()) {
                 fprintf(stderr,
@@ -2570,7 +2620,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
              * search window is mis-placed.  Fall back to the silent WAIT_JA
              * state, re-arming the Ja detector so we re-emit Sd cleanly when
              * the peer next reaches Ja. */
-            if (!s->jd_terminate_requested
+            if (!s->v92_phase3
+                && !s->jd_terminate_requested
                 && v90_jd_resync_symbols() > 0
                 && s->sample_count >= v90_jd_resync_symbols()) {
                 fprintf(stderr,
@@ -2582,6 +2633,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_bit_pos = 0;
                 s->jd_terminate_requested = false;
                 s->jd_terminated_by_s = false;
+                s->jd_terminated_by_su = false;
                 return v90_pcm_idle(s->law);
             }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
@@ -2591,12 +2643,20 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                  * arriving -- which reads in the log as real progress and
                  * cost a full investigation before the timeout was spotted
                  * on the preceding line. */
-                fprintf(stderr,
-                        "[V90] Phase 3: %s, completed current Jd repetition after %d symbols, starting J'd\n",
-                        s->jd_terminated_by_s ? "S detected"
-                                              : "NO S RECEIVED (terminated by interop timeout)",
-                        s->sample_count);
-                s->tx_phase = V90_TX_JD_PRIME;
+                if (s->v92_phase3) {
+                    fprintf(stderr,
+                            "[V92] Phase 3: Su sequence complete, finished Jd after %d symbols; starting Jp\n",
+                            s->sample_count);
+                    s->tx_phase = V90_TX_JP;
+                    s->jp_bit_pos = 0;
+                } else {
+                    fprintf(stderr,
+                            "[V90] Phase 3: %s, completed current Jd repetition after %d symbols, starting J'd\n",
+                            s->jd_terminated_by_s ? "S detected"
+                                                  : "NO S RECEIVED (terminated by interop timeout)",
+                            s->sample_count);
+                    s->tx_phase = V90_TX_JD_PRIME;
+                }
                 s->sample_count = 0;
             }
             return v90_pcm_signed_codeword(s->law, s->u_info, sign);
@@ -2629,6 +2689,46 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             return v90_pcm_signed_codeword(s->law, s->u_info, sign);
         }
 
+    case V90_TX_JP:
+        /* V.92 §8.6.3/Table 22: repeat Jp until the analogue modem has
+         * switched from Su to S-bar-u after recognising Jp. */
+        {
+            int bit = v90_get_jp_bit(s);
+            int scrambled = v90_scramble_bit(&s->scrambler, bit);
+
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            if (s->jp_terminate_requested && s->jp_bit_pos == 0) {
+                fprintf(stderr,
+                        "[V92] Phase 3: Su final transition, completed Jp after %d symbols; starting Jp'\n",
+                        s->sample_count);
+                s->tx_phase = V90_TX_JP_PRIME;
+                s->sample_count = 0;
+            }
+            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
+        }
+
+    case V90_TX_JP_PRIME:
+        /* V.92 §8.6.4: Jp' is exactly twelve scrambled, differentially
+         * encoded zeroes. */
+        {
+            int scrambled = v90_scramble_bit(&s->scrambler, 0);
+
+            s->diff_enc ^= scrambled;
+            sign = s->diff_enc;
+            s->sample_count++;
+            if (s->sample_count >= 12) {
+                s->tx_phase = s->dil_requested ? V90_TX_DIL : V90_TX_SCR;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+                fprintf(stderr,
+                        "[V92] Phase 3: Jp' complete, entering %s while waiting for CPt\n",
+                        s->dil_requested ? "DIL" : "SCR");
+            }
+            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
+        }
+
     case V90_TX_DIL:
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] Phase 3: sending DIL (%d segments, LSP=%u, LTP=%u)\n",
@@ -2636,6 +2736,16 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->phase4_hold_logged = true;
         }
         return v90_dil_codeword(s);
+
+    case V90_TX_SCR:
+        /* V.92 §8.6.6: zero-DIL calls send the continuing scrambled-one
+         * source while the upstream receiver acquires CPt. */
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V92] Phase 3: sending SCR while waiting for CPt\n");
+            s->phase4_hold_logged = true;
+        }
+        sign = v90_scramble_bit(&s->scrambler, 1);
+        return v90_pcm_signed_codeword(s->law, s->u_info, sign);
 
     case V90_TX_RI:
         /* §8.6.4/§9.4.1.1: Ri is U_INFO with +++--- signs, not idle.
@@ -3058,7 +3168,7 @@ v90_tx_phase_t v90_get_tx_phase(v90_state_t *s)
 
 bool v90_phase3_active(v90_state_t *s)
 {
-    return s->tx_phase >= V90_TX_WAIT_JA && s->tx_phase <= V90_TX_JD_PRIME;
+    return s->tx_phase >= V90_TX_WAIT_JA && s->tx_phase <= V90_TX_SCR;
 }
 
 void v90_start_phase3(v90_state_t *s, int u_info)
@@ -3071,6 +3181,8 @@ void v90_start_phase3(v90_state_t *s, int u_info)
 
     /* Build Jd frame (used later after TRN1d) */
     v90_build_jd(s);
+    if (s->v92_phase3)
+        v90_build_jp(s);
 
     /* V.90 §9.3.1.3: After receiving analog Ja, send Sd first.
      * Sd does not use scrambler or differential encoder.
@@ -3079,10 +3191,15 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->rep_count = 0;
     s->diff_enc = 0;
     s->jd_bit_pos = 0;
+    s->jp_bit_pos = 0;
     s->phase4_hold_logged = false;
     s->phase4_ri_align_remaining = 0;
     s->jd_terminate_requested = false;
     s->jd_terminated_by_s = false;
+    s->jd_terminated_by_su = false;
+    s->jp_terminate_requested = false;
+    s->v92_su_seen = false;
+    s->v92_su_bar_seen = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
     s->cp_ready = false;
@@ -3120,6 +3237,14 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->tx_phase = V90_TX_WAIT_JA;
 }
 
+void v90_enable_v92_phase3(v90_state_t *s)
+{
+    if (!s)
+        return;
+    s->v92_phase3 = true;
+    v90_build_jp(s);
+}
+
 void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
 {
     if (!s)
@@ -3154,6 +3279,9 @@ const char *v90_rx_event_name(v90_rx_event_t event)
     case V90_RX_EVENT_TRN_LOCK:       return "TRN_LOCK";
     case V90_RX_EVENT_J:              return "J";
     case V90_RX_EVENT_J_PRIME:        return "J_PRIME";
+    case V90_RX_EVENT_SU:             return "SU";
+    case V90_RX_EVENT_SU_BAR:         return "SU_BAR";
+    case V90_RX_EVENT_SU_FINAL:       return "SU_FINAL";
     case V90_RX_EVENT_CP_VALID:       return "CP_VALID";
     case V90_RX_EVENT_CP_INVALID:     return "CP_INVALID";
     case V90_RX_EVENT_E:              return "E";
@@ -3191,6 +3319,8 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_S:
+        if (s->v92_phase3)
+            return false;
         if (s->tx_phase == V90_TX_JD
             && s->sample_count >= v90_min_jd_symbols()
             && !s->jd_terminate_requested) {
@@ -3237,7 +3367,50 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         }
         return false;
 
+    case V90_RX_EVENT_SU:
+        if (s->v92_phase3 && s->tx_phase == V90_TX_JD && !s->v92_su_seen) {
+            s->v92_su_seen = true;
+            fprintf(stderr, "[V92] Phase 3: initial Su detected during Jd\n");
+            return true;
+        }
+        return false;
+
+    case V90_RX_EVENT_SU_BAR:
+        if (s->v92_phase3 && s->tx_phase == V90_TX_JD
+            && s->v92_su_seen && !s->v92_su_bar_seen) {
+            s->v92_su_bar_seen = true;
+            s->jd_terminate_requested = true;
+            s->jd_terminated_by_su = true;
+            fprintf(stderr,
+                    "[V92] Phase 3: Su-to-S-bar-u detected; completing current Jd\n");
+            return true;
+        }
+        return false;
+
+    case V90_RX_EVENT_SU_FINAL:
+        if (s->v92_phase3 && s->tx_phase == V90_TX_JP
+            && !s->jp_terminate_requested) {
+            s->jp_terminate_requested = true;
+            fprintf(stderr,
+                    "[V92] Phase 3: final Su transition detected; completing current Jp\n");
+            return true;
+        }
+        return false;
+
     case V90_RX_EVENT_CP_VALID:
+        if (s->v92_phase3
+            && (s->tx_phase == V90_TX_DIL || s->tx_phase == V90_TX_SCR)
+            && s->phase4_mapper_ready) {
+            /* V.92 §9.5.1.1.12/.13: CPt ends the Phase-3 DIL/SCR wait and
+             * starts Ri.  The following E1u/TRN2u stream is handled by the
+             * native Phase-4 receiver once Ri reaches TRN2d. */
+            fprintf(stderr,
+                    "[V92] Phase 3: valid 2-point CPt received; starting Ri\n");
+            s->tx_phase = V90_TX_RI;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+            return true;
+        }
         if (s->tx_phase == V90_TX_TRN2D
             && (s->v92_mode
                 ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
@@ -3311,6 +3484,10 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->jd_bit_pos = 0;
             s->jd_terminate_requested = false;
             s->jd_terminated_by_s = false;
+            s->jd_terminated_by_su = false;
+            s->jp_terminate_requested = false;
+            s->v92_su_seen = false;
+            s->v92_su_bar_seen = false;
             s->dil_terminate_requested = false;
             s->dil_requested = false;
             s->dil_segment_index = 0;

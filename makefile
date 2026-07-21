@@ -137,7 +137,7 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
-SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
+SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v92_proc_eval_test
@@ -235,7 +235,7 @@ $(SPANDSP_LIB): FORCE
 	$(CC) $(CFLAGS) -c $< -o $@
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_cp_rx.h v92_trn2u.h
+modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 data_stack.o:     data_stack.c     data_stack.h $(SPANDSP_DIR)/spandsp/v42.h

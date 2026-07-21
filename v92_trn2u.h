@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    int constellation_points;   /* 4 or 8 */
+    int constellation_points;   /* 2 for Phase-3 CPt, 4 or 8 for TRN2u */
     double lu;                  /* L_U reference amplitude (linear) */
     bool alaw;                  /* G.711 law of the transport */
     uint32_t scramble_reg;
@@ -41,7 +41,7 @@ typedef struct {
 } v92_trn2u_tx_t;
 
 typedef struct {
-    int constellation_points;
+    int constellation_points;   /* 2 for Phase-3 CPt, 4 or 8 for TRN2u */
     double lu;
     bool alaw;
     uint32_t descramble_reg;
@@ -79,7 +79,7 @@ void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
 /* §8.7.6: reset GPA at TRN2u entry while carrying the final E1u sign. */
 void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign);
 
-/* Bits per PAM symbol: 2 for 4-point, 3 for 8-point. */
+/* Bits per PAM symbol: 1 for Phase-3 2-point, 2 for 4-point, 3 for 8-point. */
 int v92_trn2u_bits_per_symbol(int constellation_points);
 
 /*
