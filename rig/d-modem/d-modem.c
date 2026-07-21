@@ -50,7 +50,7 @@ static void error_exit(const char *title, pj_status_t status) {
 	}
 }
 
-static FILE *dm_tap_tx, *dm_tap_rx;
+static FILE *dm_tap_tx, *dm_tap_rx, *dm_tap_tx_9600;
 
 /* Net(8000) -> DSP(9600) rational 6/5 resampler.
  *
@@ -414,6 +414,13 @@ static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *fram
 	if ((len=read(sm->sock, raw, in_n*2)) != in_n*2) {
 		error_exit("error reading frame",0);
 	}
+	/* Pre-interpolation tap: the DSP's native 9600 Hz upstream output,
+	 * before the 6/5 linear interpolation below.  dm_from_dsp.raw is
+	 * written *after* that step, so it cannot distinguish "the resampler
+	 * destroyed the signal" from "the DSP never produced one".  Compare
+	 * this file against dm_from_dsp.raw to tell them apart. */
+	if (!dm_tap_tx_9600) dm_tap_tx_9600 = fopen("/tmp/dm_from_dsp_9600.raw","wb");
+	if (dm_tap_tx_9600) { fwrite(raw,2,(size_t)in_n,dm_tap_tx_9600); fflush(dm_tap_tx_9600); }
 	out = (pj_int16_t *)frame->buf;
 	for (k = 0; k < out_n; k++) {
 		int num = k * 6;
