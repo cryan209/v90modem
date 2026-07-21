@@ -4138,8 +4138,21 @@ static void v92_apply_p3_ja_locked(void)
         return;
     ja = v92_p3_rx_get_ja(&g_v92_p3_rx);
     if (!ja || !ja->ok || !ja->parsed_v92) {
-        ME_LOG("[ME] V.92 Phase 3 receiver produced non-strict Ja; refusing V.90 fallback handoff\n");
-        g_v92_p3_rx_failure_logged = true;
+        /* Neither result_applied nor rx_active changes here, so this runs
+           again for every audio block until the call ends -- log it once
+           (129360 copies in one live call before this was gated), and say
+           which half failed so the next pass knows where to look. */
+        if (!g_v92_p3_rx_failure_logged) {
+            g_v92_p3_rx_failure_logged = true;
+            ME_LOG("[ME] V.92 Phase 3 receiver produced non-strict Ja (ja=%d ok=%d parsed_v92=%d); "
+                   "refusing V.90 fallback handoff\n",
+                   ja ? 1 : 0,
+                   (ja && ja->ok) ? 1 : 0,
+                   (ja && ja->parsed_v92) ? 1 : 0);
+            trace_phase("V92 Phase3 non-strict Ja: ok=%d parsed_v92=%d",
+                        (ja && ja->ok) ? 1 : 0,
+                        (ja && ja->parsed_v92) ? 1 : 0);
+        }
         return;
     }
 
