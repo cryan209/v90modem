@@ -58,7 +58,14 @@
 #define TRN1U_ONES_MIN_PCT 75
 #define TRN1U_ONES_MIN_PCT_SOFT 60
 #define TRN1U_EARLY_CHECK_T 256
-#define TRN1U_MIN_SOFT_T 256
+/* V.92 9.5.1.1.3: the digital modem conditions its receiver for Ja only
+ * "after receiving the first 2040T of signal TRNlu", and Figure 10 gives
+ * TRN1u as >2040T -- so 2040 is guaranteed by the peer, not a target to
+ * relax.  This was 256, which started the Ja search inside the peer's own
+ * TRN1u and could therefore only ever return a soft lock on training data
+ * (observed live: trn1u->ja_search after 280 samples, reject=ja_soft_only).
+ * Soft mode still relaxes the *lock* thresholds; it must not shorten this. */
+#define TRN1U_MIN_SOFT_T V92_P3_RX_TRN1U_MIN_T
 #define JA_LEAD_SOFT_T 24
 #define TRN1U_DEMOD_MAX_HYP 12
 #define JA_DEMOD_MAX_BITS   4096
@@ -881,6 +888,53 @@ static int prehist_copy_tail(const v92_p3_rx_t *rx,
     return count;
 }
 
+/*
+ * Enter TRN1u accumulation, seeding the Ja buffer with codeword prehistory so
+ * the GPA descrambler has sync.  Reached from uR2 in the MD-bearing flow, and
+ * directly from uR1 when INFO1a signalled MD = 0 (V.92 9.5.1.1.1: "If the
+ * duration of signal MD indicated by INFO1a is zero, the digital modem shall
+ * proceed according to 9.5.1.1.2", i.e. straight to training on TRN1u after
+ * the first Ru-to-Ru-bar transition -- there is no second Ru/uR pair to wait
+ * for).  Callers set ur1_end/ur2_end as appropriate before calling.
+ */
+static void enter_trn1u(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
+{
+    int copied;
+    int base_sample = sample_index;
+    bool soft_path = rx->p6_soft_mode;
+
+    rx->trn1u_start = sample_index;
+    copied = prehist_copy_tail(rx, 23, rx->ja_buf, &base_sample);
+    rx->ja_buf_base = (copied > 0) ? base_sample : rx->trn1u_start;
+    rx->ja_buf_fill = copied;
+    rx->gpa_reg      = 0;
+    rx->diff_valid   = false;
+    rx->trn1u_count  = 0;
+    rx->trn1u_ones   = 0;
+    p6_reset(rx);
+    rx->p6_soft_mode = soft_path;
+    rx->state = V92_P3_RX_TRN1U;
+    /* Consume the transition sample as first TRN1u symbol. */
+    if (sample_index >= rx->ja_buf_base)
+        ja_buf_push(rx, codeword, sample_index);
+    (void) trn1u_process(rx, codeword);
+}
+
+/* Leave uR1: wait out MD, or skip straight to TRN1u when INFO1a said MD = 0. */
+static void ur1_advance(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
+{
+    if (rx->md_symbols == 0) {
+        if (p3rx_debug_enabled()) {
+            fprintf(stderr,
+                    "[P3RX] sample=%d ur1->trn1u (MD=0, no second Ru/uR pair)\n",
+                    sample_index);
+        }
+        enter_trn1u(rx, codeword, sample_index);
+        return;
+    }
+    rx->state = V92_P3_RX_MD_WAIT;
+}
+
 /* -------------------------------------------------------------------------
  * Ja search — called once the buffer has enough data
  * ------------------------------------------------------------------------- */
@@ -992,6 +1046,12 @@ void v92_p3_rx_init(v92_p3_rx_t *rx)
     rx->last_reject_metric0 = 0;
     rx->last_reject_metric1 = 0;
     p6_reset(rx);
+}
+
+void v92_p3_rx_set_md_length(v92_p3_rx_t *rx, int md_symbols)
+{
+    if (rx)
+        rx->md_symbols = (md_symbols > 0) ? md_symbols : 0;
 }
 
 void v92_p3_rx_start(v92_p3_rx_t *rx, int first_sample_index)
@@ -1193,7 +1253,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             if (run_effective >= ur_min && run_effective <= ur_max) {
                 rx->ur1_end = sample_index - 1;
                 rx->p6_run = 0;
-                rx->state = V92_P3_RX_MD_WAIT;
+                ur1_advance(rx, codeword, sample_index);
             } else if (rx->p6_soft_mode
                        && run_effective > 0
                        && elapsed <= UR_ACCEPT_MAX_SOFT) {
@@ -1204,7 +1264,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
                 }
                 rx->ur1_end = sample_index - 1;
                 rx->p6_run = 0;
-                rx->state = V92_P3_RX_MD_WAIT;
+                ur1_advance(rx, codeword, sample_index);
             } else {
                 p6_rehunt_from_current(rx, codeword, sample_index,
                                        V92_P3_RX_REJECT_UR_MISMATCH,
@@ -1293,26 +1353,8 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             if (elapsed < UR_RELOCK_GRACE)
                 break;
             if (run_effective >= ur_min && run_effective <= ur_max) {
-                int copied;
-                int base_sample = sample_index;
-                bool soft_path = rx->p6_soft_mode;
                 rx->ur2_end = sample_index - 1;
-                rx->trn1u_start = sample_index;
-                /* Seed Ja buffer with true codeword prehistory for GPA sync. */
-                copied = prehist_copy_tail(rx, 23, rx->ja_buf, &base_sample);
-                rx->ja_buf_base = (copied > 0) ? base_sample : rx->trn1u_start;
-                rx->ja_buf_fill = copied;
-                rx->gpa_reg      = 0;
-                rx->diff_valid   = false;
-                rx->trn1u_count  = 0;
-                rx->trn1u_ones   = 0;
-                p6_reset(rx);
-                rx->p6_soft_mode = soft_path;
-                rx->state = V92_P3_RX_TRN1U;
-                /* Consume the transition sample as first TRN1u symbol. */
-                if (sample_index >= rx->ja_buf_base)
-                    ja_buf_push(rx, codeword, sample_index);
-                (void) trn1u_process(rx, codeword);
+                enter_trn1u(rx, codeword, sample_index);
             } else {
                 p6_rehunt_from_current(rx, codeword, sample_index,
                                        V92_P3_RX_REJECT_UR_MISMATCH,

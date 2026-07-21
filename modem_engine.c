@@ -3455,7 +3455,18 @@ static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
     static int     state;          /* 0=await signal, 1=in signal, 2=in gap, 3=fired */
     static int     ms_in_state;
 
-    if (!g_v90 || v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
+    /* V.90 only.  This is an energy heuristic -- sustained signal, silent gap,
+       energy returns => call it Ja -- tuned to the V.90 upstream, which runs
+       S/PP/TRN straight into Ja.  The V.92 Phase 3 upstream is
+       Ru/uR/[MD]/Ru/uR/TRN1u/Ja (Figure 10), so it has gaps *before* Ja that
+       this fires on, and V.92 9.5.1.1.3 anyway requires Sd to start only
+       "after receiving a DIL descriptor of Ja" -- a CRC-valid descriptor, not
+       an energy edge.  Under V.92 the strict decode in v92_p3_rx owns Ja
+       (v92_apply_p3_ja_locked); leaving this armed transmitted Sd seconds
+       early, during the peer's own training, so the peer -- which only looks
+       for Sd after it sends Ja -- reported Error Energy = -0.000 for the whole
+       call. */
+    if (!g_v90 || g_v92_active || v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
         acc = 0;
         acc_n = 0;
         state = 0;
@@ -4255,6 +4266,13 @@ static void prepare_v90_phase3_locked(void)
             if (g_v92_active) {
                 v92_p3_rx_init(&g_v92_p3_rx);
                 v92_p3_rx_start(&g_v92_p3_rx, (int)g_g711_rx_octets);
+                /* INFO1a codes MD in units of 35 ms (v34rx.c prints md*35);
+                   at 8000 sym/s that is md*35*8 symbols.  MD = 0 is the
+                   common case and selects the V.92 9.5.1.1.1 short flow --
+                   without this the receiver always took the MD-bearing path
+                   and burned its 8000-sample MD timeout waiting for a second
+                   Ru/uR pair the peer never sends. */
+                v92_p3_rx_set_md_length(&g_v92_p3_rx, (int)info1a.md * 35 * 8);
                 g_v92_p3_rx_active = true;
                 g_v92_p3_rx_result_applied = false;
                 g_v92_p3_rx_failure_logged = false;
