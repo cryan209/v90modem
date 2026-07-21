@@ -621,6 +621,7 @@ static v90_state_t   *g_v90     = NULL;
 static bool           g_v90_phase3_started = false;
 static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
+static bool           g_v90_reject_info1a_logged = false;
 static bool           g_v90_fallback_v34_logged = false;
 static bool           g_v90_fallback_phase4_released = false;
 static int            g_v90_phase3_s_events = 0;
@@ -661,6 +662,26 @@ static v92_trn2u_demod_t g_v92_trn2u_demod;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
+
+/* INFO1d Table 17 bit 70.  PCM upstream is V.92's only data-pump gain over
+ * V.90, so a zero here makes an analogue peer select V.90 even with both
+ * INFO0 capability bits set -- slmodemd reports "V92 capabilities: local=1 ,
+ * remote=1 , selected=90" the instant it consumes our INFO1d.  Off by default
+ * because the upstream data path is still V.34/V.22bis: advertising this
+ * commits to a data-mode PCM upstream receiver that does not exist.  Set
+ * ME_V92_PCM_UPSTREAM=1 to drive a peer into V.92 and exercise the Phase 3/4
+ * upstream receivers (v92_p3_rx.c, v92_trn2u.c, v92_cp_rx.c), which have no
+ * live coverage otherwise. */
+static bool v92_pcm_upstream_advertised(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_PCM_UPSTREAM");
+        cached = (v && *v && *v != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
 static int            g_v34_fallback_status = 0;
 static int            g_last_v90_bridge_rx_stage = -1;
 static int            g_last_v90_bridge_tx_stage = -1;
@@ -2260,6 +2281,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
+    g_v90_reject_info1a_logged = false;
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_phase2_restarts = 0;
@@ -2329,6 +2351,7 @@ static bool restart_v90_phase2_locked(void)
     g_v90_phase3_started = false;
     g_v90_completion_deferred_logged = false;
     g_v90_wait_info1_logged = false;
+    g_v90_reject_info1a_logged = false;
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -2358,6 +2381,8 @@ static bool restart_v90_phase2_locked(void)
     v34_set_v92_info0_capabilities(g_v34,
                                     g_v92_info0_local_advertised ? 1 : 0,
                                     0);
+    v34_set_v92_pcm_upstream_capability(g_v34,
+                                        v92_pcm_upstream_advertised() ? 1 : 0);
     v34_tx_power(g_v34, -10.0f);
     v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
     v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
@@ -3167,6 +3192,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             v34_set_v92_info0_capabilities(g_v34,
                                             g_v92_info0_local_advertised ? 1 : 0,
                                             0);
+            v34_set_v92_pcm_upstream_capability(g_v34,
+                                                v92_pcm_upstream_advertised() ? 1 : 0);
         }
         v90_cp_rx_init(&g_v90_cp_rx,
                        4,
@@ -3913,11 +3940,12 @@ void me_rx_audio(const int16_t *amp, int len)
     }
 }
 
-static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
+static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
 {
     v34_v90_info1a_t received;
-    bool v92_contract;
 
+    if (v92_selected)
+        *v92_selected = false;
     if (!info || !g_v34
         || !v34_get_v90_received_info1a(g_v34, &received))
         return false;
@@ -3928,19 +3956,38 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info)
     info->downstream_rate_code = (uint8_t)received.downstream_rate_code;
     info->freq_offset = (int16_t)received.freq_offset;
 
-    v92_contract = g_v92_info0_mutual;
-    /* V.90 Table 10 permits any V.34 upstream rate code and reserves 32:33.
-     * V.92 Table 19 instead requires 3000/3200/3429 upstream, U_INFO > 66,
-     * and sets bit 33 to select the high carrier (raw value 0b10). */
-    if (v92_contract) {
-        return received.raw_12_17 == 0
-            && received.raw_32_33 == 0x2
-            && received.u_info > 66
-            && received.upstream_symbol_rate_code >= 3
-            && received.upstream_symbol_rate_code <= 5
-            && received.downstream_rate_code == 6
-            && v90_info1a_validate(info);
+    /* V.92 Table 19, against a real one captured 2026-07-21 (raw bytes
+     * 3f c0 89 fd 0f 09 44):
+     *
+     *   raw_12_17=63  md=0  U_INFO=78  raw_32_33=0  upstream=6  downstream=6
+     *
+     * Upstream rate code 6 is 8000 sym/s -- the PCM upstream itself, since
+     * V.92 replaces the V.34 upstream carrier rather than naming one.  That
+     * makes 6 the unambiguous marker that the peer selected V.92; a V.34
+     * upstream code cannot distinguish V.92 from V.90 here, and a peer that
+     * declines PCM upstream reports V.90 anyway ("selected=90" in slmodemd),
+     * so anything else is handled as V.90 below.
+     *
+     * The earlier expectations here were written from the spec text with no
+     * ground truth and were wrong three ways: they required raw_12_17 == 0
+     * (the peer sets all six bits), raw_32_33 == 0x2 (it sends 0), and a
+     * 3000/3200/3429 upstream code (it sends 8000).  Do not reinstate them
+     * without a capture that shows them. */
+    if (g_v92_info0_mutual
+        && received.u_info > 66
+        && received.upstream_symbol_rate_code == 6
+        && received.downstream_rate_code == 6
+        && v90_info1a_validate(info)) {
+        if (v92_selected)
+            *v92_selected = true;
+        return true;
     }
+    /* Fall through to the V.90 rules even under a mutual-V.92 INFO0 contract:
+     * this peer confirms V.92 capability at INFO0 and can still answer a plain
+     * Table 10 INFO1a, and rejecting that stalls Phase 2 on a frame we could
+     * have run as V.90.  Reaching here with g_v92_info0_mutual set is the
+     * demotion path; the caller keys g_v92_active off *v92_selected, not off
+     * the INFO0 contract, so a demoted call runs as ordinary V.90. */
     return received.raw_12_17 == 0
         && received.raw_32_33 == 0
         && received.u_info > 0
@@ -4117,15 +4164,20 @@ static void v92_apply_p3_ja_locked(void)
 static void prepare_v90_phase3_locked(void)
 {
     v90_info1a_t info1a;
+    bool v92_selected = false;
 
     if (g_mod != ME_MOD_V90 || !g_v34 || g_v90_phase3_started)
         return;
 
     v92_refresh_info0_confirmation_locked();
-    if (get_strict_v90_info1a_locked(&info1a)) {
+    if (get_strict_v90_info1a_locked(&info1a, &v92_selected)) {
         const char *dil_profile = getenv("ME_V90_DIL_PROFILE");
 
-        g_v92_active = g_v92_info0_mutual;
+        if (g_v92_info0_mutual && !v92_selected)
+            ME_LOG("[ME] V.92 INFO0 was mutual but the peer answered a V.90 INFO1a "
+                   "(upstream_code=%u, not 6/8000); demoting to V.90\n",
+                   (unsigned)info1a.upstream_symbol_rate_code);
+        g_v92_active = v92_selected;
         ME_LOG("[ME] %s strict RX event: valid INFO1a U_INFO=%u MD=%u upstream_code=%u downstream_code=%u\n",
                g_v92_active ? "V.92" : "V.90",
                (unsigned)info1a.u_info,
@@ -4186,6 +4238,7 @@ static void prepare_v90_phase3_locked(void)
             g_v90_phase3_started = true;
             g_v90_completion_deferred_logged = false;
             g_v90_wait_info1_logged = false;
+            g_v90_reject_info1a_logged = false;
             if (g_v92_active) {
                 v92_p3_rx_init(&g_v92_p3_rx);
                 v92_p3_rx_start(&g_v92_p3_rx, (int)g_g711_rx_octets);
@@ -4220,15 +4273,19 @@ static void prepare_v90_phase3_locked(void)
            U_INFO is that reset snapshot, not a peer selecting plain V.34. */
         if (v34_get_v90_received_info1a(g_v34, &received)
             && received.u_info > 0) {
-            if (!g_v90_wait_info1_logged) {
-                ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d\n",
+            /* Own log-once flag, not the "still waiting" one: that has almost
+               always fired by now, which silently swallowed the only line that
+               names the field the validator objected to. */
+            if (!g_v90_reject_info1a_logged) {
+                ME_LOG("[ME] V.90 strict RX event: rejecting INFO1a reserved=%02X/%02X U_INFO=%d upstream_code=%d downstream_code=%d (v92_contract=%d)\n",
                        received.raw_12_17,
                        received.raw_32_33,
                        received.u_info,
                        received.upstream_symbol_rate_code,
-                       received.downstream_rate_code);
+                       received.downstream_rate_code,
+                       g_v92_info0_mutual ? 1 : 0);
                 trace_phase("V90 strict RX event=INFO1A_INVALID -> remain Phase2");
-                g_v90_wait_info1_logged = true;
+                g_v90_reject_info1a_logged = true;
             }
             if (!g_v90_fallback_phase4_released
                 && received.downstream_rate_code >= 0 && received.downstream_rate_code <= 5

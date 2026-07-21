@@ -508,6 +508,12 @@ typedef struct
     bool v92_info0_capable;
     bool v92_short_phase2_requested;
     bool v92_info1d_mode;
+    /*! \brief V.92 INFO1d Table 17 bit 70: PCM upstream supported by this
+        digital endpoint.  Off by default -- the upstream data path is still
+        V.34/V.22bis, so claiming this commits to a receiver we do not have.
+        Advertising it is what makes an analogue peer select V.92 rather than
+        V.90, so it exists to exercise the Phase 3/4 upstream receivers. */
+    bool v92_pcm_upstream_capable;
     /*! \brief V.90: count of L1/L2 rounds sent (need 2 before INFO1d) */
     int v90_l2_count;
     /*! \brief V.90 answerer: consecutive fast Tone-A recoveries while waiting

@@ -889,8 +889,12 @@ static void prepare_info1c(v34_state_t *s)
     max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
     /* V.92 §9.3 switches INFO1d to Table 17 only after the two INFO0
        capability bits agree.  Table 17 keeps the V.34 probing fields, but
-       repurposes bit 70 as PCM-upstream support.  This digital endpoint only
-       implements V.34 upstream, so it must emit a zero there. */
+       repurposes bit 70 as PCM-upstream support.  That bit is what actually
+       decides V.92 vs V.90: an analogue peer reading a zero has no data-pump
+       feature left to gain and answers V.90 (observed live -- slmodemd logs
+       "V92 capabilities: local=1 , remote=1 , selected=90" in the same
+       instant it consumes our INFO1d).  Default off because the upstream
+       data path here is still V.34; see v34_set_v92_pcm_upstream_capability. */
     v92_info1d = s->tx.v90_mode
               && s->tx.v92_info0_capable
               && (s->rx.info0_raw_26_27 & 0x01U) != 0
@@ -923,7 +927,8 @@ static void prepare_info1c(v34_state_t *s)
            becomes the PCM-upstream capability bit in V.92 Table 17. */
         s->tx.info1c.rate_data[V34_BAUD_RATE_3429].use_high_carrier = false;
         span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
-                 "Tx INFO1d V.92 Table 17 selected (bit70 PCM-upstream=0)\n");
+                 "Tx INFO1d V.92 Table 17 selected (bit70 PCM-upstream=%d)\n",
+                 s->tx.v92_pcm_upstream_capable ? 1 : 0);
     }
     s->tx.v92_info1d_mode = v92_info1d;
 }
@@ -1040,7 +1045,8 @@ static int info1c_sequence_tx(v34_tx_state_t *s, info1c_t *info1c)
     }
     if (v92_info1d)
     {
-        bitstream_put(&bs, &t, 0, 1); /* bit 70: no PCM upstream */
+        /* bit 70: PCM upstream capability (see v34_set_v92_pcm_upstream_capability) */
+        bitstream_put(&bs, &t, s->v92_pcm_upstream_capable ? 1 : 0, 1);
         bitstream_put(&bs, &t,
                       info1c->rate_data[V34_BAUD_RATE_3429].pre_emphasis,
                       4);
@@ -6569,6 +6575,15 @@ SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
         return;
     s->tx.v92_info0_capable = v92_capable != 0;
     s->tx.v92_short_phase2_requested = short_phase2_requested != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
+                                                        int pcm_upstream_capable)
+{
+    if (!s)
+        return;
+    s->tx.v92_pcm_upstream_capable = pcm_upstream_capable != 0;
 }
 /*- End of function --------------------------------------------------------*/
 
