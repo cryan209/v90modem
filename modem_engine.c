@@ -65,6 +65,14 @@ enum v34_rx_stages_e {
     V34_RX_STAGE_DATA,
 };
 
+/* MUST stay in sync, value for value, with enum v34_tx_stages_e in
+ * spandsp-master/src/spandsp/private/v34.h -- v34_get_tx_stage() returns a
+ * value produced inside spandsp, so any drift silently shifts every stage
+ * comparison rather than failing to build. A missing INFOMARKSA put every
+ * name from V90_WAIT_TONE_A on one low, which made the ">= FIRST_S" V.34
+ * fallback test fire a stage early, on INFO0_RETRY (observed live 2026-07-21).
+ * The HDX_* stages that follow MP in spandsp are deliberately not copied --
+ * nothing here refers to them, and they sit above every value we compare. */
 enum v34_tx_stages_e {
     V34_TX_STAGE_INITIAL_PREAMBLE = 1,
     V34_TX_STAGE_INFO0,
@@ -79,6 +87,7 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
     V34_TX_STAGE_PRE_INFO1_A,
+    V34_TX_STAGE_INFOMARKSA,
     V34_TX_STAGE_V90_WAIT_TONE_A,
     V34_TX_STAGE_V90_WAIT_INFO1A,
     V34_TX_STAGE_V90_WAIT_RX_L2,
@@ -407,6 +416,7 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_POST_L2_NOT_A:               return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE:                   return "A_SILENCE";
     case V34_TX_STAGE_PRE_INFO1_A:                 return "PRE_INFO1_A";
+    case V34_TX_STAGE_INFOMARKSA:                  return "INFOMARKSA";
     case V34_TX_STAGE_V90_WAIT_TONE_A:             return "V90_WAIT_TONE_A";
     case V34_TX_STAGE_V90_WAIT_INFO1A:             return "V90_WAIT_INFO1A";
     case V34_TX_STAGE_V90_WAIT_RX_L2:              return "V90_WAIT_RX_L2";
