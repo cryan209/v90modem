@@ -13,6 +13,15 @@ regression (section 8); `DM_RESAMPLER=sinc` remains the working default.
 **Still blocked**: with the abort gone, the peer stays in V.90 but does not lock Sd
 (`Error Energy` ~0) and retrains, so the analogue S still never arrives.
 
+> **Update 2026-07-22 — the picture has moved on; read [section 14](#14-update-2026-07-22-the-blocker-is-now-trn1sigma-saturation) first.**
+> Downstream quality is now the best on record (peer `Error Energy` converges to
+> ~20, vs the ~446 of section 8), and the RBS **variance-ratio** false-positive of
+> sections 6–6c no longer fires (ratio ~1.9, well under threshold). But the peer
+> still drops to V.34 — now via a *different* stage, `trn1Sigma` fixed-point
+> **saturation**, and `ME_V90_SD_DELAY_MS=1` no longer prevents it. Per-phase
+> TRN1d shaping was implemented and **ruled out** as a fix
+> ([section 15](#15-per-phase-trn1d-shaping-implemented-and-ruled-out)).
+
 ## 1. The S signals are Phase 3, not Phase 4
 
 Worth stating first because it misdirected earlier work. Per Figure 7 and §9.4.2,
@@ -480,3 +489,135 @@ V.90 mode — not a live path.
 `pjmedia_aud_driver_deinit`, `EXC_BAD_ACCESS` at address 0x8. It happens after the
 call has finished and does not affect results, and crash reports predate the changes
 in this document, so it is pre-existing. Worth fixing separately.
+
+## 14. Update 2026-07-22: the blocker is now `trn1Sigma` saturation
+
+Three live V.90 calls (HEAD `a624dfa`, `DM_RESAMPLER=sinc`, `AT+MS=90,0,300,56000`)
+show the failure has moved one stage deeper into the peer's impairment detector.
+Two things genuinely improved versus the state above:
+
+1. **Best-ever downstream.** The peer's `Error Energy` converges to **~20–30**
+   (section 8's best was 446; ZOH gave a blind `-0.000`). Its equaliser fully
+   locks our Sd/TRN1d now. Our Phase 3 otherwise runs clean every call: `selected=90`,
+   Ja DIL descriptor parsed (`N=144 LSP=120 LTP=120` via hypothesis 8), Sd/S̄d/TRN1d
+   all sent, retrains followed.
+2. **The RBS variance-*ratio* false-positive is gone.** `initail var (Trn1)` is now
+   e.g. `338 656 429 448 393 485`, ratio ~1.9, absolute values ~350–800 (were ~1 M),
+   all far under `AltRbsVarThresh = 4000`. **No `alternate rbs false detection`
+   line appears at all.** This is what sections 6–6c were chasing.
+
+But the peer still ends every call `drop to V34 requested / DP is 34 / Link Error`,
+now triggered by a later stage of `V90AutoDigitalImpDetector`:
+
+```
+initail var (Trn1):        338  656  429  448  393  485    <- passes the ratio test
+trn1 second update:       3772 3772 3772 3772 3772 3772    <- perfectly uniform
+trn1 Alt second update:   3772 3772 3772 3772 3772 3772
+first update  : trn1Sigma = 1073741824        (= 2^30)
+second update : trn1Sigma = -1073741824 / -1610612736 / -2147483648  (±2^30..−2^31)
+VPcmFloModem (V90): drop to V34 requested !!
+```
+
+The proximate trigger is the saturated `trn1Sigma`, not the variance ratio. The
+`trn1 second update` array is **byte-identical across all six DS0 phases**, so
+whatever `trn1Sigma` normalises by the inter-phase spread divides by ~0 and pegs to
+a fixed-point rail. Reproduced on all three calls.
+
+**Root cause is the standing "our downstream is too perfect" theme, now biting a
+different detector.** Once the peer's equaliser fully converges (Error Energy ~20),
+the residual per-phase quantity it measures is identical across all six phases,
+because our TRN1d is a spectrally/temporally perfect constant-`U_INFO` stream.
+Improving the downstream is what *exposed* this: tighter lock ⇒ more uniform
+residual ⇒ sigma overflow.
+
+**`ME_V90_SD_DELAY_MS=1` no longer prevents the drop** (contrast section 6c, where a
+clean ratio meant no drop). A call with the delay still saturated `trn1Sigma`
+(`-2147483648`) and dropped at the first Ja cycle. Its only visible effect was a
+**false** `[V90] far-end S detected → J'd → sending DIL` on our side: our Phase-3 S
+detector triggered on the peer's *post-drop V.34 retrain* SSEG, not a genuine V.90 S
+(the peer log shows `JaTXMIT ⇒ SILENCERETRAIN → Link Error`, never a `sending S`).
+So the delay marches us uselessly into DIL/Phase 4 over a peer that has already
+abandoned V.90 — a secondary S-detector false-positive worth gating (do not accept S
+while the peer is mid-V.34-retrain).
+
+Captures: `artifacts/v90-hardware/20260722T015126Z-dmodem_v90/` (baseline, no delay),
+`.../20260722T020129Z-dmodem_v90_sddelay1/` (the false-S delay call). Grep the
+per-call `/tmp/slm-current.log` (not the stale `/tmp/slm.log`) for
+`trn1 second update|trn1Sigma|alternate rbs|drop to V34`; identify a call by its
+monotonic `<NNN.xxx>` timestamp.
+
+## 15. Per-phase TRN1d shaping: implemented and ruled out
+
+The obvious hypothesis for section 14 is that a real CO line never presents a
+perfectly uniform DS0 stream — robbed-bit signalling perturbs specific frames of the
+six-frame superframe, which is exactly what this detector exists to measure — so
+giving our TRN1d a small per-DS0-phase variation should give `trn1Sigma` a finite,
+non-uniform array to work on. That was implemented as an env-gated, default-off lever
+(`ME_V90_TRN1D_SHAPE`, helpers `v90_trn1d_shape_amplitude` / `v90_trn1d_phase_dither`
+in `v90.c`) and tested live in two forms. **Both were ruled out.**
+
+### 15.1 Per-phase level offset — ineffective (mechanistic)
+
+A static, zero-sum six-phase Ucode offset (e.g. `{+3,−2,+1,+2,−3,−1}` around
+`U_INFO=78`). Live at amp=3 the peer's `trn1 second update` stayed uniform
+(`3775 ×6`), `trn1Sigma` still saturated, still dropped. Expected in hindsight: a
+per-phase *mean* offset is **variance-invariant**, and as a smooth per-phase gain it
+is exactly what the peer's equaliser normalises away before the detector measures.
+
+### 15.2 Per-phase variance dither — reaches the wire, still ineffective (decisive)
+
+Symmetric random magnitude dither with a **distinct per-phase radius** (pattern
+`{3,2,1,2,3,1}` scaled by the amplitude), so each phase carries a different
+within-phase variance — the one quantity a linear equaliser cannot predict away.
+
+At amp=9 this was **verified present on the wire**: our `live-tx.g711` TRN1d window
+carried a real 8.3 % per-phase magnitude spread,
+
+```
+per-phase mean |v|:  3921 3921 3628 3921 3933 3617   (μ-law turns the symmetric
+                                                       Ucode dither into a per-phase
+                                                       level difference too)
+```
+
+and yet the peer reported the **identical** uniform `trn1 second update` `3775 ×6`,
+`trn1Sigma` still saturated (`-536870912 / 1073741824`), still `drop to V34`. Its
+*pre*-equaliser `initail var` (`315 610 322 385 390 460`) was also unchanged from the
+unshaped baseline (~1.9× spread, i.e. channel noise) — so even the first-stage
+measurement does not reflect our deliberate per-phase content.
+
+Capture with the TX-tap proof: `artifacts/v90-hardware/20260722T022359Z-dmodem_v90_dither9/`
+(offset run: `.../20260722T021305Z-dmodem_v90_trn1dshape3/`).
+
+### 15.3 Conclusion
+
+Neither a per-phase mean nor a per-phase variance in our TRN1d moves the peer's
+measurement; the `trn1Sigma` saturation reproduces identically across unshaped,
+offset, and large-dither TX. The SmartLink/d-modem `V90AutoDigitalImpDetector` either
+normalises per-phase level in its equaliser before measuring, or its
+`second update`/`trn1Sigma` path is input-independent. **Either way, downstream
+TRN1d amplitude shaping cannot reach it — this is a peer-side (blob) defect, not a
+signal-content problem we can fix from the digital side.**
+
+The shaping code is kept default-off as a tunable diagnostic (with an honest comment
+at `v90_trn1d_shape_amplitude`); it is **not** a fix. `make` and the loopback test
+pass both default-off and with shaping forced on (our own decoder tolerates a shaped
+TRN1d).
+
+### 15.4 The real next step: disassemble `V90AutoDigitalImpDetector`
+
+Learn what `trn1Sigma` actually computes and whether it is input-independent, using
+the objdump-the-linked-`slmodemd` method already used for the V.92 PCM-upstream work
+(`docs/v92_pcm_upstream_findings.md`; copy `/src/slmodemd/slmodemd`, it is linked and
+not stripped, strings resolve at file offset = vaddr). Two outcomes to distinguish:
+
+1. **A peer-side data/logic fix** — as with `SLM_V92_PCM_UPSTREAM` and the resampler
+   headroom, the fix may be a small `slmodemd` patch (e.g. a guard on the
+   divide-by-spread, or a threshold), which we already carry patches for on the rig.
+2. **A structural divide-by-zero on a clean line** — if `trn1Sigma` is
+   `something / (per-phase spread)` and a no-impairment line legitimately yields zero
+   spread, this build simply cannot complete a clean digital V.90 connection without
+   that guard, and no conformant digital modem could satisfy it either.
+
+Until that is known, do **not** re-attempt TRN1d amplitude shaping — sections 15.1
+and 15.2 already cover per-phase mean and per-phase variance, on the wire, against
+the actual peer.
