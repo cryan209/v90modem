@@ -302,6 +302,15 @@ bool v90_training_complete(v90_state_t *s);
  */
 bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
 
+/*
+ * Repair the exact malformed dummy CPt emitted by the private SmartLink
+ * interoperability peer after its TRN2 designer selects the built-in
+ * 8-point fallback constellation.  The helper is deliberately fingerprinted
+ * and does not relax normal Table-14 validation.  Callers should additionally
+ * gate its use as an explicit interoperability workaround.
+ */
+bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp);
+
 /* Copy the currently prepared Type-0 MP/MP' bitstream for diagnostics/tests.
  * Returns its bit length, or 0 if the V.90 Phase 4 mapper is not configured. */
 int v90_copy_phase4_mp_bits(const v90_state_t *s, uint8_t *bits, int max_bits);

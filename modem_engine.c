@@ -2105,17 +2105,29 @@ static void v90_dil_capture_reset(void)
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                                       const char *source)
 {
+    vpcm_cp_frame_t repaired_frame;
+    const vpcm_cp_frame_t *frame;
     bool accepted;
 
     if (!diag || !g_v90 || g_mod != ME_MOD_V90)
         return false;
-    if (diag->frame.codec_alaw != (g_law == ME_LAW_ALAW)) {
+    frame = &diag->frame;
+    if (parse_env_int("ME_V90_SMARTLINK_DUMMY_CPT", 0) != 0) {
+        repaired_frame = diag->frame;
+        if (v90_repair_smartlink_dummy_cpt(&repaired_frame)) {
+            frame = &repaired_frame;
+            ME_LOG("[ME] V.90 SmartLink dummy CPt fingerprint matched; "
+                   "removed leaked Ucodes and restored the intended "
+                   "8-point 71..78 constellation\n");
+        }
+    }
+    if (frame->codec_alaw != (g_law == ME_LAW_ALAW)) {
         ME_LOG("[ME] V.90 %s codec-law interworking: codec-output=%s SIP=%s; transmitting primary-mask codes and using corresponding output mask for shaping\n",
-               diag->frame.v90_compatibility ? "CP" : "CPt",
-               diag->frame.codec_alaw ? "A-law" : "mu-law",
+               frame->v90_compatibility ? "CP" : "CPt",
+               frame->codec_alaw ? "A-law" : "mu-law",
                g_law == ME_LAW_ALAW ? "A-law" : "mu-law");
     }
-    accepted = v90_set_phase4_cp(g_v90, &diag->frame)
+    accepted = v90_set_phase4_cp(g_v90, frame)
         && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
     ME_LOG("[ME] V.90 strict RX event=CP_VALID source=%s kind=%s bits=%d drn=%u ack=%d constellations=%u accepted=%d\n",
            source ? source : "unknown",

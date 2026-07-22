@@ -381,6 +381,7 @@ static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool test_v90_shaped_phase4(v91_law_t law);
 static bool test_v90_codec_output_constellation_mapping(void);
+static bool test_v90_smartlink_dummy_cpt_repair(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
@@ -1973,6 +1974,88 @@ static bool test_v90_codec_output_constellation_mapping(void)
     }
 
     vpcm_log("PASS: V.90 transmits primary masks and shapes against codec-output masks");
+    ok = true;
+
+done:
+    if (tx)
+        v90_free(tx);
+    return ok;
+}
+
+static bool test_v90_smartlink_dummy_cpt_repair(void)
+{
+    static const int leaked_tx_ucodes[] = {
+        0, 71, 72, 73, 74, 75, 76, 77, 78
+    };
+    static const int leaked_codec_ucodes[] = {
+        71, 72, 73, 74, 75, 76, 77, 78, 83, 122
+    };
+    vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t near_miss;
+    v90_state_t *tx = NULL;
+    bool ok = false;
+
+    vpcm_log("Test: SmartLink failed-design dummy CPt fingerprint repair");
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 15;
+    cpt.codec_alaw = true;
+    cpt.shaping_redundancy = 1;
+    cpt.shaping_lookahead = 1;
+    cpt.trn1d_gain_q3_13 = 0x2000;
+    cpt.shaping_a1_q1_6 = 0x40;
+    cpt.upstream_rate_mask = 0x1FFF;
+    cpt.codec_constellations_differ = true;
+    for (int i = 0;
+         i < (int)(sizeof(leaked_tx_ucodes) / sizeof(leaked_tx_ucodes[0]));
+         i++)
+        vpcm_cp_mask_set(cpt.masks[0], leaked_tx_ucodes[i], true);
+    for (int i = 0;
+         i < (int)(sizeof(leaked_codec_ucodes)
+                   / sizeof(leaked_codec_ucodes[0]));
+         i++)
+        vpcm_cp_mask_set(cpt.codec_masks[0], leaked_codec_ucodes[i], true);
+    near_miss = cpt;
+    vpcm_cp_mask_set(near_miss.masks[0], 70, true);
+
+    tx = v90_init_data_pump(V90_LAW_ULAW);
+    if (!tx) {
+        fprintf(stderr, "SmartLink dummy repair could not allocate a mapper\n");
+        goto done;
+    }
+    if (v90_set_phase4_cp(tx, &cpt)) {
+        fprintf(stderr,
+                "SmartLink leaked dummy CPt unexpectedly configured TRN2d\n");
+        goto done;
+    }
+    if (v90_repair_smartlink_dummy_cpt(&near_miss)) {
+        fprintf(stderr, "SmartLink dummy repair accepted a non-fingerprint mask\n");
+        goto done;
+    }
+    if (!v90_repair_smartlink_dummy_cpt(&cpt)
+        || !vpcm_cp_validate(&cpt, NULL, 0)
+        || vpcm_cp_mask_population(cpt.masks[0]) != 8
+        || vpcm_cp_mask_population(cpt.codec_masks[0]) != 8) {
+        fprintf(stderr, "SmartLink dummy CPt repair did not produce valid 8-point masks\n");
+        goto done;
+    }
+    for (int ucode = 0; ucode < VPCM_CP_MASK_BITS; ucode++) {
+        bool expected = ucode >= 71 && ucode <= 78;
+
+        if (vpcm_cp_mask_get(cpt.masks[0], ucode) != expected
+            || vpcm_cp_mask_get(cpt.codec_masks[0], ucode) != expected) {
+            fprintf(stderr,
+                    "SmartLink dummy CPt repaired mask mismatch at Ucode %d\n",
+                    ucode);
+            goto done;
+        }
+    }
+    if (!v90_set_phase4_cp(tx, &cpt)) {
+        fprintf(stderr, "SmartLink repaired dummy CPt did not configure TRN2d\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: exact SmartLink dummy CPt repaired to Ucodes 71..78");
     ok = true;
 
 done:
@@ -8924,6 +9007,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_shaped_phase4(V91_LAW_ULAW)
         && test_v90_shaped_phase4(V91_LAW_ALAW)
         && test_v90_codec_output_constellation_mapping()
+        && test_v90_smartlink_dummy_cpt_repair()
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)
