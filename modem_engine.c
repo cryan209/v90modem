@@ -4467,6 +4467,23 @@ static void prepare_v90_phase3_locked(void)
             g_v90 = v90_init_with_v34(g_v34, law);
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
+            if (g_v90 && g_v90_phase2_restarts > 0) {
+                /* §9.5-retrained attempt: the pre-converged Phase 2 makes our
+                 * Ja detection outrun the peer's WaitForSd arming, so the
+                 * initial-attempt Sd delay transmits Sd before the peer is
+                 * listening and its equalizer trains on unanchored TRN1d
+                 * (error pinned ~3000 vs converging to ~50; call 10 attempt 2,
+                 * 2026-07-22).  1550 ms was live-validated for slow-arming
+                 * windows earlier and still fits the peer's ~8 s Phase 3
+                 * budget with the 20000-symbol Jd (ends ~0.6 s inside it). */
+                int retrain_delay =
+                    parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 1550);
+
+                v90_set_sd_delay_ms(g_v90, retrain_delay);
+                ME_LOG("[ME] V.90: retrained attempt %u; Sd delay override %d ms "
+                       "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
+                       g_v90_phase2_restarts, retrain_delay);
+            }
         }
         if (g_v90) {
             if (g_v92_active) {
