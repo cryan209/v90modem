@@ -2896,7 +2896,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                   ||
                   s->rx.received_event == V34_EVENT_L2_SEEN
                   ||
-                  ++s->tx.tone_duration >= 1200))
+                  ++s->tx.tone_duration >= 240))
         {
             /* V.90 §9.2.2.1.5: the analogue modem's second Tone A reversal is
                10 ms of tone and then L1 begins immediately.  The Phase 2
@@ -2911,8 +2911,12 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                drops the link (observed live 2026-07-22, SmartLink Link Error
                0.96 s into L1).  §9.2.1.1.4/.5 want us receiving L1/L2 and
                answering with Tone B; v90_wait_rx_l2_init() is exactly that.
-               The 2 s cap (1200 bauds) implements the dead V.34 timeout
-               comment below for the V.90 path. */
+               The 400 ms cap (240 bauds) matters most on the §9.5 retrain
+               path, where no INFO0a traffic conditions the receiver for
+               L1/L2, the peer sends no second reversal at all, and its
+               post-L1 Tone B wait (DET_AB) aborts ~1.25 s in — a fresh
+               Tone B onset must appear within that window.  The proven
+               initial-call FIRST_B_SILENCE dwell is ~353 ms. */
             const char *reason;
 
             if (s->rx.received_event == V34_EVENT_REVERSAL_2)
@@ -6464,6 +6468,35 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - v34_force_phase4(): external V.90 Phase 3 complete, handing TX/RX to native Phase 4\n");
     phase4_wait_init(s);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s)
+{
+    if (!s  ||  !s->tx.v90_mode  ||  s->calling_party)
+        return;
+    /*endif*/
+    /* V.90 9.5.1.2: answer a peer-initiated retrain with 70 +/- 5 ms of
+       silence and then Tone B, receiver conditioned for the Tone A phase
+       reversal -- the INFO0 exchange is skipped on a retrain (9.5.2.1 sends
+       the analogue modem straight back to the 9.2.2.1.3 tone ranging, and
+       SmartLink then searches directly for INFO1d after L1/L2).  Restarting
+       from INITIAL_PREAMBLE/INFO0d instead leaves the peer's Tone B detector
+       facing a modulated INFO0d carrier during its L2 window, which it does
+       not reliably accept (observed live 2026-07-22: post-Phase-4 retrains
+       aborted in DET_AB 1.3 s in).  This enters the same
+       V90_RETRAIN_SILENCE -> Tone B -> PHASE2_B_INFO0_SEEN path the INFO1a
+       deadline handler uses; repeated INFO0a from peers that do re-run INFO0
+       still triggers the acknowledged-INFO0d recovery from that state. */
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: peer retrain response armed; 70 ms silence then Tone B (9.5.1.2)\n");
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.current_getbaud = get_v90_wait_info1a_baud;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
