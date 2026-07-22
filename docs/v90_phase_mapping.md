@@ -268,6 +268,16 @@ Phase 4 is not "CP/CP' in disguise".
   `docs/v90_hardware_interop.md`; no hardware result is implied by that tooling
 - the synthetic V.90/V.92 session contract still uses V.91-derived helper
   objects and must not be treated as native V.90 interoperability proof
+- peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
+  Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
+  stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by
+  restarting the answerer Phase 2 flow (`restart_v90_phase2_locked`) so
+  Tone B/INFO0d answer the peer instead of parking in `WAIT_JA`.  This is the
+  path SmartLink's failed-`V90TRN2Design` dummy-CPt cycle depends on: it
+  studies our TRN2d, deliberately retrains (`SILENCERETRAIN` → Tone A), and
+  declares a link error ~3.1 s later if Tone A goes unanswered (observed live
+  2026-07-22; the prior silence-gap heuristic missed the 80 ms gap after
+  transport filtering)
 
 ## What `vpcm_v90_session` Should Eventually Look Like
 
