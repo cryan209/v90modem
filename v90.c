@@ -208,6 +208,83 @@ static int v90_dil_autoterminate_early_symbols(void)
     return 0;
 }
 
+/* Interop-only per-DS0-phase amplitude shaping for TRN1d.
+ *
+ * §8.4.5 makes TRN1d a *constant* U_INFO codeword, so every DS0 phase carries
+ * identical statistics and, once the peer's equaliser converges, its per-phase
+ * variance measurement is byte-identical across all six phases.  The
+ * SmartLink/d-modem V90AutoDigitalImpDetector normalises trn1Sigma by the
+ * spread of that per-phase array; a zero spread makes it saturate to +/-2^30..
+ * 2^31, which the detector reads as an impairment and answers with
+ * "drop to V34 requested".  A real CO line never presents a perfectly uniform
+ * DS0 stream because robbed-bit signalling perturbs specific frames of the
+ * six-frame superframe -- which is exactly what this detector exists to
+ * measure.
+ *
+ * The mechanism is a per-phase *variance* difference, not a per-phase level
+ * offset: a static level offset is variance-invariant and, being a smooth
+ * per-phase gain, is nulled by the peer's equaliser before the detector sees
+ * it (confirmed live 2026-07-22 -- offset amp=3 left the peer's per-phase
+ * array perfectly uniform).  Instead we dither the codeword magnitude by a
+ * per-phase amount, which the linear equaliser cannot predict away, so it
+ * survives as residual per-phase variance.  The dither is symmetric (zero
+ * mean) so the average codeword stays at U_INFO -- the peer already has U_INFO
+ * from INFO1a; TRN1d only trains its equaliser.
+ *
+ * This returns the peak dither radius in Ucodes (0 disables, spec-pure
+ * default).  Live-tunable via ME_V90_TRN1D_SHAPE so the amplitude can be swept
+ * against the peer's RBS variance threshold without a rebuild.
+ *
+ * LIVE RESULT 2026-07-22 -- kept as a diagnostic, but it does NOT move this
+ * peer.  With dither amp=9 the TX tap carried a clear 8.3% per-phase magnitude
+ * spread on the wire, yet the SmartLink/d-modem detector still reported its
+ * per-phase "second update" array as perfectly uniform (3775 x6) and trn1Sigma
+ * still saturated to +/-2^29..2^31 -> "drop to V34".  Its pre-equaliser
+ * "initail var" spread was likewise unchanged from the unshaped baseline
+ * (~1.9x, i.e. channel noise, not our signal).  So the peer either normalises
+ * per-phase level in its equaliser before measuring, or the trn1Sigma
+ * computation is input-independent -- either way the saturation is a peer-side
+ * defect that downstream TRN1d shaping cannot reach.  The real next step is to
+ * disassemble the blob's V90AutoDigitalImpDetector; see the interop-rig notes. */
+static int v90_trn1d_shape_amplitude(void)
+{
+    const char *value = getenv("ME_V90_TRN1D_SHAPE");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 20)
+            return (int) parsed;
+    }
+    return 0;
+}
+
+/* Symmetric per-phase magnitude dither for TRN1d shaping.  Each DS0 phase gets
+ * a distinct dither radius (scaled to the requested peak) so the peer's
+ * per-phase variance array is non-uniform and its trn1Sigma stays finite.
+ * Phase is the DS0 index mod 6; TRN1d begins on a superframe boundary (Sd and
+ * S-bar-d are whole multiples of six symbols), so this aligns with the peer's
+ * superframe phase, though any fixed six-periodic radius pattern breaks the
+ * degenerate uniformity regardless of alignment. */
+static int v90_trn1d_phase_dither(int phase, int amplitude)
+{
+    /* Distinct per-phase radii (three levels) at peak 3; scaled by amplitude. */
+    static const int radius[6] = { 3, 2, 1, 2, 3, 1 };
+    static uint32_t lcg = 0x1234567u;
+    int r, span, d;
+
+    if (amplitude <= 0)
+        return 0;
+    r = radius[((phase % 6) + 6) % 6] * amplitude / 3;
+    if (r <= 0)
+        return 0;
+    span = 2 * r + 1;
+    lcg = lcg * 1103515245u + 12345u;
+    d = (int) ((lcg >> 16) % (uint32_t) span) - r;   /* uniform in [-r, +r] */
+    return d;
+}
+
 /* Symbols of Jd to transmit without seeing the peer's S before requesting a
  * Phase-2 restart from the live modem engine.  Set to 0 to disable recovery.
  *
@@ -2664,7 +2741,23 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * §9.3.1.4: ≥2040T, then Jd within 4000ms of starting TRN1d */
         {
             int scrambled = v90_scramble_bit(&s->scrambler, 1);
+            int shape_amp = v90_trn1d_shape_amplitude();
+            int phase = s->sample_count % 6;   /* DS0 phase, pre-increment */
+            int ucode = s->u_info;
             sign = scrambled;  /* sign=0 → negative, sign=1 → positive */
+            if (shape_amp > 0) {
+                /* Dither the magnitude per DS0 phase so the peer's per-phase
+                 * variance array has non-zero spread and its trn1Sigma stays
+                 * finite (see v90_trn1d_shape_amplitude).  Symmetric, so the
+                 * mean codeword remains U_INFO. */
+                ucode += v90_trn1d_phase_dither(phase, shape_amp);
+                if (ucode < 1)   ucode = 1;
+                if (ucode > 127) ucode = 127;
+                if (s->sample_count == 0)
+                    fprintf(stderr, "[V90] Phase 3: TRN1d per-phase dither "
+                            "active (peak radius=%d, per-phase radii "
+                            "3 2 1 2 3 1 scaled)\n", shape_amp);
+            }
             s->sample_count++;
             if (s->sample_count >= V90_TRN1D_LEN) {
                 fprintf(stderr, "[V90] Phase 3: TRN1d complete (%d symbols), starting Jd\n",
@@ -2676,7 +2769,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_bit_pos = 0;
                 /* Scrambler continues from TRN1d into Jd (not reinitialized) */
             }
-            return v90_pcm_signed_codeword(s->law, s->u_info, sign);
+            return v90_pcm_signed_codeword(s->law, ucode, sign);
         }
 
     case V90_TX_JD:
