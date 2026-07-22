@@ -190,6 +190,24 @@ static int v90_dil_autoterminate_cycles(void)
     return 0;
 }
 
+/* Interop-only allowance for a peer whose upstream S termination request is
+ * not yet recovered reliably.  DIL must still end at a segment boundary; this
+ * only permits the bounded auto-termination target to fall slightly before a
+ * complete synthetic fallback cycle.  The standards-driven default is zero. */
+static int v90_dil_autoterminate_early_symbols(void)
+{
+    const char *value = getenv("ME_V90_DIL_EARLY_SYMBOLS");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 8000)
+            return (int) parsed;
+    }
+    return 0;
+}
+
 /* Symbols of Jd to transmit without seeing the peer's S before requesting a
  * Phase-2 restart from the live modem engine.  Set to 0 to disable recovery.
  *
@@ -2176,6 +2194,25 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
                 fprintf(stderr,
                         "[V90] Phase 3: completed one full DIL cycle (%d segments), repeating\n",
                         n);
+            }
+        } else {
+            int cycle_limit = v90_dil_autoterminate_cycles();
+            int early_symbols = v90_dil_autoterminate_early_symbols();
+            int target_symbols = cycle_limit * v90_dil_cycle_len(&s->dil);
+
+            if (cycle_limit > 0 && early_symbols > 0
+                && s->sample_count < target_symbols
+                && s->sample_count + early_symbols >= target_symbols) {
+                fprintf(stderr,
+                        "[V90] Phase 3: DIL interop fallback ending %d symbols "
+                        "before %d-cycle target at segment %d/%d; entering Phase 4\n",
+                        target_symbols - s->sample_count,
+                        cycle_limit,
+                        s->dil_segment_index,
+                        n);
+                s->tx_phase = V90_TX_RI;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
             }
         }
     }

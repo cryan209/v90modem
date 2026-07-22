@@ -8571,9 +8571,24 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * detection: the tone detectors live in info_rx(), which is not the
      * demodulator running during Phase 3/4, and silence is the unambiguous
      * first half of every retrain the peer can start. */
-    if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING
-        &&
-        s->stage <= V34_RX_STAGE_PHASE4_MP)
+    /* Do not run this detector in PHASE3_TRAINING.  V.90 §9.3.2.2 requires
+       the analogue modem to begin Phase 3 with 70 +/- 5 ms of silence, so the
+       old 60 ms threshold deterministically classified the legitimate startup
+       gap as SILENCERETRAIN.  Once the digital transmitter reaches Jd the
+       dedicated expect-silence/energy detector below owns abandonment; this
+       detector remains useful in the later Phase 4 stages.
+
+       Likewise, do not arm it during the first 1000 ms of PHASE4_MP.  The
+       project-owned V.90 transmitter hands the receiver directly from DIL to
+       CPt acquisition, and the analogue modem is allowed a quiet turnaround
+       before its first repeated CPt.  Live SmartLink calls recover CPt about
+       800 ms after this stage is armed and can contain a 60 ms low-energy gap
+       around 320 ms; the old 200 ms grace therefore still reported a false
+       SILENCERETRAIN.  Waiting 3200 bauds leaves the detector active for a
+       later retrain after CPt has had a full acquisition window. */
+    if (s->stage > V34_RX_STAGE_PHASE3_TRAINING
+        && s->stage <= V34_RX_STAGE_PHASE4_MP
+        && !(s->stage == V34_RX_STAGE_PHASE4_MP && s->duration < 3200))
     {
         int32_t retrain_floor = (s->info_rx_carrier_ref > 0)
                                 ? s->info_rx_carrier_ref/64
@@ -9111,6 +9126,13 @@ SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
 {
     return s->rx.received_event;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s)
+{
+    if (s && s->rx.received_event == V34_EVENT_PEER_RETRAIN)
+        s->rx.received_event = V34_EVENT_NONE;
 }
 /*- End of function --------------------------------------------------------*/
 

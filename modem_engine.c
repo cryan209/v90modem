@@ -3868,6 +3868,11 @@ void me_rx_audio(const int16_t *amp, int len)
                                "(accepted=%d)\n", accepted ? 1 : 0);
                         trace_phase("V90 peer retrain detected, following (accepted=%d)",
                                     accepted ? 1 : 0);
+                        /* PEER_RETRAIN is an application-owned event, unlike
+                         * the ordinary V.34 TX/RX handshake events.  A rejected
+                         * notification used to stay sticky and suppress the
+                         * later J/Ja detector indefinitely. */
+                        v34_v90_clear_peer_retrain_event(g_v34);
                     }
                     if (new_e_event && g_v90 && !g_v92_active) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
