@@ -126,7 +126,12 @@ static unsigned long rs_clip_count, rs_out_count, rs_clip_logged;
 static double rs_clip_worst;
 
 /* ---------------------------------------------------------------------------
- * Loop model: DS0 staircase + local-loop lowpass (DM_RESAMPLER=zoh, default).
+ * Loop model: DS0 staircase + local-loop lowpass (DM_RESAMPLER=zoh).
+ *
+ * SUPERSEDED AS THE DEFAULT 2026-07-22 -- sinc is the default again; see the
+ * note at the end of this block.  The reasoning below is kept because it is
+ * correct about the Phase-3 RBS false-positive the loop model was built to
+ * cure; it just loses to a later, decisive Phase-4 measurement.
  *
  * The interpolator above is mathematically "ideal reconstruction" and is
  * physically wrong, in a way that breaks V.90 specifically.  With the cutoff at
@@ -176,18 +181,41 @@ static double rs_clip_worst;
  * ringy interpolator: L1 falls from 3.81 to ~2.26 (97 taps) or ~1.11 (9 taps),
  * so the codewords arrive 1.8x to 3.6x larger than under the old 0.25.  That
  * is the point -- level resolution is what the peer's detectors actually use.
- * DM_RESAMPLER=sinc restores the old interpolator for A/B.
+ * DM_RESAMPLER=sinc restores the 257-tap interpolator (now the default).
  * DM_RESAMPLER=hybrid keeps that interpolator at the Phase-3-safe 0.25 gain
  * through Sd and S-bar-d, then reduces only its scalar gain to 0.22 over one
  * second of TRN1d/Jd.  The channel shape stays fixed while the lower final
- * gain keeps SmartLink's TRN2d error below its absolute drop threshold. */
+ * gain keeps SmartLink's TRN2d error below its absolute drop threshold.
+ *
+ * DECISIVE Phase-4 measurement (2026-07-22) -- why sinc is the default again:
+ * The loop model's DM_LOOP_FC=4400 lowpass, chosen to smooth per-phase level,
+ * also guts the near-Nyquist DIL content the analogue modem measures per
+ * Ucode.  Matched TX-tap / dm_to_dsp.raw pair from a real design-failure call,
+ * DIL window, band energy normalised to the 0-1 kHz band:
+ *
+ *     band (Hz)     our TX (8k)   at DSP (loop 9.6k)
+ *     3400-4000        0.668            0.392          (~40% rolled off)
+ *     4000-4800        0.000            0.374          (spurious ZOH imaging)
+ *
+ * The whole downstream reaches the DSP at <= 39% full scale, and findPadGain()
+ * then cannot fit a per-Ucode gain: with the loop model the peer's equalizer
+ * error energy pins at ~3000 and it retrains immediately, never attempting a
+ * design.  With sinc (cutoff exactly 4 kHz, the near-Nyquist content the
+ * detector needs) the same peer converges to error energy ~10-14,
+ * findPadGain() reports fittable per-candidate errors, and
+ * V90TRN2Designer emits a real "ADI design report" with genuine per-phase
+ * constellations (3 3 3 3 3 3 / 7 7 7 6 6 6), not the 8-point dummy fallback.
+ * The Phase-3 RBS false-positive documented above does not recur on sinc with
+ * the current server-side Phase-3 fixes (ME_V90_SD_DELAY_MS et al).  Run with
+ * DM_RS_HEADROOM=0.25 so the ringy sinc kernel cannot clip. */
 #define LOOP_TAPS_MAX 129
 static float  loop_ker[LOOP_TAPS_MAX];
 static int    loop_ker_ready;
 static int    loop_taps = 97;
 static double loop_fc = 4400.0;
 static double loop_headroom;
-static int    use_zoh_loop = 1;
+static int    use_zoh_loop;   /* default sinc: the loop model breaks Phase-4
+                               * findPadGain() (see block comment above). */
 static int    use_hybrid_loop;
 static int    hybrid_gain_active;
 static int    hybrid_blend_started;

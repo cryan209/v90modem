@@ -28,6 +28,32 @@ Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in t
 Also patched (not copied here): `slmodemd/modem_cmdline.c` (`-e` option
 declared `MANDATORY,STRING` to fix an upstream arg-parsing bug).
 
+## Required rig resampler: `DM_RESAMPLER=sinc DM_RS_HEADROOM=0.25`
+
+**The d-modem 8k↔9.6k resampler must be the 257-tap sinc at headroom 0.25,
+not the ZOH loop model.** As of 2026-07-22 this is the source default in
+`rig/d-modem/d-modem.c` again, but the deployed tower binary may still default
+to `zoh` until rebuilt — launch slmodemd with `DM_RESAMPLER=sinc
+DM_RS_HEADROOM=0.25` in its environment until then, and confirm with the
+d-modem log line `ACTIVE downstream path: windowed-sinc polyphase
+interpolator`.
+
+Why (decisive live A/B, 2026-07-22): the ZOH loop model's `DM_LOOP_FC=4400`
+lowpass smooths per-phase level but guts the near-Nyquist DIL content the
+analogue modem measures per Ucode. Matched TX-tap/`dm_to_dsp.raw` capture over
+a DIL window, band energy normalised to 0–1 kHz: the 3400–4000 Hz band arrives
+at 0.392 vs 0.668 transmitted (~40% rolled off) and a spurious 0.374 appears at
+4000–4800 Hz (ZOH imaging, where the 8 kHz TX has zero). The whole downstream
+reaches the DSP at ≤39% full scale. `findPadGain()` then cannot fit a per-Ucode
+gain: the peer's equalizer error energy pins at ~3000 and it **retrains
+immediately, never attempting a constellation design**. With sinc the same peer
+converges to error energy ~10–14, `findPadGain()` reports fittable errors, and
+`V90TRN2Designer` emits a real `ADI design report` with genuine per-phase
+constellations (`3 3 3 3 3 3` / `7 7 7 6 6 6`), not the 8-point dummy fallback —
+the first non-dummy CPt seen against this peer. The Phase-3 RBS false-positive
+the loop model was built to cure does not recur on sinc with the current
+server-side Phase-3 fixes.
+
 ## Required env vars for a successful Phase 3 run
 
 - `ME_V90_J_LOOKAHEAD_BITS=3000` — SmartLink's Phase-3 `Sd`-detection window
