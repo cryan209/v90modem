@@ -350,6 +350,12 @@ SPAN_DECLARE(int) v34_get_v90_received_info1d(v34_state_t *s, v34_v90_info1d_t *
     \return The current rx.received_event value (v34_events_e). */
 SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
 
+/*! Clear a reported V.90 peer-retrain event after the external digital-side
+    state machine has consumed or rejected it.  Other RX events are left
+    untouched.
+    \param s The modem context. */
+SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
+
 /*! Get the number of distinct, strictly detected Phase 3 S transitions.
     \param s The modem context.
     \return A monotonically increasing count for the current training attempt. */

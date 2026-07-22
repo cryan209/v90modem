@@ -121,6 +121,7 @@ static FILE *dm_tap_tx, *dm_tap_rx, *dm_tap_tx_9600;
 static float rs_ker[RS_PHASES][RS_TAPS];
 static int   rs_ker_ready;
 static double rs_headroom = RS_HEADROOM_DEFAULT;
+static double rs_fc = 4000.0;
 static unsigned long rs_clip_count, rs_out_count, rs_clip_logged;
 static double rs_clip_worst;
 
@@ -175,7 +176,11 @@ static double rs_clip_worst;
  * ringy interpolator: L1 falls from 3.81 to ~2.26 (97 taps) or ~1.11 (9 taps),
  * so the codewords arrive 1.8x to 3.6x larger than under the old 0.25.  That
  * is the point -- level resolution is what the peer's detectors actually use.
- * DM_RESAMPLER=sinc restores the old interpolator for A/B. */
+ * DM_RESAMPLER=sinc restores the old interpolator for A/B.
+ * DM_RESAMPLER=hybrid keeps that interpolator at the Phase-3-safe 0.25 gain
+ * through Sd and S-bar-d, then reduces only its scalar gain to 0.22 over one
+ * second of TRN1d/Jd.  The channel shape stays fixed while the lower final
+ * gain keeps SmartLink's TRN2d error below its absolute drop threshold. */
 #define LOOP_TAPS_MAX 129
 static float  loop_ker[LOOP_TAPS_MAX];
 static int    loop_ker_ready;
@@ -183,13 +188,29 @@ static int    loop_taps = 97;
 static double loop_fc = 4400.0;
 static double loop_headroom;
 static int    use_zoh_loop = 1;
+static int    use_hybrid_loop;
+static int    hybrid_gain_active;
+static int    hybrid_blend_started;
+static int    hybrid_blend_progress;
+static double hybrid_target_headroom = 0.22;
 
 static void rs_build_kernel(void) {
-	const double fs_in = 8000.0, fc = 4000.0;
-	const double wc = fc/(fs_in/2.0);   /* exact input Nyquist */
+	const double fs_in = 8000.0;
+	double wc;
 	const char *env;
 	int p, t;
 	if (rs_ker_ready) return;
+	env = getenv("DM_RS_FC");
+	if (env && *env) {
+		char *end;
+		double parsed = strtod(env, &end);
+		if (end != env && *end == '\0' && parsed >= 3500.0 && parsed <= 4000.0)
+			rs_fc = parsed;
+		else
+			PJ_LOG(2,(__FILE__, "DM_RS_FC='%s' ignored (want 3500..4000 Hz), "
+			                    "using %.0f Hz", env, rs_fc));
+	}
+	wc = rs_fc/(fs_in/2.0);
 	env = getenv("DM_RS_HEADROOM");
 	if (env && *env) {
 		char *end;
@@ -222,8 +243,8 @@ static void rs_build_kernel(void) {
 		PJ_LOG(4,(__FILE__, "resampler phase %d: L1=%.3f (worst-case %.2fx "
 		                    "int16 FS)", p, l1, l1));
 	}
-	PJ_LOG(3,(__FILE__, "resampler headroom %.3f (%.2f dB) folded into kernel",
-	          rs_headroom, 20.0*log10(rs_headroom)));
+	PJ_LOG(3,(__FILE__, "resampler cutoff %.0f Hz, headroom %.3f (%.2f dB) folded into kernel",
+	          rs_fc, rs_headroom, 20.0*log10(rs_headroom)));
 	rs_ker_ready = 1;
 }
 
@@ -234,6 +255,61 @@ static int loop_fdiv(int a, int b) {
 	return q;
 }
 
+/* Sd is {+W,+0,+W,-W,-0,-W}; S-bar-d is its exact sign inverse for
+ * eight repetitions.  Search the assembled FIR work buffer, which gives us
+ * 128 past and future input samples around prev[].  A 96-symbol periodic Sd
+ * history, the W/0/W magnitude signature, and the complete 48-symbol barred
+ * sequence make this boundary unique without mistaking Ri or mapped data for
+ * it.  Keep sinc through all of S-bar-d, then change at the first TRN1d
+ * symbol so the peer trains its equalizer on the final channel model. */
+#define HYBRID_SD_HISTORY_SYMBOLS  96
+#define HYBRID_SD_BAR_SYMBOLS      48
+#define HYBRID_BLEND_DELAY_SYMBOLS 12000
+#define HYBRID_BLEND_SYMBOLS        8000
+static int loop_find_trn1d_start(const pj_int16_t *work,
+                                 int prev_start,
+                                 int prev_count) {
+	int transition, k;
+
+	if (!work || prev_start < HYBRID_SD_HISTORY_SYMBOLS)
+		return -1;
+	/* Also consider transitions in the last 48 samples of hist[]: their
+	 * TRN1d boundary can fall in the current prev[] frame. */
+	for (transition = prev_start - HYBRID_SD_BAR_SYMBOLS;
+	     transition < prev_start + prev_count;
+	     transition++) {
+		int first = work[transition - 6];
+
+		if (abs(first) < 256
+		    || work[transition - 5] != 0
+		    || work[transition - 4] != first
+		    || work[transition - 3] != -first
+		    || work[transition - 2] != 0
+		    || work[transition - 1] != -first)
+			continue;
+		for (k = -HYBRID_SD_HISTORY_SYMBOLS; k < 0; k++) {
+			int phase = ((k % 6) + 6) % 6;
+
+			if (work[transition + k] != work[transition - 6 + phase])
+				break;
+		}
+		if (k != 0)
+			continue;
+		for (k = 0; k < HYBRID_SD_BAR_SYMBOLS; k++) {
+			if (work[transition + k] != -work[transition - 6 + (k % 6)])
+				break;
+		}
+		if (k == HYBRID_SD_BAR_SYMBOLS) {
+			int switch_at = transition - prev_start
+			              + HYBRID_SD_BAR_SYMBOLS;
+
+			if (switch_at >= 0 && switch_at < prev_count)
+				return switch_at;
+		}
+	}
+	return -1;
+}
+
 static void loop_build_kernel(void) {
 	const double fs = 9600.0;
 	const char *env;
@@ -242,8 +318,19 @@ static void loop_build_kernel(void) {
 
 	if (loop_ker_ready) return;
 
-	if ((env = getenv("DM_RESAMPLER")) && *env)
-		use_zoh_loop = (strcmp(env, "sinc") != 0);
+	if ((env = getenv("DM_RESAMPLER")) && *env) {
+		use_hybrid_loop = (strcmp(env, "hybrid") == 0);
+		use_zoh_loop = !use_hybrid_loop && (strcmp(env, "sinc") != 0);
+	}
+	if ((env = getenv("DM_HYBRID_HEADROOM")) && *env) {
+		char *end; double v = strtod(env, &end);
+		if (end != env && *end == '\0' && v > 0.0 && v <= rs_headroom)
+			hybrid_target_headroom = v;
+		else
+			PJ_LOG(2,(__FILE__, "DM_HYBRID_HEADROOM='%s' ignored "
+			                    "(want 0 < h <= %.3f), using %.3f",
+			                    env, rs_headroom, hybrid_target_headroom));
+	}
 	if ((env = getenv("DM_LOOP_FC")) && *env) {
 		char *end; double v = strtod(env, &end);
 		if (end != env && *end == '\0' && v > 300.0 && v <= fs/2.0) loop_fc = v;
@@ -276,7 +363,7 @@ static void loop_build_kernel(void) {
 	}
 	/* Provably cannot clip for any input, same argument as RS_HEADROOM_DEFAULT.
 	 * DM_RS_HEADROOM still overrides, for sweeping below the safe bound. */
-	loop_headroom = 1.0/l1;
+	loop_headroom = use_hybrid_loop ? rs_headroom : 1.0/l1;
 	if ((env = getenv("DM_RS_HEADROOM")) && *env) {
 		char *end; double v = strtod(env, &end);
 		if (end != env && *end == '\0' && v > 0.0 && v <= 1.0) loop_headroom = v;
@@ -292,8 +379,11 @@ static void loop_build_kernel(void) {
 	 * which one is actually in the signal path.  State it explicitly -- a
 	 * control run is worthless if you cannot prove the control was applied. */
 	PJ_LOG(3,(__FILE__,"ACTIVE downstream path: %s",
-	          use_zoh_loop ? "ZOH staircase + loop lowpass (DM_RESAMPLER=zoh)"
-	                       : "windowed-sinc polyphase interpolator (DM_RESAMPLER=sinc)"));
+	          use_hybrid_loop
+	              ? "sinc at 0.25 through early Jd, then delayed 8000-symbol gain ramp (DM_RESAMPLER=hybrid)"
+	              : (use_zoh_loop
+	                    ? "ZOH staircase + loop lowpass (DM_RESAMPLER=zoh)"
+	                    : "windowed-sinc polyphase interpolator (DM_RESAMPLER=sinc)")));
 	loop_ker_ready = 1;
 }
 
@@ -310,7 +400,8 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		int in_n = (int)(frame->size / 2);
 		pj_int16_t out[1152];
 		pj_int16_t work[RS_PAST + 1024 + RS_FUTURE];
-		int out_n, k, i;
+		int out_n, k, i, hybrid_switch_at = -1;
+		int hybrid_blend_base = 0, hybrid_blending = 0;
 
 		rs_build_kernel();
 		loop_build_kernel();
@@ -335,6 +426,16 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				work[RS_PAST + i] = prev[i];
 			for (i = 0; i < RS_FUTURE; i++)
 				work[RS_PAST + prev_n + i] = in[i];
+			if (use_hybrid_loop && !hybrid_gain_active && !hybrid_blend_started)
+				hybrid_switch_at = loop_find_trn1d_start(work, RS_PAST, prev_n);
+			if (hybrid_blend_started) {
+				hybrid_blending = 1;
+				hybrid_blend_base = hybrid_blend_progress;
+			} else if (hybrid_switch_at >= 0) {
+				hybrid_blending = 1;
+				hybrid_blend_base = -hybrid_switch_at
+				                  - HYBRID_BLEND_DELAY_SYMBOLS;
+			}
 			int loop_h = loop_taps/2;
 			for (k = 0; k < out_n; k++) {
 				int num = k * 5;
@@ -355,9 +456,25 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 						int si = RS_PAST + loop_fdiv(m*5, 6);
 						acc += (float)work[si] * loop_ker[t];
 					}
-				} else
-				for (t = 0; t < RS_TAPS; t++)
-					acc += (float)work[base + t] * h[t];
+				} else {
+					float gain = 1.0f;
+
+					for (t = 0; t < RS_TAPS; t++)
+						acc += (float)work[base + t] * h[t];
+					if (use_hybrid_loop && hybrid_gain_active) {
+						gain = (float)(hybrid_target_headroom/rs_headroom);
+					} else if (use_hybrid_loop && hybrid_blending
+					           && hybrid_blend_base + ic >= 0) {
+						int progress = hybrid_blend_base + ic;
+						float alpha = (progress >= HYBRID_BLEND_SYMBOLS)
+						              ? 1.0f
+						              : (float)progress/(float)HYBRID_BLEND_SYMBOLS;
+						float target = (float)(hybrid_target_headroom/rs_headroom);
+
+						gain = 1.0f + alpha*(target - 1.0f);
+					}
+					acc *= gain;
+				}
 				/* Clipping here is nonlinear and silently destroys the peer's
 				 * pad-gain fit (see RS_HEADROOM_DEFAULT).  It cost a long
 				 * investigation precisely because nothing ever reported it,
@@ -370,6 +487,25 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				if (acc > 32767.0f) acc = 32767.0f;
 				else if (acc < -32768.0f) acc = -32768.0f;
 				out[k] = (pj_int16_t)(acc >= 0 ? acc + 0.5f : acc - 0.5f);
+			}
+			if (hybrid_switch_at >= 0) {
+				PJ_LOG(3,(__FILE__, "hybrid downstream: complete S-bar-d detected; "
+					                    "starting %d-symbol gain ramp %d symbols after TRN1d input offset %d",
+					                    HYBRID_BLEND_SYMBOLS,
+					                    HYBRID_BLEND_DELAY_SYMBOLS,
+					                    hybrid_switch_at));
+				hybrid_blend_started = 1;
+				hybrid_blend_progress = prev_n - hybrid_switch_at
+				                      - HYBRID_BLEND_DELAY_SYMBOLS;
+			} else if (hybrid_blend_started && !hybrid_gain_active) {
+				hybrid_blend_progress += prev_n;
+			}
+			if (hybrid_blend_started && !hybrid_gain_active
+			    && hybrid_blend_progress >= HYBRID_BLEND_SYMBOLS) {
+				hybrid_gain_active = 1;
+				PJ_LOG(3,(__FILE__, "hybrid downstream: gain ramp complete; "
+				                    "sinc headroom %.3f is fully active",
+				                    hybrid_target_headroom));
 			}
 			rs_out_count += out_n;
 			if (rs_clip_count && rs_out_count - rs_clip_logged >= 9600) {
