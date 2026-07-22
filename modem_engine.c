@@ -1820,7 +1820,10 @@ static int me_start_or_restart_v8_locked(int answer_tone)
        Conexant CX93001 commit to V.92 start-up procedures on seeing it in JM
        and then wait silently for V.92 short-phase signals instead of sending
        V.90 INFO0a (observed live 2026-07-19). */
-    if (parse_env_int("ME_V92_ENABLE", 1) != 0)
+    /* Keep V.92 opt-in until its start-up path is interoperable end to end.
+       Advertising it and later demoting to V.90 leaves some analogue modems
+       waiting for QTs in their V.92 Phase 3 state machine. */
+    if (parse_env_int("ME_V92_ENABLE", 0) != 0)
         v8_parms.v92            = g_calling_party ? 0x45 : 0x47;
     else
         v8_parms.v92            = -1;
@@ -2107,7 +2110,7 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
     if (!diag || !g_v90 || g_mod != ME_MOD_V90)
         return false;
     if (diag->frame.codec_alaw != (g_law == ME_LAW_ALAW)) {
-        ME_LOG("[ME] V.90 %s codec-law bridge: peer=%s SIP=%s; translating requested analogue levels\n",
+        ME_LOG("[ME] V.90 %s codec-law interworking: codec-output=%s SIP=%s; transmitting primary-mask codes and using corresponding output mask for shaping\n",
                diag->frame.v90_compatibility ? "CP" : "CPt",
                diag->frame.codec_alaw ? "A-law" : "mu-law",
                g_law == ME_LAW_ALAW ? "A-law" : "mu-law");
@@ -3339,7 +3342,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         g_v92_v8_offered = (result->v92 >= 0
                           || (result->jm_cm.pcm_modem_availability
                               & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0)
-                        && parse_env_int("ME_V92_ENABLE", 1) != 0;
+                        && parse_env_int("ME_V92_ENABLE", 0) != 0;
         g_v92_info0_local_advertised = g_v92_v8_offered;
         g_v92_info0_peer_capable = false;
         g_v92_info0_peer_short_phase2 = false;

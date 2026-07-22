@@ -1,6 +1,6 @@
 # slmodemd rig patches
 
-Patches applied to the SmartLink slmodemd on `tower.net.cryan.nz` (container
+Patches applied to the SmartLink slmodemd on the private interop rig (container
 `d-modem`, sources under `/src/slmodemd/`). Not upstreamed. See `rig/README.md`
 for the d-modem side.
 

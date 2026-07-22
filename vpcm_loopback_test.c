@@ -380,6 +380,7 @@ static bool test_v90_jd_resync_request(v91_law_t law);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool test_v90_shaped_phase4(v91_law_t law);
+static bool test_v90_codec_output_constellation_mapping(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
@@ -1896,6 +1897,88 @@ shaped_phase4_done:
     }
     vpcm_log("PASS: V.90 shaped CPt Phase 4 Sr=1/2/3 ld=0..3 (%s)", law_name);
     return true;
+}
+
+static bool test_v90_codec_output_constellation_mapping(void)
+{
+    /* Exact one-constellation shape recovered from the SmartLink CPt.  The
+     * first set is what the digital modem must put on its mu-law bearer; the
+     * second set is the corresponding A-law codec-output constellation used
+     * by the analogue modem and by the spectral-shaping metric. */
+    static const int transmitter_ucodes[8] = {
+        2, 43, 55, 61, 71, 74, 78, 81
+    };
+    static const int codec_output_ucodes[8] = {
+        11, 30, 42, 49, 55, 61, 67, 68
+    };
+    vpcm_cp_frame_t cpt;
+    v90_shaped_rx_state_t initial = {0};
+    v90_state_t *tx = NULL;
+    uint8_t codewords[VPCM_CP_FRAME_INTERVALS];
+    bool ok = false;
+
+    vpcm_log("Test: V.90 Table-14 transmitter versus codec-output constellations");
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 15;
+    cpt.codec_alaw = true;
+    cpt.upstream_rate_mask = 0x1FFF;
+    cpt.shaping_redundancy = 1;
+    cpt.shaping_lookahead = 1;
+    cpt.trn1d_gain_q3_13 = 0x2FA3;
+    cpt.shaping_a1_q1_6 = 0x40;
+    cpt.codec_constellations_differ = true;
+    memset(cpt.masks[0], 0, sizeof(cpt.masks[0]));
+    memset(cpt.codec_masks[0], 0, sizeof(cpt.codec_masks[0]));
+    for (int i = 0; i < 8; i++) {
+        vpcm_cp_mask_set(cpt.masks[0], transmitter_ucodes[i], true);
+        vpcm_cp_mask_set(cpt.codec_masks[0], codec_output_ucodes[i], true);
+    }
+
+    tx = v90_init_data_pump(V90_LAW_ULAW);
+    if (!tx || !v90_set_phase4_cp(tx, &cpt)) {
+        fprintf(stderr,
+                "V.90 rejected the live cardinality-matched CPt masks\n");
+        goto done;
+    }
+    if (v90_generate_trn2d_codewords(V90_LAW_ULAW,
+                                     &cpt,
+                                     &initial,
+                                     1,
+                                     codewords,
+                                     (int)sizeof(codewords))
+            != VPCM_CP_FRAME_INTERVALS) {
+        fprintf(stderr,
+                "V.90 could not generate the live codec-differ TRN2d frame\n");
+        goto done;
+    }
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        int ucode = v91_codeword_to_ucode(V91_LAW_ULAW, codewords[i]);
+
+        if (ucode < 0 || !vpcm_cp_mask_get(cpt.masks[0], ucode)) {
+            fprintf(stderr,
+                    "V.90 TRN2d interval %d emitted Ucode %d outside the transmitter mask\n",
+                    i, ucode);
+            goto done;
+        }
+    }
+
+    /* A corresponding output mask without one point cannot describe every
+     * transmitter label and must not configure a live mapper. */
+    vpcm_cp_mask_set(cpt.codec_masks[0], codec_output_ucodes[0], false);
+    if (v90_set_phase4_cp(tx, &cpt)) {
+        fprintf(stderr,
+                "V.90 accepted mismatched transmitter/output cardinalities\n");
+        goto done;
+    }
+
+    vpcm_log("PASS: V.90 transmits primary masks and shapes against codec-output masks");
+    ok = true;
+
+done:
+    if (tx)
+        v90_free(tx);
+    return ok;
 }
 
 static bool test_v92_suvd_codec_and_phase4(void)
@@ -8840,6 +8923,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_strict_receiver_events(V91_LAW_ALAW)
         && test_v90_shaped_phase4(V91_LAW_ULAW)
         && test_v90_shaped_phase4(V91_LAW_ALAW)
+        && test_v90_codec_output_constellation_mapping()
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ULAW)
         && test_v90_strict_cp_bitstream_receiver(V91_LAW_ALAW)
         && test_v90_negotiated_data_rates(V91_LAW_ULAW)

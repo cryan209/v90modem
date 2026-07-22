@@ -13,14 +13,13 @@ regression (section 8); `DM_RESAMPLER=sinc` remains the working default.
 **Still blocked**: with the abort gone, the peer stays in V.90 but does not lock Sd
 (`Error Energy` ~0) and retrains, so the analogue S still never arrives.
 
-> **Update 2026-07-22 — the picture has moved on; read [section 14](#14-update-2026-07-22-the-blocker-is-now-trn1sigma-saturation) first.**
-> Downstream quality is now the best on record (peer `Error Energy` converges to
-> ~20, vs the ~446 of section 8), and the RBS **variance-ratio** false-positive of
-> sections 6–6c no longer fires (ratio ~1.9, well under threshold). But the peer
-> still drops to V.34 — now via a *different* stage, `trn1Sigma` fixed-point
-> **saturation**, and `ME_V90_SD_DELAY_MS=1` no longer prevents it. Per-phase
-> TRN1d shaping was implemented and **ruled out** as a fix
-> ([section 15](#15-per-phase-trn1d-shaping-implemented-and-ruled-out)).
+> **Correction 2026-07-22 — read [section 16](#16-correction-the-live-blocker-was-a-v92-qts-timeout).**
+> The apparent `trn1Sigma` saturation in sections 14–15 was a SmartLink debug
+> format bug: a promoted floating-point value was passed to `%d`. Correcting the
+> format string shows finite values. Kernel uprobes identify the actual event-31
+> source as the V.92 QTs timeout. Disabling the unsupported V.92 advertisement
+> carries the same modem into V.90 Phase 4; the current blocker is strict CP
+> acquisition, not Phase 3 sigma.
 
 ## 1. The S signals are Phase 3, not Phase 4
 
@@ -492,6 +491,9 @@ in this document, so it is pre-existing. Worth fixing separately.
 
 ## 14. Update 2026-07-22: the blocker is now `trn1Sigma` saturation
 
+> **Historical hypothesis, disproved by section 16.** The integer values below
+> were produced by undefined varargs formatting and are not sigma measurements.
+
 Three live V.90 calls (HEAD `a624dfa`, `DM_RESAMPLER=sinc`, `AT+MS=90,0,300,56000`)
 show the failure has moved one stage deeper into the peer's impairment detector.
 Two things genuinely improved versus the state above:
@@ -621,3 +623,54 @@ not stripped, strings resolve at file offset = vaddr). Two outcomes to distingui
 Until that is known, do **not** re-attempt TRN1d amplitude shaping — sections 15.1
 and 15.2 already cover per-phase mean and per-phase variance, on the wire, against
 the actual peer.
+
+## 16. Correction: the live blocker was a V.92 QTs timeout
+
+Disassembly of the linked SmartLink binary (SHA-256
+`ba330b87359a0f50c10b5e52ca777865c59a36c34583d15ede19c5040f83c79e`)
+disproved the saturation interpretation. `studyUrefHandler()` stores sigma as a
+`float`, promotes it to a `double` for the variadic debug call, but the two format
+strings use `%d`. The rail-looking integers in sections 14–15 are therefore words
+from the IEEE-754 argument, interpreted with the wrong type.
+
+A behaviour-preserving diagnostic changed only those two format characters from
+`d` to `f`. On a clean call it reported:
+
+```
+first update  : trn1Sigma = 795.481628
+second update : trn1Sigma = 268.031006
+```
+
+These values are finite. The later V.34 drop was not evidence of overflow.
+
+Kernel uprobes were then placed on every instruction known to assign demodulator
+event 31. The only live hit was file offset `0x43f5a`, in
+`V90Phase3Demodulator::getV92Decision()`. That instruction is the terminal branch
+after the proprietary `faking ANSpcm energy drop detected (QTs timeout)` path.
+The ordinary V.90 timeout at `0x4606f` and the six event-31 assignments in
+`V90Demodulator::progress()` did not fire.
+
+The server was advertising V.92 twice even though this call was later demoted to
+the V.90 long-startup path:
+
+- the V.92 octet in V.8 was enabled by default;
+- INFO0d bit 27 advertised V.92 capability.
+
+The SmartLink peer consequently stayed in `getV92Decision()` and waited for QTs,
+while the server sent its V.90 Phase 3 waveform. Setting `ME_V92_ENABLE=0` removed
+both advertisements. The resulting hardware capture,
+`artifacts/v90-hardware/20260722T045937Z-smartlink_v90_no_v92_advertise/`, showed:
+
+- INFO0d V.92 capability bit 27 clear;
+- peer INFO0a V.92 capability bit 26 clear;
+- CRC-valid INFO1a and J accepted;
+- Phase 3 completed without the QTs event-31 drop;
+- V.90 Phase 4 entered and Ri transmitted;
+- 1,430 upstream control bits received, with 11 CP-like candidates rejected and
+  no CRC-valid CP before disconnect.
+
+This matches the V.90 Phase 4 ordering in Figure 7/section 9.4.2: after Ri the
+analogue modem must send CP, then the exchange proceeds through CP-prime, MP-prime,
+E, B1d and DATA. We are now at that CP boundary. V.92 is therefore opt-in
+(`ME_V92_ENABLE=1`) until its QTs/ANSpcm startup path is interoperable end to end;
+plain V.90 is the default.

@@ -568,30 +568,25 @@ static inline uint8_t v90_pcm_signed_codeword(v90_law_t law, int ucode, int sign
 }
 
 /*
- * CP/CPt describes constellations in the codec law selected by the analogue
- * modem.  A misclassified or externally fixed SIP bearer can use the other
- * G.711 law.  Preserve the requested analogue level in that case instead of
- * reinterpreting the same Ucode in the bearer law (which produces a wholly
- * different magnitude).  The unavoidable quantisation is to the closest
- * codeword selected by the SpanDSP G.711 encoder.
+ * The primary Table-14 masks describe the PCM codes at the digital modem's
+ * transmitter.  They therefore have to be emitted directly in the local
+ * bearer law.  Bit 128 optionally supplies a second, corresponding set of
+ * levels at the far codec's D/A output; those levels are for the analogue
+ * modem's receiver design and our spectral-shaping metric, not codewords to
+ * substitute on the digital bearer.
+ *
+ * This distinction matters on an interworked path.  A peer can, for example,
+ * request transmitter Ucode 81 on a mu-law bearer and report that it becomes
+ * A-law Ucode 68 at the codec output.  Translating Ucode 81 as though it were
+ * already an A-law output level sends a third, unintended PCM code.
  */
 static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
                                                 const vpcm_cp_frame_t *cp,
                                                 int ucode,
                                                 int sign)
 {
-    v90_law_t cp_law;
-    uint8_t requested;
-    int16_t linear;
-
-    cp_law = cp->codec_alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
-    requested = v90_pcm_signed_codeword(cp_law, ucode, sign);
-    if (cp_law == s->law)
-        return requested;
-    linear = v90_pcm_to_linear(cp_law, requested);
-    if (s->law == V90_LAW_ALAW)
-        return linear_to_alaw(linear);
-    return linear_to_ulaw(linear);
+    (void)cp;
+    return v90_pcm_signed_codeword(s->law, ucode, sign);
 }
 
 /* V.90 §8.6.4: R is the six-symbol sign pattern +++--- repeated at the
@@ -864,6 +859,42 @@ static int v90_cp_constellation_ucode(const vpcm_cp_frame_t *cp,
     return -1;
 }
 
+/* Return the far codec-output Ucode corresponding, by Table-14 label, to a
+ * transmitter Ucode.  Both masks are ordered by descending Ucode (§5.4.4).
+ * A valid corresponding constellation must preserve the transmitter-set
+ * cardinality, so every transmitter label has exactly one output level. */
+static int v90_cp_codec_output_ucode(const vpcm_cp_frame_t *cp,
+                                     int frame_interval,
+                                     int transmitter_ucode)
+{
+    int constellation;
+    int label = 0;
+
+    if (!cp || frame_interval < 0 || frame_interval >= V90_FRAME_LEN
+        || transmitter_ucode < 0
+        || transmitter_ucode >= VPCM_CP_MASK_BITS)
+        return -1;
+    if (!cp->codec_constellations_differ)
+        return transmitter_ucode;
+    constellation = cp->dfi[frame_interval];
+    if (constellation < 0 || constellation >= cp->constellation_count)
+        return -1;
+    for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+        if (!vpcm_cp_mask_get(cp->masks[constellation], ucode))
+            continue;
+        if (ucode == transmitter_ucode)
+            break;
+        label++;
+    }
+    for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+        if (!vpcm_cp_mask_get(cp->codec_masks[constellation], ucode))
+            continue;
+        if (label-- == 0)
+            return ucode;
+    }
+    return -1;
+}
+
 static int v90_cp_max_upstream_drn(const vpcm_cp_frame_t *cp)
 {
     if (!cp)
@@ -958,6 +989,9 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
         m = vpcm_cp_mask_population(cp->masks[constellation]);
         if (m <= 0)
             return false;
+        if (cp->codec_constellations_differ
+            && vpcm_cp_mask_population(cp->codec_masks[constellation]) != m)
+            return false;
         product *= (uint64_t)m;
     }
     if (product < (1ULL << s->phase4_k))
@@ -1017,6 +1051,9 @@ static bool v90_configure_data_mapper(v90_state_t *s,
             return false;
         m = vpcm_cp_mask_population(cp->masks[constellation]);
         if (m <= 0)
+            return false;
+        if (cp->codec_constellations_differ
+            && vpcm_cp_mask_population(cp->codec_masks[constellation]) != m)
             return false;
         product *= (uint64_t)m;
     }
@@ -1166,6 +1203,7 @@ static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
     const vpcm_cp_frame_t *cp,
     const int *ucodes,
     const uint8_t *initial_signs,
+    int frame_interval,
     int length,
     int rule,
     v90_shaper_filter_state_t filter)
@@ -1175,13 +1213,27 @@ static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
     const double b1 = (double)(int8_t)cp->shaping_b1_q1_6 / 64.0;
     const double b2 = (double)(int8_t)cp->shaping_b2_q1_6 / 64.0;
 
+    (void)s;
     filter.metric = 0.0;
     for (int i = 0; i < length; i++) {
         int sign = initial_signs[i] ^ v90_shaper_rule_inverts(rule, i);
-        double x = (double)v90_pcm_to_linear(
-            s->law, v90_cp_transport_codeword(s, cp, ucodes[i], sign));
-        double y = x - b1 * filter.x1 + a1 * filter.y1;
-        double v = y - b2 * filter.y1 + a2 * filter.v1;
+        int output_ucode = v90_cp_codec_output_ucode(
+            cp, (frame_interval + i) % V90_FRAME_LEN, ucodes[i]);
+        v90_law_t output_law = cp->codec_alaw
+                             ? V90_LAW_ALAW : V90_LAW_ULAW;
+        double x;
+        double y;
+        double v;
+
+        if (output_ucode < 0) {
+            filter.metric = HUGE_VAL;
+            return filter;
+        }
+        x = (double)v90_pcm_to_linear(
+            output_law,
+            v90_pcm_signed_codeword(output_law, output_ucode, sign));
+        y = x - b1 * filter.x1 + a1 * filter.y1;
+        v = y - b2 * filter.y1 + a2 * filter.v1;
 
         filter.metric += v * v;
         filter.x1 = x;
@@ -1223,6 +1275,7 @@ static double v90_preview_shaper_rules(v90_state_t *s,
                                        const vpcm_cp_frame_t *cp,
                                        const int *ucodes,
                                        const uint8_t *initial,
+                                       int frame_interval,
                                        int frame_length,
                                        int frame_count,
                                        int trellis_state,
@@ -1240,7 +1293,8 @@ static double v90_preview_shaper_rules(v90_state_t *s,
         int rule = rules[choice];
         int next_state = (rule == 1 || rule == 3) ? 1 : 0;
         v90_shaper_filter_state_t next = v90_evaluate_shaper_rule(
-            s, cp, ucodes, initial, frame_length, rule, filter);
+            s, cp, ucodes, initial, frame_interval,
+            frame_length, rule, filter);
         double metric = next.metric;
 
         if (frame_count > 1) {
@@ -1249,6 +1303,7 @@ static double v90_preview_shaper_rules(v90_state_t *s,
                 cp,
                 ucodes + frame_length,
                 initial + frame_length,
+                (frame_interval + frame_length) % V90_FRAME_LEN,
                 frame_length,
                 frame_count - 1,
                 next_state,
@@ -1265,6 +1320,7 @@ static int v90_select_shaper_rule(v90_state_t *s,
                                   const v90_shaper_state_t *shaper,
                                   const int *ucodes,
                                   const uint8_t *initial,
+                                  int frame_interval,
                                   int frame_length,
                                   int lookahead,
                                   v90_shaper_filter_state_t *selected_filter)
@@ -1291,6 +1347,7 @@ static int v90_select_shaper_rule(v90_state_t *s,
                                            cp,
                                            ucodes,
                                            initial,
+                                           frame_interval,
                                            frame_length,
                                            first_rule,
                                            base);
@@ -1300,6 +1357,8 @@ static int v90_select_shaper_rule(v90_state_t *s,
                                                cp,
                                                ucodes + frame_length,
                                                initial + frame_length,
+                                               (frame_interval + frame_length)
+                                                   % V90_FRAME_LEN,
                                                frame_length,
                                                lookahead,
                                                next_state,
@@ -1333,6 +1392,7 @@ static void v90_shape_data_signs(v90_state_t *s,
                                       shaper,
                                       ucodes + offset,
                                       initial + offset,
+                                      offset,
                                       frame_length,
                                       cp->shaping_lookahead,
                                       &selected);
@@ -1762,7 +1822,7 @@ static int v90_max_downstream_rate_bps(void)
 
     if (value && *value) {
         parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 28000 && parsed <= 57333)
+        if (end != value && *end == '\0' && parsed >= 28000 && parsed <= 56000)
             return (int) parsed;
     }
     return 0;
@@ -1829,18 +1889,17 @@ static void v90_build_jd(v90_state_t *s)
     pos++;
 
     /* Bits 35:46 — continued rate mask + reserved.
-     * Bits 35:41 are the final seven bits of the 23-bit downstream-rate
-     * capability mask (mask bits k=16..22, i.e. Jd bit 19+k).  Bits 42:46 are
-     * reserved.  Uncapped, SmartLink's V90Jd::setRatesMask(0x7fffff) produces
-     * this exact layout. */
-    for (int i = 35; i <= 41; i++) {
+     * Bits 35:40 are the final six bits of the 22-bit downstream-rate
+     * capability mask (mask bits k=16..21, i.e. Jd bit 19+k).  Bits 41:46 are
+     * reserved by Table 13 and must be zero. */
+    for (int i = 35; i <= 40; i++) {
         if (v90_jd_rate_bit_enabled(i - 19, rate_cap)) {
             s->jd_bits[pos/8] |= (1 << (pos%8));
             rate_mask_top = i - 19;
         }
         pos++;
     }
-    pos += 5; /* bits 42:46 reserved = 0 */
+    pos += 6; /* bits 41:46 reserved = 0 */
 
     if (rate_cap > 0 && !s->jd_rate_cap_logged) {
         fprintf(stderr,
