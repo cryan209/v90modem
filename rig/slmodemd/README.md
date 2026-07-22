@@ -130,14 +130,22 @@ Rig side (note the deployed d-modem binary may still default to zoh — the env
 overrides it either way; rebuild per `rig/README.md` when convenient):
 
 ```sh
-docker exec d-modem sh -c "pkill slmodemd; pkill socat" ; sleep 1
+# container has no ps/pkill/python3 - kill via /proc scan
+docker exec d-modem sh -c 'for d in /proc/[0-9]*; do \
+  cmd=$(tr "\0" " " < $d/cmdline 2>/dev/null); \
+  case "$cmd" in *slmodemd*|*socat*) kill ${d#/proc/} 2>/dev/null;; esac; done; true'
 docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz \
   -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 \
   d-modem sh -c "/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1"
-docker exec -d d-modem sh -c "socat TCP-LISTEN:5556,reuseaddr,fork /dev/ttySL0"
-# ALWAYS verify the AT bridge before trusting a run:
-(printf 'AT\r'; sleep 3) | nc -w 6 tower 5556    # expect OK
+sleep 3   # slmodemd must create /dev/ttySL0 before socat opens it
+docker exec -d d-modem sh -c "socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0"
+# ALWAYS verify the AT bridge before trusting a run (from the Mac):
+(printf 'AT\r'; sleep 3) | nc -w 6 tower.net.cryan.nz 5556    # expect OK
 ```
+
+`tools/trn2d_call_batch.sh` automates the whole cycle (restart rig, dial,
+poll for TRN2REF / NO CARRIER, early-exit on success) — expect to need it;
+see the Phase-3 THIRD_S race below.
 
 Server side (Mac) — baseline call, then the A/B call adds
 `ME_V90_SHAPER_METRIC=transmit`:
@@ -163,8 +171,8 @@ docker cp d-modem:/tmp/slm.log .
 ### Read-out
 
 The reference is decision-directed, so most analysis is self-contained in the
-pairs (no TX alignment needed) — `scratchpad` tool
-`trn2d_pairs_analyze.py` computes all of:
+pairs (no TX alignment needed). `tools/trn2d_pairs_analyze.py` computes all
+of:
 
 - **windowed mean `(rx-ref)^2`** — must reproduce the peer's logged
   `Error Energy` curve in its own units (sanity + unit calibration).
@@ -191,4 +199,4 @@ detection+turnaround latency decides every attempt. Other observed attempt
 failures the same day: `Error Energy = -0.000` throughout WaitForSd (peer
 never saw Sd; timing), and ~2500 flat (equalizer never converged, retrained
 attempt with `ME_V90_SD_DELAY_RETRAIN_MS`). Expect a per-attempt lottery;
-batch calls (see `scratchpad` `call_batch.sh` pattern) until one wins.
+batch calls (see `tools/trn2d_call_batch.sh`) until one wins.
