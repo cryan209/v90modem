@@ -96,6 +96,10 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_V90_B_REV_10MS,
     V34_TX_STAGE_V90_PHASE2_B,
     V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
+    /* §9.5.1.2 retrain response: a Phase 2 state.  It must stay below
+       V34_TX_STAGE_FIRST_S here and in spandsp's private/v34.h or the
+       "declined V.90" demotion guard misreads it as late training. */
+    V34_TX_STAGE_V90_RETRAIN_SILENCE,
     V34_TX_STAGE_INFO1,
     V34_TX_STAGE_FIRST_B,
     V34_TX_STAGE_FIRST_B_INFO_SEEN,
@@ -425,6 +429,7 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_V90_B_REV_10MS:              return "V90_B_REV_10MS";
     case V34_TX_STAGE_V90_PHASE2_B:                return "V90_PHASE2_B";
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:     return "V90_PHASE2_B_INFO0_SEEN";
+    case V34_TX_STAGE_V90_RETRAIN_SILENCE:         return "V90_RETRAIN_SILENCE";
     case V34_TX_STAGE_INFO1:                       return "INFO1";
     case V34_TX_STAGE_FIRST_B:                     return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN:           return "FIRST_B_INFO_SEEN";
