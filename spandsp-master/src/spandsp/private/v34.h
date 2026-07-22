@@ -137,6 +137,15 @@ enum v34_tx_stages_e
     V34_TX_STAGE_V90_PHASE2_B,
     /*! \brief V.90 §9.2.1.1.2: digital answerer has received INFO0a and is waiting for Tone A reversal */
     V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN,
+    /*! \brief V.90 §9.5.1.2: 70 ms silence before Tone B in response to an
+               analog-modem retrain request.  This is a Phase 2 state and MUST
+               sit below V34_TX_STAGE_FIRST_S: it previously lived at the end
+               of the enum, where the application's "tx_stage >= FIRST_S with
+               no INFO1a means the peer declined V.90" demotion guard read it
+               as late-training and dropped the whole retrained attempt to
+               plain V.34 (observed live 2026-07-22).  The application mirrors
+               this enum value-for-value; keep both copies in sync. */
+    V34_TX_STAGE_V90_RETRAIN_SILENCE,
     /*! \brief INFO1 is being trasnmitted */
     V34_TX_STAGE_INFO1,
 
@@ -202,13 +211,7 @@ enum v34_tx_stages_e
     /*! \brief MPh is being transmitted */
     V34_TX_STAGE_HDX_MPH,
     /*! \brief E is being transmitted */
-    V34_TX_STAGE_HDX_E,
-
-    /*! \brief V.90 §9.5.1.2: 70 ms silence before Tone B in response to an
-               analog-modem retrain request (Tone A while waiting for INFO1a).
-               Kept at the end of the enum so earlier stage numbers stay
-               stable for external mirrors of this enum. */
-    V34_TX_STAGE_V90_RETRAIN_SILENCE
+    V34_TX_STAGE_HDX_E
 };
 
 enum v34_events_e
