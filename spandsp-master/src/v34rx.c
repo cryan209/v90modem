@@ -9460,6 +9460,23 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.bit_rate = bit_rate;
     s->rx.high_carrier = high_carrier;
     s->rx.training_failed_reported = false;
+    /* Phase 3/4 peer-retrain detectors: a restart returns to Phase 2, where
+       primary_channel_rx() -- and therefore these detectors' out-of-stage
+       reset branches -- never runs, so one-shot flags latched during the
+       previous attempt would otherwise mute the detectors for the whole next
+       attempt.  Observed live 2026-07-22: the peer's second retrain (1.9 s of
+       Tone A in armed stages) went unreported because phase34_tone_a_reported
+       survived the first retrain's restart. */
+    s->rx.phase34_silence_samples = 0;
+    s->rx.phase34_retrain_reported = false;
+    s->rx.phase34_tone_a_g1 = 0.0f;
+    s->rx.phase34_tone_a_g2 = 0.0f;
+    s->rx.phase34_tone_a_energy = 0.0f;
+    s->rx.phase34_tone_a_samples = 0;
+    s->rx.phase34_tone_a_blocks = 0;
+    s->rx.phase34_tone_a_reported = false;
+    s->rx.phase3_energy_samples = 0;
+    s->rx.phase3_energy_retrain_reported = false;
 
     s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     /* Phase 2 INFO exchange: answerer RX at 1200 Hz (tone B), caller RX at 2400 Hz (tone A).

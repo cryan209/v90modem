@@ -2890,6 +2890,39 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                INFO0 event so the next reversal can be recorded. */
             s->rx.received_event = V34_EVENT_NONE;
         }
+        else if (s->tx.v90_mode
+                 &&
+                 (s->rx.received_event == V34_EVENT_REVERSAL_2
+                  ||
+                  s->rx.received_event == V34_EVENT_L2_SEEN
+                  ||
+                  ++s->tx.tone_duration >= 1200))
+        {
+            /* V.90 §9.2.2.1.5: the analogue modem's second Tone A reversal is
+               10 ms of tone and then L1 begins immediately.  The Phase 2
+               reversal counter numbers reversals across the whole phase, so
+               here the second reversal arrives as REVERSAL_2, not the
+               REVERSAL_1 the branch above tests -- or the 10 ms sliver is
+               missed entirely and the first evidence is L2_SEEN.  On the
+               initial call the repeated-INFO0a recovery above masks this and
+               eventually forces the same landing state, but a §9.5-initiated
+               retrain carries no INFO0a at all, so without these exits the
+               state dead-ends while the peer waits out L2 for our Tone B and
+               drops the link (observed live 2026-07-22, SmartLink Link Error
+               0.96 s into L1).  §9.2.1.1.4/.5 want us receiving L1/L2 and
+               answering with Tone B; v90_wait_rx_l2_init() is exactly that.
+               The 2 s cap (1200 bauds) implements the dead V.34 timeout
+               comment below for the V.90 path. */
+            const char *reason;
+
+            if (s->rx.received_event == V34_EVENT_REVERSAL_2)
+                reason = "second Tone A reversal";
+            else if (s->rx.received_event == V34_EVENT_L2_SEEN)
+                reason = "L1/L2 arriving while waiting for the second Tone A reversal";
+            else
+                reason = "second Tone A reversal timeout";
+            v90_wait_rx_l2_init(s, reason);
+        }
         else if (s->tx.tone_duration == (1200 - 30))
         {
             /* Timeout, as we have not received a round trip time indication after 2s */
