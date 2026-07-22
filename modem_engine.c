@@ -2516,11 +2516,12 @@ static void cleanup_v34_v90_training_locked(void)
  * estimate.  Reinitialise the existing V.34 context as a V.90 digital
  * answerer and let its normal Phase-2 transmitter rejoin the peer.
  *
- * This is called only from the TX media callback with g_state_mtx held.  It
+ * Called from the TX media callback (Jd-without-S recovery) or the RX path
+ * (peer retrain per §9.5.1.2), always with g_state_mtx held.  It
  * intentionally preserves the overall training timeout: a broken bearer
  * still falls back rather than retrying indefinitely.
  */
-static bool restart_v90_phase2_locked(void)
+static bool restart_v90_phase2_locked(const char *reason)
 {
     int bps;
 
@@ -2566,6 +2567,11 @@ static bool restart_v90_phase2_locked(void)
     v90_cp_rx_reset(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
     v90_dil_capture_reset();
+    /* A Phase-4 retrain arrives with the strict batch CP receiver armed and
+       mid-capture; its Phase-4 hint and counters belong to the failed
+       attempt. */
+    if (g_v90_cp_live_thread_started)
+        v90_cp_live_capture_reset_locked();
 
     /* v34_restart preserves the selected V.90 mode, but reapply the mode and
        receiver callbacks explicitly because this is also where the modified
@@ -2584,7 +2590,8 @@ static bool restart_v90_phase2_locked(void)
     g_v90_phase2_restarts++;
     trace_phase("V90 restart Phase2: attempt=%u profile=3200/%d",
                 g_v90_phase2_restarts, bps);
-    ME_LOG("[ME] V.90: no S after Jd; restarting Phase 2 (%u, 3200 baud / %d bps)\n",
+    ME_LOG("[ME] V.90: %s; restarting Phase 2 (%u, 3200 baud / %d bps)\n",
+           reason ? reason : "restart requested",
            g_v90_phase2_restarts, bps);
     return true;
 }
@@ -4044,12 +4051,16 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
                     if (new_retrain_event && g_v90 && !g_v92_active) {
-                        /* The peer gave up on Phase 3/4 and is restarting its
-                         * handshake.  Follow it: drop our Phase 3/4 state and
-                         * go back to waiting for Ja, so the next attempt runs
-                         * cleanly instead of us pouring Phase 4 over the
-                         * peer's fresh Phase 1/2 (which also corrupts its
-                         * bulk-delay/RTD estimate -- see rig/README.md). */
+                        /* The peer gave up on Phase 3/4 and initiated a
+                         * retrain: 70 ms silence then Tone A, waiting for our
+                         * Tone B (V.90 §9.5.2.1).  §9.4.1/§9.3.1 require the
+                         * digital modem to respond per §9.5.1.2 -- back into
+                         * the Phase 2 tone/INFO exchange.  Dropping only the
+                         * v90 object to WAIT_JA is not enough: the V.34
+                         * receiver stays parked in a Phase 3/4 stage, nothing
+                         * ever answers Tone A, and the SmartLink peer declares
+                         * a link error after ~3.1 s of unanswered Tone A
+                         * (observed live 2026-07-22). */
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_RETRAIN);
 
                         g_v90_phase3_s_events = 0;
@@ -4066,6 +4077,13 @@ void me_rx_audio(const int16_t *amp, int len)
                          * notification used to stay sticky and suppress the
                          * later J/Ja detector indefinitely. */
                         v34_v90_clear_peer_retrain_event(g_v34);
+                        /* §9.5.1.2 response: restart the answerer Phase 2 flow
+                         * so Tone B/INFO0d go out and the retrained handshake
+                         * can complete.  This frees g_v90; later blocks in
+                         * this poll are all guarded on g_v90. */
+                        (void) restart_v90_phase2_locked(
+                            "peer retrain (Tone A/silence) during Phase 3/4; "
+                            "responding per 9.5.1.2");
                     }
                     if (new_e_event && g_v90 && !g_v92_active) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
@@ -4683,7 +4701,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                instead of sending silence while the peer expects INFO0d. */
             if (phase_before == V90_TX_JD
                 && v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA) {
-                (void) restart_v90_phase2_locked();
+                (void) restart_v90_phase2_locked("no S after Jd");
                 return false;
             }
         }

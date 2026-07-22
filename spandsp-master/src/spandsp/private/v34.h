@@ -883,6 +883,18 @@ typedef struct
     /*! \brief Set once a peer retrain has been reported, so it is announced
                only once per Phase 3/4 attempt. */
     bool phase34_retrain_reported;
+    /*! \brief Goertzel accumulators (delay line and running block energy) for
+               the V.90 Phase 3/4 Tone A retrain detector (9.3.1/9.4.1/V.90). */
+    float phase34_tone_a_g1;
+    float phase34_tone_a_g2;
+    float phase34_tone_a_energy;
+    /*! \brief Sample index within the current Tone A Goertzel block. */
+    int phase34_tone_a_samples;
+    /*! \brief Consecutive Tone-A-dominant blocks seen in a Phase 3/4 stage. */
+    int phase34_tone_a_blocks;
+    /*! \brief Set once a Tone A retrain has been reported, so it is announced
+               only once per Phase 3/4 attempt. */
+    bool phase34_tone_a_reported;
 
     bool info0_acknowledgement;
     uint8_t info0_raw_26_27;
