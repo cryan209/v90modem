@@ -67,18 +67,34 @@ docker exec d-modem sh -c "cd /src/slmodemd && cp modem.c.bak-prev92up modem.c &
 Settles which of sign / level / timing the peer's Phase-4 Error Energy plateau
 (~300-380 vs ~110-146 during DIL) is made of, in the peer's own units.
 
-SmartLink trains Phase 4 data-aided: `V90Phase4Demodulator::trn2dKnownDemod()`
-calls its own digital-side Phase 4 generator and returns the reference sample
-its equalizer expects for the current TRN2d symbol — a symbol-by-symbol
-prediction of *our* transmitter. Any legal-but-unpredicted choice we make
-(prime suspect: the §5.4.5.6 shaper-metric input convention, see
-`ME_V90_SHAPER_METRIC` below) becomes a permanent reference-error floor the
-equalizer cannot adapt away. The wrap hooks that method and streams
-interleaved int16 pairs `[received, reference]` to
-`/tmp/smartlink-trn2d-pairs.s16` for the whole call (every Phase-4 attempt,
-concatenated; `TRN2D_REF_SYMBOLS` caps the count, default 200000).
-`(received - reference)^2` reproduces Error Energy in the peer's units;
-the received stream symbol-aligns the capture against our `live-tx.g711`.
+**What disassembly established (2026-07-23):**
+`V90Phase4Demodulator::trn2dKnownDemod()` (dsplibs.o `.text` 0x25de0) is
+DECISION-DIRECTED and pure:
+
+```
+reference = sign(received) * table[(idx-1) mod 6][law(|received|)]
+```
+
+with `law()` = `linear2alaw`/`linear2ulaw` (A-law: `xor 0xD5`; u-law:
+`0xFF - x`) and `table` = the per-interval 128-entry int16 level table the
+TRN2 design (`findPadGain`) produced, at `[[this+0x3514]]` with the law flag
+at `+0xa95c` of that object. The peer does NOT regenerate our transmitted
+symbol sequence — signs come from the received samples themselves — so the
+§5.4.5.6 shaper-metric convention (`ME_V90_SHAPER_METRIC`) is invisible to
+its reference and Error Energy is a per-symbol slicer residual
+`|received - nearest designed level|^2`.
+
+**Hook placement:** the compiler inlined trn2dKnownDemod into
+`getV90Decision`/`getV92Decision` — dsplibs.o contains **zero relocations**
+against it, so interposing on it can never fire (the out-of-line copy is dead
+code). The wrap instead interposes on the dispatcher
+`V90Phase4Demodulator::getDecision(short)` (`.text` 0x27780, called via
+R_386_PC32 relocations from `V90Equalizer::process`) and calls the blob's own
+dead-but-linkable trn2dKnownDemod copy for the reference BEFORE forwarding.
+The wrap streams interleaved int16 pairs `[received, reference]` to
+`/tmp/smartlink-trn2d-pairs.s16` for every Phase-4 `getDecision` call
+(`TRN2D_REF_SYMBOLS` caps the count, default 200000; the reference is only
+meaningful during TRN2 — segment offline).
 
 ### Relink
 
@@ -86,19 +102,26 @@ the received stream symbol-aligns the capture against our `live-tx.g711`.
 # copy the wrap source in
 docker cp tools/smartlink_trn2d_reference_wrap.c d-modem:/src/slmodemd/
 
-# inside the container: alias the original at its .text offset, compile the
-# hook (slmodemd is 32-bit i386), and relink with the hook object FIRST plus
-# --allow-multiple-definition so the hook's definition wins.
-# Verify the offset first if dsplibs.o ever changes:
-#   objdump -t dsplibs.o | grep trn2dKnownDemod    # expect .text 0x25de0
+# inside the container: alias the ORIGINAL DISPATCHER at its .text offset,
+# compile the hook (slmodemd is 32-bit i386), and relink with the hook object
+# BEFORE dsplibs_trnref.o plus --allow-multiple-definition so the hook's
+# getDecision definition wins.  Verify offsets if dsplibs.o ever changes:
+#   objdump -t dsplibs.o | grep getDecision       # expect .text 0x27780
 docker exec d-modem sh -c "cd /src/slmodemd && \
   objcopy --add-symbol \
-    _ZN20V90Phase4Demodulator15trn2dKnownDemodEs_original=.text:0x25de0,global,function \
+    _ZN20V90Phase4Demodulator11getDecisionEs_original=.text:0x27780,global,function \
     dsplibs.o dsplibs_trnref.o && \
-  gcc -m32 -O2 -c smartlink_trn2d_reference_wrap.c -o trn2d_wrap.o"
-# then relink slmodemd substituting 'trn2d_wrap.o dsplibs_trnref.o' for
-# 'dsplibs.o' in the final link line, with -Wl,--allow-multiple-definition,
-# and keep the result as slmodemd_trnref (leave the stock binary alone).
+  gcc -m32 -O2 -c smartlink_trn2d_reference_wrap.c -o trn2d_wrap.o && \
+  gcc -m32 -Wl,--allow-multiple-definition -o slmodemd_trnref \
+    modem_main.o modem_cmdline.o modem.o modem_datafile.o modem_at.o \
+    modem_timer.o modem_pack.o modem_ec.o modem_comp.o modem_param.o \
+    modem_debug.o homolog_data.o dp_sinus.o dp_dummy.o \
+    trn2d_wrap.o dsplibs_trnref.o sysdep_common.o"
+# verify the wiring (hook wins the symbol, all 3 equalizer call sites bind
+# to it, hook forwards to the alias):
+docker exec d-modem sh -c "cd /src/slmodemd && \
+  nm slmodemd_trnref | grep getDecisionEs && \
+  objdump -d slmodemd_trnref | grep -c 'call.*<_ZN20V90Phase4Demodulator11getDecisionEs>'"
 ```
 
 ### Run
@@ -139,14 +162,33 @@ docker cp d-modem:/tmp/slm.log .
 
 ### Read-out
 
-Diff the dumped reference stream against our `live-tx.g711` TRN2d window
-(both fully known, aligned via the received stream):
+The reference is decision-directed, so most analysis is self-contained in the
+pairs (no TX alignment needed) — `scratchpad` tool
+`trn2d_pairs_analyze.py` computes all of:
 
-- **signs**: reference sign-flipped on ~31% of symbols → SmartLink predicts
-  the strict §5.4.5.6 transmitted-levels metric; re-run the A/B call with
-  `ME_V90_SHAPER_METRIC=transmit` (offline this flips exactly 30.7% of signs
-  and zero Ucodes for the call-13 constellation) and cross-check against the
-  `smartlink_shaper_probe` oracle.
-- **levels**: a scalar or per-Ucode offset → pad/resampler-gain workstream,
-  not the shaper.
-- **timing**: frame misalignment shows immediately in the pair stream.
+- **windowed mean `(rx-ref)^2`** — must reproduce the peer's logged
+  `Error Energy` curve in its own units (sanity + unit calibration).
+- **per-designed-level residual** `|rx|-|ref|` grouped by `|ref|` — a scalar
+  or per-Ucode offset here is a pad/resampler-gain error against the
+  `findPadGain` table; a fat symmetric residual with mean ~0 is
+  ISI/equalizer misconvergence instead.
+- **sign agreement** — must be 100% by construction (reference takes the
+  received sign); anything else means the capture is miswired.
+
+Since the metric is a slicer residual, `ME_V90_SHAPER_METRIC` cannot change
+what the peer measures (kept for spec-conformance experiments only).
+
+### Phase-3 THIRD_S race (why calls die before Phase 4)
+
+Measured 2026-07-23 (calls that never reached Phase 4): peer converges to
+Error Energy ~12 through Sd/TRN1d/Jd, logs `IndicateJdReceived`, enters
+`V90RCV_P3_THIRD_S` and starts its S — and from that instant its data-aided
+reference expects our *third Sd* while we are still transmitting Jd (its S
+has not reached our detector yet). Error jumps 12 → 289 → 432 within 340 ms
+and it issues `drop to V34 requested` (DP=34: call unrecoverable for V.90)
+or `retrain requested`. The whole race window is ~340 ms of S; our
+detection+turnaround latency decides every attempt. Other observed attempt
+failures the same day: `Error Energy = -0.000` throughout WaitForSd (peer
+never saw Sd; timing), and ~2500 flat (equalizer never converged, retrained
+attempt with `ME_V90_SD_DELAY_RETRAIN_MS`). Expect a per-attempt lottery;
+batch calls (see `scratchpad` `call_batch.sh` pattern) until one wins.
