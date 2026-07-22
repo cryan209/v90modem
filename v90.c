@@ -1318,13 +1318,18 @@ static bool v90_shaper_rule_inverts(int rule, int position)
  * When the two level sets differ (mu-law nonlinearity, differing codec
  * constellations) they rank rule choices differently, and the trellis memory
  * amplifies each disagreement, so the two conventions produce essentially
- * uncorrelated sign sequences.  §5.4.5.5 makes TRN2d deterministic end to
- * end, so a data-aided peer (SmartLink's trn2dKnownDemod) that regenerates
- * our transmitter from the spec text predicts the transmit-levels sequence —
- * every divergence lands in its Error Energy as a floor the equalizer cannot
- * adapt away.  ME_V90_SHAPER_METRIC=transmit selects the strict reading for
- * live A/B against that peer; any other value keeps the codec-levels
- * behaviour.  Cached: this runs inside the per-symbol metric loop. */
+ * uncorrelated sign sequences (measured: 30.7% of TRN2d signs differ for the
+ * call-13 SmartLink constellation, zero Ucode changes).
+ *
+ * NOTE (2026-07-23): disassembly of SmartLink's trn2dKnownDemod shows that
+ * peer's Phase-4 reference is DECISION-DIRECTED — sign and level are taken
+ * from the received sample via its own slicer table — so this convention is
+ * invisible to that receiver and is NOT the cause of its Error Energy
+ * plateau (see rig/slmodemd/README.md).  The flag is kept for
+ * spec-conformance experiments against peers that do predict the sequence.
+ * ME_V90_SHAPER_METRIC=transmit selects the strict reading; any other value
+ * keeps the codec-levels behaviour.  Cached: this runs inside the per-symbol
+ * metric loop. */
 static bool v90_shaper_metric_transmit_levels(void)
 {
     static int cached = -1;
