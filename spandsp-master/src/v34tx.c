@@ -3985,9 +3985,24 @@ static void v90_wait_info1a_init(v34_state_t *s)
        INFO1a payload. */
     s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.target_bits = 70 - (4 + 8 + 4);
-    s->rx.bit_count = 0;
-    s->rx.bitstream = 0;
-    s->rx.stage = V34_RX_STAGE_TONE_A;
+    if (s->rx.stage == V34_RX_STAGE_INFO1A  &&  s->rx.bit_count > 0)
+    {
+        /* The receiver is armed from the start of the INFO1d burst
+           (info1_baud_init) and the peer's INFO1a may already be
+           mid-accumulation when the last repeat finishes.  Zeroing the
+           accumulator or yanking the stage back to TONE_A here would
+           destroy that in-flight frame. */
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFO1a already accumulating (%d bits) at end of INFO1d; preserving it\n",
+                 s->rx.bit_count);
+    }
+    else
+    {
+        s->rx.bit_count = 0;
+        s->rx.bitstream = 0;
+        s->rx.stage = V34_RX_STAGE_TONE_A;
+    }
+    /*endif*/
     s->rx.v90_repeated_info0a_pending = false;
     s->rx.v90_info1d_sent = true;
     s->rx.received_event = V34_EVENT_NONE;
@@ -4217,6 +4232,34 @@ static void info1_baud_init(v34_state_t *s)
     {
         s->tx.tone_duration = 0;
         span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with one arbitrary-phase point\n");
+    }
+    /*endif*/
+    if (s->tx.v90_mode  &&  !s->tx.calling_party)
+    {
+        /* SmartLink answers the *first* decoded INFO1d repetition with a
+           single ~140 ms INFO1a, which can arrive while we are still
+           transmitting the remaining contiguous repeats.  The INFO1a frame
+           accumulator used to be armed only by v90_wait_info1a_init() after
+           the last repeat: v90_info1d_sent gates both the cross-Tone-state
+           sync search and the target_bits bias (and the bias also needs
+           info0_received, which a §9.5 retrain skips), so an early INFO1a
+           hit the sync hunter with stale INFO0-era framing and was
+           structurally lost.  Observed live 2026-07-22: the retrained flow
+           deadlocked whenever the peer's INFO1a landed ~100 ms inside our
+           burst (call 9), and only meshed when it happened to land after it
+           (call 8).  Arm the receiver at burst start; a mid-burst decode
+           runs v90_enter_phase3_from_info1a() synchronously and abandons
+           the rest of the burst. */
+        s->rx.v90_info1d_sent = true;
+        s->rx.target_bits = 70 - (4 + 8 + 4);
+        if (s->rx.stage != V34_RX_STAGE_INFO1A  ||  s->rx.bit_count == 0)
+        {
+            /* Don't clobber an INFO1a that is already mid-accumulation --
+               this init also runs on INFO1d retries. */
+            s->rx.bit_count = 0;
+            s->rx.bitstream = 0;
+        }
+        /*endif*/
     }
 }
 /*- End of function --------------------------------------------------------*/

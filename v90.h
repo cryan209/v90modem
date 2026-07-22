@@ -311,6 +311,15 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp);
  */
 bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp);
 
+/*
+ * Override the pre-Sd delay (§9.3.1.3) for this training attempt, in
+ * milliseconds; a negative value restores the ME_V90_SD_DELAY_MS env default.
+ * A §9.5-retrained attempt needs a longer delay than the initial one: the
+ * pre-converged Phase 2 makes our Ja detection outrun the peer's WaitForSd
+ * arming, and an early Sd leaves its equalizer training unanchored.
+ */
+void v90_set_sd_delay_ms(v90_state_t *s, int ms);
+
 /* Copy the currently prepared Type-0 MP/MP' bitstream for diagnostics/tests.
  * Returns its bit length, or 0 if the V.90 Phase 4 mapper is not configured. */
 int v90_copy_phase4_mp_bits(const v90_state_t *s, uint8_t *bits, int max_bits);

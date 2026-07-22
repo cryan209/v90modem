@@ -319,19 +319,7 @@ static int v90_jd_resync_symbols(void)
  * transmit Sd (§9.3.1.3 permits up to 500ms here). Default 0 preserves the
  * original immediate-Sd behaviour. See ME_V90_SD_DELAY_MS callers for the
  * value measured against the d-modem/slmodemd rig. */
-static int v90_sd_delay_samples(void)
-{
-    const char *value = getenv("ME_V90_SD_DELAY_MS");
-    char *end;
-    long parsed;
-
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 5000)
-            return (int) (parsed * 8);   /* ms -> samples at 8000 Hz */
-    }
-    return 0;
-}
+static int v90_sd_delay_samples(const v90_state_t *s);
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
 /* A-law positive codewords indexed by Ucode */
@@ -418,6 +406,10 @@ static int v90_descramble_reg_bit(uint32_t *reg, int in_bit)
 struct v90_state_s {
     v34_state_t     *v34;
     v90_law_t        law;
+
+    /* Per-attempt override for the pre-Sd delay; < 0 uses the
+     * ME_V90_SD_DELAY_MS env default.  See v90_set_sd_delay_ms(). */
+    int              sd_delay_override_samples;
 
     /* Phase 3/4 TX state */
     v90_tx_phase_t   tx_phase;
@@ -524,6 +516,43 @@ struct v90_state_s {
 
     bool             owns_v34;      /* true if we allocated v34 (v90_init), false if external */
 };
+
+static int v90_sd_delay_samples(const v90_state_t *s)
+{
+    const char *value;
+    char *end;
+    long parsed;
+
+    if (s && s->sd_delay_override_samples >= 0)
+        return s->sd_delay_override_samples;
+    value = getenv("ME_V90_SD_DELAY_MS");
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 5000)
+            return (int) (parsed * 8);   /* ms -> samples at 8000 Hz */
+    }
+    return 0;
+}
+
+/* Override the pre-Sd delay for this training attempt.  A negative ms value
+ * restores the ME_V90_SD_DELAY_MS env default.  Needed because the delay that
+ * suits an initial attempt does not suit a §9.5-retrained one: with the whole
+ * Phase 2 chain pre-converged, our Ja detection outruns the peer's
+ * WaitForSd arming, and an Sd transmitted before that arming leaves its
+ * Phase 3 equalizer training on unanchored TRN1d (error energy pinned at
+ * ~3000 instead of converging; observed live 2026-07-22, call 10 attempt 2). */
+void v90_set_sd_delay_ms(v90_state_t *s, int ms)
+{
+    if (!s)
+        return;
+    if (ms < 0) {
+        s->sd_delay_override_samples = -1;
+        return;
+    }
+    if (ms > 5000)
+        ms = 5000;
+    s->sd_delay_override_samples = ms * 8;
+}
 
 static void v90_reset_data_pump_state(v90_state_t *s)
 {
@@ -2808,7 +2837,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * of it and retrained after its own ~3.1s local timeout, every
          * time. Default 0 preserves prior (immediate) behaviour for
          * everything else; env-tunable per peer. */
-        if (++s->sample_count >= v90_sd_delay_samples()) {
+        if (++s->sample_count >= v90_sd_delay_samples(s)) {
             s->tx_phase = V90_TX_SD;
             s->sample_count = 0;
             s->rep_count = 0;
@@ -3403,6 +3432,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
 
     s->v34 = v34;
     s->law = law;
+    s->sd_delay_override_samples = -1;
     s->tx_phase = V90_TX_PHASE2;
     s->u_info = 80;
     s->owns_v34 = false;
@@ -3623,7 +3653,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
     switch (event) {
     case V90_RX_EVENT_J:
         if (s->tx_phase == V90_TX_WAIT_JA) {
-            int delay_samples = v90_sd_delay_samples();
+            int delay_samples = v90_sd_delay_samples(s);
 
             if (delay_samples > 0) {
                 fprintf(stderr,
