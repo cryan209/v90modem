@@ -350,6 +350,7 @@ struct v90_state_s {
     int              sample_count;  /* Sample counter within current sub-state */
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
     bool             phase4_hold_logged;
+    bool             jd_rate_cap_logged;
     int              phase4_ri_align_remaining;
     bool             jd_terminate_requested;
     bool             jp_terminate_requested;
@@ -1668,6 +1669,43 @@ bool v90_info1a_decode_diag(const uint8_t *bits, int bit_len, v90_info1a_diag_t 
 
 /* ---- Jd frame construction (Table 13) ---- */
 
+/* Interop backoff knob.  ITU-T V.90 Table 13 bit k (k=0..22) of the downstream
+ * data-signalling-rate capability mask advertises rate 28000 + k*8000/6 bps.
+ * The analogue peer must not request a downstream constellation above what we
+ * advertise here, so capping the mask makes it select a sparser, more robust
+ * CPt drn that both ends agree on -- letting its Phase-4 PDSNR gate clear when
+ * the maximal constellation's minimum distance is too small for our TX signal.
+ * ME_V90_MAX_DOWNSTREAM_RATE is the cap in bps; 0/unset advertises the full
+ * 0x7FFFFF mask (the standards-compliant default). */
+static int v90_max_downstream_rate_bps(void)
+{
+    const char *value = getenv("ME_V90_MAX_DOWNSTREAM_RATE");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 28000 && parsed <= 57333)
+            return (int) parsed;
+    }
+    return 0;
+}
+
+/* Rate advertised by downstream-rate-mask bit k, in bps (Table 13). */
+static int v90_jd_rate_bit_bps(int k)
+{
+    return 28000 + (k * 8000) / 6;
+}
+
+/* Whether mask bit k should be set given a cap.  The floor rate (k=0, 28000)
+ * is always advertised so the mask stays non-empty and contiguous. */
+static bool v90_jd_rate_bit_enabled(int k, int cap_bps)
+{
+    if (cap_bps <= 0 || k == 0)
+        return true;
+    return v90_jd_rate_bit_bps(k) <= cap_bps;
+}
+
 static void v90_build_jd(v90_state_t *s)
 {
     /* Build the 72-bit Jd frame per V.90 Table 13.
@@ -1696,26 +1734,44 @@ static void v90_build_jd(v90_state_t *s)
     pos++;
 
     /* Bits 18:33 — data signalling rate capability mask.
-     * Support 28-56 kbps (bits 18:28 = rates 28k through 56k).
-     * Bit 18:28 = 000 (28k disabled) through 56k.
-     * For now, enable all rates 28k-56k (bits 18:40).
-     * Actually the mask is: bit N = rate (N-18+20)*8000/6 / 1000
-     * Let's enable rates corresponding to common V.90 speeds.
-     * Bit 18 = 28000, bit 19 = 29333, ..., bit 33 = 48000 (first group)
-     * Simple approach: enable all. */
-    for (int i = 18; i <= 33; i++)
-        s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+     * Mask bit k (Jd bit 18+k) advertises rate 28000 + k*8000/6 bps, so this
+     * first group covers 28000 (bit 18) through 48000 (bit 33).  Uncapped we
+     * enable all; ME_V90_MAX_DOWNSTREAM_RATE clears the bits above the cap so
+     * the peer selects a lower, more robust downstream constellation. */
+    int rate_cap = v90_max_downstream_rate_bps();
+    int rate_mask_top = 0;
+    for (int i = 18; i <= 33; i++) {
+        if (v90_jd_rate_bit_enabled(i - 18, rate_cap)) {
+            s->jd_bits[pos/8] |= (1 << (pos%8));
+            rate_mask_top = i - 18;
+        }
+        pos++;
+    }
 
     /* Bit 34 — start bit (0) */
     pos++;
 
     /* Bits 35:46 — continued rate mask + reserved.
      * Bits 35:41 are the final seven bits of the 23-bit downstream-rate
-     * capability mask.  Bits 42:46 are reserved.  SmartLink's
-     * V90Jd::setRatesMask(0x7fffff) produces this exact layout. */
-    for (int i = 35; i <= 41; i++)
-        s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
+     * capability mask (mask bits k=16..22, i.e. Jd bit 19+k).  Bits 42:46 are
+     * reserved.  Uncapped, SmartLink's V90Jd::setRatesMask(0x7fffff) produces
+     * this exact layout. */
+    for (int i = 35; i <= 41; i++) {
+        if (v90_jd_rate_bit_enabled(i - 19, rate_cap)) {
+            s->jd_bits[pos/8] |= (1 << (pos%8));
+            rate_mask_top = i - 19;
+        }
+        pos++;
+    }
     pos += 5; /* bits 42:46 reserved = 0 */
+
+    if (rate_cap > 0 && !s->jd_rate_cap_logged) {
+        fprintf(stderr,
+                "[V90] Jd downstream-rate cap: %d bps -> mask top bit k=%d "
+                "(%d bps); full mask disabled\n",
+                rate_cap, rate_mask_top, v90_jd_rate_bit_bps(rate_mask_top));
+        s->jd_rate_cap_logged = true;
+    }
 
     /* Bit 47 — constellation size for training: 0=4-point */
     pos++;
