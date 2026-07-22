@@ -186,6 +186,76 @@ distinguishable levels across the 6-symbol frame to represent K bits — too
 few usable Ucodes per interval — simply can't accept that `drn`, regardless
 of how the mask is spread across the 6 intervals.
 
+## Digital-side rate ceiling: the Jd capability mask
+
+The digital modem consumes Mi (above), but it is **not** passive about rate.
+Sequence **Jd** (Table 13) carries a 23-bit *downstream data-signalling-
+rate capability mask* that the digital modem transmits, and the analogue modem
+must not request (in CPt/CP) a `drn` whose rate exceeds what Jd advertises. So
+Jd is the one downstream-rate lever *this* side controls directly — a ceiling on
+the peer's `drn` choice, complementary to the peer's own line-measurement floor.
+
+`v90_build_jd()` (`v90.c:1709`) builds this mask. Mask bit _k_ (k=0..22, at Jd
+bit `18+k` for k≤15 and `19+k` for k≥16) advertises rate `28000 + k×8000/6` bps.
+Uncapped it sets all 23 bits (`0x7FFFFF`, matching SmartLink's
+`V90Jd::setRatesMask(0x7fffff)`).
+
+### `ME_V90_MAX_DOWNSTREAM_RATE` — interop backoff knob
+
+`v90_max_downstream_rate_bps()` (`v90.c:1680`) reads `ME_V90_MAX_DOWNSTREAM_RATE`
+(bps). When set, `v90_build_jd()` clears every mask bit whose rate exceeds the
+cap — keeping the 28000 floor bit (k=0) so the mask stays valid and contiguous —
+via `v90_jd_rate_bit_enabled()` (`v90.c:1702`). Unset/0 → full mask (default, no
+behavior change). A one-shot `[V90] Jd downstream-rate cap: …` line
+(`v90.c:1768`, gated by `jd_rate_cap_logged`) records the effective cap in the
+capture. Verified mask values (standalone round-trip of the exact bit-packing):
+
+| cap (bps) | emitted mask | mask bits | top drn ≈ |
+|---:|---:|---:|---:|
+| 0 / unset | 0x7FFFFF | 23 | (peer-limited) |
+| 46666 | 0x007FFF | 15 | 15 |
+| 40000 | 0x0003FF | 10 | 10 |
+| 33333 | 0x00001F | 5 | 5 |
+| 28000 | 0x000001 | 1 | 1 |
+
+(Jd mask bit _k_ advertises the same rate that data-mode `drn = k+1` uses, so
+e.g. cap 46666 → top mask bit k=14 → the peer may go no higher than drn 15.)
+
+### Why cap: the Phase-4 PDSNR gate
+
+When downstream training completes CPt → TRN2d but the analogue peer **rejects**
+TRN2d at its Phase-4 PDSNR gate (residual error plateaus above its threshold and
+it retrains), one cause is a fixed per-symbol TX displacement whose magnitude
+only exceeds the decision boundary at dense constellations. Capping `drn` forces
+a sparser constellation with larger minimum distance, so the same residual falls
+inside the decision regions and the gate clears — proving the end-to-end path
+reaches DATA. This is both a workaround and a diagnostic: **if a low cap reaches
+DATA, the residual is a per-symbol displacement (sign / spectral-shaping-sign
+class), not a rate/mask decode error** — the sign-independent B1d acceptance
+oracle (`vpcm_decode.c:16714`) cannot see that class, so a successful backoff is
+the cleanest evidence for where to look next.
+
+The peer applies its own floor independently: in the SmartLink hardware runs it
+chose `drn=15` (~46.7k) even with the full mask, so the cap only changes the
+outcome when set strictly **below** the peer's own pick (below ~46.7k here).
+
+### Backoff / re-tighten ladder
+
+Start aggressively robust, confirm DATA, then re-tighten toward break-even:
+
+```
+ME_V90_MAX_DOWNSTREAM_RATE=33333   # drn 5,  D=25 — max headroom, prove the path
+                          40000    # drn 10, D=30
+                          44000    # drn 13, D=33
+                          46666    # drn 15 — SmartLink's uncapped pick
+```
+
+Success in the trace: the `[V90] Jd downstream-rate cap` line appears; the
+far-end CPt returns `drn < 15`; the TRN2d residual plateaus below the peer's
+gate with no retrain; the session reaches DATA. The break-even cap (the highest
+that still reaches DATA) quantifies how much of the sign/shaper residual must be
+removed to recover full rate.
+
 ## What's already real: downstream Mi consumption
 
 End-to-end pipeline, live audio to modulus encoder:
