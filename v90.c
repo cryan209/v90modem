@@ -1304,6 +1304,42 @@ static bool v90_shaper_rule_inverts(int rule, int position)
     }
 }
 
+/* §5.4.5.5-5.4.5.6 spectral-shaping metric input convention.  The shaper's
+ * "select the rule that minimizes" metric feeds on PCM output levels, and two
+ * readings of which levels exist:
+ *
+ *   codec    (default) — the far codec D/A output levels the analogue
+ *            receiver actually hears (the Table-14 bit-128 corresponding set;
+ *            see v90_cp_transport_codeword()'s comment).  Shapes the spectrum
+ *            on the subscriber loop, arguably the spec's engineering intent.
+ *   transmit — the levels of the PCM codewords we actually place on the
+ *            digital bearer: the strict reading of the §5.4.5.6 text.
+ *
+ * When the two level sets differ (mu-law nonlinearity, differing codec
+ * constellations) they rank rule choices differently, and the trellis memory
+ * amplifies each disagreement, so the two conventions produce essentially
+ * uncorrelated sign sequences.  §5.4.5.5 makes TRN2d deterministic end to
+ * end, so a data-aided peer (SmartLink's trn2dKnownDemod) that regenerates
+ * our transmitter from the spec text predicts the transmit-levels sequence —
+ * every divergence lands in its Error Energy as a floor the equalizer cannot
+ * adapt away.  ME_V90_SHAPER_METRIC=transmit selects the strict reading for
+ * live A/B against that peer; any other value keeps the codec-levels
+ * behaviour.  Cached: this runs inside the per-symbol metric loop. */
+static bool v90_shaper_metric_transmit_levels(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_SHAPER_METRIC");
+
+        cached = (value && strcmp(value, "transmit") == 0) ? 1 : 0;
+        fprintf(stderr,
+                "[V90] ACTIVE shaper metric input: %s levels\n",
+                cached ? "transmitted bearer-law" : "far-codec output");
+    }
+    return cached != 0;
+}
+
 static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
     v90_state_t *s,
     const vpcm_cp_frame_t *cp,
@@ -1319,25 +1355,31 @@ static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
     const double b1 = (double)(int8_t)cp->shaping_b1_q1_6 / 64.0;
     const double b2 = (double)(int8_t)cp->shaping_b2_q1_6 / 64.0;
 
-    (void)s;
     filter.metric = 0.0;
     for (int i = 0; i < length; i++) {
         int sign = initial_signs[i] ^ v90_shaper_rule_inverts(rule, i);
-        int output_ucode = v90_cp_codec_output_ucode(
-            cp, (frame_interval + i) % V90_FRAME_LEN, ucodes[i]);
-        v90_law_t output_law = cp->codec_alaw
-                             ? V90_LAW_ALAW : V90_LAW_ULAW;
         double x;
         double y;
         double v;
 
-        if (output_ucode < 0) {
-            filter.metric = HUGE_VAL;
-            return filter;
+        if (v90_shaper_metric_transmit_levels()) {
+            x = (double)v90_pcm_to_linear(
+                s->law,
+                v90_cp_transport_codeword(s, cp, ucodes[i], sign));
+        } else {
+            int output_ucode = v90_cp_codec_output_ucode(
+                cp, (frame_interval + i) % V90_FRAME_LEN, ucodes[i]);
+            v90_law_t output_law = cp->codec_alaw
+                                 ? V90_LAW_ALAW : V90_LAW_ULAW;
+
+            if (output_ucode < 0) {
+                filter.metric = HUGE_VAL;
+                return filter;
+            }
+            x = (double)v90_pcm_to_linear(
+                output_law,
+                v90_pcm_signed_codeword(output_law, output_ucode, sign));
         }
-        x = (double)v90_pcm_to_linear(
-            output_law,
-            v90_pcm_signed_codeword(output_law, output_ucode, sign));
         y = x - b1 * filter.x1 + a1 * filter.y1;
         v = y - b2 * filter.y1 + a2 * filter.v1;
 

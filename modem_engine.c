@@ -1508,7 +1508,29 @@ static int        g_training_tx_samples = 0; /* Sample counter for TX silencing 
                                        SmartLink DSPs need ~6 s just to
                                        validate JM before sending CJ) */
 #define TRAINING_TIMEOUT_MS 60000   /* V.90 hardware may spend ~10 seconds
-                                       retrying INFO before Phases 3/4. */
+                                       retrying INFO before Phases 3/4.
+                                       ME_TRAINING_TIMEOUT_MS overrides for
+                                       multi-retrain interop calls, where 60 s
+                                       caps Phase 4 attempts at ~3 per call. */
+
+static uint64_t me_training_timeout_ms(void)
+{
+    static uint64_t cached;
+
+    if (cached == 0) {
+        const char *v = getenv("ME_TRAINING_TIMEOUT_MS");
+
+        cached = TRAINING_TIMEOUT_MS;
+        if (v && *v) {
+            char *end;
+            long parsed = strtol(v, &end, 10);
+
+            if (end != v && *end == '\0' && parsed >= 1000)
+                cached = (uint64_t)parsed;
+        }
+    }
+    return cached;
+}
 
 /* V.34 RX stage tracking — used for notch filter activation and diagnostics */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
@@ -3886,7 +3908,7 @@ void me_rx_audio(const int16_t *amp, int len)
             me_hangup();
             return;
         }
-        if (state == ME_TRAINING && elapsed > TRAINING_TIMEOUT_MS) {
+        if (state == ME_TRAINING && elapsed > me_training_timeout_ms()) {
             ME_LOG("[ME] Training timed out after %llu ms (mod=%s)\n",
                     (unsigned long long)elapsed, me_mod_to_str(g_mod));
             trace_phase("TRAINING timeout after %llums mod=%s",
