@@ -1971,6 +1971,31 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
 static void v92_su_rx_reset_locked(void);
 void me_hangup(void);
 
+/* Format constellation `c`'s transmitter Ucodes (descending, §5.4.4) into buf,
+ * for interop diagnostics -- e.g. to check a recovered CPt against the
+ * constellation the peer's V90TRN2Designer reported it designed. */
+static void v90_cp_format_constellation(const vpcm_cp_frame_t *cp,
+                                        int c,
+                                        char *buf,
+                                        size_t buf_len)
+{
+    size_t pos = 0;
+
+    if (buf_len == 0)
+        return;
+    buf[0] = '\0';
+    if (!cp || c < 0 || c >= cp->constellation_count)
+        return;
+    for (int ucode = VPCM_CP_MASK_BITS - 1; ucode >= 0; ucode--) {
+        if (!vpcm_cp_mask_get(cp->masks[c], ucode))
+            continue;
+        pos += (size_t)snprintf(buf + pos, buf_len - pos,
+                                "%s%d", pos ? "," : "", ucode);
+        if (pos >= buf_len - 1)
+            break;
+    }
+}
+
 /* Caller holds g_state_mtx. */
 static void v90_cp_live_read_rx_counters_locked(
     v90_cp_live_rx_counters_t *counters)
@@ -2249,6 +2274,39 @@ static void *v90_cp_live_worker(void *user_data)
                         meta.bit_order,
                         meta.voted_frames,
                         meta.agreement_pct);
+                {
+                    /* Log the recovered transmitter (and, if different, codec)
+                     * constellation Ucodes so a live capture can be checked
+                     * against the peer's V90TRN2Designer "ADI design report".
+                     * A mismatch here means our TRN2d/MP is shaped to the wrong
+                     * levels and the peer's Phase-4 equalizer will diverge. */
+                    char tx_set[256];
+                    char codec_set[256];
+
+                    v90_cp_format_constellation(&diag.frame, 0,
+                                                tx_set, sizeof(tx_set));
+                    fprintf(stderr,
+                            "[ME] V.90 recovered %s constellation[0] tx-Ucodes={%s} count=%d\n",
+                            diag.frame.v90_compatibility ? "CP" : "CPt",
+                            tx_set,
+                            vpcm_cp_mask_population(diag.frame.masks[0]));
+                    if (diag.frame.codec_constellations_differ) {
+                        for (int ucode = VPCM_CP_MASK_BITS - 1, pos = 0;
+                             ucode >= 0; ucode--) {
+                            if (!vpcm_cp_mask_get(diag.frame.codec_masks[0], ucode))
+                                continue;
+                            pos += snprintf(codec_set + pos,
+                                            sizeof(codec_set) - pos,
+                                            "%s%d", pos ? "," : "", ucode);
+                            if (pos >= (int)sizeof(codec_set) - 1)
+                                break;
+                        }
+                        fprintf(stderr,
+                                "[ME] V.90 recovered %s constellation[0] codec-Ucodes={%s}\n",
+                                diag.frame.v90_compatibility ? "CP" : "CPt",
+                                codec_set);
+                    }
+                }
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
             }
             pthread_mutex_unlock(&g_state_mtx);
