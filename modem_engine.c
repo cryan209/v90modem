@@ -4077,13 +4077,21 @@ void me_rx_audio(const int16_t *amp, int len)
                          * notification used to stay sticky and suppress the
                          * later J/Ja detector indefinitely. */
                         v34_v90_clear_peer_retrain_event(g_v34);
-                        /* §9.5.1.2 response: restart the answerer Phase 2 flow
-                         * so Tone B/INFO0d go out and the retrained handshake
-                         * can complete.  This frees g_v90; later blocks in
-                         * this poll are all guarded on g_v90. */
-                        (void) restart_v90_phase2_locked(
-                            "peer retrain (Tone A/silence) during Phase 3/4; "
-                            "responding per 9.5.1.2");
+                        /* §9.5.1.2 response: restart the answerer Phase 2 flow.
+                         * This frees g_v90; later blocks in this poll are all
+                         * guarded on g_v90. */
+                        if (restart_v90_phase2_locked(
+                                "peer retrain (Tone A/silence) during Phase 3/4; "
+                                "responding per 9.5.1.2")) {
+                            /* §9.5 skips the INFO0 exchange: enter 70 ms
+                             * silence then Tone B directly instead of the
+                             * INITIAL_PREAMBLE/INFO0d start, whose modulated
+                             * carrier the SmartLink peer's Tone B detector
+                             * does not reliably accept during its L2 window
+                             * (observed live 2026-07-22 on post-Phase-4
+                             * retrains). */
+                            v34_v90_start_retrain_response(g_v34);
+                        }
                     }
                     if (new_e_event && g_v90 && !g_v92_active) {
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_E);

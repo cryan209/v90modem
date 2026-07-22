@@ -356,6 +356,14 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
 
+/*! Answer a peer-initiated V.90 retrain per §9.5.1.2: 70 ± 5 ms of silence,
+    then Tone B with the receiver conditioned for the Tone A phase reversal
+    (§9.2.1.1.3).  Call after v34_restart()/v34_set_v90_mode() so the retrained
+    Phase 2 skips the INFO0 exchange, which §9.5 omits.  No-op unless the
+    context is a V.90 digital answerer.
+    \param s The modem context. */
+SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
+
 /*! Get the number of distinct, strictly detected Phase 3 S transitions.
     \param s The modem context.
     \return A monotonically increasing count for the current training attempt. */
