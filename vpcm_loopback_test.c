@@ -1683,7 +1683,13 @@ static bool test_v90_shaped_phase4(v91_law_t law)
             }
             for (int i = 0; i < 24; i++)
                 v90_phase3_tx_codewords(tx, &codeword, 1);
-            for (int i = 0; i < 2040; i++) {
+            /* Production deliberately keeps TRN2d on the wire longer than the
+             * 2040T minimum.  Exercise every emitted training symbol and wait
+             * for the configured transmitter to advance to MP, while retaining
+             * the normative 16000T upper bound from V.90 9.4.1.3. */
+            for (int i = 0;
+                 v90_get_tx_phase(tx) == V90_TX_TRN2D && i < 16000;
+                 i++) {
                 int ucode;
                 int constellation;
 
@@ -2744,7 +2750,9 @@ typedef struct {
     int prev_sign;
     uint8_t cwbuf[VPCM_CP_FRAME_INTERVALS];
     int cw_fill;
-    uint8_t stream[16384];
+    /* Holds the production-length 12000T TRN2d (34000 bits at d=17) plus
+     * the following SUVd/CPd/Ed observations. */
+    uint8_t stream[65536];
     int nbits;
     bool failed;
 } v92_demap_stream_t;
@@ -2787,7 +2795,7 @@ static bool v92_test_upstream_send(v92_trn2u_tx_t *utx,
 
 static bool test_v92_native_cpu_phase4(v91_law_t law)
 {
-    enum { MAX_SYMBOLS = 20000, TRN2D_LEN = 2040, RI_POST_CP = 24 };
+    enum { MAX_SYMBOLS = 20000, TRN2D_MAX = 16000, RI_POST_CP = 24 };
     const bool alaw = (law == V91_LAW_ALAW);
     v90_law_t v90_law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
     v90_state_t *tx = v90_init_data_pump(v90_law);
@@ -2803,6 +2811,7 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     uint8_t codeword = 0;
     int nbits;
     int symbols = 0;
+    int trn2d_symbols = 0;
     int trn2d_bits;
     bool failed = true;
 
@@ -2856,14 +2865,19 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
         goto done;
     ds.d = cpt.drn + 8;
 
-    /* 24T barred Ri symbols, then 2040T of mapped TRN2d (scrambled ones). */
+    /* 24T barred Ri symbols, then the configured mapped TRN2d sequence.
+     * Production currently emits 12000T, longer than the 2040T minimum, so
+     * follow the transmitter phase instead of baking the minimum into this
+     * end-to-end demapper test. */
     for (int i = 0; i < RI_POST_CP; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    for (int i = 0; i < TRN2D_LEN; i++) {
+    while (v90_get_tx_phase(tx) == V90_TX_TRN2D
+           && trn2d_symbols < TRN2D_MAX) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
         v92_demap_stream_push(&ds, v90_law, codeword);
+        trn2d_symbols++;
     }
-    trn2d_bits = (TRN2D_LEN / VPCM_CP_FRAME_INTERVALS) * ds.d;
+    trn2d_bits = (trn2d_symbols / VPCM_CP_FRAME_INTERVALS) * ds.d;
     if (ds.failed || ds.nbits != trn2d_bits
         || v90_get_tx_phase(tx) != V90_TX_SUVD) {
         fprintf(stderr,
@@ -3169,7 +3183,10 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
     damaged[200] ^= 1;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 1) {
+    if (capture.count != 0 || rx.rejected_frames != 1
+        || rx.crc_rejected_frames != 1
+        || rx.semantic_rejected_frames != 0
+        || rx.structure_rejected_frames != 0) {
         fprintf(stderr, "V.90 strict CP receiver accepted a CRC-damaged frame\n");
         return false;
     }
@@ -3179,7 +3196,8 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 2) {
+    if (capture.count != 0 || rx.rejected_frames != 2
+        || rx.semantic_rejected_frames != 1) {
         fprintf(stderr, "V.90 strict CP receiver accepted reserved bit 18\n");
         return false;
     }
@@ -3312,6 +3330,10 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         v90_cp_rx_put_bit(&rx, bits[i]);
     if (capture.count != 5
         || rx.valid_frames != 5
+        || rx.sync_candidates != 10
+        || rx.crc_rejected_frames != 1
+        || rx.semantic_rejected_frames != 4
+        || rx.structure_rejected_frames != 0
         || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
         fprintf(stderr,
                 "V.90 strict CP receiver rejected maximum Table-14 frame\n");

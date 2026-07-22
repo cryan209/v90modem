@@ -19,8 +19,12 @@ typedef struct {
     bool expected_alaw;
     bool collecting;
     uint64_t input_bits;
+    uint32_t sync_candidates;
     uint32_t valid_frames;
     uint32_t rejected_frames;
+    uint32_t crc_rejected_frames;
+    uint32_t structure_rejected_frames;
+    uint32_t semantic_rejected_frames;
     v90_cp_rx_frame_handler_t frame_handler;
     void *frame_user_data;
 } v90_cp_rx_t;

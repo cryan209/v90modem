@@ -80,11 +80,13 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
         rx->bit_count = 18;
         rx->sync_ones = 0;
         rx->collecting = true;
+        rx->sync_candidates++;
         return false;
     }
 
     if (rx->bit_count >= VPCM_CP_MAX_BITS) {
         rx->rejected_frames++;
+        rx->structure_rejected_frames++;
         v90_cp_rx_reset(rx);
         return false;
     }
@@ -103,6 +105,7 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
         }
         if (max_idx >= VPCM_CP_MAX_CONSTELLATIONS) {
             rx->rejected_frames++;
+            rx->structure_rejected_frames++;
             v90_cp_rx_reset(rx);
             return false;
         }
@@ -114,14 +117,40 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
 
     if (rx->target_bits > 0 && rx->bit_count == rx->target_bits) {
         vpcm_cp_diag_t diag;
-        if (vpcm_cp_decode_diag(rx->bits, rx->target_bits, &diag)
-            && v90_cp_diag_is_strict(rx, &diag)) {
+        bool decoded;
+
+        memset(&diag, 0, sizeof(diag));
+        decoded = vpcm_cp_decode_diag(rx->bits, rx->target_bits, &diag);
+        if (decoded && v90_cp_diag_is_strict(rx, &diag)) {
             rx->valid_frames++;
             if (rx->frame_handler)
                 rx->frame_handler(rx->frame_user_data, &diag);
             accepted = true;
         } else {
             rx->rejected_frames++;
+            if (diag.frame_sync_ok
+                && diag.start_bits_ok
+                && diag.reserved_bits_ok
+                && diag.v90_compat_ok
+                && diag.fill_ok
+                && diag.crc_remainder != 0) {
+                rx->crc_rejected_frames++;
+            } else if (diag.frame_sync_ok
+                       && diag.start_bits_ok
+                       && diag.reserved_bits_ok
+                       && diag.v90_compat_ok
+                       && diag.fill_ok
+                       && diag.crc_remainder == 0) {
+                /* The wire frame is intact, but a negotiated field is not
+                 * usable by this V.90 endpoint (rate, law, mask, or a V.90
+                 * reserved semantic).  vpcm_cp_decode_diag() deliberately
+                 * returns false for some of these generic validation errors,
+                 * so classify from its detailed observations, not its final
+                 * Boolean alone. */
+                rx->semantic_rejected_frames++;
+            } else {
+                rx->structure_rejected_frames++;
+            }
         }
         v90_cp_rx_reset(rx);
     }

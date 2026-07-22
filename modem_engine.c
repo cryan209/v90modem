@@ -708,6 +708,18 @@ static int             g_v90_cp_live_phase4_hint = -1;
 static int             g_v90_cp_live_next_request = -1;
 static int             g_v90_cp_live_expected_compatibility = 0;
 static unsigned        g_v90_cp_live_generation = 0;
+typedef struct {
+    uint64_t input_bits;
+    uint32_t sync_candidates;
+    uint32_t valid_frames;
+    uint32_t rejected_frames;
+    uint32_t crc_rejected_frames;
+    uint32_t structure_rejected_frames;
+    uint32_t semantic_rejected_frames;
+} v90_cp_live_rx_counters_t;
+static int             g_v90_cp_live_cpt_accept_sample = -1;
+static unsigned        g_v90_cp_live_post_cpt_attempts = 0;
+static v90_cp_live_rx_counters_t g_v90_cp_live_rx_baseline;
 
 /* V.91 symmetric raw-G.711 startup and data path.
  *
@@ -1951,6 +1963,35 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
 static void v92_su_rx_reset_locked(void);
 void me_hangup(void);
 
+/* Caller holds g_state_mtx. */
+static void v90_cp_live_read_rx_counters_locked(
+    v90_cp_live_rx_counters_t *counters)
+{
+    if (!counters)
+        return;
+    counters->input_bits = g_v90_cp_rx.input_bits;
+    counters->sync_candidates = g_v90_cp_rx.sync_candidates;
+    counters->valid_frames = g_v90_cp_rx.valid_frames;
+    counters->rejected_frames = g_v90_cp_rx.rejected_frames;
+    counters->crc_rejected_frames = g_v90_cp_rx.crc_rejected_frames;
+    counters->structure_rejected_frames =
+        g_v90_cp_rx.structure_rejected_frames;
+    counters->semantic_rejected_frames =
+        g_v90_cp_rx.semantic_rejected_frames;
+}
+
+static uint32_t v90_cp_live_counter_delta(uint32_t current,
+                                          uint32_t baseline)
+{
+    return current >= baseline ? current - baseline : current;
+}
+
+static uint64_t v90_cp_live_counter_delta64(uint64_t current,
+                                            uint64_t baseline)
+{
+    return current >= baseline ? current - baseline : current;
+}
+
 static void v90_cp_live_capture_reset_locked(void)
 {
     pthread_mutex_lock(&g_v90_cp_live_mtx);
@@ -1959,6 +2000,11 @@ static void v90_cp_live_capture_reset_locked(void)
     g_v90_cp_live_phase4_hint = -1;
     g_v90_cp_live_next_request = -1;
     g_v90_cp_live_expected_compatibility = 0;
+    g_v90_cp_live_cpt_accept_sample = -1;
+    g_v90_cp_live_post_cpt_attempts = 0;
+    memset(&g_v90_cp_live_rx_baseline,
+           0,
+           sizeof(g_v90_cp_live_rx_baseline));
     g_v90_cp_live_pending = false;
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
 }
@@ -2018,6 +2064,17 @@ static void v90_cp_live_mark_accepted_locked(const vpcm_cp_diag_t *diag)
         /* CP' is the last Table-14 frame needed during startup. */
         g_v90_cp_live_next_request = -1;
     } else {
+        if (!diag->frame.v90_compatibility) {
+            /* This is the waveform boundary at which the digital modem
+             * accepts CPt and starts Ri/barred-Ri/TRN2d.  Retain both it and
+             * the synchronous receiver's counters so later failed CP hunts
+             * can describe what the analogue modem actually did next. */
+            g_v90_cp_live_cpt_accept_sample =
+                g_v90_cp_live_sample_count;
+            g_v90_cp_live_post_cpt_attempts = 0;
+            v90_cp_live_read_rx_counters_locked(
+                &g_v90_cp_live_rx_baseline);
+        }
         g_v90_cp_live_expected_compatibility = 1;
         g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 3200;
     }
@@ -2100,7 +2157,10 @@ static void *v90_cp_live_worker(void *user_data)
         int sample_count;
         int phase4_hint;
         int expected_compatibility;
+        int cpt_accept_sample;
+        unsigned post_cpt_attempt;
         unsigned generation;
+        v90_cp_live_rx_counters_t rx_baseline;
         vpcm_cp_diag_t diag;
         v90_cp_live_meta_t meta;
         bool found;
@@ -2117,6 +2177,11 @@ static void *v90_cp_live_worker(void *user_data)
         phase4_hint = g_v90_cp_live_phase4_hint;
         expected_compatibility =
             g_v90_cp_live_expected_compatibility;
+        cpt_accept_sample = g_v90_cp_live_cpt_accept_sample;
+        post_cpt_attempt = 0;
+        if (expected_compatibility)
+            post_cpt_attempt = ++g_v90_cp_live_post_cpt_attempts;
+        rx_baseline = g_v90_cp_live_rx_baseline;
         generation = g_v90_cp_live_generation;
         snapshot = malloc((size_t)sample_count * sizeof(*snapshot));
         if (snapshot) {
@@ -2167,6 +2232,119 @@ static void *v90_cp_live_worker(void *user_data)
                 accepted = v90_accept_cp_diag_locked(&diag, "batch");
             }
             pthread_mutex_unlock(&g_state_mtx);
+        } else if (snapshot && expected_compatibility
+                   && (post_cpt_attempt == 1
+                       || (post_cpt_attempt % 2) == 0)) {
+            vpcm_cp_diag_t repeated_cpt_diag;
+            v90_cp_live_meta_t repeated_cpt_meta;
+            v90_cp_live_rx_counters_t rx_current;
+            uint64_t energy = 0;
+            uint64_t input_bits_delta;
+            uint32_t sync_delta;
+            uint32_t valid_delta;
+            uint32_t rejected_delta;
+            uint32_t crc_delta;
+            uint32_t structure_delta;
+            uint32_t semantic_delta;
+            double recent_rms = 0.0;
+            int recent_start = sample_count - 4000;
+            int recent_count;
+            int repeated_cpt_sample = -1;
+            bool repeated_cpt;
+            bool current;
+            const char *classification;
+
+            memset(&repeated_cpt_diag, 0, sizeof(repeated_cpt_diag));
+            memset(&repeated_cpt_meta, 0, sizeof(repeated_cpt_meta));
+            repeated_cpt = v90_cp_live_recover(snapshot,
+                                                sample_count,
+                                                phase4_hint,
+                                                0,
+                                                g_law == ME_LAW_ALAW,
+                                                &repeated_cpt_diag,
+                                                &repeated_cpt_meta);
+            if (repeated_cpt)
+                repeated_cpt_sample = repeated_cpt_meta.frame_sample;
+
+            if (recent_start < cpt_accept_sample)
+                recent_start = cpt_accept_sample;
+            if (recent_start < 0)
+                recent_start = 0;
+            if (recent_start > sample_count)
+                recent_start = sample_count;
+            recent_count = sample_count - recent_start;
+            for (int i = recent_start; i < sample_count; i++)
+                energy += (uint64_t)((int64_t)snapshot[i] * snapshot[i]);
+            if (recent_count > 0)
+                recent_rms = sqrt((double)energy / recent_count);
+
+            pthread_mutex_lock(&g_state_mtx);
+            v90_cp_live_read_rx_counters_locked(&rx_current);
+            pthread_mutex_lock(&g_v90_cp_live_mtx);
+            current = generation == g_v90_cp_live_generation;
+            pthread_mutex_unlock(&g_v90_cp_live_mtx);
+            current = current && g_state == ME_TRAINING
+                && g_mod == ME_MOD_V90 && g_v90;
+            pthread_mutex_unlock(&g_state_mtx);
+
+            input_bits_delta = v90_cp_live_counter_delta64(
+                rx_current.input_bits, rx_baseline.input_bits);
+            sync_delta = v90_cp_live_counter_delta(
+                rx_current.sync_candidates, rx_baseline.sync_candidates);
+            valid_delta = v90_cp_live_counter_delta(
+                rx_current.valid_frames, rx_baseline.valid_frames);
+            rejected_delta = v90_cp_live_counter_delta(
+                rx_current.rejected_frames, rx_baseline.rejected_frames);
+            crc_delta = v90_cp_live_counter_delta(
+                rx_current.crc_rejected_frames,
+                rx_baseline.crc_rejected_frames);
+            structure_delta = v90_cp_live_counter_delta(
+                rx_current.structure_rejected_frames,
+                rx_baseline.structure_rejected_frames);
+            semantic_delta = v90_cp_live_counter_delta(
+                rx_current.semantic_rejected_frames,
+                rx_baseline.semantic_rejected_frames);
+
+            if (repeated_cpt
+                && repeated_cpt_sample >= cpt_accept_sample) {
+                classification = "repeating-CPt";
+            } else if (recent_rms < 64.0) {
+                classification = "silence";
+            } else if (crc_delta > 0) {
+                classification = "CP-like-crc-reject";
+            } else if (semantic_delta > 0) {
+                classification = "CP-like-semantic-reject";
+            } else if (structure_delta > 0 || rejected_delta > 0) {
+                classification = "CP-like-structure-reject";
+            } else if (sync_delta > 0) {
+                classification = "CP-sync-candidate-incomplete";
+            } else if (input_bits_delta == 0) {
+                classification = "upstream-carrier-not-demodulated";
+            } else {
+                classification = "SCR-or-unresolved-QAM";
+            }
+
+            if (current) {
+                fprintf(stderr,
+                        "[ME] V.90 post-CPt classifier: class=%s "
+                        "attempt=%u samples=%d recent-rms=%.0f "
+                        "newest-CPt=%d transition=%d "
+                        "live-bits=%llu sync=%u valid=%u rejected=%u "
+                        "(crc=%u structure=%u semantic=%u)\n",
+                        classification,
+                        post_cpt_attempt,
+                        sample_count,
+                        recent_rms,
+                        repeated_cpt_sample,
+                        cpt_accept_sample,
+                        (unsigned long long)input_bits_delta,
+                        sync_delta,
+                        valid_delta,
+                        rejected_delta,
+                        crc_delta,
+                        structure_delta,
+                        semantic_delta);
+            }
         }
         free(snapshot);
 
