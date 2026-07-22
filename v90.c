@@ -906,6 +906,83 @@ static int v90_cp_max_upstream_drn(const vpcm_cp_frame_t *cp)
     return 0;
 }
 
+static bool v90_cp_mask_is_exact(const uint8_t mask[VPCM_CP_MASK_BYTES],
+                                 const int *ucodes,
+                                 int count)
+{
+    if (!mask || !ucodes || count < 0)
+        return false;
+    if (vpcm_cp_mask_population(mask) != count)
+        return false;
+    for (int i = 0; i < count; i++) {
+        if (!vpcm_cp_mask_get(mask, ucodes[i]))
+            return false;
+    }
+    return true;
+}
+
+bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
+{
+    /* Disassembly of SLModem 2.9.11's setTrn2DummyConstel() shows that the
+     * failed-design fallback is exactly eight descending Ucodes, 78..71, in
+     * all six frame intervals.  Its Table-14 encoder nevertheless leaks one
+     * unused transmitter-array byte (Ucode 0) and two unused codec-array
+     * bytes (83 and 122) into the masks.  Match every stable field and those
+     * exact leak positions before removing them; no other invalid CPt is
+     * eligible for this repair. */
+    static const int leaked_tx_ucodes[] = {
+        0, 71, 72, 73, 74, 75, 76, 77, 78
+    };
+    static const int leaked_codec_ucodes[] = {
+        71, 72, 73, 74, 75, 76, 77, 78, 83, 122
+    };
+
+    if (!cp
+        || cp->transparent_mode_granted
+        || cp->v90_compatibility
+        || cp->acknowledge
+        || cp->drn != 15
+        || !cp->codec_alaw
+        || cp->shaping_redundancy != 1
+        || cp->shaping_lookahead != 1
+        || cp->trn1d_gain_q3_13 != 0x2000
+        || cp->shaping_a1_q1_6 != 0x40
+        || cp->shaping_a2_q1_6 != 0
+        || cp->shaping_b1_q1_6 != 0
+        || cp->shaping_b2_q1_6 != 0
+        || cp->upstream_rate_mask != 0x1FFF
+        || cp->constellation_count != 1
+        || !cp->codec_constellations_differ
+        || !v90_cp_mask_is_exact(cp->masks[0],
+                                 leaked_tx_ucodes,
+                                 (int)(sizeof(leaked_tx_ucodes)
+                                       / sizeof(leaked_tx_ucodes[0])))
+        || !v90_cp_mask_is_exact(cp->codec_masks[0],
+                                 leaked_codec_ucodes,
+                                 (int)(sizeof(leaked_codec_ucodes)
+                                       / sizeof(leaked_codec_ucodes[0]))))
+        return false;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        if (cp->dfi[i] != 0)
+            return false;
+    }
+    for (int constellation = 1;
+         constellation < VPCM_CP_MAX_CONSTELLATIONS;
+         constellation++) {
+        if (vpcm_cp_mask_population(cp->masks[constellation]) != 0
+            || vpcm_cp_mask_population(cp->codec_masks[constellation]) != 0)
+            return false;
+    }
+
+    memset(cp->masks[0], 0, sizeof(cp->masks[0]));
+    memset(cp->codec_masks[0], 0, sizeof(cp->codec_masks[0]));
+    for (int ucode = 71; ucode <= 78; ucode++) {
+        vpcm_cp_mask_set(cp->masks[0], ucode, true);
+        vpcm_cp_mask_set(cp->codec_masks[0], ucode, true);
+    }
+    return vpcm_cp_validate(cp, NULL, 0);
+}
+
 static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
 {
     uint16_t crc;
