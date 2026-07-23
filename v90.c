@@ -3959,8 +3959,23 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
 
     if (!s->phase4_mapper_ready)
         return false;
-    if (!s->data_mapper_ready)
-        return v90_configure_data_mapper(s, cp);
+    if (!s->data_mapper_ready) {
+        vpcm_cp_frame_t base;
+
+        /* §9.4.2: the analogue modem sets acknowledge in every CP it sends
+         * after decoding a complete MP, so a peer that validated our MP
+         * during TRN2d sends CP' as its FIRST data-mode CP.  Observed live
+         * (2026-07-23, batch-2 call 5): SmartLink sent CP #1-#5 all with
+         * ack=1; requiring a plain CP first rejected every one, we never
+         * answered Ed/B1d, and the peer hit "Phase4 TimeOut" into a DP=90
+         * retrain.  Configure the mapper from the constellation content
+         * with acknowledge cleared and let the shared handling below latch
+         * the acknowledgement under its existing MP-phase gate. */
+        base = *cp;
+        base.acknowledge = false;
+        if (!v90_configure_data_mapper(s, &base))
+            return false;
+    }
 
     /* Repeated data-mode CP/CP' frames may change only acknowledge. */
     expected = s->data_cp_frame;
