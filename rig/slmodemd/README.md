@@ -356,3 +356,37 @@ until U-lines / idle-ones emerge, then encode the offset into the live E
 handler.  Also gated the DATA-stage per-frame stderr RMS log behind
 `V34_DATA_FRAME_RMS_LOG` (~400 lines/s — a media-clock hazard of the
 buffered-tap class).
+
+### 2026-07-23 latest: offline upstream alignment sweep — decode chain mostly works
+
+The live-garble question was moved fully offline.  `winner-stereo.wav` (in
+`.../pty_soak/upstream/v2attempt6/`) is the winning call cut from the taps
+(L=digital TX, R=analog RX; the ANSam-onset cut script is
+`tools/soak/../cut_winner_call.py` pattern in session scratchpad).  New
+vpcm_decode env hooks (committed): `VPCM_V90_ASSUME_MP_RATE` (bypass PCM-side
+MP recovery with the known negotiated parameters), `VPCM_V90_PHASE3_START_
+SAMPLE` (window the replay to one attempt), `VPCM_V90_BOUNDARY_RANGE/STEP`
+(fine boundary sweep).  Reproduction:
+
+```
+VPCM_V90_ASSUME_MP_RATE=31200 VPCM_V90_PHASE3_START_SAMPLE=1697000 \
+VPCM_V90_PHASE4_JPRIME_SAMPLE=1757000 VPCM_V90_FORCE_DATA_SAMPLE=1813754 \
+VPCM_V90_BOUNDARY_SWEEP=1 VPCM_V90_NATIVE_ONLY=1 VPCM_V34_UPSTREAM_DIAG=1 \
+./vpcm_decode --all --wav winner-stereo.wav
+```
+
+Anchoring trick: TRACE phase-ms ↔ WAV samples via the DATA state-change ME
+trace (`phase_ms=0 g711_rx=9602790` ↔ WAV sample 1812018; counters ≈ tap
+byte offsets because tap and counters share the server-instance epoch).
+
+Findings: boundary locks at **1813752-54** (score 67 vs 18 noise floor;
+1-sample fine sweep adds nothing).  Transform: scale 70 correct, rotation
+0 vs 2 near-tied (differential coding absorbs it), conjugate 0.  The decoded
+stream at the best config is **mostly-correct idle ones** — long clean 0xff
+runs (one alignment: transient then 34 straight ff bytes) broken by bursty
+errors at ~mapping-frame spacing, plus a permanent ~24-bit windup transient
+at the boundary that dominates the first64 score (score is misleading —
+read the aligned_hex dumps).  So the DATA decode chain fundamentally works;
+the remaining upstream-garble work is (a) the bursty per-mapping-frame error
+source at 31200@3200 (V0/superframe bit handling and shell unmap are the
+suspects), (b) skipping the windup transient before scoring/DTE delivery.
