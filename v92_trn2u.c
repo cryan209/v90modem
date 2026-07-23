@@ -9,7 +9,12 @@
 #include <math.h>
 #include <string.h>
 
-/* Upstream GPA scrambler, x^23 + x^18 + 1 (matches v92_p3_rx.c). */
+/* Upstream scrambler — WARNING: taps 18/23 are GPC, not the GPA that
+ * V.92 §6.3 mandates for the analogue modem (GPA delay taps are 5/23,
+ * i.e. reg>>4 ^ reg>>22).  Matches v92_p3_rx.c's gpa_descramble(), which
+ * carries the same defect — see its comment for the evidence and the
+ * validation route.  The descrambler-mode enum's GPA/GPC label prefixes
+ * are likewise swapped relative to the taps they implement. */
 static inline int v92_gpa_scramble(uint32_t *reg, int in_bit)
 {
     int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
