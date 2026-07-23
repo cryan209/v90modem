@@ -8387,6 +8387,65 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 (int16_t)(transformed_re * 128.0f * s->data_symbol_scale);
             s->mapping_frame_buf[s->mapping_frame_count++] =
                 (int16_t)(transformed_im * 128.0f * s->data_symbol_scale);
+
+            /* Decision-directed carrier tracking against the DATA
+               constellation.  Root cause (2026-07-23, offline 4th-power
+               analysis of the winner capture): the V.90 answerer's Phase 3/4
+               receive path is never phase-locked -- CP/MP decode succeeds
+               because those sequences are DIFFERENTIALLY encoded (8.5.2/V.90)
+               and the 24-hypothesis machinery absorbs the unknown rotation,
+               while carrier tracking is deliberately frozen through PHASE4_MP
+               (phase4_trn_should_freeze_tracking).  Data mode is the first
+               thing in the call that needs true coherence, so it must pull in
+               and hold its own lock.  The phase detector is the same
+               Im(sym x conj(target)) form as the training loop, with the
+               target taken from the nearest odd-integer constellation point
+               and normalized so the error is sin(delta-phi) regardless of
+               ring radius.  The 90-degree acquisition ambiguity is absorbed
+               by the differential quadrant bits (V.34 data framing).
+               ME_V34_DATA_CARRIER_TRACK=0 disables for A/B. */
+            {
+                static int dd_enabled = -1;
+
+                if (dd_enabled < 0)
+                {
+                    const char *value = getenv("ME_V34_DATA_CARRIER_TRACK");
+
+                    dd_enabled = (value == NULL || atoi(value) != 0);
+                }
+                if (dd_enabled)
+                {
+                    float g_re = transformed_re * s->data_symbol_scale;
+                    float g_im = transformed_im * s->data_symbol_scale;
+                    float t_re = 2.0f*floorf((g_re - 1.0f)/2.0f + 0.5f) + 1.0f;
+                    float t_im = 2.0f*floorf((g_im - 1.0f)/2.0f + 0.5f) + 1.0f;
+                    float sym_mag;
+                    float tgt_mag;
+
+                    if (t_re > 43.0f) t_re = 43.0f;
+                    else if (t_re < -43.0f) t_re = -43.0f;
+                    if (t_im > 43.0f) t_im = 43.0f;
+                    else if (t_im < -43.0f) t_im = -43.0f;
+                    sym_mag = sqrtf(g_re*g_re + g_im*g_im);
+                    tgt_mag = sqrtf(t_re*t_re + t_im*t_im);
+                    if (sym_mag > 0.5f && tgt_mag > 0.5f)
+                    {
+                        /* Phase error in the transformed (grid) domain equals
+                           the error in the equalizer domain: the transform is
+                           a fixed rotation/conjugation/scale, and the
+                           conjugate flips the error sign, which we undo. */
+                        float error = (g_im*t_re - g_re*t_im)
+                                    / (sym_mag*tgt_mag);
+
+                        if (s->data_symbol_conjugate)
+                            error = -error;
+                        s->v34_carrier_phase_rate +=
+                            (int32_t)(s->carrier_track_i*error);
+                        s->carrier_phase +=
+                            (int32_t)(s->carrier_track_p*error);
+                    }
+                }
+            }
         }
         s->duration++;
         if (s->mapping_frame_count >= 16)
@@ -8409,6 +8468,26 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     fprintf(stderr, "[DATA] baud=%d frame_rms=%.1f (%.3f)\n",
                             s->duration, sqrtf(rms_sum / 16.0f),
                             sqrtf(rms_sum / 16.0f) / 128.0f);
+                }
+            }
+            /* Dump the EXACT Q9.7 values entering the mapping-frame decoder.
+               Offline diagnosis only (raw int16 LE pairs, 16 per frame). */
+            {
+                static int dump_initialized = 0;
+                static FILE *dump_fp = NULL;
+
+                if (!dump_initialized)
+                {
+                    const char *path = getenv("V34_DATA_FRAME_DUMP");
+
+                    dump_initialized = 1;
+                    if (path && *path)
+                        dump_fp = fopen(path, "wb");
+                }
+                if (dump_fp)
+                {
+                    fwrite(s->mapping_frame_buf, sizeof(int16_t), 16, dump_fp);
+                    fflush(dump_fp);
                 }
             }
             v34_put_mapping_frame(s, s->mapping_frame_buf);
@@ -9466,13 +9545,12 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
 
 SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
 {
+    int prior;
+
     if (!s)
         return -1;
     s->rx.step_2d = 0;
-    s->rx.input_4d = 0;
     s->rx.data_frame = 0;
-    s->rx.super_frame = 0;
-    s->rx.v0_pattern = 0;
     s->rx.mapping_frame_count = 0;
     s->rx.s_bit_cnt = 0;
     s->rx.aux_bit_cnt = 0;
@@ -9481,6 +9559,31 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     memset(s->rx.ww, 0, sizeof(s->rx.ww));
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;
+    /* 10.1.3.1/V.34: B1 is a reset-state data frame that carries the
+       superframe synchronization inversions of the FINAL data frame in a
+       superframe, and the convolutional encoder is reset to state zero.
+       Initializing to an ordinary frame zero leaves the V0 inversion
+       pattern out of phase for the whole connection. */
+    if (s->rx.parms.j > 0)
+    {
+        s->rx.super_frame = s->rx.parms.j - 1;
+        s->rx.v0_pattern = (uint16_t)(2*(s->rx.parms.j - 1));
+        s->rx.input_4d = (s->rx.parms.j - 1)*4*s->rx.parms.p;
+    }
+    else
+    {
+        s->rx.super_frame = 0;
+        s->rx.v0_pattern = 0;
+        s->rx.input_4d = 0;
+    }
+    /*endif*/
+    prior = (s->rx.viterbi.ptr - 1) & 0xF;
+    for (int state = 0;  state < s->rx.viterbi.state_count;  state++)
+    {
+        s->rx.viterbi.vit[prior].cumulative_path_metric[state] =
+            (state == 0)  ?  0U  :  0x3FFFFFFFU;
+    }
+    /*endfor*/
     s->rx.received_event = V34_EVENT_E;
     s->rx.mp_seen = 2;
     s->rx.stage = V34_RX_STAGE_DATA;

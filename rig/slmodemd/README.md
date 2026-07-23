@@ -419,3 +419,42 @@ then either fix the DATA-stage demod/tracking or the buffering.  Sweep
 tooling committed: VPCM_V90_NATIVE_MAX_BITS, VPCM_V90_NATIVE_BITS_OUT
 (decoded bitstream dump; idle = all-ones ground truth), post-windup sweep
 scoring, VPCM_V90_BOUNDARY_RANGE/STEP.
+
+### Upstream demod root cause FOUND (spec-confirmed): the V.90 answerer RX has no coherent lock
+
+mapping_frame_buf dump (V34_DATA_FRAME_DUMP env, exact int16 Q9.7 into
+v34_put_mapping_frame) confirms the decoder input is off-constellation mush
+(mean |v| 63 grid units vs max 43, no grid fit at any scale).  4th-power
+analysis of the equalized symbols shows coherence ~0.02 in the DATA region
+AND in the CP region — the receiver is phase-locked NOWHERE in Phase 4.
+CP/MP decode succeeds anyway because §8.5.2/V.90 makes those sequences
+DIFFERENTIALLY encoded ("modulated according to 10.1.3.9/V.34; the
+scrambler and differential encoder are initialized to zero"), and the
+24-hypothesis machinery absorbs rotation — the Phase-3 "TRN lock" and
+Phase-4 "MP hypothesis lock" are bit-domain latches, not carrier locks.
+Data mode (absolute trellis+mapping per clause 6/V.90 → V.34) is the first
+consumer that needs true coherence.  Eliminated en route: pre-emphasis
+change at B1 (none — 9.2/V.34 line 2191: "All signals in Phases 3 and 4
+are transmitted using the selected symbol rate, carrier frequency,
+pre-emphasis filter and power level"), scale/rotation/conjugate, boundary,
+descrambler, aux bits.
+
+Landed (necessary, not yet sufficient):
+- `v34_begin_rx_data()` now applies the 10.1.3.1/V.34 B1 exception: B1 is a
+  reset-state data frame carrying the superframe-final V0 sync inversions,
+  and the trellis starts from state zero (was: ordinary frame zero — the V0
+  inversion pattern was out of phase for the whole connection).
+- Decision-directed carrier tracking in V34_RX_STAGE_DATA (same
+  Im(sym x conj(target)) detector as training, target = nearest odd-integer
+  constellation point, error normalized to sin(dphi); 90-degree ambiguity
+  absorbed by the differential quadrant bits).  ME_V34_DATA_CARRIER_TRACK=0
+  disables.  DD can HOLD a lock but cannot ACQUIRE from the current unlocked
+  state — offline repro still decodes 50%.
+
+THE REMAINING WORK (a coherent-receiver workstream, not a patch): data-aided
+acquisition before DATA — the peer's TRN (scrambled ones, known) and B1
+(known symbol frame, 10.1.3.1/V.34) both provide known-symbol windows to
+estimate true carrier phase/equalizer response and seed the loops; then the
+existing freeze machinery holds through MP and the new DD tracking holds
+through data.  All offline-testable against winner-stereo.wav with the
+committed repro before any live call.
