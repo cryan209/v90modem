@@ -341,6 +341,11 @@ int v90_tx_data_frame_codewords(v90_state_t *s,
  */
 void v90_notify_cp_ready(v90_state_t *s);
 
+/* Cap the MP Type-0 upstream rate offer (bits 24:27 max drn and the 36:48
+ * capability mask) at the rate the V.34 upstream receiver actually trained
+ * at.  0 clears the cap (echo the peer's CPt mask verbatim). */
+void v90_set_upstream_rate_limit(v90_state_t *s, int bps);
+
 /*
  * Enable V.92 Phase 4 mode on this digital modem context.
  * When enabled, the Phase 4 sequence becomes:

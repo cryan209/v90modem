@@ -4821,6 +4821,12 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 && v90_get_tx_phase(g_v90) >= V90_TX_RI) {
                 ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
                        g_v92_active ? "V.92" : "V.90");
+                /* MP is built at CPt acceptance; the upstream V.34 rate is
+                   settled by now, so cap the MP rate offer at what the pump
+                   actually trained at (peer picked 33600 against a 31200
+                   pump when the peer's CPt mask was echoed uncapped). */
+                v90_set_upstream_rate_limit(g_v90,
+                                            v34_get_current_bit_rate(g_v34));
                 if (!g_v92_active)
                     v90_cp_live_note_phase4_hint_locked();
                 v34_force_phase4(g_v34);

@@ -452,6 +452,7 @@ struct v90_state_s {
     bool             cp_ack_received;
     bool             e_received;
     bool             b1_received;
+    int              upstream_rate_limit_bps;   /* actual V.34 upstream rate; 0 = no cap */
 
     /* V.90 Phase 4 Type-0 MP and CPt-selected modulus/shaping mapper. */
     uint8_t          mp_bits[V90_MP_MAX_BITS];
@@ -924,15 +925,50 @@ static int v90_cp_codec_output_ucode(const vpcm_cp_frame_t *cp,
     return -1;
 }
 
-static int v90_cp_max_upstream_drn(const vpcm_cp_frame_t *cp)
+static int v90_upstream_mask_max_drn(uint16_t mask)
 {
-    if (!cp)
-        return 0;
     for (int bit = 12; bit >= 0; bit--) {
-        if (cp->upstream_rate_mask & (1U << bit))
+        if (mask & (1U << bit))
             return bit + 2;
     }
     return 0;
+}
+
+/* The MP upstream-rate fields must offer only rates the V.34 upstream
+ * receiver can actually accept.  Echoing the peer's CPt capability mask
+ * verbatim let SmartLink lawfully select 33600 bps against a pump trained
+ * at 31200 — its data mode then ran "Rx bit Rate - 0" and died with
+ * "vpcm: Link Error" ~10 s after the first completed handshake
+ * (2026-07-23, batch-4 call 2).  Mask bit i corresponds to drn i+2 =
+ * (i+2)*2400 bit/s. */
+static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
+{
+    uint16_t mask = s->cp_frame.upstream_rate_mask;
+    uint16_t limited = 0;
+
+    if (s->upstream_rate_limit_bps <= 0)
+        return mask;
+    for (int bit = 0; bit <= 12; bit++) {
+        if ((bit + 2) * 2400 <= s->upstream_rate_limit_bps)
+            limited |= (uint16_t)(1U << bit);
+    }
+    if ((mask & limited) == 0) {
+        fprintf(stderr,
+                "[V90] MP: peer upstream mask 0x%04x offers no rate <= %d bps; "
+                "echoing it uncapped\n",
+                mask, s->upstream_rate_limit_bps);
+        return mask;
+    }
+    return (uint16_t)(mask & limited);
+}
+
+void v90_set_upstream_rate_limit(v90_state_t *s, int bps)
+{
+    if (!s || bps < 0)
+        return;
+    if (bps != s->upstream_rate_limit_bps)
+        fprintf(stderr, "[V90] MP upstream rate cap: %d bps\n", bps);
+    s->upstream_rate_limit_bps = bps;
 }
 
 static bool v90_cp_mask_is_exact(const uint8_t mask[VPCM_CP_MASK_BYTES],
@@ -1015,12 +1051,14 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
 static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
 {
     uint16_t crc;
+    uint16_t upstream_mask;
     int upstream_drn;
     int pos = 0;
 
     if (!s || s->phase4_d <= 0)
         return false;
-    upstream_drn = v90_cp_max_upstream_drn(&s->cp_frame);
+    upstream_mask = v90_capped_upstream_mask(s);
+    upstream_drn = v90_upstream_mask_max_drn(upstream_mask);
     if (upstream_drn < 2 || upstream_drn > 14)
         return false;
 
@@ -1041,7 +1079,7 @@ static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
     s->mp_bits[pos++] = 0; /* bit 34: start */
     s->mp_bits[pos++] = 0; /* bit 35 reserved */
     for (int i = 0; i < 13; i++)
-        s->mp_bits[pos++] = (uint8_t)((s->cp_frame.upstream_rate_mask >> i) & 1);
+        s->mp_bits[pos++] = (uint8_t)((upstream_mask >> i) & 1);
     s->mp_bits[pos++] = 0; /* bit 49 reserved */
     s->mp_bits[pos++] = 0; /* bit 50 reserved */
     s->mp_bits[pos++] = 0; /* bit 51: start */
