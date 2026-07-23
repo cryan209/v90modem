@@ -211,7 +211,14 @@ enum v34_tx_stages_e
     /*! \brief MPh is being transmitted */
     V34_TX_STAGE_HDX_MPH,
     /*! \brief E is being transmitted */
-    V34_TX_STAGE_HDX_E
+    V34_TX_STAGE_HDX_E,
+
+    /*! \brief V.90 §9.2.1.1.8 V.34 fallback: digital modem in the call-modem
+        role, transmitting silence while the analogue modem (answer role)
+        leads Phase 3 with S/S-bar/PP/TRN/J (V.34 §11.3.1.1.1-11.3.1.1.3).
+        Appended at the end of the enum so every earlier value stays stable;
+        the application mirrors this enum value-for-value. */
+    V34_TX_STAGE_V34_FALLBACK_WAIT_J
 };
 
 enum v34_events_e
@@ -503,6 +510,11 @@ typedef struct
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */
     bool v90_mode;
+    /*! \brief V.90 §9.2.1.1.8: the analogue modem's INFO1a selected V.34
+        (bits 37:39 in 0..5), so the digital modem proceeds per 11.3.1.1/V.34
+        "assuming the role of a call modem".  Cleared on retrain, which
+        returns to V.90 Phase 2 regardless of the analogue modem's choice. */
+    bool v90_v34_fallback;
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
     /*! \brief V.92 INFO0d extensions.  Table 15 bit 27 advertises V.92
@@ -853,6 +865,11 @@ typedef struct
     /*! \brief V.90 mode: when true, INFO0 RX expects V.90 INFO0a format (49 bits)
         instead of standard V.34 INFO0.  Set by external v90 module. */
     bool v90_mode;
+    /*! \brief V.90 §9.2.1.1.8: the received INFO1a selected V.34 (Table 11
+        layout, bits 37:39 in 0..5).  The frame was re-parsed with the V.34
+        INFO1a field layout and the receiver expects the analogue modem to
+        run Phase 3 in the V.34 answer-modem role. */
+    bool v90_v34_fallback;
 
     /*! \brief Buffer for receiving info frames. */
     uint8_t info_buf[25];

@@ -183,6 +183,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_V90_PHASE2_B: return "V90_PHASE2_B";
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN: return "V90_PHASE2_B_INFO0_SEEN";
     case V34_TX_STAGE_V90_RETRAIN_SILENCE: return "V90_RETRAIN_SILENCE";
+    case V34_TX_STAGE_V34_FALLBACK_WAIT_J: return "V34_FALLBACK_WAIT_J";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -642,6 +643,8 @@ static void second_a_baud_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
+static void v90_v34_fallback_wait_init(v34_state_t *s);
+static complex_sig_t get_phase4_baud(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static void infomarksa_baud_init(v34_state_t *s);
 static int info1c_wait_bauds(v34_state_t *s);
@@ -3777,6 +3780,20 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: retrain-response silence complete; transmitting Tone B and awaiting Tone A reversal\n");
+            /* V.90 §9.2.1.1.8: "Any subsequent retrains shall use Phase 2 of
+               V.90 regardless of the analogue modem's choice of operating
+               mode" -- drop any V.34-fallback role flip and restore the
+               answerer scrambler taps for the fresh Phase 2/3. */
+            if (s->tx.v90_v34_fallback  ||  s->rx.v90_v34_fallback)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: clearing V.34-fallback state for retrain\n");
+                s->tx.v90_v34_fallback = false;
+                s->rx.v90_v34_fallback = false;
+                s->tx.scrambler_tap = 4;
+                s->rx.scrambler_tap = 17;
+            }
+            /*endif*/
             s->tx.tone_duration = 0;
             s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
             s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
@@ -3840,7 +3857,18 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
         s->tx.v90_info1a_retrain_responses = 0;
-        s_not_s_baud_init(s);
+        if (s->rx.v90_v34_fallback)
+        {
+            /* V.90 §9.2.1.1.8: INFO1a bits 37:39 selected V.34; proceed per
+               11.3.1.1/V.34 as a CALL modem -- silent until the analogue
+               modem (answer role) completes its Phase 3 lead. */
+            v90_v34_fallback_wait_init(s);
+        }
+        else
+        {
+            s_not_s_baud_init(s);
+        }
+        /*endif*/
         s->rx.received_event = V34_EVENT_NONE;
         return zero;
     }
@@ -4074,6 +4102,63 @@ static void v90_wait_info1a_init(v34_state_t *s)
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_v34_fallback_wait_baud(v34_state_t *s)
+{
+    /* V.34 §11.3.1.1.1-11.3.1.1.3 (call-modem Phase 3): stay silent while the
+       answer-role analogue modem sends S/S-bar/PP/TRN/J; after receiving J,
+       respond with our own S within 500 ms.  This getbaud runs at the 600
+       baud CC rate.  Live CX93001 timing: its full lead takes ~1 s, so 8 s
+       covers slow peers plus repeats before the interop escape hatch. */
+    enum
+    {
+        V34_FALLBACK_WAIT_MAX_BAUDS = 600*8
+    };
+
+    if (s->tx.stage != V34_TX_STAGE_V34_FALLBACK_WAIT_J)
+        return zero;
+    /*endif*/
+
+    if (s->rx.received_event == V34_EVENT_J
+        ||  s->rx.phase3_j_trn16 >= 0)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 fallback: far-end Phase 3 J %s after %d bauds of silence; responding with S/S-bar\n",
+                 (s->rx.received_event == V34_EVENT_J) ? "event" : "decode",
+                 s->tx.tone_duration);
+        s->rx.received_event = V34_EVENT_NONE;
+        s_not_s_baud_init(s);
+        return zero;
+    }
+    /*endif*/
+    if (++s->tx.tone_duration >= V34_FALLBACK_WAIT_MAX_BAUDS)
+    {
+        /* Interop escape hatch: if the peer's J never decodes, respond anyway
+           rather than dying silent -- the peer's own recovery (INFOMARKSa) can
+           still resynchronise on our Phase 3. */
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 fallback: no far-end J after %d bauds; starting our Phase 3 anyway\n",
+                 s->tx.tone_duration);
+        s_not_s_baud_init(s);
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_v34_fallback_wait_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90 declined -> V.34 fallback (9.2.1.1.8): call-modem role; "
+             "silence while far end leads Phase 3 (S/S-bar/PP/TRN/J)\n");
+    s->tx.v90_v34_fallback = true;
+    s->tx.tone_duration = 0;
+    /* Use CC modulation so we get a per-baud callback while transmitting silence. */
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.stage = V34_TX_STAGE_V34_FALLBACK_WAIT_J;
+    s->tx.current_getbaud = get_v34_fallback_wait_baud;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4497,7 +4582,30 @@ static void s_not_s_baud_init(v34_state_t *s)
     int carrier_idx;
 
     span_log(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
-    if (!s->tx.calling_party)
+    if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
+    {
+        /* V.90 §9.2.1.1.8 V.34 fallback, call-modem role.  Table 11 dictates
+           our transmit configuration: bits 37:39 the digital->analogue symbol
+           rate, bit 25 the carrier, bits 26:29 the pre-emphasis, and bits
+           12:17 the power reduction (applied below via info1_source). */
+        if (s->rx.info1a.baud_rate_c_to_a >= 0  &&  s->rx.info1a.baud_rate_c_to_a <= 5)
+        {
+            s->tx.baud_rate = s->rx.info1a.baud_rate_c_to_a;
+            /* Refresh only the modulator-facing rate parameters; the full
+               v34_parameters_t is refilled at data-mode entry. */
+            s->tx.parms.samples_per_symbol_numerator = baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_numerator;
+            s->tx.parms.samples_per_symbol_denominator = baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_denominator;
+            s->tx.parms.max_bit_rate_code = baud_rate_parameters[s->tx.baud_rate].max_bit_rate_code;
+        }
+        /*endif*/
+        s->tx.high_carrier = s->rx.info1a.use_high_carrier;
+        s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - Phase 3 (V.34 fallback, call role): S/!S at %d baud, %s carrier\n",
+                 baud_rate_parameters[s->tx.baud_rate].baud_rate,
+                 s->tx.high_carrier ? "high" : "low");
+    }
+    else if (!s->tx.calling_party)
     {
         int silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
         span_log(&s->logging, SPAN_LOG_FLOW,
@@ -4536,7 +4644,22 @@ static void s_not_s_baud_init(v34_state_t *s)
        bits before accepting them. */
     baud_idx = s->tx.baud_rate;
     carrier_idx = s->tx.high_carrier ? 1 : 0;
-    if (s->tx.calling_party)
+    if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
+    {
+        /* V.90 Table 11 (V.34-selected INFO1a): bits 12:14 are the minimum
+           power reduction for the DIGITAL modem transmitter and 15:17 the
+           additional reduction the analogue receiver tolerates.  V.34
+           §11.2.1.1.8 lets the call modem apply anywhere in [min, min+add];
+           apply the full amount -- the analogue modem asked for it (the
+           live CX93001 requests 7+1 dB). */
+        info1_source = "INFO1a (V.90->V.34 fallback)";
+        power_reduction = s->rx.info1a.power_reduction + s->rx.info1a.additional_power_reduction;
+        if (power_reduction > 14)
+            power_reduction = 14;
+        /*endif*/
+        preemp_idx = s->rx.info1a.preemphasis_filter;
+    }
+    else if (s->tx.calling_party)
     {
         info1_source = (s->rx.info1a_received  &&  !s->tx.v90_mode)  ?  "INFO1a"  :  NULL;
         if (info1_source)
@@ -4986,7 +5109,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         {
             if (s->tx.duplex)
             {
-                if (s->tx.calling_party
+                if ((s->tx.calling_party  ||  s->tx.v90_v34_fallback)
                     &&
                     s->rx.received_event == V34_EVENT_S)
                 {
@@ -5010,6 +5133,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     /*endif*/
                 }
                 else if (!s->tx.calling_party
+                         &&
+                         !s->tx.v90_v34_fallback
                          &&
                          (s->rx.received_event == V34_EVENT_J
                           ||  s->rx.received_event == V34_EVENT_J_DASHED
@@ -5146,7 +5271,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         bit = s->tx.diff;
         if (++s->tx.tone_duration >= 16)
         {
-            if (s->tx.calling_party)
+            if (s->tx.calling_party  ||  s->tx.v90_v34_fallback)
             {
                 /* Caller Phase 4 RX conditioning: once local J' is complete the
                    far-end answerer begins S/S-bar/TRN before MP. Re-arm RX for
@@ -5155,8 +5280,23 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S, "S/S-bar/TRN then MP");
             }
             /*endif*/
-            /* After J', begin MP exchange (V.34/10.1.3.10) */
-            mp_or_mph_baud_init(s);
+            if (s->tx.v90_v34_fallback)
+            {
+                /* V.34 §11.4.1.1.1: the call modem transmits one J' sequence
+                   "and then transmit signal TRN" before MP.  Keep the running
+                   modulator state; just move to the Phase 4 TRN stage. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.34 fallback: J' complete, transmitting Phase 4 TRN before MP\n");
+                s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
+                s->tx.tone_duration = 0;
+                s->tx.current_getbaud = get_phase4_baud;
+            }
+            else
+            {
+                /* After J', begin MP exchange (V.34/10.1.3.10) */
+                mp_or_mph_baud_init(s);
+            }
+            /*endif*/
         }
         /*endif*/
         break;
@@ -5303,7 +5443,18 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 return zero;
             }
             /*endif*/
-            if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
+            if (s->tx.v90_v34_fallback
+                && s->tx.tone_duration >= PHASE4_TRN_BAUDS)
+            {
+                /* V.34 fallback call-modem role: our TRN follows our own J'
+                   (§11.4.1.1.1); there is no far-end J' to wait for -- the
+                   answerer moves to MP off our TRN.  512T minimum then MP. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 4 (V.34 fallback): TRN complete (%d bauds), starting MP\n",
+                         s->tx.tone_duration);
+                mp_or_mph_baud_init(s);
+            }
+            else if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
                 && s->rx.received_event == V34_EVENT_PHASE4_TRN_READY)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
@@ -5496,7 +5647,10 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
     }
     else
     {
-        if (!s->tx.v90_mode)
+        /* In V.90 the caller INFO1a repurposes this field as U_INFO, but on
+           the Table 11 (V.34-selected) fallback it is a genuine projected
+           max data rate again. */
+        if (!s->tx.v90_mode  ||  s->tx.v90_v34_fallback)
         {
             remote_max_n = s->rx.info1a.max_data_rate;
             if (mp_rate_n_is_valid(remote_max_n))
@@ -5616,7 +5770,7 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_V34;
 
     if (s->tx.duplex
-        && s->tx.calling_party
+        && (s->tx.calling_party  ||  s->tx.v90_v34_fallback)
         && s->tx.v90_mode
         && s->rx.stage < V34_RX_STAGE_PHASE4_S)
     {

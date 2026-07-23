@@ -2759,28 +2759,93 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
         /*endif*/
 
-        span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 10):\n");
-        span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
-        span_log(s->logging, SPAN_LOG_FLOW, "  U_INFO = %d\n", info1a->max_data_rate);
-        span_log(s->logging, SPAN_LOG_FLOW, "  Upstream symbol rate code = %d\n", info1a->baud_rate_a_to_c);
-        span_log(s->logging, SPAN_LOG_FLOW, "  Downstream rate code = %d (8000 PCM)\n", info1a->baud_rate_c_to_a);
-        if (info1a->freq_offset == -512)
-            span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
-        else
-            span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
-
-        /* In V.90, the upstream (analog→digital) uses V.34 modulation at the selected baud rate.
-           Use the upstream baud rate for the primary channel RX configuration. */
-        if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
+        if (info1a->baud_rate_c_to_a >= 0  &&  info1a->baud_rate_c_to_a <= 5)
         {
-            s->baud_rate = info1a->baud_rate_a_to_c;
-            if (s->info1a_raw_32_33 & 0x2)
+            /* V.90 §8.2.3.2 Table 11 / §9.2.1.1.8: bits 37:39 in 0..5 means
+               the analogue modem selected V.34.  The frame then carries the
+               standard V.34 INFO1a fields (Table 11 is bit-identical to
+               Table 16/V.34), NOT the Table 10 U_INFO layout parsed above.
+               Re-parse from the top with the V.34 field layout.  Live ground
+               truth (CX93001, 2026-07-23): raw 0f c0 34 89 c0 ba 66 decodes
+               to power reduction 7+1 dB, low carrier, pre-emphasis 3,
+               projected max 31200, 3200/3200 baud -- all coherent, where the
+               Table 10 reading gave nonzero "reserved" bits. */
+            bitstream_init(&bs, true);
+            t = buf;
+            info1a->power_reduction = bitstream_get(&bs, &t, 3);
+            info1a->additional_power_reduction = bitstream_get(&bs, &t, 3);
+            info1a->md = bitstream_get(&bs, &t, 7);
+            info1a->use_high_carrier = bitstream_get(&bs, &t, 1);
+            info1a->preemphasis_filter = bitstream_get(&bs, &t, 4);
+            info1a->max_data_rate = bitstream_get(&bs, &t, 4);
+            info1a->baud_rate_a_to_c = bitstream_get(&bs, &t, 3);
+            info1a->baud_rate_c_to_a = bitstream_get(&bs, &t, 3);
+            raw_freq = (uint16_t) bitstream_get(&bs, &t, 10);
+            s->info1a_raw_40_49 = raw_freq;
+            info1a->freq_offset = (int) raw_freq;
+            if ((info1a->freq_offset & 0x200))
+                info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+            /*endif*/
+            s->v90_v34_fallback = true;
+
+            span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 11 - V.34 selected):\n");
+            span_log(s->logging, SPAN_LOG_FLOW, "  Power reduction = %d dB + %d dB additional\n",
+                     info1a->power_reduction, info1a->additional_power_reduction);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
+            span_log(s->logging, SPAN_LOG_FLOW, "  High carrier (digital->analogue) = %d\n", info1a->use_high_carrier);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Pre-emphasis filter = %d\n", info1a->preemphasis_filter);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Projected max rate = %d (%d bps)\n",
+                     info1a->max_data_rate, info1a->max_data_rate*2400);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Symbol rate analogue->digital = %d\n", info1a->baud_rate_a_to_c);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Symbol rate digital->analogue = %d\n", info1a->baud_rate_c_to_a);
+            if (info1a->freq_offset == -512)
+                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
+            else
+                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
+
+            /* The analogue modem transmits Phase 3 at the a->c symbol rate.
+               Table 11: "The carrier frequency ... to be used are those
+               already indicated for this symbol rate in INFO1d" -- our
+               INFO1d advertises the high carrier for every upstream rate
+               (see prepare_info1c()). */
+            if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
+            {
+                s->baud_rate = info1a->baud_rate_a_to_c;
                 s->high_carrier = true;
-            s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
-            create_godard_coeffs(&s->pri_ted,
-                                 carrier_frequency(s->baud_rate, s->high_carrier),
-                                 baud_rate_parameters[s->baud_rate].baud_rate,
-                                 0.99f);
+                s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+                create_godard_coeffs(&s->pri_ted,
+                                     carrier_frequency(s->baud_rate, s->high_carrier),
+                                     baud_rate_parameters[s->baud_rate].baud_rate,
+                                     0.99f);
+            }
+            /*endif*/
+        }
+        else
+        {
+            span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 10):\n");
+            span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
+            span_log(s->logging, SPAN_LOG_FLOW, "  U_INFO = %d\n", info1a->max_data_rate);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Upstream symbol rate code = %d\n", info1a->baud_rate_a_to_c);
+            span_log(s->logging, SPAN_LOG_FLOW, "  Downstream rate code = %d (8000 PCM)\n", info1a->baud_rate_c_to_a);
+            if (info1a->freq_offset == -512)
+                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
+            else
+                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
+
+            /* In V.90, the upstream (analog→digital) uses V.34 modulation at the selected baud rate.
+               Use the upstream baud rate for the primary channel RX configuration. */
+            if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
+            {
+                s->baud_rate = info1a->baud_rate_a_to_c;
+                if (s->info1a_raw_32_33 & 0x2)
+                    s->high_carrier = true;
+                s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+                create_godard_coeffs(&s->pri_ted,
+                                     carrier_frequency(s->baud_rate, s->high_carrier),
+                                     baud_rate_parameters[s->baud_rate].baud_rate,
+                                     0.99f);
+            }
+            /*endif*/
         }
         /*endif*/
     }
@@ -2873,12 +2938,21 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
     }
     else
     {
+        /* V.90 §9.2.1.1.8: the digital modem proceeds per 11.3.1.1/V.34
+           "assuming the role of a call modem", which makes the analogue
+           modem the V.34 answer modem.  The answer modem scrambles with
+           GPA (1 + x^-5 + x^-23), so descramble its TRN/J with tap 4 and
+           scramble our own TX with GPC (tap 17).  The earlier tap-17 RX
+           choice here dated from before the role mapping was pinned down
+           (2026-07-19, when the whole fallback Phase 3 was desynced). */
         span_log(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90: INFO1a declined PCM (downstream code=%d, not 6); "
-                 "using standard V.34 answerer scrambler tap 17\n",
+                 "V.34 fallback, we take the call-modem role (RX descrambler GPA/tap 4, TX GPC/tap 17)\n",
                  s->info1a.baud_rate_c_to_a);
-        s->scrambler_tap = 17;
-        s->mp_phase4_default_scrambler_tap = 17;
+        s->scrambler_tap = 4;
+        s->mp_phase4_default_scrambler_tap = 4;
+        owner->tx.scrambler_tap = 17;
+        owner->tx.v90_v34_fallback = true;
     }
     /*endif*/
     v34_force_phase3_rx(owner);
