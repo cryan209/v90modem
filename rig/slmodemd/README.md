@@ -214,6 +214,24 @@ ack'd CP before a plain one (`accepted=0`), so we never answer Ed/B1d and
 the peer hits `Phase4 TimeOut` → DP=90 retrain.  Fix the CP-ack
 acceptance path next.
 
+**CP-ack fix VALIDATED + FIRST COMPLETED V.90 HANDSHAKE (2026-07-23,
+batch-4 call 2, `.../b4/`).** With CP'-first acceptance in
+`v90_set_phase4_cp()`: peer transmitted a real CPt, then CP' (`kind=CP
+bits=700 drn=19 ack=1 accepted=1` — first shot), we answered MP' → Ed →
+B1d → **`V.90 startup complete (upstream V.34 31200 bps, downstream PCM
+52000 bps)`**, and the peer logged `enter Data Phase, Rate = 52000
+[bps]`.  Both sides in V.90 data mode for ~10 s.  The pairs reproduce
+the metric verdict on a second constellation: 0.0% sign mismatch for
+the entire 3.0 s mapped window (TRN2d through data phase).
+**Next blocker — upstream rate agreement:** the peer died with
+`Tx bit rate - 33600, Rx bit Rate - 0` → `vpcm: Link Error` ~10 s in.
+`v90_build_mp_type0()` echoes the peer's own CPt
+`upstream_rate_mask` back verbatim in MP bits 36:48 (and bits 24:27's
+max-drn), never intersecting it with the rate our V.34 upstream
+receiver actually trained at (31200 here) — so the peer picks 33600 and
+transmits into a mismatched pump.  Cap the echoed mask/drn at
+`v34_get_current_bit_rate()` before building MP.
+
 ### Phase-3 THIRD_S deadlock (why calls died before Phase 4)
 
 The earlier "THIRD_S race" reading (peer starts its S, our
