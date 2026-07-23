@@ -8391,15 +8391,25 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         s->duration++;
         if (s->mapping_frame_count >= 16)
         {
-            /* Log RMS of mapping frame for diagnostic */
+            /* Per-frame RMS diagnostic.  MUST stay off by default on the live
+               media path: at 3200 baud this is ~400 stderr lines/s, and disk
+               I/O on the media clock is a proven call-killer (the buffered-tap
+               lesson).  V34_DATA_FRAME_RMS_LOG=1 enables it for offline work. */
             {
-                float rms_sum = 0;
-                int ii;
-                for (ii = 0; ii < 16; ii++)
-                    rms_sum += (float)s->mapping_frame_buf[ii] * s->mapping_frame_buf[ii];
-                fprintf(stderr, "[DATA] baud=%d frame_rms=%.1f (%.3f)\n",
-                        s->duration, sqrtf(rms_sum / 16.0f),
-                        sqrtf(rms_sum / 16.0f) / 128.0f);
+                static int rms_log_enabled = -1;
+
+                if (rms_log_enabled < 0)
+                    rms_log_enabled = (getenv("V34_DATA_FRAME_RMS_LOG") != NULL);
+                if (rms_log_enabled)
+                {
+                    float rms_sum = 0;
+                    int ii;
+                    for (ii = 0; ii < 16; ii++)
+                        rms_sum += (float)s->mapping_frame_buf[ii] * s->mapping_frame_buf[ii];
+                    fprintf(stderr, "[DATA] baud=%d frame_rms=%.1f (%.3f)\n",
+                            s->duration, sqrtf(rms_sum / 16.0f),
+                            sqrtf(rms_sum / 16.0f) / 128.0f);
+                }
             }
             v34_put_mapping_frame(s, s->mapping_frame_buf);
             s->mapping_frame_count = 0;
@@ -9422,6 +9432,34 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
     s->rx.data_symbol_scale = scale;
     s->rx.data_symbol_rotation = rotation;
     s->rx.data_symbol_conjugate = (conjugate != 0);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
+                                                int bit_rate,
+                                                int trellis_size)
+{
+    int i;
+    int bit_rate_n;
+
+    if (!s || bit_rate < 2400 || bit_rate > 33600 || (bit_rate % 2400) != 0)
+        return -1;
+    bit_rate_n = bit_rate/2400;
+    if (set_trellis_mode(s, trellis_size))
+        return -1;
+    s->rx.bit_rate = (bit_rate_n - 1)*2;
+    v34_set_working_parameters(&s->rx.parms,
+                               s->rx.baud_rate,
+                               s->rx.bit_rate,
+                               false);
+    s->rx.use_non_linear_encoder = false;
+    for (i = 0;  i < 3;  i++)
+    {
+        s->rx.h[i].re = 0;
+        s->rx.h[i].im = 0;
+    }
+    /*endfor*/
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

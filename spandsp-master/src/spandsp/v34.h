@@ -482,6 +482,16 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 /*! Enter receive DATA mode after externally validated E/B1 timing. */
 SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s);
 
+/*! Configure the receive data parameters (rate/trellis/parms) for the V.90
+    answerer's upstream V.34 data channel WITHOUT touching the Phase 4
+    stage, hypothesis lock or scrambler state.  Unlike v34_seed_rx_mp(),
+    this is safe to call while the live CP bit tap is still running: the
+    engine detects the analogue modem's E itself and then calls
+    v34_begin_rx_data().  bit_rate is in bps (2400..33600). */
+SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
+                                                int bit_rate,
+                                                int trellis_size);
+
 /*! Decode one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
                                                int16_t bits[16]);
