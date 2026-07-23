@@ -64,6 +64,11 @@ typedef enum {
     V92_TRN2U_SIGN_ABSOLUTE_INVERTED
 } v92_trn2u_sign_mode_t;
 
+/* GPA = 1 + x^-5 + x^-23 (V.92 §6.3, the analogue modem's polynomial —
+ * the correct default), GPC = 1 + x^-18 + x^-23.  LEFT/RIGHT are the two
+ * shift-register reflections.  Until 2026-07-23 the GPA/GPC prefixes were
+ * swapped relative to the taps they selected; results recorded against the
+ * old labels mean the other polynomial. */
 typedef enum {
     V92_TRN2U_DESCRAMBLER_GPA_LEFT = 0,
     V92_TRN2U_DESCRAMBLER_GPA_RIGHT,
