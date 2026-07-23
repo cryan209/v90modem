@@ -7053,6 +7053,9 @@ static bool v34_replay_upstream_from_phase4(const int16_t *samples,
     if (getenv("VPCM_V90_PHASE4_JPRIME_SAMPLE"))
         phase4_jprime_sample = atoi(
             getenv("VPCM_V90_PHASE4_JPRIME_SAMPLE"));
+    if (getenv("VPCM_V90_PHASE3_START_SAMPLE"))
+        phase3_start_sample = atoi(
+            getenv("VPCM_V90_PHASE3_START_SAMPLE"));
     memset(out, 0, sizeof(*out));
     baud_rate = v34_baud_code_to_rate(baud_code);
     if (baud_rate <= 0 || phase3_start_sample < 0
@@ -33667,6 +33670,24 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                 if (getenv("VPCM_V34_CP_SOFT_ONLY"))
                     goto v90_upstream_cleanup;
                 memset(&native_boundary, 0, sizeof(native_boundary));
+                if (!downstream_mp.valid && getenv("VPCM_V90_ASSUME_MP_RATE")) {
+                    /* Live-engine sweeps: the negotiated upstream parameters
+                     * are already known (rate from INFO1a, trellis 16 / type 0
+                     * from our Type-0 MP), so let the native alignment sweeps
+                     * run without requiring PCM-side MP recovery from the
+                     * capture. */
+                    memset(&downstream_mp, 0, sizeof(downstream_mp));
+                    downstream_mp.valid = true;
+                    downstream_mp.mp.bit_rate_c_to_a =
+                        atoi(getenv("VPCM_V90_ASSUME_MP_RATE")) / 2400;
+                    downstream_mp.mp.trellis_size = 0;   /* V34_TRELLIS_16 */
+                    downstream_mp.mp.type = 0;
+                    downstream_mp.b1_initial_state = 0;
+                    fprintf(stderr,
+                            "v90 native: assuming MP rate=%s bps trellis=16 "
+                            "type=0 from env\n",
+                            getenv("VPCM_V90_ASSUME_MP_RATE"));
+                }
                 if (downstream_mp.valid) {
                     have_native_boundary = v34_replay_upstream_from_phase4(
                         analog_pcm,
@@ -33772,6 +33793,11 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         if (best_phase >= 0)
                             native_boundary = best_phase_result;
                     }
+                    fprintf(stderr,
+                            "v90 native sweep gates: boundary=%s force=%s native=%s\n",
+                            getenv("VPCM_V90_BOUNDARY_SWEEP") ? "set" : "unset",
+                            getenv("VPCM_V90_FORCE_DATA_SAMPLE") ? "set" : "unset",
+                            getenv("VPCM_V90_NATIVE_SWEEP") ? "set" : "unset");
                     if (getenv("VPCM_V90_BOUNDARY_SWEEP")
                         && getenv("VPCM_V90_FORCE_DATA_SAMPLE")) {
                         v34_upstream_replay_result_t best_boundary_result;
@@ -33780,10 +33806,22 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                         int best_sample = -1;
                         int best_boundary_score = -1;
 
+                        int sweep_range = getenv("VPCM_V90_BOUNDARY_RANGE")
+                                        ? atoi(getenv("VPCM_V90_BOUNDARY_RANGE"))
+                                        : 512;
+                        int sweep_step = getenv("VPCM_V90_BOUNDARY_STEP")
+                                       ? atoi(getenv("VPCM_V90_BOUNDARY_STEP"))
+                                       : 8;
+
+                        if (sweep_range < 1)
+                            sweep_range = 1;
+                        if (sweep_step < 1)
+                            sweep_step = 1;
                         memset(&best_boundary_result, 0,
                                sizeof(best_boundary_result));
-                        for (int sample = centre - 512;
-                             sample <= centre + 512; sample += 8) {
+                        for (int sample = centre - sweep_range;
+                             sample <= centre + sweep_range;
+                             sample += sweep_step) {
                             char sample_text[24];
                             v34_upstream_replay_result_t candidate;
 
