@@ -2222,6 +2222,27 @@ static void v90_dil_capture_reset(void)
     memset(&g_v90_pending_dil, 0, sizeof(g_v90_pending_dil));
 }
 
+/* Upstream (analogue -> digital) V.34 data-path arming.  V.90's upstream
+ * Phase 4 is the CP dance, not a V.34 MP exchange, so SpanDSP's own
+ * mp_seen-gated E detector can never fire for the answerer -- the RX would
+ * sit in PHASE4_MP forever and no data bit would ever reach put_bit (the
+ * 2026-07-23 soak measured exactly 0 upstream bytes at the PTY).  Instead:
+ * when the peer's acknowledged CP (CP') is accepted we prepare the RX data
+ * parameters (v34_v90_prepare_upstream_data -- deliberately does NOT touch
+ * the hypothesis lock that keeps the phase-4 bit tap alive), then watch the
+ * same tap for the peer's E (20 consecutive ones, 9.4.2: CP' CP' E B1 ->
+ * data) and flip the RX into DATA mode at that boundary. */
+static bool g_v34_upstream_data_armed = false;
+static bool g_v34_upstream_data_started = false;
+static int g_v90_upstream_e_run = 0;
+
+static void v90_reset_upstream_data_arming(void)
+{
+    g_v34_upstream_data_armed = false;
+    g_v34_upstream_data_started = false;
+    g_v90_upstream_e_run = 0;
+}
+
 /* Runs with g_state_mtx held, either synchronously inside v34_rx() or from
  * the independent strict batch receiver after its worker reacquires state. */
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
@@ -2265,6 +2286,20 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
     if (accepted)
         v90_cp_live_mark_accepted_locked(diag);
+    if (accepted && frame->acknowledge && !g_v34_upstream_data_armed && g_v34) {
+        int rate = v34_get_current_bit_rate(g_v34);
+
+        /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
+         * peer's own decode of our Type-0 MP confirms 16-state upstream. */
+        if (v34_v90_prepare_upstream_data(g_v34, rate, 0) == 0) {
+            g_v34_upstream_data_armed = true;
+            g_v90_upstream_e_run = 0;
+            ME_LOG("[ME] V.90 upstream RX data prepared (%d bps, trellis 16); watching for E\n",
+                   rate);
+        } else {
+            ME_LOG("[ME] V.90 upstream RX data prepare FAILED (rate %d)\n", rate);
+        }
+    }
     return accepted;
 }
 
@@ -2280,6 +2315,23 @@ static void v90_live_cp_bit(void *user_data, int bit)
     uint32_t rejected_before;
 
     (void)user_data;
+    /* After CP' is accepted, the next thing on this channel is the peer's E
+     * (20 consecutive ones) followed by B1 and data.  CP preambles are only
+     * 17 ones + 0, so a run of 20 is unambiguous. */
+    if (g_v34_upstream_data_armed && !g_v34_upstream_data_started && g_v34) {
+        if (bit)
+            g_v90_upstream_e_run++;
+        else
+            g_v90_upstream_e_run = 0;
+        if (g_v90_upstream_e_run >= 20) {
+            if (v34_begin_rx_data(g_v34) == 0) {
+                g_v34_upstream_data_started = true;
+                ME_LOG("[ME] V.90 upstream E detected; V.34 RX entering data mode\n");
+                trace_phase("V90 upstream E -> V34 RX DATA");
+            }
+            return;
+        }
+    }
     rejected_before = g_v90_cp_rx.rejected_frames;
     (void)v90_cp_rx_put_bit(&g_v90_cp_rx, bit);
     if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before)
@@ -2704,6 +2756,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    v90_reset_upstream_data_arming();
     g_v92_active = false;
     g_v92_info0_peer_capable = false;
     g_v92_info0_peer_short_phase2 = false;
@@ -3555,6 +3608,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                        g_law == ME_LAW_ALAW,
                        v90_live_cp_frame,
                        NULL);
+        v90_reset_upstream_data_arming();
         if (g_v34)
             v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
         if (g_v34)

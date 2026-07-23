@@ -326,3 +326,33 @@ Hard-won facts (three soak iterations to get here):
   peer's MP lock reliable (study what differs in the winning calls' MP
   alignment), and adaptive retrained-attempt Sd timing so lost flips
   recover.
+
+### 2026-07-23 late: upstream data path WIRED — structure validated live, decode alignment open
+
+V.90's upstream Phase 4 is the CP dance, not a V.34 MP exchange, so SpanDSP's
+mp_seen-gated E detector could never fire for the answerer: the RX sat in
+PHASE4_MP forever and data-mode upstream delivered exactly 0 bytes.  Now:
+`v34_v90_prepare_upstream_data()` (new; sets rate/trellis/parms WITHOUT
+touching the hypothesis lock that keeps the live phase-4 bit tap alive) is
+called when the peer's acknowledged CP' is accepted, the engine watches the
+same tap for the peer's E (20 consecutive ones, §9.4.2 `CP' CP' E B1→data`),
+then `v34_begin_rx_data()` flips the RX to DATA.
+
+Live result (upstream/v2attempt6 in the 20260723T055443Z-pty_soak dir):
+"upstream RX data prepared (31200 bps)" → "upstream E detected" → **PTY
+received 192 KB upstream (was 0)** at ~19-25 kbps while downstream stayed
+clean (99.4%).  BUT the decoded stream is garbled: 0 U-lines in either bit
+order, and bytes arrive even while the far DTE is idle — correct decode of
+V.14 idle marks would produce *no* deframed bytes, so the decoded bitstream
+itself is wrong, not just byte framing.  Suspects, in order: (1) mapping-
+frame/E-boundary alignment (the CP'-fill ones-join can shift the 20-ones
+fire point, and B1's mapping-frame boundary sets the permanent frame
+grouping); (2) data transform rotation (scale 70 was measured on reference
+31.2k calls and is probably right); (3) superframe/V0 alignment.  Debug
+artifact preserved: `upstream/v2attempt6/live-rx.g711` (winner call at the
+tail) + the 192 KB garbled `rx_pty.bin`.  Next: offline sweep of begin
+offset (0..15 symbols) x rotation (0..3) x conjugate against that capture
+until U-lines / idle-ones emerge, then encode the offset into the live E
+handler.  Also gated the DATA-stage per-frame stderr RMS log behind
+`V34_DATA_FRAME_RMS_LOG` (~400 lines/s — a media-clock hazard of the
+buffered-tap class).
