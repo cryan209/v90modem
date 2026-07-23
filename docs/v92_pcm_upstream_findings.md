@@ -124,3 +124,37 @@ Treat V.92 upstream captures from it as invalid truth data.
   `-I. -Ispandsp-master/src -Ispandsp-master/src/.. -I$(brew --prefix libtiff)/include`
   and link `spandsp-master/src/.libs/libspandsp.a -ltiff -lssl -lcrypto -lm`.
 - The RTP path is transparent: DSP tap and our received capture match to 0.1 dB.
+
+## 8. 2026-07-23: the upstream descrambler polynomial was wrong (GPC where GPA belongs)
+
+Found during a V.90 §5 conformance audit and fixed tree-wide. V.92 §6.3 mandates
+**GPA = eq 7-2/V.34 = 1 + x^-5 + x^-23** (delay taps 5/23 → `reg>>4 ^ reg>>22`)
+for everything the analogue modem transmits, but every V.92-native upstream
+descrambler in the tree — `gpa_descramble()` and `gpa_descramble_t17_bit()` in
+`v92_p3_rx.c`, `v92_gpa_scramble()`/`v92_trn2u_descramble()` in `v92_trn2u.c`,
+`ja_descramble_reg_bit()` in `v92_ja_decode.c` — read `reg>>17` = delay tap 18 =
+**GPC**. Root cause: GPA's positive-power form x^23 + x^18 + 1 was misread as
+having a delay tap at 18. In positive-power form the x^18 term corresponds to the
+**5-symbol** delay (x^23 · x^-5); the degree-N-term-equals-tap reading is exactly
+backwards. The `v92_trn2u.h` descrambler-mode enum had its GPA/GPC prefixes
+swapped the same way (both register reflections).
+
+**Validation.** The §6 TRN1u check cannot be re-run meaningfully: the forced-
+upstream captures it was measured on are invalid truth data (§5 — 1600 sym/s
+non-signal), so no polynomial decodes them. The decisive evidence is in-tree and
+live-measured on the same peer family under the same analogue-modem-GPA mandate
+(V.90 §6.5 ≡ V.92 §6.3): spandsp `v34rx.c`'s V.90 branch records that
+SmartLink's real upstream resolves at **96–99% ones with tap 4 vs ~52% with
+tap 17**, and spandsp's role assignment (`v34tx.c`: answerer tx tap = 4, caller
+tx tap = 17) fixes the tap↔polynomial mapping. The §6 refuted-hypothesis row
+("never exceeds 53% ones") brute-forced invert × differential **at fixed
+tap 17** — the polynomial was never varied, and ~53% is the wrong-tap signature,
+though on those captures the malformed transmitter suffices as explanation.
+
+**State after the fix:** all upstream sites use taps 4/22; the enum labels now
+mean what they say (results recorded against the old labels mean the other
+polynomial); TX and RX moved together so the trn2u loopback tests still pass.
+The offline Agere/Motorola/USR QC sweeps (`docs/v92_phase4_implementation.md`)
+cannot discriminate the polynomial yet — they fail at symbol recovery upstream
+of the descrambler — and live V.92 Phase 3 validation remains blocked by the
+peer's V.90-form INFO1a, so a live all-ones TRN1u confirmation is still pending.

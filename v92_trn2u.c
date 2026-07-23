@@ -9,15 +9,13 @@
 #include <math.h>
 #include <string.h>
 
-/* Upstream scrambler — WARNING: taps 18/23 are GPC, not the GPA that
- * V.92 §6.3 mandates for the analogue modem (GPA delay taps are 5/23,
- * i.e. reg>>4 ^ reg>>22).  Matches v92_p3_rx.c's gpa_descramble(), which
- * carries the same defect — see its comment for the evidence and the
- * validation route.  The descrambler-mode enum's GPA/GPC label prefixes
- * are likewise swapped relative to the taps they implement. */
+/* Upstream GPA scrambler, 1 + x^-5 + x^-23 (delay taps 5/23; V.92 §6.3).
+ * Read taps 18/23 = GPC until 2026-07-23 — see v92_p3_rx.c's
+ * gpa_descramble() comment for the misread and the live tap-4 evidence.
+ * Matches v92_p3_rx.c. */
 static inline int v92_gpa_scramble(uint32_t *reg, int in_bit)
 {
-    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 4)) & 1;
 
     *reg = (*reg << 1) | (uint32_t)out;
     return out;
@@ -28,22 +26,26 @@ static inline int v92_trn2u_descramble(v92_trn2u_demod_t *demod, int in_bit)
     uint32_t *reg = &demod->descramble_reg;
     int out;
 
+    /* Tap sets corrected 2026-07-23: each label now implements the V.34
+     * clause-7 polynomial it names (GPA = delay taps 5/23, GPC = 18/23);
+     * they had been swapped.  LEFT = newest output at bit 0 of the shift
+     * register, RIGHT = the reflected register convention. */
     switch ((v92_trn2u_descrambler_mode_t)demod->descrambler_mode) {
     case V92_TRN2U_DESCRAMBLER_GPA_RIGHT:
-        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 5)) & 1;
+        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 18)) & 1;
         *reg = (*reg >> 1) | ((uint32_t)(in_bit & 1) << 22);
         break;
     case V92_TRN2U_DESCRAMBLER_GPC_LEFT:
-        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 4)) & 1;
+        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
         *reg = ((*reg << 1) | (uint32_t)(in_bit & 1)) & 0x7FFFFFU;
         break;
     case V92_TRN2U_DESCRAMBLER_GPC_RIGHT:
-        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 18)) & 1;
+        out = (in_bit ^ (int)(*reg) ^ (int)(*reg >> 5)) & 1;
         *reg = (*reg >> 1) | ((uint32_t)(in_bit & 1) << 22);
         break;
     case V92_TRN2U_DESCRAMBLER_GPA_LEFT:
     default:
-        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+        out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 4)) & 1;
         *reg = ((*reg << 1) | (uint32_t)(in_bit & 1)) & 0x7FFFFFU;
         break;
     }

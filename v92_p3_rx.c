@@ -317,23 +317,24 @@ static void p6_reset(v92_p3_rx_t *rx)
 }
 
 /* -------------------------------------------------------------------------
- * Upstream descrambler — WARNING: taps 18/23 are GPC, not the GPA the
- * name claims.
+ * Upstream GPA descrambler (1 + x^-5 + x^-23, delay taps 5/23 → reg>>4 ^
+ * reg>>22)
  * -------------------------------------------------------------------------
- * V.92 §6.3 mandates GPA (eq 7-2/V.34 = 1 + x^-5 + x^-23, delay taps 5 and
- * 23 → reg>>4 ^ reg>>22; spandsp's answerer tx.scrambler_tap = 4 confirms
- * the tap assignment) for everything the ANALOGUE modem transmits.  This
- * function reads reg>>17 ^ reg>>22 = delay taps 18/23 = GPC — the "x^18"
- * in GPA's positive-power form x^23 + x^18 + 1 was misread as a delay tap.
- * Never validated against live audio: the TRN1u all-ones check has never
- * exceeded ~53% ones (docs/v92_pcm_upstream_findings.md), which is exactly
- * the wrong-polynomial signature.  Fix by switching to taps 4/22 and
- * re-running the TRN1u ones check on a truth capture before trusting.
+ * V.92 §6.3 mandates GPA (eq 7-2/V.34) for everything the ANALOGUE modem
+ * transmits.  This read reg>>17 (delay tap 18 = GPC) until 2026-07-23: the
+ * "x^18" in GPA's positive-power form x^23 + x^18 + 1 had been misread as
+ * a delay tap.  Tap ground truth is in-tree and live-validated: spandsp
+ * v34tx.c assigns the answerer tx.scrambler_tap = 4, and v34rx.c's V.90
+ * branch (info1a code 6) records that SmartLink's real upstream resolves
+ * at 96-99% ones with tap 4 vs ~52% with tap 17 — the same peer and the
+ * same analogue-modem-GPA mandate as here (V.90 §6.5 ≡ V.92 §6.3).  The
+ * pre-fix TRN1u all-ones ceiling of ~53% (docs/v92_pcm_upstream_findings.md)
+ * is that identical wrong-tap signature.
  * Self-synchronising: shift register is updated with the raw INPUT bit.
  */
 static inline int gpa_descramble(uint32_t *reg, int in_bit)
 {
-    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 17)) & 1;
+    int out = (in_bit ^ (int)(*reg >> 22) ^ (int)(*reg >> 4)) & 1;
     *reg = (*reg << 1) | (uint32_t)in_bit;
     return out;
 }
@@ -375,9 +376,11 @@ static bool trn1u_ones_ok_at_count(const v92_p3_rx_t *rx, int count)
     return (rx->trn1u_ones * 100 >= count * TRN1U_ONES_MIN_PCT);
 }
 
-static inline int gpa_descramble_t17_bit(uint32_t *reg, int in_bit)
+/* Local-register GPA variant (same taps-5/23 fix as gpa_descramble; the
+ * old name _t17_ recorded the wrong tap). */
+static inline int gpa_descramble_t4_bit(uint32_t *reg, int in_bit)
 {
-    int out = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 17)) & 1;
+    int out = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
     *reg = ((*reg << 1) | (uint32_t) (in_bit & 1)) & 0x7FFFFFU;
     return out;
 }
@@ -424,13 +427,13 @@ static int trn1u_ones_pct_from_result(const p3_result_t *r,
                 int d = r->symbols[start_sym + i].dibit & 3;
                 int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
                 raw ^= inv;
-                (void) gpa_descramble_t17_bit(&reg, raw);
+                (void) gpa_descramble_t4_bit(&reg, raw);
             }
             for (int i = 0; i < payload_symbols; i++) {
                 int d = r->symbols[start_sym + 23 + i].dibit & 3;
                 int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
                 raw ^= inv;
-                ones += gpa_descramble_t17_bit(&reg, raw);
+                ones += gpa_descramble_t4_bit(&reg, raw);
             }
 
             {
@@ -553,14 +556,14 @@ static int demod_build_gpa_bits(const p3_result_t *r,
         int d = r->symbols[start_sym + i].dibit & 3;
         int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
         raw ^= inv;
-        (void) gpa_descramble_t17_bit(&reg, raw);
+        (void) gpa_descramble_t4_bit(&reg, raw);
     }
 
     for (int i = 0; i < out_n; i++) {
         int d = r->symbols[start_sym + 23 + i].dibit & 3;
         int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
         raw ^= inv;
-        out_bits[i] = (uint8_t) gpa_descramble_t17_bit(&reg, raw);
+        out_bits[i] = (uint8_t) gpa_descramble_t4_bit(&reg, raw);
     }
 
     if (first_sample_out)

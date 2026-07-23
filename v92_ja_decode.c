@@ -3,9 +3,12 @@
  *
  * Core implementation of v92_ja_dil_search().  The bit-extraction helpers use
  * the V.92 analogue modem upstream conventions (V.92 §6.3, §8.5.4, §8.5.7):
- *   - GPA scrambler polynomial: x^23 + x^18 + 1  (tap = 17, NOT GPC tap = 4)
+ *   - GPA scrambler: 1 + x^-5 + x^-23, delay taps 5/23 → reg taps 4/22
+ *     (tap 17 — GPC's second tap — was used here until 2026-07-23; see
+ *     ja_descramble_reg_bit() for the misreading and the live evidence)
  *   - Sign convention: PCM MSB=1 (positive, +L_U) → bit 0; MSB=0 → bit 1
- * These are different from the V.90 downstream channel (GPC, positive→1).
+ * These are different from the V.90 downstream channel (GPC = 1 + x^-18 +
+ * x^-23, taps 17/22, positive→1).
  */
 
 #include "v92_ja_decode.h"
@@ -15,7 +18,7 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------
- * GPA scrambler constants (V.92 §6.3 / V.34 eq. 7-2: x^23 + x^18 + 1)
+ * GPA scrambler constants (V.92 §6.3 / V.34 eq. 7-2: 1 + x^-5 + x^-23)
  * ------------------------------------------------------------------------- */
 
 /* Length of the scrambler shift register (polynomial degree). */
@@ -838,14 +841,17 @@ bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
  * ------------------------------------------------------------------------- */
 
 /*
- * ja_descramble_reg_bit() — advance the GPA descrambler (x^23+x^18+1) by one
- * bit.
+ * ja_descramble_reg_bit() — advance the GPA descrambler by one bit.
  *
- * V.92 §6.3 specifies GPA (V.34 equation 7-2) for the analogue modem upstream
- * (caller TX).  GPA taps are at positions 22 and 17 of the 23-bit shift
- * register (poly x^23 + x^18 + 1, where degree-18 maps to reg bit 17).
- * Note: GPC (x^23+x^5+1, tap=4) is the digital-modem downstream polynomial
- * and must NOT be used here.
+ * V.92 §6.3 specifies GPA (V.34 equation 7-2 = 1 + x^-5 + x^-23) for the
+ * analogue modem upstream.  GPA's DELAY taps are 5 and 23 → reg bits 4 and
+ * 22.  The positive-power form x^23 + x^18 + 1 does NOT put a tap at 18 —
+ * this function read reg>>17 until 2026-07-23 on exactly that misreading
+ * (the earlier comment here also had GPC backwards: GPC = 1 + x^-18 +
+ * x^-23, delay taps 18/23, the digital-modem downstream polynomial).
+ * Tap ground truth: spandsp v34tx.c answerer tx.scrambler_tap = 4, and
+ * v34rx.c's V.90 branch measured SmartLink's live upstream at 96-99% ones
+ * with tap 4 vs ~52% with tap 17.
  *
  * @reg     Shift register state (caller-maintained across consecutive calls).
  * @in_bit  Next scrambled input bit (0 or 1).
@@ -853,7 +859,7 @@ bool v92_parse_ja_descriptor_strict(v90_dil_desc_t *out_desc,
  */
 static int ja_descramble_reg_bit(uint32_t *reg, int in_bit)
 {
-    int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 17)) & 1;
+    int out_bit = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
     *reg = (*reg << 1) | (uint32_t) in_bit;
     return out_bit;
 }
