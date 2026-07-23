@@ -41,6 +41,8 @@
 #include <math.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 /* V.34 RX/TX stage enums — copied from spandsp/private/v34.h to avoid
    pulling in SpanDSP's full internal header chain.  We access g_v34->rx.stage
@@ -1697,6 +1699,11 @@ static void g711_taps_init(void)
         || snprintf(tx_path, sizeof(tx_path), "%s/live-tx.g711", dir) >= (int)sizeof(tx_path)) {
         fprintf(stderr, "[ME] VPCM_G711_TAP_DIR path is too long; live taps disabled\n");
         return;
+    }
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        /* Only the leaf is created; a missing parent still fails fopen below. */
+        fprintf(stderr, "[ME] VPCM_G711_TAP_DIR mkdir %s: %s\n",
+                dir, strerror(errno));
     }
     g_g711_rx_tap = fopen(rx_path, "wb");
     g_g711_tx_tap = fopen(tx_path, "wb");
