@@ -518,3 +518,27 @@ equalizer_get indexing, or the eq_put_step cadence — note the restart
 init hardcodes RX_PULSESHAPER_2400 constants).  Diff those two paths
 line by line; the spectrum of the two windows is identical, so the
 difference is in the receiver, not the signal.
+
+### DATA-vs-MP path diff: CODE PATHS PROVEN IDENTICAL — the divergence is in time, not code
+
+Traced sample→symbol end to end: RRC filter → AGC (adapts only until
+agc_scaling_save latches, stage-independent) → carrier downconversion →
+process_primary_half_baud → pri_symbol_sync + equalizer_get → one switch
+on s->stage.  Both PHASE4_MP and DATA consume the identical `sym`; there
+is NO stage-conditional processing before the switch.  The contradiction
+resolves differently: the differential-product constellation test
+(c[n]·conj(c[n−1]) — immune to phase wander; 4-DPSK ⇒ four 90°-spaced
+clusters) shows the equalizer output carries CLEAN 4-DPSK structure in
+the CPt era (8–13%/bin vs 4.2% uniform, mag-ratio peaked at 1.0) and is
+COMPLETELY FLAT in the CP'/E era and DATA era — symbol structure is
+gone from the eq output BEFORE data mode even starts, despite: frozen
+eq+derot (hold mode), net-zero Godard timing (±1 step/16k bauds),
+latched AGC, nominal carrier NCO, and a 0-ppm channel.  Either the peer's
+TX genuinely changes after the CPt→CP silence (level/spectrum/modulation
+of the post-silence burst) or a front-end state not yet identified
+mutates during the silence.  A naive python passband probe was too crude
+to separate the eras (no matched filter) — NEXT: use the p3_demod
+machinery (--p3 / p3-symbol-export, which has proper RRC + timing) on
+the raw Right channel over the CPt era vs the CP'/E era and compare
+differential-product structure receiver-independently.  That settles
+peer-vs-us in one run, on the same capture, no rig needed.
