@@ -126,6 +126,10 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_PHASE4_NOT_S,
     V34_TX_STAGE_PHASE4_TRN,
     V34_TX_STAGE_MP,
+    /* V.90 §9.2.1.1.8 V.34 fallback silent wait (call-modem role).  In
+       spandsp's enum this sits after the 18 uncopied HDX_* stages, so the
+       value is pinned explicitly here: MP(47) + 18 HDX + 1 = 66. */
+    V34_TX_STAGE_V34_FALLBACK_WAIT_J = 66,
 };
 
 /* MUST stay in sync, value for value, with enum v34_events_e in
@@ -456,6 +460,7 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_PHASE4_NOT_S:                return "PHASE4_NOT_S";
     case V34_TX_STAGE_PHASE4_TRN:                  return "PHASE4_TRN";
     case V34_TX_STAGE_MP:                          return "MP";
+    case V34_TX_STAGE_V34_FALLBACK_WAIT_J:         return "V34_FALLBACK_WAIT_J";
     default:                                       return "UNKNOWN";
     }
 }
