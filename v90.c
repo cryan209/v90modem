@@ -342,7 +342,7 @@ static const uint8_t v90_ucode_to_alaw[128] = {
     /* Ucode 120-127 */ 0xAD, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB, 0xAA,
 };
 
-/* V.90 scrambler (V.34 polynomial GPC, x^23 + x^5 + 1) */
+/* V.90 scrambler (V.34 polynomial GPC, 1 + x^-18 + x^-23) */
 typedef struct {
     uint32_t sr;
 } v90_scrambler_t;

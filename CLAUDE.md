@@ -58,7 +58,7 @@ State machine: `ME_IDLE → ME_DIALING → ME_V8 → ME_TRAINING → ME_DATA →
 - **G.711 Decoder/Encoder** - Must not transcode G.711 for V.90, V.91, V.92 PCM modem codes.
 - **V.8 negotiation** — uses SpanDSP `v8_state_t`; selects V.90, V.34, or V.22bis fallback
 - **V.90 downstream encoder** (ITU-T V.90 §5) — custom implementation:
-  - Scrambler (x^23 + x^5 + 1 polynomial)
+  - Scrambler (V.34 GPC, 1 + x^-18 + x^-23 — NOT the answer-modem GPA x^-5 tap)
   - Maps data bytes → 7-bit magnitude + 1-bit sign → Ucode → PCM codeword
   - Differential sign coding per §5.4.5.1
   - Uses `v90_ucode_to_alaw[128]` table; μ-law uses formula `0xFF - ucode`
