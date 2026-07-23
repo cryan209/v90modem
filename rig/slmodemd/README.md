@@ -290,3 +290,39 @@ standard env recipe, `ME_V90_SD_DELAY_MS=750`), artifacts in
   the sole remaining protocol blocker.
 - Call 6: rig fatigue (d-modem dial died at SIP level 1.5 s after ATD;
   nothing reached the server) — the documented ~5-call degradation.
+
+### 2026-07-23: FIRST END-TO-END V.90 DATA TRANSFER — PTY throughput soak
+
+Soak harness in `tools/soak/` (PTY pump + far-DTE socket pump + orchestrator
+with early abort + integrity analyzer).  Result (final/v2attempt8 in
+`artifacts/v90-hardware/20260723T055443Z-pty_soak/`): **99.98% of bytes
+delivered downstream** (351177/351232), 38825 pattern lines in perfect
+sequence (0 dup / 0 out-of-order, 0.5% line loss at teardown), ~40 kbps
+sustained at the offered load over the full 110 s three-phase schedule,
+readable byte-exact data at the far DTE.
+
+Hard-won facts (three soak iterations to get here):
+- **V.14 LSB-first character order is correct** — live A/B: the msb
+  experiment (`ME_V90_DATA_BIT_ORDER=msb`) delivers every byte bit-reversed
+  at the far DTE in otherwise perfect sequence.  slmodemd's DSP-layer
+  `rx pattern` debug bytes print bit-reversed relative to its DTE output —
+  never infer the wire convention from that log.
+- **`AT\N0` in the dial string is required**: without it slmodemd's V.42
+  auto-detect chews on raw test data forever and never issues CONNECT to
+  its DTE (the call looks connected at the DSP but the DTE side is dead).
+- Reversing at the mapper-byte boundary is doubly wrong (relocates V.14
+  start bits) — produces pseudo-random DTE output at the right char rate.
+- **Upstream data is confirmed unwired**: far DTE transmitted 212 KB of
+  V.34 31200 upstream data; 0 bytes reached the PTY.  This is the next
+  data-path feature (V.34 upstream RX → data stack → PTY).
+- **Phase-4 "Null MP" coin flip is the availability bottleneck**: every
+  call logs `V90Phase4Modulator: ERROR: Null MP @ end of TRN2d`; survivors
+  are the calls where `V90MP: MP detected` follows ~4.6 s later during the
+  CP barrage.  Losers carousel (peer retrains; our fixed 1550 ms
+  `ME_V90_SD_DELAY_RETRAIN_MS` misses its rushed re-ranging window every
+  time) and die.  Observed win rate: 3/6 morning, ~1/8 evening; the
+  identical `Error Energy +3191.517` on losing calls is the deterministic
+  carousel signature, not a distinct failure.  Two fix avenues: make the
+  peer's MP lock reliable (study what differs in the winning calls' MP
+  alignment), and adaptive retrained-attempt Sd timing so lost flips
+  recover.
