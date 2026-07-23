@@ -2214,7 +2214,17 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
 {
     enum
     {
-        V90_INFO0_ACK_GUARD_RETRIES = 4
+        V90_INFO0_ACK_GUARD_RETRIES = 4,
+        /* Absolute ceiling on INFO0d resends before we give up on the INFO0
+           handshake and follow the peer into the Tone B/reversal transaction,
+           regardless of the acknowledgement/INFO0a state the normal guard
+           needs.  When the peer has already moved on to Tone A reversals but
+           info0_received has gone stale, neither the resume branch (needs
+           info0_received) nor the ack guard (needs ack && info0) fires, so
+           without this the retry loop ran unbounded -- observed storming to 73
+           resends, which the peer answered with a Link Error / NO CARRIER.
+           Normal calls escape via the ack guard by ~7; 16 is clear of that. */
+        V90_INFO0_RETRY_HARD_CAP = 16
     };
     int bit;
 
@@ -2300,17 +2310,25 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                          s->rx.info0_acknowledgement,
                          s->rx.info0_received,
                          s->rx.persistence2);
-                if (s->tx.info0_retry_count >= V90_INFO0_ACK_GUARD_RETRIES
-                    && s->tx.info0_acknowledgement
-                    && s->rx.info0_received)
+                if ((s->tx.info0_retry_count >= V90_INFO0_ACK_GUARD_RETRIES
+                     && s->tx.info0_acknowledgement
+                     && s->rx.info0_received)
+                    || s->tx.info0_retry_count >= V90_INFO0_RETRY_HARD_CAP)
                 {
                     /* Some peers keep repeating valid INFO0a but never reflect the
                        acknowledgement bit back to us. Once we've resent an
                        acknowledged INFO0d a few times and still have live INFO0a
                        from the far end, stop burning more retries and move back to
-                       the Tone A/L1/L2 path. */
+                       the Tone A/L1/L2 path.  The hard-cap arm also breaks the
+                       storm where the peer has advanced to Tone A reversals but
+                       info0_received went stale, so the ack-guard condition can
+                       never be satisfied -- follow the peer into the reversal
+                       transaction instead of resending INFO0d until Link Error. */
                     span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - V.90: INFO0d retry guard reached; resuming the Tone B/reversal transaction\n");
+                             "Tx - V.90: INFO0d retry guard reached (retry=%d, ack=%d, info0=%d); resuming the Tone B/reversal transaction\n",
+                             s->tx.info0_retry_count,
+                             s->tx.info0_acknowledgement,
+                             s->rx.info0_received);
                     initial_ab_not_ab_baud_init(s);
                     s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
                 }
@@ -3763,7 +3781,14 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         V90_INFO1A_MAX_TOTAL_RETRIES = 6,
         V90_INFO1A_INTERNAL_CLOCK_MAX_FAST_RETRIES = 1,
         V90_INFO1A_INTERNAL_CLOCK_MAX_TOTAL_RETRIES = 2,
-        V90_INFO1A_MAX_RETRAIN_RESPONSES = 2
+        V90_INFO1A_MAX_RETRAIN_RESPONSES = 2,
+        /* Total INFO0d re-send recoveries allowed per Phase 2 attempt while
+           waiting for INFO1a.  Shares v90_phase2_info0_recovery_loops with the
+           FIRST_B_SILENCE recovery, so this bounds the combined budget: a peer
+           still repeating INFO0a after this many INFO0d resends will not be
+           un-stuck by another one, and resending unbounded both wiped reversal
+           progress and produced INFO0d retry storms that ended in Link Error. */
+        V90_INFO1A_MAX_INFO0_RECOVERIES = 3
     };
     int baud_rate;
     int rtd_bauds;
@@ -3886,17 +3911,38 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->rx.v90_repeated_info0a_pending || s->rx.received_event == V34_EVENT_INFO0_OK)
     {
+        int recoveries = v90_note_phase2_info0_recovery(s);
+
+        if (recoveries <= V90_INFO1A_MAX_INFO0_RECOVERIES)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: repeated INFO0a arrived while waiting for INFO1a; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
+                     recoveries);
+            s->tx.info0_acknowledgement = true;
+            s->tx.info0_retry_count = 0;
+            s->tx.tone_duration = 0;
+            s->rx.v90_repeated_info0a_pending = false;
+            s->rx.v90_info1d_sent = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            v90_phase2_reset_transactions(s);
+            info0_baud_init(s);
+            return zero;
+        }
+        /*endif*/
+
+        /* Recovery cap reached: a peer that keeps repeating INFO0a after we
+           have already acknowledged INFO0d and sent INFO1d this many times is
+           not going to be un-stuck by another INFO0d.  Stop the resend loop --
+           each resend threw away the counted Tone A reversals and, unbounded,
+           stormed INFO0d until the peer answered with Link Error.  Hold for
+           INFO1a instead; the §9.2.1.2.6 timeout path below then drives the
+           Tone A / INFOMARKSa recovery, keeping the reversal progress intact. */
         span_log(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - V.90: repeated INFO0a arrived while waiting for INFO1a; re-sending acknowledged INFO0d to recover Phase 2\n");
-        s->tx.info0_acknowledgement = true;
-        s->tx.info0_retry_count = 0;
-        s->tx.tone_duration = 0;
+                 "Tx - V.90: repeated INFO0a persists after %d INFO0d recoveries while waiting for INFO1a; holding for INFO1a/timeout instead of another INFO0d loop\n",
+                 recoveries);
         s->rx.v90_repeated_info0a_pending = false;
-        s->rx.v90_info1d_sent = false;
         s->rx.received_event = V34_EVENT_NONE;
-        v90_phase2_reset_transactions(s);
-        info0_baud_init(s);
-        return zero;
+        goto wait_timeout_check;
     }
     /*endif*/
 
