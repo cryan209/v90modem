@@ -1328,12 +1328,15 @@ static bool v90_shaper_rule_inverts(int rule, int position)
  * earlier decision-directed reading of SmartLink's trn2dKnownDemod — the
  * captured reference signs do not track the received samples (50% mismatch
  * against our +++--- Ri), so the peer regenerates the transmitter's sign
- * sequence data-aided and this convention IS visible to it.  A predicting
- * peer can only assume the spec's transmitted-levels reading, so that is
- * now the default; a ~31% persistent sign mismatch is the leading theory
- * for the Phase-4 Error Energy plateau (~110-146 → 300-380 at TRN2d start).
- * ME_V90_SHAPER_METRIC=codec restores the far-codec metric for experiments.
- * Cached: this runs inside the per-symbol metric loop. */
+ * sequence data-aided and this convention IS visible to it.
+ * CONFIRMED LIVE (2026-07-23 evening, batch-2 call 5): on the first real
+ * post-DIL TRN2d window (peer CPt {91,87,83,79,72,65,53,33}, D=23, K=18),
+ * the captured pairs show 0.0% sign mismatch across ~22k symbols under
+ * this transmit-levels default, the peer's Error Energy settles at 11-17
+ * (the codec-metric era plateaued pinned at 300-380), and the peer
+ * progressed through MP into transmitting data-mode CP for the first time
+ * ever.  ME_V90_SHAPER_METRIC=codec restores the far-codec metric for
+ * experiments.  Cached: this runs inside the per-symbol metric loop. */
 static bool v90_shaper_metric_transmit_levels(void)
 {
     static int cached = -1;

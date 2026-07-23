@@ -198,6 +198,22 @@ Because the reference signs are predicted, `ME_V90_SHAPER_METRIC` DOES
 change what the peer measures on a real TRN2d window; the strict transmit
 reading is the default as of 2026-07-23.
 
+**RESOLVED 2026-07-23 evening — transmit metric CONFIRMED on a real window.**
+Batch-2 call 5 (`artifacts/v90-hardware/20260723T021036Z-trn2d_ref_transmit_metric/`,
+`pairs-call5.s16` + `slm-call5.log`, with `ME_V90_DIL_PROFILE=smartlink-adi-qc`
+forcing DIL past the Ja-parse lottery): full DIL study → peer designed and
+TRANSMITTED CPt {91,87,83,79,72,65,53,33} → our `CPt accepted; TRN2d
+(12000 mapped symbols, D=23, K=18)` → captured pairs show **0.0% sign
+mismatch over the entire ~2.8 s real window** (~50% in the preceding Ri
+region, exactly as the decision tree predicts).  Peer Error Energy through
+our TRN2d+MP: **11-17, no plateau** (codec-metric era: pinned 300-380);
+timing +0.057 ppm; peer decoded our MP and sent data-mode CP #1-#5.
+New (furthest-ever) blocker: the peer's CPs arrive with acknowledge
+already set and our strict `v90_set_phase4_cp()` data path rejects an
+ack'd CP before a plain one (`accepted=0`), so we never answer Ed/B1d and
+the peer hits `Phase4 TimeOut` → DP=90 retrain.  Fix the CP-ack
+acceptance path next.
+
 ### Phase-3 THIRD_S deadlock (why calls died before Phase 4)
 
 The earlier "THIRD_S race" reading (peer starts its S, our
