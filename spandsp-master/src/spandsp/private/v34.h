@@ -1108,6 +1108,10 @@ typedef struct
     uint32_t phase4_da_expected_ang;
     /*! \brief True once the decision-aided tracker has been seeded. */
     int phase4_da_active;
+    /*! \brief Sticky: the tracker has seeded at least once this Phase 4.
+        Keeps CMA muted through the CPt-to-CP silence so it cannot
+        re-randomize the data-aided equalizer solution on line noise. */
+    int phase4_da_seeded;
     /*! \brief Post-equalizer derotator (DDS phase units) owned by the
         decision-aided tracker.  The phase wander it corrects comes from the
         CMA equalizer's phase-blind tap rotation, which sits downstream of

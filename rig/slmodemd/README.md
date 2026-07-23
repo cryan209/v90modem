@@ -494,3 +494,27 @@ timing loop over the CP window (log eq_put_step/total_baud_timing_correction
 vs [EQ] err), then either hold timing via the DA decisions or re-center the
 T/2 phase at DA seed.  Decode target unchanged: idle window of
 winner-stereo.wav should read ~100% ones.
+
+### Timing loop exonerated; silence gap handled; ONE contradiction left
+
+Measured (V34_DA_TRACK_LOG now includes timing state): Godard timing
+correction totals ±1 step over 16k bauds — timing slips are NOT the
+blocker.  The real Phase-4 structure on this capture: CPt (DA lock ±5°,
+DA-LMS converging 0.21→0.15) → ~3 s SILENCE (9.4.2.2 SCR is optional;
+arctan2(0,0) fakes a perfect lock — now energy-gated, reseeds on signal
+return, CMA mute made sticky so it can't re-randomize the taps on noise)
+→ second CP stretch (choppy: err ±35°, LMS 0.3-0.7 — 16-point CP per Jd
+bit 48 suspected) → E → DATA.
+
+THE CONTRADICTION TO RESOLVE NEXT (fresh context): with
+V34_DA_HOLD_AFTER_SILENCE=1 freezing the GOOD CPt-era equalizer+derotator
+through to DATA on a static (0 ppm) channel, the DATA-stage symbols are
+STILL ringless mush at every scale (grid rms 0.56 vs 0.577 random) while
+the same frozen state rendered CPt at LMS err 0.15.  An equalizer cannot
+be simultaneously good and useless on the same channel — therefore the
+DATA stage's symbol production path must differ from the MP stage's
+somewhere below the stage switch (demod branch, T/2 decimation phase,
+equalizer_get indexing, or the eq_put_step cadence — note the restart
+init hardcodes RX_PULSESHAPER_2400 constants).  Diff those two paths
+line by line; the spectrum of the two windows is identical, so the
+difference is in the receiver, not the signal.

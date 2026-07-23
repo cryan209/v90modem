@@ -7144,9 +7144,30 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 
                 da_enabled = (value == NULL || atoi(value) != 0);
             }
+            float da_sym_mag2 = sym->re*sym->re + sym->im*sym->im;
+
             if (!da_enabled || s->mp_hypothesis < 0)
             {
                 s->phase4_da_active = 0;
+            }
+            else if (da_sym_mag2 < 0.04f)
+            {
+                /* The analogue modem goes quiet for seconds between CPt and
+                   the data-mode CP (9.4.2.2/V.90 makes SCR optional).  A
+                   zero symbol has arctan2(0,0) = constant angle, so the
+                   tracker "locks" perfectly on nothing and the stale seed
+                   survives to the signal return.  Suspend; V34_DA_HOLD_AFTER_
+                   SILENCE=1 additionally freezes the CPt-era solution through
+                   the (16-point-suspect) second CP stretch instead of
+                   re-acquiring on it -- the channel is static, so the CPt
+                   solution should carry to DATA. */
+                s->phase4_da_active = 0;
+                if (s->phase4_da_seeded && getenv("V34_DA_HOLD_AFTER_SILENCE"))
+                    s->phase4_da_seeded = 2;    /* 2 = hold: no more updates */
+            }
+            else if (s->phase4_da_seeded == 2)
+            {
+                /* Held: CPt-era derot + equalizer frozen through to DATA. */
             }
             else if (!s->phase4_da_active)
             {
@@ -7162,6 +7183,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->phase4_da_derot += (uint32_t) ((int32_t) (ang1c - snapped));
                 s->phase4_da_expected_ang = snapped;
                 s->phase4_da_active = 1;
+                s->phase4_da_seeded = 1;
             }
             else
             {
@@ -7193,10 +7215,12 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if (getenv("V34_DA_TRACK_LOG") && (s->duration % 256) == 0)
                 {
                     fprintf(stderr,
-                            "[DA] baud=%d err=%.1fdeg derot=%.1fdeg\n",
+                            "[DA] baud=%d err=%.1fdeg derot=%.1fdeg timing_corr=%d baud_phase=%.1f\n",
                             s->duration,
                             (float) err_i*(360.0f/4294967296.0f),
-                            (float) s->phase4_da_derot*(360.0f/4294967296.0f));
+                            (float) s->phase4_da_derot*(360.0f/4294967296.0f),
+                            s->total_baud_timing_correction,
+                            (float) s->pri_ted.baud_phase);
                 }
             }
         }
@@ -8679,7 +8703,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    fight: CMA's phase-blind gradient re-randomizes the phase
                    the DA loop just fixed. */
                 bool da_owns_eq = (s->stage == V34_RX_STAGE_PHASE4_MP)
-                               && s->phase4_da_active;
+                               && s->phase4_da_seeded;
                 if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                     tune_equalizer_cma(s, sym);
             }
@@ -9388,6 +9412,9 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.mp_phase4_force_abs_active = 0;
     s->rx.mp_phase4_diff_collapse_streak = 0;
     s->rx.mp_phase4_diff_recover_streak = 0;
+    s->rx.phase4_da_active = 0;
+    s->rx.phase4_da_seeded = 0;
+    s->rx.phase4_da_derot = 0;
     mp_reset_hypothesis_search(&s->rx);
     mp_vote_reset(&s->rx);
 
@@ -9904,6 +9931,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_phase4_force_abs_active = 0;
     s->rx.mp_phase4_diff_collapse_streak = 0;
     s->rx.mp_phase4_diff_recover_streak = 0;
+    s->rx.phase4_da_active = 0;
+    s->rx.phase4_da_seeded = 0;
+    s->rx.phase4_da_derot = 0;
     mp_reset_hypothesis_search(&s->rx);
     mp_vote_reset(&s->rx);
     s->rx.last_logged_mp_diag_state = V34_MP_DIAG_STATE_NONE;
