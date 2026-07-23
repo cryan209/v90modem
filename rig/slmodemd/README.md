@@ -264,3 +264,29 @@ equalizer), and possibly our 750 ms `ME_V90_SD_DELAY_MS` brushing the
 peer's 1500 ms §9.3.2.4 Sd-S̄d deadline (two of the seven taped attempts
 show Ja persisting through our Sd — shorten the delay if that family
 dominates a batch).  Batch calls with `tools/trn2d_call_batch.sh`.
+
+### 2026-07-23: rate cap + Phase-2 rework LIVE-VALIDATED — 3/6 calls to sustained data mode
+
+6-call batch at HEAD 8b06612 (fresh `docker restart d-modem`, sinc resampler,
+standard env recipe, `ME_V90_SD_DELAY_MS=750`), artifacts in
+`artifacts/v90-hardware/20260723T045437Z-phase2_tones_ratecap/`:
+
+- **Calls 1/2/5: complete V.90 handshake to data mode** (upstream V.34
+  31200 / downstream PCM 52000) in ~26 s, `[V90] MP upstream rate cap:
+  31200` fired (first live firings of the 8ae49e1 fix) and the peer entered
+  data with `Tx bit rate - 31200` — equal to the cap — every time.  The
+  33600-into-a-31200-pump `Link Error` at ~10 s is gone: holds measured
+  >240 s, ~470 s (ended only by batch teardown; Error Energy ~3.2 flat
+  throughout), and >240 s.
+- **Phase 2: zero aborts in all 5 real calls**, including the retrained
+  re-handshakes inside calls 3/4.  The durable-milestone rework (8b06612:
+  `v90_phase2_reversals_consumed`/`l2_consumed` replacing `received_event`
+  as sequencing memory, §9.2.1.2.4 900 ms+RTD third-reversal recovery
+  replacing the empirical timeout) removed the INFO1a-timeout/
+  reversal-thrash lottery entirely.
+- Calls 3/4: identical late failure — peer builds CPt, fires two
+  recoverable DP=90 retrains (both followed), then `drop to V34` → Link
+  Error.  The post-CPt `exitPhase3 delayedRetrainRequest` family is now
+  the sole remaining protocol blocker.
+- Call 6: rig fatigue (d-modem dial died at SIP level 1.5 s after ATD;
+  nothing reached the server) — the documented ~5-call degradation.
