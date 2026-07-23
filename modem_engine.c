@@ -484,6 +484,49 @@ static bool valid_v34_bps(int bps)
     return bps >= 2400 && bps <= 33600 && (bps % 2400) == 0;
 }
 
+/* V.90 data-mode character bit order.  V.14 mandates data bits LSB-first
+ * within each start/stop-framed character, ds_tx_load follows that, and
+ * live A/B against SmartLink (2026-07-23, artifacts/v90-hardware/
+ * 20260723T055443Z-pty_soak) confirmed the spec order is CORRECT: with the
+ * experimental msb setting the far DTE receives every byte bit-reversed
+ * ('D' 0x44 arrives as 0x22) in otherwise perfect sequence, i.e. SmartLink
+ * assembles characters LSB-first like the spec says.  Two traps recorded so
+ * nobody re-introduces this: (1) slmodemd's DSP-layer "rx pattern" debug
+ * bytes print bit-reversed relative to what its DTE receives -- do not infer
+ * the wire convention from that log; (2) the missing DTE CONNECT that
+ * started this chase was slmodemd's V.42 auto-detect waiting forever on raw
+ * test data, fixed by AT\N0 in the dial string, not a bit-order problem.
+ * (3) reversing at the mapper-byte boundary is doubly wrong -- it reverses
+ * 8-bit windows of the *framed* stream, relocating start bits.
+ * ME_V90_DATA_BIT_ORDER=msb keeps the experiment available; scoped to V.90
+ * so the V.22bis/V.34 fallback paths always keep spec order. */
+static bool me_v90_data_bit_order_msb(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_DATA_BIT_ORDER");
+
+        cached = (value && strcasecmp(value, "msb") == 0) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static uint8_t me_reverse8(uint8_t v)
+{
+    v = (uint8_t)(((v & 0xF0) >> 4) | ((v & 0x0F) << 4));
+    v = (uint8_t)(((v & 0xCC) >> 2) | ((v & 0x33) << 2));
+    v = (uint8_t)(((v & 0xAA) >> 1) | ((v & 0x55) << 1));
+    return v;
+}
+
+static me_modulation_t g_mod;   /* defined below with the engine state */
+
+static bool me_v90_reverse_dte_bytes_locked(void)
+{
+    return g_mod == ME_MOD_V90 && me_v90_data_bit_order_msb();
+}
+
 static int data_stack_pull_dte_byte(void *user_data)
 {
     uint8_t byte;
@@ -491,12 +534,16 @@ static int data_stack_pull_dte_byte(void *user_data)
     (void)user_data;
     if (dring_read(&downstream_ring, &byte, 1) != 1)
         return -1;
+    if (me_v90_reverse_dte_bytes_locked())
+        byte = me_reverse8(byte);
     return byte;
 }
 
 static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
 {
     (void)user_data;
+    if (me_v90_reverse_dte_bytes_locked())
+        byte = me_reverse8(byte);
     if (dring_write(&upstream_ring, &byte, 1) != 1)
         ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
 }
@@ -610,7 +657,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 /* ------------------------------------------------------------------ */
 
 static me_state_t      g_state     = ME_IDLE;
-static me_modulation_t g_mod       = ME_MOD_NONE;
+static me_modulation_t g_mod       = ME_MOD_NONE;   /* tentatively declared above the DTE callbacks */
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
 static bool            g_invert_v34_role = false; /* debug override via env */

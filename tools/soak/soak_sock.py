@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Socket-side (d-modem DTE) pump for the V.90 data-mode soak test.
+
+Connects to the tower socat AT bridge, dials, waits for CONNECT, then runs
+the mirror of soak_pty.py's schedule keyed to its own CONNECT sighting:
+  Phase A (0-35s):   read-only (downstream test)
+  Phase B (35-70s):  send upstream pattern lines
+  Phase C (70-105s): send + read (bidirectional)
+Pattern lines are "U%07d\n".  Received bytes -> rx_sock.bin + rx_sock.idx.
+"""
+import os, sys, time, socket, select
+
+HOST, PORT = "tower.net.cryan.nz", 5556
+OUTDIR = sys.argv[1]
+SEND_RATE = 3000          # B/s, under the 3120 B/s V.14 payload capacity of 31200 bps
+CHUNK = 512
+PHASES = [(0, 35, False), (35, 70, True), (70, 105, True)]
+END_T = 110
+
+s = socket.create_connection((HOST, PORT), timeout=20)
+s.setblocking(False)
+
+def send_at(cmd, wait=2.0):
+    s.sendall(cmd.encode() + b"\r")
+    end = time.time() + wait
+    got = b""
+    while time.time() < end:
+        r, _, _ = select.select([s], [], [], 0.2)
+        if r:
+            try:
+                got += s.recv(4096)
+            except BlockingIOError:
+                pass
+    print(f"SOCK: {cmd} -> {got!r}", flush=True)
+    return got
+
+send_at("ATZ"); send_at("ATX3"); send_at("AT\\N0"); send_at("AT+MS=90,1,300,56000")
+s.sendall(b"ATD6001\r")
+print("SOCK: dialing", flush=True)
+
+rxf = open(os.path.join(OUTDIR, "rx_sock.bin"), "wb")
+idxf = open(os.path.join(OUTDIR, "rx_sock.idx"), "w")
+
+buf = b""
+t_wait = time.time()
+while True:
+    r, _, _ = select.select([s], [], [], 1.0)
+    if r:
+        try:
+            d = s.recv(4096)
+        except BlockingIOError:
+            d = b""
+        if d == b"" and r:
+            print("SOCK: socket closed while waiting for CONNECT", flush=True)
+            sys.exit(1)
+        buf += d
+        if b"CONNECT" in buf:
+            print(f"SOCK: CONNECT seen: {buf[-120:]!r}", flush=True)
+            break
+        if b"NO CARRIER" in buf or b"BUSY" in buf or b"ERROR" in buf:
+            print(f"SOCK: dial failed: {buf[-120:]!r}", flush=True)
+            sys.exit(1)
+    if time.time() - t_wait > 240:
+        print("SOCK: no CONNECT within 240s; giving up", flush=True)
+        sys.exit(1)
+
+t0 = time.time()
+seq = 0
+tx_bytes = 0
+rx_bytes = 0
+send_credit = 0.0
+last_credit_t = t0
+last_report = t0
+pending = b""
+
+while True:
+    now = time.time()
+    t = now - t0
+    if t >= END_T:
+        break
+    sending = any(a <= t < b and snd for a, b, snd in PHASES)
+
+    r, _, _ = select.select([s], [], [], 0.02)
+    if r:
+        try:
+            d = s.recv(4096)
+        except BlockingIOError:
+            d = b""
+        if d == b"":
+            print(f"SOCK: socket closed at t={t:.1f}s", flush=True)
+            break
+        rxf.write(d)
+        idxf.write(f"{t:.3f} {len(d)}\n")
+        rx_bytes += len(d)
+        if b"NO CARRIER" in d:
+            print(f"SOCK: NO CARRIER at t={t:.1f}s", flush=True)
+            break
+
+    send_credit += (now - last_credit_t) * SEND_RATE
+    send_credit = min(send_credit, 4 * CHUNK)
+    last_credit_t = now
+    if sending and send_credit >= CHUNK:
+        while len(pending) < CHUNK:
+            pending += b"U%07d\n" % seq
+            seq += 1
+        chunk, pending = pending[:CHUNK], pending[CHUNK:]
+        try:
+            n = s.send(chunk)
+            tx_bytes += n
+            send_credit -= n
+            if n < len(chunk):
+                pending = chunk[n:] + pending
+        except (BlockingIOError, BrokenPipeError) as e:
+            if isinstance(e, BrokenPipeError):
+                print(f"SOCK: broken pipe at t={t:.1f}s", flush=True)
+                break
+            pending = chunk + pending
+            time.sleep(0.01)
+
+    if now - last_report >= 5:
+        print(f"SOCK t={t:5.1f} tx={tx_bytes} rx={rx_bytes}", flush=True)
+        last_report = now
+
+rxf.flush(); rxf.close(); idxf.close()
+print(f"SOCK DONE: tx={tx_bytes} rx={rx_bytes} (lines sent: {seq})", flush=True)
+try:
+    s.close()
+except Exception:
+    pass
