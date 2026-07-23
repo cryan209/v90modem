@@ -534,6 +534,14 @@ typedef struct
                after the peer asserted Tone A instead of INFO1a. Bounded so a
                peer that retrains forever cannot trap the start-up. */
     int v90_info1a_retrain_responses;
+    /*! \brief Number of durable Phase 2 Tone A reversal transactions already
+               consumed by the TX state machine.  RX owns the corresponding
+               monotonic count; TX advances this cursor one transaction at a
+               time so a later INFO/tone event cannot erase peer progress. */
+    int v90_phase2_reversals_consumed;
+    /*! \brief Number of durable Phase 2 L2-complete transactions already
+               consumed by the TX state machine. */
+    int v90_phase2_l2_consumed;
     union
     {
         info1a_t info1a;
@@ -1119,6 +1127,10 @@ typedef struct
                places, so a reversal sequence could be reset to zero between
                reversals and never reach the third. */
     int phase2_reversal_count;
+    /*! \brief How many Phase 2 L1/L2 probes have completed.  Unlike
+               received_event, this is not cleared when TX consumes an
+               unrelated INFO or tone event. */
+    int phase2_l2_count;
     /*! \brief Phase 4 S signal detection: 32-bit circular window of data_bits==2 flags */
     uint32_t s_window;
 

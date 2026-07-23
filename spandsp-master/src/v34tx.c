@@ -243,80 +243,82 @@ static const char *v34_modulation_to_str(int mod)
     }
 }
 
-/* How long V90_WAIT_TONE_A_REV waits for the peer's Tone A reversal before
-   invoking the 9.2.1.2.4 recovery and reversing Tone B anyway, in 600-baud CC
-   symbols (600 = 1000 ms).
-
-   Measured against a live SmartLink peer: while we sit here, the peer is parked
-   in its own RX_PHASE1_ANS waiting for *our* Tone B reversal, and it advances
-   ~320 ms after our recovery fires. Both sides wait; this timeout is what breaks
-   it, so its length is ~1 s of dead air in the middle of every Phase 2. The peer
-   had already entered RX_PHASE1_ANS before we entered this stage, so a shorter
-   value should be safe.
-
-   Swept against that peer, Phase 2 total: 600 -> 4580 ms (4 calls), 200 ->
-   3920 ms (2 calls), 100 -> 3740 ms (1 call). 200 is the default because it
-   takes 660 ms of the ~840 ms available while still leaving roughly 5x margin
-   over the 40+10 ms reversal windows of 9.2.1.1.6, so a genuine late reversal
-   is still honoured; 100 bought only 180 ms more for noticeably less margin.
-   The peer reached INFODONE and the Ja descriptor still decoded at both values.
-
-   Overridable to allow sweeping against a real peer without a rebuild, and to
-   restore the old 1 s behaviour if some peer needs it. Do NOT retune this on
-   harness evidence alone -- the loopback harness and the rig have already
-   disagreed in opposite directions on Phase 2 sequencing. Reversing too early
-   is a known failure mode (see the comment in the stage itself: committing on
-   mere tone presence puts our reversal inside the peer's Tone A window and it
-   retrains), so this bounds a wait, it does not remove one. */
-static int v90_tone_a_rev_timeout_bauds(void)
+/* V.90 9.2.1.2.4 defines the third-reversal recovery deadline as 900 ms
+   plus RTD from the second received Tone A reversal.  Keep that absolute
+   deadline as a recovery guard; normal progress is driven by the durable
+   reversal transaction below.  The old default was an empirically shortened
+   333 ms stage timer, so every call that lost the mailbox event appeared to
+   make progress while actually waiting on a local clock. */
+static bool v90_tone_a_reversal_recovery_due(const v34_state_t *s)
 {
-    static int timeout_bauds = 200;
-    static int initialized = 0;
+    span_sample_timer_t deadline_samples;
+    span_sample_timer_t elapsed_samples;
+    int rtd_samples;
+    int rtd_bauds;
+    int fallback_bauds;
 
-    if (!initialized)
+    rtd_samples = (s->rx.round_trip_delay_estimate > 0)
+                  ? s->rx.round_trip_delay_estimate
+                  : 0;
+    deadline_samples = (SAMPLE_RATE*900 + 500)/1000 + rtd_samples;
+    if (s->rx.tone_ab_hop_time > 0
+        &&  s->tx.sample_time >= s->rx.tone_ab_hop_time)
     {
-        const char *value = getenv("ME_V90_TONE_A_REV_BAUDS");
-
-        if (value  &&  value[0] != '\0')
-        {
-            char *end = NULL;
-            long parsed = strtol(value, &end, 10);
-
-            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 0)
-                timeout_bauds = (int) parsed;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
+        elapsed_samples = s->tx.sample_time - s->rx.tone_ab_hop_time;
+        return elapsed_samples >= deadline_samples;
     }
     /*endif*/
-    return timeout_bauds;
+
+    /* If the second reversal edge itself was missed, retain a bounded
+       standards-sized recovery measured from this stage's entry. */
+    rtd_bauds = (rtd_samples*600 + SAMPLE_RATE/2)/SAMPLE_RATE;
+    fallback_bauds = (600*900 + 500)/1000 + rtd_bauds;
+    return s->tx.tone_duration >= fallback_bauds;
 }
 /*- End of function --------------------------------------------------------*/
 
-/* True for any Tone A/B phase reversal, whatever its position in the sequence.
+/* Phase 2 receive progress is transactional, not a "latest event" value.
 
-   The receiver numbers reversals by sequence position: v34rx.c keeps
-   phase2_reversal_count and emits REVERSAL_1, REVERSAL_2 then REVERSAL_3,
-   seeding the count to 2 once L2 has been seen (Phase 2 is past the first two
-   reversals by then, whatever the counter says). The transmitter only ever
-   tested REVERSAL_1 -- REVERSAL_2 appears nowhere and REVERSAL_3 is tested
-   nowhere -- so a stage waiting for a reversal after the first waits on a value
-   the receiver can no longer produce.
-
-   Applied deliberately narrowly, to V90_WAIT_TONE_A_REV only. The same
-   mismatch exists in FIRST_B_SILENCE and SECOND_B, but those are on the V.34
-   fallback branch, and "fixing" them measured *worse* against the live rig
-   (Phase 2 4580 ms -> 13520 ms): accepting the reversal in FIRST_B_SILENCE
-   commits to that branch, which then parks in SECOND_B's 7 s timeout and falls
-   back to the V.90 path anyway. Leaving them mismatched keeps the call on the
-   V.90 path via INFO0 recovery, which is cheaper. Do not widen this without
-   re-measuring on the rig. */
-static bool v34_event_is_reversal(int event)
+   received_event is still useful for diagnostics and for V.34 compatibility,
+   but it is a lossy mailbox: an INFO repeat, tone indication, or TX-side clear
+   can replace an unconsumed reversal/L2 event.  RX therefore owns monotonic
+   counters and TX consumes one completed transaction at a time.  Consuming
+   only one count is important when a large media block contains two adjacent
+   milestones; the next TX stage must still observe the second one. */
+static bool v90_phase2_reversal_pending(const v34_state_t *s)
 {
-    return event == V34_EVENT_REVERSAL_1
-           ||  event == V34_EVENT_REVERSAL_2
-           ||  event == V34_EVENT_REVERSAL_3;
+    return s->rx.phase2_reversal_count > s->tx.v90_phase2_reversals_consumed;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_phase2_consume_reversal(v34_state_t *s)
+{
+    if (v90_phase2_reversal_pending(s))
+        s->tx.v90_phase2_reversals_consumed++;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool v90_phase2_l2_pending(const v34_state_t *s)
+{
+    return s->rx.phase2_l2_count > s->tx.v90_phase2_l2_consumed;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_phase2_consume_l2(v34_state_t *s)
+{
+    if (v90_phase2_l2_pending(s))
+        s->tx.v90_phase2_l2_consumed++;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_phase2_reset_transactions(v34_state_t *s)
+{
+    s->rx.phase2_reversal_count = 0;
+    s->rx.phase2_l2_count = 0;
+    s->tx.v90_phase2_reversals_consumed = 0;
+    s->tx.v90_phase2_l2_consumed = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2220,7 +2222,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             && !s->tx.calling_party
             && s->tx.duplex)
         {
-            if (s->rx.received_event == V34_EVENT_INFO0_OK)
+            if (s->rx.info0_received)
             {
                 if (!s->tx.info0_acknowledgement
                     &&  s->tx.stage == V34_TX_STAGE_INFO0)
@@ -2237,7 +2239,8 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                              "Tx - V.90: INFO0a received OK, proceeding to Tone B (9.2.1.1.2)\n");
                     v90_arm_tone_a_detection(s, "INFO0a received error-free");
                     s->rx.received_event = V34_EVENT_NONE;
-                    v90_wait_rx_l2_init(s, "INFO0a received error-free");
+                    initial_ab_not_ab_baud_init(s);
+                    s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
                     if (bit)
                         s->tx.lastbit.re = -s->tx.lastbit.re;
                     /*endif*/
@@ -2276,7 +2279,11 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                     reason = "Tone A reversal detected after INFO0a";
                 else
                     reason = "Tone A detected after INFO0a";
-                v90_wait_rx_l2_init(s, reason);
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: %s; completing INFO0d and resuming the Tone B/reversal transaction\n",
+                         reason);
+                initial_ab_not_ab_baud_init(s);
+                s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
             }
             else if (s->tx.info0_acknowledgement
                      || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
@@ -2299,7 +2306,10 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                        acknowledged INFO0d a few times and still have live INFO0a
                        from the far end, stop burning more retries and move back to
                        the Tone A/L1/L2 path. */
-                    v90_wait_rx_l2_init(s, "INFO0d retry guard timer");
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - V.90: INFO0d retry guard reached; resuming the Tone B/reversal transaction\n");
+                    initial_ab_not_ab_baud_init(s);
+                    s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
                 }
                 else
                 {
@@ -2586,14 +2596,21 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_V90_WAIT_RX_L2:
         /* V.90 §9.2.1.1.5: send Tone B while receiving analog's L1/L2.
-           Wait for L2_SEEN event or timeout (~1200ms = 720 bauds) */
-        if (s->rx.received_event == V34_EVENT_L2_SEEN
+           L1 lasts 160 ms and L2 may be received for at most another
+           500 ms, so 400 bauds is a rounded 667 ms recovery guard. */
+        if (v90_phase2_l2_pending(s)
             ||
-            ++s->tx.tone_duration >= 720)
+            ++s->tx.tone_duration >= 400)
         {
+            bool l2_received;
+
+            l2_received = v90_phase2_l2_pending(s);
+            if (l2_received)
+                v90_phase2_consume_l2(s);
+            /*endif*/
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: analog L1/L2 %s after %d bauds, waiting for Tone A reversal\n",
-                     (s->rx.received_event == V34_EVENT_L2_SEEN) ? "received" : "timeout",
+                     l2_received ? "received" : "timeout",
                      s->tx.tone_duration);
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A_REV;
@@ -2608,8 +2625,10 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* V.90 §9.2.1.1.6: send Tone B, wait for Tone A phase REVERSAL from analog.
            Analog sends Tone A 50ms + reversal + 10ms + silence (§9.2.2.1.6).
            TONE_SEEN means Tone A is present (not a reversal) — must wait for REVERSAL_1. */
-        if (s->rx.v90_repeated_info0a_pending
-            ||  s->rx.received_event == V34_EVENT_INFO0_OK)
+        if (!v90_phase2_reversal_pending(s)
+            &&
+            (s->rx.v90_repeated_info0a_pending
+             ||  s->rx.received_event == V34_EVENT_INFO0_OK))
         {
             int recoveries;
 
@@ -2651,10 +2670,16 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         }
         /*endif*/
         ++s->tx.tone_duration;
-        if (v34_event_is_reversal(s->rx.received_event)
+        if (v90_phase2_reversal_pending(s)
             ||
-            s->tx.tone_duration >= v90_tone_a_rev_timeout_bauds())
+            v90_tone_a_reversal_recovery_due(s))
         {
+            bool reversal_received;
+
+            reversal_received = v90_phase2_reversal_pending(s);
+            if (reversal_received)
+                v90_phase2_consume_reversal(s);
+            /*endif*/
             /* V.90 9.2.1.1.6: the B reversal must be timed from the RECEIVED
                Tone A reversal edge.  The analogue modem sends only 50 ms of
                Tone A before reversing (9.2.2.1.6), and it arms its own Tone B
@@ -2663,10 +2688,11 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                our B reversal inside the peer's Tone A window, where its
                detector was not yet listening - it then retrained instead of
                sending INFO1a.  Tone presence alone must never trigger this
-               transition; the >=600 baud timeout is the 9.2.1.2.4 recovery. */
+               transition; the absolute 900 ms + RTD deadline is the
+               9.2.1.2.4 recovery. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
-                     v34_event_is_reversal(s->rx.received_event) ? "reversal detected"
+                     reversal_received ? "reversal transaction completed"
                      : "reversal timeout (9.2.1.2.4 recovery)",
                      s->rx.received_event, s->tx.tone_duration);
             s->rx.received_event = V34_EVENT_NONE;
@@ -2723,14 +2749,14 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                      s->rx.signal_present, s->rx.persistence1,
                      s->rx.persistence2, s->rx.current_demodulator);
         }
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        if (s->rx.info0_received)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
             s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
             s->rx.received_event = V34_EVENT_NONE;
         }
-        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        else if (v90_phase2_reversal_pending(s))
         {
             /* Some peers assert Tone A and its first reversal before we manage
                to decode a clean INFO0a frame. Treat the observed reversal as
@@ -2738,6 +2764,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                INFO0d retries forever. */
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A reversal arrived before clean INFO0a, continuing Phase 2 using reversal fallback\n");
+            v90_phase2_consume_reversal(s);
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
         }
@@ -2774,23 +2801,24 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         }
         /*endif*/
         break;
-    case V34_TX_STAGE_FIRST_B_INFO_SEEN:
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:
-        /* Continue sending pure tone. For the V.90 digital answerer, repeated
-           INFO0a during this Tone B window triggers INFO0d recovery with
-           acknowledgement set (§9.2.1.2.1).
-           received_event==INFO0_OK only fires for the *first* INFO0a (see
-           v34rx.c put_info_bit()); every repeat after that sets the sticky
-           v90_repeated_info0a_pending flag instead so it doesn't clobber a
-           REVERSAL_1 event. This case was only checking the one-shot event,
-           so once the far end had sent its first INFO0a, every subsequent
-           repeat here was silently ignored and we never re-sent an
-           acknowledged INFO0d -- leaving the far end retrying forever. */
-        if (s->tx.v90_mode
-            && !s->tx.calling_party
-            && s->tx.duplex
-            && (s->rx.received_event == V34_EVENT_INFO0_OK
-                || s->rx.v90_repeated_info0a_pending))
+        /* A completed Tone A reversal commits the peer to 9.2.2.1.3.  Consume
+           that transaction before considering a concurrently decoded INFO0a
+           repeat; otherwise the repeat regresses both modems to INFO0 recovery
+           after ranging has already advanced (the source of the multi-second
+           live Phase 2 loop). */
+        if (v90_phase2_reversal_pending(s))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: first Tone A reversal transaction completed; scheduling Tone B reversal\n");
+            v90_phase2_consume_reversal(s);
+            s->rx.v90_repeated_info0a_pending = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
+        }
+        else if (s->rx.received_event == V34_EVENT_INFO0_OK
+                 || s->rx.v90_repeated_info0a_pending)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: repeated INFO0a during Tone B, repeating INFO0d with acknowledgement\n");
@@ -2799,7 +2827,10 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->rx.received_event = V34_EVENT_NONE;
             s->rx.v90_repeated_info0a_pending = false;
         }
-        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        /*endif*/
+        break;
+    case V34_TX_STAGE_FIRST_B_INFO_SEEN:
+        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
             /* First reversal seen - continue sending pure tone for 40+-1ms */
             s->tx.tone_duration = 1;
@@ -2842,7 +2873,20 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_B_SILENCE:
         /* Send silence, as we wait for reversal (V.34/11.2.1.1.4) */
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        if (s->tx.v90_mode && v90_phase2_reversal_pending(s))
+        {
+            /* The second Tone A reversal transaction may be reported as any
+               event ordinal, or the event may already have been overwritten
+               by the immediately following L1.  The durable counter is the
+               authority. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: second Tone A reversal transaction completed; receiving analogue L1/L2\n");
+            v90_phase2_consume_reversal(s);
+            s->rx.received_event = V34_EVENT_NONE;
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
+        }
+        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
             /* Second reversal seen. We now have the round trip timed */
             s->tx.tone_duration = 1;
@@ -2864,6 +2908,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 s->tx.tone_duration = 0;
                 s->rx.v90_repeated_info0a_pending = false;
                 s->rx.received_event = V34_EVENT_NONE;
+                v90_phase2_reset_transactions(s);
                 info0_baud_init(s);
             }
             else
@@ -2892,7 +2937,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         }
         else if (s->tx.v90_mode
                  &&
-                 (s->rx.received_event == V34_EVENT_REVERSAL_2
+                 (v90_phase2_l2_pending(s)
                   ||
                   s->rx.received_event == V34_EVENT_L2_SEEN
                   ||
@@ -2919,8 +2964,19 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                initial-call FIRST_B_SILENCE dwell is ~353 ms. */
             const char *reason;
 
-            if (s->rx.received_event == V34_EVENT_REVERSAL_2)
-                reason = "second Tone A reversal";
+            if (v90_phase2_l2_pending(s))
+            {
+                v90_phase2_consume_l2(s);
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: analogue L1/L2 transaction completed after a missed second reversal; transmitting Tone B and waiting for the next Tone A reversal\n");
+                s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A_REV;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                break;
+            }
             else if (s->rx.received_event == V34_EVENT_L2_SEEN)
                 reason = "L1/L2 arriving while waiting for the second Tone A reversal";
             else
@@ -2948,10 +3004,15 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 l1_l2_signal_init(s);
             }
         }
-        else if (s->rx.received_event == V34_EVENT_L2_SEEN
+        else if ((s->tx.v90_mode && v90_phase2_l2_pending(s))
+            ||
+            s->rx.received_event == V34_EVENT_L2_SEEN
             ||
             ++s->tx.tone_duration >= 400)
         {
+            if (s->tx.v90_mode && v90_phase2_l2_pending(s))
+                v90_phase2_consume_l2(s);
+            /*endif*/
             /* L2 recognised */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
@@ -2976,21 +3037,23 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         if (s->tx.v90_mode)
         {
             /* V.90 §9.2.1.1.6: wait for Tone A phase reversal, then delay 40ms.
-               After clearing events at SECOND_B entry, TONE_SEEN fires first,
-               then REVERSAL_1 on the actual reversal. */
-            if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+               Normal progress is the next durable reversal transaction. */
+            if (v90_phase2_reversal_pending(s))
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: Tone A reversal detected at SECOND_B after %d bauds (event=%d), delaying 40ms\n",
+                         "Tx - V.90: Tone A reversal transaction completed at SECOND_B after %d bauds (event=%d), delaying 40ms\n",
                          s->tx.tone_duration, s->rx.received_event);
+                v90_phase2_consume_reversal(s);
                 s->tx.tone_duration = 1;
                 s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
             }
-            else if (s->tx.tone_duration >= 4200)
+            else if (v90_tone_a_reversal_recovery_due(s))
             {
-                /* Timeout: 550ms + generous RTD margin (~7s at 600 baud) */
+                /* V.90 §9.2.1.2.4 recovery: the deadline is absolute from
+                   the second received Tone A reversal, not a seven-second
+                   local stage timer. */
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90: Tone A reversal timeout at SECOND_B after %d bauds\n",
+                         "Tx - V.90: Tone A reversal recovery deadline reached at SECOND_B after %d bauds\n",
                          s->tx.tone_duration);
                 s->tx.tone_duration = 1;
                 s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
@@ -3803,6 +3866,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->rx.v90_repeated_info0a_pending = false;
         s->rx.v90_info1d_sent = false;
         s->rx.received_event = V34_EVENT_NONE;
+        v90_phase2_reset_transactions(s);
         info0_baud_init(s);
         return zero;
     }
@@ -3819,6 +3883,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                silence, then Tone B and the §9.2.1.1.3 ranging exchange)
                instead of ignoring it until the peer gives up. */
             s->tx.v90_info1a_retrain_responses++;
+            v90_phase2_reset_transactions(s);
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A after INFO1a deadline (event=%d at %d bauds); responding to retrain per 9.5.1.2 (response %d)\n",
                      s->rx.received_event,
@@ -3905,6 +3970,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->rx.received_event = V34_EVENT_NONE;
         s->rx.persistence1 = 0;
         s->rx.persistence2 = 0;
+        v90_phase2_reset_transactions(s);
         info0_baud_init(s);
         return zero;
     }
@@ -6533,6 +6599,7 @@ SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s)
        still triggers the acknowledged-INFO0d recovery from that state. */
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: peer retrain response armed; 70 ms silence then Tone B (9.5.1.2)\n");
+    v90_phase2_reset_transactions(s);
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
     s->tx.tone_duration = 0;
@@ -6566,6 +6633,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
     s->tx.v90_l2_count = 0;
     s->tx.v90_info1a_retrain_responses = 0;
     s->rx.v90_mode = true;
+    v90_phase2_reset_transactions(s);
 
     if (s->calling_party)
     {

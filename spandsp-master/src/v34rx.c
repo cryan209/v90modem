@@ -3796,19 +3796,25 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     else
                     {
                         int preserve_tone_a_recovery;
+                        int first_info0;
 
                         preserve_tone_a_recovery = (s->v90_mode
                                                     && !s->calling_party
                                                     && s->stage == V34_RX_STAGE_TONE_A);
+                        first_info0 = !s->info0_received;
                         process_rx_info0(s, s->info_buf);
                         if (preserve_tone_a_recovery)
                         {
                             /* V.90 answerer recovery: after receiving INFO0a and
                                conditioning RX for Tone A, keep looking for Tone A
                                instead of falling back to Tone B on every repeated
-                               INFO0a. */
+                               INFO0a.  A repeated INFO0a is not a new Phase 2
+                               transaction: do not erase a Tone A reversal that
+                               may have arrived in the same media block. */
                             s->stage = V34_RX_STAGE_TONE_A;
-                            s->phase2_reversal_count = 0;   /* fresh Phase 2 attempt */
+                            if (first_info0)
+                                s->phase2_reversal_count = 0;
+                            /*endif*/
                             s->persistence1 = 0;
                             s->persistence2 = 0;
                         }
@@ -4859,6 +4865,7 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             if (++s->l1_l2_duration > 20)
             {
                 span_log(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
+                s->phase2_l2_count++;
                 s->received_event = V34_EVENT_L2_SEEN;
                 s->current_demodulator = V34_MODULATION_TONES;
                 if (s->calling_party)
@@ -9600,6 +9607,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     memset(s->rx.phase3_ja_capture_hyp_raw_len, 0, sizeof(s->rx.phase3_ja_capture_hyp_raw_len));
     phase3_trn_hyp_reset(&s->rx);
     s->rx.phase2_reversal_count = 0;
+    s->rx.phase2_l2_count = 0;
     s->rx.phase3_trn_mag_sum = 0.0f;
     s->rx.phase3_trn_mag_count = 0;
     s->rx.phase4_j_seen = 0;
