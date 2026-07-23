@@ -390,3 +390,32 @@ read the aligned_hex dumps).  So the DATA decode chain fundamentally works;
 the remaining upstream-garble work is (a) the bursty per-mapping-frame error
 source at 31200@3200 (V0/superframe bit handling and shell unmap are the
 suspects), (b) skipping the windup transient before scoring/DTE delivery.
+
+### Upstream garble root-cause narrowed: DATA-stage symbols are off-constellation
+
+Systematic elimination on winner-stereo.wav (all offline, deterministic):
+- Descrambler taps 4/17, both shift conventions: raw pre-descrambler stream
+  is already 50% — not the scrambler.
+- Boundary: fine 1-sample sweep ±40 around the E estimate with corrected
+  post-windup scoring (ones in decoded bits 300..1300 — the old first64
+  metric sat inside the Viterbi windup and was blind): flat ~51% everywhere.
+- Transform: scale x rotation x conjugate sweep with corrected scoring —
+  flat ~51%.
+- parms: aux channel w=0 confirmed correct (internal rate code 24 = plain
+  31200, no +200 bps aux).
+- Decisive: fitting the exported equalized data-region symbols to the
+  odd-integer Q9.7 constellation grid across scales 15..120 — NO scale
+  beats the uniform-random baseline (0.565 vs 0.577 rms).  The CP/MP-region
+  symbols do cluster (4-point-ish), so demod is sane pre-DATA.
+
+Conclusion: the symbol stream consumed in V34_RX_STAGE_DATA is not
+decision-point samples — either the DATA-stage equalizer/timing output
+genuinely collapses at the stage switch (adaptation freezes there:
+DD-tracking is gated PHASE3_WAIT_S..PHASE4_MP only), or the QAM export tap
+misrepresents what put_mapping_frame consumes.  NEXT STEP: dump
+s->mapping_frame_buf (the exact int16 Q9.7 values entering
+v34_put_mapping_frame) env-gated, offline AND live, and check grid fit;
+then either fix the DATA-stage demod/tracking or the buffering.  Sweep
+tooling committed: VPCM_V90_NATIVE_MAX_BITS, VPCM_V90_NATIVE_BITS_OUT
+(decoded bitstream dump; idle = all-ones ground truth), post-windup sweep
+scoring, VPCM_V90_BOUNDARY_RANGE/STEP.

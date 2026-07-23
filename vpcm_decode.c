@@ -5989,6 +5989,27 @@ typedef struct {
     uint8_t first_hdlc[64];
 } v34_upstream_bit_collector_t;
 
+/* Ones count over decoded bits [from_bit, to_bit) of a replay result.
+   Boundary/transform sweeps must score PAST the Viterbi windup: the first
+   ~2 mapping frames of decoded output are structurally garbage, so first64
+   can never distinguish a correct frame phase from a wrong one. */
+static int v34_replay_ones_in_range(const void *result_bytes,
+                                    int stored_bits,
+                                    int from_bit,
+                                    int to_bit)
+{
+    const uint8_t *bytes = (const uint8_t *) result_bytes;
+    int ones = 0;
+
+    if (to_bit > stored_bits)
+        to_bit = stored_bits;
+    for (int i = from_bit; i < to_bit; i++) {
+        if ((bytes[i >> 3] >> (i & 7)) & 1)
+            ones++;
+    }
+    return ones;
+}
+
 typedef struct {
     bool valid;
     int rx_stage;
@@ -7225,12 +7246,30 @@ static bool v34_replay_upstream_from_phase4(const int16_t *samples,
             }
         }
         offset += chunk;
+        if (getenv("VPCM_V90_NATIVE_MAX_BITS"))
+            max_data_bits = atoi(getenv("VPCM_V90_NATIVE_MAX_BITS"));
         if (max_data_bits > 0 && collector.data_bits >= max_data_bits)
             break;
     }
 
     if (!flow_debug)
         silence_stderr_end(&stderr_guard);
+    if (getenv("VPCM_V90_NATIVE_BITS_OUT")) {
+        /* Dump the stored decoded bitstream (LSB-first packed) for offline
+         * error-position analysis -- during far-DTE idle every 0 bit is a
+         * decode error, so the idle window is exact ground truth. */
+        FILE *fp = fopen(getenv("VPCM_V90_NATIVE_BITS_OUT"), "wb");
+
+        if (fp) {
+            fwrite(collector.bytes, 1,
+                   (size_t) ((collector.stored_bits + 7) / 8), fp);
+            fclose(fp);
+            fprintf(stderr,
+                    "v90 native bits dumped: %d bits to %s\n",
+                    collector.stored_bits,
+                    getenv("VPCM_V90_NATIVE_BITS_OUT"));
+        }
+    }
     out->valid = true;
     out->rx_stage = v34_get_rx_stage(v34);
     out->rx_event = v34_get_rx_event(v34);
@@ -33768,11 +33807,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     70.0f,
                                     0,
                                     false,
-                                    64,
+                                    1500,
                                     NULL,
                                     &candidate)) {
-                                int score = candidate.first64_ones
-                                          + candidate.b1_tail_ones;
+                                int score = v34_replay_ones_in_range(
+                                    candidate.bytes,
+                                    candidate.stored_bits,
+                                    300, 1300);
 
                                 if (score > best_phase_score) {
                                     best_phase_score = score;
@@ -33841,11 +33882,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                     70.0f,
                                     0,
                                     false,
-                                    64,
+                                    1500,
                                     NULL,
                                     &candidate)) {
-                                int score = candidate.first64_ones
-                                          + candidate.b1_tail_ones;
+                                int score = v34_replay_ones_in_range(
+                                    candidate.bytes,
+                                    candidate.stored_bits,
+                                    300, 1300);
 
                                 if (score > best_boundary_score) {
                                     best_boundary_score = score;
@@ -33879,11 +33922,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                         70.0f,
                                         0,
                                         false,
-                                        64,
+                                        1500,
                                         NULL,
                                         &candidate)) {
-                                    int score = candidate.first64_ones
-                                              + candidate.b1_tail_ones;
+                                    int score = v34_replay_ones_in_range(
+                                        candidate.bytes,
+                                        candidate.stored_bits,
+                                        300, 1300);
 
                                     if (score > best_boundary_score) {
                                         best_boundary_score = score;
@@ -33942,11 +33987,13 @@ static void stereo_resolve_cross_channel(stereo_decode_context_t *ctx,
                                             scale_trial[scale_index],
                                             rotation,
                                             conjugate != 0,
-                                            512,
+                                            1500,
                                             NULL,
                                             &candidate)) {
-                                        int score = candidate.first64_ones
-                                                  + candidate.b1_tail_ones;
+                                        int score = v34_replay_ones_in_range(
+                                            candidate.bytes,
+                                            candidate.stored_bits,
+                                            300, 1300);
 
                                         if (score > best_native_score) {
                                             best_native_score = score;
