@@ -153,7 +153,7 @@ Server side (Mac) — baseline call, then the A/B call adds
 ```sh
 ME_V8_ANSWER_TONE=ansam_pr SIP_FORCE_PCMU=1 \
 ME_TRAINING_TIMEOUT_MS=300000 \
-ME_V90_J_LOOKAHEAD_BITS=3000 ME_V90_JD_RESYNC_SYMBOLS=24000 ME_V90_SD_DELAY_MS=750 \
+ME_V90_J_LOOKAHEAD_BITS=3000 ME_V90_JD_RESYNC_SYMBOLS=48000 ME_V90_SD_DELAY_MS=750 \
 VPCM_G711_TAP_DIR=artifacts/v90-hardware/$(date -u +%Y%m%dT%H%M%SZ)-trn2d_ref \
 ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 --password 6001 \
   --pty /tmp/v90modem
@@ -186,17 +186,35 @@ of:
 Since the metric is a slicer residual, `ME_V90_SHAPER_METRIC` cannot change
 what the peer measures (kept for spec-conformance experiments only).
 
-### Phase-3 THIRD_S race (why calls die before Phase 4)
+### Phase-3 THIRD_S deadlock (why calls died before Phase 4)
 
-Measured 2026-07-23 (calls that never reached Phase 4): peer converges to
-Error Energy ~12 through Sd/TRN1d/Jd, logs `IndicateJdReceived`, enters
-`V90RCV_P3_THIRD_S` and starts its S — and from that instant its data-aided
-reference expects our *third Sd* while we are still transmitting Jd (its S
-has not reached our detector yet). Error jumps 12 → 289 → 432 within 340 ms
-and it issues `drop to V34 requested` (DP=34: call unrecoverable for V.90)
-or `retrain requested`. The whole race window is ~340 ms of S; our
-detection+turnaround latency decides every attempt. Other observed attempt
-failures the same day: `Error Energy = -0.000` throughout WaitForSd (peer
-never saw Sd; timing), and ~2500 flat (equalizer never converged, retrained
-attempt with `ME_V90_SD_DELAY_RETRAIN_MS`). Expect a per-attempt lottery;
-batch calls (see `tools/trn2d_call_batch.sh`) until one wins.
+The earlier "THIRD_S race" reading (peer starts its S, our
+detection+turnaround latency decides) is DISPROVEN, by two independent
+captures on 2026-07-23:
+
+- G.711 taps of 7 straight failed attempts show ZERO upstream S energy in
+  any Jd window — the peer never transmitted its §9.3.2.7 S at all.  (Those
+  7 were the other family: `IndicateJdReceived` never fired, peer silently
+  hit its Jd deadline and retrained — Ja tail → ~2.7 s silence → INFO0a →
+  tone A.)
+- The tower log of a `IndicateJdReceived`-reaching call shows the peer's TX
+  state going `JaTXMIT => SILENCERETRAIN` at the drop — no S-transmit state
+  ever entered.
+
+The actual mechanism was a deadlock we caused: §9.3.2.7 lets the analogue
+modem wait **up to 5000 ms from silence start** before transmitting S, but
+`ME_V90_JD_RESYNC_SYMBOLS=24000` capped our Jd at 3.0 s (≈ silence+3.3 s).
+We abandoned Jd while the peer was still lawfully waiting; its "Error
+Energy explosion" (12 → ~1145, then `drop to V34` ~120 ms later) is
+timestamp-aligned with our own Jd ending, not with any mismatched
+reference.  Our Phase-3 S detector has therefore never been shown a real S.
+
+Fix: `ME_V90_JD_RESYNC_SYMBOLS=48000` (6.0 s) covers the peer's full
+discretionary window; §9.3.1.4 puts no upper bound on Jd duration on the
+digital side.  Residual attempt failures to still expect: the peer failing
+to decode Jd at all (retrain family above — includes the
+`Error Energy = -0.000` WaitForSd misses and the ~2500-flat unconverged
+equalizer), and possibly our 750 ms `ME_V90_SD_DELAY_MS` brushing the
+peer's 1500 ms §9.3.2.4 Sd-S̄d deadline (two of the seven taped attempts
+show Ja persisting through our Sd — shorten the delay if that family
+dominates a batch).  Batch calls with `tools/trn2d_call_batch.sh`.
