@@ -458,3 +458,39 @@ estimate true carrier phase/equalizer response and seed the loops; then the
 existing freeze machinery holds through MP and the new DD tracking holds
 through data.  All offline-testable against winner-stereo.wav with the
 committed repro before any live call.
+
+### Data-aided acquisition landed — phase LOCK achieved; equalizer/timing is the last layer
+
+Implemented on the CP/MP window (better than TRN/B1: §8.5.2/V.90 inits the
+peer's differential encoder at the first CPt, the 4-point constellation sits
+on the 45° family, and the hypothesis-locked dibit decisions are the same
+ones that CRC-validate CP frames — reliable known data ending exactly at the
+E→B1 handoff):
+- Decision-aided phase tracker (`phase4_da_*` in v34_rx_state_t): integrates
+  decision quadrants into an expected absolute angle (seeded by snapping to
+  the 45° family; 90° ambiguity absorbed by data differential bits), error
+  drives a POST-EQUALIZER DEROTATOR (`phase4_da_derot`) — zero loop delay,
+  quarter-deadbeat.  Correcting the carrier NCO instead does NOT work: the
+  wander source is CMA's phase-blind tap rotation, downstream of the NCO,
+  behind ~40 bauds of equalizer group delay.  **VERIFIED LOCKED: err ±5°
+  through the whole CP/MP stretch** (V34_DA_TRACK_LOG=1 to watch).
+- The DATA stage derotates by phase4_da_derot before its transform, and its
+  DD tracker now updates the derotator (gain 1/32), not the NCO.
+- Data-aided LMS (`tune_equalizer` with the known 4-point target) replaces
+  CMA once the DA tracker is seeded (CMA muted — the two fight).
+- **Replay carrier trap**: this capture demodulates ~91 Hz off with the
+  pipeline's default carrier detection — err pinned at +45° with derot
+  spinning is the signature (residual = carrier spacing 1920−1829 Hz;
+  differential CP decode masks it).  `VPCM_V90_NATIVE_CARRIER=1` required
+  on winner-stereo.wav.  CHECK THE LIVE ENGINE'S carrier selection too.
+
+Remaining blocker (measured, not speculation): with phase locked and DA-LMS
+running (delta 1.65e-3), LMS error stays ~0.6 rms on unit targets and the
+eq output magnitude swings 0.35–1.75 on a constant-modulus input — the
+equalizer never reaches a data-grade solution.  Prime suspect: Godard
+timing-loop ±1-sample slips shifting the eq input stream under the taps
+(see ME_V34_FREEZE_TIMING_DURING_MP note).  Next session: characterize the
+timing loop over the CP window (log eq_put_step/total_baud_timing_correction
+vs [EQ] err), then either hold timing via the DA decisions or re-center the
+T/2 phase at DA seed.  Decode target unchanged: idle window of
+winner-stereo.wav should read ~100% ones.

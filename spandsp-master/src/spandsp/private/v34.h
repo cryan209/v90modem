@@ -1099,6 +1099,22 @@ typedef struct
     int mp_phase4_force_abs_active;
     int mp_phase4_diff_collapse_streak;
     int mp_phase4_diff_recover_streak;
+    /*! \brief Decision-aided Phase 4 carrier acquisition: expected absolute
+        symbol angle (DDS phase units), integrated from the hypothesis-locked
+        differential dibit decisions.  Seeded by snapping the received angle
+        to the 45-degree constellation family at lock, so the loop pulls the
+        constellation onto the true grid up to a 90-degree ambiguity (which
+        V.34's differential quadrant bits absorb in data mode). */
+    uint32_t phase4_da_expected_ang;
+    /*! \brief True once the decision-aided tracker has been seeded. */
+    int phase4_da_active;
+    /*! \brief Post-equalizer derotator (DDS phase units) owned by the
+        decision-aided tracker.  The phase wander it corrects comes from the
+        CMA equalizer's phase-blind tap rotation, which sits downstream of
+        the carrier NCO -- correcting there fights the equalizer's group
+        delay, so the rotation is taken out at the equalizer output where the
+        loop delay is zero and a deadbeat update is stable. */
+    uint32_t phase4_da_derot;
     int last_logged_mp_diag_state;
 
     int dft_ptr;

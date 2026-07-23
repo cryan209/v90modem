@@ -7118,6 +7118,89 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         mp_decode_domain = s->mp_phase4_force_abs_active ? 1 : s->mp_phase4_domain;
 
+        /* Decision-aided carrier acquisition through the CP/MP stretch.
+           The receiver reaches Phase 4 with no coherent lock (the TRN/MP
+           "locks" are bit-domain hypothesis latches; CP/MP decode survives
+           on differential dibits alone).  Data mode needs true coherence,
+           and this window is the last chance to acquire it: the analogue
+           modem's differential encoder is initialized to zero at the first
+           CPt (8.5.2/V.90), the 4-point constellation sits on the 45-degree
+           family, and once the hypothesis machinery locks, the differential
+           dibit decisions here are the same ones that go on to CRC-validate
+           whole CP frames -- reliable known data.  Integrate those quadrant
+           increments into an expected absolute angle (seeded by snapping the
+           received angle onto the 45-degree family, leaving only the
+           90-degree ambiguity that V.34's differential quadrant bits absorb
+           in data mode) and drive the existing carrier loop with the angle
+           error, so the constellation is pulled onto the true grid before
+           E/B1 hands over to the DATA slicer.  ME_V34_PHASE4_DA_TRACK=0
+           disables for A/B. */
+        {
+            static int da_enabled = -1;
+
+            if (da_enabled < 0)
+            {
+                const char *value = getenv("ME_V34_PHASE4_DA_TRACK");
+
+                da_enabled = (value == NULL || atoi(value) != 0);
+            }
+            if (!da_enabled || s->mp_hypothesis < 0)
+            {
+                s->phase4_da_active = 0;
+            }
+            else if (!s->phase4_da_active)
+            {
+                /* Seed the derotator so the corrected angle lands on the
+                   45-degree constellation family (90-degree family ambiguity
+                   is absorbed by the data differential quadrant bits), and
+                   start the expected-angle integrator there. */
+                uint32_t ang1c = ang1 - s->phase4_da_derot;
+                uint32_t tmp = ang1c - DDS_PHASE(45.0f);
+                uint32_t quadrant = (tmp + 0x20000000U) >> 30;
+                uint32_t snapped = (quadrant << 30) + DDS_PHASE(45.0f);
+
+                s->phase4_da_derot += (uint32_t) ((int32_t) (ang1c - snapped));
+                s->phase4_da_expected_ang = snapped;
+                s->phase4_da_active = 1;
+            }
+            else
+            {
+                int32_t err_i;
+
+                s->phase4_da_expected_ang += ((uint32_t) data_bits) << 30;
+                err_i = (int32_t) ((ang1 - s->phase4_da_derot)
+                                   - s->phase4_da_expected_ang);
+                /* Zero-delay loop: quarter-deadbeat is stable and follows
+                   the CMA random walk with a ~4-baud time constant. */
+                s->phase4_da_derot += err_i/4;
+                /* Data-aided LMS: with the transmitted symbol known, train
+                   the equalizer to the true zero-ISI solution.  CMA only
+                   restores the modulus; its residual ISI is invisible on
+                   constant-envelope signals but is exactly what smears the
+                   multi-amplitude data constellation into ringless mush.
+                   Target = the known 4-point symbol at CMA's unit radius,
+                   rotated back into the equalizer-output domain. */
+                {
+                    float tang = (float) (uint32_t) (s->phase4_da_expected_ang
+                                                     + s->phase4_da_derot)
+                               * (float) (3.14159265358979/2147483648.0);
+                    complexf_t da_target;
+
+                    da_target.re = cosf(tang);
+                    da_target.im = sinf(tang);
+                    tune_equalizer(s, sym, &da_target);
+                }
+                if (getenv("V34_DA_TRACK_LOG") && (s->duration % 256) == 0)
+                {
+                    fprintf(stderr,
+                            "[DA] baud=%d err=%.1fdeg derot=%.1fdeg\n",
+                            s->duration,
+                            (float) err_i*(360.0f/4294967296.0f),
+                            (float) s->phase4_da_derot*(360.0f/4294967296.0f));
+                }
+            }
+        }
+
         /* ME_V34_DUMP_MP_DIBITS (diagnostic, 2026-07-19): dumps the raw
            diff/abs dibit per baud for offline replay -- e.g. brute-forcing
            every (hypothesis, domain, tap, order) combination against the
@@ -8361,8 +8444,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             float transformed_re;
             float transformed_im;
 
-            re = sym->re;
-            im = s->data_symbol_conjugate ? -sym->im : sym->im;
+            /* Take out the decision-aided derotator acquired over the CP/MP
+               stretch: this is what makes the symbols coherent.  CMA (the
+               wander source) is frozen in DATA, so from here only genuine
+               carrier drift remains, held by the DD tracker below. */
+            {
+                float c = cosf((float) s->phase4_da_derot
+                               *(float) (3.14159265358979/2147483648.0));
+                float sn = sinf((float) s->phase4_da_derot
+                                *(float) (3.14159265358979/2147483648.0));
+                float dr = sym->re*c + sym->im*sn;
+                float di = sym->im*c - sym->re*sn;
+
+                re = dr;
+                im = s->data_symbol_conjugate ? -di : di;
+            }
             switch (s->data_symbol_rotation & 3)
             {
             case 1:
@@ -8433,16 +8529,18 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         /* Phase error in the transformed (grid) domain equals
                            the error in the equalizer domain: the transform is
                            a fixed rotation/conjugation/scale, and the
-                           conjugate flips the error sign, which we undo. */
+                           conjugate flips the error sign, which we undo.
+                           Update the zero-delay derotator (positive error =
+                           received leads target = derotator must remove
+                           more), gently -- data decisions are less reliable
+                           than the CP/MP decision-aided ones. */
                         float error = (g_im*t_re - g_re*t_im)
                                     / (sym_mag*tgt_mag);
 
                         if (s->data_symbol_conjugate)
                             error = -error;
-                        s->v34_carrier_phase_rate +=
-                            (int32_t)(s->carrier_track_i*error);
-                        s->carrier_phase +=
-                            (int32_t)(s->carrier_track_p*error);
+                        s->phase4_da_derot +=
+                            (int32_t) (error*(1.0f/32.0f)*2147483648.0f/3.14159265f);
                     }
                 }
             }
@@ -8576,7 +8674,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                 bool freeze_mp_cma = (s->stage == V34_RX_STAGE_PHASE4_MP)
                                   && getenv("ME_V34_FREEZE_CMA_DURING_MP");
-                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma)
+                /* Once the decision-aided Phase 4 tracker owns the taps
+                   (data-aided LMS above), CMA must stand down or the two
+                   fight: CMA's phase-blind gradient re-randomizes the phase
+                   the DA loop just fixed. */
+                bool da_owns_eq = (s->stage == V34_RX_STAGE_PHASE4_MP)
+                               && s->phase4_da_active;
+                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                     tune_equalizer_cma(s, sym);
             }
             /*endif*/
