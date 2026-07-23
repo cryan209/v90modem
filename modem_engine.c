@@ -1712,7 +1712,23 @@ static void g711_taps_init(void)
         g711_taps_close();
         return;
     }
+    /* The tap fwrites run on the media clock; with default 4 KB stdio
+     * buffers each flush is a disk write() on that path, and an occasional
+     * stall past the 20 ms frame deadline slips a frame — fatal for the
+     * sample-exact V.90 PCM stages while leaving tones/DPSK fine (observed
+     * live 2026-07-23: taps-on 0/9 attempts decode Jd, taps-off 4/4).
+     * 64 MB per tap holds >2 h of G.711, so no write() lands mid-call. */
+    setvbuf(g_g711_rx_tap, NULL, _IOFBF, 64 * 1024 * 1024);
+    setvbuf(g_g711_tx_tap, NULL, _IOFBF, 64 * 1024 * 1024);
     ME_LOG("[ME] Live G.711 taps: RX=%s TX=%s\n", rx_path, tx_path);
+}
+
+void me_flush_g711_taps(void)
+{
+    if (g_g711_rx_tap)
+        fflush(g_g711_rx_tap);
+    if (g_g711_tx_tap)
+        fflush(g_g711_tx_tap);
 }
 
 /* Voice-mode PCM fidelity testing (tools/voice_pcm_fidelity.py).
