@@ -987,6 +987,15 @@ typedef struct
     uint8_t phase3_s_ring[32];
     float phase3_s_mag_ring[32];
     int phase3_s_counts[4];
+    /* Sustained-rotation S detection: against real peers (SmartLink d-modem)
+       the far-end S / S-bar present as a steady +/-90 degrees-per-symbol
+       rotation (a single dominant differential dibit held for the whole
+       128T signal), not the A,B,A,B alternation the alt detector looks for.
+       Scrambled Ja never holds one dibit beyond ~10 bauds, so a long-run
+       dominant ±90 dibit is an unambiguous S. */
+    int phase3_s_dom_windows;   /* consecutive bauds the 32-window is dominated by a +/-90 dibit */
+    int phase3_s_dom_symbol;    /* the currently dominant differential dibit (1 or 3), else -1 */
+    int phase3_s_fired_symbol;  /* dibit whose rotation set the current phase3_s_present, else -1 */
     int phase3_s_pos;
     uint8_t phase3_pp_lag8[8];
     int phase3_pp_obs;
