@@ -124,6 +124,11 @@ void me_tx_audio(int16_t *amp, int len);
 void me_rx_g711(const uint8_t *codewords, int count);
 int  me_tx_g711(uint8_t *codewords, int count);
 
+/* Flush the live G.711 tap files (VPCM_G711_TAP_DIR).  The taps are fully
+ * memory-buffered so no disk write() lands on the media clock; call this at
+ * call boundaries (media-down) so a later kill cannot lose the capture. */
+void me_flush_g711_taps(void);
+
 /* Notify the engine that a SIP call has been connected (audio active). */
 void me_on_sip_connected(void);
 

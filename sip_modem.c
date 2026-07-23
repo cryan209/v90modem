@@ -1086,6 +1086,8 @@ int main(int argc, char *argv[])
         if ((g_media_connected ? 1 : 0) != g_last_logged_media_connected) {
             g_last_logged_media_connected = g_media_connected ? 1 : 0;
             log_modem_diag_snapshot(g_media_connected ? "media-up" : "media-down");
+            if (!g_media_connected)
+                me_flush_g711_taps();   /* off the media clock; see header */
         }
 
         /* ── Ring timer: send RING and auto-answer after N rings ── */
