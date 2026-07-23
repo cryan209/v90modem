@@ -317,8 +317,18 @@ static void p6_reset(v92_p3_rx_t *rx)
 }
 
 /* -------------------------------------------------------------------------
- * GPA descrambler (x^23 + x^18 + 1, tap = 17)
+ * Upstream descrambler — WARNING: taps 18/23 are GPC, not the GPA the
+ * name claims.
  * -------------------------------------------------------------------------
+ * V.92 §6.3 mandates GPA (eq 7-2/V.34 = 1 + x^-5 + x^-23, delay taps 5 and
+ * 23 → reg>>4 ^ reg>>22; spandsp's answerer tx.scrambler_tap = 4 confirms
+ * the tap assignment) for everything the ANALOGUE modem transmits.  This
+ * function reads reg>>17 ^ reg>>22 = delay taps 18/23 = GPC — the "x^18"
+ * in GPA's positive-power form x^23 + x^18 + 1 was misread as a delay tap.
+ * Never validated against live audio: the TRN1u all-ones check has never
+ * exceeded ~53% ones (docs/v92_pcm_upstream_findings.md), which is exactly
+ * the wrong-polynomial signature.  Fix by switching to taps 4/22 and
+ * re-running the TRN1u ones check on a truth capture before trusting.
  * Self-synchronising: shift register is updated with the raw INPUT bit.
  */
 static inline int gpa_descramble(uint32_t *reg, int in_bit)
