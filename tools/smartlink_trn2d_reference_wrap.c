@@ -97,8 +97,9 @@ smartlink_getdecision_hook(void *demodulator, int16_t received)
             (void)fwrite(pair, sizeof(pair[0]), 2, record_file);
             record_count++;
             /* Flush often: calls end by retrain/timeout, not clean
-             * shutdown. */
-            if (record_count % 2048 == 0)
+             * shutdown, and a no-DIL Phase 4 lasts ~100 ms (~800 pairs) —
+             * a 2048-pair cadence lost one such capture on 2026-07-23. */
+            if (record_count % 64 == 0)
                 fflush(record_file);
             if (record_count % 12000 == 0)
                 fprintf(stderr, "TRN2REF %lu pairs captured\n", record_count);
