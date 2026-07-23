@@ -67,9 +67,9 @@ docker exec d-modem sh -c "cd /src/slmodemd && cp modem.c.bak-prev92up modem.c &
 Settles which of sign / level / timing the peer's Phase-4 Error Energy plateau
 (~300-380 vs ~110-146 during DIL) is made of, in the peer's own units.
 
-**What disassembly established (2026-07-23):**
-`V90Phase4Demodulator::trn2dKnownDemod()` (dsplibs.o `.text` 0x25de0) is
-DECISION-DIRECTED and pure:
+**What disassembly claimed (2026-07-23) — sign part DISPROVED by the round-3
+live pairs, keep only the level-table part.** The static read of
+`V90Phase4Demodulator::trn2dKnownDemod()` (dsplibs.o `.text` 0x25de0) was:
 
 ```
 reference = sign(received) * table[(idx-1) mod 6][law(|received|)]
@@ -78,11 +78,16 @@ reference = sign(received) * table[(idx-1) mod 6][law(|received|)]
 with `law()` = `linear2alaw`/`linear2ulaw` (A-law: `xor 0xD5`; u-law:
 `0xFF - x`) and `table` = the per-interval 128-entry int16 level table the
 TRN2 design (`findPadGain`) produced, at `[[this+0x3514]]` with the law flag
-at `+0xa95c` of that object. The peer does NOT regenerate our transmitted
-symbol sequence — signs come from the received samples themselves — so the
-§5.4.5.6 shaper-metric convention (`ME_V90_SHAPER_METRIC`) is invisible to
-its reference and Error Energy is a per-symbol slicer residual
-`|received - nearest designed level|^2`.
+at `+0xa95c` of that object. The level-table half held up against the
+captured pairs; the `sign(received)` half did NOT — the round-3 pairs show
+the reference signs mismatching the received signs 50% of the time against
+our deterministic +++--- Ri, which `sign(received)` could never do. The
+reference sign is therefore DATA-AIDED: the peer regenerates the
+transmitter's §5.4.5 sign sequence, and the §5.4.5.6 shaper-metric
+convention (`ME_V90_SHAPER_METRIC`, ~31% sign divergence between readings)
+is fully visible to its Error Energy. The strict transmitted-levels reading
+is now the v90.c default (`ME_V90_SHAPER_METRIC=codec` restores the old
+far-codec metric).
 
 **Hook placement:** the compiler inlined trn2dKnownDemod into
 `getV90Decision`/`getV92Decision` — dsplibs.o contains **zero relocations**
@@ -147,8 +152,9 @@ docker exec -d d-modem sh -c "socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/tty
 poll for TRN2REF / NO CARRIER, early-exit on success) — expect to need it;
 see the Phase-3 THIRD_S race below.
 
-Server side (Mac) — baseline call, then the A/B call adds
-`ME_V90_SHAPER_METRIC=transmit`:
+Server side (Mac) — baseline call (strict transmit metric is now the
+default), then the A/B call adds `ME_V90_SHAPER_METRIC=codec` to restore the
+old far-codec metric:
 
 ```sh
 ME_V8_ANSWER_TONE=ansam_pr SIP_FORCE_PCMU=1 \
@@ -170,9 +176,10 @@ docker cp d-modem:/tmp/slm.log .
 
 ### Read-out
 
-The reference is decision-directed, so most analysis is self-contained in the
-pairs (no TX alignment needed). `tools/trn2d_pairs_analyze.py` computes all
-of:
+The reference LEVELS come from the peer's own findPadGain table, but the
+reference SIGNS are data-aided (predicted transmitter sequence — see the
+revision above), so sign analysis needs TX alignment against live-tx.g711.
+`tools/trn2d_pairs_analyze.py` computes all of:
 
 - **windowed mean `(rx-ref)^2`** — must reproduce the peer's logged
   `Error Energy` curve in its own units (sanity + unit calibration).
@@ -180,11 +187,16 @@ of:
   or per-Ucode offset here is a pad/resampler-gain error against the
   `findPadGain` table; a fat symmetric residual with mean ~0 is
   ISI/equalizer misconvergence instead.
-- **sign agreement** — must be 100% by construction (reference takes the
-  received sign); anything else means the capture is miswired.
+- **sign agreement** — NOT guaranteed; on a real (post-DIL, post-CPt) TRN2d
+  window this directly measures whether the peer's predicted sign sequence
+  matches ours, i.e. whether our §5.4.5.6 metric convention matches its
+  reference. ~0% mismatch = convention right; ~31% = the codec-vs-transmit
+  fork; ~50% = degenerate window (peer demodding Ri, no DIL happened — the
+  rounds-3/4 captures are all this) or miswired capture.
 
-Since the metric is a slicer residual, `ME_V90_SHAPER_METRIC` cannot change
-what the peer measures (kept for spec-conformance experiments only).
+Because the reference signs are predicted, `ME_V90_SHAPER_METRIC` DOES
+change what the peer measures on a real TRN2d window; the strict transmit
+reading is the default as of 2026-07-23.
 
 ### Phase-3 THIRD_S deadlock (why calls died before Phase 4)
 

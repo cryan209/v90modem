@@ -1308,12 +1308,15 @@ static bool v90_shaper_rule_inverts(int rule, int position)
  * "select the rule that minimizes" metric feeds on PCM output levels, and two
  * readings of which levels exist:
  *
- *   codec    (default) — the far codec D/A output levels the analogue
- *            receiver actually hears (the Table-14 bit-128 corresponding set;
- *            see v90_cp_transport_codeword()'s comment).  Shapes the spectrum
- *            on the subscriber loop, arguably the spec's engineering intent.
- *   transmit — the levels of the PCM codewords we actually place on the
- *            digital bearer: the strict reading of the §5.4.5.6 text.
+ *   transmit (default) — the levels of the PCM codewords we actually place
+ *            on the digital bearer: the strict reading of §5.4.5.6 ("the
+ *            linear value corresponding to PCM codes being transmitted...
+ *            given in Table 1").
+ *   codec    — the far codec D/A output levels the analogue receiver
+ *            actually hears (the Table-14 bit-128 corresponding set; see
+ *            v90_cp_transport_codeword()'s comment).  Shapes the spectrum
+ *            on the subscriber loop — arguably better engineering, but
+ *            nothing the spec licenses a peer to predict.
  *
  * When the two level sets differ (mu-law nonlinearity, differing codec
  * constellations) they rank rule choices differently, and the trellis memory
@@ -1321,15 +1324,16 @@ static bool v90_shaper_rule_inverts(int rule, int position)
  * uncorrelated sign sequences (measured: 30.7% of TRN2d signs differ for the
  * call-13 SmartLink constellation, zero Ucode changes).
  *
- * NOTE (2026-07-23): disassembly of SmartLink's trn2dKnownDemod shows that
- * peer's Phase-4 reference is DECISION-DIRECTED — sign and level are taken
- * from the received sample via its own slicer table — so this convention is
- * invisible to that receiver and is NOT the cause of its Error Energy
- * plateau (see rig/slmodemd/README.md).  The flag is kept for
- * spec-conformance experiments against peers that do predict the sequence.
- * ME_V90_SHAPER_METRIC=transmit selects the strict reading; any other value
- * keeps the codec-levels behaviour.  Cached: this runs inside the per-symbol
- * metric loop. */
+ * NOTE (2026-07-23, revised): the round-3 TRN2REF pairs DISPROVED the
+ * earlier decision-directed reading of SmartLink's trn2dKnownDemod — the
+ * captured reference signs do not track the received samples (50% mismatch
+ * against our +++--- Ri), so the peer regenerates the transmitter's sign
+ * sequence data-aided and this convention IS visible to it.  A predicting
+ * peer can only assume the spec's transmitted-levels reading, so that is
+ * now the default; a ~31% persistent sign mismatch is the leading theory
+ * for the Phase-4 Error Energy plateau (~110-146 → 300-380 at TRN2d start).
+ * ME_V90_SHAPER_METRIC=codec restores the far-codec metric for experiments.
+ * Cached: this runs inside the per-symbol metric loop. */
 static bool v90_shaper_metric_transmit_levels(void)
 {
     static int cached = -1;
@@ -1337,7 +1341,7 @@ static bool v90_shaper_metric_transmit_levels(void)
     if (cached < 0) {
         const char *value = getenv("ME_V90_SHAPER_METRIC");
 
-        cached = (value && strcmp(value, "transmit") == 0) ? 1 : 0;
+        cached = (value && strcmp(value, "codec") == 0) ? 0 : 1;
         fprintf(stderr,
                 "[V90] ACTIVE shaper metric input: %s levels\n",
                 cached ? "transmitted bearer-law" : "far-codec output");
