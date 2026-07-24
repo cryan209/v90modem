@@ -5548,6 +5548,14 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason)
 {
+    const char *retain_env;
+    bool retain_phase3_frontend;
+
+    retain_env = getenv("ME_V34_RETAIN_PHASE3_FRONTEND");
+    retain_phase3_frontend = s->rx.v90_mode
+                          && retain_env
+                          && atoi(retain_env) != 0;
+
     s->primary_channel_active = true;
     s->rx.current_demodulator = V34_MODULATION_V34;
     s->rx.stage = initial_stage;
@@ -5609,32 +5617,39 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
     memset(s->rx.mp_hyp_scramble, 0, sizeof(s->rx.mp_hyp_scramble));
     memset(s->rx.mp_hyp_bitstream, 0, sizeof(s->rx.mp_hyp_bitstream));
 
-    /* Carry Phase 3 equalizer coefficients into Phase 4 and re-seed the
-       surrounding timing/filter state for a clean Phase 4 acquisition. */
-    s->rx.eq_target_mag = 0.0f;
-    cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
-    s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
-    s->rx.baud_half = 0;
-    s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
-    s->rx.carrier_phase = 0;
-    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
-    s->rx.rrc_filter_step = 0;
-    s->rx.pri_ted.baud_phase = 0.0f;
-    s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
-    s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
-    s->rx.pri_ted.symbol_sync_high[0] = 0.0f;
-    s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
-    s->rx.pri_ted.symbol_sync_dc_filter[0] = 0.0f;
-    s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
-    s->rx.total_baud_timing_correction = 0;
+    /* The normal path carries the Phase 3 coefficients but re-seeds the
+       surrounding timing/filter state for a clean Phase 4 acquisition.  On
+       an analogue V.90 line, optionally retain the complete trained frontend
+       instead: the equalizer history, carrier phase, RRC history, and TED
+       state are all part of the coherent solution established by Phase 3. */
+    if (!retain_phase3_frontend)
+    {
+        s->rx.eq_target_mag = 0.0f;
+        cvec_zerof(s->rx.eq_buf, V34_EQUALIZER_MASK + 1);
+        s->rx.eq_step = V34_EQUALIZER_PRE_LEN;
+        s->rx.baud_half = 0;
+        s->rx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+        s->rx.carrier_phase = 0;
+        memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+        s->rx.rrc_filter_step = 0;
+        s->rx.pri_ted.baud_phase = 0.0f;
+        s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
+        s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
+        s->rx.pri_ted.symbol_sync_high[0] = 0.0f;
+        s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
+        s->rx.pri_ted.symbol_sync_dc_filter[0] = 0.0f;
+        s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
+        s->rx.total_baud_timing_correction = 0;
+    }
 
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Rx - Phase 4: conditioned for %s (stage=%d, baud_rate=%d, high_carrier=%d, carrier=%.1f Hz)\n",
+             "Rx - Phase 4: conditioned for %s (stage=%d, baud_rate=%d, high_carrier=%d, carrier=%.1f Hz, frontend=%s)\n",
              reason ? reason : "Phase 4 startup",
              s->rx.stage,
              s->rx.baud_rate,
              s->rx.high_carrier,
-             carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+             carrier_frequency(s->rx.baud_rate, s->rx.high_carrier),
+             retain_phase3_frontend ? "retained" : "reset");
 }
 /*- End of function --------------------------------------------------------*/
 
