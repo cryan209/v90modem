@@ -134,6 +134,13 @@ static int phase3_rx_dump_count = 0;
 #define MP_PREAMBLE_WAIT_BITS           800
 #define MP_PRELOCK_PREAMBLE_WAIT_BITS   160
 #define PHASE4_MP_TIMEOUT_BAUDS         20000
+/* V.90 §9.4.1 lets the digital modem wait 15 s plus round-trip delays for
+   B1 after INFO1a.  Before CPt is accepted, silence is therefore not enough
+   evidence that the analogue modem has retrained: it may still be between
+   repeated CPt attempts.  Keep the legacy silence heuristic out of that
+   acquisition window; the independent Tone A detector below still handles a
+   genuine §9.5.2.1 retrain immediately. */
+#define PHASE4_CP_ACQUISITION_WAIT_SECONDS 15
 #define MP_TRN_PRELOCK_SCORE_MIN        70
 #define PHASE4_TRN_SCORE_START_BAUD     145
 #define PHASE4_TRN_LOCK_MIN_BITS        64
@@ -976,6 +983,15 @@ static void mp_phase4_update_auto_domain(v34_rx_state_t *s, const int diff_hist[
 {
     int diff_collapsed;
     int abs_healthy;
+
+    /* Once a Phase 4 hypothesis has locked, its bit stream must remain in the
+       same dibit domain for the complete CP/MP frame.  Switching from the
+       absolute fallback back to differential dibits while the frame is being
+       collected preserves the preamble but corrupts the DFI/DRN/CRC fields.
+       Leave the selected domain latched until the hypothesis is explicitly
+       reset after a rejected frame. */
+    if (s->mp_hypothesis >= 0)
+        return;
 
     diff_collapsed = mp_phase4_diff_hist_collapsed(diff_hist);
     abs_healthy = mp_phase4_abs_hist_healthy(abs_hist);
@@ -8962,17 +8978,23 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
        dedicated expect-silence/energy detector below owns abandonment; this
        detector remains useful in the later Phase 4 stages.
 
-       Likewise, do not arm it during the first 1000 ms of PHASE4_MP.  The
-       project-owned V.90 transmitter hands the receiver directly from DIL to
-       CPt acquisition, and the analogue modem is allowed a quiet turnaround
-       before its first repeated CPt.  Live SmartLink calls recover CPt about
-       800 ms after this stage is armed and can contain a 60 ms low-energy gap
-       around 320 ms; the old 200 ms grace therefore still reported a false
-       SILENCERETRAIN.  Waiting 3200 bauds leaves the detector active for a
-       later retrain after CPt has had a full acquisition window. */
+       Likewise, do not arm it during the initial CPt acquisition window in
+       PHASE4_MP.  The project-owned V.90 transmitter hands the receiver
+       directly from DIL to CPt acquisition, and the analogue modem may send
+       CPt, SCR, or silence while it searches for a usable upstream path.
+       V.90 gives this exchange a 15 s plus round-trip-delay budget.  A short
+       silence inside that interval must not stop our unbarred Ri and restart
+       Phase 2.  The independent Tone A detector below remains armed for an
+       explicit peer retrain request. */
+    int phase4_cp_wait_bauds = 0;
+    if (s->baud_rate >= 0 && s->baud_rate < 6)
+        phase4_cp_wait_bauds = PHASE4_CP_ACQUISITION_WAIT_SECONDS
+                               * baud_rate_parameters[s->baud_rate].baud_rate;
+
     if (s->stage > V34_RX_STAGE_PHASE3_TRAINING
         && s->stage <= V34_RX_STAGE_PHASE4_MP
-        && !(s->stage == V34_RX_STAGE_PHASE4_MP && s->duration < 3200))
+        && !(s->stage == V34_RX_STAGE_PHASE4_MP
+             && s->duration < phase4_cp_wait_bauds))
     {
         int32_t retrain_floor = (s->info_rx_carrier_ref > 0)
                                 ? s->info_rx_carrier_ref/64

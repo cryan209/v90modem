@@ -166,11 +166,10 @@ static int v90_jd_prime_symbols(void)
 }
 
 /* Some analogue implementations stop DIL after a known number of complete
- * descriptor cycles, but our upstream S/S-bar detector may not yet recover
- * their second turnaround reliably.  Keep the standards-driven default
- * (repeat until the peer's S event), while allowing a bounded interop
- * fallback.  SmartLink's ADI/ADI-QC profiles both request one complete cycle
- * before they enter Phase 4 and start CPt. */
+ * descriptor cycles, but our upstream S/S-bar detector may momentarily match
+ * SCR/TRN or silence at the beginning of DIL.  Require one complete cycle by
+ * default before accepting an S-like termination event; an explicit zero
+ * keeps the old repeat-until-S diagnostic behavior. */
 static int v90_dil_autoterminate_cycles(void)
 {
     const char *value;
@@ -187,7 +186,7 @@ static int v90_dil_autoterminate_cycles(void)
     if (value && (strcmp(value, "smartlink-adi-qc") == 0
                   || strcmp(value, "smartlink-adi") == 0))
         return 1;
-    return 0;
+    return 1;
 }
 
 /* Interop-only allowance for a peer whose upstream S termination request is
@@ -3219,6 +3218,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->phase4_hold_logged = true;
         }
         if (!s->cp_ready) {
+            if (s->sample_count == 0) {
+                fprintf(stderr,
+                        "[V90] Phase 4: holding unbarred Ri while waiting for CPt\n");
+            }
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, false);
 
             s->sample_count++;
@@ -3786,26 +3789,28 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         }
         if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
             int cycle_limit = v90_dil_autoterminate_cycles();
-            int minimum_segments = cycle_limit * s->dil.n;
+            int minimum_cycles = cycle_limit > 0 ? cycle_limit : 1;
+            int minimum_segments = minimum_cycles * s->dil.n;
 
-            /* The SmartLink interop descriptors require one complete DIL
-             * cycle.  A primary-channel S detector can momentarily match the
-             * changing PCM training levels themselves; accepting that early
-             * match truncated a 144-segment ADI-QC cycle after only six
-             * segments on hardware.  Do not let a physical event contradict
-             * the explicit minimum-cycle contract. */
-            if (cycle_limit > 0
-                && s->dil_segment_index < minimum_segments) {
+            /* The analogue modem may still produce the Su/Su-bar transition
+             * near the J'd -> DIL boundary.  SpanDSP exposes both polarities
+             * through the same phase-3 S event, and SCR or silence can also
+             * resemble a sustained S rotation.  Hold DIL for at least one
+             * complete descriptor cycle before allowing that ambiguous event
+             * to end it. */
+            if (s->dil_segment_index < minimum_segments) {
                 fprintf(stderr,
-                        "[V90] Phase 3: ignored early far-end S during DIL "
-                        "at segment %d/%d (minimum %d complete cycle%s)\n",
+                        "[V90] Phase 3: ignored early S/S-bar candidate "
+                        "during DIL at segment %d/%d (minimum %d cycle%s)\n",
                         s->dil_segment_index + 1,
                         s->dil.n,
-                        cycle_limit,
-                        cycle_limit == 1 ? "" : "s");
+                        minimum_cycles,
+                        minimum_cycles == 1 ? "" : "s");
                 return false;
             }
-            fprintf(stderr, "[V90] Phase 3: subsequent far-end S detected during DIL, terminating at the next segment boundary\n");
+            fprintf(stderr,
+                    "[V90] Phase 3: S/S-bar received after minimum DIL "
+                    "duration; terminating at the next segment boundary\n");
             s->dil_terminate_requested = true;
             return true;
         }
