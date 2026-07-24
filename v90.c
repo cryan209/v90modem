@@ -165,11 +165,28 @@ static int v90_jd_prime_symbols(void)
     return 12;
 }
 
-/* Some analogue implementations stop DIL after a known number of complete
- * descriptor cycles, but our upstream S/S-bar detector may momentarily match
- * SCR/TRN or silence at the beginning of DIL.  Require one complete cycle by
- * default before accepting an S-like termination event; an explicit zero
- * keeps the old repeat-until-S diagnostic behavior. */
+/* Per V.90 §9.3.1.6 and §8.4.1 the digital modem should repeat the entire DIL
+ * sequence until the analogue modem signals completion with an S/S-bar
+ * transition -- it must NOT decide on its own when the peer has "enough" DIL,
+ * and real modems can need more than one descriptor cycle to converge their
+ * impairment/constellation design.
+ *
+ * Spec-correct behaviour is thus value 0 = repeat-until-S.  That is NOT yet the
+ * default because two live findings (2026-07-24, USR Courier) must be resolved
+ * first:
+ *   1. The upstream S/S-bar detector false-fires on the analogue modem's silent
+ *      DIL turnaround (a carrier-offset rotation of near-silent noise reads as a
+ *      sustained S; the AGC normalises equalizer magnitude, so only *raw* input
+ *      power discriminates -- now logged next to each far-end-S detection so the
+ *      floor can be calibrated).  Repeat-until-S without that gate just accepts
+ *      the first false S past the minimum and still ends at ~1 cycle; a naive
+ *      power gate instead suppressed the *real* pre-DIL S and stalled Phase 3.
+ *   2. The analogue modem retrains ~15 s + round-trip after INFO1a (§9.4.2), so
+ *      the whole DIL/Ri/CPt/TRN2d/MP/B1 sequence shares one deadline -- extra
+ *      DIL cycles trade against that budget and can themselves trip the timeout.
+ * Until (1) is calibrated, default to the one-cycle interop cap.  Non-zero N
+ * auto-terminates after N complete cycles; SmartLink ADI/ADI-QC want exactly 1.
+ * The minimum-cycle floor for *accepting* an S is separate (v90_handle_rx_event). */
 static int v90_dil_autoterminate_cycles(void)
 {
     const char *value;

@@ -5910,7 +5910,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /* Sustained-rotation tracking: count how long one +/-90 dibit
                (dibit 1 or 3) dominates the 32-baud window.  A change of the
                dominant dibit (the S-to-S-bar rotation flip) or loss of
-               dominance restarts the run. */
+               dominance restarts the run.
+
+               NOTE (2026-07-24): this rotation detector false-fires on any
+               sustained single-frequency tone, because a pure tone differen-
+               tially demodulates to a constant dibit.  Live against a USR
+               Courier it fired on our own ~1325 Hz DIL echo (RX RMS ~132) and
+               on the peer's 2400 Hz Tone A retrain (RMS ~3976) -- neither is a
+               real far-end S.  Raw input power does NOT cleanly separate them
+               (echo-tone S ~61k..275k overlaps real-signal power), so an energy
+               gate is not a sufficient fix; the far-end-S log below now carries
+               power/carrier_ref to support a better discriminator. */
             if (s->duration >= 32
                 &&  dominant_count >= PHASE3_S_DOMINANT_MIN
                 &&  (dominant_symbol == 1  ||  dominant_symbol == 3))
@@ -5971,14 +5981,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             s->phase3_s_fired_symbol = by_rotation ? s->phase3_s_dom_symbol : dominant_symbol;
             s->received_event = V34_EVENT_S;
             span_log(s->logging, SPAN_LOG_FLOW,
-                     "Rx - Phase 3: far-end S detected after J decode (count=%d via=%s role=%s alt=%d/32 stable=%d dom=%d:%d/32 domwin=%d rev=%d/32 bits=%d trn=%s)\n",
+                     "Rx - Phase 3: far-end S detected after J decode (count=%d via=%s role=%s alt=%d/32 stable=%d dom=%d:%d/32 domwin=%d rev=%d/32 bits=%d trn=%s power=%ld carrier_ref=%ld)\n",
                      s->phase3_s_event_count,
                      by_rotation ? "rotation" : "alternation",
                      s->calling_party ? "caller" : "V.90 digital answerer",
                      s->phase3_s_alt_count, s->phase3_s_stable_windows,
                      dominant_symbol, dominant_count, s->phase3_s_dom_windows,
                      s->bit_count, s->phase3_j_bits,
-                     s->phase3_j_trn16 ? "16-point" : "4-point");
+                     s->phase3_j_trn16 ? "16-point" : "4-point",
+                     (long) power_meter_current(&s->power),
+                     (long) s->info_rx_carrier_ref);
         }
 
         /* Rearm only after the current S has genuinely ended, so V.90 can
