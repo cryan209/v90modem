@@ -4663,6 +4663,7 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     float y_mag2;
     float R2;
     float error;
+    float cma_delta;
 
     /* CMA (Constant Modulus Algorithm) — blind equalizer for constant-envelope
        signals like DQPSK.  Minimizes E[(R² - |y|²)²] without needing to know
@@ -4671,6 +4672,18 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     y_mag2 = z->re*z->re + z->im*z->im;
     R2 = 1.0f;  /* Fixed unit radius for QPSK — R²=1.0 */
     error = R2 - y_mag2;
+
+    /* On a real analogue line, the Phase 3 solution is usually useful at
+       the start of Phase 4.  Keep CMA available for slow level correction,
+       but avoid letting its blind phase-insensitive gradient pull the taps
+       away from that trained solution while MP/CP is being acquired.  This
+       is deliberately opt-in for live A/B testing. */
+    cma_delta = s->eq_delta;
+    if (s->stage == V34_RX_STAGE_PHASE4_MP
+        && getenv("ME_V34_SLOW_CMA_DURING_MP"))
+    {
+        cma_delta *= EQUALIZER_SLOW_ADAPT_RATIO;
+    }
 
     /* Log CMA error periodically */
     if (V34_TRACE_DIAGNOSTICS && ((s->duration & 0xFF) == 0))
@@ -4691,8 +4704,8 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     /*endif*/
     {
         float norm = (y_mag2 > 0.001f) ? y_mag2 : 0.001f;
-        gz.re = 0.1f * s->eq_delta * error * z->re / norm;
-        gz.im = 0.1f * s->eq_delta * error * z->im / norm;
+        gz.re = 0.1f * cma_delta * error * z->re / norm;
+        gz.im = 0.1f * cma_delta * error * z->im / norm;
     }
 
     p = s->eq_step - 1;
@@ -7846,8 +7859,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 if (s->mp_hypothesis >= 0  &&  s->mp_frame_pos == 0  &&  s->mp_seen == 0)
                 {
                     int preamble_wait_limit;
+                    const char *hold_env;
+                    bool hold_mp_hypothesis;
 
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "awaiting MP preamble");
+
+                    hold_env = getenv("ME_V34_HOLD_MP_HYPOTHESIS");
+                    hold_mp_hypothesis = hold_env && atoi(hold_env) != 0;
 
                     /* If we started from a TRN direct pre-lock, fail fast and
                        fall back to global hypothesis search rather than waiting
@@ -7857,6 +7875,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                                           : MP_PREAMBLE_WAIT_BITS;
                     if (++s->mp_count > preamble_wait_limit)
                     {
+                        if (hold_mp_hypothesis)
+                        {
+                            /* A strong preamble can be followed by a short
+                               equalizer/timing excursion before the peer's
+                               repeated MP arrives. Keep the same hypothesis
+                               and restart only the local wait window. The
+                               normal CRC and semantic checks still decide
+                               whether this hypothesis is valid. */
+                            s->mp_count = 0;
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 4: holding MP hypothesis=%d after preamble timeout; restarting local wait\n",
+                                     s->mp_hypothesis);
+                            break;
+                        }
                         span_log(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
                                  s->mp_hypothesis, s->mp_count);
@@ -9553,9 +9585,27 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
 
 SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
 {
+    const char *hold_env;
+
     if (!s || !s->rx.v90_mode || s->rx.calling_party
         || s->rx.stage != V34_RX_STAGE_PHASE4_MP)
         return;
+    hold_env = getenv("ME_V34_HOLD_MP_HYPOTHESIS");
+    if (hold_env && atoi(hold_env) != 0 && s->rx.mp_hypothesis >= 0)
+    {
+        /* The V.90 CP framer is the owner of frame validity, so a failed CP
+           CRC does not by itself prove that SpanDSP's symbol hypothesis is
+           wrong. Preserve that hypothesis and let the next repeated CP
+           preamble try again with the same coherent bit stream. */
+        s->rx.mp_early_rejects = 0;
+        s->rx.mp_count = 0;
+        s->rx.mp_frame_pos = 0;
+        s->rx.mp_frame_target = 0;
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 Phase 4: strict CP reject; holding MP hypothesis=%d for repeated CP\n",
+                 s->rx.mp_hypothesis);
+        return;
+    }
     /* A strict Table 14 CRC rejection invalidates more than the current phase
        seed.  Advance the existing domain/tap/bit-order retry state as well;
        merely clearing mp_hypothesis retries the same decode mode forever. */
