@@ -4873,6 +4873,26 @@ static void enter_v90_data_locked(void)
     }
 }
 
+/* At the V.90 DIL -> Ri boundary, V.90 owns the downstream transmitter.
+ * SpanDSP is still needed for the V.34 upstream receiver, but its generic
+ * Phase 4 handoff also starts the V.34 S/S-bar/TRN transmitter.  That is not
+ * part of the V.90 Phase 4 sequence: the answerer sends Ri, then TRN2d. */
+static void enter_v90_phase4_rx_locked(void)
+{
+    if (!g_v90 || !g_v34)
+        return;
+
+    ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
+           g_v92_active ? "V.92" : "V.90");
+    v90_set_upstream_rate_limit(g_v90, v34_get_current_bit_rate(g_v34));
+    if (!g_v92_active) {
+        v90_cp_live_note_phase4_hint_locked();
+        v34_force_v90_phase4_cp_rx(g_v34);
+    } else {
+        v34_force_phase4(g_v34);
+    }
+}
+
 /* Called with g_state_mtx held. Returns true when codewords were generated
  * without a linear-PCM round trip. */
 static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
@@ -4925,19 +4945,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                to v90_live_cp_bit(). */
             if (phase_before < V90_TX_RI
                 && v90_get_tx_phase(g_v90) >= V90_TX_RI) {
-                ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
-                       g_v92_active ? "V.92" : "V.90");
-                /* MP is built at CPt acceptance; the upstream V.34 rate is
-                   settled by now, so cap the MP rate offer at what the pump
-                   actually trained at (peer picked 33600 against a 31200
-                   pump when the peer's CPt mask was echoed uncapped). */
-                v90_set_upstream_rate_limit(g_v90,
-                                            v34_get_current_bit_rate(g_v34));
-                if (!g_v92_active)
-                    v90_cp_live_note_phase4_hint_locked();
-                v34_force_phase4(g_v34);
-                if (!g_v92_active)
-                    v34_force_v90_phase4_cp_rx(g_v34);
+                enter_v90_phase4_rx_locked();
             }
 
             /* v90.c returns to WAIT_JA after a bounded Jd-without-S interval.
@@ -4949,13 +4957,6 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 (void) restart_v90_phase2_locked("no S after Jd");
                 return false;
             }
-        }
-
-        /* Keep the wrapped V.34 state machine advancing while its waveform is
-         * replaced by the authoritative V.90 codeword stream. */
-        {
-            int16_t discard[len];
-            v34_tx(g_v34, discard, len);
         }
 
         if (v90_get_tx_phase(g_v90) == V90_TX_DATA) {
@@ -5040,14 +5041,11 @@ void me_tx_audio(int16_t *amp, int len)
 
                 if (g_v90_phase3_started && g_v90) {
                     /* V.90 Phase 3: generate PCM codewords for actual RTP output */
+                    v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
                     v90_phase3_tx(g_v90, amp, len);
-                    /* Run v34_tx into discard but protect RX state from being
-                       overwritten by V.34 TX Phase 3/4 transitions */
-                    int16_t discard[len];
-                    v34_tx(g_v34, discard, len);
-                    /* V.34 TX may have clobbered RX stage — don't let it;
-                       the V.90 RX flow controls its own stage transitions. */
-                    /* (RX stage restoration handled by v34rx directly) */
+                    if (phase_before < V90_TX_RI
+                        && v90_get_tx_phase(g_v90) >= V90_TX_RI)
+                        enter_v90_phase4_rx_locked();
                 } else if (g_mod == ME_MOD_V90
                            && v34_get_tx_stage(g_v34) >= V34_TX_STAGE_FIRST_S) {
                     /* tx_stage only reaches FIRST_S after SpanDSP has accepted
