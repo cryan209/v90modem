@@ -59,7 +59,41 @@
 /* TRN1d: the spec requires ≥2040T (§9.3.1.4), and 2040 is already
  * exactly 340 six-symbol data frames.  Start Jd immediately afterward so
  * the receiver's reference-Ucode acquisition is not fed extra TRN1d signs. */
-#define V90_TRN1D_LEN   2040
+/* §9.3.1.4 makes TRN1d a *minimum* of 2040T, and only requires Jd to start
+ * within 4000 ms of TRN1d's start -- so sending the bare minimum leaves ~3.7 s
+ * of headroom unused.  §9.3.2.5 has the analogue modem condition its equaliser
+ * on the *first 2040T*, so transmitting exactly 2040T gives a peer that arms
+ * even slightly late a short training sequence and no way to recover.
+ *
+ * Live against the USR Courier (2026-07-25) that is the observed failure: it
+ * detects our Sd->S-bar-d and goes silent per §9.3.2.4 (correctly), then never
+ * decodes Jd, never sends S, and retrains exactly at its §9.3.2.7 deadline
+ * (5.0 s after the end of Ja).  Default 2500T = 312 ms adds margin while
+ * v90_jd_s_wait_symbols() below subtracts it from the same §9.3.1.5 budget, so
+ * the total from the start of TRN1d is unchanged. */
+#define V90_TRN1D_MIN_LEN 2040
+
+static int v90_trn1d_len(void)
+{
+    static int cached;
+
+    if (cached == 0) {
+        const char *value = getenv("ME_V90_TRN1D_SYMBOLS");
+
+        cached = 2500;
+        if (value && *value) {
+            char *end;
+            long parsed = strtol(value, &end, 10);
+
+            /* Below 2040T violates §9.3.1.4; much above ~2 s starts eating the
+             * Jd window §9.3.2.7 entitles the peer to use. */
+            if (end != value && *end == '\0'
+                && parsed >= V90_TRN1D_MIN_LEN && parsed <= 16000)
+                cached = (int) parsed;
+        }
+    }
+    return cached;
+}
 
 /* The decoded Ja event is the standards-driven trigger for downstream Sd.
  * Retain a deliberately late 3 s fallback only as a last-resort guard against
@@ -96,7 +130,7 @@ static int v90_min_jd_symbols(void)
  *
  * §9.3.1.5 gives the digital modem 5100 ms plus a round-trip delay measured
  * from the *start of TRN1d* before it must retrain.  Jd begins exactly
- * V90_TRN1D_LEN symbols after that reference point, so the Jd-relative budget
+ * v90_trn1d_len() symbols after that reference point, so the Jd-relative budget
  * is 5100 ms - TRN1d + rtd.
  *
  * This matters because the peer is entitled to take nearly all of it: §9.3.2.7
@@ -123,7 +157,7 @@ static int v90_jd_s_wait_symbols(void)
         if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
             rtd_allowance = (int) parsed;
     }
-    return 5100*8 - V90_TRN1D_LEN + rtd_allowance;
+    return 5100*8 - v90_trn1d_len() + rtd_allowance;
 }
 
 static int v90_jd_autoterminate_symbols(void)
@@ -3032,7 +3066,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                             "3 2 1 2 3 1 scaled)\n", shape_amp);
             }
             s->sample_count++;
-            if (s->sample_count >= V90_TRN1D_LEN) {
+            if (s->sample_count >= v90_trn1d_len()) {
                 fprintf(stderr, "[V90] Phase 3: TRN1d complete (%d symbols), starting Jd\n",
                         s->sample_count);
                 s->tx_phase = V90_TX_JD;
