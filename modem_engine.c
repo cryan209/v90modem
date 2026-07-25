@@ -1529,6 +1529,12 @@ static void v91_live_receive_codewords_locked(const uint8_t *in, int len)
         len -= chunk;
     }
 }
+
+/* A usable DIL descriptor and a descriptor decoded from the live Ja are
+ * deliberately separate facts.  ME_V90_DIL_PROFILE may preload a known-good
+ * interoperability fallback, making g_v90_pending_dil_valid true before Ja,
+ * but that must not suppress the live decoder: V.90 §9.3.1.3 requires the
+ * received Ja transition to trigger Sd. */
 static bool           g_v90_dil_parse_logged = false;
 
 #define V90_DIL_CAPTURE_MAX_BITS 65536
@@ -3090,8 +3096,13 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
     uint8_t unpacked[V90_DIL_CAPTURE_MAX_BITS];
     int first_bits;
 
-    if (!g_v34 || g_v90_pending_dil_valid)
-        return g_v90_pending_dil_valid;
+    /* g_v90_pending_dil_valid can mean either "decoded from this Ja" or
+     * "preloaded by ME_V90_DIL_PROFILE".  Only the former makes another
+     * decode unnecessary.  Treating a fallback as live receive evidence
+     * disabled this entire path and left SmartLink waiting for Sd until the
+     * unrelated J-lookahead timer expired. */
+    if (!g_v34 || g_v90_dil_parse_logged)
+        return g_v90_dil_parse_logged;
 
     first_bits = v34_v90_copy_phase3_ja_bits(g_v34,
                                              0,
@@ -3222,7 +3233,10 @@ static void v34_put_aux_bit_cb(void *user_data, int bit)
 
     if (bit < 0 || bit > 1)
         return;
-    if (g_mod != ME_MOD_V90 || g_v92_active || g_v90_pending_dil_valid)
+    /* A preloaded DIL profile supplies recovery data, not proof that Ja has
+     * arrived.  Continue collecting until a live, CRC-valid descriptor has
+     * actually parsed (V.90 §8.3.1 and §9.3.1.3). */
+    if (g_mod != ME_MOD_V90 || g_v92_active || g_v90_dil_parse_logged)
         return;
     if (g_v90_dil_capture_bits >= V90_DIL_CAPTURE_MAX_BITS)
         return;
@@ -4748,7 +4762,11 @@ void me_rx_audio(const int16_t *amp, int len)
                                     g_v90_phase3_s_events, accepted ? 1 : 0, echo, rx_rms, (unsigned long long)g_rx_ref_samples);
                     }
 
-                    if (!g_v90_pending_dil_valid)
+                    /* Decode live Ja even when an interoperability profile
+                     * already supplied the DIL contents.  The decoded frame is
+                     * the standards-driven timing event; the profile is only a
+                     * fallback if the frame cannot be recovered. */
+                    if (!g_v90_dil_parse_logged)
                         (void)v90_dil_capture_try_v34_hypotheses();
                 }
                 /* RX PCM dump during training */

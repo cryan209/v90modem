@@ -1167,9 +1167,13 @@ int main(int argc, char *argv[])
         pjsua_call_hangup(g_call_id, 0, NULL, NULL);
 
     pjsua_handle_events(200); /* flush pending events */
-    pjsua_destroy();
+    /* The audio subsystem was initialized with PJSUA's pool factory.
+     * Destroy its CoreAudio factories before pjsua_destroy() invalidates
+     * that factory and the mutexes allocated from it.  The error paths above
+     * use the same ordering. */
     if (aud_subsys_inited)
         pjmedia_aud_subsys_shutdown();
+    pjsua_destroy();
 
     di_close();
     me_destroy();
