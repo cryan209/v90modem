@@ -1226,8 +1226,8 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             goto done;
         }
     }
-    if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
-        fprintf(stderr, "V.90 strict event test did not reach TRN2d\n");
+    if (v90_get_tx_phase(tx) != V90_TX_RI) {
+        fprintf(stderr, "V.90 strict event test left Ri before CPt\n");
         goto done;
     }
     if (v90_handle_rx_event(tx, V90_RX_EVENT_J)
@@ -1246,8 +1246,8 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
             goto done;
         }
     }
-    if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
-        fprintf(stderr, "V.90 TRN2d advanced without a valid CP event\n");
+    if (v90_get_tx_phase(tx) != V90_TX_RI) {
+        fprintf(stderr, "V.90 Ri advanced before a valid CP event\n");
         goto done;
     }
     if (!v90_set_phase4_cp(tx, &cp)) {
@@ -1288,12 +1288,12 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         }
     }
     if (!v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
-        fprintf(stderr, "V.90 strict event test rejected valid CP during TRN2d\n");
+        fprintf(stderr, "V.90 strict event test rejected valid CP during Ri\n");
         goto done;
     }
     /* ITU-T V.90 §8.6.4: barred R is "4 repetitions of the 6-symbol sequence
      * - - - + + +", so it must begin on a frame boundary.  CPt is accepted here
-     * after 256 unbarred Ri symbols in TRN2d, which is not a whole number of
+     * after 256 unbarred Ri symbols, which is not a whole number of
      * 6-symbol periods (256 % 6 = 4).  Per §9.4.1.1 (Ri is a *minimum* of 192T)
      * the digital modem completes the current +++--- period first, so 2 more
      * unbarred symbols precede the 24T barred R (see phase4_ri_align_remaining

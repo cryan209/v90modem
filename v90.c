@@ -31,11 +31,34 @@
 /* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
 #define V90_RI_SYMBOLS   192  /* Ri duration: at least 192T (§9.4.1.1) */
 #define V90_RI_POST_CP_SYMBOLS 24
-/* SmartLink's full ADI path studies 7200 TRN2d symbols and then uses an
- * additional settling window before it enables MP demapping.  The V.90
- * requirement is a minimum of 2040T and MP within 2000 ms, so 12000T keeps
- * the transmitter standards-compliant while satisfying that receiver. */
-#define V90_TRN2D_SYMBOLS 12000
+/* V.90 requires a minimum of 2040T and MP within 2000 ms (§9.4.1.2/.3).
+ * Use the minimum by default so a late CPt leaves the analogue modem the
+ * largest possible Phase-4 acquisition window.  Longer TRN2d study windows
+ * remain available through ME_V90_TRN2D_SYMBOLS for peers such as SmartLink. */
+#define V90_TRN2D_DEFAULT_SYMBOLS 2040
+
+static int v90_trn2d_symbols(void)
+{
+    static int cached;
+
+    if (cached == 0) {
+        const char *value = getenv("ME_V90_TRN2D_SYMBOLS");
+        char *end;
+        long parsed;
+
+        cached = V90_TRN2D_DEFAULT_SYMBOLS;
+        if (value && *value) {
+            parsed = strtol(value, &end, 10);
+            if (end != value && *end == '\0'
+                && parsed >= 2040 && parsed <= 16000)
+                cached = (int)parsed;
+        }
+        cached -= cached % V90_FRAME_LEN;
+        if (cached < 2040)
+            cached = 2040;
+    }
+    return cached;
+}
 #define V90_B1D_FRAMES    48
 #define V90_B1D_SYMBOLS   (V90_B1D_FRAMES * V90_FRAME_LEN)
 #define V90_MP_MAX_BITS  256
@@ -3254,7 +3277,9 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
 
     case V90_TX_RI:
         /* §8.6.4/§9.4.1.1: Ri is U_INFO with +++--- signs, not idle.
-         * Send at least 192T before allowing the analogue modem's CPt. */
+         * Send at least 192T before allowing the analogue modem's CPt.  Do
+         * not change to the TRN2d state on that timer: CPt must be accepted
+         * first, after which the transmitter emits the barred R-i ACK. */
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] Phase 4: Ri (%d symbols)\n", V90_RI_SYMBOLS);
             s->phase4_hold_logged = true;
@@ -3263,14 +3288,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, false);
 
             s->sample_count++;
-            if (s->sample_count >= V90_RI_SYMBOLS) {
-                s->tx_phase = V90_TX_TRN2D;
-                s->sample_count = 0;
-                s->phase4_hold_logged = false;
-            }
             return codeword;
         }
 
+    case V90_TX_RI_ACK:
     case V90_TX_TRN2D:
         /* §9.4.1.1/§9.4.1.2: remain in Ri while acquiring CPt.  After
          * accepting CPt, send 24T of barred Ri followed by at least 2040T of
@@ -3326,13 +3347,19 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
             fprintf(stderr,
                     "[V90] Phase 4: CPt accepted; TRN2d (%d mapped symbols, D=%d, K=%d)\n",
-                    V90_TRN2D_SYMBOLS, s->phase4_d, s->phase4_k);
+                    v90_trn2d_symbols(), s->phase4_d, s->phase4_k);
+            /* The 24T barred R-i above is the CPt acknowledgement.  Do not
+             * expose TRN2d as the active phase until that ACK is complete. */
+            if (s->tx_phase == V90_TX_RI_ACK) {
+                s->tx_phase = V90_TX_TRN2D;
+                s->phase4_hold_logged = false;
+            }
         }
         {
             uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ONES);
 
             s->sample_count++;
-            if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + V90_TRN2D_SYMBOLS) {
+            if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + v90_trn2d_symbols()) {
                 if (s->v92_mode) {
                     /* §9.6.1.1.1/V.92: TRN2d done; condition for SUVu and
                      * transmit SUVd sequences over the TRN2d mapper. */
@@ -3923,11 +3950,11 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->phase4_hold_logged = false;
             return true;
         }
-        if (s->tx_phase == V90_TX_TRN2D
-            && (s->v92_mode
-                ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
-                                        : (s->cp_nbits > 0))
-                : s->phase4_mapper_ready)
+        if ((s->tx_phase == V90_TX_RI && s->sample_count >= V90_RI_SYMBOLS
+             && (s->v92_mode
+                 ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
+                                         : (s->cp_nbits > 0))
+                 : s->phase4_mapper_ready))
             && !s->cp_ready) {
             fprintf(stderr, "[V90] Phase 4: valid far-end CPt received\n");
             s->cp_ready = true;
@@ -3940,6 +3967,10 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
                         s->phase4_ri_align_remaining);
             }
             s->sample_count = 0;
+            /* CPt is acknowledged by the following barred Ri (R-i).  Only
+             * after that acknowledgement may the transmitter enter TRN2d. */
+            s->tx_phase = V90_TX_RI_ACK;
+            s->phase4_hold_logged = false;
             return true;
         }
         if (!s->v92_mode && s->data_cp_received

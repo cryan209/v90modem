@@ -149,7 +149,8 @@ typedef enum {
     V90_TX_DIL,           /* Sending DIL descriptor symbols */
     V90_TX_SCR,           /* V.92 SCR while waiting for CPt */
     V90_TX_RI,            /* Phase 4: Ri — retrain init (idle codewords, §9.4.1.1) */
-    V90_TX_TRN2D,         /* Phase 4: post-CP Ri plus negotiated mapped TRN2d */
+    V90_TX_RI_ACK,        /* Phase 4: CPt acknowledgement, barred R-i */
+    V90_TX_TRN2D,         /* Phase 4: negotiated mapped TRN2d after R-i */
     V90_TX_MP,            /* V.90 Phase 4: MP/MP' modulation-parameter frames */
     V90_TX_SUVD,          /* V.92 Phase 4: SUVd (no ack) — short update values digital */
     V90_TX_CP,            /* V.92 Phase 4: CPd compatibility frame */
