@@ -1602,8 +1602,9 @@ static int     g_tx_buf_rd = 0;  /* read position (updated by me_rx_audio) */
 /* Mirror of the RX samples as the V.34/V.90 receiver sees them (post notch /
    post EC), so the echo gate correlates exactly the signal the S detector
    decided on. */
-static int16_t g_rx_ref_buf[TX_BUF_SIZE];
-static int     g_rx_ref_wr = 0;
+static int16_t  g_rx_ref_buf[TX_BUF_SIZE];
+static int      g_rx_ref_wr = 0;
+static uint64_t g_rx_ref_samples = 0;   /* monotonic; aligns gate logs to the tap */
 
 /* Notch filter to remove our own TX carrier echo from the RX signal.
    During V.34 Phase 3/4, we TX at 1600 Hz (answerer low carrier) and RX at 1800 Hz.
@@ -3956,6 +3957,119 @@ static double v90_s_rx_rms_locked(void)
     return sqrt(energy / (double)S_ECHO_WIN);
 }
 
+/* Fraction of 10 ms sub-windows in the last DIL_S_ACTIVE_WIN samples whose RMS
+ * clears the signal floor.
+ *
+ * A single 100 ms RMS reading is not enough to qualify the DIL-terminating S.
+ * §9.3.2.10 has the analogue modem send S for 128T then S̄ for 16T — at 3200
+ * baud that is only ~45 ms — but for it to mean anything the far end must
+ * actually be transmitting *around* that point, not producing one isolated
+ * window of energy in an otherwise dead line.  Live against the Courier
+ * (trn2500-1) the far end sat at RMS 8 continuously from 13.6 s to 16.2 s, i.e.
+ * across the whole of DIL and our Ri, yet a single-window reading still let a
+ * DIL-terminating S through and we left DIL ~2.9 s before its §9.3.2.10
+ * deadline.  Requiring the line to be live across a majority of a 300 ms span
+ * rejects that without needing a precise threshold on any one window. */
+enum { DIL_S_ACTIVE_WIN = 2400, DIL_S_SUB = 80 };   /* 300 ms in 10 ms steps */
+
+static double v90_s_rx_active_fraction_locked(double floor_rms)
+{
+    int active = 0;
+    int subs = DIL_S_ACTIVE_WIN / DIL_S_SUB;
+
+    for (int w = 0; w < subs; w++) {
+        double energy = 0.0;
+
+        for (int k = 0; k < DIL_S_SUB; k++) {
+            int idx = (g_rx_ref_wr - 1 - (w * DIL_S_SUB + k)) & TX_BUF_MASK;
+            double r = (double)g_rx_ref_buf[idx];
+
+            energy += r * r;
+        }
+        if (sqrt(energy / (double)DIL_S_SUB) >= floor_rms)
+            active++;
+    }
+    return (double)active / (double)subs;
+}
+
+/* RMS of our OWN transmit over the same window, for the RX/TX ratio test. */
+static double v90_s_tx_rms_locked(void)
+{
+    double energy = 0.0;
+
+    for (int k = 0; k < S_ECHO_WIN; k++) {
+        double t = (double)g_tx_buf[(g_tx_buf_wr - 1 - k) & TX_BUF_MASK];
+
+        energy += t * t;
+    }
+    return sqrt(energy / (double)S_ECHO_WIN);
+}
+
+/* Minimum RX/TX level ratio for an S to be believable.
+ *
+ * This is the discriminator that actually separates the cases, and unlike an
+ * absolute floor it is independent of units — both sides are measured from the
+ * same rings, so any scaling cancels.  That matters: the gate's RMS readings and
+ * the G.711 tap disagree by several times because they are different timelines
+ * and processing points, which made an absolute threshold impossible to
+ * calibrate confidently.
+ *
+ * Measured on the Cisco path with the FXS echo canceller disabled
+ * (`*gate25-*` runs), RX RMS as a fraction of our own TX RMS:
+ *   genuine far-end signal (the Courier's Ja):   0.27 – 0.53
+ *   our echo + line noise while it is silent:    0.026 – 0.042
+ * A 10x gap.  0.15 sits in the middle of it.
+ *
+ * This is what catches the failure the correlation gate could not: at the
+ * moment we accepted a "far-end S" 108 Jd symbols in, the Courier had been
+ * silent since it saw our Sd→S̄d, but the window was mostly line *noise* rather
+ * than a clean copy of our transmitter, so it correlated at only 0.129 and
+ * passed.  Acting on it made us send J'd ~5 s early; per §9.3.2.8 the analogue
+ * modem must detect J'd before it will receive DIL at all, so it never entered
+ * the DIL-reception state and ignored the whole sequence.
+ *
+ * When we are not transmitting, tx_rms is ~0 and the test trivially passes —
+ * correct, since there is no echo to mistake for signal. */
+static double me_v90_s_min_rx_tx_ratio(void)
+{
+    static double cached = -1.0;
+
+    if (cached < 0.0) {
+        const char *v = getenv("ME_V90_S_MIN_RX_TX_RATIO");
+
+        cached = 0.15;
+        if (v && *v) {
+            char *end;
+            double parsed = strtod(v, &end);
+
+            /* 0 disables the test. */
+            if (end != v && *end == '\0' && parsed >= 0.0 && parsed <= 10.0)
+                cached = parsed;
+        }
+    }
+    return cached;
+}
+
+static double me_v90_dil_s_active_fraction(void)
+{
+    static double cached = -1.0;
+
+    if (cached < 0.0) {
+        const char *v = getenv("ME_V90_DIL_S_ACTIVE_FRACTION");
+
+        cached = 0.5;
+        if (v && *v) {
+            char *end;
+            double parsed = strtod(v, &end);
+
+            /* 0 disables the requirement. */
+            if (end != v && *end == '\0' && parsed >= 0.0 && parsed <= 1.0)
+                cached = parsed;
+        }
+    }
+    return cached;
+}
+
 static int me_v90_s_echo_gate_pct(void)
 {
     static int cached = -1;
@@ -4036,6 +4150,13 @@ static void v90_s_echo_record_rx_locked(const int16_t *amp, int len)
         g_rx_ref_buf[g_rx_ref_wr] = amp[i];
         g_rx_ref_wr = (g_rx_ref_wr + 1) & TX_BUF_MASK;
     }
+    /* Monotonic count of RX samples that reached the V.34/V.90 receiver.  Logged
+     * with every S event so gate readings can be aligned against the live-rx
+     * G.711 tap: the two timelines are NOT the same, because the tap records
+     * from call answer while this ring only fills once the V.34 branch runs.
+     * Comparing a [TRACE +Nms] stamp directly against a tap offset produced
+     * contradictory RMS readings during the 2026-07-25 Courier analysis. */
+    g_rx_ref_samples += (uint64_t)len;
 }
 
 /* V.90 WAIT_JA energy-gap Ja detector.
@@ -4538,6 +4659,31 @@ void me_rx_audio(const int16_t *amp, int len)
                         bool  is_silence = (min_rms > 0.0 && rx_rms < min_rms);
 
                         g_v90_phase3_s_events++;
+                        {
+                            double tx_rms = v90_s_tx_rms_locked();
+                            double want   = me_v90_s_min_rx_tx_ratio();
+
+                            if (want > 0.0 && tx_rms > 1.0
+                                && rx_rms < want * tx_rms) {
+                                /* The line is carrying our own transmission and
+                                   little else.  Acting on this sends J'd or ends
+                                   DIL while the peer is still legitimately
+                                   silent (§9.3.2.7 allows it 5000 ms), and it
+                                   will then never see the 12-symbol J'd it must
+                                   detect per §9.3.2.8. */
+                                fprintf(stderr,
+                                        "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                        "REJECTED as own-line noise (rx/tx=%.3f < %.2f, "
+                                        "rx_rms=%.1f tx_rms=%.1f corr=%.3f rx_sample=%llu)\n",
+                                        g_v90_phase3_s_events,
+                                        (int)v90_get_tx_phase(g_v90),
+                                        rx_rms / tx_rms, want, rx_rms, tx_rms, echo,
+                                        (unsigned long long)g_rx_ref_samples);
+                                trace_phase("V90 strict RX event=S count=%d rejected_ratio rx/tx=%.3f",
+                                            g_v90_phase3_s_events, rx_rms / tx_rms);
+                                continue;
+                            }
+                        }
                         if (is_silence) {
                             /* The far end is not transmitting at all, so this
                                cannot be its S.  §9.3.2.9 lets it stay silent for
@@ -4552,6 +4698,29 @@ void me_rx_audio(const int16_t *amp, int len)
                             trace_phase("V90 strict RX event=S count=%d rejected_silence rms=%.1f",
                                         g_v90_phase3_s_events, rx_rms);
                             continue;
+                        }
+                        /* §9.3.2.10 DIL terminator: the far end must actually be
+                           on the line around the event, not just for one
+                           window.  Only applied while transmitting DIL — Jd's
+                           terminator is a different, longer signal. */
+                        if ((int)v90_get_tx_phase(g_v90) == V90_TX_DIL
+                            && me_v90_dil_s_active_fraction() > 0.0) {
+                            double want = me_v90_dil_s_active_fraction();
+                            double got  = v90_s_rx_active_fraction_locked(min_rms);
+
+                            if (got < want) {
+                                fprintf(stderr,
+                                        "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                        "REJECTED as dead line during DIL (active=%.2f < %.2f over 300ms, "
+                                        "rx_rms=%.1f corr=%.3f rx_sample=%llu)\n",
+                                        g_v90_phase3_s_events,
+                                        (int)v90_get_tx_phase(g_v90),
+                                        got, want, rx_rms, echo,
+                                        (unsigned long long)g_rx_ref_samples);
+                                trace_phase("V90 strict RX event=S count=%d rejected_dead_line active=%.2f",
+                                            g_v90_phase3_s_events, got);
+                                continue;
+                            }
                         }
                         if (is_echo) {
                             /* Our own DIL/Ri leaking back, not the analogue
@@ -4571,12 +4740,12 @@ void me_rx_audio(const int16_t *amp, int len)
                         accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
                         fprintf(stderr,
                                 "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d "
-                                "echo_corr=%.3f rx_rms=%.1f\n",
+                                "echo_corr=%.3f rx_rms=%.1f rx_sample=%llu\n",
                                 g_v90_phase3_s_events,
                                 (int)v90_get_tx_phase(g_v90),
-                                accepted ? 1 : 0, echo, rx_rms);
+                                accepted ? 1 : 0, echo, rx_rms, (unsigned long long)g_rx_ref_samples);
                         trace_phase("V90 strict RX event=S count=%d accepted=%d echo_corr=%.3f rms=%.1f",
-                                    g_v90_phase3_s_events, accepted ? 1 : 0, echo, rx_rms);
+                                    g_v90_phase3_s_events, accepted ? 1 : 0, echo, rx_rms, (unsigned long long)g_rx_ref_samples);
                     }
 
                     if (!g_v90_pending_dil_valid)

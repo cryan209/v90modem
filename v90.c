@@ -80,7 +80,15 @@ static int v90_trn1d_len(void)
     if (cached == 0) {
         const char *value = getenv("ME_V90_TRN1D_SYMBOLS");
 
-        cached = 2500;
+        /* §8.4.5: "TRN1d shall be an integer multiple of 6 symbols long."
+         * This is not cosmetic -- §8.4.4 puts the first symbol of Sd in data
+         * frame interval 0 and requires the digital modem to keep data frame
+         * alignment from that point on.  A TRN1d that is not a whole number of
+         * 6-symbol frames shifts Jd, J'd and DIL out of frame alignment for the
+         * rest of Phase 3, which is exactly the kind of thing that leaves the
+         * peer unable to decode Jd at all.  2040 (=6*340) was compliant; 2500
+         * is not (2500/6 = 416.67), so default to 2496 = 6*416. */
+        cached = 2496;
         if (value && *value) {
             char *end;
             long parsed = strtol(value, &end, 10);
@@ -91,6 +99,10 @@ static int v90_trn1d_len(void)
                 && parsed >= V90_TRN1D_MIN_LEN && parsed <= 16000)
                 cached = (int) parsed;
         }
+        /* Enforce the multiple-of-6 rule whatever the source of the value. */
+        cached -= cached % 6;
+        if (cached < V90_TRN1D_MIN_LEN)
+            cached = V90_TRN1D_MIN_LEN;     /* 2040 = 6*340, already compliant */
     }
     return cached;
 }
