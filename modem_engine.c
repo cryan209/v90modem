@@ -1590,13 +1590,20 @@ static uint64_t me_training_timeout_ms(void)
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
 static int g_last_tx_stage = 0;            /* Last logged TX stage */
 
-/* TX sample ring buffer (kept for future use but EC is disabled).
+/* TX sample ring buffer.  Feeds the optional NLMS canceller and the Phase 3
+   far-end-S echo gate (which needs it even when the canceller is off).
    Size must be a power of 2. */
 #define TX_BUF_SIZE 4096
 #define TX_BUF_MASK (TX_BUF_SIZE - 1)
 static int16_t g_tx_buf[TX_BUF_SIZE];
 static int     g_tx_buf_wr = 0;  /* write position (updated by me_tx_audio) */
 static int     g_tx_buf_rd = 0;  /* read position (updated by me_rx_audio) */
+
+/* Mirror of the RX samples as the V.34/V.90 receiver sees them (post notch /
+   post EC), so the echo gate correlates exactly the signal the S detector
+   decided on. */
+static int16_t g_rx_ref_buf[TX_BUF_SIZE];
+static int     g_rx_ref_wr = 0;
 
 /* Notch filter to remove our own TX carrier echo from the RX signal.
    During V.34 Phase 3/4, we TX at 1600 Hz (answerer low carrier) and RX at 1800 Hz.
@@ -3399,6 +3406,14 @@ static void start_v34_training(void)
         g_tx_buf_wr = 0;
         g_tx_buf_rd = 0;
     }
+    /* Unconditional: the echo gate correlates these rings on every V.90 call,
+       and stale audio from a previous training attempt would correlate as
+       nonsense. */
+    memset(g_tx_buf, 0, sizeof(g_tx_buf));
+    memset(g_rx_ref_buf, 0, sizeof(g_rx_ref_buf));
+    g_tx_buf_wr = 0;
+    g_tx_buf_rd = 0;
+    g_rx_ref_wr = 0;
 
     /* Initialize notch filter at our TX carrier to remove FXS hybrid echo.
        Carrier frequency depends on baud rate (V.34 Table 2):
@@ -3849,6 +3864,180 @@ void me_on_sip_disconnected(void)
 /* Audio I/O — called from PJSIP media thread (real-time)             */
 /* ------------------------------------------------------------------ */
 
+/* ---- V.90 Phase 3 far-end-S echo gate -------------------------------------
+ *
+ * The rotation branch of the S detector (v34rx.c, phase3_s_dom_windows) fires
+ * on ANY sustained single-frequency tone, because a pure tone differentially
+ * demodulates to a constant dibit.  Our own Phase 3/4 downstream is exactly
+ * that: DIL is tonal per segment and Ri is a dead-flat 8000/6 = 1333 Hz
+ * (§8.6.4 signal R at U_INFO).  Leaked back through the SIP/FXS/ATA hybrid it
+ * reads as a textbook far-end S.
+ *
+ * Measured on artifacts/v90-hardware/20260724T094048Z-courier-uscan-21210-
+ * firegate, over the stuck-Ri window t=14..16 s: RX was 1333.5 Hz at -29.4 dB
+ * relative to our TX, cross-correlating 0.868 with our own TX at 2 samples
+ * lag, while the Courier transmitted nothing at all.  Both "far-end S" events
+ * in that call were that echo.  The first one truncated Jd to 135 ms, so we
+ * ran the whole Phase 3 tail ~4.6 s ahead of the Courier's §9.3.2.7 schedule
+ * and it retrained to Tone A at its deadline.
+ *
+ * Raw power does NOT separate the two cases (see the note at v34rx.c:5915),
+ * but provenance does: the echo is a coherent copy of our own transmitter, and
+ * a real far-end S is not.  So gate on normalised cross-correlation against
+ * the TX reference ring rather than on level.  Discrimination is wide — echo
+ * ~0.87 vs an expected ~0.04 when the far end is actually transmitting (its
+ * signal is ~29 dB above the echo, so it dominates the correlation).
+ *
+ * Runs with g_state_mtx held.  Returns [0,1], or -1.0 when there is not enough
+ * signal on either side to have an opinion (caller then accepts the event, so
+ * an unusable reference fails towards the old behaviour rather than deadlocking
+ * Phase 3).
+ */
+enum {
+    S_ECHO_WIN     = 800,   /* 100 ms correlation window */
+    S_ECHO_LAG_MIN = -320,  /* -40 ms: TX ring may trail RX by a frame or two */
+    S_ECHO_LAG_MAX = 640,   /*  80 ms: covers SIP + ATA hybrid round trip */
+    S_ECHO_COARSE  = 4,     /* coarse lag step, then refined +/- S_ECHO_COARSE */
+};
+
+/* Absolute signal-presence floor, complementary to the correlation gate above.
+ *
+ * The correlation gate only catches an S that is OUR OWN transmitter coming
+ * back.  On a low-echo path there is nothing to correlate against, and the same
+ * rotation detector instead fires on a carrier-offset rotation of near-silent
+ * noise — §9.3.2.9 explicitly permits the analogue modem to send *silence*
+ * throughout DIL, so this is a state we are guaranteed to sit in on every call.
+ *
+ * Measured over the Cisco FXS path
+ * (artifacts/v90-hardware/20260725T015104Z-courier-echogate-novad): far-end RX
+ * is RMS **8** through both DIL cycles while the Courier is silent, versus
+ * **625–634** during TRN1d/Jd when it is genuinely transmitting — ~38 dB of
+ * separation.  On the AudioCodes path a real far-end signal ran ~3671.  The
+ * default floor of 64 sits ~18 dB above observed silence and ~20 dB below the
+ * weakest real signal seen.
+ *
+ * Deliberately kept as a SEPARATE test from the correlation gate rather than
+ * replacing it: on the AudioCodes path our own echo measured RMS ~132, which is
+ * comfortably above any sane floor, so energy alone would not have caught it
+ * (this is the trap the note at v34rx.c:5915 describes, and why the earlier
+ * `info_rx_carrier_ref/64` attempt regressed).  Echo needs provenance; silence
+ * needs level.  Both, or neither works.
+ */
+static double me_v90_s_min_rx_rms(void)
+{
+    static double cached = -1.0;
+
+    if (cached < 0.0) {
+        const char *v = getenv("ME_V90_S_MIN_RX_RMS");
+
+        cached = 64.0;
+        if (v && *v) {
+            char *end;
+            double parsed = strtod(v, &end);
+
+            /* 0 disables the floor. */
+            if (end != v && *end == '\0' && parsed >= 0.0)
+                cached = parsed;
+        }
+    }
+    return cached;
+}
+
+/* RMS of the same window the correlation gate scores. */
+static double v90_s_rx_rms_locked(void)
+{
+    double energy = 0.0;
+
+    for (int k = 0; k < S_ECHO_WIN; k++) {
+        double r = (double)g_rx_ref_buf[(g_rx_ref_wr - 1 - k) & TX_BUF_MASK];
+
+        energy += r * r;
+    }
+    return sqrt(energy / (double)S_ECHO_WIN);
+}
+
+static int me_v90_s_echo_gate_pct(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V90_S_ECHO_GATE_PCT");
+
+        cached = 50;    /* reject an S whose window is >50% our own TX */
+        if (v && *v) {
+            char *end;
+            long parsed = strtol(v, &end, 10);
+
+            /* 0 disables the gate entirely. */
+            if (end != v && *end == '\0' && parsed >= 0 && parsed <= 100)
+                cached = (int)parsed;
+        }
+    }
+    return cached;
+}
+
+/* Sum of rx[k]*tx[k+lag] over the window, plus the TX energy at that lag.
+   Index 0 is the newest sample in each ring. */
+static double v90_s_echo_corr_at_locked(int lag, double rx_energy)
+{
+    double num = 0.0, tx_energy = 0.0;
+
+    for (int k = 0; k < S_ECHO_WIN; k++) {
+        int ri = (g_rx_ref_wr - 1 - k) & TX_BUF_MASK;
+        int ti = (g_tx_buf_wr - 1 - k - lag) & TX_BUF_MASK;
+        double r = (double)g_rx_ref_buf[ri];
+        double t = (double)g_tx_buf[ti];
+
+        num += r * t;
+        tx_energy += t * t;
+    }
+    if (tx_energy < 1.0)
+        return 0.0;
+    return fabs(num) / sqrt(rx_energy * tx_energy);
+}
+
+static double v90_s_echo_correlation_locked(void)
+{
+    double rx_energy = 0.0;
+    double best = 0.0;
+    int best_lag = 0;
+
+    for (int k = 0; k < S_ECHO_WIN; k++) {
+        double r = (double)g_rx_ref_buf[(g_rx_ref_wr - 1 - k) & TX_BUF_MASK];
+
+        rx_energy += r * r;
+    }
+    /* < ~1 LSB RMS on either side: no usable reference, express no opinion. */
+    if (rx_energy < (double)S_ECHO_WIN)
+        return -1.0;
+
+    for (int lag = S_ECHO_LAG_MIN; lag <= S_ECHO_LAG_MAX; lag += S_ECHO_COARSE) {
+        double c = v90_s_echo_corr_at_locked(lag, rx_energy);
+
+        if (c > best) {
+            best = c;
+            best_lag = lag;
+        }
+    }
+    for (int lag = best_lag - S_ECHO_COARSE; lag <= best_lag + S_ECHO_COARSE; lag++) {
+        double c = v90_s_echo_corr_at_locked(lag, rx_energy);
+
+        if (c > best)
+            best = c;
+    }
+    return best;
+}
+
+static void v90_s_echo_record_rx_locked(const int16_t *amp, int len)
+{
+    if (!amp || len <= 0)
+        return;
+    for (int i = 0; i < len; i++) {
+        g_rx_ref_buf[g_rx_ref_wr] = amp[i];
+        g_rx_ref_wr = (g_rx_ref_wr + 1) & TX_BUF_MASK;
+    }
+}
+
 /* V.90 WAIT_JA energy-gap Ja detector.
  *
  * The analogue modem's Phase 3 upstream is S/PP/TRN, then a silent gap
@@ -4226,6 +4415,7 @@ void me_rx_audio(const int16_t *amp, int len)
                     notch_filter_apply(&g_notch, filtered, len);
                 }
                 v90_wait_ja_energy_gate_locked(filtered, len);
+                v90_s_echo_record_rx_locked(filtered, len);
                 v34_rx(g_v34, filtered, len);
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;
@@ -4337,16 +4527,56 @@ void me_rx_audio(const int16_t *amp, int len)
 
                     while (g_v90_phase3_s_events < s_events) {
                         bool accepted;
+                        int  gate_pct = me_v90_s_echo_gate_pct();
+                        /* Measure even when the gate is off, so a capture can
+                           always be used to calibrate the threshold. */
+                        double echo = v90_s_echo_correlation_locked();
+                        double rx_rms = v90_s_rx_rms_locked();
+                        double min_rms = me_v90_s_min_rx_rms();
+                        bool  is_echo = (gate_pct > 0 && echo >= 0.0
+                                         && echo >= gate_pct / 100.0);
+                        bool  is_silence = (min_rms > 0.0 && rx_rms < min_rms);
 
                         g_v90_phase3_s_events++;
+                        if (is_silence) {
+                            /* The far end is not transmitting at all, so this
+                               cannot be its S.  §9.3.2.9 lets it stay silent for
+                               the whole of DIL, so acting on this would end DIL
+                               before it ever asked us to. */
+                            fprintf(stderr,
+                                    "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                    "REJECTED as silence (rx_rms=%.1f < %.1f, corr=%.3f)\n",
+                                    g_v90_phase3_s_events,
+                                    (int)v90_get_tx_phase(g_v90),
+                                    rx_rms, min_rms, echo);
+                            trace_phase("V90 strict RX event=S count=%d rejected_silence rms=%.1f",
+                                        g_v90_phase3_s_events, rx_rms);
+                            continue;
+                        }
+                        if (is_echo) {
+                            /* Our own DIL/Ri leaking back, not the analogue
+                               modem.  Swallow it: forwarding it would cut Jd or
+                               DIL short and desynchronise us from the peer's
+                               §9.3.2.7 / §9.3.2.10 schedule. */
+                            fprintf(stderr,
+                                    "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                    "REJECTED as own-TX echo (corr=%.3f >= %d%%, rx_rms=%.1f)\n",
+                                    g_v90_phase3_s_events,
+                                    (int)v90_get_tx_phase(g_v90),
+                                    echo, gate_pct, rx_rms);
+                            trace_phase("V90 strict RX event=S count=%d rejected_echo corr=%.3f",
+                                        g_v90_phase3_s_events, echo);
+                            continue;
+                        }
                         accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
                         fprintf(stderr,
-                                "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d\n",
+                                "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d "
+                                "echo_corr=%.3f rx_rms=%.1f\n",
                                 g_v90_phase3_s_events,
                                 (int)v90_get_tx_phase(g_v90),
-                                accepted ? 1 : 0);
-                        trace_phase("V90 strict RX event=S count=%d accepted=%d",
-                                    g_v90_phase3_s_events, accepted ? 1 : 0);
+                                accepted ? 1 : 0, echo, rx_rms);
+                        trace_phase("V90 strict RX event=S count=%d accepted=%d echo_corr=%.3f rms=%.1f",
+                                    g_v90_phase3_s_events, accepted ? 1 : 0, echo, rx_rms);
                     }
 
                     if (!g_v90_pending_dil_valid)
@@ -4982,11 +5212,12 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
     if (!amp || len <= 0 || (g_mod != ME_MOD_V34 && g_mod != ME_MOD_V90))
         return;
     pthread_mutex_lock(&g_state_mtx);
-    if (g_echo_can) {
-        for (int i = 0; i < len; i++) {
-            g_tx_buf[g_tx_buf_wr] = amp[i];
-            g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
-        }
+    /* Fill unconditionally: the NLMS canceller below is optional (g_echo_can),
+       but the Phase 3 far-end-S echo gate needs this TX reference on every
+       call, including the ones where the canceller is not allocated. */
+    for (int i = 0; i < len; i++) {
+        g_tx_buf[g_tx_buf_wr] = amp[i];
+        g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
     }
     pthread_mutex_unlock(&g_state_mtx);
 }
