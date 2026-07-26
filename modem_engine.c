@@ -27,6 +27,7 @@
 #include "v91.h"
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
+#include "p3_demod.h"
 #include "v92_cp_rx.h"
 #include "v92_p3_rx.h"
 #include "v92_trn2u.h"
@@ -2715,6 +2716,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_phase2_restarts = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
+    v90_cp_rx_clear_votes(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
     v92_p3_rx_init(&g_v92_p3_rx);
     v92_cp_rx_reset(&g_v92_p3_cpt_rx);
@@ -2801,6 +2803,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     v90_cp_rx_reset(&g_v90_cp_rx);
+    v90_cp_rx_clear_votes(&g_v90_cp_rx);
     v92_cp_rx_reset(&g_v92_cp_rx);
     v90_dil_capture_reset();
     /* A Phase-4 retrain arrives with the strict batch CP receiver armed and
@@ -4182,6 +4185,197 @@ static void v90_s_echo_record_rx_locked(const int16_t *amp, int len)
     g_rx_ref_samples += (uint64_t)len;
 }
 
+/* Structural cross-check for the live V.34 Phase-3 S/J detectors.
+ *
+ * The SpanDSP V.34 receiver (spandsp/src/v34rx.c) fires V34_EVENT_S on a
+ * sustained-rotation / alternation heuristic and V34_EVENT_J on 8 sustained
+ * near-perfect canonical windows.  Both false-positive on near-silent noise and
+ * DIL turnaround: a carrier-offset rotation of noise reads as a sustained S
+ * (the AGC normalises magnitude so only raw power discriminates), and that
+ * same false S during DIL cuts the descriptor short before the far end has
+ * converged on it (observed live against the USR Courier: DIL terminated at
+ * 0.25-0.5 of a cycle on a faulty S).
+ *
+ * p3_demod classifies the actual 6-symbol repeating structure (3+ unique
+ * dibits, >=80% periodic match for S; 16-bit repeating pattern for J) which
+ * noise and silence cannot produce.  Running it on a recent RX window and
+ * requiring it to agree turns the event gate from a raw-threshold detector
+ * into a confidence-gated one without weakening the strict path.
+ *
+ * Returns true when the signal is confirmed (or when confirmation is
+ * disabled / p3_demod cannot run, so the gate never blocks a real event on a
+ * p3_demod defect).  Returns false only when p3_demod successfully ran and
+ * did NOT find the expected pattern — the case that rejects a false S. */
+enum { P3_CONFIRM_SAMPLES = 1600 };   /* 200 ms at 8 kHz */
+
+static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
+{
+    static int disabled = -1;
+    int16_t window[P3_CONFIRM_SAMPLES];
+    int baud_code;
+    int n;
+    p3_result_t *result;
+    bool found = false;
+
+    if (disabled < 0)
+        disabled = getenv("ME_V90_P3_CONFIRM") &&
+                   !strcmp(getenv("ME_V90_P3_CONFIRM"), "0") ? 1 : 0;
+    if (disabled)
+        return true;
+    /* The J gate can be independently disabled: the SmartLink interop rig
+     * uses ME_V90_J_LOOKAHEAD_BITS to fire a synthetic J early (before the
+     * strict canonical path would confirm it), and p3_demod may not have a
+     * clear enough window at that point.  The S gate is the one that
+     * directly fixes the false-S DIL cutoff; the J detector is already very
+     * strict. */
+    if (want == P3_SIGNAL_J
+        && getenv("ME_V90_P3_CONFIRM_J")
+        && !strcmp(getenv("ME_V90_P3_CONFIRM_J"), "0"))
+        return true;
+    if (!g_v34)
+        return true;
+
+    baud_code = v34_get_rx_baud_rate(g_v34);
+    if (baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT)
+        baud_code = P3_BAUD_2400;
+
+    /* Copy the most recent samples from the RX ring buffer. */
+    n = P3_CONFIRM_SAMPLES;
+    if (n > TX_BUF_SIZE)
+        n = TX_BUF_SIZE;
+    for (int i = 0; i < n; i++)
+        window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
+
+    /* The analogue caller transmits at the high carrier (1800 Hz at 2400
+     * baud).  p3_demod's PLL corrects residual carrier offset. */
+    result = p3_demod_run(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
+    if (!result)
+        return true;   /* p3_demod defect: don't block a real event */
+
+    for (int i = 0; i < result->segment_count; i++) {
+        p3_signal_type_t type = result->segments[i].type;
+        if (want == P3_SIGNAL_S) {
+            /* Accept either polarity: the v34rx detector reports both S and
+             * S-bar through the same event. */
+            if (type == P3_SIGNAL_S || type == P3_SIGNAL_S_BAR) {
+                found = true;
+                break;
+            }
+        } else if (type == want) {
+            found = true;
+            break;
+        }
+    }
+    p3_result_free(result);
+    return found;
+}
+
+/* Primary Ja detector: structurally identifies the 16-bit repeating J
+ * pattern in the live RX stream using p3_demod and fires V90_RX_EVENT_J
+ * directly, bypassing the slow v34rx canonical path (1.25 s for 8
+ * sustained windows) and the ME_V90_J_LOOKAHEAD_BITS fixed bit-count
+ * shortcut (625 ms).
+ *
+ * p3_demod classifies the J pattern from the actual 16-bit Table 18
+ * structure — scrambled TRN cannot produce a sustained canonical J match —
+ * so detection is both faster and more reliable than threshold counting.
+ * At 2400 baud the J period is 8 symbols (3.3 ms); two periods fit in
+ * ~7 ms, so a 100 ms scan window has ample data.
+ *
+ * Throttled to every 80 ms to keep CPU usage reasonable (~9 ms per scan).
+ * Total J detection latency is ~80 ms (throttle) + ~7 ms (pattern) =
+ * ~87 ms, well within the peer's ~1.1 s WaitForSd timeout.  With this
+ * as the primary detector, ME_V90_SD_DELAY_MS and
+ * ME_V90_SD_DELAY_RETRAIN_MS can both default to 0 (§9.3.1.3 allows
+ * 0–500 ms; 0 is valid when Ja is detected structurally rather than
+ * by bit count).
+ *
+ * Once J fires, the TX phase moves past V90_TX_WAIT_JA and this scanner
+ * becomes a no-op.  On retrain resync back to WAIT_JA, scanning resumes
+ * automatically (the sample counter resets when the phase changes).
+ *
+ * Disabled by ME_V90_P3_CONFIRM=0 (same kill switch as the S/J
+ * confirmation gates). */
+enum { P3_JA_SCAN_THROTTLE = 640 };  /* 80 ms at 8 kHz */
+enum { P3_JA_SCAN_WINDOW  = 800 };   /* 100 ms at 8 kHz */
+
+static int g_v90_p3_ja_scan_samples = 0;
+
+static void v90_p3_scan_ja_locked(int len)
+{
+    int16_t window[P3_JA_SCAN_WINDOW];
+    int baud_code;
+    int n;
+    p3_result_t *result;
+
+    if (!g_v90 || g_v92_active || !g_v34)
+        return;
+    /* Only scan while waiting for Ja.  Once J fires, the phase moves to
+     * SD_DELAY/SD and this function becomes a no-op.  On retrain resync
+     * back to WAIT_JA, scanning resumes.  The counter reset on phase
+     * change ensures we don't carry stale throttle state across retrains. */
+    if (v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
+        g_v90_p3_ja_scan_samples = 0;
+        return;
+    }
+
+    g_v90_p3_ja_scan_samples += len;
+    if (g_v90_p3_ja_scan_samples < P3_JA_SCAN_THROTTLE)
+        return;
+    g_v90_p3_ja_scan_samples = 0;
+
+    /* Reuse the confirmation gate's env kill switch. */
+    {
+        static int disabled = -1;
+
+        if (disabled < 0)
+            disabled = getenv("ME_V90_P3_CONFIRM") &&
+                       !strcmp(getenv("ME_V90_P3_CONFIRM"), "0") ? 1 : 0;
+        if (disabled)
+            return;
+    }
+
+    baud_code = v34_get_rx_baud_rate(g_v34);
+    if (baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT)
+        baud_code = P3_BAUD_2400;
+
+    n = P3_JA_SCAN_WINDOW;
+    if (n > TX_BUF_SIZE)
+        n = TX_BUF_SIZE;
+    for (int i = 0; i < n; i++)
+        window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
+
+    /* The analogue caller transmits at the high carrier (1800 Hz at 2400
+     * baud).  p3_demod's PLL corrects residual carrier offset. */
+    result = p3_demod_run(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
+    if (!result)
+        return;
+
+    for (int i = 0; i < result->segment_count; i++) {
+        if (result->segments[i].type == P3_SIGNAL_J) {
+            bool accepted;
+
+            p3_result_free(result);
+            /* Fire J event directly.  The post-processing (DIL capture,
+             * S-detector arming) mirrors the v34rx J event handler so the
+             * downstream state is identical regardless of which detector
+             * fired first. */
+            accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+            if (accepted) {
+                (void)v90_dil_capture_try_v34_hypotheses();
+                v34_v90_arm_phase3_s_detector(g_v34);
+            }
+            fprintf(stderr,
+                    "[ME] V.90 p3_demod: J detected (structural, %d ms window, baud=%d); "
+                    "accepted=%d\n",
+                    n * 1000 / 8000, baud_code, accepted ? 1 : 0);
+            trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
+            return;
+        }
+    }
+    p3_result_free(result);
+}
+
 /* V.90 WAIT_JA energy-gap Ja detector.
  *
  * The analogue modem's Phase 3 upstream is S/PP/TRN, then a silent gap
@@ -4560,6 +4754,7 @@ void me_rx_audio(const int16_t *amp, int len)
                 }
                 v90_wait_ja_energy_gate_locked(filtered, len);
                 v90_s_echo_record_rx_locked(filtered, len);
+                v90_p3_scan_ja_locked(len);
                 v34_rx(g_v34, filtered, len);
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;
@@ -4651,7 +4846,26 @@ void me_rx_audio(const int16_t *amp, int len)
                                     accepted ? 1 : 0);
                     }
                     if (new_j_event && g_v90 && !g_v92_active) {
-                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                        bool accepted;
+
+                        /* If p3_demod already fired J and moved us past
+                           WAIT_JA, the v34rx J event is a late secondary
+                           confirmation.  The && short-circuits so p3_demod
+                           is NOT called again; v90_handle_rx_event rejects
+                           it directly (phase != WAIT_JA).  This avoids a
+                           wasteful ~18 ms p3_demod scan on every v34rx J
+                           re-fire. */
+                        if (v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA
+                            && !v90_p3_confirm_signal_locked(P3_SIGNAL_J)) {
+                            fprintf(stderr,
+                                    "[ME] V.90 strict RX event=J tx_phase=%d "
+                                    "REJECTED by p3_demod structural check (no 16-bit J pattern)\n",
+                                    (int)v90_get_tx_phase(g_v90));
+                            trace_phase("V90 strict RX event=J rejected_p3_structural");
+                            accepted = false;
+                        } else {
+                            accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                        }
 
                         if (accepted) {
                             (void)v90_dil_capture_try_v34_hypotheses();
@@ -4758,6 +4972,25 @@ void me_rx_audio(const int16_t *amp, int len)
                                     echo, gate_pct, rx_rms);
                             trace_phase("V90 strict RX event=S count=%d rejected_echo corr=%.3f",
                                         g_v90_phase3_s_events, echo);
+                            continue;
+                        }
+                        /* Structural confirmation: run p3_demod on the
+                           recent RX window and require it to classify the
+                           region as a genuine S/S-bar pattern (6-symbol
+                           repeating, 3+ unique dibits).  This is the gate
+                           that stops a faulty S from cutting DIL short —
+                           the Courier case where a false S fired at
+                           0.25-0.5 of a DIL cycle. */
+                        if (!v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
+                            fprintf(stderr,
+                                    "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                    "REJECTED by p3_demod structural check (no 6-symbol S pattern) "
+                                    "echo_corr=%.3f rx_rms=%.1f rx_sample=%llu\n",
+                                    g_v90_phase3_s_events,
+                                    (int)v90_get_tx_phase(g_v90),
+                                    echo, rx_rms, (unsigned long long)g_rx_ref_samples);
+                            trace_phase("V90 strict RX event=S count=%d rejected_p3_structural",
+                                        g_v90_phase3_s_events);
                             continue;
                         }
                         accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
@@ -5103,21 +5336,25 @@ static void prepare_v90_phase3_locked(void)
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
             if (g_v90 && g_v90_phase2_restarts > 0) {
-                /* §9.5-retrained attempt: the pre-converged Phase 2 makes our
-                 * Ja detection outrun the peer's WaitForSd arming, so the
-                 * initial-attempt Sd delay transmits Sd before the peer is
-                 * listening and its equalizer trains on unanchored TRN1d
-                 * (error pinned ~3000 vs converging to ~50; call 10 attempt 2,
-                 * 2026-07-22).  1550 ms was live-validated for slow-arming
-                 * windows earlier and still fits the peer's ~8 s Phase 3
-                 * budget with the 20000-symbol Jd (ends ~0.6 s inside it). */
+                /* With p3_demod as the primary Ja detector (~80-100 ms
+                 * detection), Sd starts immediately after J confirmation.
+                 * §9.3.1.3 allows 0 ms delay ("may wait for up to 500 ms").
+                 * The retrain override is kept as an env escape hatch for
+                 * peers whose WaitForSd arms late, but defaults to 0 (no
+                 * override) since structural J detection fires within the
+                 * peer's arming window on both initial and retrained
+                 * attempts.  The old 1550 ms default compensated for the
+                 * 625 ms ME_V90_J_LOOKAHEAD_BITS detection delay; with
+                 * p3_demod that delay is gone. */
                 int retrain_delay =
-                    parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 1550);
+                    parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 0);
 
-                v90_set_sd_delay_ms(g_v90, retrain_delay);
-                ME_LOG("[ME] V.90: retrained attempt %u; Sd delay override %d ms "
-                       "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
-                       g_v90_phase2_restarts, retrain_delay);
+                if (retrain_delay > 0) {
+                    v90_set_sd_delay_ms(g_v90, retrain_delay);
+                    ME_LOG("[ME] V.90: retrained attempt %u; Sd delay override %d ms "
+                           "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
+                           g_v90_phase2_restarts, retrain_delay);
+                }
             }
         }
         if (g_v90) {

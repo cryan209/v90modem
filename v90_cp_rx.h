@@ -10,6 +10,17 @@
 typedef void (*v90_cp_rx_frame_handler_t)(void *user_data,
                                           const vpcm_cp_diag_t *diag);
 
+/* Soft-combine history depth.  CPt/CP repeat; keeping the last few
+ * CRC-failed copies lets a per-bit majority vote recover a CRC-valid
+ * consensus even when no single copy is clean.  CRC remains the final
+ * gate on both the raw copy and the voted consensus. */
+#define V90_CP_RX_VOTE_FRAMES 8
+
+typedef struct {
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int target_bits;
+} v90_cp_rx_vote_t;
+
 typedef struct {
     uint8_t bits[VPCM_CP_MAX_BITS];
     int bit_count;
@@ -25,8 +36,17 @@ typedef struct {
     uint32_t crc_rejected_frames;
     uint32_t structure_rejected_frames;
     uint32_t semantic_rejected_frames;
+    uint32_t voted_frames_accepted;
     v90_cp_rx_frame_handler_t frame_handler;
     void *frame_user_data;
+    /* Soft-combine accumulator: the last V90_CP_RX_VOTE_FRAMES rejected
+     * copies that shared the same target_bits.  Persists across the
+     * per-frame v90_cp_rx_reset() so repeated CP copies accumulate; cleared
+     * explicitly by v90_cp_rx_clear_votes() on retrain / phase transition
+     * and by v90_cp_rx_init(). */
+    v90_cp_rx_vote_t vote[V90_CP_RX_VOTE_FRAMES];
+    int vote_count;
+    int vote_target_bits;
 } v90_cp_rx_t;
 
 void v90_cp_rx_init(v90_cp_rx_t *rx,
@@ -35,6 +55,10 @@ void v90_cp_rx_init(v90_cp_rx_t *rx,
                     v90_cp_rx_frame_handler_t frame_handler,
                     void *user_data);
 void v90_cp_rx_reset(v90_cp_rx_t *rx);
+/* Clear the soft-combine vote history.  Call on retrain / phase transition;
+ * v90_cp_rx_reset() deliberately keeps votes so repeated CP copies
+ * accumulate across frame boundaries. */
+void v90_cp_rx_clear_votes(v90_cp_rx_t *rx);
 bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit);
 
 #endif
