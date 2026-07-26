@@ -38,7 +38,7 @@ nested download. By default it extracts the three generic V.34/V.90 overlays:
   -o artifacts/eicon-dsp/build-103-492
 
 ./tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
-  -o artifacts/eicon-dsp/build-117-926
+  --match 'V\.90 APCM Overlay' -o artifacts/eicon-dsp/build-117-926
 ```
 
 List all contained downloads without writing images:
@@ -86,10 +86,10 @@ Build 117-926:
 | V.90 APCM | `0x026b` | `0x1eca42` | 57,419 | 8,692 | 9,852 |
 
 All declared section sizes, block counts, and the final combifile length match
-exactly for both files. The newer V.34 and DPCM overlays contain three Eicon
-type-2 relocations each. The extractor resolves their ADSP standard-command
-14-bit direct addresses against relocatable segment 4. The selected APCM and
-older overlays need no non-zero relocation fixups.
+exactly for both files. All four relocation forms and DWORD PM byte packing are
+now recovered from the shipping MIPS protocol loader, as described below.
+Across build 117-926 the extractor resolves 4,265 type-0 and 40,802 type-2
+fixups; types 1 and 3 are supported although these combifiles do not use them.
 
 ## Container references
 
@@ -107,6 +107,119 @@ driver (`drivers/isdn/hardware/eicon/dsp_defs.h`) and its userspace loader
 This container is distinct from the simpler IDMA/BDMA boot-page format in
 section 6.1 of `addspv90guide.pdf`, although both ultimately describe ADSP-218x
 PM and DM loads.
+
+## Standalone ADSP-2181 execution prototype
+
+`tools/adsp2181emu/` now contains a standalone ADSP-2181 interpreter adapted
+from MAME's BSD-licensed ADSP-21xx core. It has separate 16K-word PM/DM spaces,
+the ADSP register banks, DAGs, ALU/MAC/shifter, loops, SPORT callbacks and the
+full 24-bit instruction dispatcher. It intentionally has no Eicon peripheral
+model yet.
+
+Build it with:
+
+```bash
+make -C tools/adsp2181emu
+```
+
+A first real execution test uses the bootable primary-rate kernel:
+
+```bash
+./tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
+  --match '^DIVA Server PRI 30M Kernel' -o /tmp/eicon-kernel
+
+./tools/adsp2181emu/eicon_adsp_run \
+  /tmp/eicon-kernel/0009-diva-server-pri-30m-kernel/pm.bin \
+  /tmp/eicon-kernel/0009-diva-server-pri-30m-kernel/dm.bin 100000
+```
+
+The corrected interpreter run executes reset PM `0x0000` (`0x18580f`), jumps
+to the kernel entry at `0x0580`, initializes the ADSP and reaches its IDLE at
+PM `0x02a9` after about 100 instructions. The earlier apparent `0x0f1858`
+SPORT path was caused by treating DWORD PM as an ordinary little-endian
+integer; it was byte-rotated and is not a valid result.
+
+Set `ADSP_TRACE` to trace the first N instructions:
+
+```bash
+ADSP_TRACE=64 ./tools/adsp2181emu/eicon_adsp_run <pm.bin> <dm.bin> 1000
+```
+
+`ADSP_RX0`/`ADSP_RX1` and `ADSP_TX0`/`ADSP_TX1` attach little-endian signed
+16-bit SPORT streams. `ADSP_TRACE_SPORT=N` logs the first N transfers, and
+`ADSP_START_PC` is available for entry-point experiments.
+
+### Recovered MIPS relocation loader
+
+The PRI protocol image `docs/firmware/te_dmlt.pm` is little-endian MIPS. Its
+routine at file offsets `0x75e04..0x75f30` reads each DWORD PM container and
+performs relocation. The input layout is:
+
+```text
+host word 0: instruction[23:8]
+host word 1 low byte: instruction[7:0]
+host word 1 high byte: relocation type | segment number
+```
+
+In pseudocode, after reconstructing the 24-bit instruction as `v` and looking
+up the allocated segment base `b`, the four cases are:
+
+```text
+type 0: PM v += b << 8; DM word += b
+type 1: v += b            # low PM data part
+type 2: v += b << 4       # standard ADSP command
+type 3: permute(v); v += b << 2; inverse_permute(v)
+```
+
+The exact type-3 masks are implemented in `tools/eicon_dsp_extract.py` from
+MIPS offsets `0x75eb0..0x75efc`. As a semantic check, V.90 DPCM PM `0x1900`
+resolves from its container form to instruction `0x872f71`; its direct DM
+operand is `0x32f7`, inside referenced segment 4 (`0x32f0..0x32f7`).
+
+The extracted kernel, `TIKRNL81.F34`, and V.90 DPCM images can be composed in
+load order with `tools/eicon_adsp_bundle.py`. There are 117 differing overlaps:
+108 words where TIKRNL replaces the kernel task-loader window and nine where
+DPCM replaces TIKRNL state/code. Preloading all three before reset is not a
+valid boot sequence: the TIKRNL replacement removes the boot kernel entry.
+The boot kernel must first run to IDLE, then receive task descriptors through
+the Eicon host interface and perform the staged loads itself.
+
+The emulator now includes the ADSP-2181 interrupt controller, IDMA PM/DM
+transfer protocol, PMOVLAY/DMOVLAY registers and two external 8K PM/DM banks.
+The corrected register map removes the false reset-time writes to invalid
+registers: group-1 registers 14 and 15 are PMOVLAY and DMOVLAY.
+
+The resident PRI kernel enables only mask bit `0x020`, the SPORT0 receive
+interrupt, and idles at `0x02a9`. Pulsing it vectors through PM `0x0014`; this
+is the 8 kHz PRI sample/TDM path, not a task-download mailbox. With no line
+interface model it emits G.711 idle code `0x00ff` and passes words along SPORT1,
+which is consistent with the physical DSP chain on a 30-channel card.
+
+A staged-load experiment now performs the real sequence more closely:
+
+1. boot the PRI kernel to IDLE;
+2. write TIKRNL81.F34 and V.90 DPCM populated PM/DM words without resetting;
+3. CALL TIKRNL's zero-sized exported label at PM `0x0672` with a valid return
+   stack entry;
+4. return cleanly to kernel IDLE and clock SPORT0 receive interrupts.
+
+The TIKRNL initializer clears/configures its PM window and populates its data
+structures (including DM `0x3184..` and the task tables at `0x31c8..`). It does
+not activate a modem channel by itself. Calling V.90 symbol 0 as code was ruled
+out: it is a one-word fixed data symbol at DM `0x3602`, not an entry point.
+The remaining boundary is the MIPS-side `dsp_assign` control transaction that
+selects a channel and fills the TIKRNL task/database parameters. That protocol
+runs in `te_dmlt.pm`; it is distinct from the sample SPORT and from the generic
+IDMA modem interface in `addspv90guide.pdf`.
+
+`--card-type` can now apply the combifile directory's usage masks. Card type 23
+(the older DIVA Server PRI 30M profile) maps to file set 5 and selects the
+DPCM-capable digital-side task family:
+
+```bash
+./tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
+  --card-type 23 --list
+```
 
 ## Next reverse-engineering step
 

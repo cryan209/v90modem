@@ -100,6 +100,8 @@ core.3194
 core.3478
 vpcm_decode
 vpcm_encode
+tools/adsp2181emu/eicon_adsp_run
+tools/adsp2181emu/adsp2181_core_test
 left_neg_test.wav
 /artifacts/v90-hardware/
 tools/__pycache__/v90_pad_gain.cpython-313.pyc

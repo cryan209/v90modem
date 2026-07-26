@@ -142,13 +142,35 @@ def resolve_block_values(
             base = relocation_base(target_segment, segments)
             before = value
             resolved = False
-            if relocation_type == 0x80:
-                # ADSP-218x standard CALL/JUMP commands carry their direct
-                # address in bits 13:0.  Eicon calls this DSP_RELOC_TYPE_2.
-                address = (value & 0x3FFF) + base
-                if address <= 0x3FFF:
-                    value = (value & ~0x3FFF) | address
-                    resolved = True
+            if relocation_type == 0x00:
+                # Recovered from the shipping MIPS loader in te_dmlt.pm,
+                # build 117-926, at file offsets 0x75e64..0x75e7c.
+                value = value + (base if domain == "dm" else base << 8)
+                resolved = True
+            elif relocation_type == 0x40:
+                # Address in the low part of a PM data word (0x75e80..94).
+                value += base
+                resolved = True
+            elif relocation_type == 0x80:
+                # Address in a standard ADSP command (0x75e98..0x75eac).
+                value += base << 4
+                resolved = True
+            elif relocation_type == 0xC0:
+                # CALL/JUMP-on-FLAG_IN permutes its split address around a
+                # base<<2 addition (te_dmlt.pm 0x75eb0..0x75efc).
+                temporary = (
+                    (value & 0xFF0003)
+                    | ((value & 0x00FFF0) >> 2)
+                    | ((value & 0x00000C) << 12)
+                )
+                temporary += base << 2
+                value = (
+                    (temporary & 0xFF0003)
+                    | ((temporary & 0x003FFC) << 2)
+                    | ((temporary & 0x00C000) >> 12)
+                )
+                resolved = True
+            value &= mask
             relocations.append(
                 {
                     "word_index": word_index,
@@ -202,7 +224,20 @@ def parse_blocks(
         if width == 2:
             values = list(struct.unpack_from(f"<{words}H", data, pos))
         elif width == 4:
-            values = list(struct.unpack_from(f"<{words}I", data, pos))
+            containers = list(struct.unpack_from(f"<{words}I", data, pos))
+            if domain == "pm":
+                # Eicon stores DWORD PM as two host words: instruction bits
+                # 23:8 in the first word, instruction bits 7:0 in the low byte
+                # of the second, and relocation in its high byte.  This is the
+                # exact unpacking at te_dmlt.pm 0x75e04..0x75e24.
+                values = [
+                    (raw & 0xFF000000)
+                    | ((raw & 0x0000FFFF) << 8)
+                    | ((raw >> 16) & 0xFF)
+                    for raw in containers
+                ]
+            else:
+                values = containers
         else:
             values = [
                 int.from_bytes(data[pos + 3 * i : pos + 3 * i + 3], "little")
@@ -473,18 +508,57 @@ def main() -> int:
         default=r"V\.34 Overlay|V\.90 (?:DPCM|APCM) Overlay",
         help="case-insensitive regular expression selecting descriptions",
     )
+    parser.add_argument(
+        "--card-type",
+        type=lambda value: int(value, 0),
+        help="select only downloads required by this Eicon card-type number",
+    )
     parser.add_argument("--list", action="store_true", help="list downloads without extracting")
     args = parser.parse_args()
 
     try:
         combi = parse_combifile(args.combifile)
         pattern = re.compile(args.match, re.IGNORECASE)
-        selected = [d for d in combi["downloads"] if pattern.search(d["description"])]
+        file_set = None
+        if args.card_type is not None:
+            matches = [
+                entry["file_set"]
+                for entry in combi["directory"]
+                if entry["card_type"] == args.card_type
+            ]
+            if not matches:
+                raise FormatError(f"card type {args.card_type} is not in the combifile directory")
+            file_set = matches[0]
+            if file_set // 8 >= combi["usage_mask_size"]:
+                raise FormatError(
+                    f"card type {args.card_type} maps to invalid file set {file_set}"
+                )
+
+        def required(download: dict) -> bool:
+            if file_set is None:
+                return True
+            mask = bytes.fromhex(download["usage_mask"])
+            return bool(mask[file_set // 8] & (1 << (file_set & 7)))
+
+        selected = [
+            d
+            for d in combi["downloads"]
+            if required(d) and pattern.search(d["description"])
+        ]
         print(f"{args.combifile}: {combi['description']}")
-        print(f"downloads={len(combi['downloads'])}, selected={len(selected)}")
-        for download in combi["downloads"] if args.list else selected:
+        card_text = (
+            f", card_type={args.card_type}, file_set={file_set}"
+            if args.card_type is not None
+            else ""
+        )
+        print(f"downloads={len(combi['downloads'])}, selected={len(selected)}{card_text}")
+        shown = combi["downloads"] if args.list and file_set is None else (
+            [d for d in combi["downloads"] if required(d)] if args.list else selected
+        )
+        for download in shown:
             line = (
                 f"[{download['index']:3d}] id=0x{download['download_id']:04x} "
+                f"flags=0x{download['flags']:02x} "
                 f"offset=0x{download['file_offset']:x} size={download['file_size']:7d} "
                 f"DM={sum(b.words for b in download['dm_blocks']):5d} "
                 f"PM={sum(b.words for b in download['pm_blocks']):5d}  "
