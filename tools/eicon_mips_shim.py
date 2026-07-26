@@ -36,6 +36,7 @@ STUB_BASE = 0x00900000
 HOST_WRITE = BIAS + 0x71950  # 0x80082950
 HOST_READ = BIAS + 0x71920   # 0x80082920
 SCRIPT_SENDER = BIAS + 0x786A4  # 0x800896a4
+REQUEST_PARSER = BIAS + 0x78138  # 0x80089138
 
 # ---------------------------------------------------------------- ADSP side
 
@@ -191,15 +192,26 @@ def main() -> int:
     struct.pack_into("<II", buf, 0x00, 0xDEAD0000, 0xDEAD0004)  # host regs
     struct.pack_into("<HH", buf, 0x08, 0x3310, 0x3338)  # symbol13/14 addrs
     buf[0x0C] = 1                     # active
-    buf[0x10] = args.code             # script code (< 75)
-    buf[0x11] = args.mode             # script mode (< 2)
     struct.pack_into("<H", buf, 0x12, args.selector)    # command selector
-    struct.pack_into("<H", buf, 0x14, 0)                # script pc
-    struct.pack_into("<H", buf, 0x1C, 0)                # form 0 = script
     struct.pack_into("<H", buf, 0x3E, 0x0020)           # control word
     shim.uc.mem_write(RAM_BASE + 0x1000, bytes(buf))  # API uses physical
 
-    shim.call(SCRIPT_SENDER, [req, 0], gp=0x80108000, sp=RAM_VIRT + 0x8000)
+    # Top-level byte request: [len, ?, form, code, mode] selects a script.
+    outer = bytes([4, 0, 0, args.code, args.mode])
+    shim.uc.mem_write(RAM_BASE + 0x2000, outer)
+    # Context struct: +0x20 = pointer to the byte request.
+    ctx = bytearray(0x40)
+    struct.pack_into("<I", ctx, 0x20, RAM_VIRT + 0x2000)
+    shim.uc.mem_write(RAM_BASE + 0x3000, bytes(ctx))
+
+    # parser(a0=request, a1=context) then sender(a0=request, a1=context)
+    v0 = shim.call(REQUEST_PARSER, [req, RAM_VIRT + 0x3000],
+                   gp=0x80108000, sp=RAM_VIRT + 0x8000)
+    if args.log:
+        print(f"[mips] parser -> {v0:#x}")
+    if v0:
+        shim.call(SCRIPT_SENDER, [req, RAM_VIRT + 0x3000],
+                  gp=0x80108000, sp=RAM_VIRT + 0x8000)
 
     # pump the 8 kHz host loop so the DSP consumes the command
     for _ in range(args.words):

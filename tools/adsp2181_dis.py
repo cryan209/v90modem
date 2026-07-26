@@ -101,6 +101,14 @@ def disas(op: int) -> str:
         return f"{REG_GROUP0[op & 15]} = IO(${(op >> 4) & 0x7FF:03X})"
     if top in (0x10, 0x11):
         return f"DO ${op & 0x3FFF:04X} UNTIL {COND[(op >> 4) & 15]}"
+    if 0x30 <= top <= 0x3F:
+        grp = (top - 0x30) >> 2
+        val = (op << 14) >> 18
+        if val & 0x2000:
+            val -= 0x4000
+        return f"{REG_GROUPS[grp][op & 15]} = ${val & 0xFFFF:04X}"
+    if 0x40 <= top <= 0x4F:
+        return f"{REG_GROUP0[op & 15]} = ${(op >> 4) & 0xFFFF:04X}"
     cmt = COMMENTS.get(top, "")
     if cmt:
         desc = cmt.split("  ", 1)[-1].strip() if "  " in cmt else cmt

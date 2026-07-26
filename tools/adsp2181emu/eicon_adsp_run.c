@@ -312,7 +312,10 @@ int main(int argc, char **argv)
                     adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                     adsp2181_icntl(cpu));
         }
-        if (getenv("ADSP_STAGE_ENTRY2")) {
+        long entry2_at = -1;
+        if (getenv("ADSP_STAGE_ENTRY2_AT"))
+            entry2_at = strtol(getenv("ADSP_STAGE_ENTRY2_AT"), NULL, 0);
+        if (getenv("ADSP_STAGE_ENTRY2") && entry2_at < 0) {
             unsigned long entry = strtoul(getenv("ADSP_STAGE_ENTRY2"), &end, 0);
             if (*end || entry > 0x3fff) {
                 fprintf(stderr, "invalid ADSP_STAGE_ENTRY2: %s\n", getenv("ADSP_STAGE_ENTRY2"));
@@ -325,6 +328,8 @@ int main(int argc, char **argv)
                     adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                     adsp2181_icntl(cpu));
         }
+        if (getenv("ADSP_STAGE_ENTRY2"))
+            entry2_at = entry2_at; /* keep */
         /* MIPS dsp_assign writes occur after the task initializer has built its
          * mailbox/database structures, so keep this separate from staged DM. */
         if (getenv("ADSP_POST_DM_WORDS") &&
@@ -353,9 +358,22 @@ int main(int argc, char **argv)
                 adsp2181_watch_dm(cpu, (uint16_t)a, 1);
                 adsp2181_watch_pm(cpu, (uint16_t)a, 1);
             }
-        if (getenv("ADSP_TRACE_HOST"))
+        long trace_at = getenv("ADSP_TRACE_AT_WORD")
+            ? strtol(getenv("ADSP_TRACE_AT_WORD"), NULL, 0) : 0;
+        if (getenv("ADSP_TRACE_HOST") && trace_at == 0)
             adsp2181_trace_budget(cpu, strtol(getenv("ADSP_TRACE_HOST"), NULL, 0));
         for (long word = 0; word < words; word++) {
+            if (getenv("ADSP_TRACE_HOST") && word == trace_at && trace_at > 0)
+                adsp2181_trace_budget(cpu, strtol(getenv("ADSP_TRACE_HOST"), NULL, 0));
+            if (entry2_at == word && getenv("ADSP_STAGE_ENTRY2")) {
+                unsigned long entry = strtoul(getenv("ADSP_STAGE_ENTRY2"), NULL, 16);
+                adsp2181_call(cpu, (uint16_t)entry, 0x02a8);
+                (void)adsp2181_run(cpu, 1000000);
+                fprintf(stderr, "[ADSP] stage-init2(at %ld) pc=%04x idle=%d imask=%03x icntl=%02x\n",
+                        word, adsp2181_pc(cpu), adsp2181_idle(cpu),
+                        adsp2181_imask(cpu), adsp2181_icntl(cpu));
+                entry2_at = -2; /* once */
+            }
             for (int i = 0; i < host_script_len; i++)
                 if (host_script[i].index == word) {
                     adsp2181_host_write(cpu, host_script[i].addr,

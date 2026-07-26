@@ -469,3 +469,35 @@ Also: the kernel queue handler at `0x01c1` performs `CALL (I4)` on queued
 entries — queue entries carry function vectors. The per-frame descriptor at
 DM `0x2f00` (fields: `+0` flags, `+1 = 0x2800`, `+4` DM data pointer) is
 serviced every 8 kHz frame by the routine at `0x00d8`.
+
+## Session 5: parser path live, kernel scheduler model complete (2026-07-27)
+
+- The shim now drives the full top-level path: byte request
+  `[len, ?, form, code, mode]` -> request_parser (`0x80089138`) ->
+  script_sender, reproducing the script-66 PM-ring commit through the real
+  firmware code path (not just the sender in isolation).
+- Kernel scheduler model: five service slots whose entry pointers live at
+  DM `0x2f27..0x2f2b` (entries at `0x2f21/0x2f00/0x2f0e/0x2f42/0x2f4e`).
+  IRQ/service handlers each own a slot (SPORT0 TX -> `2f27`, IRQ2 -> `2f28`,
+  IRQL1/2 -> `2f29`, timer -> `2f2a`, `2f2b` spare) and CALL the slot's
+  vector. The foreground per-frame service uses slot `2f28` (entry `0x2f00`,
+  vector field `+1`, currently the inactive `0x2800`).
+- TIKRNL's vector table (DM `0x31bb`) entries are wrappers that CALL the
+  kernel's `0x01b2/0x00d8` service routine and then dispatch via SR0 — the
+  kernel and task kernels share the scheduler.
+- TIKRNL init (entry `0x672`) calls `0x0637/0x184d/0x064a`; `0x184d` exports
+  service vectors `0x05ab/0x05b1` (or `0x05b7/0x05be`) into DM `0x3307+`.
+- Service-driver table in te_dmlt.pm at file `0xeaec4`: {release `0x8008c978`,
+  `0x80096980`, `0x80098310`, `0x80098614`, `0x80099734`, `0x800a6820`,
+  `0x8009fae8`, `0x800a6874`, `0x800a687c`, `0x800a68c0`, `0x800a318c`} —
+  the modem service entry points (assign is reached via this table, not by
+  direct `jal`).
+- Harness: `ADSP_STAGE_ENTRY2_AT` (call after word N), `ADSP_TRACE_AT_WORD`,
+  hex-safe entry parsing. `tools/adsp2181_dis.py` decodes the full
+  ADSP-2181 kernel+TIKRNL images reliably.
+
+Next: run the modem service assign entry (table slot 1, `0x80096980`) in the
+shim with a synthesized TIKRNL download struct (segments/symbols from
+metadata.json), which performs the switch-on database commit; then feed the
+E1 timeslot stream on SPORT0 (a call can also be signalled from the E1 side:
+the kernel ISR walks timeslots and CAS/signalling arrives in-band).
