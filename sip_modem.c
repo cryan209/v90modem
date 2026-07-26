@@ -12,7 +12,7 @@
  * Usage:
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path>]
- *                   [--local-port <port>]
+ *                   [--local-port <port>] [--rtp-port <port>]
  *
  * If --sip-server is omitted the UA starts in peer-to-peer mode and
  * waits for incoming calls on the specified local SIP port (default 5060).
@@ -859,6 +859,7 @@ int main(int argc, char *argv[])
     const char *bind_addr   = NULL;
     char        bind_addr_buf[64];
     int         local_port  = 5060;
+    int         rtp_port    = 0;
     pj_bool_t   aud_subsys_inited = PJ_FALSE;
 
     /* Parse command-line arguments */
@@ -873,6 +874,8 @@ int main(int argc, char *argv[])
             pty_link = argv[++i];
         else if (!strcmp(argv[i], "--local-port") && i+1 < argc)
             local_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--rtp-port") && i+1 < argc)
+            rtp_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind-addr") && i+1 < argc)
             bind_addr = argv[++i];
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
@@ -880,7 +883,7 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--help")) {
             fprintf(stderr,
                 "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-                "          [--pty-link path] [--local-port port]\n"
+                "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
                 "          [--bind-addr ip] [--verbose]\n", argv[0]);
             return 0;
         }
@@ -1037,6 +1040,10 @@ int main(int argc, char *argv[])
         acc_cfg.cred_info[0].username = pj_str((char *)username);
         acc_cfg.cred_info[0].data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
         acc_cfg.cred_info[0].data      = pj_str((char *)password ? (char *)password : "");
+        if (rtp_port > 0) {
+            acc_cfg.rtp_cfg.port = (unsigned)rtp_port;
+            PJ_LOG(3, ("sip_modem", "RTP media base port: %d", rtp_port));
+        }
 
         status = pjsua_acc_add(&acc_cfg, PJ_TRUE, &g_acc_id);
         if (status != PJ_SUCCESS)
@@ -1050,6 +1057,10 @@ int main(int argc, char *argv[])
         acc_cfg.id = pj_str(id_buf);
         if (bind_addr)
             acc_cfg.rtp_cfg.bound_addr = pj_str((char *)bind_addr);
+        if (rtp_port > 0) {
+            acc_cfg.rtp_cfg.port = (unsigned)rtp_port;
+            PJ_LOG(3, ("sip_modem", "RTP media base port: %d", rtp_port));
+        }
         pjsua_acc_add(&acc_cfg, PJ_TRUE, &g_acc_id);
     }
 

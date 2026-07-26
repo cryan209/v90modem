@@ -666,8 +666,8 @@ static me_modulation_t g_mod       = ME_MOD_NONE;   /* tentatively declared abov
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
 static bool            g_invert_v34_role = false; /* debug override via env */
-static int             g_v8_answer_tone = MODEM_CONNECT_TONES_ANSAM;
-static int             g_v8_active_answer_tone = MODEM_CONNECT_TONES_ANSAM;
+static int             g_v8_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
+static int             g_v8_active_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
 static bool            g_v8_answer_tone_retry_done = false;
 
 /* SpanDSP modem contexts */
@@ -1630,7 +1630,6 @@ typedef struct {
 } notch_filter_t;
 
 static notch_filter_t g_notch = {0};
-
 /* V.22bis guard tone (ITU-T V.22bis §2.1/2.2): an 1800 Hz (or, as a national
    option, 550 Hz) tone transmitted continuously alongside the "high
    channel" carrier, 6 dB (1800 Hz) or 3 dB (550 Hz) below the data signal
@@ -3731,7 +3730,7 @@ void me_init(void)
             ME_LOG("[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
     }
     g_v8_answer_tone = parse_v8_answer_tone_env("ME_V8_ANSWER_TONE",
-                                                MODEM_CONNECT_TONES_ANSAM);
+                                                MODEM_CONNECT_TONES_ANSAM_PR);
     ME_LOG("[ME] V.8 answer tone: %s\n",
             modem_connect_tone_to_str(g_v8_answer_tone));
     {
