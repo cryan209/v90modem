@@ -273,8 +273,22 @@ static const char *v34_rx_stage_to_str(int stage)
     case V34_RX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
     case V34_RX_STAGE_PHASE4_MP: return "PHASE4_MP";
     case V34_RX_STAGE_DATA: return "DATA";
+    case V34_RX_STAGE_V90_CP: return "V90_CP";
     default: return "UNKNOWN";
     }
+}
+
+static bool v34_rx_stage_is_phase4_frame(int stage)
+{
+    return stage == V34_RX_STAGE_PHASE4_MP
+        || stage == V34_RX_STAGE_V90_CP;
+}
+
+static bool v34_rx_stage_is_primary_training(int stage)
+{
+    return (stage >= V34_RX_STAGE_PHASE3_WAIT_S
+            && stage <= V34_RX_STAGE_PHASE4_MP)
+        || stage == V34_RX_STAGE_V90_CP;
 }
 
 static const char *v34_event_to_str(int event)
@@ -771,7 +785,7 @@ static int phase4_trn_should_freeze_tracking(const v34_rx_state_t *s)
     /* Also freeze carrier tracking during MP — the carrier phase was locked
        during TRN and CMA-based QPSK slicer decisions during MP are too noisy
        to drive carrier tracking without corrupting the locked phase. */
-    if (s->stage == V34_RX_STAGE_PHASE4_MP)
+    if (v34_rx_stage_is_phase4_frame(s->stage))
         return 1;
     return (s->stage == V34_RX_STAGE_PHASE4_TRN
             && s->phase4_j_seen
@@ -1071,6 +1085,40 @@ static void mp_phase4_apply_retry_mode(v34_rx_state_t *s, int retry_mode)
     s->mp_phase4_alt_tap_active = use_alt_tap;
     s->mp_phase4_alt_order_active = use_alt_order;
     s->mp_phase4_alt_domain_active = use_alt_domain;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void mp_vote_reset(v34_rx_state_t *s);
+
+static void mp_v90_cp_reset_at_carrier_gap(v34_rx_state_t *s)
+{
+    /* V.90 §8.5.2 initializes the analogue modem's scrambler and
+       differential encoder to zero before the first CPt.  The forced V.90
+       receiver can be armed while the preceding Phase-3 signal is still
+       present, so hypotheses accumulated before the carrier gap do not
+       belong to CPt.  Reset only the CP framing/descrambling search at that
+       unambiguous boundary; retain the trained equalizer, carrier recovery
+       and sample timing. */
+    s->mp_phase4_retry_mode = 0;
+    mp_phase4_apply_retry_mode(s, 0);
+    s->mp_phase4_reject_streak = 0;
+    s->mp_phase4_nolock_count = 0;
+    s->mp_phase4_force_abs_active = 0;
+    s->mp_phase4_diff_collapse_streak = 0;
+    s->mp_phase4_diff_recover_streak = 0;
+    s->phase4_da_active = 0;
+    s->phase4_da_seeded = 0;
+    s->phase4_da_expected_ang = 0;
+    s->phase4_da_derot = 0;
+    s->mp_frame_pos = 0;
+    s->mp_frame_target = 0;
+    s->mp_early_rejects = 0;
+    s->bitstream = 0;
+    s->bit_count = 0;
+    memset(s->mp_hyp_scramble, 0, sizeof(s->mp_hyp_scramble));
+    memset(s->mp_hyp_bitstream, 0, sizeof(s->mp_hyp_bitstream));
+    mp_reset_hypothesis_search(s);
+    mp_vote_reset(s);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4695,7 +4743,7 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
        away from that trained solution while MP/CP is being acquired.  This
        is deliberately opt-in for live A/B testing. */
     cma_delta = s->eq_delta;
-    if (s->stage == V34_RX_STAGE_PHASE4_MP
+    if (v34_rx_stage_is_phase4_frame(s->stage)
         && getenv("ME_V34_SLOW_CMA_DURING_MP"))
     {
         cma_delta *= EQUALIZER_SLOW_ADAPT_RATIO;
@@ -7269,17 +7317,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         }
         break;
 
+    case V34_RX_STAGE_V90_CP:
     case V34_RX_STAGE_PHASE4_MP:
-        /* Phase 4 MP detection on primary channel using DQPSK demodulation.
-           Same approach as CC channel MP detection: differential phase decoding,
-           descrambling, then scanning for the MP preamble and frame. */
+        /* These stages share only the V.34 primary-channel DQPSK front end
+           and hypothesis acquisition. V34_RX_STAGE_V90_CP hands the recovered
+           bitstream to the project-owned V.90 Table-14 framer; the ordinary
+           MP stage retains V.34 frame lengths, acknowledgements, timeouts and
+           the E transition. Keeping the protocol states distinct is important:
+           V.90 9.4.1.1 requires CPt reception while the digital modem sends Ri,
+           without the preceding V.34 J'/TRN-to-MP sequencing. */
         {
             int locked_this_symbol;
             int h;
             int expected_mp_type;
             int abs_bits;
             int mp_decode_domain;
+            int v90_cp_rx;
 
+        v90_cp_rx = (s->stage == V34_RX_STAGE_V90_CP);
         ang1 = arctan2(sym->im, sym->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
@@ -7481,7 +7536,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 bits[0] = descramble(s, in0);
                 bits[1] = descramble(s, in1);
             }
-            else if ((sym->re*sym->re + sym->im*sym->im) < MP_LOCK_MIN_SIGNAL_MAG2)
+            else if ((sym->re*sym->re + sym->im*sym->im)
+                         < MP_LOCK_MIN_SIGNAL_MAG2
+                     || (v90_cp_rx
+                         && power_meter_current(&s->power)
+                              < s->carrier_off_power))
             {
                 /* No real signal yet -- don't attempt a preamble lock
                    against near-zero-energy samples. Measured live: after
@@ -7493,18 +7552,42 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    deterministically locks onto a frame straddling that
                    ramp -- structurally plausible (correct start bits) but
                    with corrupted payload bits from the still-settling
-                   samples, failing CRC every time. See rig/README.md. */
+                   samples, failing CRC every time. See rig/README.md.
+
+                   The equalizer can ring above MP_LOCK_MIN_SIGNAL_MAG2
+                   through the real pre-CPt carrier gap. For the forced V.90
+                   CP receiver, also use the primary-channel carrier-off
+                   threshold; unlike an arbitrary constellation threshold,
+                   that meter is already level-calibrated and hysteretic. */
+                if (v90_cp_rx && s->mp_signal_settle_bauds > 0)
+                {
+                    mp_v90_cp_reset_at_carrier_gap(s);
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 Phase 4: CP carrier gap; reset Table-14 search to first-CPt initial state\n");
+                }
+                /*endif*/
                 s->mp_signal_settle_bauds = 0;
                 bits[0] = bits[1] = 0;
             }
-            else if (s->mp_signal_settle_bauds++ < MP_LOCK_SETTLE_BAUDS)
+            else if (!v90_cp_rx
+                     && s->mp_signal_settle_bauds++ < MP_LOCK_SETTLE_BAUDS)
             {
                 /* Signal is present but the CMA equalizer is still
                    re-adapting its gain from the silence-era near-zero
                    coefficients to the real signal's amplitude -- locking
                    here still produces structurally-plausible but corrupt
                    frames (start-bit/CRC failures). Wait for a sustained
-                   settle window. See rig/README.md. */
+                   settle window. See rig/README.md.
+
+                   Do not apply that V.34 MP guard to the V.90 digital
+                   answerer's project-owned CP receiver. The primary-channel
+                   front end was already conditioned before
+                   v34_force_v90_phase4_cp_rx(), and V.90 9.4.1.1 requires
+                   the digital modem to condition its receiver to receive
+                   CPt while sending Ri. A short analogue modem can finish
+                   its first CPt before this 400-baud guard expires. The
+                   external Table-14 receiver still requires exact framing,
+                   CRC and semantic validity before accepting anything. */
                 bits[0] = bits[1] = 0;
             }
             else
@@ -7531,6 +7614,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 int hint_pending_bit;
                 uint32_t hint_preamble_stream;
 
+                if (v90_cp_rx)
+                    s->mp_signal_settle_bauds++;
+                /*endif*/
                 chosen_hyp = -1;
                 chosen_type_bit = 0;
                 chosen_score = -1;
@@ -7587,7 +7673,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         && (!hint_only || h == hint_h)
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && (d1 == 0
-                            || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
+                            || v90_cp_rx)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > chosen_score)
@@ -7609,7 +7695,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         && sc0 >= MP_HINT_LOCK_SCORE_MIN
                         && (expected_mp_type < 0 || d0 == expected_mp_type)
                         && (d1 == 0
-                            || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
+                            || v90_cp_rx)
                         && mp_preamble_has_start_zero(pre0)
                         && mp_preamble_has_sync_ones(pre0)
                         && sc0 > hint_score)
@@ -7627,7 +7713,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     /*endif*/
                     sc = mp_preamble_score(bstream);
                     if ((!strict_mp0_lock || expected_mp_type != 0
-                         || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
+                         || v90_cp_rx)
                         && sc >= ((hint_only && h == hint_h) ? MP_HINT_LOCK_SCORE_MIN : MP_LOCK_SCORE_MIN)
                         && (!hint_only || h == hint_h)
                         && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
@@ -7649,7 +7735,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                     if ((!strict_mp0_lock || expected_mp_type != 0
-                         || (s->v90_mode && !s->calling_party && s->put_phase4_bit))
+                         || v90_cp_rx)
                         && h == hint_h
                         && sc >= MP_HINT_LOCK_SCORE_MIN
                         && (!strict_mp0_lock || sc >= MP_PREAMBLE_SCORE_MIN)
@@ -7726,7 +7812,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             s->bit_count = 0;
                         }
                         /*endif*/
-                        if (s->v90_mode && !s->calling_party && s->put_phase4_bit)
+                        if (v90_cp_rx)
                         {
                             int replay_len;
 
@@ -7777,7 +7863,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
 
         s->duration++;
-        if (s->v90_mode && !s->calling_party && s->put_phase4_bit)
+        if (v90_cp_rx)
         {
             if (s->mp_hypothesis >= 0 && !locked_this_symbol)
             {
@@ -8818,8 +8904,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        both phase AND amplitude distortion (ISI).  Using the received magnitude as
        the target (as before) gives the equalizer zero amplitude-correction incentive
        and leaves ISI uncorrected. */
-    if (s->stage >= V34_RX_STAGE_PHASE3_WAIT_S
-    &&  s->stage <= V34_RX_STAGE_PHASE4_MP)
+    if (v34_rx_stage_is_primary_training(s->stage))
     {
         float mag;
 
@@ -8860,7 +8945,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
              * phase reversals and must not be tracked out.  Set
              * ME_V34_TRACK_PHASE3=0 to restore the frozen behaviour. */
             if (s->stage == V34_RX_STAGE_PHASE4_TRN
-                || s->stage == V34_RX_STAGE_PHASE4_MP
+                || v34_rx_stage_is_phase4_frame(s->stage)
                 || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
                     && s->phase3_tracking_armed
                     && phase3_tracking_enabled()))
@@ -8884,13 +8969,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    variability -- freezing it needs live A/B verification
                    before it can safely become the default. */
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                bool freeze_mp_cma = (s->stage == V34_RX_STAGE_PHASE4_MP)
+                bool freeze_mp_cma = v34_rx_stage_is_phase4_frame(s->stage)
                                   && getenv("ME_V34_FREEZE_CMA_DURING_MP");
                 /* Once the decision-aided Phase 4 tracker owns the taps
                    (data-aided LMS above), CMA must stand down or the two
                    fight: CMA's phase-blind gradient re-randomizes the phase
                    the DA loop just fixed. */
-                bool da_owns_eq = (s->stage == V34_RX_STAGE_PHASE4_MP)
+                bool da_owns_eq = v34_rx_stage_is_phase4_frame(s->stage)
                                && s->phase4_da_seeded;
                 if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                     tune_equalizer_cma(s, sym);
@@ -8991,7 +9076,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
        detector remains useful in the later Phase 4 stages.
 
        Likewise, do not arm it during the initial CPt acquisition window in
-       PHASE4_MP.  The project-owned V.90 transmitter hands the receiver
+       V90_CP.  The project-owned V.90 transmitter hands the receiver
        directly from DIL to CPt acquisition, and the analogue modem may send
        CPt, SCR, or silence while it searches for a usable upstream path.
        V.90 gives this exchange a 15 s plus round-trip-delay budget.  A short
@@ -9003,9 +9088,9 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         phase4_cp_wait_bauds = PHASE4_CP_ACQUISITION_WAIT_SECONDS
                                * baud_rate_parameters[s->baud_rate].baud_rate;
 
-    if (s->stage > V34_RX_STAGE_PHASE3_TRAINING
-        && s->stage <= V34_RX_STAGE_PHASE4_MP
-        && !(s->stage == V34_RX_STAGE_PHASE4_MP
+    if (v34_rx_stage_is_primary_training(s->stage)
+        && s->stage > V34_RX_STAGE_PHASE3_TRAINING
+        && !(s->stage == V34_RX_STAGE_V90_CP
              && s->duration < phase4_cp_wait_bauds))
     {
         int32_t retrain_floor = (s->info_rx_carrier_ref > 0)
@@ -9064,8 +9149,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * harmonics) never put most of it in one bin, so require a dominant,
      * sustained single-bin ratio. */
     if (s->v90_mode
-        && s->stage >= V34_RX_STAGE_PHASE3_WAIT_S
-        && s->stage <= V34_RX_STAGE_PHASE4_MP)
+        && v34_rx_stage_is_primary_training(s->stage))
     {
         /* 2*cos(2*pi*2400/8000) */
         static const float tone_a_coeff = -0.6180339887f;
@@ -9573,7 +9657,7 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        and begin the CP preamble/hypothesis search immediately. */
     s->primary_channel_active = true;
     s->rx.current_demodulator = V34_MODULATION_V34;
-    s->rx.stage = V34_RX_STAGE_PHASE4_MP;
+    s->rx.stage = V34_RX_STAGE_V90_CP;
     s->rx.duration = 0;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.bitstream = 0;
@@ -9622,7 +9706,7 @@ SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
     const char *hold_env;
 
     if (!s || !s->rx.v90_mode || s->rx.calling_party
-        || s->rx.stage != V34_RX_STAGE_PHASE4_MP)
+        || s->rx.stage != V34_RX_STAGE_V90_CP)
         return;
     hold_env = getenv("ME_V34_HOLD_MP_HYPOTHESIS");
     if (hold_env && atoi(hold_env) != 0 && s->rx.mp_hypothesis >= 0)
@@ -9827,7 +9911,7 @@ SPAN_DECLARE(int) v34_seed_rx_mp(v34_state_t *s,
            in PHASE4_TRN after the project layer has supplied the accepted MP
            parameters; enter MP/E search while preserving the trained primary
            equalizer and carrier/timing state. */
-        s->rx.stage = V34_RX_STAGE_PHASE4_MP;
+        s->rx.stage = V34_RX_STAGE_V90_CP;
         s->rx.duration = 0;
         s->rx.mp_accepted_baud = 0;
         s->rx.bitstream = 0;

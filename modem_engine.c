@@ -65,6 +65,7 @@ enum v34_rx_stages_e {
     V34_RX_STAGE_PHASE4_TRN,
     V34_RX_STAGE_PHASE4_MP,
     V34_RX_STAGE_DATA,
+    V34_RX_STAGE_V90_CP,
 };
 
 /* MUST stay in sync, value for value, with enum v34_tx_stages_e in
@@ -405,6 +406,7 @@ static const char *v34_rx_stage_name(int stage)
     case V34_RX_STAGE_PHASE4_TRN:        return "PHASE4_TRN";
     case V34_RX_STAGE_PHASE4_MP:         return "PHASE4_MP";
     case V34_RX_STAGE_DATA:              return "DATA";
+    case V34_RX_STAGE_V90_CP:            return "V90_CP";
     default:                             return "UNKNOWN";
     }
 }
@@ -754,6 +756,14 @@ static uint64_t       g_phase_start_ms = 0;
  * CRC-selected front end that recovered the hardware capture offline.  It
  * never runs on the PJSIP media callback. */
 #define V90_CP_LIVE_MAX_SAMPLES (40 * 8000)
+/* V.90 §9.4.1.1 requires CPt reception while Ri is being sent.  The
+ * synchronous SpanDSP path is primary; this independent strict fallback
+ * starts at 100 ms and retries every 40 ms so a short, single CPt is examined
+ * before the analogue modem can abandon Phase 4.  An incomplete snapshot
+ * cannot advance state because v90_cp_live_recover() requires a complete
+ * Table-14 frame with valid CRC and semantics. */
+#define V90_CP_LIVE_FIRST_ATTEMPT_SAMPLES 800
+#define V90_CP_LIVE_RETRY_SAMPLES 320
 static pthread_mutex_t g_v90_cp_live_mtx;
 static pthread_cond_t  g_v90_cp_live_cond;
 static pthread_t       g_v90_cp_live_thread;
@@ -2187,10 +2197,10 @@ static void v90_cp_live_note_phase4_hint_locked(void)
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     g_v90_cp_live_phase4_hint = g_v90_cp_live_sample_count;
     g_v90_cp_live_expected_compatibility = 0;
-    /* SmartLink can enter Phase 4 roughly 300 ms after our downstream Ri
-     * marker.  Wait 800 ms so the first batch contains several complete
-     * 89-ms CPt copies even with callback and RTP framing skew. */
-    g_v90_cp_live_next_request = g_v90_cp_live_sample_count + 6400;
+    /* Attempt as soon as one observed 428-bit CPt could be complete.  If the
+     * peer starts later, short strict retries below catch its first frame. */
+    g_v90_cp_live_next_request =
+        g_v90_cp_live_sample_count + V90_CP_LIVE_FIRST_ATTEMPT_SAMPLES;
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
     ME_LOG("[ME] V.90 strict batch CP receiver armed at upstream sample %d\n",
            g_v90_cp_live_phase4_hint);
@@ -2243,7 +2253,7 @@ static void v90_dil_capture_reset(void)
 /* Upstream (analogue -> digital) V.34 data-path arming.  V.90's upstream
  * Phase 4 is the CP dance, not a V.34 MP exchange, so SpanDSP's own
  * mp_seen-gated E detector can never fire for the answerer -- the RX would
- * sit in PHASE4_MP forever and no data bit would ever reach put_bit (the
+ * sit in its CP receive stage forever and no data bit would reach put_bit (the
  * 2026-07-23 soak measured exactly 0 upstream bytes at the PTY).  Instead:
  * when the peer's acknowledged CP (CP') is accepted we prepare the RX data
  * parameters (v34_v90_prepare_upstream_data -- deliberately does NOT touch
@@ -2595,11 +2605,11 @@ static void *v90_cp_live_worker(void *user_data)
             && expected_compatibility
                  == g_v90_cp_live_expected_compatibility
             && g_v90_cp_live_phase4_hint >= 0) {
-            /* Retry on a fresh 500 ms of waveform.  A failed snapshot is not
+            /* Retry on a fresh 40 ms of waveform.  A failed snapshot is not
              * evidence for a frame; only a complete CRC-valid observation
              * can advance the modem state. */
             g_v90_cp_live_next_request =
-                g_v90_cp_live_sample_count + 4000;
+                g_v90_cp_live_sample_count + V90_CP_LIVE_RETRY_SAMPLES;
         }
         pthread_mutex_unlock(&g_v90_cp_live_mtx);
     }

@@ -87,7 +87,8 @@ enum vpcm_v34_rx_stages_e {
     V34_RX_STAGE_PHASE4_S_BAR,
     V34_RX_STAGE_PHASE4_TRN,
     V34_RX_STAGE_PHASE4_MP,
-    V34_RX_STAGE_DATA
+    V34_RX_STAGE_DATA,
+    V34_RX_STAGE_V90_CP
 };
 
 enum vpcm_v34_tx_stages_e {
@@ -385,6 +386,7 @@ static bool test_v90_shaped_phase4(v91_law_t law);
 static bool test_v90_codec_output_constellation_mapping(void);
 static bool test_v90_smartlink_dummy_cpt_repair(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
+static bool test_v90_v34_rx_stage_isolation(void);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
 static bool test_v92_suvd_codec_and_phase4(void);
@@ -1675,22 +1677,34 @@ static bool test_v90_shaped_phase4(v91_law_t law)
                 failed = true;
                 goto shaped_phase4_done;
             }
-            while (v90_get_tx_phase(tx) != V90_TX_TRN2D
+            while (v90_get_tx_phase(tx) != V90_TX_RI
                    && symbols++ < MAX_SYMBOLS) {
                 v90_phase3_tx_codewords(tx, &codeword, 1);
             }
-            if (v90_get_tx_phase(tx) != V90_TX_TRN2D
-                || !v90_set_phase4_cp(tx, &cpt)
+            if (v90_get_tx_phase(tx) != V90_TX_RI) {
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            for (int i = 0; i < 192; i++)
+                v90_phase3_tx_codewords(tx, &codeword, 1);
+            if (!v90_set_phase4_cp(tx, &cpt)
                 || !v90_handle_rx_event(tx, V90_RX_EVENT_CP_VALID)) {
                 failed = true;
                 goto shaped_phase4_done;
             }
             for (int i = 0; i < 24; i++)
                 v90_phase3_tx_codewords(tx, &codeword, 1);
-            /* Production deliberately keeps TRN2d on the wire longer than the
-             * 2040T minimum.  Exercise every emitted training symbol and wait
-             * for the configured transmitter to advance to MP, while retaining
-             * the normative 16000T upper bound from V.90 9.4.1.3. */
+            if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
+                fprintf(stderr,
+                        "V.90 shaped CPt did not complete barred Ri Sr=%d ld=%d\n",
+                        sr, lookahead);
+                failed = true;
+                goto shaped_phase4_done;
+            }
+            /* Exercise every emitted training symbol and wait for the
+             * configured transmitter to advance to MP, including optional
+             * extended interop durations, while retaining the normative
+             * 16000T upper bound from V.90 §9.4.1.3. */
             for (int i = 0;
                  v90_get_tx_phase(tx) == V90_TX_TRN2D && i < 16000;
                  i++) {
@@ -3008,10 +3022,12 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     if (v90_get_tx_phase(tx) != V90_TX_JD
         || !v90_handle_rx_event(tx, V90_RX_EVENT_S))
         goto done;
-    while (v90_get_tx_phase(tx) != V90_TX_TRN2D && symbols++ < MAX_SYMBOLS)
+    while (v90_get_tx_phase(tx) != V90_TX_RI && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
-    if (v90_get_tx_phase(tx) != V90_TX_TRN2D)
+    if (v90_get_tx_phase(tx) != V90_TX_RI)
         goto done;
+    for (int i = 0; i < 192; i++)
+        v90_phase3_tx_codewords(tx, &codeword, 1);
 
     /* A Table 23 CPt over TRN2u configures the TRN2d mapper (d = 17). */
     memset(&cpt, 0, sizeof(cpt));
@@ -3034,11 +3050,14 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     ds.d = cpt.drn + 8;
 
     /* 24T barred Ri symbols, then the configured mapped TRN2d sequence.
-     * Production currently emits 12000T, longer than the 2040T minimum, so
-     * follow the transmitter phase instead of baking the minimum into this
-     * end-to-end demapper test. */
+     * Follow the transmitter phase so the optional extended interop duration
+     * is covered without baking a particular TRN2d length into this test. */
     for (int i = 0; i < RI_POST_CP; i++)
         v90_phase3_tx_codewords(tx, &codeword, 1);
+    if (v90_get_tx_phase(tx) != V90_TX_TRN2D) {
+        fprintf(stderr, "V.92 native CPt did not complete barred Ri\n");
+        goto done;
+    }
     while (v90_get_tx_phase(tx) == V90_TX_TRN2D
            && trn2d_symbols < TRN2D_MAX) {
         v90_phase3_tx_codewords(tx, &codeword, 1);
@@ -4243,6 +4262,7 @@ static const char *vpcm_v34_rx_stage_to_str(int stage)
     case V34_RX_STAGE_PHASE4_TRN: return "PHASE4_TRN";
     case V34_RX_STAGE_PHASE4_MP: return "PHASE4_MP";
     case V34_RX_STAGE_DATA: return "DATA";
+    case V34_RX_STAGE_V90_CP: return "V90_CP";
     default: return "other";
     }
 }
@@ -4338,6 +4358,70 @@ static void vpcm_v34_dummy_put_bit(void *user_data, int bit)
 {
     (void) user_data;
     (void) bit;
+}
+
+static bool test_v90_v34_rx_stage_isolation(void)
+{
+    v34_state_t *answerer;
+    int ordinary_stage;
+
+    vpcm_log("Test: dedicated V.90-over-V.34 CP receive stage");
+    answerer = v34_init(NULL, 3200, 21600, false, true,
+                        vpcm_v34_dummy_get_bit, NULL,
+                        vpcm_v34_dummy_put_bit, NULL);
+    if (answerer == NULL)
+    {
+        fprintf(stderr, "V.90/V.34 RX stage test could not initialize answerer\n");
+        return false;
+    }
+
+    v34_set_put_phase4_bit(answerer, vpcm_v34_dummy_put_bit, NULL);
+    ordinary_stage = v34_get_rx_stage(answerer);
+    v34_force_v90_phase4_cp_rx(answerer);
+    if (v34_get_rx_stage(answerer) != ordinary_stage)
+    {
+        fprintf(stderr,
+                "V.90/V.34 RX stage test let the V.90 force API alter ordinary V.34 (stage %d -> %d)\n",
+                ordinary_stage, v34_get_rx_stage(answerer));
+        v34_free(answerer);
+        return false;
+    }
+
+    v34_set_v90_mode(answerer, V91_LAW_ULAW);
+    v34_force_v90_phase4_cp_rx(answerer);
+    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
+    {
+        fprintf(stderr,
+                "V.90/V.34 RX stage test entered %s instead of dedicated V90_CP\n",
+                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+        v34_free(answerer);
+        return false;
+    }
+
+    /* A strict Table-14 rejection is local CP acquisition state. It must not
+       fall into the V.34 MP state machine (V.90 9.4.1.1 and 8.5.2). */
+    v34_reject_v90_phase4_hypothesis(answerer);
+    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
+    {
+        fprintf(stderr,
+                "V.90/V.34 RX stage test leaked CP rejection into stage %s\n",
+                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+        v34_free(answerer);
+        return false;
+    }
+
+    if (v34_begin_rx_data(answerer) != 0
+        || v34_get_rx_stage(answerer) != V34_RX_STAGE_DATA)
+    {
+        fprintf(stderr,
+                "V.90/V.34 RX stage test did not make the explicit E handoff to DATA\n");
+        v34_free(answerer);
+        return false;
+    }
+
+    v34_free(answerer);
+    vpcm_log("PASS: V.90 CP acquisition is isolated from V.34 MP framing");
+    return true;
 }
 
 static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)
@@ -8992,6 +9076,7 @@ static bool run_vpcm_session_suite(void)
 static bool run_vpcm_primitive_suite(void)
 {
     return test_vpcm_cp_robbed_bit_safe_profile()
+        && test_v90_v34_rx_stage_isolation()
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)

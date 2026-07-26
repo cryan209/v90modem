@@ -436,7 +436,9 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
 /*! Start immediate V.90 CPt acquisition on the primary-channel receiver.
     This is the digital-answerer companion to v34_force_phase4() when an
     external V.90 implementation owns Ri and the project-owned CP framer owns
-    the variable-length Table 14 message. */
+    the variable-length Table 14 message. The receiver enters its dedicated
+    V90_CP stage; ordinary V.34 MP frame lengths, timeouts and E handling do
+    not run there. */
 SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s);
 
 /*! Force the primary-channel receiver into Phase 3 PP/TRN conditioning.

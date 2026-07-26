@@ -1187,6 +1187,18 @@ bool v90_cp_live_recover(const int16_t *samples,
             search_end = carrier_onset + 8 * V90_CP_LIVE_SAMPLE_RATE;
             if (search_end > sample_count)
                 search_end = sample_count;
+        } else if (sample_count
+                       < phase4_hint_sample + V90_CP_LIVE_SAMPLE_RATE / 2) {
+            /* V.90 §9.4.1.1: receive CPt while transmitting Ri.  Early live
+             * retries do not yet contain the 500 ms after-carrier window
+             * needed by v90_cp_live_find_carrier_rise().  Bound those retries
+             * to the immediate Phase-4 boundary instead of repeatedly
+             * matched-filtering eight seconds of Phase-3 history.  Once
+             * another 500 ms exists, the normal carrier-rise search restores
+             * the long pre-hint window for unusually early CPt streams. */
+            search_start = phase4_hint_sample - V90_CP_LIVE_SAMPLE_RATE / 10;
+            if (search_start < capture_start)
+                search_start = capture_start;
         }
     }
     if (equalizer_freeze_sample < capture_start)

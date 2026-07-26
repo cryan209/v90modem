@@ -21,7 +21,8 @@ enum vpcm_v90_v34_rx_stages_e {
     VPCM_V90_V34_RX_STAGE_PHASE4_S = 13,
     VPCM_V90_V34_RX_STAGE_PHASE4_TRN = 15,
     VPCM_V90_V34_RX_STAGE_PHASE4_MP = 16,
-    VPCM_V90_V34_RX_STAGE_DATA = 17
+    VPCM_V90_V34_RX_STAGE_DATA = 17,
+    VPCM_V90_V34_RX_STAGE_V90_CP = 18
 };
 
 enum vpcm_v90_v34_tx_stages_e {

@@ -26553,6 +26553,7 @@ static const char *v34_rx_stage_to_str_local(int stage)
     case 15: return "PHASE4_TRN";
     case 16: return "PHASE4_MP";
     case 17: return "DATA";
+    case 18: return "V90_CP";
     default: return "UNKNOWN";
     }
 }

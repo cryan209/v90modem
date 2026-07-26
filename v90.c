@@ -3342,18 +3342,18 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, true);
 
             s->sample_count++;
-            return codeword;
-        }
-        if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
-            fprintf(stderr,
-                    "[V90] Phase 4: CPt accepted; TRN2d (%d mapped symbols, D=%d, K=%d)\n",
-                    v90_trn2d_symbols(), s->phase4_d, s->phase4_k);
-            /* The 24T barred R-i above is the CPt acknowledgement.  Do not
-             * expose TRN2d as the active phase until that ACK is complete. */
-            if (s->tx_phase == V90_TX_RI_ACK) {
-                s->tx_phase = V90_TX_TRN2D;
-                s->phase4_hold_logged = false;
+            if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
+                fprintf(stderr,
+                        "[V90] Phase 4: CPt accepted; TRN2d (%d mapped symbols, D=%d, K=%d)\n",
+                        v90_trn2d_symbols(), s->phase4_d, s->phase4_k);
+                /* The 24th barred R-i symbol completes the CPt
+                 * acknowledgement (§9.4.1.1).  Expose TRN2d immediately
+                 * after returning that symbol so the next codeword is the
+                 * first mapped TRN2d symbol (§9.4.1.2). */
+                if (s->tx_phase == V90_TX_RI_ACK)
+                    s->tx_phase = V90_TX_TRN2D;
             }
+            return codeword;
         }
         {
             uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ONES);
@@ -4096,6 +4096,12 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
 
     if (!s->phase4_mapper_ready)
         return false;
+    /* Acknowledged CP (CP') is valid only after the analogue modem has
+     * received MP (§9.4.2).  Reject it before configuring the data mapper:
+     * a rejected early CP' must not leave data_cp_received latched and cause
+     * the first transmitted MP frame to become MP'. */
+    if (cp->acknowledge && s->tx_phase != V90_TX_MP)
+        return false;
     if (!s->data_mapper_ready) {
         vpcm_cp_frame_t base;
 
@@ -4120,8 +4126,6 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
     expected.acknowledge = false;
     received.acknowledge = false;
     if (!vpcm_cp_frames_equal(&expected, &received))
-        return false;
-    if (cp->acknowledge && s->tx_phase != V90_TX_MP)
         return false;
     if (cp->acknowledge)
         s->cp_ack_received = true;

@@ -295,8 +295,8 @@ int main(int argc, char **argv)
     }
     enc_mark(&st, "S received (2nd)", "DIL terminates");
 
-    if (!enc_pump_until_phase(&st, tx, V90_TX_TRN2D)) {
-        fprintf(stderr, "never reached TRN2d hold (phase=%d)\n", (int) v90_get_tx_phase(tx));
+    if (!enc_pump_until_phase(&st, tx, V90_TX_RI)) {
+        fprintf(stderr, "never reached Ri hold (phase=%d)\n", (int) v90_get_tx_phase(tx));
         goto done;
     }
     enc_mark(&st, "Ri (awaiting CPt)", "");

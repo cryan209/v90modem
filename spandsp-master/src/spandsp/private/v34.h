@@ -93,7 +93,10 @@ enum v34_rx_stages_e
     /*! \brief Phase 4: detecting MP on primary channel (DQPSK demod) */
     V34_RX_STAGE_PHASE4_MP,
     /*! \brief Data mode: full constellation decode (Viterbi, shell unmap, etc.) */
-    V34_RX_STAGE_DATA
+    V34_RX_STAGE_DATA,
+    /*! \brief V.90 Phase 4: receiving analogue-modem CP on the V.34 upstream.
+               Kept after DATA so the pre-existing stage values remain stable. */
+    V34_RX_STAGE_V90_CP = 18
 };
 
 enum v34_tx_stages_e
