@@ -218,6 +218,11 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->use_instant_rrc_agc = getenv("P3_INSTANT_RRC_AGC") != NULL;
     d->rrc_signal_active = false;
     d->use_dd_equalizer = getenv("P3_DD_EQUALIZER") != NULL;
+    /* PP-directed training is opt-in.  p3_demod_init() zeroes the state, so
+     * leaving this at zero would silently train every ordinary run from the
+     * first input sample.  The two-pass runner replaces -1 with the detected
+     * PP start before processing its supervised pass. */
+    d->pp_train_start_sample = -1;
     d->eq_coeff_re[63] = 1.0f;
     d->eq_delta = 0.21f / 127.0f;
     if (getenv("P3_EQ_DELTA_SCALE")) {
@@ -290,6 +295,9 @@ void p3_demod_reset(p3_demod_t *d)
     d->cma_freeze_symbols = 0;
     d->cma_freeze_after_sample = -1;
     d->pll_freeze_after_sample = -1;
+    d->pp_train_start_sample = -1;
+    d->pp_train_phase = 0;
+    d->pp_train_symbol_count = 0;
     d->s_alternating_run = 0;
     d->s_previous_dibit = -1;
     d->prev_re = 0.0f;
@@ -675,6 +683,55 @@ static void equalizer_tune_qpsk(p3_demod_t *d,
     }
 }
 
+/* PP-directed LMS: train the equalizer against the known V.34 PP reference
+ * sequence (SPRA159 §3.2.3).  Unlike blind CMA, which minimizes constant-
+ * modulus error without knowing the signal, this uses the actual transmitted
+ * symbols as the training reference — the same principle as the fast equalizer
+ * in SPRA159, just using LMS instead of spectral division.  The PP sequence is
+ * a 48-symbol CAZAC sequence repeated 6 times (288T), giving 288 known
+ * reference symbols to train on. */
+#define P3_PP_PERIOD_SYMBOLS 48
+static void pp_reference_symbol(int idx, float *re_out, float *im_out);
+
+static void equalizer_tune_pp(p3_demod_t *d,
+                              float out_re,
+                              float out_im)
+{
+    float ref_re, ref_im;
+    float error_re, error_im;
+    int pp_idx;
+    int p;
+
+    if (!isfinite(out_re) || !isfinite(out_im)
+        || out_re * out_re + out_im * out_im > 100.0f) {
+        d->pp_train_symbol_count++;
+        return;
+    }
+    pp_idx = (d->pp_train_phase + d->pp_train_symbol_count)
+             % P3_PP_PERIOD_SYMBOLS;
+    pp_reference_symbol(pp_idx, &ref_re, &ref_im);
+    d->pp_train_symbol_count++;
+
+    /* LMS with a larger step size than CMA: the known reference makes it
+     * stable, and we only have 288 symbols to converge. */
+    error_re = ref_re - out_re;
+    error_im = ref_im - out_im;
+    error_re *= d->eq_delta * 4.0f;
+    error_im *= d->eq_delta * 4.0f;
+
+    p = d->eq_buf_pos - 1;
+    for (int i = 0; i < 127; i++) {
+        float xr;
+        float xi;
+
+        p = (p - 1) & 127;
+        xr = d->eq_buf_re[p];
+        xi = d->eq_buf_im[p];
+        d->eq_coeff_re[i] += error_re * xr + error_im * xi;
+        d->eq_coeff_im[i] += error_im * xr - error_re * xi;
+    }
+}
+
 static void store_half_baud_sample(p3_demod_t *d,
                                    float re,
                                    float im,
@@ -806,7 +863,23 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                      * state across the long V.90 half-duplex quiet gap. */
                 } else if (d->cma_freeze_symbols > 0)
                     d->cma_freeze_symbols--;
-                else if (d->use_dd_equalizer)
+                else if (d->pp_train_start_sample >= 0
+                         && sample_offset + i >= d->pp_train_start_sample
+                         && d->pp_train_symbol_count
+                            < P3_PP_PERIOD_SYMBOLS * 6) {
+                    /* PP-directed training: use the known V.34 PP reference
+                     * sequence instead of blind CMA.  This is the SPRA159
+                     * §3.2.3 fast-equalizer principle — train on the known
+                     * CAZAC sequence for one-shot convergence instead of
+                     * relying on blind adaptation. */
+                    equalizer_tune_pp(d, eq_re, eq_im);
+                } else if (d->pp_train_start_sample >= 0
+                           && d->pp_train_symbol_count
+                              >= P3_PP_PERIOD_SYMBOLS * 6) {
+                    /* PP training complete: switch to decision-directed
+                     * for the remaining TRN/Ja. */
+                    equalizer_tune_qpsk(d, eq_re, eq_im);
+                } else if (d->use_dd_equalizer)
                     equalizer_tune_qpsk(d, eq_re, eq_im);
                 else
                     equalizer_tune_cma(d, eq_re, eq_im);
@@ -965,9 +1038,9 @@ static bool is_s_pattern(const p3_symbol_t *syms, int start, int len,
 }
 
 /* PP reference from V.34 §10.1.3.6.
- * One PP block is a 48-symbol sequence repeated six times (288T). */
-#define P3_PP_PERIOD_SYMBOLS 48
-
+ * One PP block is a 48-symbol sequence repeated six times (288T).
+ * P3_PP_PERIOD_SYMBOLS and pp_reference_symbol are forward-declared above
+ * for equalizer_tune_pp(). */
 static void pp_reference_symbol(int idx, float *re_out, float *im_out)
 {
     int i = idx % P3_PP_PERIOD_SYMBOLS;
@@ -2824,6 +2897,131 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                                  -1,
                                  -1,
                                  false);
+}
+
+p3_result_t *p3_demod_run_pp_trained(const int16_t *samples,
+                                     int sample_count,
+                                     int sample_offset,
+                                     int baud_code,
+                                     int carrier_sel,
+                                     int sample_rate)
+{
+    p3_result_t *pass1;
+    p3_baud_params_t bp;
+    int pp_start_sample;
+    int pp_phase;
+    const p3_segment_t *best_pp;
+
+    /* Pass 1: blind CMA.  Find PP segment if present. */
+    pass1 = p3_demod_run(samples, sample_count, sample_offset,
+                         baud_code, carrier_sel, sample_rate);
+    if (!pass1 || pass1->segment_count == 0)
+        return pass1;
+
+    /* Find the best PP segment. */
+    best_pp = NULL;
+    for (int i = 0; i < pass1->segment_count; i++) {
+        if (pass1->segments[i].type == P3_SIGNAL_PP) {
+            if (!best_pp
+                || pass1->segments[i].pp_blocks > best_pp->pp_blocks)
+                best_pp = &pass1->segments[i];
+        }
+    }
+    if (!best_pp)
+        return pass1;   /* No PP found: return blind-CMA result */
+
+    /* Get the PP start sample and phase. */
+    pp_start_sample = best_pp->start_sample;
+    pp_phase = best_pp->pp_phase;
+
+    if (!p3_get_baud_params(baud_code, &bp)) {
+        return pass1;
+    }
+
+    /* Pass 2: re-run with PP-directed training.  Use the same internal
+     * runner but with PP training enabled — the demod will use blind CMA
+     * before PP, PP-directed LMS during PP, then DD-QPSK after PP.  This
+     * gives a converged equalizer for TRN/Ja classification.
+     *
+     * We use p3_demod_run_internal directly with the PP training fields
+     * set via a thin wrapper that modifies the demod after init.  Since
+     * p3_demod_run_internal doesn't expose pp_train fields, we do a single
+     * trial manually. */
+    {
+        p3_demod_t demod;
+        p3_result_t *result;
+        int est_symbols;
+        float best_score = -FLT_MAX;
+        p3_result_t *best_result = NULL;
+        int trials;
+
+        est_symbols = (int)((float)sample_count * 2.0f) + 100;
+
+        /* Use 4 timing trials to find the best phase, same as the default. */
+        trials = (sample_count > 16000) ? 2 : 4;
+
+        for (int t = 0; t < trials; t++) {
+            result = p3_result_alloc(est_symbols, est_symbols / 4 + 16);
+            if (!result)
+                continue;
+
+            p3_demod_init(&demod, baud_code, carrier_sel, sample_rate);
+            demod.baud_phase = ((float)t / (float)trials) * demod.samples_per_symbol;
+            demod.rrc_step = (t * P3_RRC_PHASES) / trials;
+            /* Enable PP-directed training at the sample position found in
+             * pass 1.  The phase offset from pass 1's PP correlation tells
+             * us where in the 48-symbol reference cycle we are. */
+            demod.pp_train_start_sample = pp_start_sample;
+            demod.pp_train_phase = pp_phase;
+            demod.pp_train_symbol_count = 0;
+
+            p3_demod_process(&demod, samples, sample_count,
+                             sample_offset, result);
+            p3_segment_symbols(result);
+
+            result->carrier_freq_estimate = demod.carrier_hz + demod.pll_freq_err;
+            result->baud_rate_estimate = demod.baud_rate;
+            result->locked = (demod.magnitude_count > 24);
+            if (demod.magnitude_count > 0 && demod.magnitude_sum > 0.0f) {
+                float avg_mag = demod.magnitude_sum / (float)demod.magnitude_count;
+                result->snr_estimate_db = 20.0f * log10f(avg_mag + 1e-10f);
+            }
+
+            {
+                float s = score_result(result);
+
+                if (!best_result || s > best_score) {
+                    if (best_result)
+                        p3_result_free(best_result);
+                    best_result = result;
+                    best_score = s;
+                } else {
+                    p3_result_free(result);
+                }
+            }
+        }
+
+        /* If the PP-trained pass found J, use it.  Otherwise fall back
+         * to the pass-1 result. */
+        if (best_result) {
+            bool found_j = false;
+            for (int i = 0; i < best_result->segment_count; i++) {
+                if (best_result->segments[i].type == P3_SIGNAL_J) {
+                    found_j = true;
+                    break;
+                }
+            }
+            if (found_j) {
+                p3_result_free(pass1);
+                return best_result;
+            }
+            /* Even without J, if the PP-trained result has more segments
+             * or better SNR, it may be useful for the S gate. */
+            p3_result_free(best_result);
+        }
+    }
+
+    return pass1;
 }
 
 p3_result_t *p3_demod_run_answer_phase4(const int16_t *samples,

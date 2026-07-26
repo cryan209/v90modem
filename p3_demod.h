@@ -135,6 +135,17 @@ typedef struct {
     bool  use_dd_equalizer;
     bool  emit_half_baud;
 
+    /* PP-directed equalizer training (SPRA159 §3.2.3 fast equalizer).
+     * When pp_train_start_sample >= 0, the equalizer switches from blind
+     * CMA to LMS with the known PP reference sequence during the PP
+     * segment, then to DD-QPSK after PP ends.  This trains the equalizer
+     * in one shot on the known CAZAC sequence instead of relying on blind
+     * convergence — the difference between detecting J on a noisy Courier
+     * and not. */
+    int   pp_train_start_sample;   /* -1 = disabled */
+    int   pp_train_phase;          /* PP phase offset (0..47) */
+    int   pp_train_symbol_count;   /* symbols trained so far */
+
     /* 127-tap T/2 fractionally-spaced equalizer (SpanDSP dimensions). */
     float eq_buf_re[128];
     float eq_buf_im[128];
@@ -328,6 +339,24 @@ p3_result_t *p3_demod_run(const int16_t *samples,
                           int baud_code,
                           int carrier_sel,
                           int sample_rate);
+
+/* Two-pass variant that trains the equalizer on the known V.34 PP sequence
+ * before classifying J (SPRA159 §3.2.3 fast-equalizer principle).
+ *
+ * Pass 1: blind CMA, segment to find PP.
+ * Pass 2: if PP was found, re-run with PP-directed LMS training enabled at
+ * the PP start sample, then segment to find J with a converged equalizer.
+ *
+ * This is what real V.34 chipsets do — they don't rely on blind CMA for
+ * initial training.  On noisy signals (e.g. USR Courier) blind CMA may not
+ * converge in a short window, but PP-directed LMS converges in one shot
+ * because it uses the known 48-symbol CAZAC reference sequence. */
+p3_result_t *p3_demod_run_pp_trained(const int16_t *samples,
+                                     int sample_count,
+                                     int sample_offset,
+                                     int baud_code,
+                                     int carrier_sel,
+                                     int sample_rate);
 
 /* As above, but choose the initial timing-phase trial by the normative
  * answer-modem Phase-4 S/S-bar signature before falling back to the generic

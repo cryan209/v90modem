@@ -4247,8 +4247,10 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
         window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
 
     /* The analogue caller transmits at the high carrier (1800 Hz at 2400
-     * baud).  p3_demod's PLL corrects residual carrier offset. */
-    result = p3_demod_run(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
+     * baud).  p3_demod's PLL corrects residual carrier offset.
+     * Use PP-trained variant for the J confirmation: the fast equalizer
+     * (SPRA159 §3.2.3) converges on noisy signals where blind CMA fails. */
+    result = p3_demod_run_pp_trained(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
     if (!result)
         return true;   /* p3_demod defect: don't block a real event */
 
@@ -4297,9 +4299,12 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * Disabled by ME_V90_P3_CONFIRM=0 (same kill switch as the S/J
  * confirmation gates). */
 enum { P3_JA_SCAN_THROTTLE = 640 };  /* 80 ms at 8 kHz */
-enum { P3_JA_SCAN_WINDOW  = 800 };   /* 100 ms at 8 kHz */
+enum { P3_JA_SCAN_WINDOW  = 3200 };  /* 400 ms at 8 kHz — longer for noisy HW */
+enum { P3_JA_SCAN_LOG_INTERVAL = 2400 };  /* log every 300 ms */
 
 static int g_v90_p3_ja_scan_samples = 0;
+static int g_v90_p3_ja_scan_total = 0;   /* total samples scanned since WAIT_JA */
+static bool g_v90_p3_ja_fired = false;
 
 static void v90_p3_scan_ja_locked(int len)
 {
@@ -4316,10 +4321,12 @@ static void v90_p3_scan_ja_locked(int len)
      * change ensures we don't carry stale throttle state across retrains. */
     if (v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
         g_v90_p3_ja_scan_samples = 0;
+        g_v90_p3_ja_scan_total = 0;
+        g_v90_p3_ja_fired = false;
         return;
     }
-
     g_v90_p3_ja_scan_samples += len;
+    g_v90_p3_ja_scan_total += len;
     if (g_v90_p3_ja_scan_samples < P3_JA_SCAN_THROTTLE)
         return;
     g_v90_p3_ja_scan_samples = 0;
@@ -4345,35 +4352,81 @@ static void v90_p3_scan_ja_locked(int len)
     for (int i = 0; i < n; i++)
         window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
 
-    /* The analogue caller transmits at the high carrier (1800 Hz at 2400
-     * baud).  p3_demod's PLL corrects residual carrier offset. */
-    result = p3_demod_run(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
-    if (!result)
-        return;
+    /* Try the negotiated baud first, then fall back to other common rates.
+     * V.34 Phase 3 training (S/S̄/PP/TRN/Ja) runs at the negotiated symbol
+     * rate, but v34_get_rx_baud_rate() can return the wrong value on some
+     * peers (observed: returns 3200 when the analogue modem trains at
+     * 2400).  Trying all rates costs ~4×18 ms = 72 ms every 80 ms throttle —
+     * acceptable since this only runs while waiting for Ja.
+     *
+     * Try both carriers at each baud: the caller uses the high carrier, but
+     * which frequency is “high” depends on the baud (1800 Hz @ 2400, 1920 Hz
+     * @ 3200, etc.).  p3_demod’s PLL corrects residual offset but needs the
+     * starting carrier to be close. */
+    {
+        /* Priority order: negotiated baud first, then 2400 (most common for
+         * V.90 Phase 3), then 3200, then the rest. */
+        int try_bauds[P3_BAUD_COUNT];
+        int n_try = 0;
 
-    for (int i = 0; i < result->segment_count; i++) {
-        if (result->segments[i].type == P3_SIGNAL_J) {
-            bool accepted;
+        try_bauds[n_try++] = baud_code;
+        if (baud_code != P3_BAUD_2400)
+            try_bauds[n_try++] = P3_BAUD_2400;
+        if (baud_code != P3_BAUD_3200)
+            try_bauds[n_try++] = P3_BAUD_3200;
+        for (int b = 0; b < P3_BAUD_COUNT; b++) {
+            if (b != baud_code && b != P3_BAUD_2400 && b != P3_BAUD_3200)
+                try_bauds[n_try++] = b;
+        }
 
-            p3_result_free(result);
-            /* Fire J event directly.  The post-processing (DIL capture,
-             * S-detector arming) mirrors the v34rx J event handler so the
-             * downstream state is identical regardless of which detector
-             * fired first. */
-            accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
-            if (accepted) {
-                (void)v90_dil_capture_try_v34_hypotheses();
-                v34_v90_arm_phase3_s_detector(g_v34);
+        for (int bi = 0; bi < n_try; bi++) {
+            int b = try_bauds[bi];
+
+            for (int ci = 0; ci <= 1; ci++) {
+                int carrier = ci ? P3_CARRIER_LOW : P3_CARRIER_HIGH;
+
+                result = p3_demod_run_pp_trained(window, n, 0, b, carrier, 8000);
+                if (!result)
+                    continue;
+
+                for (int i = 0; i < result->segment_count; i++) {
+                    if (result->segments[i].type == P3_SIGNAL_J) {
+                        bool accepted;
+
+                        p3_result_free(result);
+                        /* Fire J event directly.  The post-processing (DIL
+                         * capture, S-detector arming) mirrors the v34rx J
+                         * event handler so the downstream state is identical
+                         * regardless of which detector fired first. */
+                        g_v90_p3_ja_fired = true;
+                        accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                        if (accepted) {
+                            (void)v90_dil_capture_try_v34_hypotheses();
+                            v34_v90_arm_phase3_s_detector(g_v34);
+                        }
+                        fprintf(stderr,
+                                "[ME] V.90 p3_demod: J detected (structural, %d ms window, "
+                                "baud=%d carrier=%s); accepted=%d\n",
+                                n * 1000 / 8000, b,
+                                carrier == P3_CARRIER_HIGH ? "high" : "low",
+                                accepted ? 1 : 0);
+                        trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
+                        return;
+                    }
+                }
+                p3_result_free(result);
             }
-            fprintf(stderr,
-                    "[ME] V.90 p3_demod: J detected (structural, %d ms window, baud=%d); "
-                    "accepted=%d\n",
-                    n * 1000 / 8000, baud_code, accepted ? 1 : 0);
-            trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
-            return;
         }
     }
-    p3_result_free(result);
+
+    /* Diagnostic: log periodically so we can see p3_demod is running but
+     * not finding J (useful for noisy-signal debugging). */
+    if ((g_v90_p3_ja_scan_total % P3_JA_SCAN_LOG_INTERVAL) < P3_JA_SCAN_THROTTLE) {
+        fprintf(stderr,
+                "[ME] V.90 p3_demod: J scan at %d ms, no J found "
+                "(baud=%d tried all carriers)\n",
+                g_v90_p3_ja_scan_total * 1000 / 8000, baud_code);
+    }
 }
 
 /* V.90 WAIT_JA energy-gap Ja detector.
@@ -4754,8 +4807,12 @@ void me_rx_audio(const int16_t *amp, int len)
                 }
                 v90_wait_ja_energy_gate_locked(filtered, len);
                 v90_s_echo_record_rx_locked(filtered, len);
-                v90_p3_scan_ja_locked(len);
                 v34_rx(g_v34, filtered, len);
+                /* p3_demod J scanner runs AFTER v34_rx so the real-time V.34
+                   receiver processes samples first.  The scanner reads from
+                   the g_rx_ref_buf ring (filled by v90_s_echo_record above),
+                   not from v34_rx's internal state, so ordering is safe. */
+                v90_p3_scan_ja_locked(len);
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;
                     fprintf(stderr,
@@ -4846,26 +4903,17 @@ void me_rx_audio(const int16_t *amp, int len)
                                     accepted ? 1 : 0);
                     }
                     if (new_j_event && g_v90 && !g_v92_active) {
-                        bool accepted;
-
-                        /* If p3_demod already fired J and moved us past
-                           WAIT_JA, the v34rx J event is a late secondary
-                           confirmation.  The && short-circuits so p3_demod
-                           is NOT called again; v90_handle_rx_event rejects
-                           it directly (phase != WAIT_JA).  This avoids a
-                           wasteful ~18 ms p3_demod scan on every v34rx J
-                           re-fire. */
-                        if (v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA
-                            && !v90_p3_confirm_signal_locked(P3_SIGNAL_J)) {
-                            fprintf(stderr,
-                                    "[ME] V.90 strict RX event=J tx_phase=%d "
-                                    "REJECTED by p3_demod structural check (no 16-bit J pattern)\n",
-                                    (int)v90_get_tx_phase(g_v90));
-                            trace_phase("V90 strict RX event=J rejected_p3_structural");
-                            accepted = false;
-                        } else {
-                            accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
-                        }
+                        /* Accept v34rx J directly.  p3_demod runs as an
+                           independent fast-path scanner (v90_p3_scan_ja)
+                           that fires J in ~80 ms when it can classify the
+                           16-bit pattern; the v34rx canonical path (8
+                           sustained windows) and energy-gap heuristic are
+                           slower but work on noisier signals where p3_demod's
+                           structural classifier may not find a clean J
+                           segment.  Neither path should block the other.
+                           The p3_demod S gate (below) is the one that
+                           matters — it prevents false-S DIL cutoff. */
+                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
 
                         if (accepted) {
                             (void)v90_dil_capture_try_v34_hypotheses();
@@ -4873,10 +4921,12 @@ void me_rx_audio(const int16_t *amp, int len)
                         }
 
                         fprintf(stderr,
-                                "[ME] V.90 strict RX event=J tx_phase=%d accepted=%d\n",
-                                (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0);
-                        trace_phase("V90 strict RX event=J accepted=%d",
-                                    accepted ? 1 : 0);
+                                "[ME] V.90 strict RX event=J tx_phase=%d accepted=%d"
+                                " p3_demod_fired=%d\n",
+                                (int)v90_get_tx_phase(g_v90), accepted ? 1 : 0,
+                                g_v90_p3_ja_fired ? 1 : 0);
+                        trace_phase("V90 strict RX event=J accepted=%d p3_demod_fired=%d",
+                                    accepted ? 1 : 0, g_v90_p3_ja_fired ? 1 : 0);
                     }
                 }
 

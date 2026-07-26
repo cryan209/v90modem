@@ -5587,8 +5587,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     }
                     /*endif*/
                 }
-                if (s->phase3_j_bits <= 8
-                    || (s->phase3_j_bits % 64) == 0)
+                if (!s->phase3_s_detect_armed
+                    && (s->phase3_j_bits <= 8
+                        || (s->phase3_j_bits % 64) == 0))
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 J progress: bits=%d best_score=%d/32 hyp=%d trn_hint=%d/%d%%\n",
@@ -5596,7 +5597,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                              s->phase3_trn_lock_hyp, s->phase3_trn_lock_score);
                 }
                 /*endif*/
-                if (s->phase3_j_bits >= 16
+                if (!s->phase3_s_detect_armed
+                    && s->phase3_j_bits >= 16
                     &&
                     (s->phase3_j_bits == 16
                         ||
@@ -5607,7 +5609,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                              s->phase3_j_bits, best_score, best_h);
                 }
                 /*endif*/
-                if (s->phase3_j_bits >= 32
+                if (!s->phase3_s_detect_armed
+                    && s->phase3_j_bits >= 32
                     &&
                     best_score >= 24
                     &&
@@ -5663,7 +5666,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                         j_validity = canonical_ok ? "valid J(4-point)" : "near/non-canonical";
                     else
                         j_validity = canonical_ok ? "valid J'" : "near/non-canonical";
-                    emit_diag = canonical_ok || ((s->phase3_j_bits % 16) == 0);
+                    emit_diag = (!s->phase3_s_detect_armed)
+                               && (canonical_ok || ((s->phase3_j_bits % 16) == 0));
                     if (emit_diag)
                     {
                         span_log(s->logging, SPAN_LOG_FLOW,
@@ -5678,7 +5682,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             /* Phase 3 transition should be driven by J (Table 18).
                                Treat J' hits here as diagnostics only to avoid
                                premature Phase 4 transitions with unknown TRN size. */
-                            if ((s->phase3_j_bits % 32) == 0)
+                            if (!s->phase3_s_detect_armed
+                                && (s->phase3_j_bits % 32) == 0)
                             {
                                 span_log(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 3: canonical J' candidate ignored (hyp=%d phase=%d score=%d/32 bits=%d)\n",
@@ -5762,16 +5767,19 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                             }
                             else
                             {
-                                span_log(s->logging, SPAN_LOG_FLOW,
-                                         "Rx - Phase 3: canonical J/Ja candidate %d/8 (hyp=%d phase=%d score=%d/32 bits=%d)\n",
-                                         s->phase3_j_candidate_count, best_h, best_p,
-                                         best_score, s->phase3_j_bits);
+                                if (!s->phase3_s_detect_armed)
+                                {
+                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                             "Rx - Phase 3: canonical J/Ja candidate %d/8 (hyp=%d phase=%d score=%d/32 bits=%d)\n",
+                                             s->phase3_j_candidate_count, best_h, best_p,
+                                             best_score, s->phase3_j_bits);
+                                }
                             }
                         }
                     }
                     else
                     {
-                        if (emit_diag)
+                        if (emit_diag && !s->phase3_s_detect_armed)
                         {
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 3: J candidate rejected (non-canonical 16-bit pattern)\n");
