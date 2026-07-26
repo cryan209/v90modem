@@ -437,3 +437,35 @@ to `0x2f00`), and the per-frame descriptor at `0x2f00` is processed every
 `0x02ad..0x02c0` and the service routine at `0x00d8..0x0109` statically, then
 replaying a task-download queue entry for TIKRNL so the boot kernel performs
 the staged load itself (the real boot sequence), instead of pre-staging.
+
+## MIPS shim: real firmware routines drive the emulator (2026-07-27, session 4)
+
+`tools/eicon_mips_shim.py` runs the actual te_dmlt.pm routines under Unicorn
+(physical kseg0 mappings — this unicorn build has unreliable guest data
+accesses for pages first written after execution starts, and kuseg pages) and
+connects their host-port calls to the ADSP-2181 emulator via ctypes
+(`libadsp2181.dylib`). host_write (`0x80082950`) and host_read (`0x80082920`)
+are hooked; `adsp2181_host_write/read` implement the exact IDMA semantics.
+
+The command-script sender (`0x800896a4`) takes `a0` = request struct:
+`+0/+4` host-reg pointers, `+8` symbol-13 address (`0x3310`), `+0xa`
+symbol-14 (`0x3338`), `+0xc` active flag, `+0x10` script code (<75),
+`+0x11` script mode (<2), `+0x12` command selector, `+0x14` script pc,
+`+0x1c` request form (0=script, 1=single word, >=2=raw byte payload at
+`+0x1e`), `+0x3e` control word. Script table index is `mode*75 + code`
+(earlier "79" was wrong) into the pointer table at `0x800FC248`.
+
+Verified end-to-end: with code 66 (mode 0) the sender writes the ring records
+`a001 0708 | a00d 0a28 4333 0286 | e007 004b` to PM `0x3327..`, advances the
+producer to `0x3331`, writes selector `0x0001` to DM `0x3310`, and clears the
+control word — matching the statically recovered script (including the
+mask-bit-3 `>>1` argument rule: `0x050c -> 0x0286`).
+
+The DSP does not consume the command yet (consumer stays `0x3327`): channel
+activation/doorbell on the DSP side is still required (kernel queue vector +
+IRQE, or TIKRNL's own consumer hooked into the frame loop).
+
+Also: the kernel queue handler at `0x01c1` performs `CALL (I4)` on queued
+entries — queue entries carry function vectors. The per-frame descriptor at
+DM `0x2f00` (fields: `+0` flags, `+1 = 0x2800`, `+4` DM data pointer) is
+serviced every 8 kHz frame by the routine at `0x00d8`.
