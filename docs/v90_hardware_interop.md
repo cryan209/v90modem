@@ -36,6 +36,15 @@ the first failed protocol layer when DATA is not reached.
 - first failure point from `summary.json`
 - RTP loss, reordering, duplicate packets, and timestamp discontinuities
 - downstream and upstream byte/bit error counts from the deterministic payload
+- for USRobotics Courier tests, run the post-call diagnostic bundle before
+  resetting the analogue modem:
+  `./.venv/bin/python tools/cx_at.py --dev /dev/cu.usbserial-21210 usrdiag`
+- for a Courier failure that reaches V.90 Phase 3/4 and then retrains, also run
+  the verbose hidden-Y diagnostic bundle once:
+  `./.venv/bin/python tools/cx_at.py --dev /dev/cu.usbserial-21210 usrdeepdiag`
+- when the Courier itself is originating the analogue call, use its hidden Y4
+  call-progress dial form for one repro run:
+  `./.venv/bin/python tools/cx_at.py --dev /dev/cu.usbserial-21210 usry4dial 6001 --wait 120`
 
 ## Progression
 

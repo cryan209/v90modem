@@ -3,8 +3,11 @@
 
 Usage:
   cx_at.py probe                     — reset + identify
+  cx_at.py usrdiag                   — USR/Courier post-call diagnostics
+  cx_at.py usrdeepdiag               — verbose USR/Courier hidden diagnostics
   cx_at.py cmd 'ATI3' 'ATI6' ...     — run arbitrary commands
   cx_at.py dial 6001 --wait 60       — dial and log everything until CONNECT/NO CARRIER/timeout
+  cx_at.py usry4dial 6001 --wait 60  — Courier ATY4DT call-progress diagnostic dial
   cx_at.py answer --wait 60          — ATA (manual answer) and log
 """
 import argparse
@@ -18,17 +21,36 @@ def open_port(dev: str) -> serial.Serial:
     return serial.Serial(dev, 115200, timeout=0.2, rtscts=False, dsrdtr=False)
 
 
-def send(port: serial.Serial, cmd: str, wait: float = 2.0, quiet: bool = False) -> str:
+def cancel_pager(port: serial.Serial) -> None:
+    """Cancel a USR help pager that may be waiting for a keystroke."""
+    port.write(b"\x03")
+    port.flush()
+    time.sleep(0.2)
+    port.read(4096)
+    port.reset_input_buffer()
+
+
+def send(port: serial.Serial, cmd: str, wait: float = 2.0, quiet: bool = False,
+         page_help: bool = False) -> str:
+    cancel_pager(port)
     port.reset_input_buffer()
     port.write((cmd + "\r").encode())
     port.flush()
     deadline = time.time() + wait
     buf = b""
+    pages = 0
     while time.time() < deadline:
         chunk = port.read(256)
         if chunk:
             buf += chunk
             text = buf.decode(errors="replace")
+            prompt_count = text.count("Strike a key when ready")
+            if page_help and prompt_count > pages and pages < 8:
+                port.write(b" ")
+                port.flush()
+                pages += 1
+                deadline = time.time() + wait
+                continue
             if any(t in text for t in ("OK", "ERROR", "CONNECT", "NO CARRIER",
                                        "NO DIALTONE", "NO DIAL TONE", "BUSY", "NO ANSWER")):
                 # allow trailing bytes to arrive
@@ -69,12 +91,15 @@ def monitor(port: serial.Serial, wait: float) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dev", default="/dev/cu.usbmodem123456781")
-    ap.add_argument("mode", choices=["probe", "cmd", "dial", "answer"])
+    ap.add_argument("mode", choices=["probe", "usrdiag", "usrdeepdiag",
+                                     "cmd", "dial", "usry4dial", "answer"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--wait", type=float, default=60.0)
     ap.add_argument("--setup", action="append", default=[],
                     help="extra AT command(s) before dialing")
     opts = ap.parse_args()
+    if opts.mode in ("dial", "usry4dial") and not opts.args:
+        ap.error(f"{opts.mode} requires a phone number")
 
     port = open_port(opts.dev)
     try:
@@ -85,9 +110,26 @@ def main() -> int:
             for c in ("ATI0", "ATI1", "ATI2", "ATI3", "ATI4", "ATI5", "ATI6", "ATI7",
                       "AT+GMM", "AT+GMR", "AT+FCLASS=?", "AT+MS=?"):
                 send(port, c, wait=2.0)
+        elif opts.mode == "usrdiag":
+            # Read-only diagnostics known to work on USRobotics Courier
+            # V.Everything 03/13/98 firmware.  Run immediately after a failed
+            # interop attempt, before ATZ/power-cycle clears the last-call data.
+            for c in ("AT", "ATE1V1Q0X7", "ATI3", "ATI6", "ATI7",
+                      "ATS30?", "ATS57?", "ATS58?",
+                      "ATI11", "ATY11", "ATY12", "ATY14"):
+                send(port, c, wait=5.0)
+        elif opts.mode == "usrdeepdiag":
+            # Hidden/undocumented Y diagnostics found by firmware and live
+            # command-surface probing.  Y8 and Y17 are verbose tables which may
+            # only be useful after a real call has populated datapump state.
+            for c in ("AT", "ATE1V1Q0X7", "ATI3", "ATI6", "ATI7", "ATI10",
+                      "ATS30?", "ATS57?", "ATS58?",
+                      "ATI11", "ATI15", "ATY8", "ATY11", "ATY12", "ATY14",
+                      "ATY15", "ATY17"):
+                send(port, c, wait=8.0)
         elif opts.mode == "cmd":
             for c in opts.args:
-                send(port, c, wait=5.0)
+                send(port, c, wait=5.0, page_help=c.endswith("$"))
         elif opts.mode == "dial":
             number = opts.args[0]
             send(port, "ATZ", wait=3.0)
@@ -100,6 +142,22 @@ def main() -> int:
             print(f">>> ATDT{number}  (monitoring {opts.wait:.0f}s)")
             monitor(port, opts.wait)
             # hang up: DTR drop + +++ATH
+            time.sleep(1.0)
+            port.write(b"+++")
+            port.flush()
+            time.sleep(1.5)
+            send(port, "ATH", wait=3.0)
+        elif opts.mode == "usry4dial":
+            number = opts.args[0]
+            send(port, "ATZ", wait=3.0)
+            send(port, "ATE1V1Q0X3")
+            for c in opts.setup:
+                send(port, c, wait=3.0)
+            port.reset_input_buffer()
+            port.write((f"ATY4DT{number}\r").encode())
+            port.flush()
+            print(f">>> ATY4DT{number}  (monitoring {opts.wait:.0f}s)")
+            monitor(port, opts.wait)
             time.sleep(1.0)
             port.write(b"+++")
             port.flush()
