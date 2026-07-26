@@ -8969,8 +8969,22 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    variability -- freezing it needs live A/B verification
                    before it can safely become the default. */
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                bool freeze_mp_cma = v34_rx_stage_is_phase4_frame(s->stage)
-                                  && getenv("ME_V34_FREEZE_CMA_DURING_MP");
+                /* V34_RX_STAGE_V90_CP must behave like the stateless
+                   matched-filter fallback (v90_cp_live_direct_recover):
+                   the CPt/CP payload is up to 428 bits / 214 symbols, and
+                   CMA is phase-blind on the QPSK-only CP signal.  Letting it
+                   re-adapt through the frame rotates the constellation
+                   away from its TRN-converged state -- the synchronous path
+                   repeatedly achieves a perfect 18/18 preamble lock then
+                   fails every payload structural bit (live 2026-07-26:
+                   crc=0 structure=N, source=spandsp accepted 0 frames).
+                   Freeze CMA unconditionally for the dedicated V.90 CP
+                   stage; ordinary V.34 MP keeps its env-gated behaviour so
+                   this cannot contaminate normal MP acquisition (verified
+                   by test_v90_v34_rx_stage_isolation). */
+                bool freeze_mp_cma = (s->stage == V34_RX_STAGE_V90_CP)
+                                  || (v34_rx_stage_is_phase4_frame(s->stage)
+                                      && getenv("ME_V34_FREEZE_CMA_DURING_MP"));
                 /* Once the decision-aided Phase 4 tracker owns the taps
                    (data-aided LMS above), CMA must stand down or the two
                    fight: CMA's phase-blind gradient re-randomizes the phase
@@ -9951,12 +9965,47 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
 {
     int i;
     int bit_rate_n;
+    int data_baud;
+    const char *baud_env;
 
     if (!s || bit_rate < 2400 || bit_rate > 33600 || (bit_rate % 2400) != 0)
         return -1;
     bit_rate_n = bit_rate/2400;
     if (set_trellis_mode(s, trellis_size))
         return -1;
+    /* V.90 §6.2 mandates the V.34 analogue modem support the 3200-baud
+       symbol rate; the upstream V.34 data direction uses it.  The dedicated
+       V90_CP stage acquires CPt/CP at the 2400-baud control-channel rate
+       (see v90_cp_live.c V90_CP_LIVE_BAUD_CODE), so by the time CP' is
+       accepted s->rx.baud_rate is still the CP value and v34_set_working_
+       parameters() below would size the data mapping frame / viterbi /
+       superframe for the wrong baud -- which is exactly the dead-upstream-
+       RX signature (live 2026-07-26: DATA entered at baud_rate=0/1800 Hz,
+       zero mapping frames, while the downstream TX was healthy).  V.90
+       skips the ordinary V.34 MP exchange that would otherwise reconfigure
+       the receiver for data, so do it here, at the V90_CP seam: restore the
+       negotiated data baud and recompute the carrier/shaper/parm state
+       without touching the trained equalizer, carrier-tracking or
+       decision-aided derotator (those carry CPt's solution into DATA per
+       the §9.4.2.2 channel-static assumption).  high_carrier is preserved
+       from the Phase-3/INFO1a assignment. */
+    data_baud = V34_BAUD_RATE_3200;
+    baud_env = getenv("ME_V90_UPSTREAM_BAUD");
+    if (baud_env && *baud_env)
+    {
+        int b = atoi(baud_env);
+        if (b >= V34_BAUD_RATE_2400 && b <= V34_BAUD_RATE_3429)
+            data_baud = b;
+    }
+    s->rx.baud_rate = data_baud;
+    s->rx.v34_carrier_phase_rate =
+        dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+    s->rx.shaper_re = v34_rx_shapers_re[s->rx.baud_rate][s->rx.high_carrier];
+    s->rx.shaper_im = v34_rx_shapers_im[s->rx.baud_rate][s->rx.high_carrier];
+    create_godard_coeffs(&s->rx.pri_ted,
+                         carrier_frequency(s->rx.baud_rate, s->rx.high_carrier),
+                         baud_rate_parameters[s->rx.baud_rate].baud_rate,
+                         0.99f);
     s->rx.bit_rate = (bit_rate_n - 1)*2;
     v34_set_working_parameters(&s->rx.parms,
                                s->rx.baud_rate,

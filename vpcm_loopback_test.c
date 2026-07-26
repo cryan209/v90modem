@@ -387,6 +387,7 @@ static bool test_v90_codec_output_constellation_mapping(void);
 static bool test_v90_smartlink_dummy_cpt_repair(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_v34_rx_stage_isolation(void);
+static bool test_v90_v90cp_upstream_data_reconfiguration(void);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
 static bool test_v92_suvd_codec_and_phase4(void);
@@ -4421,6 +4422,92 @@ static bool test_v90_v34_rx_stage_isolation(void)
 
     v34_free(answerer);
     vpcm_log("PASS: V.90 CP acquisition is isolated from V.34 MP framing");
+    return true;
+}
+
+/* The dedicated V90_CP stage acquires CPt/CP at the 2400-baud control-channel
+   rate, then hands to DATA.  V.90 skips the ordinary V.34 MP exchange that
+   would reconfigure the receiver for the upstream data baud, so
+   v34_v90_prepare_upstream_data() must do it at the V90_CP seam: restore the
+   V.90-mandated 3200-baud data rate (V.90 §6.2) and recompute carrier/shaper/
+   parm state, without resetting the trained equalizer.  Regression for the
+   dead-upstream-RX bug (live 2026-07-26: DATA entered at baud_rate=0/1800 Hz,
+   zero mapping frames, while downstream TX was healthy). */
+static bool test_v90_v90cp_upstream_data_reconfiguration(void)
+{
+    v34_state_t *answerer;
+    int cp_baud;
+    int data_baud;
+
+    vpcm_log("Test: V.90 V90_CP -> DATA upstream reconfiguration");
+    answerer = v34_init(NULL, 3200, 21600, false, true,
+                        vpcm_v34_dummy_get_bit, NULL,
+                        vpcm_v34_dummy_put_bit, NULL);
+    if (answerer == NULL)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test could not initialize answerer\n");
+        return false;
+    }
+    v34_set_put_phase4_bit(answerer, vpcm_v34_dummy_put_bit, NULL);
+    v34_set_v90_mode(answerer, V91_LAW_ULAW);
+    v34_force_v90_phase4_cp_rx(answerer);
+    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test did not enter V90_CP\n");
+        v34_free(answerer);
+        return false;
+    }
+    /* CP acquisition runs at the 2400-baud control-channel rate.  Whatever
+       baud_rate the CP stage holds, the data prepare must move it to 3200. */
+    cp_baud = v34_get_rx_baud_rate(answerer);
+    if (v34_v90_prepare_upstream_data(answerer, 31200, 0) != 0)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test: v34_v90_prepare_upstream_data failed\n");
+        v34_free(answerer);
+        return false;
+    }
+    data_baud = v34_get_rx_baud_rate(answerer);
+    if (data_baud != 4 /* V34_BAUD_RATE_3200, v34_tables.h */)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test: data baud stayed at %d (CP=%d), expected %d (3200)\n",
+                data_baud, cp_baud, 4 /* V34_BAUD_RATE_3200 */);
+        v34_free(answerer);
+        return false;
+    }
+    /* The seam must not promote the stage out of V90_CP; only the E handoff
+       (v34_begin_rx_data) does that. */
+    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test: prepare moved stage to %s\n",
+                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+        v34_free(answerer);
+        return false;
+    }
+    if (v34_begin_rx_data(answerer) != 0
+        || v34_get_rx_stage(answerer) != V34_RX_STAGE_DATA)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test: E handoff to DATA failed\n");
+        v34_free(answerer);
+        return false;
+    }
+    /* The reconfigured baud must survive into DATA (the dead-RX bug left it
+       at the CP value through DATA entry). */
+    if (v34_get_rx_baud_rate(answerer) != 4 /* V34_BAUD_RATE_3200 */)
+    {
+        fprintf(stderr,
+                "V.90 upstream reconfiguration test: DATA baud %d != 3200\n",
+                v34_get_rx_baud_rate(answerer));
+        v34_free(answerer);
+        return false;
+    }
+    v34_free(answerer);
+    vpcm_log("PASS: V.90 V90_CP -> DATA reconfigures RX to 3200 baud");
     return true;
 }
 
@@ -9077,6 +9164,7 @@ static bool run_vpcm_primitive_suite(void)
 {
     return test_vpcm_cp_robbed_bit_safe_profile()
         && test_v90_v34_rx_stage_isolation()
+        && test_v90_v90cp_upstream_data_reconfiguration()
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)

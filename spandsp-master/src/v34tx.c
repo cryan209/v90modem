@@ -6648,6 +6648,14 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s)
+{
+    if (!s)
+        return -1;
+    return s->rx.baud_rate;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
 {
     return s->tx.stage;

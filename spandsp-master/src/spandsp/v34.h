@@ -317,6 +317,14 @@ SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s);
     \return The current RX stage (v34_rx_stages_e value). */
 SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
 
+/*! Get the current RX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
+    After v34_v90_prepare_upstream_data() this is the negotiated V.90
+    upstream data baud (3200 for V.90 per V.90 §6.2), not the CP
+    control-channel rate.  Primarily a regression-test hook.
+    \param s The modem context.
+    \return The RX baud-rate code, or -1 on error. */
+SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s);
+
 /*! Get the current TX stage of the V.34 state machine.
     \param s The modem context.
     \return The current TX stage (v34_tx_stages_e value). */
