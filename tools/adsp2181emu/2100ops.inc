@@ -654,6 +654,10 @@ INLINE void pgm_write_dag2(adsp2100_state *adsp, UINT32 op, INT32 val)
 	UINT32 i = adsp->i[ireg];
 	UINT32 l = adsp->l[ireg];
 
+	if (adsp->watch_pm[i & 0x3fff])
+		logerror("[WATCH] pm w %04x=%06x pc=%04x cyc=%llu\n", i & 0x3fff,
+			 ((val << 8) | adsp->px) & 0xffffff, (unsigned)(adsp->pc & 0x3fff),
+			 (unsigned long long)adsp->cycles);
 	WWORD_PGM(adsp, i, (val << 8) | adsp->px);
 
 	i += adsp->m[mreg];
@@ -673,6 +677,10 @@ INLINE UINT32 pgm_read_dag2(adsp2100_state *adsp, UINT32 op)
 	UINT32 res;
 
 	res = RWORD_PGM(adsp, i);
+	if (adsp->watch_pm[i & 0x3fff])
+		logerror("[WATCH] pm r %04x=%06x pc=%04x cyc=%llu\n", i & 0x3fff,
+			 res & 0xffffff, (unsigned)(adsp->pc & 0x3fff),
+			 (unsigned long long)adsp->cycles);
 	adsp->px = res;
 	res >>= 8;
 

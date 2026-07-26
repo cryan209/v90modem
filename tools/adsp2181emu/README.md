@@ -35,3 +35,35 @@ points have run. This is the correct seam for replaying MIPS `dsp_assign`
 writes: applying them with `ADSP_STAGE_DM_WORDS` would let the TIKRNL
 initializer overwrite them. `tools/eicon_dsp_assign.py` locates the stripped
 assignment routines and the TIKRNL command/database mailboxes.
+
+## Host-interface model and instrumentation
+
+The IDMA model now follows the ground-truth semantics recovered from the
+te_dmlt.pm host-port helper (runtime `0x80082950`): IDMA addresses with bit
+`0x4000` set select 24-bit PM (two data writes per word), addresses below
+`0x4000` select 16-bit DM. `adsp2181_host_write()` implements the MIPS
+helper's single-word transaction (PM words land as `value<<8`).
+
+The MIPS script sender commits modem commands as: script record words into a
+16-word PM ring at PM `0x3327..0x3336` (host addresses `0x7327..`), then the
+producer pointer to DM `0x3315`, the command selector to DM `0x3310`, and the
+control word with bit `0x20` cleared to DM `0x3338`.
+
+Harness additions:
+
+- `ADSP_WATCH_DM=a,b,c` / `ADSP_WATCH_PM=a,b,c` log DSP reads/writes of the
+  listed addresses with PC and cycle.
+- `ADSP_WATCH_ALL=1` logs all DM/PM data accesses during the host loop.
+- `ADSP_TRACE_HOST=N` traces the first N instructions executed inside the
+  host loop (including ISR bodies).
+- `ADSP_HOST_SCRIPT=path` replays host writes, one `<word-index> <addr>
+  <value>` hex triplet per line, through `adsp2181_host_write`.
+- `ADSP_HOST_POLL=a,b,c` prints host-visible mailbox changes after each word.
+- `ADSP_HOST_IRQ=n` pulses IRQ `n` alongside each SPORT0 RX strobe.
+
+Current status: with TIKRNL staged and initialized, the SPORT0 RX ISR remains
+the kernel's per-timeslot TDM state machine (DM `0x2e44/0x2e45` channel-table
+pointers, `0x2e50` substate countdown, `0x2e52` current PCM code, idle code
+`0x00ff`). No IRQ doorbell (0/1/2/6) makes the DSP read the TIKRNL command
+mailbox; activation requires replaying the `dsp_assign` initial database
+writes that hook the channel table to the modem task.

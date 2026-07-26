@@ -178,6 +178,12 @@ struct adsp2181
     UINT16 data_overlay[2][0x2000];
     UINT16 io[0x800];
 
+	/* reverse-engineering instrumentation */
+    UINT8 watch_dm[0x4000];
+    UINT8 watch_pm[0x4000];
+    UINT64 cycles;
+    INT64 trace_budget;
+
 };
 typedef struct adsp2181 adsp2100_state;
 
@@ -201,14 +207,23 @@ static UINT8 *condition_table;
 static void check_irqs(adsp2100_state *adsp);
 INLINE UINT16 RWORD_DATA(adsp2100_state *a, UINT32 x)
 {
+    UINT16 v;
     x &= 0x3fff;
     if (x < 0x2000 && a->dmovlay >= 1 && a->dmovlay <= 2)
-        return a->data_overlay[a->dmovlay - 1][x];
-    return a->data[x];
+        v = a->data_overlay[a->dmovlay - 1][x];
+    else
+        v = a->data[x];
+    if (a->watch_dm[x])
+        logerror("[WATCH] dm r %04x=%04x pc=%04x cyc=%llu\n", x, v,
+                 (unsigned)(a->pc & 0x3fff), (unsigned long long)a->cycles);
+    return v;
 }
 INLINE void WWORD_DATA(adsp2100_state *a, UINT32 x, UINT16 v)
 {
     x &= 0x3fff;
+    if (a->watch_dm[x])
+        logerror("[WATCH] dm w %04x=%04x pc=%04x cyc=%llu\n", x, v,
+                 (unsigned)(a->pc & 0x3fff), (unsigned long long)a->cycles);
     if (x < 0x2000 && a->dmovlay >= 1 && a->dmovlay <= 2)
         a->data_overlay[a->dmovlay - 1][x] = v;
     else
@@ -287,6 +302,13 @@ static void execute(adsp2100_state *adsp)
 
 		/* instruction fetch */
 		op = ROPCODE(adsp);
+
+		if (adsp->trace_budget > 0) {
+			adsp->trace_budget--;
+			logerror("[TRACE] pc=%04x op=%06x cyc=%llu\n",
+				 (unsigned)(adsp->pc & 0x3fff), op,
+				 (unsigned long long)adsp->cycles);
+		}
 
 		/* advance to the next instruction */
 		if (adsp->pc != adsp->loop)
@@ -998,6 +1020,7 @@ static void execute(adsp2100_state *adsp)
 		}
 
 		adsp->icount--;
+		adsp->cycles++;
 	} while (adsp->icount > 0);
 }
 
@@ -1112,9 +1135,15 @@ void adsp2181_idma_addr_write(adsp2181_t *a, uint16_t address)
     a->idma_addr = address; a->idma_offs = 0;
 }
 uint16_t adsp2181_idma_addr_read(const adsp2181_t *a) { return a->idma_addr; }
+/* The ground truth for IDMA address semantics is the Eicon MIPS host-port
+ * helper (te_dmlt.pm runtime 0x80082950): it performs one 16-bit data
+ * write for addresses below 0x4000 and two data writes (value, then a
+ * zero pad byte) for addresses with bit 0x4000 set.  A 24-bit PM write
+ * requires two IDMA data writes, so bit 0x4000 set selects PM, clear
+ * selects DM.  The previous implementation had this inverted. */
 void adsp2181_idma_data_write(adsp2181_t *a, uint16_t value)
 {
-    if (!(a->idma_addr & 0x4000)) {
+    if (a->idma_addr & 0x4000) {
         if (!a->idma_offs) { a->idma_cache = value; a->idma_offs = 1; }
         else {
             WWORD_PGM(a, a->idma_addr++ & 0x3fff, (a->idma_cache << 8) | (value & 0xff));
@@ -1127,7 +1156,7 @@ void adsp2181_idma_data_write(adsp2181_t *a, uint16_t value)
 uint16_t adsp2181_idma_data_read(adsp2181_t *a)
 {
     uint16_t result;
-    if (!(a->idma_addr & 0x4000)) {
+    if (a->idma_addr & 0x4000) {
         if (!a->idma_offs) {
             result = RWORD_PGM(a, a->idma_addr & 0x3fff) >> 8;
             a->idma_offs = 1;
@@ -1140,6 +1169,32 @@ uint16_t adsp2181_idma_data_read(adsp2181_t *a)
     }
     return result;
 }
+/* Single host-port word write with the Eicon MIPS helper semantics:
+ * addr < 0x4000 writes one DM word; addr >= 0x4000 writes one PM word
+ * stored as value<<8 (the helper's second pad write supplies zero). */
+void adsp2181_host_write(adsp2181_t *a, uint16_t addr, uint16_t value)
+{
+    if (addr & 0x4000)
+        WWORD_PGM(a, addr & 0x3fff, (UINT32)value << 8);
+    else
+        WWORD_DATA(a, addr & 0x3fff, value);
+}
+uint16_t adsp2181_host_read(adsp2181_t *a, uint16_t addr)
+{
+    if (addr & 0x4000)
+        return (uint16_t)(RWORD_PGM(a, addr & 0x3fff) >> 8);
+    return RWORD_DATA(a, addr & 0x3fff);
+}
+void adsp2181_watch_dm(adsp2181_t *a, uint16_t addr, int on)
+{
+    if (a) a->watch_dm[addr & 0x3fff] = on != 0;
+}
+void adsp2181_watch_pm(adsp2181_t *a, uint16_t addr, int on)
+{
+    if (a) a->watch_pm[addr & 0x3fff] = on != 0;
+}
+uint64_t adsp2181_cycles(const adsp2181_t *a) { return a ? a->cycles : 0; }
+void adsp2181_trace_budget(adsp2181_t *a, int64_t n) { if (a) a->trace_budget = n; }
 uint16_t adsp2181_pc(const adsp2181_t *a) { return a->pc & 0x3fff; }
 void adsp2181_set_pc(adsp2181_t *a, uint16_t pc) { a->pc = pc & 0x3fff; a->idle = 0; }
 void adsp2181_call(adsp2181_t *a, uint16_t entry, uint16_t return_pc)

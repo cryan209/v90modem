@@ -314,3 +314,51 @@ Load `pm.bin` as little-endian packed 24-bit ADSP-218x program memory and use
 
 A disassembler must explicitly support ADSP-218x 24-bit instructions. Ordinary
 x86/ARM `objdump` cannot decode these images.
+
+## Script sender and command-ring semantics (2026-07-27)
+
+Disassembly of the build 107-79 mailbox sender (te_dmlt.pm file
+`0x786a4..0x78cc0`, capstone MIPS) recovered the exact command commit:
+
+- The script interpreter walks 16-bit records: word 0 is the record length
+  (including itself and the mask word), word 1 is a bit mask, and one argument
+  word follows per set mask bit. A record with bit 15 set is a relative
+  branch; a zero word terminates the script. Arguments whose mask bit is 3 or
+  6 are shifted right by one unless a global flag is set. A NULL script
+  pointer selects the shared empty script at file `0xeaf2c`.
+- Record words are written to a 16-word ring in **PM data space** at PM
+  `0x3327..0x3336`: the sender forms host-port address `ring_pos + 0x4000`,
+  and the host-port helper (runtime `0x80082950`) treats addresses with bit
+  `0x4000` set as 24-bit PM writes (data word then a zero pad byte), lower
+  addresses as single 16-bit DM writes.
+- The commit then writes the producer pointer to DM `0x3315`, the command
+  selector to DM `0x3310`, and the control word with bit `0x20` cleared to DM
+  `0x3338`.
+
+The emulator's IDMA model previously had the bit-`0x4000` PM/DM select
+inverted; this is fixed and covered by `adsp2181_core_test`.
+
+Dynamic probing with the staged TIKRNL image (watchpoints +
+`ADSP_TRACE_HOST`) shows:
+
+- The resident kernel's SPORT0 RX ISR at PM `0x0072` is a per-timeslot TDM
+  state machine: DM `0x2e44/0x2e45` hold channel-table pointers (`0x2e00`),
+  DM `0x2e50` is a per-channel substate countdown, DM `0x2e52` holds the
+  current PCM code (`0x00ff` idle). A staged but unassigned TIKRNL never runs:
+  no IRQ (0/1/2/6) doorbells the command mailbox, and the DSP never reads DM
+  `0x3310`.
+- Channel activation therefore requires the `dsp_assign` initial database
+  writes (the database-ring commit path at MIPS file `0x7cd14..0x7cf18`),
+  which must hook a channel-table entry to the modem task before command
+  scripts mean anything.
+
+## Next reverse-engineering step
+
+Reconstruct the complete `dsp_assign` write sequence for a modem (task
+`0x0258`) assignment: disassemble `dsp_assign` (file `0x79cc4..0x7b978`), the
+database record builder (`0x7bbf8..0x7bd0c`, format chars `b`/`w`) and the
+ring commit (`0x7cd14..0x7cf18`), and emit the resulting DM/PM word map for
+the emulator's `ADSP_POST_DM_WORDS`/`ADSP_HOST_SCRIPT` replay. Success
+criterion: the SPORT0 ISR's channel-table walk reaches TIKRNL channel state
+(the `0x2e00` table entry for the assigned timeslot points into TIKRNL
+structures) and DM `0x3310` command selectors start being consumed.

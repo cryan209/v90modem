@@ -108,6 +108,57 @@ static int load_word_map(const char *path, uint32_t *pm, uint16_t *dm)
     return 0;
 }
 
+#define HOST_SCRIPT_MAX 4096
+struct host_poke { long index; uint16_t addr; uint16_t value; };
+static struct host_poke host_script[HOST_SCRIPT_MAX];
+static int host_script_len;
+
+static int load_host_script(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    long index;
+    unsigned addr, value;
+    if (!fp) {
+        fprintf(stderr, "%s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    while (host_script_len < HOST_SCRIPT_MAX &&
+           fscanf(fp, "%ld %x %x", &index, &addr, &value) == 3) {
+        if (addr > 0x7fff || value > 0xffff) {
+            fprintf(stderr, "%s: host poke out of range\n", path);
+            fclose(fp);
+            return -1;
+        }
+        host_script[host_script_len].index = index;
+        host_script[host_script_len].addr = (uint16_t)addr;
+        host_script[host_script_len].value = (uint16_t)value;
+        host_script_len++;
+    }
+    fclose(fp);
+    return 0;
+}
+
+#define HOST_POLL_MAX 64
+static uint16_t host_poll_addr[HOST_POLL_MAX];
+static uint16_t host_poll_last[HOST_POLL_MAX];
+static int host_poll_len;
+
+static int parse_addr_list(const char *text, uint16_t *out, int max)
+{
+    int count = 0;
+    char *copy = strdup(text), *tok, *save = NULL;
+    if (!copy) return -1;
+    for (tok = strtok_r(copy, ",", &save); tok && count < max;
+         tok = strtok_r(NULL, ",", &save)) {
+        char *end;
+        unsigned long addr = strtoul(tok, &end, 0);
+        if (*end || addr > 0x3fff) { free(copy); return -1; }
+        out[count++] = (uint16_t)addr;
+    }
+    free(copy);
+    return count;
+}
+
 static int load_dm(const char *path, uint16_t *dm)
 {
     FILE *fp = fopen(path, "rb");
@@ -185,6 +236,39 @@ int main(int argc, char **argv)
     }
     adsp2181_set_callbacks(cpu, sport_rx, sport_tx, timer_changed);
     adsp2181_reset(cpu);
+    {
+        const char *vars[2] = { getenv("ADSP_WATCH_DM"), getenv("ADSP_WATCH_PM") };
+        for (int which = 0; which < 2; which++) {
+            uint16_t addrs[256];
+            int n;
+            if (!vars[which]) continue;
+            n = parse_addr_list(vars[which], addrs, 256);
+            if (n < 0) {
+                fprintf(stderr, "invalid ADSP_WATCH_%s list\n", which ? "PM" : "DM");
+                adsp2181_destroy(cpu);
+                return 2;
+            }
+            for (int i = 0; i < n; i++)
+                which ? adsp2181_watch_pm(cpu, addrs[i], 1)
+                      : adsp2181_watch_dm(cpu, addrs[i], 1);
+        }
+    }
+    if (getenv("ADSP_HOST_SCRIPT") &&
+        load_host_script(getenv("ADSP_HOST_SCRIPT"))) {
+        adsp2181_destroy(cpu);
+        return 1;
+    }
+    if (getenv("ADSP_HOST_POLL")) {
+        host_poll_len = parse_addr_list(getenv("ADSP_HOST_POLL"),
+                                        host_poll_addr, HOST_POLL_MAX);
+        if (host_poll_len < 0) {
+            fprintf(stderr, "invalid ADSP_HOST_POLL list\n");
+            adsp2181_destroy(cpu);
+            return 2;
+        }
+        for (int i = 0; i < host_poll_len; i++)
+            host_poll_last[i] = 0xeeee;
+    }
     if (getenv("ADSP_START_PC")) {
         unsigned long pc = strtoul(getenv("ADSP_START_PC"), &end, 0);
         if (*end || pc > 0x3fff) {
@@ -247,14 +331,50 @@ int main(int argc, char **argv)
             adsp2181_destroy(cpu);
             return 1;
         }
+        long host_irq = -1;
+        if (getenv("ADSP_HOST_IRQ")) {
+            host_irq = strtol(getenv("ADSP_HOST_IRQ"), &end, 0);
+            if (*end || host_irq < 0 || host_irq >= ADSP2181_IRQ_COUNT) {
+                fprintf(stderr, "invalid ADSP_HOST_IRQ: %s\n", getenv("ADSP_HOST_IRQ"));
+                adsp2181_destroy(cpu);
+                return 2;
+            }
+        }
         fprintf(stderr, "[ADSP] host-start pc=%04x idle=%d imask=%03x icntl=%02x words=%ld staged=%s\n",
                 adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                 adsp2181_icntl(cpu), words,
                 getenv("ADSP_STAGE_PM_WORDS") ? "yes" : "no");
+        if (getenv("ADSP_WATCH_ALL"))
+            for (int a = 0; a < 0x4000; a++) {
+                adsp2181_watch_dm(cpu, (uint16_t)a, 1);
+                adsp2181_watch_pm(cpu, (uint16_t)a, 1);
+            }
+        if (getenv("ADSP_TRACE_HOST"))
+            adsp2181_trace_budget(cpu, strtol(getenv("ADSP_TRACE_HOST"), NULL, 0));
         for (long word = 0; word < words; word++) {
+            for (int i = 0; i < host_script_len; i++)
+                if (host_script[i].index == word) {
+                    adsp2181_host_write(cpu, host_script[i].addr,
+                                        host_script[i].value);
+                    if (trace_sport)
+                        fprintf(stderr, "[ADSP] host-poke[%ld] %04x=%04x\n",
+                                word, host_script[i].addr, host_script[i].value);
+                }
             adsp2181_set_irq(cpu, ADSP2181_SPORT0_RX, 1);
             adsp2181_set_irq(cpu, ADSP2181_SPORT0_RX, 0);
+            if (host_irq >= 0) {
+                adsp2181_set_irq(cpu, (int)host_irq, 1);
+                adsp2181_set_irq(cpu, (int)host_irq, 0);
+            }
             (void)adsp2181_run(cpu, 10000);
+            for (int i = 0; i < host_poll_len; i++) {
+                uint16_t now = adsp2181_host_read(cpu, host_poll_addr[i]);
+                if (now != host_poll_last[i]) {
+                    fprintf(stderr, "[ADSP] host-poll[%ld] %04x: %04x -> %04x\n",
+                            word, host_poll_addr[i], host_poll_last[i], now);
+                    host_poll_last[i] = now;
+                }
+            }
             if (trace_sport)
                 fprintf(stderr, "[ADSP] host[%ld] pc=%04x idle=%d imask=%03x icntl=%02x\n",
                         word, adsp2181_pc(cpu), adsp2181_idle(cpu),
