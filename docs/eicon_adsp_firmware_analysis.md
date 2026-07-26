@@ -362,3 +362,48 @@ the emulator's `ADSP_POST_DM_WORDS`/`ADSP_HOST_SCRIPT` replay. Success
 criterion: the SPORT0 ISR's channel-table walk reaches TIKRNL channel state
 (the `0x2e00` table entry for the assigned timeslot points into TIKRNL
 structures) and DM `0x3310` command selectors start being consumed.
+
+## Database ring commit and kernel task dispatch (2026-07-27, session 2)
+
+The database ring commit helper (MIPS file `0x7cd14..0x7cf18`) is fully
+decoded. Its ring descriptor (MIPS-side struct) has: `+0x0c` producer-pointer
+DM address, `+0x10` PM flag (clear: payload words are written to PM via the
+`+0x4000` host-address convention), `+0x12` ring start, `+0x14` ring length.
+Each commit writes: header word `(payload_bytes + 2) | resource_flags`, then
+the database/task identifier word, then the byte payload (packed two bytes
+per word, wrap-split), and publishes the producer last. The record builder
+(file `0x7bbf8..0x7bd0c`) emits `[DM addr lo, DM addr hi, value bytes...]`;
+its address operand resolves either a download symbol (8-byte table entries,
+address at `+4`) or a database location id, and its format string emits one
+byte (`b`) or one little-endian word (`w`) per character from a varargs list.
+
+The `0x0258` tail of `dsp_assign` (runtime `0x8008c6e8..0x8008c978`) only
+initializes the per-channel mailbox/request struct: `+0x140/0x144` = DSP host
+register block, `+0x148` = TIKRNL symbol 13 (`0x3310`), `+0x14a` = symbol 14
+(`0x3338`), plus timeout defaults (`0x80`) and zeroed state. All actual DSP
+writes happen later through the asynchronous request/script machinery.
+
+On the DSP side, watchpoint+trace analysis of the resident kernel shows the
+foreground idle loop at PM `0x02a8..0x02ac` reads the channel-table pointers
+DM `0x2e44/0x2e45` (-> `0x2e00`) and there is an indirect `CALL (I4)` at PM
+`0x02a4` — the kernel's task dispatcher (further indirect calls through I4 at
+PM `0x01d9/0x01ed/0x0266`, indirect jumps at `0x02fe/0x0522..`). DM
+`0x2e00..0x2e3f` is the 64-entry G.711 timeslot buffer (`0x00ff` idle);
+channel descriptors start at `0x2e40`; a second pointer/link table lives at
+`0x2f00..0x2f2b`. DM `0x3fe0..0x3fff` is the ADSP-2181 system-register page
+(`0x3ff9 = 0x8000` and `0x3ffa = 0` are read by the ISR every frame but are
+not a host command doorbell — poking them changes nothing).
+
+A standalone ADSP-218x disassembler now exists (MAME `2100dasm.cpp`,
+BSD-3-Clause, fetched from the mamedev mirror) and is wired up as
+`/tmp/dasm`; it decodes ALU/MAC/control flow correctly but mislabels the
+direct DM read/write opcodes (`10dd ddaa ..` form, address in bits 4..17),
+so watchpoints remain the ground truth for those.
+
+Caller-scan of the protocol image shows the modem database setup is the dense
+`db_record_append`/`db_ring_commit` cluster at file `0x8892c..0x8a50c`
+(roughly a dozen append+commit pairs), with `request_parser` called from file
+`0x92e50` and `0x9f05c`. Next step: disassemble that cluster to recover the
+exact switch-on database contents (ring target, record list, values) for a
+modem answer assignment, then replay through `ADSP_HOST_SCRIPT` and verify
+the kernel's `CALL (I4)` dispatcher reaches TIKRNL channel code.
