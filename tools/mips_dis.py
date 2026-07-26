@@ -26,6 +26,7 @@ def main() -> int:
 
     data = open(args.image, "rb").read()
     md = Cs(CS_ARCH_MIPS, CS_MODE_MIPS32 | CS_MODE_LITTLE_ENDIAN)
+    md.skipdata = True
     code = data[args.start:args.end]
     for ins in md.disasm(code, RUNTIME_FILE_BIAS + args.start):
         raw = ""

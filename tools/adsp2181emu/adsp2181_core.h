@@ -56,6 +56,7 @@ void adsp2181_set_pc(adsp2181_t *cpu, uint16_t pc);
 void adsp2181_call(adsp2181_t *cpu, uint16_t entry, uint16_t return_pc);
 void adsp2181_set_irq(adsp2181_t *cpu, int irq, int asserted);
 uint16_t adsp2181_imask(const adsp2181_t *cpu);
+void adsp2181_set_imask(adsp2181_t *cpu, uint16_t imask);
 uint16_t adsp2181_icntl(const adsp2181_t *cpu);
 int adsp2181_idle(const adsp2181_t *cpu);
 

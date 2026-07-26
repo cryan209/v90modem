@@ -407,3 +407,33 @@ Caller-scan of the protocol image shows the modem database setup is the dense
 exact switch-on database contents (ring target, record list, values) for a
 modem answer assignment, then replay through `ADSP_HOST_SCRIPT` and verify
 the kernel's `CALL (I4)` dispatcher reaches TIKRNL channel code.
+
+## Host doorbell and kernel command queue (2026-07-27, session 3)
+
+The host doorbell is **IRQE** (enum 6, priority 5, imask bit `0x0100`,
+vector `0x18`). The vector contains a bare RTI: its only purpose is to wake
+the kernel foreground from IDLE. After an IRQE wake the foreground leaves its
+`0x02a8..0x02ac` idle loop and runs the queue processor at `0x02ad..`:
+
+1. rebuilds the free-list links at DM `0x2f27..0x2f2b` (-> `0x2f21`, `0x2f00`,
+   `0x2f0e`, `0x2f42`, `0x2f4e` — five message entries);
+2. reads the queue head/tail DM `0x2f08/0x2f09` (equal = empty);
+3. calls the service dispatcher (`0x01c1` -> `0x02a1` -> `0x01b2` ->
+   `0x00d8`) which walks the per-frame descriptor at DM `0x2f00`:
+   field `+0` flags/command, `+1` = `0x2800`, `+4` = DM data pointer
+   (dereferenced), `+0x0c/+0x0d` state; DM `0x2e78` is cleared when a queued
+   entry was present.
+
+Harness notes: level-sensitive IRQs must be held asserted across two
+`adsp2181_run` slices because `check_irqs` runs at run-entry and the SPORT0
+ISR masks IRQ1/IRQE (priority 5/7) while active. The kernel restores imask
+from the status stack on RTI, so `ADSP_FORCE_IMASK` is re-applied every host
+word. IRQ2's vector (`0x0004`) is a parked IDLE — it is not the doorbell.
+
+Open: the exact queue-entry semantics for task download / channel assign.
+Queue pushes with head!=tail are consumed silently (pointers normalized back
+to `0x2f00`), and the per-frame descriptor at `0x2f00` is processed every
+8 kHz frame regardless. The next step is decoding the queue processor at PM
+`0x02ad..0x02c0` and the service routine at `0x00d8..0x0109` statically, then
+replaying a task-download queue entry for TIKRNL so the boot kernel performs
+the staged load itself (the real boot sequence), instead of pre-staging.

@@ -135,6 +135,7 @@ static int load_host_script(const char *path)
         host_script_len++;
     }
     fclose(fp);
+    fprintf(stderr, "[ADSP] host-script: %d pokes loaded\n", host_script_len);
     return 0;
 }
 
@@ -344,6 +345,9 @@ int main(int argc, char **argv)
                 adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                 adsp2181_icntl(cpu), words,
                 getenv("ADSP_STAGE_PM_WORDS") ? "yes" : "no");
+        long force_imask = 0;
+        if (getenv("ADSP_FORCE_IMASK"))
+            force_imask = strtol(getenv("ADSP_FORCE_IMASK"), NULL, 0);
         if (getenv("ADSP_WATCH_ALL"))
             for (int a = 0; a < 0x4000; a++) {
                 adsp2181_watch_dm(cpu, (uint16_t)a, 1);
@@ -362,11 +366,19 @@ int main(int argc, char **argv)
                 }
             adsp2181_set_irq(cpu, ADSP2181_SPORT0_RX, 1);
             adsp2181_set_irq(cpu, ADSP2181_SPORT0_RX, 0);
+            if (force_imask)
+                adsp2181_set_imask(cpu, (uint16_t)(force_imask | adsp2181_imask(cpu)));
             if (host_irq >= 0) {
+                /* level-sensitive inputs must stay asserted into the run */
                 adsp2181_set_irq(cpu, (int)host_irq, 1);
+                (void)adsp2181_run(cpu, 5000);
+                /* keep asserted: the first run is spent in the masked
+                 * SPORT0 ISR, the second run is where it can vector */
+                (void)adsp2181_run(cpu, 5000);
                 adsp2181_set_irq(cpu, (int)host_irq, 0);
+            } else {
+                (void)adsp2181_run(cpu, 10000);
             }
-            (void)adsp2181_run(cpu, 10000);
             for (int i = 0; i < host_poll_len; i++) {
                 uint16_t now = adsp2181_host_read(cpu, host_poll_addr[i]);
                 if (now != host_poll_last[i]) {

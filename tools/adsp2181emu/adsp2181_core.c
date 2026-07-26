@@ -1214,5 +1214,6 @@ void adsp2181_set_irq(adsp2181_t *a, int irq, int asserted)
     check_irqs(a);
 }
 uint16_t adsp2181_imask(const adsp2181_t *a) { return a->imask; }
+void adsp2181_set_imask(adsp2181_t *a, uint16_t imask) { if (a) a->imask = imask & 0x3ff; }
 uint16_t adsp2181_icntl(const adsp2181_t *a) { return a->icntl; }
 int adsp2181_idle(const adsp2181_t *a) { return a->idle != 0; }
