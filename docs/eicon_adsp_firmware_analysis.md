@@ -207,10 +207,88 @@ The TIKRNL initializer clears/configures its PM window and populates its data
 structures (including DM `0x3184..` and the task tables at `0x31c8..`). It does
 not activate a modem channel by itself. Calling V.90 symbol 0 as code was ruled
 out: it is a one-word fixed data symbol at DM `0x3602`, not an entry point.
-The remaining boundary is the MIPS-side `dsp_assign` control transaction that
-selects a channel and fills the TIKRNL task/database parameters. That protocol
-runs in `te_dmlt.pm`; it is distinct from the sample SPORT and from the generic
-IDMA modem interface in `addspv90guide.pdf`.
+The MIPS-side assignment boundary is now located. In `te_dmlt.pm` build
+107-79, file-backed runtime objects use address bias `0x80011000`. Resolving the
+trace-format references identifies generic `dsp_assign` at file offsets
+`0x79cc4..0x7b978` and PRI `dsp30_assign` at `0x9775c..0x97dcc`.
+`tools/eicon_dsp_assign.py` verifies these xrefs directly from the protocol
+image.
+
+The two routines have different roles. `dsp30_assign` pairs PRI transparent or
+voice tasks such as download IDs `0x0065/0x0066` and `0x01f9/0x01fa`. Generic
+`dsp_assign` selects download ID `0x0258`, `TIKRNL81.F34`, for a modem service;
+it is therefore the relevant path even on the 30-DSP E1 card. The routine
+allocates a per-DSP resource, copies the assignment parameter blob, and sets up
+an asynchronous command state machine. It does **not** synchronously write a
+flat modem database before returning.
+
+For TIKRNL, the `0x0258` branch resolves symbol-table entries 13 and 14. In
+build 117-926 these are fixed DM symbols:
+
+| Symbol | DM address | Words | Role |
+|---:|---:|---:|---|
+| 13 | `0x3310` | 21 | MIPS-to-TIKRNL command/database mailbox |
+| 14 | `0x3338` | 27 | TIKRNL-to-MIPS mailbox |
+
+The mailbox transport is now recovered in more detail. The request parser is
+at MIPS file offsets `0x78138..0x78388` and the sender is at
+`0x786a4..0x78cc0`. The symbol-13 structure starts with control fields and owns
+a 16-word circular command ring:
+
+| Symbol-13 offset | Initial value | Meaning |
+|---:|---:|---|
+| `+0` | `0x0000` | command selector/doorbell written on commit |
+| `+5` | `0x3327` | MIPS producer pointer |
+| `+6` | `0x3327` | DSP consumer/shadow pointer |
+| `+7` | `0x0010` | ring length in words |
+| `+8` | `0x3327` | ring start |
+
+For each commit the sender writes command words into DM
+`0x3327..0x3336`, wrapping at 16 words, then writes the new producer pointer to
+DM `0x3315`. It writes the request's selector to DM `0x3310` and the request's
+control word, with bit `0x0020` cleared, to DM `0x3338`. These are the exact
+post-initializer writes the emulator must reproduce.
+
+The upper request is a byte record whose byte 2 selects one of five parser
+forms. Form 0 selects a command script using bytes 3 and 4; form 1 queues a raw
+byte payload; forms 2 and 3 update the `0x3338` control and `0x3310` selector
+respectively; form 4 updates a separate state word. Script selection is
+`script[mode][code]`, with two modes and codes below 75. The pointer table is at
+MIPS file offset `0xeb248`. Script records consist of a word count, a
+mask/opcode word and the remaining argument words; zero terminates and a
+negative word branches within the script. `tools/eicon_dsp_assign.py` now dumps
+that complete pointer map.
+
+A second path carries the initial database itself. The helper at MIPS file
+offsets `0x7bbf8..0x7bd0c` appends one database record to a host buffer. It
+resolves the requested download symbol/location, emits that 16-bit DM address
+little-endian, and appends arguments according to a compact format string:
+`b` emits one byte and `w` emits one little-endian word. The strings adjacent
+to `DSP_DRV.C` include formats such as `wbbww`, `bbbbb`, `bbbbww`, `bbb`, and
+`bw`.
+
+The commit helper at `0x7cd14..0x7cf18` writes the completed buffer into a
+second ADSP circular ring. Its exact sequence is:
+
+1. read and validate the ring producer against its start and length;
+2. write a header containing the payload length and resource flags;
+3. write the selected database/task identifier;
+4. bulk-write the generated address/value records, splitting at ring wrap;
+5. publish the updated producer pointer last.
+
+The modem-specific switch-on branch is selected when the assigned task ID is
+`0x0258`. It builds the TIKRNL/F34 setup block, appends additional records with
+the format helper, and commits it through this ring. For example, one recovered
+call selects database location `0x16` or `0x1c` and emits a `bbb` record with
+three one-byte values. This is the database-write path originally being sought;
+the symbol-13 command mailbox is the later runtime control path.
+
+Thus `dsp_assign` itself allocates and loads the resource, switch-on commits the
+initial database ring, and subsequent asynchronous requests use the symbol-13
+command mailbox. Reproducing only one of those stages cannot activate a modem
+channel. The emulator accepts `ADSP_POST_DM_WORDS` specifically for captured or
+reconstructed post-initializer writes. SPORT0/SPORT1 remain only the PCM
+highway.
 
 `--card-type` can now apply the combifile directory's usage masks. Card type 23
 (the older DIVA Server PRI 30M profile) maps to file set 5 and selects the

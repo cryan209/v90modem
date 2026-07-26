@@ -25,7 +25,13 @@ assignment protocol and real-time sample clock are not modeled yet.
 
 The first validated target is the bootable `DIVA Server PRI 30M Kernel`. It
 executes reset instruction `0x18580f`, enters at PM `0x0580`, initializes and
-reaches IDLE at PM `0x02a9`. Exact Eicon type-2 relocation is implemented. TIKRNL/V.90 can be staged after boot
-with `ADSP_STAGE_PM_WORDS` and `ADSP_STAGE_DM_WORDS`; `ADSP_STAGE_ENTRY=0x672`
-runs the TIKRNL initializer with a valid return stack. Activating a modem
-channel still requires the MIPS firmware's `dsp_assign` database transaction.
+reaches IDLE at PM `0x02a9`. Exact Eicon type-2 relocation is implemented.
+TIKRNL/V.90 can be staged after boot with `ADSP_STAGE_PM_WORDS` and
+`ADSP_STAGE_DM_WORDS`; `ADSP_STAGE_ENTRY=0x672` runs the TIKRNL initializer
+with a valid return stack.
+
+`ADSP_POST_DM_WORDS` applies an addressed DM word map after all staged entry
+points have run. This is the correct seam for replaying MIPS `dsp_assign`
+writes: applying them with `ADSP_STAGE_DM_WORDS` would let the TIKRNL
+initializer overwrite them. `tools/eicon_dsp_assign.py` locates the stripped
+assignment routines and the TIKRNL command/database mailboxes.

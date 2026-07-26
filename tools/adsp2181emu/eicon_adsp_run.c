@@ -240,6 +240,13 @@ int main(int argc, char **argv)
                     adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                     adsp2181_icntl(cpu));
         }
+        /* MIPS dsp_assign writes occur after the task initializer has built its
+         * mailbox/database structures, so keep this separate from staged DM. */
+        if (getenv("ADSP_POST_DM_WORDS") &&
+            load_word_map(getenv("ADSP_POST_DM_WORDS"), NULL, adsp2181_dm(cpu))) {
+            adsp2181_destroy(cpu);
+            return 1;
+        }
         fprintf(stderr, "[ADSP] host-start pc=%04x idle=%d imask=%03x icntl=%02x words=%ld staged=%s\n",
                 adsp2181_pc(cpu), adsp2181_idle(cpu), adsp2181_imask(cpu),
                 adsp2181_icntl(cpu), words,
