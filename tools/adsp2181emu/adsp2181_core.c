@@ -1134,6 +1134,13 @@ uint16_t *adsp2181_dm_overlay(adsp2181_t *a, int overlay)
 }
 void adsp2181_idma_addr_write(adsp2181_t *a, uint16_t address)
 {
+    /* If a PM data write is pending (one value written, pad byte not yet
+     * supplied), commit it as value<<8 before changing the address. Real
+     * ADSP-2181 IDMA hardware latches the word on the next address change;
+     * this matches the Eicon presence check (one data write, then a fresh
+     * address write, then a read-back that must see the value). */
+    if ((a->idma_addr & 0x4000) && a->idma_offs)
+        WWORD_PGM(a, a->idma_addr & 0x3fff, (UINT32)a->idma_cache << 8);
     a->idma_addr = address; a->idma_offs = 0;
 }
 uint16_t adsp2181_idma_addr_read(const adsp2181_t *a) { return a->idma_addr; }
@@ -1215,5 +1222,7 @@ void adsp2181_set_irq(adsp2181_t *a, int irq, int asserted)
 }
 uint16_t adsp2181_imask(const adsp2181_t *a) { return a->imask; }
 void adsp2181_set_imask(adsp2181_t *a, uint16_t imask) { if (a) a->imask = imask & 0x3ff; }
+void adsp2181_set_flagin(adsp2181_t *a, int asserted) { if (a) a->flagin = asserted ? 1 : 0; }
+int adsp2181_flagin(const adsp2181_t *a) { return a ? a->flagin : 0; }
 uint16_t adsp2181_icntl(const adsp2181_t *a) { return a->icntl; }
 int adsp2181_idle(const adsp2181_t *a) { return a->idle != 0; }

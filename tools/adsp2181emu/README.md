@@ -36,6 +36,13 @@ writes: applying them with `ADSP_STAGE_DM_WORDS` would let the TIKRNL
 initializer overwrite them. `tools/eicon_dsp_assign.py` locates the stripped
 assignment routines and the TIKRNL command/database mailboxes.
 
+The MIPS shim (`tools/eicon_mips_shim.py --assign`) drives the real
+service-assign entry (0x80096980) under Unicorn and routes both the
+single-word host-port helper and the bulk-write IDMA helper (memory-mapped
+writes to the host register block at +0x80/+0x00) to the ADSP emulator's
+IDMA interface, so the switch-on database commit reaches the DSP through
+the firmware's own code path.
+
 ## Host-interface model and instrumentation
 
 The IDMA model now follows the ground-truth semantics recovered from the

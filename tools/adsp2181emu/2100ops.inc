@@ -169,8 +169,10 @@ INLINE void pc_stack_pop(adsp2100_state *adsp)
 		adsp->pc_sp--;
 		if (adsp->pc_sp == 0)
 			adsp->sstat |= PC_EMPTY;
+		adsp->pc = adsp->pc_stack[adsp->pc_sp];
 	}
-	adsp->pc = adsp->pc_stack[adsp->pc_sp];
+	else
+		adsp->sstat |= PC_EMPTY;
 }
 
 INLINE UINT32 pc_stack_pop_val(adsp2100_state *adsp)
@@ -180,8 +182,10 @@ INLINE UINT32 pc_stack_pop_val(adsp2100_state *adsp)
 		adsp->pc_sp--;
 		if (adsp->pc_sp == 0)
 			adsp->sstat |= PC_EMPTY;
+		return adsp->pc_stack[adsp->pc_sp];
 	}
-	return adsp->pc_stack[adsp->pc_sp];
+	adsp->sstat |= PC_EMPTY;
+	return 0;
 }
 
 
@@ -216,8 +220,10 @@ INLINE void cntr_stack_pop(adsp2100_state *adsp)
 		adsp->cntr_sp--;
 		if (adsp->cntr_sp == 0)
 			adsp->sstat |= COUNT_EMPTY;
+		adsp->cntr = adsp->cntr_stack[adsp->cntr_sp];
 	}
-	adsp->cntr = adsp->cntr_stack[adsp->cntr_sp];
+	else
+		adsp->sstat |= COUNT_EMPTY;
 }
 
 
@@ -292,12 +298,14 @@ INLINE void stat_stack_pop(adsp2100_state *adsp)
 		adsp->stat_sp--;
 		if (adsp->stat_sp == 0)
 			adsp->sstat |= STATUS_EMPTY;
+		adsp->mstat = adsp->stat_stack[adsp->stat_sp][0];
+		update_mstat(adsp);
+		adsp->imask = adsp->stat_stack[adsp->stat_sp][1];
+		adsp->astat = adsp->stat_stack[adsp->stat_sp][2];
+		check_irqs(adsp);
 	}
-	adsp->mstat = adsp->stat_stack[adsp->stat_sp][0];
-	update_mstat(adsp);
-	adsp->imask = adsp->stat_stack[adsp->stat_sp][1];
-	adsp->astat = adsp->stat_stack[adsp->stat_sp][2];
-	check_irqs(adsp);
+	else
+		adsp->sstat |= STATUS_EMPTY;
 }
 
 

@@ -106,3 +106,11 @@ left_neg_test.wav
 /artifacts/v90-hardware/
 tools/__pycache__/v90_pad_gain.cpython-313.pyc
 tools/__pycache__/cx_at.cpython-313.pyc
+
+# ADSP emulator build/debug artifacts
+tools/adsp2181emu/*.dSYM/
+tools/__pycache__/
+
+# Regenerable extracted Eicon DSP firmware images
+# (run tools/eicon_dsp_extract.py docs/firmware/dspdload.bin to recreate)
+/artifacts/eicon-dsp/

@@ -501,3 +501,113 @@ shim with a synthesized TIKRNL download struct (segments/symbols from
 metadata.json), which performs the switch-on database commit; then feed the
 E1 timeslot stream on SPORT0 (a call can also be signalled from the E1 side:
 the kernel ISR walks timeslots and CAS/signalling arrives in-band).
+
+## Session 6: service-assign entry runs live in the shim (2026-07-27)
+
+`tools/eicon_mips_shim.py` gained an `--assign` mode that calls the real
+service-assign entry `0x80096980` (file `0x85980`, service-driver table slot
+1) under Unicorn with a synthesized TIKRNL download/task struct, so the
+firmware's own code performs the switch-on database commit through the
+hooked host port — not a hand-replayed write sequence.
+
+Reverse-engineering required to make the routine run:
+
+- **Correct `$gp`.** The image entry (file `0x4774`/`0x4764c`) sets
+  `gp = 0x8010.0000 - 0x5c4b = 0x800fa3b5`. The shim's previous hardcoded
+  `0x80108000` was wrong; it left the trace-printf pointer at `gp+0x1a7b`
+  (`0x800fbe30`) NULL, so the first `jalr $v0` in the assign trace path
+  faulted to address 0. The real pointer is file-backed and equals
+  `0x80083180`.
+- **Trace-printf redirection.** The real printf (`0x80083180`) writes to the
+  hardware trace buffer at `0xa0005d20` (uncached kseg1). The shim overwrites
+  the pointer at `0x800fbe30` with the no-op stub address so trace calls
+  return immediately.
+- **Three MIPS memory segments** the shim now maps: the code image
+  (`0x11000`–`0x111000`, file-backed), the `.data`/`.bss` segment
+  (`0x80200000`, physical `0x200000`, zero — the lookup tables at
+  `0x80272c90` etc. are *not* in `te_dmlt.pm`, which ends at `0x100230`),
+  and the runtime stack/heap segment (`0x80300000`, physical `0x300000`, zero
+  — `sp = 0x80338700` and the database-record buffers at `0x80331c12` live
+  here). An auto-map hook covers neighbouring pages and a low kuseg guard
+  page so NULL-ish dereferences surface as zero instead of stopping the run.
+- **Synthesized struct.** `0x80096980` takes `a0` = an assign request whose
+  `+0` -> base (s2), `+4` -> resource (s0), `+8` -> existing mailbox (0 for
+  fresh), `+0x18` = channel byte. `s0+4` -> a download descriptor with id
+  `0x0258` at `+0`; `s0+0x40` = task id halfword. `s2+0xc` -> a channel
+  context whose `+0x24` -> a descriptor; `s2+0x10` -> the host register
+  block (data port `+0`, address port `+0x80`). The per-channel state
+  `s1 = s2+0x200` owns the command mailbox (`+0x24`, active flag `+0x10`)
+  and the database-ring descriptor (`+0x0c` producer DM offset, `+0x10` PM
+  flag, `+0x12` ring base, `+0x14` ring length).
+
+The dispatch for task `0x0258` (none of `0x213/0x1f5/0x1ff/0x227/0x2bd` match)
+runs `0x80093d14` then `0x80090e58`. `0x80093d14` is a synchronous
+command/handshake: it calls `0x80086af8` (DSP wait) and, on success,
+`0x80093ba4` -> `0x8008cacc` (send a command word via `host_write`). For a
+fresh assign the mailbox active flag makes `0x80086af8` return nonzero so
+`0x80090e58` (the db record-append + ring-commit body) runs. `0x80090e58`
+calls `db_record_append` (`0x8008cbf8`, 7x) and finishes at `0x80093b50`
+with `db_ring_commit` (`0x8008dd14`).
+
+Verified: `--assign` produces host_write transactions through the real
+firmware path — the ring header to the PM ring and the producer-pointer
+publish to DM — i.e. the switch-on database commit is live. The DSP does
+not yet consume the command, because the synthesized database ring targets
+DM `0x0001` rather than the real TIKRNL symbol-13 ring at `0x3327`; the
+remaining work is feeding the correct ring descriptor (real TIKRNL
+database-ring DM address and segment/symbol relocation table from
+`metadata.json`) so the kernel's channel-table walk hooks the modem task.
+
+## Session 7: Linux driver source + PR_RAM request queue (2026-07-27)
+
+The `divas4linux` driver source (in `/tmp/divas4linux-master`) provides the
+complete host-side architecture, confirming the reverse-engineered model:
+
+- **`kernel/pr_pc.h`**: `struct pr_ram` — the shared-RAM request queue.
+  `NextReq`/`NextRc`/`NextInd` are word offsets into `B[]` (the buffer area
+  at +0x20).  `ReqInput`/`ReqOutput` are byte counters.  `REQ`/`RC`/`IND`
+  structures form linked lists via their `next` field.
+- **`kernel/di.c` `pr_out()`**: the host writes a `REQ` at `B[NextReq]`,
+  advances `NextReq = REQ->next`, increments `ReqInput`.  The MIPS reads
+  from `B[read_offset]` (gp+0x5e99), advances via `REQ->next`, increments
+  `ReqOutput`.
+- **`kernel/mi_pc.h`**: shared RAM at physical `0x1000`, protocol at
+  `0x11000`, boot structure (`struct mp_load`) at `0x0`.
+- **`kernel/mdm_msg.h`**: complete modem CAI byte layout (hardware type
+  `0x11` = modem async, V.8 negotiation, modulation masks, speeds).
+- **`kernel/message.c` `add_modem_b23()`**: CAPI→IDI modem call path.
+- **`kernel/s_pri.c`**: PRI card init, DSP detect (`dsp_addr_port` at
+  `+0x80`, `dsp_data_port` at `+0x00` — confirms the IDMA hook).
+
+The shim's `--mainloop` mode now:
+1. Maps shared RAM (physical `0x0`–`0x11000`).
+2. Fixes the auto-map hook for kseg0/kseg1 (translates `0x8xxx`/`0xaxxx` to
+   physical via `& 0x1fffffff`).
+3. Calls the real firmware entry (`0x80082f90`) which stores the PR_RAM
+   pointer and runs basic init.
+4. Calls the post-wait init functions (`0x80083d10`, `0x8002a534`).
+5. Hooks the DSP register region (physical `0x380000`+, computed from
+   `DSPInfo=0x80`) with `_dsp_read`/`_dsp_write` routing to the ADSP IDMA
+   interface.
+6. Writes a modem `ASSIGN` request to the PR_RAM queue and runs the main
+   loop (`0x80027970`).
+
+**Result**: the MIPS main loop runs and reads the ASSIGN request from PR_RAM.
+The firmware entry produces IDMA writes to the DSP (PM code download at
+`0x3e8+`).  However, the init's DSP presence check (`lhu $s2, ($s1)` at
+`0x80380000`) returns 0 because the ADSP's DM[0] is 0, so the firmware skips
+DSP resource registration (gp+0x5eb9 stays 0).  Without registered DSPs, the
+ASSIGN can't allocate a channel and produces no host_writes.
+
+**Remaining work** (well-defined, not exploratory):
+1. Model the DSP presence check: the firmware writes `0xFF` to DM[0x3f] via
+   the addr/data ports and reads it back.  The `_dsp_read`/`_dsp_write` hooks
+   must correctly route this through `idma_addr_write`/`idma_data_write`/
+   `idma_data_read` so the write-back-read returns `0xFF`.
+2. Load the combifile (`dspdload.bin`) into shared RAM at `DspCodeBaseAddr`
+   (computed from the protocol image's end address) so the firmware can
+   download DSP code from it.
+3. Once the init detects DSPs and registers them (gp+0x5eb9 != 0), the
+   main loop will process the ASSIGN request, calling `dsp_assign` and
+   downloading the V.90 overlay internally.
+
