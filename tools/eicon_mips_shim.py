@@ -26,6 +26,12 @@ from pathlib import Path
 from unicorn import Uc, UC_ARCH_MIPS, UC_MODE_LITTLE_ENDIAN, UC_MODE_32
 from unicorn import UC_HOOK_CODE
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from eicon_dsp_stage import (CARDTYPE_DIVASRV_P_30M_PCI,
+                             OFFS_DSP_CODE_BASE_ADDR, build_dsp_code_image,
+                             protocol_end_addr)
+
 BIAS = 0x80011000
 # Unicorn's MIPS translates kseg0 (0x8xxxxxxx) to physical by clearing the
 # top three bits, so all mappings use the physical equivalents.
@@ -390,6 +396,27 @@ class MipsShim:
     def write8(self, virt: int, value: int) -> None:
         self.uc.mem_write(virt & 0x1fffffff, bytes([value & 0xff]))
 
+    def ensure_mapped(self, virt: int, size: int) -> None:
+        """Map every auto-page the range [virt, virt+size) falls in.
+
+        The fixed mappings are larger than AUTO_PAGE, so membership in
+        `mapped_pages` is not enough — check the live region list.
+        """
+        phys = virt & 0x1fffffff
+        regions = [(begin, end) for begin, end, _perms in self.uc.mem_regions()]
+        first = phys & ~(AUTO_PAGE - 1)
+        last = (phys + size - 1) & ~(AUTO_PAGE - 1)
+        for page in range(first, last + AUTO_PAGE, AUTO_PAGE):
+            if any(begin <= page <= end for begin, end in regions):
+                continue
+            self.uc.mem_map(page, AUTO_PAGE)
+            self.mapped_pages.add(page)
+            regions.append((page, page + AUTO_PAGE - 1))
+
+    def write_bytes(self, virt: int, data: bytes) -> None:
+        self.ensure_mapped(virt, len(data))
+        self.uc.mem_write(virt & 0x1fffffff, data)
+
     def alloc(self, virt_base: int, words: int) -> int:
         """Reserve a zeroed guest block; returns the guest-visible pointer."""
         self.uc.mem_write(virt_base & 0x1fffffff, bytes(words * 4))
@@ -567,6 +594,33 @@ def run_assign(shim: "MipsShim", args) -> None:
             print(f"  host_write {tag} 0x{addr & 0x7fff:04x} = 0x{val:04x}")
 
 
+def stage_dsp_code(shim: "MipsShim", args) -> int:
+    """Write the DSP download image to card RAM and point the header at it.
+
+    Reproduces pri_telindus_load (kernel/s_pri.c): the image goes at
+    DspCodeBaseAddr — the protocol image's own OFFS_PROTOCOL_END_ADDR,
+    dword-aligned — and that address is written back into the image header
+    at OFFS_DSP_CODE_BASE_ADDR, which is where the MIPS entry reads it from
+    (`lw $s1, 0x106c($s1)` with the image based at 0xa0011000).
+    """
+    base = args.dsp_code_base
+    if base is None:
+        base = protocol_end_addr(args.image)
+    image = build_dsp_code_image(args.dsp_combifile, args.card_type, base)
+    shim.write_bytes(base, image.data)
+    # The header field is read through the uncached image alias; write it via
+    # the physical address the image was loaded at.
+    shim.write32(BIAS + OFFS_DSP_CODE_BASE_ADDR, base)
+    print(f"[mainloop] DSP code staged at 0x{base:08x}..0x{image.end_addr:08x} "
+          f"({len(image.data)} bytes, {len(image.downloads)} downloads, "
+          f"card type {image.card_type} -> file set {image.file_set})")
+    for entry in image.downloads:
+        if entry.download_id in (0x0258, 0x0261, 0x026A, 0x025F):
+            print(f"           id=0x{entry.download_id:04x} @0x{entry.address:08x} "
+                  f"{entry.description}")
+    return base
+
+
 def run_mainloop(shim: "MipsShim", args) -> None:
     """Drive the MIPS via its native PR_RAM request queue (the real host
     interface).  Maps shared RAM, runs the MIPS init, sets up the PR_RAM
@@ -583,6 +637,14 @@ def run_mainloop(shim: "MipsShim", args) -> None:
 
     gp = GP
     sp = STACK_TOP
+
+    # 0. Stage the DSP code image, as the host driver's pri_telindus_load
+    #    does, and publish its address in the protocol image header.  The
+    #    firmware entry reads the count at DspCodeBaseAddr and the descriptor
+    #    table right after it; with no image the count is 0, every DSP object
+    #    is built with an empty code table and no overlay can be assigned.
+    if args.dsp_combifile is not None:
+        stage_dsp_code(shim, args)
 
     # 1. Write card config + boot command + PR_RAM buffers + ASSIGN request
     #    BEFORE calling the firmware entry.  The firmware entry (0x80082f90)
@@ -710,8 +772,21 @@ def main() -> int:
                              "ASSIGN request and running the main loop")
     parser.add_argument("--channel", type=int, default=1,
                         help="E1 timeslot / channel byte written at req+0x18")
+    parser.add_argument("--dsp-combifile", type=Path,
+                        default=Path("docs/firmware/dspdload.bin"),
+                        help="DSP download combifile staged in card RAM for "
+                             "--mainloop (pass an empty value to skip)")
+    parser.add_argument("--card-type", type=lambda s: int(s, 0),
+                        default=CARDTYPE_DIVASRV_P_30M_PCI,
+                        help="CARDTYPE_* number selecting the combifile's "
+                             "required download set (23 = PRI 30M PCI)")
+    parser.add_argument("--dsp-code-base", type=lambda s: int(s, 0), default=None,
+                        help="override DspCodeBaseAddr (default: the protocol "
+                             "image's OFFS_PROTOCOL_END_ADDR)")
     parser.add_argument("--log", action="store_true")
     args = parser.parse_args()
+    if args.dsp_combifile is not None and not str(args.dsp_combifile):
+        args.dsp_combifile = None
 
     cpu = ADSP.adsp2181_create()
     ADSP.adsp2181_reset(cpu)
