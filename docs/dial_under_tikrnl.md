@@ -25,13 +25,16 @@ TIKRNL ships PM `0x08F0`/`0x08F1` as `0a000f` (`RTS`, `RTS`) — "no overlay
 loaded, do nothing". The DIAL download replaces them with
 
 ```
-08f0: 19b9cf  IF NOT FLAG_IN JUMP $1B9C   ; state dispatcher
-08f1: 19bbdf  IF NOT FLAG_IN JUMP $1BBD   ; line/RX handler
+08f0: 19b9cf  JUMP $1B9C   ; state dispatcher
+08f1: 19bbdf  JUMP $1BBD   ; line/RX handler
 ```
 
-`FLAG_IN` is deasserted on this card, so every `IF NOT FLAG_IN JUMP/CALL` in
-these images is an unconditional transfer — the whole firmware is written that
-way.
+These read as `IF NOT FLAG_IN JUMP` until `tools/adsp2181_dis.py`'s condition
+table was fixed. Condition field 15 is simply the unconditional encoding —
+`condition_table[i | 0xf00] = 1` in `adsp2181_core.c` — and there is no
+FLAG_IN condition in the ISA at all. The whole firmware is written with
+condition 15 on ordinary transfers, which is unremarkable rather than a card
+quirk.
 
 ## Download order is load-bearing
 
@@ -52,32 +55,46 @@ kernel+DIAL image behaves nothing like the card. The overlay has to be
 downloaded after the task has initialised, which is also the order the host
 driver uses.
 
-## The task entry registers a per-frame continuation
+## The task entry claims the kernel's dispatch slot
 
 The task's download symbol 0 is PM `0x0672`. Calling it (with the kernel
 booted and its idle loop at `0x02A8` as the return) runs the init, then at
 `0x0699-0x069C`:
 
 ```
-0699: AR = $06FC       ; the per-frame continuation
-069a: SR1 = $08F6      ; the message-send helper
+0699: AR = $06FC       ; the per-sample continuation
+069a: SR1 = $08F6      ; the helper for the ISR word it claims
+069b: SR0 = $31BA      ; its entry table
 069c: CALL $0017       ; kernel service: patch a vector slot
 ```
 
 Kernel service `0x0017` (PM `0x0281`, helper at `0x0294`) *builds an
 instruction* — `SR1 = $1C00`, `SR0 = $0F00`, shift the vector in, `PX = SR0`,
-then `PM(I4) = SR1:PX` — and patches it into the kernel's vector table.
-Diffing PM across the task entry shows exactly two words change:
+then `PM(I4) = SR1:PX` — and patches it over two words named by the
+registration block at DM `0x2F21`:
 
 ```
-PM 0000: 18580f -> 1c8f6f    JUMP $0580  ->  CALL $08F6
-PM 000a: 181def -> 1c6fcf    JUMP $01DE  ->  CALL $06FC
+DM 2f24 = 0x02b9 -> PM 02b9: 1c2a1f CALL $02A1              -> 1c6fcf CALL $06FC
+DM 2f25 = 0x00b5 -> PM 00b5: 2a7eea AR = SR0 + 0, SR0 = AR  -> 1c8f6f CALL $08F6
 ```
+
+PM `0x02B9` is the kernel foreground's per-sample dispatch and PM `0x00B5` is
+inside the SPORT0 ISR. `docs/dial_kernel_dispatch.md` follows what that buys.
+
+This section previously recorded the patch landing on PM `0x0000` and
+PM `0x000A`. That was an artifact of this harness: the block at DM `0x2F21` is
+found through DM `0x2F27`, which the kernel's foreground writes and which this
+harness — never letting the foreground run — left at zero, so PM `0x0283`
+indexed DM `0x0002` and the patch went into the vector table. `Card.boot()`
+now plants the pointers first; the direct-call results below are unchanged by
+it, because this harness dispatches the task itself either way.
 
 The kernel's reset/vector table doubles as its service jump table: the real
 interrupt vectors (`0x0004`, `0x0008`, `0x000C`, `0x0018`, …) are `RTI`, and
 the gaps (`0x0001-0x0003`, `0x000A-0x000B`, `0x000E`, `0x0015`, `0x0017`,
-`0x0019`, `0x001E`) are service entries a task may claim.
+`0x0019`, `0x001E`) are service entries a task may claim. PM `0x000A`
+(`JUMP $01DE`) is the DSP→host doorbell, not a task slot: `JUMP $000A` with a
+bit in AR toggles it into DM `0x2F17` and raises FLAG_OUT.
 
 ## TIKRNL's frame loop is what calls DIAL
 
@@ -113,8 +130,13 @@ did before it served them — see below):
 |---|---:|---:|---|
 | silence (`0xFF`) | 200 | 0 | `000c` ×200 — settles and holds |
 | 440 Hz | 17 | 485 | `0000` ×189, `000c` ×10, `000b` ×1 |
-| 1300 Hz | 253 | 43273 | `0000` ×181, `000c` ×13, `000b` ×6 |
-| 2100 Hz | 51 | 1066 | `0000` ×162, `000c` ×23, `000b` ×13, `0010` ×2 |
+| 1300 Hz | 23 | 581 | `0000` ×188, `000c` ×10, `000b` ×2 |
+| 2100 Hz | 288 | 4996 | `0000` ×100, `000c` ×93, `000b` ×4, `0010` ×3 |
+
+(The 1300 Hz and 2100 Hz rows were re-measured after the registration fix
+above. With the patch landing on PM `0x000A`, the task's doorbell raise
+`JUMP $000A` called its own continuation instead, so those two runs were
+re-entering `0x06FC` recursively. The 440 Hz and silence rows are unchanged.)
 
 Silence never enters the line-signal handler at all; every tone does, and the
 state word walks the toggling pairs recovered in
@@ -142,7 +164,7 @@ numbering exactly:
 
 Negative entries are requested indirectly: they fall through `0x068F` to the
 fixed pair (type `0x000D`, download `0x0270` = the SIG overlay) until SIG is
-resident; from then on `DM(0x31F0)` carries `MV`, `0x0690` skips the override,
+resident; from then on `DM(0x31F0)` carries `AC`, `0x0690` skips the override,
 and the negated table entry is requested directly.
 
 This is the DSP-side half of the page switch `docs/dial_v8_call.md` describes.
@@ -211,9 +233,9 @@ stops at `0x1517`/`0x17FF` and resumes at `0x1B80`, leaving exactly this hole �
 and it collides with TIKRNL in three words, the same way DIAL collides in two:
 
 ```
-1900: TIKRNL 0a000f (RTS)  ->  SIG 19b6cf  IF NOT FLAG_IN JUMP $1B6C
-1901: TIKRNL 0a000f (RTS)  ->  SIG 19b70f  IF NOT FLAG_IN JUMP $1B70
-1902: TIKRNL 0a000f (RTS)  ->  SIG 19b76f  IF NOT FLAG_IN JUMP $1B76
+1900: TIKRNL 0a000f (RTS)  ->  SIG 19b6cf  JUMP $1B6C
+1901: TIKRNL 0a000f (RTS)  ->  SIG 19b70f  JUMP $1B70
+1902: TIKRNL 0a000f (RTS)  ->  SIG 19b76f  JUMP $1B76
 ```
 
 TIKRNL calls `0x1901` at PM `0x07E2` and `0x1902` at PM `0x06FF`, both on the
@@ -240,26 +262,23 @@ The 440 Hz churn is a harness artifact worth naming: a real host takes
 milliseconds to push an overlay down, and this one serves it inside the same
 frame, so a page that flips on every decision flips every 125 µs here.
 
-## What is still not reached
+## The host-command ring, and why this harness steps over it
 
-- The kernel's own foreground still never dispatches the task on its own: with
-  SPORT0 strobed the ISR (PM `0x0072`) advances the request queue
-  (DM `0x2E44`/`0x2E45` now move, which they did not before the task was
-  loaded) and the foreground reaches its dispatcher at `0x02A1` → `0x01B2` →
-  `0x00D8`, but the service list head at DM `0x2F28` is zero, so `CALL (I4)`
-  at `0x02A4` never fires. Populating it is the channel assignment, i.e. the
-  MIPS side — see `docs/dial_sport_drive.md` and the `--mainloop` path in
-  `tools/eicon_mips_shim.py`.
-- Serving the downloads makes that gap bite for the first time. PM `0x00D8`
-  walks the list as `I0 = DM(0x2F28)`, so an unassigned head walks DM `0x0000`,
-  and PM `0x06C0` calls whatever address the walk produces. DM `0x0000` was
-  unpopulated while DIAL was the only overlay — DIAL loads DM from `0x1240` up
-  — but V.8, V.22FC and DIAL-partial all load DM from `0x0000`, so the first
-  page switch turns overlay coefficients into dispatch addresses (`CALL (I4)`
-  with I4 = `0x1400`, running off into unpopulated PM within a few frames).
-  The harness therefore enters the frame at PM `0x06C1`, past the
-  fetch-and-dispatch pair, which is what an empty queue means anyway;
-  `--host-dispatch` restores PM `0x06BB` and reproduces the fault.
-- `--no-serve-overlays --host-dispatch` reproduces the pre-serving numbers
-  exactly (2100 Hz: 51 `08F1` entries, 1066 `0x1BCE`, bootpage `0000`×162,
-  `000c`×23, `000b`×13, `0010`×2), so the old measurements above still stand.
+PM `0x06BB-0x06C0` fetches and dispatches a host command before the frame
+proper. DM `0x2F28` heads that ring, and this harness has nothing to put in
+it, so the fetch finds an empty ring — except that DM `0x2F28` is only written
+by the kernel's foreground (PM `0x02AD`), which this harness never lets run.
+An unwritten head walks DM `0x0000` instead, and PM `0x06C0` calls whatever
+address the walk produces. DM `0x0000` is unpopulated while DIAL is the only
+overlay — DIAL loads DM from `0x1240` up — but V.8, V.22FC and DIAL-partial
+all load DM from `0x0000`, so serving downloads turns overlay coefficients into
+dispatch addresses (`CALL (I4)` with I4 = `0x1400`, off into unpopulated PM
+within a few frames). `Card.boot()` now plants the five descriptor pointers,
+and the frame entry defaults to PM `0x06C1`, past the fetch-and-dispatch pair;
+`--host-dispatch` restores PM `0x06BB`.
+
+`docs/dial_kernel_dispatch.md` fills the ring properly and lets the kernel's
+foreground dispatch the task off SPORT0, which it now does — one host command
+in, and the kernel calls the task on every sample by itself. What is still
+open there is how the host hands a *resume* back once the task owns the
+foreground slot.

@@ -1,12 +1,16 @@
 # Driving DIAL with a μ-law T1/E1 stream on SPORT0
 
-> Follow-up in `docs/dial_under_tikrnl.md`. The conclusion here — that SPORT0
-> alone does not reach DIAL — is confirmed, but the missing link is narrower
-> than "a channel-table entry": DIAL is an overlay on the **TIKRNL task**, and
-> with the task loaded the ISR does advance DM `0x2E44`/`0x2E45` and the
-> foreground does reach its dispatcher. What is still empty is the service
-> list at DM `0x2F28`. Calling the task's own frame entry (PM `0x06BB`) runs
-> DIAL without any of that.
+> **Superseded — see `docs/dial_kernel_dispatch.md`.** SPORT0 alone really
+> does not reach DIAL, and DIAL is an overlay on the **TIKRNL task**, so the
+> task has to be loaded first (`docs/dial_under_tikrnl.md`). But the last
+> obstacle recorded below is wrong twice over. DM `0x2F28` is not a channel
+> table the MIPS side must fill: the kernel's own foreground writes it
+> (PM `0x02AD`) as soon as the ISR queues a sample, pointing at a ring
+> descriptor already in the kernel image, and it heads a *host command ring*
+> whose entries are PM addresses to call. Queue TIKRNL's task entry there and
+> the kernel dispatches the task itself, on every sample, unaided. The
+> `0x0F00`/`0x2800` addresses quoted below came from a 12-bit immediate decode;
+> the field is 16 bits.
 
 Experiment: feed a μ-law PCM stream into the ADSP-2181 emulator's SPORT0
 (port 0 RX callback), 32 timeslots per 8 kHz frame, with the PRI kernel

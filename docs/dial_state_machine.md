@@ -14,17 +14,25 @@ and the country-specific autodialler. It is an *overlay*: it owns PM
 `0x08f0–0x2400` and DM `0x1240–0x3fb4` and has **zero conflicts** with the
 resident PRI kernel, which keeps the low PM/DM and the reset vector.
 
-The kernel enters DIAL through the flag-conditional stubs at the top of the
-overlay:
+> **Correction.** Everything below that treats `FLAG_IN` as the kernel's task
+> strobe is wrong, and it was a disassembler bug, not a firmware feature: the
+> ADSP condition field 15 is the *unconditional* encoding, and
+> `tools/adsp2181_dis.py` had it labelled `NOT FLAG_IN`. Nothing in these
+> images tests FLAG_IN. What actually dispatches DIAL is the TIKRNL task —
+> `docs/dial_under_tikrnl.md` for the overlay stubs, and
+> `docs/dial_kernel_dispatch.md` for the kernel calling the task off SPORT0.
+> The state-machine findings themselves are unaffected.
+
+TIKRNL enters DIAL through the stubs at the top of the overlay:
 
 ```
-08f0: IF NOT FLAG_IN JUMP $1B9C   ; primary DIAL dispatcher
-08f1: IF NOT FLAG_IN JUMP $1BBD   ; secondary path (line-signal handler)
+08f0: JUMP $1B9C   ; primary DIAL dispatcher
+08f1: JUMP $1BBD   ; secondary path (line-signal handler)
 ```
 
-`FLAG_IN` is the kernel's task strobe. `0x1B9C` is the **state dispatcher**;
-`0x1BBD` is the **line/input handler** (it reads DM `0x3F08`/`0x3F09`, the
-data-pump RX/line registers from guide §5.3).
+`0x1B9C` is the **state dispatcher**; `0x1BBD` is the **line/input handler**
+(it reads DM `0x3F08`/`0x3F09`, the data-pump RX/line registers from guide
+§5.3).
 
 ## The state word and dispatcher (0x1B9C)
 
@@ -61,11 +69,11 @@ new state and sets vector pointers), and all other states fall through to the
 1dab: DM($127B) = ASTAT      ; save flags (ring/tone detect latches)
 1dac: IF NE JUMP $1DB2       ; branch on saved compare
 1dae: IF EQ JUMP $1BCE       ; -> line-signal handler (0x1BCE)
-1db1: IF NOT FLAG_IN JUMP $1DBC
+1db1: JUMP $1DBC
 ...
 1dbc: DM($3FB0) = AX1        ; commit new state
 1dbd: I4 = $9400            ; vector-table base for the chosen action
-1dbe: IF NOT FLAG_IN JUMP $1DDA   ; -> DSP inner loop A
+1dbe: JUMP $1DDA   ; -> DSP inner loop A
 ```
 
 From `0x1DDA` and `0x1DCB` DIAL runs its actual signal-processing kernels.
@@ -75,11 +83,11 @@ generation / ring-detect / DTMF filtering:
 | Loop PC | What it does |
 |---|---|
 | `0x1DDA` | MAC inner loop: `ALU->AF + DM write`, `MAC->MR + DM read`, `IF NE JUMP $1DBF`. Continuously walks a DM buffer doing multiply-accumulate (tone generation / filter). |
-| `0x1DCB`/`0x1DCD` | Shift + ALU inner loop with PX (pixel/byte pack) and CNTR-driven block repeats — block DSP work (DTMF/coefficient update). Exits on `IF NOT FLAG_IN JUMP $1DDA`. |
+| `0x1DCB`/`0x1DCD` | Shift + ALU inner loop with PX (pixel/byte pack) and CNTR-driven block repeats — block DSP work (DTMF/coefficient update). Exits on `JUMP $1DDA`. |
 | `0x0756` | **Fall-through to empty NOPs** — states 1/2/3 with no configured action return through the `IF EQ RTS` stub table at `0x0900+` and land here (effectively a no-op return to the kernel). |
 
-Every loop re-enters on `IF NOT FLAG_IN JUMP $1DDA` — DIAL only leaves its
-DSP loop when the kernel raises `FLAG_IN` again (next task slot).
+Every loop re-enters on `JUMP $1DDA`; DIAL leaves this work only by returning
+to whoever called the stub, i.e. once per task slot.
 
 ## Vector pointers
 
@@ -118,9 +126,9 @@ So the live state machine is three toggling pairs plus a cold-start hop:
 ```
 
 All other values (0x01–0x03, 0x05–0x0A, 0x0C–0x0E, 0x12–0x1F) are **stable**:
-they hold the state, run the DSP inner loop at `0x1DCD`, and wait for the next
-`FLAG_IN` strobe. This is consistent with DIAL being the idle page — most
-states are "keep doing the current DSP work, check again next slot."
+they hold the state, run the DSP inner loop at `0x1DCD`, and wait to be called
+again. This is consistent with DIAL being the idle page — most states are
+"keep doing the current DSP work, check again next slot."
 
 ## What this confirms
 
@@ -128,16 +136,19 @@ states are "keep doing the current DSP work, check again next slot."
    data-pump database (DM `0x3F08/0x3F09/0x3FB0/0x3FB2/0x3FB3/0x3FC1/0x3EE1`),
    exactly the registers the ADDSP guide §5.3 documents, and runs continuous
    MAC/ALU DSP kernels over DM buffers.
-2. **It is event-driven by `FLAG_IN`** (the kernel task strobe), not by a host
-   doorbell. To make DIAL do something observable, the kernel's per-frame
-   dispatcher must strobe `FLAG_IN`, and DIAL's inputs (DM `0x3F08/0x3F09` —
-   the line/RX registers, and DM `0x3EE1` — GEN_SETUP1) must be driven.
+2. **It is driven by being called**, once per slot, through the PM
+   `0x08F0`/`0x08F1` stubs — by TIKRNL, not by a host doorbell and not by any
+   flag. To make DIAL do something observable, the task has to be dispatched
+   and DIAL's inputs (DM `0x3F08/0x3F09` — the line/RX registers, and
+   DM `0x3EE1` — GEN_SETUP1) driven.
 3. **The state machine is small and fully recovered**: three toggling pairs
    plus a cold-start, with the steady state being "hold and run the DSP loop."
    DIAL does not advance state on its own beyond these toggles — state
    progression comes from the line-signal handler (`0x1BBD`/`0x1BCE`) writing
    `0x3FB0` in response to detected tones/ring.
 
-Next step to see real behaviour: wire SPORT0 PCM input into DM `0x3F08/0x3F09`
-and drive the kernel's `FLAG_IN` strobe so `0x1BBD` (the line handler) can
-detect ring/tone and advance the state machine.
+Next step to see real behaviour: wire SPORT0 PCM input into DM
+`0x3F08/0x3F09` and get the task dispatched so `0x1BBD` (the line handler) can
+detect ring/tone and advance the state machine. Both halves of that are done —
+`docs/dial_under_tikrnl.md` (task-driven) and `docs/dial_kernel_dispatch.md`
+(kernel-driven off SPORT0).

@@ -135,13 +135,28 @@ DM_BOOTPAGE_TABLE = 0x31D5   # bootpage number -> overlay download id
 DM_DOWNLOAD_REQ = 0x31AA     # download id TIKRNL is asking the host for
 DM_DOWNLOAD_FLAG = 0x31A9
 
-# Kernel host-command queue head.  PM 0x00D8 walks it as `I0 = DM(0x2F28)`;
-# PM 0x06C0 then calls whatever handler address the walk produced.  It stays
-# zero until the MIPS side assigns a channel, so an unassigned queue walks
-# DM 0x0000 -- harmless while that is unpopulated, which is why the pre-serving
-# harness never noticed, but the V.8, V.22FC and DIAL-partial overlays all load
-# DM from 0x0000, so the first page switch turns overlay coefficients into
-# dispatch addresses.  See FRAME_ENTRY_NO_HOST.
+# The kernel's five ring-descriptor pointers.  Its foreground writes them at
+# PM 0x02AD-0x02B2 the first time it wakes, but this harness calls the task
+# directly and never lets the foreground run, so they have to be planted --
+# see tools/dial_kernel_dispatch.py, which lets the kernel write them itself.
+# They matter here because the task's registration (kernel service 0x0017)
+# reads the block at DM 0x2F21 to find the two words it patches; with the
+# pointers zero it indexes DM 0x0002 instead and patches PM 0x0000/0x000A.
+RING_POINTERS = {0x2F27: 0x2F21,   # task registration block
+                 0x2F28: 0x2F00,   # host -> DSP command ring descriptor
+                 0x2F29: 0x2F0E,   # DSP -> host descriptor + doorbell
+                 0x2F2A: 0x2F42,
+                 0x2F2B: 0x2F4E}
+PM_FOREGROUND_SLOT = 0x02B9   # kernel foreground: CALL $02A1 -> the task
+PM_ISR_SLOT = 0x00B5          # SPORT0 ISR: an inline op the task may claim
+
+# PM 0x00D8 walks the command ring as `I0 = DM(0x2F28)`, and PM 0x06C0 calls
+# whatever handler address the walk produced.  DM 0x2F03 (the byte count) stays
+# zero until a host command is queued, and an unwritten DM 0x2F28 walks DM
+# 0x0000 instead -- harmless while that is unpopulated, which is why the
+# pre-serving harness never noticed, but the V.8, V.22FC and DIAL-partial
+# overlays all load DM from 0x0000, so the first page switch turns overlay
+# coefficients into dispatch addresses.  See FRAME_ENTRY_NO_HOST.
 DM_QUEUE_HEAD = 0x2F28
 
 
@@ -238,6 +253,10 @@ class Card:
         if not ADSP.adsp2181_idle(self.cpu):
             raise RuntimeError('kernel did not reach its idle loop')
 
+        # Stand in for the foreground pass this harness never lets happen.
+        for addr, value in RING_POINTERS.items():
+            self.dm[addr] = value
+
         self._download(TIKRNL)
         ADSP.adsp2181_call(self.cpu, TASK_ENTRY, KERNEL_IDLE)
         for _ in range(1_000_000):
@@ -247,10 +266,11 @@ class Card:
         else:
             raise RuntimeError('TIKRNL task entry did not return to the kernel')
 
-        # The task registered itself: kernel service slot 0x000A now calls
-        # TIKRNL's per-frame continuation, slot 0x0000 its message helper.
-        self.service_000a = self.pm[0x000A]
-        self.service_0000 = self.pm[0x0000]
+        # The task registered itself: the kernel's foreground dispatch now
+        # calls TIKRNL's per-sample continuation, and the SPORT0 ISR word the
+        # task claimed calls its own copy of the instruction it displaced.
+        self.foreground_slot = self.pm[PM_FOREGROUND_SLOT]
+        self.isr_slot = self.pm[PM_ISR_SLOT]
 
         # Only now is it safe to download the overlay: the task init cleared
         # PM 0x0900-0x1DFF on its way through.
@@ -349,8 +369,10 @@ def main() -> int:
                 max_downloads=args.max_downloads,
                 host_dispatch=args.host_dispatch)
     card.boot()
-    print(f'[card] kernel + TIKRNL + DIAL up; '
-          f'PM0000={card.service_0000:06x} PM000a={card.service_000a:06x}')
+    print(f'[card] kernel + TIKRNL + DIAL up; the task claimed '
+          f'PM {PM_FOREGROUND_SLOT:04x}={card.foreground_slot & 0xFFFFFF:06x} '
+          f'(foreground dispatch) and '
+          f'PM {PM_ISR_SLOT:04x}={card.isr_slot & 0xFFFFFF:06x} (SPORT0 ISR)')
     print(f'[card] overlay stubs after the DIAL download: '
           f'PM 08f0={card.pm[OVL_STATE_STUB]:06x} '
           f'08f1={card.pm[OVL_LINE_STUB]:06x} (TIKRNL ships both as 0a000f = RTS)')
