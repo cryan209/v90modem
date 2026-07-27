@@ -54,6 +54,19 @@ Select other variants, such as the analogue-card overlays, with `--match`:
   --match 'V34\.ANA|V90\.ANA' -o artifacts/eicon-dsp/ana
 ```
 
+`--match` alone is ambiguous where a download id ships in several variants —
+`0x0270` is `SIGLK`, `SIG` and `SIG.ANA`; `0x0262` is plain, `.F34` and `.ANA`.
+`--card-type` resolves it the way the driver does, by the usage mask. Card type
+56 is file set 12, the set the PRI 30M kernel, TIKRNL81.F34 and
+DIAL/FSK/FAX.F34 all belong to, so it selects exactly the `.F34` variants:
+
+```bash
+./tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
+  --card-type 56 --match Overlay -o artifacts/eicon-dsp/overlays
+```
+
+That is the overlay set `tools/dial_tikrnl_drive.py` serves page switches from.
+
 Each selected download produces:
 
 - `download.bin` — exact nested download record;

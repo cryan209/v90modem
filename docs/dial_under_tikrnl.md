@@ -105,7 +105,9 @@ DM `0x3F08`, runs DIAL through its real interface.
 
 ## Result: DIAL runs, dispatched by the task, and reacts to the line
 
-200 frames per run, μ-law into DM `0x3F08`:
+200 frames per run, μ-law into DM `0x3F08`, with the overlay requests left
+unanswered (`--no-serve-overlays --host-dispatch`, which is what the harness
+did before it served them — see below):
 
 | Line input | `08F1` entries | DIAL `0x1BCE` line-signal handler | bootpage_nr (DM `0x3FB0`) |
 |---|---:|---:|---|
@@ -139,30 +141,125 @@ numbering exactly:
 | 8 | `0261` | `0x0261` V.34 | 17 | `fd9e` | `0x0262` |
 
 Negative entries are requested indirectly: they fall through `0x068F` to the
-fixed pair (type `0x000D`, download `0x0270` = the SIG overlay), which is what
-the harness observes the task asking for while DIAL is the active page.
+fixed pair (type `0x000D`, download `0x0270` = the SIG overlay) until SIG is
+resident; from then on `DM(0x31F0)` carries `MV`, `0x0690` skips the override,
+and the negated table entry is requested directly.
 
 This is the DSP-side half of the page switch `docs/dial_v8_call.md` describes.
 It also supersedes that document's open question about how the V.8 page number
 maps to an overlay: the mapping is this table, and it lives in TIKRNL, not in
 DIAL.
 
+## Serving the request: the task yields, the host downloads, the task resumes
+
+Publishing the request is only half a handshake. `0x0686-0x0694` ends with
+
+```
+0699  AR = $06FC / SR1 = $08F6 / SR0 = $31BA
+069c  CALL $0017        ; register the continuation and the entry table
+069d  AR = $0002
+069e  JUMP $000A        ; yield to the kernel with an entry selector in AR
+```
+
+`SR0 = 0x31BA` hands the kernel the task's entry table, and AR selects from it:
+
+| AR | Table slot | Entry | Meaning |
+|---:|---|---|---|
+| 1 | DM `0x31BA` | `0x06BB` | ordinary per-frame entry |
+| 2 | DM `0x31BB` | `0x06D8` | the overlay you asked for is loaded |
+
+`0x06D8` is the half of the frame loop the request path skips:
+
+```
+06d8  ASTAT = DM($31A9)   ; the request type, used as a flag word
+06d9  IF NOT AV JUMP $06DD
+06da  DM($31F0) = ASTAT   ; remember that SIG is now resident
+06db  CALL $1900          ; -> the SIG overlay
+06dc  JUMP $0686          ; ask for the page overlay itself
+06dd  DM($31A9) = M0      ; clear the request
+06de  AR = DM($3FC1) AND $FEFF   ; clear the page-change strobe
+06e2  CALL $08F0          ; -> the active page's state dispatcher
+06e7  I4 = DM($3FB2)
+06e8  CALL (I4)           ; -> the page's own action vector
+```
+
+Type `0x000D` has `AV` set, so a SIG request routes through `0x06DB` and back
+to `0x0686`; the type the second request carries (`0x0001`) does not, so the
+resume after *that* download falls into `0x06DD` and runs the dispatcher. That
+is why `0x08F0` and the `DM(0x3FB2)` action vector were never reached before:
+they are not gated on the `DM(0x3FC1) & 0x0100` test at `0x06D5` at all, they
+are on the far side of a download the host has to serve.
+
+`Card.frame()` in the harness now plays that host role — download the image
+named in DM `0x31AA`, re-enter at `DM(0x31BB)`, repeat — from the card-type 56
+(PRI 30M / `.F34`) overlay set:
+
+```bash
+python3 tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
+    --card-type 56 --match Overlay -o artifacts/eicon-dsp/overlays
+```
+
+Card type 56 is file set 12, which is the set the PRI 30M kernel, TIKRNL81.F34
+and DIAL/FSK/FAX.F34 all belong to; it picks the `.F34` variant of every
+overlay and never the `.ANA` or plain ones.
+
+### The SIG overlay is a second, independent stub interface
+
+Download `0x0270` (`SIG Overlay`, 636 PM / 122 DM words) loads PM
+`0x1900-0x1B7C` and DM `0x2700-0x2779`. That is disjoint from DIAL — DIAL's PM
+stops at `0x1517`/`0x17FF` and resumes at `0x1B80`, leaving exactly this hole —
+and it collides with TIKRNL in three words, the same way DIAL collides in two:
+
+```
+1900: TIKRNL 0a000f (RTS)  ->  SIG 19b6cf  IF NOT FLAG_IN JUMP $1B6C
+1901: TIKRNL 0a000f (RTS)  ->  SIG 19b70f  IF NOT FLAG_IN JUMP $1B70
+1902: TIKRNL 0a000f (RTS)  ->  SIG 19b76f  IF NOT FLAG_IN JUMP $1B76
+```
+
+TIKRNL calls `0x1901` at PM `0x07E2` and `0x1902` at PM `0x06FF`, both on the
+yield/continuation path, and `0x1900` from `0x06DB` as above. So SIG is
+signalling, layered under whichever data-pump page is resident, with its own
+three-stub interface parallel to the page interface at `0x08F0`/`0x08F1`.
+
+## Result: the page walk runs
+
+200 frames, serving every request (`--freq 0` is μ-law silence):
+
+| Line input | Downloads served | Chain | `0x08F0` | `0x06E8` | Settles on |
+|---|---:|---|---:|---:|---|
+| silence | 3 | SIG → V.22FC → V.8 | 2 | 2 | page 6 (V.8) |
+| 440 Hz | 275 | + DIAL, DIAL partial, FAX partial | 274 | 269 | churns 6 ⇄ 12 |
+| 1300 Hz | 14 | SIG → V.22FC ⇄ V.8 → DIAL | 13 | 12 | page 12 (V.22FC) |
+| 2100 Hz | 8 | SIG → V.22FC ⇄ V.8 → DIAL | 7 | 6 | page 12 (V.22FC) |
+
+Every run opens the same way — `0x0270` SIG, then the page the bootpage table
+names — and from the second download onwards the state dispatcher and the
+page's own action vector run each frame, which they never did before.
+
+The 440 Hz churn is a harness artifact worth naming: a real host takes
+milliseconds to push an overlay down, and this one serves it inside the same
+frame, so a page that flips on every decision flips every 125 µs here.
+
 ## What is still not reached
 
-- `0x08F0` (the DIAL **state dispatcher**) and the `DM(0x3FB2)` action-vector
-  call at `0x06E8` are on the far side of the `DM(0x3FC1) & 0x0100` test at
-  `0x06D5`, which currently always routes back to the bootpage check at
-  `0x0686`. Only the line handler at `0x08F1` runs each frame.
-- `0x0686` then re-registers the continuation and yields through the patched
-  PM `0x000A`, so the loop does not sustain itself without a host serving the
-  overlay request in DM `0x31A9`/`0x31AA`.
 - The kernel's own foreground still never dispatches the task on its own: with
   SPORT0 strobed the ISR (PM `0x0072`) advances the request queue
   (DM `0x2E44`/`0x2E45` now move, which they did not before the task was
   loaded) and the foreground reaches its dispatcher at `0x02A1` → `0x01B2` →
-  `0x00D8`, but the service list at DM `0x2F28` (`0x0F00`) is empty, so
-  `CALL (I4)` at `0x02A4` never fires. Populating that list is the channel
-  assignment, i.e. the MIPS side — see `docs/dial_sport_drive.md` and the
-  `--mainloop` path in `tools/eicon_mips_shim.py`. This harness bypasses it by
-  calling the task's frame entry directly, exactly as the host would if it
-  drove the task itself.
+  `0x00D8`, but the service list head at DM `0x2F28` is zero, so `CALL (I4)`
+  at `0x02A4` never fires. Populating it is the channel assignment, i.e. the
+  MIPS side — see `docs/dial_sport_drive.md` and the `--mainloop` path in
+  `tools/eicon_mips_shim.py`.
+- Serving the downloads makes that gap bite for the first time. PM `0x00D8`
+  walks the list as `I0 = DM(0x2F28)`, so an unassigned head walks DM `0x0000`,
+  and PM `0x06C0` calls whatever address the walk produces. DM `0x0000` was
+  unpopulated while DIAL was the only overlay — DIAL loads DM from `0x1240` up
+  — but V.8, V.22FC and DIAL-partial all load DM from `0x0000`, so the first
+  page switch turns overlay coefficients into dispatch addresses (`CALL (I4)`
+  with I4 = `0x1400`, running off into unpopulated PM within a few frames).
+  The harness therefore enters the frame at PM `0x06C1`, past the
+  fetch-and-dispatch pair, which is what an empty queue means anyway;
+  `--host-dispatch` restores PM `0x06BB` and reproduces the fault.
+- `--no-serve-overlays --host-dispatch` reproduces the pre-serving numbers
+  exactly (2100 Hz: 51 `08F1` entries, 1066 `0x1BCE`, bootpage `0000`×162,
+  `000c`×23, `000b`×13, `0010`×2), so the old measurements above still stand.
