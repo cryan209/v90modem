@@ -29,8 +29,12 @@ REG_GROUP3 = ["ASTAT","MSTAT","SSTAT","IMASK","ICNTL","CNTR","SB","PX",
               "RX0","?","RX1","?","?","?","?","SP"]
 REG_GROUPS = [REG_GROUP0, REG_GROUP1, REG_GROUP2, REG_GROUP3]
 
-COND = ["EQ","NE","GT","LE","LT","GE","AV","NOT AV","MV","NOT MV",
-        "NEG","POS","ABS","NOT ABS","FLAG_IN","NOT FLAG_IN","CE","ALWAYS"]
+# condition_table[] in adsp2181_core.c, in encoding order.  14 is the loop
+# counter (CONDITION() decrements CNTR for it); 15 is the unconditional
+# encoding -- it is not a FLAG_IN test, which is why every transfer in these
+# images that looked like "IF NOT FLAG_IN" is simply unconditional.
+COND = ["EQ","NE","GT","LE","LT","GE","AV","NOT AV","AC","NOT AC",
+        "NEG","POS","MV","NOT MV","NOT CE","ALWAYS"]
 
 # Operand register files, from adsp2181_core.c's alu_/mac_/shift_xregs setup.
 ALU_X = ["AX0","AX1","AR","MR0","MR1","MR2","SR0","SR1"]
@@ -137,6 +141,11 @@ def load_pm(path: str) -> list[int]:
             for a in range(0x4000)]
 
 
+def guard(op: int, text: str) -> str:
+    """Prefix a transfer with its condition; 15 is the unconditional form."""
+    return text if (op & 15) == 15 else f"IF {COND[op & 15]} {text}"
+
+
 def disas(op: int) -> str:
     top = op >> 16
     cond = COND[op & 15]
@@ -149,14 +158,14 @@ def disas(op: int) -> str:
         return f"FLAG_OUT({op & 0xff:02x})"
     if top == 0x0A:
         what = "RTI" if op & 0x10 else "RTS"
-        return f"IF {cond} {what}" if (op & 15) != 15 else what
+        return what if (op & 15) == 15 else f"IF {cond} {what}"
     if top == 0x0B:
         kind = "CALL" if op & 0x10 else "JUMP"
-        return f"IF {cond} {kind} (I{4 + ((op >> 6) & 3)})"
+        return guard(op, f"{kind} (I{4 + ((op >> 6) & 3)})")
     if 0x18 <= top <= 0x1B:
-        return f"IF {cond} JUMP ${addr:04X}"
+        return guard(op, f"JUMP ${addr:04X}")
     if 0x1C <= top <= 0x1F:
-        return f"IF {cond} CALL ${addr:04X}"
+        return guard(op, f"CALL ${addr:04X}")
     if 0x80 <= top <= 0x8F:
         grp = (top >> 2) & 3
         return f"{REG_GROUPS[grp][op & 15]} = DM(${addr:04X})"
@@ -164,9 +173,9 @@ def disas(op: int) -> str:
         grp = (top >> 2) & 3
         return f"DM(${addr:04X}) = {REG_GROUPS[grp][op & 15]}"
     if 0xA0 <= top <= 0xAF:
-        return f"DM(I{(op >> 2) & 3},M{op & 3}) = ${(op >> 4) & 0xFFF:04X}"
+        return f"DM(I{(op >> 2) & 3},M{op & 3}) = ${(op >> 4) & 0xFFFF:04X}"
     if 0xB0 <= top <= 0xBF:
-        return f"DM(I{4 + ((op >> 2) & 3)},M{4 + (op & 3)}) = ${(op >> 4) & 0xFFF:04X}"
+        return f"DM(I{4 + ((op >> 2) & 3)},M{4 + (op & 3)}) = ${(op >> 4) & 0xFFFF:04X}"
     if top == 0x0D:
         return (f"{REG_GROUPS[(op >> 10) & 3][(op >> 4) & 15]} = "
                 f"{REG_GROUPS[(op >> 8) & 3][op & 15]}")
@@ -233,10 +242,19 @@ def disas(op: int) -> str:
                 f"{pm_reg} = PM({dag(op >> 4, True)})")
     if 0x30 <= top <= 0x3F:
         grp = (top - 0x30) >> 2
-        val = (op << 14) >> 18
-        if val & 0x2000:
-            val -= 0x4000
-        return f"{REG_GROUPS[grp][op & 15]} = ${val & 0xFFFF:04X}"
+        # (INT32)(op << 14) >> 18 in the core: 32-bit truncation, then an
+        # arithmetic shift, so the 14-bit field is signed.  M and L registers
+        # are strides and lengths, and reading them unsigned is misleading.
+        val = (op << 14) & 0xFFFFFFFF
+        if val & 0x80000000:
+            val -= 0x100000000
+        val >>= 18
+        name = REG_GROUPS[grp][op & 15]
+        if val < 0:
+            # I and L registers are 14-bit unsigned; M registers are strides.
+            return f"{name} = {val}" if name[0] == "M" else \
+                   f"{name} = ${val & 0x3FFF:04X}"
+        return f"{name} = ${val:04X}" if name[0] != "M" else f"{name} = {val}"
     if 0x40 <= top <= 0x4F:
         return f"{REG_GROUP0[op & 15]} = ${(op >> 4) & 0xFFFF:04X}"
     cmt = COMMENTS.get(top, "")
