@@ -93,8 +93,11 @@ PR_NextInd = 0x04   # word: MIPS indication write pointer
 PR_ReqInput = 0x06  # byte: count of requests submitted by host
 PR_ReqOutput = 0x07 # byte: count of requests processed by MIPS
 PR_Int = 0x09       # byte: interrupt flag
-PR_RcOutput = 0x0a  # byte: count of RC buffers the MIPS has returned
-PR_IndOutput = 0x0b # byte: count of IND buffers the MIPS has returned
+PR_ReqReserved = 0x08 # byte: Req buffers reserved
+PR_XLock = 0x0a     # byte: arbitration lock
+PR_RcOutput = 0x0b  # byte: count of RC buffers the MIPS has returned
+PR_IndOutput = 0x0c # byte: count of IND buffers the MIPS has returned
+PR_IMask = 0x0d     # byte: interrupt mask flag
 PR_ReadyInt = 0x10  # byte: host pokes this to request a ready interrupt
 PR_Signature = 0x1e # word: MIPS writes 0x5858 (not ready) or valid sig
 PR_B = 0x20         # start of the REQ/RC/IND buffer area
@@ -891,8 +894,11 @@ def report_return_codes(shim: "MipsShim", sr: int, limit: int = 8) -> None:
         rc_id = shim.uc.mem_read(rb + RC_RCID, 1)[0]
         rc_ch = shim.uc.mem_read(rb + RC_RCCH, 1)[0]
         ref = struct.unpack_from("<H", shim.uc.mem_read(rb + RC_REFERENCE, 2))[0]
+        # isdn_rc() (kernel/di.c) treats any Rc & 0xf0 == ASSIGN_RC as an
+        # assign acknowledgement carrying the assigned Id, but only
+        # ASSIGN_OK means the assign succeeded.
         name = {ASSIGN_OK: "ASSIGN_OK", RC_OK: "OK"}.get(
-            rc, f"ASSIGN_RC+0x{rc - ASSIGN_RC:02x}" if rc & 0xf0 == ASSIGN_RC
+            rc, f"assign rejected (0x{rc:02x})" if rc & 0xf0 == ASSIGN_RC
             else "?")
         print(f"[mainloop] RC 0x{rc:02x} ({name}) Id=0x{rc_id:02x} "
               f"Ch=0x{rc_ch:02x} Ref=0x{ref:04x} @B[0x{off:04x}]")

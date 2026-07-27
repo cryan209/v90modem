@@ -306,23 +306,56 @@ window 7, no XID, and negotiation flags `0x43`
 `B2_TRANSPARENT` branch of `add_modem_b23()`. LLC `{9, 4}` is V42_IN with L3
 transparent, i.e. the answering side.
 
-### Next: still no return code
+### The signalling ASSIGN succeeds
 
-Correct framing did not by itself produce one, so the payload was not the
-blocker. Both entities behave the same: the request is consumed and
-acknowledged on the first iteration (`ReqOutput` 32 -> 33) but `RcOutput`
-stays 0 over 200 iterations, and there are still no host writes.
+The "no return code" was a misreading on my side, twice over.
 
-`RcOutput` is genuinely card-owned — `pr_rc()` in `kernel/di.c` reads it as
-the count of pending RCs, walks the chain from `NextRc`, and clears it — so 0
-means no RC has been produced rather than one being missed. An ASSIGN must be
-answered with an `ASSIGN_RC` (0xe0..0xef) carrying the assigned local id.
+**The host does not build the buffer chains.** The driver only ever *reads*
+`NextRc` and `NextInd` (`kernel/di.c:266,304`) and writes `NextReq` just to
+advance it along a chain it did not create (`di.c:214`). The firmware builds
+all three during boot, and the layout it produces confirms it:
 
-Worth checking next: `NextRc` is 0 while `NextReq` (0x03e0) and `NextInd`
-(0x27e0) are firmware-initialised, so it is not clear whether B[0] is a
-genuine RC chain head or an uninitialised pointer. If the host is supposed to
-build the RC/IND chains, that would explain an entity that accepts a request
-but can never answer it.
+| chain | head | stride | region |
+|---|---|---|---|
+| RC | `B[0x0000]` | 0x10 | 0x0000..0x03e0, 62 buffers |
+| REQ | `B[0x03e0]` | 0x120 | 0x03e0..0x27e0, **32** buffers |
+| IND | `B[0x27e0]` | 0x120 | 0x27e0.. |
+
+32 REQ buffers is exactly the `0x20` in the main loop's queue arithmetic, so
+`NextRc = 0` is a genuine chain head, not an uninitialised pointer.
+
+**`RcOutput` is at +0x0b, not +0x0a.** I had miscounted `struct pr_ram`:
+`ReqReserved` is +0x08, `Int` +0x09, `XLock` +0x0a, `RcOutput` +0x0b,
+`IndOutput` +0x0c, `IMask` +0x0d. The publish step at `0x80029848` writes the
+pending count with `sb $a0, 0xb($a1)` and the indication count with
+`sb $a0, 0xc($a1)`, which settles it. The RC had been published all along;
+the shim was reading `XLock`.
+
+With the offsets fixed, the signalling ASSIGN completes:
+
+```
+[mainloop] RcOutput=1 NextRc=0x0000
+[mainloop] RC 0xef (ASSIGN_OK) Id=0x02 Ch=0x00 Ref=0x0000 @B[0x0000]
+```
+
+`ASSIGN_OK` with the card's assigned local entity id `0x02`. The RC is queued
+by `0x80029fc8` (called from the signalling handler at `0x8001701c`), which
+fills Rc/RcId/RcCh/Reference and bumps the pending count at `gp+0x5e9d`;
+`0x80029774` then publishes it into PR_RAM.
+
+### Next: the network-layer ASSIGN is rejected
+
+`--entity nl` gets `RC 0xe6` with `Id=0x3f` — an `ASSIGN_RC`-class code but
+not `ASSIGN_OK`, so the assign was rejected. `isdn_rc()` (`kernel/di.c:699`)
+treats any `Rc & 0xf0 == ASSIGN_RC` as an acknowledgement carrying the
+assigned id but only accepts `ASSIGN_OK`; it does not decode the sub-code, so
+what 0x06 means has to come from the firmware.
+
+The likely cause is ordering rather than payload: the driver always assigns
+the signalling entity first and only then issues the network-layer ASSIGN,
+which is sent on an established PLCI. Posting both in sequence — and feeding
+the assigned Id from the first RC into the second request — is the next step,
+and is also what should finally produce host writes to a DSP.
 
 ## Why `.2qm` is still expensive
 
