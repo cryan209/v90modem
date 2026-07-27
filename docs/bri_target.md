@@ -176,25 +176,63 @@ The transfers are validated by the firmware itself: all 36 DM blocks and the
 PM blocks pass its read-back verify (`0x80082a38` for DM, `0x80082b8c` for
 the 24-bit PM form).
 
-### Still open: running the DSPs during init
+### The SIGSEGV: an over-wide register hook, not the emulator
 
-`--dsp-pump N` interleaves DSP execution with the MIPS, and with it the run
-crashes: the MIPS wild-jumps through a corrupted stack frame at
-`0x800b1b74` and the process takes SIGSEGV, which points at a memory-safety
-bug in the emulator reachable only from these downloaded kernels (running
-each core on its own for 200k cycles after the download is clean). Deferring
-execution around IDMA writes and running only the actively addressed core
-both fail to avoid it, so it is not simply a partial-image effect. Running
-it under AddressSanitizer is the next step.
+Running the DSPs during init (`--dsp-pump N`) used to crash. It was not a
+memory-safety bug in the emulator, and AddressSanitizer would not have found
+it — under lldb the fault is a NULL dereference inside `libunicorn`'s code
+generator (`temp_load`), reached only *after* the MIPS had already faulted.
+Two shim bugs were behind it:
 
-Until then `--mainloop` holds the DSPs for the download and runs them
-afterwards (`--dsp-pump 0`, the default), so the handshake acknowledgement
-is produced after the validator's in-line poll has already given up. That
-poll is `0x3e7` retries with no host-side delay, so the remaining work is
-making the DSPs runnable *during* the poll.
+**The DSP register hook was too wide.** It covered `0x1c000000..0x1c002000`,
+but the DSP blocks stop at `0xbc0010f0` (two on-board DSPs at `+0x08`/`+0x20`,
+module rows at `+0x800..+0x870` and `+0x1000..+0x1070`, each with its address
+port `0x80` above). The card object's `+0x80` holds a *control* register
+block at `0xbc001800`, and `0x80082dc0` writes a byte to
+`[obj+0x80] + (a1 << 4)` — `0xbc0019b0` for `a1 = 0x1b`. The hook swallowed
+that, read offset `0xb0` as an IDMA address-port write, and spawned a phantom
+DSP core (31 cores became 46). The firmware then read back nonsense, computed
+a bad pointer, and took a MIPS CPU exception; Unicorn crashed afterwards.
+The hook now ends at `0x1c001100`.
+
+**The auto-map hook could not map.** `_unmapped` called `mem_map` directly,
+which throws when the page overlaps one of the larger fixed mappings, so an
+auto-mappable access surfaced as `UC_ERR_WRITE_UNMAPPED`. It now goes through
+`ensure_mapped`, which consults the live region list and maps at Unicorn's
+4K granularity (a 64K unit can straddle a region edge and `mem_map` rejects
+any overlap).
+
+With both fixed, `--dsp-pump 256` runs clean:
+
+```
+[mainloop] running firmware entry (basic init)...      <- no fault
+[mainloop] after init: gp+0x5e81=0x0000 gp+0x5eb9=0x0060
+[dsp] 31 cores: 30 answered the boot handshake with 0xa5a5, 1 still held
+[mainloop] ASSIGN posted: Sig=0x4447 NextReq=0x03e0 -> 0x0500 ReqInput 32->33
+```
+
+That is the whole init sequence working: the firmware entry completes with no
+faults, the DSPs answer the handshake *in line* during the validator's poll,
+96 resources are registered (`gp+0x5eb9`, previously 0), and the firmware
+publishes its PR_RAM signature `0x4447` — the card has booted and is ready
+for host requests.
+
+The request queue is now set up by the firmware during boot, so
+`run_mainloop` posts the modem ASSIGN afterwards, following `pr_out()`
+(`kernel/di.c`): fill the REQ at `B[NextReq]`, advance `NextReq` to
+`REQ->next`, and bump `ReqInput` from the firmware's `ReqOutput` so the
+counters start level.
 
 The DSP count never became a blocker: 30 cores are cheap, and the validator
 handshakes them one at a time.
+
+### Next: the main loop does not consume the request
+
+`ReqIn=33 / ReqOut=32` holds steady — one request correctly pending, and
+`0x80027970` never picks it up. The main loop is being called directly rather
+than reached from the entry's post-init path, so it is probably missing timer
+or interrupt state the real loop runs with; that is the next thing to work
+out.
 
 ## Why `.2qm` is still expensive
 

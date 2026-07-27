@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import os
 import struct
 import sys
 from pathlib import Path
@@ -122,8 +123,11 @@ GP = 0x800fa3b5
 
 # ---------------------------------------------------------------- ADSP side
 
-ADSP = ctypes.CDLL(str(Path(__file__).resolve().parent /
-                     "adsp2181emu" / "libadsp2181.dylib"))
+# ADSP2181_LIB overrides the emulator library, e.g. to load the
+# AddressSanitizer build (make -C tools/adsp2181emu libadsp2181_asan.dylib).
+ADSP = ctypes.CDLL(os.environ.get(
+    "ADSP2181_LIB",
+    str(Path(__file__).resolve().parent / "adsp2181emu" / "libadsp2181.dylib")))
 ADSP.adsp2181_create.restype = ctypes.c_void_p
 ADSP.adsp2181_destroy.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_reset.argtypes = [ctypes.c_void_p]
@@ -237,11 +241,19 @@ class MipsShim:
         # only looks at the low byte, so whichever DSP the firmware talks to
         # reaches the same core.  That is what makes the 30-DSP card init
         # work against a single emulated DSP.
+        # The range must stop after the last DSP block: the two on-board DSPs
+        # are at +0x08/+0x20, the module rows at +0x800..+0x870 and
+        # +0x1000..+0x1070, and each block's address port is 0x80 above it,
+        # so the highest byte in use is 0x10f8.  The card's own control
+        # registers live just past that (the card object's +0x80 holds
+        # 0xbc001800); hooking them too would route a plain register write
+        # into the IDMA path and spawn phantom DSPs.
         self._dsp_base = 0x1c000000
+        self._dsp_limit = self._dsp_base + 0x1100
         self.uc.hook_add(UC_HOOK_MEM_READ, self._dsp_read,
-                         begin=self._dsp_base, end=self._dsp_base + 0x2000)
+                         begin=self._dsp_base, end=self._dsp_limit)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._dsp_write,
-                         begin=self._dsp_base, end=self._dsp_base + 0x2000)
+                         begin=self._dsp_base, end=self._dsp_limit)
         self.uc.hook_add(UC_HOOK_CODE, self._hook)
         from unicorn import (UC_HOOK_MEM_FETCH_UNMAPPED,
                              UC_HOOK_MEM_READ_UNMAPPED,
@@ -381,8 +393,11 @@ class MipsShim:
                 if self.log:
                     print(f"[mips] auto-map page phys=0x{page:06x} "
                           f"(touch @0x{address:08x} pc=0x{pc:08x})")
-                uc.mem_map(page, AUTO_PAGE)
-                self.mapped_pages.add(page)
+                # ensure_mapped consults the live region list: a bare
+                # mem_map here throws when the page overlaps one of the
+                # larger fixed mappings, which surfaces as an unmapped-access
+                # error rather than the auto-map it is meant to perform.
+                self.ensure_mapped(page, AUTO_PAGE)
             return True
         print(f"[mips] unmapped access {access} {address:08x} (phys 0x{phys:08x}) "
               f"sz={size} pc=0x{pc:08x} ra=0x{uc.reg_read(UC_MIPS_REG_RA):08x}")
@@ -475,16 +490,19 @@ class MipsShim:
         The fixed mappings are larger than AUTO_PAGE, so membership in
         `mapped_pages` is not enough — check the live region list.
         """
+        # Map at Unicorn's 4K granularity: a 64K unit can straddle the edge
+        # of an existing region, and mem_map rejects any overlap.
+        page_size = 0x1000
         phys = virt & 0x1fffffff
         regions = [(begin, end) for begin, end, _perms in self.uc.mem_regions()]
-        first = phys & ~(AUTO_PAGE - 1)
-        last = (phys + size - 1) & ~(AUTO_PAGE - 1)
-        for page in range(first, last + AUTO_PAGE, AUTO_PAGE):
+        first = phys & ~(page_size - 1)
+        last = (phys + size - 1) & ~(page_size - 1)
+        for page in range(first, last + page_size, page_size):
             if any(begin <= page <= end for begin, end in regions):
                 continue
-            self.uc.mem_map(page, AUTO_PAGE)
+            self.uc.mem_map(page, page_size)
             self.mapped_pages.add(page)
-            regions.append((page, page + AUTO_PAGE - 1))
+            regions.append((page, page + page_size - 1))
 
     def write_bytes(self, virt: int, data: bytes) -> None:
         self.ensure_mapped(virt, len(data))
@@ -788,11 +806,10 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     if args.dsp_combifile is not None:
         stage_dsp_code(shim, args)
 
-    # 1. Write card config + boot command + PR_RAM buffers + ASSIGN request
-    #    BEFORE calling the firmware entry.  The firmware entry (0x80082f90)
-    #    does NOT clear shared RAM (only the separate MIPS_INIT does), so
-    #    everything survives.  It reads the config during init and registers
-    #    DSP resources.
+    # 1. Write the card config and boot command the firmware entry reads
+    #    during init.  The request queue is NOT set up here: the firmware
+    #    initialises PR_RAM itself as it boots and publishes its signature
+    #    when ready, so a request written beforehand is overwritten.
     sr = PR_RAM_PHYS
     shim.write8(sr + 0x08, 0)      # TEI (0 = auto)
     shim.write8(sr + 0x10, 1)      # ForceLaw = a-law (E1)
@@ -801,29 +818,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     shim.write8(sr + 0xe0, 0)      # PCINIT_END_OF_LIST
     shim.write32(0x00, 3)          # boot->cmd = 3 (start)
     shim.write32(0x04, 0xa0011000) # boot->addr
-    # PR_RAM buffer chains
-    for i in range(8):
-        shim.write16(sr + PR_B + i * REQ_SIZE + REQ_NEXT,
-                     ((i + 1) % 8) * REQ_SIZE)
-    shim.write16(sr + PR_NextReq, 0)
-    shim.write16(sr + PR_NextRc, 0x1000)
-    for i in range(8):
-        shim.write16(sr + PR_B + 0x1000 + i * 0x10,
-                     0x1000 + ((i + 1) % 8) * 0x10)
-    # ASSIGN request
-    cai = bytearray(26)
-    cai[0] = 25; cai[1] = DSP_CAI_HARDWARE_MODEM_ASYNC; cai[8] = 0x04
-    struct.pack_into("<H", cai, 15, 56000)
-    struct.pack_into("<H", cai, 19, 56000)
-    rb = sr + PR_B
-    shim.write8(rb + REQ_REQ, ASSIGN)
-    shim.write8(rb + REQ_REQID, NL_ID)
-    shim.write8(rb + REQ_REQCH, args.channel)
-    shim.write16(rb + REQ_XBUFFER, len(cai))
-    shim.uc.mem_write(rb + REQ_XDATA, bytes(cai))
-    shim.write16(sr + PR_NextReq, REQ_SIZE)
-    shim.write8(sr + PR_ReqInput, 1)
-    print("[mainloop] config + boot + PR_RAM + ASSIGN written")
+    print("[mainloop] card config + boot command written")
 
     # 2. Call the firmware entry (0x80082f90) to store the PR_RAM pointer
     #    and run basic init.  It reaches a self-loop waiting for a hardware
@@ -861,6 +856,32 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     print(f"[mainloop] after init: gp+0x5e81={init_state:#06x} "
           f"gp+0x5eb9={dsp_table:#06x}")
     report_dsp_boot(shim)
+
+    # 3b. Post the modem ASSIGN now that the firmware has initialised PR_RAM,
+    #     following pr_out() in the Linux driver (kernel/di.c): fill the REQ
+    #     at B[NextReq], advance NextReq to REQ->next, bump ReqInput.
+    sig = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_Signature, 2))[0]
+    next_req = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextReq, 2))[0]
+    cai = bytearray(26)
+    cai[0] = 25; cai[1] = DSP_CAI_HARDWARE_MODEM_ASYNC; cai[8] = 0x04
+    struct.pack_into("<H", cai, 15, 56000)
+    struct.pack_into("<H", cai, 19, 56000)
+    rb = sr + PR_B + next_req
+    req_next = struct.unpack_from("<H", shim.uc.mem_read(rb + REQ_NEXT, 2))[0]
+    shim.write8(rb + REQ_REQ, ASSIGN)
+    shim.write8(rb + REQ_REQID, NL_ID)
+    shim.write8(rb + REQ_REQCH, args.channel)
+    shim.write16(rb + REQ_XBUFFER, len(cai))
+    shim.uc.mem_write(rb + REQ_XDATA, bytes(cai))
+    shim.write16(sr + PR_NextReq, req_next)
+    # ReqInput/ReqOutput are free-running byte counters and the firmware owns
+    # ReqOutput; the host's counter starts level with it, then one increment
+    # per posted request (pr_out()).  Syncing first is what makes the main
+    # loop see exactly this one request.
+    req_out = shim.uc.mem_read(sr + PR_ReqOutput, 1)[0]
+    shim.write8(sr + PR_ReqInput, (req_out + 1) & 0xff)
+    print(f"[mainloop] ASSIGN posted: Sig=0x{sig:04x} NextReq=0x{next_req:04x} "
+          f"-> 0x{req_next:04x} ReqInput {req_out}->{(req_out + 1) & 0xff}")
 
     # 4. Run the main loop.
     for i in range(args.words if args.words > 0 else 50):

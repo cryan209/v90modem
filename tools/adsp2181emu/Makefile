@@ -12,6 +12,13 @@ eicon_adsp_run: eicon_adsp_run.o adsp2181_core.o
 libadsp2181.dylib: adsp2181_core.c adsp2181_core.h 2100ops.inc
 	$(CC) $(CFLAGS) -fPIC -dynamiclib adsp2181_core.c -o $@
 
+# AddressSanitizer build of the same library, for debugging memory errors
+# reached through the ctypes callers.  Point the shim at it with
+# ADSP2181_LIB and preload the ASan runtime (see README).
+ASAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -O1 -g
+libadsp2181_asan.dylib: adsp2181_core.c adsp2181_core.h 2100ops.inc
+	$(CC) -std=c11 $(ASAN_FLAGS) -fPIC -dynamiclib adsp2181_core.c -o $@
+
 adsp2181_core_test: adsp2181_core_test.o adsp2181_core.o
 	$(CC) $(CFLAGS) $^ -o $@
 
