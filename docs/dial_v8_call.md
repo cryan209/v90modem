@@ -1,5 +1,9 @@
 # How DIAL calls V.8
 
+> The DSP-side half of the page switch is now recovered: TIKRNL, not DIAL,
+> owns the bootpage → overlay mapping, in the table at DM `0x31D5` (page 6 →
+> download `0x025F` = V8.F34). See `docs/dial_under_tikrnl.md`.
+
 ## The bootpage mechanism (addspv90guide §2.2, §5.4.1)
 
 The ADDSP V.90 software is segmented into **bootpages**. Each page has a

@@ -1,5 +1,13 @@
 # Driving DIAL with a μ-law T1/E1 stream on SPORT0
 
+> Follow-up in `docs/dial_under_tikrnl.md`. The conclusion here — that SPORT0
+> alone does not reach DIAL — is confirmed, but the missing link is narrower
+> than "a channel-table entry": DIAL is an overlay on the **TIKRNL task**, and
+> with the task loaded the ISR does advance DM `0x2E44`/`0x2E45` and the
+> foreground does reach its dispatcher. What is still empty is the service
+> list at DM `0x2F28`. Calling the task's own frame entry (PM `0x06BB`) runs
+> DIAL without any of that.
+
 Experiment: feed a μ-law PCM stream into the ADSP-2181 emulator's SPORT0
 (port 0 RX callback), 32 timeslots per 8 kHz frame, with the PRI kernel
 booted and the DIAL bootpage (overlay 0x0262) layered on top, strobing the

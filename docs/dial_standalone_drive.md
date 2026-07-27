@@ -1,5 +1,12 @@
 # DIAL running standalone with direct μ-law input
 
+> **Superseded for the dispatch question** by `docs/dial_under_tikrnl.md`:
+> DIAL now runs under TIKRNL through its real overlay interface (PM
+> `0x08F0`/`0x08F1`), which also shows this harness layers DIAL onto the wrong
+> base — the task's init clears PM `0x0900`+, so the overlay must be
+> downloaded after TIKRNL, not before. The audio-processing conclusions below
+> still hold.
+
 The kernel task dispatcher cannot be easily coerced into calling DIAL
 without the full MIPS `dsp_assign` channel-table hookup (the queue protocol
 at DM 0x2F00/0x2F08/0x2F09 with free-list 0x2F27 normalises any invalid
