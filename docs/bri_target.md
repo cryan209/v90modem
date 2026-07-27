@@ -343,19 +343,49 @@ by `0x80029fc8` (called from the signalling handler at `0x8001701c`), which
 fills Rc/RcId/RcCh/Reference and bumps the pending count at `gp+0x5e9d`;
 `0x80029774` then publishes it into PR_RAM.
 
-### Next: the network-layer ASSIGN is rejected
+### The host must acknowledge the card's notification
 
-`--entity nl` gets `RC 0xe6` with `Id=0x3f` — an `ASSIGN_RC`-class code but
-not `ASSIGN_OK`, so the assign was rejected. `isdn_rc()` (`kernel/di.c:699`)
-treats any `Rc & 0xf0 == ASSIGN_RC` as an acknowledgement carrying the
-assigned id but only accepts `ASSIGN_OK`; it does not decode the sub-code, so
-what 0x06 means has to come from the firmware.
+Posting the two ASSIGNs in sequence exposed one more piece of the host side.
+The second return code was queued in card RAM (`gp+0x5e9d` stuck at 1) but
+never published, no matter how many main-loop iterations ran.
 
-The likely cause is ordering rather than payload: the driver always assigns
-the signalling entity first and only then issues the network-layer ASSIGN,
-which is sent on an established PLCI. Posting both in sequence — and feeding
-the assigned Id from the first RC into the second request — is the next step,
-and is also what should finally produce host writes to a DSP.
+The main loop only calls the RC/IND flush (`0x80029774`) when `RcOutput` and
+`IndOutput` are both zero **and** the byte pointed at by `gp+0x5eaf` is zero
+(`0x80027d84`). That byte — `PR_RAM+0x3fe` here — is the card→host
+notification the flush raises on its way out (`0x8002989c` sets it to 1). A
+real host clears it when its ISR services the interrupt; the shim never did,
+so after the first flush the firmware silently stopped publishing.
+`drain_return_codes()` now clears it, and the next RC appears on the first
+iteration.
+
+### Where the sequence stands
+
+```
+[sig] ASSIGN Id=0x00 Ch=0x01 payload=101a11...2d0643617069323000
+[sig] RC 0xef (ASSIGN_OK) Id=0x02 Ch=0x00 Ref=0x0000
+[nl]  ASSIGN Id=0x20 Ch=0x01 payload=1901017c020904200900040301070700004300
+[nl]  RC 0xe6 (assign rejected) Id=0x3f Ch=0x00 Ref=0x0001
+```
+
+The signalling ASSIGN succeeds and the card allocates entity id `0x02`. The
+network-layer ASSIGN is rejected with `0xe6`, and doing it after a successful
+signalling assign changes nothing — the standalone attempt returned the same
+code — so ordering was not the problem.
+
+`run_mainloop` now drives the whole sequence (`--entity sig|nl|both`, default
+`both`) through `post_request()` / `run_until_rc()` / `drain_return_codes()`,
+which mirror `pr_out()` and `pr_rc()` in `kernel/di.c`.
+
+### Next: why the network-layer ASSIGN is rejected
+
+The request is dispatched to the entity with id `0x3f`: `0x80029ed4` maps
+`ReqId` through a byte table at `0x80121370` (`ReqId * 2`), and the live table
+is `0x00 -> 0x1f`, `0x02 -> 0x1f`, `0x1f -> 0xfe`, `0x20 -> 0x3f`. That
+entity's handler queues the rejection from `0x80065db8`, which is where the
+reason lives. `isdn_rc()` never decodes the sub-code, so 0x06 has to be read
+out of the firmware.
+
+Still no host writes, so no DSP work has been triggered yet.
 
 ## Why `.2qm` is still expensive
 

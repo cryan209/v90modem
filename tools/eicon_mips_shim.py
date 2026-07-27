@@ -874,35 +874,117 @@ def modem_nl_assign_payload(max_data_length: int = 1024,
     return idi_parameters((IDI_LLI, lli), (IDI_LLC, llc), (IDI_DLC, bytes(dlc)))
 
 
-def report_return_codes(shim: "MipsShim", sr: int, limit: int = 8) -> None:
-    """Print the return codes the firmware queued for the host.
+def rc_name(rc: int) -> str:
+    # isdn_rc() (kernel/di.c) treats any Rc & 0xf0 == ASSIGN_RC as an assign
+    # acknowledgement carrying the assigned Id, but only ASSIGN_OK means the
+    # assign succeeded.
+    if rc == ASSIGN_OK:
+        return "ASSIGN_OK"
+    if rc == RC_OK:
+        return "OK"
+    if rc & 0xF0 == ASSIGN_RC:
+        return f"assign rejected (0x{rc:02x})"
+    return "?"
 
-    The MIPS owns NextRc and RcOutput; it writes each RC into the buffer at
-    B[NextRc] and advances the chain, exactly as the host's pr_rc() walk in
-    kernel/di.c expects.
+
+def clear_host_doorbell(shim: "MipsShim") -> None:
+    """Acknowledge the card->host notification, as a host ISR would.
+
+    The main loop only calls the RC/IND flush (0x80029774) when RcOutput and
+    IndOutput are both zero *and* the byte pointed at by gp+0x5eaf is zero
+    (0x80027d84).  The flush sets that byte to 1 on its way out
+    (0x8002989c), so leaving it set stops the firmware publishing any further
+    return codes: the RC sits queued in card RAM with gp+0x5e9d stuck at 1.
+    """
+    ptr = struct.unpack_from("<I",
+        shim.uc.mem_read((GP + 0x5eaf) & 0x1fffffff, 4))[0]
+    if ptr:
+        shim.write8(ptr, 0)
+
+
+def drain_return_codes(shim: "MipsShim", sr: int) -> "list[tuple[int, int, int, int]]":
+    """Consume the queued return codes the way pr_rc() (kernel/di.c) does.
+
+    Walk `RcOutput` entries from `B[NextRc]` along the chain, zero each Rc
+    field as it is taken, then clear `RcOutput`.  Returns
+    (Rc, RcId, RcCh, Reference) tuples.
     """
     rc_out = shim.uc.mem_read(sr + PR_RcOutput, 1)[0]
-    next_rc = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextRc, 2))[0]
-    print(f"[mainloop] RcOutput={rc_out} NextRc=0x{next_rc:04x}")
     if not rc_out:
-        print("[mainloop] no return code queued")
-        return
-    off = next_rc
-    for _ in range(min(rc_out, limit)):
+        return []
+    clear_host_doorbell(shim)
+    off = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextRc, 2))[0]
+    out = []
+    for _ in range(rc_out):
         rb = sr + PR_B + off
         rc = shim.uc.mem_read(rb + RC_RC, 1)[0]
-        rc_id = shim.uc.mem_read(rb + RC_RCID, 1)[0]
-        rc_ch = shim.uc.mem_read(rb + RC_RCCH, 1)[0]
-        ref = struct.unpack_from("<H", shim.uc.mem_read(rb + RC_REFERENCE, 2))[0]
-        # isdn_rc() (kernel/di.c) treats any Rc & 0xf0 == ASSIGN_RC as an
-        # assign acknowledgement carrying the assigned Id, but only
-        # ASSIGN_OK means the assign succeeded.
-        name = {ASSIGN_OK: "ASSIGN_OK", RC_OK: "OK"}.get(
-            rc, f"assign rejected (0x{rc:02x})" if rc & 0xf0 == ASSIGN_RC
-            else "?")
-        print(f"[mainloop] RC 0x{rc:02x} ({name}) Id=0x{rc_id:02x} "
-              f"Ch=0x{rc_ch:02x} Ref=0x{ref:04x} @B[0x{off:04x}]")
+        if rc:
+            out.append((rc,
+                        shim.uc.mem_read(rb + RC_RCID, 1)[0],
+                        shim.uc.mem_read(rb + RC_RCCH, 1)[0],
+                        struct.unpack_from("<H",
+                            shim.uc.mem_read(rb + RC_REFERENCE, 2))[0]))
+            shim.write8(rb + RC_RC, 0)
         off = struct.unpack_from("<H", shim.uc.mem_read(rb, 2))[0]
+    shim.write8(sr + PR_RcOutput, 0)
+    return out
+
+
+def post_request(shim: "MipsShim", sr: int, req: int, req_id: int,
+                 req_ch: int, payload: bytes) -> int:
+    """Put one IDI request in the queue, as pr_out() (kernel/di.c) does.
+
+    Fill the REQ at B[NextReq], advance NextReq to REQ->next, and increment
+    the host-owned ReqInput counter.  Returns the buffer offset used.
+    """
+    off = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextReq, 2))[0]
+    rb = sr + PR_B + off
+    req_next = struct.unpack_from("<H", shim.uc.mem_read(rb + REQ_NEXT, 2))[0]
+    shim.write8(rb + REQ_REQ, req)
+    shim.write8(rb + REQ_REQID, req_id)
+    shim.write8(rb + REQ_REQCH, req_ch)
+    shim.write16(rb + REQ_XBUFFER, len(payload))
+    shim.uc.mem_write(rb + REQ_XDATA, payload)
+    shim.write16(sr + PR_NextReq, req_next)
+    req_in = shim.uc.mem_read(sr + PR_ReqInput, 1)[0]
+    shim.write8(sr + PR_ReqInput, (req_in + 1) & 0xFF)
+    return off
+
+
+def run_until_rc(shim: "MipsShim", sr: int, gp: int, sp: int,
+                 iterations: int = 32) -> "list[tuple[int, int, int, int]]":
+    """Spin the main loop until the firmware queues a return code."""
+    for _ in range(iterations):
+        try:
+            shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
+        except Exception as exc:
+            print(f"[mainloop] fault: {exc}")
+            break
+        if shim.uc.mem_read(sr + PR_RcOutput, 1)[0]:
+            break
+    return drain_return_codes(shim, sr)
+
+
+def assign_entity(shim: "MipsShim", sr: int, gp: int, sp: int, label: str,
+                  req_id: int, req_ch: int, payload: bytes) -> "int | None":
+    """Post one ASSIGN and report its return code.
+
+    Returns the local entity id the card assigned on ASSIGN_OK, else None.
+    """
+    off = post_request(shim, sr, ASSIGN, req_id, req_ch, payload)
+    print(f"[{label}] ASSIGN Id=0x{req_id:02x} Ch=0x{req_ch:02x} "
+          f"@B[0x{off:04x}] payload={payload.hex()}")
+    codes = run_until_rc(shim, sr, gp, sp)
+    if not codes:
+        print(f"[{label}] no return code")
+        return None
+    assigned = None
+    for rc, rc_id, rc_ch, ref in codes:
+        print(f"[{label}] RC 0x{rc:02x} ({rc_name(rc)}) Id=0x{rc_id:02x} "
+              f"Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+        if rc == ASSIGN_OK and assigned is None:
+            assigned = rc_id
+    return assigned
 
 
 def run_mainloop(shim: "MipsShim", args) -> None:
@@ -993,64 +1075,35 @@ def run_mainloop(shim: "MipsShim", args) -> None:
           f"gp+0x5eb9={dsp_table:#06x}")
     report_dsp_boot(shim)
 
-    # 3b. Post the modem ASSIGN now that the firmware has initialised PR_RAM,
-    #     following pr_out() in the Linux driver (kernel/di.c): fill the REQ
-    #     at B[NextReq], advance NextReq to REQ->next, bump ReqInput.
+    # 3b. Assign the entities now that the firmware has initialised PR_RAM.
+    #     The driver's order is signalling first (sig_req(plci, ASSIGN,
+    #     DSIG_ID), carrying the CAI from add_b1()), then the network layer
+    #     (nl_req_ncci(plci, ASSIGN, 0), carrying LLI/LLC/DLC from
+    #     add_modem_b23()).  Each ASSIGN is answered with an ASSIGN_RC
+    #     carrying the local entity id the card allocated.
     sig = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_Signature, 2))[0]
-    next_req = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextReq, 2))[0]
-    if args.entity == "nl":
-        req_id = NL_ID
-        payload = modem_nl_assign_payload()
-    else:
-        req_id = DSIG_ID
-        payload = modem_sig_assign_payload()
-    rb = sr + PR_B + next_req
-    req_next = struct.unpack_from("<H", shim.uc.mem_read(rb + REQ_NEXT, 2))[0]
-    shim.write8(rb + REQ_REQ, ASSIGN)
-    shim.write8(rb + REQ_REQID, req_id)
-    shim.write8(rb + REQ_REQCH, args.channel)
-    shim.write16(rb + REQ_XBUFFER, len(payload))
-    shim.uc.mem_write(rb + REQ_XDATA, payload)
-    shim.write16(sr + PR_NextReq, req_next)
-    # The main loop treats (ReqOutput - ReqInput) & 0xff == 0x20 as empty
-    # (0x80027ae4) and 0x20 - that difference as the free-slot count
-    # (0x80027a94), so ReqOutput leads ReqInput by 32 when idle.  The host
-    # only ever increments ReqInput, one per posted request (pr_out()).
-    req_in = shim.uc.mem_read(sr + PR_ReqInput, 1)[0]
-    req_out = shim.uc.mem_read(sr + PR_ReqOutput, 1)[0]
-    shim.write8(sr + PR_ReqInput, (req_in + 1) & 0xff)
-    read_off = struct.unpack_from("<H",
-        shim.uc.mem_read((gp + 0x5e99) & 0x1fffffff, 2))[0]
-    print(f"[mainloop] ASSIGN posted at B[0x{next_req:04x}]: Id=0x{req_id:02x} "
-          f"({args.entity}) payload={payload.hex()}")
-    print(f"[mainloop]   Sig=0x{sig:04x} NextReq->0x{req_next:04x} "
-          f"ReqInput {req_in}->{(req_in + 1) & 0xff} ReqOutput={req_out} "
-          f"MIPS read offset=0x{read_off:04x}")
+    print(f"[mainloop] card ready: Sig=0x{sig:04x}")
 
-    # 4. Run the main loop.
-    for i in range(args.words if args.words > 0 else 50):
-        try:
-            v0 = shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
-        except Exception as exc:
-            from unicorn.mips_const import UC_MIPS_REG_PC, UC_MIPS_REG_RA
-            pc = shim.uc.reg_read(UC_MIPS_REG_PC)
-            ra = shim.uc.reg_read(UC_MIPS_REG_RA)
-            print(f"[mainloop] fault at iteration {i}: {exc} "
-                  f"pc=0x{pc:08x} ra=0x{ra:08x}")
-            print("  recent:")
-            for e in shim.trace_log[-16:]:
-                print(f"    {e}")
-            return
-        ri = shim.uc.mem_read(PR_RAM_PHYS + PR_ReqInput, 1)[0]
-        ro = shim.uc.mem_read(PR_RAM_PHYS + PR_ReqOutput, 1)[0]
-        sig = struct.unpack_from("<H", shim.uc.mem_read(PR_RAM_PHYS + PR_Signature, 2))[0]
-        if i < 5 or i % 10 == 0 or ri != ro:
-            print(f"[mainloop] iter {i}: v0=0x{v0:08x} ReqIn={ri} ReqOut={ro} "
-                  f"Sig=0x{sig:04x} host_writes={len(shim.host_writes)}")
-        if ri == ro and i > 0:
-            # Request consumed; check DSP state
+    steps = []
+    if args.entity in ("sig", "both"):
+        steps.append(("sig", DSIG_ID, modem_sig_assign_payload()))
+    if args.entity in ("nl", "both"):
+        steps.append(("nl", NL_ID, modem_nl_assign_payload()))
+
+    assigned = {}
+    for label, req_id, payload in steps:
+        entity_id = assign_entity(shim, sr, gp, sp, label, req_id,
+                                  args.channel, payload)
+        if entity_id is None:
+            print(f"[{label}] assign did not succeed; stopping the sequence")
             break
-    report_return_codes(shim, sr)
+        assigned[label] = entity_id
+        print(f"[{label}] entity id 0x{entity_id:02x} assigned "
+              f"(host_writes={len(shim.host_writes)})")
+
+    if assigned:
+        print("[mainloop] assigned: " +
+              ", ".join(f"{k}=0x{v:02x}" for k, v in assigned.items()))
 
     print(f"[mainloop] done: host_writes={len(shim.host_writes)}")
     if shim.log and shim.host_writes:
@@ -1089,10 +1142,12 @@ def main() -> int:
                         default=CARDTYPE_DIVASRV_P_30M_PCI,
                         help="CARDTYPE_* number selecting the combifile's "
                              "required download set (23 = PRI 30M PCI)")
-    parser.add_argument("--entity", choices=("sig", "nl"), default="sig",
-                        help="which entity the --mainloop ASSIGN targets: the "
-                             "signalling entity (DSIG_ID, carries the CAI) or "
-                             "the network layer (NL_ID, carries LLI/LLC/DLC)")
+    parser.add_argument("--entity", choices=("sig", "nl", "both"),
+                        default="both",
+                        help="which entities --mainloop assigns: the signalling "
+                             "entity (DSIG_ID, carries the CAI), the network "
+                             "layer (NL_ID, carries LLI/LLC/DLC), or both in "
+                             "the driver's order (default)")
     parser.add_argument("--dsp-pump", type=int, default=256,
                         help="MIPS instructions between DSP time slices during "
                              "--mainloop; the DSPs must run in line with the "
