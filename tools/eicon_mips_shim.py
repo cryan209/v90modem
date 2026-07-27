@@ -113,7 +113,7 @@ RC_OK = 0xff        # command accepted
 REQ_SIZE = 0x120    # next(2)+Req(1)+ReqId(1)+ReqCh(1)+Res1(1)+Ref(2)+Res[8]+XBuffer(2+270)
 REQ_NEXT = 0x00     # word: offset of next free REQ in B[]
 REQ_REQ = 0x02      # byte: request code (ASSIGN=0x01, etc.)
-REQ_REQID = 0x03    # byte: entity ID (NL_ID=0x01, etc.)
+REQ_REQID = 0x03    # byte: global entity id (DSIG_ID, NL_ID, ...)
 REQ_REQCH = 0x04    # byte: channel number
 REQ_XBUFFER = 0x10  # PBUFFER: word length + byte[270] data
 REQ_XDATA = 0x12    # start of the 270-byte data payload
@@ -127,8 +127,28 @@ TASK_ID = 0x80    # dynamic user tasks
 MAN_ID = 0xe0     # management
 REMOVE = 0x04
 
-# DSP CAI modem hardware types (from kernel/mdm_msg.h).
+# DSP CAI modem hardware types (kernel/mdm_msg.h).  add_b1()'s resource[]
+# table maps B1 protocol 7/8 (MODEM_ALL_NEGOTIATE / MODEM_ASYNC) to 17 and
+# protocol 9 (MODEM_SYNC_HDLC) to 18, so a modem call's B1 resource is one
+# of these.
 DSP_CAI_HARDWARE_MODEM_ASYNC = 0x11
+DSP_CAI_HARDWARE_MODEM_SYNC = 0x12
+
+# IDI parameter codes (kernel/pc.h).
+IDI_BC = 0x04     # bearer capability
+IDI_CAI = 0x10    # call identity: the B1/DSP configuration
+IDI_LLI = 0x19    # logical link id
+IDI_DLC = 0x20    # data link layer configuration
+IDI_UID = 0x2d    # user id
+IDI_LLC = 0x7c    # low layer compatibility
+
+# DLC modem protocol negotiation flags (kernel/mdm_msg.h).
+DLC_MODEMPROT_DISABLE_V42_V42BIS = 0x01
+DLC_MODEMPROT_DISABLE_MNP_MNP5 = 0x02
+DLC_MODEMPROT_REQUIRE_PROTOCOL = 0x04
+DLC_MODEMPROT_DISABLE_V42_DETECT = 0x08
+DLC_MODEMPROT_DISABLE_COMPRESSION = 0x10
+DLC_MODEMPROT_DISABLE_SDLC = 0x40
 
 # The protocol image sets $gp = 0x8010.0000 - 0x5c4b = 0x800fa3b5 at its entry
 # (file 0x4774/0x4764c).  All gp-relative globals live off this value: the
@@ -786,6 +806,71 @@ def report_dsp_boot(shim: "MipsShim", cycles: int = 200000) -> int:
     return acked
 
 
+def idi_parameters(*params: "tuple[int, bytes]") -> bytes:
+    """Encode an IDI request payload the way add_ie() (message.c) does.
+
+    Each parameter is a {code, length, data} triple and the list ends with a
+    single zero code byte — add_ie() writes a terminating 0 after every
+    parameter and backs over it when the next one is appended.
+    """
+    out = bytearray()
+    for code, data in params:
+        out += bytes((code, len(data)))
+        out += data
+    out.append(0)
+    return bytes(out)
+
+
+def modem_cai(max_bit_rate: int = 56000,
+              b1_resource: int = DSP_CAI_HARDWARE_MODEM_ASYNC,
+              b1_options: int = 0) -> bytes:
+    """The 26-byte CAI add_b1() builds for a modem B1 protocol.
+
+    Offsets follow the driver's cai[] array, whose [0] is the length byte
+    add_p() strips off, so data[i] here is the driver's cai[i+1].
+    """
+    cai = bytearray(26)
+    cai[0] = b1_resource & 0xFF          # cai[1]: B1 resource, low
+    cai[1] = (b1_resource >> 8) & 0xFF   # cai[2]: B1 resource, high
+    cai[2] = 0                           # cai[3]: async framing (8N1)
+    cai[3] = b1_options                  # cai[4]: B1 options
+    cai[6] = 0                           # cai[7]: line taking options
+    cai[7] = 0                           # cai[8]: modem negotiation options
+    struct.pack_into("<H", cai, 12, 0)             # cai[13]: min Tx speed
+    struct.pack_into("<H", cai, 14, max_bit_rate)  # cai[15]: max Tx speed
+    struct.pack_into("<H", cai, 16, 0)             # cai[17]: min Rx speed
+    struct.pack_into("<H", cai, 18, max_bit_rate)  # cai[19]: max Rx speed
+    return bytes(cai)
+
+
+def modem_sig_assign_payload(max_bit_rate: int = 56000) -> bytes:
+    """Signalling-entity ASSIGN payload: the CAI, as add_b1() attaches it."""
+    return idi_parameters((IDI_CAI, modem_cai(max_bit_rate)),
+                          (IDI_UID, b"Capi20"))
+
+
+def modem_nl_assign_payload(max_data_length: int = 1024,
+                            answering: bool = True) -> bytes:
+    """Network-layer ASSIGN payload, as add_modem_b23() builds it.
+
+    LLI/LLC/DLC — not a CAI: the CAI belongs to the signalling entity.  This
+    is the plain B2_TRANSPARENT branch (no error correction / compression
+    negotiation block).
+    """
+    lli = bytes((1,))                            # driver lli[1]
+    llc = bytes((9 if answering else 10, 4))     # V42_IN / V42, L3 transparent
+    dlc = bytearray(struct.pack("<H", max_data_length))
+    dlc += bytes((3,     # Addr A
+                  1,     # Addr B
+                  7,     # modulo mode
+                  7,     # window size
+                  0, 0,  # XID length
+                  DLC_MODEMPROT_DISABLE_V42_V42BIS
+                  | DLC_MODEMPROT_DISABLE_MNP_MNP5
+                  | DLC_MODEMPROT_DISABLE_SDLC))
+    return idi_parameters((IDI_LLI, lli), (IDI_LLC, llc), (IDI_DLC, bytes(dlc)))
+
+
 def report_return_codes(shim: "MipsShim", sr: int, limit: int = 8) -> None:
     """Print the return codes the firmware queued for the host.
 
@@ -907,17 +992,19 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     #     at B[NextReq], advance NextReq to REQ->next, bump ReqInput.
     sig = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_Signature, 2))[0]
     next_req = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextReq, 2))[0]
-    cai = bytearray(26)
-    cai[0] = 25; cai[1] = DSP_CAI_HARDWARE_MODEM_ASYNC; cai[8] = 0x04
-    struct.pack_into("<H", cai, 15, 56000)
-    struct.pack_into("<H", cai, 19, 56000)
+    if args.entity == "nl":
+        req_id = NL_ID
+        payload = modem_nl_assign_payload()
+    else:
+        req_id = DSIG_ID
+        payload = modem_sig_assign_payload()
     rb = sr + PR_B + next_req
     req_next = struct.unpack_from("<H", shim.uc.mem_read(rb + REQ_NEXT, 2))[0]
     shim.write8(rb + REQ_REQ, ASSIGN)
-    shim.write8(rb + REQ_REQID, NL_ID)
+    shim.write8(rb + REQ_REQID, req_id)
     shim.write8(rb + REQ_REQCH, args.channel)
-    shim.write16(rb + REQ_XBUFFER, len(cai))
-    shim.uc.mem_write(rb + REQ_XDATA, bytes(cai))
+    shim.write16(rb + REQ_XBUFFER, len(payload))
+    shim.uc.mem_write(rb + REQ_XDATA, payload)
     shim.write16(sr + PR_NextReq, req_next)
     # The main loop treats (ReqOutput - ReqInput) & 0xff == 0x20 as empty
     # (0x80027ae4) and 0x20 - that difference as the free-slot count
@@ -928,9 +1015,11 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     shim.write8(sr + PR_ReqInput, (req_in + 1) & 0xff)
     read_off = struct.unpack_from("<H",
         shim.uc.mem_read((gp + 0x5e99) & 0x1fffffff, 2))[0]
-    print(f"[mainloop] ASSIGN posted at B[0x{next_req:04x}]: Sig=0x{sig:04x} "
-          f"NextReq->0x{req_next:04x} ReqInput {req_in}->{(req_in + 1) & 0xff} "
-          f"ReqOutput={req_out} MIPS read offset=0x{read_off:04x}")
+    print(f"[mainloop] ASSIGN posted at B[0x{next_req:04x}]: Id=0x{req_id:02x} "
+          f"({args.entity}) payload={payload.hex()}")
+    print(f"[mainloop]   Sig=0x{sig:04x} NextReq->0x{req_next:04x} "
+          f"ReqInput {req_in}->{(req_in + 1) & 0xff} ReqOutput={req_out} "
+          f"MIPS read offset=0x{read_off:04x}")
 
     # 4. Run the main loop.
     for i in range(args.words if args.words > 0 else 50):
@@ -994,6 +1083,10 @@ def main() -> int:
                         default=CARDTYPE_DIVASRV_P_30M_PCI,
                         help="CARDTYPE_* number selecting the combifile's "
                              "required download set (23 = PRI 30M PCI)")
+    parser.add_argument("--entity", choices=("sig", "nl"), default="sig",
+                        help="which entity the --mainloop ASSIGN targets: the "
+                             "signalling entity (DSIG_ID, carries the CAI) or "
+                             "the network layer (NL_ID, carries LLI/LLC/DLC)")
     parser.add_argument("--dsp-pump", type=int, default=256,
                         help="MIPS instructions between DSP time slices during "
                              "--mainloop; the DSPs must run in line with the "

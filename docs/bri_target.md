@@ -266,15 +266,63 @@ iteration:
 for the validator's handshake to complete within one call, and the IDMA boot
 hold makes that safe.
 
-### Next: no return code yet
+### The ASSIGN payload, checked against the driver
 
-`RcOutput` stays 0, so the assign has been accepted but has not completed —
-and there are still no host writes, so the DSP-side work has not started. The
-RC path is `0x80029774` (called from `0x80027d94`), which walks the queued
-entities and posts an RC at `B[NextRc]`. Whether the assign is waiting on
-something else or the CAI payload is wrong is the next thing to check; the
-CAI in `run_mainloop` is a hand-built guess and should be compared against
-`add_modem_b23()` in `kernel/message.c`.
+The hand-built CAI was wrong in three ways, and `add_modem_b23()` turned out
+not to be where a CAI comes from at all.
+
+**Framing.** An IDI request payload is a list of `{code, length, data}`
+triples with a single zero code byte terminating it — `add_ie()`
+(`kernel/message.c`) writes a `0` after each parameter and backs over it when
+the next is appended. The shim was writing a bare 26-byte blob with no code,
+no length and no terminator.
+
+**Wrong entity.** `add_modem_b23()` builds **LLI/LLC/DLC**, not a CAI, and
+those go on the *network-layer* ASSIGN (`nl_req_ncci(plci, ASSIGN, 0)`). The
+CAI is built by `add_b1()` and rides on the *signalling* ASSIGN
+(`sig_req(plci, ASSIGN, DSIG_ID)`). The driver sends the signalling ASSIGN
+first.
+
+**Length.** `add_b1()` sets `cai[0] = 26` for a modem B1 protocol; the shim
+had 25.
+
+The CAI *content* was largely right. `cai[1] = 0x11` is correct — `add_b1()`'s
+`resource[] = {5,9,13,12,16,39,9,17,17,18}` maps B1 protocol 7/8
+(`B1_MODEM_ALL_NEGOTIATE` / `B1_MODEM_ASYNC`) to 17 = `DSP_CAI_HARDWARE_MODEM_ASYNC`
+— and the Tx/Rx speed words were already at the right offsets (`cai[15]` /
+`cai[19]`, with the minima at `cai[13]` / `cai[17]`).
+
+`idi_parameters()`, `modem_cai()`, `modem_sig_assign_payload()` and
+`modem_nl_assign_payload()` now build both, selected by `--entity`:
+
+```
+sig: 10 1a <26-byte CAI> 2d 06 "Capi20" 00
+nl:  19 01 01 · 7c 02 09 04 · 20 09 0004 03 01 07 07 0000 43 · 00
+```
+
+The NL payload decodes as MaxDataLength 1024, Addr A 3, Addr B 1, modulo 7,
+window 7, no XID, and negotiation flags `0x43`
+(`DISABLE_V42_V42BIS | DISABLE_MNP_MNP5 | DISABLE_SDLC`) — the plain
+`B2_TRANSPARENT` branch of `add_modem_b23()`. LLC `{9, 4}` is V42_IN with L3
+transparent, i.e. the answering side.
+
+### Next: still no return code
+
+Correct framing did not by itself produce one, so the payload was not the
+blocker. Both entities behave the same: the request is consumed and
+acknowledged on the first iteration (`ReqOutput` 32 -> 33) but `RcOutput`
+stays 0 over 200 iterations, and there are still no host writes.
+
+`RcOutput` is genuinely card-owned — `pr_rc()` in `kernel/di.c` reads it as
+the count of pending RCs, walks the chain from `NextRc`, and clears it — so 0
+means no RC has been produced rather than one being missed. An ASSIGN must be
+answered with an `ASSIGN_RC` (0xe0..0xef) carrying the assigned local id.
+
+Worth checking next: `NextRc` is 0 while `NextReq` (0x03e0) and `NextInd`
+(0x27e0) are firmware-initialised, so it is not clear whether B[0] is a
+genuine RC chain head or an uninitialised pointer. If the host is supposed to
+build the RC/IND chains, that would explain an entity that accepts a request
+but can never answer it.
 
 ## Why `.2qm` is still expensive
 
