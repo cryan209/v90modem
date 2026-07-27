@@ -125,22 +125,76 @@ So the pattern resembles `dsp_check_presence`, but it goes through the
 firmware's command/wait machinery rather than raw IDMA, and it needs the DSP
 side to actually run and answer.
 
-Two ways forward, in order of preference:
+### Resolved: the DSPs answer it
 
-1. **Make the emulated ADSP answer the handshake.** The shim's
-   `host_write`/`host_read` hooks are function-level (`0x80082950` /
-   `0x80082920`) and ignore `a0` — the register block — so all 30 DSPs
-   already alias onto the single emulated ADSP. If one boot handshake
-   completes, all 30 iterations complete. This is the honest path and it is
-   what a real single-DSP call would exercise.
-2. **Short-circuit the validator** by forcing `0x80082130` to return 0.
-   Quick, but it skips whatever per-DSP state the validator establishes
-   (`+0x108`/`+0x110` counters on the card object, the `0x1acb`/`0x1acf`
-   gp-relative masks cleared per DSP index) and that state is likely read
-   later during assign.
+`0x800a77e0` is not just a probe — it is a full kernel download followed by
+an alive check. It writes `0x5a5a` to the download's symbol 0, streams the
+DSP kernel in through `0x80086af8`, releases the core, then polls that word
+for `0xa5a5`. Getting the emulated DSPs to answer took four fixes:
 
-The DSP count is only reachable as a blocker at step 1, and only if the
-single emulated DSP cannot be made to answer 30 times.
+**1. The IDMA destination-type bit was inverted.** Bit 14 of the IDMA
+address selects 16-bit data memory when set and 24-bit program memory when
+clear — see the comment in `adsp2181_idma_data_write` for the three
+independent proofs in the firmware and combifile. The emulator had it the
+other way round, which is also why a single PM write previously needed a
+commit-on-address-change workaround to make the DSP presence check pass.
+`symbol_host_address` in the shim now applies the same rule as the
+firmware's resolver, and the harness call sites that hand a bare DM address
+to the host port OR in `0x4000`.
+
+**2. The shim hooked the wrong register region.** The card init computes its
+own DSP register bases (`0xbc000800 + row + index*8`, kseg1 for physical
+`0x1c000000`); the shim's hook was still at `0x380000` from the earlier
+hand-synthesized assign path, so the bulk transfer helper's writes went to
+a scratch page and its read-back verify failed.
+
+**3. The DSP must be held for the download.** ADSP-2181 IDMA boot
+(BMODE=1, MMAP=0): "Program execution is held off until on-chip program
+memory location 0 is written to." The Eicon download streams from PM
+`0x0001` up and releases the core with a final write to PM 0.
+`adsp2181_set_idma_boot_hold` models this; a core left running executes its
+own half-replaced image and corrupts the transfer, which the download's own
+read-back verify catches. Any later PM write re-arms the hold, since that
+means a new code download is starting; data-memory writes do not, so
+mailboxes and command rings still reach a running DSP.
+
+**4. One emulated core per DSP.** All 30 register blocks previously aliased
+onto a single ADSP, so each download landed in the previous DSP's running
+image. `MipsShim.core_for` now creates a core per register block (~350 KB
+each, so 30 is free), each held in IDMA boot mode until its own download
+completes.
+
+With those in place `--mainloop` reports:
+
+```
+[dsp] 31 cores: 29 answered the boot handshake with 0xa5a5, 2 still held (no download)
+```
+
+Every DSP the firmware downloads to boots from its own downloaded kernel and
+writes `0xa5a500` to PM `0x3fff` — the exact word `0x800a78d0` polls for.
+The transfers are validated by the firmware itself: all 36 DM blocks and the
+PM blocks pass its read-back verify (`0x80082a38` for DM, `0x80082b8c` for
+the 24-bit PM form).
+
+### Still open: running the DSPs during init
+
+`--dsp-pump N` interleaves DSP execution with the MIPS, and with it the run
+crashes: the MIPS wild-jumps through a corrupted stack frame at
+`0x800b1b74` and the process takes SIGSEGV, which points at a memory-safety
+bug in the emulator reachable only from these downloaded kernels (running
+each core on its own for 200k cycles after the download is clean). Deferring
+execution around IDMA writes and running only the actively addressed core
+both fail to avoid it, so it is not simply a partial-image effect. Running
+it under AddressSanitizer is the next step.
+
+Until then `--mainloop` holds the DSPs for the download and runs them
+afterwards (`--dsp-pump 0`, the default), so the handshake acknowledgement
+is produced after the validator's in-line poll has already given up. That
+poll is `0x3e7` retries with no host-side delay, so the remaining work is
+making the DSPs runnable *during* the poll.
+
+The DSP count never became a blocker: 30 cores are cheap, and the validator
+handshakes them one at a time.
 
 ## Why `.2qm` is still expensive
 

@@ -142,6 +142,9 @@ struct adsp2181
 	UINT16		idma_addr;
 	UINT16		idma_cache;
 	UINT8		idma_offs;
+	UINT8		idma_pending_write;
+	UINT8		idma_boot_hold;
+	UINT8		idma_boot_mode;
 
 	/* interrupt handling */
 	UINT16		imask;
@@ -1119,7 +1122,18 @@ void adsp2181_reset(adsp2181_t *a)
     memset(a->irq_state, 0, sizeof(a->irq_state));
     memset(a->irq_latch, 0, sizeof(a->irq_latch));
 }
-int adsp2181_run(adsp2181_t *a, int cycles) { if (!a || cycles<=0) return 0; a->icount=cycles; execute(a); return cycles-a->icount; }
+int adsp2181_run(adsp2181_t *a, int cycles) { if (!a || cycles<=0 || a->idma_boot_hold) return 0; a->icount=cycles; execute(a); return cycles-a->icount; }
+/* Put the core in IDMA boot hold: it executes nothing until an IDMA write
+ * commits a word to program memory location 0, which starts it at PM 0.
+ * This is what keeps a DSP from running its own half-overwritten image
+ * while the host streams a download into it. */
+void adsp2181_set_idma_boot_hold(adsp2181_t *a, int on)
+{
+    if (!a) return;
+    a->idma_boot_hold = on != 0;
+    if (on) a->idma_boot_mode = 1;
+}
+int adsp2181_idma_boot_held(const adsp2181_t *a) { return a ? a->idma_boot_hold : 0; }
 void adsp2181_set_callbacks(adsp2181_t *a, adsp2181_rx_cb r, adsp2181_tx_cb t, adsp2181_timer_cb f) { a->sport_rx_callback=r; a->sport_tx_callback=t; a->timer_fired=f; }
 uint32_t *adsp2181_pm(adsp2181_t *a) { return a->program; }
 uint16_t *adsp2181_dm(adsp2181_t *a) { return a->data; }
@@ -1132,67 +1146,108 @@ uint16_t *adsp2181_dm_overlay(adsp2181_t *a, int overlay)
 {
     return a && overlay >= 1 && overlay <= 2 ? a->data_overlay[overlay - 1] : NULL;
 }
+/* IDMA address bit 14 is the ADSP-2181 "destination type" the datasheet
+ * describes ("a 14-bit address and 1-bit destination type"): 0 selects the
+ * 24-bit program memory, 1 selects the 16-bit data memory.
+ *
+ * Three independent facts in the shipping Eicon firmware fix this polarity:
+ *
+ *  - the host-port helpers (te_dmlt.pm 0x80082950 write / 0x80082920 read)
+ *    use the two-access form for addresses *below* 0x4000 and a single
+ *    access at or above it (both use `bnel`/`beqz` on `addr < 0x4000`), and
+ *    a 24-bit PM word is exactly what needs two 16-bit accesses.  The
+ *    unconditional 24-bit accessors at 0x80082974 / 0x80082994 confirm the
+ *    two-access form is `(hi << 8) | (lo & 0xff)`.
+ *  - the symbol resolver (0x800a6204) adds 0x4000 when the target memory
+ *    block's `memory_type & 1` is clear, and the combifile memory-block
+ *    tables give type 0 to the DM blocks (kernel block 0 @0x0000, block 2
+ *    @0x2f80) and type 1 to the PM blocks (block 1 @0x0900, block 3
+ *    @0x0580).  So DM gets the flag, PM does not.
+ *  - the same resolver's fixed-segment path adds 0x4000 for segments 0 and
+ *    2 and not for 1 and 3, matching those blocks' DM/PM split.
+ *
+ * A previous revision had this inverted, which is why a single PM write
+ * needed a commit-on-address-change workaround to make the DSP presence
+ * check pass: the check writes DM, and DM needs no workaround.
+ */
 void adsp2181_idma_addr_write(adsp2181_t *a, uint16_t address)
 {
-    /* If a PM data write is pending (one value written, pad byte not yet
-     * supplied), commit it as value<<8 before changing the address. Real
-     * ADSP-2181 IDMA hardware latches the word on the next address change;
-     * this matches the Eicon presence check (one data write, then a fresh
-     * address write, then a read-back that must see the value). */
-    if ((a->idma_addr & 0x4000) && a->idma_offs)
+    /* A PM word takes two data accesses.  If only the first *write* half
+     * has arrived, commit it as value<<8 before the address changes; the
+     * helper's second access supplies a zero pad byte anyway.  A dangling
+     * read half carries no data and must not write anything back. */
+    if (!(a->idma_addr & 0x4000) && a->idma_offs && a->idma_pending_write)
         WWORD_PGM(a, a->idma_addr & 0x3fff, (UINT32)a->idma_cache << 8);
-    a->idma_addr = address; a->idma_offs = 0;
+    a->idma_addr = address; a->idma_offs = 0; a->idma_pending_write = 0;
 }
 uint16_t adsp2181_idma_addr_read(const adsp2181_t *a) { return a->idma_addr; }
-/* The ground truth for IDMA address semantics is the Eicon MIPS host-port
- * helper (te_dmlt.pm runtime 0x80082950): it performs one 16-bit data
- * write for addresses below 0x4000 and two data writes (value, then a
- * zero pad byte) for addresses with bit 0x4000 set.  A 24-bit PM write
- * requires two IDMA data writes, so bit 0x4000 set selects PM, clear
- * selects DM.  The previous implementation had this inverted. */
 void adsp2181_idma_data_write(adsp2181_t *a, uint16_t value)
 {
     if (a->idma_addr & 0x4000) {
-        if (!a->idma_offs) { a->idma_cache = value; a->idma_offs = 1; }
-        else {
-            WWORD_PGM(a, a->idma_addr++ & 0x3fff, (a->idma_cache << 8) | (value & 0xff));
-            a->idma_offs = 0;
-        }
-    } else {
         WWORD_DATA(a, a->idma_addr++ & 0x3fff, value);
+    } else if (!a->idma_offs) {
+        a->idma_cache = value; a->idma_offs = 1; a->idma_pending_write = 1;
+    } else {
+        uint16_t pm_addr = a->idma_addr & 0x3fff;
+        WWORD_PGM(a, pm_addr, (a->idma_cache << 8) | (value & 0xff));
+        a->idma_addr++;
+        a->idma_offs = 0; a->idma_pending_write = 0;
+        /* IDMA boot (BMODE=1, MMAP=0): "Program execution is held off until
+         * on-chip program memory location 0 is written to."  The Eicon
+         * download streams the image from PM 0x0001 up and releases the core
+         * with a final write to PM 0.
+         *
+         * Any other program-memory write re-arms the hold: it means a code
+         * download is under way, and a core executing its own half-replaced
+         * image corrupts the transfer and then runs wild.  Data memory is
+         * left alone, so mailboxes and command rings can be written to a
+         * running DSP as usual.
+         *
+         * Only cores put in IDMA boot mode behave this way; a core whose
+         * image was staged directly (the single-DSP harnesses) keeps
+         * running through host PM writes. */
+        if (a->idma_boot_mode) {
+            if (pm_addr == 0) {
+                if (a->idma_boot_hold) {
+                    a->idma_boot_hold = 0;
+                    a->pc = 0; a->ppc = 0xffffffff;
+                }
+            } else {
+                a->idma_boot_hold = 1;
+            }
+        }
     }
 }
 uint16_t adsp2181_idma_data_read(adsp2181_t *a)
 {
     uint16_t result;
     if (a->idma_addr & 0x4000) {
-        if (!a->idma_offs) {
-            result = RWORD_PGM(a, a->idma_addr & 0x3fff) >> 8;
-            a->idma_offs = 1;
-        } else {
-            result = RWORD_PGM(a, a->idma_addr++ & 0x3fff) & 0xff;
-            a->idma_offs = 0;
-        }
-    } else {
         result = RWORD_DATA(a, a->idma_addr++ & 0x3fff);
+    } else if (!a->idma_offs) {
+        result = RWORD_PGM(a, a->idma_addr & 0x3fff) >> 8;
+        a->idma_offs = 1; a->idma_pending_write = 0;
+    } else {
+        result = RWORD_PGM(a, a->idma_addr++ & 0x3fff) & 0xff;
+        a->idma_offs = 0;
     }
     return result;
 }
-/* Single host-port word write with the Eicon MIPS helper semantics:
- * addr < 0x4000 writes one DM word; addr >= 0x4000 writes one PM word
- * stored as value<<8 (the helper's second pad write supplies zero). */
+/* Whole-word host-port access with the Eicon helper semantics: bit 14 set
+ * is one 16-bit DM access; bit 14 clear is a 24-bit PM word carried by two
+ * accesses, of which the helper supplies the value first and a zero pad
+ * byte second. */
 void adsp2181_host_write(adsp2181_t *a, uint16_t addr, uint16_t value)
 {
     if (addr & 0x4000)
-        WWORD_PGM(a, addr & 0x3fff, (UINT32)value << 8);
-    else
         WWORD_DATA(a, addr & 0x3fff, value);
+    else
+        WWORD_PGM(a, addr & 0x3fff, (UINT32)value << 8);
 }
 uint16_t adsp2181_host_read(adsp2181_t *a, uint16_t addr)
 {
     if (addr & 0x4000)
-        return (uint16_t)(RWORD_PGM(a, addr & 0x3fff) >> 8);
-    return RWORD_DATA(a, addr & 0x3fff);
+        return RWORD_DATA(a, addr & 0x3fff);
+    return (uint16_t)(RWORD_PGM(a, addr & 0x3fff) >> 8);
 }
 void adsp2181_watch_dm(adsp2181_t *a, uint16_t addr, int on)
 {

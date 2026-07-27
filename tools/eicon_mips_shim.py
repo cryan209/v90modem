@@ -144,6 +144,9 @@ ADSP.adsp2181_idma_addr_write.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
 ADSP.adsp2181_idma_data_write.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
 ADSP.adsp2181_idma_data_read.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_idma_data_read.restype = ctypes.c_uint16
+ADSP.adsp2181_set_idma_boot_hold.argtypes = [ctypes.c_void_p, ctypes.c_int]
+ADSP.adsp2181_idma_boot_held.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_idma_boot_held.restype = ctypes.c_int
 ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
@@ -196,6 +199,25 @@ class MipsShim:
         self.stub_returns = 0
         # trace printf pointer lives at gp + 0x1a7b; gp is set per-run
         self.host_writes: list[tuple[int, int]] = []
+        # MIPS instructions between ADSP time slices (0 disables the pump).
+        # A DSP that runs while the MIPS is streaming an IDMA download will
+        # execute the half-replaced image and clobber it, so the download
+        # paths hold the core instead (see adsp2181_set_idma_boot_hold).
+        self.pump_every = 256
+        # One emulated ADSP per DSP register block (see core_for).  Off by
+        # default so the single-DSP harness paths keep using self.cpu.
+        self.multi_dsp = False
+        self.cores: dict[int, object] = {}
+        self._idma_addrs: dict[int, int] = {}
+        # MIPS instruction count of the last IDMA *write* to each core.  A
+        # core is not run while a download is streaming into it: the real
+        # card holds the DSP in reset for the transfer, and a core executing
+        # its own half-replaced image corrupts it (and then runs wild).
+        # Reads do not defer execution, so the boot-handshake poll still
+        # lets the DSP it is polling make progress.
+        self._core_last_write: dict[int, int] = {}
+        self.dsp_write_quiet = 512
+        self._active_block = -1
         self._idma_addr = 0
         # Hook memory-mapped writes to the host register block.  The single
         # host_write helper (0x80082950) is intercepted at the function level
@@ -205,15 +227,21 @@ class MipsShim:
         from unicorn import UC_HOOK_MEM_WRITE, UC_HOOK_MEM_READ
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._hostreg_write,
                          begin=RAM_BASE + 0x5000, end=RAM_BASE + 0x5084)
-        # The firmware computes the DSP register base from DSPInfo:
-        # base = 0x80380000 (physical 0x380000) for DSPInfo=0x80.
-        # DSP ports: +0x80 = address (IDMA addr), +0x00 = data (IDMA data).
-        # Hook reads AND writes for the full 0x380000-0x390000 region.
-        self._dsp_base = 0x380000
+        # The card init (0x80081de0) builds the DSP register bases itself:
+        # 0xbc000800 + row_offset + dsp_index*8 for the 30 module DSPs, plus
+        # 0xbc000008 / 0xbc000020 for the two on-board ones.  kseg1 maps
+        # 0xbc000000 to physical 0x1c000000.  Within each block, +0x80 is the
+        # IDMA address port and +0x00 the (auto-incrementing) data port.
+        #
+        # All 30 blocks alias onto the one emulated ADSP: the port decode
+        # only looks at the low byte, so whichever DSP the firmware talks to
+        # reaches the same core.  That is what makes the 30-DSP card init
+        # work against a single emulated DSP.
+        self._dsp_base = 0x1c000000
         self.uc.hook_add(UC_HOOK_MEM_READ, self._dsp_read,
-                         begin=self._dsp_base, end=self._dsp_base + 0x10000)
+                         begin=self._dsp_base, end=self._dsp_base + 0x2000)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._dsp_write,
-                         begin=self._dsp_base, end=self._dsp_base + 0x10000)
+                         begin=self._dsp_base, end=self._dsp_base + 0x2000)
         self.uc.hook_add(UC_HOOK_CODE, self._hook)
         from unicorn import (UC_HOOK_MEM_FETCH_UNMAPPED,
                              UC_HOOK_MEM_READ_UNMAPPED,
@@ -250,46 +278,75 @@ class MipsShim:
                     val = val & 0xFFFF
             uc.reg_write(UC_MIPS_REG_0 + rt, val)
 
+    def core_for(self, block: int):
+        """The emulated DSP behind one host register block.
+
+        Each of the card's DSPs has its own 8-byte register block and its own
+        ADSP-2181, so they need separate cores: with a single shared core the
+        second DSP's download lands in the first DSP's running image.  Cores
+        are created on demand, held in IDMA boot mode until their own
+        download writes PM 0.  `block` may be a kseg address.
+        """
+        if not self.multi_dsp:
+            return self.cpu
+        block &= 0x1fffffff
+        self._active_block = block
+        core = self.cores.get(block)
+        if core is None:
+            core = ADSP.adsp2181_create()
+            ADSP.adsp2181_reset(core)
+            ADSP.adsp2181_set_idma_boot_hold(core, 1)
+            self.cores[block] = core
+            self._idma_addrs[block] = 0
+            if self.log:
+                print(f"[mips] new DSP core for register block 0x{block:08x}")
+        return core
+
+    def _dsp_ports(self, address):
+        """Split a DSP register access into (block base, port)."""
+        port = address & 0xFF
+        if port >= 0x80:
+            return address - 0x80, port
+        return address, port
+
     def _dsp_read(self, uc, access, address, size, value, user):
-        # Read from the DSP register region (physical 0x380000+).
-        # +0x80 offset = address port -> return IDMA address.
-        # +0x00 offset = data port -> return IDMA data (auto-increment).
-        off = address - self._dsp_base
-        port = off & 0xFF
+        # DSP register block: +0x80 = IDMA address port, +0x00 = data port.
+        block, port = self._dsp_ports(address)
         if port >= 0x80:
             # Address port reads are rare; let the auto-mapped zero page
             # return 0.
             return True
-        else:
-            # Data port read — return IDMA data and force it into the
-            # destination register so the presence check sees the value.
-            val = ADSP.adsp2181_idma_data_read(self.cpu)
-            if self.log:
-                tag = "PM" if self._idma_addr & 0x4000 else "DM"
-                print(f"[mips] dsp_read {tag} 0x{self._idma_addr & 0x7fff:04x} -> 0x{val:04x}")
-            # Patch the mapped page (fallback if Unicorn re-reads), and
-            # directly set the destination register.
-            uc.mem_write(address, struct.pack("<H", val))
-            self._set_load_result(uc, val, size)
-            return True
+        # Data port read — return IDMA data and force it into the
+        # destination register so the read-back verify sees the value.
+        val = ADSP.adsp2181_idma_data_read(self.core_for(block))
+        if self.log:
+            idma = self._idma_addrs.get(block & 0x1fffffff, self._idma_addr)
+            tag = "DM" if idma & 0x4000 else "PM"
+            print(f"[mips] dsp_read {tag} 0x{idma & 0x3fff:04x} -> 0x{val:04x}")
+        # Patch the mapped page (fallback if Unicorn re-reads), and
+        # directly set the destination register.
+        uc.mem_write(address, struct.pack("<H", val))
+        self._set_load_result(uc, val, size)
+        return True
 
     def _dsp_write(self, uc, access, address, size, value, user):
-        # Write to the DSP register region (physical 0x380000+).
-        # +0x80 offset = address port -> set IDMA address.
-        # +0x00 offset = data port -> write IDMA data (auto-increment).
-        off = address - self._dsp_base
-        port = off & 0xFF
+        block, port = self._dsp_ports(address)
+        core = self.core_for(block)
+        value &= 0xFFFF
         if port >= 0x80:
-            self._idma_addr = value & 0xFFFF
-            ADSP.adsp2181_idma_addr_write(self.cpu, value & 0xFFFF)
+            self._idma_addr = value
+            self._idma_addrs[block & 0x1fffffff] = value
+            ADSP.adsp2181_idma_addr_write(core, value)
             if self.log:
                 print(f"[mips] dsp_addr 0x{value:04x}")
         else:
-            ADSP.adsp2181_idma_data_write(self.cpu, value & 0xFFFF)
+            ADSP.adsp2181_idma_data_write(core, value)
+            self._core_last_write[block & 0x1fffffff] = self._insn_count
+            idma = self._idma_addrs.get(block & 0x1fffffff, self._idma_addr)
             if self.log:
-                tag = "PM" if self._idma_addr & 0x4000 else "DM"
-                print(f"[mips] dsp_write {tag} 0x{self._idma_addr & 0x7fff:04x} = 0x{value:04x}")
-            self.host_writes.append((self._idma_addr, value))
+                tag = "DM" if idma & 0x4000 else "PM"
+                print(f"[mips] dsp_write {tag} 0x{idma & 0x3fff:04x} = 0x{value:04x}")
+            self.host_writes.append((idma, value))
         return True
 
     def _hostreg_write(self, uc, access, address, size, value, user):
@@ -302,7 +359,7 @@ class MipsShim:
         elif off == 0x00:
             ADSP.adsp2181_idma_data_write(self.cpu, value & 0xFFFF)
             if self.log:
-                tag = "PM" if self._idma_addr & 0x4000 else "DM"
+                tag = "DM" if self._idma_addr & 0x4000 else "PM"
                 print(f"[mips] idma_write {tag} 0x{self._idma_addr & 0x7fff:04x} = 0x{value:04x}")
             self.host_writes.append((self._idma_addr, value))
         return True
@@ -341,29 +398,45 @@ class MipsShim:
         # the MIPS init hangs polling for a DSP boot-acknowledge that never
         # comes (the DSP never runs).
         self._insn_count = getattr(self, '_insn_count', 0) + 1
-        if self._insn_count % 256 == 0:
+        if self.pump_every and self._insn_count % self.pump_every == 0:
             # Strobe IRQE (irq 6) to wake the DSP foreground from IDLE so it
             # runs code the MIPS just downloaded and writes the boot-ack.
-            ADSP.adsp2181_set_irq(self.cpu, 6, 1)
-            ADSP.adsp2181_run(self.cpu, 2000)
-            ADSP.adsp2181_set_irq(self.cpu, 6, 0)
-            ADSP.adsp2181_run(self.cpu, 1000)
+            # Cores still in IDMA boot hold ignore the run and stay stopped.
+            if self.multi_dsp:
+                # Only the DSP the firmware is currently talking to runs: the
+                # card brings its DSPs up one at a time, and every other core
+                # is either still being downloaded into or waiting its turn.
+                block = self._active_block
+                core = self.cores.get(block)
+                quiet = (self._insn_count -
+                         self._core_last_write.get(block, -1 << 30))
+                runnable = [core] if core is not None and quiet > self.dsp_write_quiet else []
+            else:
+                runnable = [self.cpu]
+            for core in runnable:
+                ADSP.adsp2181_set_irq(core, 6, 1)
+                ADSP.adsp2181_run(core, 2000)
+                ADSP.adsp2181_set_irq(core, 6, 0)
+                ADSP.adsp2181_run(core, 1000)
         from unicorn.mips_const import (UC_MIPS_REG_PC, UC_MIPS_REG_RA,
-                                        UC_MIPS_REG_A1, UC_MIPS_REG_A2,
-                                        UC_MIPS_REG_V0)
+                                        UC_MIPS_REG_A0, UC_MIPS_REG_A1,
+                                        UC_MIPS_REG_A2, UC_MIPS_REG_V0)
         if address == HOST_WRITE:
+            a0 = uc.reg_read(UC_MIPS_REG_A0)
             a1 = uc.reg_read(UC_MIPS_REG_A1) & 0xFFFF
             a2 = uc.reg_read(UC_MIPS_REG_A2) & 0xFFFF
             if self.log:
-                print(f"[mips] host_write {a1:04x} = {a2:04x}")
+                print(f"[mips] host_write [0x{a0:08x}] {a1:04x} = {a2:04x}")
             self.host_writes.append((a1, a2))
-            ADSP.adsp2181_host_write(self.cpu, a1, a2)
+            ADSP.adsp2181_host_write(self.core_for(a0), a1, a2)
+            self._core_last_write[a0 & 0x1fffffff] = self._insn_count
             uc.reg_write(UC_MIPS_REG_PC, uc.reg_read(UC_MIPS_REG_RA))
         elif address == HOST_READ:
+            a0 = uc.reg_read(UC_MIPS_REG_A0)
             a1 = uc.reg_read(UC_MIPS_REG_A1) & 0xFFFF
-            value = ADSP.adsp2181_host_read(self.cpu, a1)
+            value = ADSP.adsp2181_host_read(self.core_for(a0), a1)
             if self.log:
-                print(f"[mips] host_read {a1:04x} -> {value:04x}")
+                print(f"[mips] host_read [0x{a0:08x}] {a1:04x} -> {value:04x}")
             uc.reg_write(UC_MIPS_REG_V0, value)
             uc.reg_write(UC_MIPS_REG_PC, uc.reg_read(UC_MIPS_REG_RA))
         elif address == STUB_VIRT:
@@ -423,12 +496,35 @@ class MipsShim:
         return virt_base
 
 
-def symbol_dm_address(metadata: dict, index: int) -> int:
+def symbol_address(metadata: dict, index: int) -> int:
+    """Resolve a download symbol to its bare DSP address (no IDMA type bit)."""
     symbol = metadata["symbols"][index]
-    if symbol["segment"] < 4:
+    segment = symbol["segment"]
+    if segment < 4:
         return symbol["offset"]
-    seg = next(s for s in metadata["segments"] if s["number"] == symbol["segment"])
+    seg = next(s for s in metadata["segments"] if s["number"] == segment)
     return seg["base"] + symbol["offset"]
+
+
+def symbol_host_address(metadata: dict, index: int) -> int:
+    """Resolve a download symbol to a host-port address, as 0x800a6204 does.
+
+    The firmware ORs in 0x4000 for data memory and leaves it clear for
+    program memory, which is the ADSP-2181 IDMA "destination type" bit.  For
+    the fixed segments 0-3 that split is by segment number (0/2 = DM, 1/3 =
+    PM, matching memory blocks 0-3); for relocatable segments it comes from
+    the target memory block's `memory_type & 1` (1 = PM).
+    """
+    symbol = metadata["symbols"][index]
+    segment = symbol["segment"]
+    if segment < 4:
+        is_pm = segment in (1, 3)
+        return symbol["offset"] | (0 if is_pm else 0x4000)
+    seg = next(s for s in metadata["segments"] if s["number"] == segment)
+    block = next(b for b in metadata["memory_blocks"]
+                 if b["number"] == seg["memory_block"])
+    is_pm = bool(block["type"] & 1)
+    return (seg["base"] + symbol["offset"]) | (0 if is_pm else 0x4000)
 
 
 def run_assign(shim: "MipsShim", args) -> None:
@@ -455,8 +551,8 @@ def run_assign(shim: "MipsShim", args) -> None:
     """
     import json
     metadata = json.loads((args.tikrnl / "metadata.json").read_text())
-    write13 = symbol_dm_address(metadata, 13)  # 0x3310 host->TIKRNL mailbox
-    write14 = symbol_dm_address(metadata, 14)  # 0x3338 TIKRNL->host mailbox
+    write13 = symbol_host_address(metadata, 13)  # 0x3310 host->TIKRNL mailbox
+    write14 = symbol_host_address(metadata, 14)  # 0x3338 TIKRNL->host mailbox
 
     # Guest RAM layout (RAM_VIRT + offset; API uses physical = RAM_BASE + off):
     #   0x4000 assign request (s3)        0x60 bytes
@@ -538,18 +634,20 @@ def run_assign(shim: "MipsShim", args) -> None:
     # Database ring descriptor in the channel state (s6/s3 = s1 = base+0x200).
     # db_ring_commit (0x8008dd14) reads the DSP producer via host_read at
     # *(s3+0xc)+1, then validates (producer - base) < length before writing.
-    #   s3+0x0c = producer DM address - 1 (host_read reads DM at s3+0xc+1)
-    #   s3+0x10 (byte) = PM flag (nonzero = PM ring via +0x4000 host select)
-    #   s3+0x12 = ring base address;  s3+0x14 = ring length
-    # The TIKRNL symbol-13 command ring is in PM at 0x3327 (16 words) with its
+    #   s3+0x0c = producer address - 1, already carrying the IDMA type bit
+    #             (db_ring_commit host_reads s3+0xc+1 with no further masking)
+    #   s3+0x10 (byte) = ring memory select: zero makes 0x8008dda8 OR in
+    #             0x4000, i.e. a DM ring; nonzero leaves the address in PM
+    #   s3+0x12 = bare ring base address;  s3+0x14 = ring length
+    # The TIKRNL symbol-13 command ring is in DM at 0x3327 (16 words) with its
     # producer pointer at DM 0x3315 (initialised to 0x3327 by the TIKRNL
     # initializer at PM 0x672).  The switch-on database commit targets this
     # ring: the DSP's TIKRNL consumer polls DM 0x3315/0x3316 and processes
-    # records from PM 0x3327.
+    # records from DM 0x3327.
     ring_v = base_v + 0x200
-    shim.write16(ring_v + 0x0c, write13 + 0x05 - 1)  # producer DM addr - 1 = 0x3314
-    shim.write8(ring_v + 0x10, 0x00)                  # PM flag CLEAR -> PM ring (+0x4000)
-    shim.write16(ring_v + 0x12, write13 + 0x17)       # ring base = 0x3327
+    shim.write16(ring_v + 0x0c, write13 + 0x05 - 1)  # producer addr - 1 = 0x7314
+    shim.write8(ring_v + 0x10, 0x00)                  # zero -> DM ring (+0x4000)
+    shim.write16(ring_v + 0x12, symbol_address(metadata, 13) + 0x17)  # bare 0x3327
     shim.write16(ring_v + 0x14, 0x0010)               # ring length (16)
 
     # Assign request (s3): +0 -> base, +4 -> resource, +8 = 0, +0x18 = channel.
@@ -590,7 +688,7 @@ def run_assign(shim: "MipsShim", args) -> None:
         print("  db buffer @0x80331c12 is empty (db_record_append produced nothing)")
     if shim.log and shim.host_writes:
         for addr, val in shim.host_writes[:64]:
-            tag = "PM" if addr & 0x4000 else "DM"
+            tag = "DM" if addr & 0x4000 else "PM"
             print(f"  host_write {tag} 0x{addr & 0x7fff:04x} = 0x{val:04x}")
 
 
@@ -621,6 +719,39 @@ def stage_dsp_code(shim: "MipsShim", args) -> int:
     return base
 
 
+DSP_BOOT_MAILBOX = 0x3FFF   # kernel symbol 0: PM 0x3fff
+DSP_BOOT_PROBE = 0x5A5A     # written by 0x800a77e0 before the download
+DSP_BOOT_ACK = 0xA5A5       # polled for by 0x800a78d0 afterwards
+
+
+def report_dsp_boot(shim: "MipsShim", cycles: int = 200000) -> int:
+    """Run each downloaded DSP and report the boot handshake result.
+
+    The validator (0x80082130 -> 0x800a77e0) writes 0x5a5a to the download's
+    symbol 0, streams the kernel in, releases the core, then polls that word
+    for 0xa5a5.  This runs the cores the firmware has finished downloading
+    and reports how many produce the acknowledgement, which is what the
+    handshake is waiting on.
+    """
+    if not shim.cores:
+        return 0
+    held = acked = 0
+    for block, core in sorted(shim.cores.items()):
+        if ADSP.adsp2181_idma_boot_held(core):
+            held += 1
+            continue
+        ADSP.adsp2181_run(core, cycles)
+        if ADSP.adsp2181_host_read(core, DSP_BOOT_MAILBOX) == DSP_BOOT_ACK:
+            acked += 1
+        elif shim.log:
+            pm = ADSP.adsp2181_pm(core)
+            print(f"[dsp] block 0x{block:08x} no ack: "
+                  f"pm[0x{DSP_BOOT_MAILBOX:04x}]=0x{pm[DSP_BOOT_MAILBOX]:06x}")
+    print(f"[dsp] {len(shim.cores)} cores: {acked} answered the boot handshake "
+          f"with 0x{DSP_BOOT_ACK:04x}, {held} still held (no download)")
+    return acked
+
+
 def run_mainloop(shim: "MipsShim", args) -> None:
     """Drive the MIPS via its native PR_RAM request queue (the real host
     interface).  Maps shared RAM, runs the MIPS init, sets up the PR_RAM
@@ -632,8 +763,8 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     """
     import json
     metadata = json.loads((args.tikrnl / "metadata.json").read_text())
-    write13 = symbol_dm_address(metadata, 13)
-    write14 = symbol_dm_address(metadata, 14)
+    write13 = symbol_host_address(metadata, 13)
+    write14 = symbol_host_address(metadata, 14)
 
     gp = GP
     sp = STACK_TOP
@@ -643,6 +774,17 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     #    firmware entry reads the count at DspCodeBaseAddr and the descriptor
     #    table right after it; with no image the count is 0, every DSP object
     #    is built with an empty code table and no overlay can be assigned.
+    # Each DSP register block gets its own emulated ADSP, all held in IDMA
+    # boot mode: the firmware downloads a kernel into every one of them and
+    # a shared core would see each download land in the previous DSP's
+    # running image.
+    shim.multi_dsp = True
+    # Downloads dominate this path, and the card holds a DSP for the whole
+    # transfer.  Interleaving DSP execution with it is still unstable (a core
+    # that starts on a partial image runs wild), so the pump is off by
+    # default here; --dsp-pump N turns it back on.
+    shim.pump_every = args.dsp_pump
+
     if args.dsp_combifile is not None:
         stage_dsp_code(shim, args)
 
@@ -718,6 +860,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         shim.uc.mem_read((gp + 0x5e81) & 0x1fffffff, 2))[0]
     print(f"[mainloop] after init: gp+0x5e81={init_state:#06x} "
           f"gp+0x5eb9={dsp_table:#06x}")
+    report_dsp_boot(shim)
 
     # 4. Run the main loop.
     for i in range(args.words if args.words > 0 else 50):
@@ -746,7 +889,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     print(f"[mainloop] done: host_writes={len(shim.host_writes)}")
     if shim.log and shim.host_writes:
         for addr, val in shim.host_writes[:32]:
-            tag = "PM" if addr & 0x4000 else "DM"
+            tag = "DM" if addr & 0x4000 else "PM"
             print(f"  host_write {tag} 0x{addr & 0x7fff:04x} = 0x{val:04x}")
 
 
@@ -780,6 +923,10 @@ def main() -> int:
                         default=CARDTYPE_DIVASRV_P_30M_PCI,
                         help="CARDTYPE_* number selecting the combifile's "
                              "required download set (23 = PRI 30M PCI)")
+    parser.add_argument("--dsp-pump", type=int, default=0,
+                        help="MIPS instructions between DSP time slices during "
+                             "--mainloop (0 = hold the DSPs for the download, "
+                             "the default; they are run afterwards)")
     parser.add_argument("--dsp-code-base", type=lambda s: int(s, 0), default=None,
                         help="override DspCodeBaseAddr (default: the protocol "
                              "image's OFFS_PROTOCOL_END_ADDR)")
@@ -790,21 +937,30 @@ def main() -> int:
 
     cpu = ADSP.adsp2181_create()
     ADSP.adsp2181_reset(cpu)
-    load_pm_words(cpu, args.kernel / "pm.bin")
-    load_dm_words(cpu, args.kernel / "dm.bin")
-    ADSP.adsp2181_run(cpu, 1000)  # boot to IDLE
-    # stage TIKRNL and run its initializer, as in eicon_adsp_run
-    pm = ADSP.adsp2181_pm(cpu)
-    dm = ADSP.adsp2181_dm(cpu)
-    for line in (args.tikrnl / "pm.words").read_text().splitlines():
-        a, v = line.split()
-        pm[int(a, 16)] = int(v, 16)
-    for line in (args.tikrnl / "dm.words").read_text().splitlines():
-        a, v = line.split()
-        dm[int(a, 16)] = int(v, 16)
-    ADSP.adsp2181_call(cpu, 0x672, 0x02A8)
-    ADSP.adsp2181_run(cpu, 1000000)
-    print(f"[adsp] staged: idle={ADSP.adsp2181_idle(cpu)}")
+    if args.mainloop:
+        # The firmware downloads the DSP's own kernel over IDMA, so nothing is
+        # pre-staged here.  Hold the core in IDMA boot mode until that
+        # download writes PM 0; a DSP left running would execute its
+        # half-replaced image and corrupt the transfer (the download's own
+        # read-back verify catches it).
+        ADSP.adsp2181_set_idma_boot_hold(cpu, 1)
+        print("[adsp] held in IDMA boot mode; firmware downloads the kernel")
+    else:
+        load_pm_words(cpu, args.kernel / "pm.bin")
+        load_dm_words(cpu, args.kernel / "dm.bin")
+        ADSP.adsp2181_run(cpu, 1000)  # boot to IDLE
+        # stage TIKRNL and run its initializer, as in eicon_adsp_run
+        pm = ADSP.adsp2181_pm(cpu)
+        dm = ADSP.adsp2181_dm(cpu)
+        for line in (args.tikrnl / "pm.words").read_text().splitlines():
+            a, v = line.split()
+            pm[int(a, 16)] = int(v, 16)
+        for line in (args.tikrnl / "dm.words").read_text().splitlines():
+            a, v = line.split()
+            dm[int(a, 16)] = int(v, 16)
+        ADSP.adsp2181_call(cpu, 0x672, 0x02A8)
+        ADSP.adsp2181_run(cpu, 1000000)
+        print(f"[adsp] staged: idle={ADSP.adsp2181_idle(cpu)}")
 
     shim = MipsShim(args.image, cpu, log=args.log)
 
@@ -825,7 +981,9 @@ def main() -> int:
     req = RAM_VIRT + 0x1000  # guest-visible pointer
     buf = bytearray(0x60)
     struct.pack_into("<II", buf, 0x00, 0xDEAD0000, 0xDEAD0004)  # host regs
-    struct.pack_into("<HH", buf, 0x08, 0x3310, 0x3338)  # symbol13/14 addrs
+    # symbol 13/14 mailbox addresses, in the form the firmware's own resolver
+    # (0x800a6204) produces: 0x4000 selects data memory.
+    struct.pack_into("<HH", buf, 0x08, 0x4000 | 0x3310, 0x4000 | 0x3338)
     buf[0x0C] = 1                     # active
     struct.pack_into("<H", buf, 0x12, args.selector)    # command selector
     struct.pack_into("<H", buf, 0x3E, 0x0020)           # control word
@@ -870,10 +1028,13 @@ def main() -> int:
         # but dispatch needs TIKRNL to have registered.
         ADSP.adsp2181_call(cpu, 0x64A, 0x02A8)
         ADSP.adsp2181_run(cpu, 20000)
-    print(f"[adsp] selector DM3310={ADSP.adsp2181_host_read(cpu, 0x3310):04x}"
-          f" producer DM3315={ADSP.adsp2181_host_read(cpu, 0x3315):04x}"
-          f" consumer DM3316={ADSP.adsp2181_host_read(cpu, 0x3316):04x}"
-          f" resp DM3338={ADSP.adsp2181_host_read(cpu, 0x3338):04x}")
+    # Host-port reads need the 0x4000 data-memory select; a bare address
+    # selects program memory (see symbol_host_address).
+    dm_sel = 0x4000
+    print(f"[adsp] selector DM3310={ADSP.adsp2181_host_read(cpu, dm_sel | 0x3310):04x}"
+          f" producer DM3315={ADSP.adsp2181_host_read(cpu, dm_sel | 0x3315):04x}"
+          f" consumer DM3316={ADSP.adsp2181_host_read(cpu, dm_sel | 0x3316):04x}"
+          f" resp DM3338={ADSP.adsp2181_host_read(cpu, dm_sel | 0x3338):04x}")
     # dump the channel table and free-list to see if the descriptor got hooked
     dm = ADSP.adsp2181_dm(cpu)
     print("[adsp] channel table: 2E44=%04x 2E45=%04x  queue 2F08=%04x 2F09=%04x"

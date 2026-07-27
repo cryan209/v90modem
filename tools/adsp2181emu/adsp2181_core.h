@@ -34,6 +34,10 @@ adsp2181_t *adsp2181_create(void);
 void adsp2181_destroy(adsp2181_t *cpu);
 void adsp2181_reset(adsp2181_t *cpu);
 int adsp2181_run(adsp2181_t *cpu, int cycles);
+/* IDMA boot hold (BMODE=1, MMAP=0): the core executes nothing until an IDMA
+ * write commits program memory location 0, then starts at PM 0. */
+void adsp2181_set_idma_boot_hold(adsp2181_t *cpu, int on);
+int adsp2181_idma_boot_held(const adsp2181_t *cpu);
 void adsp2181_set_callbacks(adsp2181_t *cpu, adsp2181_rx_cb rx,
                             adsp2181_tx_cb tx, adsp2181_timer_cb timer);
 uint32_t *adsp2181_pm(adsp2181_t *cpu);
