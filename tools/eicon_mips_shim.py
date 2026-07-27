@@ -93,9 +93,21 @@ PR_NextInd = 0x04   # word: MIPS indication write pointer
 PR_ReqInput = 0x06  # byte: count of requests submitted by host
 PR_ReqOutput = 0x07 # byte: count of requests processed by MIPS
 PR_Int = 0x09       # byte: interrupt flag
+PR_RcOutput = 0x0a  # byte: count of RC buffers the MIPS has returned
+PR_IndOutput = 0x0b # byte: count of IND buffers the MIPS has returned
 PR_ReadyInt = 0x10  # byte: host pokes this to request a ready interrupt
 PR_Signature = 0x1e # word: MIPS writes 0x5858 (not ready) or valid sig
 PR_B = 0x20         # start of the REQ/RC/IND buffer area
+
+# RC structure (kernel/pr_pc.h): next(2) Rc(1) RcId(1) RcCh(1) Res(1) Ref(2)
+RC_RC = 0x02
+RC_RCID = 0x03
+RC_RCCH = 0x04
+RC_REFERENCE = 0x06
+# Return codes (kernel/pc.h).
+ASSIGN_RC = 0xe0    # ASSIGN acknowledgement class
+ASSIGN_OK = 0xef    # ASSIGN succeeded
+RC_OK = 0xff        # command accepted
 
 # REQ structure (from kernel/pr_pc.h).  Each REQ buffer in B[].
 REQ_SIZE = 0x120    # next(2)+Req(1)+ReqId(1)+ReqCh(1)+Res1(1)+Ref(2)+Res[8]+XBuffer(2+270)
@@ -106,9 +118,13 @@ REQ_REQCH = 0x04    # byte: channel number
 REQ_XBUFFER = 0x10  # PBUFFER: word length + byte[270] data
 REQ_XDATA = 0x12    # start of the 270-byte data payload
 
-# IDI request codes (from the driver).
+# IDI request codes and global entity ids (kernel/pc.h).
 ASSIGN = 0x01
-NL_ID = 0x01      # network layer entity
+DSIG_ID = 0x00    # D-channel signalling
+NL_ID = 0x20      # network-layer access (B or D channel)
+BLLC_ID = 0x60    # B-channel link level access
+TASK_ID = 0x80    # dynamic user tasks
+MAN_ID = 0xe0     # management
 REMOVE = 0x04
 
 # DSP CAI modem hardware types (from kernel/mdm_msg.h).
@@ -770,6 +786,34 @@ def report_dsp_boot(shim: "MipsShim", cycles: int = 200000) -> int:
     return acked
 
 
+def report_return_codes(shim: "MipsShim", sr: int, limit: int = 8) -> None:
+    """Print the return codes the firmware queued for the host.
+
+    The MIPS owns NextRc and RcOutput; it writes each RC into the buffer at
+    B[NextRc] and advances the chain, exactly as the host's pr_rc() walk in
+    kernel/di.c expects.
+    """
+    rc_out = shim.uc.mem_read(sr + PR_RcOutput, 1)[0]
+    next_rc = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextRc, 2))[0]
+    print(f"[mainloop] RcOutput={rc_out} NextRc=0x{next_rc:04x}")
+    if not rc_out:
+        print("[mainloop] no return code queued")
+        return
+    off = next_rc
+    for _ in range(min(rc_out, limit)):
+        rb = sr + PR_B + off
+        rc = shim.uc.mem_read(rb + RC_RC, 1)[0]
+        rc_id = shim.uc.mem_read(rb + RC_RCID, 1)[0]
+        rc_ch = shim.uc.mem_read(rb + RC_RCCH, 1)[0]
+        ref = struct.unpack_from("<H", shim.uc.mem_read(rb + RC_REFERENCE, 2))[0]
+        name = {ASSIGN_OK: "ASSIGN_OK", RC_OK: "OK"}.get(
+            rc, f"ASSIGN_RC+0x{rc - ASSIGN_RC:02x}" if rc & 0xf0 == ASSIGN_RC
+            else "?")
+        print(f"[mainloop] RC 0x{rc:02x} ({name}) Id=0x{rc_id:02x} "
+              f"Ch=0x{rc_ch:02x} Ref=0x{ref:04x} @B[0x{off:04x}]")
+        off = struct.unpack_from("<H", shim.uc.mem_read(rb, 2))[0]
+
+
 def run_mainloop(shim: "MipsShim", args) -> None:
     """Drive the MIPS via its native PR_RAM request queue (the real host
     interface).  Maps shared RAM, runs the MIPS init, sets up the PR_RAM
@@ -797,10 +841,11 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     # a shared core would see each download land in the previous DSP's
     # running image.
     shim.multi_dsp = True
-    # Downloads dominate this path, and the card holds a DSP for the whole
-    # transfer.  Interleaving DSP execution with it is still unstable (a core
-    # that starts on a partial image runs wild), so the pump is off by
-    # default here; --dsp-pump N turns it back on.
+    # The DSPs have to run in line with the MIPS: the validator writes 0x5a5a
+    # to a DSP, downloads its kernel, releases it, then polls for 0xa5a5
+    # within one call, and without that acknowledgement no DSP resources are
+    # registered.  IDMA boot hold keeps each core stopped for its own
+    # download, so interleaving is safe.
     shim.pump_every = args.dsp_pump
 
     if args.dsp_combifile is not None:
@@ -874,14 +919,18 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     shim.write16(rb + REQ_XBUFFER, len(cai))
     shim.uc.mem_write(rb + REQ_XDATA, bytes(cai))
     shim.write16(sr + PR_NextReq, req_next)
-    # ReqInput/ReqOutput are free-running byte counters and the firmware owns
-    # ReqOutput; the host's counter starts level with it, then one increment
-    # per posted request (pr_out()).  Syncing first is what makes the main
-    # loop see exactly this one request.
+    # The main loop treats (ReqOutput - ReqInput) & 0xff == 0x20 as empty
+    # (0x80027ae4) and 0x20 - that difference as the free-slot count
+    # (0x80027a94), so ReqOutput leads ReqInput by 32 when idle.  The host
+    # only ever increments ReqInput, one per posted request (pr_out()).
+    req_in = shim.uc.mem_read(sr + PR_ReqInput, 1)[0]
     req_out = shim.uc.mem_read(sr + PR_ReqOutput, 1)[0]
-    shim.write8(sr + PR_ReqInput, (req_out + 1) & 0xff)
-    print(f"[mainloop] ASSIGN posted: Sig=0x{sig:04x} NextReq=0x{next_req:04x} "
-          f"-> 0x{req_next:04x} ReqInput {req_out}->{(req_out + 1) & 0xff}")
+    shim.write8(sr + PR_ReqInput, (req_in + 1) & 0xff)
+    read_off = struct.unpack_from("<H",
+        shim.uc.mem_read((gp + 0x5e99) & 0x1fffffff, 2))[0]
+    print(f"[mainloop] ASSIGN posted at B[0x{next_req:04x}]: Sig=0x{sig:04x} "
+          f"NextReq->0x{req_next:04x} ReqInput {req_in}->{(req_in + 1) & 0xff} "
+          f"ReqOutput={req_out} MIPS read offset=0x{read_off:04x}")
 
     # 4. Run the main loop.
     for i in range(args.words if args.words > 0 else 50):
@@ -906,6 +955,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         if ri == ro and i > 0:
             # Request consumed; check DSP state
             break
+    report_return_codes(shim, sr)
 
     print(f"[mainloop] done: host_writes={len(shim.host_writes)}")
     if shim.log and shim.host_writes:
@@ -944,10 +994,11 @@ def main() -> int:
                         default=CARDTYPE_DIVASRV_P_30M_PCI,
                         help="CARDTYPE_* number selecting the combifile's "
                              "required download set (23 = PRI 30M PCI)")
-    parser.add_argument("--dsp-pump", type=int, default=0,
+    parser.add_argument("--dsp-pump", type=int, default=256,
                         help="MIPS instructions between DSP time slices during "
-                             "--mainloop (0 = hold the DSPs for the download, "
-                             "the default; they are run afterwards)")
+                             "--mainloop; the DSPs must run in line with the "
+                             "MIPS for the boot handshake to complete.  0 holds "
+                             "them for the whole run instead.")
     parser.add_argument("--dsp-code-base", type=lambda s: int(s, 0), default=None,
                         help="override DspCodeBaseAddr (default: the protocol "
                              "image's OFFS_PROTOCOL_END_ADDR)")

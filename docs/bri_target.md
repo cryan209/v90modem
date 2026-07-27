@@ -226,13 +226,55 @@ counters start level.
 The DSP count never became a blocker: 30 cores are cheap, and the validator
 handshakes them one at a time.
 
-### Next: the main loop does not consume the request
+### Resolved: the main loop now consumes the request
 
-`ReqIn=33 / ReqOut=32` holds steady — one request correctly pending, and
-`0x80027970` never picks it up. The main loop is being called directly rather
-than reached from the entry's post-init path, so it is probably missing timer
-or interrupt state the real loop runs with; that is the next thing to work
-out.
+Two bugs, both in what the shim was writing rather than in the firmware.
+
+**The queue counters.** The main loop treats `(ReqOutput - ReqInput) & 0xff
+== 0x20` as *empty* (`0x80027ae4`) and `0x20 -` that difference as the free
+slot count (`0x80027a94`), so `ReqOutput` leads `ReqInput` by 32 when idle.
+The firmware initialises `ReqOutput` to 32 with `ReqInput` at 0, and the host
+only ever increments `ReqInput` — one per posted request, as `pr_out()` does.
+Trying to "sync" the two first left the difference at `0xff` and the loop
+never saw a request.
+
+**The entity id.** `NL_ID` is **0x20** (`kernel/pc.h`; `DSIG_ID` 0x00,
+`BLLC_ID` 0x60, `TASK_ID` 0x80, `MAN_ID` 0xe0) — the shim was sending 0x01.
+That is not a harmless mislabel. The main loop matches a request against the
+registered entities by `entity+0x14 == translate(ReqId)`, where
+`0x80029ed4` indexes a byte table at `0x80121370` by `ReqId * 2`. Entry 0 is
+`0x1f` and the rest are 0, so `translate(0x01)` returned 0 and matched the
+first *free* entity (94 of the 96 registered entities have id 0). The request
+was then handed to that entity's protocol handler (`0x80016564`), which
+compares the raw `ReqId` against its own id, found `0x01 != 0x00`, and
+returned without doing anything — never reaching the assign path at
+`0x80027c4c` and never acknowledging.
+
+With both fixed the request is consumed and acknowledged on the first
+iteration:
+
+```
+[mainloop] ASSIGN posted at B[0x03e0]: Sig=0x4447 NextReq->0x0500 ReqInput 0->1 ReqOutput=32
+[mainloop] iter 0: v0=0x00000001 ReqIn=1 ReqOut=33 Sig=0x4447
+```
+
+`ReqOutput` 32 -> 33 is the firmware's own acknowledgement, written by
+`0x80029f88` (`REQ->Reference` stamped, read offset `gp+0x5e99` advanced to
+`REQ->next`, `ReqOutput++`).
+
+`--dsp-pump` now defaults to 256: the DSPs have to run in line with the MIPS
+for the validator's handshake to complete within one call, and the IDMA boot
+hold makes that safe.
+
+### Next: no return code yet
+
+`RcOutput` stays 0, so the assign has been accepted but has not completed —
+and there are still no host writes, so the DSP-side work has not started. The
+RC path is `0x80029774` (called from `0x80027d94`), which walks the queued
+entities and posts an RC at `B[NextRc]`. Whether the assign is waiting on
+something else or the CAI payload is wrong is the next thing to check; the
+CAI in `run_mainloop` is a hand-built guess and should be compared against
+`add_modem_b23()` in `kernel/message.c`.
 
 ## Why `.2qm` is still expensive
 
