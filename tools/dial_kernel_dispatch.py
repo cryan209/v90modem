@@ -131,7 +131,6 @@ DM_BOOTPAGE = 0x3FB0
 V8_DOWNLOAD = 0x025F
 FSK_OWN_DOWNLOAD = 0x025C
 V_OWN_DOWNLOAD = 0x026D
-V90_D_DOWNLOAD = 0x026A
 DM_COUPLED_BUFFER_MODE = 0x32F0
 DM_LINE_RX = 0x3F08
 DM_RX_BUFFER_POINTER = 0x3F0F
@@ -577,27 +576,6 @@ class LiveKernelModem:
         if self.dm[DM_WSTATUS] & 0x2000:
             raise RuntimeError('DSP did not consume answer-mode write database')
 
-    def _load_v90d(self) -> None:
-        """Perform the closed supervisor's INFO -> V.90 DPCM handoff."""
-        driver, card, dm = self.driver, self.card, self.dm
-        dm[DM_BOOTPAGE] = 14
-        dm[DM_DOWNLOAD_FLAG] = 1
-        dm[DM_DOWNLOAD_REQ] = V90_D_DOWNLOAD
-        description = card.download_overlay(V90_D_DOWNLOAD)
-        if description is None:
-            raise RuntimeError('V.90 DPCM overlay 0x026a is unavailable')
-        driver.assign_pcm_buffers()
-        dm[DM_WSTATUS] = 0x1000
-        # INFO has already yielded at the supervisor seam; dispatch the
-        # registered overlay completion directly before the next TDM frame,
-        # equivalent to the MIPS IDMA foreground handback.
-        card._run(dm[DM_ENTRIES + 1], 300_000)
-        dm[DM_WSTATUS] &= ~0x1000
-        # Consume INFO's pending completion doorbell. The handoff above has
-        # already dispatched the now-V90D entry; service() must not dispatch
-        # that same slot a second time in this sample.
-        dm[DM_DOORBELL] = 0
-
     @staticmethod
     def _decode_mulaw(code: int) -> int:
         value = (~code) & 0xff
@@ -679,13 +657,10 @@ class LiveKernelModem:
             if not ADSP.adsp2181_idle(card.cpu):
                 raise RuntimeError('INFO detector initialization did not return to IDLE')
         self._info_detector_last_trn = trn_progress
-        # The closed line-follow-up supervisor selects V90D only after INFO
-        # publishes its real 0x003b completion. State 0x0037 is still the
-        # §9.2.1.1.5-.7 L1/L2 and INFO1 exchange; forcing the page there makes
-        # the digital modem silent while the analogue peer is still in Tone A.
-        if (card.resident == 0x0260
-                and dm[DM_LIVE_TRNPROG] == 0x003b):
-            self._load_v90d()
+        # Do not force the INFO -> V90D handoff from TrnProgress.  Per V.90
+        # §9.2.1.1.8, INFO1a bits 37:39 select Phase 3 only when they encode 6.
+        # INFO turns that result into bootpage 14 itself; driver.service() then
+        # serves TIKRNL's ordinary page-14 request for overlay 0x026a.
         driver.service(index, fast=True)
         if card.resident == V8_DOWNLOAD and not self.v8_loaded:
             self.v8_loaded = True

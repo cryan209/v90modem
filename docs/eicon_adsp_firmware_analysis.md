@@ -2624,3 +2624,68 @@ post-`0x00a2` transition.
 `tools/info_state_records.py --records 0x09d7:0x0a5b` now walks consecutive
 records on their true boundaries and resolves each candidate and condition
 index, so the result is reproducible without hand-splitting the table.
+
+## The real V90D load path is INFO1a mode 6 -> bootpage 14
+
+The desired destination is not selected by a magic TrnProgress value or by a
+MIPS policy decision.  The DSP carries the V.90/V.34 decision all the way to
+TIKRNL's ordinary overlay loader.
+
+INFO initializer PM `0x3304..0x3310` computes the page to use when INFO
+completes:
+
+```
+  AX0 = 0x000e
+  AR = DM(0x3fbb) & 0x0070             ; BaudInfo, INFO1a bits 37:39
+  if AR == 0x0060: DM(0x16b6) = AX0    ; value 6 -> page 14 / V90D
+  else:
+      AX0 = 0x000d
+      if !(DM(0x3f94) & 2): AX0 = 8
+      DM(0x16b6) = AX0                  ; non-6 result -> another data pump
+```
+
+That test is the firmware implementation of ITU-T V.90 §9.2.1.1.8: after
+sending INFO1d and receiving INFO1a, the digital modem proceeds to V.90 Phase
+3 only when INFO1a bits 37:39 encode integer 6; values 0 through 5 continue as
+a V.34 call modem.
+
+INFO's completion routine PM `0x2176..0x217f` then performs the actual DSP-side
+page selection:
+
+```
+  DM(0x3fc1) |= 0x0100                  ; publish page-change status
+  DM(0x3fb0) = DM(0x16b6)               ; bootpage_nr = 14 for V.90
+```
+
+From there the already-recovered normal loader path applies unchanged:
+
+1. TIKRNL PM `0x0686..0x0694` indexes its table at `DM(0x31d5)` with
+   `DM(0x3fb0) = 14`.
+2. Table entry 14 is positive `0x026a`, the V.90 DPCM overlay, so TIKRNL
+   publishes `DM(0x31aa) = 0x026a`, registers its post-download continuation,
+   and yields through kernel service PM `0x000a`.
+3. The host downloads overlay `0x026a`, sets `WSTATUS.BOOTFINISHED`, and
+   dispatches the registered completion entry.
+4. TIKRNL resumes into the V90D program for V.90 Phase 3.
+
+This corrects the harness's synthetic `_load_v90d()` path, which watched for
+TrnProgress `0x003b`, wrote bootpage 14 itself, and directly downloaded the
+overlay.  There is no `0x003b` state in the decoded INFO record families, and
+that shortcut bypassed the protocol decision we need to test.  It has been
+removed: `KernelDispatch.service()` already serves the genuine page-14
+request when INFO publishes one.
+
+Therefore the path to pursue is:
+
+```
+INFO0 exchange -> Tone B/reversal -> L1/L2 -> INFO1d -> valid INFO1a
+  -> INFO1a bits 37:39 == 6
+  -> DM(0x3fbb) rate field 0x60
+  -> DM(0x16b6) = DM(0x3fb0) = 14
+  -> TIKRNL requests 0x026a V90D
+```
+
+Our call currently fails back at the `0x37` INFO0/Tone-B decision, long before
+INFO1a can set that rate field.  Reaching the `0x41` Tone A detector is not the
+goal by itself; the goal is to take the complete V.90 Phase 2 chain through a
+CRC-valid INFO1a whose mode field is 6, then let the DSP request V90D naturally.
