@@ -744,3 +744,46 @@ native CALL_RES is missing the per-call PLCI creation event.** The next code
 step is to use the `0x800c94xx`/`0x800c99xx` signalling helpers as format
 oracles while locating the upstream network ingress that emits `CALL_IND`
 (`0x02`) to PR_RAM.
+
+## Session 10: fake ingress state in the MIPS shim
+
+`tools/eicon_mips_shim.py --simulate-b-channel` now explicitly arms incoming
+signalling before answer:
+
+1. SIG ASSIGN returns `Id=0x02`.
+2. NL ASSIGN returns `Id=0x03`.
+3. `INDICATE_REQ`/listen is posted to the assigned SIG id and returns `OK`.
+4. A synthetic incoming-call object is linked into the listening SIG entity.
+
+The entity table used by the firmware dispatcher is at `0x80299928`, with the
+entity count in `gp+0x5eb9`. After SIG/NL assignment, the active listener is
+slot 0:
+
+```text
+[entities] 00: ptr=0x801004e0 ... +14=00000002 +18=800164b8
+```
+
+With fake ingress enabled, the shim links a synthetic call object at
+`SIG+0x1c` before issuing `CALL_RES`:
+
+```text
+[listen] RC 0xff (OK) Id=0x02 Ch=0x00 Ref=0x0000
+[ingress] synthetic call object 0x80807000 linked to entity slot 0 obj=0x801004e0
+[entities] 00: ptr=0x801004e0 ... +1c=80807000 +24=00000001
+```
+
+This proves the harness can fake the firmware-owned ingress state rather than
+only pushing host PR_RAM requests. It still does not enter modem service
+assignment:
+
+```text
+[mainloop] modem DSP path: service_assign=0 switch_on=0
+```
+
+So the remaining gap is no longer "how do we fake an ingress at all"; it is
+which additional per-call fields the CALL_RES/resource-selection path expects
+besides the minimal linkage written by the recovered `0x800172a8` allocation
+branch. The branch writes `call+0x2f=1`, `call+0x28=sig`,
+`sig+0x24=1`, `sig+0x12a=1`, `sig+0x1c=call`, and clears bit `0x10000` in
+`sig+0x20`; later service selection likely depends on the call object's parsed
+BC/LLC/CIP fields.

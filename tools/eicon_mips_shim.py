@@ -130,7 +130,9 @@ REQ_XDATA = 0x12    # start of the 270-byte data payload
 
 # IDI request codes and global entity ids (kernel/pc.h).
 ASSIGN = 0x01
+LISTEN_REQ = 0x02
 N_CONNECT = 0x02
+INDICATE_REQ = 0x0a
 CALL_RES = 0x0b
 DSIG_ID = 0x00    # D-channel signalling
 NL_ID = 0x20      # network-layer access (B or D channel)
@@ -138,6 +140,13 @@ BLLC_ID = 0x60    # B-channel link level access
 TASK_ID = 0x80    # dynamic user tasks
 MAN_ID = 0xe0     # management
 REMOVE = 0xff
+
+# Entity pointer vector seen in the protocol image around the common IDI
+# dispatcher.  gp+0x5eb9 holds the count; entries are firmware runtime
+# pointers and must be accessed through Unicorn's physical mirror.
+ENTITY_TABLE = 0x80299928
+CALL_INGRESS_ALLOC = 0x800172a8
+SYNTH_CALL_OBJECT = RAM_VIRT + 0x7000
 
 # DSP CAI modem hardware types (kernel/mdm_msg.h).  add_b1()'s resource[]
 # table maps B1 protocol 7/8 (MODEM_ALL_NEGOTIATE / MODEM_ASYNC) to 17 and
@@ -526,7 +535,8 @@ class MipsShim:
             uc.reg_write(UC_MIPS_REG_PC, uc.reg_read(UC_MIPS_REG_RA))
 
     def call(self, entry: int, args: list[int], gp: int, sp: int,
-             max_insns: int = 200000) -> int:
+             max_insns: int = 200000,
+             extra_regs: "dict[int, int] | None" = None) -> int:
         from unicorn.mips_const import (UC_MIPS_REG_A0, UC_MIPS_REG_A1,
                                         UC_MIPS_REG_A2, UC_MIPS_REG_A3,
                                         UC_MIPS_REG_SP, UC_MIPS_REG_GP,
@@ -538,6 +548,9 @@ class MipsShim:
         for i, value in enumerate(args[:4]):
             uc.reg_write([UC_MIPS_REG_A0, UC_MIPS_REG_A1,
                           UC_MIPS_REG_A2, UC_MIPS_REG_A3][i], value)
+        if extra_regs:
+            for reg, value in extra_regs.items():
+                uc.reg_write(reg, value)
         if not self.preserve_host_writes:
             self.host_writes = []
         uc.emu_start(entry, STUB_VIRT + 0x20, count=max_insns)
@@ -1075,6 +1088,105 @@ def assign_entity(shim: "MipsShim", sr: int, gp: int, sp: int, label: str,
     return assigned
 
 
+def issue_listen_request(shim: "MipsShim", sr: int, gp: int, sp: int,
+                         sig_id: int, legacy_req_id: bool = False) -> None:
+    """Put the assigned signalling entity into incoming-call listening state.
+
+    The old i4l driver names this host operation INDICATE_REQ even though the
+    firmware-side CAPI state machine talks about LISTEN_REQ.  Its payload is a
+    one-byte zero parameter block (idi_put_req()), and it must happen before a
+    CALL_IND can exist for CALL_RES to answer.
+    """
+    req_id = 1 if legacy_req_id else sig_id
+    off = post_request(shim, sr, INDICATE_REQ, req_id, 0, b"\x00", reference=0)
+    print(f"[listen] INDICATE_REQ/LISTEN Id=0x{req_id:02x} "
+          f"(sig=0x{sig_id:02x}) Ch=0x00 @B[0x{off:04x}]")
+    for rc, rc_id, rc_ch, ref in run_until_rc(shim, sr, gp, sp,
+                                              phase="listen-req"):
+        print(f"[listen] RC 0x{rc:02x} ({rc_name(rc)}) Id=0x{rc_id:02x} "
+              f"Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+    for ind, ind_id, ind_ch, ref, payload in drain_indications(shim, sr):
+        print(f"[listen] IND 0x{ind:02x} Id=0x{ind_id:02x} "
+              f"Ch=0x{ind_ch:02x} Ref=0x{ref:04x} payload={payload.hex()}")
+
+
+def read_runtime32(shim: "MipsShim", addr: int) -> int:
+    return struct.unpack_from("<I",
+        shim.uc.mem_read(addr & 0x1fffffff, 4))[0]
+
+
+def dump_entities(shim: "MipsShim", gp: int, limit: int = 16) -> None:
+    count = struct.unpack_from("<H",
+        shim.uc.mem_read((gp + 0x5eb9) & 0x1fffffff, 2))[0]
+    print(f"[entities] count={count} table=0x{ENTITY_TABLE:08x}")
+    for idx in range(min(count, limit)):
+        ptr = read_runtime32(shim, ENTITY_TABLE + idx * 4)
+        if ptr == 0:
+            continue
+        words = []
+        for off in range(0, 0x30, 4):
+            words.append(read_runtime32(shim, ptr + off))
+        formatted = " ".join(f"+{i * 4:02x}={word:08x}"
+                             for i, word in enumerate(words))
+        print(f"[entities] {idx:02x}: ptr=0x{ptr:08x} {formatted}")
+
+
+def inject_call_ingress(shim: "MipsShim", gp: int, sp: int,
+                        slot: int = 0) -> None:
+    """Run the firmware branch that fabricates a per-call object on a listener.
+
+    This is deliberately below PR_RAM: there is no host request for a Q.931
+    SETUP arriving from the line.  The setup block at 0x800172a8 is reached
+    by the D-channel receive state machine after it has matched a listening
+    SIG entity; it allocates entity+0x1c and emits the incoming-call
+    indication.
+    """
+    from unicorn.mips_const import UC_MIPS_REG_S0, UC_MIPS_REG_S2
+
+    sig_obj = read_runtime32(shim, ENTITY_TABLE + slot * 4)
+    if sig_obj == 0:
+        print(f"[ingress] no entity object in slot {slot}")
+        return
+    before = read_runtime32(shim, sig_obj + 0x1c)
+    print(f"[ingress] fake CALL_IND on entity slot {slot} "
+          f"obj=0x{sig_obj:08x} before +1c=0x{before:08x}")
+    try:
+        shim.phase = "fake-ingress"
+        shim.call(CALL_INGRESS_ALLOC, [], gp=gp, sp=sp, max_insns=500000,
+                  extra_regs={UC_MIPS_REG_S0: 0, UC_MIPS_REG_S2: sig_obj})
+    except Exception as exc:
+        print(f"[ingress] firmware ingress trampoline stopped: {exc}")
+    after = read_runtime32(shim, sig_obj + 0x1c)
+    print(f"[ingress] entity slot {slot} after +1c=0x{after:08x}")
+
+
+def synthesize_call_ingress(shim: "MipsShim", slot: int = 0) -> None:
+    """Fabricate the minimum incoming-call object needed before CALL_RES.
+
+    This mirrors the field writes in the 0x800172a8 allocation branch without
+    depending on the surrounding Q.931 dispatcher frame: the listening SIG
+    entity gains a call object at +0x1c, enters pending-call state, and the
+    call object points back at its owning SIG entity.
+    """
+    sig_obj = read_runtime32(shim, ENTITY_TABLE + slot * 4)
+    if sig_obj == 0:
+        print(f"[ingress] no entity object in slot {slot}")
+        return
+    call_obj = SYNTH_CALL_OBJECT + slot * 0x100
+    shim.alloc(call_obj, 0x100)
+    for off in range(0, 0x100, 4):
+        shim.write32(call_obj + off, 0)
+    flags = read_runtime32(shim, sig_obj + 0x20) & 0xfffeffff
+    shim.write8(call_obj + 0x2f, 1)
+    shim.write32(call_obj + 0x28, sig_obj)
+    shim.write16(sig_obj + 0x24, 1)
+    shim.write8(sig_obj + 0x12a, 1)
+    shim.write32(sig_obj + 0x1c, call_obj)
+    shim.write32(sig_obj + 0x20, flags)
+    print(f"[ingress] synthetic call object 0x{call_obj:08x} "
+          f"linked to entity slot {slot} obj=0x{sig_obj:08x}")
+
+
 def run_mainloop(shim: "MipsShim", args) -> None:
     """Drive the MIPS via its native PR_RAM request queue (the real host
     interface).  Maps shared RAM, runs the MIPS init, sets up the PR_RAM
@@ -1213,6 +1325,16 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             print(f"[nl] entity id 0x{entity_id:02x} assigned "
                   f"(host_writes={len(shim.host_writes)})")
 
+    if args.fake_call_ingress and "sig" in assigned:
+        issue_listen_request(shim, sr, gp, sp, assigned["sig"],
+                             legacy_req_id=args.legacy_sig_req_id)
+        if args.inject_call_ingress:
+            inject_call_ingress(shim, gp, sp, args.ingress_entity_slot)
+        if args.synthesize_call_ingress:
+            synthesize_call_ingress(shim, args.ingress_entity_slot)
+        if args.dump_entities:
+            dump_entities(shim, gp, args.dump_entity_limit)
+
     if args.connect and "nl" in assigned:
         bearer_disconnected = False
         if args.call_direction == "answering" and "sig" in assigned:
@@ -1229,6 +1351,8 @@ def run_mainloop(shim: "MipsShim", args) -> None:
                                                       phase="call-res"):
                 print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
                       f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+            if args.dump_entities:
+                dump_entities(shim, gp, args.dump_entity_limit)
         off = post_request(shim, sr, N_CONNECT, assigned["nl"], 0,
                            b"\x00", reference=1)
         print(f"[call] N_CONNECT Id=0x{assigned['nl']:02x} Ch=0x00 "
@@ -1237,6 +1361,8 @@ def run_mainloop(shim: "MipsShim", args) -> None:
                                                   phase="n-connect"):
             print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
                   f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+        if args.dump_entities:
+            dump_entities(shim, gp, args.dump_entity_limit)
         for _ in range(args.call_steps):
             shim.phase = "call-pump"
             shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
@@ -1343,6 +1469,24 @@ def main() -> int:
                         help="simulate an answered incoming call: issue "
                              "CALL_RES, activate NL, and keep pumping the "
                              "firmware while checking for N_DISC")
+    parser.add_argument("--fake-call-ingress", action="store_true",
+                        help="drive the incoming-call host sequence before "
+                             "answering: put the assigned signalling entity "
+                             "into LISTEN/INDICATE state, then use the normal "
+                             "CALL_RES + N_CONNECT path")
+    parser.add_argument("--legacy-sig-req-id", action="store_true",
+                        help="use ReqId=1 for simple signalling requests, "
+                             "matching the old i4l idi_put_req() helper")
+    parser.add_argument("--inject-call-ingress", action="store_true",
+                        help="after LISTEN/INDICATE, run the internal "
+                             "firmware branch that allocates the incoming "
+                             "per-call object before CALL_RES")
+    parser.add_argument("--synthesize-call-ingress", action="store_true",
+                        help="after LISTEN/INDICATE, fabricate the minimum "
+                             "incoming call object expected by CALL_RES")
+    parser.add_argument("--ingress-entity-slot", type=int, default=0,
+                        help="entity table slot whose listener object receives "
+                             "the fake ingress")
     parser.add_argument("--call-steps", type=int, default=64,
                         help="MIPS main-loop iterations to run after N_CONNECT")
     parser.add_argument("--dsp-pump", type=int, default=256,
@@ -1358,10 +1502,17 @@ def main() -> int:
                         help="record MIPS jal/jalr call targets per harness phase")
     parser.add_argument("--trace-call-limit", type=int, default=24,
                         help="number of hot call targets to print per phase")
+    parser.add_argument("--dump-entities", action="store_true",
+                        help="dump the firmware entity pointer table after "
+                             "incoming-call state transitions")
+    parser.add_argument("--dump-entity-limit", type=int, default=16,
+                        help="maximum number of entity table slots to dump")
     args = parser.parse_args()
     if args.simulate_b_channel:
         args.connect = True
         args.call_direction = "answering"
+        args.fake_call_ingress = True
+        args.synthesize_call_ingress = True
     if args.dsp_combifile is not None and not str(args.dsp_combifile):
         args.dsp_combifile = None
 
