@@ -2702,6 +2702,7 @@ User's Guide v5.3 §5.3.1 and §5.4.1 Tables 12, 13 and 15 gives:
 | `GEN_SETUP2 +02` | `0030` | signal-quality step-up and fallback |
 | `V8_SETUP +04` | `6000` | **V90_DPCM** and **digital network** |
 | `INFO0_SETUP +07` | `f0fd` | V.34 Phase-2 capabilities and 3429 support |
+| `delaycorrection +24` | `000c` | Eicon build's supplementary-buffer calibration |
 | `NORM_H/L +28/+29` | `0001/8100` | V.8, V.90, and V.34 fallback |
 | `SPEED_SEL_H/L +2a/+2b` | `001f/ff00` | V.34 fallback rates through 33600 |
 | `V34SLOT +78` | channel | assigned TDM slot, now explicitly programmed |
@@ -2738,3 +2739,43 @@ by V.90 §9.2.1.1.8: the firmware must finish INFO1 and decode INFO1a bits
 37:39 as 6.  Our present failure occurs before that field exists, at the
 `0x37` INFO0/Tone-B branch, and is not evidence of another missing V90D enable
 bit.
+
+### Other PDF requirements, separated from the current blocker
+
+A wider pass over the guide found four integration requirements that are not
+V90D-enable bits:
+
+1. **`delaycorrection` (`+0x24`) must be platform calibrated.**  The guide
+   says to measure `roundtripcntr` in a calibrated back-to-back session and
+   write the compensation when INFO is initialized.  We had not written the
+   word, so it happened to retain build 117-926's DM-image value `0x000c`.
+   The harness now writes and validates `0x000c` explicitly, preserving
+   existing behaviour while making the assumption visible.  Replaying
+   `run02` with `0x0000` shifts the state-`0x30` exit by 5 ms but leaves the
+   complete path and the `0x37 -> 0x10` failure unchanged.  A real calibrated
+   loop is still required before claiming exact ranging timing.
+2. **SPORT0 setup words `+0x70..+0x74` must be initialized before the startup
+   page.**  They contain the physical SPORT0 control and 32-channel RX/TX
+   enable masks.  The emulator does not execute a physical SPORT: its
+   `sport0_tdm_frame` callback presents the selected slot directly, so writing
+   guessed hardware-register images would make the model less faithful, not
+   more.  These words are a hardware-integration obligation, not an omitted
+   INFO capability bit.  `V34SLOT +0x78`, which the DSP does consume for the
+   logical modem channel, is now set.
+3. **`DATACONFIG +0x77` defaults to SCC1 data.**  Selecting value 1 in its
+   two-bit data-pump field (word `0x4000`) chooses the documented IDMA TX/RX
+   buffers.  This matters after V90D reaches DATASTATE and the PTY bridge is
+   attached; it does not participate in V.8, INFO, or the page-14 decision.
+   The experimental endpoint currently has no completed V90D data-interface
+   cycle, so changing it during training would conceal that later work.
+4. **Runtime boot service must finish within 75 ms.**  Guide §2.3 imposes the
+   general page-load deadline (70 ms specifically for INFO -> V.34).  The
+   emulator downloads and acknowledges a requested overlay synchronously in
+   the same 8 kHz frame, so it meets the logical requirement without dropping
+   or manufacturing bearer samples.
+
+The guide also requires separate initial and training `change_wdb`
+communication cycles and a `BOOTFINISHED` acknowledgement after each runtime
+page load.  Both are already implemented.  The reconstructed 2400-Hz event
+publication cycle is host-supervisor plumbing rather than another capability
+setting.

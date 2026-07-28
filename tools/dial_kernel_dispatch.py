@@ -411,7 +411,7 @@ class KernelDispatch:
                   f'PM {PM_FOREGROUND_SLOT:04x}')
         return hist
 
-    def program_initial_setup(self) -> None:
+    def program_initial_setup(self, delay_correction: int = 0x000C) -> None:
         """Write the power-up setup, ADDSP guide §5.4.1 Table 12."""
         dm = self.card.dm
         dm[DM_DB + 0x00] = 0x00C4
@@ -424,6 +424,10 @@ class KernelDispatch:
         dm[DM_DB + 0x0A] = 0x00FF
         dm[DM_DB + 0x0B] = 0x0030
         dm[DM_DB + 0x0C] = 0x0000
+        # Guide §5.3.1 requires platform calibration of supplementary kernel
+        # buffering.  Build 117-926's Eicon image defaults to 12; write it
+        # explicitly instead of inheriting whichever overlay occupied +0x24.
+        dm[DM_DB + 0x24] = delay_correction
         dm[DM_DB + 0x2C] = 0x0003
         dm[DM_DB + 0x2D] = 0x0003
         dm[DM_WSTATUS] = 0x2000
@@ -494,7 +498,8 @@ class LiveKernelModem:
 
     def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False,
                  init_info_detector_at_24: bool = False,
-                 info_actions: dict[int, int] | None = None):
+                 info_actions: dict[int, int] | None = None,
+                 delay_correction: int = 0x000C):
         self.driver = KernelDispatch()
         self.card = self.driver.card
         self.dm = self.card.dm
@@ -518,6 +523,9 @@ class LiveKernelModem:
         if not 0 <= channel < 32:
             raise ValueError('PRI channel must be in range 0..31')
         self.channel = channel
+        if not 0 <= delay_correction <= 0xFFFF:
+            raise ValueError('delay correction must be a 16-bit word')
+        self.delay_correction = delay_correction
 
     def boot(self) -> None:
         driver, card, dm = self.driver, self.card, self.dm
@@ -552,6 +560,7 @@ class LiveKernelModem:
             0x01: 0x0484,  # answer, 2-wire, internal clock, NORM
             0x04: 0x6000,  # V90_DPCM and digital network
             0x07: 0xF0FD,  # V.34 INFO0 capabilities
+            0x24: self.delay_correction,
             0x28: 0x0001,  # V.8
             0x29: 0x8100,  # V.90 with V.34 fallback
             0x2A: 0x001F,  # V.34 high-rate mask
@@ -593,7 +602,7 @@ class LiveKernelModem:
         # Table 12 first, then recommendation/answer-mode Tables 13 and 15.
         # Drive a few genuine SPORT frames after each activation so TIKRNL
         # consumes change_wdb before any later values replace the first set.
-        self.driver.program_initial_setup()
+        self.driver.program_initial_setup(self.delay_correction)
         for index in range(-16, -8):
             self.driver.tdm_frame(0x00ff, self.channel)
             self.driver.service(index, fast=True)
