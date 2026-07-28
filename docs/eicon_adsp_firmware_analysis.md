@@ -2277,3 +2277,69 @@ the vector table, so the next step is to find which record's candidate field
 carries those indices and what condition selects it — and whether the choice
 keys off `DM(0x16b6)`/`DM(0x3f94)`, the INFO variant, since PM `0x3317` seeds
 the `0x0bxx` entry while explicitly setting `DM(0x16b6) = 8`.
+
+## What selects the `0x07xx` chain: `GEN_setup1` bit 7 and the reserved word `DM(0x3f8a)`
+
+The chain entry is chosen by PM `0x34b5`, which is dispatched as bit 7 of the
+PM `0x2eb5` action table:
+
+```
+  34b5: AR = 0x07a0 ; AX1 = 0x07a0
+  34b7: AF = DM(0x3f8a) XOR 0x5678
+  34ba: IF EQ JUMP 0x34c3                  ; magic present -> keep 0x07a0
+  34bb: AF = DM(0x3ee0) AND 0x0040
+  34be: IF EQ JUMP 0x34c1
+  34bf:   AR = 0x0ae8 ; AX1 = 0x0ac4       ; override the entry vector
+  34c1: DM(0x3f91) = DM(0x3ee7)
+  34c3: CALL 0x34cb                        ; AF = DM(0x3f94) AND 0x0008
+  34c4: IF NE JUMP 0x34c8
+  34c5:   MR0 = AX1 ; I4 = 0x3376 ; JUMP 0x331e   ; packed record loader
+  34c8:   MR0 = AR  ; I4 = 0x336a ; JUMP 0x331e   ; triple record loader
+```
+
+The field that dispatches it is `DM(0x167e)`, loaded verbatim from
+`DM(0x3ee1)` at PM `0x3efe` — database offset `0x01`, **`GEN_setup1`**,
+"operation mode parameters" in the ADDSP guide.  Our calls have
+`GEN_setup1 = 0x0484` (bits 2, 7, 10), so bit 7 does fire PM `0x34b5`; the
+`0x0bxx` alternative is bit 9 (PM `0x3315`) and is not set.
+
+So the entry vector is decided by two words the host owns:
+
+| `DM(0x3f8a)` | `DM(0x3ee0) & 0x0040` | `DM(0x3f94) & 8` | entry vector |
+|---|---|---|---|
+| `0x5678` | — | set | `0x07a0` |
+| `0x5678` | — | clear | `0x07a0` |
+| other | set | set | `0x0ae8` |
+| other | set | clear | `0x0ac4` |
+
+`DM(0x3f8a)` is database offset `0xaa`, inside the guide's elided
+`A8..B7` reserved range.  The DSP only ever reads-and-clears it (PM `0x33bd`
+is a condition handler testing for the same `0x5678`; PM `0x33be` clears it),
+so it is a host-written token.  `tools/dial_kernel_dispatch.py` writes
+`DM(0x3ee0) = 0x00c4` and never writes `DM(0x3f8a)`, so the override fires and
+we get `0x0ae8` — the chain whose state `0x24` record leaves `DM(0x164c)` at
+zero.
+
+### Live with the token set
+
+`--db-word 0x3f8a:0x5678` (`artifacts/eicon-live/run04`).  The page takes the
+other chain — `0x24 -> 0x2c -> 0x2e -> 0x30 -> 0x32 -> 0x36 -> 0x37`, skipping
+`0x22`, `0x28` and `0x34` — and **the firmware installs framer B itself**:
+`DM(0x19cf)` cycles `0x25ab -> 0x25c7 -> 0x25e2` for the whole call, the first
+time that has happened without the `--init-info-detector-at-24` diagnostic.
+`0x37` then exits to `0x0026` rather than `0x0010`.
+
+It is not a fix.  Framer B never validates a frame, `DM(0x198e)` stays `0`,
+and event 1 still never fires.  The peer does worse than `run03`: one
+`rxinfo0`, no L1/L2 probing, `vpcm: Link Error` after 14 s.  The new chain
+skips state `0x34`, so the transmit window that unblocked probing in `run03`
+is gone too.
+
+Treat `0x5678` as an undocumented mode token, not a recovered setting: it is a
+magic value in a reserved word, it changes the state graph, and nothing yet
+shows a real MIPS supervisor writes it.  What it does establish is that the
+`0x07xx` chain is reachable by configuration alone, and that framer B running
+is necessary but not sufficient — this peer never sends the 8-bit message it
+waits for.  The next question is what that message is on the wire, and whether
+a V.90 call is supposed to see one at all, since `DM(0x3f94) = 9` selects
+V.90 and the 8-bit class may belong to the `0x0006` (non-V.90) mode.

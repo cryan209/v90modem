@@ -341,7 +341,8 @@ class EiconSipEndpoint:
                  kernel_dispatch: bool = False,
                  init_info_detector_at_24: bool = False,
                  watch_exec: tuple[int, ...] = (),
-                 info_actions: dict[int, int] | None = None):
+                 info_actions: dict[int, int] | None = None,
+                 db_words: dict[int, int] | None = None):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -357,6 +358,7 @@ class EiconSipEndpoint:
         self.init_info_detector_at_24 = init_info_detector_at_24
         self.watch_exec = watch_exec
         self.info_actions = dict(info_actions or {})
+        self.db_words = dict(db_words or {})
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind((bind, sip_port))
@@ -492,6 +494,8 @@ class EiconSipEndpoint:
                 card.boot()
                 card.configure_modem('answer', self.law)
                 # LiveKernelModem wraps a Card; both expose the same emulator.
+                for address, value in self.db_words.items():
+                    getattr(card, 'card', card).dm[address] = value
                 cpu = getattr(card, 'card', card).cpu
                 for address in self.watch_exec:
                     ADSP.adsp2181_watch_exec(cpu, address, 1)
@@ -680,6 +684,11 @@ def main() -> int:
                     help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('--db-word', default='', metavar='ADDR:VALUE[,...]',
+                    help='write DSP DM words after configure_modem, e.g. '
+                         '0x3f8a:0x5678 -- the reserved database word PM 0x34b5 '
+                         'tests to select the INFO state chain that arms the '
+                         '8-bit control channel')
     ap.add_argument('--info-action', default='', metavar='STATE:CODE[,...]',
                     help='diagnostic: dispatch INFO action-table entry CODE '
                          '(PM 0x2ee6..0x2eee) the first time TrnProgress '
@@ -704,6 +713,9 @@ def main() -> int:
                                       args.watch_exec.split(',') if field.strip()),
                                 {int(pair.split(':')[0], 0): int(pair.split(':')[1], 0)
                                  for pair in args.info_action.split(',')
+                                 if pair.strip()},
+                                {int(pair.split(':')[0], 0): int(pair.split(':')[1], 0)
+                                 for pair in args.db_word.split(',')
                                  if pair.strip()})
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
