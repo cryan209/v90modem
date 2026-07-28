@@ -2705,17 +2705,13 @@ User's Guide v5.3 §5.3.1 and §5.4.1 Tables 12, 13 and 15 gives:
 | `delaycorrection +24` | `000c` | Eicon build's supplementary-buffer calibration |
 | `NORM_H/L +28/+29` | `0001/8100` | V.8, V.90, and V.34 fallback |
 | `SPEED_SEL_H/L +2a/+2b` | `001f/ff00` | V.34 fallback rates through 33600 |
-| `V34SLOT +78` | channel | assigned TDM slot, now explicitly programmed |
 | `SPEED_SEL_V90_H/L +79/+7a` | `003f/ffff` | every defined V.90 rate, 28000–56000 |
 | `INFO0D_SETUP +7b` | `03b7` | lookahead 3, 3429 upstream, µ-law, codec measurement, −12 dBm0 |
 | maxima `+7c..+7f` | `000e/0015/000e/0015` | V.34 33600 and V.90 56000, TX and RX |
 
 These are all the documented host-controlled capability fields relevant to a
-digital-side V.90 call.  One omission was found: the guide says `V34SLOT`
-must be initialized before modem operation on a TDM interface.  It previously
-worked only by relying on the reset default of slot zero.  The harness now
-writes the selected channel explicitly; this matters for non-zero PRI slots
-but does not explain the channel-zero captures.
+digital-side V.90 call.  The guide also defines generic line-driver fields at
+`+0x70..+0x78`; the Eicon PRI kernel bypasses them as detailed below.
 
 Two write-database words change after DIAL consumes them, but neither removes
 V.90 capability:
@@ -2754,10 +2750,9 @@ V90D-enable bits:
    `run02` with `0x0000` shifts the state-`0x30` exit by 5 ms but leaves the
    complete path and the `0x37 -> 0x10` failure unchanged.  A real calibrated
    loop is still required before claiming exact ranging timing.
-2. **SPORT0 setup words `+0x70..+0x74` are required by the guide's generic
-   T1/E1 line driver, but not consumed by Eicon's PRI kernel.**  The distinction
-   is established below.  `V34SLOT +0x78`, which the modem task does consume
-   for the logical channel, is set explicitly.
+2. **SPORT0 setup words `+0x70..+0x74` and `V34SLOT +0x78` are required by
+   the guide's generic T1/E1 line driver, but not consumed by Eicon's PRI
+   kernel.**  The distinction is established below.
 3. **`DATACONFIG +0x77` defaults to SCC1 data.**  Selecting value 1 in its
    two-bit data-pump field (word `0x4000`) chooses the documented IDMA TX/RX
    buffers.  This matters after V90D reaches DATASTATE and the PTY bridge is
@@ -2812,3 +2807,38 @@ the emulator to consume guessed values would double-model the descriptor
 filter rather than restore a missing input.  These words would matter in a
 new generic-SPORT hardware model; they cannot alter INFO's `0x37` decision in
 the present Eicon PRI path.
+
+## V34SLOT is also bypassed; the real input is the PRI channel descriptor
+
+The guide says `V34SLOT` at write-database offset `0x78` selects SPORT0 slot
+0–31 and must be initialized before modem operation.  That is again the
+interface of its generic T1/E1 driver, not Eicon's layered PRI integration:
+
+- Disassembly finds no direct reference to `DM(0x3f58)` in the PRI kernel,
+  TIKRNL, DIAL, V.8, INFO, or V90D.  Apparent matches at PM address `0x3f58`
+  are code locations, not reads of the database word.
+- Isolating `V34SLOT` from the emulated selected descriptor and consuming
+  values 0, 1, 15, and 31 through the normal second `change_wdb` cycle gives
+  identical `run02` state transitions and the same TX hash as above.
+- The harness formerly wrote `V34SLOT = channel` and validated that the word
+  survived.  That proved only that host-owned DM retained the value, not that
+  firmware consumed it.  The write and validation have now been removed.
+
+What Eicon requires instead is the full closed-MIPS **channel assignment**:
+its private kernel descriptor links one of the `DM(0x2e00..0x2e1f)` PRI
+sample slots to the TIKRNL task, supplies the companding descriptor, schedules
+the task only for that 8 kHz slot, and supplies its RX/TX buffer pointers.
+`V34SLOT` is not a substitute for that assignment.
+
+The emulator currently models those effects explicitly:
+
+- `adsp2181_sport0_tdm_frame()` presents the selected slot and dispatches the
+  registered TIKRNL continuation once per 8 kHz frame;
+- `DM(0x2f22)` selects the µ-law (`0x3c27`) or A-law (`0x3c07`) adapter;
+- `assign_pcm_buffers()` restores the assigned one-word RX/TX pointers.
+
+Thus there is no additional value or companion bit missing *for V34SLOT*.
+Either a future emulator reproduces the complete MIPS descriptor assignment,
+or the current selected-descriptor abstraction remains the boundary.  Merely
+writing `DM(0x3f58)` cannot change the modem's line input, output, INFO state
+chain, or V90D selection.

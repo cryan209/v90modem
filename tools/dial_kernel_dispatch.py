@@ -436,7 +436,7 @@ class KernelDispatch:
         dm[DM_DB + 0x2D] = 0x0003
         dm[DM_WSTATUS] = 0x2000
 
-    def program_v8_call(self, calling: bool, channel: int = 0) -> None:
+    def program_v8_call(self, calling: bool) -> None:
         """Write Tables 13 and 15 after Table 12 has been consumed."""
         dm = self.card.dm
         dm[DM_DB + 0x2A] = 0x001F
@@ -459,9 +459,9 @@ class KernelDispatch:
         dm[DM_DB + 0x7D] = 0x0015
         dm[DM_DB + 0x7E] = 0x000E
         dm[DM_DB + 0x7F] = 0x0015
-        # ADDSP guide §5.3.1: V34SLOT must be initialised before modem
-        # operation on a TDM interface.  INFO/V90D share that assigned slot.
-        dm[DM_DB + 0x78] = channel
+        # Do not write generic V34SLOT (+0x78).  Eicon's PRI kernel routes
+        # TIKRNL through its private channel descriptor; A/B replay confirms
+        # that +0x78 is inert in this image, like SPORT setup +0x70..+0x74.
         dm[DM_WSTATUS] = 0x2000
         dm[DM_DB + 0x0F] = 0x0001
         dm[DM_DB + 0x10] = 0x0100
@@ -568,7 +568,6 @@ class LiveKernelModem:
             0x28: 0x0001,  # V.8
             0x29: 0x8100,  # V.90 with V.34 fallback
             0x2A: 0x001F,  # V.34 high-rate mask
-            0x78: self.channel,
             0x79: 0x003F,  # every defined V.90 rate through 56 kbit/s
             0x7A: 0xFFFF,
             0x7B: 0x03B7,  # lookahead 3, 3429 upstream, PCMU, -12 dBm0
@@ -612,7 +611,7 @@ class LiveKernelModem:
             self.driver.service(index, fast=True)
         if self.dm[DM_WSTATUS] & 0x2000:
             raise RuntimeError('DSP did not consume initial write database')
-        self.driver.program_v8_call(calling=False, channel=self.channel)
+        self.driver.program_v8_call(calling=False)
         # These are DIAL-overlay setup entries and must run before the second
         # cycle is allowed to request/load V.8; calling them after that partial
         # overlay replacement corrupts the completion path.
