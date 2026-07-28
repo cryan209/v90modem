@@ -428,6 +428,10 @@ class KernelDispatch:
         # buffering.  Build 117-926's Eicon image defaults to 12; write it
         # explicitly instead of inheriting whichever overlay occupied +0x24.
         dm[DM_DB + 0x24] = delay_correction
+        # Do not write generic guide SPORT0 setup words +0x70..+0x74 here.
+        # Eicon's PRI kernel 0x0009 owns DM(0x3ff6..0x3ffa) through its private
+        # channel descriptors; neither it nor TIKRNL reads DB +0x70..+0x74.
+        # adsp2181_sport0_tdm_frame models that descriptor selection directly.
         dm[DM_DB + 0x2C] = 0x0003
         dm[DM_DB + 0x2D] = 0x0003
         dm[DM_WSTATUS] = 0x2000

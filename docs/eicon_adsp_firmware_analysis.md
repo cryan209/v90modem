@@ -2754,14 +2754,10 @@ V90D-enable bits:
    `run02` with `0x0000` shifts the state-`0x30` exit by 5 ms but leaves the
    complete path and the `0x37 -> 0x10` failure unchanged.  A real calibrated
    loop is still required before claiming exact ranging timing.
-2. **SPORT0 setup words `+0x70..+0x74` must be initialized before the startup
-   page.**  They contain the physical SPORT0 control and 32-channel RX/TX
-   enable masks.  The emulator does not execute a physical SPORT: its
-   `sport0_tdm_frame` callback presents the selected slot directly, so writing
-   guessed hardware-register images would make the model less faithful, not
-   more.  These words are a hardware-integration obligation, not an omitted
-   INFO capability bit.  `V34SLOT +0x78`, which the DSP does consume for the
-   logical modem channel, is now set.
+2. **SPORT0 setup words `+0x70..+0x74` are required by the guide's generic
+   T1/E1 line driver, but not consumed by Eicon's PRI kernel.**  The distinction
+   is established below.  `V34SLOT +0x78`, which the modem task does consume
+   for the logical channel, is set explicitly.
 3. **`DATACONFIG +0x77` defaults to SCC1 data.**  Selecting value 1 in its
    two-bit data-pump field (word `0x4000`) chooses the documented IDMA TX/RX
    buffers.  This matters after V90D reaches DATASTATE and the PTY bridge is
@@ -2779,3 +2775,40 @@ communication cycles and a `BOOTFINISHED` acknowledgement after each runtime
 page load.  Both are already implemented.  The reconstructed 2400-Hz event
 publication cycle is host-supervisor plumbing rather than another capability
 setting.
+
+## SPORT0 setup does not feed this Eicon PRI kernel
+
+The suggestion to populate `Sp0CntrlReg`/the four multichannel masks was worth
+testing because ADDSP guide §3.3 and §5.3.1 say they must be initialized before
+the startup page for a T1/E1 interface.  That text describes the generic
+Analog Devices line-driver integration.  This image instead runs Eicon's
+**Diva Server PRI 30M kernel `0x0009`** around TIKRNL.
+
+Static and runtime checks agree:
+
+- There is no reference to database words `DM(0x3f50..0x3f54)` in either the
+  PRI kernel or TIKRNL program image.
+- PRI kernel PM `0x004b..0x0070` programs the real SPORT words
+  `DM(0x3ff6..0x3ffa)` from its private per-channel descriptor block at
+  `DM(0x2e44...)`, including dynamically recomputing RX/TX slot masks.
+- After kernel startup the actual registers are `SPORT0 control = 0x8207` and
+  RX-low mask `0x8000`; the generic setup database remains all zero.
+- Writing zeroes, plausible `0x8207/ffff/ffff/ffff/ffff`, or marker values
+  `0x1234/1/2/4/8` to `+0x70..+0x74` immediately before executing the kernel
+  leaves those actual SPORT registers unchanged.
+- Applying the same three configurations after modem setup and replaying all
+  of `run02.rx.ulaw` produces identical state transitions and an identical
+  signed-TX SHA-256:
+  `8bbb79a33feb189e926edddeef657c6439b434b81319a8c064b4011c79533c61`.
+
+The emulator's `adsp2181_sport0_tdm_frame()` is explicit about the missing
+closed-MIPS layer: it models the assigned PRI descriptor by presenting one
+selected 8 kHz slot, populating the channel table, and dispatching TIKRNL only
+for that slot.  It intentionally does not emulate physical SPORT register
+clocking or consult the generic setup words.
+
+Therefore configuring `+0x70..+0x74` would currently be inert, and teaching
+the emulator to consume guessed values would double-model the descriptor
+filter rather than restore a missing input.  These words would matter in a
+new generic-SPORT hardware model; they cannot alter INFO's `0x37` decision in
+the present Eicon PRI path.
