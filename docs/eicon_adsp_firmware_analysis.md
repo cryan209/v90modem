@@ -2689,3 +2689,52 @@ Our call currently fails back at the `0x37` INFO0/Tone-B decision, long before
 INFO1a can set that rate field.  Reaching the `0x41` Tone A detector is not the
 goal by itself; the goal is to take the complete V.90 Phase 2 chain through a
 CRC-valid INFO1a whose mode field is 6, then let the DSP request V90D naturally.
+
+## Host-bit audit: V90D is enabled; the remaining selector is received INFO1a
+
+Auditing `program_initial_setup()` and `program_v8_call()` against ADDSP V.90
+User's Guide v5.3 §5.3.1 and §5.4.1 Tables 12, 13 and 15 gives:
+
+| write DB | value | relevant meaning |
+|---|---:|---|
+| `GEN_SETUP0 +00` | `00c4` | extended training, PSTN, normal equalizer |
+| `GEN_SETUP1 +01` | `0484` | answer, two-wire, internal clock, NORM operation |
+| `GEN_SETUP2 +02` | `0030` | signal-quality step-up and fallback |
+| `V8_SETUP +04` | `6000` | **V90_DPCM** and **digital network** |
+| `INFO0_SETUP +07` | `f0fd` | V.34 Phase-2 capabilities and 3429 support |
+| `NORM_H/L +28/+29` | `0001/8100` | V.8, V.90, and V.34 fallback |
+| `SPEED_SEL_H/L +2a/+2b` | `001f/ff00` | V.34 fallback rates through 33600 |
+| `V34SLOT +78` | channel | assigned TDM slot, now explicitly programmed |
+| `SPEED_SEL_V90_H/L +79/+7a` | `003f/ffff` | every defined V.90 rate, 28000–56000 |
+| `INFO0D_SETUP +7b` | `03b7` | lookahead 3, 3429 upstream, µ-law, codec measurement, −12 dBm0 |
+| maxima `+7c..+7f` | `000e/0015/000e/0015` | V.34 33600 and V.90 56000, TX and RX |
+
+These are all the documented host-controlled capability fields relevant to a
+digital-side V.90 call.  One omission was found: the guide says `V34SLOT`
+must be initialized before modem operation on a TDM interface.  It previously
+worked only by relying on the reset default of slot zero.  The harness now
+writes the selected channel explicitly; this matters for non-zero PRI slots
+but does not explain the channel-zero captures.
+
+Two write-database words change after DIAL consumes them, but neither removes
+V.90 capability:
+
+- DIAL's line handler changes `GEN_SETUP2` from `0x0030` to `0x0070`, enabling
+  its tone detector while retaining the requested `0x30` step-up/fallback
+  bits.
+- PM `0x0bb7..0x0bc8` masks the ordinary V.34 `SPEED_SEL_L` fallback word from
+  `0xff00` to `0x0100` for the selected recommendation.  The separate V.90
+  masks at `+0x79/+0x7a` remain `0x003f/0xffff`.
+
+`LiveKernelModem.configure_modem()` now validates the surviving V90D fields
+after DIAL activation and fails immediately if a later change clears one.
+The fact that live calls reach INFO with `DM(0x3f94) = 0x0009` independently
+confirms that V.8 selected the V.90 INFO variant, rather than rejecting our
+host capability setup.
+
+So: **yes, the documented host bits needed to negotiate V90D are set**.  They
+cannot directly force page 14.  The final selector is deliberately peer-owned
+by V.90 §9.2.1.1.8: the firmware must finish INFO1 and decode INFO1a bits
+37:39 as 6.  Our present failure occurs before that field exists, at the
+`0x37` INFO0/Tone-B branch, and is not evidence of another missing V90D enable
+bit.

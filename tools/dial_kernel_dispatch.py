@@ -428,7 +428,7 @@ class KernelDispatch:
         dm[DM_DB + 0x2D] = 0x0003
         dm[DM_WSTATUS] = 0x2000
 
-    def program_v8_call(self, calling: bool) -> None:
+    def program_v8_call(self, calling: bool, channel: int = 0) -> None:
         """Write Tables 13 and 15 after Table 12 has been consumed."""
         dm = self.card.dm
         dm[DM_DB + 0x2A] = 0x001F
@@ -451,6 +451,9 @@ class KernelDispatch:
         dm[DM_DB + 0x7D] = 0x0015
         dm[DM_DB + 0x7E] = 0x000E
         dm[DM_DB + 0x7F] = 0x0015
+        # ADDSP guide §5.3.1: V34SLOT must be initialised before modem
+        # operation on a TDM interface.  INFO/V90D share that assigned slot.
+        dm[DM_DB + 0x78] = channel
         dm[DM_WSTATUS] = 0x2000
         dm[DM_DB + 0x0F] = 0x0001
         dm[DM_DB + 0x10] = 0x0100
@@ -541,6 +544,38 @@ class LiveKernelModem:
         card.download_overlay(DIAL_ID)
         self.resident = card.resident
 
+    def _validate_v90d_configuration(self) -> None:
+        """Verify the documented host inputs that make V90D negotiable."""
+        dm = self.dm
+        expected = {
+            0x00: 0x00C4,  # extended training, PSTN, normal equaliser
+            0x01: 0x0484,  # answer, 2-wire, internal clock, NORM
+            0x04: 0x6000,  # V90_DPCM and digital network
+            0x07: 0xF0FD,  # V.34 INFO0 capabilities
+            0x28: 0x0001,  # V.8
+            0x29: 0x8100,  # V.90 with V.34 fallback
+            0x2A: 0x001F,  # V.34 high-rate mask
+            0x78: self.channel,
+            0x79: 0x003F,  # every defined V.90 rate through 56 kbit/s
+            0x7A: 0xFFFF,
+            0x7B: 0x03B7,  # lookahead 3, 3429 upstream, PCMU, -12 dBm0
+            0x7C: 0x000E,  # V.34 TX maximum 33600
+            0x7D: 0x0015,  # V.90 TX maximum 56000
+            0x7E: 0x000E,  # V.34 RX maximum 33600
+            0x7F: 0x0015,  # V.90 RX maximum 56000
+        }
+        bad = [(offset, dm[DM_DB + offset], value)
+               for offset, value in expected.items()
+               if dm[DM_DB + offset] != value]
+        # DIAL enables its line tone detector after consuming host GEN_SETUP2;
+        # bit 6 is firmware-owned at this point, while 0x30 must survive.
+        if dm[DM_DB + 0x02] & 0x003F != 0x0030:
+            bad.append((0x02, dm[DM_DB + 0x02], 0x0030))
+        if bad:
+            detail = ', '.join(f'+{offset:02x}={actual:04x} (want {wanted:04x})'
+                               for offset, actual, wanted in bad)
+            raise RuntimeError(f'V90D setup did not survive DIAL activation: {detail}')
+
     def configure_modem(self, role: str, law: str = 'pcmu') -> None:
         if law != 'pcmu':
             raise NotImplementedError('kernel-dispatch live mode currently supports PCMU')
@@ -564,7 +599,7 @@ class LiveKernelModem:
             self.driver.service(index, fast=True)
         if self.dm[DM_WSTATUS] & 0x2000:
             raise RuntimeError('DSP did not consume initial write database')
-        self.driver.program_v8_call(calling=False)
+        self.driver.program_v8_call(calling=False, channel=self.channel)
         # These are DIAL-overlay setup entries and must run before the second
         # cycle is allowed to request/load V.8; calling them after that partial
         # overlay replacement corrupts the completion path.
@@ -575,6 +610,7 @@ class LiveKernelModem:
             self.driver.service(index, fast=True)
         if self.dm[DM_WSTATUS] & 0x2000:
             raise RuntimeError('DSP did not consume answer-mode write database')
+        self._validate_v90d_configuration()
 
     @staticmethod
     def _decode_mulaw(code: int) -> int:
