@@ -433,8 +433,23 @@ static void wr_ifc(adsp2100_state *adsp, INT32 val)
 	}
 	check_irqs(adsp);
 }
-static void wr_tx0(adsp2100_state *adsp, INT32 val)	{ if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 0, val); }
-static void wr_tx1(adsp2100_state *adsp, INT32 val)	{ if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 1, val); }
+/* The ADSP-218x register-to-register MOVE instruction permits RX0/RX1 and
+ * TX0/TX1 as both sources and destinations (Instruction Set Reference
+ * §4, "Register Move").  Keep the data-register latches separate from the
+ * external transfer callbacks: serial receive events load RXn, while a MOVE
+ * may also write/read either latch without performing another wire transfer. */
+static void wr_rx0(adsp2100_state *adsp, INT32 val)	{ adsp->sport_rx[0] = (UINT16)val; }
+static void wr_rx1(adsp2100_state *adsp, INT32 val)	{ adsp->sport_rx[1] = (UINT16)val; }
+static void wr_tx0(adsp2100_state *adsp, INT32 val)
+{
+	adsp->sport_tx[0] = (UINT16)val;
+	if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 0, val);
+}
+static void wr_tx1(adsp2100_state *adsp, INT32 val)
+{
+	adsp->sport_tx[1] = (UINT16)val;
+	if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 1, val);
+}
 static void wr_owrctr(adsp2100_state *adsp, INT32 val) { adsp->cntr = val & 0x3fff; }
 static void wr_topstack(adsp2100_state *adsp, INT32 val) { pc_stack_push_val(adsp, val & 0x3fff); }
 
@@ -456,7 +471,7 @@ static void (*const wr_reg[4][16])(adsp2100_state*, INT32) =
 	},
 	{
 		wr_astat, wr_mstat, wr_inval, wr_imask, wr_icntl, wr_cntr, wr_sb, wr_px,
-		wr_inval, wr_tx0, wr_inval, wr_tx1, wr_ifc, wr_owrctr, wr_inval, wr_topstack
+		wr_rx0, wr_tx0, wr_rx1, wr_tx1, wr_ifc, wr_owrctr, wr_inval, wr_topstack
 	}
 };
 
@@ -517,8 +532,10 @@ static INT32 rd_icntl(adsp2100_state *adsp) { return adsp->icntl; }
 static INT32 rd_cntr(adsp2100_state *adsp)  { return adsp->cntr; }
 static INT32 rd_sb(adsp2100_state *adsp)    { return adsp->core.sb.s; }
 static INT32 rd_px(adsp2100_state *adsp)    { return adsp->px; }
-static INT32 rd_rx0(adsp2100_state *adsp)	{ if (adsp->sport_rx_callback) return adsp->sport_rx_callback(adsp, 0); else return 0; }
-static INT32 rd_rx1(adsp2100_state *adsp)	{ if (adsp->sport_rx_callback) return adsp->sport_rx_callback(adsp, 1); else return 0; }
+static INT32 rd_rx0(adsp2100_state *adsp)	{ return adsp->sport_rx[0]; }
+static INT32 rd_rx1(adsp2100_state *adsp)	{ return adsp->sport_rx[1]; }
+static INT32 rd_tx0(adsp2100_state *adsp)	{ return adsp->sport_tx[0]; }
+static INT32 rd_tx1(adsp2100_state *adsp)	{ return adsp->sport_tx[1]; }
 static INT32 rd_stacktop(adsp2100_state *adsp)	{ return pc_stack_pop_val(adsp); }
 
 #define READ_REG(adsp,grp,reg) ((*rd_reg[grp][reg])(adsp))
@@ -539,7 +556,7 @@ static INT32 (*const rd_reg[4][16])(adsp2100_state *adsp) =
 	},
 	{
 		rd_astat, rd_mstat, rd_sstat, rd_imask, rd_icntl, rd_cntr, rd_sb, rd_px,
-		rd_rx0, rd_inval, rd_rx1, rd_inval, rd_inval, rd_inval, rd_inval, rd_stacktop
+		rd_rx0, rd_tx0, rd_rx1, rd_tx1, rd_inval, rd_inval, rd_inval, rd_stacktop
 	}
 };
 

@@ -56,6 +56,27 @@ int main(void)
     assert(adsp2181_dm_overlay(cpu, 2));
     assert(!adsp2181_pm_overlay(cpu, 0));
 
+    /* ADSP-218x Instruction Set Reference §4-117 permits RXn/TXn on both
+     * sides of a register-to-register MOVE.  The Eicon kernel relies on
+     * RX1=SR0 and SR0=TX1 in its SPORT ISR. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x41234f; /* SR1 = 0x1234 */
+    adsp2181_pm(cpu)[1] = 0x0d0caf; /* RX1 = SR1 */
+    adsp2181_pm(cpu)[2] = 0x40000f; /* SR1 = 0 */
+    adsp2181_pm(cpu)[3] = 0x0d03fa; /* SR1 = RX1 */
+    adsp2181_pm(cpu)[4] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 16);
+    assert(adsp2181_sr1(cpu) == 0x1234);
+
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x45678f; /* SR1 = 0x5678 */
+    adsp2181_pm(cpu)[1] = 0x0d0cbf; /* TX1 = SR1 */
+    adsp2181_pm(cpu)[2] = 0x40000f; /* SR1 = 0 */
+    adsp2181_pm(cpu)[3] = 0x0d03fb; /* SR1 = TX1 */
+    adsp2181_pm(cpu)[4] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 16);
+    assert(adsp2181_sr1(cpu) == 0x5678);
+
     adsp2181_destroy(cpu);
     puts("adsp2181_core_test: PASS");
     return 0;

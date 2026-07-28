@@ -65,6 +65,7 @@ void adsp2181_set_flagin(adsp2181_t *cpu, int asserted);
 int adsp2181_flagin(const adsp2181_t *cpu);
 uint16_t adsp2181_icntl(const adsp2181_t *cpu);
 int adsp2181_idle(const adsp2181_t *cpu);
+uint16_t adsp2181_sr1(const adsp2181_t *cpu);
 
 #ifdef __cplusplus
 }

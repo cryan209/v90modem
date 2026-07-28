@@ -2,7 +2,7 @@
 """Test how DIAL calls V.8.
 
 Per addspv90guide §5.4.1: after the host runs the calling/answer-mode
-training script (GEN_SETUP1=0x048C calling / 0x068C answer, GEN_SETUP2,
+training script (GEN_SETUP1=0x048C calling / 0x0484 answer, GEN_SETUP2,
 WSTATUS=0x2000) while DIAL is active, "the dial page requests the host to
 boot the V.8 page." DIAL signals this by writing bootpage_nr (DM 0x3FB0)
 and setting the bootrequestbit/Boot in RSTATUS_dbs (DM 0x3FA5).
@@ -95,7 +95,7 @@ def main():
     if args.mode == 'calling':
         ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x048C)  # GEN_SETUP1 calling mode
     elif args.mode == 'answer':
-        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x068C)  # GEN_SETUP1 answer mode
+        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x0484)  # GEN_SETUP1 answer mode
     else:
         ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x0040)  # default
     ADSP.adsp2181_host_write(cpu, DB + 0x02, 0x0030)  # GEN_SETUP2

@@ -623,4 +623,124 @@ ASSIGN can't allocate a channel and produces no host_writes.
 3. Once the init detects DSPs and registers them (gp+0x5eb9 != 0), the
    main loop will process the ASSIGN request, calling `dsp_assign` and
    downloading the V.90 overlay internally.
+## Session 8: linked call assignment and bearer activation
 
+The network-layer `0xe6` rejection was a missing call-parent link, not a bad
+modem LLC/DLC. In the Linux driver's `message.c`, the first
+`nl_req_ncci(..., ASSIGN, 0)` is sent with global `NL_ID`; `send_req()`
+prepends `CAI, 1, plci->Sig.Id` to the parameters. The shim previously sent
+only LLI/LLC/DLC, leaving the firmware no signalling entity (PLCI) to attach
+the network entity to.
+
+`modem_nl_assign_payload()` now accepts the assigned signalling ID and emits
+that CAI prefix. The native PR_RAM sequence consequently succeeds:
+
+```
+[sig] RC 0xef (ASSIGN_OK) Id=0x02 Ref=0x0000
+[nl]  RC 0xef (ASSIGN_OK) Id=0x03 Ref=0x0001
+```
+
+The shim also writes the REQ `Reference` field explicitly, can submit the
+network-layer `N_CONNECT`, and drains the PR_RAM indication chain. With
+`--connect`, firmware accepts bearer activation and produces:
+
+```
+[call] RC  0xff (OK) Id=0x03 Ch=0x02 Ref=0x0001
+[call] IND 0x03      Id=0x03 Ch=0x02   # N_CONNECT_ACK
+[call] IND 0x04      Id=0x03 Ch=0x02   # N_DISC
+```
+
+The initial experiment disconnected because it activated NL without first
+answering the parent signalling call. `--simulate-b-channel` now models the
+answered incoming sequence: linked SIG+NL assignment, `CALL_RES` on SIG, then
+NL activation. Both entities return `IND 0x03`, and no `N_DISC` appears after
+512 main-loop iterations; the harness reports the simulated B-channel
+`ACTIVE`.
+
+RING and CID therefore belong to signalling before modem activation, as
+expected. The next boundary is DSP resource startup: the held B-channel
+currently produces no post-boot IDMA writes, so the switch-on database has
+not yet initialized TIKRNL/DIAL before NORM/V.8.
+
+Tracing the two modem-service entry points makes the missing state precise:
+neither service assign `0x80096980` nor switch-on `0x80090e58` executes.
+The `ASSIGN DSIG_ID` result (`Id=0x02`) is the global/listener signalling
+entity. A real incoming call first produces `CALL_IND` and allocates a
+per-call PLCI; `connect_res()` attaches `add_b1()`'s modem CAI to `CALL_RES`
+on that PLCI. Sending `CALL_RES` to the listener can return `OK` and keep NL
+from immediately disconnecting, but it does not allocate a modem DSP.
+
+The simulator now reports this honestly as
+`SIGNALLING ACTIVE, DSP UNASSIGNED`. The next implementation step is to inject
+the network-side incoming-call event through the signalling handler (creating
+the per-call entity), then issue linked NL ASSIGN and CAI-bearing CALL_RES
+against that new entity.
+
+## Session 9: native signalling trace and direct service-assign proof
+
+`tools/eicon_mips_shim.py` now has `--trace-calls`, which records MIPS
+`jal`/`jalr` targets by harness phase. The trace normalizes Unicorn's physical
+PCs back to the protocol image's `0x800...` runtime addresses, so the output
+can be compared directly with disassembly and earlier recovered entry points.
+
+The native PR_RAM path is reproducible with:
+
+```bash
+.venv/bin/python tools/eicon_mips_shim.py \
+  --kernel artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel \
+  --tikrnl artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task \
+  --mainloop --simulate-b-channel --call-steps 2 \
+  --trace-calls --trace-call-limit 120
+```
+
+Result: DSP resource registration is healthy (`gp+0x5eb9=0x0060`, 30 DSPs
+answer the `0xa5a5` boot handshake), SIG and NL assignment both return
+`ASSIGN_OK`, and `CALL_RES`/`N_CONNECT` both return/indicate success, but the
+modem DSP path remains unentered:
+
+```text
+[call] simulated B-channel: SIGNALLING ACTIVE, DSP UNASSIGNED
+[mainloop] modem DSP path: service_assign=0 switch_on=0
+```
+
+The phase trace pins down the boundary:
+
+| Phase | Distinctive firmware calls | Meaning |
+|---|---|---|
+| `sig-assign` | `0x800c99e4` x4 | SIG ASSIGN copies/normalizes the listen/register parameter block. |
+| `call-res` | `0x800c9470` x3 | CALL_RES runs signalling IE parsing/serialization, not modem service assignment. |
+| all native phases | no `0x80096980`, no `0x80090e58` | The listener entity never becomes a per-call PLCI in the synthetic sequence. |
+
+Disassembly around `0x800c9470` shows the IE walker/copy helpers and calls
+into `0x800c99e4`; it is useful for reconstructing signalling payload format,
+but it is downstream of the missing network-originated incoming-call event.
+The viable clean route is therefore still to inject the incoming SETUP/CALL_IND
+event before `CALL_RES`, so the firmware allocates a per-call PLCI instead of
+answering the listener entity.
+
+The direct allocator route is also live. This command:
+
+```bash
+.venv/bin/python tools/eicon_mips_shim.py \
+  --kernel artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel \
+  --tikrnl artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task \
+  --assign --words 40
+```
+
+calls the real service-driver entry `0x80096980` and produces the switch-on
+database record through firmware host writes:
+
+```text
+[assign] returned v0=0x80804100 host_writes=17
+[assign] TIKRNL command ring DM3327..3336:
+001d 0000 0000 0000 00ff 0002 0000 0000
+0102 0008 0000 0200 0008 0000 1e00 0000
+[assign] host writes:
+7327=001d ... 7315=3337
+```
+
+So the current hard fact is: **DSP switch-on works when invoked directly;
+native CALL_RES is missing the per-call PLCI creation event.** The next code
+step is to use the `0x800c94xx`/`0x800c99xx` signalling helpers as format
+oracles while locating the upstream network ingress that emits `CALL_IND`
+(`0x02`) to PR_RAM.

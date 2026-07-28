@@ -53,7 +53,7 @@ Per guide §5.4.2 ("data-pump supervisory rules") and §5.4.1: the V.8 page
 load is a **host-side decision**, not a DIAL-side one:
 
 1. The host runs a **training script** while DIAL is active (guide Table 14/15):
-   - GEN_SETUP1 = `0x048C` (calling) or `0x068C` (answer mode)
+   - GEN_SETUP1 = `0x048C` (calling) or `0x0484` (answer mode)
    - GEN_SETUP2 = `0x0030`, WSTATUS = `0x2000` (activate, bit D)
    - Norm_H = `0x0001` (V.8), Norm_L = `0x0100` (V.34+V8), speed selects.
 2. DIAL's NORM-mode handler (PM `0x13CC`) reads GEN_SETUP1, sees bit 7

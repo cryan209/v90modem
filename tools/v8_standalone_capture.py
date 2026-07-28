@@ -109,7 +109,7 @@ def main():
     if args.mode == 'calling':
         ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x048C)
     else:
-        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x068C)
+        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x0484)
     ADSP.adsp2181_host_write(cpu, DB + 0x02, 0x0030)
     ADSP.adsp2181_host_write(cpu, DB + 0x0E, 0x2000)
     ADSP.adsp2181_host_write(cpu, DB + 0x0F, 0x0001)  # Norm_H V.8

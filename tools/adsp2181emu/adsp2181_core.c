@@ -145,6 +145,8 @@ struct adsp2181
 	UINT8		idma_pending_write;
 	UINT8		idma_boot_hold;
 	UINT8		idma_boot_mode;
+	UINT16		sport_rx[2];
+	UINT16		sport_tx[2];
 
 	/* interrupt handling */
 	UINT16		imask;
@@ -1117,6 +1119,8 @@ void adsp2181_reset(adsp2181_t *a)
     a->pc=0; a->ppc=0xffffffff; a->loop=0xffff; a->loop_condition=0;
     a->astat_clear=~(CFLAG|VFLAG|NFLAG|ZFLAG); a->mstat=0; a->sstat=0x55; a->idle=0;
     a->pmovlay=0; a->dmovlay=0;
+    memset(a->sport_rx, 0, sizeof(a->sport_rx));
+    memset(a->sport_tx, 0, sizeof(a->sport_tx));
     update_mstat(a);
     a->pc_sp=a->cntr_sp=a->stat_sp=a->loop_sp=0; a->imask=0; a->icntl=0;
     memset(a->irq_state, 0, sizeof(a->irq_state));
@@ -1271,7 +1275,15 @@ void adsp2181_call(adsp2181_t *a, uint16_t entry, uint16_t return_pc)
 void adsp2181_set_irq(adsp2181_t *a, int irq, int asserted)
 {
     if (!a || irq < 0 || irq >= ADSP2181_IRQ_COUNT) return;
-    if (asserted && !a->irq_state[irq]) a->irq_latch[irq] = 1;
+    if (asserted && !a->irq_state[irq]) {
+        a->irq_latch[irq] = 1;
+        if (a->sport_rx_callback) {
+            if (irq == ADSP2181_SPORT0_RX)
+                a->sport_rx[0] = (UINT16)a->sport_rx_callback(a, 0);
+            else if (irq == ADSP2181_SPORT1_RX)
+                a->sport_rx[1] = (UINT16)a->sport_rx_callback(a, 1);
+        }
+    }
     a->irq_state[irq] = asserted != 0;
     check_irqs(a);
 }
@@ -1281,3 +1293,7 @@ void adsp2181_set_flagin(adsp2181_t *a, int asserted) { if (a) a->flagin = asser
 int adsp2181_flagin(const adsp2181_t *a) { return a ? a->flagin : 0; }
 uint16_t adsp2181_icntl(const adsp2181_t *a) { return a->icntl; }
 int adsp2181_idle(const adsp2181_t *a) { return a->idle != 0; }
+uint16_t adsp2181_sr1(const adsp2181_t *a)
+{
+    return a ? a->core.sr.srx.sr1.u : 0;
+}

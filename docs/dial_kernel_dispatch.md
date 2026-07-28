@@ -154,25 +154,95 @@ the task owns the slot that used to call it. That is the SPORT0-driven,
 kernel-dispatched path `docs/dial_sport_drive.md` concluded was unreachable
 without the MIPS side.
 
-## What is still open
+## Recovered: how the host hands the resume back
 
-The task then parks. It publishes the SIG overlay request (DM `0x31A9` =
-`0x000D`, DM `0x31AA` = `0x0270`) and raises doorbell bit 1; the host serves
-the download and queues `DM(0x31BB)` = `0x06D8` — and nothing reads it.
-Claiming PM `0x02B9` took PM `0x02A1` out of the loop, and the only other
-reader of the ring is the task's own frame head, PM `0x06BB` → `CALL $0002` →
-PM `0x01B2`. A pending download is exactly what stops it getting there:
+The task parks after publishing the SIG overlay request (DM `0x31A9` =
+`0x000D`, DM `0x31AA` = `0x0270`) and raising doorbell bit 1. Merely queuing
+`DM(0x31BB)` = `0x06D8` in the byte command ring cannot work: claiming PM
+`0x02B9` took PM `0x02A1` out of the loop, and a pending download keeps the
+sample continuation away from the task's own command fetch:
 
 ```
 0705  ASTAT = DM($31A9)
 0706  IF EQ JUMP $07D2      ; request outstanding -> pass audio, do nothing else
 ```
 
-So in kernel-dispatch mode the host has a command it cannot deliver. The
-kernel does have a service that swaps the dispatch slot back
-(PM `0x0019` → `0x029A`, restoring `CALL $02A1` via PM `0x029F-0x02A0`), which
-is the obvious candidate for how a resume is handed over, but what drives it
-is not yet established — clearing DM `0x31A9` from the host instead makes the
-task fall out of dispatch after seven samples. Answering that is the next step,
-and it is the last thing between this path and DIAL running the line off
-SPORT0 with no host in the loop at all.
+The completion instead uses the slot TIKRNL registered for precisely this
+purpose. After downloading the requested image, the host temporarily changes
+PM `0x02B9` from `CALL 0x06FC` to `CALL DM(0x31BB)` (`CALL 0x06D8`) for one
+SPORT0 dispatch, then restores `CALL 0x06FC`. This is the same instruction
+encoding kernel service `0x0017` builds at PM `0x0294-0x0298`; the real host
+can perform the one-word program-memory change over IDMA.
+
+The one-shot call reaches:
+
+```
+06d8  ASTAT = DM($31A9)
+...
+06dd  DM($31A9) = M0
+06e2  CALL $08F0
+06e8  CALL (I4)
+```
+
+so the request is acknowledged, the freshly downloaded page is entered, and
+the next SPORT0 slot is back on the ordinary `0x06FC` sample continuation.
+`KernelDispatch.resume()` models this handback.
+
+With the ADDSP guide §5.4.1 calling setup programmed, the recovered live
+sequence is:
+
+```
+SIG (0x0270) -> DIAL (0x0262) -> DIAL partial (0x0263) -> V.8 (0x025f)
+```
+
+Verification:
+
+```bash
+python3 tools/dial_kernel_dispatch.py \
+    --dial-v8 --freq 2100 --samples 100
+```
+
+The run reports `resident=0x025f`, four `0x06D8` completion entries and V.8
+entered through the shared PM `0x08F0` overlay interface.
+
+## SPORT register and assigned-line requirements
+
+The Eicon kernel legally performs `RX1 = SR0` at PM `0x00AE` and
+`SR0 = TX1` at PM `0x00B8`. The ADSP-218x Instruction Set Reference §4-117
+allows RX0/RX1/TX0/TX1 on either side of a register-to-register MOVE. The
+original emulator inherited directional-only register handlers, discarded
+the RX1 write and returned zero for the TX1 read. The core now models all
+four SPORT data-register latches; external receive events load RXn and TXn
+writes still invoke the wire callback.
+
+Two values normally supplied by the MIPS channel-assignment database are also
+required after the V.8 download:
+
+- DM `0x32F0 = 0x0004`: TIKRNL loads this word into ASTAT and tests AV to
+  select pointer-mode RX/TX buffers at `0x3F0F` and `0x3FB4`.
+- DM `0x3F08` bit 5: marks the line descriptor assigned. With it clear,
+  V.8's PM `0x2000` line entry interprets the word as a page selector and
+  requests page 6 again instead of leaving its processing vectors active.
+
+With both present, the kernel-dispatch verification reaches V.8 PM `0x08F1`
+and runs the V.8 action vector at PM `0x204A` from the `0x06FC` sample
+continuation.
+
+## ANSam response check
+
+`--stimulus ansam` generates the calling-side test input specified by
+ITU-T V.8 (11/2000) §7.2: a 2100 Hz carrier, a 15 Hz sinusoidal amplitude
+envelope ranging from 0.8 to 1.2 of average amplitude, and 180-degree phase
+reversals every 450 ms. A two-second run is:
+
+```bash
+python3 tools/dial_kernel_dispatch.py \
+    --dial-v8 --stimulus ansam --samples 16000
+```
+
+The transmit report is deliberately measured only after V.8 activation.
+The current result is **no V.8 response**: of 15,992 post-activation SPORT0
+transmit words, 15,937 were zero, 54 were μ-law silence (`0x00FF`), and one
+was `0x0400`. A single isolated control-looking word is not an output
+waveform. Thus overlay residency, PM `0x08F1`, and PM `0x204A` execution are
+confirmed, but ANSam detection/CM transmission is not.

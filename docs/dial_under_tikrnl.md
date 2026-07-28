@@ -278,7 +278,7 @@ and the frame entry defaults to PM `0x06C1`, past the fetch-and-dispatch pair;
 `--host-dispatch` restores PM `0x06BB`.
 
 `docs/dial_kernel_dispatch.md` fills the ring properly and lets the kernel's
-foreground dispatch the task off SPORT0, which it now does — one host command
-in, and the kernel calls the task on every sample by itself. What is still
-open there is how the host hands a *resume* back once the task owns the
-foreground slot.
+foreground dispatch the task off SPORT0 — one host command in, and the kernel
+calls the task on every sample by itself. It also recovers the host resume:
+lend PM `0x02B9` to the registered `0x06D8` completion for one SPORT0 slot,
+then restore TIKRNL's `0x06FC` sample continuation.

@@ -107,6 +107,12 @@ RC_RC = 0x02
 RC_RCID = 0x03
 RC_RCCH = 0x04
 RC_REFERENCE = 0x06
+IND_IND = 0x02
+IND_ID = 0x03
+IND_CH = 0x04
+IND_REFERENCE = 0x08
+IND_RBUFFER = 0x10
+IND_RDATA = 0x12
 # Return codes (kernel/pc.h).
 ASSIGN_RC = 0xe0    # ASSIGN acknowledgement class
 ASSIGN_OK = 0xef    # ASSIGN succeeded
@@ -118,17 +124,20 @@ REQ_NEXT = 0x00     # word: offset of next free REQ in B[]
 REQ_REQ = 0x02      # byte: request code (ASSIGN=0x01, etc.)
 REQ_REQID = 0x03    # byte: global entity id (DSIG_ID, NL_ID, ...)
 REQ_REQCH = 0x04    # byte: channel number
+REQ_REFERENCE = 0x06  # word: host cookie (0 = signalling, 1 = network)
 REQ_XBUFFER = 0x10  # PBUFFER: word length + byte[270] data
 REQ_XDATA = 0x12    # start of the 270-byte data payload
 
 # IDI request codes and global entity ids (kernel/pc.h).
 ASSIGN = 0x01
+N_CONNECT = 0x02
+CALL_RES = 0x0b
 DSIG_ID = 0x00    # D-channel signalling
 NL_ID = 0x20      # network-layer access (B or D channel)
 BLLC_ID = 0x60    # B-channel link level access
 TASK_ID = 0x80    # dynamic user tasks
 MAN_ID = 0xe0     # management
-REMOVE = 0x04
+REMOVE = 0xff
 
 # DSP CAI modem hardware types (kernel/mdm_msg.h).  add_b1()'s resource[]
 # table maps B1 protocol 7/8 (MODEM_ALL_NEGOTIATE / MODEM_ASYNC) to 17 and
@@ -242,6 +251,7 @@ class MipsShim:
         self.stub_returns = 0
         # trace printf pointer lives at gp + 0x1a7b; gp is set per-run
         self.host_writes: list[tuple[int, int]] = []
+        self.preserve_host_writes = False
         # MIPS instructions between ADSP time slices (0 disables the pump).
         # A DSP that runs while the MIPS is streaming an IDMA download will
         # execute the half-replaced image and clobber it, so the download
@@ -301,6 +311,9 @@ class MipsShim:
         self.uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED, self._unmapped)
         self.uc.hook_add(UC_HOOK_MEM_WRITE_UNMAPPED, self._unmapped)
         self.trace_log = []
+        self.call_trace: list[tuple[str, int, int]] = []
+        self.trace_calls = False
+        self.phase = "boot"
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -474,7 +487,22 @@ class MipsShim:
                 ADSP.adsp2181_run(core, 1000)
         from unicorn.mips_const import (UC_MIPS_REG_PC, UC_MIPS_REG_RA,
                                         UC_MIPS_REG_A0, UC_MIPS_REG_A1,
-                                        UC_MIPS_REG_A2, UC_MIPS_REG_V0)
+                                        UC_MIPS_REG_A2, UC_MIPS_REG_V0,
+                                        UC_MIPS_REG_0)
+        if self.trace_calls:
+            try:
+                insn = struct.unpack("<I", uc.mem_read(address & 0x1fffffff, 4))[0]
+            except Exception:
+                insn = 0
+            opcode = (insn >> 26) & 0x3F
+            target = None
+            if opcode == 0x03:  # jal
+                target = ((address + 4) & 0xF0000000) | ((insn & 0x03FFFFFF) << 2)
+            elif opcode == 0x00 and (insn & 0x3F) == 0x09:  # jalr
+                rs = (insn >> 21) & 0x1F
+                target = uc.reg_read(UC_MIPS_REG_0 + rs)
+            if target is not None:
+                self.call_trace.append((self.phase, address, target))
         if address == HOST_WRITE:
             a0 = uc.reg_read(UC_MIPS_REG_A0)
             a1 = uc.reg_read(UC_MIPS_REG_A1) & 0xFFFF
@@ -510,7 +538,8 @@ class MipsShim:
         for i, value in enumerate(args[:4]):
             uc.reg_write([UC_MIPS_REG_A0, UC_MIPS_REG_A1,
                           UC_MIPS_REG_A2, UC_MIPS_REG_A3][i], value)
-        self.host_writes = []
+        if not self.preserve_host_writes:
+            self.host_writes = []
         uc.emu_start(entry, STUB_VIRT + 0x20, count=max_insns)
         return uc.reg_read(UC_MIPS_REG_V0)
 
@@ -582,6 +611,14 @@ def symbol_host_address(metadata: dict, index: int) -> int:
                  if b["number"] == seg["memory_block"])
     is_pm = bool(block["type"] & 1)
     return (seg["base"] + symbol["offset"]) | (0 if is_pm else 0x4000)
+
+
+def mips_runtime_addr(addr: int) -> int:
+    """Normalize Unicorn's physical MIPS PCs/targets to firmware kseg0 addrs."""
+    phys = addr & 0x1fffffff
+    if PHYS_BIAS <= phys < PHYS_BIAS + IMAGE_SIZE:
+        return phys | 0x80000000
+    return addr
 
 
 def run_assign(shim: "MipsShim", args) -> None:
@@ -705,7 +742,10 @@ def run_assign(shim: "MipsShim", args) -> None:
     shim.write16(ring_v + 0x0c, write13 + 0x05 - 1)  # producer addr - 1 = 0x7314
     shim.write8(ring_v + 0x10, 0x00)                  # zero -> DM ring (+0x4000)
     shim.write16(ring_v + 0x12, symbol_address(metadata, 13) + 0x17)  # bare 0x3327
-    shim.write16(ring_v + 0x14, 0x0010)               # ring length (16)
+    # DM 0x3327..0x3337 is 17 words.  The switch-on record occupies exactly
+    # 16 words; declaring a 16-word ring wraps the producer to the consumer
+    # and makes the full ring indistinguishable from empty.
+    shim.write16(ring_v + 0x14, 0x0011)               # ring length (17)
 
     # Assign request (s3): +0 -> base, +4 -> resource, +8 = 0, +0x18 = channel.
     shim.write32(RAM_VIRT + 0x4000 + 0x00, base_v)
@@ -729,6 +769,15 @@ def run_assign(shim: "MipsShim", args) -> None:
             print(f"    {e}")
         return
     print(f"[assign] returned v0=0x{v0:08x} host_writes={len(shim.host_writes)}")
+    adsp_dm = ADSP.adsp2181_dm(shim.cpu)
+    print("[assign] TIKRNL command ring DM3327..3336: "
+          + " ".join(f"{adsp_dm[a]:04x}"
+                     for a in range(0x3327, 0x3337)))
+    print("[assign] TIKRNL control DM3310..3316: "
+          + " ".join(f"{adsp_dm[a]:04x}" for a in range(0x3310, 0x3317)))
+    print("[assign] host writes: "
+          + " ".join(f"{addr:04x}={val:04x}"
+                     for addr, val in shim.host_writes))
     if args.log:
         # Show the last PCs in the assign call to see which return path fired.
         print("  assign trace tail:")
@@ -853,11 +902,13 @@ def modem_sig_assign_payload(max_bit_rate: int = 56000) -> bytes:
 
 
 def modem_nl_assign_payload(max_data_length: int = 1024,
-                            answering: bool = True) -> bytes:
-    """Network-layer ASSIGN payload, as add_modem_b23() builds it.
+                            answering: bool = True,
+                            signaling_id: int | None = None) -> bytes:
+    """Network-layer ASSIGN payload, as add_modem_b23()/send_req() build it.
 
-    LLI/LLC/DLC — not a CAI: the CAI belongs to the signalling entity.  This
-    is the plain B2_TRANSPARENT branch (no error correction / compression
+    The modem configuration is LLI/LLC/DLC. On the first global NL request,
+    send_req() prefixes a one-byte CAI containing the parent signalling ID.
+    This is the plain B2_TRANSPARENT branch (no error correction/compression
     negotiation block).
     """
     lli = bytes((1,))                            # driver lli[1]
@@ -871,7 +922,15 @@ def modem_nl_assign_payload(max_data_length: int = 1024,
                   DLC_MODEMPROT_DISABLE_V42_V42BIS
                   | DLC_MODEMPROT_DISABLE_MNP_MNP5
                   | DLC_MODEMPROT_DISABLE_SDLC))
-    return idi_parameters((IDI_LLI, lli), (IDI_LLC, llc), (IDI_DLC, bytes(dlc)))
+    parameters = []
+    if signaling_id is not None:
+        # message.c send_req(): the first NL request for a PLCI is global
+        # (Id=NL_ID), and is prefixed with CAI[0] = the already assigned
+        # signalling entity. This is the call-parent link; omitting it makes
+        # the firmware reject the otherwise valid modem ASSIGN with 0xe6.
+        parameters.append((IDI_CAI, bytes((signaling_id & 0xFF,))))
+    parameters.extend(((IDI_LLI, lli), (IDI_LLC, llc), (IDI_DLC, bytes(dlc))))
+    return idi_parameters(*parameters)
 
 
 def rc_name(rc: int) -> str:
@@ -930,8 +989,34 @@ def drain_return_codes(shim: "MipsShim", sr: int) -> "list[tuple[int, int, int, 
     return out
 
 
+def drain_indications(shim: "MipsShim", sr: int) -> list[tuple[int, int, int, int, bytes]]:
+    """Consume card indications using the PR_RAM IND chain."""
+    count = shim.uc.mem_read(sr + PR_IndOutput, 1)[0]
+    if not count:
+        return []
+    clear_host_doorbell(shim)
+    off = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_NextInd, 2))[0]
+    out = []
+    for _ in range(count):
+        rb = sr + PR_B + off
+        length = struct.unpack_from("<H",
+            shim.uc.mem_read(rb + IND_RBUFFER, 2))[0]
+        out.append((
+            shim.uc.mem_read(rb + IND_IND, 1)[0],
+            shim.uc.mem_read(rb + IND_ID, 1)[0],
+            shim.uc.mem_read(rb + IND_CH, 1)[0],
+            struct.unpack_from("<H",
+                shim.uc.mem_read(rb + IND_REFERENCE, 2))[0],
+            bytes(shim.uc.mem_read(rb + IND_RDATA, length)),
+        ))
+        shim.write8(rb + IND_IND, 0)
+        off = struct.unpack_from("<H", shim.uc.mem_read(rb, 2))[0]
+    shim.write8(sr + PR_IndOutput, 0)
+    return out
+
+
 def post_request(shim: "MipsShim", sr: int, req: int, req_id: int,
-                 req_ch: int, payload: bytes) -> int:
+                 req_ch: int, payload: bytes, reference: int = 0) -> int:
     """Put one IDI request in the queue, as pr_out() (kernel/di.c) does.
 
     Fill the REQ at B[NextReq], advance NextReq to REQ->next, and increment
@@ -943,6 +1028,7 @@ def post_request(shim: "MipsShim", sr: int, req: int, req_id: int,
     shim.write8(rb + REQ_REQ, req)
     shim.write8(rb + REQ_REQID, req_id)
     shim.write8(rb + REQ_REQCH, req_ch)
+    shim.write16(rb + REQ_REFERENCE, reference)
     shim.write16(rb + REQ_XBUFFER, len(payload))
     shim.uc.mem_write(rb + REQ_XDATA, payload)
     shim.write16(sr + PR_NextReq, req_next)
@@ -952,10 +1038,11 @@ def post_request(shim: "MipsShim", sr: int, req: int, req_id: int,
 
 
 def run_until_rc(shim: "MipsShim", sr: int, gp: int, sp: int,
-                 iterations: int = 32) -> "list[tuple[int, int, int, int]]":
+                 iterations: int = 32, phase: str = "mainloop") -> "list[tuple[int, int, int, int]]":
     """Spin the main loop until the firmware queues a return code."""
     for _ in range(iterations):
         try:
+            shim.phase = phase
             shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
         except Exception as exc:
             print(f"[mainloop] fault: {exc}")
@@ -971,10 +1058,11 @@ def assign_entity(shim: "MipsShim", sr: int, gp: int, sp: int, label: str,
 
     Returns the local entity id the card assigned on ASSIGN_OK, else None.
     """
-    off = post_request(shim, sr, ASSIGN, req_id, req_ch, payload)
+    off = post_request(shim, sr, ASSIGN, req_id, req_ch, payload,
+                       reference=1 if label == "nl" else 0)
     print(f"[{label}] ASSIGN Id=0x{req_id:02x} Ch=0x{req_ch:02x} "
           f"@B[0x{off:04x}] payload={payload.hex()}")
-    codes = run_until_rc(shim, sr, gp, sp)
+    codes = run_until_rc(shim, sr, gp, sp, phase=f"{label}-assign")
     if not codes:
         print(f"[{label}] no return code")
         return None
@@ -1032,7 +1120,10 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     shim.write8(sr + 0x08, 0)      # TEI (0 = auto)
     shim.write8(sr + 0x10, 1)      # ForceLaw = a-law (E1)
     shim.write8(sr + 0x16, 0x80)    # DSPInfo = DSP code loaded
-    shim.write8(sr + 0x1a, 12)     # CardType = CARD_MAEP (PRI 30M)
+    # The protocol image and staged combifile must agree on card identity.
+    # Hardcoding legacy value 12 while selecting the PRI-30M file set (23)
+    # lets basic signalling run but bypasses the matching DSP resource path.
+    shim.write8(sr + 0x1a, args.card_type)
     shim.write8(sr + 0xe0, 0)      # PCINIT_END_OF_LIST
     shim.write32(0x00, 3)          # boot->cmd = 3 (start)
     shim.write32(0x04, 0xa0011000) # boot->addr
@@ -1044,6 +1135,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     #    pointer (gp+0x5e93) is now set.
     print("[mainloop] running firmware entry (basic init)...")
     try:
+        shim.phase = "entry"
         shim.call(MIPS_ENTRY, [], gp=gp, sp=sp, max_insns=5000000)
     except Exception as exc:
         print(f"[mainloop] entry stopped at self-loop: {exc}")
@@ -1058,10 +1150,12 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     MIPS_POST_INIT2 = BIAS + 0x1a534   # 0x8002a534
     print("[mainloop] running post-wait init functions...")
     try:
+        shim.phase = "post-init1"
         shim.call(MIPS_POST_INIT1, [], gp=gp, sp=sp, max_insns=2000000)
     except Exception as exc:
         print(f"[mainloop] init1 fault: {exc}")
     try:
+        shim.phase = "post-init2"
         shim.call(MIPS_POST_INIT2, [], gp=gp, sp=sp, max_insns=2000000)
     except Exception as exc:
         print(f"[mainloop] init2 fault: {exc}")
@@ -1083,14 +1177,18 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     #     carrying the local entity id the card allocated.
     sig = struct.unpack_from("<H", shim.uc.mem_read(sr + PR_Signature, 2))[0]
     print(f"[mainloop] card ready: Sig=0x{sig:04x}")
-
-    steps = []
-    if args.entity in ("sig", "both"):
-        steps.append(("sig", DSIG_ID, modem_sig_assign_payload()))
-    if args.entity in ("nl", "both"):
-        steps.append(("nl", NL_ID, modem_nl_assign_payload()))
+    # From this point onward report the whole call lifecycle. MipsShim.call()
+    # normally resets this diagnostic per helper invocation, which made a
+    # connected call incorrectly finish with "host_writes=0" whenever its
+    # final main-loop iteration happened to be idle.
+    shim.host_writes = []
+    shim.preserve_host_writes = True
 
     assigned = {}
+    if args.entity in ("sig", "both"):
+        steps = (("sig", DSIG_ID, modem_sig_assign_payload()),)
+    else:
+        steps = ()
     for label, req_id, payload in steps:
         entity_id = assign_entity(shim, sr, gp, sp, label, req_id,
                                   args.channel, payload)
@@ -1101,11 +1199,97 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         print(f"[{label}] entity id 0x{entity_id:02x} assigned "
               f"(host_writes={len(shim.host_writes)})")
 
+    if args.entity in ("nl", "both"):
+        signaling_id = assigned.get("sig")
+        payload = modem_nl_assign_payload(
+            answering=args.call_direction == "answering",
+            signaling_id=signaling_id)
+        entity_id = assign_entity(shim, sr, gp, sp, "nl", NL_ID,
+                                  args.channel, payload)
+        if entity_id is None:
+            print("[nl] assign did not succeed; stopping the sequence")
+        else:
+            assigned["nl"] = entity_id
+            print(f"[nl] entity id 0x{entity_id:02x} assigned "
+                  f"(host_writes={len(shim.host_writes)})")
+
+    if args.connect and "nl" in assigned:
+        bearer_disconnected = False
+        if args.call_direction == "answering" and "sig" in assigned:
+            # message.c connect_res(): add_b1() appends the modem CAI to the
+            # CALL_RES itself. The initial SIG ASSIGN only creates the PLCI;
+            # an empty CALL_RES answers signalling but never allocates the
+            # 0x0258 modem DSP service.
+            call_payload = idi_parameters((IDI_CAI, modem_cai()))
+            off = post_request(shim, sr, CALL_RES, assigned["sig"], 0,
+                               call_payload, reference=0)
+            print(f"[call] CALL_RES Id=0x{assigned['sig']:02x} Ch=0x00 "
+                  f"@B[0x{off:04x}]")
+            for rc, rc_id, rc_ch, ref in run_until_rc(shim, sr, gp, sp,
+                                                      phase="call-res"):
+                print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
+                      f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+        off = post_request(shim, sr, N_CONNECT, assigned["nl"], 0,
+                           b"\x00", reference=1)
+        print(f"[call] N_CONNECT Id=0x{assigned['nl']:02x} Ch=0x00 "
+              f"@B[0x{off:04x}]")
+        for rc, rc_id, rc_ch, ref in run_until_rc(shim, sr, gp, sp,
+                                                  phase="n-connect"):
+            print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
+                  f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+        for _ in range(args.call_steps):
+            shim.phase = "call-pump"
+            shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
+            for ind, ind_id, ind_ch, ref, payload in drain_indications(shim, sr):
+                print(f"[call] IND 0x{ind:02x} Id=0x{ind_id:02x} "
+                      f"Ch=0x{ind_ch:02x} Ref=0x{ref:04x} "
+                      f"payload={payload.hex()}")
+                if ind == 0x04:
+                    bearer_disconnected = True
+        dsp_assigned = f"{SERVICE_ASSIGN:08x}" in shim.trace_log
+        if bearer_disconnected:
+            bearer_state = "DISCONNECTED"
+        elif dsp_assigned:
+            bearer_state = "ACTIVE (modem DSP assigned)"
+        else:
+            bearer_state = "SIGNALLING ACTIVE, DSP UNASSIGNED"
+        print(f"[call] simulated B-channel: {bearer_state}")
+
     if assigned:
         print("[mainloop] assigned: " +
               ", ".join(f"{k}=0x{v:02x}" for k, v in assigned.items()))
 
     print(f"[mainloop] done: host_writes={len(shim.host_writes)}")
+    print("[mainloop] modem DSP path: service_assign=%d switch_on=%d"
+          % (shim.trace_log.count(f"{SERVICE_ASSIGN:08x}"),
+             shim.trace_log.count("80090e58")))
+    if args.trace_calls:
+        from collections import Counter, defaultdict
+        phases: dict[str, Counter[int]] = defaultdict(Counter)
+        for phase, _src, target in shim.call_trace:
+            target = mips_runtime_addr(target)
+            if BIAS <= target < BIAS + len(args.image.read_bytes()):
+                phases[phase][target] += 1
+        print("[trace] firmware call targets by phase:")
+        printed = False
+        for phase in sorted(phases):
+            top = phases[phase].most_common(args.trace_call_limit)
+            if not top:
+                continue
+            printed = True
+            print(f"  [{phase}]")
+            for target, count in top:
+                mark = ""
+                if target == SERVICE_ASSIGN:
+                    mark = " SERVICE_ASSIGN"
+                elif target == BIAS + 0x7fe58:
+                    mark = " SWITCH_ON"
+                print(f"    0x{target:08x} count={count}{mark}")
+        if not printed:
+            raw = Counter((phase, src, target) for phase, src, target in shim.call_trace)
+            print(f"  no file-backed targets decoded; raw_calls={sum(raw.values())}")
+            for (phase, src, target), count in raw.most_common(args.trace_call_limit):
+                print(f"    [{phase}] src=0x{src:08x} target=0x{target:08x} count={count}")
     if shim.log and shim.host_writes:
         for addr, val in shim.host_writes[:32]:
             tag = "DM" if addr & 0x4000 else "PM"
@@ -1148,6 +1332,19 @@ def main() -> int:
                              "entity (DSIG_ID, carries the CAI), the network "
                              "layer (NL_ID, carries LLI/LLC/DLC), or both in "
                              "the driver's order (default)")
+    parser.add_argument("--connect", action="store_true",
+                        help="after linked SIG+NL assignment, submit the "
+                             "network N_CONNECT that activates the bearer")
+    parser.add_argument("--call-direction", choices=("calling", "answering"),
+                        default="calling",
+                        help="select outgoing V42 or incoming V42_IN bearer "
+                             "semantics for the modem NL entity")
+    parser.add_argument("--simulate-b-channel", action="store_true",
+                        help="simulate an answered incoming call: issue "
+                             "CALL_RES, activate NL, and keep pumping the "
+                             "firmware while checking for N_DISC")
+    parser.add_argument("--call-steps", type=int, default=64,
+                        help="MIPS main-loop iterations to run after N_CONNECT")
     parser.add_argument("--dsp-pump", type=int, default=256,
                         help="MIPS instructions between DSP time slices during "
                              "--mainloop; the DSPs must run in line with the "
@@ -1157,7 +1354,14 @@ def main() -> int:
                         help="override DspCodeBaseAddr (default: the protocol "
                              "image's OFFS_PROTOCOL_END_ADDR)")
     parser.add_argument("--log", action="store_true")
+    parser.add_argument("--trace-calls", action="store_true",
+                        help="record MIPS jal/jalr call targets per harness phase")
+    parser.add_argument("--trace-call-limit", type=int, default=24,
+                        help="number of hot call targets to print per phase")
     args = parser.parse_args()
+    if args.simulate_b_channel:
+        args.connect = True
+        args.call_direction = "answering"
     if args.dsp_combifile is not None and not str(args.dsp_combifile):
         args.dsp_combifile = None
 
@@ -1189,6 +1393,7 @@ def main() -> int:
         print(f"[adsp] staged: idle={ADSP.adsp2181_idle(cpu)}")
 
     shim = MipsShim(args.image, cpu, log=args.log)
+    shim.trace_calls = args.trace_calls
 
     # The firmware's trace-printf pointer (gp+0x1a7b = 0x800fbe30) is
     # file-backed and points at the real printf (0x80083180), which writes to
@@ -1237,6 +1442,8 @@ def main() -> int:
         ADSP.adsp2181_watch_dm(cpu, addr, 1)
     ADSP.adsp2181_watch_pm(cpu, 0x3327, 1)
     for _ in range(args.words):
+        if ADSP.adsp2181_dm(cpu)[0x3315] != ADSP.adsp2181_dm(cpu)[0x3316]:
+            ADSP.adsp2181_host_write(cpu, 0x7310, 0x0001)
         ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX
         ADSP.adsp2181_set_irq(cpu, 3, 0)
         # IRQE (irq 6) wakes the kernel foreground from IDLE so it runs
@@ -1253,6 +1460,15 @@ def main() -> int:
         # dispatch loop is circular: TIKRNL only runs when dispatched,
         # but dispatch needs TIKRNL to have registered.
         ADSP.adsp2181_call(cpu, 0x64A, 0x02A8)
+        ADSP.adsp2181_run(cpu, 20000)
+        # TIKRNL init publishes 0x05B1 as its command service vector at
+        # DM 0x3308.  The frame initializer above does not consume the
+        # host->task database ring by itself; invoke the published service
+        # vector to break the assignment/dispatch bootstrap cycle.
+        service_vector = ADSP.adsp2181_dm(cpu)[0x3308]
+        ADSP.adsp2181_call(cpu, service_vector, 0x02A8)
+        ADSP.adsp2181_run(cpu, 20000)
+        ADSP.adsp2181_call(cpu, 0x06BB, 0x02A8)
         ADSP.adsp2181_run(cpu, 20000)
     # Host-port reads need the 0x4000 data-memory select; a bare address
     # selects program memory (see symbol_host_address).

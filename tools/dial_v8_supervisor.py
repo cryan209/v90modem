@@ -110,7 +110,7 @@ def main():
     if args.mode == 'calling':
         ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x048C)  # calling
     else:
-        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x068C)  # answer
+        ADSP.adsp2181_host_write(cpu, DB + 0x01, 0x0484)  # answer
     ADSP.adsp2181_host_write(cpu, DB + 0x02, 0x0030)
     ADSP.adsp2181_host_write(cpu, DB + 0x03, 0xF0FD)
     ADSP.adsp2181_host_write(cpu, DB + 0x0E, 0x2000)  # WSTATUS activate
