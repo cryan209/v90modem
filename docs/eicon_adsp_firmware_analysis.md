@@ -2343,3 +2343,51 @@ is necessary but not sufficient — this peer never sends the 8-bit message it
 waits for.  The next question is what that message is on the wire, and whether
 a V.90 call is supposed to see one at all, since `DM(0x3f94) = 9` selects
 V.90 and the 8-bit class may belong to the `0x0006` (non-V.90) mode.
+
+## No: the 8-bit class belongs to the V.90 decoding, not mode `0x0006`
+
+The two record loaders read the *same* DM bytes differently.  PM `0x336a`
+takes the offset from `w1 & 0xff` and the value from the low bytes of `w2`/`w3`;
+PM `0x3376` takes the offset from `w1 >> 8` and the value from the high bytes.
+The record blocks are dual-encoded — both decodings yield a plausible state
+sequence over the same addresses — and PM `0x34c4` picks the loader from
+`DM(0x3f94) & 0x0008`: set (mode `0x0009`, V.90) uses PM `0x336a`, clear (mode
+`0x0006`) uses PM `0x3376`.
+
+Decoding the token chain at `0x07a0` both ways:
+
+```
+  triple  (mode 9, V.90)   0020  0022  0024 actions=0002  0026  0028  002a  002b  002c
+  packed  (mode 6)         0020  0022  0024 actions=0000  0026  0028  002a  002c  002e
+```
+
+**The framer-B install is present only in the triple decoding** — the V.90
+one.  Under mode `0x0006` the same bytes at state `0x24` decode to
+`actions = 0000`.  And the non-token entries never arm it under either
+decoding:
+
+```
+  0x0ac4 packed (mode 6's own loader)   0020 0022 0024 0026 0028 002a 002c 002d  -- all actions=0000
+  0x0ae8 triple (mode 9)                0020 0022 0024 0026 0028 002a 002b       -- all actions=0000
+```
+
+So the answer is no.  The 8-bit control channel is a **V.90** feature: it is
+armed by the mode-9 decoding of the token chain and by nothing else.  That is
+consistent with `run04`, where mode `0x0009` plus `DM(0x3f8a) = 0x5678` made
+the firmware install framer B on its own.  Mode `0x0006`'s message class is
+the 30-bit one PM `0x3f7f` selects (`DM(0x1651) = 0x01e0`), not 8-bit.
+
+This also settles the previous section's closing speculation, which guessed the
+opposite: the `0x0bxx` chain we ran originally is not "the right V.90 path" —
+it is the V.90 path *without* the token, and the token chain is the V.90 path
+with the 8-bit control channel armed.
+
+What remains is why framer B, once genuinely installed and running for a whole
+call (`run04`: `DM(0x19cf)` cycling `0x25ab/0x25c7/0x25e2` throughout), never
+validates a frame.  Either this peer does not transmit the 8-bit message at
+all, or it is transmitted in a form the magnitude-thresholded bit decision at
+PM `0x3515` cannot recover.  Distinguishing those two needs the message's
+on-wire form, and the transmitter is available to answer it: PM `0x2446` builds
+the frame and `--info-action` can fire actions 3..8 to emit each message code.
+Capturing our own transmission of message 1 and measuring it gives the exact
+waveform framer B is waiting to receive, offline and without a peer.
