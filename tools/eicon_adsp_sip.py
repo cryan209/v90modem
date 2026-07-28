@@ -342,7 +342,12 @@ class EiconSipEndpoint:
                  init_info_detector_at_24: bool = False,
                  watch_exec: tuple[int, ...] = (),
                  info_actions: dict[int, int] | None = None,
-                 db_words: dict[int, int] | None = None):
+                 db_words: dict[int, int] | None = None,
+                 native_mips: bool = False,
+                 mips_kernel: Path | None = None,
+                 mips_tikrnl: Path | None = None,
+                 mips_image: Path = Path('docs/firmware/te_dmlt.pm'),
+                 mips_combifile: Path = Path('docs/firmware/dspdload.bin')):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -359,6 +364,12 @@ class EiconSipEndpoint:
         self.watch_exec = watch_exec
         self.info_actions = dict(info_actions or {})
         self.db_words = dict(db_words or {})
+        self.native_mips = native_mips
+        self.mips_kernel = mips_kernel
+        self.mips_tikrnl = mips_tikrnl
+        self.mips_image = mips_image
+        self.mips_combifile = mips_combifile
+        self.native_card = None
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind((bind, sip_port))
@@ -381,6 +392,13 @@ class EiconSipEndpoint:
         self.codec = Card()
         self.codec.boot()
         self.codec.configure_g711_law(law)
+        if native_mips:
+            if mips_kernel is None or mips_tikrnl is None:
+                raise ValueError('--native-mips requires kernel and TIKRNL paths')
+            from eicon_mips_shim import create_native_mips_modem
+            print('[native-mips] prebooting card firmware and incoming modem call...')
+            self.native_card = create_native_mips_modem(
+                mips_kernel, mips_tikrnl, law, mips_image, mips_combifile)
         if registrar and username:
             self.send_register()
 
@@ -484,7 +502,15 @@ class EiconSipEndpoint:
                 self.response(486, 'Busy Here', headers, peer)
                 return
             if not self.call:
-                if self.kernel_dispatch:
+                if self.native_mips:
+                    if self.native_card is None:
+                        from eicon_mips_shim import create_native_mips_modem
+                        self.native_card = create_native_mips_modem(
+                            self.mips_kernel, self.mips_tikrnl, self.law,
+                            self.mips_image, self.mips_combifile)
+                    card = self.native_card
+                    self.native_card = None
+                elif self.kernel_dispatch:
                     from dial_kernel_dispatch import LiveKernelModem
                     card = LiveKernelModem(
                         init_info_detector_at_24=self.init_info_detector_at_24,
@@ -684,6 +710,20 @@ def main() -> int:
                     help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('--native-mips', action='store_true',
+                    help='experimental: supervise the SIP ADSP with the real '
+                         'Unicorn MIPS firmware; assignment works, but the '
+                         'SIG.MDM inter-DSP connect callback is not yet routed')
+    ap.add_argument('--mips-kernel', type=Path,
+                    default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
+                                 '0009-diva-server-pri-30m-kernel'))
+    ap.add_argument('--mips-tikrnl', type=Path,
+                    default=Path('artifacts/eicon-dsp/build-117-926/tikrnl/'
+                                 '0258-tikrnl81.f34-task'))
+    ap.add_argument('--mips-image', type=Path,
+                    default=Path('docs/firmware/te_dmlt.pm'))
+    ap.add_argument('--mips-combifile', type=Path,
+                    default=Path('docs/firmware/dspdload.bin'))
     ap.add_argument('--db-word', default='', metavar='ADDR:VALUE[,...]',
                     help='write DSP DM words after configure_modem, e.g. '
                          '0x3f8a:0x5678 -- the reserved database word PM 0x34b5 '
@@ -716,7 +756,10 @@ def main() -> int:
                                  if pair.strip()},
                                 {int(pair.split(':')[0], 0): int(pair.split(':')[1], 0)
                                  for pair in args.db_word.split(',')
-                                 if pair.strip()})
+                                 if pair.strip()},
+                                args.native_mips, args.mips_kernel,
+                                args.mips_tikrnl, args.mips_image,
+                                args.mips_combifile)
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

@@ -25,6 +25,7 @@ import os
 import struct
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from unicorn import Uc, UC_ARCH_MIPS, UC_MODE_LITTLE_ENDIAN, UC_MODE_32
 from unicorn import UC_HOOK_CODE
@@ -218,6 +219,10 @@ ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_in
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
 ADSP.adsp2181_set_callbacks.argtypes = [ctypes.c_void_p] * 4
+ADSP.adsp2181_sport0_tdm_frame.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
+    ctypes.c_uint16, ctypes.c_int]
+ADSP.adsp2181_sport0_tdm_frame.restype = ctypes.c_uint16
 
 RX_CB = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int)
 TX_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int32)
@@ -1350,7 +1355,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     #    when ready, so a request written beforehand is overwritten.
     sr = PR_RAM_PHYS
     shim.write8(sr + 0x08, 0)      # TEI (0 = auto)
-    shim.write8(sr + 0x10, 1)      # ForceLaw = a-law (E1)
+    shim.write8(sr + 0x10, args.force_law)  # 1=A-law, 2=mu-law
     shim.write8(sr + 0x16, 0x80)    # DSPInfo = DSP code loaded
     # The protocol image and staged combifile must agree on card identity.
     # Hardcoding legacy value 12 while selecting the PRI-30M file set (23)
@@ -1487,6 +1492,17 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             if args.dump_entities:
                 dump_entities(shim, gp, args.dump_entity_limit)
 
+    if defer_nl_assign:
+        # NL ASSIGN gives the asynchronous lower SETUP path enough main-loop
+        # turns to publish CALL_IND.  Consume it before CALL_RES, matching the
+        # real host ordering and releasing PR_RAM indication flow control.
+        for ind, ind_id, ind_ch, ref, payload in drain_indications(shim, sr):
+            print(f"[ingress] IND 0x{ind:02x} Id=0x{ind_id:02x} "
+                  f"Ch=0x{ind_ch:02x} Ref=0x{ref:04x} "
+                  f"payload={payload.hex()}")
+            if ind == 0x02:
+                call_channel = ind_ch
+
     if args.connect and "nl" in assigned:
         bearer_disconnected = False
         if args.call_direction == "answering" and "sig" in assigned:
@@ -1589,6 +1605,122 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         for addr, val in shim.host_writes[:32]:
             tag = "DM" if addr & 0x4000 else "PM"
             print(f"  host_write {tag} 0x{addr & 0x7fff:04x} = 0x{val:04x}")
+
+
+class NativeMipsModem:
+    """SIP-facing view of the modem core assigned by the real MIPS firmware.
+
+    The MIPS remains live as the host supervisor.  RTP's 8 kHz clock drives
+    the selected ADSP core one PRI frame at a time, while one MIPS main-loop
+    pass per RTP packet handles database commands and overlay downloads.
+    """
+
+    def __init__(self, shim: MipsShim, core, law: str,
+                 mips_interval: int = 160, adsp_budget: int = 300000):
+        self.shim = shim
+        self.cpu = core
+        self.dm = ADSP.adsp2181_dm(core)
+        self.law = law
+        self.silence = 0xD5 if law == "pcma" else 0xFF
+        self.mips_interval = max(1, mips_interval)
+        self.adsp_budget = adsp_budget
+        self.switches: list[tuple[int, int, int]] = []
+        self.overlays: dict[int, tuple[object, str]] = {}
+        self.forced_info_samples: list[int] = []
+        self.l1l2_forced_samples: list[int] = []
+        self.resident = 0x0258
+        self._mips_fault_reported = False
+
+    def _frame_core(self, code: int) -> None:
+        # The hardware PRI descriptor calls TIKRNL's registered continuation
+        # only for this selected channel.  The generic SPORT frame walks the
+        # kernel queue but cannot reconstruct that private callback.
+        self.dm[0x3F08] = code & 0xFF
+        ADSP.adsp2181_sport0_tdm_frame(
+            self.cpu, 0, 0, code & 0xFF, self.silence,
+            self.adsp_budget)
+        # Native SERVICE_ASSIGN relocates TIKRNL, so the direct harness's
+        # fixed 0x06fc continuation is invalid here.  Run the page handler
+        # published by the natively loaded DIAL overlay; the remaining TX
+        # adapter seam is diagnosed separately below.
+        handler = self.dm[0x3FB3] & 0x3FFF
+        if handler:
+            ADSP.adsp2181_call(self.cpu, handler, 0x02A8)
+            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+
+    def boot(self) -> None:
+        """Compatibility with ``Card``/``LiveKernelModem``; already booted."""
+
+    def configure_modem(self, role: str, law: str = "pcmu") -> None:
+        if role != "answer":
+            raise ValueError("native MIPS SIP backend currently answers calls only")
+        if law != self.law:
+            raise ValueError(f"native core booted for {self.law}, not {law}")
+
+    def _step_mips(self) -> None:
+        try:
+            self.shim.phase = "native-sip"
+            self.shim.call(MIPS_MAINLOOP, [], gp=GP, sp=STACK_TOP,
+                           max_insns=500000)
+            # Act as the host consumer so a long call cannot fill PR_RAM with
+            # status indications.  Data-plane delivery will be attached to
+            # the NL entity separately; signalling diagnostics are printed.
+            for ind, ind_id, ind_ch, ref, payload in drain_indications(
+                    self.shim, PR_RAM_PHYS):
+                if ind not in (N_CONNECT, 3):
+                    print(f"[native-mips] IND 0x{ind:02x} "
+                          f"Id=0x{ind_id:02x} Ch=0x{ind_ch:02x} "
+                          f"Ref=0x{ref:04x} payload={payload.hex()}")
+            drain_return_codes(self.shim, PR_RAM_PHYS)
+        except Exception as exc:
+            if not self._mips_fault_reported:
+                print(f"[native-mips] runtime supervisor stopped: {exc}")
+                self._mips_fault_reported = True
+
+    def frame_fast(self, code: int, sample_index: int) -> int:
+        self._frame_core(code)
+        if (sample_index + 1) % self.mips_interval == 0:
+            self._step_mips()
+        pointer = self.dm[0x3FB4] & 0x3FFF
+        value = self.dm[pointer] if pointer else 0
+        return value - 0x10000 if value & 0x8000 else value
+
+
+def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
+                             image: Path = Path("docs/firmware/te_dmlt.pm"),
+                             dsp_combifile: Path = Path("docs/firmware/dspdload.bin"),
+                             channel: int = 1, call_steps: int = 2,
+                             dsp_pump: int = 256) -> NativeMipsModem:
+    """Boot the real card firmware and return its naturally assigned modem."""
+    if law not in ("pcmu", "pcma"):
+        raise ValueError("native MIPS backend supports only pcmu or pcma")
+    cpu = ADSP.adsp2181_create()
+    ADSP.adsp2181_reset(cpu)
+    ADSP.adsp2181_set_idma_boot_hold(cpu, 1)
+    shim = MipsShim(image, cpu)
+    shim.write32(0x800fbe30, STUB_VIRT)
+    args = SimpleNamespace(
+        image=image, tikrnl=tikrnl, dsp_combifile=dsp_combifile,
+        dsp_code_base=None, card_type=CARDTYPE_DIVASRV_P_30M_PCI,
+        force_law=2 if law == "pcmu" else 1,
+        dsp_pump=dsp_pump, entity="both", channel=channel,
+        call_direction="answering", fake_call_ingress=True,
+        inject_call_ingress=True, synthesize_call_ingress=False,
+        ingress_entity_slot=0, legacy_sig_req_id=False,
+        connect=True, force_modem_dsp_assign=False, call_steps=call_steps,
+        dump_entities=False, dump_entity_limit=0, native_dm_out=None,
+        trace_calls=False, trace_call_limit=0)
+    run_mainloop(shim, args)
+    block = shim.service_assign_block
+    core = shim.cores.get(block) if block is not None else None
+    if core is None:
+        raise RuntimeError("native incoming call did not assign a modem DSP core")
+    print(f"[native-mips] SIP media attached to DSP block 0x{block:08x} "
+          f"using {law}")
+    modem = NativeMipsModem(shim, core, law)
+    print("[native-mips] media clock attached; native SIG.MDM->TIKRNL "
+          "connect callback is not yet routed")
+    return modem
 
 
 def stage_direct_tikrnl_core(args):
@@ -2055,6 +2187,9 @@ def main() -> int:
                         default=CARDTYPE_DIVASRV_P_30M_PCI,
                         help="CARDTYPE_* number selecting the combifile's "
                              "required download set (23 = PRI 30M PCI)")
+    parser.add_argument("--force-law", type=int, choices=(1, 2), default=1,
+                        help="native card companding: 1=A-law (default), "
+                             "2=mu-law")
     parser.add_argument("--entity", choices=("sig", "nl", "both"),
                         default="both",
                         help="which entities --mainloop assigns: the signalling "
