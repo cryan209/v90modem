@@ -2212,3 +2212,68 @@ earlier INFO state sets `DM(0x164c)` bit 1 before `0x37` in a real call, or
 framer B is installed by a path outside this overlay.  Dump `DM(0x164c)` and
 `DM(0x19cf)` across every state of a call that gets further than ours — that
 comparison, not more static reading, is what will settle it.
+
+## INFOH is not it; the INFO page has two state chains and we take the wrong one
+
+### INFOH checked and ruled out
+
+INFOH (download `0x026e`) loads cleanly — "INFOH.F34 Overlay Version 1.00 Build
+117-926" — and the bootpage table `DM(0x31d5)` maps **bootpage 10** to it
+(entries are negative: `0xfd92` is `-0x026e`, `0xfda0` is `-0x0260` for page 7,
+`0xfda1` is `-0x025f` for V.8).  So the firmware can request it.
+
+It is not a variant of the INFO page, though.  Every region that matters
+differs: the classifier/action block `0x2410..0x24ff`, the PM `0x2602` entry,
+the framers `0x3510..0x35ff`, the PM action table `0x2ee0..0x2eef`, and the
+record handlers `0x3435..0x34bf` all hash differently between the two
+overlays, and INFOH brings its own DM image, so the INFO state records do not
+exist in it.  `DM(0x164c)` reads `0x0006` after loading INFOH, but that is
+overlay data sitting at that address, not a live state field.  INFOH is not
+the missing piece.
+
+### The missing piece is a state chain inside INFO
+
+`tools/info_state_records.py` decodes every record and the state-vector table
+at `DM(0x133e)`.  Across all 0x40 entries, exactly one record dispatches
+action 1:
+
+```
+  index 03  state 0024 @07e5  DM(0x164c)=0002  ->  PM 0x2602 INSTALL FRAMER B
+  index 2a  state 00a0 @1736  DM(0x164c)=0001  ->  PM 0x2410 build message table
+  index 30  state 00a2 @175d  DM(0x164c)=0080  ->  PM 0x2434 transmit message 1
+  index 32  state 00a7 @1796  DM(0x164c)=0101  ->  PM 0x2410, PM 0x243b (message 2)
+```
+
+Framer B is installed by the record for **state `0x0024`** at `DM 0x07e5`, which
+belongs to the `0x07xx`/`0x08xx` chain (`07a0` state `0x20`, `07e5` state
+`0x24`, `07f7` `0x26`, `080f` `0x28`, `082d` `0x2b`, `0836` `0x2c`, `084e`
+`0x2e`, `08d5` `0x37` ...; records also simply run on into the next address,
+so a chain of consecutive records is one state sequence).
+
+Our calls never touch it.  PM `0x32dd` enters INFO with vector `0x0b87` and PM
+`0x3317` with `0x0b69`, both in the `0x0bxx` chain, and the live trace walks
+`0b18 -> 0b27 -> 0b36 -> 0b4b -> 0b60` before crossing into `0869 -> 087b ->
+088d -> 0899 -> 08b1 -> 08e7`.  The `0x0bxx` record for state `0x24` leaves
+`DM(0x164c)` at zero, so framer B is never installed — which is why the
+`--init-info-detector-at-24` diagnostic worked: it was calling PM `0x2602` at
+exactly the state whose real record would have done it, by luck.
+
+### Correction: `DM(0x1651)` does reach `0x0080`
+
+The record at `0x1736` (state `0x00a0`) sets `DM(0x1651) = 0x0080`, confirmed
+live — it goes `0x0110 -> 0x0080` at the moment that state is entered.  The
+earlier claim that `0x0080` was unreachable because PM `0x3f84` is the only
+writer was wrong: it was a scan of direct-addressed writes only, and the
+record loader writes `DM(0x1642 + offset)` through a DAG store.  So framer A
+is itself reconfigured to the 8-bit message class at `0x00a0` and becomes the
+event publisher there; framer B is not the only candidate after all.
+
+### The remaining question
+
+What selects the `0x07xx` chain over the `0x0bxx` one.  Both are complete INFO
+sequences over the same states; only the `0x07xx` one arms the 8-bit control
+channel at `0x24`.  Entry into it is via candidate index `0x02` or `0x14` in
+the vector table, so the next step is to find which record's candidate field
+carries those indices and what condition selects it — and whether the choice
+keys off `DM(0x16b6)`/`DM(0x3f94)`, the INFO variant, since PM `0x3317` seeds
+the `0x0bxx` entry while explicitly setting `DM(0x16b6) = 8`.
