@@ -2136,3 +2136,79 @@ script pointer `DM(0x1667)` in a real call.  PM `0x2148` is the interpreter and
 PM `0x2169..0x2175` walk `DM(0x1667)` within 8-entry blocks based at `0x2be0`,
 `0x2be8` and `0x2bf0`, so recovering who seeds that pointer for the INFO page
 is the concrete remaining step — not another injection.
+
+## The state-record format, and what actually seeds `DM(0x1667)`
+
+### How a state record is applied
+
+PM `0x336a` (installed as `DM(0x169f)` by PM `0x32dd`/`0x34c9`; PM `0x3376` is a
+packed alternative) decodes the state script as `(offset, value-lo, value-hi)`
+triples, writing each value to `DM(0x1642 + offset)` and stopping when the
+offset equals `MR1 = 0x19`.  So a record can only reach `DM(0x1642..0x165a)` —
+the raw fields, plus the candidate/condition indices at `DM(0x1653..0x165b)`
+that PM `0x3329..0x3332` translate through the tables at `0x133e`/`0x131e` into
+`DM(0x1692..0x1695)` and `DM(0x1696..0x169a)`.
+
+PM `0x3435` then diffs each raw field against a shadow copy in
+`DM(0x1688..0x1690)` and calls a per-field handler on change.  Two handler
+shapes:
+
+- PM `0x3480`, a **bitmask dispatcher**: for each set bit of the field, fetch
+  an action address from a PM table and `CALL` it.  Used by PM `0x345e`
+  (`0x2e9a`, 11 entries), `0x3463` (`0x2ea5`, 16), `0x3468` (`0x2eb5`, 13),
+  `0x346d` (`0x2ec2`, 16), `0x3472` (`0x2ed2`, 16), `0x3477` (`0x2ee6`, 9) and
+  `0x347c` (`0x2ee2`, 4).
+- PM `0x34ae`, a **2-bit-slot pointer loader**: each slot indexes a PM
+  sub-table and the fetched pointer is stored to consecutive DM words.  PM
+  `0x349e` fills `DM(0x166a..0x166c)` (the transmit source `DM(0x166b)` among
+  them) from the bases at PM `0x2bd5..0x2bd7`; PM `0x34a4` fills
+  `DM(0x166e..0x166f)`; PM `0x34a9` fills `DM(0x1681..0x1683)`.
+
+### `DM(0x1667)` is seeded, and it is not the problem
+
+PM `0x2169`, `0x216b` and `0x216d` load `AY1` with `0x2be8`, `0x2be0` and
+`0x2bf0` and fall into PM `0x216e`, which computes
+`((DM(0x1667) - 0x2be0) & 7) + AY1` — switch script block, keep the phase
+within it.  Those three are entries 10, 9 and 8 of the PM `0x2ea5` table, so
+they are selected by bits in the state-record field **`DM(0x1644)`**.  The INFO
+page initializer's block clear at PM `0x3f6a..0x3f6f` zeroes `DM(0x1667)`
+first; PM `0x2149`/`0x214b` then walk it and PM `0x2165`/`0x2168` rewind it.
+
+Watching it live confirms all of that works.  `DM(0x1644) = 0x0401` throughout
+INFO selects block `0x2be8`, and `DM(0x1667)` walks `0x2be8..0x2bec` normally
+across every state.  **The script pointer was never unseeded.**
+
+### The action table is dispatched from a different field, and is downstream
+
+PM `0x2ee6..0x2eee` is not reached through `DM(0x1667)` at all.  It is handler
+PM `0x3477`'s table, dispatched as a bitmask from the state-record field
+**`DM(0x164c)`** — bit N runs action N.
+
+`DM(0x164c)` is `0x0000` for every INFO state `0x20..0x37`, and that is
+correct, not a gap.  On the event-1 branch it is set by the states that follow:
+
+```
+  6.625  state 0x00a0   DM(0x164c)=0x0001   -> action 0, PM 0x2410, build the
+                                               message table at DM(0x1986)
+  6.626  state 0x00a2   DM(0x164c)=0x0080   -> action 7, PM 0x2434, transmit
+                                               message 1, TX source 0x3b30
+```
+
+So the previous section's chicken-and-egg framing was wrong.  Installing
+framer B and transmitting the 8-bit message are the **response** to event 1,
+not its prerequisite: on receiving message 1 at `0x37` the page moves to
+`0x00a0`, builds the message table, and at `0x00a2` sends its own message 1
+back on the 1200 Hz Tone B carrier.  Nothing about the action block is
+missing — the states that dispatch it are simply downstream of the transition
+we never take.
+
+That leaves exactly one thing unexplained, and it is now sharply posed: PM
+`0x2470` is the only writer of a non-zero `DM(0x198e)` and it runs only from
+the classifier PM `0x2461`, which only the 8-bit framer can reach.  So a real
+card receiving message 1 at state `0x37` must be running framer B at that
+point — yet PM `0x3f4c` parks it at `0x25f3` and the only installer, action 1,
+is dispatched by a state we only reach afterwards.  Either another page or an
+earlier INFO state sets `DM(0x164c)` bit 1 before `0x37` in a real call, or
+framer B is installed by a path outside this overlay.  Dump `DM(0x164c)` and
+`DM(0x19cf)` across every state of a call that gets further than ours — that
+comparison, not more static reading, is what will settle it.
