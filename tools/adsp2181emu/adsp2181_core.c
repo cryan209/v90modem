@@ -187,6 +187,7 @@ struct adsp2181
     UINT8 watch_dm[0x4000];
     UINT8 watch_pm[0x4000];
     UINT8 watch_exec[0x4000];
+    UINT8 watch_irqs;
     UINT64 cycles;
     INT64 trace_budget;
 
@@ -262,6 +263,12 @@ static int generate_irq(adsp2100_state *adsp, int which, int priority)
 {
     if (!(adsp->imask & (0x200 >> priority)))
         return 0;
+    if (adsp->watch_irqs)
+        logerror("[IRQ] take=%d priority=%d from=%04x cyc=%llu imask=%03x icntl=%02x pcsp=%u statsp=%u\n",
+                 which, priority, (unsigned)(adsp->pc & 0x3fff),
+                 (unsigned long long)adsp->cycles, (unsigned)adsp->imask,
+                 (unsigned)adsp->icntl, (unsigned)adsp->pc_sp,
+                 (unsigned)adsp->stat_sp);
     adsp->irq_latch[which] = 0;
     pc_stack_push(adsp);
     stat_stack_push(adsp);
@@ -1281,6 +1288,11 @@ void adsp2181_watch_pm(adsp2181_t *a, uint16_t addr, int on)
 void adsp2181_watch_exec(adsp2181_t *a, uint16_t addr, int on)
 {
     if (a) a->watch_exec[addr & 0x3fff] = on != 0;
+}
+
+void adsp2181_watch_irqs(adsp2181_t *a, int on)
+{
+    if (a) a->watch_irqs = on != 0;
 }
 uint64_t adsp2181_cycles(const adsp2181_t *a) { return a ? a->cycles : 0; }
 void adsp2181_trace_budget(adsp2181_t *a, int64_t n) { if (a) a->trace_budget = n; }

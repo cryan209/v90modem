@@ -1636,3 +1636,24 @@ in INFO0d bit 39 on a PCMU call; the kernel path advertises µ-law.  Thus the
 next meaningful hardware test is `tools/eicon_adsp_sip.py --kernel-dispatch`.
 A fresh call, rather than another replay, is required to determine whether the
 Courier acknowledges that corrected INFO0d and advances beyond `0x2b`.
+
+## INFO `0x37` terminal FFT corruption
+
+Execution watchpoints on the INFO analysis sequencer (`PM 0x36ed`) show the
+normal transform actions entering `PM 0x376e`, `0x3771`, and `0x3774` with
+`DM(0x16c5..0x16c7)` progressing from `0x0080/0x0002/0x0004` to the terminal
+`0x0001/0x0100/0x0200`.  At the `0x37` failure boundary, the sequencer invokes
+`PM 0x376e` again without first running the `PM 0x373a` reset action.  The
+next stage shifts the span to zero and doubles count/stride to
+`0x0200/0x0400`.  The indirect butterfly stores at PM `0x3792/0x3794` then
+escape the `0x1110` work buffer and overwrite the INFO control workspace.
+The first consequential overwrite is `DM(0x16b6)=0xffec`; PM
+`0x217d..0x217f` subsequently copies that invalid variant selector to the
+shared boot-page word.  The later `DI_control=0xfd00`, `BaudInfo=0x3000`, and
+status values are downstream corruption, not host requests.
+
+This is evidence of a missing or incorrectly timed emulator path rather than
+a valid firmware transition.  The stale classifier/event value
+`DM(0x198e)=0x06a6` is present at every watched transform entry.  Do not hide
+the problem with an FFT bounds check: trace why the sequencer skips its reset
+or why the detector completion fails to stop/reconfigure that sequence.
