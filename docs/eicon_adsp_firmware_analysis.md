@@ -2449,3 +2449,55 @@ it gets it.  A response driven by an actual Tone A detector — rather than the
 bit-clock stall `run03` used — is the next thing worth building, and
 `tools/eicon_info_replay.py` can prototype it offline against the captured
 peer audio before spending live calls.
+
+## The tone detector: found, armed, counting — and two profiles are dead code
+
+The INFO page's tone detector is FFT based.  PM `0x372d` fills the working
+buffers, PM `0x36ed` runs the transform (256-point: span/count/stride walk
+`0x80/2/4 -> 0x20/8/0x10 -> 8/0x20/0x40 -> 1/0x100/0x200`), and results are
+appended to the 20-word buffer at `DM(0x0ddd)` through the pointer
+`DM(0x15f3)`.  A detector is armed by writing a bin index to `DM(0x16f2)` and
+a threshold to `DM(0x16f3)`, with `DM(0x16f0)`, `DM(0x16f1)` and `DM(0x06e7)`
+as further parameters.
+
+Four arming profiles exist in the image:
+
+| routine | bin `DM(0x16f2)` | threshold `DM(0x16f3)` | reachable |
+|---|---|---|---|
+| PM `0x365c` | `0x0003` | `0x2aaa` | yes — armed on entering state `0x36` |
+| PM `0x36b9` | `0x0005` | `0x1999` | yes |
+| PM `0x3716` | `0x0008` | `0x1000` | **no reference anywhere** |
+| PM `0x3722` | `0x0012` | `0x071c` | **no reference anywhere** |
+
+PM `0x3716` and PM `0x3722` have no branch, no PM table slot and no DM vector
+pointing at them — the same signature PM `0x2602` had before its action-table
+slot was found.  PM `0x3722`'s bin 18 with the lowest threshold of the four is
+the profile one would expect for acquiring a distant modem's Tone A.
+
+The detection counter is `DM(0x06e6)`, incremented by PM `0x3702`/`0x370c`,
+which are bits 2 and 1 of the PM `0x2ed2` table — handler PM `0x3472`, state
+record field `DM(0x164b)`.  State `0x37` sets `DM(0x164b) = 0x1002`, so bit 1
+dispatches PM `0x370c`, and live `DM(0x06e6)` counts `0,1,2,3,4` across state
+`0x37`, one per ~26.7 ms analysis, before we leave at 4.  The condition
+handlers PM `0x33ae..0x33bc` compare `DM(0x06e6)` against 3, 5, 6, `0x0e` and
+`0x18`, so the state graph is waiting on a detection count.
+
+So the detector is armed, the transform runs, and the count advances — what
+never happens is a result that turns into `DM(0x198e)`.
+
+Arming the dead profiles by hand does not help, and the reason is instructive:
+calling PM `0x3722` or PM `0x3716` at state `0x34` or `0x36` leaves the state
+path and `DM(0x198e)` bit-identical, because state `0x36`'s own record runs PM
+`0x365c` on entry and immediately re-arms bin 3 over the top.  Any real use of
+those profiles has to come from a state record that selects them, not from an
+injection.
+
+That points away from the MIPS/driver hypothesis rather than toward it: these
+arming routines are dispatched from PM tables driven by state-record fields,
+not from database words, so a different host-side database setup cannot reach
+them directly.  What can is a state chain we do not run — the same conclusion
+the `DM(0x164c)` work reached from the other side.  The concrete next step is
+to search the record blocks for a field value whose PM `0x2ed2`/`0x2ec2` bits
+resolve to `0x3716`/`0x3722`, which would name the state that arms the Tone A
+profile; `tools/info_state_records.py` already decodes the records, so this is
+a table lookup rather than more disassembly.
