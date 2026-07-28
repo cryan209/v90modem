@@ -2501,3 +2501,70 @@ to search the record blocks for a field value whose PM `0x2ed2`/`0x2ec2` bits
 resolve to `0x3716`/`0x3722`, which would name the state that arms the Tone A
 profile; `tools/info_state_records.py` already decodes the records, so this is
 a table lookup rather than more disassembly.
+
+## The Tone A detector is armed at state `0x0c41`, which we never reach
+
+Correcting the previous section: PM `0x3716` and PM `0x3722` are *not*
+unreferenced.  The earlier scan looked for branches, PM table slots and DM
+vectors, and missed immediate-store opcodes.  Two routines install them into
+the analysis action lists:
+
+```
+  36ae: I4 = 0x0e53 ; DM(I4,M5) = 0x3716 ; DM(I4,M5) = 0x3700
+  36e3: I4 = 0x0e4c ; DM(I4,M5) = 0x3722 ; DM(I4,M5) = 0x3700
+```
+
+`DM(0x0e4c)` and `DM(0x0e53)` are the analysis action slots — lists of PM
+addresses terminated by `0x3700` — that the FFT sequencer executes.  (This is
+also why the result-buffer overrun documented earlier is so destructive: the
+20-word buffer at `DM(0x0ddd..0x0df0)` runs directly into the detector
+programs.)
+
+The installers are all bits of the PM `0x2ed2` table, dispatched from the
+state-record field `DM(0x164b)`:
+
+| bit | routine | profile |
+|---|---|---|
+| 4 | `0x36a7` | multi-action sequence |
+| 6 | `0x36ae` | bin 8, threshold `0x1000` |
+| 7 | `0x365c` | bin 3, threshold `0x2aaa` |
+| 8 | `0x36dd` | — |
+| 9 | `0x36e7` | — |
+| **10** | **`0x36e3`** | **bin 18, threshold `0x071c`** |
+| 11 | `0x36b9` | bin 5, threshold `0x1999` |
+
+Scanning all 125 reachable records for `DM(0x164b)` gives the answer:
+
+```
+  @08b1 state=0a36  DM(0x164b)=0080  -> 365c (bin 3)      <- what our calls arm
+  @08ff state=0b37  DM(0x164b)=0010  -> 36a7
+  @0914 state=0c37  DM(0x164b)=0040  -> 36ae (bin 8)
+  @09b3 state=0040  DM(0x164b)=0800  -> 36b9 (bin 5)
+  @0a07 state=0b41  DM(0x164b)=0100  -> 36dd
+  @0a28 state=0c41  DM(0x164b)=0400  -> 36e3 (bin 18)     <- the Tone A profile
+  @0a3a state=0d41  DM(0x164b)=0200  -> 36e7
+  @1b32/1b3e/1b59   DM(0x164b)=ff1f  -> arms every detector
+```
+
+The states form two parallel families: `0x37` with sub-states `0a37`, `0b37`,
+`0c37`, `0d37`, and `0x41` with `0a41`, `0b41`, `0c41`, `0d41`.  Our calls
+reach `0x37`/`0x0a37` and stop — never `0x0b37`, never `0x0c37`, and never the
+`0x40`/`0x41`/`0x42` family at all.
+
+Live exec watchpoints confirm it: PM `0x365c` runs on entering state `0x36`
+and PM `0x36a7` at `0x37`, so `DM(0x0e4c)` only ever holds `0x376e`/`0x373a`
+and `DM(0x0e53)` `0x3700`/`0x325c`.  **PM `0x36e3` never executes**, so
+`0x3722` is never installed and the bin-18 detector never runs.  PM `0x36ae`
+executes exactly once, early, during DIAL — never during INFO.
+
+This also explains why arming the profiles by hand did nothing: state `0x36`'s
+record re-runs PM `0x365c` on entry and overwrites the slot.
+
+So the answer to "where is the Tone A detector" is: it exists, it is
+configured with the lowest threshold of the four profiles as expected for
+acquiring a distant tone, and it is armed by the record for state `0x0c41` —
+a state in a family our INFO sequence never enters.  Whether `0x41` is
+supposed to follow `0x37` directly, or belongs after the Tone B response at
+`0x00a2`, is the next thing to establish; `tools/info_state_records.py` decodes
+the `0x09d7..0x0a4f` records, and their candidate/condition indices should say
+what leads into them.
