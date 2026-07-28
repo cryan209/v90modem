@@ -2563,8 +2563,64 @@ record re-runs PM `0x365c` on entry and overwrites the slot.
 So the answer to "where is the Tone A detector" is: it exists, it is
 configured with the lowest threshold of the four profiles as expected for
 acquiring a distant tone, and it is armed by the record for state `0x0c41` —
-a state in a family our INFO sequence never enters.  Whether `0x41` is
-supposed to follow `0x37` directly, or belongs after the Tone B response at
-`0x00a2`, is the next thing to establish; `tools/info_state_records.py` decodes
-the `0x09d7..0x0a4f` records, and their candidate/condition indices should say
-what leads into them.
+a state in a family our INFO sequence never enters.
+
+## The `0x41` family is the no-message path, not downstream of Tone B
+
+Decoding complete records (the `0x19` terminator consumes a full three-word
+triple) resolves the `0x41` decision at `0x09ec`:
+
+```
+  @09d7  state 0041
+  @09ec  state 0a41
+           default successor -> @0a07 state 0b41, pretest[12] (count == 5)
+           slot 0: next[23] -> @0a28 state 0c41, test[13] -> PM 33b6 (count == 6)
+           slot 1: next[24] -> @0a3a state 0d41, test[14] -> PM 33b8 (count == 24)
+           slot 2: next[25] -> @09d7 state 0041, test[01] -> PM 33ca (always)
+  @0a07  state 0b41
+  @0a28  state 0c41                         <- arms bin 18 / Tone A
+  @0a3a  state 0d41
+  @0a4f  state 0042
+```
+
+Thus `0x0a41` takes its sequential `0x0b41` successor at detector-count 5,
+selects `0x0c41` at 6, selects `0x0d41` at 24, and otherwise loops through
+root state `0x41`.  At 6, `0x0c41`'s `DM(0x164b) = 0x0400` dispatches PM
+`0x36e3` and installs the bin-18 Tone A profile.  This is a real, internally
+connected detector path; the apparent absence of a vector pointing at
+`0x0a41` is because the sequencer stores the address immediately after each
+record as its default successor.  The `0x19` terminator's two-byte payload is
+also live: it becomes `DM(0x165b)`/the default-successor pre-condition, which
+is why the updated decoder prints it as `pretest` rather than discarding it.
+
+The preceding default-successor records are:
+
+```
+  @098f  state 003c, event-1 candidate -> @1736 state 00a0
+  @09a7  state 003e
+  @09b3  state 0040
+  @09c8  state 0a40
+  @09d7  state 0041
+```
+
+State `0x3c` is the fork.  Its slot 3 is condition PM `0x2476`
+(`DM(0x198e) == 1`) to vector index `0x2f`, record `0x1736`; that message
+branch proceeds immediately to state `0x00a2` and transmits Tone B.  If the
+message event does not fire, the inherited countdown pre-condition takes the
+sequential path through `0x3e`/`0x40` into the `0x41` detector family.  No
+record in the `0x00a0`/`0x00a2` message chain has a candidate back to vector
+indices `0x23..0x25`, and the only candidate for root `0x41` is its own
+`0x0a41` loop.
+
+So the Tone A detector is **not after the Tone B response**.  It is on the
+alternative no-message/default-successor chain.  Nor is it a direct candidate
+of the `0x37` record: several intermediate receive states precede it.  In the
+live call, framer A wins at `0x37` and sends the page to state `0x10` before
+that chain can be reached, while the missing event-1 exit is what would send
+it to the genuine Tone B path.  The `0x37` exit choice therefore remains the
+single blocking question; the `0x41` lookup does not reveal a missing
+post-`0x00a2` transition.
+
+`tools/info_state_records.py --records 0x09d7:0x0a5b` now walks consecutive
+records on their true boundaries and resolves each candidate and condition
+index, so the result is reproducible without hand-splitting the table.

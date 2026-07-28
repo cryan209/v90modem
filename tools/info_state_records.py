@@ -27,6 +27,7 @@ Usage:
     python3 tools/info_state_records.py            # table + records with actions
     python3 tools/info_state_records.py --all      # every table entry
     python3 tools/info_state_records.py --record 0x1736
+    python3 tools/info_state_records.py --records 0x09d7:0x0a5b
 """
 from __future__ import annotations
 
@@ -47,7 +48,8 @@ VECTOR_TABLE_LEN = 0x40
 FIELDS = {0x02: 'script(0x1644)', 0x05: 'timer(0x1647)', 0x0A: 'actions(0x164c)',
           0x0F: 'length(0x1651)', 0x10: 'state(0x1652)',
           0x11: 'next0', 0x12: 'next1', 0x13: 'next2', 0x14: 'next3',
-          0x15: 'test0', 0x16: 'test1', 0x17: 'test2', 0x18: 'test3'}
+          0x15: 'test0', 0x16: 'test1', 0x17: 'test2', 0x18: 'test3',
+          0x19: 'pretest'}
 
 ACTIONS = {0: 'PM 0x2410 build message table',
            1: 'PM 0x2602 INSTALL FRAMER B',
@@ -59,17 +61,32 @@ ACTIONS = {0: 'PM 0x2410 build message table',
            7: 'PM 0x2434 transmit message 1',
            8: 'PM 0x243b transmit message 2'}
 
+# Conditions needed to read the 0x37/0x41 decision paths.  Unnamed entries
+# are still printed with their PM address.
+CONDITIONS = {0x00: 'never',
+              0x01: 'always',
+              0x12: 'DM(0x06e6) == 5',
+              0x13: 'DM(0x06e6) == 6',
+              0x14: 'DM(0x06e6) == 24',
+              0x1C: 'DM(0x198e) == 1'}
 
-def decode(dm, address: int, limit: int = 48) -> dict[int, int]:
-    """Replay PM 0x336a over one record."""
+
+def decode_with_end(dm, address: int, limit: int = 48) -> tuple[dict[int, int], int]:
+    """Replay PM 0x336a and return the address after its terminator triple."""
     out: dict[int, int] = {}
     for _ in range(limit):
         offset = dm[address] & 0xFF
-        if offset == RECORD_END:
-            break
-        out[offset] = (dm[address + 1] & 0xFF) | ((dm[address + 2] & 0xFF) << 8)
+        value = (dm[address + 1] & 0xFF) | ((dm[address + 2] & 0xFF) << 8)
         address += 3
-    return out
+        out[offset] = value
+        if offset == RECORD_END:
+            return out, address
+    raise ValueError('state record has no terminator')
+
+
+def decode(dm, address: int, limit: int = 48) -> dict[int, int]:
+    """Replay PM 0x336a over one record."""
+    return decode_with_end(dm, address, limit)[0]
 
 
 def describe(record: dict[int, int]) -> str:
@@ -77,13 +94,52 @@ def describe(record: dict[int, int]) -> str:
                     for offset, value in sorted(record.items()))
 
 
+def parse_range(value: str) -> tuple[int, int]:
+    try:
+        start, end = value.split(':', 1)
+        return int(start, 0), int(end, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('expected START:END') from exc
+
+
+def describe_edges(dm, record: dict[int, int]) -> list[str]:
+    lines = []
+    pretest = record.get(0x19)
+    if pretest is not None:
+        pm = dm[0x131E + pretest]
+        meaning = CONDITIONS.get(pretest)
+        lines.append(f'default successor: test[{pretest:02x}] -> PM {pm:04x}' +
+                     ('' if meaning is None else f' ({meaning})'))
+    for slot in range(4):
+        candidate = record.get(0x11 + slot)
+        condition = record.get(0x15 + slot)
+        if candidate is None and condition is None:
+            continue
+        parts = [f'slot {slot}:']
+        if candidate is not None:
+            target = dm[VECTOR_TABLE + candidate]
+            target_state = decode(dm, target).get(0x10)
+            label = '----' if target_state is None else f'{target_state:04x}'
+            parts.append(f'next[{candidate:02x}] -> @{target:04x} state {label}')
+        if condition is not None:
+            pm = dm[0x131E + condition]
+            meaning = CONDITIONS.get(condition)
+            parts.append(f'test[{condition:02x}] -> PM {pm:04x}' +
+                         ('' if meaning is None else f' ({meaning})'))
+        lines.append(' '.join(parts))
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--all', action='store_true',
                     help='print every state-vector table entry')
-    ap.add_argument('--record', type=lambda v: int(v, 0),
-                    help='decode a single record at this DM address')
+    selection = ap.add_mutually_exclusive_group()
+    selection.add_argument('--record', type=lambda v: int(v, 0),
+                           help='decode a single record at this DM address')
+    selection.add_argument('--records', type=parse_range, metavar='START:END',
+                           help='decode consecutive records in this half-open DM range')
     args = ap.parse_args()
 
     modem = LiveKernelModem()
@@ -97,7 +153,24 @@ def main() -> int:
     print(description)
 
     if args.record is not None:
-        print(f'record @{args.record:04x}: {describe(decode(dm, args.record))}')
+        record = decode(dm, args.record)
+        print(f'record @{args.record:04x}: {describe(record)}')
+        for line in describe_edges(dm, record):
+            print(f'  {line}')
+        return 0
+
+    if args.records is not None:
+        address, end = args.records
+        while address < end:
+            record, next_address = decode_with_end(dm, address)
+            print(f'record @{address:04x}..{next_address - 1:04x}: {describe(record)}')
+            for line in describe_edges(dm, record):
+                print(f'  {line}')
+            address = next_address
+        if address != end:
+            print(f'range ends inside a record (next boundary is {address:#06x})',
+                  file=sys.stderr)
+            return 1
         return 0
 
     print(f'\nstate-vector table DM({VECTOR_TABLE:#06x}):')
