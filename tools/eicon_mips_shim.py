@@ -143,12 +143,16 @@ TASK_ID = 0x80    # dynamic user tasks
 MAN_ID = 0xe0     # management
 REMOVE = 0xff
 
-# Entity pointer vector seen in the protocol image around the common IDI
-# dispatcher.  gp+0x5eb9 holds the count; entries are firmware runtime
-# pointers and must be accessed through Unicorn's physical mirror.
+# Signalling-controller object vector used by the common IDI dispatcher.
+# gp+0x5eb9 holds the count; entries are firmware runtime pointers and must
+# be accessed through Unicorn's physical mirror.
 ENTITY_TABLE = 0x80299928
-CALL_INGRESS_ALLOC = 0x800172a8
+# Complete incoming signalling-message parser.  Do not confuse this with
+# 0x800172a8: that address is only the delay slot of a jal to the IE-copy
+# helper at the end of the preceding function.
+CALL_INGRESS_PARSER = 0x800172c0
 SYNTH_CALL_OBJECT = RAM_VIRT + 0x7000
+SYNTH_INGRESS_MESSAGE = RAM_VIRT + 0x7800
 
 # DSP CAI modem hardware types (kernel/mdm_msg.h).  add_b1()'s resource[]
 # table maps B1 protocol 7/8 (MODEM_ALL_NEGOTIATE / MODEM_ASYNC) to 17 and
@@ -348,6 +352,8 @@ class MipsShim:
         self.call_trace: list[tuple[str, int, int]] = []
         self.trace_calls = False
         self.phase = "boot"
+        self.service_assign_pending = False
+        self.service_assign_block: int | None = None
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -430,6 +436,8 @@ class MipsShim:
     def _dsp_write(self, uc, access, address, size, value, user):
         block, port = self._dsp_ports(address)
         core = self.core_for(block)
+        if self.service_assign_pending and self.service_assign_block is None:
+            self.service_assign_block = block & 0x1fffffff
         value &= 0xFFFF
         if port >= 0x80:
             self._idma_addr = value
@@ -537,8 +545,12 @@ class MipsShim:
                 target = uc.reg_read(UC_MIPS_REG_0 + rs)
             if target is not None:
                 self.call_trace.append((self.phase, address, target))
+        if address == SERVICE_ASSIGN:
+            self.service_assign_pending = True
         if address == HOST_WRITE:
             a0 = uc.reg_read(UC_MIPS_REG_A0)
+            if self.service_assign_pending and self.service_assign_block is None:
+                self.service_assign_block = a0 & 0x1fffffff
             a1 = uc.reg_read(UC_MIPS_REG_A1) & 0xFFFF
             a2 = uc.reg_read(UC_MIPS_REG_A2) & 0xFFFF
             if self.log:
@@ -953,14 +965,15 @@ def modem_sig_assign_payload(max_bit_rate: int = 56000) -> bytes:
                           (IDI_UID, b"Capi20"))
 
 
-def modem_call_res_payload() -> bytes:
-    """CALL_RES payload for ISDN_PROTO_L2_MODEM from i4l_idi.c.
+def modem_call_res_payload(max_bit_rate: int = 56000) -> bytes:
+    """CAPI20 ``connect_res()`` modem payload produced by ``add_b1()``.
 
-    This is not the full 26-byte CAPI20 add_b1() descriptor used while
-    assigning/listening.  The old IDI answer path sends CAI length 6 with
-    resource 0x11 (modem async), LLC selector 9, and 0x20 in byte 4.
+    The old i4l IDI compatibility path used a six-byte CAI, but Eicon's
+    CAPI20 hardware path attaches the complete 26-byte modem descriptor to
+    CALL_RES.  This is the transaction whose private DSP effects the native
+    ingress experiment needs to preserve.
     """
-    return idi_parameters((IDI_CAI, bytes((0x11, 0x09, 0x00, 0x00, 0x20, 0x00))))
+    return idi_parameters((IDI_CAI, modem_cai(max_bit_rate)))
 
 
 def modem_nl_assign_payload(max_data_length: int = 1024,
@@ -1188,31 +1201,72 @@ def dump_entities(shim: "MipsShim", gp: int, limit: int = 16) -> None:
 
 def inject_call_ingress(shim: "MipsShim", gp: int, sp: int,
                         slot: int = 0) -> None:
-    """Run the firmware branch that fabricates a per-call object on a listener.
+    """Inject a network-originated SETUP into the real signalling parser.
 
-    This is deliberately below PR_RAM: there is no host request for a Q.931
-    SETUP arriving from the line.  The setup block at 0x800172a8 is reached
-    by the D-channel receive state machine after it has matched a listening
-    SIG entity; it allocates entity+0x1c and emits the incoming-call
-    indication.
+    ``0x800172c0`` obtains the current message type from ``gp+0x5e87`` and,
+    when ``gp+0x5e88`` is zero, parses the length/data block selected by
+    ``gp+0x5ecf``.  This is the same interface the lower PRI/SIG dispatcher
+    establishes before calling the controller object's handler.  Event
+    ``0x17`` is the no-call-state jump-table entry that allocates the incoming
+    call object; event 2 only updates bearer-status flags.
     """
-    from unicorn.mips_const import UC_MIPS_REG_S0, UC_MIPS_REG_S2
-
     sig_obj = read_runtime32(shim, ENTITY_TABLE + slot * 4)
     if sig_obj == 0:
-        print(f"[ingress] no entity object in slot {slot}")
+        print(f"[ingress] no signalling object in slot {slot}")
         return
-    before = read_runtime32(shim, sig_obj + 0x1c)
-    print(f"[ingress] fake CALL_IND on entity slot {slot} "
-          f"obj=0x{sig_obj:08x} before +1c=0x{before:08x}")
-    try:
-        shim.phase = "fake-ingress"
-        shim.call(CALL_INGRESS_ALLOC, [], gp=gp, sp=sp, max_insns=500000,
-                  extra_regs={UC_MIPS_REG_S0: 0, UC_MIPS_REG_S2: sig_obj})
-    except Exception as exc:
-        print(f"[ingress] firmware ingress trampoline stopped: {exc}")
-    after = read_runtime32(shim, sig_obj + 0x1c)
-    print(f"[ingress] entity slot {slot} after +1c=0x{after:08x}")
+
+    # IDI/Q.931 information elements consumed by the parser: 3.1-kHz audio
+    # bearer capability, V.42 low-layer compatibility, and a minimal channel
+    # identification.  The parser uses the ordinary code,length,data form.
+    payload = idi_parameters(
+        (IDI_BC, bytes((0x90, 0x90, 0xa3))),
+        (IDI_LLC, bytes((0x88, 0x90, 0x21))),
+        (0x18, bytes((0xa1, 0x83))),
+    )
+    message = SYNTH_INGRESS_MESSAGE + slot * 0x100
+    shim.alloc(message, 0x100)
+    for off in range(0, 0x100, 4):
+        shim.write32(message + off, 0)
+    shim.write16(message + 0x10, len(payload))
+    shim.write_bytes(message + 0x12, payload)
+
+    entity_id = shim.uc.mem_read((sig_obj + 0x14) & 0x1fffffff, 1)[0]
+    shim.write32(gp + 0x5ecf, message)
+    shim.write8(gp + 0x5e88, 0x00)  # use the gp+0x5ecf message block
+    shim.write8(gp + 0x5eab, entity_id)
+
+    # The PRI dispatcher reports a new call first (0x17), causing state 0 to
+    # allocate the call object, then delivers SETUP indication 0x0b to the new
+    # call-state handler.  Calling only the first event leaves a correctly
+    # allocated but never indicated call.
+    for event, label in ((0x17, "allocate"), (0x0b, "SETUP")):
+        shim.write8(gp + 0x5e87, event)
+        before = read_runtime32(shim, sig_obj + 0x1c)
+        print(f"[ingress] {label} event 0x{event:02x} on controller slot "
+              f"{slot} obj=0x{sig_obj:08x} entity=0x{entity_id:02x} "
+              f"message=0x{message:08x} payload={payload.hex()} "
+              f"before +1c=0x{before:08x}")
+        try:
+            shim.phase = f"call-ingress-{label.lower()}"
+            shim.call(CALL_INGRESS_PARSER, [sig_obj], gp=gp, sp=sp,
+                      max_insns=2000000)
+        except Exception as exc:
+            print(f"[ingress] firmware {label} parser stopped: {exc}")
+        after = read_runtime32(shim, sig_obj + 0x1c)
+        state = (shim.uc.mem_read((after + 0x2c) & 0x1fffffff, 1)[0]
+                 if after else 0)
+        print(f"[ingress] controller slot {slot} after {label}: "
+              f"+1c=0x{after:08x} call_state=0x{state:02x}")
+        if event == 0x17 and after:
+            # The lower D-channel dispatcher advances the newly allocated
+            # controller from allocation state 1 to pending-incoming state 2
+            # before delivering the decoded SETUP.  0x8002a89c treats state 2
+            # as an already network-owned call; leaving state 1 makes it try
+            # to allocate an outgoing B-channel and reject the SETUP.
+            shim.write16(sig_obj + 0x24, 2)
+            shim.write16(sig_obj + 0x26, 1)
+            flags = read_runtime32(shim, sig_obj + 0x20)
+            shim.write32(sig_obj + 0x20, flags | 0x00400000)
 
 
 def synthesize_call_ingress(shim: "MipsShim", slot: int = 0) -> None:
@@ -1397,11 +1451,21 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             print(f"[nl] entity id 0x{entity_id:02x} assigned "
                   f"(host_writes={len(shim.host_writes)})")
 
+    call_channel = 0
     if args.fake_call_ingress and "sig" in assigned:
         issue_listen_request(shim, sr, gp, sp, assigned["sig"],
                              legacy_req_id=args.legacy_sig_req_id)
         if args.inject_call_ingress:
             inject_call_ingress(shim, gp, sp, args.ingress_entity_slot)
+            # The real SETUP parser emits CALL_IND through PR_RAM.  Its Ch is
+            # the per-call selector that must be echoed by CALL_RES; Ch=0
+            # answers the listener and bypasses the allocated call object.
+            for ind, ind_id, ind_ch, ref, payload in drain_indications(shim, sr):
+                print(f"[ingress] IND 0x{ind:02x} Id=0x{ind_id:02x} "
+                      f"Ch=0x{ind_ch:02x} Ref=0x{ref:04x} "
+                      f"payload={payload.hex()}")
+                if ind == 0x02:
+                    call_channel = ind_ch
         if args.synthesize_call_ingress:
             synthesize_call_ingress(shim, args.ingress_entity_slot)
         if args.dump_entities:
@@ -1431,10 +1495,10 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             # an empty CALL_RES answers signalling but never allocates the
             # 0x0258 modem DSP service.
             call_payload = modem_call_res_payload()
-            off = post_request(shim, sr, CALL_RES, assigned["sig"], 0,
-                               call_payload, reference=0)
-            print(f"[call] CALL_RES Id=0x{assigned['sig']:02x} Ch=0x00 "
-                  f"@B[0x{off:04x}]")
+            off = post_request(shim, sr, CALL_RES, assigned["sig"],
+                               call_channel, call_payload, reference=0)
+            print(f"[call] CALL_RES Id=0x{assigned['sig']:02x} "
+                  f"Ch=0x{call_channel:02x} @B[0x{off:04x}]")
             for rc, rc_id, rc_ch, ref in run_until_rc(shim, sr, gp, sp,
                                                       phase="call-res"):
                 print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
@@ -1479,6 +1543,21 @@ def run_mainloop(shim: "MipsShim", args) -> None:
     print("[mainloop] modem DSP path: service_assign=%d switch_on=%d"
           % (shim.trace_log.count(f"{SERVICE_ASSIGN:08x}"),
              shim.trace_log.count("80090e58")))
+    if shim.service_assign_block is not None:
+        block = shim.service_assign_block
+        core = shim.cores.get(block)
+        if core is not None:
+            dm = ADSP.adsp2181_dm(core)
+            print(f"[mainloop] native modem core block=0x{block:08x} "
+                  f"ring=DM{dm[0x3316]:04x}..DM{dm[0x3315]:04x} "
+                  f"page=0x{dm[0x3fb0]:04x} "
+                  f"mode=0x{dm[0x3f94]:04x}")
+            if args.native_dm_out is not None:
+                args.native_dm_out.parent.mkdir(parents=True, exist_ok=True)
+                args.native_dm_out.write_bytes(struct.pack(
+                    "<16384H", *(dm[i] for i in range(0x4000))))
+                print(f"[mainloop] native modem DM snapshot: "
+                      f"{args.native_dm_out}")
     if args.trace_calls:
         from collections import Counter, defaultdict
         phases: dict[str, Counter[int]] = defaultdict(Counter)
@@ -1990,10 +2069,9 @@ def main() -> int:
                         help="select outgoing V42 or incoming V42_IN bearer "
                              "semantics for the modem NL entity")
     parser.add_argument("--simulate-b-channel", action="store_true",
-                        help="simulate an answered incoming call: issue "
-                             "CALL_RES, activate NL, force the recovered "
-                             "TIKRNL modem service assignment, and keep "
-                             "pumping the firmware while checking for N_DISC")
+                        help="simulate an answered incoming call through the "
+                             "native SETUP/CALL_IND, CALL_RES, NL activation, "
+                             "and TIKRNL service-assignment path")
     parser.add_argument("--force-modem-dsp-assign", action="store_true",
                         help="after N_CONNECT, run the recovered "
                              "SERVICE_ASSIGN path against a directly staged "
@@ -2092,13 +2170,15 @@ def main() -> int:
                              "incoming-call state transitions")
     parser.add_argument("--dump-entity-limit", type=int, default=16,
                         help="maximum number of entity table slots to dump")
+    parser.add_argument("--native-dm-out", type=Path,
+                        help="write the naturally assigned modem core's full "
+                             "0x4000-word DM image after --mainloop")
     args = parser.parse_args()
     if args.simulate_b_channel:
         args.connect = True
         args.call_direction = "answering"
         args.fake_call_ingress = True
-        args.synthesize_call_ingress = True
-        args.force_modem_dsp_assign = True
+        args.inject_call_ingress = True
     if args.dsp_combifile is not None and not str(args.dsp_combifile):
         args.dsp_combifile = None
 

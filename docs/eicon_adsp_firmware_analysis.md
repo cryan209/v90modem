@@ -2911,3 +2911,71 @@ the same milestones would be an even shorter oracle.  Until that comparison,
 the honest answer is: we are missing the **native CAI-to-TIKRNL control
 transaction**, not a known SPORT/V34SLOT value, and the exact private field
 that changes the INFO message class is still unrecovered.
+
+## Session 31: native incoming-call assignment recovered
+
+The native transaction above is now reproducible.  The earlier ingress probe
+contained one decisive disassembly error: `0x800172a8` is not an allocator.
+It is the delay-slot instruction of a `jal 0x800c99e4` at the end of the
+preceding IE helper.  Entering there merely executes `addiu a1,a2,0x28` and
+returns through whatever stale frame the harness supplied.  The complete
+signalling message parser starts at **`0x800172c0`**.
+
+The lower PRI dispatcher interface to that parser was recovered from its
+prologue and event jump tables:
+
+- `gp+0x5e87`: current signalling event;
+- `gp+0x5e88 = 0`: select the contiguous message representation;
+- `gp+0x5ecf`: pointer to `{..., uint16 length @ +0x10, data @ +0x12}`;
+- event `0x17`: allocate the network-originated call object while no call is
+  attached;
+- controller state `+0x24 = 2` and flag `0x00400000`: the pending-incoming,
+  network-owned state established by the real lower dispatcher;
+- event `0x0b`: deliver the parsed SETUP to that object.
+
+The synthetic SETUP uses ordinary IDI `code,length,data` elements for 3.1-kHz
+audio BC, V.42 LLC, and channel identification.  Event `0x17` now calls the
+real `0x800785c4` allocator and links a firmware-owned object (observed at
+`0x8028fda0`); event `0x0b` takes the incoming branch rather than trying to
+allocate an outgoing B channel.  No synthetic object at `0x80807000` is
+needed.
+
+The other important correction is CALL_RES configuration.  The old i4l
+compatibility path's six-byte CAI is not Eicon's CAPI20 hardware path.
+`connect_res()` receives the complete 26-byte modem CAI produced by
+`add_b1()`, so `modem_call_res_payload()` now sends that descriptor.
+
+Consequently this command reaches modem service assignment without either
+`synthesize_call_ingress()` or `--force-modem-dsp-assign`:
+
+```bash
+/tmp/eicon-venv/bin/python tools/eicon_mips_shim.py \
+  --kernel artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel \
+  --tikrnl artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task \
+  --mainloop --simulate-b-channel --call-steps 2 \
+  --native-dm-out /tmp/native-modem.dm.bin
+```
+
+Observed result:
+
+```text
+[ingress] allocate event 0x17 ... after +1c=0x8028fda0
+[ingress] SETUP event 0x0b ...
+[call] IND 0x02 Id=0x02 Ch=0x00 ...
+[call] simulated B-channel: ACTIVE (modem DSP assigned)
+[mainloop] modem DSP path: service_assign=1 switch_on=1
+[mainloop] native modem core block=0x1c000808 ...
+```
+
+The call trace contains exactly one `SERVICE_ASSIGN 0x80096980` and one
+`SWITCH_ON 0x80090e58`; 2,274 host writes are made during the native call.
+`--simulate-b-channel` now selects this route by default.  The force and
+minimal-object options remain available only as independent diagnostics.
+
+`--native-dm-out` writes all `0x4000` words from the naturally selected modem
+core, identifying the core from the first host transaction after
+`SERVICE_ASSIGN`.  At the end of this short pre-DIAL run, block `0x1c000808`
+has consumed its initial ring (`DM3315 == DM3316 == 0x3327`) and has not yet
+selected a datapump overlay (`DM3fb0 = 0`, `DM3f94 = 0`), which is expected.
+This snapshot is now the clean baseline for diffing native switch-on/private
+state against `LiveKernelModem` before DIAL and at each INFO milestone.
