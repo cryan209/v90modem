@@ -2060,3 +2060,79 @@ than a real L1, and it retrains when no INFO1 follows.  Two things to settle
 next, in order: what the firmware's genuine Tone B and L1/L2 transmit path is
 (action 1 is a diagnostic that stalls a clock, not that path), and why our
 side resets to `0x0000` at 8.02 s instead of proceeding from `0x37`.
+
+## The real Tone B path, and the reset is the FFT overrun
+
+### Tone B is state `0x00a2`, reached only through event 1
+
+The transmit source is a per-state field, `DM(0x166b)`, dispatched at PM
+`0x3b0c` (`I4 = DM(0x166b); CALL (I4)`).  It has no writer in the overlay: the
+state-script executor PM `0x336a` loads it as part of the 25-word state record,
+alongside `DM(0x1667)`, `DM(0x1668)` and the rest of `DM(0x1665..0x167x)`.
+
+Replaying `run02` with the event injected at `0x37` shows the sources and what
+each transmits:
+
+| state | `DM(0x166b)` | `DM(0x16a6)` | TX |
+|---|---|---|---|
+| `0x34`, `0x36`, `0x37` | `0x3b29` | `0xbbc0` | silent |
+| `0x00a0` | `0x3b30` | `0x4440` | — |
+| `0x00a2` | `0x3b30` | `0x4440` | **1200 Hz, rms 1998, 848 ms** |
+| `0x00e0` | `0x3b29` | `0x4440` | 2100 Hz |
+
+PM `0x3b29` is `SI = 0` — the receive states feed the modulator zeros, so their
+silence is deliberate and correct, not a fault.  PM `0x3b30` is the message
+buffer readout (`DM(0x16a5)` against the end marker `DM(0x16b3)`).  State
+`0x00a2` selects it and puts out a clean 1200 Hz carrier for 848 ms: that is
+the genuine V.34 answer-modem Tone B, produced by the state's own script with
+no clock manipulation, and it is entered from `0x37` only through condition PM
+`0x2476` (event 1) to candidate `DM(0x1695) = 0x1736`.
+
+So `--info-action 0x34:1` produced 1200 Hz by a completely different mechanism
+— stalling the bit-clock divider so the carrier leaks — and is not the real
+path.  The real path needs event 1.
+
+### The 8.02 s reset is the Courier's FFT overrun
+
+Watchpoints put the corrupting stores at PM `0x3793` and `0x3795`: the
+indirect butterfly this document identified in the first `0x37` investigation.
+The analysis-result pointer `DM(0x15f3)` advances two words per analysis every
+~26.7 ms from `0x0ddd`, and its buffer ends at `0x0df0`:
+
+```
+  run02 (baseline)     0x0ddd -> 0x0de9, still inside the buffer
+  run03 (action 1)     0x0ddd -> 0x0df0 at ~6.62 s, then straight through:
+                       0x0df1 ... 0x0e4b ... 0x0e4d at 7.8489 s
+```
+
+`DM(0x0e4c)` holds the sequence's second `PM 0x373a` reset action; it flips
+from `373a` to `0000` at exactly 7.8489 s.  2.6 ms later the transform runs
+without that reset, the butterfly escapes its `0x1110` work buffer, and PM
+`0x3793`/`0x3795` overwrite `DM(0x1652)`, `DM(0x166b)` and `DM(0x1679)` — the
+sequencer's own working set.  The garbage next-state and condition addresses
+then walk `TrnProgress` through nonsense in a few hundred microseconds and
+land on `0x0000`.  That is the "reset" at 8.02 s.
+
+This corrects the earlier claim that slmodemd calls show no FFT corruption.
+They show none only because they leave `0x37` after 113 ms and the pointer
+never reaches `0x0df0`.  The corruption is not peer-specific — it is
+dwell-time specific, and it bites about 1.2 s into the receive window.  Any
+fix that legitimately keeps us in `0x34..0x37` long enough to do the real work
+will hit it.
+
+### One bug, two symptoms
+
+Both open threads reduce to the same missing event.  The classifier PM `0x2461`
+publishes `DM(0x198e)` and is also what completes the analysis; because it
+never runs, (a) state `0x37` never advances to Tone B at `0x00a2`, and (b) the
+analysis never stops appending, so the result buffer overruns into the
+sequencer's action list.  Raising event 1 needs framer B — the fixed `0x0080`
+length instance — to decode the 8-bit control-channel message, and framer B is
+parked disabled at `0x25f3` by PM `0x3f4c` with only the unreferenced PM
+`0x2602` installing it.
+
+Next: find what dispatches the PM `0x2ee6..0x2eee` action table through the
+script pointer `DM(0x1667)` in a real call.  PM `0x2148` is the interpreter and
+PM `0x2169..0x2175` walk `DM(0x1667)` within 8-entry blocks based at `0x2be0`,
+`0x2be8` and `0x2bf0`, so recovering who seeds that pointer for the INFO page
+is the concrete remaining step — not another injection.
