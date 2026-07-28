@@ -1642,15 +1642,30 @@ Courier acknowledges that corrected INFO0d and advances beyond `0x2b`.
 Execution watchpoints on the INFO analysis sequencer (`PM 0x36ed`) show the
 normal transform actions entering `PM 0x376e`, `0x3771`, and `0x3774` with
 `DM(0x16c5..0x16c7)` progressing from `0x0080/0x0002/0x0004` to the terminal
-`0x0001/0x0100/0x0200`.  At the `0x37` failure boundary, the sequencer invokes
-`PM 0x376e` again without first running the `PM 0x373a` reset action.  The
-next stage shifts the span to zero and doubles count/stride to
-`0x0200/0x0400`.  The indirect butterfly stores at PM `0x3792/0x3794` then
-escape the `0x1110` work buffer and overwrite the INFO control workspace.
-The first consequential overwrite is `DM(0x16b6)=0xffec`; PM
+`0x0001/0x0100/0x0200`.  At the `0x37` failure boundary, repeated analysis-result publication has
+already advanced the linear pointer `DM(0x15f3)` beyond its 20-word buffer at
+`0x0ddd..0x0df0`.  PM `0x323e..0x3244` appends two words per analysis and,
+because detector completion never occurs, eventually writes through
+`DM(0x0e4c)`, which holds the second `PM 0x373a` reset action in the active
+analysis sequence.  It replaces that action with `0xffed`.  The sequencer
+therefore reaches its second `PM 0x376e` transform without resetting the
+terminal `0x0001/0x0100/0x0200` parameters.  The next stage shifts the span
+to zero and doubles count/stride to `0x0200/0x0400`.  The indirect butterfly
+stores at PM `0x3792/0x3794` then escape the `0x1110` work buffer and overwrite
+the INFO control workspace.  The first consequential overwrite is
+`DM(0x16b6)=0xffec`; PM
 `0x217d..0x217f` subsequently copies that invalid variant selector to the
 shared boot-page word.  The later `DI_control=0xfd00`, `BaudInfo=0x3000`, and
 status values are downstream corruption, not host requests.
+
+An independent emulator defect was also found in opcode class `0x10` (shift
+with internal register move): the core executed the shift before sampling the
+parallel move source.  INFO PM `0x25fc` shifts a new value into SR while moving
+the preceding `SR1` accumulator to AR, so the old ordering forced AR to read
+the newly cleared SR1.  The core now samples the move source first, with a
+regression test using the firmware's exact `0x1013af` opcode.  The captured
+candidate still fails earlier validation at PM `0x25e9..0x25f1`, so this fix
+is necessary instruction semantics but is not by itself the `0x37` cure.
 
 This is evidence of a missing or incorrectly timed emulator path rather than
 a valid firmware transition.  The stale classifier/event value

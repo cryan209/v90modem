@@ -219,7 +219,9 @@ class RtpCapture:
                         'rx_ptr,rx_value,tx_ptr,tx_value,'
                         'datagram_rate,gen_control,di_control,rxd0,rxd1,baud_info,'
                         'info_mode_selector,info_variant,info_fft_span,info_fft_count,'
-                        'info_fft_stride,wstatus\n')
+                        'info_fft_stride,info_result_ptr,info_sequence_reset,'
+                        'detector_bit,detector_event,detector_word,detector_count,'
+                        'detector_parser,wstatus\n')
         self.ip_id = 0
         self.prefix = prefix
         self.law = law
@@ -291,7 +293,8 @@ class RtpCapture:
                   dm[0x3FB4], dm[dm[0x3FB4] & 0x3fff] if dm[0x3FB4] else 0,
                   dm[0x3F60], dm[0x3F9F], dm[0x3FAD], dm[0x3FAE], dm[0x3FAF],
                   dm[0x3FBB], dm[0x3F94], dm[0x16B6], dm[0x16C5], dm[0x16C6],
-                  dm[0x16C7], dm[0x3EEE])
+                  dm[0x16C7], dm[0x15F3], dm[0x0E4C], dm[0x060F], dm[0x198E],
+                  dm[0x198F], dm[0x19CD], dm[0x19CF], dm[0x3EEE])
         self.diag.write(f'{values[0]},{values[1]:.6f},' +
                         ','.join(f'0x{value:04x}' for value in values[2:]) + '\n')
         # Preserve every defined, reserved and spare word in the complete
@@ -335,7 +338,8 @@ class EiconSipEndpoint:
                  registrar: str | None = None, username: str | None = None,
                  password: str = '', rx_guard_ms: int = 1000,
                  force_info_after_v8: bool = False,
-                 kernel_dispatch: bool = False):
+                 kernel_dispatch: bool = False,
+                 init_info_detector_at_24: bool = False):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -348,6 +352,7 @@ class EiconSipEndpoint:
         self.rx_guard_samples = max(0, rx_guard_ms * 8)
         self.force_info_after_v8 = force_info_after_v8
         self.kernel_dispatch = kernel_dispatch
+        self.init_info_detector_at_24 = init_info_detector_at_24
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind((bind, sip_port))
@@ -475,7 +480,8 @@ class EiconSipEndpoint:
             if not self.call:
                 if self.kernel_dispatch:
                     from dial_kernel_dispatch import LiveKernelModem
-                    card = LiveKernelModem()
+                    card = LiveKernelModem(
+                        init_info_detector_at_24=self.init_info_detector_at_24)
                 else:
                     card = Card(force_info_after_v8=self.force_info_after_v8)
                 card.boot()
@@ -665,13 +671,16 @@ def main() -> int:
                     help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('--init-info-detector-at-24', action='store_true',
+                    help='diagnostic: invoke firmware PM 0x2602 at INFO state 0x24')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
     endpoint = EiconSipEndpoint(args.bind, args.sip_port, args.rtp_port,
                                 args.advertise, args.verbose,
                                 args.capture_prefix, args.law, args.registrar,
                                 args.username, args.password, args.rx_guard_ms,
-                                args.force_info_after_v8, args.kernel_dispatch)
+                                args.force_info_after_v8, args.kernel_dispatch,
+                                args.init_info_detector_at_24)
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

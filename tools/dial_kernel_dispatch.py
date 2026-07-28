@@ -480,7 +480,8 @@ class KernelDispatch:
 class LiveKernelModem:
     """Card-compatible live modem using the real SPORT0 kernel dispatcher."""
 
-    def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False):
+    def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False,
+                 init_info_detector_at_24: bool = False):
         self.driver = KernelDispatch()
         self.card = self.driver.card
         self.dm = self.card.dm
@@ -495,6 +496,8 @@ class LiveKernelModem:
         self._tone_a_checks = 0
         self._tone_a_injected = False
         self.enable_l1l2_gate = enable_l1l2_gate
+        self.init_info_detector_at_24 = init_info_detector_at_24
+        self._info_detector_last_trn = -1
         if not 0 <= channel < 32:
             raise ValueError('PRI channel must be in range 0..31')
         self.channel = channel
@@ -600,7 +603,7 @@ class LiveKernelModem:
         dm = self.dm
         if not self.enable_l1l2_gate:
             return
-        if dm[DM_LIVE_TRNPROG] != 0x0037:
+        if dm[DM_LIVE_TRNPROG] != 0x0024:
             self._tone_a_window.clear()
             self._tone_a_checks = 0
             self._tone_a_injected = False
@@ -634,6 +637,20 @@ class LiveKernelModem:
         before = card.resident
         self._inject_l1l2_completion(code, index)
         driver.tdm_frame(code, self.channel)
+        # Diagnostic reconstruction: PM 0x2602 installs the detector parser
+        # and event table after the FFT workspace is finished with DM 0x1986.
+        # Calling it at overlay load is too early: the FFT overwrites the table.
+        # The natural variant-8 path currently fails to invoke it at the 0x37
+        # seam, so keep this explicit and opt-in until that branch is recovered.
+        trn_progress = dm[DM_LIVE_TRNPROG]
+        if (self.init_info_detector_at_24
+                and card.resident == 0x0260 and trn_progress == 0x0024
+                and self._info_detector_last_trn != 0x0024):
+            ADSP.adsp2181_call(card.cpu, 0x2602, KERNEL_IDLE)
+            ADSP.adsp2181_run(card.cpu, 300_000)
+            if not ADSP.adsp2181_idle(card.cpu):
+                raise RuntimeError('INFO detector initialization did not return to IDLE')
+        self._info_detector_last_trn = trn_progress
         # The closed line-follow-up supervisor selects V90D only after INFO
         # publishes its real 0x003b completion. State 0x0037 is still the
         # §9.2.1.1.5-.7 L1/L2 and INFO1 exchange; forcing the page there makes

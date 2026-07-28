@@ -536,9 +536,12 @@ static void execute(adsp2100_state *adsp)
 				shift_op_imm(adsp, op);
 				break;
 			case 0x10:
-				/* 00010000 0xxxxxxx xxxxxxxx  shift with internal data register move */
-				shift_op(adsp, op);
+				/* 00010000 0xxxxxxx xxxxxxxx  shift with internal data register move.
+                 * Parallel-move sources are sampled before either destination
+                 * is written.  This matters when the move reads SR while the
+                 * shift writes SR (INFO PM 0x25fc). */
 				temp = READ_REG(adsp, 0, op & 15);
+				shift_op(adsp, op);
 				WRITE_REG(adsp, 0, (op >> 4) & 15, temp);
 				break;
 			case 0x11:

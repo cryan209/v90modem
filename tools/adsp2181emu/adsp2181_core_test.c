@@ -77,6 +77,17 @@ int main(void)
     adsp2181_run(cpu, 16);
     assert(adsp2181_sr1(cpu) == 0x5678);
 
+    /* Parallel sources are read before destinations are committed.  INFO's
+     * detector uses this exact instruction at PM 0x25fc: the shift replaces
+     * SR while AR must receive the preceding SR1 accumulator. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x41234f; /* SR1 = 0x1234 */
+    adsp2181_pm(cpu)[1] = 0x1013af; /* SR = LSHIFT MR0 (LO), AR = SR1 */
+    adsp2181_pm(cpu)[2] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[3] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 16);
+    assert(adsp2181_dm(cpu)[0x0100] == 0x1234);
+
     adsp2181_destroy(cpu);
     puts("adsp2181_core_test: PASS");
     return 0;
