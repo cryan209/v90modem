@@ -2391,3 +2391,61 @@ on-wire form, and the transmitter is available to answer it: PM `0x2446` builds
 the frame and `--info-action` can fire actions 3..8 to emit each message code.
 Capturing our own transmission of message 1 and measuring it gives the exact
 waveform framer B is waiting to receive, offline and without a peer.
+
+## Stepping back: our own stack already documents this exact failure
+
+The simple thing was in this repository the whole time.  `modem_engine.c:4856`,
+written from live work against this same SmartLink peer:
+
+> the peer gave up on Phase 3/4 and initiated a retrain: 70 ms silence then
+> Tone A, waiting for our Tone B (V.90 §9.5.2.1) ... nothing ever answers Tone
+> A, and the SmartLink peer declares a link error after ~3.1 s of unanswered
+> Tone A (observed live 2026-07-22)
+
+That is precisely the emulated card's symptom: slmodemd transmits Tone A,
+nothing answers it, and it link-errors.  `run03` is the same statement from
+the other side — putting 1200 Hz into the `0x34..0x37` window made the peer
+advance to `TX_L1`/`TX_L2` immediately.  So the failure is simply **we never
+answer Tone A with Tone B**, and the 8-bit control-channel work of the last
+several sections was chasing the machinery around that, not the fault itself.
+
+The earlier session's `_inject_l1l2_completion` comment — "the emulated INFO
+probing classifier never publishes event 1, although the waveform is present"
+— was right about the symptom.  Treating its Tone A reading as unfounded and
+going after the message classifier instead was my error; both descriptions
+converge on the same missing detection.
+
+### Ruled out cheaply this turn
+
+- **Host event acknowledgement.**  `tools/dial_kernel_dispatch.py:270-286`
+  does service `DM(0x3fc1)` and the change bits; `change_flags` and `wstatus`
+  stay `0x0000` across the call and `dbs_trnprogress` tracks every transition,
+  so the host side of the interface is being consumed.
+- **Receive level.**  Replaying `run02` with the µ-law stream scaled by 0.5x,
+  2x and 4x produces a bit-identical state path and `DM(0x198e)` never leaves
+  its stale `0x06a6` at any gain.  Not a threshold or scaling problem.
+- **Skipping Tone A acquisition.**  States `0x2a`/`0x2b` last about two samples
+  by construction, not because this peer causes an early exit: the record at
+  `0x0b60` sets `DM(0x1650) = 1`, so the pre-condition PM `0x3391` fires on the
+  second sample, and its only live condition targets state `0x2e` anyway.  The
+  earlier note calling `0x2a`/`0x2b` "acquisition of the peer's Tone A" does
+  not survive reading the record.
+- **Any other writer of the event word.**  A watchpoint on `DM(0x198e)` across
+  a whole call logs no write at all.  PM `0x2470` really is the only writer and
+  it never runs, so the Tone A path does not reach it either.
+
+### Where that leaves it
+
+Two readings remain and they are worth separating before more work.  Either
+this firmware answers Tone A from a detector we have not found — in which case
+it is not `DM(0x198e)`, since nothing writes that word — or the INFO page
+genuinely expects an 8-bit control-channel message here that slmodemd never
+sends, and this build's Phase 2 is not the plain V.34 exchange the peer
+implements.
+
+The `run03` result is the practical lever either way: energy in the
+`0x34..0x37` window is what the peer needs, and it advances immediately when
+it gets it.  A response driven by an actual Tone A detector — rather than the
+bit-clock stall `run03` used — is the next thing worth building, and
+`tools/eicon_info_replay.py` can prototype it offline against the captured
+peer audio before spending live calls.
