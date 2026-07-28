@@ -480,8 +480,19 @@ class KernelDispatch:
 class LiveKernelModem:
     """Card-compatible live modem using the real SPORT0 kernel dispatcher."""
 
+    # The INFO overlay's action table, PM 0x2ee6..0x2eee, indexed by action
+    # code.  Nothing in the resident image dispatches it; PM 0x2148 executes
+    # such tables through the script pointer DM(0x1667).  Action 1 (PM 0x2602)
+    # installs framer B and clears the transmit bit-clock divider DM(0x16af),
+    # which leaves the 1200 Hz modulator carrier running unmodulated instead
+    # of idle; actions 3..8 build an 8-bit control-channel message for
+    # transmission through PM 0x2446.
+    INFO_ACTIONS = {0: 0x2410, 1: 0x2602, 2: 0x242B, 3: 0x2430, 4: 0x243D,
+                    5: 0x2441, 6: 0x243F, 7: 0x2434, 8: 0x243B}
+
     def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False,
-                 init_info_detector_at_24: bool = False):
+                 init_info_detector_at_24: bool = False,
+                 info_actions: dict[int, int] | None = None):
         self.driver = KernelDispatch()
         self.card = self.driver.card
         self.dm = self.card.dm
@@ -497,6 +508,10 @@ class LiveKernelModem:
         self._tone_a_injected = False
         self.enable_l1l2_gate = enable_l1l2_gate
         self.init_info_detector_at_24 = init_info_detector_at_24
+        # {TrnProgress: action code}, each fired once on first reaching it.
+        self.info_actions = dict(info_actions or {})
+        self._info_actions_fired: set[int] = set()
+        self.info_action_samples: list[tuple[int, int, int]] = []
         self._info_detector_last_trn = -1
         if not 0 <= channel < 32:
             raise ValueError('PRI channel must be in range 0..31')
@@ -643,6 +658,19 @@ class LiveKernelModem:
         # The natural variant-8 path currently fails to invoke it at the 0x37
         # seam, so keep this explicit and opt-in until that branch is recovered.
         trn_progress = dm[DM_LIVE_TRNPROG]
+        # Diagnostic: dispatch an INFO action-table entry the first time the
+        # page reaches a chosen state.  The natural dispatcher for this table
+        # has not been recovered, so this stays explicit and opt-in.
+        action = self.info_actions.get(trn_progress)
+        if action is not None and trn_progress not in self._info_actions_fired:
+            self._info_actions_fired.add(trn_progress)
+            entry = self.INFO_ACTIONS[action]
+            ADSP.adsp2181_call(card.cpu, entry, KERNEL_IDLE)
+            ADSP.adsp2181_run(card.cpu, 400_000)
+            if not ADSP.adsp2181_idle(card.cpu):
+                raise RuntimeError(f'INFO action {action} (PM {entry:#06x}) '
+                                   'did not return to IDLE')
+            self.info_action_samples.append((index, trn_progress, action))
         if (self.init_info_detector_at_24
                 and card.resident == 0x0260 and trn_progress == 0x0024
                 and self._info_detector_last_trn != 0x0024):

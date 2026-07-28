@@ -340,7 +340,8 @@ class EiconSipEndpoint:
                  force_info_after_v8: bool = False,
                  kernel_dispatch: bool = False,
                  init_info_detector_at_24: bool = False,
-                 watch_exec: tuple[int, ...] = ()):
+                 watch_exec: tuple[int, ...] = (),
+                 info_actions: dict[int, int] | None = None):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -355,6 +356,7 @@ class EiconSipEndpoint:
         self.kernel_dispatch = kernel_dispatch
         self.init_info_detector_at_24 = init_info_detector_at_24
         self.watch_exec = watch_exec
+        self.info_actions = dict(info_actions or {})
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind((bind, sip_port))
@@ -483,7 +485,8 @@ class EiconSipEndpoint:
                 if self.kernel_dispatch:
                     from dial_kernel_dispatch import LiveKernelModem
                     card = LiveKernelModem(
-                        init_info_detector_at_24=self.init_info_detector_at_24)
+                        init_info_detector_at_24=self.init_info_detector_at_24,
+                        info_actions=self.info_actions)
                 else:
                     card = Card(force_info_after_v8=self.force_info_after_v8)
                 card.boot()
@@ -677,6 +680,11 @@ def main() -> int:
                     help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('--info-action', default='', metavar='STATE:CODE[,...]',
+                    help='diagnostic: dispatch INFO action-table entry CODE '
+                         '(PM 0x2ee6..0x2eee) the first time TrnProgress '
+                         'reaches STATE, e.g. 0x34:1 to run PM 0x2602 at the '
+                         'start of the 0x34..0x37 receive window')
     ap.add_argument('--watch-exec', default='',
                     help='comma-separated PM addresses to log on execution; '
                          '0x3515 is the control-channel bit decision, where '
@@ -693,7 +701,10 @@ def main() -> int:
                                 args.force_info_after_v8, args.kernel_dispatch,
                                 args.init_info_detector_at_24,
                                 tuple(int(field, 0) for field in
-                                      args.watch_exec.split(',') if field.strip()))
+                                      args.watch_exec.split(',') if field.strip()),
+                                {int(pair.split(':')[0], 0): int(pair.split(':')[1], 0)
+                                 for pair in args.info_action.split(',')
+                                 if pair.strip()})
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

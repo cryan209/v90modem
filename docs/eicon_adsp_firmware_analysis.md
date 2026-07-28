@@ -1973,3 +1973,90 @@ the PM `0x2ee6..0x2eee` action block (`0x2410` table build, `0x2602` framer B
 install, and the `DM(0x3f4b)` flag actions) that nothing in our run ever
 enters.  `DM(0x3f4b)` stays `0x0000` for the whole call, which is consistent
 with that block never running.
+
+## The action block gates the transmitter, and running it unblocks the peer
+
+### DM(0x3f94) and DM(0x1651) are already correct
+
+`DM(0x3f94)` is set by the V.8 overlay, not the INFO page: PM `0x38a1`/`0x38a2`
+store `0x0009` when the V.8 result has bit `0x0008`, PM `0x38a6`/`0x38a7`
+store `0x0006` for bit `0x0004`, with `0x0008`/`0x0000` at PM `0x382e`/`0x385e`.
+The INFO overlay's only writer, PM `0x3db5`, merely clears bit 1 when
+`DM(0x3f93) & 0x0010` is zero.  Our calls get `0x0009`, so PM `0x330c` selects
+INFO variant 8 (`DM(0x16b6) = 8`) and PM `0x3f7f` derives `DM(0x1651) =
+0x0110`.  That is the V.90 path and the 17-bit message class that goes with
+it; the `0x01e0` alternative belongs to mode `0x0006`.  Nothing is
+misconfigured here, and the previous section's framing of this as a
+misconfiguration was wrong — the 8-bit class simply is not this variant's.
+
+### What the action block actually does
+
+PM `0x2ee6..0x2eee` is a dispatch table indexed by action code, executed by the
+script interpreter PM `0x2148` through the pointer `DM(0x1667)`:
+
+| code | entry | effect |
+|---|---|---|
+| 0 | `0x2410` | build the message table at `DM(0x1986)`; `DM(0x16af) = 1` |
+| 1 | `0x2602` | install framer B, call `0x2410`, then `DM(0x16af) = 0` |
+| 2 | `0x242b` | clear `DM(0x3f4b)` bit `0x80` |
+| 3 | `0x2430` | disable framer B; transmit message 0 |
+| 4-8 | `0x243d`, `0x2441`, `0x243f`, `0x2434`, `0x243b` | transmit message 3, 5, 4, 1, 2 |
+
+The transmit arms all reach PM `0x2446`, which builds an outgoing frame at
+`DM(0x16a5)` — `0x0010`, then `0x0f72` (fill bits plus the sync `0x372`), the
+message octet, and a CRC from PM `0x3aa4` (CRC-16-CCITT, `0x1021`, MSB first;
+the framers use the reflected `0x8408` form of the same polynomial).  So this
+block is the 8-bit control-channel transmitter, and action 7 sends message 1 —
+the very code event 1 waits to receive.
+
+`DM(0x16af)` is not a mute.  PM `0x3b0e..0x3b13` decrements it every sample and
+reloads it with 4 on reaching zero, clocking the next bit out of the message
+buffer: it is the transmit bit-clock divider.  Setting it to 0 — which is
+exactly PM `0x2602`'s last instruction, PM `0x2609` — makes the countdown run
+away for 65535 samples, so the modulator's carrier keeps running unmodulated
+instead of going idle.
+
+### Replay: the carrier is 1200 Hz
+
+Dispatching action 1 at state `0x34` in replay turns the `0x34..0x37` window
+from silent into a continuous, clean **1200 Hz** tone at rms 2048.  Writing
+`DM(0x16af) = 0` directly does the same, which isolates the divider as the
+cause.  1200 Hz is the V.34 answer-modem Tone B, and the peer is transmitting
+2400 Hz Tone A across the same window.  Whether the shipping firmware really
+produces Tone B by stalling this divider is not proven by that alone — the
+peer is the arbiter.
+
+### Live: the peer runs line probing for the first time
+
+`tools/eicon_adsp_sip.py --kernel-dispatch --info-action 0x34:1`
+(`artifacts/eicon-live/run03.adsp.csv`).  Our transmit envelope loses its gap:
+baseline `run02` is 3%/0%/0%/0%/0%/19% active over 6.3-6.8 s, `run03` is 100%
+throughout.  State `0x37` then holds for 1.44 s instead of 113 ms and does not
+fall back to `0x0010`.
+
+slmodemd's own state machine goes far past anything previously seen:
+
+```
+  357.865  microstate TX_PHASE2_ANS=>TX_L1      <- line probing L1
+  358.025  microstate TX_L1=>TX_L2              <- line probing L2
+  358.245  microstate TX_L2=>TX_PHASE3_ANS
+  358.325  microstate TX_PHASE3_ANS=>RX_PHASE2_ANS   (goes silent, waits for us)
+  359.785  rxstate RX_DPSK=>RX_L1               <- detects an L1 from us
+  360.225  rxstate RX_L1=>RX_DPSK
+  361.425  txstate TONE_AB=>SILENCERETRAIN
+  364.585  vpcm: Link Error
+```
+
+Every earlier call ended in the `DET_INFO -> TX_PHASE1_ANS` loop with the peer
+repeating INFO0 until it gave up.  This is the first time it has transmitted
+L1 and L2 or detected anything from us in the probing phase, which confirms
+the causal claim: the `0x34..0x37` silence was what blocked V.34 Phase 2, and
+putting energy there unblocks the peer.
+
+It still fails ~3 s later.  The peer detects our "L1" at 359.785, which maps
+to our 8.03 s — the moment our own `TrnProgress` resets to `0x0000` — so what
+it detected was most likely the stalled carrier or the reset transient rather
+than a real L1, and it retrains when no INFO1 follows.  Two things to settle
+next, in order: what the firmware's genuine Tone B and L1/L2 transmit path is
+(action 1 is a diagnostic that stalls a clock, not that path), and why our
+side resets to `0x0000` at 8.02 s instead of proceeding from `0x37`.
