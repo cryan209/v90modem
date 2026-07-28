@@ -1899,3 +1899,77 @@ against a tone-only peer.  Either the probing/tone classifier reaches PM
 and folded into the table entry itself — is the tone-detector's output and the
 gap is upstream of the classifier.  Resolve that before adding any injection
 to the live path.
+
+## What raises event 1: not the MIPS, and not a tone
+
+The previous section left open what publishes `DM(0x198e) = 1` for a peer that
+looks tone-only in the `0x36`/`0x37` window.  Three findings close it.
+
+### The MIPS supervisor cannot be the source
+
+`DM(0x198e)` has exactly one writer that stores a non-zero value: PM
+`0x2470..0x2474`, the match arm of the classifier PM `0x2461`.  PM `0x2461` is
+entered from PM `0x2600` (framer B's success path) and PM `0x3587` (framer
+A's), and from nowhere else — no PM data word anywhere in the loaded image
+holds `0x2461 << 8` or `0x2470 << 8`, so no script table can dispatch either.
+The event is therefore raised inside the DSP, by a framer, or not at all.
+
+That matches the host's documented role.  `DM(0x198e)` is overlay-private
+scratch, outside the host-visible database window `0x3ee0..0x3fdf` that
+`.adsp-dm.bin` snapshots, and the ADDSP guide's line follow-up only monitors
+`TrnProgress`, runs the training/response timers and decides retrain policy.
+The guide even anticipates this exact transition: "It is also possible that,
+because of some recovery mechanisms in the training, the TrnProgress is
+smaller than LastStatus", handled by counting `RetrainAutofallbackcount` and
+forcing a fresh retrain past 10.  So `0x37 -> 0x0010` is a recovery the host
+design expects to see occasionally — the defect is that we take it every time,
+not that we take it.
+
+### The peer is not tone-only there
+
+The 2400 Hz carrier's phase reversals are its DPSK transmission, not tone
+timing: slmodemd's own log shows `txstate TONE_AB=>TX_DPSK` at 667.464 and
+back at 668.263, which maps to our 6.34-7.14 s — the reversal bursts measured
+at 6.59-6.74 s and 6.97-7.36 s fall inside it.  Reading those bursts as Tone A
+reversals in the previous section was wrong.
+
+And the receiver decodes it.  Reconstructing framer A's bit planes
+(`DM(0x068c..)`) per lane at each `DM(0x0686)` 0->1 edge gives a real message,
+twice, with the same payload:
+
+```
+  5.568s trn=0028   lanes 1-13:  1 1111 1111 0000 1000
+  6.710s trn=0037   lanes 2-13:  1 1111 1111 0000 1000
+```
+
+Twelve of the sixteen sample-phase lanes agree exactly, and the firmware's own
+zero-scan accepted one, so the received CRC matched the computed `0x9bf1`.
+The demodulator, the 16-lane phase search and the framer all work on real
+signal — this is a genuine 17-bit control-channel message, not a false lock.
+
+### Why the event branch is structurally dead
+
+PM `0x3583` only lets framer A reach the classifier when `DM(0x1651) ==
+0x0080`.  `DM(0x1651)` has a single writer, PM `0x3f84`, fed by PM `0x3f7f`,
+which stores `0x0110` or `0x01e0` depending on `DM(0x3f94)` bit 1.  **It can
+never hold `0x0080`**, so framer A can never publish an event in this build.
+
+Framer B is hard-wired to the `0x0080` length (PM `0x25c5`) and is therefore
+the only possible publisher — and the INFO page initializer PM `0x3f4c` parks
+it at the disabled handler `0x25f3`, with only PM `0x2602` installing it and
+nothing in the resident image calling that.  `run01` did call it via
+`--init-info-detector-at-24`; framer B then cycled `0x25ab -> 0x25c7 ->
+0x25e2` all call without validating, because the peer is sending 17-bit
+messages in that window, not 8-bit ones.
+
+So the `0x37` state offers two exits and only one of them is live for this
+traffic: "17-bit message received" to `0x0a9d`/state `0x0010`, and "8-bit
+message 1 received" to `0x1736`, which needs a message class the peer never
+sends here.  The question is no longer what raises event 1 — it is why the
+page is configured for 17-bit messages at a point in the handshake where its
+own state graph expects the 8-bit class, i.e. what should have set
+`DM(0x3f94)`/`DM(0x1651)` differently, or which earlier state should have run
+the PM `0x2ee6..0x2eee` action block (`0x2410` table build, `0x2602` framer B
+install, and the `DM(0x3f4b)` flag actions) that nothing in our run ever
+enters.  `DM(0x3f4b)` stays `0x0000` for the whole call, which is consistent
+with that block never running.
