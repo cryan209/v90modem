@@ -787,3 +787,303 @@ branch. The branch writes `call+0x2f=1`, `call+0x28=sig`,
 `sig+0x24=1`, `sig+0x12a=1`, `sig+0x1c=call`, and clears bit `0x10000` in
 `sig+0x20`; later service selection likely depends on the call object's parsed
 BC/LLC/CIP fields.
+
+## Session 11: ingress field seeding
+
+The fake ingress path now seeds the fields the recovered incoming setup parser
+uses before answer:
+
+| Offset | Seed | Meaning inferred from parser |
+|---|---:|---|
+| `sig+0x24` | `2` | pending incoming-call state after initial allocation |
+| `sig+0x365` | `04 90 90 a3 00` | BC: 3.1 kHz audio / 64 kbit/s / A-law |
+| `sig+0x37d` | `04 88 90 21 00` | LLC-style low-layer information |
+| `sig+0x395` | `01 80` | channel/additional-info placeholder |
+| `sig+0x51f` | `ff` | previous/invalid channel marker |
+| `sig+0x520` | `11` | selected modem async resource byte |
+
+`CALL_RES` now also uses the old IDI modem answer payload instead of the
+26-byte SIG ASSIGN CAI:
+
+```text
+CAI len=6: 11 09 00 00 20 00
+```
+
+The run confirms these fields are present in the firmware object before
+`CALL_RES`, but the path still stops before `service_assign`:
+
+```text
+[entities] 00 ... +1c=80807000 +24=00000002
+[entities] 00: sig+340..52f=...049090a3...04889021...ff11...
+[mainloop] modem DSP path: service_assign=0 switch_on=0
+```
+
+This means the blocker has moved again: the firmware is no longer missing
+only obvious parsed BC/LLC/channel fields. The remaining condition is likely
+ownership/allocator metadata on the per-call object that the real
+`0x800785c4` allocation path creates and the synthetic `0x80807000` object
+does not yet reproduce.
+
+## Session 12: PRI/E1 signalling DSP lead
+
+`docs/ADSP-21MOD870.PDF` and `docs/addspv90guide.pdf` are a useful correction
+to the call-ingress model. The ADSP-21mod870 reference design is not just a
+host plus isolated modem datapumps: its network-access diagram has
+line-interface/call-control blocks for `T1,E1,PRI,xDSL,ATM`, and its modem
+software guide says that T1/E1 operation programs SPORT0 in multichannel
+mode, with DB setup locations for the SPORT0 control registers and `V34SLOT`
+selecting the TDM slot used by modem operation.
+
+The actual build-117-926 combifile for card type 23 matches that architecture.
+The staged image contains separate PRI line/signalling downloads before the
+modem task:
+
+| ID | Download |
+|---:|---|
+| `0x0007` | DIVA Server PRI 2M TX Kernel |
+| `0x0008` | DIVA Server PRI 2M RX Kernel |
+| `0x000b` | DIVA Server PRI 2M TX SIG Kernel |
+| `0x000c` | DIVA Server PRI 2M RX SIG Kernel |
+| `0x0208` | SIG.MDM Task |
+| `0x0209` | SIGPRTX Task |
+| `0x020a` | SIGPRRX Task |
+| `0x0258` | TIKRNL81.F34 Task |
+| `0x0270` | SIG Overlay |
+| `0x025f` | V8.F34 Overlay |
+| `0x026a` | V.90 DPCM Overlay |
+
+`tools/eicon_mips_shim.py` now prints those IDs in its DSP staging summary so
+each run shows whether the line/SIG layer is present. A fresh
+`--simulate-b-channel` run still answers the synthetic PLCI through SIG/NL but
+never reaches DSP assignment:
+
+```text
+[mainloop] DSP code staged ... (64 downloads, card type 23 -> file set 5)
+           id=0x000b ... DIVA Server PRI 2M TX SIG Kernel ...
+           id=0x000c ... DIVA Server PRI 2M RX SIG Kernel ...
+           id=0x0208 ... SIG.MDM Task ...
+           id=0x0209 ... SIGPRTX Task ...
+           id=0x020a ... SIGPRRX Task ...
+           id=0x0258 ... TIKRNL81.F34 Task ...
+           id=0x0270 ... SIG Overlay ...
+[call] simulated B-channel: SIGNALLING ACTIVE, DSP UNASSIGNED
+[mainloop] modem DSP path: service_assign=0 switch_on=0
+```
+
+That result changes the most likely next route. The fake MIPS object proves
+we can satisfy visible PR_RAM request/response state, but it does not reproduce
+the internal call-control ownership chain. The better target is now the
+PRI/SIG DSP ingress side: either instantiate the SIG.MDM/SIGPRTX/SIGPRRX path
+far enough that it emits the normal incoming-call indication into the MIPS
+PLCI allocator, or recover exactly what metadata that path passes to
+`0x800172a8`/`0x800785c4` and synthesize that object rather than the current
+minimal shell.
+
+## Session 13: SIG task registration recovered
+
+`tools/eicon_sig_path_probe.py` now extracts the ADSP-side registration points
+for the PRI/SIG path. The probe loads one kernel plus one SIG task, runs the
+task's download entry, and diffs PM after the task calls the kernel's service
+registration routine.
+
+The task entries and registration results are:
+
+| Task | Kernel | Entry | Registered patch |
+|---|---|---:|---|
+| `0x0208` SIG.MDM | PRI 30M kernel `0x0009` | `PM 0x0980` | `PM 0x02b9: CALL 0x02a1 -> CALL 0x0999` |
+| `0x0209` SIGPRTX | PRI 2M TX SIG kernel `0x000b` | `PM 0x3900` | `PM 0x0032 -> CALL 0x3914` |
+| `0x020a` SIGPRRX | PRI 2M RX SIG kernel `0x000c` | `PM 0x3900` | `PM 0x0032 -> CALL 0x390d` |
+
+Probe output for `SIG.MDM`:
+
+```text
+[probe] task=0208-sig.mdm-task entry=0x0980
+[probe] patch slots before: PM02b9=1c2a1f PM00b5=2a7eea
+[probe] patch slots after:  PM02b9=1c999f PM00b5=2a7eea
+[probe] PM changes: 1
+  PM02b9: 1c2a1f -> 1c999f
+```
+
+Probe output for the PRI 2M SIG tasks:
+
+```text
+[probe] task=0209-sigprtx-task entry=0x3900
+[probe] PM changes: 1
+  PM0032: 0d0c7e -> 1f914f
+
+[probe] task=020a-sigprrx-task entry=0x3900
+[probe] PM changes: 1
+  PM0032: 0d0c7e -> 1f90df
+```
+
+`SIG.MDM` is therefore not a vague architectural hunch any more: it installs a
+foreground callback at `PM 0x0999`. That callback processes the task's private
+state and eventually reaches the DSP-to-host doorbell helper at `PM 0x13a2`.
+The helper saves temporary registers at `DM 0x05e2..0x05e4` and calls kernel
+service `PM 0x000a` at `PM 0x13d2`, the same DSP-to-host doorbell path used by
+TIKRNL. Its queue/format state is centred on:
+
+```text
+DM 05de = 0000
+DM 05df = 00ab
+DM 05e0 = 05f5
+DM 05e1 = 0601
+DM 05e5..0612 = nibble/order and format tables
+DM 0660..06ef = SIG.MDM runtime state block
+```
+
+The immediate next target is to drive `SIG.MDM`'s `0x0999` foreground callback
+with a populated `DM 0x05de..0x05e4` queue until it toggles the DSP-to-host
+service bit at `DM 0x2f17`. Once that event shape is recovered, the MIPS shim
+can either deliver the real DSP-side indication into PR_RAM or synthesize the
+corresponding allocator metadata at the MIPS call-ingress boundary.
+
+## Session 14: forced modem DSP assignment during fake call
+
+There is now a deliberately simpler path in `tools/eicon_mips_shim.py`:
+`--force-modem-dsp-assign`. `--simulate-b-channel` enables it by default.
+After `CALL_RES` and `N_CONNECT`, the shim stages a direct PRI-kernel+TIKRNL
+core, runs the recovered MIPS modem `SERVICE_ASSIGN` entry (`0x80096980`), and
+pumps the TIKRNL command path long enough to observe the real switch-on
+database commit.
+
+This bypasses native PRI/SIG call ingress selection; it is a practical shim
+affordance for "the bearer is connected, tell the modem DSP to handle it."
+
+Successful run:
+
+```text
+[force] staging direct TIKRNL core for modem DSP assignment
+[assign] calling 0x80096980 ... ch=1 mb13=0x7310 mb14=0x7338
+[assign] returned v0=0x80804100 host_writes=17
+[assign] TIKRNL command ring DM3327..3336:
+001d 0000 0000 0000 00ff 0002 0000 0000
+0102 0008 0000 0200 0008 0000 1e00 0000
+[call] simulated B-channel: ACTIVE (modem DSP assigned)
+[mainloop] modem DSP path: service_assign=1 switch_on=1
+```
+
+So the architectural problem is split cleanly:
+
+1. The harness can now force genuine modem service assignment at the connected
+   call boundary.
+2. The still-open faithful path is to replace the forced direct TIKRNL core
+   with either native PRI/SIG ingress metadata or a real firmware-selected DSP
+   resource, then route the bearer PCM into that assigned task.
+
+## Session 15: raw G.711 RX probe into forced TIKRNL
+
+`tools/eicon_mips_shim.py` also has a first RX-side G.711 probe:
+`--g711-probe-samples N --g711-probe-code BYTE`. After forced assignment it
+writes the raw octet into TIKRNL's line words (`DM 0x3f08`/`0x3f09`) and runs
+the task frame entry. If TIKRNL requests an overlay, the probe loads the
+extracted image by download ID, sets `BOOTFINISHED`, and resumes the task's
+completion entry.
+
+This proves the assigned core can hear raw G.711 codewords and advance through
+the task/page machinery:
+
+```text
+[g711] served requested overlay 0x0270 from 0270-sig-overlay
+[g711] sample 0000: ... 31A9=0001 31AA=0262
+[g711] served requested overlay 0x0262 from 0262-dial-fsk-fax.f34-overlay
+[g711] sample 0001: ... 3FB0=000b 3FB2=17bb 3FB3=1706 ... 31AA=0263
+[g711] served requested overlay 0x0271 from 0271-v.22fc-overlay
+[g711] sample 0002: ... 3FB0=0001 3FB2=1582 3FB3=15dd ... 31AA=0266
+[g711] served requested overlay 0x0266 from 0266-v.22-v.32-lec-overlay
+[g711] fed 16 raw G.711 octets 0xff; line-state changes=5
+```
+
+So the current boundary is:
+
+- RX into the forced modem DSP core: working enough to trigger SIG/DIAL/page
+  transitions from raw codewords.
+- TX back out as a B-channel G.711 stream: still open. Prior V.8 capture work
+  shows the generated transmit signal is not written back to `0x3f08/0x3f09`;
+  it goes through the kernel SPORT0 TX/channel-table bridge or a task TX
+  buffer that still needs to be wired into this forced-call path.
+
+## Session 16: forcing SPORT0 TX from the assigned core
+
+`tools/eicon_mips_shim.py` now has two TX helpers for the forced-call path:
+
+- `--tx-source-scan` pokes candidate DM words with a marker and checks whether
+  SPORT0 TX0 emits it.
+- `--force-tx-samples N --force-tx-code BYTE` preloads the recovered source
+  and captures the resulting SPORT0 TX0 words.
+
+The key correction was to drive the kernel's RX-side TDM interrupt, not only
+the explicit SPORT0 TX interrupt. The resident ISR writes TX0 during the
+SPORT0_RX timeslot walk. The source scan found the practical output latch:
+
+```text
+[txscan] marker 0x0055 source hits: rx:DM2e52->0055
+```
+
+Forcing that latch proves byte/codeword-level outbound control:
+
+```text
+[force-tx] source DM2e52=0x0055: captured=16 forced=16
+top=0055:16 first16=0055 0055 0055 0055 0055 0055 0055 0055 ...
+```
+
+So we can force G.711 TX now by preloading `DM 0x2e52` before each
+SPORT0_RX-driven TDM slot. This is not yet the modem page's generated TX; it
+is the kernel TDM output latch. The next recovery step is to connect the
+task-side TX buffer (`DM 0x3fb4` pointer mode, expected target around
+`DM 0x2b01`/`0x3f09`) to this latch, or identify where the page writes its
+generated sample before the ISR emits `DM 0x2e52`.
+
+## Session 17: tone-driven RX and live TX pointer bridge
+
+`--g711-probe-samples` can now drive the forced modem DSP with synthesized
+u-law stimuli:
+
+- `--g711-probe-stimulus constant` preserves the old raw-byte probe.
+- `--g711-probe-stimulus tone --g711-probe-freq 2100` feeds a stable tone.
+- `--g711-probe-stimulus ansam` feeds a V.8-style 2100 Hz ANSam carrier with
+  15 Hz amplitude modulation and 450 ms phase reversals.
+
+The probe can also test a live TX bridge:
+
+```text
+--bridge-task-tx
+```
+
+This follows the firmware's current `DM 0x3fb4` pointer, copies
+`DM[DM 0x3fb4]` into the recovered kernel TDM output latch `DM 0x2e52`, and
+then strobes the RX-driven TDM ISR so SPORT0 TX0 emits that value.
+
+With ANSam, the forced core enters a different overlay chain than flat
+silence/idle: after `0x0270` and `0x0262`, it requests and serves
+`0x0263-dial.f34-partial-overlay`, then moves to `0x0271-v.22fc-overlay`.
+The TX pointer also changes from the old pointer-mode buffer to page-owned
+addresses:
+
+```text
+sample 0002: ... 31AA=0263 3FB4=2277 TXPTR=0000
+sample 0004: ... 31AA=0271 3FB4=3764 TXPTR=0000
+```
+
+A 512-sample 2100 Hz tone run proves RX tone drive and separates the two TX
+effects:
+
+```text
+[g711] fed 512 tone 2100Hz amp=20000; line-state changes=486
+[g711] bridged task TX DM[3FB4]->DM2e52:
+  words=512 unique=4 non_idle=3 top=0000:509,10cd:1,0080:1,fc58:1
+[g711] SPORT0 TX0 bridged captures:
+  words=512 unique=4 non_idle=3 top=0000:509,10cd:1,0080:1,fc58:1
+[g711] SPORT0 TX0 natural captures:
+  words=512 unique=126 non_idle=179 top=0000:300,00ff:33,...
+```
+
+Interpretation:
+
+- RX can now be driven with real G.711 tone waveforms, not just a flat byte.
+- The kernel/TDM side naturally emits varying TX0 words while a tone is being
+  received, but that is separate from the explicit task-pointer bridge.
+- The live task TX pointer bridge is only seeing three startup non-idle words;
+  after the page settles at `DM 0x3fb4 = 0x3764`, `DM[0x3764]` stays zero in
+  this forced path. The next target is therefore the page initialization or
+  action vector that arms sustained transmit generation, not the SPORT0 latch.

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
+import math
 import os
 import struct
 import sys
@@ -211,6 +213,19 @@ ADSP.adsp2181_idma_boot_held.restype = ctypes.c_int
 ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+ADSP.adsp2181_set_callbacks.argtypes = [ctypes.c_void_p] * 4
+
+RX_CB = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int)
+TX_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int32)
+TIM_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int)
+
+SAMPLE_RATE = 8000
+DM_COUPLED_BUFFER_MODE = 0x32F0
+DM_RX_BUFFER_POINTER = 0x3F0F
+DM_TX_BUFFER_POINTER = 0x3FB4
+DM_RX_BUFFER = 0x2B00
+DM_TX_BUFFER = 0x2B01
+DM_TDM_OUTPUT_LATCH = 0x2E52
 
 
 def load_pm_words(cpu, path: Path) -> None:
@@ -831,8 +846,22 @@ def stage_dsp_code(shim: "MipsShim", args) -> int:
     print(f"[mainloop] DSP code staged at 0x{base:08x}..0x{image.end_addr:08x} "
           f"({len(image.data)} bytes, {len(image.downloads)} downloads, "
           f"card type {image.card_type} -> file set {image.file_set})")
+    interesting_downloads = {
+        0x0007,  # DIVA Server PRI 2M TX Kernel
+        0x0008,  # DIVA Server PRI 2M RX Kernel
+        0x000B,  # DIVA Server PRI 2M TX SIG Kernel
+        0x000C,  # DIVA Server PRI 2M RX SIG Kernel
+        0x0208,  # SIG.MDM Task
+        0x0209,  # SIGPRTX Task
+        0x020A,  # SIGPRRX Task
+        0x0258,  # TIKRNL81.F34 Task
+        0x025F,  # V.8 overlay
+        0x0261,  # V.34 overlay
+        0x026A,  # V.90 DPCM overlay
+        0x0270,  # SIG overlay loaded before negative TIKRNL pages
+    }
     for entry in image.downloads:
-        if entry.download_id in (0x0258, 0x0261, 0x026A, 0x025F):
+        if entry.download_id in interesting_downloads:
             print(f"           id=0x{entry.download_id:04x} @0x{entry.address:08x} "
                   f"{entry.description}")
     return base
@@ -912,6 +941,16 @@ def modem_sig_assign_payload(max_bit_rate: int = 56000) -> bytes:
     """Signalling-entity ASSIGN payload: the CAI, as add_b1() attaches it."""
     return idi_parameters((IDI_CAI, modem_cai(max_bit_rate)),
                           (IDI_UID, b"Capi20"))
+
+
+def modem_call_res_payload() -> bytes:
+    """CALL_RES payload for ISDN_PROTO_L2_MODEM from i4l_idi.c.
+
+    This is not the full 26-byte CAPI20 add_b1() descriptor used while
+    assigning/listening.  The old IDI answer path sends CAI length 6 with
+    resource 0x11 (modem async), LLC selector 9, and 0x20 in byte 4.
+    """
+    return idi_parameters((IDI_CAI, bytes((0x11, 0x09, 0x00, 0x00, 0x20, 0x00))))
 
 
 def modem_nl_assign_payload(max_data_length: int = 1024,
@@ -1129,6 +1168,12 @@ def dump_entities(shim: "MipsShim", gp: int, limit: int = 16) -> None:
         formatted = " ".join(f"+{i * 4:02x}={word:08x}"
                              for i, word in enumerate(words))
         print(f"[entities] {idx:02x}: ptr=0x{ptr:08x} {formatted}")
+        call = read_runtime32(shim, ptr + 0x1c)
+        if call:
+            sig_fields = bytes(shim.uc.mem_read((ptr + 0x340) & 0x1fffffff, 0x1f0))
+            call_fields = bytes(shim.uc.mem_read(call & 0x1fffffff, 0x240))
+            print(f"[entities] {idx:02x}: sig+340..52f={sig_fields.hex()}")
+            print(f"[entities] {idx:02x}: call[0..23f]={call_fields.hex()}")
 
 
 def inject_call_ingress(shim: "MipsShim", gp: int, sp: int,
@@ -1179,10 +1224,21 @@ def synthesize_call_ingress(shim: "MipsShim", slot: int = 0) -> None:
     flags = read_runtime32(shim, sig_obj + 0x20) & 0xfffeffff
     shim.write8(call_obj + 0x2f, 1)
     shim.write32(call_obj + 0x28, sig_obj)
-    shim.write16(sig_obj + 0x24, 1)
+    # The allocation branch stores state 1 first; the real SETUP parser then
+    # progresses the PLCI into the pending incoming-call state before CALL_RES.
+    shim.write16(sig_obj + 0x24, 2)
     shim.write8(sig_obj + 0x12a, 1)
     shim.write32(sig_obj + 0x1c, call_obj)
     shim.write32(sig_obj + 0x20, flags)
+    # Parsed SETUP fields used by the incoming answer path.  These are
+    # length-prefixed internal copies of the Q.931 BC/LLC/HLC/channel IEs.
+    # BC 90 90 a3 = 3.1 kHz audio, 64 kbit/s, G.711 A-law; LLC 88 90 21
+    # selects V.42/modem-style low-layer handling in the IDI firmware.
+    shim.write_bytes(sig_obj + 0x365, bytes((4, 0x90, 0x90, 0xa3, 0x00)))
+    shim.write_bytes(sig_obj + 0x37d, bytes((4, 0x88, 0x90, 0x21, 0x00)))
+    shim.write_bytes(sig_obj + 0x395, bytes((1, 0x80)))
+    shim.write8(sig_obj + 0x51f, 0xff)
+    shim.write8(sig_obj + 0x520, 0x11)
     print(f"[ingress] synthetic call object 0x{call_obj:08x} "
           f"linked to entity slot {slot} obj=0x{sig_obj:08x}")
 
@@ -1311,7 +1367,13 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         print(f"[{label}] entity id 0x{entity_id:02x} assigned "
               f"(host_writes={len(shim.host_writes)})")
 
-    if args.entity in ("nl", "both"):
+    defer_nl_assign = (
+        args.fake_call_ingress
+        and args.call_direction == "answering"
+        and args.entity in ("nl", "both")
+    )
+
+    if args.entity in ("nl", "both") and not defer_nl_assign:
         signaling_id = assigned.get("sig")
         payload = modem_nl_assign_payload(
             answering=args.call_direction == "answering",
@@ -1335,6 +1397,22 @@ def run_mainloop(shim: "MipsShim", args) -> None:
         if args.dump_entities:
             dump_entities(shim, gp, args.dump_entity_limit)
 
+    if defer_nl_assign:
+        signaling_id = assigned.get("sig")
+        payload = modem_nl_assign_payload(
+            answering=True,
+            signaling_id=signaling_id)
+        entity_id = assign_entity(shim, sr, gp, sp, "nl", NL_ID,
+                                  args.channel, payload)
+        if entity_id is None:
+            print("[nl] assign did not succeed after fake ingress")
+        else:
+            assigned["nl"] = entity_id
+            print(f"[nl] entity id 0x{entity_id:02x} assigned after ingress "
+                  f"(host_writes={len(shim.host_writes)})")
+            if args.dump_entities:
+                dump_entities(shim, gp, args.dump_entity_limit)
+
     if args.connect and "nl" in assigned:
         bearer_disconnected = False
         if args.call_direction == "answering" and "sig" in assigned:
@@ -1342,7 +1420,7 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             # CALL_RES itself. The initial SIG ASSIGN only creates the PLCI;
             # an empty CALL_RES answers signalling but never allocates the
             # 0x0258 modem DSP service.
-            call_payload = idi_parameters((IDI_CAI, modem_cai()))
+            call_payload = modem_call_res_payload()
             off = post_request(shim, sr, CALL_RES, assigned["sig"], 0,
                                call_payload, reference=0)
             print(f"[call] CALL_RES Id=0x{assigned['sig']:02x} Ch=0x00 "
@@ -1363,6 +1441,8 @@ def run_mainloop(shim: "MipsShim", args) -> None:
                   f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
         if args.dump_entities:
             dump_entities(shim, gp, args.dump_entity_limit)
+        if args.force_modem_dsp_assign:
+            force_modem_dsp_assign(shim, args)
         for _ in range(args.call_steps):
             shim.phase = "call-pump"
             shim.call(MIPS_MAINLOOP, [], gp=gp, sp=sp, max_insns=500000)
@@ -1422,6 +1502,416 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             print(f"  host_write {tag} 0x{addr & 0x7fff:04x} = 0x{val:04x}")
 
 
+def stage_direct_tikrnl_core(args):
+    """Create a standalone PRI-kernel+TIKRNL core for forced call assignment.
+
+    The PR_RAM mainloop emulates every card DSP as a separate core while the
+    MIPS firmware boots the card.  The direct service-assign helper, however,
+    talks through the synthetic host register block at RAM+0x5000, which is
+    wired to shim.cpu.  Use a deliberately staged TIKRNL core there so the
+    switch-on command ring lands in a modem task that can consume it.
+    """
+    cpu = ADSP.adsp2181_create()
+    ADSP.adsp2181_reset(cpu)
+    load_pm_words(cpu, args.kernel / "pm.bin")
+    load_dm_words(cpu, args.kernel / "dm.bin")
+    ADSP.adsp2181_run(cpu, 1000)
+    pm = ADSP.adsp2181_pm(cpu)
+    dm = ADSP.adsp2181_dm(cpu)
+    for line in (args.tikrnl / "pm.words").read_text().splitlines():
+        a, v = line.split()
+        pm[int(a, 16)] = int(v, 16)
+    for line in (args.tikrnl / "dm.words").read_text().splitlines():
+        a, v = line.split()
+        dm[int(a, 16)] = int(v, 16)
+    ADSP.adsp2181_call(cpu, 0x0672, 0x02A8)
+    ADSP.adsp2181_run(cpu, 1000000)
+    return cpu
+
+
+def load_adsp_module(cpu, module: Path) -> None:
+    """Layer one extracted ADSP download directory onto an existing core."""
+    pm = ADSP.adsp2181_pm(cpu)
+    dm = ADSP.adsp2181_dm(cpu)
+    for line in (module / "pm.words").read_text().splitlines():
+        a, v = line.split()
+        pm[int(a, 16)] = int(v, 16)
+    for line in (module / "dm.words").read_text().splitlines():
+        a, v = line.split()
+        dm[int(a, 16)] = int(v, 16)
+
+
+def find_extracted_download(download_id: int) -> Path | None:
+    roots = (
+        Path("artifacts/eicon-dsp/overlays"),
+        Path("artifacts/eicon-dsp/sig-path"),
+        Path("artifacts/eicon-dsp/build-117-926/tikrnl"),
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            meta = entry / "metadata.json"
+            if not meta.is_file():
+                continue
+            try:
+                if json.loads(meta.read_text()).get("download_id") == download_id:
+                    return entry
+            except (OSError, json.JSONDecodeError):
+                continue
+    return None
+
+
+def pump_direct_tikrnl_core(cpu, words: int) -> None:
+    """Let TIKRNL consume the switch-on database ring written by run_assign."""
+    for _ in range(words):
+        dm = ADSP.adsp2181_dm(cpu)
+        if dm[0x3315] != dm[0x3316]:
+            ADSP.adsp2181_host_write(cpu, 0x7310, 0x0001)
+        ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX
+        ADSP.adsp2181_set_irq(cpu, 3, 0)
+        ADSP.adsp2181_set_irq(cpu, 6, 1)  # IRQE doorbell
+        ADSP.adsp2181_run(cpu, 5000)
+        ADSP.adsp2181_set_irq(cpu, 6, 0)
+        ADSP.adsp2181_run(cpu, 5000)
+        ADSP.adsp2181_call(cpu, 0x064A, 0x02A8)
+        ADSP.adsp2181_run(cpu, 20000)
+        service_vector = ADSP.adsp2181_dm(cpu)[0x3308]
+        if service_vector:
+            ADSP.adsp2181_call(cpu, service_vector, 0x02A8)
+            ADSP.adsp2181_run(cpu, 20000)
+        ADSP.adsp2181_call(cpu, 0x06BB, 0x02A8)
+        ADSP.adsp2181_run(cpu, 20000)
+
+
+def linear_to_mulaw(sample: int) -> int:
+    sample = max(-32768, min(32767, sample))
+    sign = 0x80 if sample < 0 else 0
+    if sample < 0:
+        sample = -sample - 1
+    sample += 0x84
+    if sample > 0x7FFF:
+        sample = 0x7FFF
+    segment = 0
+    shifted = sample >> 5
+    while shifted and segment < 8:
+        shifted >>= 1
+        segment += 1
+    if segment >= 8:
+        return (sign | 0x7F) ^ 0xFF
+    return (sign | (segment << 4) | ((sample >> (segment + 3)) & 0xF)) ^ 0xFF
+
+
+def make_g711_stimulus(kind: str, samples: int, code: int,
+                       freq: float = 2100.0, amp: int = 20000) -> list[int]:
+    """Build an 8 kHz u-law G.711 stimulus for the forced DSP RX path."""
+    if samples <= 0:
+        return []
+    if kind == "constant":
+        return [code & 0xFF] * samples
+    if kind == "silence" or not freq:
+        return [0xFF] * samples
+    result = []
+    phase_offset = 0.0
+    reversal_samples = int(0.450 * SAMPLE_RATE)
+    for index in range(samples):
+        if kind == "ansam" and index and index % reversal_samples == 0:
+            phase_offset += math.pi
+        envelope = (1.0 + 0.2 * math.sin(2 * math.pi * 15 * index / SAMPLE_RATE)
+                    if kind == "ansam" else 1.0)
+        linear = int(amp * envelope
+                     * math.sin(2 * math.pi * freq * index / SAMPLE_RATE
+                                + phase_offset))
+        result.append(linear_to_mulaw(linear))
+    return result
+
+
+def restore_direct_pcm_pointers(cpu) -> None:
+    """Restore the one-line pointer-mode PCM buffers used by TIKRNL pages."""
+    dm = ADSP.adsp2181_dm(cpu)
+    dm[DM_COUPLED_BUFFER_MODE] = 0x0004
+    dm[DM_RX_BUFFER_POINTER] = DM_RX_BUFFER
+    dm[DM_TX_BUFFER_POINTER] = DM_TX_BUFFER
+
+
+def probe_direct_tikrnl_g711(cpu, samples: int, code: int,
+                             stimulus_kind: str = "constant",
+                             stimulus_freq: float = 2100.0,
+                             stimulus_amp: int = 20000,
+                             bridge_tx: bool = False,
+                             restore_pcm_pointers: bool = False) -> None:
+    """Feed raw G.711 codewords into the assigned direct TIKRNL core.
+
+    It writes u-law octets to the data-pump line words that DIAL/V.8 consume
+    (`DM 0x3f08`/`0x3f09`) and runs TIKRNL's frame entry.  With bridge_tx set,
+    it also copies the task pointer-mode TX buffer to the kernel TDM output
+    latch (`DM 0x2e52`) before strobing SPORT0_RX so TX0 emits it.
+    """
+    dm = ADSP.adsp2181_dm(cpu)
+    stimulus = make_g711_stimulus(stimulus_kind, samples, code,
+                                  stimulus_freq, stimulus_amp)
+    tx_words: list[int] = []
+    natural_tx_words: list[int] = []
+    bridge_tx_words: list[int] = []
+    bridged_words: list[int] = []
+    rx_index = 0
+
+    def rx_cb(_cpu, port):
+        if port != 0:
+            return 0
+        if not stimulus:
+            return code & 0xFF
+        return stimulus[min(rx_index, len(stimulus) - 1)] & 0xFF
+
+    def tx_cb(_cpu, port, value):
+        if port == 0:
+            tx_words.append(value & 0xFFFF)
+
+    def timer_cb(_cpu, _enabled):
+        return None
+
+    callbacks = (RX_CB(rx_cb), TX_CB(tx_cb), TIM_CB(timer_cb))
+    ADSP.adsp2181_set_callbacks(cpu, *callbacks)
+    changes = 0
+    prev = None
+    for index in range(samples):
+        rx_index = index
+        rx_code = stimulus[index] if stimulus else (code & 0xFF)
+        dm[0x3F08] = rx_code & 0xFF
+        dm[0x3F09] = rx_code & 0xFF
+        # Exercise both paths: the direct frame entry makes page progress
+        # visible, while SPORT0 RX/TX strobes give the kernel bridge a chance
+        # to move line samples to and from the serial port callbacks.
+        tx_mark = len(tx_words)
+        ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX
+        ADSP.adsp2181_set_irq(cpu, 3, 0)
+        ADSP.adsp2181_run(cpu, 50000)
+        natural_tx_words.extend(tx_words[tx_mark:])
+        ADSP.adsp2181_call(cpu, 0x06BB, 0x02A8)
+        ADSP.adsp2181_run(cpu, 50000)
+        ADSP.adsp2181_set_irq(cpu, 4, 1)  # SPORT0_TX
+        ADSP.adsp2181_set_irq(cpu, 4, 0)
+        ADSP.adsp2181_run(cpu, 50000)
+        wanted = dm[0x31AA]
+        if dm[0x31A9] and wanted:
+            module = find_extracted_download(wanted)
+            if module is not None:
+                load_adsp_module(cpu, module)
+                if restore_pcm_pointers:
+                    restore_direct_pcm_pointers(cpu)
+                dm[0x3EEE] = 0x1000  # BOOTFINISHED; mirrors host overlay ack
+                resume = dm[0x31BB]
+                if resume:
+                    ADSP.adsp2181_call(cpu, resume, 0x02A8)
+                    ADSP.adsp2181_run(cpu, 100000)
+                print(f"[g711] served requested overlay 0x{wanted:04x} "
+                      f"from {module.name}")
+            else:
+                print(f"[g711] requested overlay 0x{wanted:04x}, "
+                      "but no extracted image is available")
+        if bridge_tx:
+            if restore_pcm_pointers:
+                restore_direct_pcm_pointers(cpu)
+            tx_ptr = dm[DM_TX_BUFFER_POINTER] & 0x3FFF
+            tx_value = dm[tx_ptr] if tx_ptr else dm[0x3F09]
+            bridged_words.append(tx_value & 0xFFFF)
+            dm[DM_TDM_OUTPUT_LATCH] = tx_value & 0xFFFF
+            tx_mark = len(tx_words)
+            ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX drives TDM TX0
+            ADSP.adsp2181_set_irq(cpu, 3, 0)
+            ADSP.adsp2181_run(cpu, 20000)
+            bridge_tx_words.extend(tx_words[tx_mark:])
+        now = (dm[0x3F08], dm[0x3F09], dm[0x3FB0], dm[0x3FB2],
+               dm[0x3FB3], dm[0x3FC1], dm[0x31A9], dm[0x31AA],
+               dm[DM_TX_BUFFER_POINTER],
+               dm[dm[DM_TX_BUFFER_POINTER] & 0x3FFF]
+               if dm[DM_TX_BUFFER_POINTER] else 0)
+        if now != prev:
+            changes += 1
+            if changes <= 12:
+                print(f"[g711] sample {index:04d}: "
+                      f"3F08={now[0]:04x} 3F09={now[1]:04x} "
+                      f"3FB0={now[2]:04x} 3FB2={now[3]:04x} "
+                      f"3FB3={now[4]:04x} 3FC1={now[5]:04x} "
+                      f"31A9={now[6]:04x} 31AA={now[7]:04x} "
+                      f"3FB4={now[8]:04x} TXPTR={now[9]:04x}")
+            prev = now
+    if stimulus_kind == "constant":
+        source_desc = f"raw G.711 octets 0x{code & 0xff:02x}"
+    elif stimulus_kind == "silence":
+        source_desc = "u-law silence"
+    else:
+        source_desc = (f"{stimulus_kind} {stimulus_freq:g}Hz "
+                       f"amp={stimulus_amp}")
+    print(f"[g711] fed {samples} {source_desc}; line-state changes={changes}")
+    if bridged_words:
+        from collections import Counter
+        counts = Counter(bridged_words)
+        non_idle = sum(value not in (0x0000, 0x00ff, 0x0400)
+                       for value in bridged_words)
+        print(f"[g711] bridged task TX DM[3FB4]->DM{DM_TDM_OUTPUT_LATCH:04x}: "
+              f"words={len(bridged_words)} unique={len(counts)} non_idle={non_idle} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in counts.most_common(8))} "
+              f"first16={' '.join(f'{value:04x}' for value in bridged_words[:16])}")
+        bridge_counts = Counter(bridge_tx_words)
+        bridge_non_idle = sum(value not in (0x0000, 0x00ff, 0x0400)
+                              for value in bridge_tx_words)
+        print(f"[g711] SPORT0 TX0 bridged captures: words={len(bridge_tx_words)} "
+              f"unique={len(bridge_counts)} non_idle={bridge_non_idle} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in bridge_counts.most_common(8))} "
+              f"first16={' '.join(f'{value:04x}' for value in bridge_tx_words[:16])}")
+    if natural_tx_words:
+        from collections import Counter
+        counts = Counter(natural_tx_words)
+        non_idle = sum(value not in (0x0000, 0x00ff, 0x0400)
+                       for value in natural_tx_words)
+        print(f"[g711] SPORT0 TX0 natural captures: words={len(natural_tx_words)} "
+              f"unique={len(counts)} non_idle={non_idle} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in counts.most_common(8))} "
+              f"first16={' '.join(f'{value:04x}' for value in natural_tx_words[:16])}")
+    if tx_words:
+        from collections import Counter
+        counts = Counter(tx_words)
+        non_idle = sum(value not in (0x0000, 0x00ff, 0x0400)
+                       for value in tx_words)
+        print(f"[g711] SPORT0 TX0 captured: words={len(tx_words)} "
+              f"unique={len(counts)} non_idle={non_idle} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in counts.most_common(8))} "
+              f"first16={' '.join(f'{value:04x}' for value in tx_words[:16])}")
+    else:
+        print("[g711] SPORT0 TX0 captured: words=0")
+
+
+def scan_direct_tikrnl_tx_source(cpu, marker: int = 0x0055,
+                                 start: int | None = None,
+                                 end: int | None = None) -> None:
+    """Poke likely TX buffers and see which one appears on SPORT0 TX0."""
+    dm = ADSP.adsp2181_dm(cpu)
+    hits: list[tuple[str, int, int]] = []
+    tx_words: list[int] = []
+
+    def rx_cb(_cpu, _port):
+        return 0xFF
+
+    def tx_cb(_cpu, port, value):
+        if port == 0:
+            tx_words.append(value & 0xFFFF)
+
+    def timer_cb(_cpu, _enabled):
+        return None
+
+    callbacks = (RX_CB(rx_cb), TX_CB(tx_cb), TIM_CB(timer_cb))
+    ADSP.adsp2181_set_callbacks(cpu, *callbacks)
+    if start is not None or end is not None:
+        lo = 0 if start is None else start
+        hi = 0x4000 if end is None else end
+        ordered_candidates = list(range(max(0, lo), min(0x4000, hi)))
+    else:
+        candidates = (
+            list(range(0x2E00, 0x2E60))
+            + list(range(0x2B00, 0x2B10))
+            + [0x2E52, 0x3F08, 0x3F09, 0x3F0F, 0x3FB4]
+        )
+        seen = set()
+        ordered_candidates = []
+        for addr in candidates:
+            if addr not in seen:
+                seen.add(addr)
+                ordered_candidates.append(addr)
+    for addr in ordered_candidates:
+        saved = dm[addr]
+        tx_words.clear()
+        dm[addr] = marker & 0xFFFF
+        ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX drives the TDM walk
+        ADSP.adsp2181_set_irq(cpu, 3, 0)
+        ADSP.adsp2181_run(cpu, 20000)
+        if tx_words and tx_words[-1] == (marker & 0xFFFF):
+            hits.append(("rx", addr, tx_words[-1]))
+        tx_words.clear()
+        ADSP.adsp2181_set_irq(cpu, 4, 1)  # SPORT0_TX
+        ADSP.adsp2181_set_irq(cpu, 4, 0)
+        ADSP.adsp2181_run(cpu, 20000)
+        dm[addr] = saved
+        if tx_words and tx_words[-1] == (marker & 0xFFFF):
+            hits.append(("tx", addr, tx_words[-1]))
+    print("[txscan] marker 0x%04x source hits: %s" % (
+        marker & 0xFFFF,
+        " ".join(f"{irq}:DM{addr:04x}->{value:04x}"
+                 for irq, addr, value in hits)
+        or "none"))
+
+
+def force_direct_tikrnl_tx(cpu, samples: int, code: int,
+                           source: int = 0x2E52) -> None:
+    """Preload the kernel TDM output latch and capture forced SPORT0 TX0."""
+    dm = ADSP.adsp2181_dm(cpu)
+    tx_words: list[int] = []
+
+    def rx_cb(_cpu, port):
+        return 0xFF if port == 0 else 0
+
+    def tx_cb(_cpu, port, value):
+        if port == 0:
+            tx_words.append(value & 0xFFFF)
+
+    def timer_cb(_cpu, _enabled):
+        return None
+
+    callbacks = (RX_CB(rx_cb), TX_CB(tx_cb), TIM_CB(timer_cb))
+    ADSP.adsp2181_set_callbacks(cpu, *callbacks)
+    for _ in range(samples):
+        dm[source & 0x3FFF] = code & 0xFFFF
+        ADSP.adsp2181_set_irq(cpu, 3, 1)  # SPORT0_RX runs the TDM TX walk
+        ADSP.adsp2181_set_irq(cpu, 3, 0)
+        ADSP.adsp2181_run(cpu, 20000)
+    if tx_words:
+        from collections import Counter
+        counts = Counter(tx_words)
+        forced = sum(value == (code & 0xFFFF) for value in tx_words)
+        print(f"[force-tx] source DM{source & 0x3fff:04x}=0x{code & 0xffff:04x}: "
+              f"captured={len(tx_words)} forced={forced} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in counts.most_common(8))} "
+              f"first16={' '.join(f'{value:04x}' for value in tx_words[:16])}")
+    else:
+        print(f"[force-tx] source DM{source & 0x3fff:04x}: captured=0")
+
+
+def force_modem_dsp_assign(shim: "MipsShim", args) -> None:
+    """Force the recovered TIKRNL service assignment during fake call setup."""
+    print("[force] staging direct TIKRNL core for modem DSP assignment")
+    forced_cpu = stage_direct_tikrnl_core(args)
+    old_cpu = shim.cpu
+    old_multi = shim.multi_dsp
+    try:
+        shim.cpu = forced_cpu
+        shim.multi_dsp = False
+        run_assign(shim, args)
+        pump_direct_tikrnl_core(forced_cpu, args.words)
+        dm = ADSP.adsp2181_dm(forced_cpu)
+        print("[force] after TIKRNL pump: DM3310..3316 "
+              + " ".join(f"{dm[a]:04x}" for a in range(0x3310, 0x3317))
+              + " DM3327..3336 "
+              + " ".join(f"{dm[a]:04x}" for a in range(0x3327, 0x3337)))
+        if args.g711_probe_samples:
+            probe_direct_tikrnl_g711(forced_cpu, args.g711_probe_samples,
+                                     args.g711_probe_code,
+                                     args.g711_probe_stimulus,
+                                     args.g711_probe_freq,
+                                     args.g711_probe_amp,
+                                     args.bridge_task_tx,
+                                     args.restore_pcm_pointers)
+        if args.tx_source_scan:
+            scan_direct_tikrnl_tx_source(forced_cpu, args.tx_source_marker,
+                                         args.tx_scan_start, args.tx_scan_end)
+        if args.force_tx_samples:
+            force_direct_tikrnl_tx(forced_cpu, args.force_tx_samples,
+                                   args.force_tx_code, args.force_tx_source)
+    finally:
+        shim.cpu = old_cpu
+        shim.multi_dsp = old_multi
+    shim.forced_modem_cpu = forced_cpu
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", type=Path, required=True)
@@ -1467,8 +1957,69 @@ def main() -> int:
                              "semantics for the modem NL entity")
     parser.add_argument("--simulate-b-channel", action="store_true",
                         help="simulate an answered incoming call: issue "
-                             "CALL_RES, activate NL, and keep pumping the "
-                             "firmware while checking for N_DISC")
+                             "CALL_RES, activate NL, force the recovered "
+                             "TIKRNL modem service assignment, and keep "
+                             "pumping the firmware while checking for N_DISC")
+    parser.add_argument("--force-modem-dsp-assign", action="store_true",
+                        help="after N_CONNECT, run the recovered "
+                             "SERVICE_ASSIGN path against a directly staged "
+                             "TIKRNL core so the modem DSP receives a real "
+                             "switch-on database commit")
+    parser.add_argument("--g711-probe-samples", type=int, default=0,
+                        help="after forced modem DSP assignment, feed this "
+                             "many raw G.711 octets into the direct TIKRNL "
+                             "core's line words (RX-side probe only)")
+    parser.add_argument("--g711-probe-code", type=lambda s: int(s, 0),
+                        default=0xff,
+                        help="raw G.711 octet used by --g711-probe-samples "
+                             "(default 0xff)")
+    parser.add_argument("--g711-probe-stimulus",
+                        choices=("constant", "tone", "ansam", "silence"),
+                        default="constant",
+                        help="stimulus used by --g711-probe-samples "
+                             "(default constant)")
+    parser.add_argument("--g711-probe-freq", type=float, default=2100.0,
+                        help="tone/ANSam carrier frequency for "
+                             "--g711-probe-stimulus (default 2100)")
+    parser.add_argument("--g711-probe-amp", type=int, default=20000,
+                        help="linear PCM amplitude before u-law encoding for "
+                             "tone/ANSam stimulus (default 20000)")
+    parser.add_argument("--bridge-task-tx", action="store_true",
+                        help="during --g711-probe-samples, copy the "
+                             "pointer-mode task TX buffer to the kernel "
+                             "SPORT0 TX latch before each TDM strobe")
+    parser.add_argument("--restore-pcm-pointers", action="store_true",
+                        help="during --g711-probe-samples, restore the old "
+                             "one-line pointer-mode PCM block "
+                             "(3F0F->2B00, 3FB4->2B01) after overlays")
+    parser.add_argument("--tx-source-scan", action="store_true",
+                        help="after forced modem DSP assignment, poke likely "
+                             "DM TX buffers with --tx-source-marker and report "
+                             "whether SPORT0 TX0 emits the marker")
+    parser.add_argument("--tx-source-marker", type=lambda s: int(s, 0),
+                        default=0x0055,
+                        help="16-bit marker used by --tx-source-scan "
+                             "(default 0x0055)")
+    parser.add_argument("--tx-scan-start", type=lambda s: int(s, 0),
+                        default=None,
+                        help="optional inclusive DM start address for a wider "
+                             "--tx-source-scan")
+    parser.add_argument("--tx-scan-end", type=lambda s: int(s, 0),
+                        default=None,
+                        help="optional exclusive DM end address for a wider "
+                             "--tx-source-scan")
+    parser.add_argument("--force-tx-samples", type=int, default=0,
+                        help="after forced modem DSP assignment, preload the "
+                             "kernel TDM TX source and capture this many "
+                             "SPORT0 TX0 words")
+    parser.add_argument("--force-tx-code", type=lambda s: int(s, 0),
+                        default=0x0055,
+                        help="G.711/codeword marker used by --force-tx-samples "
+                             "(default 0x0055)")
+    parser.add_argument("--force-tx-source", type=lambda s: int(s, 0),
+                        default=0x2E52,
+                        help="DM source address used by --force-tx-samples "
+                             "(default 0x2E52, kernel TDM output latch)")
     parser.add_argument("--fake-call-ingress", action="store_true",
                         help="drive the incoming-call host sequence before "
                              "answering: put the assigned signalling entity "
@@ -1513,6 +2064,7 @@ def main() -> int:
         args.call_direction = "answering"
         args.fake_call_ingress = True
         args.synthesize_call_ingress = True
+        args.force_modem_dsp_assign = True
     if args.dsp_combifile is not None and not str(args.dsp_combifile):
         args.dsp_combifile = None
 
