@@ -49,12 +49,15 @@ STUB_BASE = 0x00900000
 
 HOST_WRITE = BIAS + 0x71950  # 0x80082950
 HOST_READ = BIAS + 0x71920   # 0x80082920
+HOST_WRITE_DM_BLOCK = BIAS + 0x71A38  # 0x80082a38
+HOST_WRITE_PM_BLOCK = BIAS + 0x71B8C  # 0x80082b8c
 SCRIPT_SENDER = BIAS + 0x786A4  # 0x800896a4
 REQUEST_PARSER = BIAS + 0x78138  # 0x80089138
 # Service-driver table slot 1: the modem service assign entry (file 0x85980).
 # Performs the switch-on database commit for task 0x0258 (TIKRNL81.F34),
 # reached through the table at file 0xeaec4 rather than by a direct jal.
 SERVICE_ASSIGN = BIAS + 0x85980  # 0x80096980
+DSP_DOWNLOAD = BIAS + 0x75AF8    # 0x80086af8, native block/relocation loader
 
 # The MIPS image's .data/.bss for the protocol task lives at 0x80200000
 # (physical 0x200000).  The te_dmlt.pm file only covers 0x11000..0x100230,
@@ -358,6 +361,8 @@ class MipsShim:
         self.trace_calls = False
         self.phase = "boot"
         self.service_assign_pending = False
+        self.intercept_bulk_writes = False
+        self.bulk_write_calls: list[tuple[int, int, int]] = []
         self.service_assign_block: int | None = None
 
     def _set_load_result(self, uc, val, size):
@@ -534,7 +539,8 @@ class MipsShim:
                 ADSP.adsp2181_run(core, 1000)
         from unicorn.mips_const import (UC_MIPS_REG_PC, UC_MIPS_REG_RA,
                                         UC_MIPS_REG_A0, UC_MIPS_REG_A1,
-                                        UC_MIPS_REG_A2, UC_MIPS_REG_V0,
+                                        UC_MIPS_REG_A2, UC_MIPS_REG_A3,
+                                        UC_MIPS_REG_V0,
                                         UC_MIPS_REG_0)
         if self.trace_calls:
             try:
@@ -552,7 +558,33 @@ class MipsShim:
                 self.call_trace.append((self.phase, address, target))
         if address == SERVICE_ASSIGN:
             self.service_assign_pending = True
-        if address == HOST_WRITE:
+        if (self.intercept_bulk_writes
+                and address in (HOST_WRITE_DM_BLOCK, HOST_WRITE_PM_BLOCK)):
+            a0 = uc.reg_read(UC_MIPS_REG_A0)
+            dest = uc.reg_read(UC_MIPS_REG_A1) & 0x3FFF
+            source = uc.reg_read(UC_MIPS_REG_A2)
+            count = uc.reg_read(UC_MIPS_REG_A3) & 0xFFFF
+            core = self.core_for(a0)
+            self.bulk_write_calls.append((address, dest, count))
+            raw = bytes(uc.mem_read(source & 0x1FFFFFFF,
+                                    count * (2 if address == HOST_WRITE_DM_BLOCK else 4)))
+            if address == HOST_WRITE_DM_BLOCK:
+                dm = ADSP.adsp2181_dm(core)
+                for index in range(count):
+                    value = struct.unpack_from("<H", raw, index * 2)[0]
+                    dm[(dest + index) & 0x3FFF] = value
+                    self.host_writes.append((0x4000 | ((dest + index) & 0x3FFF),
+                                             value))
+            else:
+                pm = ADSP.adsp2181_pm(core)
+                for index in range(count):
+                    high, low = struct.unpack_from("<HH", raw, index * 4)
+                    value = ((high << 8) | (low & 0xFF)) & 0xFFFFFF
+                    pm[(dest + index) & 0x3FFF] = value
+                    self.host_writes.append(((dest + index) & 0x3FFF, value))
+            uc.reg_write(UC_MIPS_REG_V0, 1)
+            uc.reg_write(UC_MIPS_REG_PC, uc.reg_read(UC_MIPS_REG_RA))
+        elif address == HOST_WRITE:
             a0 = uc.reg_read(UC_MIPS_REG_A0)
             if self.service_assign_pending and self.service_assign_block is None:
                 self.service_assign_block = a0 & 0x1fffffff
@@ -1615,12 +1647,15 @@ class NativeMipsModem:
     pass per RTP packet handles database commands and overlay downloads.
     """
 
-    def __init__(self, shim: MipsShim, core, law: str,
+    def __init__(self, shim: MipsShim, core, law: str, dsp_block: int,
+                 download_descriptors: dict[int, int],
                  mips_interval: int = 160, adsp_budget: int = 300000):
         self.shim = shim
         self.cpu = core
         self.dm = ADSP.adsp2181_dm(core)
         self.law = law
+        self.dsp_block = dsp_block
+        self.download_descriptors = download_descriptors
         self.silence = 0xD5 if law == "pcma" else 0xFF
         self.mips_interval = max(1, mips_interval)
         self.adsp_budget = adsp_budget
@@ -1631,22 +1666,79 @@ class NativeMipsModem:
         self.resident = 0x0258
         self._mips_fault_reported = False
 
+    def load_native_overlay(self, download_id: int) -> None:
+        """Run the firmware's real segmented/relocating ADSP loader."""
+        descriptor = self.download_descriptors.get(download_id)
+        if descriptor is None:
+            raise RuntimeError(f"download 0x{download_id:04x} is not staged")
+        # 0x80086af8 consumes this 0x1c-byte transfer state.  Its segment-base
+        # pointer is biased by eight bytes: relocation segment N is read at
+        # table + N*2 - 8.  Native TIKRNL allocated modem DM segment 4 at
+        # 0x32f0 and movable PM export segment 5 at 0x0580.
+        state = RAM_VIRT + 0xA000
+        bases = RAM_VIRT + 0xA100
+        self.shim.alloc(state, 0x200)
+        self.shim.write_bytes(state, bytes(0x40))
+        self.shim.write_bytes(bases, bytes(0x40))
+        self.shim.write32(state + 0x00, self.dsp_block)
+        self.shim.write32(state + 0x08, descriptor)
+        self.shim.write32(state + 0x0C, bases + 8)
+        dm_blocks = struct.unpack(
+            "<I", self.shim.uc.mem_read((descriptor + 0x28) & 0x1FFFFFFF, 4))[0]
+        self.shim.write32(state + 0x14, dm_blocks)
+        self.shim.write16(bases + 4 * 2, 0x32F0)
+        self.shim.write16(bases + 5 * 2, 0x0580)
+        before = len(self.shim.host_writes)
+        self.shim.intercept_bulk_writes = True
+        try:
+            result = self.shim.call(DSP_DOWNLOAD, [state, 0xFFFF, 0],
+                                    gp=GP, sp=STACK_TOP, max_insns=8_000_000)
+        finally:
+            self.shim.intercept_bulk_writes = False
+        active = self.shim.uc.mem_read((state + 0x10) & 0x1FFFFFFF, 1)[0]
+        block_index = struct.unpack(
+            "<H", self.shim.uc.mem_read((state + 0x12) & 0x1FFFFFFF, 2))[0]
+        if result != 1 or not active:
+            raise RuntimeError(
+                f"native loader did not complete 0x{download_id:04x}: "
+                f"result={result} active={active} block={block_index} "
+                f"bulk={self.shim.bulk_write_calls[-4:]}")
+        self.resident = download_id
+        print(f"[native-mips] loaded 0x{download_id:04x} through MIPS "
+              f"({len(self.shim.host_writes) - before} host writes)")
+
+    def attach_connected_bearer(self) -> None:
+        # This is the exact result of SIG.MDM's private bearer-connected
+        # notification; use the card loader rather than copying extracted
+        # fixed-address word maps.
+        for download_id in (0x026D, 0x025C, 0x0262):
+            self.load_native_overlay(download_id)
+        self.dm[0x32F0] = 0x0004
+        self.dm[0x3F0F] = 0x2B00
+        self.dm[0x3FB4] = 0x2B01
+        print("[native-mips] connected bearer overlays loaded through MIPS")
+
     def _frame_core(self, code: int) -> None:
         # The hardware PRI descriptor calls TIKRNL's registered continuation
         # only for this selected channel.  The generic SPORT frame walks the
         # kernel queue but cannot reconstruct that private callback.
         self.dm[0x3F08] = code & 0xFF
-        ADSP.adsp2181_sport0_tdm_frame(
-            self.cpu, 0, 0, code & 0xFF, self.silence,
-            self.adsp_budget)
-        # Native SERVICE_ASSIGN relocates TIKRNL, so the direct harness's
-        # fixed 0x06fc continuation is invalid here.  Run the page handler
-        # published by the natively loaded DIAL overlay; the remaining TX
-        # adapter seam is diagnosed separately below.
-        handler = self.dm[0x3FB3] & 0x3FFF
-        if handler:
-            ADSP.adsp2181_call(self.cpu, handler, 0x02A8)
-            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+        # Native TIKRNL registers PM 0x0703 (published by the AR literal at
+        # runtime PM 0x06a0) in Eicon's private PRI descriptor.  Select that
+        # descriptor for this one SPORT frame without permanently replacing
+        # the kernel's global host-command dispatcher at PM 0x02b9.
+        pm = ADSP.adsp2181_pm(self.cpu)
+        saved_dispatch = pm[0x02B9]
+        saved_isr = pm[0x00B5]
+        pm[0x02B9] = 0x1C000F | (0x0703 << 4)
+        pm[0x00B5] = 0x1C000F | (0x0586 << 4)
+        try:
+            ADSP.adsp2181_sport0_tdm_frame(
+                self.cpu, 0, 0, code & 0xFF, self.silence,
+                self.adsp_budget)
+        finally:
+            pm[0x02B9] = saved_dispatch
+            pm[0x00B5] = saved_isr
 
     def boot(self) -> None:
         """Compatibility with ``Card``/``LiveKernelModem``; already booted."""
@@ -1717,9 +1809,13 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
         raise RuntimeError("native incoming call did not assign a modem DSP core")
     print(f"[native-mips] SIP media attached to DSP block 0x{block:08x} "
           f"using {law}")
-    modem = NativeMipsModem(shim, core, law)
-    print("[native-mips] media clock attached; native SIG.MDM movable-overlay "
-          "load is not yet routed")
+    base = protocol_end_addr(image)
+    staged = build_dsp_code_image(
+        dsp_combifile, CARDTYPE_DIVASRV_P_30M_PCI, base)
+    descriptors = {entry.download_id: base + 4 + index * 0x30
+                   for index, entry in enumerate(staged.downloads)}
+    modem = NativeMipsModem(shim, core, law, block, descriptors)
+    modem.attach_connected_bearer()
     return modem
 
 

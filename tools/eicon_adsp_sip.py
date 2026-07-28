@@ -712,8 +712,8 @@ def main() -> int:
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
     ap.add_argument('--native-mips', action='store_true',
                     help='experimental: supervise the SIP ADSP with the real '
-                         'Unicorn MIPS firmware; assignment works, but the '
-                         'SIG.MDM movable-overlay load is not yet routed')
+                         'Unicorn MIPS firmware; assignment and native overlay '
+                         'loading work, but bearer WDB activation remains open')
     ap.add_argument('--mips-kernel', type=Path,
                     default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
                                  '0009-diva-server-pri-30m-kernel'))

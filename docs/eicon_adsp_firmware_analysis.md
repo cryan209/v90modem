@@ -3072,3 +3072,49 @@ will apply the real segment allocator and relocations), rather than emulating
 SIG.MDM by copying extracted PM/DM maps.  Once that loader publishes the
 native `0x0703` descriptor callback, the existing exact 8 kHz SIP media clock
 can drive it directly.
+
+## Session 34: the real MIPS overlay loader is live
+
+The SIP backend now invokes the protocol firmware's actual segmented ADSP
+loader at MIPS `0x80086af8` for the naturally assigned modem core.  Its
+transfer state is reconstructed from the already staged portable descriptor:
+
+- `+0x00`: assigned DSP register block (`0x1c000808` in the probe);
+- `+0x08`: staged `t_dsp_portable_desc`;
+- `+0x0c`: allocated segment-base table;
+- `+0x14`: initial DM block-list pointer from descriptor `+0x28`;
+- `+0x10/+0x12/+0x18`: loader phase, block index, and block offset.
+
+The native allocations recovered from the running task are supplied to the
+loader: modem DM segment 4 at `0x32f0` and movable PM export segment 5 at
+`0x0580`.  The earlier failed probe omitted state `+0x14`, causing the loader
+to interpret zero-page data as block headers; initializing it was the key to
+running the genuine routine.
+
+Two hardware bulk-IDMA helpers (`0x80082a38` for DM and `0x80082b8c` for PM)
+are now intercepted only while this loader runs.  They copy the firmware's
+already-relocated scratch words into the selected ADSP core and return the
+same success result as card hardware.  Normal card boot retains its existing
+instruction-level path.  This preserves the MIPS implementation of all block
+walking and all four relocation forms instead of recreating them in Python.
+
+The connected bearer now loads the exact native module stack successfully:
+
+```text
+[native-mips] loaded 0x026d through MIPS (15028 host writes)
+[native-mips] loaded 0x025c through MIPS (4108 host writes)
+[native-mips] loaded 0x0262 through MIPS (12145 host writes)
+[native-mips] connected bearer overlays loaded through MIPS
+```
+
+Post-load validation matches the extracted DIAL image while retaining the
+native movable export: `DM3fb2=0x17bb`, `DM3fb3=0x1706`,
+`PM0580=0x19b9cf`, and `DM3eee=0x2000`.  The fixed-address transplant has
+therefore been eliminated.
+
+The remaining media blocker is after loading: the private PRI descriptor's
+page/continuation activation still does not consume the pending WDB, so a
+1600-sample silence probe remains before ANSam.  `NativeMipsModem` now selects
+native PM `0x0586` and `0x0703` only around its assigned SPORT frame, but the
+missing bearer command cycle must still be recovered rather than forcing the
+direct harness's setup calls.
