@@ -320,13 +320,20 @@ static void execute(adsp2100_state *adsp)
 
         if (adsp->watch_exec[adsp->pc & 0x3fff]) {
             unsigned ret = adsp->pc_sp ? pc_stack_top(adsp) & 0x3fff : 0xffff;
+            /* ax1/ar/mr1 carry the control-channel correlator magnitude at the
+             * PM 0x3515 decision seam: PM 0x350b puts |MR1| in AR, PM 0x350d
+             * copies it to AX1, and the bit in DM(0x060f) is that magnitude
+             * thresholded at 0x0578.  Neither value is ever stored to DM. */
             logerror("[EXEC] pc=%04x ret=%04x cyc=%llu cntr=%04x "
                      "i0=%04x i1=%04x m1=%04x m3=%04x "
+                     "ax1=%04x ar=%04x mr1=%04x "
                      "state=%04x event=%04x span=%04x count=%04x stride=%04x\n",
                      (unsigned)(adsp->pc & 0x3fff), ret,
                      (unsigned long long)adsp->cycles, (unsigned)(adsp->cntr & 0x3fff),
                      adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
                      adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
+                     adsp->core.ax1.u & 0xffff, adsp->core.ar.u & 0xffff,
+                     adsp->core.mr.mrx.mr1.u & 0xffff,
                      adsp->data[0x16bd], adsp->data[0x198e], adsp->data[0x16c5],
                      adsp->data[0x16c6], adsp->data[0x16c7]);
         }

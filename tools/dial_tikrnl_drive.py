@@ -96,7 +96,10 @@ for _name, _args in [('reset', [ctypes.c_void_p]), ('pm', [ctypes.c_void_p]),
                      ('pc', [ctypes.c_void_p]), ('idle', [ctypes.c_void_p]),
                      ('set_pc', [ctypes.c_void_p, ctypes.c_uint16]),
                      ('call', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]),
-                     ('set_ar', [ctypes.c_void_p, ctypes.c_uint16])]:
+                     ('set_ar', [ctypes.c_void_p, ctypes.c_uint16]),
+                     ('watch_dm', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]),
+                     ('watch_pm', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]),
+                     ('watch_exec', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int])]:
     getattr(ADSP, 'adsp2181_' + _name).argtypes = _args
 ADSP.adsp2181_pm.restype = ctypes.POINTER(ctypes.c_uint32)
 ADSP.adsp2181_dm.restype = ctypes.POINTER(ctypes.c_uint16)

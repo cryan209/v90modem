@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dial_tikrnl_drive import Card
+from dial_tikrnl_drive import ADSP, Card
 
 SAMPLES_PER_PACKET = 160
 TICK_SECONDS = SAMPLES_PER_PACKET / 8000
@@ -339,7 +339,8 @@ class EiconSipEndpoint:
                  password: str = '', rx_guard_ms: int = 1000,
                  force_info_after_v8: bool = False,
                  kernel_dispatch: bool = False,
-                 init_info_detector_at_24: bool = False):
+                 init_info_detector_at_24: bool = False,
+                 watch_exec: tuple[int, ...] = ()):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -353,6 +354,7 @@ class EiconSipEndpoint:
         self.force_info_after_v8 = force_info_after_v8
         self.kernel_dispatch = kernel_dispatch
         self.init_info_detector_at_24 = init_info_detector_at_24
+        self.watch_exec = watch_exec
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind((bind, sip_port))
@@ -486,6 +488,10 @@ class EiconSipEndpoint:
                     card = Card(force_info_after_v8=self.force_info_after_v8)
                 card.boot()
                 card.configure_modem('answer', self.law)
+                # LiveKernelModem wraps a Card; both expose the same emulator.
+                cpu = getattr(card, 'card', card).cpu
+                for address in self.watch_exec:
+                    ADSP.adsp2181_watch_exec(cpu, address, 1)
                 self.call = Call(peer, media, call_id,
                                  f'{random.randrange(2**32):08x}', card)
                 print(f'[call] answering {peer[0]}:{peer[1]}, RTP -> '
@@ -671,6 +677,11 @@ def main() -> int:
                     help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('--watch-exec', default='',
+                    help='comma-separated PM addresses to log on execution; '
+                         '0x3515 is the control-channel bit decision, where '
+                         'ax1 in the [EXEC] line is the correlator magnitude '
+                         'the firmware thresholds at 0x0578')
     ap.add_argument('--init-info-detector-at-24', action='store_true',
                     help='diagnostic: invoke firmware PM 0x2602 at INFO state 0x24')
     ap.add_argument('-v', '--verbose', action='store_true')
@@ -680,7 +691,9 @@ def main() -> int:
                                 args.capture_prefix, args.law, args.registrar,
                                 args.username, args.password, args.rx_guard_ms,
                                 args.force_info_after_v8, args.kernel_dispatch,
-                                args.init_info_detector_at_24)
+                                args.init_info_detector_at_24,
+                                tuple(int(field, 0) for field in
+                                      args.watch_exec.split(',') if field.strip()))
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

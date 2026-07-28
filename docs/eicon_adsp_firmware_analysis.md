@@ -1672,3 +1672,69 @@ a valid firmware transition.  The stale classifier/event value
 `DM(0x198e)=0x06a6` is present at every watched transform entry.  Do not hide
 the problem with an FFT bounds check: trace why the sequencer skips its reset
 or why the detector completion fails to stop/reconfigure that sequence.
+
+## The control-channel framer is not the `0x37` fault
+
+The detector completion that never occurs is `DM(0x0686)`, published by the
+INFO page's control-channel framer.  That framer has now been recovered and
+exercised in isolation, and it works: the fault is upstream of it.
+
+Two stages sit between the line and `DM(0x0686)`:
+
+- **PM `0x34f0`, the demodulator.**  A 16-word circular sample history at
+  `DM(0x16bb)` (`L0 = 0x10`) is correlated against the 16-tap reference at
+  `DM(0x1554)`.  PM `0x350b` takes `|MR1|`; over `DM(0x164f)` it raises the
+  energy flag `DM(0x0685)`, and over the immediate `0x0578` it becomes the
+  one-bit decision published in `DM(0x060f)` at PM `0x3515`.  The magnitude
+  itself lives only in `AR`/`AX1` and is never stored to DM.
+- **PM `0x3520` and PM `0x25ab`, two framers.**  PM `0x3515` runs framer A
+  through `DM(0x16bd)` and then falls into framer B (the `JUMP $25A0` at PM
+  `0x351f`), once per demodulated sample.
+
+Both framers keep 16 lanes in a circular buffer, one per sample phase of a
+16x oversampled bit, advancing one lane per call:
+
+|  | framer A | framer B |
+|---|---|---|
+| state | `DM(0x16bd)`, hunt `0x3520` | `DM(0x19cf)`, hunt `0x25ab` |
+| lanes | `DM(0x0620..0x062f)` | `DM(0x1990..0x199f)` |
+| bit planes | `DM(0x068c..)` | `DM(0x19d0..)` |
+| call count | `DM(0x068a)` | `DM(0x19cd)` |
+| payload | `DM(0x1651)`: `0x0110`/`0x01e0` (17/30 bits), by `DM(0x3f94)` bit 1 | fixed `0x0080` (8 bits) |
+| success | `DM(0x0686) = 1` | `DM(0x198e)` event, `DM(0x198f)` octet |
+
+A lane hunts an 11-bit window equal to `0x0772` — one fill bit followed by
+the V.34 INFO synchronization code `0x372`, the same constant as
+`V34_INFO_SYNC_CODE` in `v34_info_decode.h` — five times, then accumulates
+CRC-16 (reflected `0x8408`, preset `0xffff`) over the payload while the bit
+planes collect every lane's decision.  The received CRC is shifted in against
+each lane's own register, so the lane whose residue is zero is the one that
+sampled on the correct phase.  PM `0x3568`/`0x25e9` is that zero scan — the
+validation the previous session saw fail — and PM `0x3574`/`0x25f5`
+transposes the bit planes to recover the winning lane's payload.
+
+`tools/info_cc_framer_probe.py` drives PM `0x3515` directly with ideal
+decisions (each bit repeated across all 16 lanes) after running the
+firmware's own initializers, PM `0x359a` and PM `0x3f7f`.  Framer A locks
+sync, accepts its 17-bit payload, validates the CRC and sets
+`DM(0x0686) = 1`.  So the framer, the 16-lane phase search and the emulated
+instruction semantics along that path — including the opcode-class `0x10`
+fix above — are all correct.  Framer B behaves identically when fed its own
+8-bit message (it recovers `DM(0x198f) = 0x30` and publishes
+`DM(0x198e) = 1`, the event the `_inject_l1l2_completion` gate fakes), but
+note that the INFO page initializer at PM `0x3f4c` deliberately parks framer
+B at the disabled handler `0x25f3`; PM `0x2602` is what installs it, and
+nothing in the resident image references `0x2602` directly — it is reached
+only through the PM action table at `0x2ee6..0x2eee`.
+
+The remaining candidate is therefore the decision itself.  `DM(0x060f)` is a
+hard threshold on a correlation magnitude against fixed constants
+(`DM(0x164f)`, `0x0578`) that assume the real card's signal levels; nothing
+downstream can recover if that bit is stuck or noisy.  The `[EXEC]`
+watchpoint line now carries `ax1`/`ar`/`mr1` for this reason, and
+`tools/eicon_adsp_sip.py --watch-exec 0x3515` logs the magnitude per sample
+on a live call.  The next measurement is that magnitude against `0x0578`
+over the INFO window: a magnitude that never crosses, or never stops
+crossing, is a level/scaling fault in the emulated RX path, not a framing
+one.  Note this repository's standing μ-law level gotcha (0 dBm0 is RMS
+16017, not 4004) when interpreting it.
