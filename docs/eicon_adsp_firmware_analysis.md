@@ -3112,9 +3112,69 @@ native movable export: `DM3fb2=0x17bb`, `DM3fb3=0x1706`,
 `PM0580=0x19b9cf`, and `DM3eee=0x2000`.  The fixed-address transplant has
 therefore been eliminated.
 
-The remaining media blocker is after loading: the private PRI descriptor's
-page/continuation activation still does not consume the pending WDB, so a
-1600-sample silence probe remains before ANSam.  `NativeMipsModem` now selects
-native PM `0x0586` and `0x0703` only around its assigned SPORT frame, but the
-missing bearer command cycle must still be recovered rather than forcing the
-direct harness's setup calls.
+At this point the private PRI descriptor still did not consume WDB. Session
+35 below resolves that result as an IDMA boot-hold lifecycle problem rather
+than another missing overlay or relocation.
+
+## Session 35: native activation, V.8, and INFO
+
+The last apparent activation blocker was an emulator lifecycle error.  The
+core selected by `SERVICE_ASSIGN` was the one DSP still in IDMA boot hold.
+Consequently every earlier `adsp2181_call()` was a no-op even though PM/DM
+looked correctly loaded.  The native backend now releases that exact core and
+runs TIKRNL's loader-relocated initializer at PM `0x0679` before loading the
+connected-bearer overlays.
+
+The recovered private PRI descriptor has two callbacks:
+
+- runtime PM `0x0586`: selected-channel SPORT ISR adapter;
+- runtime PM `0x0703`: RX/page/TX continuation, published by PM `0x06a0`.
+
+They are selected only around one exact SPORT frame; the global kernel slots
+are restored immediately.  Native descriptor-active state is DM `0x3131`,
+the one-word buffers remain DM `0x2b00/0x2b01`, and PCMU/PCMA selects the
+same `0x3c27/0x3c07` adapter as the direct kernel harness.
+
+Native page-download supervision is now live as well.  The relocated outbound
+request is `DM3131/DM3132`, and `DM3143` publishes resume PM `0x06df`.
+`NativeMipsModem` serves each request through the real MIPS loader, sets the
+one-cycle BOOTFINISHED acknowledgement, and resumes TIKRNL.  A normal startup
+now traverses genuine firmware requests such as:
+
+```text
+0x0270 SIG -> 0x0263 DIAL partial -> 0x0271 V.22FC
+           -> 0x025f V.8
+```
+
+The connected callback's ADDSP V.90 §5.4.1 setup is delivered as two separate
+WDB cycles.  Both are consumed in one native descriptor frame, after which
+DIAL/V.8 produces nonzero line samples.  Long V.8 FFT passes preserve their
+live ADSP context across media frames rather than being restarted when one C
+execution budget expires.
+
+The existing diagnostic `--force-info-after-v8` is now supported by the
+native-MIPS backend.  It leaves V.8 resident for 12,000 exact samples; if V.8
+then requests a low-level fallback instead of page 7, the host policy changes
+the pending request to INFO and still loads/resumes it through the real MIPS
+loader.  The offline silence proof reaches native INFO as requested:
+
+```text
+[native-mips] diagnostic post-V.8 fallback -> INFO at sample 12000
+[native-mips] loaded 0x0260 through MIPS (7905 host writes)
+[native-mips] page request 0x0260 (from 0x025f) resumed at PM 0x06df
+FINAL resident=0x0260 bootpage=7 TrnProgress=0x002a
+```
+
+Run a SIP hardware test with:
+
+```bash
+/tmp/eicon-venv/bin/python tools/eicon_adsp_sip.py \
+  --native-mips --force-info-after-v8 --law pcmu \
+  --mips-kernel artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel \
+  --mips-tikrnl artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task \
+  --registrar example.net --username 6001 --password 6001
+```
+
+This policy remains explicitly diagnostic.  With a valid calling-modem CM/JM,
+shipping V.8 should request `0x0260` naturally and the same loader/resume path
+is used without substitution.

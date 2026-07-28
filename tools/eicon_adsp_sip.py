@@ -398,7 +398,8 @@ class EiconSipEndpoint:
             from eicon_mips_shim import create_native_mips_modem
             print('[native-mips] prebooting card firmware and incoming modem call...')
             self.native_card = create_native_mips_modem(
-                mips_kernel, mips_tikrnl, law, mips_image, mips_combifile)
+                mips_kernel, mips_tikrnl, law, mips_image, mips_combifile,
+                force_info_after_v8=force_info_after_v8)
         if registrar and username:
             self.send_register()
 
@@ -507,7 +508,8 @@ class EiconSipEndpoint:
                         from eicon_mips_shim import create_native_mips_modem
                         self.native_card = create_native_mips_modem(
                             self.mips_kernel, self.mips_tikrnl, self.law,
-                            self.mips_image, self.mips_combifile)
+                            self.mips_image, self.mips_combifile,
+                            force_info_after_v8=self.force_info_after_v8)
                     card = self.native_card
                     self.native_card = None
                 elif self.kernel_dispatch:

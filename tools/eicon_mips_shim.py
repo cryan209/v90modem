@@ -203,6 +203,8 @@ ADSP.adsp2181_pm.restype = ctypes.POINTER(ctypes.c_uint32)
 ADSP.adsp2181_dm.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_dm.restype = ctypes.POINTER(ctypes.c_uint16)
 ADSP.adsp2181_idle.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_pc.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_pc.restype = ctypes.c_uint16
 ADSP.adsp2181_call.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]
 ADSP.adsp2181_run.argtypes = [ctypes.c_void_p, ctypes.c_int]
 ADSP.adsp2181_set_irq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
@@ -1649,6 +1651,7 @@ class NativeMipsModem:
 
     def __init__(self, shim: MipsShim, core, law: str, dsp_block: int,
                  download_descriptors: dict[int, int],
+                 force_info_after_v8: bool = False,
                  mips_interval: int = 160, adsp_budget: int = 300000):
         self.shim = shim
         self.cpu = core
@@ -1656,6 +1659,8 @@ class NativeMipsModem:
         self.law = law
         self.dsp_block = dsp_block
         self.download_descriptors = download_descriptors
+        self.force_info_after_v8 = force_info_after_v8
+        self._media_samples = 0
         self.silence = 0xD5 if law == "pcma" else 0xFF
         self.mips_interval = max(1, mips_interval)
         self.adsp_budget = adsp_budget
@@ -1665,6 +1670,18 @@ class NativeMipsModem:
         self.l1l2_forced_samples: list[int] = []
         self.resident = 0x0258
         self._mips_fault_reported = False
+
+    def start_native_task(self) -> None:
+        """Release the assigned core and run TIKRNL's relocated initializer."""
+        if ADSP.adsp2181_idma_boot_held(self.cpu):
+            ADSP.adsp2181_set_idma_boot_hold(self.cpu, 0)
+        ADSP.adsp2181_call(self.cpu, 0x0679, 0x02A8)
+        ADSP.adsp2181_run(self.cpu, 2_000_000)
+        if not ADSP.adsp2181_idle(self.cpu):
+            raise RuntimeError(
+                f"native TIKRNL initializer stopped at PM "
+                f"0x{ADSP.adsp2181_pc(self.cpu):04x}")
+        print("[native-mips] released assigned DSP and initialized TIKRNL")
 
     def load_native_overlay(self, download_id: int) -> None:
         """Run the firmware's real segmented/relocating ADSP loader."""
@@ -1713,32 +1730,114 @@ class NativeMipsModem:
         # fixed-address word maps.
         for download_id in (0x026D, 0x025C, 0x0262):
             self.load_native_overlay(download_id)
+        # Private descriptor activation flag consumed at native PM 0x070d.
+        self.dm[0x3131] = 0x0001
+        self.dm[0x2F22] = 0x3C27 if self.law == "pcmu" else 0x3C07
         self.dm[0x32F0] = 0x0004
         self.dm[0x3F0F] = 0x2B00
         self.dm[0x3FB4] = 0x2B01
-        print("[native-mips] connected bearer overlays loaded through MIPS")
+        # ADDSP V.90 guide §5.4.1 Table 12, followed in a distinct host
+        # communication cycle by answer-mode Tables 13 and 15.
+        initial = {
+            0x00: 0x00C4, 0x01: 0x0040, 0x02: 0x0000, 0x03: 0x0000,
+            0x07: 0xF0FD, 0x08: 0x0006, 0x09: 0x0006, 0x0A: 0x00FF,
+            0x0B: 0x0030, 0x0C: 0x0000, 0x24: 0x000C,
+            0x2C: 0x0003, 0x2D: 0x0003,
+        }
+        for offset, value in initial.items():
+            self.dm[0x3EE0 + offset] = value
+        self.dm[0x3EEE] = 0x2000
+        initial_frames = 0
+        for initial_frames in range(1, 4097):
+            self._frame_core(self.silence)
+            if not (self.dm[0x3EEE] & 0x2000):
+                break
+        if self.dm[0x3EEE] & 0x2000:
+            raise RuntimeError(
+                "native TIKRNL did not consume initial WDB: "
+                f"3131={self.dm[0x3131]:04x} 3137={self.dm[0x3137]:04x} "
+                f"3138={self.dm[0x3138]:04x} 3141={self.dm[0x3141]:04x}")
+        final = {
+            0x01: 0x0484, 0x02: 0x0030, 0x04: 0x6000,
+            0x0F: 0x0001, 0x10: 0x0100, 0x28: 0x0001,
+            0x29: 0x8100, 0x2A: 0x001F, 0x2B: 0xFF00,
+            0x79: 0x003F, 0x7A: 0xFFFF, 0x7B: 0x03B7,
+            0x7C: 0x000E, 0x7D: 0x0015, 0x7E: 0x000E, 0x7F: 0x0015,
+        }
+        for offset, value in final.items():
+            self.dm[0x3EE0 + offset] = value
+        self.dm[0x3EEE] = 0x2000
+        if self.resident != 0x0262:
+            self.load_native_overlay(0x0262)
+        for entry, budget in ((0x0581, 200000), (0x13CC, 1000000)):
+            ADSP.adsp2181_call(self.cpu, entry, 0x02A8)
+            ADSP.adsp2181_run(self.cpu, budget)
+            if not ADSP.adsp2181_idle(self.cpu):
+                raise RuntimeError(f"native DIAL setup PM {entry:04x} did not return")
+        # PM 0581 imports the native CAI defaults, including NORM_H=0x00ff.
+        # The documented answer-mode WDB is the following communication cycle;
+        # publish it after that import so V.8 sees NORM_H=1 (negotiate).
+        for offset, value in final.items():
+            self.dm[0x3EE0 + offset] = value
+        self.dm[0x3EEE] = 0x2000
+        answer_frames = 0
+        for answer_frames in range(1, 4097):
+            self._frame_core(self.silence)
+            if not (self.dm[0x3EEE] & 0x2000):
+                break
+        if self.dm[0x3EEE] & 0x2000:
+            raise RuntimeError("native TIKRNL did not consume answer WDB")
+        print("[native-mips] connected bearer activated through DIAL "
+              f"(WDB frames {initial_frames}+{answer_frames})")
 
     def _frame_core(self, code: int) -> None:
+        self._media_samples += 1
         # The hardware PRI descriptor calls TIKRNL's registered continuation
         # only for this selected channel.  The generic SPORT frame walks the
         # kernel queue but cannot reconstruct that private callback.
         self.dm[0x3F08] = code & 0xFF
-        # Native TIKRNL registers PM 0x0703 (published by the AR literal at
-        # runtime PM 0x06a0) in Eicon's private PRI descriptor.  Select that
-        # descriptor for this one SPORT frame without permanently replacing
-        # the kernel's global host-command dispatcher at PM 0x02b9.
+        # Native TIKRNL registers PM 0x0586 as the selected-channel ISR and
+        # PM 0x0703 as its continuation. Model the private descriptor without
+        # permanently replacing either global kernel dispatch slot.
         pm = ADSP.adsp2181_pm(self.cpu)
-        saved_dispatch = pm[0x02B9]
         saved_isr = pm[0x00B5]
-        pm[0x02B9] = 0x1C000F | (0x0703 << 4)
         pm[0x00B5] = 0x1C000F | (0x0586 << 4)
         try:
             ADSP.adsp2181_sport0_tdm_frame(
                 self.cpu, 0, 0, code & 0xFF, self.silence,
                 self.adsp_budget)
         finally:
-            pm[0x02B9] = saved_dispatch
             pm[0x00B5] = saved_isr
+        if ADSP.adsp2181_idle(self.cpu):
+            ADSP.adsp2181_call(self.cpu, 0x0703, 0x02A8)
+            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+        wanted = self.dm[0x3132] & 0xFFFF
+        if (self.force_info_after_v8 and self.resident == 0x025F
+                and wanted != 0x0260 and self.dm[0x3FB0] not in (6, 7)):
+            if self._media_samples < 12000:
+                return
+            wanted = 0x0260
+            self.dm[0x3FB0] = 7
+            self.dm[0x3132] = wanted
+            self.forced_info_samples.append(self._media_samples)
+            print(f"[native-mips] diagnostic post-V.8 fallback -> INFO "
+                  f"at sample {self._media_samples}")
+        if self.dm[0x3131] and wanted in self.download_descriptors:
+            previous = self.resident
+            if wanted != self.resident:
+                self.load_native_overlay(wanted)
+                self.switches.append(
+                    (self._media_samples, self.dm[0x3FB0], wanted))
+            self.dm[0x3EEE] = 0x1000
+            resume = self.dm[0x3143] & 0x3FFF
+            if resume:
+                ADSP.adsp2181_call(self.cpu, resume, 0x02A8)
+                ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+            self.dm[0x3EEE] &= ~0x1000
+            print(f"[native-mips] page request 0x{wanted:04x} "
+                  f"(from 0x{previous:04x}) resumed at PM 0x{resume:04x}")
+        # V.8 FFT work can span more than one execution budget. Preserve a
+        # live page context and continue it on the next exact SPORT frame.
 
     def boot(self) -> None:
         """Compatibility with ``Card``/``LiveKernelModem``; already booted."""
@@ -1782,7 +1881,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                              image: Path = Path("docs/firmware/te_dmlt.pm"),
                              dsp_combifile: Path = Path("docs/firmware/dspdload.bin"),
                              channel: int = 1, call_steps: int = 2,
-                             dsp_pump: int = 256) -> NativeMipsModem:
+                             dsp_pump: int = 256,
+                             force_info_after_v8: bool = False) -> NativeMipsModem:
     """Boot the real card firmware and return its naturally assigned modem."""
     if law not in ("pcmu", "pcma"):
         raise ValueError("native MIPS backend supports only pcmu or pcma")
@@ -1814,7 +1914,10 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
         dsp_combifile, CARDTYPE_DIVASRV_P_30M_PCI, base)
     descriptors = {entry.download_id: base + 4 + index * 0x30
                    for index, entry in enumerate(staged.downloads)}
-    modem = NativeMipsModem(shim, core, law, block, descriptors)
+    modem = NativeMipsModem(
+        shim, core, law, block, descriptors,
+        force_info_after_v8=force_info_after_v8)
+    modem.start_native_task()
     modem.attach_connected_bearer()
     return modem
 
