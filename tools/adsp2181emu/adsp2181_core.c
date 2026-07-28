@@ -186,6 +186,7 @@ struct adsp2181
 	/* reverse-engineering instrumentation */
     UINT8 watch_dm[0x4000];
     UINT8 watch_pm[0x4000];
+    UINT8 watch_exec[0x4000];
     UINT64 cycles;
     INT64 trace_budget;
 
@@ -219,16 +220,18 @@ INLINE UINT16 RWORD_DATA(adsp2100_state *a, UINT32 x)
     else
         v = a->data[x];
     if (a->watch_dm[x])
-        logerror("[WATCH] dm r %04x=%04x pc=%04x cyc=%llu\n", x, v,
-                 (unsigned)(a->pc & 0x3fff), (unsigned long long)a->cycles);
+        logerror("[WATCH] dm r %04x=%04x pc=%04x ov=%u cyc=%llu\n", x, v,
+                 (unsigned)(a->pc & 0x3fff), (unsigned)a->dmovlay,
+                 (unsigned long long)a->cycles);
     return v;
 }
 INLINE void WWORD_DATA(adsp2100_state *a, UINT32 x, UINT16 v)
 {
     x &= 0x3fff;
     if (a->watch_dm[x])
-        logerror("[WATCH] dm w %04x=%04x pc=%04x cyc=%llu\n", x, v,
-                 (unsigned)(a->pc & 0x3fff), (unsigned long long)a->cycles);
+        logerror("[WATCH] dm w %04x=%04x pc=%04x ov=%u cyc=%llu\n", x, v,
+                 (unsigned)(a->pc & 0x3fff), (unsigned)a->dmovlay,
+                 (unsigned long long)a->cycles);
     if (x < 0x2000 && a->dmovlay >= 1 && a->dmovlay <= 2)
         a->data_overlay[a->dmovlay - 1][x] = v;
     else
@@ -307,6 +310,19 @@ static void execute(adsp2100_state *adsp)
 
 		/* instruction fetch */
 		op = ROPCODE(adsp);
+
+        if (adsp->watch_exec[adsp->pc & 0x3fff]) {
+            unsigned ret = adsp->pc_sp ? pc_stack_top(adsp) & 0x3fff : 0xffff;
+            logerror("[EXEC] pc=%04x ret=%04x cyc=%llu cntr=%04x "
+                     "i0=%04x i1=%04x m1=%04x m3=%04x "
+                     "state=%04x event=%04x span=%04x count=%04x stride=%04x\n",
+                     (unsigned)(adsp->pc & 0x3fff), ret,
+                     (unsigned long long)adsp->cycles, (unsigned)(adsp->cntr & 0x3fff),
+                     adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
+                     adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
+                     adsp->data[0x16bd], adsp->data[0x198e], adsp->data[0x16c5],
+                     adsp->data[0x16c6], adsp->data[0x16c7]);
+        }
 
 		if (adsp->trace_budget > 0) {
 			adsp->trace_budget--;
@@ -1260,6 +1276,11 @@ void adsp2181_watch_dm(adsp2181_t *a, uint16_t addr, int on)
 void adsp2181_watch_pm(adsp2181_t *a, uint16_t addr, int on)
 {
     if (a) a->watch_pm[addr & 0x3fff] = on != 0;
+}
+
+void adsp2181_watch_exec(adsp2181_t *a, uint16_t addr, int on)
+{
+    if (a) a->watch_exec[addr & 0x3fff] = on != 0;
 }
 uint64_t adsp2181_cycles(const adsp2181_t *a) { return a ? a->cycles : 0; }
 void adsp2181_trace_budget(adsp2181_t *a, int64_t n) { if (a) a->trace_budget = n; }

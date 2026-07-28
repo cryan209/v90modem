@@ -152,6 +152,7 @@ class Call:
     di_control: int = -1
     baud_info: int = -1
     info_mode_selector: int = -1
+    info_variant: int = -1
 
 
 class CrashSafeWave:
@@ -217,7 +218,8 @@ class RtpCapture:
                         'info_test0,info_test1,info_test2,info_test3,info_test4,'
                         'rx_ptr,rx_value,tx_ptr,tx_value,'
                         'datagram_rate,gen_control,di_control,rxd0,rxd1,baud_info,'
-                        'info_mode_selector,wstatus\n')
+                        'info_mode_selector,info_variant,info_fft_span,info_fft_count,'
+                        'info_fft_stride,wstatus\n')
         self.ip_id = 0
         self.prefix = prefix
         self.law = law
@@ -288,7 +290,8 @@ class RtpCapture:
                   dm[0x3F0F], dm[dm[0x3F0F] & 0x3fff] if dm[0x3F0F] else 0,
                   dm[0x3FB4], dm[dm[0x3FB4] & 0x3fff] if dm[0x3FB4] else 0,
                   dm[0x3F60], dm[0x3F9F], dm[0x3FAD], dm[0x3FAE], dm[0x3FAF],
-                  dm[0x3FBB], dm[0x3F94], dm[0x3EEE])
+                  dm[0x3FBB], dm[0x3F94], dm[0x16B6], dm[0x16C5], dm[0x16C6],
+                  dm[0x16C7], dm[0x3EEE])
         self.diag.write(f'{values[0]},{values[1]:.6f},' +
                         ','.join(f'0x{value:04x}' for value in values[2:]) + '\n')
         # Preserve every defined, reserved and spare word in the complete
@@ -579,15 +582,19 @@ class EiconSipEndpoint:
             di_control = call.card.dm[0x3FAD]
             baud_info = call.card.dm[0x3FBB]
             info_mode = call.card.dm[0x3F94]
+            info_variant = call.card.dm[0x16B6]
             if (di_control != call.di_control or baud_info != call.baud_info
-                    or info_mode != call.info_mode_selector):
+                    or info_mode != call.info_mode_selector
+                    or info_variant != call.info_variant):
                 print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
                       f'DI_control=0x{di_control:04x}'
                       f'[{flag_names(di_control, DI_CONTROL_BITS)}] '
-                      f'BaudInfo=0x{baud_info:04x} INFO_mode=0x{info_mode:04x}')
+                      f'BaudInfo=0x{baud_info:04x} INFO_mode=0x{info_mode:04x} '
+                      f'INFO_variant=0x{info_variant:04x}')
                 call.di_control = di_control
                 call.baud_info = baud_info
                 call.info_mode_selector = info_mode
+                call.info_variant = info_variant
             bootpage = call.card.dm[0x3FB0]
             if bootpage != call.bootpage:
                 old = (f'{call.bootpage} {PAGE_NAMES.get(call.bootpage, "?")}'

@@ -56,6 +56,7 @@ void adsp2181_host_write(adsp2181_t *cpu, uint16_t addr, uint16_t value);
 uint16_t adsp2181_host_read(adsp2181_t *cpu, uint16_t addr);
 void adsp2181_watch_dm(adsp2181_t *cpu, uint16_t addr, int on);
 void adsp2181_watch_pm(adsp2181_t *cpu, uint16_t addr, int on);
+void adsp2181_watch_exec(adsp2181_t *cpu, uint16_t addr, int on);
 uint64_t adsp2181_cycles(const adsp2181_t *cpu);
 void adsp2181_trace_budget(adsp2181_t *cpu, int64_t n);
 uint16_t adsp2181_pc(const adsp2181_t *cpu);
