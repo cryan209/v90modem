@@ -1801,3 +1801,101 @@ exit targets it.  `DM(0x1695)`/`DM(0x1692)` hold the candidate next states at
 that point, and PM `0x331e`/`0x334d` are where the winning one is committed;
 capture those four words across the transition rather than inferring the
 mapping from `TrnProgress` alone.
+
+## The `0x37` exit: candidates captured, and the missing event
+
+`tools/eicon_info_replay.py` replays a `.rx.ulaw` capture through a fresh
+`LiveKernelModem`.  Our transmission cannot affect an already-recorded RX, so
+the replay reproduces `run02`'s state path sample for sample and any DM word
+can be instrumented without dialling the rig.
+
+### The candidate table across the transition
+
+`DM(0x1692..0x1695)` and `DM(0x1696..0x1699)` through the window:
+
+| time | state | next0/test0 | next1/test1 | next2/test2 | next3/test3 |
+|---|---|---|---|---|---|
+| 6.1559 | `0x34` | `0a9d`/`33c4` | `0836`/`3384` | `0b69`/`33c2` | `0b69`/`33c2` |
+| 6.5571 | `0x36` | `0a9d`/`33c4` | `0836`/`33c2` | `0b69`/`33c2` | `098f`/`3384` |
+| 6.5671 | `0x36` | `0a9d`/`33c4` | `0836`/`33c2` | `0b69`/`33c2` | `1736`/`2476` |
+| 6.6508 | `0x37` | `0a9d`/`33c4` | `0914`/`33c2` | `08d5`/`33c2` | `1736`/`2476` |
+| 6.7371 | `0x10` | `0a9d`/`33c2` | `0a9d`/`339b` | `08d5`/`33c2` | `1736`/`2476` |
+
+`0x33c2` is `AR = 0 + 1`, a stub that never fires, so state `0x37` has exactly
+two live exits: `0x33c4` (framer A completed, `DM(0x0686) == 1`) to `0x0a9d`,
+and `0x2476` (`DM(0x198e) == 1`) to `0x1736`.  Note `0x36` arms a timer exit
+first and re-arms 10 ms later to the `DM(0x198e)` test — the sequencer is
+deliberately set up to wait for that event across `0x36`/`0x37`.
+
+`0x0a9d` is not a mis-set candidate: it is the intended framer-A successor,
+and it is the state-`0x0010` script.  So the transition is the firmware taking
+its documented fallback because the branch it is actually waiting for never
+becomes true.  `DM(0x1647)` still held `0x0a15`, so nothing timed out.
+
+### What is missing while we are silent
+
+Transmit activity per state, from the same replay:
+
+```
+  6.1559s  0x0034    3210 samples    2.0% non-zero TX
+  6.5571s  0x0036     534 samples    0.0% non-zero TX
+  6.6239s  0x0037     906 samples    0.0% non-zero TX
+  6.7371s  0x0010  109783 samples   99.4% non-zero TX
+```
+
+The 580 ms of silence is correct — the digital modem is listening.  Nothing is
+missing from our transmit path.  What is missing is the input event.
+
+The peer is presenting exactly what should raise it.  Complex demodulation of
+the captured RX at 2400 Hz shows a steady Tone A from ~5.5 s at magnitude
+~1738, with 180-degree phase reversals starting at 6.59 s: a burst at
+6.59-6.74 s and another at 6.97-7.36 s.  The first burst coincides with our
+`0x36` (6.557 s) and `0x37` (6.624 s) window almost exactly.
+
+Injecting the event confirms the diagnosis.  With `DM(0x198e) = 1` written on
+first reaching `0x37`, the sequencer takes `0x2476` instead:
+
+```
+  6.6239s  0x0037       5 samples    0.0% non-zero TX
+  6.6245s  0x00a0      10 samples    0.0% non-zero TX
+  6.6258s  0x00a2    6790 samples   99.3% non-zero TX
+  7.4745s  0x00ab     111 samples   28.8% non-zero TX
+```
+
+State `0x00a2` transmits for 848 ms — the phase-1 response we currently never
+send.  The `0xa0`/`0xa2`/`0xab` family had never been reached before.  Past
+that point the replay is open loop and says nothing about what the call would
+have done.
+
+### Why the event is never published
+
+`DM(0x198e)` has five writers in the INFO image and four of them clear it.
+The only one that sets a value is PM `0x2470..0x2474`, the match arm of the
+classifier PM `0x2461`: it stores `I6 - 0x1986`, the index of the matched
+message code in the 8-entry table PM `0x2410` builds at `DM(0x1986)`
+(`0x30`, `0x50 | DM(0x3f4b) & 0x0f`, `0x70`, `0x90`, `0xb0`, `0xd0`, `0x40`,
+`0x60`).  Event 1 is therefore "the `0x50` message was received".
+
+That classifier is reachable from framer B's success path (PM `0x2600`) and
+from framer A's (PM `0x3587`) — but PM `0x357e` compares `DM(0x1651)` against
+the length the INFO mode word selects, which is the value PM `0x3f7f` just
+wrote there, so that test always takes the equal branch and PM `0x3583` only
+lets the classify path run when `DM(0x1651) == 0x0080`.  With `DM(0x1651) =
+0x0110` on this call, framer A can never publish an event.  Framer B has the
+fixed `0x0080` length and is the intended publisher — and the INFO page
+initializer at PM `0x3f4c` parks it at the disabled handler `0x25f3`, with
+only PM `0x2602` installing it, which nothing in the resident image calls.
+
+Installing it is necessary but not sufficient: `run01` ran with
+`--init-info-detector-at-24`, which does call PM `0x2602`, and framer B cycled
+`0x25ab -> 0x25c7 -> 0x25e2` all call without ever validating.  This peer is
+transmitting a phase-reversed tone in that window, not an 8-bit control-channel
+message, so there is nothing for framer B to decode.
+
+Open question, and the next thing to settle: what is supposed to raise event 1
+against a tone-only peer.  Either the probing/tone classifier reaches PM
+`0x2470` by a path not yet found, or `DM(0x3f4b)` — tested for bits `0x10` and
+`0x80` by the neighbouring condition handlers PM `0x2495`, `0x249a`, `0x24a9`
+and folded into the table entry itself — is the tone-detector's output and the
+gap is upstream of the classifier.  Resolve that before adding any injection
+to the live path.
