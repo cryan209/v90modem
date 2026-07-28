@@ -125,7 +125,7 @@ DM_RSTATUS_CH_DBS = DM_DB + 0xC3
 DM_RSTATUS_DBS = DM_DB + 0xC4
 DM_TRNPROG_DBS = DM_DB + 0xC5
 DM_WSTATUS = 0x3EEE
-DM_TRNPROG = 0x3FAD
+DM_DI_CONTROL = 0x3FAD
 DM_LIVE_TRNPROG = 0x3FC2
 DM_BOOTPAGE = 0x3FB0
 V8_DOWNLOAD = 0x025F
@@ -179,6 +179,8 @@ class KernelDispatch:
         self.published_rstatus_ch = 0
         self.published_rstatus = 0
         self.published_trnprogress = 0
+        self.rx2400_phase = 0
+        self.rx2400_last: tuple[int, int, int] | None = None
         self.commands: list[int] = []
         self.started = False
         # Keep the ctypes trampolines alive for the life of the object.
@@ -251,6 +253,45 @@ class KernelDispatch:
             self.card.cpu, active_slot, dispatch_slot, active_word & 0xffff,
             idle_word & 0xffff, budget)
 
+    def produce_rx2400(self) -> None:
+        """Reconstruct the missing Host-Kernel RX_2400 publication cycle.
+
+        The closed host schedules this at 2400 Hz.  TIKRNL's live status words
+        exist in the emulation, but its MIPS-facing cycle is absent, leaving
+        the documented `_dbs` mirrors and event ring empty.  Guide §5.3.2
+        defines this operation completely: copy changed status, set C1 bits
+        F/E/D for this cycle, and publish event codes 1/2/3 (§5.5).
+        """
+        self.rx2400_phase += 2400
+        if self.rx2400_phase < SAMPLE_RATE:
+            return
+        self.rx2400_phase -= SAMPLE_RATE
+        dm = self.card.dm
+        current = (dm[0x3FC0], dm[0x3FC1], dm[0x3FC2])
+        previous = self.rx2400_last
+        self.rx2400_last = current
+        pointer = dm[DM_EVENT_STRUCT_PTR] & 0x3fff
+        change = dm[DM_CHANGE_BITS] & 0x000f
+        if previous is None:
+            previous = tuple(value ^ 0xffff for value in current)
+        publications = []
+        for value, old, mirror, flag, event in zip(
+                current, previous,
+                (DM_RSTATUS_CH_DBS, DM_RSTATUS_DBS, DM_TRNPROG_DBS),
+                (0x8000, 0x4000, 0x2000), (1, 2, 3)):
+            if value != old:
+                dm[mirror] = value
+                change |= flag
+                publications.append(event)
+        dm[DM_CHANGE_BITS] = change
+        if not publications or not pointer or pointer + 8 >= 0x4000:
+            return
+        counter = dm[pointer + 8]
+        for event in publications:
+            dm[pointer + (counter & 7)] = event
+            counter = (counter + 1) & 0xffff
+        dm[pointer + 8] = counter
+
     def poll_events(self, index: int) -> None:
         """Consume the documented DSP-to-host event ring.
 
@@ -295,6 +336,7 @@ class KernelDispatch:
         """The host half: consume events, answer doorbells and serve downloads."""
         dm = self.card.dm
         hist: collections.Counter = collections.Counter()
+        self.produce_rx2400()
         self.poll_events(index)
         bits = dm[DM_DOORBELL]
         if bits:
@@ -370,29 +412,33 @@ class KernelDispatch:
                   f'PM {PM_FOREGROUND_SLOT:04x}')
         return hist
 
-    def program_v8_call(self, calling: bool) -> None:
-        """Run the documented DIAL training setup (guide §5.4.1)."""
+    def program_initial_setup(self) -> None:
+        """Write the power-up setup, ADDSP guide §5.4.1 Table 12."""
         dm = self.card.dm
-        # One-time data-pump initialization, ADDSP V.90 guide §5.4.1
-        # Tables 12-13. The real driver applies this before its per-call
-        # training script; leaving these at overlay residue prevents V.8's
-        # answer-delay/generator state from being armed.
         dm[DM_DB + 0x00] = 0x00C4
-        dm[DM_DB + 0x07] = 0xF0FD
+        dm[DM_DB + 0x01] = 0x0040
+        dm[DM_DB + 0x02] = 0x0000
+        dm[DM_DB + 0x03] = 0x0000  # DISP_setup, guide §5.3.1 default
+        dm[DM_DB + 0x07] = 0xF0FD  # INFO0_setup
         dm[DM_DB + 0x08] = 0x0006
         dm[DM_DB + 0x09] = 0x0006
         dm[DM_DB + 0x0A] = 0x00FF
         dm[DM_DB + 0x0B] = 0x0030
         dm[DM_DB + 0x0C] = 0x0000
-        dm[DM_DB + 0x2A] = 0x001F
-        dm[DM_DB + 0x2B] = 0xFF00
         dm[DM_DB + 0x2C] = 0x0003
         dm[DM_DB + 0x2D] = 0x0003
-        # ADDSP V.90 guide §5.4.1, Tables 14-16:
-        # 0x048c is calling, 0x0484 is answering; 0x068c is analog loop test.
+        dm[DM_WSTATUS] = 0x2000
+
+    def program_v8_call(self, calling: bool) -> None:
+        """Write Tables 13 and 15 after Table 12 has been consumed."""
+        dm = self.card.dm
+        dm[DM_DB + 0x2A] = 0x001F
+        dm[DM_DB + 0x2B] = 0xFF00
+        # ADDSP V.90 guide §5.4.1 Tables 14-15.  This must be a second write
+        # communication cycle; combining it with Table 12 prevents the DSP
+        # from ever observing initial GEN_SETUP1/2 = 0x0040/0x0000.
         dm[DM_DB + 0x01] = 0x048C if calling else 0x0484
         dm[DM_DB + 0x02] = 0x0030
-        dm[DM_DB + 0x03] = 0xF0FD
         # Digital-side V.90 call identity. Without these CAI-equivalent
         # fields V.8 completes correctly but clears its PCM capability bit and
         # deliberately selects page 1/V.22.
@@ -434,7 +480,7 @@ class KernelDispatch:
 class LiveKernelModem:
     """Card-compatible live modem using the real SPORT0 kernel dispatcher."""
 
-    def __init__(self, channel: int = 0):
+    def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False):
         self.driver = KernelDispatch()
         self.card = self.driver.card
         self.dm = self.card.dm
@@ -444,6 +490,11 @@ class LiveKernelModem:
         self.forced_info_samples = self.card.forced_info_samples
         self.resident = 0
         self.v8_loaded = False
+        self.l1l2_forced_samples: list[int] = []
+        self._tone_a_window: collections.deque[int] = collections.deque(maxlen=160)
+        self._tone_a_checks = 0
+        self._tone_a_injected = False
+        self.enable_l1l2_gate = enable_l1l2_gate
         if not 0 <= channel < 32:
             raise ValueError('PRI channel must be in range 0..31')
         self.channel = channel
@@ -486,9 +537,27 @@ class LiveKernelModem:
         # descriptor: 0x3c27 is µ-law, 0x3c07 is A-law. The MIPS assignment
         # normally writes this before TIKRNL configures its per-line adapter.
         self.dm[0x2F22] = 0x3C27 if law == 'pcmu' else 0x3C07
+        # The guide requires two distinct Host-Kernel write cycles: power-up
+        # Table 12 first, then recommendation/answer-mode Tables 13 and 15.
+        # Drive a few genuine SPORT frames after each activation so TIKRNL
+        # consumes change_wdb before any later values replace the first set.
+        self.driver.program_initial_setup()
+        for index in range(-16, -8):
+            self.driver.tdm_frame(0x00ff, self.channel)
+            self.driver.service(index, fast=True)
+        if self.dm[DM_WSTATUS] & 0x2000:
+            raise RuntimeError('DSP did not consume initial write database')
         self.driver.program_v8_call(calling=False)
+        # These are DIAL-overlay setup entries and must run before the second
+        # cycle is allowed to request/load V.8; calling them after that partial
+        # overlay replacement corrupts the completion path.
         self.card._run(0x08F1, 200_000)
         self.card._run(0x13CC, 1_000_000)
+        for index in range(-8, 0):
+            self.driver.tdm_frame(0x00ff, self.channel)
+            self.driver.service(index, fast=True)
+        if self.dm[DM_WSTATUS] & 0x2000:
+            raise RuntimeError('DSP did not consume answer-mode write database')
 
     def _load_v90d(self) -> None:
         """Perform the closed supervisor's INFO -> V.90 DPCM handoff."""
@@ -511,9 +580,59 @@ class LiveKernelModem:
         # that same slot a second time in this sample.
         dm[DM_DOORBELL] = 0
 
+    @staticmethod
+    def _decode_mulaw(code: int) -> int:
+        value = (~code) & 0xff
+        sample = (((value & 0x0f) << 3) + 0x84) << ((value >> 4) & 7)
+        sample -= 0x84
+        return -sample if value & 0x80 else sample
+
+    def _inject_l1l2_completion(self, code: int, index: int) -> None:
+        """Publish INFO's missing post-L2 event on confirmed peer Tone A.
+
+        V.90 §9.2.1.1.5 says Tone A follows the analogue modem's L1/L2.
+        The emulated INFO probing classifier never publishes event 1, although
+        the waveform is present.  Use a narrowband 2400-Hz gate only while the
+        genuine firmware is in state 0x37; all subsequent sequencing remains
+        firmware generated.  Four overlapping 20-ms confirmations reject the
+        preceding multitone L2 signal.
+        """
+        dm = self.dm
+        if not self.enable_l1l2_gate:
+            return
+        if dm[DM_LIVE_TRNPROG] != 0x0037:
+            self._tone_a_window.clear()
+            self._tone_a_checks = 0
+            self._tone_a_injected = False
+            return
+        if self._tone_a_injected:
+            return
+        self._tone_a_window.append(self._decode_mulaw(code))
+        if len(self._tone_a_window) < 160 or index % 40:
+            return
+        samples = list(self._tone_a_window)
+        mean = sum(samples) / len(samples)
+        total = sum((sample - mean) ** 2 for sample in samples)
+        if total < 160 * 500 * 500:
+            self._tone_a_checks = 0
+            return
+        coefficient = 2.0 * math.cos(2.0 * math.pi * 2400.0 / SAMPLE_RATE)
+        q1 = q2 = 0.0
+        for sample in samples:
+            q0 = sample - mean + coefficient * q1 - q2
+            q2, q1 = q1, q0
+        tone_power = q1 * q1 + q2 * q2 - coefficient * q1 * q2
+        ratio = 2.0 * tone_power / (len(samples) * total)
+        self._tone_a_checks = self._tone_a_checks + 1 if ratio >= 0.70 else 0
+        if self._tone_a_checks >= 4:
+            dm[0x198E] = 1
+            self._tone_a_injected = True
+            self.l1l2_forced_samples.append(index)
+
     def frame_fast(self, code: int, index: int) -> int:
         driver, card, dm = self.driver, self.card, self.dm
         before = card.resident
+        self._inject_l1l2_completion(code, index)
         driver.tdm_frame(code, self.channel)
         # The closed line-follow-up supervisor selects V90D only after INFO
         # publishes its real 0x003b completion. State 0x0037 is still the

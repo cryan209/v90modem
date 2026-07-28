@@ -36,6 +36,24 @@ PAGE_NAMES = {0: 'DIAL', 1: 'V.22', 2: 'V.32', 3: 'FSK', 4: 'FAX',
               10: 'protocol', 11: 'AT offline', 12: 'AT online',
               13: 'V.90 APCM', 14: 'V.90 DPCM', 15: 'fax protocol',
               16: 'low-level/FAX partial'}
+RSTATUS_CH_BITS = {15: 'change_h', 13: 'speed_tx', 12: 'ratechange',
+                   11: 'speed_rx', 10: 'CTS', 9: 'DSR', 8: 'DCD',
+                   7: 'change_l', 4: 'sq_alarm', 3: 'dial_pending',
+                   2: 'sec_tx_request', 1: 'sec_rx_present', 0: 'sec_rx_data'}
+RSTATUS_BITS = {13: 'CI', 12: 'online', 11: 'ring_valid', 10: 'core',
+                9: 'autodial_done', 8: 'boot_request', 7: 'flow_blocked',
+                6: 'booting', 5: 'test', 4: 'loop2', 3: 'ring',
+                2: '1300Hz', 1: 'energy', 0: 'zero_cross'}
+DI_CONTROL_BITS = {15: 'tx_request', 14: 'rx1_valid', 13: 'rx0_valid',
+                   11: 'codec_clocking', 10: 'slave', 9: 'sync'}
+CHANGE_BITS = {15: 'rstatus_ch', 14: 'rstatus', 13: 'trnprogress'}
+WSTATUS_BITS = {15: 'secondary_tx_present', 14: 'secondary_tx_data',
+                13: 'change_wdb', 12: 'boot_finished', 4: 'txdog_changed'}
+
+
+def flag_names(value: int, definitions: dict[int, str]) -> str:
+    names = [name for bit, name in definitions.items() if value & (1 << bit)]
+    return '|'.join(names) if names else '-'
 
 
 def parse_sip(data: bytes) -> tuple[str, dict[str, str], str]:
@@ -127,7 +145,13 @@ class Call:
     samples: int = 0
     bootpage: int = -1
     trn_progress: int = -1
+    rstatus_ch: int = -1
+    rstatus: int = -1
     logged_overlay_switches: int = 0
+    logged_l1l2_injections: int = 0
+    di_control: int = -1
+    baud_info: int = -1
+    info_mode_selector: int = -1
 
 
 class CrashSafeWave:
@@ -177,7 +201,10 @@ class RtpCapture:
         self.law_suffix = law_suffix
         self.diag = prefix.with_suffix('.adsp.csv').open('w', buffering=1)
         self.diag_dm = prefix.with_suffix('.adsp-dm.bin').open('wb', buffering=0)
-        self.diag_dm.write(b'EADSPDM1')  # uint64 sample + 128 uint16 LE per record
+        # V2 retains the complete 256-word memory-mapped data-pump interface:
+        # write database 0x3EE0-0x3F5F followed by read database
+        # 0x3F60-0x3FDF (ADDSP guide §§5.3 and 6.5).
+        self.diag_dm.write(b'EADSPDM2')  # uint64 sample + 256 uint16 LE per record
         self.diag_scc = prefix.with_suffix('.adsp-scc.bin').open('wb', buffering=0)
         # Per record: sample, SCC ptr, 0x50 SCC words, then 16 x (ptr, 64 words).
         self.diag_scc.write(b'EADSPSCC1')
@@ -188,7 +215,9 @@ class RtpCapture:
                         'event_struct_ptr,data_struct_ptr,dce_scc_struct_ptr,'
                         'info_timer_hi,info_timer_lo,info_internal_progress,info_state_vector,'
                         'info_test0,info_test1,info_test2,info_test3,info_test4,'
-                        'rx_ptr,rx_value,tx_ptr,tx_value\n')
+                        'rx_ptr,rx_value,tx_ptr,tx_value,'
+                        'datagram_rate,gen_control,di_control,rxd0,rxd1,baud_info,'
+                        'info_mode_selector,wstatus\n')
         self.ip_id = 0
         self.prefix = prefix
         self.law = law
@@ -257,15 +286,17 @@ class RtpCapture:
                   dm[0x1647], dm[0x1650], dm[0x1652], dm[0x1679],
                   dm[0x1696], dm[0x1697], dm[0x1698], dm[0x1699], dm[0x169A],
                   dm[0x3F0F], dm[dm[0x3F0F] & 0x3fff] if dm[0x3F0F] else 0,
-                  dm[0x3FB4], dm[dm[0x3FB4] & 0x3fff] if dm[0x3FB4] else 0)
+                  dm[0x3FB4], dm[dm[0x3FB4] & 0x3fff] if dm[0x3FB4] else 0,
+                  dm[0x3F60], dm[0x3F9F], dm[0x3FAD], dm[0x3FAE], dm[0x3FAF],
+                  dm[0x3FBB], dm[0x3F94], dm[0x3EEE])
         self.diag.write(f'{values[0]},{values[1]:.6f},' +
                         ','.join(f'0x{value:04x}' for value in values[2:]) + '\n')
-        # Preserve the complete DSP-owned read database (guide §5.3.2), not
-        # just currently understood fields. This includes selected modulation
-        # and speed formats, ErrorMessage, detector levels, debug values, and
-        # future/undocumented diagnostics set by the shipping firmware.
-        snapshot = [dm[0x3F60 + offset] for offset in range(128)]
-        self.diag_dm.write(struct.pack('<Q128H', sample, *snapshot))
+        # Preserve every defined, reserved and spare word in the complete
+        # memory-mapped interface.  Reserved words are especially useful when
+        # reverse-engineering firmware because they are undocumented but live;
+        # spare words establish that no hidden state was present.
+        snapshot = [dm[0x3EE0 + offset] for offset in range(256)]
+        self.diag_dm.write(struct.pack('<Q256H', sample, *snapshot))
         scc_ptr = dm[0x3F76] & 0x3fff
         valid_scc = scc_ptr != 0 and scc_ptr + 0x50 <= 0x4000
         scc = ([dm[scc_ptr + offset] for offset in range(0x50)]
@@ -521,8 +552,16 @@ class EiconSipEndpoint:
                       f'overlay request page {page} {PAGE_NAMES.get(page, "?")} '
                       f'-> 0x{wanted:04x} {overlay_name} served{forced}')
             call.logged_overlay_switches = len(call.card.switches)
+            injections = getattr(call.card, 'l1l2_forced_samples', [])
+            for sample in injections[call.logged_l1l2_injections:]:
+                print(f'[adsp] sample {sample} ({sample / 8000:.3f}s): '
+                      'confirmed 2400-Hz Tone A; injected INFO post-L2 event 1')
+            call.logged_l1l2_injections = len(injections)
             trn_progress = call.card.dm[0x3FC2]
-            if trn_progress != call.trn_progress:
+            rstatus_ch = call.card.dm[0x3FC0]
+            rstatus = call.card.dm[0x3FC1]
+            if (trn_progress != call.trn_progress
+                    or rstatus_ch != call.rstatus_ch or rstatus != call.rstatus):
                 info_rx = ''
                 if call.card.dm[0x3FB0] == 7:
                     info_rx = (f'; INFO_RX event=0x{call.card.dm[0x0685]:04x} '
@@ -530,9 +569,25 @@ class EiconSipEndpoint:
                                f'parser=0x{call.card.dm[0x16BD]:04x}')
                 print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
                       f'TrnProgress 0x{call.trn_progress & 0xffff:04x} -> '
-                      f'0x{trn_progress:04x}; Rstatus_ch=0x{call.card.dm[0x3FC0]:04x} '
-                      f'Rstatus=0x{call.card.dm[0x3FC1]:04x}{info_rx}')
+                      f'0x{trn_progress:04x}; Rstatus_ch=0x{rstatus_ch:04x}'
+                      f'[{flag_names(rstatus_ch, RSTATUS_CH_BITS)}] '
+                      f'Rstatus=0x{rstatus:04x}'
+                      f'[{flag_names(rstatus, RSTATUS_BITS)}]{info_rx}')
                 call.trn_progress = trn_progress
+                call.rstatus_ch = rstatus_ch
+                call.rstatus = rstatus
+            di_control = call.card.dm[0x3FAD]
+            baud_info = call.card.dm[0x3FBB]
+            info_mode = call.card.dm[0x3F94]
+            if (di_control != call.di_control or baud_info != call.baud_info
+                    or info_mode != call.info_mode_selector):
+                print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
+                      f'DI_control=0x{di_control:04x}'
+                      f'[{flag_names(di_control, DI_CONTROL_BITS)}] '
+                      f'BaudInfo=0x{baud_info:04x} INFO_mode=0x{info_mode:04x}')
+                call.di_control = di_control
+                call.baud_info = baud_info
+                call.info_mode_selector = info_mode
             bootpage = call.card.dm[0x3FB0]
             if bootpage != call.bootpage:
                 old = (f'{call.bootpage} {PAGE_NAMES.get(call.bootpage, "?")}'

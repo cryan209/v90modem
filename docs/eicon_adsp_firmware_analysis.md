@@ -1467,9 +1467,13 @@ normal kernel flow.
 The DSP's own diagnostic outputs are now retained once per RTP packet in
 `PREFIX.adsp.csv`: live and event-latched `TrnProgress`, `Rstatus_ch`,
 `Rstatus`, change flags, bootpage/overlay, and all three eye-pattern words.
-`PREFIX.adsp-dm.bin` additionally snapshots all 128 DSP-owned read-database
-words every 20 ms, retaining selected-rate formats, `ErrorMessage`, detector
-levels, and undocumented diagnostic values for later decoding.
+`PREFIX.adsp-dm.bin` originally snapshotted the 128 DSP-owned read-database
+words every 20 ms. Format `EADSPDM2` now retains the complete 256-word
+memory-mapped interface at `DM 0x3EE0..0x3FDF`: all 128 host-written setup
+words followed by all 128 DSP-written status words. This preserves activation
+strobes and selected setup alongside rate formats, `ErrorMessage`, detector
+levels, reserved live state, and undocumented diagnostic values. Each record
+is a little-endian `uint64` sample number followed by 256 `uint16` words.
 The fields come from guide §5.3.2 and §6.6 (`EYESAMPLE_0` for V.8,
 `EYESAMPLE_2` for INFO). This distinguishes a host timeout from a DSP state
 stall on the next physical call.
