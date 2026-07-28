@@ -1738,3 +1738,66 @@ over the INFO window: a magnitude that never crosses, or never stops
 crossing, is a level/scaling fault in the emulated RX path, not a framing
 one.  Note this repository's standing μ-law level gotcha (0 dBm0 is RMS
 16017, not 4004) when interpreting it.
+
+## Live against slmodemd: no `0x37` stall, no FFT corruption
+
+Two calls from the tower rig's SmartLink softmodem (`slmodemd_trnref` behind
+d-modem, dialling `ATD6001` into `tools/eicon_adsp_sip.py --kernel-dispatch`
+registered as 6001) settle the framer question live and move the frontier.
+The second call ran without `--init-info-detector-at-24`; both are
+byte-identical in outcome, so that diagnostic is not load-bearing against
+this peer.  Traces: `artifacts/eicon-live/run01.adsp.csv`, `run02.adsp.csv`.
+
+What works, none of it forced:
+
+- V.8 completes naturally (`TrnProgress 0x0004 -> 0x0003 -> 0x0009`) and the
+  DSP requests page 7 on its own at ~5.57 s.  `--force-info-after-v8` is not
+  needed against this peer.
+- The peer decodes our INFO0a: `V34INFO, rxinfo0 0xbf,0x84,0x07,0x68,0x32`,
+  logged by slmodemd as `rxinfo0a`.
+- **The control-channel framer runs and validates.**  `DM(0x0686)` is set in
+  749/754 of the 1028 captured 20 ms windows, and `DM(0x16bd)` cycles
+  `0x3520 -> 0x3546 -> 0x3561` throughout.  The "detector completion never
+  occurs" symptom is Courier-specific; the framer analysis above holds live.
+- **No FFT corruption.**  `DM(0x15f3)` advances only `0x0ddd -> 0x0de9`,
+  inside its 20-word buffer; `DM(0x0e4c)` holds `0x373a`/`0x376e`, the real
+  reset and transform actions, never `0xffed`; `DM(0x16b6)` never leaves
+  `0x0000`.  Zero anomalies in either run.
+- INFO advances `0x20 -> 0x24 -> 0x26 -> 0x28 -> 0x2e -> 0x30 -> 0x32 ->
+  0x34 -> 0x36 -> 0x37` in ~1.3 s.  It does not stall at `0x37`.
+
+Where it actually fails: after ~120 ms in `0x37` the sequencer leaves for
+state `0x0010` and stays there for the rest of the call.  The exit is a
+normal, understood transition, not a fault in itself.  PM `0x3335` is the
+INFO sequencer: it counts `DM(0x1647)` down, then calls the pre-condition
+`DM(0x169a)` and up to four condition handlers `DM(0x1696..0x1699)`, taking
+the first that returns LE and loading the matching next state from
+`DM(0x1692..0x1695)`.  In state `0x37` those handlers are `0x33c4`,
+`0x33c2`, `0x33c2` and `0x2476`; `0x33c2` is `AR = 0 + 1`, a stub that never
+fires, `0x2476` tests framer B's event `DM(0x198e)` against 1, and `0x33c4`
+falls through `0x33a3` to `AR = DM(0x0686) XOR 1` — it fires when framer A
+completes.  The capture shows `DM(0x0686)` going to 1 in the window before
+the transition, so `0x37` ends because a genuine CRC-valid control frame
+arrived, exactly as designed.  `DM(0x1647)` still had `0x0a2f` left, so this
+is not a timeout.
+
+The real defect is what `0x0010` does.  `DM(0x3fb4)`'s sample is zero for the
+whole `0x34..0x37` window — correct, the digital modem is listening for the
+analogue modem's L1/L2 — and resumes at the `0x0010` transition.  The peer
+decodes that resumed transmission as a **second INFO0a**
+(`0xbf,0x84,0x87,0x68,0x29`, differing from the first in bit `0x80` of octet
+2), returns to `TX_PHASE1_ANS`, and gets nothing further; it reports
+`vpcm: Link Error` 13 s later.  So instead of proceeding from the INFO0
+exchange to line probing and INFO1, the page drops back and repeats INFO0a.
+
+Note that framer B never publishes: `DM(0x198e)` and `DM(0x198f)` stay zero
+for the entire call while its state cycles `0x25ab -> 0x25c7 -> 0x25e2`.
+That is consistent rather than alarming — framer B's payload is fixed at 8
+bits where framer A takes the 17 that `DM(0x1651)` selects, so the two are
+alternative message formats and this peer only sends the longer one.
+
+Next: identify what state `0x0010` is meant to be and why `0x37`'s framer-A
+exit targets it.  `DM(0x1695)`/`DM(0x1692)` hold the candidate next states at
+that point, and PM `0x331e`/`0x334d` are where the winning one is committed;
+capture those four words across the transition rather than inferring the
+mapping from `TrnProgress` alone.
