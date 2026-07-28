@@ -1287,12 +1287,53 @@ void adsp2181_set_irq(adsp2181_t *a, int irq, int asserted)
     a->irq_state[irq] = asserted != 0;
     check_irqs(a);
 }
+
+uint16_t adsp2181_sport0_tdm_frame(adsp2181_t *a, int active_slot,
+                                   int dispatch_slot, uint16_t active_word,
+                                   uint16_t idle_word, int cycles_per_slot)
+{
+    if (!a || active_slot < 0 || active_slot >= 32 || dispatch_slot < 0 ||
+        dispatch_slot >= 32 || cycles_per_slot <= 0)
+        return 0;
+    /* PM 02b9 is the kernel foreground dispatch slot. TIKRNL patches it to
+     * CALL its continuation. Keep that call only on the assigned PRI
+     * timeslot; the other 31 slots run the ordinary empty host dispatcher. */
+    const UINT32 task_dispatch = RWORD_PGM(a, 0x02b9);
+    const UINT32 task_isr = RWORD_PGM(a, 0x00b5);
+    uint16_t selected_tx = 0;
+    /* The closed MIPS channel assignment filters the 32-slot TDM stream
+     * before this task dispatch: one call receives one 8 kHz slot, not 32
+     * task invocations. Model that selected descriptor directly. */
+    WWORD_PGM(a, 0x02b9, task_dispatch);
+    WWORD_PGM(a, 0x00b5, task_isr);
+    a->sport_rx[0] = active_word;
+    for (UINT16 address = 0x2e00; address < 0x2e40; ++address)
+        WWORD_DATA(a, address, active_word);
+    a->irq_latch[ADSP2181_SPORT0_RX] = 1;
+    a->irq_state[ADSP2181_SPORT0_RX] = 1;
+    check_irqs(a);
+    a->irq_state[ADSP2181_SPORT0_RX] = 0;
+    a->icount = cycles_per_slot;
+    execute(a);
+    selected_tx = a->sport_tx[0];
+    WWORD_PGM(a, 0x02b9, task_dispatch);
+    WWORD_PGM(a, 0x00b5, task_isr);
+    return selected_tx;
+}
 uint16_t adsp2181_imask(const adsp2181_t *a) { return a->imask; }
 void adsp2181_set_imask(adsp2181_t *a, uint16_t imask) { if (a) a->imask = imask & 0x3ff; }
 void adsp2181_set_flagin(adsp2181_t *a, int asserted) { if (a) a->flagin = asserted ? 1 : 0; }
 int adsp2181_flagin(const adsp2181_t *a) { return a ? a->flagin : 0; }
 uint16_t adsp2181_icntl(const adsp2181_t *a) { return a->icntl; }
 int adsp2181_idle(const adsp2181_t *a) { return a->idle != 0; }
+void adsp2181_set_ar(adsp2181_t *a, uint16_t value)
+{
+    if (a) a->core.ar.u = value;
+}
+uint16_t adsp2181_sr0(const adsp2181_t *a)
+{
+    return a ? a->core.sr.srx.sr0.u : 0;
+}
 uint16_t adsp2181_sr1(const adsp2181_t *a)
 {
     return a ? a->core.sr.srx.sr1.u : 0;

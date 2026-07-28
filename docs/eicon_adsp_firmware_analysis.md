@@ -1087,3 +1087,548 @@ Interpretation:
   after the page settles at `DM 0x3fb4 = 0x3764`, `DM[0x3764]` stays zero in
   this forced path. The next target is therefore the page initialization or
   action vector that arms sustained transmit generation, not the SPORT0 latch.
+
+## Session 18: DM 0x3764 TX producer recovered
+
+Static tracing of the extracted `0x0271` V.22FC overlay corrects the earlier
+interpretation of `DM 0x3764`. It is not a persistent G.711 buffer and the
+`0xfc58` found there in `dm.words` is not an idle code. The overlay initially
+uses `DM 0x3680..0x37cb` as boot data; its loader at `PM 0x1dc5` copies that
+material into PM and clears the runtime region. The same address range is then
+reused as line-adapter state.
+
+The overlay publishes its receive and transmit sample locations during init:
+
+```text
+PM 1dc0: AR = 3763
+PM 1dc1: DM(3f0f) = AR       ; RX sample pointer
+PM 1dc2: AR = 3764
+PM 1dc3: DM(3fb4) = AR       ; TX sample pointer
+```
+
+The kernel task dereferences the TX pointer once per frame:
+
+```text
+PM 076a: I4 = DM(3fb3)
+PM 076b: CALL (I4)           ; V.22FC PM 1d06 TX action
+...
+PM 07bb: I0 = DM(3fb4)
+PM 07bc: SR1 = DM(I0,M0)     ; fetch DM 3764
+```
+
+`PM 0x1d06` is the line-side sample-rate adapter. Its final path at `0x1d46`
+produces `DM 0x3764` from a 20-word circular queue:
+
+| DM | Role |
+|---:|---|
+| `0x3761` | queued TX sample count |
+| `0x3764` | current signed linear TX sample, one word per 8 kHz frame |
+| `0x3765` | producer/write pointer, initialized to `0x36e0` |
+| `0x3768` | consumer/read pointer, initialized to `0x36e0` |
+| `0x36e0..0x36f3` | 20-word circular TX queue |
+
+At `PM 0x1d46`, a nonzero queue count is decremented, one signed sample is read
+through `I0/L0=0x14`, the read pointer is saved, and the sample is written to
+`DM 0x3764`. An empty queue writes zero. The producer is `PM 0x1d69`; when the
+phase/count test at `PM 0x1d1e` fires it synthesizes a block into the circular
+queue and increments `DM 0x3761`. The V.22FC page initializer sets
+`DM 0x3f67 = 6`, which is the block size used by the adjacent line adapter.
+
+Therefore the sustained zero has a precise meaning: the V.22FC modem engine is
+idle or is feeding zero-valued source samples, rather than the TX pointer or
+SPORT bridge being broken. Also, `DM 0x3764` is **linear 16-bit PCM**, not a raw
+G.711 octet. Copying it directly to the TDM latch is useful as a plumbing probe
+but bypasses the TIKRNL post-processing beginning at `PM 0x07db`; natural TX
+capture must remain the correctness path.
+
+The forced G.711 probe now reports the `0x3764` adapter independently: number
+of nonzero output frames, queue-count range, final read/write pointers, and the
+maximum number of nonzero words observed in the 20-word queue. This separates
+three failure cases on the next run:
+
+1. queue count always zero: the producer is not being scheduled;
+2. queue count advances but the ring remains zero: modem TX source is idle;
+3. `DM 0x3764` varies but SPORT0 TX does not: fault is after the page adapter.
+
+The first instrumented 512-frame, 2100 Hz run reports:
+
+```text
+[g711] V.22FC page TX adapter DM3764:
+  frames=508 nonzero=0 queue-count=0..8
+  write=DM36ea read=DM36e6 ring-nonzero-max=0/20 top=0000:508
+```
+
+This resolves the three-way test as case 2. The producer is definitely being
+scheduled: the queue count reaches eight and both circular pointers advance.
+However, no nonzero word ever appears in the queue, so `PM 0x1d46` correctly
+emits zero on every steady-state frame. The next target is upstream of the
+line adapter: trace the V.22FC engine's source block around `DM 0x3fa7` and its
+`PM 0x3cba` action while `DM 0x3fb0 = 0x000c`, and determine which control or
+call-progress event transitions that engine from idle to answer-tone TX.
+
+## Session 19: BRI experiment and a simpler direct driver
+
+The BRI suggestion was tested against download `0x0006`, `DIVA Server BRI 2M
+Kernel`, selected by card type 60/file set 9. This file set uses the exact same
+`TIKRNL81.F34`, V.8, V.34 and V.90 overlays as the working PRI set, which made
+the kernel look like a promising drop-in replacement.
+
+It is not ABI-compatible at the resident-kernel boundary. Its service jump
+table is shifted (for example service slots `0x0001..0x001e` target different
+resident routines), its SPORT layout differs, and the current PRI task
+registration/resume assumptions do not hold. In the forced probe it repeatedly
+requests `0x0270` SIG and never advances to DIAL. Moving to BRI therefore means
+recovering a second set of kernel vectors and interrupt plumbing; it does not
+address the zero-valued modem source inside the shared F34 task.
+
+The useful simplification is instead to remove MIPS/PRI **call control**, while
+retaining the already-understood `0x0009` kernel as a small compatibility
+substrate. `tools/dial_tikrnl_drive.py` now accepts:
+
+```text
+--role idle|answer|calling
+```
+
+`answer` and `calling` write the ADDSP §5.4.1 data-pump database directly:
+`GEN_SETUP0`, role-specific `GEN_SETUP1` (`0x0484` answer, `0x048c` calling),
+`GEN_SETUP2`, `INFO0_SETUP`, `WSTATUS`, `Norm_H` and `Norm_L`. This path has one
+emulated ADSP, no Unicorn, no MIPS protocol image, no CAPI/IDI entities, no
+synthetic call object and no PRI timeslot assignment. The Linux Eicon driver's
+`message.c` remains the format oracle for those modem B1 parameters, while the
+ADDSP guide defines their DSP database representation.
+
+A direct answer-side smoke test now reaches V.8 immediately:
+
+```bash
+python3 tools/dial_tikrnl_drive.py --role answer --freq 0 --frames 512
+```
+
+```text
+role=answer
+page switches: SIG -> V.22FC -> V8.F34
+bootpage_nr 0006:512
+GEN_SETUP1=0484 WSTATUS=2000 Norm_H=0001 Norm_L=0100
+```
+
+The matching calling-side run remains on V.22FC (`bootpage 0x000c`), proving
+that the role bit is live rather than an inert poke. This direct harness is the
+preferred bring-up path. BRI kernel emulation can be deferred unless actual
+BRI hardware timing becomes a goal.
+
+The apparent remaining switch-on requirement was then disproved. The direct
+harness was only running TIKRNL's `PM 0x06c1` page/RX half. On hardware the
+kernel separately invokes the callback TIKRNL registered at `PM 0x06fc` once
+per SPORT sample. That continuation calls the secondary page action through
+`DM 0x3fb3`, consumes the signed-linear sample through `DM 0x3fb4`, and runs
+the TX post-processing. Without it, the answer-side V.8 page was selected but
+its transmitter never ran.
+
+`Card.frame()` now invokes both halves. A 1.5-second direct answer run with
+silence on RX produces real modem TX without any MIPS switch-on command:
+
+```bash
+python3 tools/dial_tikrnl_drive.py \
+  --role answer --freq 0 --frames 12000 \
+  --tx-out artifacts/eicon-dsp/direct-answer-tx.s16
+```
+
+```text
+DM[3FB4] signed-linear TX:
+  pointer=3764 nonzero=7733/12000 first-nonzero=4267
+```
+
+The transmitter starts at sample 4267 (533.4 ms). FFT of the first 4096 active
+samples peaks at 2099.6 Hz, with signed amplitude approximately
+`-1677..+1820`: this is the expected V.8 answer carrier generated by the
+shipping firmware. The direct output file is raw 8 kHz signed 16-bit
+little-endian PCM. This is now the uncomplicated modem-driving path originally
+wanted: one ADSP core, direct documented database writes, real overlay
+switching, both TIKRNL sample callbacks, and captured generated TX.
+
+## Session 20: firmware G.711 encoder called
+
+Download `0x02bf`, `G.711 Overlay`, is real and contains A-law/µ-law conversion
+code at PM `0x0913..0x0972`. It belongs to the voice-kernel family, however,
+and loads over PM `0x08f0..0x0975`; loading it beside V.8 would overwrite the
+active modem overlay interface.
+
+The important discovery is that TIKRNL already carries the same conversion
+algorithm as a resident utility. Its signed-linear-to-G.711 entry is
+`PM 0x1810..0x182f`. The modem overlays leave this range untouched. The
+PRI/E1 kernel selects the A-law parameter table through `DM 0x3309 = 0x35b7`.
+The routine takes the signed sample in AR and returns a bit-reversed serial
+codeword in the low byte of SR1. Reversing that octet produces conventional
+G.711/RTP byte order (`0xab` from the DSP becomes A-law silence `0xd5`).
+
+The emulator now exposes diagnostic AR/SR accessors, and the direct harness
+can call the shipping encoder after collecting the modem samples:
+
+```bash
+python3 tools/dial_tikrnl_drive.py \
+  --role answer --freq 0 --frames 5000 \
+  --tx-out artifacts/eicon-dsp/direct-answer-tx.s16 \
+  --g711-out artifacts/eicon-dsp/direct-answer-tx.alaw
+```
+
+```text
+called TIKRNL PM 1810; wrote 5000 A-law octets
+first16=d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5 d5
+```
+
+The 5000-octet result has 113 distinct codewords. Decoding it with the local
+independent G.711 implementation differs from the source linear PCM by at most
+39 counts (mean absolute error 8.46), confirming the firmware routine and bit
+order. Thus the direct harness now emits the actual firmware-companded DS0
+stream; no software approximation and no destructive `0x02bf` page load are
+needed.
+
+## Session 21: direct SIP/RTP endpoint
+
+`tools/eicon_adsp_sip.py` turns the direct TIKRNL harness into a callable SIP
+endpoint. It intentionally implements only UDP INVITE/ACK/BYE/OPTIONS and
+PCMA/8000, avoiding all card signalling and host-driver call objects. Incoming
+RTP A-law octets are written byte-exact to TIKRNL's `DM 0x3f08` line interface.
+For every octet the harness executes one `PM 0x06c1` frame pass and one
+`PM 0x06fc` continuation. The resulting signed-linear sample at the pointer
+in `DM 0x3fb4` is passed through the shipping G.711 routine at `PM 0x1810` on
+a second emulated ADSP core, then sent as RTP payload type 8.
+
+The media scheduler advances in exact 160-sample/20-ms quanta. It has no
+resampler, transcoder, PLC, VAD, comfort noise, echo cancellation or gain
+processing. A missing inbound sample is A-law silence; late scheduler wakeups
+execute every elapsed sample quantum rather than changing sample accounting.
+
+```bash
+python3 tools/eicon_adsp_sip.py \
+  --bind 0.0.0.0 --advertise 192.0.2.10 \
+  --sip-port 5060 --rtp-port 4000 --law pcma \
+  --capture-prefix artifacts/eicon-dsp/sip-answer
+```
+
+A local loop test completed INVITE/200, received three 172-byte packets (12
+bytes RTP plus 160 A-law octets), and completed BYE/200. The initial media was
+firmware-generated A-law silence (`d5`). The optimized `Card.frame_fast()`
+runs 5000 modem samples in approximately 0.11 seconds on the development
+machine, leaving ample margin for an 8-kHz real-time call.
+
+`--capture-prefix` records every outbound packet in a raw-IP PCAP, appends its
+payload byte-exact to a raw A-law file, and independently decodes it to an
+8-kHz mono WAV for listening. A 60-second local SIP call with continuous
+inbound A-law silence produced:
+
+```text
+3001 RTP packets / 480160 samples / 60.02 seconds
+RTP timestamp step: 160
+active packets: 231, one run from packet 26 through 256
+active interval: 0.520 through 5.140 seconds
+active RMS: 981.4 counts, range -1696..+1824
+FFT peak: 2098.6 Hz
+```
+
+The answer modem therefore waits about 520 ms, emits its approximately 2100 Hz
+answer signal continuously for 4.62 seconds, then returns to A-law silence
+when the caller supplies no modem signal. It remains stable and silent for the
+rest of the minute; there are no extra tones, page-switch loops, RTP timestamp
+discontinuities, or emulator stalls. The retained files are:
+
+```text
+artifacts/eicon-dsp/sip-answer-60s.rtp.pcap
+artifacts/eicon-dsp/sip-answer-60s.alaw
+artifacts/eicon-dsp/sip-answer-60s.wav
+```
+
+The WAV can be played directly with `afplay` on macOS or any ordinary audio
+player. The PCAP uses `LINKTYPE_RAW` and contains synthesized IPv4/UDP headers
+plus the exact RTP packets sent on the socket.
+
+A subsequent call used this repository's `sip_v90_modem` as a genuine call
+modem rather than a silence generator. `ATD1` placed a peer-to-peer SIP call;
+the endpoints negotiated raw PCMU/8000 and exchanged 488 packets before the
+caller's V.8 timeout. Capture now records both directions (`.ulaw`/`.wav` for
+ADSP TX and `.rx.ulaw`/`.rx.wav` for peer TX) in one bidirectional PCAP.
+
+The caller detected the ADSP's ANSam and transmitted real V.8 CM at the
+expected 980/1170-Hz DPSK frequencies. On replay, the Eicon firmware remained
+in bootpage 6 (V.8) until sample 41271 (5.159 s), then selected bootpage 1
+(`0x0266`, V.22/V.32 LEC) and bootpage 3 (`0x025c`, FSK OWN). This proves the
+receive RTP reaches and controls the genuine firmware state machine. The
+remaining failure is now protocol-level: the Eicon side emits no JM response
+after that page transition, so the project caller times out V.8 after about
+9.7 seconds. Captures are retained as:
+
+```text
+artifacts/eicon-dsp/sip-project-caller-pcmu.rtp.pcap
+artifacts/eicon-dsp/sip-project-caller-pcmu.wav
+artifacts/eicon-dsp/sip-project-caller-pcmu.rx.wav
+```
+
+PCMU is now the endpoint default because TIKRNL's `DM 0x3f08` modem interface
+is µ-law. `--law pcma` remains available for E1 experiments and selects the
+firmware A-law encoder table; it must not be used as an implicit transcoder.
+
+## Session 22: PDF setup correction and physical Courier call
+
+The ADDSP V.90 User's Guide v5.3 §5.3.1 and §5.4.1 Tables 12-15 exposed a
+major direct-harness setup error. `Info0_setup`, `Norm_H`, and `Norm_L` are at
+write-database offsets `0x07`, `0x28`, and `0x29`; the harness had written them
+to `0x03`, `0x0f`, and `0x10`. The latter two are P2SD and the low-level
+dialler range, not modulation masks. The corrected initialization now writes:
+
+```text
+GEN_SETUP0    +00 = 00c4
+GEN_SETUP1    +01 = 0484             answer, 2-wire, internal clock, norm
+GEN_SETUP2    +02 = 0030
+V8_SETUP      +04 = 6000             V90_DPCM + digital network
+INFO0_SETUP   +07 = f0fd
+TD / TA       +08/+09 = 0006/0006
+TX tune       +0a = 00ff
+DCD off/hyst  +0b/+0c = 0030/0000
+WSTATUS       +0e = 2000             change_wdb
+NORM_H        +28 = 0001             V.8
+NORM_L        +29 = 8100             V.90 + V.34
+SPEED masks   +2a/+2b = 001f/ff00
+```
+
+With those values, the repository's software call modem changed from V.8
+failure to a successful V.8 result (`status=2`) and entered V.34 training.
+That confirms the PDF-defined offsets were operationally significant.
+
+The SIP endpoint now also implements SIP REGISTER with MD5 digest auth. It
+registered extension 6001 directly with the test Asterisk and accepted a real
+call from the physical USRobotics Courier on `/dev/cu.usbserial-21210`. The
+45-second call exchanged 2232 outbound RTP packets / 357120 samples and saved
+both directions:
+
+```text
+artifacts/eicon-dsp/sip-courier-pcmu.rtp.pcap
+artifacts/eicon-dsp/sip-courier-pcmu.ulaw
+artifacts/eicon-dsp/sip-courier-pcmu.wav
+artifacts/eicon-dsp/sip-courier-pcmu.rx.ulaw
+artifacts/eicon-dsp/sip-courier-pcmu.rx.wav
+```
+
+This first Courier call did not train. The Eicon changed from V.8 page 6 to
+page 25 / `V.OWN` (`0x026d`) almost immediately and emitted no answer tone.
+The Courier reported no carrier and `ATI6` showed a keypress abort. This is a
+better reference peer than the software modem, but it reveals another startup
+or capability-selection issue rather than validating the full path. The SIP
+endpoint now logs live bootpage changes with sample timestamps so the next
+Courier attempt can distinguish actual live timing from offline replay.
+
+The reason the first Courier call was inaudible was then isolated in its RX
+capture: the FXS path delivered a near-full-scale off-hook transient at about
+100 ms (`-32124..+32124`). That made DIAL select `V.OWN` at 160 ms, well before
+the normal transmitter begins ANSam at about 533 ms, leaving TX silent. The
+SIP endpoint now discards the first 1000 ms of received bearer audio while
+still consuming every RTP sample, modelling the bearer-seizure settling time
+without shifting its clock.
+
+A guarded Courier call was audibly active for 19.8 seconds. The audible
+intervals correlate exactly with page changes: the first ANSam run is
+`0.520..2.040 s`, and it cuts out when the firmware transitions from page 6
+V.8 to page 16 (`0x0265`, FAX.F34 Partial). It does **not** request page 7 /
+`0x0260` INFO during this call. It returns to V.8 at 6.300 s and emits several
+more 2100-Hz bursts before selecting page 2 / `0x0267` V.32 Partial at
+17.420 s and emitting a 3000-Hz signal. The cut-out is therefore genuine
+firmware behavior, but it is a wrong low-level/fax path rather than the
+expected V.34/V.90 INFO phase. The captured TX had RMS 1411, range
+`-6908..+8316`, and 89956 non-zero decoded samples:
+
+```text
+artifacts/eicon-dsp/sip-courier-pcmu-guarded2.rtp.pcap
+artifacts/eicon-dsp/sip-courier-pcmu-guarded2.wav
+artifacts/eicon-dsp/sip-courier-pcmu-guarded2.rx.wav
+```
+
+A second PDF pass found the V.90-specific setup at write-database offsets
+`0x79..0x7f`. Merely setting `V8_SETUP.V90_DPCM` and `NORM_L.V90` is not
+enough: both V.90 speed masks default to zero. The harness now additionally
+sets `SPEED_SEL_V90_H=0x003f`, `SPEED_SEL_V90_L=0xffff`, and explicit maximum
+V.34/V.90 rates. `INFO0D_SETUP=0x03b7` advertises lookahead 3, 3429-baud
+upstream support, µ-law PCM, codec-output power measurement, and -12 dBm0
+maximum power. PCMA mode sets its PCM-coding bit 6 dynamically.
+
+Two immediate physical retries registered successfully but received no SIP
+INVITE from the FXS/Asterisk path, despite the Courier producing its local Y4
+call-progress dump. Their unique crash-safe captures correctly contain only
+headers, so they are not modem results. The settings remain in place for the
+next call that reaches the endpoint.
+
+The guide's §2.2 ordinary host flow sets `WSTATUS.BOOTFINISHED` (`0x1000`)
+after a download and then lets the kernel redispatch the task. Testing that bit
+in the direct harness changed post-V.8 `TrnProgress` to `0x0040/0x0044`, but
+physical calls regressed into repeated low-level/FAX pages and never reached
+INFO. The direct harness already resumes through TIKRNL's registered
+post-download entry `DM(0x31bb)`; doing that *and* setting BOOTFINISHED signals
+completion twice. The extra bit was therefore reverted. This distinction is
+specific to the direct-resume harness, not a contradiction of the documented
+normal kernel flow.
+
+The DSP's own diagnostic outputs are now retained once per RTP packet in
+`PREFIX.adsp.csv`: live and event-latched `TrnProgress`, `Rstatus_ch`,
+`Rstatus`, change flags, bootpage/overlay, and all three eye-pattern words.
+`PREFIX.adsp-dm.bin` additionally snapshots all 128 DSP-owned read-database
+words every 20 ms, retaining selected-rate formats, `ErrorMessage`, detector
+levels, and undocumented diagnostic values for later decoding.
+The fields come from guide §5.3.2 and §6.6 (`EYESAMPLE_0` for V.8,
+`EYESAMPLE_2` for INFO). This distinguishes a host timeout from a DSP state
+stall on the next physical call.
+
+The retained `sip-courier-live-20260728-181057.log` confirms the audible
+"INFO then timeout" report. Three Courier calls cleanly selected page 7 /
+`0x0260` INFO at 3.24-3.52 s. Their DSP-owned `TrnProgress` advanced through
+`0x22/0x24`, `0x26`, and `0x28`, then stopped at `0x28` until the calls ended.
+This is materially different from the later FAX/V.OWN attempts and proves the
+Courier reached V.34/V.90 phase 2. A later A/B test showed that additionally
+setting `WSTATUS.BOOTFINISHED` prevents this direct-resume path from reaching
+INFO, so the INFO stall has a different cause.
+
+The complete read-database snapshots exposed the larger missing flow: event
+flags and their latched `RSTATUS_CH_dbs`, `RSTATUS_dbs`, and
+`TRNPROGRESS_dbs` copies remain identically zero while the live E0-E2 words
+change. Per §5.3.2 these mirrors are populated during the Host-Kernel RX_2400
+communication cycle. The direct SIP harness calls TIKRNL entries as ordinary
+subroutines and never runs that kernel/SPORT host cycle. It also differs from
+the recovered MIPS flow, which sets BOOTFINISHED, restores assigned PCM buffer
+pointers after non-V.8 overlays, and resumes the registered completion through
+the kernel foreground slot. Therefore further setup-bit guessing cannot make
+the direct-call path faithful; the SIP media loop needs to use the existing
+`KernelDispatch` SPORT/doorbell path while retaining direct database call
+activation.
+
+A second concrete layering omission was found by comparing `Card.boot()` with
+that kernel-driven harness. The `.F34` images are partial overlays: before
+DIAL, the real flow layers V.OWN (`0x026d`) and FSK OWN (`0x025c`) underneath
+it. DIAL calls shared routines beyond its own image, notably PM `0x244c` and
+`0x2c4f`. The SIP direct harness loaded DIAL alone, leaving those targets as
+cleared task memory or stale content and making classification vary among
+INFO, FAX, and V.OWN across otherwise similar calls. `Card.boot()` now loads
+V.OWN, FSK OWN, then DIAL in the recovered order. The direct-resume harness
+must not also set the ordinary host/kernel BOOTFINISHED acknowledgement: doing
+both completes a download twice. A fresh physical capture is required to
+determine whether the remaining Host-Kernel RX_2400 cycle is still necessary
+after fixing the base-image layer.
+
+## Recovered: V.8's indirect page-7 handoff
+
+The V.8 overlay does select INFO, but there is deliberately no immediate
+`DM(0x3fb0) = 7` at the V.8 decision point.  The handoff has three stages:
+
+1. PM `0x3ba1..0x3bfb` classifies the V.8 result.  On the normal-modem path,
+   `DM(0x3fc4) & 0x0100` branches at `0x3ba7` to `0x3bc8`, which loads `AR=7`
+   and stores it in the pending-page word `DM(0x0491)` at `0x3bfb`.  The
+   alternate entry at `0x3c18..0x3c27` can also store 7 there.
+2. A completion callback sets `DM(0x075b)`.  PM `0x372c..0x3763` then counts
+   25 callback invocations in `DM(0x06b3)` before copying the pending page
+   from `DM(0x0491)` to `bootpage_nr` (`DM(0x3fb0)`) at PM `0x3761` and
+   setting the page-change strobe in `DM(0x3fc1)`.
+3. TIKRNL sees that strobe, indexes its bootpage table at `DM(0x31d5)`, and
+   requests download `0x0260`; the host only serves and acknowledges that
+   request.  INFO is therefore not a direct ADSP `CALL` from V.8.
+
+Replay of the first successful Courier capture confirms the exact path.  At
+sample 27332, `DM(0x3fc4)=0xa100` selects page 7 into `DM(0x0491)`.  At sample
+27487 the completion flag becomes non-zero.  At sample 27572 the counter moves
+from 24 to 25, PM `0x3761` copies 7 into `DM(0x3fb0)`, and TIKRNL requests the
+INFO overlay.  In a failed low-level/FAX call, `DM(0x0491)` never becomes 7;
+V.8 classifies the input first and changes directly to page 16.  Thus a
+missing page-7 transition is upstream of the overlay loader: either V.8 did
+not set pending page 7 (inspect `0x0491`/`0x3fc4`) or its delayed completion
+callback did not run (inspect `0x075b`/`0x06b3`).
+
+## Replay result: page 7 loads; INFO receive acquisition stalls
+
+Replaying the first successful Courier RX capture through the current layered
+`Card` path proves the complete request and load path.  At sample 27573
+(3.447 s) TIKRNL requested page 7, the harness served `0x0260`, and the
+resident image became INFO.  `TrnProgress` then advanced
+`0x20 -> 0x22 -> 0x24 -> 0x26 -> 0x28`; it remained at `0x28` through sample
+80000.  The SIP endpoint now logs the served request explicitly rather than
+only reporting the bootpage at the next 160-sample packet boundary.
+
+INFO transmission is active after the switch.  The replayed DSP output is
+non-zero continuously after `TrnProgress=0x28`, and the offline Phase 1/2
+decoder recovers a V.90 `INFO0d` from it.  The failure is on INFO receive
+acquisition: at the stall, the control-channel parser remains at its initial
+PM state (`DM(0x16bd)=0x3520`) and its completion flag `DM(0x0686)` remains
+zero.  PM `0x3574..0x358d` sets that flag only after the receive parser accepts
+its bit sequence, while the state-`0x28` condition at PM `0x33a3..0x33cb`
+continues testing it.  The peer capture contains control-channel energy and a
+Tone-A candidate, but the independent decoder also fails to recover a valid
+INFO0 frame from that interval.  Therefore the next investigation is the
+INFO page's control-channel RX input/carrier/framing path, not page mapping,
+overlay loading, or INFO transmission.
+
+A subsequent live call exposed a separate direct-harness drive bug on page 16.
+The same still-asserted request was treated as a new download up to eight times
+per sample, repeatedly resetting the resident partial overlay and flooding the
+synchronous log enough to make media processing appear stalled.  `Card.frame`
+and `Card.frame_fast` now resume a request for the already-resident download
+without reloading it or recording a duplicate page switch.  Replays retain the
+single page-7/`0x0260` transition and no longer produce thousands of destructive
+page-16 reloads.
+
+The next physical calls confirmed a distinct policy gap: after exchanging V.8
+signals the peer went quiet waiting for Phase 2, while the firmware selected
+page 16 or V.32 rather than setting pending page 7.  An opt-in
+`--force-info-after-v8` diagnostic now replaces the first post-V.8 low-level
+fallback (after 1.5 s) with page 7/`0x0260`; natural page-7 requests are
+untouched.  Replay of the first affected call changes the path from page 16 to
+INFO and advances `TrnProgress` through `0x20/0x22/0x24/0x26/0x28` to `0x2a`.
+This validates the host-policy hypothesis strongly enough for a live A/B call,
+but the override remains diagnostic rather than a claim about the shipping
+supervisor's exact acceptance gate.
+
+The first forced live A/B calls show that the INFO microstate cadence itself is
+not anomalously fast: `0x20 -> 0x2a` takes about 140-160 ms, comparable to the
+natural page-7 captures.  The uncertain timing is the V.8-to-INFO seam.  In the
+second call page 7 loaded at 2.055 s, while the peer-side recording contains a
+CRC-valid INFO0c candidate beginning at 1.889 s, so waiting for the DSP's
+fallback request can actually enter INFO too late and miss the peer's first
+control-channel frame.
+
+The open-source `divas4linux` driver does not schedule page 7.  Its
+`kernel/message.c:add_b1()` builds a modem CAI and hands the call to the closed
+MIPS protocol firmware.  That CAI includes call direction, digital-modem use,
+modulation masks, exact answer-tone duration, answer-tone delay, carrier-wait
+time and carrier-loss time.  The ADDSP guide §5.4.2 confirms that the MIPS
+supervisor starts 40 s abort and 15 s training timers when the DSP requests
+V.8, monitors published `TrnProgress`, and initiates retrain/disconnect policy;
+it does not advance INFO microstates directly.  Our direct path bypasses both
+the CAI-to-database call setup and the Host-Kernel RX_2400 publication cycle,
+so the next faithful fix is to recover those MIPS-derived timing/setup writes,
+not add sleeps between INFO states.
+
+The natural V.8 completion gate is now pinned down.  At the protocol level it
+is answer-side CJ reception after the modem has sent JM.  In the successful
+firmware replay, that event sets `TrnProgress=0x0009` and dispatches PM
+`0x3ba1`; with `DM(0x3eaa)&0x0060 == 0` and `DM(0x3fc4)&0x0100 != 0`, PM
+`0x3bc8/0x3bfb` stores pending page 7 in `DM(0x0491)`.  A later transmitter
+completion calls PM `0x3b95`, setting `DM(0x075b)=1`; PM `0x372c..0x3761`
+counts 25 callbacks in `DM(0x06b3)` before publishing page 7.  The forced
+calls never produce this gate naturally: they remain at `TrnProgress=0x0004`
+and `DM(0x0491)=0` until the diagnostic override.  New captures retain all
+five gate words and label forced page-7 requests explicitly.
+
+## Blocker isolated: direct INFO RX is disconnected
+
+A sample-by-sample replay of the first successful Courier call separates the
+remaining failure from INFO framing.  In the direct `Card.frame_fast()` path,
+page 7 loads at sample 27572 and publishes `DM(0x3f0f)=0x3763`, but
+`DM(0x3763)` becomes zero and stays zero while the incoming `DM(0x3f08)`
+codeword continues changing.  Consequently the INFO parser never leaves
+`DM(0x16bd)=0x3520`, `DM(0x0686)` stays zero, and `TrnProgress` stops at
+`0x0028`.  V.8 had its own active G.711 line adapter at the same pointer;
+INFO depends on the assigned kernel/SPORT path that the direct subroutine
+harness bypasses.
+
+Replaying the identical RX bytes through `LiveKernelModem` proves the point.
+The kernel path advances through `0x20/0x22/0x24/0x26/0x28` and then reaches
+`0x2a/0x2b` at 3.642 s, corresponding to acquisition of the peer's Tone A.
+It cannot progress further on a fixed replay because the recorded Courier
+cannot react to the newly generated response.  Both paths transmit a
+decodable INFO0d at 3.590 s, but the direct path incorrectly advertises A-law
+in INFO0d bit 39 on a PCMU call; the kernel path advertises µ-law.  Thus the
+next meaningful hardware test is `tools/eicon_adsp_sip.py --kernel-dispatch`.
+A fresh call, rather than another replay, is required to determine whether the
+Courier acknowledges that corrected INFO0d and advances beyond `0x2b`.

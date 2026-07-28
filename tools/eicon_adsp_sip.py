@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+"""Minimal G.711 SIP/RTP endpoint backed by the emulated Eicon ADSP modem.
+
+This deliberately implements only the small SIP subset needed for direct test
+calls: UDP INVITE/ACK/BYE, one PCMU/8000 or PCMA/8000 media stream, and 20 ms RTP packets.
+There is no PRI/BRI, CAPI/IDI, MIPS call object, audio device, transcoder, PLC,
+VAD, echo canceller, gain control, or resampler in the path.
+
+Example:
+    python3 tools/eicon_adsp_sip.py --bind 0.0.0.0 --sip-port 5060
+
+Then direct an INVITE containing PCMA (static payload type 8) to this host.
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import hashlib
+import random
+import re
+import selectors
+import signal
+import socket
+import struct
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dial_tikrnl_drive import Card
+
+SAMPLES_PER_PACKET = 160
+TICK_SECONDS = SAMPLES_PER_PACKET / 8000
+LAW_INFO = {'pcmu': (0, 0xFF, 'PCMU'), 'pcma': (8, 0xD5, 'PCMA')}
+PAGE_NAMES = {0: 'DIAL', 1: 'V.22', 2: 'V.32', 3: 'FSK', 4: 'FAX',
+              6: 'V.8', 7: 'INFO (V.34/V.90 phase 2)', 8: 'V.34',
+              10: 'protocol', 11: 'AT offline', 12: 'AT online',
+              13: 'V.90 APCM', 14: 'V.90 DPCM', 15: 'fax protocol',
+              16: 'low-level/FAX partial'}
+
+
+def parse_sip(data: bytes) -> tuple[str, dict[str, str], str]:
+    text = data.decode('latin1', errors='replace')
+    head, _, body = text.partition('\r\n\r\n')
+    lines = head.split('\r\n')
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ':' in line:
+            name, value = line.split(':', 1)
+            key = name.strip().lower()
+            headers[key] = headers.get(key, '') + (',' if key in headers else '') + value.strip()
+    return lines[0], headers, body
+
+
+def sip_tagged_to(value: str, tag: str) -> str:
+    return value if re.search(r'(?:^|;)\s*tag=', value, re.I) else f'{value};tag={tag}'
+
+
+def local_address_for(peer: tuple[str, int], bound: str, advertised: str | None) -> str:
+    if advertised:
+        return advertised
+    if bound not in ('0.0.0.0', '::'):
+        return bound
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(peer)
+        return probe.getsockname()[0]
+    finally:
+        probe.close()
+
+
+def parse_g711_sdp(body: str, sip_peer: tuple[str, int], payload_type: int) -> tuple[str, int] | None:
+    address = sip_peer[0]
+    session_c = re.search(r'(?im)^c=IN IP4\s+([^\s]+)', body)
+    if session_c:
+        address = session_c.group(1)
+    media = re.search(r'(?im)^m=audio\s+(\d+)\s+RTP/AVP\s+([^\r\n]+)', body)
+    if not media:
+        return None
+    payloads = {int(x) for x in re.findall(r'\d+', media.group(2))}
+    if payload_type not in payloads:
+        return None
+    media_tail = body[media.end():]
+    media_c = re.search(r'(?im)^c=IN IP4\s+([^\s]+)', media_tail)
+    if media_c:
+        address = media_c.group(1)
+    return address, int(media.group(1))
+
+
+def rtp_payload(packet: bytes, payload_type: int) -> tuple[int, int, bytes] | None:
+    if len(packet) < 12 or packet[0] >> 6 != 2:
+        return None
+    cc = packet[0] & 0x0F
+    offset = 12 + 4 * cc
+    if len(packet) < offset:
+        return None
+    if packet[0] & 0x10:
+        if len(packet) < offset + 4:
+            return None
+        words = struct.unpack_from('!H', packet, offset + 2)[0]
+        offset += 4 + 4 * words
+    if len(packet) < offset:
+        return None
+    end = len(packet)
+    if packet[0] & 0x20:
+        padding = packet[-1]
+        if not padding or padding > end - offset:
+            return None
+        end -= padding
+    pt = packet[1] & 0x7F
+    seq, timestamp = struct.unpack_from('!HI', packet, 2)
+    return seq, timestamp, packet[offset:end] if pt == payload_type else b''
+
+
+@dataclass
+class Call:
+    sip_peer: tuple[str, int]
+    rtp_peer: tuple[str, int]
+    call_id: str
+    local_tag: str
+    card: Card
+    rx: collections.deque[int] = field(default_factory=collections.deque)
+    tx_seq: int = field(default_factory=lambda: random.randrange(65536))
+    tx_timestamp: int = field(default_factory=lambda: random.randrange(2**32))
+    ssrc: int = field(default_factory=lambda: random.randrange(2**32))
+    next_tick: float = field(default_factory=time.monotonic)
+    packets: int = 0
+    samples: int = 0
+    bootpage: int = -1
+    trn_progress: int = -1
+    logged_overlay_switches: int = 0
+
+
+class CrashSafeWave:
+    """Streaming PCM WAV whose header and payload survive an abrupt exit."""
+
+    def __init__(self, path: Path):
+        self.file = path.open('w+b', buffering=0)
+        self.data_bytes = 0
+        self.writes = 0
+        self._patch_header()
+
+    def _patch_header(self) -> None:
+        self.file.seek(0)
+        self.file.write(struct.pack('<4sI4s4sIHHIIHH4sI',
+                                    b'RIFF', 36 + self.data_bytes, b'WAVE',
+                                    b'fmt ', 16, 1, 1, 8000, 16000, 2, 16,
+                                    b'data', self.data_bytes))
+        self.file.seek(0, 2)
+
+    def write(self, pcm: bytes) -> None:
+        self.file.write(pcm)
+        self.data_bytes += len(pcm)
+        self.writes += 1
+        # Patch once per second. At worst an unclean exit leaves a valid WAV
+        # header one second short; the raw PCM remains present after it.
+        if self.writes % 50 == 0:
+            self._patch_header()
+
+    def close(self) -> None:
+        self._patch_header()
+        self.file.close()
+
+
+class RtpCapture:
+    """Write both RTP directions as PCAP, raw G.711, and listenable WAV."""
+
+    def __init__(self, prefix: Path, law: str):
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        self.pcap = prefix.with_suffix('.rtp.pcap').open('wb', buffering=0)
+        self.pcap.write(struct.pack('<IHHIIII', 0xA1B2C3D4, 2, 4, 0, 0,
+                                    65535, 101))  # LINKTYPE_RAW
+        law_suffix = '.ulaw' if law == 'pcmu' else '.alaw'
+        self.alaw = prefix.with_suffix(law_suffix).open('wb', buffering=0)
+        self.wav = CrashSafeWave(prefix.with_suffix('.wav'))
+        self.rx_alaw = prefix.with_suffix('.rx' + law_suffix).open('wb', buffering=0)
+        self.rx_wav = CrashSafeWave(prefix.with_suffix('.rx.wav'))
+        self.law_suffix = law_suffix
+        self.diag = prefix.with_suffix('.adsp.csv').open('w', buffering=1)
+        self.diag_dm = prefix.with_suffix('.adsp-dm.bin').open('wb', buffering=0)
+        self.diag_dm.write(b'EADSPDM1')  # uint64 sample + 128 uint16 LE per record
+        self.diag_scc = prefix.with_suffix('.adsp-scc.bin').open('wb', buffering=0)
+        # Per record: sample, SCC ptr, 0x50 SCC words, then 16 x (ptr, 64 words).
+        self.diag_scc.write(b'EADSPSCC1')
+        self.diag.write('sample,seconds,bootpage,overlay,trnprogress,rstatus_ch,rstatus,'
+                        'change_flags,dbs_rstatus_ch,dbs_rstatus,dbs_trnprogress,'
+                        'eye0,eye1,eye2,info_rx_event,info_rx_complete,info_rx_parser,'
+                        'v8_result,v8_line_result,v8_pending_page,v8_tx_complete,v8_handoff_count,'
+                        'event_struct_ptr,data_struct_ptr,dce_scc_struct_ptr,'
+                        'info_timer_hi,info_timer_lo,info_internal_progress,info_state_vector,'
+                        'info_test0,info_test1,info_test2,info_test3,info_test4,'
+                        'rx_ptr,rx_value,tx_ptr,tx_value\n')
+        self.ip_id = 0
+        self.prefix = prefix
+        self.law = law
+
+    @staticmethod
+    def ip_checksum(header: bytes) -> int:
+        total = sum(struct.unpack(f'!{len(header) // 2}H', header))
+        total = (total & 0xFFFF) + (total >> 16)
+        total = (total & 0xFFFF) + (total >> 16)
+        return (~total) & 0xFFFF
+
+    @staticmethod
+    def decode_alaw(code: int) -> int:
+        value = code ^ 0x55
+        sample = (value & 0x0F) << 4
+        segment = (value & 0x70) >> 4
+        if segment == 0:
+            sample += 8
+        elif segment == 1:
+            sample += 0x108
+        else:
+            sample = (sample + 0x108) << (segment - 1)
+        return sample if value & 0x80 else -sample
+
+    @staticmethod
+    def decode_ulaw(code: int) -> int:
+        value = (~code) & 0xFF
+        sample = (((value & 0x0F) << 3) + 0x84) << ((value & 0x70) >> 4)
+        sample -= 0x84
+        return -sample if value & 0x80 else sample
+
+    def write(self, rtp: bytes, payload: bytes, source: tuple[str, int],
+              destination: tuple[str, int], outbound: bool) -> None:
+        udp_len = 8 + len(rtp)
+        ip_len = 20 + udp_len
+        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, ip_len, self.ip_id,
+                         0, 64, socket.IPPROTO_UDP, 0,
+                         socket.inet_aton(source[0]),
+                         socket.inet_aton(destination[0]))
+        checksum = self.ip_checksum(ip)
+        ip = ip[:10] + struct.pack('!H', checksum) + ip[12:]
+        udp = struct.pack('!HHHH', source[1], destination[1], udp_len, 0)
+        packet = ip + udp + rtp
+        now = time.time()
+        sec = int(now)
+        usec = int((now - sec) * 1_000_000)
+        record = struct.pack('<IIII', sec, usec, len(packet), len(packet)) + packet
+        self.pcap.write(record)
+        alaw = self.alaw if outbound else self.rx_alaw
+        wav = self.wav if outbound else self.rx_wav
+        alaw.write(payload)
+        decode = self.decode_ulaw if self.law == 'pcmu' else self.decode_alaw
+        pcm = b''.join(struct.pack('<h', decode(code)) for code in payload)
+        wav.write(pcm)
+        self.ip_id = (self.ip_id + 1) & 0xFFFF
+
+    def write_diag(self, sample: int, card: Card) -> None:
+        dm = card.dm
+        values = (sample, sample / 8000, dm[0x3FB0], card.resident,
+                  dm[0x3FC2], dm[0x3FC0], dm[0x3FC1], dm[0x3FA2],
+                  dm[0x3FA3], dm[0x3FA4], dm[0x3FA5],
+                  dm[0x3F9C], dm[0x3F9D], dm[0x3F9E],
+                  dm[0x0685], dm[0x0686], dm[0x16BD],
+                  dm[0x3EAA], dm[0x3FC4], dm[0x0491], dm[0x075B], dm[0x06B3],
+                  dm[0x3F70], dm[0x3F71], dm[0x3F76],
+                  dm[0x1647], dm[0x1650], dm[0x1652], dm[0x1679],
+                  dm[0x1696], dm[0x1697], dm[0x1698], dm[0x1699], dm[0x169A],
+                  dm[0x3F0F], dm[dm[0x3F0F] & 0x3fff] if dm[0x3F0F] else 0,
+                  dm[0x3FB4], dm[dm[0x3FB4] & 0x3fff] if dm[0x3FB4] else 0)
+        self.diag.write(f'{values[0]},{values[1]:.6f},' +
+                        ','.join(f'0x{value:04x}' for value in values[2:]) + '\n')
+        # Preserve the complete DSP-owned read database (guide §5.3.2), not
+        # just currently understood fields. This includes selected modulation
+        # and speed formats, ErrorMessage, detector levels, debug values, and
+        # future/undocumented diagnostics set by the shipping firmware.
+        snapshot = [dm[0x3F60 + offset] for offset in range(128)]
+        self.diag_dm.write(struct.pack('<Q128H', sample, *snapshot))
+        scc_ptr = dm[0x3F76] & 0x3fff
+        valid_scc = scc_ptr != 0 and scc_ptr + 0x50 <= 0x4000
+        scc = ([dm[scc_ptr + offset] for offset in range(0x50)]
+               if valid_scc else [0] * 0x50)
+        record = bytearray(struct.pack('<QH80H', sample, scc_ptr, *scc))
+        descriptor_offsets = ([0x06 + 3 * i for i in range(8)] +
+                              [0x1E + 3 * i for i in range(8)])
+        for descriptor in descriptor_offsets:
+            pointer = scc[descriptor + 2] & 0x3fff if valid_scc else 0
+            data = ([dm[pointer + i] if pointer + i < 0x4000 else 0
+                     for i in range(64)] if pointer else [0] * 64)
+            record.extend(struct.pack('<H64H', pointer, *data))
+        self.diag_scc.write(record)
+
+    def close(self) -> None:
+        self.pcap.close()
+        self.alaw.close()
+        self.rx_alaw.close()
+        self.wav.close()
+        self.rx_wav.close()
+        self.diag.close()
+        self.diag_dm.close()
+        self.diag_scc.close()
+        print(f'[capture] wrote {self.prefix}.rtp.pcap/.adsp.csv/.adsp-dm.bin/'
+              f'.adsp-scc.bin, TX '
+              f'{self.law_suffix}/.wav and RX .rx{self.law_suffix}/.rx.wav')
+
+
+class EiconSipEndpoint:
+    def __init__(self, bind: str, sip_port: int, rtp_port: int,
+                 advertised: str | None, verbose: bool = False,
+                 capture_prefix: Path | None = None, law: str = 'pcmu',
+                 registrar: str | None = None, username: str | None = None,
+                 password: str = '', rx_guard_ms: int = 1000,
+                 force_info_after_v8: bool = False,
+                 kernel_dispatch: bool = False):
+        self.bind = bind
+        self.advertised = advertised
+        self.law = law
+        self.payload_type, self.silence, self.codec_name = LAW_INFO[law]
+        self.registrar = registrar
+        self.username = username
+        self.password = password
+        self.register_cseq = 0
+        self.register_call_id = f'eicon-{random.randrange(2**64):016x}'
+        self.rx_guard_samples = max(0, rx_guard_ms * 8)
+        self.force_info_after_v8 = force_info_after_v8
+        self.kernel_dispatch = kernel_dispatch
+        self.verbose = verbose
+        self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sip.bind((bind, sip_port))
+        self.sip.setblocking(False)
+        self.rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rtp.bind((bind, rtp_port))
+        self.rtp.setblocking(False)
+        self.sip_port = self.sip.getsockname()[1]
+        self.rtp_port = self.rtp.getsockname()[1]
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.sip, selectors.EVENT_READ, self.on_sip)
+        self.selector.register(self.rtp, selectors.EVENT_READ, self.on_rtp)
+        self.call: Call | None = None
+        self.running = True
+        self.capture = RtpCapture(capture_prefix, law) if capture_prefix else None
+
+        # Keep firmware companding on an independent ADSP core. PM 0x1810
+        # uses DAG registers, while a real SPORT compander would not alter the
+        # modem task's register state.
+        self.codec = Card()
+        self.codec.boot()
+        self.codec.configure_g711_law(law)
+        if registrar and username:
+            self.send_register()
+
+    def send_register(self, challenge: dict[str, str] | None = None) -> None:
+        host, _, port_text = self.registrar.partition(':')
+        peer = (socket.gethostbyname(host), int(port_text or 5060))
+        local_ip = local_address_for(peer, self.bind, self.advertised)
+        self.register_cseq += 1
+        uri = f'sip:{self.registrar}'
+        branch = f'z9hG4bK{random.randrange(2**48):012x}'
+        lines = [f'REGISTER {uri} SIP/2.0',
+                 f'Via: SIP/2.0/UDP {local_ip}:{self.sip_port};branch={branch};rport',
+                 f'From: <sip:{self.username}@{self.registrar}>;tag=eicon',
+                 f'To: <sip:{self.username}@{self.registrar}>',
+                 f'Call-ID: {self.register_call_id}',
+                 f'CSeq: {self.register_cseq} REGISTER',
+                 f'Contact: <sip:{self.username}@{local_ip}:{self.sip_port}>',
+                 'Expires: 3600']
+        if challenge:
+            realm, nonce = challenge['realm'], challenge['nonce']
+            cnonce = f'{random.randrange(2**64):016x}'
+            nc = '00000001'
+            ha1 = hashlib.md5(f'{self.username}:{realm}:{self.password}'.encode()).hexdigest()
+            ha2 = hashlib.md5(f'REGISTER:{uri}'.encode()).hexdigest()
+            if challenge.get('qop'):
+                digest = hashlib.md5(f'{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}'.encode()).hexdigest()
+                auth = (f'Digest username="{self.username}", realm="{realm}", '
+                        f'nonce="{nonce}", uri="{uri}", response="{digest}", '
+                        f'algorithm=MD5, qop=auth, nc={nc}, cnonce="{cnonce}"')
+            else:
+                digest = hashlib.md5(f'{ha1}:{nonce}:{ha2}'.encode()).hexdigest()
+                auth = (f'Digest username="{self.username}", realm="{realm}", '
+                        f'nonce="{nonce}", uri="{uri}", response="{digest}", algorithm=MD5')
+            if challenge.get('opaque'):
+                auth += f', opaque="{challenge["opaque"]}"'
+            lines.append('Authorization: ' + auth)
+        lines.extend(['Content-Length: 0', '', ''])
+        self.sip.sendto('\r\n'.join(lines).encode(), peer)
+
+    @staticmethod
+    def digest_challenge(value: str) -> dict[str, str]:
+        result = {}
+        for key, quoted, bare in re.findall(
+                r'(\w+)=(?:"([^"]*)"|([^,\s]+))', value):
+            result[key.lower()] = quoted or bare
+        return result
+
+    def response(self, code: int, reason: str, headers: dict[str, str],
+                 peer: tuple[str, int], body: str = '', extra: list[str] | None = None,
+                 tag: str | None = None) -> None:
+        lines = [f'SIP/2.0 {code} {reason}']
+        for name in ('via', 'from'):
+            if headers.get(name):
+                lines.append(f'{name.title()}: {headers[name]}')
+        if headers.get('to'):
+            to = sip_tagged_to(headers['to'], tag) if tag else headers['to']
+            lines.append(f'To: {to}')
+        for name in ('call-id', 'cseq'):
+            if headers.get(name):
+                lines.append(f'{name.title()}: {headers[name]}')
+        if extra:
+            lines.extend(extra)
+        payload = body.encode('ascii')
+        lines.append(f'Content-Length: {len(payload)}')
+        wire = ('\r\n'.join(lines) + '\r\n\r\n').encode('ascii') + payload
+        self.sip.sendto(wire, peer)
+
+    def on_sip(self) -> None:
+        data, peer = self.sip.recvfrom(65535)
+        first, headers, body = parse_sip(data)
+        parts = first.split()
+        if not parts:
+            return
+        if first.startswith('SIP/2.0'):
+            parts = first.split()
+            cseq = headers.get('cseq', '')
+            if len(parts) > 1 and cseq.upper().endswith('REGISTER'):
+                if parts[1] in ('401', '407'):
+                    value = headers.get('www-authenticate') or headers.get('proxy-authenticate', '')
+                    challenge = self.digest_challenge(value)
+                    if challenge.get('realm') and challenge.get('nonce'):
+                        self.send_register(challenge)
+                elif parts[1] == '200':
+                    print(f'[sip] registered {self.username}@{self.registrar}')
+            return
+        method = parts[0].upper()
+        if self.verbose:
+            print(f'[sip] {method} from {peer[0]}:{peer[1]}')
+
+        if method == 'OPTIONS':
+            self.response(200, 'OK', headers, peer, extra=['Allow: INVITE, ACK, BYE, OPTIONS'])
+            return
+        if method == 'INVITE':
+            media = parse_g711_sdp(body, peer, self.payload_type)
+            if media is None:
+                self.response(488, 'Not Acceptable Here', headers, peer,
+                              extra=['Accept: application/sdp'])
+                return
+            call_id = headers.get('call-id', '')
+            if self.call and self.call.call_id != call_id:
+                self.response(486, 'Busy Here', headers, peer)
+                return
+            if not self.call:
+                if self.kernel_dispatch:
+                    from dial_kernel_dispatch import LiveKernelModem
+                    card = LiveKernelModem()
+                else:
+                    card = Card(force_info_after_v8=self.force_info_after_v8)
+                card.boot()
+                card.configure_modem('answer', self.law)
+                self.call = Call(peer, media, call_id,
+                                 f'{random.randrange(2**32):08x}', card)
+                print(f'[call] answering {peer[0]}:{peer[1]}, RTP -> '
+                      f'{media[0]}:{media[1]}, {self.codec_name}/8000')
+            call = self.call
+            local_ip = local_address_for(peer, self.bind, self.advertised)
+            sdp = (f'v=0\r\no=eicon 0 0 IN IP4 {local_ip}\r\n'
+                   f's=Eicon ADSP modem\r\nc=IN IP4 {local_ip}\r\n'
+                   f't=0 0\r\nm=audio {self.rtp_port} RTP/AVP {self.payload_type}\r\n'
+                   f'a=rtpmap:{self.payload_type} {self.codec_name}/8000\r\na=sendrecv\r\n'
+                   f'a=ptime:20\r\n')
+            self.response(200, 'OK', headers, peer, sdp,
+                          [f'Contact: <sip:eicon@{local_ip}:{self.sip_port}>',
+                           'Content-Type: application/sdp'], call.local_tag)
+            return
+        if method in ('BYE', 'CANCEL'):
+            tag = self.call.local_tag if self.call else None
+            self.response(200, 'OK', headers, peer, tag=tag)
+            if self.call:
+                print(f'[call] ended after {self.call.packets} RTP packets, '
+                      f'{self.call.samples} samples')
+                self.call = None
+            return
+        if method == 'ACK':
+            return
+        self.response(405, 'Method Not Allowed', headers, peer,
+                      extra=['Allow: INVITE, ACK, BYE, OPTIONS'])
+
+    def on_rtp(self) -> None:
+        packet, peer = self.rtp.recvfrom(65535)
+        call = self.call
+        if not call:
+            return
+        parsed = rtp_payload(packet, self.payload_type)
+        if parsed is None:
+            return
+        _, _, payload = parsed
+        if not payload:
+            return
+        # NAT symmetric-RTP: reply to the address that actually sent media.
+        call.rtp_peer = peer
+        if self.capture:
+            destination_ip = local_address_for(call.sip_peer, self.bind,
+                                                self.advertised)
+            self.capture.write(packet, payload, peer,
+                               (destination_ip, self.rtp_port), False)
+        if len(call.rx) < 8000:
+            call.rx.extend(payload)
+
+    def media_tick(self, now: float) -> None:
+        call = self.call
+        if not call:
+            return
+        # Never manufacture or drop modem-clock samples to chase wall time.
+        # If the process wakes late, run each elapsed 160-sample quantum.
+        while now >= call.next_tick and self.call is call:
+            linear: list[int] = []
+            for _ in range(SAMPLES_PER_PACKET):
+                received = call.rx.popleft() if call.rx else self.silence
+                # Ignore the FXS off-hook transient before presenting the
+                # seized bearer to the modem. The Courier/ATA produces a
+                # near-full-scale pulse about 100 ms after SIP answer; without
+                # this guard DIAL falsely selects V.OWN before ANSam starts.
+                code = self.silence if call.samples < self.rx_guard_samples else received
+                linear.append(call.card.frame_fast(code, call.samples))
+                call.samples += 1
+            switches = call.card.switches[call.logged_overlay_switches:]
+            for sample, page, wanted in switches:
+                overlay = call.card.overlays.get(wanted)
+                overlay_name = overlay[1].split(' Version')[0] if overlay else '?'
+                forced = ' [FORCED post-V.8 fallback]' if sample in call.card.forced_info_samples else ''
+                print(f'[adsp] sample {sample} ({sample / 8000:.3f}s): '
+                      f'overlay request page {page} {PAGE_NAMES.get(page, "?")} '
+                      f'-> 0x{wanted:04x} {overlay_name} served{forced}')
+            call.logged_overlay_switches = len(call.card.switches)
+            trn_progress = call.card.dm[0x3FC2]
+            if trn_progress != call.trn_progress:
+                info_rx = ''
+                if call.card.dm[0x3FB0] == 7:
+                    info_rx = (f'; INFO_RX event=0x{call.card.dm[0x0685]:04x} '
+                               f'complete=0x{call.card.dm[0x0686]:04x} '
+                               f'parser=0x{call.card.dm[0x16BD]:04x}')
+                print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
+                      f'TrnProgress 0x{call.trn_progress & 0xffff:04x} -> '
+                      f'0x{trn_progress:04x}; Rstatus_ch=0x{call.card.dm[0x3FC0]:04x} '
+                      f'Rstatus=0x{call.card.dm[0x3FC1]:04x}{info_rx}')
+                call.trn_progress = trn_progress
+            bootpage = call.card.dm[0x3FB0]
+            if bootpage != call.bootpage:
+                old = (f'{call.bootpage} {PAGE_NAMES.get(call.bootpage, "?")}'
+                       if call.bootpage >= 0 else '-')
+                overlay = call.card.overlays.get(call.card.resident)
+                overlay_name = overlay[1].split(' Version')[0] if overlay else '?'
+                if bootpage in PAGE_NAMES:
+                    print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
+                          f'bootpage {old} -> {bootpage} '
+                          f'{PAGE_NAMES[bootpage]}, overlay=0x{call.card.resident:04x} '
+                          f'{overlay_name}')
+                else:
+                    signed = bootpage - 0x10000 if bootpage & 0x8000 else bootpage
+                    print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
+                          f'shared boot word {old} -> 0x{bootpage:04x} ({signed}); '
+                          'no valid overlay page')
+                call.bootpage = bootpage
+            if self.capture:
+                self.capture.write_diag(call.samples, call.card)
+            payload = self.codec.encode_g711(linear)
+            marker = 0x80 if call.packets == 0 else 0
+            header = struct.pack('!BBHII', 0x80, marker | self.payload_type,
+                                 call.tx_seq, call.tx_timestamp, call.ssrc)
+            packet = header + payload
+            self.rtp.sendto(packet, call.rtp_peer)
+            if self.capture:
+                source_ip = local_address_for(call.sip_peer, self.bind, self.advertised)
+                self.capture.write(packet, payload, (source_ip, self.rtp_port),
+                                   call.rtp_peer, True)
+            call.tx_seq = (call.tx_seq + 1) & 0xFFFF
+            call.tx_timestamp = (call.tx_timestamp + SAMPLES_PER_PACKET) & 0xFFFFFFFF
+            call.packets += 1
+            call.next_tick += TICK_SECONDS
+
+    def run(self) -> None:
+        print(f'[sip] listening on {self.bind}:{self.sip_port}; RTP '
+              f'{self.bind}:{self.rtp_port}; {self.codec_name} only')
+        try:
+            while self.running:
+                now = time.monotonic()
+                timeout = (0.25 if not self.call else
+                           max(0.0, min(0.25, self.call.next_tick - now)))
+                for key, _ in self.selector.select(timeout):
+                    key.data()
+                self.media_tick(time.monotonic())
+        finally:
+            if self.capture:
+                self.capture.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--bind', default='0.0.0.0')
+    ap.add_argument('--advertise', help='IP address placed in Contact and SDP')
+    ap.add_argument('--sip-port', type=int, default=5060)
+    ap.add_argument('--rtp-port', type=int, default=4000)
+    ap.add_argument('--registrar', help='optional SIP registrar host[:port]')
+    ap.add_argument('--username', help='registrar account/user')
+    ap.add_argument('--password', default='', help='registrar password')
+    ap.add_argument('--rx-guard-ms', type=int, default=1000,
+                    help='discard FXS startup audio before modem RX (default: 1000)')
+    ap.add_argument('--law', choices=('pcmu', 'pcma'), default='pcmu',
+                    help='transparent RTP G.711 law (default: pcmu)')
+    ap.add_argument('--capture-prefix', type=Path,
+                    help='save both RTP directions plus raw G.711 and decoded WAV files')
+    ap.add_argument('--force-info-after-v8', action='store_true',
+                    help='diagnostic: replace a post-V.8 low-level fallback with page 7 INFO')
+    ap.add_argument('--kernel-dispatch', action='store_true',
+                    help='drive TIKRNL through the SPORT0 kernel dispatcher')
+    ap.add_argument('-v', '--verbose', action='store_true')
+    args = ap.parse_args()
+    endpoint = EiconSipEndpoint(args.bind, args.sip_port, args.rtp_port,
+                                args.advertise, args.verbose,
+                                args.capture_prefix, args.law, args.registrar,
+                                args.username, args.password, args.rx_guard_ms,
+                                args.force_info_after_v8, args.kernel_dispatch)
+    signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
+    signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
+    endpoint.run()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

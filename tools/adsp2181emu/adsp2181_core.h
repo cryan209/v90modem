@@ -34,6 +34,9 @@ adsp2181_t *adsp2181_create(void);
 void adsp2181_destroy(adsp2181_t *cpu);
 void adsp2181_reset(adsp2181_t *cpu);
 int adsp2181_run(adsp2181_t *cpu, int cycles);
+uint16_t adsp2181_sport0_tdm_frame(adsp2181_t *cpu, int active_slot,
+                                   int dispatch_slot, uint16_t active_word,
+                                   uint16_t idle_word, int cycles_per_slot);
 /* IDMA boot hold (BMODE=1, MMAP=0): the core executes nothing until an IDMA
  * write commits program memory location 0, then starts at PM 0. */
 void adsp2181_set_idma_boot_hold(adsp2181_t *cpu, int on);
@@ -65,6 +68,8 @@ void adsp2181_set_flagin(adsp2181_t *cpu, int asserted);
 int adsp2181_flagin(const adsp2181_t *cpu);
 uint16_t adsp2181_icntl(const adsp2181_t *cpu);
 int adsp2181_idle(const adsp2181_t *cpu);
+void adsp2181_set_ar(adsp2181_t *cpu, uint16_t value);
+uint16_t adsp2181_sr0(const adsp2181_t *cpu);
 uint16_t adsp2181_sr1(const adsp2181_t *cpu);
 
 #ifdef __cplusplus

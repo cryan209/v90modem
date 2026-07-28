@@ -227,6 +227,16 @@ DM_RX_BUFFER = 0x2B00
 DM_TX_BUFFER = 0x2B01
 DM_TDM_OUTPUT_LATCH = 0x2E52
 
+# V.22FC's common 8 kHz line-side TX adapter (overlay 0x0271).  The overlay
+# publishes DM_PAGE_TX_SAMPLE through DM_TX_BUFFER_POINTER.  PM 0x1d06 fills
+# the 20-word circular queue and PM 0x1d46 consumes one sample per frame.
+DM_PAGE_TX_COUNT = 0x3761
+DM_PAGE_TX_SAMPLE = 0x3764
+DM_PAGE_TX_WRITE_POINTER = 0x3765
+DM_PAGE_TX_READ_POINTER = 0x3768
+DM_PAGE_TX_RING = 0x36E0
+DM_PAGE_TX_RING_WORDS = 0x14
+
 
 def load_pm_words(cpu, path: Path) -> None:
     data = path.read_bytes()
@@ -1674,6 +1684,10 @@ def probe_direct_tikrnl_g711(cpu, samples: int, code: int,
     ADSP.adsp2181_set_callbacks(cpu, *callbacks)
     changes = 0
     prev = None
+    page_tx_seen = False
+    page_tx_counts: list[int] = []
+    page_tx_samples: list[int] = []
+    page_tx_ring_nonzero_max = 0
     for index in range(samples):
         rx_index = index
         rx_code = stimulus[index] if stimulus else (code & 0xFF)
@@ -1721,11 +1735,18 @@ def probe_direct_tikrnl_g711(cpu, samples: int, code: int,
             ADSP.adsp2181_set_irq(cpu, 3, 0)
             ADSP.adsp2181_run(cpu, 20000)
             bridge_tx_words.extend(tx_words[tx_mark:])
+        tx_pointer = dm[DM_TX_BUFFER_POINTER] & 0x3FFF
+        if tx_pointer == DM_PAGE_TX_SAMPLE:
+            page_tx_seen = True
+            page_tx_counts.append(dm[DM_PAGE_TX_COUNT])
+            page_tx_samples.append(dm[DM_PAGE_TX_SAMPLE])
+            page_tx_ring_nonzero_max = max(
+                page_tx_ring_nonzero_max,
+                sum(dm[DM_PAGE_TX_RING + n] != 0
+                    for n in range(DM_PAGE_TX_RING_WORDS)))
         now = (dm[0x3F08], dm[0x3F09], dm[0x3FB0], dm[0x3FB2],
                dm[0x3FB3], dm[0x3FC1], dm[0x31A9], dm[0x31AA],
-               dm[DM_TX_BUFFER_POINTER],
-               dm[dm[DM_TX_BUFFER_POINTER] & 0x3FFF]
-               if dm[DM_TX_BUFFER_POINTER] else 0)
+               dm[DM_TX_BUFFER_POINTER], dm[tx_pointer] if tx_pointer else 0)
         if now != prev:
             changes += 1
             if changes <= 12:
@@ -1744,6 +1765,19 @@ def probe_direct_tikrnl_g711(cpu, samples: int, code: int,
         source_desc = (f"{stimulus_kind} {stimulus_freq:g}Hz "
                        f"amp={stimulus_amp}")
     print(f"[g711] fed {samples} {source_desc}; line-state changes={changes}")
+    if page_tx_seen:
+        from collections import Counter
+        sample_counts = Counter(page_tx_samples)
+        queue_min = min(page_tx_counts) if page_tx_counts else 0
+        queue_max = max(page_tx_counts) if page_tx_counts else 0
+        print("[g711] V.22FC page TX adapter DM3764: "
+              f"frames={len(page_tx_samples)} "
+              f"nonzero={sum(value != 0 for value in page_tx_samples)} "
+              f"queue-count={queue_min}..{queue_max} "
+              f"write=DM{dm[DM_PAGE_TX_WRITE_POINTER] & 0x3fff:04x} "
+              f"read=DM{dm[DM_PAGE_TX_READ_POINTER] & 0x3fff:04x} "
+              f"ring-nonzero-max={page_tx_ring_nonzero_max}/{DM_PAGE_TX_RING_WORDS} "
+              f"top={','.join(f'{value:04x}:{count}' for value, count in sample_counts.most_common(8))}")
     if bridged_words:
         from collections import Counter
         counts = Counter(bridged_words)

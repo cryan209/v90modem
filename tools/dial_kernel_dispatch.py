@@ -79,16 +79,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dial_tikrnl_drive import (ADSP, DIAL_ID, KERNEL, TASK_ENTRY, TIKRNL,
-                               Card, linear_to_mulaw)
+from dial_tikrnl_drive import (ADSP, DIAL_ID, KERNEL, KERNEL_IDLE,
+                               TASK_ENTRY, TIKRNL, Card, linear_to_mulaw)
 
 for _name, _args in [('set_callbacks', [ctypes.c_void_p] * 4),
                      ('set_irq', [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
+                     ('sport0_tdm_frame', [ctypes.c_void_p, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_uint16,
+                                           ctypes.c_uint16, ctypes.c_int]),
                      ('watch_dm', [ctypes.c_void_p, ctypes.c_uint16,
                                    ctypes.c_int]),
                      ('imask', [ctypes.c_void_p])]:
     getattr(ADSP, 'adsp2181_' + _name).argtypes = _args
 ADSP.adsp2181_imask.restype = ctypes.c_uint16
+ADSP.adsp2181_sport0_tdm_frame.restype = ctypes.c_uint16
 
 RX_CB = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int)
 TX_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int32)
@@ -114,14 +118,22 @@ DM_DOWNLOAD_REQ = 0x31AA
 
 # Data-pump write/read databases (ADDSP V.90 guide §5.4.1/§5.4.2).
 DM_DB = 0x3EE0
+DM_READ_DB = 0x3F60
+DM_EVENT_STRUCT_PTR = DM_DB + 0x90  # guide §6.3: 8 words + eventcounter
+DM_CHANGE_BITS = DM_DB + 0xC1
+DM_RSTATUS_CH_DBS = DM_DB + 0xC3
+DM_RSTATUS_DBS = DM_DB + 0xC4
+DM_TRNPROG_DBS = DM_DB + 0xC5
 DM_WSTATUS = 0x3EEE
 DM_TRNPROG = 0x3FAD
+DM_LIVE_TRNPROG = 0x3FC2
 DM_BOOTPAGE = 0x3FB0
 V8_DOWNLOAD = 0x025F
 FSK_OWN_DOWNLOAD = 0x025C
 V_OWN_DOWNLOAD = 0x026D
+V90_D_DOWNLOAD = 0x026A
 DM_COUPLED_BUFFER_MODE = 0x32F0
-DM_LINE_DESCRIPTOR = 0x3F08
+DM_LINE_RX = 0x3F08
 DM_RX_BUFFER_POINTER = 0x3F0F
 DM_TX_BUFFER_POINTER = 0x3FB4
 DM_RX_BUFFER = 0x2B00
@@ -162,6 +174,11 @@ class KernelDispatch:
         self.sample = 0xFF
         self.tx: list[int] = []
         self.doorbell: collections.Counter = collections.Counter()
+        self.events: collections.Counter = collections.Counter()
+        self.host_event_counter: int | None = None
+        self.published_rstatus_ch = 0
+        self.published_rstatus = 0
+        self.published_trnprogress = 0
         self.commands: list[int] = []
         self.started = False
         # Keep the ctypes trampolines alive for the life of the object.
@@ -215,10 +232,70 @@ class KernelDispatch:
                 break
         return hist
 
-    def service(self, index: int) -> collections.Counter:
-        """The host half: answer the doorbell, serve overlay downloads."""
+    def strobe_fast(self, budget: int = 300000) -> None:
+        """One SPORT0 slot without per-instruction Python tracing."""
+        card = self.card
+        ADSP.adsp2181_set_irq(card.cpu, SPORT0_RX, 1)
+        ADSP.adsp2181_set_irq(card.cpu, SPORT0_RX, 0)
+        ADSP.adsp2181_run(card.cpu, budget)
+        if not ADSP.adsp2181_idle(card.cpu):
+            raise RuntimeError('kernel SPORT0 dispatch did not return to IDLE')
+
+    def tdm_frame(self, active_word: int, active_slot: int = 0,
+                  dispatch_slot: int | None = None, idle_word: int = 0x00ff,
+                  budget: int = 300000) -> int:
+        """Drive one 8 kHz PRI frame, dispatching this task on one timeslot."""
+        if dispatch_slot is None:
+            dispatch_slot = active_slot
+        return ADSP.adsp2181_sport0_tdm_frame(
+            self.card.cpu, active_slot, dispatch_slot, active_word & 0xffff,
+            idle_word & 0xffff, budget)
+
+    def poll_events(self, index: int) -> None:
+        """Consume the documented DSP-to-host event ring.
+
+        ADDSP guide §§5.1.3.1, 5.5 and 6.3 specify an eight-word ring followed
+        by a monotonically wrapping event counter.  The host keeps its own
+        counter; reading an event requires no DSP acknowledgement.
+        """
+        dm = self.card.dm
+        pointer = dm[DM_EVENT_STRUCT_PTR] & 0x3fff
+        if not pointer or pointer + 8 >= 0x4000:
+            return
+        dsp_counter = dm[pointer + 8]
+        if self.host_event_counter is None:
+            # Calls start with a fresh event structure.  If firmware residue
+            # says otherwise, retain the newest eight events as required by
+            # the guide rather than interpreting overwritten ring entries.
+            self.host_event_counter = max(0, dsp_counter - 8)
+        pending = (dsp_counter - self.host_event_counter) & 0xffff
+        if pending > 8:
+            if self.log:
+                print(f'  sample {index}: lost {pending - 8} DSP events')
+            self.host_event_counter = (dsp_counter - 8) & 0xffff
+            pending = 8
+        for _ in range(pending):
+            event = dm[pointer + (self.host_event_counter & 7)]
+            self.host_event_counter = (self.host_event_counter + 1) & 0xffff
+            self.events[event] += 1
+            if event == 0x0001:
+                self.published_rstatus_ch = dm[DM_RSTATUS_CH_DBS]
+            elif event == 0x0002:
+                self.published_rstatus = dm[DM_RSTATUS_DBS]
+            elif event == 0x0003:
+                self.published_trnprogress = dm[DM_TRNPROG_DBS]
+            if self.log and event in (0x0001, 0x0002, 0x0003):
+                print(f'  sample {index}: data-pump event {event:04x}; '
+                      f'change={dm[DM_CHANGE_BITS]:04x} '
+                      f'status={self.published_rstatus_ch:04x}/'
+                      f'{self.published_rstatus:04x} '
+                      f'trn={self.published_trnprogress:04x}')
+
+    def service(self, index: int, fast: bool = False) -> collections.Counter:
+        """The host half: consume events, answer doorbells and serve downloads."""
         dm = self.card.dm
         hist: collections.Counter = collections.Counter()
+        self.poll_events(index)
         bits = dm[DM_DOORBELL]
         if bits:
             dm[DM_DOORBELL] = 0
@@ -243,7 +320,11 @@ class KernelDispatch:
             if self.log:
                 print(f'  sample {index}: served 0x{wanted:04x} {description}')
         if bits & 0x0002:
-            hist.update(self.resume(DM_ENTRIES + 1, index))
+            hist.update(self.resume(DM_ENTRIES + 1, index, fast=fast))
+            # BOOTFINISHED is a one-communication-cycle acknowledgement, not
+            # persistent modem configuration. The MIPS host clears it after
+            # dispatching the registered completion.
+            dm[DM_WSTATUS] &= ~0x1000
         return hist
 
     def assign_pcm_buffers(self) -> None:
@@ -258,7 +339,8 @@ class KernelDispatch:
         """Encode ADSP-2181 CALL target, as kernel PM 0x0294-0x0298 does."""
         return 0x1C000F | ((target & 0x3FFF) << 4)
 
-    def resume(self, entry_slot: int, index: int) -> collections.Counter:
+    def resume(self, entry_slot: int, index: int,
+               fast: bool = False) -> collections.Counter:
         """Hand one SPORT0 dispatch to a registered TIKRNL entry.
 
         TIKRNL has patched PM 0x02B9 to CALL 0x06FC, so a completion queued in
@@ -273,7 +355,14 @@ class KernelDispatch:
         saved = self.card.pm[PM_FOREGROUND_SLOT]
         self.card.pm[PM_FOREGROUND_SLOT] = self._call_word(entry)
         try:
-            hist = self.strobe()
+            if fast:
+                ADSP.adsp2181_call(self.card.cpu, entry, KERNEL_IDLE)
+                ADSP.adsp2181_run(self.card.cpu, 300_000)
+                if not ADSP.adsp2181_idle(self.card.cpu):
+                    raise RuntimeError('overlay completion did not return to IDLE')
+                hist = collections.Counter()
+            else:
+                hist = self.strobe()
         finally:
             self.card.pm[PM_FOREGROUND_SLOT] = saved
         if self.log:
@@ -304,6 +393,19 @@ class KernelDispatch:
         dm[DM_DB + 0x01] = 0x048C if calling else 0x0484
         dm[DM_DB + 0x02] = 0x0030
         dm[DM_DB + 0x03] = 0xF0FD
+        # Digital-side V.90 call identity. Without these CAI-equivalent
+        # fields V.8 completes correctly but clears its PCM capability bit and
+        # deliberately selects page 1/V.22.
+        dm[DM_DB + 0x04] = 0x6000  # V90_DPCM + digital network (§5.3.1)
+        dm[DM_DB + 0x28] = 0x0001  # negotiate through V.8
+        dm[DM_DB + 0x29] = 0x8100  # V.90 + V.34 modulation mask
+        dm[DM_DB + 0x79] = 0x003F
+        dm[DM_DB + 0x7A] = 0xFFFF
+        dm[DM_DB + 0x7B] = 0x03B7
+        dm[DM_DB + 0x7C] = 0x000E
+        dm[DM_DB + 0x7D] = 0x0015
+        dm[DM_DB + 0x7E] = 0x000E
+        dm[DM_DB + 0x7F] = 0x0015
         dm[DM_WSTATUS] = 0x2000
         dm[DM_DB + 0x0F] = 0x0001
         dm[DM_DB + 0x10] = 0x0100
@@ -312,7 +414,7 @@ class KernelDispatch:
         # the line words at 0x3F08/0x3F09.
         self.assign_pcm_buffers()
 
-    def load_v8(self, index: int) -> collections.Counter:
+    def load_v8(self, index: int, fast: bool = False) -> collections.Counter:
         """Perform the host-supervisor DIAL -> V.8 decision (§5.4.2.1)."""
         dm = self.card.dm
         dm[DM_BOOTPAGE] = 6
@@ -322,10 +424,122 @@ class KernelDispatch:
         if description is None:
             raise RuntimeError('V.8 overlay 0x025f is unavailable')
         dm[DM_WSTATUS] = 0x1000       # BOOTFINISHED
-        hist = self.resume(DM_ENTRIES + 1, index)
+        hist = self.resume(DM_ENTRIES + 1, index, fast=fast)
+        dm[DM_WSTATUS] &= ~0x1000
         if self.log:
             print(f'  sample {index}: supervisor loaded V.8 ({description})')
         return hist
+
+
+class LiveKernelModem:
+    """Card-compatible live modem using the real SPORT0 kernel dispatcher."""
+
+    def __init__(self, channel: int = 0):
+        self.driver = KernelDispatch()
+        self.card = self.driver.card
+        self.dm = self.card.dm
+        self.pm = self.card.pm
+        self.overlays = self.card.overlays
+        self.switches = self.card.switches
+        self.forced_info_samples = self.card.forced_info_samples
+        self.resident = 0
+        self.v8_loaded = False
+        if not 0 <= channel < 32:
+            raise ValueError('PRI channel must be in range 0..31')
+        self.channel = channel
+
+    def boot(self) -> None:
+        driver, card, dm = self.driver, self.card, self.dm
+        driver.boot()
+        for _ in range(32):
+            driver.strobe_fast()
+            if dm[DM_CMD_DESC]:
+                break
+        else:
+            raise RuntimeError('kernel foreground did not initialise command ring')
+        if not driver.push(TASK_ENTRY):
+            raise RuntimeError('could not queue TIKRNL task entry')
+        for _ in range(32):
+            driver.strobe_fast()
+            if dm[DM_ENTRIES] and self.pm[PM_FOREGROUND_SLOT] != driver._call_word(PM_DISPATCH):
+                break
+        else:
+            raise RuntimeError('kernel did not register TIKRNL')
+        for base_id in (V_OWN_DOWNLOAD, FSK_OWN_DOWNLOAD):
+            entry = card.overlays.get(base_id)
+            if entry is None:
+                raise RuntimeError(f'missing base overlay 0x{base_id:04x}')
+            card._download(entry[0])
+        card.download_overlay(DIAL_ID)
+        self.resident = card.resident
+
+    def configure_modem(self, role: str, law: str = 'pcmu') -> None:
+        if law != 'pcmu':
+            raise NotImplementedError('kernel-dispatch live mode currently supports PCMU')
+        if role != 'answer':
+            raise NotImplementedError('kernel-dispatch live mode currently supports answer mode')
+        # The MIPS channel assignment normally selects the SPORT companding
+        # table. TIKRNL defaults to A-law; select the RTP bearer law before
+        # DIAL snapshots it into INFO0D_setup bit 6.
+        self.card.configure_g711_law(law)
+        # Kernel service 0x001e identifies the assigned channel's companding
+        # descriptor: 0x3c27 is µ-law, 0x3c07 is A-law. The MIPS assignment
+        # normally writes this before TIKRNL configures its per-line adapter.
+        self.dm[0x2F22] = 0x3C27 if law == 'pcmu' else 0x3C07
+        self.driver.program_v8_call(calling=False)
+        self.card._run(0x08F1, 200_000)
+        self.card._run(0x13CC, 1_000_000)
+
+    def _load_v90d(self) -> None:
+        """Perform the closed supervisor's INFO -> V.90 DPCM handoff."""
+        driver, card, dm = self.driver, self.card, self.dm
+        dm[DM_BOOTPAGE] = 14
+        dm[DM_DOWNLOAD_FLAG] = 1
+        dm[DM_DOWNLOAD_REQ] = V90_D_DOWNLOAD
+        description = card.download_overlay(V90_D_DOWNLOAD)
+        if description is None:
+            raise RuntimeError('V.90 DPCM overlay 0x026a is unavailable')
+        driver.assign_pcm_buffers()
+        dm[DM_WSTATUS] = 0x1000
+        # INFO has already yielded at the supervisor seam; dispatch the
+        # registered overlay completion directly before the next TDM frame,
+        # equivalent to the MIPS IDMA foreground handback.
+        card._run(dm[DM_ENTRIES + 1], 300_000)
+        dm[DM_WSTATUS] &= ~0x1000
+        # Consume INFO's pending completion doorbell. The handoff above has
+        # already dispatched the now-V90D entry; service() must not dispatch
+        # that same slot a second time in this sample.
+        dm[DM_DOORBELL] = 0
+
+    def frame_fast(self, code: int, index: int) -> int:
+        driver, card, dm = self.driver, self.card, self.dm
+        before = card.resident
+        driver.tdm_frame(code, self.channel)
+        # The closed line-follow-up supervisor selects V90D only after INFO
+        # publishes its real 0x003b completion. State 0x0037 is still the
+        # §9.2.1.1.5-.7 L1/L2 and INFO1 exchange; forcing the page there makes
+        # the digital modem silent while the analogue peer is still in Tone A.
+        if (card.resident == 0x0260
+                and dm[DM_LIVE_TRNPROG] == 0x003b):
+            self._load_v90d()
+        driver.service(index, fast=True)
+        if card.resident == V8_DOWNLOAD and not self.v8_loaded:
+            self.v8_loaded = True
+            dm[DM_LINE_RX] |= 0x0020
+            self.card._run(dm[DM_ENTRIES], 200_000)
+        elif (not self.v8_loaded and not (dm[DM_DB + 1] & 0x0080)):
+            driver.load_v8(index, fast=True)
+            self.v8_loaded = True
+        if card.resident != before:
+            card.switches.append((index, dm[DM_BOOTPAGE], card.resident))
+        self.resident = card.resident
+        # The PRI timeslot-to-SPORT TX bridge still needs the MIPS channel
+        # assignment descriptor.  TIKRNL nevertheless publishes the exact
+        # signed-linear sample through its assigned one-word TX buffer, just
+        # as the direct harness reads it after the continuation.
+        pointer = dm[DM_TX_BUFFER_POINTER] & 0x3fff
+        value = dm[pointer] if pointer else 0
+        return value - 0x10000 if value & 0x8000 else value
 
 
 def main() -> int:
@@ -435,7 +649,7 @@ def main() -> int:
                         ADSP.adsp2181_watch_dm(card.cpu, address, 1)
                 # The reconstructed single line must remain selected by the
                 # kernel's line dispatcher after the completion returns.
-                dm[DM_LINE_DESCRIPTOR] |= 0x0020
+                dm[DM_LINE_RX] |= 0x0020
                 totals.update(card._run(dm[DM_ENTRIES], 200000))
                 v8_tx_start = len(card_driver.tx)
                 print(f'[host] sample {index}: TIKRNL selected V.8; '

@@ -68,8 +68,15 @@ Overlay images come from the card-type 56 (PRI 30M / .F34) download set:
     python3 tools/eicon_dsp_extract.py docs/firmware/dspdload.bin \
         --card-type 56 --match Overlay -o artifacts/eicon-dsp/overlays
 
+The harness can also activate calling or answering operation by writing the
+ADDSP §5.4.1 database directly.  It invokes both halves of the real sample
+schedule: the page/RX entry and TIKRNL's registered PM 0x06FC continuation.
+This produces genuine modem TX without MIPS, IDI, call objects or timeslots:
+
 Usage:
     python3 tools/dial_tikrnl_drive.py --freq 2100 --frames 200
+    python3 tools/dial_tikrnl_drive.py --role answer --freq 0 --frames 12000 \\
+        --tx-out /tmp/eicon-answer.s16 --g711-out /tmp/eicon-answer.alaw
 """
 from __future__ import annotations
 
@@ -88,22 +95,31 @@ for _name, _args in [('reset', [ctypes.c_void_p]), ('pm', [ctypes.c_void_p]),
                      ('run', [ctypes.c_void_p, ctypes.c_int]),
                      ('pc', [ctypes.c_void_p]), ('idle', [ctypes.c_void_p]),
                      ('set_pc', [ctypes.c_void_p, ctypes.c_uint16]),
-                     ('call', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16])]:
+                     ('call', [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]),
+                     ('set_ar', [ctypes.c_void_p, ctypes.c_uint16])]:
     getattr(ADSP, 'adsp2181_' + _name).argtypes = _args
 ADSP.adsp2181_pm.restype = ctypes.POINTER(ctypes.c_uint32)
 ADSP.adsp2181_dm.restype = ctypes.POINTER(ctypes.c_uint16)
 ADSP.adsp2181_pc.restype = ctypes.c_uint16
 ADSP.adsp2181_idle.restype = ctypes.c_int
+ADSP.adsp2181_sr0.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_sr0.restype = ctypes.c_uint16
+ADSP.adsp2181_sr1.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_sr1.restype = ctypes.c_uint16
 
 KERNEL = 'artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel'
 TIKRNL = 'artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task'
 OVERLAYS = 'artifacts/eicon-dsp/overlays'   # card-type 56 (PRI 30M / .F34) set
 DIAL_ID = 0x0262                            # the bootpage the card starts on
+V_OWN_ID = 0x026D                           # base routines under partial pages
+FSK_OWN_ID = 0x025C                         # base routines under DIAL/FSK/FAX
 
 # TIKRNL entry points (download 0x0258).
 TASK_ENTRY = 0x0672      # download symbol 0: init + register with the kernel
 FRAME_ENTRY = 0x06BB     # per-frame loop head: command dispatch -> overlay
 FRAME_ENTRY_NO_HOST = 0x06C1  # same loop, past the host-command fetch/dispatch
+SAMPLE_CONTINUATION = 0x06FC  # registered kernel callback: RX/TX second half
+G711_ENCODE_ENTRY = 0x1810    # TIKRNL's resident signed-linear -> G.711 routine
 KERNEL_IDLE = 0x02A8     # return address for a task call
 
 # Task entry table registered with the kernel at init (PM 0x069C, SR0=0x31BA).
@@ -128,7 +144,9 @@ DM_LINE_TX = 0x3F09
 DM_BOOTPAGE = 0x3FB0     # bootpage_nr / DIAL state selector
 DM_VEC_A = 0x3FB2        # DIAL primary action vector
 DM_VEC_B = 0x3FB3        # DIAL secondary action vector
+DM_TX_POINTER = 0x3FB4   # pointer to current signed-linear TX sample
 DM_STATUS = 0x3FC1
+DM_DB = 0x3EE0          # ADDSP data-pump database base (§5.4.1)
 
 # TIKRNL private state.
 DM_BOOTPAGE_TABLE = 0x31D5   # bootpage number -> overlay download id
@@ -169,6 +187,13 @@ def read_words(path: Path) -> dict[int, int]:
     return out
 
 
+def reverse_octet(value: int) -> int:
+    value &= 0xFF
+    value = ((value & 0x55) << 1) | ((value >> 1) & 0x55)
+    value = ((value & 0x33) << 2) | ((value >> 2) & 0x33)
+    return ((value << 4) | (value >> 4)) & 0xFF
+
+
 def linear_to_mulaw(sample: int) -> int:
     sample = max(-32768, min(32767, sample))
     sign = 0x80 if sample < 0 else 0
@@ -189,10 +214,12 @@ class Card:
     """Kernel + TIKRNL task + DIAL overlay on one emulated ADSP-2181."""
 
     def __init__(self, log: bool = False, serve: bool = True,
-                 max_downloads: int = 8, host_dispatch: bool = False):
+                 max_downloads: int = 8, host_dispatch: bool = False,
+                 force_info_after_v8: bool = False):
         self.log = log
         self.serve = serve
         self.max_downloads = max_downloads
+        self.force_info_after_v8 = force_info_after_v8
         # PM 0x06BB-0x06C0 fetches and dispatches a host command.  With no
         # channel assigned there is nothing to fetch, and the walk aliases an
         # overlay's DM 0x0000, so the default entry starts just past it.
@@ -207,6 +234,7 @@ class Card:
         self.served: collections.Counter = collections.Counter()
         self.unserved: collections.Counter = collections.Counter()
         self.switches: list[tuple[int, int, int]] = []     # frame, bootpage, id
+        self.forced_info_samples: list[int] = []
 
     @staticmethod
     def _index_overlays() -> dict[int, tuple[Path, str]]:
@@ -242,6 +270,11 @@ class Card:
             return None
         path, description = entry
         self._download(path)
+        # Do not set WSTATUS.BOOTFINISHED here.  This direct harness resumes
+        # TIKRNL explicitly through DM(0x31BB); adding the ordinary host/kernel
+        # acknowledgement as well completes the download twice.  In particular
+        # FAX/partial pages then leave the page-change strobe asserted and are
+        # destructively reloaded several times per sample.
         self.resident = download_id
         self.served[download_id] += 1
         return description
@@ -272,11 +305,74 @@ class Card:
         self.foreground_slot = self.pm[PM_FOREGROUND_SLOT]
         self.isr_slot = self.pm[PM_ISR_SLOT]
 
-        # Only now is it safe to download the overlay: the task init cleared
-        # PM 0x0900-0x1DFF on its way through.
+        # Only now is it safe to download overlays: task init cleared PM
+        # 0x0900-0x1DFF. The .F34 images are layered partial overlays. DIAL
+        # calls shared routines beyond its own image (notably PM 0x244c and
+        # 0x2c4f), supplied by V.OWN and FSK OWN in the real host flow. Loading
+        # DIAL alone leaves those calls unpopulated and causes unstable V.8
+        # classification/INFO transitions.
+        for base_id in (V_OWN_ID, FSK_OWN_ID):
+            entry = self.overlays.get(base_id)
+            if entry is None:
+                raise SystemExit(f'no extracted base image 0x{base_id:04x}')
+            self._download(entry[0])
         if self.download_overlay(DIAL_ID) is None:
             raise SystemExit(f'no extracted image for download 0x{DIAL_ID:04x}')
         self.served.clear()   # the boot page is not a page *switch*
+
+    def configure_g711_law(self, law: str) -> None:
+        """Select TIKRNL's resident encoder parameter table."""
+        self.dm[0x3309] = 0x35BE if law == 'pcmu' else 0x35B7
+
+    def encode_g711(self, samples: list[int]) -> bytes:
+        """Call TIKRNL's resident G.711 encoder at PM 0x1810.
+
+        The PRI/E1 kernel selects the A-law parameter table at DM 0x3309.
+        PM 0x1810 accepts signed linear PCM in AR and returns the serial-wire
+        bit order in SR1.  Reverse each returned octet to conventional G.711
+        file/RTP bit order.  Run this after modem framing: the subroutine uses
+        core DAG registers that hardware SPORT companding would not disturb.
+        """
+        encoded = bytearray()
+        for sample in samples:
+            ADSP.adsp2181_set_ar(self.cpu, sample & 0xFFFF)
+            ADSP.adsp2181_call(self.cpu, G711_ENCODE_ENTRY, KERNEL_IDLE)
+            ADSP.adsp2181_run(self.cpu, 1000)
+            encoded.append(reverse_octet(ADSP.adsp2181_sr1(self.cpu)))
+        return bytes(encoded)
+
+    def configure_modem(self, role: str, law: str = 'pcmu') -> None:
+        """Activate the data pump directly, without MIPS/IDI call control.
+
+        These are the ADDSP §5.4.1 database writes also made by the Linux
+        driver's modem B1 assignment path.  GEN_SETUP1 bit 3 distinguishes
+        calling (0x048c) from answering (0x0484) operation.
+        """
+        if role == 'idle':
+            return
+        # Tables 12-15 plus V.90-specific §5.3.1 fields. These values are all
+        # resident before the final change_wdb strobe is consumed by DIAL.
+        writes = {
+            DM_DB + 0x00: 0x00C4,
+            DM_DB + 0x01: 0x048C if role == 'calling' else 0x0484,
+            DM_DB + 0x02: 0x0030,
+            DM_DB + 0x04: 0x6000,                     # V90_DPCM + digital network
+            DM_DB + 0x07: 0xF0FD,
+            DM_DB + 0x08: 0x0006, DM_DB + 0x09: 0x0006,
+            DM_DB + 0x0A: 0x00FF, DM_DB + 0x0B: 0x0030,
+            DM_DB + 0x0C: 0x0000,
+            DM_DB + 0x28: 0x0001,                     # V.8
+            DM_DB + 0x29: 0x8100,                     # V.90 + V.34
+            DM_DB + 0x2A: 0x001F, DM_DB + 0x2B: 0xFF00,
+            DM_DB + 0x2C: 0x0003, DM_DB + 0x2D: 0x0003,
+            DM_DB + 0x79: 0x003F, DM_DB + 0x7A: 0xFFFF,
+            DM_DB + 0x7B: 0x03B7 | (0x0040 if law == 'pcma' else 0),
+            DM_DB + 0x7C: 0x000E, DM_DB + 0x7D: 0x0015,
+            DM_DB + 0x7E: 0x000E, DM_DB + 0x7F: 0x0015,
+            DM_DB + 0x0E: 0x2000,
+        }
+        for address, value in writes.items():
+            self.dm[address] = value
 
     def _run(self, entry: int, budget: int) -> collections.Counter:
         """Run the task from one entry point until it yields to the kernel."""
@@ -297,6 +393,26 @@ class Card:
                 break
         return hist
 
+    def _maybe_force_info(self, wanted: int, index: int) -> int:
+        """Diagnostic host policy: replace a post-V.8 fallback with INFO.
+
+        Shipping V.8 normally writes pending page 7 itself. This option tests
+        whether a peer that goes quiet after V.8 is waiting for the host side
+        to start V.34/V.90 Phase 2 rather than accepting the DSP's low-level
+        fallback. It is intentionally opt-in and does not alter natural page-7
+        requests.
+        """
+        page = self.dm[DM_BOOTPAGE]
+        if (self.force_info_after_v8 and index >= 12000
+                and self.resident == 0x025F and page not in (6, 7)
+                and wanted != 0x0260):
+            self.dm[DM_BOOTPAGE] = 7
+            self.dm[DM_DOWNLOAD_REQ] = 0x0260
+            if not self.forced_info_samples or self.forced_info_samples[-1] != index:
+                self.forced_info_samples.append(index)
+            return 0x0260
+        return wanted
+
     def frame(self, rx_code: int, index: int = 0,
               budget: int = 20000) -> collections.Counter:
         """One 8 kHz frame: present a line sample, run TIKRNL's frame loop.
@@ -315,7 +431,13 @@ class Card:
             hist.update(this_pass)
             if not self.serve or not this_pass.get(PM_DOWNLOAD_YIELD):
                 break
-            wanted = self.dm[DM_DOWNLOAD_REQ]
+            wanted = self._maybe_force_info(self.dm[DM_DOWNLOAD_REQ], index)
+            if wanted == self.resident:
+                # The direct completion path can leave the request strobe set
+                # briefly. Resume it, but do not destructively reload the
+                # already-resident partial image or report a new page switch.
+                entry = self.dm[RESUME_DOWNLOAD]
+                continue
             description = self.download_overlay(wanted)
             if description is None:
                 if self.log:
@@ -327,7 +449,47 @@ class Card:
                 print(f'  frame {index}: bootpage {self.dm[DM_BOOTPAGE]:04x} '
                       f'-> served 0x{wanted:04x} {description}')
             entry = self.dm[RESUME_DOWNLOAD]
+
+        # The real kernel invokes the continuation TIKRNL registered at init
+        # once per SPORT sample.  It calls DM(3FB3), consumes DM(3FB4), and
+        # runs the task's TX post-processing.  Calling only the 0x06c1 half
+        # drives page/RX state but silently leaves every transmitter idle.
+        hist.update(self._run(SAMPLE_CONTINUATION, budget))
         return hist
+
+    def frame_fast(self, rx_code: int, index: int = 0,
+                   budget: int = 20000) -> int:
+        """Production version of :meth:`frame` without instruction tracing.
+
+        ``adsp2181_run`` executes the whole pass in C.  The page-change strobe
+        remains set while TIKRNL is yielded to the host, so it is sufficient
+        to detect downloads without the Python per-instruction PC histogram.
+        Returns the current signed-linear transmit sample.
+        """
+        self.dm[DM_LINE_RX] = rx_code & 0xFFFF
+        entry = self.entry
+        for _ in range(self.max_downloads + 1):
+            ADSP.adsp2181_call(self.cpu, entry, KERNEL_IDLE)
+            ADSP.adsp2181_run(self.cpu, budget)
+            if not self.serve or not (self.dm[DM_STATUS] & 0x0100):
+                break
+            wanted = self._maybe_force_info(self.dm[DM_DOWNLOAD_REQ], index)
+            if wanted == self.resident:
+                # Complete a still-asserted request without resetting the
+                # state held in the already-resident partial overlay.
+                entry = self.dm[RESUME_DOWNLOAD]
+                continue
+            description = self.download_overlay(wanted)
+            if description is None:
+                break
+            self.switches.append((index, self.dm[DM_BOOTPAGE], wanted))
+            entry = self.dm[RESUME_DOWNLOAD]
+
+        ADSP.adsp2181_call(self.cpu, SAMPLE_CONTINUATION, KERNEL_IDLE)
+        ADSP.adsp2181_run(self.cpu, budget)
+        pointer = self.dm[DM_TX_POINTER] & 0x3FFF
+        value = self.dm[pointer] if pointer else 0
+        return value - 0x10000 if value & 0x8000 else value
 
 
 def print_bootpage_table(card: Card) -> None:
@@ -351,6 +513,14 @@ def main() -> int:
     ap.add_argument('--freq', type=int, default=2100,
                     help='line tone in Hz (0 = μ-law silence)')
     ap.add_argument('--amp', type=int, default=20000)
+    ap.add_argument('--role', choices=('idle', 'answer', 'calling'),
+                    default='idle',
+                    help='directly activate the modem database in this role; '
+                         'bypasses MIPS, IDI, signalling and bearer assignment')
+    ap.add_argument('--tx-out', type=Path,
+                    help='write DM[3FB4] signed-linear TX samples as s16le')
+    ap.add_argument('--g711-out', type=Path,
+                    help='call TIKRNL PM 0x1810 and write raw A-law octets')
     ap.add_argument('--bootpage-table', action='store_true',
                     help='dump the recovered bootpage -> overlay id table')
     ap.add_argument('--no-serve-overlays', action='store_true',
@@ -369,7 +539,8 @@ def main() -> int:
                 max_downloads=args.max_downloads,
                 host_dispatch=args.host_dispatch)
     card.boot()
-    print(f'[card] kernel + TIKRNL + DIAL up; the task claimed '
+    card.configure_modem(args.role)
+    print(f'[card] kernel + TIKRNL + DIAL up; role={args.role}; the task claimed '
           f'PM {PM_FOREGROUND_SLOT:04x}={card.foreground_slot & 0xFFFFFF:06x} '
           f'(foreground dispatch) and '
           f'PM {PM_ISR_SLOT:04x}={card.isr_slot & 0xFFFFFF:06x} (SPORT0 ISR)')
@@ -399,12 +570,15 @@ def main() -> int:
     changes = 0
     prev = None
     tx = []
+    tx_linear = []
     for f in range(args.frames):
         hist = card.frame(tone[f % len(tone)], index=f)
         totals.update(hist)
         state = card.dm[DM_BOOTPAGE]
         states[state] += 1
         tx.append(card.dm[DM_LINE_TX])
+        tx_pointer = card.dm[DM_TX_POINTER] & 0x3FFF
+        tx_linear.append(card.dm[tx_pointer] if tx_pointer else 0)
         now = (card.dm[DM_LINE_RX], card.dm[DM_LINE_TX], state,
                card.dm[DM_VEC_A], card.dm[DM_VEC_B], card.dm[DM_STATUS])
         if now != prev:
@@ -457,6 +631,23 @@ def main() -> int:
     # rather than pretending the low byte is a bare μ-law codeword.
     print('[card] DM 3F09 (line register, post-TIKRNL) first 16: '
           + ' '.join(f'{v:04x}' for v in tx[:16]))
+    first_nonzero = next((i for i, value in enumerate(tx_linear) if value), None)
+    print(f'[card] DM[3FB4] signed-linear TX: pointer={card.dm[DM_TX_POINTER]:04x} '
+          f'nonzero={sum(value != 0 for value in tx_linear)}/{len(tx_linear)} '
+          f'first-nonzero={first_nonzero if first_nonzero is not None else "none"} '
+          'first16=' + ' '.join(f'{v:04x}' for v in tx_linear[:16]))
+    if args.tx_out:
+        args.tx_out.parent.mkdir(parents=True, exist_ok=True)
+        args.tx_out.write_bytes(b''.join(
+            int(value).to_bytes(2, 'little') for value in tx_linear))
+        print(f'[card] wrote {len(tx_linear)} signed-linear samples to {args.tx_out}')
+    if args.g711_out:
+        g711 = card.encode_g711(tx_linear)
+        args.g711_out.parent.mkdir(parents=True, exist_ok=True)
+        args.g711_out.write_bytes(g711)
+        print(f'[card] called TIKRNL PM {G711_ENCODE_ENTRY:04x}; wrote '
+              f'{len(g711)} A-law octets to {args.g711_out}; '
+              f'first16={" ".join(f"{value:02x}" for value in g711[:16])}')
     return 0
 
 
