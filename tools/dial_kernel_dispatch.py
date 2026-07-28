@@ -589,6 +589,12 @@ class LiveKernelModem:
             raise RuntimeError(f'V90D setup did not survive DIAL activation: {detail}')
 
     def configure_modem(self, role: str, law: str = 'pcmu') -> None:
+        # This is the documented ADDSP database path, not Eicon's complete
+        # hardware call-control path.  The card's closed MIPS firmware first
+        # creates a per-call PLCI, translates the modem CAI, assigns the PRI
+        # descriptor, and sends private TIKRNL switch-on/runtime commands.
+        # Keep that boundary explicit: public capability bits alone are not a
+        # byte-for-byte replacement for a native hardware modem assignment.
         if law != 'pcmu':
             raise NotImplementedError('kernel-dispatch live mode currently supports PCMU')
         if role != 'answer':

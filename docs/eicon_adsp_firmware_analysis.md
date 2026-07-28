@@ -2842,3 +2842,72 @@ Either a future emulator reproduces the complete MIPS descriptor assignment,
 or the current selected-descriptor abstraction remains the boundary.  Merely
 writing `DM(0x3f58)` cannot change the modem's line input, output, INFO state
 chain, or V90D selection.
+
+## What hardware still has that this harness does not
+
+The remaining difference is now narrow enough to name, but not yet to reduce
+to one magic word: **the native MIPS per-call modem assignment and its
+CAI-derived private setup sequence**.
+
+On the card, the path is:
+
+```
+PRI/SIG incoming call
+  -> allocate a real per-call PLCI
+  -> add_b1() 26-byte modem CAI (direction, digital modem, modulation/rate,
+     INFO options, answer-tone/carrier timing)
+  -> MIPS SERVICE_ASSIGN / switch_on for TIKRNL 0x0258
+  -> private PRI channel descriptor + initial database-ring commit
+  -> later symbol-13 command-mailbox scripts
+  -> DIAL / V.8 / INFO
+```
+
+`LiveKernelModem` currently starts below that boundary.  It registers TIKRNL,
+models one selected 8 kHz descriptor, supplies the companding and PCM pointers,
+and writes the public ADDSP database directly.  That is sufficient to make
+V.8 negotiate V.90 (`DM(0x3f94) = 9`), transmit a decodable INFO0d, receive a
+CRC-valid peer control frame, and preserve exact sample accounting.  It is
+not proof that every private switch-on/runtime command the MIPS normally
+derives from the CAI has run.
+
+The MIPS shim confirms both halves independently:
+
+- Direct `SERVICE_ASSIGN` executes real firmware and commits TIKRNL's initial
+  database ring (`DM(0x3327..0x3336)`), activating the kernel task.
+- The native synthetic incoming-call route still reports `SIGNALLING ACTIVE,
+  DSP UNASSIGNED`; its fake PLCI lacks ownership/allocator metadata from the
+  real PRI/SIG ingress, so `connect_res()` never carries the full modem CAI
+  into `SERVICE_ASSIGN`.  The current `--force-modem-dsp-assign` deliberately
+  jumps over exactly this seam.
+
+That missing seam is a better explanation for "hardware works" than SPORT0
+or `V34SLOT`.  It can select private INFO setup before the overlay runs.  It
+cannot write INFO's event word directly: PM `0x2470` remains the sole non-zero
+writer of `DM(0x198e)`.  The observed consequence of wrong setup is instead
+that INFO enters a family whose `0x37` branch waits for an 8-bit message while
+the peer sends the valid 17-bit class.
+
+`DM(0x3f8a) = 0x5678` is evidence that private setup can change the family,
+not the answer by itself: forcing it arms the other framer but still does not
+make the peer send the expected class.  The MIPS protocol image contains no
+literal `0x5678`, so that token must not be promoted to a presumed hardware
+write without a real trace.
+
+### Concrete next comparison
+
+The decisive next step is not another public database bit.  Complete the
+native PRI/SIG ingress in `tools/eicon_mips_shim.py` far enough that the real
+per-call PLCI reaches `connect_res()` and `SERVICE_ASSIGN` without
+`--force-modem-dsp-assign`.  Then capture and replay, in order:
+
+1. the switch-on database-ring records;
+2. symbol-13 runtime command records at `DM(0x3310..0x3338)`;
+3. the full interface `DM(0x3ee0..0x3fdf)` at V.8 result, INFO entry, and
+   states `0x24`, `0x34`, and `0x37`;
+4. effective INFO fields `DM(0x1642..0x165b)` after each state load.
+
+Diff that against `LiveKernelModem`.  A hardware IDMA trace or DM snapshot at
+the same milestones would be an even shorter oracle.  Until that comparison,
+the honest answer is: we are missing the **native CAI-to-TIKRNL control
+transaction**, not a known SPORT/V34SLOT value, and the exact private field
+that changes the INFO message class is still unrecovered.
