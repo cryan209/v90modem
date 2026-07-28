@@ -3030,3 +3030,45 @@ IDLE.  That forcing was removed from the SIP backend.  The next implementation
 must recover the assigned descriptor's relocated continuation/callback (or
 route SIG.MDM's actual inter-DSP message), not transplant the direct harness's
 fixed PM addresses.
+
+## Session 33: native loader relocation, not a relocated continuation
+
+A runtime PM dump of the naturally assigned core corrected the interpretation
+above. `DM3308=0x35ab` is a **DM command-descriptor pointer**, not a PM service
+entry: DM `0x35ab` contains descriptor data while PM `0x35ab` is zero.  Calling
+it as PM (as the old diagnostic `pump_direct_tikrnl_core()` does) is invalid.
+
+The actual native TIKRNL image reveals the private callback construction:
+
+- the card task loader inserts a seven-word prefix into the movable task
+  segment;
+- extracted source PM `0x06bb` appears at runtime PM `0x06c2`;
+- source PM `0x06fc` appears at runtime PM `0x0703`;
+- runtime PM `0x06a0` explicitly loads `AR=0x0703` before registering the
+  callback with the private PRI descriptor.
+
+The important new result is that DIAL is also a **movable** overlay in this
+native layout.  Runtime TIKRNL calls DIAL setup at PM `0x0581`, whereas the
+standalone extracted image and direct harness place the same entry at PM
+`0x08f1`.  The native loader therefore assigns the overlay PM segment a base
+shift of `-0x0370` and relocates its internal calls, loops, exported vectors,
+and references.  Simply copying `pm.words` at its extracted addresses leaves
+TIKRNL calling unrelated task code; merely shifting words without applying
+the module's complete relocation semantics is also insufficient.
+
+This explains every silence experiment consistently:
+
+1. native assignment and switch-on consume the symbol-13 WDB ring;
+2. `DM3eee=0x2000` remains pending because no native DIAL page is resident;
+3. fixed-address DIAL makes `DM3fb2/3` look populated but does not match the
+   native TIKRNL link layout;
+4. the wrong entry either returns without consuming WDB or loops at its entry;
+5. the unmodified native SIP backend remains stable because it does not apply
+   this invalid mixed-layout forcing.
+
+The next concrete step is now narrower: invoke the MIPS firmware's existing
+module loader for download `0x0262` in the assigned service context (which
+will apply the real segment allocator and relocations), rather than emulating
+SIG.MDM by copying extracted PM/DM maps.  Once that loader publishes the
+native `0x0703` descriptor callback, the existing exact 8 kHz SIP media clock
+can drive it directly.

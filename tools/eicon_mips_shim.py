@@ -1718,8 +1718,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     print(f"[native-mips] SIP media attached to DSP block 0x{block:08x} "
           f"using {law}")
     modem = NativeMipsModem(shim, core, law)
-    print("[native-mips] media clock attached; native SIG.MDM->TIKRNL "
-          "connect callback is not yet routed")
+    print("[native-mips] media clock attached; native SIG.MDM movable-overlay "
+          "load is not yet routed")
     return modem
 
 

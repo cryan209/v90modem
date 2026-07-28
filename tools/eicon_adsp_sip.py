@@ -713,7 +713,7 @@ def main() -> int:
     ap.add_argument('--native-mips', action='store_true',
                     help='experimental: supervise the SIP ADSP with the real '
                          'Unicorn MIPS firmware; assignment works, but the '
-                         'SIG.MDM inter-DSP connect callback is not yet routed')
+                         'SIG.MDM movable-overlay load is not yet routed')
     ap.add_argument('--mips-kernel', type=Path,
                     default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
                                  '0009-diva-server-pri-30m-kernel'))
