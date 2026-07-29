@@ -3414,18 +3414,21 @@ line descriptor has two additional publications which the generic walk does
 not reproduce:
 
 1. processed line status `0x0021` at `DM3f08`; and
-2. the byte-exact G.711 codeword at the V.PCM-family one-word RX location
-   `DM3763` before the page's primary action.
+2. the SPORT-compander's expanded signed sample at the V.PCM-family one-word
+   RX location `DM3763` before the page's primary action.
 
 Writing the RTP octet to `DM3f08` was the earlier mistake. It mixed line data
 with status/result bits. Merely leaving the seam value `1` also fails: V.8's
 RX action stalls. Fixed dispatch keeps `DM3f08=0x21` during ordinary media and
-feeds the octet separately through `DM3763`. The native adapter now models
-those two descriptor outputs after V.8 becomes resident, and keeps doing so
-across INFO and later V.PCM overlays which share the PM `0x1661` line adapter.
-DIAL startup retains its existing pre-descriptor `DM3f08` path.
+feeds the separately expanded sample through `DM3763`. ADDSP V.90 User's
+Guide §3.3 explicitly specifies µ-law/A-law companding on the T1/E1 SPORT;
+the RTP/DS0 octet remains byte-exact outside that hardware boundary. The
+native adapter now models those two descriptor outputs after V.8 becomes
+resident, and keeps doing so across INFO and later V.PCM overlays which share
+the PM `0x1661` line adapter. DIAL startup retains its existing pre-descriptor
+`DM3f08` path.
 
-A byte-exact replay of run06 proves that this is the missing RX input. Before
+A replay of run06 proves that this is the missing RX input. Before
 the change, native V.8's history at `DM3700..DM3753` remained stale boot value
 `0xfce8` and timed out to V.32. The direct path filled it with the captured
 PCMU octets and changed TrnProgress 4 -> 3 at sample 32297. Native now makes
@@ -3452,3 +3455,86 @@ active across INFO now advances naturally through:
 The original G.711 RX blocker is resolved. The next live run can now test the
 existing INFO/Tone-B frontier and whether decoded INFO1a naturally requests
 V90D overlay `0x026a`.
+
+## Session 43: forcing event 1 is the wrong response
+
+Tower run08 validates the complete native RX path and reproduces the earlier
+kernel-dispatch result exactly: INFO reaches `0x37`, receives a CRC-valid
+17-bit INFO0a, and takes successor `0x10`.  slmodemd then returns to
+narrowband 2400-Hz Tone A.  Under V.90 §9.2.1.2.1 the digital modem must
+finish its current INFO0d, detect Tone A and its phase reversal, and only then
+send the correctly timed Tone B response before continuing at §9.2.1.1.3.
+The native firmware does not make that response.
+
+Tower run10 took a different timing path: slmodemd advanced to `TX_L1` and
+`TX_L2` while Eicon INFO remained at `0x37`.  The Eicon still failed to finish
+the corresponding receive/probing state, and after about 1.4 seconds the
+known unbounded FFT result pointer overwrote the detector action list.  This
+shows that transport is carrying the peer waveform, but the INFO detector
+result/state transition is missing or incorrectly modelled.
+
+A diagnostic then wrote `DM198e=1` after recognizing Tone A or a 160-ms probe.
+Exact replay entered `0x00a0 -> 0x00a2`, and tower run11 produced:
+
+```text
+sample  70880: 0x37 -> 0x10 after repeated INFO0a
+sample  80640: forced event 1
+sample  80800: 0x10 -> 0x00a2
+sample  81600: 0x00a2 -> 0x00ab -> V.8 retrain
+```
+
+This is a negative result.  Event 1 is not a generic "Tone A/L1 complete"
+publication that may be asserted from either receive state.  Forcing it from
+`0x10` skips the required Tone-A phase-reversal/ranging sequence and sends a
+Tone B state at the wrong point; slmodemd remains in `TX_PHASE1_ANS` and the
+call immediately retrains.  The `--native-phase2-gate` experiment was removed
+rather than retained as a false fix.
+
+The next task is therefore narrower: trace the firmware condition selected by
+its actual Tone-A detector in recovery state `0x10`, including the phase-
+reversal timestamp required by §9.2.1.2.1/§9.2.1.1.3, and determine why that
+condition is never published from the SPORT receive samples.  Only that
+condition may select the firmware's correctly ordered Tone-B/ranging path;
+`DM198e` must not be used as a shortcut.
+
+## Session 44: restore SPORT companding; recovery now exits naturally
+
+The receive seam was still in the wrong numeric domain.  The native adapter
+put the raw 8-bit PCMU code into both the selected SPORT word and `DM3763`.
+That was sufficient for V.8 and the robust 16-lane DPSK framer, but it made
+INFO's correlators operate on the logarithmic G.711 code rather than the
+signed linear sample a real SPORT supplies.  It also contradicted the known
+TX boundary (`DM3764` is signed linear) and ADDSP V.90 User's Guide §3.3.
+
+`NativeMipsModem` now expands PCMU/PCMA only at the emulated SPORT boundary.
+RTP and the DS0 stream remain byte-exact; no network transcoding, resampling,
+gain change or sample-count change is introduced.  Exact run08 replay now
+leaves recovery state `0x10` naturally rather than through `DM198e`.
+
+Tower run12 confirms the change live without any event or state injection:
+
+```text
+0x37 -> 0x10 -> 0x28 -> 0x2e -> 0x30 -> 0x32 -> 0x34 -> 0x36 -> 0x37
+```
+
+slmodemd correspondingly advances through `TX_PHASE2_ANS -> TX_L1 -> TX_L2`
+for the first time on the native path.  This is the correct response direction,
+but not a completed Phase 2.
+
+The apparent late arrival at the second `0x37` was a capture-coordinate error:
+the endpoint's ADSP counter includes 5200 pre-media samples that are absent
+from `.rx.ulaw`.  After removing that fixed 650-ms offset, state `0x36` begins
+at RX 11.090 s, exactly as L1 begins.  Its root plus `0x0a36` timers total 160
+2400-Hz symbol ticks (66.7 ms) and arm the bin-3 FFT profile immediately;
+`0x37` is a continuation of that already-active receiver, not its start.
+Changing those timers would violate the firmware sequence rather than improve
+it.
+
+Exact replay exposes the actual failure.  Each analysis increments
+`DM06e6`; at count 5 the `0x0a37` condition correctly visits transient state
+`0x0c37`, whose `DM164b=0x0040` is meant to dispatch PM `0x36ae`.  That routine
+installs PM `0x3716`, and PM `0x3716` calls PM `0x3231` to reset the 20-word
+result buffer before changing detector profile.  In the native replay the
+pointer does not reset: it advances past `0x0df0` and overwrites the action
+lists.  The next boundary is therefore why the transient `0x0c37` profile
+installer/reset does not take effect, not Phase-2 line timing.

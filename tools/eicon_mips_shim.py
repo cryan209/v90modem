@@ -223,6 +223,7 @@ ADSP.adsp2181_idma_boot_held.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_idma_boot_held.restype = ctypes.c_int
 ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
+ADSP.adsp2181_watch_exec.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
 ADSP.adsp2181_set_callbacks.argtypes = [ctypes.c_void_p] * 4
 ADSP.adsp2181_sport0_tdm_frame.argtypes = [
@@ -1702,6 +1703,25 @@ class NativeMipsModem:
         self._mips_fault_reported = False
         self._private_line_active = False
 
+    def _sport_rx_word(self, code: int) -> int:
+        """Expand a DS0 octet as the T1/E1 SPORT compander does."""
+        code &= 0xFF
+        if self.law == "pcma":
+            value = code ^ 0x55
+            sample = (value & 0x0F) << 4
+            segment = (value & 0x70) >> 4
+            if segment == 0:
+                sample += 8
+            elif segment == 1:
+                sample += 0x108
+            else:
+                sample = (sample + 0x108) << (segment - 1)
+            return (sample if value & 0x80 else -sample) & 0xFFFF
+        value = (~code) & 0xFF
+        sample = (((value & 0x0F) << 3) + 0x84) << ((value >> 4) & 7)
+        sample -= 0x84
+        return (-sample if value & 0x80 else sample) & 0xFFFF
+
     def start_native_task(self) -> None:
         """Release the assigned core and run TIKRNL's relocated initializer."""
         if self.dsp_block in self.shim.native_task_started:
@@ -1831,6 +1851,7 @@ class NativeMipsModem:
 
     def _frame_core(self, code: int) -> None:
         self._media_samples += 1
+        sport_word = code & 0xFF
         # The hardware PRI descriptor calls TIKRNL's registered continuation
         # only for this selected channel.  The generic SPORT frame walks the
         # kernel queue but cannot reconstruct that private callback.
@@ -1845,10 +1866,11 @@ class NativeMipsModem:
             # here during normal V.8 media; storing the octet itself corrupts
             # the result bits, while leaving it at 1 stalls the RX action.
             self.dm[0x3F08] = 0x0021
-            # The selected descriptor also publishes the raw line codeword at
-            # the V.PCM-family fixed one-word RX location before each page's
-            # primary action. The generic SPORT ring is not connected to it.
-            self.dm[0x3763] = code & 0xFF
+            # ADDSP V.90 User's Guide §3.3 specifies SPORT companding for the
+            # T1/E1 interface. The private descriptor publishes the expanded
+            # signed sample, not the compressed DS0 octet, to the page RX word.
+            sport_word = self._sport_rx_word(code)
+            self.dm[0x3763] = sport_word
         # Native TIKRNL registers PM 0x0586 as the selected-channel ISR and
         # PM 0x0703 as its continuation. Model the private descriptor without
         # permanently replacing either global kernel dispatch slot.
@@ -1857,7 +1879,7 @@ class NativeMipsModem:
         pm[0x00B5] = 0x1C000F | (0x0586 << 4)
         try:
             ADSP.adsp2181_sport0_tdm_frame(
-                self.cpu, 0, 0, code & 0xFF, self.silence,
+                self.cpu, 0, 0, sport_word, self.silence,
                 self.adsp_budget)
         finally:
             pm[0x00B5] = saved_isr

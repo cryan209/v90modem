@@ -88,6 +88,25 @@ int main(void)
     adsp2181_run(cpu, 16);
     assert(adsp2181_dm(cpu)[0x0100] == 0x1234);
 
+    /* INFO PM 0x33ae..0x33bc uses SUBTRACT followed by ABS and IF LE as an
+     * equality test for its detector-count state transitions. */
+    adsp2181_reset(cpu);
+    adsp2181_dm(cpu)[0x06e6] = 3;
+    adsp2181_pm(cpu)[0] = 0x1c010f; /* CALL 0x0010 */
+    adsp2181_pm(cpu)[1] = 0x180043; /* IF LE JUMP 0x0004 */
+    adsp2181_pm(cpu)[2] = 0x22180f; /* AR = 0 */
+    adsp2181_pm(cpu)[3] = 0x18005f; /* JUMP 0x0005 */
+    adsp2181_pm(cpu)[4] = 0x22380f; /* AR = 1 */
+    adsp2181_pm(cpu)[5] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[6] = 0x028000; /* IDLE */
+    adsp2181_pm(cpu)[0x10] = 0x400034; /* AY0 = 3 */
+    adsp2181_pm(cpu)[0x11] = 0x806e60; /* AX0 = DM(0x06e6) */
+    adsp2181_pm(cpu)[0x12] = 0x23200f; /* AR = AY0 - AX0 */
+    adsp2181_pm(cpu)[0x13] = 0x23e20f; /* AR = ABS AR */
+    adsp2181_pm(cpu)[0x14] = 0x0a000f; /* RTS */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 1);
+
     adsp2181_destroy(cpu);
     puts("adsp2181_core_test: PASS");
     return 0;
