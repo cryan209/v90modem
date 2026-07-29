@@ -4105,3 +4105,80 @@ indefinitely in a late one, with no timeout involved.  The transmit path is
 dead independently of which state the page is in, for 82 seconds at a stretch.
 The countdown work above is correct but is not on the critical path — Session
 48's transmit source is, and it should be the whole of the next session.
+
+## Session 51: the host never answers the transmit request — and the rig is not real time
+
+Two problems, found from the six `run14` dials.  The second one is the reason
+page 14 has never transmitted, and it is not a firmware fault at all.
+
+### The data interface is a host responsibility we never implemented
+
+The ADDSP V.90 guide's host/DSP block is based at `DM(0x3ee0)` — confirmed
+twice over, since guide offset `0xcd` (`DI_control`) lands on the known
+`DM(0x3fad)` and offset `0xd0` (`bootpage_nr`) on the known `DM(0x3fb0)`.
+That fixes the transmit-data registers:
+
+| guide offset | address | name |
+|---|---|---|
+| 0x25 | `DM(0x3f05)` | TXD0 |
+| 0x26 | `DM(0x3f06)` | TXD1 |
+| 0x27 | `DM(0x3f07)` | TXD2 |
+| 0xcd | `DM(0x3fad)` | DI_control |
+
+The guide on `DI_control` bit F, and on TXD0 in V90D mode:
+
+> TX request bit: if 1, the modem core asks the kernel to give a new data
+> packet (in the TXD0, TXD1, TXD2-location); this bit is cleared by the DSP
+> after arrival of the packet.
+>
+> In case of V90D operation: TXD0, b0 is the oldest bit of the Datagram,
+> consecutive bit locations are filled up until b15, further bits are put in
+> TXD1 and TXD2.  Datagram package size can vary from 21 to 42.
+
+**Nothing in this repository ever writes `DM(0x3f05)`, `DM(0x3f06)` or
+`DM(0x3f07)`.**  `eicon_mips_shim.py` says as much in a comment at the point
+it declines to do it: "Data-plane delivery will be attached to the NL entity
+separately."  It never was.
+
+So the V.90 data pump raises the TX request every baud interval asking for a
+datagram, the host does not supply one, and the page has nothing to modulate.
+That explains the whole of Session 48 and the `run14` table above in one
+stroke — 0.0 % non-idle TX in *every* page-14 state of every call, including
+the 82-second stay in `0x00c2`, because the silence never depended on which
+state the sequencer was in.  `DM(0x3fa7)` being a null transmit pointer is the
+same fact seen from the DSP side, and Session 48's search for a transmit
+*source* inside the overlay was looking on the wrong side of the interface.
+
+The test is direct: on `tx_request`, write a known datagram into TXD0..TXD2
+and clear the bit, then measure TX.  Until that runs this is a hypothesis, but
+it is the only one that accounts for the silence being state-independent.
+
+### The rig loses real time once page 14 loads
+
+Measured from `run14.rtp.pcap`, per call, comparing our own RTP send times
+against the media they carry:
+
+| call | media | wall | drift at end |
+|---|---|---|---|
+| 1 | 31.1 s | 30.7 s | constant −0.40 s offset, no drift |
+| 2 | 32.5 s | 32.1 s | constant −0.39 s |
+| 3 | 20.1 s | 19.7 s | constant −0.38 s |
+| 4 | 95.4 s | 104.3 s | **+8.93 s (−9.4 %)** |
+| 5 | 42.7 s | 45.0 s | +2.32 s (−5.4 %) |
+| 6 | 27.0 s | 27.6 s | +0.60 s (−2.2 %) |
+
+Short calls hold a fixed −0.39 s startup offset and then track real time
+exactly.  The long ones start level and then fall behind monotonically, and
+the crossover is at 15–20 s of media — which is when the V.90 page loads.  The
+emulated data pump costs more than the 8 kHz budget, so from the handoff
+onward we transmit roughly 10 % slow.
+
+Per CLAUDE.md's third constraint, a few ppm of sample-rate error destroys the
+constellation; this is ~100 000 ppm.  Everything a peer does after the page-14
+handoff on this rig is a response to a signal that is not real time, so no
+live conclusion about *the peer's* behaviour past that point is safe —
+including the deep `0x00c2` call, whose peer had stopped sending (741 RX
+packets in 104 s) long before the state walk happened.
+
+The offline replays are unaffected: they are open loop and sample-driven, with
+no wall clock in them at all.
