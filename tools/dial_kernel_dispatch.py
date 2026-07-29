@@ -80,7 +80,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dial_tikrnl_drive import (ADSP, DIAL_ID, KERNEL, KERNEL_IDLE,
-                               TASK_ENTRY, TIKRNL, Card, linear_to_mulaw)
+                               TASK_ENTRY, TIKRNL, Card, linear_to_mulaw,
+                               sport_rx_word)
 
 for _name, _args in [('set_callbacks', [ctypes.c_void_p] * 4),
                      ('set_irq', [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
@@ -503,7 +504,8 @@ class LiveKernelModem:
     def __init__(self, channel: int = 0, enable_l1l2_gate: bool = False,
                  init_info_detector_at_24: bool = False,
                  info_actions: dict[int, int] | None = None,
-                 delay_correction: int = 0x000C):
+                 delay_correction: int = 0x000C,
+                 expand_sport: bool = False):
         self.driver = KernelDispatch()
         self.card = self.driver.card
         self.dm = self.card.dm
@@ -519,6 +521,7 @@ class LiveKernelModem:
         self._tone_a_injected = False
         self.enable_l1l2_gate = enable_l1l2_gate
         self.init_info_detector_at_24 = init_info_detector_at_24
+        self.expand_sport = expand_sport
         # {TrnProgress: action code}, each fired once on first reaching it.
         self.info_actions = dict(info_actions or {})
         self._info_actions_fired: set[int] = set()
@@ -683,7 +686,13 @@ class LiveKernelModem:
         driver, card, dm = self.driver, self.card, self.dm
         before = card.resident
         self._inject_l1l2_completion(code, index)
-        driver.tdm_frame(code, self.channel)
+        # This harness historically handed the raw DS0 octet to SPORT0, which
+        # is the wrong numeric domain for INFO's correlators; NativeMipsModem
+        # was corrected to expand it (ADDSP V.90 guide §3.3).  Opt-in here so
+        # a replay can reproduce the native path, without changing the domain
+        # under the harnesses whose results were recorded in the old one.
+        driver.tdm_frame(sport_rx_word(code) if self.expand_sport else code,
+                         self.channel)
         # Diagnostic reconstruction: PM 0x2602 installs the detector parser
         # and event table after the FFT workspace is finished with DM 0x1986.
         # Calling it at overlay load is too early: the FFT overwrites the table.

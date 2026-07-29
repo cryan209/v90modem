@@ -105,6 +105,12 @@ ADSP.adsp2181_pm.restype = ctypes.POINTER(ctypes.c_uint32)
 ADSP.adsp2181_dm.restype = ctypes.POINTER(ctypes.c_uint16)
 ADSP.adsp2181_pc.restype = ctypes.c_uint16
 ADSP.adsp2181_idle.restype = ctypes.c_int
+ADSP.adsp2181_pmovlay.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_pmovlay.restype = ctypes.c_uint16
+ADSP.adsp2181_dmovlay.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_dmovlay.restype = ctypes.c_uint16
+ADSP.adsp2181_read_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+ADSP.adsp2181_read_pm.restype = ctypes.c_uint32
 ADSP.adsp2181_sr0.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_sr0.restype = ctypes.c_uint16
 ADSP.adsp2181_sr1.argtypes = [ctypes.c_void_p]
@@ -140,6 +146,33 @@ SIG_STUBS = (0x1900, 0x1901, 0x1902)  # the SIG overlay's three stubs
 # download in DM 0x31A9/0x31AA -- the marker that the task yielded for an
 # overlay rather than finishing the frame.
 PM_DOWNLOAD_YIELD = 0x069E
+
+def sport_rx_word(code: int, law: str = 'pcmu') -> int:
+    """Expand a DS0 octet as the T1/E1 SPORT compander does.
+
+    ADDSP V.90 User's Guide §3.3: the SPORT companding hardware hands the
+    page a signed linear sample, not the logarithmic G.711 code.  INFO's
+    correlators are meaningless in the compressed domain, and the transmit
+    side already agrees -- DM(0x3764) is signed linear.  Nothing here
+    resamples or changes gain, so the DS0 stream stays byte-exact.
+    """
+    code &= 0xFF
+    if law == 'pcma':
+        value = code ^ 0x55
+        sample = (value & 0x0F) << 4
+        segment = (value & 0x70) >> 4
+        if segment == 0:
+            sample += 8
+        elif segment == 1:
+            sample += 0x108
+        else:
+            sample = (sample + 0x108) << (segment - 1)
+        return (sample if value & 0x80 else -sample) & 0xFFFF
+    value = (~code) & 0xFF
+    sample = (((value & 0x0F) << 3) + 0x84) << ((value >> 4) & 7)
+    sample -= 0x84
+    return (-sample if value & 0x80 else sample) & 0xFFFF
+
 
 # Data-pump database (ADDSP V.90 guide §5.3).
 DM_LINE_RX = 0x3F08

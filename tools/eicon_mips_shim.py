@@ -32,6 +32,7 @@ from unicorn import UC_HOOK_CODE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from dial_tikrnl_drive import sport_rx_word
 from eicon_dsp_stage import (CARDTYPE_DIVASRV_P_30M_PCI,
                              OFFS_DSP_CODE_BASE_ADDR, build_dsp_code_image,
                              protocol_end_addr)
@@ -224,6 +225,12 @@ ADSP.adsp2181_idma_boot_held.restype = ctypes.c_int
 ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_exec.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
+ADSP.adsp2181_pmovlay.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_pmovlay.restype = ctypes.c_uint16
+ADSP.adsp2181_dmovlay.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_dmovlay.restype = ctypes.c_uint16
+ADSP.adsp2181_read_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+ADSP.adsp2181_read_pm.restype = ctypes.c_uint32
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
 ADSP.adsp2181_set_callbacks.argtypes = [ctypes.c_void_p] * 4
 ADSP.adsp2181_sport0_tdm_frame.argtypes = [
@@ -1705,22 +1712,7 @@ class NativeMipsModem:
 
     def _sport_rx_word(self, code: int) -> int:
         """Expand a DS0 octet as the T1/E1 SPORT compander does."""
-        code &= 0xFF
-        if self.law == "pcma":
-            value = code ^ 0x55
-            sample = (value & 0x0F) << 4
-            segment = (value & 0x70) >> 4
-            if segment == 0:
-                sample += 8
-            elif segment == 1:
-                sample += 0x108
-            else:
-                sample = (sample + 0x108) << (segment - 1)
-            return (sample if value & 0x80 else -sample) & 0xFFFF
-        value = (~code) & 0xFF
-        sample = (((value & 0x0F) << 3) + 0x84) << ((value >> 4) & 7)
-        sample -= 0x84
-        return (-sample if value & 0x80 else sample) & 0xFFFF
+        return sport_rx_word(code, self.law)
 
     def start_native_task(self) -> None:
         """Release the assigned core and run TIKRNL's relocated initializer."""

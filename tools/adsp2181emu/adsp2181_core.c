@@ -324,11 +324,17 @@ static void execute(adsp2100_state *adsp)
              * PM 0x3515 decision seam: PM 0x350b puts |MR1| in AR, PM 0x350d
              * copies it to AX1, and the bit in DM(0x060f) is that magnitude
              * thresholded at 0x0578.  Neither value is ever stored to DM. */
-            logerror("[EXEC] pc=%04x ret=%04x cyc=%llu cntr=%04x "
+            /* pmovlay and the fetched word are logged together because a PM
+             * address at or above 0x2000 means a different instruction on
+             * each overlay page: the pair says which page actually ran. */
+            logerror("[EXEC] pc=%04x ret=%04x pmovlay=%u dmovlay=%u op=%06x "
+                     "cyc=%llu cntr=%04x "
                      "i0=%04x i1=%04x m1=%04x m3=%04x "
                      "ax1=%04x ar=%04x mr1=%04x "
                      "state=%04x event=%04x span=%04x count=%04x stride=%04x\n",
                      (unsigned)(adsp->pc & 0x3fff), ret,
+                     (unsigned)adsp->pmovlay, (unsigned)adsp->dmovlay,
+                     (unsigned)op,
                      (unsigned long long)adsp->cycles, (unsigned)(adsp->cntr & 0x3fff),
                      adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
                      adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
@@ -1307,6 +1313,20 @@ void adsp2181_watch_exec(adsp2181_t *a, uint16_t addr, int on)
 void adsp2181_watch_irqs(adsp2181_t *a, int on)
 {
     if (a) a->watch_irqs = on != 0;
+}
+
+/* The PMOVLAY/DMOVLAY page selectors.  Written by the firmware through the
+ * register map (2100ops.inc wr_pmovlay/wr_dmovlay), so a caller that wants
+ * to know which page a PM address above 0x2000 resolved to has to read them
+ * at the same instant as the fetch, not afterwards. */
+uint16_t adsp2181_pmovlay(const adsp2181_t *a) { return a ? a->pmovlay : 0; }
+uint16_t adsp2181_dmovlay(const adsp2181_t *a) { return a ? a->dmovlay : 0; }
+
+/* Read a PM word the way the core would right now: resolved through the
+ * current PMOVLAY, not out of the resident image. */
+uint32_t adsp2181_read_pm(adsp2181_t *a, uint16_t addr)
+{
+    return a ? RWORD_PGM(a, addr) : 0;
 }
 uint64_t adsp2181_cycles(const adsp2181_t *a) { return a ? a->cycles : 0; }
 void adsp2181_trace_budget(adsp2181_t *a, int64_t n) { if (a) a->trace_budget = n; }

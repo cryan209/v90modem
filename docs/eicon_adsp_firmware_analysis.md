@@ -3538,3 +3538,79 @@ result buffer before changing detector profile.  In the native replay the
 pointer does not reset: it advances past `0x0df0` and overwrites the action
 lists.  The next boundary is therefore why the transient `0x0c37` profile
 installer/reset does not take effect, not Phase-2 line timing.
+
+## Session 45: not overlay paging, and the installer never runs at all
+
+Two candidate explanations for the Session 44 boundary were open: the wrong
+firmware image (would a BRI build differ?), or an emulator fault in PMOVLAY
+paging, since `0x36ae`, `0x3716` and `0x3231` all sit above PM `0x2000` and
+therefore name a different instruction on each overlay page.
+
+**Firmware is not a variable here.**  The `.bit` files are Xilinx bitstreams
+for the board's line interface (`dsbri2m.bit` identifies itself as
+`dsbri2m_fpga_chip.ncd`), with no ADSP code.  The BRI/PRI split inside
+`dspdload.bin` is confined to the ~1500-word kernels, id `0x0006` (BRI 2M) and
+id `0x0009` (PRI 30M); the handshake lives in the single card-independent
+`V.90 DPCM Overlay` (id `0x026a`).  The only per-card V.90 variant in the file
+is `V90.ANA APCM`, the analogue side.  There is no BRI V.90 firmware to try.
+
+**PMOVLAY is not a variable either.**  `adsp2181_pmovlay`/`_dmovlay`/`_read_pm`
+now export the page selectors and an overlay-resolved PM read, the `[EXEC]`
+watchpoint line carries `pmovlay`/`dmovlay` and the fetched word, and
+`tools/eicon_info_replay.py --overlay` traces the seam.  Across every native
+tower capture, `pmovlay` and `dmovlay` are **0 at every sample and at every
+installer execution**.  The Eicon loader relocates each page into the resident
+image (Sessions 33-34), so the 2181's overlay pages are never selected and a
+mis-paged fetch is impossible.
+
+The replay first had to be put in the native numeric domain: `--overlay` alone
+still reproduced the pre-Session-44 compressed-code path, because the SPORT
+companding fix landed only in `NativeMipsModem`.  `sport_rx_word()` now lives
+in `dial_tikrnl_drive.py` with both callers sharing it, and the new
+`--sport-companding` flag selects it (opt-in, so recorded results in the old
+domain are not silently reinterpreted).  With it, run08's replay leaves `0x10`
+naturally, as tower run12 did.
+
+With both domains correct, run09 reproduces the overrun offline and the
+resident image reads back **exactly as documented**:
+
+```text
+36ae: 38e530 I4 = $0E53   b37161 DM(I4,M5) = $3716   b37001 DM(I4,M5) = $3700
+3231: 40ddd0 AX0 = $0DDD  915f30 DM($15F3) = AX0     0d0400 I0 = AX0
+```
+
+So Session 44's diagnosis was wrong in an important way.  The installer chain
+is intact; it simply never runs:
+
+  - PM `0x36ae` executes **once**, at cycle 6.5 M, during DIAL - where the
+    resident word is still `1b6b2f JUMP $36B2`, the DIAL image's content.  It
+    never executes during INFO.
+  - PM `0x3716` **never executes**.
+  - PM `0x3231` executes twice, both times with `ret=3676`, i.e. called from
+    PM `0x3675 CALL $3231` in the detector-init block at PM `0x366e` - never
+    from PM `0x3716`.
+
+The DM view says why.  Through the whole of state `0x37` the internal state
+`DM(0x1652)` stays `0x0037` and the state record's dispatch field
+`DM(0x164b)` stays `0x0000`.  The transient `0x0c37`, whose record carries
+`DM(0x164b) = 0x0040`, is never entered, so nothing ever dispatches PM
+`0x36ae` and the action slot `DM(0x0e53)` keeps the `0x325c`/`0x3700` pair it
+was given at `0x0a36`.  Meanwhile the analysis counter runs past 5 without
+stopping and the result pointer walks off the end - run09, counts 0..8:
+
+```text
+11.2457  count=0004  resultp=0de9  164b=0000  0e53=325c  buffer in
+11.2721  count=0005  resultp=0deb  164b=0000  0e53=325c  buffer in
+11.3257  count=0007  resultp=0def  164b=0000  0e53=325c  buffer in
+11.3521  count=0008  resultp=0df1  164b=0000  0e53=325c  buffer OVERRUN
+```
+
+The overrun is therefore a *consequence* of the missed sub-state, not an
+independent fault, and it corrupts the detector action lists from `0x0df1`
+onwards exactly as the earlier section predicted.
+
+The boundary moves up one level: find what loads `DM(0x164b)` from a state
+record and why the `0x0a37` condition selects the plain `0x37` successor
+instead of the transient `0x0c37` at count 5.  That is sequencer record
+selection (PM `0x3335`, `DM(0x1692..0x169a)`), not detector programming, and
+no firmware substitution can affect it.
