@@ -1704,6 +1704,7 @@ class NativeMipsModem:
                  download_descriptors: dict[int, int],
                  force_info_after_v8: bool = False,
                  tx_prbs: bool = False,
+                 prime_v90d_bulk_cursor: bool = False,
                  mips_interval: int = 160, adsp_budget: int = 20000):
         self.shim = shim
         self.cpu = core
@@ -1724,6 +1725,8 @@ class NativeMipsModem:
         self._mips_fault_reported = False
         self._private_line_active = False
         self.tx_prbs = tx_prbs
+        self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
+        self._v90d_bulk_cursor_primed = False
         self.tx_requests = 0
         self.tx_accepted = 0
         self.tx_first_sample: int | None = None
@@ -1981,6 +1984,17 @@ class NativeMipsModem:
             self.dm[0x3EEE] &= ~0x1000
             print(f"[native-mips] page request 0x{wanted:04x} "
                   f"(from 0x{previous:04x}) resumed at PM 0x{resume:04x}")
+        # Diagnostic seam: PM 0x1982 preserves the far-bulk cursor in DM4,
+        # but the portable V90D image initializes it to zero. A real selected
+        # channel is expected to publish the first valid delay-line address.
+        # Prime it once at activation to distinguish that missing publication
+        # from a DSP state-machine or codec failure.
+        if (self.prime_v90d_bulk_cursor and not self._v90d_bulk_cursor_primed
+                and self.resident == 0x026A and self.dm[0x1FF7] == 0x0060):
+            self.dm[4] = self.dm[0]
+            self._v90d_bulk_cursor_primed = True
+            print(f"[native-mips] diagnostic V90D bulk cursor DM4 "
+                  f"primed to DM0=0x{self.dm[0]:04x}")
         if self._tx_pending and not (self.dm[0x3FAD] & 0x8000):
             self.tx_accepted += 1
             self._tx_pending = False
@@ -2031,7 +2045,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                              channel: int = 1, call_steps: int = 2,
                              dsp_pump: int = 256,
                              force_info_after_v8: bool = False,
-                             tx_prbs: bool = False) -> NativeMipsModem:
+                             tx_prbs: bool = False,
+                             prime_v90d_bulk_cursor: bool = False) -> NativeMipsModem:
     """Boot the real card firmware and return its naturally assigned modem."""
     if law not in ("pcmu", "pcma"):
         raise ValueError("native MIPS backend supports only pcmu or pcma")
@@ -2065,7 +2080,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                    for index, entry in enumerate(staged.downloads)}
     modem = NativeMipsModem(
         shim, core, law, block, descriptors,
-        force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs)
+        force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs,
+        prime_v90d_bulk_cursor=prime_v90d_bulk_cursor)
     modem.start_native_task()
     modem.attach_connected_bearer()
     return modem

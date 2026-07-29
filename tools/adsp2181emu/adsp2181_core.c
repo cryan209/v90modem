@@ -357,8 +357,9 @@ static void execute(adsp2100_state *adsp)
              * each overlay page: the pair says which page actually ran. */
             logerror("[EXEC] pc=%04x from=%04x ret=%04x pmovlay=%u dmovlay=%u op=%06x "
                      "cyc=%llu cntr=%04x astat=%02x "
-                     "i0=%04x i1=%04x m1=%04x m3=%04x "
-                     "ax1=%04x ar=%04x mr0=%04x mr1=%04x "
+                     "i0=%04x i1=%04x i4=%04x i5=%04x m1=%04x m3=%04x l0=%04x b0=%04x "
+                     "ax0=%04x ax1=%04x ay0=%04x af=%04x ar=%04x mr0=%04x mr1=%04x "
+                     "sr0=%04x sr1=%04x si=%04x se=%04x rx0=%04x "
                      "state=%04x event=%04x span=%04x count=%04x stride=%04x "
                      "istate=%04x analysis=%04x\n",
                      (unsigned)(adsp->pc & 0x3fff),
@@ -368,13 +369,21 @@ static void execute(adsp2100_state *adsp)
                      (unsigned long long)adsp->cycles, (unsigned)(adsp->cntr & 0x3fff),
                      (unsigned)(adsp->astat & 0xff),
                      adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
-                     adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
-                     adsp->core.ax1.u & 0xffff, adsp->core.ar.u & 0xffff,
+                     adsp->i[4] & 0x3fff, adsp->i[5] & 0x3fff,
+                     adsp->m[1] & 0x3fff,
+                     adsp->m[3] & 0x3fff, adsp->l[0] & 0x3fff,
+                     adsp->base[0] & 0x3fff, adsp->core.ax0.u & 0xffff,
+                     adsp->core.ax1.u & 0xffff, adsp->core.ay0.u & 0xffff,
+                     adsp->core.af.u & 0xffff, adsp->core.ar.u & 0xffff,
                      /* mr0 carries the candidate record pointer the sequencer
                       * loads from DM(0x1692..0x1695) before testing its
                       * condition; at PM 0x334d it is the record selected. */
                      adsp->core.mr.mrx.mr0.u & 0xffff,
                      adsp->core.mr.mrx.mr1.u & 0xffff,
+                     adsp->core.sr.srx.sr0.u & 0xffff,
+                     adsp->core.sr.srx.sr1.u & 0xffff,
+                     adsp->core.si.u & 0xffff, adsp->core.se.u & 0xffff,
+                     adsp->sport_rx[0] & 0xffff,
                      adsp->data[0x16bd], adsp->data[0x198e], adsp->data[0x16c5],
                      adsp->data[0x16c6], adsp->data[0x16c7],
                      /* the INFO sequencer's internal state and the analysis

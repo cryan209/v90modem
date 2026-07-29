@@ -153,6 +153,7 @@ class Call:
     baud_info: int = -1
     info_mode_selector: int = -1
     info_variant: int = -1
+    v90d_state_key: tuple[int, ...] | None = None
 
 
 class CrashSafeWave:
@@ -221,7 +222,14 @@ class RtpCapture:
                         'info_mode_selector,info_variant,info_fft_span,info_fft_count,'
                         'info_fft_stride,info_result_ptr,info_sequence_reset,'
                         'detector_bit,detector_event,detector_word,detector_count,'
-                        'detector_parser,wstatus\n')
+                        'detector_parser,wstatus,'
+                        'v90d_outer_ptr,v90d_outer_state,v90d_outer_dwell,'
+                        'v90d_outer_next0,v90d_outer_next1,v90d_outer_next2,v90d_outer_next3,'
+                        'v90d_outer_test0,v90d_outer_test1,v90d_outer_test2,v90d_outer_test3,'
+                        'v90d_outer_pretest,v90d_inner_ptr,v90d_inner_state,v90d_inner_dwell,'
+                        'v90d_outer_mode,v90d_inner_flag,v90d_flag_source,'
+                        'v90d_flag_input,v90d_flag_scale,v90d_flag_decoded,'
+                        'v90d_result_lo,v90d_result_hi,v90d_global_countdown\n')
         self.ip_id = 0
         self.prefix = prefix
         self.law = law
@@ -294,7 +302,13 @@ class RtpCapture:
                   dm[0x3F60], dm[0x3F9F], dm[0x3FAD], dm[0x3FAE], dm[0x3FAF],
                   dm[0x3FBB], dm[0x3F94], dm[0x16B6], dm[0x16C5], dm[0x16C6],
                   dm[0x16C7], dm[0x15F3], dm[0x0E4C], dm[0x060F], dm[0x198E],
-                  dm[0x198F], dm[0x19CD], dm[0x19CF], dm[0x3EEE])
+                  dm[0x198F], dm[0x19CD], dm[0x19CF], dm[0x3EEE],
+                  dm[0x120F], dm[0x1FF7], dm[0x1FF6],
+                  dm[0x1FF8], dm[0x1FF9], dm[0x1FFA], dm[0x1FFB],
+                  dm[0x1FFC], dm[0x1FFD], dm[0x1FFE], dm[0x1FFF], dm[0x2000],
+                  dm[0x204A], dm[0x2008], dm[0x2007],
+                  dm[0x1FE9], dm[0x2004], dm[0x0AD5], dm[0x0DD7], dm[0x0ACF],
+                  dm[0x0A56], dm[0x206D], dm[0x206E], dm[0x20E0])
         self.diag.write(f'{values[0]},{values[1]:.6f},' +
                         ','.join(f'0x{value:04x}' for value in values[2:]) + '\n')
         # Preserve every defined, reserved and spare word in the complete
@@ -348,7 +362,9 @@ class EiconSipEndpoint:
                  mips_kernel: Path | None = None,
                  mips_tikrnl: Path | None = None,
                  mips_image: Path = Path('docs/firmware/te_dmlt.pm'),
-                 mips_combifile: Path = Path('docs/firmware/dspdload.bin')):
+                 mips_combifile: Path = Path('docs/firmware/dspdload.bin'),
+                 trace_v90d_state: bool = False,
+                 prime_v90d_bulk_cursor: bool = False):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -371,6 +387,8 @@ class EiconSipEndpoint:
         self.mips_tikrnl = mips_tikrnl
         self.mips_image = mips_image
         self.mips_combifile = mips_combifile
+        self.trace_v90d_state = trace_v90d_state
+        self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
         self.native_card = None
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -402,7 +420,8 @@ class EiconSipEndpoint:
             self.native_card = create_native_mips_modem(
                 mips_kernel, mips_tikrnl, law, mips_image, mips_combifile,
                 force_info_after_v8=force_info_after_v8,
-                tx_prbs=tx_prbs)
+                tx_prbs=tx_prbs,
+                prime_v90d_bulk_cursor=prime_v90d_bulk_cursor)
         if registrar and username:
             self.send_register()
 
@@ -513,7 +532,8 @@ class EiconSipEndpoint:
                             self.mips_kernel, self.mips_tikrnl, self.law,
                             self.mips_image, self.mips_combifile,
                             force_info_after_v8=self.force_info_after_v8,
-                            tx_prbs=self.tx_prbs)
+                            tx_prbs=self.tx_prbs,
+                            prime_v90d_bulk_cursor=self.prime_v90d_bulk_cursor)
                     card = self.native_card
                     self.native_card = None
                 elif self.kernel_dispatch:
@@ -601,6 +621,36 @@ class EiconSipEndpoint:
                 code = self.silence if call.samples < self.rx_guard_samples else received
                 linear.append(call.card.frame_fast(code, call.samples))
                 call.samples += 1
+                if self.trace_v90d_state and call.card.resident == 0x026A:
+                    dm = call.card.dm
+                    key = (dm[0x120F], dm[0x1FF7], dm[0x204A], dm[0x2008],
+                           dm[0x2004], dm[0x206D], dm[0x206E])
+                    if dm[0x1FF7] >= 0x0078:
+                        key += (dm[0x11E8], dm[0x11E9], dm[0x11EB],
+                                dm[0x0EE6], dm[0x2055],
+                                dm[0x11F5], dm[0x11F6])
+                    if key != call.v90d_state_key:
+                        print(f'[v90d] sample {call.samples} '
+                              f'({call.samples / 8000:.6f}s): '
+                              f'optr={dm[0x120F]:04x} state={dm[0x1FF7]:04x} '
+                              f'dwell={dm[0x1FF6]:04x} '
+                              f'next={dm[0x1FF8]:04x}/{dm[0x1FF9]:04x}/'
+                              f'{dm[0x1FFA]:04x}/{dm[0x1FFB]:04x} '
+                              f'test={dm[0x1FFC]:04x}/{dm[0x1FFD]:04x}/'
+                              f'{dm[0x1FFE]:04x}/{dm[0x1FFF]:04x} '
+                              f'pre={dm[0x2000]:04x} '
+                              f'iptr={dm[0x204A]:04x} istate={dm[0x2008]:04x} '
+                              f'idwell={dm[0x2007]:04x} mode={dm[0x1FE9]:04x} '
+                              f'iflag={dm[0x2004]:04x} source={dm[0x0AD5]:04x} '
+                              f'input={dm[0x0DD7]:04x} scale={dm[0x0ACF]:04x} '
+                              f'decoded={dm[0x0A56]:04x} '
+                              f'result={dm[0x206D]:04x}/{dm[0x206E]:04x} '
+                              f'global={dm[0x20E0]:04x} '
+                              f'phase={dm[0x11E8]:04x} diff={dm[0x11E9]:04x} '
+                              f'dhist={dm[0x11EB]:04x} raw={dm[0x0EE6]:04x} '
+                              f'bits={dm[0x2055]:04x} '
+                              f'eq={dm[0x11F5]:04x}/{dm[0x11F6]:04x}')
+                        call.v90d_state_key = key
             switches = call.card.switches[call.logged_overlay_switches:]
             for sample, page, wanted in switches:
                 overlay = call.card.overlays.get(wanted)
@@ -732,6 +782,12 @@ def main() -> int:
     ap.add_argument('--tx-prbs', action='store_true',
                     help='diagnostic: answer V90D TX requests with deterministic '
                          'PRBS data (requires --native-mips)')
+    ap.add_argument('--trace-v90d-state', action='store_true',
+                    help='log exact outer/inner V90D record transitions; the capture '
+                         'CSV always records these fields once per RTP packet')
+    ap.add_argument('--prime-v90d-bulk-cursor', action='store_true',
+                    help='diagnostic: initialize V90D far-bulk cursor DM4 from DM0 '
+                         'when state 0x60 activates the adapter (requires --native-mips)')
     ap.add_argument('--mips-kernel', type=Path,
                     default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
                                  '0009-diva-server-pri-30m-kernel'))
@@ -779,7 +835,8 @@ def main() -> int:
                                  if pair.strip()},
                                 args.native_mips, args.tx_prbs,
                                 args.mips_kernel, args.mips_tikrnl, args.mips_image,
-                                args.mips_combifile)
+                                args.mips_combifile, args.trace_v90d_state,
+                                args.prime_v90d_bulk_cursor)
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

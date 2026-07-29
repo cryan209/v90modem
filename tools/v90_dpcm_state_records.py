@@ -69,8 +69,10 @@ NEVER = 0x00            # condition index 0 -> PM 0x3038, constant false
 CONDITIONS = {
     0x00: "never (AR = 0 + 1)",
     0x01: "outer dwell DM(0x1ff6) expired",
-    0x02: "global countdown DM(0x20e0) expired",
-    0x03: "inner dwell DM(0x2007) expired",
+    0x02: "inner dwell DM(0x2007) expired",
+    0x03: "global countdown DM(0x20e0) expired",
+    0x28: "outer mode DM(0x1fe9) bit 1 set (enables inner state 0x20)",
+    0x2A: "generated inner flag DM(0x2004) bit 0 set",
 }
 
 
