@@ -3215,3 +3215,44 @@ is now precise: native MIPS/TIKRNL can load and execute INFO, but the answer
 call enters the wrong DIAL/V.8 transmit state before the peer recognizes an
 answer tone.  Fixing that TX state is required before a natural slmodemd INFO
 request is meaningful.
+
+## Session 37: the Linux driver identifies the TX-state boundary
+
+The `divas4linux` source in `/tmp/divas4linux-master` rules out another set of
+ADDSP setup-bit guesses.  `kernel/message.c:add_b1()` is the complete host
+answer path.  For an incoming modem call it sets `CALL_DIR_ANSWER`, builds the
+26-byte CAI already reproduced by `modem_cai()`, and sends that CAI through
+CALL_RES.  `add_modem_b23()` separately sends LLC mode 9 (`V42_IN`).  The
+host driver does **not** write `GEN_SETUP*`, invoke a DIAL PM export, or issue a
+second ADDSP answer WDB.  Relevant CAI defaults are:
+
+- `cai[7] = 0`: answer tone is not disabled;
+- `cai[8] = 0`: negotiate the highest available class;
+- `cai[9] = 0` for an ordinary incoming call: no reverse-direction override;
+- `cai[24] = 0`: default answer-tone duration/speaker policy;
+- resource `0x11`: asynchronous hardware modem.
+
+The naturally assigned core confirms that the closed MIPS protocol has already
+translated this call before Python touches it.  Its pending database begins
+`0040 0024 0038 0008 ...`, has `WSTATUS=2000`, and contains the native
+capability/rate defaults through the rest of `DM3ee0..`.  Our current
+`attach_connected_bearer()` then overwrites that transaction with generic
+ADDSP Tables 12/13/15 and directly calls relocated PM `0x0581`/`0x13cc`.
+That sequence has no counterpart in the Linux driver and is now the leading
+explanation for the wrong 2300-Hz fallback state.
+
+A second boundary is equally important.  Python calls the low-level MIPS
+loader `0x80086af8` directly and acknowledges the ADSP at PM `0x06df`.
+The protocol image has thirteen callers of that loader (notably
+`0x800a9d14..0x800aa158`); those callers own the per-channel transfer object,
+post-download state and subsequent WDB publication.  Calling the loader body
+alone bypasses exactly the supervisor transition that real hardware performs
+after DIAL/V.8 downloads.
+
+The corrective implementation should therefore remove the synthetic
+answer-WDB/direct-PM activation, retain the MIPS-generated CAI transaction,
+and route `DM3131/3132` requests through the owning MIPS per-channel download
+caller.  Only the byte-exact SPORT line callback remains in Python.  The Linux
+driver answers the policy question: answer/calling role is already represented
+by native CALL_RES + LLC `V42_IN`; it should not be reconstructed as a second
+host-side ADDSP transaction.
