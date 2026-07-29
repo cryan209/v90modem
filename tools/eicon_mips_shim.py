@@ -1754,6 +1754,12 @@ class NativeMipsModem:
                 f"native loader did not complete 0x{download_id:04x}: "
                 f"result={result} active={active} block={block_index} "
                 f"bulk={self.shim.bulk_write_calls[-4:]}")
+        # Eicon's PRI kernel publishes the relocated selected-channel state
+        # at DM2f86. Generic modem overlays dereference the compatibility word
+        # DM32f6 instead; portable overlay DM blocks reset it to zero. Bridge
+        # the private descriptor after every download before page init runs.
+        if self.dm[0x2F86]:
+            self.dm[0x32F6] = self.dm[0x2F86]
         self.resident = download_id
         print(f"[native-mips] loaded 0x{download_id:04x} through MIPS "
               f"({len(self.shim.host_writes) - before} host writes)")
@@ -1866,6 +1872,11 @@ class NativeMipsModem:
                 self.load_native_overlay(wanted)
                 self.switches.append(
                     (self._media_samples, self.dm[0x3FB0], wanted))
+            if wanted == 0x025F:
+                # PM 2025 snapshots DIAL's processed line status before the
+                # first callback. Raw PCMU idle 0xff has result bits 5-6 set;
+                # hardware/direct dispatch presents idle status 1 here.
+                self.dm[0x3F08] = 0x0001
             self.dm[0x3EEE] = 0x1000
             resume = self.dm[0x3143] & 0x3FFF
             if resume:

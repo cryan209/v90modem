@@ -3321,3 +3321,38 @@ A separate-RX-callback PM `0x0585` experiment produced the same page sequence
 and was reverted.  Thus the remaining transmit defect is below the now-proven
 CALL_RES callback boundary, in the private descriptor/V.8 line-state handoff;
 it is not a missing Linux operation or delayed SIG.MDM bearer event.
+
+## Session 40: V.8's four-frame exit fixed; TX encoding remains
+
+A cycle trace of the first native V.8 frame found the exact page-17 writer.
+V.8 initializer PM `0x2025..0x2026` copies `DM3f08` into `DM3994`.  Later PM
+`0x207f..0x2092` tests `DM3994 & 0x0060`; when nonzero it writes bootpage 17
+and returns to DIAL.  The native shim had written the raw PCMU idle octet
+`0xff` directly to `DM3f08`, so this branch was guaranteed.  At the same seam
+the working fixed-layout dispatcher presents processed idle status `0x0001`.
+The native page completion now publishes that idle status before resuming V.8.
+
+The comparison also exposed Eicon's private descriptor bridge.  The assigned
+PRI descriptor pointer is `DM2f86=0x3110`, but generic modem overlays consume
+compatibility word `DM32f6`; portable overlay data resets the latter to zero.
+The MIPS loader path now republishes `DM2f86` into `DM32f6` after every overlay
+download and before page initialization.
+
+Offline silence no longer leaves V.8 after four frames: resident `0x025f`,
+bootpage 6 and TrnProgress 4 remain stable for 16,000 samples.  A fifth tower
+call (`artifacts/eicon-native-tower/run05`) confirms the timing live:
+
+```text
+sample     3: load V.8 0x025f
+sample  2240: TrnProgress 0 -> 4
+sample 20639: V.8 times out without peer signalling and requests V.32
+```
+
+This removes the immediate `page 17 -> DIAL -> 0x0271/2300 Hz` failure.  It
+does not yet produce recognizable ANSam: slmodemd remains in
+`CALLPROG_WAIT_RING`, and run05 TX is broadband/corrupted rather than a
+2100-Hz carrier.  Comparing the native and direct V.8 state confirms page,
+role, processed idle status, RX/TX pointers and descriptor selection are now
+stable.  The remaining boundary is narrower again: conversion/accounting of
+the V.8 TX word through PM `0x0703` and the private G.711 SPORT adapter, not
+V.8 state selection.
