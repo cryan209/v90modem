@@ -81,17 +81,20 @@ def main() -> int:
     ap.add_argument('--from', dest='start', type=float, default=0.0)
     ap.add_argument('--to', dest='end', type=float, default=25.0,
                     help='stop here; the replay runs far slower than real time')
+    ap.add_argument('--tx-prbs', action='store_true',
+                    help='answer V90D TX requests with deterministic PRBS data')
     args = ap.parse_args()
 
     data = args.capture.read_bytes()
     card = create_native_mips_modem(KERNEL, TIKRNL, 'pcmu',
-                                    force_info_after_v8=True)
+                                    force_info_after_v8=True,
+                                    tx_prbs=args.tx_prbs)
     dm = card.dm
     print('[replay] native-MIPS harness ready', flush=True)
 
     previous = None
     seeded = None
-    live = total = 0
+    live = total = page14_live = page14_total = 0
     for index, code in enumerate(data):
         seconds = index / SAMPLE_RATE
         if seconds > args.end:
@@ -123,9 +126,15 @@ def main() -> int:
 
         total += 1
         live += 1 if sample else 0
+        if card.resident == 0x026A:
+            page14_total += 1
+            page14_live += 1 if sample else 0
 
     print(f'TX over the replayed window: {100.0 * live / max(1, total):.1f}% '
-          f'non-zero of {total} samples')
+          f'non-zero of {total} samples; page 14: '
+          f'{100.0 * page14_live / max(1, page14_total):.1f}% non-zero of '
+          f'{page14_total}; TX datagrams '
+          f'{card.tx_accepted}/{card.tx_requests} accepted/requested')
     return 0
 
 

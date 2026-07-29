@@ -26,7 +26,7 @@ REG_GROUP1 = ["I0","I1","I2","I3","M0","M1","M2","M3",
 REG_GROUP2 = ["I4","I5","I6","I7","M4","M5","M6","M7",
               "L4","L5","L6","L7","?","?","?","?"]
 REG_GROUP3 = ["ASTAT","MSTAT","SSTAT","IMASK","ICNTL","CNTR","SB","PX",
-              "RX0","?","RX1","?","?","?","?","SP"]
+              "RX0","TX0","RX1","TX1","?","?","?","TOPPCSTACK"]
 REG_GROUPS = [REG_GROUP0, REG_GROUP1, REG_GROUP2, REG_GROUP3]
 
 # condition_table[] in adsp2181_core.c, in encoding order.  14 is the loop
@@ -176,6 +176,17 @@ def disas(op: int) -> str:
         return f"DM(I{(op >> 2) & 3},M{op & 3}) = ${(op >> 4) & 0xFFFF:04X}"
     if 0xB0 <= top <= 0xBF:
         return f"DM(I{4 + ((op >> 2) & 3)},M{4 + (op & 3)}) = ${(op >> 4) & 0xFFFF:04X}"
+    if top == 0x04:
+        if (op & 0xFFFF) == 0x0040:
+            return "DIS INTS"
+        if (op & 0xFFFF) == 0x0060:
+            return "ENA INTS"
+        actions = []
+        if op & 0x10: actions.append("POP PC")
+        if op & 0x08: actions.append("POP LOOP")
+        if op & 0x04: actions.append("POP CNTR")
+        if op & 0x02: actions.append("POP STS" if op & 1 else "PUSH STS")
+        return ", ".join(actions) if actions else "STACK CONTROL"
     if top == 0x0D:
         return (f"{REG_GROUPS[(op >> 10) & 3][(op >> 4) & 15]} = "
                 f"{REG_GROUPS[(op >> 8) & 3][op & 15]}")

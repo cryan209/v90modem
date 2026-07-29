@@ -114,6 +114,7 @@ struct adsp2181
 	UINT32		loop;
 	UINT32		loop_condition;
 	UINT32		cntr;
+	UINT8		cntr_valid;
 
 	/* status registers */
 	UINT32		astat;
@@ -161,6 +162,7 @@ struct adsp2181
 	UINT16		dmovlay;
     UINT8   	irq_state[9];
     UINT8   	irq_latch[9];
+    UINT8   	interrupts_enabled;
     void *irq_callback;
 
 	/* other internal states */
@@ -192,8 +194,12 @@ struct adsp2181
     UINT8 watch_dm[0x4000];
     UINT8 watch_pm[0x4000];
     UINT8 watch_exec[0x4000];
+    UINT16 exec_history[64];
+    UINT8 exec_history_pos;
+    UINT8 exec_history_enabled;
     UINT8 watch_irqs;
     UINT64 cycles;
+    UINT64 coverage[0x4000];
     INT64 trace_budget;
 
 };
@@ -235,9 +241,21 @@ INLINE void WWORD_DATA(adsp2100_state *a, UINT32 x, UINT16 v)
 {
     x &= 0x3fff;
     if (a->watch_dm[x])
-        logerror("[WATCH] dm w %04x=%04x pc=%04x ov=%u cyc=%llu\n", x, v,
-                 (unsigned)(a->pc & 0x3fff), (unsigned)a->dmovlay,
-                 (unsigned long long)a->cycles);
+    {
+        logerror("[WATCH] dm w %04x=%04x ppc=%04x pc=%04x ov=%u cyc=%llu "
+                 "i0=%04x i4=%04x ar=%04x af=%04x mr0=%04x mr1=%04x "
+                 "sr0=%04x sr1=%04x\n", x, v,
+                 (unsigned)(a->ppc & 0x3fff), (unsigned)(a->pc & 0x3fff),
+                 (unsigned)a->dmovlay, (unsigned long long)a->cycles,
+                 (unsigned)(a->i[0] & 0x3fff), (unsigned)(a->i[4] & 0x3fff),
+                 a->core.ar.u, a->core.af.u, a->core.mr.mrx.mr0.u,
+                 a->core.mr.mrx.mr1.u, a->core.sr.srx.sr0.u,
+                 a->core.sr.srx.sr1.u);
+        logerror("[WATCH] prior pcs:");
+        for (unsigned n = 24; n > 0; n--)
+            logerror(" %04x", a->exec_history[(a->exec_history_pos - n) & 63]);
+        logerror("\n");
+    }
     if (x < 0x2000 && a->dmovlay >= 1 && a->dmovlay <= 2)
         a->data_overlay[a->dmovlay - 1][x] = v;
     else
@@ -289,6 +307,8 @@ static int generate_irq(adsp2100_state *adsp, int which, int priority)
 static void check_irqs(adsp2100_state *adsp)
 {
     UINT8 check;
+    if (!adsp->interrupts_enabled)
+        return;
 #define TRY_IRQ(which, priority, expression) \
     do { check = (expression); if (check && generate_irq(adsp, (which), (priority))) return; } while (0)
     TRY_IRQ(ADSP2181_IRQ2,      0, (adsp->icntl & 4) ? adsp->irq_latch[ADSP2181_IRQ2] : adsp->irq_state[ADSP2181_IRQ2]);
@@ -322,6 +342,9 @@ static void execute(adsp2100_state *adsp)
 
 		/* instruction fetch */
 		op = ROPCODE(adsp);
+		if (adsp->exec_history_enabled)
+			adsp->exec_history[adsp->exec_history_pos++ & 63] = adsp->pc & 0x3fff;
+        adsp->coverage[adsp->pc & 0x3fff]++;
 
         if (adsp->watch_exec[adsp->pc & 0x3fff]) {
             unsigned ret = adsp->pc_sp ? pc_stack_top(adsp) & 0x3fff : 0xffff;
@@ -332,16 +355,18 @@ static void execute(adsp2100_state *adsp)
             /* pmovlay and the fetched word are logged together because a PM
              * address at or above 0x2000 means a different instruction on
              * each overlay page: the pair says which page actually ran. */
-            logerror("[EXEC] pc=%04x ret=%04x pmovlay=%u dmovlay=%u op=%06x "
-                     "cyc=%llu cntr=%04x "
+            logerror("[EXEC] pc=%04x from=%04x ret=%04x pmovlay=%u dmovlay=%u op=%06x "
+                     "cyc=%llu cntr=%04x astat=%02x "
                      "i0=%04x i1=%04x m1=%04x m3=%04x "
                      "ax1=%04x ar=%04x mr0=%04x mr1=%04x "
                      "state=%04x event=%04x span=%04x count=%04x stride=%04x "
                      "istate=%04x analysis=%04x\n",
-                     (unsigned)(adsp->pc & 0x3fff), ret,
+                     (unsigned)(adsp->pc & 0x3fff),
+                     adsp->exec_history[(adsp->exec_history_pos - 2) & 63], ret,
                      (unsigned)adsp->pmovlay, (unsigned)adsp->dmovlay,
                      (unsigned)op,
                      (unsigned long long)adsp->cycles, (unsigned)(adsp->cntr & 0x3fff),
+                     (unsigned)(adsp->astat & 0xff),
                      adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
                      adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
                      adsp->core.ax1.u & 0xffff, adsp->core.ar.u & 0xffff,
@@ -457,6 +482,21 @@ static void execute(adsp2100_state *adsp)
 				}
 				break;
 			case 0x04:
+				/* ADSP-217x/218x global interrupt control occupies two of
+				 * the bits reserved by the older stack-control encoding:
+				 * 0x040040 = DIS INTS, 0x040060 = ENA INTS (User's Manual
+				 * pp. 15-90..91). It masks servicing without changing IMASK. */
+				if ((op & 0x00ffff) == 0x0040)
+				{
+					adsp->interrupts_enabled = 0;
+					break;
+				}
+				if ((op & 0x00ffff) == 0x0060)
+				{
+					adsp->interrupts_enabled = 1;
+					check_irqs(adsp);
+					break;
+				}
 				/* 00000100 00000000 000xxxxx  stack control */
 				if (op & 0x000010) pc_stack_pop_val(adsp);
 				if (op & 0x000008) loop_stack_pop(adsp);
@@ -475,6 +515,7 @@ static void execute(adsp2100_state *adsp)
 						adsp->core.mr.mrx.mr2.u = 0xffff, adsp->core.mr.mrx.mr1.u = 0x8000, adsp->core.mr.mrx.mr0.u = 0x0000;
 					else
 						adsp->core.mr.mrx.mr2.u = 0x0000, adsp->core.mr.mrx.mr1.u = 0x7fff, adsp->core.mr.mrx.mr0.u = 0xffff;
+					normalize_mr(adsp);
 				}
 				break;
 			case 0x06:
@@ -507,7 +548,7 @@ static void execute(adsp2100_state *adsp)
 
 					temp = res ^ xop;
 					adsp->astat = (adsp->astat & ~QFLAG) | ((temp >> 10) & QFLAG);
-					adsp->core.af.u = (res << 1) | (adsp->core.ay0.u >> 15);
+					adsp->core.af.u = ((UINT32)res << 1) | (adsp->core.ay0.u >> 15);
 					adsp->core.ay0.u = (adsp->core.ay0.u << 1) | ((~temp >> 15) & 0x0001);
 				}
 				break;
@@ -1172,14 +1213,14 @@ void adsp2181_reset(adsp2181_t *a)
     wr_l5(a, a->l[5]); wr_i5(a, a->i[5]);
     wr_l6(a, a->l[6]); wr_i6(a, a->i[6]);
     wr_l7(a, a->l[7]); wr_i7(a, a->i[7]);
-    a->pc=0; a->ppc=0xffffffff; a->loop=0xffff; a->loop_condition=0;
+    a->pc=0; a->ppc=0xffffffff; a->cntr_valid=0; a->loop=0xffff; a->loop_condition=0;
     a->astat_clear=~(CFLAG|VFLAG|NFLAG|ZFLAG); a->mstat=0; a->sstat=0x55; a->idle=0;
     a->pmovlay=0; a->dmovlay=0;
     memset(a->sport_rx, 0, sizeof(a->sport_rx));
     memset(a->sport_tx, 0, sizeof(a->sport_tx));
     memset(a->sport_tx_written, 0, sizeof(a->sport_tx_written));
     update_mstat(a);
-    a->pc_sp=a->cntr_sp=a->stat_sp=a->loop_sp=0; a->imask=0; a->icntl=0;
+    a->pc_sp=a->cntr_sp=a->stat_sp=a->loop_sp=0; a->imask=0; a->icntl=0; a->interrupts_enabled=1;
     memset(a->irq_state, 0, sizeof(a->irq_state));
     memset(a->irq_latch, 0, sizeof(a->irq_latch));
 }
@@ -1312,7 +1353,10 @@ uint16_t adsp2181_host_read(adsp2181_t *a, uint16_t addr)
 }
 void adsp2181_watch_dm(adsp2181_t *a, uint16_t addr, int on)
 {
-    if (a) a->watch_dm[addr & 0x3fff] = on != 0;
+    if (a) {
+        a->watch_dm[addr & 0x3fff] = on != 0;
+        if (on) a->exec_history_enabled = 1;
+    }
 }
 void adsp2181_watch_pm(adsp2181_t *a, uint16_t addr, int on)
 {
@@ -1321,7 +1365,10 @@ void adsp2181_watch_pm(adsp2181_t *a, uint16_t addr, int on)
 
 void adsp2181_watch_exec(adsp2181_t *a, uint16_t addr, int on)
 {
-    if (a) a->watch_exec[addr & 0x3fff] = on != 0;
+    if (a) {
+        a->watch_exec[addr & 0x3fff] = on != 0;
+        if (on) a->exec_history_enabled = 1;
+    }
 }
 
 void adsp2181_watch_irqs(adsp2181_t *a, int on)
@@ -1351,6 +1398,14 @@ uint32_t adsp2181_read_pm(adsp2181_t *a, uint16_t addr)
     return a ? RWORD_PGM(a, addr) : 0;
 }
 uint64_t adsp2181_cycles(const adsp2181_t *a) { return a ? a->cycles : 0; }
+void adsp2181_coverage_clear(adsp2181_t *a)
+{
+    if (a) memset(a->coverage, 0, sizeof(a->coverage));
+}
+uint64_t adsp2181_coverage_count(const adsp2181_t *a, uint16_t pc)
+{
+    return a ? a->coverage[pc & 0x3fff] : 0;
+}
 void adsp2181_trace_budget(adsp2181_t *a, int64_t n) { if (a) a->trace_budget = n; }
 uint16_t adsp2181_pc(const adsp2181_t *a) { return a->pc & 0x3fff; }
 void adsp2181_set_pc(adsp2181_t *a, uint16_t pc) { a->pc = pc & 0x3fff; a->idle = 0; }
@@ -1410,6 +1465,48 @@ uint16_t adsp2181_sport0_tdm_frame(adsp2181_t *a, int active_slot,
     WWORD_PGM(a, 0x00b5, task_isr);
     return selected_tx;
 }
+
+uint16_t adsp2181_modem_sample(adsp2181_t *a, uint16_t active_word,
+                               uint16_t idle_word, int cycles_per_pass,
+                               uint16_t continuation, uint16_t return_pc)
+{
+    uint16_t tx = adsp2181_sport0_tdm_frame(
+        a, 0, 0, active_word, idle_word, cycles_per_pass);
+    if (a && a->idle) {
+        pc_stack_push_val(a, return_pc & 0x3fff);
+        a->pc = continuation & 0x3fff;
+        a->idle = 0;
+        a->icount = cycles_per_pass;
+        execute(a);
+    }
+    return tx;
+}
+
+int adsp2181_g711_encode_block(adsp2181_t *a, const int16_t *samples,
+                               uint8_t *codes, size_t count,
+                               uint16_t entry, uint16_t return_pc,
+                               int cycles_per_sample)
+{
+    if (!a || !samples || !codes || cycles_per_sample <= 0 ||
+        a->idma_boot_hold)
+        return -1;
+    for (size_t i = 0; i < count; ++i) {
+        a->core.ar.u = (uint16_t)samples[i];
+        pc_stack_push_val(a, return_pc & 0x3fff);
+        a->pc = entry & 0x3fff;
+        a->idle = 0;
+        a->icount = cycles_per_sample;
+        execute(a);
+        /* PM 0x1810 returns serial-wire bit order in SR1. Reverse it to the
+         * conventional G.711 RTP octet, exactly as the scalar caller. */
+        uint8_t value = (uint8_t)a->core.sr.srx.sr1.u;
+        value = (uint8_t)(((value & 0x55u) << 1) | ((value >> 1) & 0x55u));
+        value = (uint8_t)(((value & 0x33u) << 2) | ((value >> 2) & 0x33u));
+        codes[i] = (uint8_t)((value << 4) | (value >> 4));
+    }
+    return 0;
+}
+
 uint16_t adsp2181_imask(const adsp2181_t *a) { return a->imask; }
 void adsp2181_set_imask(adsp2181_t *a, uint16_t imask) { if (a) a->imask = imask & 0x3ff; }
 void adsp2181_set_flagin(adsp2181_t *a, int asserted) { if (a) a->flagin = asserted ? 1 : 0; }

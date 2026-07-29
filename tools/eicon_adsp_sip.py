@@ -344,6 +344,7 @@ class EiconSipEndpoint:
                  info_actions: dict[int, int] | None = None,
                  db_words: dict[int, int] | None = None,
                  native_mips: bool = False,
+                 tx_prbs: bool = False,
                  mips_kernel: Path | None = None,
                  mips_tikrnl: Path | None = None,
                  mips_image: Path = Path('docs/firmware/te_dmlt.pm'),
@@ -365,6 +366,7 @@ class EiconSipEndpoint:
         self.info_actions = dict(info_actions or {})
         self.db_words = dict(db_words or {})
         self.native_mips = native_mips
+        self.tx_prbs = tx_prbs
         self.mips_kernel = mips_kernel
         self.mips_tikrnl = mips_tikrnl
         self.mips_image = mips_image
@@ -399,7 +401,8 @@ class EiconSipEndpoint:
             print('[native-mips] prebooting card firmware and incoming modem call...')
             self.native_card = create_native_mips_modem(
                 mips_kernel, mips_tikrnl, law, mips_image, mips_combifile,
-                force_info_after_v8=force_info_after_v8)
+                force_info_after_v8=force_info_after_v8,
+                tx_prbs=tx_prbs)
         if registrar and username:
             self.send_register()
 
@@ -509,7 +512,8 @@ class EiconSipEndpoint:
                         self.native_card = create_native_mips_modem(
                             self.mips_kernel, self.mips_tikrnl, self.law,
                             self.mips_image, self.mips_combifile,
-                            force_info_after_v8=self.force_info_after_v8)
+                            force_info_after_v8=self.force_info_after_v8,
+                            tx_prbs=self.tx_prbs)
                     card = self.native_card
                     self.native_card = None
                 elif self.kernel_dispatch:
@@ -546,8 +550,12 @@ class EiconSipEndpoint:
             tag = self.call.local_tag if self.call else None
             self.response(200, 'OK', headers, peer, tag=tag)
             if self.call:
+                tx_stats = ''
+                if hasattr(self.call.card, 'tx_requests'):
+                    tx_stats = (f'; TX datagrams {self.call.card.tx_accepted}/'
+                                f'{self.call.card.tx_requests} accepted/requested')
                 print(f'[call] ended after {self.call.packets} RTP packets, '
-                      f'{self.call.samples} samples')
+                      f'{self.call.samples} samples{tx_stats}')
                 self.call = None
             return
         if method == 'ACK':
@@ -630,18 +638,25 @@ class EiconSipEndpoint:
             baud_info = call.card.dm[0x3FBB]
             info_mode = call.card.dm[0x3F94]
             info_variant = call.card.dm[0x16B6]
-            if (di_control != call.di_control or baud_info != call.baud_info
-                    or info_mode != call.info_mode_selector
-                    or info_variant != call.info_variant):
+            di_changed = di_control != call.di_control
+            # PRBS mode services bit F at the DSP datagram rate. The complete
+            # value remains in the binary/CSV capture; avoid synchronous log
+            # I/O twice per request on the real-time media thread.
+            tx_request_only = (self.tx_prbs and call.di_control >= 0 and
+                               (di_control ^ call.di_control) == 0x8000)
+            if ((di_changed and not tx_request_only) or
+                    baud_info != call.baud_info or
+                    info_mode != call.info_mode_selector or
+                    info_variant != call.info_variant):
                 print(f'[adsp] sample {call.samples} ({call.samples / 8000:.3f}s): '
                       f'DI_control=0x{di_control:04x}'
                       f'[{flag_names(di_control, DI_CONTROL_BITS)}] '
                       f'BaudInfo=0x{baud_info:04x} INFO_mode=0x{info_mode:04x} '
                       f'INFO_variant=0x{info_variant:04x}')
-                call.di_control = di_control
                 call.baud_info = baud_info
                 call.info_mode_selector = info_mode
                 call.info_variant = info_variant
+            call.di_control = di_control
             bootpage = call.card.dm[0x3FB0]
             if bootpage != call.bootpage:
                 old = (f'{call.bootpage} {PAGE_NAMES.get(call.bootpage, "?")}'
@@ -713,9 +728,10 @@ def main() -> int:
     ap.add_argument('--kernel-dispatch', action='store_true',
                     help='drive TIKRNL through the SPORT0 kernel dispatcher')
     ap.add_argument('--native-mips', action='store_true',
-                    help='experimental: supervise the SIP ADSP with the real '
-                         'Unicorn MIPS firmware; assignment and native overlay '
-                         'loading work, but bearer WDB activation remains open')
+                    help='supervise the SIP ADSP with the real Unicorn MIPS firmware')
+    ap.add_argument('--tx-prbs', action='store_true',
+                    help='diagnostic: answer V90D TX requests with deterministic '
+                         'PRBS data (requires --native-mips)')
     ap.add_argument('--mips-kernel', type=Path,
                     default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
                                  '0009-diva-server-pri-30m-kernel'))
@@ -745,6 +761,8 @@ def main() -> int:
                     help='diagnostic: invoke firmware PM 0x2602 at INFO state 0x24')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
+    if args.tx_prbs and not args.native_mips:
+        ap.error('--tx-prbs requires --native-mips')
     endpoint = EiconSipEndpoint(args.bind, args.sip_port, args.rtp_port,
                                 args.advertise, args.verbose,
                                 args.capture_prefix, args.law, args.registrar,
@@ -759,8 +777,8 @@ def main() -> int:
                                 {int(pair.split(':')[0], 0): int(pair.split(':')[1], 0)
                                  for pair in args.db_word.split(',')
                                  if pair.strip()},
-                                args.native_mips, args.mips_kernel,
-                                args.mips_tikrnl, args.mips_image,
+                                args.native_mips, args.tx_prbs,
+                                args.mips_kernel, args.mips_tikrnl, args.mips_image,
                                 args.mips_combifile)
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))

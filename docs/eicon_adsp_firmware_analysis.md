@@ -4150,8 +4150,9 @@ same fact seen from the DSP side, and Session 48's search for a transmit
 *source* inside the overlay was looking on the wrong side of the interface.
 
 The test is direct: on `tx_request`, write a known datagram into TXD0..TXD2
-and clear the bit, then measure TX.  Until that runs this is a hypothesis, but
-it is the only one that accounts for the silence being state-independent.
+and let the DSP clear the request bit after consuming it, then measure TX.
+Host-clearing bit F races the polling handshake and is not the ownership
+specified by the guide.
 
 ### The rig loses real time once page 14 loads
 
@@ -4183,35 +4184,430 @@ packets in 104 s) long before the state walk happened.
 The offline replays are unaffected: they are open loop and sample-driven, with
 no wall clock in them at all.
 
-### Session 51, tested: the interface is live, the silence is real
+### Session 51, tested correctly: DSP-owned acknowledgement and real-time headroom
 
-Both halves of the hypothesis above were run on the native replay of `run14`
-call 1, and only one survives.
+The first direct test host-cleared `DI_control` bit F. That demonstrated that
+the page notices the mailbox, but it did not implement the documented
+handshake: the guide says the **DSP clears the bit after arrival**. The native
+backend now writes deterministic PRBS datagrams to `TXD0..TXD2` while bit F is
+set and leaves acknowledgement to the DSP. On the `run14` call-1 replay it
+accepted 8337 of 8337 supplied datagrams. Use:
 
-**Supplying a datagram does not start transmission, but the handshake is
-live.**  In the control the TX request bit stays set for 8067 consecutive
-samples — the core raises it and nothing ever clears it.  Writing a datagram
-into TXD0..TXD2 and clearing the bit makes the core re-raise it 235 times, so
-it is genuinely consuming what the host gives it.  TX stayed 0.0 %.  It did
-change the page's behaviour: the control restarted to `0x0050` when the
-countdown expired at 16.27 s, while the supplied run held `0x0062` past it.
-Feeding the interface keeps the page alive; it does not make it transmit.
+```bash
+/tmp/eicon-venv/bin/python tools/v90_dpcm_replay.py \
+  artifacts/eicon-native-tower/run14.rx.ulaw --to 20 --tx-prbs
+```
 
-**The silence is not a measurement artifact.**  `DM(0x3fa7)` is not a null
-pointer, as Session 48 read it — guide offset `0xc7` off the `0x3ee0` base is
-`TXSAMPLE_0`, the head of the transmit sample buffer `DM(0x3fa7..0x3fac)`,
-which is why `DM(0x3fb4) = DM(0x3fa7)` puts a sample value where a pointer
-belongs.  That raised the possibility that the card transmits into TXSAMPLE
-while every harness we have reads one word through `DM(0x3fb4)`, making the
-silence ours.  Measured: `TXSAMPLE_0..5` are **zero in 100 % of page-14
-samples**, in every state.  `Samplebuffersize` `DM(0x3f67)` reads 1, which is
-correct for V.90 downstream — one codeword per symbol at 8000 Hz — so
-`TXSAMPLE_0` alone would carry it, and it is empty.
+The open-loop replay remains 0.0% non-zero during its 78245 page-14 samples.
+That does not settle the live transmit question: its recorded Courier input
+was produced in response to the old silent output and cannot react to the
+changed host handshake. The supplied stream also changes the state timing
+(the restart moves from 16.2696 s to 16.4721 s), confirming that the page is
+consuming it. A closed-loop Courier call is the decisive next test.
 
-So the card really does produce nothing, confirmed at two independent
-locations, and Session 48's conclusion stands even though its reading of
-`DM(0x3fa7)` does not.  The data interface is not the blocker either — it
-works, we simply were not driving it.  Whatever enables the transmit path is
-still unidentified; the remaining candidates are page-14 configuration we
-never send (the answer-mode tables beyond `attach_connected_bearer`'s three
-cycles) or a start/enable bit outside the data interface.
+The wall-clock blocker was removed independently. `Card.encode_g711()` now
+runs the unchanged resident TIKRNL PM `0x1810` compander over each 160-sample
+packet in one C call rather than crossing ctypes four times per sample. The
+block output was checked byte-for-byte against the old scalar path. A
+20-second native replay including PRBS delivery, G.711 encoding, and the full
+DM/SCC diagnostic snapshots measured:
+
+| media interval | wall time | utilization |
+|---|---:|---:|
+| 0–10 s | 5.45 s | 54.5% |
+| 10–20 s (page 14) | 6.19 s | **61.9%** |
+
+This preserves all 8000 samples/s and gives page 14 about 38% execution
+headroom on the test machine. The live test mode is `eicon_adsp_sip.py
+--native-mips --tx-prbs`; RTP timing must still be checked from the resulting
+capture before interpreting the Courier's state progression.
+
+## Session 52: executed-opcode audit finds incorrect MAC rounding
+
+The ABS/ASTAT fault in Session 46 established that apparently coherent INFO
+behaviour is not evidence that the adapted MAME CPU core is instruction
+accurate. `tools/adsp_opcode_audit.py` now records resident-PM execution
+coverage after INFO loads, discarding DIAL/V.8 coverage because movable pages
+reuse the same addresses. On `run14` through 9.5 seconds it measured:
+
+```text
+INFO samples:          40939
+unique executed PCs:    3393
+total instructions: 59,832,252
+ALU/MAC:            16,016,250
+shifter:             1,883,855
+hardware loop:         601,018
+```
+
+This turns the audit from a review of every nominally supported instruction
+into a review of the exact firmware idioms reached by INFO:
+
+```bash
+make -C tools/adsp2181emu
+/tmp/eicon-venv/bin/python tools/adsp_opcode_audit.py \
+  artifacts/eicon-native-tower/run14.rx.ulaw --to 9.5 \
+  --out /tmp/info-opcodes.tsv
+```
+
+The first conformance failure is in all four MAC implementations. For the
+`MR +/- X*Y (RND)` forms, the MAME-derived code tested the low word of the
+multiply product to detect the unbiased-rounding midpoint. The ADSP-2100
+Family User's Manual §2.3.2.6 defines rounding on the complete unrounded MR
+value. Once an existing accumulator participates, the product low word is not
+MR0. INFO executes rounded MAC operations heavily, including
+`MR=MR+MX0*MY0 (RND)` 143872 times in this replay.
+
+A focused instruction test constructs `MR0=0x4000` plus the fractional
+product `0x2000*1=0x4000`. The complete result is the exact `0x8000` midpoint
+with an even MR1, so unbiased rounding must leave MR1 zero. The old core
+produced one. The emulator now takes the midpoint from the complete result;
+the regression covers MR0 and MR1.
+
+That test exposed two more MAC defects. Every multiply was first evaluated
+into a signed 32-bit `temp`. Fractional `-32768 * -32768` is positive
+`0x80000000` in the MAC's 40-bit domain but became negative in `int32_t`;
+unsigned products can exceed 32 bits much more broadly. All four MAC paths
+now form products in signed 64-bit storage before applying the documented
+fractional/integer placement. In addition, the two MF-destination paths never
+updated ASTAT.MV, despite the multiply instruction's status table specifying
+MV for both MR and MF destinations. They now calculate MV from bits 39..31 of
+the complete result, as the MR paths do. A regression executes
+`MF=-32768*-32768 (SS)` in fractional mode and verifies MV.
+
+The run14 state path is unchanged by these corrections, so these real opcode
+bugs are not claimed as that capture's protocol blocker. They demonstrate that
+the opcode-audit direction is necessary.
+
+### DAG modulo correction changes the INFO signal path
+
+The next audit found a firmware-active error in all six DAG access/modify
+paths. The User's Manual §4.2.3 defines circular modification as
+`(I + M - B) modulo L + B`, with M signed. The core added signed M to an
+unsigned host `I`. When a valid buffer had base zero and negative M crossed
+its lower boundary, the host value underflowed before the boundary test and
+the core subtracted L instead of adding it. For example, INFO executes
+PM `0x329c` with `I0=0`, `M3=-14`, and `L0=0x400`; the old core produced an
+effective address of `0x3bf2` instead of `0x03f2`. A trace through eight
+seconds counted 1644 such firmware-reached underflows, including strides
+-13, -14, and -511.
+
+DAG modification now uses a signed intermediate and applies the manual's
+single-wrap formula. When L=0 disables circular buffering, the result is
+still masked back into the architectural 14-bit I register, so linear
+`0 - 1` becomes `0x3fff`. Focused tests cover both that case and the base-zero
+three-word circular case, where `(0 - 1) modulo 3 = 2`.
+
+Unlike the MAC corrections, this changes run14's INFO output values beginning
+before eight seconds. It also changes the later restart countdown seed at
+16.4721 seconds from `0x58b8` to the saturated `0x7fff`, while reaching the
+same high-level state sequence. This is therefore the first audit correction
+known to alter the captured INFO/data-pump signal path materially.
+
+### Shifter and count-stack checks
+
+The high-volume EXP(HI/LO), EXPADJ, and NORM(HI/LO) paths were checked against
+the shifter chapter. Tests now cover ordinary EXP/NORM normalization and the
+HIX overflow case where SE becomes +1 and NORM(HI) fills from ASTAT.AC. The
+firmware-reached semantics agree with the manual. Signed-left-shift undefined
+behaviour inherited from the old C core was removed from shifter, M-register,
+program-memory, MAC, and DIVQ operations. A UBSan build now replays INFO
+through 9.5 seconds without a diagnostic.
+
+The count stack had another conformance defect from the MAME adaptation:
+every CNTR load pushed the previous value, including the invalid value after
+reset. The User's Manual §3.2.3 explicitly excludes that first push. The core
+now tracks whether current CNTR is valid, preserving all four physical stack
+entries for dormant nested counts; a five-active-count test verifies that
+COUNT_OVER remains clear. The run14 path is unchanged by this stack fix.
+
+Remaining firmware-reached work includes conditional ALU/MAC flags,
+multifunction ordering beyond the tested SR1 case, normal and exceptional
+hardware-loop exits, and interrupt/loop stack interaction. Live Courier
+testing remains paused until those idioms have conformance coverage.
+
+### ADSP-218x global interrupt instructions were decoded as no-ops
+
+The interrupt/stack audit found that PM `0x076b=0x040040` and
+`0x0770=0x040060`, each executed 40939 times in the INFO coverage window,
+are not generic stack-control padding. They are the ADSP-217x/218x
+`DIS INTS` and `ENA INTS` opcodes. The Family User's Manual pp. 15-90..91
+assigns reserved stack-control bit 6 to global interrupt control and bit 5 to
+the enable value. The old 2100 core inspected only the original stack fields
+in bits 4..0, making both instructions no-ops.
+
+The core now has a global interrupt-enable latch, enabled after reset.
+`DIS INTS` suppresses interrupt servicing without modifying IMASK or losing
+pending latches; `ENA INTS` re-enables servicing and immediately recognizes a
+pending unmasked interrupt. A regression disables interrupts, asserts IRQ2,
+verifies that PC and IMASK do not change, then executes ENA and verifies the
+pending vector to PM `0x0004`. The disassembler now names both opcodes.
+This matters because the resident ISR dispatcher brackets TOPPCSTACK
+manipulation with this pair; allowing an interrupt in that interval can corrupt
+the shared PC stack even when ordinary replay timing happens not to inject one.
+
+All 69 DO instructions reached in this INFO window terminate on NOT CE, and
+none of their reached final instructions is JUMP, CALL, RETURN, or IDLE. The
+ordinary loop comparator path now has a focused `CNTR=3` regression proving
+three passes and correct fall-through. Exceptional end-of-loop control-flow
+semantics remain outside this capture's executed idioms.
+
+The MAC audit also corrected the host representation of architectural MR.
+MR is 40 bits and MR2 is an 8-bit signed extension, while the inherited C union
+allocated a 16-bit field for MR2 and retained unmasked host carry bits after an
+accumulation. MAC writes, explicit MR1/MR2 writes, and SAT MR now normalize and
+sign-extend exactly 40 bits. A maximum-positive-MR plus two regression wraps to
+negative MR and verifies that MR2 reads as `0xff80`, not `0x0080`. This does not
+change the run14 state path but closes a real overflow/readback error in the
+firmware's heavily used SAT MR sequences.
+
+## Session 53: live Phase 3 stall localised to the page-14 callback transition
+
+The corrected live `run17` repeatedly reaches page 14 around 10 seconds and
+advances through `0x60,0x62,0x66,0x68`; some calls also report `0x6a/0x72` and
+DCD. This is not a successful Phase 3 continuation. In the final captured call,
+the Eicon transmit stream becomes predominantly PCMU idle or held codewords
+immediately after the transition. The Courier-to-Eicon stream later settles to
+a measured 2400 Hz tone, so the audible solid tone is the Courier waiting while
+the emulated Eicon has stopped emitting useful training.
+
+Page-14-only coverage (`--page 0x026a`) exposes the CPU failure directly. Near
+the later timeout/restart seam, the normal page-14 record decompressor at PM
+`0x2fe3..0x2feb` rewrites callback word `DM(0x20b1)`:
+
+```text
+initial callback: 3038
+cycle 219605136:  10e4
+cycle 219605656:  a020
+```
+
+PM `0x2f9d` subsequently loads that word into I4 and PM `0x2f9e` executes
+`CALL (I4)`. Architectural I registers retain 14 bits, so `0xa020` calls PM
+`0x2020`. PM `0x2020..` is packed page data rather than a routine. Execution
+walks through it until PM `0x204a`, whose data word happens to decode as
+`IF EQ JUMP (I4)`. With ASTAT.AZ set and I4 still `0x2020`/later self-directed,
+the core executes that accidental dispatch loop hundreds of millions of times.
+This also explains the apparently meaningful logged `TrnProgress=0x204a`: the
+old diagnostic labels page-private words after their role has changed.
+
+The real MIPS driver was kept active every 160 samples during this replay.
+Tracing its IDMA writes shows **no host DSP writes after the 18541 writes that
+load page 14**. In particular there is no write at DCD or at the callback-table
+rewrite. This agrees with ADDSP V.90 Guide §5.4.2: the host supervisor enters
+SUPDATA only at `TrnProgress=DATASTATE (0xd0)`, not merely when DCD rises. The
+rewrite and bad indirect call are internal DSP execution, not a driver reaction
+to DCD. Host behavior can still be missing later, but it is not the cause of
+this transition.
+
+A deeper trace rules out accidental byte assembly in the decompressor. The
+transition is selected by the first callback scheduler at PM `0x2f7d..0x2f9c`.
+Its second callback, PM `0x2fff`, returns `DM(0x20e0)` through PM `0x3082`; when
+that timer reaches zero, the scheduler selects state-image pointer `0x1c9e`.
+The PM `0x2fe3` unpacker then consumes the page's **DM** record stream (not PM
+instructions). The extracted firmware image contains the exact three records
+which produce the bad word:
+
+```text
+DM 22a1 = 02c8   destination offset c8 -> 1fe9+c8 = 20b1
+DM 22a2 = 0220   output low byte 20
+DM 22a3 = 01a0   output high byte a0
+```
+
+Thus `0xa020` is byte-for-byte what build 117-926's state image requests. The
+same unpack operation ends normally on its `AF=0x17` sentinel; ASTAT.EQ and the
+loop termination are correct. It also changes the primary scheduler target
+`DM(0x2039)` from `0x2eeb` to `0xf894`. The masked target PM `0x3894` executes
+normally once before the next six-tick secondary dispatch. `DM(0x203a)` remains
+`0x3db9`, `DM(0x201a)` remains zero, and the secondary-dispatch countdown
+`DM(0x20df)` is not changed by the state image. Consequently PM `0x2a50` still
+calls PM `0x2f9d`, which unconditionally consumes `DM(0x20b1)`.
+
+The image is layered: after unpacking `0x1c9e..0x2475`, the primary scheduler
+selects base image `0x180f` and restores part of the runtime tables. It does not
+restore `DM(0x20b1)`. Source records, destination arithmetic, shifter OR
+placement, sentinel handling, and the final `0xa020` all agree with the
+extracted binary. The timer itself is also deterministic: PM `0x2c7a` seeds
+`DM(0x20e0)=0x4b9c` and `DM(0x20e1)=0`; PM `0x2f7d..0x2f80` decrements it once
+per primary scheduler dispatch until zero. The expiry is therefore the page's
+roughly six-second Phase 3 watchdog, not wall-clock drift or an ADSP hardware
+timer interrupt. During restart initialization the firmware reseeds it through
+`0x4b9c`, `0x3f1c`, `0x58b8`, `0x671c`, and finally `0x7fff`, proving that the
+state image is trying to initiate another training/recovery configuration before
+the bad secondary call.
+
+The remaining fault is therefore earlier: either the Phase 3 watchdog should
+not select image `0x1c9e` in this operating state, or real hardware/host/watchdog
+handling removes this scheduler before its next secondary tick. It is no longer
+credible to fix this by byte-swapping `0xa020` or changing PM/DMD placement.
+
+Trace tooling now supports page-selective coverage, watched PM execution,
+richer watched-DM writes, and a rolling prior-PC history for this seam.
+
+## Session 54: watchdog audit points back to the synthetic kernel continuation
+
+There are three distinct mechanisms called a watchdog in the ADDSP interface,
+and they must not be conflated:
+
+1. `WSTATUS.TXdog`/`change_TXdog` and `changeBITS.RXdog` form an optional
+   host↔DSP liveness handshake (ADDSP guide write offset `0x0e`, read offset
+   `0xc1`).
+2. `Unitimer` at read offsets `0x92..0x94` is a 1 kHz host-visible clock which
+   the host line-follow-up can use for its timers.
+3. Page 14's `DM(0x20e0)` is a private primary-scheduler count. It is the timer
+   that actually expires immediately before state image `0x1c9e` is selected.
+
+Supplying a correct changing TXdog nibble every 160 samples does not alter the
+failure: page 14 still ends at PM `0x204a`, `DM(0x20b1)` still becomes `0xa020`,
+and the firmware does not consume the synthetic TXdog request before trapping.
+There are still no MIPS IDMA writes at expiry. This excludes the external
+TXdog handshake as the trigger or cure for the callback transition.
+
+A first interpretation that the synthetic boundary skipped TIKRNL's full
+selected-channel continuation was wrong. Runtime coverage settles this exactly:
+PM `0x06c8` executes once per sample and reaches the loader-relocated callback
+at PM `0x0703` once per sample through the registered descriptor. This is the
+same single-call accounting established in Session 41; explicitly selecting
+`0x0703` makes it execute twice and recreates that old error. Runtime PM
+`0x0703..0x07ed` already performs sample selection, calls the page through
+`DM(0x3fb3)`, runs the host/data gate, and publishes the final SPORT word.
+The extracted TIKRNL listing is shifted by the native loader's seven-word
+prefix, so disassembling extracted PM at the same numeric addresses caused the
+mistake.
+
+The host communication subroutine at runtime PM `0x18b0` is likewise reached
+once per sample. Its cadence word `DM(0x35f9)` counts `1 -> 0` and reloads from
+relocated `DM(0x2f82)=1`. `DM(0x35f8)` is an ASTAT snapshot, not a Boolean:
+zero makes `IF NE RTS` true because AZ is clear, while value `1` enables the
+four conditional host slots. Forcing AZ there proves PM `0x18b8..0x18c8` is
+otherwise executable, but does not affect the Phase 3 deadline or recovery.
+Likewise, page-14 PM `0x299b..0x299f` sees `WSTATUS.change_TXdog` and clears bit
+4 correctly. Driving TXdog every 160 samples leaves the low nibble consumed but
+does not change `DM(0x20e0)`, state selection, `0xa020`, or the terminal trap.
+
+Thus neither a missing PM `0x0703` call nor the optional external TXdog
+handshake explains the six-second recovery. The selected SPORT descriptor is
+already executing at exact 8 kHz accounting.
+
+The MIPS side was then traced at every native `HOST_READ`. Each 20 ms main-loop
+pass polls five words on every DSP. On the selected modem DSP they are:
+
+```text
+IDMA 6f18 / DM2f18 = 8000
+IDMA 6f17 / DM2f17 = 8000
+IDMA 6e49 / DM2e49 = SPORT/sample counter, +160 per pass
+IDMA 6e46 / DM2e46 = foreground/error activity
+IDMA 6f19 / DM2f19 = 0000
+```
+
+The paired `DM2f17/2f18` values are compared and acknowledged only when their
+XOR changes. They remain equal across the trap. PM `0x204a` does not disable
+interrupts: each SPORT interrupt preempts the bad foreground loop, updates
+`DM2e49`, and returns to the loop. Consequently the MIPS liveness poll still
+sees exactly 160 samples per 20 ms and has no reason to reset the DSP.
+`DM2e46`, previously zero, begins increasing after the trap; the MIPS handler
+at `0x800a507c` notices changes and reads/formats a diagnostic block, but does
+not write or reload the DSP.
+
+Continuing exact SPORT frames to 32 seconds (with a reduced foreground budget
+after the trap) produces no MIPS IDMA writes, page reload, retrain WDB, or
+cleardown. Calling 600 additional MIPS main-loop passes without SPORT time also
+produces no action. `TrnProgress` remains the deliberately published `0x0050`
+while the foreground remains at PM `0x204a`. There is therefore no omitted
+host watchdog rescue to implement in this path.
+
+This also corrects the phrase "earlier clean restart": Session 50 observed the
+published `0x0062 -> 0x0050` state transition but never audited the following
+indirect callback. It did not prove execution continued after the restart.
+The evidence now supports a simpler interpretation: build 117-926's six-second
+failure/restart path itself reaches an unusable secondary table. Successful
+hardware must avoid this path by making Phase 3 progress before the deadline.
+The callback trap is a terminal consequence of the existing Phase 3 stall, not
+the cause to patch around.
+
+The concrete missing boundary is now the V90D transmit publication. Generic
+DIAL/V.8/INFO output uses the task pointer left in `DM(0x3fb4)`, which is why
+the SIP adapter historically dereferenced that word after each frame. Page 14
+uses the private scalar slot `DM(0x3fa7)` instead. The runtime adapter proves
+the ownership and timing:
+
+```text
+PM 1a1b: DM(3607) = DM(3fb4)   save generic task context
+PM 1a1d: DM(3fb4) = DM(3fa7)   publish previous V90D scalar to kernel
+... page action computes the following DM(3fa7) ...
+PM 19ed: DM(3fb4) = DM(3607)   restore generic task context
+```
+
+Reading `DM(0x3fb4)` after the frame does read the restored generic context,
+so `DM(0x3fa7)` was tested as a signed-linear sample in live `run18`, then the
+raw-G.711 alternative was checked against the captured value stream. The
+experiment disproved that candidate. Across both calls, `DM(0x3fa7)` remained
+zero for the whole valid page-14 interval. Treating it as signed-linear
+therefore emitted PCMU silence; treating the same value as a codeword would
+emit constant PCMU `0x00`, not a Phase 3 sequence. The only
+nonzero values appeared after shared state was already corrupt. Both run18
+calls reached `0x0060/0x0062` and left page 14 within 0.3 seconds; neither
+produced downstream training. The experimental source selection was reverted.
+
+PM `0x1a1d` is a context swap, not proof that the swapped scalar is the V90D
+modulator output. The next candidate was the SPORT0 TX latch, and live `run19` disproved it.
+Only PM `0x0079` writes TX0: `TX0 = DM(0x2e52)`, before the selected descriptor
+continuation. PM `0x00bd` updates `DM(0x2e52)` from the generic TDM slot walk.
+The apparent post-continuation waveform (`-8`, `8`, `1980`, etc.) is therefore
+the delayed TDM/RX mirror already rejected in Session 41, not a V90D waveform.
+Returning it on SIP made the call sound different because the Courier heard a
+version of its own signal; both run19 calls then left page 14 almost
+immediately after `0x0060/0x0062`. The SPORT-latch experiment was reverted.
+
+We have now ruled out all three externally visible post-frame candidates:
+restored generic `DM(0x3fb4)`, zero `DM(0x3fa7)`, and mirrored SPORT0 TX.
+Following the firmware's own dataflow shows that zero output is intentional at
+the state currently reached, not a missing line descriptor:
+
+- PM `0x3db9..0x3dc6` copies the six-sample vector `DM(0x10ae..0x10b3)` into
+  `DM(0x3fa7..0x3fac)` (three samples followed by their negatives).
+- PM `0x2ee9` dispatches through `DM(0x2039)`. Mode zero selects PM `0x2eeb`,
+  which deliberately clears the published scalar. Transmit mode selects PM
+  `0x2eed..0x2ef2`, which walks the six-sample vector through `DM(0x20de)` and
+  publishes one signed-linear sample at a time.
+- PM `0x24de..0x24e3` derives that handler set from inner field `DM(0x2001)`.
+  The initial inner state `0x0001` leaves it zero. Inner state `0x0020` sets it
+  to `0x1000`, selecting the real serializer.
+- The `0x0001 -> 0x0020` inner transition is gated at PM `0x30ce..0x30d2` by
+  bit `0x0002` in outer field `DM(0x1fe9)`. The outer records do not set that
+  bit until outer state `0x0080` (`DM(0x1fe9)=0x1402`). The best live run only
+  reached `TrnProgress 0x0072`.
+
+Consequently, V90D is not yet supposed to emit downstream training at
+`0x0060/0x0062/0x0072`. The primary fault remains the receive-side outer state
+machine failing to progress from `0x0072` through `0x0074`, `0x0076`, `0x0078`,
+`0x007a`, and `0x007c` to `0x0080`; fabricating output earlier would violate
+the firmware sequence. `tools/v90_dpcm_state_records.py` now decodes inner
+records with PM `0x2fee`'s high-byte packing rather than incorrectly applying
+PM `0x2fe3`'s outer low-byte format to both layers.
+
+### Handover after Session 54
+
+The tree is intentionally back on the validated generic `DM(0x3fb4)` transmit
+path. Neither the run18 `DM(0x3fa7)` experiment nor the run19 SPORT/RX-mirror
+experiment remains enabled. Do not restore either one. Page-14 silence before
+outer state `0x0080` agrees with the firmware.
+
+The next investigation should start at the receive-side outer-state seam, not
+at RTP publication:
+
+1. Replay the complete `run17.rx.ulaw`; unlike replaying only its final segment,
+   it reaches page `0x026a` and outer state `0x0072`.
+2. Watch `DM(0x1ff6)`, `DM(0x120f)`, `DM(0x1ff7)`, and execution of PM
+   `0x2ffb..0x3014`. State `0x0072` installs dwell `0x003e`; determine why the
+   expected timed records `0x0074`, `0x0076`, and `0x0078` are not published.
+3. Separately watch `DM(0x204a)`, `DM(0x2008)`, and PM `0x2fee..0x2ffa` so an
+   inner-record transition is not confused with the later recovery image that
+   repurposes those words. Values observed after bootpage leaves V90D are not
+   valid Phase-3 state.
+4. Only after outer state `0x0080` is reached should line output be taken from
+   the firmware serializer at PM `0x2eed..0x2ef2`/`DM(0x3fa7)`. At that point
+   verify one G.711 companding operation and exact 8 kHz sample accounting in a
+   new closed-loop Courier call.
+
+The useful local captures are `run17` (best live progress), `run18` (zero
+`DM(0x3fa7)` experiment), and `run19` (disproved SPORT mirror). Their large
+capture files remain untracked and are not part of the source commit.

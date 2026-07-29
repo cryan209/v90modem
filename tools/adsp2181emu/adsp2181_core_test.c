@@ -120,6 +120,148 @@ int main(void)
         assert(adsp2181_dm(cpu)[0x0100] == 0);
     }
 
+    /* ADSP-2100 Family User's Manual §2.3.2.6 rounds the complete
+     * accumulator, not just the multiply product. Construct an exact
+     * midpoint from MR0=0x4000 plus 0x2000*1 in fractional mode. Unbiased
+     * rounding keeps the even MR1 at zero. The old MAME-derived code tested
+     * the product low word (0x4000), incorrectly rounding MR1 up to one. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x40000c; /* MR1 = 0 */
+    adsp2181_pm(cpu)[1] = 0x44000b; /* MR0 = 0x4000 */
+    adsp2181_pm(cpu)[2] = 0x420002; /* MX0 = 0x2000 */
+    adsp2181_pm(cpu)[3] = 0x400016; /* MY0 = 1 */
+    adsp2181_pm(cpu)[4] = 0x20400f; /* MR = MR + MX0*MY0 (RND) */
+    adsp2181_pm(cpu)[5] = 0x90101c; /* DM(0x0101) = MR1 */
+    adsp2181_pm(cpu)[6] = 0x90100b; /* DM(0x0100) = MR0 */
+    adsp2181_pm(cpu)[7] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0101] == 0);
+    assert(adsp2181_dm(cpu)[0x0100] == 0);
+
+    /* The multiply instruction's status table specifies MV for either MR or
+     * MF destinations. (-32768 * -32768) in fractional mode overflows the
+     * signed result; the old mac_op_mf path never updated MV at all. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x480002; /* MX0 = 0x8000 */
+    adsp2181_pm(cpu)[1] = 0x480006; /* MY0 = 0x8000 */
+    adsp2181_pm(cpu)[2] = 0x24800f; /* MF = MX0*MY0 (SS) */
+    adsp2181_pm(cpu)[3] = 0x0d03a0; /* AR = ASTAT */
+    adsp2181_pm(cpu)[4] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[5] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] & 0x0040); /* MV */
+
+    /* I registers remain 14-bit when L=0 disables circular buffering. A
+     * linear negative modification must wrap 0 -> 0x3fff, rather than leave
+     * the unsigned host intermediate at 0xffffffff. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x340000; /* I0 = 0 */
+    adsp2181_pm(cpu)[1] = 0x37fff4; /* M0 = -1 */
+    adsp2181_pm(cpu)[2] = 0x340008; /* L0 = 0 */
+    adsp2181_pm(cpu)[3] = 0x090000; /* MODIFY(I0,M0) */
+    adsp2181_pm(cpu)[4] = 0x0d01a0; /* AR = I0 */
+    adsp2181_pm(cpu)[5] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[6] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 0x3fff);
+
+    /* Manual §4.2.3 circular formula at base zero: (0 - 1) mod 3 = 2.
+     * The previous unsigned comparison instead produced 0x3ffc. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x340000; /* I0 = 0 (base 0) */
+    adsp2181_pm(cpu)[1] = 0x37fff4; /* M0 = -1 */
+    adsp2181_pm(cpu)[2] = 0x340038; /* L0 = 3 */
+    adsp2181_pm(cpu)[3] = 0x090000; /* MODIFY(I0,M0) */
+    adsp2181_pm(cpu)[4] = 0x0d01a0; /* AR = I0 */
+    adsp2181_pm(cpu)[5] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[6] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 2);
+
+    /* INFO uses EXP(HI) followed by NORM(HI/LO) for double-precision
+     * normalization. AR=1 derives SE=-14 and normalizes into SR bit 30. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x40001a; /* AR = 1 */
+    adsp2181_pm(cpu)[1] = 0x0e620f; /* SE = EXP AR (HI) */
+    adsp2181_pm(cpu)[2] = 0x0e420f; /* SR = NORM AR (HI) */
+    adsp2181_pm(cpu)[3] = 0x90100f; /* DM(0x0100) = SR1 */
+    adsp2181_pm(cpu)[4] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 0x4000);
+
+    /* HIX with AV derives SE=+1. NORM(HI) then downshifts and fills bit 31
+     * from AC, as specified in the shifter chapter. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x48000a; /* AR = 0x8000 */
+    adsp2181_pm(cpu)[1] = 0x3c00c0; /* ASTAT = AV | AC */
+    adsp2181_pm(cpu)[2] = 0x0e6a0f; /* SE = EXP AR (HIX) */
+    adsp2181_pm(cpu)[3] = 0x0e420f; /* SR = NORM AR (HI) */
+    adsp2181_pm(cpu)[4] = 0x90100f; /* DM(0x0100) = SR1 */
+    adsp2181_pm(cpu)[5] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 0xc000);
+
+    /* The first CNTR load after reset does not push an invalid old count.
+     * Five active counts therefore use the current CNTR plus all four count
+     * stack entries without setting COUNT_OVER. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x3c0015; /* CNTR = 1 */
+    adsp2181_pm(cpu)[1] = 0x3c0025; /* CNTR = 2 */
+    adsp2181_pm(cpu)[2] = 0x3c0035; /* CNTR = 3 */
+    adsp2181_pm(cpu)[3] = 0x3c0045; /* CNTR = 4 */
+    adsp2181_pm(cpu)[4] = 0x3c0055; /* CNTR = 5 */
+    adsp2181_pm(cpu)[5] = 0x0d03a2; /* AR = SSTAT */
+    adsp2181_pm(cpu)[6] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[7] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(!(adsp2181_dm(cpu)[0x0100] & 0x0008)); /* !COUNT_OVER */
+    assert(!(adsp2181_dm(cpu)[0x0100] & 0x0004)); /* !COUNT_EMPTY */
+
+    /* MR is 40 bits even though the host union gives MR2 a 16-bit slot.
+     * Overflow maximum-positive MR by two; architectural MR2 is the signed
+     * 8-bit value 0x80 and must read back sign-extended as 0xff80. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x4ffffc; /* MR1 = 0xffff */
+    adsp2181_pm(cpu)[1] = 0x4007fd; /* MR2 = 0x7f */
+    adsp2181_pm(cpu)[2] = 0x4ffffb; /* MR0 = 0xffff */
+    adsp2181_pm(cpu)[3] = 0x400012; /* MX0 = 1 */
+    adsp2181_pm(cpu)[4] = 0x400016; /* MY0 = 1 */
+    adsp2181_pm(cpu)[5] = 0x21000f; /* MR = MR + MX0*MY0 (SS), +2 */
+    adsp2181_pm(cpu)[6] = 0x90100d; /* DM(0x0100) = MR2 */
+    adsp2181_pm(cpu)[7] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 0xff80);
+
+    /* ADSP-218x DIS/ENA INTS use reserved stack-control bits 6 and 5.
+     * DIS masks servicing globally without changing IMASK; ENA must then
+     * take the still-pending IRQ2 and vector to PM 0x0004. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x040040; /* DIS INTS */
+    adsp2181_pm(cpu)[1] = 0x040060; /* ENA INTS */
+    adsp2181_set_imask(cpu, 0x0200); /* IRQ2 */
+    adsp2181_run(cpu, 1);
+    assert(adsp2181_pc(cpu) == 1);
+    adsp2181_set_irq(cpu, ADSP2181_IRQ2, 1);
+    assert(adsp2181_pc(cpu) == 1); /* pending, globally disabled */
+    assert(adsp2181_imask(cpu) == 0x0200);
+    adsp2181_run(cpu, 1);
+    assert(adsp2181_pc(cpu) == 4); /* pending IRQ taken by ENA */
+    adsp2181_set_irq(cpu, ADSP2181_IRQ2, 0);
+
+    /* All hardware loops reached by INFO terminate on NOT CE with an
+     * ordinary compute/move final instruction. CNTR=N must execute exactly
+     * N passes while preserving the zero-overhead loop PC sequencing. */
+    adsp2181_reset(cpu);
+    adsp2181_pm(cpu)[0] = 0x400014; /* AY0 = 1 */
+    adsp2181_pm(cpu)[1] = 0x40000a; /* AR = 0 */
+    adsp2181_pm(cpu)[2] = 0x3c0035; /* CNTR = 3 */
+    adsp2181_pm(cpu)[3] = 0x14004e; /* DO PM(4) UNTIL NOT CE */
+    adsp2181_pm(cpu)[4] = 0x22620f; /* AR = AR + AY0 */
+    adsp2181_pm(cpu)[5] = 0x90100a; /* DM(0x0100) = AR */
+    adsp2181_pm(cpu)[6] = 0x028000; /* IDLE */
+    adsp2181_run(cpu, 32);
+    assert(adsp2181_dm(cpu)[0x0100] == 3);
+
     adsp2181_destroy(cpu);
     puts("adsp2181_core_test: PASS");
     return 0;

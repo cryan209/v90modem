@@ -113,11 +113,20 @@ def load_dm() -> list[int]:
 
 def decode(dm, address: int, layer: Layer,
            limit: int = 48) -> tuple[dict[int, int], int]:
-    """Replay PM 0x2fe3 over one record; return it and the following address."""
+    """Replay the layer's record applier; return it and the following address.
+
+    The outer PM 0x2fe3 applier consumes the low byte of each stored word.
+    The inner PM 0x2fee applier consumes the high byte instead. Both encode an
+    (offset, value-low, value-high) triple, but they are not interchangeable.
+    """
     out: dict[int, int] = {}
     for _ in range(limit):
-        offset = dm[address] & 0xFF
-        value = (dm[address + 1] & 0xFF) | ((dm[address + 2] & 0xFF) << 8)
+        if layer is INNER:
+            offset = (dm[address] >> 8) & 0xFF
+            value = ((dm[address + 1] >> 8) & 0xFF) | (dm[address + 2] & 0xFF00)
+        else:
+            offset = dm[address] & 0xFF
+            value = (dm[address + 1] & 0xFF) | ((dm[address + 2] & 0xFF) << 8)
         address += 3
         out[offset] = value
         if offset == layer.end:

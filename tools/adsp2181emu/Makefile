@@ -1,5 +1,8 @@
 CC ?= cc
-CFLAGS ?= -O2 -g
+# The live V.90 page has to execute 8000 complete modem samples per second.
+# -O2 falls behind on the deeper page-14 state paths; -O3 preserves emulator
+# semantics while providing the required real-time headroom.
+CFLAGS ?= -O3 -g
 CFLAGS += -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 
 all: eicon_adsp_run libadsp2181.dylib
@@ -30,6 +33,6 @@ test: adsp2181_core_test
 	./adsp2181_core_test
 
 clean:
-	rm -f eicon_adsp_run adsp2181_core_test *.o
+	rm -f eicon_adsp_run adsp2181_core_test libadsp2181.dylib *.o
 
 .PHONY: all test clean

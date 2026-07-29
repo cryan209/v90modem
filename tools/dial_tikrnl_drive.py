@@ -115,6 +115,11 @@ ADSP.adsp2181_sr0.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_sr0.restype = ctypes.c_uint16
 ADSP.adsp2181_sr1.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_sr1.restype = ctypes.c_uint16
+ADSP.adsp2181_g711_encode_block.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(ctypes.c_int16),
+    ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
+    ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int]
+ADSP.adsp2181_g711_encode_block.restype = ctypes.c_int
 
 KERNEL = 'artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel'
 TIKRNL = 'artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task'
@@ -369,12 +374,16 @@ class Card:
         file/RTP bit order.  Run this after modem framing: the subroutine uses
         core DAG registers that hardware SPORT companding would not disturb.
         """
-        encoded = bytearray()
-        for sample in samples:
-            ADSP.adsp2181_set_ar(self.cpu, sample & 0xFFFF)
-            ADSP.adsp2181_call(self.cpu, G711_ENCODE_ENTRY, KERNEL_IDLE)
-            ADSP.adsp2181_run(self.cpu, 1000)
-            encoded.append(reverse_octet(ADSP.adsp2181_sr1(self.cpu)))
+        count = len(samples)
+        if not count:
+            return b''
+        source = (ctypes.c_int16 * count)(*samples)
+        encoded = (ctypes.c_uint8 * count)()
+        result = ADSP.adsp2181_g711_encode_block(
+            self.cpu, source, encoded, count,
+            G711_ENCODE_ENTRY, KERNEL_IDLE, 1000)
+        if result:
+            raise RuntimeError(f'firmware G.711 block encoder failed: {result}')
         return bytes(encoded)
 
     def configure_modem(self, role: str, law: str = 'pcmu') -> None:

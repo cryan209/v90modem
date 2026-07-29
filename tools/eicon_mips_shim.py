@@ -234,11 +234,18 @@ ADSP.adsp2181_dmovlay.restype = ctypes.c_uint16
 ADSP.adsp2181_read_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
 ADSP.adsp2181_read_pm.restype = ctypes.c_uint32
 ADSP.adsp2181_trace_budget.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+ADSP.adsp2181_coverage_clear.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_coverage_count.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+ADSP.adsp2181_coverage_count.restype = ctypes.c_uint64
 ADSP.adsp2181_set_callbacks.argtypes = [ctypes.c_void_p] * 4
 ADSP.adsp2181_sport0_tdm_frame.argtypes = [
     ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
     ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_sport0_tdm_frame.restype = ctypes.c_uint16
+ADSP.adsp2181_modem_sample.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int,
+    ctypes.c_uint16, ctypes.c_uint16]
+ADSP.adsp2181_modem_sample.restype = ctypes.c_uint16
 
 RX_CB = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_int)
 TX_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int32)
@@ -310,6 +317,8 @@ class MipsShim:
         self.stub_returns = 0
         # trace printf pointer lives at gp + 0x1a7b; gp is set per-run
         self.host_writes: list[tuple[int, int]] = []
+        self.host_reads: list[tuple[int, int, int]] = []
+        self.trace_host_reads = False
         self.preserve_host_writes = False
         # MIPS instructions between ADSP time slices (0 disables the pump).
         # A DSP that runs while the MIPS is streaming an IDMA download will
@@ -630,6 +639,8 @@ class MipsShim:
             a0 = uc.reg_read(UC_MIPS_REG_A0)
             a1 = uc.reg_read(UC_MIPS_REG_A1) & 0xFFFF
             value = ADSP.adsp2181_host_read(self.core_for(a0), a1)
+            if self.trace_host_reads:
+                self.host_reads.append((a0 & 0x1FFFFFFF, a1, value))
             if self.log:
                 print(f"[mips] host_read [0x{a0:08x}] {a1:04x} -> {value:04x}")
             uc.reg_write(UC_MIPS_REG_V0, value)
@@ -1692,6 +1703,7 @@ class NativeMipsModem:
     def __init__(self, shim: MipsShim, core, law: str, dsp_block: int,
                  download_descriptors: dict[int, int],
                  force_info_after_v8: bool = False,
+                 tx_prbs: bool = False,
                  mips_interval: int = 160, adsp_budget: int = 20000):
         self.shim = shim
         self.cpu = core
@@ -1711,6 +1723,12 @@ class NativeMipsModem:
         self.resident = 0x0258
         self._mips_fault_reported = False
         self._private_line_active = False
+        self.tx_prbs = tx_prbs
+        self.tx_requests = 0
+        self.tx_accepted = 0
+        self.tx_first_sample: int | None = None
+        self._tx_pending = False
+        self._tx_lfsr = 0x6D2B79F5
 
     def _sport_rx_word(self, code: int) -> int:
         """Expand a DS0 octet as the T1/E1 SPORT compander does."""
@@ -1843,7 +1861,44 @@ class NativeMipsModem:
         print("[native-mips] connected bearer activated through DIAL "
               f"(WDB frames {initial_frames}+{answer_frames})")
 
+    def _next_tx_words(self) -> tuple[int, int, int]:
+        """Generate 48 deterministic bits for one V.90D datagram request."""
+        words = []
+        for _ in range(3):
+            value = 0
+            for bit in range(16):
+                # x^32 + x^22 + x^2 + x + 1, non-zero deterministic seed.
+                lsb = self._tx_lfsr & 1
+                self._tx_lfsr = ((self._tx_lfsr >> 1) ^
+                                 (0x80200003 if lsb else 0)) & 0xFFFFFFFF
+                value |= lsb << bit
+            words.append(value)
+        return words[0], words[1], words[2]
+
+    def _service_tx_request(self) -> None:
+        """Supply the polling data interface described by ADDSP guide §5.3.1.
+
+        In V90D, TXD0 bit 0 is oldest and a datagram spans TXD0..TXD2. The
+        negotiated packet uses only 21..42 of these bits. The DSP owns and
+        clears DI_control bit F after consuming the packet.
+        """
+        if (not self.tx_prbs or self.resident != 0x026A or self._tx_pending or
+                not (self.dm[0x3FAD] & 0x8000)):
+            return
+        words = self._next_tx_words()
+        self.dm[0x3F05], self.dm[0x3F06], self.dm[0x3F07] = words
+        self.tx_requests += 1
+        self._tx_pending = True
+        if self.tx_first_sample is None:
+            self.tx_first_sample = self._media_samples
+            print(f"[native-mips] supplied first V90D TX datagram at sample "
+                  f"{self._media_samples}: "
+                  f"{words[0]:04x}/{words[1]:04x}/{words[2]:04x}")
+
     def _frame_core(self, code: int) -> None:
+        # A request raised by the preceding sample is answered before the DSP
+        # receives the next SPORT clock, matching an IDMA host polling cycle.
+        self._service_tx_request()
         self._media_samples += 1
         sport_word = code & 0xFF
         # The hardware PRI descriptor calls TIKRNL's registered continuation
@@ -1878,16 +1933,14 @@ class NativeMipsModem:
             # bootpage 14 handoff, TX[t+1] == RX[t] for 16000/16000 samples, so
             # publishing it would echo the peer to itself.  The modem's own
             # transmit sample reaches the line only through DM(0x3fb4).
-            ADSP.adsp2181_sport0_tdm_frame(
-                self.cpu, 0, 0, sport_word, self.silence,
-                self.adsp_budget)
+            # MIPS has already consumed the private command mailbox. Run the
+            # relocated no-host continuation (source 06c1+7) if the selected
+            # channel ISR yields, in the same C call to avoid per-sample FFI.
+            ADSP.adsp2181_modem_sample(
+                self.cpu, sport_word, self.silence, self.adsp_budget,
+                0x06C8, 0x02A8)
         finally:
             pm[0x00B5] = saved_isr
-        if ADSP.adsp2181_idle(self.cpu):
-            # MIPS has already consumed the private command mailbox, so use
-            # TIKRNL's relocated no-host per-frame entry (source 06c1+7).
-            ADSP.adsp2181_call(self.cpu, 0x06C8, 0x02A8)
-            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
         wanted = self.dm[0x3132] & 0xFFFF
         if (self.force_info_after_v8 and self.resident == 0x025F
                 and wanted != 0x0260 and self.dm[0x3FB0] not in (6, 7)):
@@ -1928,6 +1981,9 @@ class NativeMipsModem:
             self.dm[0x3EEE] &= ~0x1000
             print(f"[native-mips] page request 0x{wanted:04x} "
                   f"(from 0x{previous:04x}) resumed at PM 0x{resume:04x}")
+        if self._tx_pending and not (self.dm[0x3FAD] & 0x8000):
+            self.tx_accepted += 1
+            self._tx_pending = False
         # V.8 FFT work can span more than one execution budget. Preserve a
         # live page context and continue it on the next exact SPORT frame.
 
@@ -1974,7 +2030,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                              dsp_combifile: Path = Path("docs/firmware/dspdload.bin"),
                              channel: int = 1, call_steps: int = 2,
                              dsp_pump: int = 256,
-                             force_info_after_v8: bool = False) -> NativeMipsModem:
+                             force_info_after_v8: bool = False,
+                             tx_prbs: bool = False) -> NativeMipsModem:
     """Boot the real card firmware and return its naturally assigned modem."""
     if law not in ("pcmu", "pcma"):
         raise ValueError("native MIPS backend supports only pcmu or pcma")
@@ -2008,7 +2065,7 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                    for index, entry in enumerate(staged.downloads)}
     modem = NativeMipsModem(
         shim, core, law, block, descriptors,
-        force_info_after_v8=force_info_after_v8)
+        force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs)
     modem.start_native_task()
     modem.attach_connected_bearer()
     return modem
