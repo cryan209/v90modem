@@ -3356,3 +3356,51 @@ role, processed idle status, RX/TX pointers and descriptor selection are now
 stable.  The remaining boundary is narrower again: conversion/accounting of
 the V.8 TX word through PM `0x0703` and the private G.711 SPORT adapter, not
 V.8 state selection.
+
+## Session 41: native G.711 TX and ANSam recovered
+
+The corrupted TX was a sample-accounting error, not a companding-table error.
+A one-frame PM trace counted execution of the native continuation:
+
+```text
+PM 06c8: 1 hit
+PM 0703: 2 hits
+```
+
+Calling runtime PM `0x06c8` already reaches the registered PM `0x0703`
+continuation through TIKRNL's selected-channel dispatch.  `_frame_core()` then
+called `0x0703` explicitly a second time.  Consequently the V.8 TX engine ran
+at twice the 8-kHz line clock: its first nonzero sample appeared near 2131
+instead of the direct path's 4267, and the nominal carrier was broadband when
+observed at the real RTP sample rate.
+
+The explicit second call is removed.  The movable V.8 handoff also now finishes
+the same shared runtime state as fixed dispatch after its completion callback:
+`DM3995=DM3999=0xffff` and the line adapter's current TX word `DM3764=0`.
+Native TX is again taken from the firmware-published signed-linear pointer
+`DM3fb4`; the existing SIP codec performs the selected G.711 companding once.
+
+Offline PCMU silence now matches the direct firmware path:
+
+```text
+first nonzero TX sample: 4262 (direct: 4267)
+FFT peak after startup:  2100 Hz
+TX range:                -3472..+3475
+```
+
+Tower run06 (`artifacts/eicon-native-tower/run06`) validates the transmitted
+G.711 stream end to end.  Its RTP capture peaks at 2101 Hz and slmodemd reports:
+
+```text
+V8_ORG_WAITING_FOR_ANSAM
+V8_ORG_ANSAM_DETECTED_WAITING_TE
+V8 ANSAM Detected (CM ready)
+V8_ORG_SEND_CM
+```
+
+This is the first native MIPS-controlled call on which the peer recognizes
+ANSam and transmits CM.  The next blocker is now RX: the Eicon remains at V.8
+TrnProgress 4/11 and times out to V.32 without decoding the peer's CM, while
+slmodemd eventually times out waiting for JM.  The private descriptor's G.711
+to-linear SR1 input convention must be recovered without adding a second page
+callback.

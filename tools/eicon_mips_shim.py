@@ -1851,9 +1851,6 @@ class NativeMipsModem:
             # TIKRNL's relocated no-host per-frame entry (source 06c1+7).
             ADSP.adsp2181_call(self.cpu, 0x06C8, 0x02A8)
             ADSP.adsp2181_run(self.cpu, self.adsp_budget)
-        if ADSP.adsp2181_idle(self.cpu):
-            ADSP.adsp2181_call(self.cpu, 0x0703, 0x02A8)
-            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
         wanted = self.dm[0x3132] & 0xFFFF
         if (self.force_info_after_v8 and self.resident == 0x025F
                 and wanted != 0x0260 and self.dm[0x3FB0] not in (6, 7)):
@@ -1882,6 +1879,14 @@ class NativeMipsModem:
             if resume:
                 ADSP.adsp2181_call(self.cpu, resume, 0x02A8)
                 ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+            if wanted == 0x025F:
+                # The movable V.8 init leaves its temporary DM image in the
+                # runtime TX word and zeroes the two disabled-timer sentinels.
+                # Fixed-layout dispatch has completed this shared-state seam
+                # with -1 timers and an empty adapter output before frame 1.
+                self.dm[0x3995] = 0xFFFF
+                self.dm[0x3999] = 0xFFFF
+                self.dm[0x3764] = 0x0000
             self.dm[0x3EEE] &= ~0x1000
             print(f"[native-mips] page request 0x{wanted:04x} "
                   f"(from 0x{previous:04x}) resumed at PM 0x{resume:04x}")
