@@ -3256,3 +3256,31 @@ caller.  Only the byte-exact SPORT line callback remains in Python.  The Linux
 driver answers the policy question: answer/calling role is already represented
 by native CALL_RES + LLC `V42_IN`; it should not be reconstructed as a second
 host-side ADDSP transaction.
+
+## Session 38: owner-path experiment disproves the proposed direct replacement
+
+The Session 37 implementation was attempted end to end and then reverted after
+instrumented offline runs.  The important correction is that TIKRNL81 task
+`0x0258` does **not** use the newer per-channel owner at MIPS `0x800a9d14`.
+`SERVICE_ASSIGN 0x80096980` takes its default/old-task branch and creates the
+transfer state at `task_state+0x24`; it calls `0x80093d14`, then calls
+`SWITCH_ON 0x80090e58` only when that initial task download returns one.  The
+`0x800a9d14..0x800aa158` family belongs to newer task formats.
+
+Reusing the real embedded transfer state and segment table was successful at
+the IDMA level, but applying the assignment-time `SWITCH_ON` sequence to live
+page requests was wrong: DIAL/V.8 was redirected to `0x0270/0x0271`, remained
+silent, and never produced ANSam.  Removing the generic ADDSP cycles entirely
+had the same result.  The MIPS-generated pending WDB starts
+`0040/0024/0038`, is consumed, and selects the low-level online path; it is an
+assignment transaction, not the later bearer-connected digital-answer
+transaction.
+
+This establishes a sharper boundary than Session 37: the Linux host driver
+only supplies CAI and `V42_IN`, but the missing operation is inside the closed
+SIG.MDM protocol between N_CONNECT/service assignment and its later
+bearer-connected callback.  It is not any public Linux `add_b1()` operation,
+not the generic loader owner, and not assignment-time SWITCH_ON.  The existing
+synthetic second WDB remains necessary until that specific protocol callback
+is recovered.  All unsuccessful owner-path code was removed so the last
+validated native-INFO behavior is preserved.
