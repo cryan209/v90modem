@@ -89,6 +89,42 @@ OVERLAY_SEAM = {
 # PM 0x36ae installs 0x3716; 0x3716 calls 0x3231, which rewinds the pointer.
 INSTALLER_CHAIN = (0x36AE, 0x3716, 0x3231)
 
+# The sequencer loop, PM 0x3335, as the resident INFO page disassembles:
+#
+#   3335  AY0 = DM($1647) ; AR = AY0 - 1 ; IF LT AR = 0 ; DM($1647) = AR
+#   3339  I4 = DM($169A) ; CALL (I4) ; IF LE JUMP $334E    <- pre-condition
+#   333c  MR0 = DM($1692) ; I4 = DM($1696) ; CALL ; IF LE JUMP $334D
+#   3340  MR0 = DM($1693) ; I4 = DM($1697) ; CALL ; IF LE JUMP $334D
+#   3344  MR0 = DM($1694) ; I4 = DM($1698) ; CALL ; IF LE JUMP $334D
+#   3348  MR0 = DM($1695) ; I4 = DM($1699) ; CALL ; IF LE JUMP $334D
+#   334c  RTS                                              <- nothing matched
+#   334d  DM($1679) = MR0                                  <- record selected
+#   334e  I4 = DM($1679) ; MR1 = $0019 ; I6 = DM($169F) ; CALL (I6)
+#   3353  DM($3FC2) = DM($1652) AND $00FF                  <- TrnProgress
+#   3357  translate DM(0x1653..56) through 0x133e -> DM(0x1692..95)
+#   335c  translate DM(0x1657..5b) through 0x131e -> DM(0x1696..9a)
+#   3361  CALL $3435   <- diff the raw fields, dispatch the changed handlers
+#   3362  JUMP $3339
+#
+# PM 0x169f is the record applier (PM 0x336a), which walks (offset, lo, hi)
+# triples writing DM(0x1642 + offset).  DM(0x164b) is offset 9, so it has
+# exactly one writer: whichever record DM(0x1679) was pointed at.
+PM_CONDITION_TEST = {0x333D: 0, 0x3341: 1, 0x3345: 2, 0x3349: 3}
+PM_RECORD_SELECTED = 0x334D
+PM_RECORD_APPLY = 0x334E
+SEQUENCER_TRACE = tuple(PM_CONDITION_TEST) + (PM_RECORD_SELECTED,
+                                              PM_RECORD_APPLY)
+
+# The candidate records and their condition handlers, as translated into place
+# by PM 0x3357/0x335c on the previous pass.
+SEQUENCER_STATE = {
+    'trn': DM_TRNPROGRESS, 'internal': 0x1652, 'count': DM_ANALYSIS_COUNT,
+    'record': 0x1679, 'dispatch': DM_RECORD_DISPATCH,
+    'next0': 0x1692, 'next1': 0x1693, 'next2': 0x1694, 'next3': 0x1695,
+    'test0': 0x1696, 'test1': 0x1697, 'test2': 0x1698, 'test3': 0x1699,
+    'pre': 0x169A,
+}
+
 # The INFO sequencer's working set, PM 0x3335.
 SEQUENCER = {
     'trn': 0x3FC2, 'internal': 0x1652, 'vector': 0x1679, 'entry': 0x169F,
@@ -98,6 +134,11 @@ SEQUENCER = {
 }
 # Shown alongside, but excluded from the change key: these move every sample.
 EXTRA = {'timer': 0x1647, 'doneA': 0x0686, 'eventB': 0x198E}
+# The same exclusion for the sequencer view: PM 0x3335 decrements the dwell
+# timer on every pass, so keying on it prints one line per sample.
+# dwell is DM(0x1650), the counter the pre-condition PM 0x3391 decrements; the
+# chain only advances to the next record when it reaches 0.
+SEQUENCER_EXTRA = {'timer': 0x1647, 'dwell': 0x1650}
 
 
 def main() -> int:
@@ -112,6 +153,9 @@ def main() -> int:
                     help='set DM(0x198e) = 1 on first reaching this TrnProgress')
     ap.add_argument('--overlay', action='store_true',
                     help='trace the 0x0c37 installer seam and its PMOVLAY page')
+    ap.add_argument('--sequencer', action='store_true',
+                    help='trace PM 0x3335 record selection: the candidates, '
+                         'their conditions, and the record DM(0x164b) came from')
     ap.add_argument('--sport-companding', action='store_true',
                     help='expand the DS0 octet at SPORT0 as the native path '
                          'does (ADDSP V.90 guide §3.3); without it this replay '
@@ -120,7 +164,7 @@ def main() -> int:
     ap.add_argument('--to', dest='end', type=float, default=1e9)
     args = ap.parse_args()
 
-    if not args.states and not args.tx and not args.overlay:
+    if not args.states and not args.tx and not args.overlay and not args.sequencer:
         args.tx = True
 
     data = args.capture.read_bytes()
@@ -136,8 +180,16 @@ def main() -> int:
         print(f'watching PM {"/".join(f"0x{a:04x}" for a in INSTALLER_CHAIN)}'
               f' -- [EXEC] lines carry pmovlay and the fetched word, on stderr')
 
+    if args.sequencer:
+        for address in SEQUENCER_TRACE:
+            ADSP.adsp2181_watch_exec(cpu, address, 1)
+        print('watching PM ' + '/'.join(f'0x{a:04x}' for a in SEQUENCER_TRACE)
+              + ' -- on stderr, mr0 at 0x334d is the selected record; the last'
+                ' 0x333d/41/45/49 before it names the condition that matched')
+
     previous = None
     overlay_previous = None
+    sequencer_previous = None
     injected = False
     activity: dict[int, list[int]] = {}
     order: list[int] = []
@@ -162,6 +214,16 @@ def main() -> int:
         activity[state][0] += 1
         if sample:
             activity[state][1] += 1
+
+        if args.sequencer and args.start <= seconds <= args.end:
+            key = tuple(dm[address] for address in SEQUENCER_STATE.values())
+            if key != sequencer_previous:
+                fields = ' '.join(f'{name}={dm[address]:04x}'
+                                  for name, address in SEQUENCER_STATE.items())
+                extra = ' '.join(f'{name}={dm[address]:04x}'
+                                 for name, address in SEQUENCER_EXTRA.items())
+                print(f'{seconds:8.4f}  {fields} | {extra}')
+                sequencer_previous = key
 
         if args.overlay and args.start <= seconds <= args.end:
             key = tuple(dm[address] for address in OVERLAY_SEAM.values())

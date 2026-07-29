@@ -330,8 +330,9 @@ static void execute(adsp2100_state *adsp)
             logerror("[EXEC] pc=%04x ret=%04x pmovlay=%u dmovlay=%u op=%06x "
                      "cyc=%llu cntr=%04x "
                      "i0=%04x i1=%04x m1=%04x m3=%04x "
-                     "ax1=%04x ar=%04x mr1=%04x "
-                     "state=%04x event=%04x span=%04x count=%04x stride=%04x\n",
+                     "ax1=%04x ar=%04x mr0=%04x mr1=%04x "
+                     "state=%04x event=%04x span=%04x count=%04x stride=%04x "
+                     "istate=%04x analysis=%04x\n",
                      (unsigned)(adsp->pc & 0x3fff), ret,
                      (unsigned)adsp->pmovlay, (unsigned)adsp->dmovlay,
                      (unsigned)op,
@@ -339,9 +340,16 @@ static void execute(adsp2100_state *adsp)
                      adsp->i[0] & 0x3fff, adsp->i[1] & 0x3fff,
                      adsp->m[1] & 0x3fff, adsp->m[3] & 0x3fff,
                      adsp->core.ax1.u & 0xffff, adsp->core.ar.u & 0xffff,
+                     /* mr0 carries the candidate record pointer the sequencer
+                      * loads from DM(0x1692..0x1695) before testing its
+                      * condition; at PM 0x334d it is the record selected. */
+                     adsp->core.mr.mrx.mr0.u & 0xffff,
                      adsp->core.mr.mrx.mr1.u & 0xffff,
                      adsp->data[0x16bd], adsp->data[0x198e], adsp->data[0x16c5],
-                     adsp->data[0x16c6], adsp->data[0x16c7]);
+                     adsp->data[0x16c6], adsp->data[0x16c7],
+                     /* the INFO sequencer's internal state and the analysis
+                      * counter its record conditions compare against */
+                     adsp->data[0x1652], adsp->data[0x06e6]);
         }
 
 		if (adsp->trace_budget > 0) {

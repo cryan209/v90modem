@@ -852,10 +852,16 @@ static void alu_op_ar(adsp2100_state *adsp, int op)
 			CALC_NZ(res);
 			break;
 		case 0x0f<<13:
-			/* ABS X */
+			/* ABS X.  AZ and AN come from the *result*, as they do for
+			 * every other ALU operation; only AS carries the sign of the
+			 * input.  Setting AZ from the input alone and leaving AN
+			 * untouched left the previous instruction's AN in ASTAT, which
+			 * silently turns the firmware's equality idiom
+			 *   AR = AY0 - AX0 ; AR = ABS AR ; IF LE ...
+			 * into a >= test. */
 			xop = ALU_GETXREG_UNSIGNED(adsp, xop);
 			res = (xop & 0x8000) ? -xop : xop;
-			if (xop == 0) SET_Z;
+			CALC_NZ(res);
 			if (xop == 0x8000) SET_N, SET_V;
 			CLR_S;
 			if (xop & 0x8000) SET_S;
@@ -978,10 +984,16 @@ static void alu_op_ar_const(adsp2100_state *adsp, int op)
 			CALC_NZ(res);
 			break;
 		case 0x0f<<13:
-			/* ABS X */
+			/* ABS X.  AZ and AN come from the *result*, as they do for
+			 * every other ALU operation; only AS carries the sign of the
+			 * input.  Setting AZ from the input alone and leaving AN
+			 * untouched left the previous instruction's AN in ASTAT, which
+			 * silently turns the firmware's equality idiom
+			 *   AR = AY0 - AX0 ; AR = ABS AR ; IF LE ...
+			 * into a >= test. */
 			xop = ALU_GETXREG_UNSIGNED(adsp, xop);
 			res = (xop & 0x8000) ? -xop : xop;
-			if (xop == 0) SET_Z;
+			CALC_NZ(res);
 			if (xop == 0x8000) SET_N, SET_V;
 			CLR_S;
 			if (xop & 0x8000) SET_S;
@@ -1116,10 +1128,16 @@ static void alu_op_af(adsp2100_state *adsp, int op)
 			CALC_NZ(res);
 			break;
 		case 0x0f<<13:
-			/* ABS X */
+			/* ABS X.  AZ and AN come from the *result*, as they do for
+			 * every other ALU operation; only AS carries the sign of the
+			 * input.  Setting AZ from the input alone and leaving AN
+			 * untouched left the previous instruction's AN in ASTAT, which
+			 * silently turns the firmware's equality idiom
+			 *   AR = AY0 - AX0 ; AR = ABS AR ; IF LE ...
+			 * into a >= test. */
 			xop = ALU_GETXREG_UNSIGNED(adsp, xop);
 			res = (xop & 0x8000) ? -xop : xop;
-			if (xop == 0) SET_Z;
+			CALC_NZ(res);
 			if (xop == 0x8000) SET_N, SET_V;
 			CLR_S;
 			if (xop & 0x8000) SET_S;
@@ -1239,10 +1257,16 @@ static void alu_op_af_const(adsp2100_state *adsp, int op)
 			CALC_NZ(res);
 			break;
 		case 0x0f<<13:
-			/* ABS X */
+			/* ABS X.  AZ and AN come from the *result*, as they do for
+			 * every other ALU operation; only AS carries the sign of the
+			 * input.  Setting AZ from the input alone and leaving AN
+			 * untouched left the previous instruction's AN in ASTAT, which
+			 * silently turns the firmware's equality idiom
+			 *   AR = AY0 - AX0 ; AR = ABS AR ; IF LE ...
+			 * into a >= test. */
 			xop = ALU_GETXREG_UNSIGNED(adsp, xop);
 			res = (xop & 0x8000) ? -xop : xop;
-			if (xop == 0) SET_Z;
+			CALC_NZ(res);
 			if (xop == 0x8000) SET_N, SET_V;
 			CLR_S;
 			if (xop & 0x8000) SET_S;
@@ -1374,10 +1398,16 @@ static void alu_op_none(adsp2100_state *adsp, int op)
 			CALC_NZ(res);
 			break;
 		case 0x0f<<13:
-			/* ABS X */
+			/* ABS X.  AZ and AN come from the *result*, as they do for
+			 * every other ALU operation; only AS carries the sign of the
+			 * input.  Setting AZ from the input alone and leaving AN
+			 * untouched left the previous instruction's AN in ASTAT, which
+			 * silently turns the firmware's equality idiom
+			 *   AR = AY0 - AX0 ; AR = ABS AR ; IF LE ...
+			 * into a >= test. */
 			xop = ALU_GETXREG_UNSIGNED(adsp, xop);
 			res = (xop & 0x8000) ? -xop : xop;
-			if (xop == 0) SET_Z;
+			CALC_NZ(res);
 			if (xop == 0x8000) SET_N, SET_V;
 			CLR_S;
 			if (xop & 0x8000) SET_S;

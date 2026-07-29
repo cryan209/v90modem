@@ -3614,3 +3614,95 @@ record and why the `0x0a37` condition selects the plain `0x37` successor
 instead of the transient `0x0c37` at count 5.  That is sequencer record
 selection (PM `0x3335`, `DM(0x1692..0x169a)`), not detector programming, and
 no firmware substitution can affect it.
+
+## Session 46: the sequencer's equality test, and the emulator's ABS flags
+
+Tracing the one writer of `DM(0x164b)` settles the Session 45 boundary and
+finds the root cause, which is ours.
+
+### What loads `DM(0x164b)`
+
+PM `0x3335` disassembles as:
+
+```text
+3335  AY0 = DM($1647) ; AR = AY0 - 1 ; IF LT AR = 0 ; DM($1647) = AR
+3339  I4 = DM($169A) ; CALL (I4) ; IF LE JUMP $334E     <- pre-condition
+333c  MR0 = DM($1692) ; I4 = DM($1696) ; CALL ; IF LE JUMP $334D
+3340  MR0 = DM($1693) ; I4 = DM($1697) ; CALL ; IF LE JUMP $334D
+3344  MR0 = DM($1694) ; I4 = DM($1698) ; CALL ; IF LE JUMP $334D
+3348  MR0 = DM($1695) ; I4 = DM($1699) ; CALL ; IF LE JUMP $334D
+334c  RTS                                               <- nothing matched
+334d  DM($1679) = MR0                                   <- record selected
+334e  I4 = DM($1679) ; MR1 = $0019 ; I6 = DM($169F) ; CALL (I6)
+3352  DM($1679) = I4
+3353  DM($3FC2) = DM($1652) AND $00FF
+3357  translate DM(0x1653..56) through 0x133e -> DM(0x1692..95)
+335c  translate DM(0x1657..5b) through 0x131e -> DM(0x1696..9a)
+3361  CALL $3435   ; 3362  JUMP $3339
+```
+
+So `DM(0x164b)` has exactly one writer: the record applier PM `0x336a` at
+`DM(0x169f)`, writing offset 9 of whichever record `DM(0x1679)` names.  The
+pre-condition returning LE means "fall through to the next record"; a
+candidate returning LE means "jump to that record".  `tools/eicon_info_replay.py
+--sequencer` traces all of it, and the `[EXEC]` line now carries `mr0` (the
+candidate under test), `istate` and `analysis`.
+
+Only record `@0914` (state `0x0c37`) carries `DM(0x164b) = 0x0040`, and the
+`0x37` chain offers it twice:
+
+```text
+@08d5  state 0037  dwell DM(0x1650)=0x40, pre = 3391 (countdown), no candidates
+@08e7  state 0a37  164b=0x1002, pre = 33ae (count == 3)
+                   slot1 -> @0914 (0c37) when 33b0 (count == 6)
+                   slot2 -> @08d5 (0037) always
+@08ff  state 0b37  164b=0x0010, slot2 -> @08d5 always
+@0914  state 0c37  164b=0x0040   <- the bin-8 profile installer, PM 0x36ae
+```
+
+Live, each analysis ran `0037 -> 0a37 -> 0b37 -> back to 0037`.  At `0a37` the
+pre-condition returned LE with the analysis counter at **6**, falling straight
+through to `@08ff` without ever testing slot 1 — the very candidate that
+selects the transient at count 6.
+
+### The pre-condition is an equality test that was behaving as `>=`
+
+PM `0x33ae` and its siblings are all the same idiom:
+
+```text
+33ae  AY0 = $0003 ; JUMP $33B9
+33b9  AX0 = DM($06E6) ; AR = AY0 - AX0 ; AR = ABS AR ; RTS
+```
+
+`ABS` then `IF LE` is how this firmware writes "count == N".  Our ALU set AZ
+from the *input* being zero and touched AN only on the `0x8000` overflow, so
+AN survived from the preceding subtract.  For `count > N` the subtract left AN
+set and `IF LE` read true: every one of these tests fired at `count >= N`
+instead of `count == N`.
+
+`2100ops.inc` now takes AZ and AN from the result (`CALC_NZ(res)`), keeping AS
+as the sign of the input and the `0x8000` overflow case, at all five ABS
+sites.  `adsp2181_core_test` already exercised this idiom, but only at
+`count == 3`, which passed either way; it now checks `count = 0..8` and fails
+on the old core.
+
+### Effect
+
+Exact replay of the same captures, no injection, nothing forced:
+
+- PM `0x36ae` now executes **during INFO**, at `istate=0c37`, `analysis=0006`,
+  exactly as record `@08e7` specifies.
+- PM `0x3716` executes for the first time ever, and calls PM `0x3231`, which
+  rewinds `DM(0x15f3)` to `0x0ddd`.
+- The result-buffer overrun is **gone in all five native captures**.  It was
+  never an unbounded-FFT defect: the buffer was simply never being rewound
+  because the state that rewinds it was unreachable.
+- INFO passes state `0x37` for the first time.  run09, run10 and run12 reach
+  `0x38` and `0x3a`; run08 and run11 still take the `0x10` recovery carousel,
+  which is peer-timing dependent.
+
+Sessions 30-45 read a long series of symptoms — the "terminal FFT
+corruption", the `0x37` stall, the unreferenced `0x3716`/`0x3722` installers,
+the dead detector profiles — as firmware behaviour to be reverse-engineered.
+They were all one emulator flag bug.  The next boundary is real INFO state
+`0x38`/`0x3a` behaviour against the peer.

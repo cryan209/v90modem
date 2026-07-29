@@ -107,6 +107,19 @@ int main(void)
     adsp2181_run(cpu, 32);
     assert(adsp2181_dm(cpu)[0x0100] == 1);
 
+    /* The same sequence must be false on either side of the target.  ABS
+     * takes AZ and AN from its result; leaving the subtract's AN in ASTAT
+     * made this an `count >= 3` test, so every INFO detector-count
+     * transition fired early and the 0x0c37 profile was never reached. */
+    for (int count = 0; count <= 8; count++) {
+        if (count == 3) continue;
+        adsp2181_dm(cpu)[0x06e6] = count;
+        adsp2181_dm(cpu)[0x0100] = 0xffff;
+        adsp2181_set_pc(cpu, 0);
+        adsp2181_run(cpu, 32);
+        assert(adsp2181_dm(cpu)[0x0100] == 0);
+    }
+
     adsp2181_destroy(cpu);
     puts("adsp2181_core_test: PASS");
     return 0;
