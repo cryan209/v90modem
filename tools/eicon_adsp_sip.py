@@ -624,7 +624,8 @@ class EiconSipEndpoint:
                 if self.trace_v90d_state and call.card.resident == 0x026A:
                     dm = call.card.dm
                     key = (dm[0x120F], dm[0x1FF7], dm[0x204A], dm[0x2008],
-                           dm[0x2004], dm[0x206D], dm[0x206E])
+                           dm[0x2004], dm[0x206D], dm[0x206E], dm[0x3FB3],
+                           dm[0x3FBC], dm[0x3FBD], dm[4])
                     if dm[0x1FF7] >= 0x0078:
                         key += (dm[0x11E8], dm[0x11E9], dm[0x11EB],
                                 dm[0x0EE6], dm[0x2055],
@@ -646,6 +647,11 @@ class EiconSipEndpoint:
                               f'decoded={dm[0x0A56]:04x} '
                               f'result={dm[0x206D]:04x}/{dm[0x206E]:04x} '
                               f'global={dm[0x20E0]:04x} '
+                              f'core8k={dm[0x3FB3]:04x} '
+                              f'bulk={dm[0x3FBC]:04x}/{dm[0x3FBD]:04x} '
+                              f'farcur={dm[4]:04x} '
+                              f'farbounds={dm[8]:04x}/{dm[9]:04x}/'
+                              f'{dm[10]:04x}/{dm[11]:04x} '
                               f'phase={dm[0x11E8]:04x} diff={dm[0x11E9]:04x} '
                               f'dhist={dm[0x11EB]:04x} raw={dm[0x0EE6]:04x} '
                               f'bits={dm[0x2055]:04x} '

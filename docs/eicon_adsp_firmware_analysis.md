@@ -5082,3 +5082,54 @@ The next trace target is the timing/symbol-strobe gate feeding `DM11f5/DM11f6`
 at the moment the result freezes (around live sample 136017), especially the
 state selected by `DM1fec=0x4060`, `DM1fed=0x331c`, `DM1ff1=1` and the callback
 at `DM2035`. Do not alter differential decoding, GPA taps or the equalizer.
+
+## Session 65: the apparent TRN-to-Ja freeze is the delayed bulk-cursor collision
+
+Instruction coverage on the two sides of the final `DM11f5/DM11f6` update
+showed that this was not a symbol-strobe branch inside the V.34 receiver. The
+entire V.34 foreground disappears. Before the freeze, PM `0x19e1` and the
+receiver chain run once per 8 kHz or symbol event as appropriate; afterwards
+they execute only twice while the already-dispatched calls drain.
+
+A write watch identifies the destructive instruction exactly. At replay sample
+130257 PM `0x1930` zeroes `DM3fad`; one sample later it zeroes `DM3fb3`:
+
+```text
+PM 1930: DM(I0,M1) = SR0
+I0 = 3fad, then 3fb3
+DM3fb3: 19e1 -> 0000
+```
+
+`DM3fb3` is the ADDSP write-database `Core8kRoutine` callback. PM `0x076d`
+loads it and PM `0x0771` invokes it once per selected-channel sample. Once the
+bulk adapter replaces it with zero, the modem core is no longer called, so the
+equalizer and Ja detector necessarily freeze. SPORT and the kernel foreground
+continue exactly as observed.
+
+This is the original Session 58 collision returning later, not yet a distinct
+Ja transition defect. Priming `DM4=DM0` merely moves the far-bulk cursor from
+zero to the near-bulk cursor. It delays the zero-fill sweep long enough to
+reach state `0x7a`, but does not put the cursor in a valid far-bulk interval.
+At page entry the two descriptors are visibly different:
+
+```text
+DM0..DM3   = 2aca 2ad2 2ae5 2b1b   (near descriptor)
+DM4..DM11  = 0000 0000 0000 0000 2ac7 2ad2 2ae0 2b1b (far descriptor)
+```
+
+When state `0x60` reconfigures them, the near cursor becomes `0x1e17`, while
+the far cursor is still generated as zero and then advanced to one. The
+one-shot diagnostic changes only that far cursor to the unrelated near cursor.
+It subsequently advances to `0x2a85`; PM `0x1930`'s delayed destination then
+reaches `DM3fb3` and kills `Core8kRoutine`. The terminal `1ab2/a604` word is
+still proven to be a deterministic TRN-tail signature, but its being the final
+word is explained by this memory collision rather than by a demonstrated
+TRN-to-Ja receiver-mode branch.
+
+The next ownership target is therefore the **complete far-bulk descriptor**,
+not `DM2035` or the slicer. Trace PM `0x1982` while it generates `DM4..DM11`
+from `DM3fbc/DM3fbd` (`Nearbulklength/BulkLength`), the RX sample/database
+workspace and the kernel bulk allocation state. Determine which omitted
+selected-channel initializer should publish a valid initial far cursor and
+bounds. Keep `--prime-v90d-bulk-cursor` diagnostic-only; it is now known to be
+temporarily useful but eventually destructive.
