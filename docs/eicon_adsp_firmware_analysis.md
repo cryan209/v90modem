@@ -4066,9 +4066,11 @@ make -C tools/adsp2181emu
 ### Addendum: a call that runs the page to `0x00c2` and still never transmits
 
 `run14` grew to five live dials.  The fourth took the page far deeper than
-anything recorded before, entering through `0x004f` (as `run13` did, and with
-the same `INFO_variant = 0x000e`) rather than the `0x0046 -> 0x0060` the others
-took:
+anything recorded before.  It entered through `0x004f` with
+`INFO_variant = 0x000e`, as `run13` did, rather than the `0x0046 -> 0x0060` the
+others took — but that is not what selects the deep path: a sixth dial entered
+through `0x004f` with the same variant and went no further than `0x0062`.
+What distinguishes the deep call is still unknown.
 
 ```text
 13.140  0x0046 -> 0x004f        INFO_variant=0x000e
