@@ -3844,6 +3844,11 @@ host-side value at all.
 
 ## Session 49: the V.90 data pump's TrnProgress table — `0xea` is a timeout abort
 
+> **Superseded in part by Session 50.**  The table decoding below is static
+> analysis and holds.  The replay trace is not reproducible: it was measured
+> against a stale `libadsp2181.dylib`, and on a current build the page never
+> reaches `0xea` — it runs its full 6.3 s budget in state `0x0060`.
+
 `tools/v90_dpcm_state_records.py` decodes overlay `0x026a`'s state machine.
 It is the INFO page's design one level deeper: **two** record layers over the
 same two index tables.
@@ -3931,3 +3936,107 @@ both cheap to test on the offline replay: `DM(0x20e0)` is never seeded (its
 writers are PM 0x2c69 and PM 0x2c7a, seeding 0x7530 and 0x1b58 plus
 `DM(0x3fcb)`), or it is seeded but the routine that should restart it per
 state never runs.  Watch `DM(0x20e0)` across the handoff before anything else.
+
+## Session 50: `DM(0x20e0)` across the handoff — the page lives 6.3 s, and Session 49's abort was a stale build
+
+Session 49 ended by asking for exactly one measurement: watch the global
+countdown `DM(0x20e0)` across the INFO → V.90 handoff.  It is now a committed
+view, `tools/eicon_info_replay.py --v90d`, and it says something the previous
+session's replay could not.
+
+### First, the correction
+
+**`tools/adsp2181emu/libadsp2181.dylib` is gitignored and the top-level
+`makefile` does not build it.**  The copy on disk was missing
+`adsp2181_pmovlay`, added four commits earlier in `f8e88a6` — so every replay
+since then, Session 49's included, ran against an emulator core predating
+`f8e88a6`, `c6d64ab` (the ABS `AZ`/`AN` fix) and `78f8bf6`.
+
+Rebuilt (`make -C tools/adsp2181emu`), the run13 replay does **not** reach
+state `0xea`.  The `0xea` record and its `test[02]` escape are real — that part
+of Session 49 is static table decoding and still holds — but "the data pump
+aborts 0.21 s after it starts" is an artifact of the stale core.  Every replay
+conclusion drawn between `f8e88a6` and here is worth re-running.
+
+### What actually happens
+
+```text
+15.5478  resident page -> 0x026a
+15.5478  trn=0050 count=0000 rate=0004 addend=1cb8 optr=1d25 ostate=0050
+15.5485  trn=0052 count=0000 ...
+15.5491  countdown seeded 0x4eb8 = 20152 ticks, addend DM(0x3fcb)=7352
+                                                from DM(0x3fc9)=2206
+15.5491  trn=0053 count=4eb8 optr=1869 ostate=0053
+15.5497  trn=0060 count=4eb6 optr=18cc ostate=0060
+21.8466  countdown expired after 6.2975 s (3200 ticks/s)
+21.8466  trn=0060 count=0000 optr=1cb9
+21.8534  trn=0060 optr=1d2b
+21.8712  resident page -> 0x0270
+21.8714  resident page -> 0x0260   trn=0020    <- INFO again
+```
+
+The page parks in TrnProgress `0x0060` for 50572 samples — 6.32 s — and
+`--tx` measures **0.0 % non-zero TX across every one of them**.  It then leaves
+through the countdown's escape (`optr` 1cb9 → 1d25 → 1d2b, the chain Session 49
+decoded), drops through page 0x0270 and hands back to INFO at `trn=0x0020`.
+So the timeout is still not the disease: the page is alive and silent for six
+seconds, and only then runs out of time.  Session 48's question — what should
+be driving SPORT0 in state `0x0060` — is the live one.
+
+### The countdown is seeded once, late, and with an inherited term
+
+A `--countdown-writers` watchpoint gives three writers and no others.  (The
+emulator logs the pc already advanced, so a logged `pc` names the *previous*
+instruction.)
+
+| logged pc | instruction | what it does |
+|---|---|---|
+| 0x0d91 | — | the overlay download, clearing DM |
+| 0x2c7b | PM 0x2c7a `DM(0x20e0) = AR` | the one and only seed |
+| 0x2f81 | PM 0x2f80 `DM(0x20e0) = AR` | the per-tick decrement |
+
+Three things follow, and the first is the one worth acting on.
+
+1. **The page enters with the countdown already at zero.**  States `0x0050`,
+   `0x0050` and `0x0052` — 1.3 ms — run before PM 0x2c7a fires.  Nothing seeds
+   `DM(0x20e0)` at page entry; the seed is a side effect of reaching `0x0053`.
+   Any record arming condition `0x02` inside that window escapes immediately,
+   which is precisely the shape of the abort Session 49 thought it had seen.
+
+2. **The 4.000 s budget is exact, and rate-correct.**  An exec watchpoint puts
+   the entry at PM 0x2c6b, called from PM 0x2458:
+
+   ```text
+   2c6b  AR = $4E20                     20000
+   2c6c  CALL $2C7D                     MY0 = PM($200C + DM($20E3)), MR = AR * MY0
+   2c6d  SR = LSHIFT MR1 (LO) BY 1      x2
+   2c6f  JUMP $2C78                     AR = MR1 + DM($3FCB) ; DM($20E0) = AR
+   ```
+
+   PM 0x200c..0x2011 is `0x1eb8 0x231c 0x23d7 0x2666 0x28f6 0x2be3` — as 1.15,
+   0.2400 / 0.2743 / 0.2800 / 0.3000 / 0.3200 / 0.3429.  That is the V.34 baud
+   family over 10000, so the table is a symbol-rate scale and `DM(0x20e3) = 4`
+   selects 3200.  20000 × 0.32 × 2 = 12800 ticks, and the replay measures the
+   decrement at 3200 ticks/s, so the budget is 12800 / 3200 = **4.000 s** on
+   the nose.  Nothing is wrong with this half.
+
+3. **The addend is not the data pump's own.**  PM 0x2cb4 computes
+   `DM(0x3fcb) = DM(0x3fc9) x 10/3` (`MX0 = DM(0x3fc9) ; MY0 = 0xD555 ; MR =
+   MX0 * MY0 (SU) ; SR = ASHIFT MR1 BY 1`): 2206 → 7352 ticks = 2.2975 s, added
+   to the seed to give the observed 20152.  `DM(0x3fc9)` belongs to the
+   *resident INFO page*, which increments it at PM 0x3caf/0x3cb4 at ~535 Hz
+   from −133 at 6.9722 s until it stops at 2206 at 11.3453 s — four seconds
+   before the handoff.  So the data pump's deadline is 4.000 s of its own
+   budget plus 2.2975 s inherited from a counter INFO left behind, and unlike
+   the budget, the ×10/3 is hardcoded rather than taken from the symbol-rate
+   table `DM(0x20e3)` indexes.
+
+Next: `DM(0x3fc9)` is the thread to pull.  What INFO is counting at ~535 Hz,
+why it stops at 11.3453 s, and whether PM 0x2cb4 is meant to read it at all
+decides whether 6.2975 s or 4.000 s is the deadline the peer expects — and a
+seed that varies with how long INFO ran is a much better fit for
+"intermittently retrains" than a fixed one.  Reproduce with:
+
+```bash
+python3 tools/eicon_info_replay.py artifacts/eicon-native-tower/run13.rx.ulaw --v90d --sport-companding
+```

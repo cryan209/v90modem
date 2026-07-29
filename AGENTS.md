@@ -44,6 +44,7 @@ Layering that isn't obvious from filenames:
 - Not every decoder is live. `p3_demod.c` *is* — via `v90_cp_live.c` and `v92_p3_rx.c`. But `v34_phase2_decode.c`, `v34_info_decode.c`, `v8bis_decode.c`, `phase12_decode.c`, `v92_short_phase*_decode.c` and `v92_anspcm_decode.c` are absent from `SRCS` and reachable only from `vpcm_decode` and the test harnesses. Check `SRCS` in `makefile` before assuming a change affects real calls.
 - `*_rrc.h`, `*_godard.h` and `v34_*_tables.h` are generated coefficient tables. Data, not hand-editable code.
 - `tools/` holds Python analysis and replay scripts; `captures/` and `artifacts/` hold recorded line audio and run outputs from hardware sessions.
+- The ADSP-2181 emulator the firmware replays run on (`tools/adsp2181emu/`) is **not** built by the top-level `makefile`, and `libadsp2181.dylib` is gitignored. Run `make -C tools/adsp2181emu` before trusting a replay: a stale library silently changes what the replay concludes, which is how the Session 49 write-up in `docs/eicon_adsp_firmware_analysis.md` reached a wrong result.
 
 Each module's header comment states its role and the spec sections it implements — read that before the `.c`.
 
