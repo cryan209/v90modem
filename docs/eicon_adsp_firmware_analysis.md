@@ -4182,3 +4182,36 @@ packets in 104 s) long before the state walk happened.
 
 The offline replays are unaffected: they are open loop and sample-driven, with
 no wall clock in them at all.
+
+### Session 51, tested: the interface is live, the silence is real
+
+Both halves of the hypothesis above were run on the native replay of `run14`
+call 1, and only one survives.
+
+**Supplying a datagram does not start transmission, but the handshake is
+live.**  In the control the TX request bit stays set for 8067 consecutive
+samples — the core raises it and nothing ever clears it.  Writing a datagram
+into TXD0..TXD2 and clearing the bit makes the core re-raise it 235 times, so
+it is genuinely consuming what the host gives it.  TX stayed 0.0 %.  It did
+change the page's behaviour: the control restarted to `0x0050` when the
+countdown expired at 16.27 s, while the supplied run held `0x0062` past it.
+Feeding the interface keeps the page alive; it does not make it transmit.
+
+**The silence is not a measurement artifact.**  `DM(0x3fa7)` is not a null
+pointer, as Session 48 read it — guide offset `0xc7` off the `0x3ee0` base is
+`TXSAMPLE_0`, the head of the transmit sample buffer `DM(0x3fa7..0x3fac)`,
+which is why `DM(0x3fb4) = DM(0x3fa7)` puts a sample value where a pointer
+belongs.  That raised the possibility that the card transmits into TXSAMPLE
+while every harness we have reads one word through `DM(0x3fb4)`, making the
+silence ours.  Measured: `TXSAMPLE_0..5` are **zero in 100 % of page-14
+samples**, in every state.  `Samplebuffersize` `DM(0x3f67)` reads 1, which is
+correct for V.90 downstream — one codeword per symbol at 8000 Hz — so
+`TXSAMPLE_0` alone would carry it, and it is empty.
+
+So the card really does produce nothing, confirmed at two independent
+locations, and Session 48's conclusion stands even though its reading of
+`DM(0x3fa7)` does not.  The data interface is not the blocker either — it
+works, we simply were not driving it.  Whatever enables the transmit path is
+still unidentified; the remaining candidates are page-14 configuration we
+never send (the answer-mode tables beyond `attach_connected_bearer`'s three
+cycles) or a start/enable bit outside the data interface.
