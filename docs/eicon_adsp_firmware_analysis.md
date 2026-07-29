@@ -3706,3 +3706,65 @@ corruption", the `0x37` stall, the unreferenced `0x3716`/`0x3722` installers,
 the dead detector profiles — as firmware behaviour to be reverse-engineered.
 They were all one emulator flag bug.  The next boundary is real INFO state
 `0x38`/`0x3a` behaviour against the peer.
+
+## Session 47: live tower call — INFO completes, V.90 DPCM loads, TX stops
+
+First live call after the ABS fix (`artifacts/eicon-native-tower/run13`,
+endpoint registered as 6001, `slmodemd_trnref` as 6000 dialing `ATD6001`).
+INFO ran to completion for the first time:
+
+```text
+12.120  0x0036 -> 0x0037
+12.520  0x0037 -> 0x0038          <- past 0x37, live
+13.540  0x0038 -> 0x003a -> 0x003c -> 0x003e -> 0x0040
+13.640  0x0040 -> 0x0041          <- the 0x41 family, previously never reached
+14.280  0x0041 -> 0x0042 -> 0x0044 -> 0x0046
+16.240  0x0046 -> 0x004f   INFO_RX complete=0x0001, INFO_mode=0x0009 variant=0x000e
+16.248  overlay request page 14 V.90 DPCM -> 0x026a served
+16.260  bootpage 7 INFO -> 14 V.90 DPCM;  0x0060 -> 0x0062 -> 0x0064 -> 0x0066
+16.460  0x0066 -> 0x00ea   Rstatus_ch=0x8800[change_h|speed_rx]
+```
+
+The peer agrees: it finishes Phase 2 (`V90Phase2Info: L2[20] = +204.332`),
+constructs the Phase 3 demodulator (`Reset called`, `initial state set to
+WaitForSd`) and waits.  Both sides are in V.90, on the right pages, at the
+right time.  This is the furthest any call has reached.
+
+It then fails for a new reason.  `V90Demodulator: Error Energy = -0.000` for
+three seconds, then `VPcmFloModem (V90): retrain requested !!` /
+`VPcmV34Main: Initiating retrain, requested DP is 90`, back to
+`TX_PHASE1_ANS`.  Error Energy is exactly zero because there is no signal:
+
+```text
+TX ours->peer, RMS per 0.5 s     RX peer->ours
+  14.50s  2078.8                   2479.1
+  15.00s  1196.2                   2470.8
+  15.50s     0.0                   1138.3   <- peer transmits throughout
+  16.50s     7.7                   1096.5
+  ...       0.0                    1093.8
+  20.00s     0.0                   2271.1   <- peer gives up, retrain tones
+```
+
+`run13.adsp.csv` locates it exactly.  Through INFO the transmit sample pointer
+`DM(0x3fb4)` holds `0x3764`, the signed-linear TX word, and `tx_value` carries
+real modulator output.  At the page handoff:
+
+```text
+16.240  bootpage=0x0007 trn=0x004f  tx_ptr=0x3764  tx_value=0x0000  gen=0x3cb8
+16.260  bootpage=0x000e trn=0x0060  tx_ptr=0x0000  tx_value=0x0000  gen=0x0000
+```
+
+**The V.90 DPCM page comes up with no transmit source at all** — `tx_ptr` and
+`gen_control` are both zero and stay zero for the rest of the call.  The page
+is resident and its state machine sequences normally (`0x60..0x66..0xea`,
+`speed_rx` asserted), but nothing is wired to the SPORT transmit word, so the
+digital modem never sends Sd and the peer times out in `WaitForSd`.
+
+This is the same class of defect as the V.8 handoff fixed in `f5bfe3d` and
+`0806495`: page-local transmit state that the real host re-establishes across
+a boot-page change and our supervisor does not.  The next task is the bootpage
+7 -> 14 handoff specifically — which database words the host writes to point
+page 14's modulator at `DM(0x3764)`, the analogue of what was recovered for
+V.8.  ADDSP V.90 User's Guide §5.4.1's database setup and the `DM(0x166a..
+0x166c)` transmit-source group (PM `0x349e`, Session "state-record format")
+are the places to look.
