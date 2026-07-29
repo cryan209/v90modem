@@ -1700,6 +1700,7 @@ class NativeMipsModem:
         self.l1l2_forced_samples: list[int] = []
         self.resident = 0x0258
         self._mips_fault_reported = False
+        self._private_line_active = False
 
     def start_native_task(self) -> None:
         """Release the assigned core and run TIKRNL's relocated initializer."""
@@ -1833,7 +1834,21 @@ class NativeMipsModem:
         # The hardware PRI descriptor calls TIKRNL's registered continuation
         # only for this selected channel.  The generic SPORT frame walks the
         # kernel queue but cannot reconstruct that private callback.
-        self.dm[0x3F08] = code & 0xFF
+        # DIAL activation still consumes this reconstructed line word. Once
+        # V.8 is resident, however, DM3f08 is processed status owned by the
+        # page; raw G.711 reaches it through the selected SPORT descriptor.
+        if not self._private_line_active:
+            self.dm[0x3F08] = code & 0xFF
+        else:
+            # The private descriptor supplies a processed line-status word
+            # separately from the raw G.711 ring. Fixed dispatch holds 0x21
+            # here during normal V.8 media; storing the octet itself corrupts
+            # the result bits, while leaving it at 1 stalls the RX action.
+            self.dm[0x3F08] = 0x0021
+            # The selected descriptor also publishes the raw line codeword at
+            # the V.PCM-family fixed one-word RX location before each page's
+            # primary action. The generic SPORT ring is not connected to it.
+            self.dm[0x3763] = code & 0xFF
         # Native TIKRNL registers PM 0x0586 as the selected-channel ISR and
         # PM 0x0703 as its continuation. Model the private descriptor without
         # permanently replacing either global kernel dispatch slot.
@@ -1870,6 +1885,7 @@ class NativeMipsModem:
                 self.switches.append(
                     (self._media_samples, self.dm[0x3FB0], wanted))
             if wanted == 0x025F:
+                self._private_line_active = True
                 # PM 2025 snapshots DIAL's processed line status before the
                 # first callback. Raw PCMU idle 0xff has result bits 5-6 set;
                 # hardware/direct dispatch presents idle status 1 here.

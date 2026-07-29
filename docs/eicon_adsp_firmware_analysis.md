@@ -3404,3 +3404,51 @@ TrnProgress 4/11 and times out to V.32 without decoding the peer's CM, while
 slmodemd eventually times out waiting for JM.  The private descriptor's G.711
 to-linear SR1 input convention must be recovered without adding a second page
 callback.
+
+## Session 42: private G.711 RX publication recovered
+
+The TX fix made the reciprocal RX boundary visible. Enhanced PM traces now
+include AR/SR0/SR1. They show the selected SPORT walk carrying the prior raw
+codeword in SR1 into runtime continuation PM `0x0703`, but Eicon's private
+line descriptor has two additional publications which the generic walk does
+not reproduce:
+
+1. processed line status `0x0021` at `DM3f08`; and
+2. the byte-exact G.711 codeword at the V.PCM-family one-word RX location
+   `DM3763` before the page's primary action.
+
+Writing the RTP octet to `DM3f08` was the earlier mistake. It mixed line data
+with status/result bits. Merely leaving the seam value `1` also fails: V.8's
+RX action stalls. Fixed dispatch keeps `DM3f08=0x21` during ordinary media and
+feeds the octet separately through `DM3763`. The native adapter now models
+those two descriptor outputs after V.8 becomes resident, and keeps doing so
+across INFO and later V.PCM overlays which share the PM `0x1661` line adapter.
+DIAL startup retains its existing pre-descriptor `DM3f08` path.
+
+A byte-exact replay of run06 proves that this is the missing RX input. Before
+the change, native V.8's history at `DM3700..DM3753` remained stale boot value
+`0xfce8` and timed out to V.32. The direct path filled it with the captured
+PCMU octets and changed TrnProgress 4 -> 3 at sample 32297. Native now makes
+the same transition at sample 32301 and remains in V.8.
+
+Tower run07 validates natural bidirectional V.8:
+
+```text
+Eicon: TrnProgress 4 -> 3 -> 9 -> INFO page 0x0260
+peer:  SEND_CM -> SEND_CJ -> V8_OK
+peer:  remote V90=1, digital connection=1, pcmIndication=1
+peer:  receives Eicon INFO0a and enters V.90 training
+```
+
+Run07 itself used the V.8-only form of the fix and therefore stalled in INFO at
+state `0x28`. Replaying its exact RX capture with descriptor publication kept
+active across INFO now advances naturally through:
+
+```text
+0x20 -> 0x22 -> 0x24 -> 0x26 -> 0x28 -> 0x2e
+     -> 0x30 -> 0x32 -> 0x34
+```
+
+The original G.711 RX blocker is resolved. The next live run can now test the
+existing INFO/Tone-B frontier and whether decoded INFO1a naturally requests
+V90D overlay `0x026a`.

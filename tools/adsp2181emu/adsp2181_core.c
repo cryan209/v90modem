@@ -340,8 +340,12 @@ static void execute(adsp2100_state *adsp)
 
 		if (adsp->trace_budget > 0) {
 			adsp->trace_budget--;
-			logerror("[TRACE] pc=%04x op=%06x i4=%04x i5=%04x i6=%04x i7=%04x cyc=%llu\n",
+			logerror("[TRACE] pc=%04x op=%06x ar=%04x sr0=%04x sr1=%04x "
+				 "i4=%04x i5=%04x i6=%04x i7=%04x cyc=%llu\n",
 				 (unsigned)(adsp->pc & 0x3fff), op,
+				 adsp->core.ar.u & 0xffff,
+				 adsp->core.sr.srx.sr0.u & 0xffff,
+				 adsp->core.sr.srx.sr1.u & 0xffff,
 				 adsp->i[4] & 0x3fff, adsp->i[5] & 0x3fff,
 				 adsp->i[6] & 0x3fff, adsp->i[7] & 0x3fff,
 				 (unsigned long long)adsp->cycles);
