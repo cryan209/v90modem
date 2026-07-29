@@ -46,24 +46,11 @@ Two views:
              `I4 = 0x0e53 ; DM(I4,M5) = 0x3716` store, the wrong overlay page
              is mapped and the fault is ours, not the firmware's.
 
-  --v90d     trace the V.90 data pump (overlay 0x026a) across the handoff --
-             both record layers from `tools/v90_dpcm_state_records.py` plus
-             the global countdown DM(0x20e0), reporting each seed with its
-             decomposition and each expiry with the measured tick rate.
-             `--countdown-writers` adds a DM watchpoint on 0x20e0, so every
-             access logs its pc ([WATCH] lines on stderr).
-
-**Pass `--sport-companding`, and build the emulator first.**  Without the
-first the replay never leaves INFO, and `tools/adsp2181emu/libadsp2181.dylib`
-is gitignored and not built by the top-level makefile, so a stale one silently
-changes what the replay concludes -- run `make -C tools/adsp2181emu`.
-
 Usage:
     python3 tools/eicon_info_replay.py CAPTURE.rx.ulaw --tx
     python3 tools/eicon_info_replay.py CAPTURE.rx.ulaw --states --from 6.1 --to 6.8
     python3 tools/eicon_info_replay.py CAPTURE.rx.ulaw --tx --inject-event 0x37
     python3 tools/eicon_info_replay.py CAPTURE.rx.ulaw --overlay 2> EXEC.log
-    python3 tools/eicon_info_replay.py CAPTURE.rx.ulaw --v90d --sport-companding
 """
 from __future__ import annotations
 
@@ -153,37 +140,6 @@ EXTRA = {'timer': 0x1647, 'doneA': 0x0686, 'eventB': 0x198E}
 # chain only advances to the next record when it reaches 0.
 SEQUENCER_EXTRA = {'timer': 0x1647, 'dwell': 0x1650}
 
-# The V.90 data pump (overlay 0x026a) after the handoff, as
-# `tools/v90_dpcm_state_records.py` decodes it: two record layers plus the
-# global countdown DM(0x20e0) that condition index 0x02 tests.
-#
-#   PM 0x2c7d   MY0 = PM(0x200c + DM(0x20e3)) -- the symbol-rate scale table
-#               0x200c..0x2011 = 0.2400 0.2743 0.2800 0.3000 0.3200 0.3429,
-#               i.e. the V.34 baud family over 10000.  Index 4 is 3200 baud,
-#               and the countdown does tick at 3200 Hz.
-#   PM 0x2c6b   AR = 0x4e20 ; scale ; double        -- 12800 ticks = 4.000 s
-#   PM 0x2c78   AR = MR1 + DM(0x3fcb) ; DM(0x20e0) = AR
-#   PM 0x2cb4   DM(0x3fcb) = DM(0x3fc9) * 10/3      -- the addend
-#   PM 0x2f7d   AY0 = DM(0x20e0) ; AR = AY0 - 1 ; DM(0x20e0) = AR, clamped
-#
-# DM(0x3fc9) is not the data pump's: the resident INFO page maintains it at
-# PM 0x3caf/0x3cb4.  Whatever it has reached at the handoff is added to every
-# countdown this page seeds, so the deadline is 4.000 s plus an inherited term.
-V90D = {
-    'trn': 0x3FC2,      # published TrnProgress = outer state AND 0x00ff
-    'count': 0x20E0,    # global countdown, condition index 0x02
-    'rate': 0x20E3,     # index into the PM 0x200c symbol-rate scale table
-    'addend': 0x3FCB,   # DM(0x3fc9) * 10/3, added to every seed
-    'optr': 0x120F, 'ostate': 0x1FF7, 'odwell': 0x1FF6,
-    'iptr': 0x204A, 'istate': 0x2008, 'idwell': 0x2007,
-}
-# The countdown moves every tick, so key on the record pointers and states
-# only -- otherwise the view prints one line per sample for six seconds.
-V90D_KEY = ('trn', 'optr', 'ostate', 'iptr', 'istate')
-V90D_COUNT = 0x20E0
-V90D_ELAPSED = 0x3FC9
-V90D_PAGE = 0x026A
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -200,12 +156,6 @@ def main() -> int:
     ap.add_argument('--sequencer', action='store_true',
                     help='trace PM 0x3335 record selection: the candidates, '
                          'their conditions, and the record DM(0x164b) came from')
-    ap.add_argument('--v90d', action='store_true',
-                    help='trace the V.90 data pump across the handoff: its two '
-                         'record layers and the global countdown DM(0x20e0)')
-    ap.add_argument('--countdown-writers', action='store_true',
-                    help='with --v90d, put a DM watchpoint on 0x20e0 so every '
-                         'read and write logs its pc ([WATCH] lines, stderr)')
     ap.add_argument('--sport-companding', action='store_true',
                     help='expand the DS0 octet at SPORT0 as the native path '
                          'does (ADDSP V.90 guide §3.3); without it this replay '
@@ -214,8 +164,7 @@ def main() -> int:
     ap.add_argument('--to', dest='end', type=float, default=1e9)
     args = ap.parse_args()
 
-    if (not args.states and not args.tx and not args.overlay
-            and not args.sequencer and not args.v90d):
+    if not args.states and not args.tx and not args.overlay and not args.sequencer:
         args.tx = True
 
     data = args.capture.read_bytes()
@@ -241,10 +190,6 @@ def main() -> int:
     previous = None
     overlay_previous = None
     sequencer_previous = None
-    v90d_previous = None
-    v90d_watching = False
-    v90d_resident = None
-    v90d_seeded = None      # (seconds, value) the countdown was last seeded at
     injected = False
     activity: dict[int, list[int]] = {}
     order: list[int] = []
@@ -260,40 +205,7 @@ def main() -> int:
             print(f'{seconds:8.4f}  injected DM(0x198e) = 1 at TrnProgress '
                   f'0x{args.inject_event:04x}')
 
-        if (args.countdown_writers and args.v90d and not v90d_watching
-                and seconds >= args.start):
-            ADSP.adsp2181_watch_dm(cpu, V90D_COUNT, 1)
-            v90d_watching = True
-
         sample = modem.frame_fast(code, index)
-
-        if args.v90d:
-            if modem.card.resident != v90d_resident:
-                v90d_resident = modem.card.resident
-                print(f'{seconds:8.4f}  resident page -> 0x{v90d_resident:04x}')
-            # DM(0x20e0) belongs to whichever page is resident, so only the
-            # data pump's own use of it is reported.
-            count = dm[V90D_COUNT] if v90d_resident == V90D_PAGE else 0
-            if v90d_seeded is None or count > v90d_seeded[1]:
-                # The only way the countdown rises is a seed: PM 0x2f7d only
-                # ever decrements it, and clamps at zero.
-                v90d_seeded = (seconds, count)
-                if count:
-                    print(f'{seconds:8.4f}  countdown seeded {count:#06x} '
-                          f'= {count} ticks, addend DM(0x3fcb)={dm[0x3FCB]} '
-                          f'from DM(0x3fc9)={dm[V90D_ELAPSED]}')
-            elif count == 0 and v90d_seeded[1]:
-                held = seconds - v90d_seeded[0]
-                print(f'{seconds:8.4f}  countdown expired after {held:.4f} s '
-                      f'({v90d_seeded[1] / held:.0f} ticks/s)')
-                v90d_seeded = (seconds, 0)
-            if args.start <= seconds <= args.end:
-                key = tuple(dm[V90D[name]] for name in V90D_KEY)
-                if key != v90d_previous:
-                    fields = ' '.join(f'{n}={dm[a]:04x}'
-                                      for n, a in V90D.items())
-                    print(f'{seconds:8.4f}  {fields}')
-                    v90d_previous = key
 
         state = dm[DM_TRNPROGRESS]
         if state not in activity:

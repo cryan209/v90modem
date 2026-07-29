@@ -44,7 +44,8 @@ Layering that isn't obvious from filenames:
 - Not every decoder is live. `p3_demod.c` *is* — via `v90_cp_live.c` and `v92_p3_rx.c`. But `v34_phase2_decode.c`, `v34_info_decode.c`, `v8bis_decode.c`, `phase12_decode.c`, `v92_short_phase*_decode.c` and `v92_anspcm_decode.c` are absent from `SRCS` and reachable only from `vpcm_decode` and the test harnesses. Check `SRCS` in `makefile` before assuming a change affects real calls.
 - `*_rrc.h`, `*_godard.h` and `v34_*_tables.h` are generated coefficient tables. Data, not hand-editable code.
 - `tools/` holds Python analysis and replay scripts; `captures/` and `artifacts/` hold recorded line audio and run outputs from hardware sessions.
-- The ADSP-2181 emulator the firmware replays run on (`tools/adsp2181emu/`) is **not** built by the top-level `makefile`, and `libadsp2181.dylib` is gitignored. Run `make -C tools/adsp2181emu` before trusting a replay: a stale library silently changes what the replay concludes, which is how the Session 49 write-up in `docs/eicon_adsp_firmware_analysis.md` reached a wrong result.
+- The ADSP-2181 emulator the firmware replays run on (`tools/adsp2181emu/`) is **not** built by the top-level `makefile`, and `libadsp2181.dylib` is gitignored — run `make -C tools/adsp2181emu` before trusting a replay.
+- Two replay harnesses drive that emulator and they disagree past the INFO page: `tools/eicon_info_replay.py` uses `LiveKernelModem`, while live captures (`eicon_adsp_sip.py --native-mips`) and `tools/v90_dpcm_replay.py` use `create_native_mips_modem()`. Only the native one reproduces the live card on V.90 page 14 — it needs `unicorn`, so run it under `/tmp/eicon-venv/bin/python`. Session 50 in `docs/eicon_adsp_firmware_analysis.md` records what mixing them up costs.
 
 Each module's header comment states its role and the spec sections it implements — read that before the `.c`.
 

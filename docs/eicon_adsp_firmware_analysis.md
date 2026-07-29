@@ -3937,106 +3937,128 @@ writers are PM 0x2c69 and PM 0x2c7a, seeding 0x7530 and 0x1b58 plus
 `DM(0x3fcb)`), or it is seeded but the routine that should restart it per
 state never runs.  Watch `DM(0x20e0)` across the handoff before anything else.
 
-## Session 50: `DM(0x20e0)` across the handoff — the page lives 6.3 s, and Session 49's abort was a stale build
 
-Session 49 ended by asking for exactly one measurement: watch the global
-countdown `DM(0x20e0)` across the INFO → V.90 handoff.  It is now a committed
-view, `tools/eicon_info_replay.py --v90d`, and it says something the previous
-session's replay could not.
+## Session 50: `DM(0x20e0)` across the handoff — the deadline is inherited from INFO, and `0xea` is not a timeout
 
-### First, the correction
+Session 49 asked for one measurement: the global countdown `DM(0x20e0)` across
+the INFO → V.90 handoff.  `tools/v90_dpcm_replay.py` is that view.  A second
+live call, `run14` (four dials, all four identical), is the corroboration.
 
-**`tools/adsp2181emu/libadsp2181.dylib` is gitignored and the top-level
-`makefile` does not build it.**  The copy on disk was missing
-`adsp2181_pmovlay`, added four commits earlier in `f8e88a6` — so every replay
-since then, Session 49's included, ran against an emulator core predating
-`f8e88a6`, `c6d64ab` (the ABS `AZ`/`AN` fix) and `78f8bf6`.
+### The harness trap, first
 
-Rebuilt (`make -C tools/adsp2181emu`), the run13 replay does **not** reach
-state `0xea`.  The `0xea` record and its `test[02]` escape are real — that part
-of Session 49 is static table decoding and still holds — but "the data pump
-aborts 0.21 s after it starts" is an artifact of the stale core.  Every replay
-conclusion drawn between `f8e88a6` and here is worth re-running.
+Two replay harnesses drive the same firmware:
 
-### What actually happens
+| tool | harness |
+|---|---|
+| `tools/eicon_info_replay.py` | `LiveKernelModem` (`dial_kernel_dispatch`) |
+| `tools/v90_dpcm_replay.py` | `create_native_mips_modem()` (`eicon_mips_shim`) |
+
+Live captures come from `eicon_adsp_sip.py --native-mips`, i.e. the second.
+On the INFO page the two track each other closely enough to be mistaken for
+one another.  **On page 14 they do not.**  The kernel-dispatch harness parks in
+TrnProgress `0x0060` for the whole page; the native one walks
+`0x0060 -> 0x0062 -> ...` exactly as the live card does.  A first pass at this
+session measured the countdown on the wrong harness and blamed a stale
+`libadsp2181.dylib`; that was wrong, and Session 49's replay trace reproduces
+exactly on a current build.  (Rebuilding the emulator is still necessary —
+it is gitignored and the top-level makefile does not build it.)
+
+Fidelity of the right harness, `run14` call 1, page 14:
 
 ```text
-15.5478  resident page -> 0x026a
-15.5478  trn=0050 count=0000 rate=0004 addend=1cb8 optr=1d25 ostate=0050
-15.5485  trn=0052 count=0000 ...
-15.5491  countdown seeded 0x4eb8 = 20152 ticks, addend DM(0x3fcb)=7352
-                                                from DM(0x3fc9)=2206
-15.5491  trn=0053 count=4eb8 optr=1869 ostate=0053
-15.5497  trn=0060 count=4eb6 optr=18cc ostate=0060
-21.8466  countdown expired after 6.2975 s (3200 ticks/s)
-21.8466  trn=0060 count=0000 optr=1cb9
-21.8534  trn=0060 optr=1d2b
-21.8712  resident page -> 0x0270
-21.8714  resident page -> 0x0260   trn=0020    <- INFO again
+              live card          native replay
+0x0060        11.000 s           10.2215 s
+0x0062        11.160 s           10.3908 s
+leaves        17.040 s           16.2696 s
+dwell in 0x0062   5.880 s            5.879 s
 ```
 
-The page parks in TrnProgress `0x0060` for 50572 samples — 6.32 s — and
-`--tx` measures **0.0 % non-zero TX across every one of them**.  It then leaves
-through the countdown's escape (`optr` 1cb9 → 1d25 → 1d2b, the chain Session 49
-decoded), drops through page 0x0270 and hands back to INFO at `trn=0x0020`.
-So the timeout is still not the disease: the page is alive and silent for six
-seconds, and only then runs out of time.  Session 48's question — what should
-be driving SPORT0 in state `0x0060` — is the live one.
+The absolute times differ by the call-setup offset; the dwell agrees to one
+millisecond.
 
-### The countdown is seeded once, late, and with an inherited term
+### `0xea` is not a timeout abort
 
-A `--countdown-writers` watchpoint gives three writers and no others.  (The
-emulator logs the pc already advanced, so a logged `pc` names the *previous*
-instruction.)
+Replaying `run13` natively reproduces Session 49's trace to the sample —
+`0x0050` 15.5476, `0x0053` 15.5490, `0x0060` 15.5496, `0x0062` 15.6351,
+`0x0064` 15.6584, `0x0066` 15.6634, `0x00ea` 15.7589.  But with the countdown
+in view, the reason is not what Session 49 concluded:
 
-| logged pc | instruction | what it does |
+```text
+15.5490  countdown seeded 0x4eb8 = 20152 ticks
+15.6807  trn=0066 count=4d13 odwell=00f9      <- 249 ticks of outer dwell left
+15.7589  trn=00ea count=4c19                  <- 19481 ticks still on the clock
+```
+
+`0x0066` is entered with `DM(0x1ff6) = 0xf9` (249 ticks), and `0xea` follows
+249 ticks — 78 ms — later.  That is condition `0x01`, the **outer dwell**.
+The global countdown still had 19481 of its 20152 ticks, six seconds, when the
+page arrived at `0xea`.  It was armed as an escape from state `0x0053` onward
+and simply never fired.  So the `0x60 -> 0x62 -> 0x64 -> 0x66 -> 0xea` walk is
+ordinary dwell-driven sequencing that happens to end in a state with no exit —
+not a page that ran out of time.
+
+### `run14`: a second call, and there the countdown *is* the exit
+
+Four dials, live, all four the same, and the native replay agrees:
+
+```text
+10.2209  countdown seeded 0x4b9c = 19356 ticks, addend DM(0x3fcb)=6556
+                                                from DM(0x3fc9)=1967
+10.2215  trn=0060
+10.3908  trn=0062                <- and stays there
+16.2696  trn=0050                <- 19356 / 3200 = 6.0488 s after the seed
+```
+
+Here the page reaches `0x0062` and holds until the countdown expires, then
+restarts the outer chain at `0x0050`.  `0xea` is never reached.  So the two
+calls take two different exits from the same page, and neither is the story
+Session 49 told.
+
+### The deadline varies per call, because it is inherited
+
+The seed decomposes the same way in both calls, and the variable part is not
+the data pump's own:
+
+| | run13 | run14 |
 |---|---|---|
-| 0x0d91 | — | the overlay download, clearing DM |
-| 0x2c7b | PM 0x2c7a `DM(0x20e0) = AR` | the one and only seed |
-| 0x2f81 | PM 0x2f80 `DM(0x20e0) = AR` | the per-tick decrement |
+| `DM(0x3fc9)` at the handoff | 2206 | 1967 |
+| `DM(0x3fcb)` = `x 10/3` | 7352 (2.2975 s) | 6556 (2.0488 s) |
+| budget | 12800 (4.000 s) | 12800 (4.000 s) |
+| seed | 20152 (6.2975 s) | 19356 (6.0488 s) |
 
-Three things follow, and the first is the one worth acting on.
+The budget half is exact and rate-correct: PM 0x2c6b takes `0x4e20` = 20000,
+scales it through PM 0x200c + `DM(0x20e3)`, doubles, and 20000 × 0.32 × 2 =
+12800 ticks at the measured 3200 ticks/s = 4.000 s on the nose.  The table
+PM 0x200c..0x2011 is `0.2400 0.2743 0.2800 0.3000 0.3200 0.3429` — the V.34
+baud family over 10000 — and index 4 is 3200.
 
-1. **The page enters with the countdown already at zero.**  States `0x0050`,
-   `0x0050` and `0x0052` — 1.3 ms — run before PM 0x2c7a fires.  Nothing seeds
-   `DM(0x20e0)` at page entry; the seed is a side effect of reaching `0x0053`.
-   Any record arming condition `0x02` inside that window escapes immediately,
-   which is precisely the shape of the abort Session 49 thought it had seen.
+The addend is another page's.  PM 0x2cb4 computes `DM(0x3fcb) = DM(0x3fc9) x
+10/3` with a *hardcoded* factor, not one indexed by `DM(0x20e3)`, and
+`DM(0x3fc9)` is maintained by the **resident INFO page** at PM 0x3caf/0x3cb4 —
+counting at ~535 Hz and stopping seconds before the handoff.  Whatever it has
+reached when INFO hands over lands in every deadline the data pump sets, so
+the page's time budget varies call to call with how INFO ran.
 
-2. **The 4.000 s budget is exact, and rate-correct.**  An exec watchpoint puts
-   the entry at PM 0x2c6b, called from PM 0x2458:
+`run14` also exercises the other seeder, and it double-counts.  Its restart at
+16.2696 seeds 22712 = 9600 + 2 × 6556: PM 0x2c65 loads `0x7530` = 30000,
+scales to 9600 ticks (3.000 s), calls PM 0x2c78 — which stores `MR1 +
+DM(0x3fcb)` — and then falls into PM 0x2c68, `AR = AR + AY0`, storing again
+with the addend applied a second time.
 
-   ```text
-   2c6b  AR = $4E20                     20000
-   2c6c  CALL $2C7D                     MY0 = PM($200C + DM($20E3)), MR = AR * MY0
-   2c6d  SR = LSHIFT MR1 (LO) BY 1      x2
-   2c6f  JUMP $2C78                     AR = MR1 + DM($3FCB) ; DM($20E0) = AR
-   ```
+### Where this leaves the transmit question
 
-   PM 0x200c..0x2011 is `0x1eb8 0x231c 0x23d7 0x2666 0x28f6 0x2be3` — as 1.15,
-   0.2400 / 0.2743 / 0.2800 / 0.3000 / 0.3200 / 0.3429.  That is the V.34 baud
-   family over 10000, so the table is a symbol-rate scale and `DM(0x20e3) = 4`
-   selects 3200.  20000 × 0.32 × 2 = 12800 ticks, and the replay measures the
-   decrement at 3200 ticks/s, so the budget is 12800 / 3200 = **4.000 s** on
-   the nose.  Nothing is wrong with this half.
+`DI_control = 0x8000 [tx_request]` toggles every 20 ms across the entire
+page-14 window on all four `run14` calls, and TX is 0.0 % non-idle for every
+one of those samples.  The request side of the transmit path is alive; the
+data side produces nothing.  That is Session 48's gap stated more sharply, and
+it is upstream of anything the countdown does — both exits above are what
+happens *after* six silent seconds, not why they were silent.
 
-3. **The addend is not the data pump's own.**  PM 0x2cb4 computes
-   `DM(0x3fcb) = DM(0x3fc9) x 10/3` (`MX0 = DM(0x3fc9) ; MY0 = 0xD555 ; MR =
-   MX0 * MY0 (SU) ; SR = ASHIFT MR1 BY 1`): 2206 → 7352 ticks = 2.2975 s, added
-   to the seed to give the observed 20152.  `DM(0x3fc9)` belongs to the
-   *resident INFO page*, which increments it at PM 0x3caf/0x3cb4 at ~535 Hz
-   from −133 at 6.9722 s until it stops at 2206 at 11.3453 s — four seconds
-   before the handoff.  So the data pump's deadline is 4.000 s of its own
-   budget plus 2.2975 s inherited from a counter INFO left behind, and unlike
-   the budget, the ×10/3 is hardcoded rather than taken from the symbol-rate
-   table `DM(0x20e3)` indexes.
-
-Next: `DM(0x3fc9)` is the thread to pull.  What INFO is counting at ~535 Hz,
-why it stops at 11.3453 s, and whether PM 0x2cb4 is meant to read it at all
-decides whether 6.2975 s or 4.000 s is the deadline the peer expects — and a
-seed that varies with how long INFO ran is a much better fit for
-"intermittently retrains" than a fixed one.  Reproduce with:
+Next: `DM(0x3fc9)` — what INFO counts at ~535 Hz, why it stops when it does,
+and whether PM 0x2cb4 is meant to read it at all.
 
 ```bash
-python3 tools/eicon_info_replay.py artifacts/eicon-native-tower/run13.rx.ulaw --v90d --sport-companding
+make -C tools/adsp2181emu
+/tmp/eicon-venv/bin/python tools/v90_dpcm_replay.py \
+  artifacts/eicon-native-tower/run14.rx.ulaw --to 20
 ```
