@@ -4062,3 +4062,44 @@ make -C tools/adsp2181emu
 /tmp/eicon-venv/bin/python tools/v90_dpcm_replay.py \
   artifacts/eicon-native-tower/run14.rx.ulaw --to 20
 ```
+
+### Addendum: a call that runs the page to `0x00c2` and still never transmits
+
+`run14` grew to five live dials.  The fourth took the page far deeper than
+anything recorded before, entering through `0x004f` (as `run13` did, and with
+the same `INFO_variant = 0x000e`) rather than the `0x0046 -> 0x0060` the others
+took:
+
+```text
+13.140  0x0046 -> 0x004f        INFO_variant=0x000e
+13.160  bootpage 7 -> 14, overlay 0x026a served
+13.160  0x0060
+13.240  0x0062 -> 0x0064 -> 0x0068
+13.360  0x0072 -> 0x0074 -> 0x0076
+13.520  0x00c2                  <- and stays, for 81.96 s
+```
+
+`0x00c2` is in the `0xc0..0xd0` family Session 49 decoded but never saw
+entered.  The page held it for 82 seconds — no dwell expiry, no countdown, no
+restart — until the peer hung up at 95.5 s.
+
+TX across every page-14 state of all five calls, measured against our own
+`run14.ulaw`:
+
+| call | page-14 path | longest state | TX non-idle |
+|---|---|---|---|
+| 1 | `0x60 0x62` | `0x62`, 5.86 s | 0.0 % |
+| 2 | `0x60 0x62` | `0x62`, 5.78 s | 0.0 % |
+| 3 | `0x60` | `0x60`, 9.36 s | 0.0 % |
+| 4 | `0x60 0x62 0x64 0x68 0x72 0x74 0x76 0xc2` | `0xc2`, **81.96 s** | 0.0 % |
+| 5 | `0x60 0x62` | `0x62`, 5.64 s | 0.0 % |
+
+Zero non-idle codewords in any of them, while `DI_control` toggles
+`tx_request` every 20 ms throughout.
+
+This separates the two problems for good.  The sequencer is *not* the blocker:
+given the right INFO outcome it advances through eight states and parks
+indefinitely in a late one, with no timeout involved.  The transmit path is
+dead independently of which state the page is in, for 82 seconds at a stretch.
+The countdown work above is correct but is not on the critical path — Session
+48's transmit source is, and it should be the whole of the next session.
