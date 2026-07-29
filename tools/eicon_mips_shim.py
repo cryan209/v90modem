@@ -57,6 +57,7 @@ REQUEST_PARSER = BIAS + 0x78138  # 0x80089138
 # Performs the switch-on database commit for task 0x0258 (TIKRNL81.F34),
 # reached through the table at file 0xeaec4 rather than by a direct jal.
 SERVICE_ASSIGN = BIAS + 0x85980  # 0x80096980
+SWITCH_ON = BIAS + 0x7FE58       # 0x80090e58, publish initial task command
 DSP_DOWNLOAD = BIAS + 0x75AF8    # 0x80086af8, native block/relocation loader
 
 # The MIPS image's .data/.bss for the protocol task lives at 0x80200000
@@ -366,6 +367,7 @@ class MipsShim:
         self.intercept_bulk_writes = False
         self.bulk_write_calls: list[tuple[int, int, int]] = []
         self.service_assign_block: int | None = None
+        self.native_task_started: set[int] = set()
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -560,6 +562,22 @@ class MipsShim:
                 self.call_trace.append((self.phase, address, target))
         if address == SERVICE_ASSIGN:
             self.service_assign_pending = True
+        elif address == SWITCH_ON and self.service_assign_block is not None:
+            # Real hardware releases the newly downloaded task before
+            # SWITCH_ON publishes its first command/WDB. The emulator's IDMA
+            # boot hold otherwise postpones PM 0679 until after CALL_RES, so
+            # TIKRNL sees the command in the wrong lifecycle state.
+            block = self.service_assign_block
+            core = self.cores.get(block)
+            if core is not None and block not in self.native_task_started:
+                ADSP.adsp2181_set_idma_boot_hold(core, 0)
+                ADSP.adsp2181_call(core, 0x0679, 0x02A8)
+                ADSP.adsp2181_run(core, 2_000_000)
+                if not ADSP.adsp2181_idle(core):
+                    raise RuntimeError(
+                        f"native task initializer stopped before SWITCH_ON "
+                        f"at PM 0x{ADSP.adsp2181_pc(core):04x}")
+                self.native_task_started.add(block)
         if (self.intercept_bulk_writes
                 and address in (HOST_WRITE_DM_BLOCK, HOST_WRITE_PM_BLOCK)):
             a0 = uc.reg_read(UC_MIPS_REG_A0)
@@ -1616,6 +1634,18 @@ def run_mainloop(shim: "MipsShim", args) -> None:
             if BIAS <= target < BIAS + len(args.image.read_bytes()):
                 phases[phase][target] += 1
         print("[trace] firmware call targets by phase:")
+        marked = {SERVICE_ASSIGN, BIAS + 0x7FE58}
+        for index, (phase, src, target) in enumerate(shim.call_trace):
+            runtime_target = mips_runtime_addr(target)
+            if runtime_target not in marked:
+                continue
+            lo = max(0, index - 8)
+            hi = min(len(shim.call_trace), index + 9)
+            print(f"[trace] ordered window around 0x{runtime_target:08x} "
+                  f"in {phase}:")
+            for item_phase, item_src, item_target in shim.call_trace[lo:hi]:
+                print(f"    [{item_phase}] 0x{mips_runtime_addr(item_src):08x} "
+                      f"-> 0x{mips_runtime_addr(item_target):08x}")
         printed = False
         for phase in sorted(phases):
             top = phases[phase].most_common(args.trace_call_limit)
@@ -1673,6 +1703,9 @@ class NativeMipsModem:
 
     def start_native_task(self) -> None:
         """Release the assigned core and run TIKRNL's relocated initializer."""
+        if self.dsp_block in self.shim.native_task_started:
+            print("[native-mips] TIKRNL initialized before native SWITCH_ON")
+            return
         if ADSP.adsp2181_idma_boot_held(self.cpu):
             ADSP.adsp2181_set_idma_boot_hold(self.cpu, 0)
         ADSP.adsp2181_call(self.cpu, 0x0679, 0x02A8)
@@ -1681,6 +1714,7 @@ class NativeMipsModem:
             raise RuntimeError(
                 f"native TIKRNL initializer stopped at PM "
                 f"0x{ADSP.adsp2181_pc(self.cpu):04x}")
+        self.shim.native_task_started.add(self.dsp_block)
         print("[native-mips] released assigned DSP and initialized TIKRNL")
 
     def load_native_overlay(self, download_id: int) -> None:

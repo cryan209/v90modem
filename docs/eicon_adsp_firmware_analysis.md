@@ -3284,3 +3284,40 @@ not the generic loader owner, and not assignment-time SWITCH_ON.  The existing
 synthetic second WDB remains necessary until that specific protocol callback
 is recovered.  All unsuccessful owner-path code was removed so the last
 validated native-INFO behavior is preserved.
+
+## Session 39: the bearer callback is not missing
+
+An ordered MIPS call trace corrects the remaining callback hypothesis.  The
+modem assignment and its initial command occur synchronously inside native
+CALL_RES, before N_CONNECT:
+
+```text
+CALL_RES 0x8001852c -> 0x8002aaec
+         0x8002ace8 -> 0x80082794 -> table dispatch
+         0x800827c0 -> 0x80096980  SERVICE_ASSIGN
+         0x80097dd0 -> 0x80093d14  TIKRNL81 download owner
+         0x80093e34 -> 0x80086af8  relocating loader
+         0x80097dec -> 0x80090e58  SWITCH_ON
+```
+
+N_CONNECT and 32 subsequent main-loop passes contain no second
+`SERVICE_ASSIGN`, no second `SWITCH_ON`, and no distinct modem-task callback.
+The pending `0040/0024/0038` WDB is therefore the output of the real native
+CALL_RES bearer callback, not an assignment placeholder awaiting a later
+SIG.MDM event.  Sessions 37-38 were right that Linux supplies only CAI and
+`V42_IN`, but wrong to infer a missing later MIPS callback.
+
+The trace exposed one real emulator lifecycle mismatch.  Hardware releases
+and initializes the newly downloaded TIKRNL task before SWITCH_ON publishes
+its first command.  The shim previously left that core in IDMA boot hold until
+`NativeMipsModem` was constructed, after all of CALL_RES had returned.  The
+MIPS hook now releases the selected core and runs relocated initializer PM
+`0x0679` at entry to native SWITCH_ON; the later SIP adapter recognizes that
+it is already initialized and does not run PM `0x0679` twice.
+
+This correction preserves the existing offline outcome: V.8 still returns to
+DIAL after four line frames and the fallback remains a 2300-Hz `0x0271` tone.
+A separate-RX-callback PM `0x0585` experiment produced the same page sequence
+and was reverted.  Thus the remaining transmit defect is below the now-proven
+CALL_RES callback boundary, in the private descriptor/V.8 line-state handoff;
+it is not a missing Linux operation or delayed SIG.MDM bearer event.
