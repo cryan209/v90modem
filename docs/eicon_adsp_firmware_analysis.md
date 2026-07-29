@@ -3841,3 +3841,93 @@ host-side value at all.
    kernel queue indices.  If (1) shows the page is transmitting, correlating
    these against a known Sd sequence identifies the word `DM(0x3fa7)` should
    point at.
+
+## Session 49: the V.90 data pump's TrnProgress table — `0xea` is a timeout abort
+
+`tools/v90_dpcm_state_records.py` decodes overlay `0x026a`'s state machine.
+It is the INFO page's design one level deeper: **two** record layers over the
+same two index tables.
+
+```text
+layer   base        terminator   state word    record pointer
+outer   DM(0x1fe9)  offset 0x17  DM(0x1ff7)    DM(0x120f)
+inner   DM(0x2001)  offset 0x10  DM(0x2008)    DM(0x204a)
+
+DM(0x0613), 0x40 entries   candidate index -> record address
+DM(0x05e0), 0x33 entries   condition index -> PM address
+```
+
+PM 0x2fe3 applies both — the same `(offset, lo, hi)` triple walk as INFO's
+PM 0x336a, base in MR0, terminator offset in MR1.  **TrnProgress is the outer
+layer's state word**: PM 0x2fba..0x2fbd is
+`DM(0x3fc2) = DM(0x1ff7) AND 0x00ff`, and it is the only writer of DM(0x3fc2)
+in the whole overlay.  PM 0x2f9d is the selection chain — four candidate slots
+plus a fall-through, first condition returning LE wins — identical in shape to
+INFO's PM 0x3335.
+
+79 records decode to **56 distinct TrnProgress states**: `0x50..0x5c`,
+`0x60..0x6a`, `0x70..0x80`, `0xa6`, `0xb0..0xbd`, `0xc0..0xd0`, `0xea`, and a
+`0x0bc0/0x0cc0/0x0dc0/0x0ec0/0x0fc2` family whose low byte repeats `0xc0..0xc4`.
+
+Two cautions the tool now encodes:
+
+- **Records are deltas.**  The applier writes only the offsets a record
+  carries; everything else keeps the previous record's value.  A record that
+  sets some conditions to the never stub does not by itself prove a dead end.
+- **Records cannot be found by scanning.**  A triple walk started at the wrong
+  address still terminates on a byte that happens to equal the terminator
+  offset, so a contiguous scan silently mis-aligns (it put state `0x50` at
+  `@17b8` instead of `@180f`).  Seed from the vector table.
+
+Conditions decoded so far, all sharing PM 0x3010 — the dwell countdown, the
+same shape as INFO's PM 0x3391 (decrement through I0, return the old value, so
+LE means expired):
+
+| index | PM | meaning |
+|---|---|---|
+| 0x00 | 0x3038 | `AR = 0 + 1` — never |
+| 0x01 | 0x2ffb | outer dwell `DM(0x1ff6)` expired |
+| 0x02 | 0x2fff | **global countdown `DM(0x20e0)` expired** |
+| 0x03 | 0x2ffd | inner dwell `DM(0x2007)` expired |
+
+### `0xea` is terminal, and we reach it on a timeout
+
+Tracing the outer pointer and the translated condition set through the run13
+replay gives the whole page life — 0.21 seconds of it:
+
+```text
+15.5476 ptr=1d25 state=0050 | next=180f,180f,180f,180f test=3038,3038,3038,3038 pre=2ffb
+15.5490 ptr=1869 state=0053 | next=180f,1c9e,180f,180f test=3038,2fff,3038,3038 pre=2ffb
+15.5496 ptr=18cc state=0060 | next=18ba,1c9e,180f,180f test=30a7,2fff,3038,3038 pre=2ffb
+15.6351 ptr=18d8 state=0062
+15.6584 ptr=18e7 state=0064
+15.6634 ptr=18f6 state=0066
+15.7589 ptr=1ce0 state=00ea | next=1aee,1cce,180f,180f test=3038,3038,3038,3038 pre=3038
+```
+
+Two things settle it.
+
+First, at `0x00ea` **every one of the five conditions is PM 0x3038**, the never
+stub — including the two slots record `@1cce` does not set, which were already
+never.  On this path the state has no exit at all.  The data pump parks there
+for the rest of the call.
+
+Second, the exit that took us there is visible from state `0x0053` onward:
+slot 1 is armed with `next -> @1c9e` under `test[02]`, the global countdown
+`DM(0x20e0)`.  `@1c9e` falls through `@1cb9 -> @1cc2 -> @1cce`, and `@1cce` is
+state `0xea`.  PM 0x2f7d..0x2f80 decrements `DM(0x20e0)` and PM 0x2fff returns
+it, so this is a plain "the page ran out of time" escape, armed for the entire
+run and firing 0.21 s after the overlay loads.
+
+### What this means for Session 48
+
+The transmit-pointer investigation was chasing a symptom, as suspected.  The
+V.90 data pump aborts on its own timeout a fifth of a second after it starts,
+long before it could produce Sd; `DM(0x3fb4)` being null is what an aborted
+page leaves behind, not the reason it never transmitted.
+
+The question is now why the countdown expires immediately.  Two candidates,
+both cheap to test on the offline replay: `DM(0x20e0)` is never seeded (its
+writers are PM 0x2c69 and PM 0x2c7a, seeding 0x7530 and 0x1b58 plus
+`DM(0x3fcb)`), or it is seeded but the routine that should restart it per
+state never runs.  Watch `DM(0x20e0)` across the handoff before anything else.
