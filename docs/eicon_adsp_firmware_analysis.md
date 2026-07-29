@@ -3768,3 +3768,76 @@ page 14's modulator at `DM(0x3764)`, the analogue of what was recovered for
 V.8.  ADDSP V.90 User's Guide §5.4.1's database setup and the `DM(0x166a..
 0x166c)` transmit-source group (PM `0x349e`, Session "state-record format")
 are the places to look.
+
+## Session 48: the page-14 transmit source — reproduced offline, two candidates ruled out
+
+**Not fixed yet.**  This section records the reproduction and two negatives, so
+neither is re-derived.
+
+### Reproduction is now offline
+
+`create_native_mips_modem()` replaying `run13.rx.ulaw` reproduces the failure
+exactly — bootpage 7 -> 14 at 15.55 s, `DM(0x3fb4)` 0x3764 -> 0x0000, silence
+thereafter.  No live call is needed to iterate on this; a run to 18 s takes
+about two minutes.
+
+### The page does swap the pointer, deliberately
+
+Watching `DM(0x3fb4)` shows two writers, both inside the V.90 DPCM overlay,
+alternating every frame:
+
+```text
+1a19: AR = DM($3F0F) ; DM($3606) = AR      <- save RX pointer
+1a1b: AR = DM($3FB4) ; DM($3607) = AR      <- save TX pointer
+1a1d: AR = DM($3FA7) ; DM($3FB4) = AR      <- swap in its own context
+19eb: AR = DM($3606) ; DM($3F0F) = AR      <- restore
+19ed: AR = DM($3607) ; DM($3FB4) = AR
+```
+
+`DM(0x3fa7)` is zero, so the swapped-in pointer is null.
+
+### Negative 1: the SPORT0 transmit latch is not the transmit source
+
+`adsp2181_sport0_tdm_frame()` returns the SPORT0 TX latch, and after the
+handoff that latch varies every frame with signal-like values while the
+pointer dereference reads zero — which looks exactly like the answer.  It is
+not.  The core now reports whether the firmware actually drove the latch
+(`adsp2181_sport0_tx_written()`), and comparing the latch against the received
+stream settles it:
+
+```text
+TX[t+0] == RX[t]:   160/16000 =   1.0%
+TX[t+1] == RX[t]: 15999/15999 = 100.0%
+```
+
+It is the kernel's TDM slot mirror — the received word delayed one frame.
+Publishing it would echo the peer to itself.  `_frame_core` therefore
+discards the return value, with the measurement recorded at the call site.
+
+### Negative 2: the host cannot seed `DM(0x3fa7)`
+
+`DM(0x3fa7)` is the base of a six-word block that pages *clear* during init:
+DIAL at PM `0x13d3` (`docs/dial_v8_call.md`) and the V.90 page at PM
+`0x2a4c..0x2a50` (`AX0 = 0x0006 ; DM(0x20df) = AX0 ; AX0 = 0x3fa7 ;
+DM(0x20de) = AX0 ; CALL 0x2f9d`).  Seeding `DM(0x3fa7) = 0x3764` at the
+`0x026a` load — the analogue of the V.8 handoff fixes — changes nothing:
+the page clears it again and `DM(0x3fb4)` still reads 0x0000 for the rest of
+the call.  A host-side seed has to land after the page's own init, if it is a
+host-side value at all.
+
+### Open, and the two things to settle next
+
+1. **Is the page even trying to transmit?**  TrnProgress runs
+   `0x60 -> 0x62 -> 0x64 -> 0x66 -> 0xea` in 200 ms and then stops, which is
+   far too fast for V.90 Phase 3.  `Rstatus` never sets `online`.  If `0xea` is
+   an abort, the transmit pointer is a symptom and not the fault.  The guide's
+   TrnProgress table for the V.90 data pump has not been decoded yet; do that
+   before more pointer archaeology.
+2. **Which DM word is the page's transmit sample?**  Scanning all of DM across
+   1600 post-handoff frames for words that change nearly every frame gives
+   `DM(0x25b8)` (rms 9566), `DM(0x2059)` (4520), `DM(0x202d)` (3744),
+   `DM(0x0f94)` (2971) and `DM(0x2056)` (2164) as candidates; `DM(0x2e00..
+   0x2e3f)` at rms ~1080 is our own TDM mirror and `DM(0x2e44)/0x2e45` are the
+   kernel queue indices.  If (1) shows the page is transmitting, correlating
+   these against a known Sd sequence identifies the word `DM(0x3fa7)` should
+   point at.

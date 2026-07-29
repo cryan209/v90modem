@@ -225,6 +225,8 @@ ADSP.adsp2181_idma_boot_held.restype = ctypes.c_int
 ADSP.adsp2181_watch_dm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_pm.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
 ADSP.adsp2181_watch_exec.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_int]
+ADSP.adsp2181_sport0_tx_written.argtypes = [ctypes.c_void_p]
+ADSP.adsp2181_sport0_tx_written.restype = ctypes.c_int
 ADSP.adsp2181_pmovlay.argtypes = [ctypes.c_void_p]
 ADSP.adsp2181_pmovlay.restype = ctypes.c_uint16
 ADSP.adsp2181_dmovlay.argtypes = [ctypes.c_void_p]
@@ -1870,6 +1872,12 @@ class NativeMipsModem:
         saved_isr = pm[0x00B5]
         pm[0x00B5] = 0x1C000F | (0x0586 << 4)
         try:
+            # The returned SPORT0 latch is deliberately discarded.  It is not a
+            # transmit source: it carries the kernel's TDM slot mirror, i.e. the
+            # received word delayed one frame.  Measured on run13 after the
+            # bootpage 14 handoff, TX[t+1] == RX[t] for 16000/16000 samples, so
+            # publishing it would echo the peer to itself.  The modem's own
+            # transmit sample reaches the line only through DM(0x3fb4).
             ADSP.adsp2181_sport0_tdm_frame(
                 self.cpu, 0, 0, sport_word, self.silence,
                 self.adsp_budget)

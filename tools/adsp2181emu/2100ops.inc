@@ -443,11 +443,13 @@ static void wr_rx1(adsp2100_state *adsp, INT32 val)	{ adsp->sport_rx[1] = (UINT1
 static void wr_tx0(adsp2100_state *adsp, INT32 val)
 {
 	adsp->sport_tx[0] = (UINT16)val;
+	adsp->sport_tx_written[0] = 1;
 	if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 0, val);
 }
 static void wr_tx1(adsp2100_state *adsp, INT32 val)
 {
 	adsp->sport_tx[1] = (UINT16)val;
+	adsp->sport_tx_written[1] = 1;
 	if (adsp->sport_tx_callback) adsp->sport_tx_callback(adsp, 1, val);
 }
 static void wr_owrctr(adsp2100_state *adsp, INT32 val) { adsp->cntr = val & 0x3fff; }

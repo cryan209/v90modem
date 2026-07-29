@@ -147,6 +147,11 @@ struct adsp2181
 	UINT8		idma_boot_mode;
 	UINT16		sport_rx[2];
 	UINT16		sport_tx[2];
+	/* Whether the firmware wrote each transmit latch since the flag was last
+	 * cleared.  sport_tx alone cannot answer that: it holds the last value
+	 * written whenever it was written, so a page that publishes its transmit
+	 * sample through a DM pointer instead leaves a stale word behind. */
+	UINT8		sport_tx_written[2];
 
 	/* interrupt handling */
 	UINT16		imask;
@@ -1172,6 +1177,7 @@ void adsp2181_reset(adsp2181_t *a)
     a->pmovlay=0; a->dmovlay=0;
     memset(a->sport_rx, 0, sizeof(a->sport_rx));
     memset(a->sport_tx, 0, sizeof(a->sport_tx));
+    memset(a->sport_tx_written, 0, sizeof(a->sport_tx_written));
     update_mstat(a);
     a->pc_sp=a->cntr_sp=a->stat_sp=a->loop_sp=0; a->imask=0; a->icntl=0;
     memset(a->irq_state, 0, sizeof(a->irq_state));
@@ -1327,6 +1333,14 @@ void adsp2181_watch_irqs(adsp2181_t *a, int on)
  * register map (2100ops.inc wr_pmovlay/wr_dmovlay), so a caller that wants
  * to know which page a PM address above 0x2000 resolved to has to read them
  * at the same instant as the fetch, not afterwards. */
+/* Did the firmware drive the SPORT0 transmit latch during the last
+ * adsp2181_sport0_tdm_frame()?  A caller acting as the line side needs this
+ * to tell a real transmit sample from a stale latch left by an earlier page. */
+int adsp2181_sport0_tx_written(const adsp2181_t *a)
+{
+    return a ? a->sport_tx_written[0] : 0;
+}
+
 uint16_t adsp2181_pmovlay(const adsp2181_t *a) { return a ? a->pmovlay : 0; }
 uint16_t adsp2181_dmovlay(const adsp2181_t *a) { return a ? a->dmovlay : 0; }
 
@@ -1382,6 +1396,7 @@ uint16_t adsp2181_sport0_tdm_frame(adsp2181_t *a, int active_slot,
     WWORD_PGM(a, 0x02b9, task_dispatch);
     WWORD_PGM(a, 0x00b5, task_isr);
     a->sport_rx[0] = active_word;
+    a->sport_tx_written[0] = 0;
     for (UINT16 address = 0x2e00; address < 0x2e40; ++address)
         WWORD_DATA(a, address, active_word);
     a->irq_latch[ADSP2181_SPORT0_RX] = 1;
