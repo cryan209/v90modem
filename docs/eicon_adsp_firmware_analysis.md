@@ -3131,9 +3131,10 @@ The recovered private PRI descriptor has two callbacks:
 - runtime PM `0x0703`: RX/page/TX continuation, published by PM `0x06a0`.
 
 They are selected only around one exact SPORT frame; the global kernel slots
-are restored immediately.  Native descriptor-active state is DM `0x3131`,
-the one-word buffers remain DM `0x2b00/0x2b01`, and PCMU/PCMA selects the
-same `0x3c27/0x3c07` adapter as the direct kernel harness.
+are restored immediately.  The one-word buffers remain DM `0x2b00/0x2b01`,
+and PCMU/PCMA selects the same `0x3c27/0x3c07` adapter as the direct kernel
+harness.  DM `0x3131/0x3132` are the loader-relocated download flag/request,
+not a descriptor-active flag.
 
 Native page-download supervision is now live as well.  The relocated outbound
 request is `DM3131/DM3132`, and `DM3143` publishes resume PM `0x06df`.
@@ -3178,3 +3179,39 @@ Run a SIP hardware test with:
 This policy remains explicitly diagnostic.  With a valid calling-modem CM/JM,
 shipping V.8 should request `0x0260` naturally and the same loader/resume path
 is used without substitution.
+
+## Session 36: live tower/slmodemd result
+
+Four live calls were made from `root@tower.net.cryan.nz`, container `d-modem`,
+with `slmodemd_trnref` registered as 6000 and dialing 6001.  Captures are under
+`artifacts/eicon-native-tower/run01..run04`; peer logs were
+`/tmp/slm-native{,2,3,4}.log` in the container.
+
+The live run corrected two more native descriptor details.  TIKRNL's full
+relocated no-host frame entry is PM `0x06c8` (source `0x06c1` plus the loader's
+seven-word prefix); it must run before continuation PM `0x0703`.  Page requests
+must also be gated by `DM3fc1 & 0x0100`: the initial `DM3131/3132 =
+0x000d/0x0270` pair is task-image state, not by itself a live request.  With
+those corrections, each real request is loaded only on the page-change strobe
+and resumed through PM `0x06df`.
+
+The `--force-info-after-v8` tower call reached native INFO on live RTP:
+
+```text
+sample 12000: load 0x0260, bootpage 7, TrnProgress 0x0020
+sample 12160: TrnProgress 0x0026
+sample 12480: TrnProgress 0x0028
+sample 12640: TrnProgress 0x002a
+```
+
+This is an internal DSP milestone, not yet modem interoperability.  The peer
+never left call-progress detection.  Its log ended with
+`CALLPROG_WAIT_RING -> CALLPROG_END`; in the earlier native runs where V.8 was
+allowed to fall through immediately it instead reported `Time Out Waiting For
+ANSam`.  Received RTP in run01 was entirely PCMU `0xff`, confirming slmodemd
+never began CM/JM transmission.  Our transmitted capture was a sustained
+~2300 Hz tone rather than V.8's 2100 Hz ANSam.  Thus the current live frontier
+is now precise: native MIPS/TIKRNL can load and execute INFO, but the answer
+call enters the wrong DIAL/V.8 transmit state before the peer recognizes an
+answer tone.  Fixing that TX state is required before a natural slmodemd INFO
+request is meaningful.

@@ -1652,7 +1652,7 @@ class NativeMipsModem:
     def __init__(self, shim: MipsShim, core, law: str, dsp_block: int,
                  download_descriptors: dict[int, int],
                  force_info_after_v8: bool = False,
-                 mips_interval: int = 160, adsp_budget: int = 300000):
+                 mips_interval: int = 160, adsp_budget: int = 20000):
         self.shim = shim
         self.cpu = core
         self.dm = ADSP.adsp2181_dm(core)
@@ -1730,8 +1730,6 @@ class NativeMipsModem:
         # fixed-address word maps.
         for download_id in (0x026D, 0x025C, 0x0262):
             self.load_native_overlay(download_id)
-        # Private descriptor activation flag consumed at native PM 0x070d.
-        self.dm[0x3131] = 0x0001
         self.dm[0x2F22] = 0x3C27 if self.law == "pcmu" else 0x3C07
         self.dm[0x32F0] = 0x0004
         self.dm[0x3F0F] = 0x2B00
@@ -1809,6 +1807,11 @@ class NativeMipsModem:
         finally:
             pm[0x00B5] = saved_isr
         if ADSP.adsp2181_idle(self.cpu):
+            # MIPS has already consumed the private command mailbox, so use
+            # TIKRNL's relocated no-host per-frame entry (source 06c1+7).
+            ADSP.adsp2181_call(self.cpu, 0x06C8, 0x02A8)
+            ADSP.adsp2181_run(self.cpu, self.adsp_budget)
+        if ADSP.adsp2181_idle(self.cpu):
             ADSP.adsp2181_call(self.cpu, 0x0703, 0x02A8)
             ADSP.adsp2181_run(self.cpu, self.adsp_budget)
         wanted = self.dm[0x3132] & 0xFFFF
@@ -1822,7 +1825,8 @@ class NativeMipsModem:
             self.forced_info_samples.append(self._media_samples)
             print(f"[native-mips] diagnostic post-V.8 fallback -> INFO "
                   f"at sample {self._media_samples}")
-        if self.dm[0x3131] and wanted in self.download_descriptors:
+        if (self.dm[0x3FC1] & 0x0100 and self.dm[0x3131]
+                and wanted in self.download_descriptors):
             previous = self.resident
             if wanted != self.resident:
                 self.load_native_overlay(wanted)
