@@ -48,6 +48,14 @@ RAM_SIZE = 0x100000
 STUB_VIRT = 0x80900000
 STUB_BASE = 0x00900000
 
+# See the page-14 overlay-load site below. Default keeps the diagnostic that
+# reaches outer state 0x0080; EICON_V90D_BULK_ADAPTER=1 restores the adapter.
+V90D_BULK_ADAPTER_DISABLED = os.environ.get("EICON_V90D_BULK_ADAPTER", "0") != "1"
+# Hold the six-word mapping-frame block across the resident kernel's per-frame
+# clear; see the page-14 continuation site below. EICON_V90D_TX_BLOCK_HOLD=0
+# restores the old behaviour (one downstream sample in six).
+V90D_HOLD_TX_BLOCK = os.environ.get("EICON_V90D_TX_BLOCK_HOLD", "1") != "0"
+
 HOST_WRITE = BIAS + 0x71950  # 0x80082950
 HOST_READ = BIAS + 0x71920   # 0x80082920
 HOST_WRITE_DM_BLOCK = BIAS + 0x71A38  # 0x80082a38
@@ -1805,6 +1813,7 @@ class NativeMipsModem:
         self.tx_prbs = tx_prbs
         self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
         self._v90d_bulk_cursor_primed = False
+        self._v90d_saved_clear = None
         self._direct_selected_dispatch = False
         self.native_bearer_activation = native_bearer_activation
         self.tx_requests = 0
@@ -2049,6 +2058,19 @@ class NativeMipsModem:
                     self.cpu, sport_word, self.silence, self.adsp_budget,
                     0x02A9, 0x02A8)
                 if ADSP.adsp2181_idle(self.cpu):
+                    # The tail of this continuation zeroes the six-word V.90
+                    # mapping-frame block DM(0x3fa7..0x3fac) at PM
+                    # 0x06ca..0x06cd (6 writes every frame, reached through the
+                    # 0x04f8 call and its RTS). The page-14 generator refills
+                    # that block once per 1333 Hz mapping frame at PM 0x2a52
+                    # (`CALL (I4)`, AX0 = 0x3fa7) while the serializer at PM
+                    # 0x2eed..0x2ef2 walks cursor DM(0x20de) across it one slot
+                    # per 8 kHz frame, so the block has to survive six frames.
+                    # Without the block surviving, five of every six downstream
+                    # samples read zero and the line carries an impulse train
+                    # instead of Sd. The clear runs inside the ISR above rather
+                    # than in this continuation, so it is suppressed at the
+                    # store itself when page 14 loads, not snapshotted here.
                     ADSP.adsp2181_call(self.cpu, 0x06C8, 0x02A8)
                     ADSP.adsp2181_run(self.cpu, self.adsp_budget)
             else:
@@ -2077,6 +2099,31 @@ class NativeMipsModem:
             previous = self.resident
             if wanted != self.resident:
                 self.load_native_overlay(wanted)
+                if wanted == 0x026A and V90D_HOLD_TX_BLOCK:
+                    # PM 0x06cd is the six-count store that zeroes the V.90
+                    # mapping-frame block DM(0x3fa7..0x3fac) every frame in the
+                    # resident kernel's frame tail. The page-14 generator
+                    # refills the block once per 1333 Hz mapping frame while
+                    # the serializer walks it one slot per 8 kHz frame, so the
+                    # clear has to stop for the block to survive its six reads.
+                    pm_words = ADSP.adsp2181_pm(self.cpu)
+                    self._v90d_saved_clear = pm_words[0x06CD]
+                    pm_words[0x06CD] = 0x000000
+                    print("[native-mips] diagnostic: suppressed per-frame "
+                          "clear of the V90D mapping-frame block")
+                elif (self._v90d_saved_clear is not None
+                        and self.resident == 0x026A):
+                    ADSP.adsp2181_pm(self.cpu)[0x06CD] = self._v90d_saved_clear
+                    self._v90d_saved_clear = None
+                if wanted == 0x026A and V90D_BULK_ADAPTER_DISABLED:
+                    # Diagnostic: RTS out the tail of the 0x1900..0x19c8
+                    # near/far echo bulk-delay adapter. With the adapter live
+                    # the outer state machine stalls before 0x0080 (session
+                    # 65's delayed bulk-cursor collision); with it disabled the
+                    # machine reaches 0x0080 and transmits. Set
+                    # EICON_V90D_BULK_ADAPTER=1 to keep the adapter running.
+                    ADSP.adsp2181_pm(self.cpu)[0x19C8] = 0x0A000F
+                    print("[native-mips] diagnostic: disabled V90D bulk adapter")
                 self.switches.append(
                     (self._media_samples, self.dm[0x3FB0], wanted))
             if wanted == 0x025F:
@@ -2151,8 +2198,18 @@ class NativeMipsModem:
         self._frame_core(code)
         if (sample_index + 1) % self.mips_interval == 0:
             self._step_mips()
-        pointer = self.dm[0x3FB4] & 0x3FFF
-        value = self.dm[pointer] if pointer else 0
+        if self.resident == 0x026A:
+            # Page 14 publishes the sample itself in DM(0x3fb4): PM 0x19ee
+            # re-primes the generic pointer 0x3764 every frame and PM 0x1a1e
+            # then overwrites it with the word the V90D serializer left in
+            # DM(0x3fa7). Nothing writes DM(0x3764) at all while V90D
+            # transmits, so there is nothing for the generic indirection to
+            # dereference here; applying it turns each sample into whatever
+            # unrelated word lives at that address.
+            value = self.dm[0x3FB4]
+        else:
+            pointer = self.dm[0x3FB4] & 0x3FFF
+            value = self.dm[pointer] if pointer else 0
         return value - 0x10000 if value & 0x8000 else value
 
 
