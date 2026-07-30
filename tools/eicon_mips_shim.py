@@ -2077,23 +2077,6 @@ class NativeMipsModem:
             previous = self.resident
             if wanted != self.resident:
                 self.load_native_overlay(wanted)
-                if (wanted == 0x026A and
-                        (self.dm[4] == 0 or self.dm[6] == 0)):
-                    # PM 1982 consumes the common-layer far cursor retained in
-                    # DM4 and its bound in DM6 while constructing the V.90
-                    # DM0..DM7 bulk descriptor. DM3fbc is not published until
-                    # immediately before PM19c6, so bridge it at that exact
-                    # call seam rather than guessing
-                    # a cursor before page initialization has allocated it.
-                    pm = ADSP.adsp2181_pm(self.cpu)
-                    pm[0x3FBA] = 0x83FBC4  # AY0 = DM(3fbc)
-                    pm[0x3FBB] = 0x900044  # DM(0004) = AY0
-                    pm[0x3FBC] = 0x900064  # DM(0006) = AY0
-                    pm[0x3FBD] = 0x1D982F  # CALL 1982
-                    pm[0x3FBE] = 0x0A000F  # RTS
-                    pm[0x19C6] = 0x1C000F | (0x3FBA << 4)
-                    print("[native-mips] attached retained ADDSP far-cursor "
-                          "publication at PM19c6")
                 self.switches.append(
                     (self._media_samples, self.dm[0x3FB0], wanted))
             if wanted == 0x025F:

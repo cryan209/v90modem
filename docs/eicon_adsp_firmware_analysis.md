@@ -5409,3 +5409,35 @@ is after Ja, not a forced Sd. Reproduce it with:
 The result is an offline hardware-capture replay. A fresh tower call is still
 required to validate the same retained publication and Sd/S-bar-d stream
 against the live analogue modem.
+
+## Session 61: run31 hardware test disproves the DM3fbc cursor bridge
+
+A fresh closed-loop call was run against tower `slmodemd_trnref` with native
+event-03 attachment, PRBS TX service and the Session 60 PM19c6 bridge. The
+capture is `artifacts/eicon-native-tower/run31.*`. Native activation itself was
+successful (`host_writes=2281`, `DM2f08/DM2f09=8000/8000`), and the call
+naturally completed V.8 and INFO before loading V90D at sample 86528.
+
+The retained-workspace conclusion from offline run25 was wrong. In run25,
+`DM3fbc=0x1e17` happened to be a plausible resident-DM address. On the live
+call it was `0x0be9`; it is capture-dependent bulk input, not an allocated
+far-delay cursor. Publishing it into `DM4` and `DM6` produced:
+
+```text
+sample 86542: DM0..DM7 = 0be9/2ad2/0001/0001/0bea/0000/0be9/0001
+sample 86566: descriptor words begin changing to ab3d
+sample 87360: bootpage 14 -> 0, followed by nonsensical page/status values
+```
+
+The peer reported `NO CARRIER` and hung up after about 15.7 seconds. V90D did
+not reach a valid `0x007a -> 0x0080` transition. Supplying a TX datagram at
+sample 86529 only serviced `DI_control`; it is not evidence that valid Sd was
+transmitted.
+
+The PM19c6/DM3fbc bridge has therefore been removed from the default path. The
+native task-relocation and event-03 fixes remain valid, but the retained
+ADDSP delay workspace owner is still unresolved. In particular, the correct
+`DM4..DM6` values must come from the common-layer allocation lifecycle; they
+must not be inferred from `DM3fbc`, copied from a V.32 snapshot, or repaired
+after PM1982. Until that owner is recovered, the hardware result supersedes
+Session 60's offline transmit claim.
