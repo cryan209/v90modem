@@ -5212,20 +5212,37 @@ PM `0x0581/0x13cc`, and later `_frame_core()` manually resumes the selected
 continuation. This is precisely the layer capable of omitting private
 selected-channel/bulk initialization.
 
-The reason that synthesis is still needed is visible in the MIPS call ingress.
-Event `0x17` allocates a per-call object at `0x8028fda0`, but the synthetic
-SETUP dispatch immediately clears the controller's `+0x1c` link. CALL_IND is
-therefore emitted with channel zero and `CALL_RES` answers the listening SIG
-entity rather than a persistent per-call PLCI. A diagnostic write to the
-allocated object's state kept the link alive through SETUP, confirming that
-this is the relevant ownership layer, but CALL_RES then correctly refused the
-incomplete object and no modem service was assigned. The experiment was
-reverted.
+A write-PC trace corrects the initial interpretation of the synthetic call
+link. Event `0x17` allocates a staging object at `0x8028fda0`; SETUP clears the
+controller's `+0x1c` at MIPS `0x8001855c`, in the delay slot of the successful
+transfer path after `0x8002a89c` accepts the call. That clear is intentional,
+not evidence that allocation failed. CALL_IND channel zero is also valid for
+the first call. The missing event is later: an answering `CALL_RES` is not the
+line-side connected indication.
 
-The next repair should be above the ADSP emulator: reconstruct the lower
-PRI/SIG SETUP dispatcher frame sufficiently to retain the allocated call
-object, obtain its real nonzero CALL_IND channel, and let `CALL_RES` plus the
-bearer-connected event drive SIG.MDM/TIKRNL naturally. Only after capturing
-that native activation's `DM0..DM7`, `DM32f0..32f7` and initial WDB should the
-ADSP arithmetic be changed. The current hand-built bearer seam is now the
-strongest explanation for the missing bulk state.
+Injecting lower-PRI event `0x03` immediately after successful `CALL_RES`
+produces the previously absent native effects:
+
+```text
+CONNECT_ACTIVE indication: IND 0x01, Id 0x02, Ch 0
+network indication:        IND 0x03, Id 0x03, Ch 2
+MIPS host writes:          2274 -> 3814
+modem DM2e58:              0000 -> 0277
+modem DM2f08:              0000 -> 8000
+```
+
+The resident kernel compares `DM2f08` with `DM2f09` at PM `0x02b3..0x02b6`
+and calls PM `0x01c1` to install the selected task vectors when they differ.
+This is the genuine early-firmware selected-bearer seam that the compatibility
+path omitted. It cannot simply be combined with `attach_connected_bearer()`:
+doing so double-activates the task and its first synthetic WDB is no longer
+consumed (`DM3131=0x000d`).
+
+`--native-bearer-activation` now exposes this path diagnostically. It delivers
+event `0x03` and disables the compatibility DIAL/WDB synthesis. The resulting
+core intentionally remains at TIKRNL page `0x0258`, requesting SIG overlay
+`0x0270`, until the remaining native supervisor/page-service continuation is
+reconstructed. This is progress rather than a working media mode: it preserves
+the real activation state so the next trace can follow PM `0x01c1`, the
+`0x0270` request and the native WDB owner without overwriting them with the
+hand-built DIAL setup.

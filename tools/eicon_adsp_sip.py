@@ -364,7 +364,8 @@ class EiconSipEndpoint:
                  mips_image: Path = Path('docs/firmware/te_dmlt.pm'),
                  mips_combifile: Path = Path('docs/firmware/dspdload.bin'),
                  trace_v90d_state: bool = False,
-                 prime_v90d_bulk_cursor: bool = False):
+                 prime_v90d_bulk_cursor: bool = False,
+                 native_bearer_activation: bool = False):
         self.bind = bind
         self.advertised = advertised
         self.law = law
@@ -389,6 +390,7 @@ class EiconSipEndpoint:
         self.mips_combifile = mips_combifile
         self.trace_v90d_state = trace_v90d_state
         self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
+        self.native_bearer_activation = native_bearer_activation
         self.native_card = None
         self.verbose = verbose
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -421,7 +423,8 @@ class EiconSipEndpoint:
                 mips_kernel, mips_tikrnl, law, mips_image, mips_combifile,
                 force_info_after_v8=force_info_after_v8,
                 tx_prbs=tx_prbs,
-                prime_v90d_bulk_cursor=prime_v90d_bulk_cursor)
+                prime_v90d_bulk_cursor=prime_v90d_bulk_cursor,
+                native_bearer_activation=native_bearer_activation)
         if registrar and username:
             self.send_register()
 
@@ -533,7 +536,8 @@ class EiconSipEndpoint:
                             self.mips_image, self.mips_combifile,
                             force_info_after_v8=self.force_info_after_v8,
                             tx_prbs=self.tx_prbs,
-                            prime_v90d_bulk_cursor=self.prime_v90d_bulk_cursor)
+                            prime_v90d_bulk_cursor=self.prime_v90d_bulk_cursor,
+                            native_bearer_activation=self.native_bearer_activation)
                     card = self.native_card
                     self.native_card = None
                 elif self.kernel_dispatch:
@@ -794,6 +798,9 @@ def main() -> int:
     ap.add_argument('--prime-v90d-bulk-cursor', action='store_true',
                     help='diagnostic: initialize V90D far-bulk cursor DM4 from DM0 '
                          'when state 0x60 activates the adapter (requires --native-mips)')
+    ap.add_argument('--native-bearer-activation', action='store_true',
+                    help='diagnostic: deliver the lower-PRI post-CALL_RES connected '
+                         'event and disable the compatibility DIAL/WDB synthesis')
     ap.add_argument('--mips-kernel', type=Path,
                     default=Path('artifacts/eicon-dsp/build-117-926/kernel/'
                                  '0009-diva-server-pri-30m-kernel'))
@@ -842,7 +849,8 @@ def main() -> int:
                                 args.native_mips, args.tx_prbs,
                                 args.mips_kernel, args.mips_tikrnl, args.mips_image,
                                 args.mips_combifile, args.trace_v90d_state,
-                                args.prime_v90d_bulk_cursor)
+                                args.prime_v90d_bulk_cursor,
+                                args.native_bearer_activation)
     signal.signal(signal.SIGINT, lambda *_: setattr(endpoint, 'running', False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(endpoint, 'running', False))
     endpoint.run()

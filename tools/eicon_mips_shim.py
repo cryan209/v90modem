@@ -1592,6 +1592,18 @@ def run_mainloop(shim: "MipsShim", args) -> None:
                                                       phase="call-res"):
                 print(f"[call] RC 0x{rc:02x} ({rc_name(rc)}) "
                       f"Id=0x{rc_id:02x} Ch=0x{rc_ch:02x} Ref=0x{ref:04x}")
+            if (args.inject_call_ingress and
+                    getattr(args, "native_bearer_activation", False)):
+                # SETUP allocation is followed by a distinct lower-PRI
+                # connected event after an answering CALL_RES. It publishes
+                # CONNECT_ACTIVE and installs the selected bearer state.
+                sig_obj = read_runtime32(shim, ENTITY_TABLE +
+                                          args.ingress_entity_slot * 4)
+                shim.write8(gp + 0x5e87, 0x03)
+                shim.phase = "call-ingress-connected"
+                shim.call(CALL_INGRESS_PARSER, [sig_obj], gp=gp, sp=sp,
+                          max_insns=2_000_000)
+                print("[ingress] delivered post-CALL_RES event 0x03")
             if args.dump_entities:
                 dump_entities(shim, gp, args.dump_entity_limit)
         off = post_request(shim, sr, N_CONNECT, assigned["nl"], 0,
@@ -2046,7 +2058,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
                              dsp_pump: int = 256,
                              force_info_after_v8: bool = False,
                              tx_prbs: bool = False,
-                             prime_v90d_bulk_cursor: bool = False) -> NativeMipsModem:
+                             prime_v90d_bulk_cursor: bool = False,
+                             native_bearer_activation: bool = False) -> NativeMipsModem:
     """Boot the real card firmware and return its naturally assigned modem."""
     if law not in ("pcmu", "pcma"):
         raise ValueError("native MIPS backend supports only pcmu or pcma")
@@ -2065,7 +2078,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
         ingress_entity_slot=0, legacy_sig_req_id=False,
         connect=True, force_modem_dsp_assign=False, call_steps=call_steps,
         dump_entities=False, dump_entity_limit=0, native_dm_out=None,
-        trace_calls=False, trace_call_limit=0)
+        trace_calls=False, trace_call_limit=0,
+        native_bearer_activation=native_bearer_activation)
     run_mainloop(shim, args)
     block = shim.service_assign_block
     core = shim.cores.get(block) if block is not None else None
@@ -2083,7 +2097,11 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
         force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs,
         prime_v90d_bulk_cursor=prime_v90d_bulk_cursor)
     modem.start_native_task()
-    modem.attach_connected_bearer()
+    if native_bearer_activation:
+        print("[native-mips] using native lower-PRI bearer activation; "
+              "compatibility DIAL/WDB synthesis disabled")
+    else:
+        modem.attach_connected_bearer()
     return modem
 
 
