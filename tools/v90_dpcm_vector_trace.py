@@ -107,6 +107,13 @@ def main() -> int:
                          'page-14 frame that leaves it zeroed, so the six-word '
                          'mapping frame survives the resident-kernel clear at '
                          'PM 0x06ca..0x06cd for all six serializer reads')
+    ap.add_argument('--refill-audit', action='store_true',
+                    help='audit block/cursor lock-step: the serializer cursor '
+                         'DM(0x20de) must advance one slot per frame and the '
+                         'generator must refill DM(0x3fa7..0x3fac) exactly '
+                         'every six frames at the same cursor phase. Any other '
+                         'refill interval slips the mapping frame against the '
+                         'sample clock, which the peer sees as a timing offset')
     ap.add_argument('--count', type=lambda t: int(t, 0), action='append',
                     default=[], help='PM address to count executions of; '
                                      'coverage is cleared at outer state 0x0080')
@@ -134,6 +141,11 @@ def main() -> int:
     watch_on = False
     counted_from = None
     held = None
+    last_cursor = last_block = last_refill = None
+    cursor_steps = collections.Counter()
+    refill_gaps = collections.Counter()
+    refill_phase = collections.Counter()
+    refill_misses = []
     previous = None
     page14 = 0
     nonzero_slot = collections.Counter()
@@ -209,6 +221,25 @@ def main() -> int:
         for slot, addr in enumerate(PUBLISHED):
             if dm[addr]:
                 published_nonzero[slot] += 1
+        if args.refill_audit and state >= 0x0080:
+            # DM(0x3fa7) is both slot 0 and the output port -- PM 0x2ef1 writes
+            # the published sample there every frame -- so a refill can only be
+            # detected from the tail slots. The cursor is sampled after the
+            # frame, so it runs 0x3fa8..0x3fad (0x3fad = post-increment past the
+            # last slot), seven values, not six.
+            block = tuple(dm[a] for a in range(0x3FA8, 0x3FAD))
+            cursor = dm[DM_SERIAL]
+            if last_cursor is not None:
+                cursor_steps[cursor - last_cursor] += 1
+            last_cursor = cursor
+            if block != last_block:
+                if last_refill is not None:
+                    refill_gaps[page14 - last_refill] += 1
+                    refill_phase[cursor] += 1
+                    if page14 - last_refill != 6:
+                        refill_misses.append((seconds, page14 - last_refill))
+                last_refill = page14
+                last_block = block
         serial_values[dm[DM_SERIAL]] += 1
         mode_values[dm[DM_MODE]] += 1
         handler_values[dm[DM_HANDLER]] += 1
@@ -259,6 +290,32 @@ def main() -> int:
           ' '.join(f'{v}x{n}' for v, n in out_values.most_common(6)))
     print(f'[trace] TX datagrams {card.tx_accepted}/{card.tx_requests} '
           'accepted/requested')
+    if args.refill_audit:
+        print('[trace] serializer cursor steps per frame: '
+              + ' '.join(f'{step}x{n}' for step, n in cursor_steps.most_common()))
+        total = sum(refill_gaps.values())
+        print(f'[trace] generator refill intervals over {total} refills: '
+              + ' '.join(f'{gap} frames x{n}' for gap, n in
+                         sorted(refill_gaps.items())))
+        if refill_misses:
+            spacing = [round((b[0] - a[0]) * 8000) for a, b in
+                       zip(refill_misses, refill_misses[1:])]
+            print(f'[trace] {len(refill_misses)} non-6-frame intervals; '
+                  f'first 12 at ' + ' '.join(f'{t:.3f}s/{g}' for t, g in
+                                             refill_misses[:12]))
+            if spacing:
+                spacing.sort()
+                mid = spacing[len(spacing) // 2]
+                print(f'[trace] frames between misses: min {spacing[0]} '
+                      f'median {mid} max {spacing[-1]}')
+        print('[trace] cursor at refill: '
+              + ' '.join(f'{c:04x}x{n}' for c, n in refill_phase.most_common()))
+        if total:
+            frames = sum(gap * n for gap, n in refill_gaps.items())
+            slip = frames - 6 * total
+            print(f'[trace] {frames} frames carried {total} mapping frames; '
+                  f'slip vs an exact 6-frame cadence: {slip} frames '
+                  f'({1e6 * slip / max(1, frames):+.0f} ppm)')
     if args.count and counted_from is not None:
         frames = page14 - counted_from
         print(f'[trace] execution counts over {frames} frames from ostate 0x0080:')
