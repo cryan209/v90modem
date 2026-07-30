@@ -1814,6 +1814,8 @@ class NativeMipsModem:
         self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
         self._v90d_bulk_cursor_primed = False
         self._v90d_saved_clear = None
+        self._v90d_generated = -1
+        self._v90d_generator_idle = 0
         self._direct_selected_dispatch = False
         self.native_bearer_activation = native_bearer_activation
         self.tx_requests = 0
@@ -2199,19 +2201,29 @@ class NativeMipsModem:
         if (sample_index + 1) % self.mips_interval == 0:
             self._step_mips()
         if self.resident == 0x026A:
-            if V90D_HOLD_TX_BLOCK and self.dm[0x20DE] == 0x3FAD:
-                # The mapping-frame block is held across the resident kernel's
-                # per-frame clear so the serializer can walk all six slots, but
-                # it must not outlive its cycle: zero it once the cursor has
-                # read the sixth slot (post-frame DM(0x20de) = 0x3fad, its wrap
-                # value). The generator refills at the start of the next mapping
-                # frame; if it has stopped, the next cycle reads silence instead
-                # of re-emitting the last block for ever. Suppressing the clear
-                # without this froze run35's second call on codeword 148
-                # (linear -13948, near full scale) for its last 7 seconds, from
-                # the instant the state machine reached 0x00b3.
-                for address in range(0x3FA7, 0x3FAD):
-                    self.dm[address] = 0
+            # The block is held across the resident kernel's per-frame clear so
+            # the serializer can walk all six slots, which means a generator
+            # that stops leaves its last mapping frame on the line for ever.
+            # It must not be cleared on content, though: Phase 4 opens with Ri,
+            # "the single PCM codeword whose Ucode is UINFO for all data frame
+            # intervals" (§9.4.1.1), so a constant block is a legitimate signal
+            # and indistinguishable from a stale one by inspection. Ask the core
+            # whether the generator dispatch at PM 0x2a52 is still running
+            # instead, and only clear when it has genuinely gone quiet.
+            generated = ADSP.adsp2181_coverage_count(self.cpu, 0x2A52)
+            if generated != self._v90d_generated:
+                self._v90d_generated = generated
+                self._v90d_generator_idle = 0
+            else:
+                self._v90d_generator_idle += 1
+                if (V90D_HOLD_TX_BLOCK
+                        and self._v90d_generator_idle == 12):
+                    for address in range(0x3FA7, 0x3FAD):
+                        self.dm[address] = 0
+                    print("[native-mips] V90D generator idle for two mapping "
+                          f"frames at sample {self._media_samples}; cleared the "
+                          "held block (state "
+                          f"0x{self.dm[0x1FF7]:04x})")
             # Page 14 publishes the sample itself in DM(0x3fb4): PM 0x19ee
             # re-primes the generic pointer 0x3764 every frame and PM 0x1a1e
             # then overwrites it with the word the V90D serializer left in
