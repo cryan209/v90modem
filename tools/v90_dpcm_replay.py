@@ -83,18 +83,22 @@ def main() -> int:
                     help='stop here; the replay runs far slower than real time')
     ap.add_argument('--tx-prbs', action='store_true',
                     help='answer V90D TX requests with deterministic PRBS data')
+    ap.add_argument('--native-bearer-activation', action='store_true',
+                    help='use lower-PRI event 03 task attachment before ADDSP answer setup')
     args = ap.parse_args()
 
     data = args.capture.read_bytes()
     card = create_native_mips_modem(KERNEL, TIKRNL, 'pcmu',
                                     force_info_after_v8=True,
-                                    tx_prbs=args.tx_prbs)
+                                    tx_prbs=args.tx_prbs,
+                                    native_bearer_activation=args.native_bearer_activation)
     dm = card.dm
     print('[replay] native-MIPS harness ready', flush=True)
 
     previous = None
     seeded = None
     live = total = page14_live = page14_total = 0
+    first_page14_tx = None
     for index, code in enumerate(data):
         seconds = index / SAMPLE_RATE
         if seconds > args.end:
@@ -129,6 +133,10 @@ def main() -> int:
         if card.resident == 0x026A:
             page14_total += 1
             page14_live += 1 if sample else 0
+            if sample and first_page14_tx is None:
+                first_page14_tx = (seconds, sample, dm[WORDS['ostate']])
+                print(f'{seconds:8.4f}  first V90D TX sample={sample} '
+                      f'outer_state={first_page14_tx[2]:04x}', flush=True)
 
     print(f'TX over the replayed window: {100.0 * live / max(1, total):.1f}% '
           f'non-zero of {total} samples; page 14: '

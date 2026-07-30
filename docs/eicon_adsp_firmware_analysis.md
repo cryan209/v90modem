@@ -5332,3 +5332,80 @@ PM `0x06c8` execute, but PM `0x0703` is not yet reached, no DIAL successor is
 requested, and the native network task eventually emits IND `0x04`. The next
 trace belongs in the `0x80098310 -> 0x80095318` completion state and SIG
 `0x0270` handoff, not in V.90 bulk workspace or kernel free-list code.
+
+## Session 60: relocated native task attachment and first V90D transmit
+
+The apparent post-SIG blocker was caused by restoring the wrong task image.
+`SERVICE_ASSIGN` calls `SWITCH_ON` before it returns. The old hook initialized
+and marked the task at `SWITCH_ON`, so the intended deferred return hook became
+a no-op. It also copied the extracted source-address TIKRNL PM over the MIPS
+loader's relocated image. The naturally completed download proves that no PM
+composition is needed:
+
+```text
+PM0014 = 18072f                 resident kernel vector
+PM0580 = 0a000f
+PM0586 = 18589f                 selected-channel ISR entry
+PM06a0 = 40703a                 relocated continuation address 0703
+PM0703 = 8313f9                 source PM06fc after the +7 relocation
+```
+
+The `SWITCH_ON` initializer was removed. The selected core is released and
+runtime PM `0x0679` is called only after `SERVICE_ASSIGN` returns, preserving
+the genuine relocated kernel/task image. The bounded PRI setup-clock window
+also starts at MIPS `0x800951d4`, where the connected driver actually publishes
+its control toggle, rather than at entry to the much earlier event-03 driver.
+Three clocks are consumed before the MIPS sees completion:
+
+```text
+host writes: 3814 timeout -> 2281 success
+DM2f08/DM2f09: 8000/8000
+```
+
+Event `0x03` remains the sole TIKRNL attachment owner. The subsequent helper
+only completes the documented ADDSP answer transaction: common pages plus the
+two Table 12/13/15 WDB cycles already required by Sessions 38-42. It does not
+run another task initializer or publish another kernel descriptor. After page
+downloads replace the private kernel records, media uses the established
+one-call PM `0x06c8` selected-channel adapter, preserving one continuation per
+8 kHz sample.
+
+The final V90D corruption was then reduced to one exact retained-publication
+seam. PM `0x1982` builds the overlapping `DM0..DM7` bulk descriptor. Its
+same-cycle old-value sequence preserves the incoming far cursor in `DM4` and
+consumes the corresponding bound in `DM6`. The INFO-to-V90D handoff left both
+zero. PM `0x19c6` is the first point where the newly allocated far-buffer base
+is available in `DM3fbc`; publishing it to `DM4` and `DM6` immediately before
+calling PM `0x1982` produces:
+
+```text
+DM0..DM7 = 1e17/2ad2/0001/0001/1e17/0000/1e17/0001
+```
+
+This is not the destructive diagnostic `DM4=DM0` applied after setup. It
+models the missing common-layer retained publication at the consumer seam.
+The PM `0x1900` sweep no longer reaches `DM1938` or `Core8kRoutine`.
+
+A native-MIPS replay of `run25.rx.ulaw` now reaches the Ja gate, detects Ja,
+and transmits only after entering outer state `0x0080`:
+
+```text
+page 0x026a: sample 127059
+outer state 0x007a: before sample 140000
+first nonzero V90D TX: sample 145852, value 4, outer state 0x0080
+final outer state: 0x00b0
+TX datagrams: 10157/10157 accepted/requested
+```
+
+This preserves V.90 §9.3.1.3 silence through state `0x007a`; the first output
+is after Ja, not a forced Sd. Reproduce it with:
+
+```bash
+/tmp/eicon-venv/bin/python tools/v90_dpcm_replay.py \
+  artifacts/eicon-native-tower/run25.rx.ulaw \
+  --native-bearer-activation --tx-prbs --to 23.5
+```
+
+The result is an offline hardware-capture replay. A fresh tower call is still
+required to validate the same retained publication and Sd/S-bar-d stream
+against the live analogue modem.
