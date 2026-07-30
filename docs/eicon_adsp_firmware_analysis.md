@@ -5176,3 +5176,56 @@ emulator defect remains possible, especially in the PM `0x1900` carry paths,
 but simply changing carry or old-value semantics would contradict both the
 manual and the captured instruction-level data. The first unexplained input is
 the absent retained workspace state, not the resulting subtraction.
+
+## Session 67: the missing owner is above the ADSP page, in call ingress/activation
+
+The Linux and early-MIPS paths narrow the ownership boundary further. Linux
+`drivers/isdn/hardware/eicon/message.c` (`connect_res()` and `add_b1()` in the
+v4.0 tree) only builds the modem CAI—resource, framing, negotiation options and
+speed limits—and attaches it to `CALL_RES`. It does not calculate or publish
+ADDSP near/far bulk workspace words. Those are card-firmware/task activation
+state, not Linux modem parameters.
+
+The real MIPS `SERVICE_ASSIGN`/`SWITCH_ON` path was then stopped before the
+SIP adapter's `attach_connected_bearer()` synthesis. At that point the modem
+DSP has consumed its genuine TIKRNL assignment command, but has no active page:
+
+```text
+resident/page = 0000
+DM2f86/2f87  = 3110/3108
+DM32f0..32f7 = all zero
+DM0..DM11    = 0000 0000 3150 000a 0000 ...
+```
+
+The initial write database left by `SWITCH_ON` is also materially different
+from the two hand-built WDBs in `attach_connected_bearer()`:
+
+```text
+DM3ee0.. = 0040 0024 0038 0008 0000 0000 2105 f1fd
+            000c 000c 00b8 0033 0003 0000 2000 abcd ...
+```
+
+`attach_connected_bearer()` therefore is not yet “the exact result” of the
+SIG.MDM bearer-connected notification, despite its old comment. It manually
+loads DIAL-related pages, writes a generic ADDSP Table 12/13/15 database, calls
+PM `0x0581/0x13cc`, and later `_frame_core()` manually resumes the selected
+continuation. This is precisely the layer capable of omitting private
+selected-channel/bulk initialization.
+
+The reason that synthesis is still needed is visible in the MIPS call ingress.
+Event `0x17` allocates a per-call object at `0x8028fda0`, but the synthetic
+SETUP dispatch immediately clears the controller's `+0x1c` link. CALL_IND is
+therefore emitted with channel zero and `CALL_RES` answers the listening SIG
+entity rather than a persistent per-call PLCI. A diagnostic write to the
+allocated object's state kept the link alive through SETUP, confirming that
+this is the relevant ownership layer, but CALL_RES then correctly refused the
+incomplete object and no modem service was assigned. The experiment was
+reverted.
+
+The next repair should be above the ADSP emulator: reconstruct the lower
+PRI/SIG SETUP dispatcher frame sufficiently to retain the allocated call
+object, obtain its real nonzero CALL_IND channel, and let `CALL_RES` plus the
+bearer-connected event drive SIG.MDM/TIKRNL naturally. Only after capturing
+that native activation's `DM0..DM7`, `DM32f0..32f7` and initial WDB should the
+ADSP arithmetic be changed. The current hand-built bearer seam is now the
+strongest explanation for the missing bulk state.
