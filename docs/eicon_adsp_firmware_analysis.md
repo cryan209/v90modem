@@ -5263,3 +5263,40 @@ does neither, so the missing early state is visible. The next MIPS/TIKRNL
 target is the post-`SWITCH_ON` command consumer that should populate
 `DM2f27..DM2f29` before the first selected-channel interrupt. This is earlier
 than any V.90 overlay or bulk-delay calculation.
+
+A comparison across every emulated DSP localised why those roots were absent.
+The modem assignment selects block `0x1c000808`, the same exceptional core
+reported at boot as held without a resident download. Its sparse TIKRNL task
+is present around PM `0x0580`, but its resident interrupt and scheduler words
+are still parking instructions:
+
+```text
+selected 0x1c000808: PM0014/0072/00b5 = 18000f/18000f/18000f (JUMP 0)
+other active cores:  PM0014/0072/00b5 = 18072f/3c0611/2a7eea
+```
+
+The `kernel` argument to `create_native_mips_modem()` was unused. Thus this
+was not yet evidence of a missing firmware write to `DM2f27`: there was no
+resident kernel capable of receiving the first SPORT/IRQE event. The TIKRNL
+image is genuinely sparse (its PM blocks begin at `0x0580` and `0x1800`), so
+loading it cannot supply the resident vectors.
+
+Native activation now composes the extracted F34 resident kernel with only
+the declared sparse TIKRNL PM blocks, preserving the DM state already written
+by `SWITCH_ON` and PRI event `0x03`. It then releases IDMA boot hold and runs
+the relocated TIKRNL initializer. The first selected-channel pipeline behaves
+normally after the two-sample SPORT delay:
+
+```text
+frame 0: DM2f08/DM2f09 = 8000/0000
+frame 2: DM2f08/DM2f09 = 8000/8000
+         DM2f27..DM2f29 = 2f21/2f00/2f0e
+```
+
+This clears the early resident-kernel/scheduler blocker without manufacturing
+DSP workspace words. The next native boundary is narrower: PM `0x02b9 ->
+0x02a1 -> 0x01b2 -> 0x00d8` runs, but the `DM2f00` descriptor remains inactive
+and there is no coverage at TIKRNL selected-channel entries PM `0x0586`,
+`0x06c8` or `0x0703`. The remaining owner is the post-`SWITCH_ON` task
+attachment that should populate/arm that descriptor, not the kernel free-list
+initializer and not V.90 bulk state.

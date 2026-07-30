@@ -284,6 +284,20 @@ def load_dm_words(cpu, path: Path) -> None:
         dm[a] = data[a * 2] | (data[a * 2 + 1] << 8)
 
 
+def load_sparse_pm_words(cpu, image: Path) -> None:
+    """Apply only the PM blocks actually present in an extracted image."""
+    import json
+    metadata = json.loads((image / "metadata.json").read_text())
+    data = (image / "pm.bin").read_bytes()
+    pm = ADSP.adsp2181_pm(cpu)
+    for block in metadata["pm_blocks"]:
+        start = block["address"]
+        for address in range(start, start + block["words"]):
+            off = address * 3
+            pm[address] = (data[off] | (data[off + 1] << 8) |
+                           (data[off + 2] << 16))
+
+
 def apply_word_map(cpu, path: Path) -> None:
     for line in path.read_text().splitlines():
         addr_s, value_s = line.split()
@@ -387,6 +401,7 @@ class MipsShim:
         self.bulk_write_calls: list[tuple[int, int, int]] = []
         self.service_assign_block: int | None = None
         self.native_task_started: set[int] = set()
+        self.native_bearer_activation = False
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -590,13 +605,14 @@ class MipsShim:
             core = self.cores.get(block)
             if core is not None and block not in self.native_task_started:
                 ADSP.adsp2181_set_idma_boot_hold(core, 0)
-                ADSP.adsp2181_call(core, 0x0679, 0x02A8)
-                ADSP.adsp2181_run(core, 2_000_000)
-                if not ADSP.adsp2181_idle(core):
-                    raise RuntimeError(
-                        f"native task initializer stopped before SWITCH_ON "
-                        f"at PM 0x{ADSP.adsp2181_pc(core):04x}")
-                self.native_task_started.add(block)
+                if not self.native_bearer_activation:
+                    ADSP.adsp2181_call(core, 0x0679, 0x02A8)
+                    ADSP.adsp2181_run(core, 2_000_000)
+                    if not ADSP.adsp2181_idle(core):
+                        raise RuntimeError(
+                            f"native task initializer stopped before SWITCH_ON "
+                            f"at PM 0x{ADSP.adsp2181_pc(core):04x}")
+                    self.native_task_started.add(block)
         if (self.intercept_bulk_writes
                 and address in (HOST_WRITE_DM_BLOCK, HOST_WRITE_PM_BLOCK)):
             a0 = uc.reg_read(UC_MIPS_REG_A0)
@@ -2080,6 +2096,7 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     ADSP.adsp2181_reset(cpu)
     ADSP.adsp2181_set_idma_boot_hold(cpu, 1)
     shim = MipsShim(image, cpu)
+    shim.native_bearer_activation = native_bearer_activation
     shim.write32(0x800fbe30, STUB_VIRT)
     args = SimpleNamespace(
         image=image, tikrnl=tikrnl, dsp_combifile=dsp_combifile,
@@ -2110,8 +2127,22 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
         force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs,
         prime_v90d_bulk_cursor=prime_v90d_bulk_cursor,
         native_bearer_activation=native_bearer_activation)
-    modem.start_native_task()
+    if not native_bearer_activation:
+        modem.start_native_task()
     if native_bearer_activation:
+        # The task download is sparse, but the selected boot-held core has no
+        # resident modem kernel beneath it and retains JUMP-0 parking vectors.
+        # Recompose the actual kernel+TIKRNL image while preserving live DM
+        # lifecycle state established by SWITCH_ON and the lower-PRI event.
+        load_pm_words(core, kernel / "pm.bin")
+        load_sparse_pm_words(core, tikrnl)
+        # SERVICE_ASSIGN leaves the selected core in IDMA boot hold. Release
+        # it and run the relocated TIKRNL initializer against the now-complete
+        # resident image before the first selected-channel interrupt.
+        ADSP.adsp2181_set_idma_boot_hold(core, 0)
+        ADSP.adsp2181_call(core, 0x0679, 0x02A8)
+        ADSP.adsp2181_run(core, 2_000_000)
+        shim.native_task_started.add(block)
         print("[native-mips] using native lower-PRI bearer activation; "
               "compatibility DIAL/WDB synthesis disabled")
     else:
