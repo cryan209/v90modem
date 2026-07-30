@@ -5246,3 +5246,20 @@ reconstructed. This is progress rather than a working media mode: it preserves
 the real activation state so the next trace can follow PM `0x01c1`, the
 `0x0270` request and the native WDB owner without overwriting them with the
 hand-built DIAL setup.
+
+Driving one media frame through that preserved state exposes the next missing
+owner. Event `0x03` sets `DM2f08=0x8000`, and resident PM `0x02b3..0x02b6`
+correctly notices that it differs from `DM2f09`. But the kernel dispatch-list
+roots are still absent:
+
+```text
+DM2f27/DM2f28/DM2f29 = 0000/0000/0000
+```
+
+PM `0x01c1` therefore follows a null task-vector list and execution reaches PM
+zero. The compatibility sample path hid this by patching PM `0x00b5` and
+resuming TIKRNL directly at PM `0x06c8`; native activation now deliberately
+does neither, so the missing early state is visible. The next MIPS/TIKRNL
+target is the post-`SWITCH_ON` command consumer that should populate
+`DM2f27..DM2f29` before the first selected-channel interrupt. This is earlier
+than any V.90 overlay or bulk-delay calculation.

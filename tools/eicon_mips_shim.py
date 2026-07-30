@@ -1717,6 +1717,7 @@ class NativeMipsModem:
                  force_info_after_v8: bool = False,
                  tx_prbs: bool = False,
                  prime_v90d_bulk_cursor: bool = False,
+                 native_bearer_activation: bool = False,
                  mips_interval: int = 160, adsp_budget: int = 20000):
         self.shim = shim
         self.cpu = core
@@ -1739,6 +1740,7 @@ class NativeMipsModem:
         self.tx_prbs = tx_prbs
         self.prime_v90d_bulk_cursor = prime_v90d_bulk_cursor
         self._v90d_bulk_cursor_primed = False
+        self.native_bearer_activation = native_bearer_activation
         self.tx_requests = 0
         self.tx_accepted = 0
         self.tx_first_sample: int | None = None
@@ -1940,7 +1942,8 @@ class NativeMipsModem:
         # permanently replacing either global kernel dispatch slot.
         pm = ADSP.adsp2181_pm(self.cpu)
         saved_isr = pm[0x00B5]
-        pm[0x00B5] = 0x1C000F | (0x0586 << 4)
+        if not self.native_bearer_activation:
+            pm[0x00B5] = 0x1C000F | (0x0586 << 4)
         try:
             # The returned SPORT0 latch is deliberately discarded.  It is not a
             # transmit source: it carries the kernel's TDM slot mirror, i.e. the
@@ -1951,11 +1954,21 @@ class NativeMipsModem:
             # MIPS has already consumed the private command mailbox. Run the
             # relocated no-host continuation (source 06c1+7) if the selected
             # channel ISR yields, in the same C call to avoid per-sample FFI.
-            ADSP.adsp2181_modem_sample(
-                self.cpu, sport_word, self.silence, self.adsp_budget,
-                0x06C8, 0x02A8)
+            if self.native_bearer_activation:
+                # Keep the resident kernel foreground at PM 0x02a9 live. It
+                # observes DM2f08 != DM2f09 and calls PM 0x01c1 to install the
+                # selected task vectors. The compatibility path skips that
+                # owner and resumes TIKRNL directly at PM 0x06c8.
+                ADSP.adsp2181_modem_sample(
+                    self.cpu, sport_word, self.silence, self.adsp_budget,
+                    0x02A9, 0x02A8)
+            else:
+                ADSP.adsp2181_modem_sample(
+                    self.cpu, sport_word, self.silence, self.adsp_budget,
+                    0x06C8, 0x02A8)
         finally:
-            pm[0x00B5] = saved_isr
+            if not self.native_bearer_activation:
+                pm[0x00B5] = saved_isr
         wanted = self.dm[0x3132] & 0xFFFF
         if (self.force_info_after_v8 and self.resident == 0x025F
                 and wanted != 0x0260 and self.dm[0x3FB0] not in (6, 7)):
@@ -2095,7 +2108,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     modem = NativeMipsModem(
         shim, core, law, block, descriptors,
         force_info_after_v8=force_info_after_v8, tx_prbs=tx_prbs,
-        prime_v90d_bulk_cursor=prime_v90d_bulk_cursor)
+        prime_v90d_bulk_cursor=prime_v90d_bulk_cursor,
+        native_bearer_activation=native_bearer_activation)
     modem.start_native_task()
     if native_bearer_activation:
         print("[native-mips] using native lower-PRI bearer activation; "
