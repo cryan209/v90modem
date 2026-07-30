@@ -5441,3 +5441,199 @@ ADDSP delay workspace owner is still unresolved. In particular, the correct
 must not be inferred from `DM3fbc`, copied from a V.32 snapshot, or repaired
 after PM1982. Until that owner is recovered, the hardware result supersedes
 Session 60's offline transmit claim.
+
+## Session 68: the downstream samples reach the line, and Phase 4 begins
+
+Sessions 60 and 61 left page 14 reaching outer state `0x0072` at best, with the
+`0x007a -> 0x0080` transition never observed and no valid downstream transmit.
+Two defects between the transmit generator and the line are now fixed, the card
+transmits genuine Phase 3 and Phase 4 signals, and a live Courier call reaches
+outer state `0x00d0`.
+
+### The generator was never the problem; the block's lifetime was
+
+`tools/v90_dpcm_vector_trace.py` (added this session) traces the six-word
+mapping-frame block with the core's DM-write and PM-execution watches. Per
+8 kHz frame on page 14:
+
+```text
+PM 0x19ee   DM(0x3fb4) = 0x3764              generic pointer re-published
+PM 0x2a52   CALL (I4)  with AX0 = 0x3fa7     generator dispatch, 0.167/frame
+PM 0x2eef   MX0 = DM(I0)                     serializer reads one slot
+PM 0x2ef1   DM(0x3fa7) = <slot, scaled >>2>
+PM 0x1a1e   DM(0x3fb4) = DM(0x3fa7)          the sample leaves here
+PM 0x07c1   reads DM(0x3fb4)
+PM 0x06cd   DM(0x3fa7..0x3fac) = 0  x6       resident kernel frame tail
+```
+
+`DM(0x3fa7..0x3fac)` is the V.90 mapping frame, six DS0 samples. The generator
+fills it once per 1333 Hz mapping frame — correctly, 8000/6 — and the serializer
+walks cursor `DM(0x20de)` across it one slot per 8 kHz frame, so the block must
+survive six frames. The resident kernel's frame tail zeroed all six words every
+frame, measured at 6.000 executions of PM `0x06cd` per frame against the
+generator's 0.167. Five of every six downstream samples were lost, producing the
+one-nonzero-in-six impulse train seen on the wire in run33.
+
+PM `0x2a52` is `0x0B001F`, an unconditional `CALL (I4)`: a dispatch table, not a
+gate. I4 held `0x3db9` (the Session 54 vector copy) for the first 64 mapping
+frames and `0x2199` thereafter. Session 54's "the copy never runs" reading was
+really "the copy is one of at least two generators".
+
+Second, `frame_fast()` read `DM(0x3fb4)` as a pointer and returned
+`DM[DM(0x3fb4)]`. That is right for the earlier pages, where PM `0x19ee`
+publishes `0x3764`, but on page 14 PM `0x1a1e` overwrites it with the sample
+itself, and nothing writes `DM(0x3764)` at all while V90D transmits — zero
+accesses over a 40-frame watch. Each surviving sample was being turned into
+whatever unrelated word lived at its own numeric value.
+
+With both fixed, replaying run33 takes the page-14 output from 2045 to 12125
+nonzero samples of 31050, and the first 48 ms carry
+
+```text
+1919, 0, 1919, -1919, 0, -1919   repeating on the six-sample mapping frame
+```
+
+which is exactly the Sd of §9.3.1.3: 64 repetitions of `{+W, +0, +W, -W, -0, -W}`.
+The shape and period are per spec.
+
+### The block clear also publishes silence
+
+Suppressing that clear outright is wrong in the other direction. When the
+generator stops, the serializer re-emits the last mapping frame for ever: run35
+froze on codeword 148 (linear +13948, near full scale) for 7.02 s and codeword
+200 (linear +1372) for 8.64 s, both from the instant the state machine reached
+`0x00b3`.
+
+The first correction cleared the block at every cursor wrap, which would have
+been worse. Phase 4 opens with Ri, "signal R using the single PCM codeword whose
+Ucode is `UINFO` for all data frame intervals" (§9.4.1.1, sent for a minimum of
+192T while the receiver is conditioned for CPt) — a constant block is a
+legitimate transmitted signal and is indistinguishable from a stale one by
+inspection. Clearing on content would replace Ri with silence.
+
+The core can answer the question that content cannot: read the execution count
+of PM `0x2a52` each frame and clear only after the generator has produced
+nothing for two mapping frames, logging sample and outer state when it does.
+A live call then reports whether the generator actually stops.
+
+### run34: the first peer-side measurement of our downstream
+
+Tower `slmodemd`, `artifacts/eicon-native-tower/run34.*`. The card's state
+timeline matched the offline replay exactly (`0x007a` at 10.22 s, Ja detected
+into `0x007b` at 11.92 s, `0x0080` at 12.20 s, `0x00b0` at 16.00 s) and TX came
+up at 12.18 s.
+
+```text
+                            run33            run34
+Error Energy during TX      -0.000           +117 .. +162 (first +1600)
+Phase 3 held after Ja       1.94 s           8.12 s
+Timing Offset               -0.000           +4750 .. +4884 ppm
+```
+
+The peer's first nonzero Error Energy is at its 794.945 and our TX starts at our
+12.18 s — the same instant under the 782.77 s clock offset. The 1.94 s in run33
+is the §9.3.2.4 deadline (retrain if the Sd-to-S̄d transition is not seen within
+1500 ms of Ja); that deadline no longer fires.
+
+### The +4800 ppm is in the signal, not the sample accounting
+
+`tools/rtp_pcap_timing.py` (added) decodes the capture properly. `RtpCapture`
+writes **LINKTYPE_RAW** (101), bare IP with no Ethernet header, so parsing it as
+Ethernet produces plausible garbage — constant 146-byte payloads and nonsense
+SSRCs — rather than an error. Both directions of run34 are clean 160-byte PCMU
+with zero sequence gaps and zero timestamp jumps, reading 8012.84 Hz outbound
+against 8010.37 Hz inbound on our host's one wall clock. The shared ~1500 ppm is
+a stamping bias; the two media clocks differ from each other by +308 ppm.
+
+Our own accounting is exact: the cursor advances +1 per frame with a -5 wrap
+every sixth (32391/6478 over the transmit era), and PM `0x2a52` executes 6479
+times in 38870 frames against 6478.33 for an exact 1333 Hz mapping frame — one
+single-frame anomaly in the whole era, 26 ppm.
+
+The peer's estimator is trustworthy: on this same rig, locked to our own
+sample-exact C implementation, it reports ±0.04 to ±7 ppm (`20260723T045437Z`
+shows +0.037, +0.038, +0.041 sustained).
+
+**Methodology warning.** A first version of the refill audit reported ~4% missed
+refills and was wrong. It detected refills by watching the block contents change,
+which cannot distinguish a skipped refill from a refill that writes the same six
+values; with a small symbol alphabet, chance collisions alone produce that rate.
+Execution counts are the sound measure. Do not infer generator activity from
+block contents.
+
+What remains is content. The spec defines Sd's W as the PCM *codeword* whose
+Ucode is `16 + UINFO`, while the card publishes linear values that the harness
+mu-law encodes, and that encoding moves them: 943 -> 924 and 1919 -> 1980 on the
+wire. Ri's codeword is Ucode `UINFO`, so Ri must be quieter than Sd's W. Measured
+against run35: call 3's post-DIL constant is 1372 against Sd's 1980, plausible;
+call 2's is 13948, seven times too loud. Whether `DM(0x3fb4)` is a codeword
+rather than a linear sample, and whether the resulting Ucode matches `UINFO`, is
+open — and it subsumes the serializer's `>>2`, which as a linear scale puts the
+line at -20.7 dBm0 and would be meaningless as a codeword.
+
+### Courier: DIL, DSR, and Phase 4 to `0x00d0`
+
+Six live Courier calls, `run35.*` (three) and `run37.*` (three). All six reach
+
+```text
+ 8.7 s   0x007b -> 0x0080        Sd/TRN1d/Jd, then DIL
+12.5 s   0x0080 -> 0x00b0
+12.7 s   0x00b0 -> 0x00b1        Rstatus_ch = 0x8200 [change_h|DSR]
+12.9 s   0x00b1 -> 0x00b2
+14.6 s   0x00b2 -> 0x00b3
+```
+
+DSR asserting at `0x00b1` is new. The DIL era is audible and visible as the
+stepped TX levels through the `0x0080` dwell.
+
+Five of the six stop at `0x00b3` with the generator genuinely idle — the
+coverage-based clear logs it — so run35's constant was a stall, not Ri. run37
+call 1 continued:
+
+```text
+14.64 s  0x00b3 -> 0x00b6 -> 0x00c0     single level +-924 alternating at 1332 Hz
+15.24 s  0x00c2                         levels 652/748/556
+16.64 s  0x00c4 -> 0x00c8 -> 0x00ca -> 0x00cc   levels 844/748/556
+17.06 s  0x00d0                         outer mode -> 0x0000, dwell = ffff
+19.34 s  0x0024                         retrain
+```
+
+The 1332 Hz alternation is the mapping-frame rate, i.e. an audible tone, and the
+multi-level stretches have the shape TRN2d and MP should have. At `0x00d0` the
+transmit mode field drops to zero and the dwell goes indefinite; 2.3 s later the
+card retrains from the top.
+
+The Courier is not silent while we wait. Received level is 147 during our DIL
+(listening, as expected) and then 2085, 2114, 2119, 2127 across our Phase 4
+signals, rising to **2343 during the whole `0x00d0` wait**. It is answering
+continuously and the card is not consuming it: `0x00d0` is a receive-side gate,
+the same shape as the `0x007a` Ja gate one phase earlier.
+
+### Open
+
+- `0x00d0`: identify what the outer record tests there, and why the Courier's
+  continuous Phase 4 response is not accepted. Receive side, not transmit.
+- the `0x00b3` stall, five calls in six. The generator stops; the owner is
+  unknown.
+- codeword versus linear at `DM(0x3fb4)`, and the Ucode/`UINFO` relationship
+  above. This is the most likely cause of the peer's +4800 ppm.
+- the Session 61 `DM4..DM6` retained-workspace owner is still unresolved, and
+  reaching `0x0080` at all still depends on the diagnostic that RTS-es out the
+  `0x1900..0x19c8` echo bulk-delay adapter.
+
+### Reproduce
+
+```bash
+make -C tools/adsp2181emu
+/tmp/eicon-venv/bin/python tools/v90_dpcm_vector_trace.py \
+  artifacts/eicon-native-tower/run34.rx.ulaw --to 17.0 --refill-audit
+/tmp/eicon-venv/bin/python tools/v90_dpcm_vector_trace.py \
+  artifacts/eicon-native-tower/run34.rx.ulaw --to 17.0 --count 0x2a52
+tools/rtp_pcap_timing.py artifacts/eicon-native-tower/run34.rtp.pcap
+```
+
+Both page-14 diagnostics are env-gated: `EICON_V90D_TX_BLOCK_HOLD=0` restores
+the per-frame clear (one downstream sample in six), and
+`EICON_V90D_BULK_ADAPTER=1` keeps the echo bulk-delay adapter live, in which
+case the outer state machine never reaches `0x0080` and there is no transmit era
+to trace.
