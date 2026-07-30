@@ -2199,6 +2199,19 @@ class NativeMipsModem:
         if (sample_index + 1) % self.mips_interval == 0:
             self._step_mips()
         if self.resident == 0x026A:
+            if V90D_HOLD_TX_BLOCK and self.dm[0x20DE] == 0x3FAD:
+                # The mapping-frame block is held across the resident kernel's
+                # per-frame clear so the serializer can walk all six slots, but
+                # it must not outlive its cycle: zero it once the cursor has
+                # read the sixth slot (post-frame DM(0x20de) = 0x3fad, its wrap
+                # value). The generator refills at the start of the next mapping
+                # frame; if it has stopped, the next cycle reads silence instead
+                # of re-emitting the last block for ever. Suppressing the clear
+                # without this froze run35's second call on codeword 148
+                # (linear -13948, near full scale) for its last 7 seconds, from
+                # the instant the state machine reached 0x00b3.
+                for address in range(0x3FA7, 0x3FAD):
+                    self.dm[address] = 0
             # Page 14 publishes the sample itself in DM(0x3fb4): PM 0x19ee
             # re-primes the generic pointer 0x3764 every frame and PM 0x1a1e
             # then overwrites it with the word the V90D serializer left in
