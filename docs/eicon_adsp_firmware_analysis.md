@@ -5281,11 +5281,16 @@ resident kernel capable of receiving the first SPORT/IRQE event. The TIKRNL
 image is genuinely sparse (its PM blocks begin at `0x0580` and `0x1800`), so
 loading it cannot supply the resident vectors.
 
-Native activation now composes the extracted F34 resident kernel with only
-the declared sparse TIKRNL PM blocks, preserving the DM state already written
-by `SWITCH_ON` and PRI event `0x03`. It then releases IDMA boot hold and runs
-the relocated TIKRNL initializer. The first selected-channel pipeline behaves
-normally after the two-sample SPORT delay:
+At entry to `SWITCH_ON`, `a0` is the task object and its `+0x10` word is the
+DSP host-register base (`0xbc000808`). This identifies the selected core before
+the older write-based assignment latch is available. Native activation now
+composes the extracted F34 resident kernel with only the declared sparse
+TIKRNL PM blocks at that entry, releases IDMA boot hold, and runs the relocated
+initializer before `SWITCH_ON` continues. Because the transfer body leaves the
+resident PM parking words again, the same PM composition is restored after the
+MIPS call without rerunning initialization or changing the live DM records.
+The first selected-channel pipeline then behaves normally after the two-sample
+SPORT delay:
 
 ```text
 frame 0: DM2f08/DM2f09 = 8000/0000

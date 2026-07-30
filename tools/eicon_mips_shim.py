@@ -402,6 +402,8 @@ class MipsShim:
         self.service_assign_block: int | None = None
         self.native_task_started: set[int] = set()
         self.native_bearer_activation = False
+        self.native_kernel: Path | None = None
+        self.native_tikrnl: Path | None = None
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -453,6 +455,25 @@ class MipsShim:
             if self.log:
                 print(f"[mips] new DSP core for register block 0x{block:08x}")
         return core
+
+    def _start_native_selected_task(self, block: int, core) -> None:
+        block &= 0x1fffffff
+        if (not self.native_bearer_activation or
+                block != self.service_assign_block or
+                block in self.native_task_started):
+            return
+        if self.native_kernel is None or self.native_tikrnl is None:
+            raise RuntimeError("native bearer image paths not configured")
+        load_pm_words(core, self.native_kernel / "pm.bin")
+        load_sparse_pm_words(core, self.native_tikrnl)
+        ADSP.adsp2181_set_idma_boot_hold(core, 0)
+        ADSP.adsp2181_call(core, 0x0679, 0x02A8)
+        ADSP.adsp2181_run(core, 2_000_000)
+        if not ADSP.adsp2181_idle(core):
+            raise RuntimeError(
+                f"native selected-task initializer stopped at "
+                f"PM 0x{ADSP.adsp2181_pc(core):04x}")
+        self.native_task_started.add(block)
 
     def _dsp_ports(self, address):
         """Split a DSP register access into (block base, port)."""
@@ -596,6 +617,15 @@ class MipsShim:
                 self.call_trace.append((self.phase, address, target))
         if address == SERVICE_ASSIGN:
             self.service_assign_pending = True
+        elif address == SWITCH_ON and self.native_bearer_activation:
+            # The task object owns its DSP host-register base at +0x10. This
+            # is available before SWITCH_ON executes even though the generic
+            # service-assignment latch is not populated until a later write.
+            task = uc.reg_read(UC_MIPS_REG_A0)
+            block = struct.unpack(
+                "<I", bytes(uc.mem_read((task + 0x10) & 0x1fffffff, 4)))[0]
+            self.service_assign_block = block & 0x1fffffff
+            self._start_native_selected_task(block, self.core_for(block))
         elif address == SWITCH_ON and self.service_assign_block is not None:
             # Real hardware releases the newly downloaded task before
             # SWITCH_ON publishes its first command/WDB. The emulator's IDMA
@@ -605,14 +635,13 @@ class MipsShim:
             core = self.cores.get(block)
             if core is not None and block not in self.native_task_started:
                 ADSP.adsp2181_set_idma_boot_hold(core, 0)
-                if not self.native_bearer_activation:
-                    ADSP.adsp2181_call(core, 0x0679, 0x02A8)
-                    ADSP.adsp2181_run(core, 2_000_000)
-                    if not ADSP.adsp2181_idle(core):
-                        raise RuntimeError(
-                            f"native task initializer stopped before SWITCH_ON "
-                            f"at PM 0x{ADSP.adsp2181_pc(core):04x}")
-                    self.native_task_started.add(block)
+                ADSP.adsp2181_call(core, 0x0679, 0x02A8)
+                ADSP.adsp2181_run(core, 2_000_000)
+                if not ADSP.adsp2181_idle(core):
+                    raise RuntimeError(
+                        f"native task initializer stopped before SWITCH_ON "
+                        f"at PM 0x{ADSP.adsp2181_pc(core):04x}")
+                self.native_task_started.add(block)
         if (self.intercept_bulk_writes
                 and address in (HOST_WRITE_DM_BLOCK, HOST_WRITE_PM_BLOCK)):
             a0 = uc.reg_read(UC_MIPS_REG_A0)
@@ -2097,6 +2126,8 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     ADSP.adsp2181_set_idma_boot_hold(cpu, 1)
     shim = MipsShim(image, cpu)
     shim.native_bearer_activation = native_bearer_activation
+    shim.native_kernel = kernel
+    shim.native_tikrnl = tikrnl
     shim.write32(0x800fbe30, STUB_VIRT)
     args = SimpleNamespace(
         image=image, tikrnl=tikrnl, dsp_combifile=dsp_combifile,
@@ -2130,19 +2161,13 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     if not native_bearer_activation:
         modem.start_native_task()
     if native_bearer_activation:
-        # The task download is sparse, but the selected boot-held core has no
-        # resident modem kernel beneath it and retains JUMP-0 parking vectors.
-        # Recompose the actual kernel+TIKRNL image while preserving live DM
-        # lifecycle state established by SWITCH_ON and the lower-PRI event.
+        # SWITCH_ON's transfer leaves parking words in resident PM after it
+        # has consumed the initializer's exported callbacks. Restore the same
+        # kernel+sparse-task composition without rerunning initialization or
+        # disturbing the live DM records it just installed.
         load_pm_words(core, kernel / "pm.bin")
         load_sparse_pm_words(core, tikrnl)
-        # SERVICE_ASSIGN leaves the selected core in IDMA boot hold. Release
-        # it and run the relocated TIKRNL initializer against the now-complete
-        # resident image before the first selected-channel interrupt.
         ADSP.adsp2181_set_idma_boot_hold(core, 0)
-        ADSP.adsp2181_call(core, 0x0679, 0x02A8)
-        ADSP.adsp2181_run(core, 2_000_000)
-        shim.native_task_started.add(block)
         print("[native-mips] using native lower-PRI bearer activation; "
               "compatibility DIAL/WDB synthesis disabled")
     else:
