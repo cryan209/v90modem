@@ -5637,3 +5637,132 @@ the per-frame clear (one downstream sample in six), and
 `EICON_V90D_BULK_ADAPTER=1` keeps the echo bulk-delay adapter live, in which
 case the outer state machine never reaches `0x0080` and there is no transmit era
 to trace.
+
+## Session 69: first downstream data from the card, and the retrain blocker
+
+Session 68 was written before the first Courier connect and is superseded twice
+over by what followed. Two live results, both on `artifacts/eicon-native-tower/run37.*`.
+
+### The V.90 connect, with error control on
+
+The Courier trained and reported a connect:
+
+```text
+Modulation               V.90/V.34+
+Symbol Rate              8000/3200
+Speed                    37333/31200
+Protocol                 LAPM SREJ 128/15
+Retrains Requested       0        Retrains Granted     0
+Chars sent 0                      Chars Received 0
+Disconnect Reason is XID Timeout
+```
+
+37333 bps downstream on an 8000 Hz PCM symbol rate, with **zero retrains
+requested**. The blocker recorded in `docs/courier_firmware_analysis.md` and
+`docs/v90_phase3_s_and_rbs_false_positive.md` — the Courier retraining after DIL
+— did not occur.
+
+`XID Timeout` is V.42 LAPM, not the physical layer: the Courier brought up LAPM,
+waited for our XID parameter-negotiation frames, and timed out having moved zero
+characters. `eicon_adsp_sip.py --tx-prbs` answers the card's datagram requests
+with deterministic pseudorandom bytes, so there are no XID frames to send and
+LAPM cannot complete however long it waits. The Eicon path has no V.42 at all.
+
+### With error control disabled, data crosses
+
+Dialled with `AT&M0` so no XID is required:
+
+```text
+Modulation               V.90/V.34+
+Symbol Rate              8000/2400
+Speed                    48000/24000
+Protocol                 NONE
+Recv/Xmit Level (-dBm)   24.9/17.3  then  18.9/11.3
+SNR             ( dB )   42.5
+Chars sent 1606                   Chars Received 39507
+Retrains Requested       0        Retrains Granted     1
+Disconnect Reason is Unable to Retrain
+```
+
+**39507 characters delivered downstream**, the card's first data of any kind.
+The PRBS arrived as garbage on the Courier's terminal, which is exactly right
+with `Protocol NONE`. Downstream rate rose from 37333 to 48000 and the received
+level improved by 6 dB between the two `ATI11` reads.
+
+Our side of the same call is `run37` call 6: 3079 RTP packets, 492640 samples
+(61.58 s), 46242/46242 TX datagrams accepted. The Courier's `Last Call 00:00:43`
+counts from CONNECT while our capture counts from SIP answer, and the difference
+(18.6 s) matches this call's training reaching outer state `0x00d0` at 17.0 s.
+That reconciles the call-duration mismatch noted while the run was in progress.
+
+### `0x00d0` is not a dead end
+
+Session 68 described `0x00d0` as a receive-side gate ending in a retrain, on the
+strength of one call. Three later calls leave it:
+
+```text
+17.06 s  0x00cc -> 0x00d0
+21.96 s  0x00d0 -> 0x00c2        (call 4 via 0x00bd)
+22.56 s  0x00c2 -> 0x00c4 -> 0x00c6
+22.9 s+  0x00c6   dwell = ffff, outer mode = 0x147e (transmit active)
+```
+
+The transmitted signal there is a multi-level constellation, 14 distinct levels
+on the `0x00c2`/`0x00c4` passes and 31 during the `0x00c6` dwell, not a training
+pattern. The `0x00b3` stall with the generator idle still happens on some calls;
+it is intermittent, not a fixed ceiling.
+
+### The blocker is now our retrain path
+
+`Unable to Retrain`, with `Retrains Requested 0 / Granted 1`: the Courier never
+asked for one. Our card restarted its own training three times inside call 6
+(`0x00c4 -> 0x0024`, then the full handshake again, ending mid-handshake at
+`0x0052`). The Courier granted the first and gave up when the later ones did not
+converge.
+
+Throughput matches that picture: 39507 characters in 43 s is about 7.3 kbps
+against a 48000 bps line rate, so data moved in bursts between training
+restarts rather than continuously. Data mode is reachable and not yet holdable.
+
+### The timing offset is not a fixed property of our downstream
+
+Session 68 recorded +4800 ppm from the tower peer and −4413 ppm from the
+Courier as corroborating measurements of one defect. The `&M0` call complicates
+that. In the 8000/3200 configuration the Courier read −4432 ppm; after the
+retrain to 8000/2400 it read 0.
+
+That second reading cannot be taken at face value: the same register block
+reports `SNR 6469.5 dB`, which is impossible, so it was sampled in a disturbed
+state. What survives is that the offset differed between two upstream symbol
+rates on one call, so it is not a constant of the downstream stream. Settling it
+needs a deliberate test — two calls forced to each upstream rate, reading
+`ATI11` while `Online` and stable — not inference from post-retrain registers.
+
+### Open
+
+- our retrain path: why the card restarts training from `0x00c4`, and why the
+  restarts do not converge. This is what ends an otherwise working connection.
+- the transmit level. `Recv Level` of 24.9 dBm and the serializer's `>>2` point
+  the same way, and 48000 is short of the 56000 ceiling.
+- the timing offset, per the deliberate test above.
+- V.42: `--tx-prbs` is why LAPM times out. A real connection needs XID and LAPM
+  on the Eicon data path, or `&M0`-style raw operation on the analogue side.
+- unchanged from Session 68: the `0x00b3` intermittent stall, the codeword versus
+  linear question at `DM(0x3fb4)`, the `DM4..DM6` retained-workspace owner, and
+  the bulk-adapter RTS diagnostic that `0x0080` still depends on.
+
+### Reproduce
+
+```bash
+/tmp/eicon-venv/bin/python -u tools/eicon_adsp_sip.py \
+  --native-mips --force-info-after-v8 --native-bearer-activation --tx-prbs \
+  --trace-v90d-state --law pcmu --capture-prefix artifacts/eicon-native-tower/runNN \
+  --mips-kernel artifacts/eicon-dsp/build-117-926/kernel/0009-diva-server-pri-30m-kernel \
+  --mips-tikrnl artifacts/eicon-dsp/build-117-926/tikrnl/0258-tikrnl81.f34-task \
+  --registrar asterisk.net.cryan.nz --username 6001 --password 6001
+./.venv/bin/python tools/cx_at.py --dev /dev/cu.usbserial-21210 dial 6001 --wait 120 --pre 'AT&M0'
+./.venv/bin/python tools/cx_at.py --dev /dev/cu.usbserial-21210 usrdiag
+```
+
+Take `ATI6` and `ATI11` while the call is still `Online`, not only after it
+drops: the post-disconnect register block is not reliable.
