@@ -5281,15 +5281,16 @@ resident kernel capable of receiving the first SPORT/IRQE event. The TIKRNL
 image is genuinely sparse (its PM blocks begin at `0x0580` and `0x1800`), so
 loading it cannot supply the resident vectors.
 
-At entry to `SWITCH_ON`, `a0` is the task object and its `+0x10` word is the
-DSP host-register base (`0xbc000808`). This identifies the selected core before
-the older write-based assignment latch is available. Native activation now
-composes the extracted F34 resident kernel with only the declared sparse
-TIKRNL PM blocks at that entry, releases IDMA boot hold, and runs the relocated
-initializer before `SWITCH_ON` continues. Because the transfer body leaves the
-resident PM parking words again, the same PM composition is restored after the
-MIPS call without rerunning initialization or changing the live DM records.
-The first selected-channel pipeline then behaves normally after the two-sample
+The earlier `SWITCH_ON` hook was still one lifecycle step too late. At
+`SERVICE_ASSIGN`, the service object's `+0` pointer leads to the task object,
+whose `+0x10` word is the DSP register base `0xbc000808`. The return address of
+`SERVICE_ASSIGN` is therefore the first safe seam where all sparse task blocks
+exist but the MIPS has not yet published its task commands. Native activation
+now composes and initializes the selected core there, before the next DSP pump.
+Both kernel and TIKRNL are restored from their declared PM blocks only; loading
+a flattened 16K PM image erased the live command ring at PM `0x3327`.
+
+The first selected-channel pipeline then behaves normally after its two-sample
 SPORT delay:
 
 ```text
@@ -5298,10 +5299,36 @@ frame 2: DM2f08/DM2f09 = 8000/8000
          DM2f27..DM2f29 = 2f21/2f00/2f0e
 ```
 
-This clears the early resident-kernel/scheduler blocker without manufacturing
-DSP workspace words. The next native boundary is narrower: PM `0x02b9 ->
-0x02a1 -> 0x01b2 -> 0x00d8` runs, but the `DM2f00` descriptor remains inactive
-and there is no coverage at TIKRNL selected-channel entries PM `0x0586`,
-`0x06c8` or `0x0703`. The remaining owner is the post-`SWITCH_ON` task
-attachment that should populate/arm that descriptor, not the kernel free-list
-initializer and not V.90 bulk state.
+Tracing the task drivers identifies the real connected task path. Lower-PRI
+event `0x03` dispatches service driver `0x80098310`; it verifies task ID
+`0x0258`, describes the two native transfers as:
+
+```text
+KERNEL:   DSP address 0x6e68, 0x0010 words
+DATABASE: DSP address 0x7ee0, 0x0100 words
+```
+
+and then calls `0x80097f60` plus `0x80095318`. The latter polls the DSP for
+completion. On the physical card PRI SPORT continues clocking while that MIPS
+poll runs. The shim instead pumped masked IRQE and supplied no selected-channel
+clocks, so `0x80095318` timed out and its cleanup path removed the task.
+
+Native activation now supplies a bounded pre-media SPORT window while phase
+`call-ingress-connected` is executing, using the registered PM `0x0586` ISR
+and PM `0x06c8` continuation. Four setup clocks are sufficient to change
+the native task marker without fabricating any RTP samples:
+
+```text
+DM3137: 0000 -> 0001
+DM3131/DM3132: 000d/0270
+```
+
+That makes the initial SIG request live. The page supervisor loads `0x0270`
+once and resumes PM `0x06df`; unlike the old unconditional interpretation, it
+does not repeatedly reload the static `000d/0270` image pair.
+
+The remaining task boundary is now after SIG-page attachment: PM `0x0586` and
+PM `0x06c8` execute, but PM `0x0703` is not yet reached, no DIAL successor is
+requested, and the native network task eventually emits IND `0x04`. The next
+trace belongs in the `0x80098310 -> 0x80095318` completion state and SIG
+`0x0270` handoff, not in V.90 bulk workspace or kernel free-list code.

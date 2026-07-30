@@ -404,6 +404,8 @@ class MipsShim:
         self.native_bearer_activation = False
         self.native_kernel: Path | None = None
         self.native_tikrnl: Path | None = None
+        self.native_service_assign_return: int | None = None
+        self.native_setup_frames = 0
 
     def _set_load_result(self, uc, val, size):
         """Decode the MIPS load instruction at current PC and write val
@@ -464,7 +466,7 @@ class MipsShim:
             return
         if self.native_kernel is None or self.native_tikrnl is None:
             raise RuntimeError("native bearer image paths not configured")
-        load_pm_words(core, self.native_kernel / "pm.bin")
+        load_sparse_pm_words(core, self.native_kernel)
         load_sparse_pm_words(core, self.native_tikrnl)
         ADSP.adsp2181_set_idma_boot_hold(core, 0)
         ADSP.adsp2181_call(core, 0x0679, 0x02A8)
@@ -576,6 +578,12 @@ class MipsShim:
         # the MIPS init hangs polling for a DSP boot-acknowledge that never
         # comes (the DSP never runs).
         self._insn_count = getattr(self, '_insn_count', 0) + 1
+        if (self.native_bearer_activation and
+                self.native_service_assign_return == address and
+                self.service_assign_block is not None):
+            block = self.service_assign_block
+            self._start_native_selected_task(block, self.core_for(block))
+            self.native_service_assign_return = None
         if self.pump_every and self._insn_count % self.pump_every == 0:
             # Strobe IRQE (irq 6) to wake the DSP foreground from IDLE so it
             # runs code the MIPS just downloaded and writes the boot-ack.
@@ -592,10 +600,26 @@ class MipsShim:
             else:
                 runnable = [self.cpu]
             for core in runnable:
-                ADSP.adsp2181_set_irq(core, 6, 1)
-                ADSP.adsp2181_run(core, 2000)
-                ADSP.adsp2181_set_irq(core, 6, 0)
-                ADSP.adsp2181_run(core, 1000)
+                if (self.native_bearer_activation and
+                        self.phase == "call-ingress-connected" and
+                        self.native_setup_frames < 4 and
+                        self.service_assign_block in self.native_task_started and
+                        core is self.cores.get(self.service_assign_block)):
+                    # PRI SPORT never stops while the MIPS handles call setup.
+                    # The selected task consumes its connected command on that
+                    # clock; IRQE alone is masked after TIKRNL initialization.
+                    pm = ADSP.adsp2181_pm(core)
+                    saved_isr = pm[0x00B5]
+                    pm[0x00B5] = 0x1C000F | (0x0586 << 4)
+                    ADSP.adsp2181_modem_sample(
+                        core, 0x00FF, 0x00FF, 3000, 0x06C8, 0x02A8)
+                    pm[0x00B5] = saved_isr
+                    self.native_setup_frames += 1
+                else:
+                    ADSP.adsp2181_set_irq(core, 6, 1)
+                    ADSP.adsp2181_run(core, 2000)
+                    ADSP.adsp2181_set_irq(core, 6, 0)
+                    ADSP.adsp2181_run(core, 1000)
         from unicorn.mips_const import (UC_MIPS_REG_PC, UC_MIPS_REG_RA,
                                         UC_MIPS_REG_A0, UC_MIPS_REG_A1,
                                         UC_MIPS_REG_A2, UC_MIPS_REG_A3,
@@ -615,17 +639,27 @@ class MipsShim:
                 target = uc.reg_read(UC_MIPS_REG_0 + rs)
             if target is not None:
                 self.call_trace.append((self.phase, address, target))
+        if address == 0x80098310 and self.native_bearer_activation:
+            block = self.service_assign_block
+            core = self.cores.get(block) if block is not None else None
+            if core is not None:
+                load_sparse_pm_words(core, self.native_kernel)
+                load_sparse_pm_words(core, self.native_tikrnl)
+                ADSP.adsp2181_set_idma_boot_hold(core, 0)
         if address == SERVICE_ASSIGN:
             self.service_assign_pending = True
-        elif address == SWITCH_ON and self.native_bearer_activation:
-            # The task object owns its DSP host-register base at +0x10. This
-            # is available before SWITCH_ON executes even though the generic
-            # service-assignment latch is not populated until a later write.
-            task = uc.reg_read(UC_MIPS_REG_A0)
-            block = struct.unpack(
-                "<I", bytes(uc.mem_read((task + 0x10) & 0x1fffffff, 4)))[0]
-            self.service_assign_block = block & 0x1fffffff
-            self._start_native_selected_task(block, self.core_for(block))
+            if self.native_bearer_activation:
+                # The service object points at the task object at +0; the
+                # task owns its DSP host-register base at +0x10. Capture the
+                # caller now, then initialize only after SERVICE_ASSIGN has
+                # completed its sparse download and before the next DSP pump.
+                service = uc.reg_read(UC_MIPS_REG_A0)
+                task = struct.unpack(
+                    "<I", bytes(uc.mem_read(service & 0x1fffffff, 4)))[0]
+                block = struct.unpack(
+                    "<I", bytes(uc.mem_read((task + 0x10) & 0x1fffffff, 4)))[0]
+                self.service_assign_block = block & 0x1fffffff
+                self.native_service_assign_return = uc.reg_read(UC_MIPS_REG_RA)
         elif address == SWITCH_ON and self.service_assign_block is not None:
             # Real hardware releases the newly downloaded task before
             # SWITCH_ON publishes its first command/WDB. The emulator's IDMA
@@ -1987,8 +2021,7 @@ class NativeMipsModem:
         # permanently replacing either global kernel dispatch slot.
         pm = ADSP.adsp2181_pm(self.cpu)
         saved_isr = pm[0x00B5]
-        if not self.native_bearer_activation:
-            pm[0x00B5] = 0x1C000F | (0x0586 << 4)
+        pm[0x00B5] = 0x1C000F | (0x0586 << 4)
         try:
             # The returned SPORT0 latch is deliberately discarded.  It is not a
             # transmit source: it carries the kernel's TDM slot mirror, i.e. the
@@ -2007,13 +2040,15 @@ class NativeMipsModem:
                 ADSP.adsp2181_modem_sample(
                     self.cpu, sport_word, self.silence, self.adsp_budget,
                     0x02A9, 0x02A8)
+                if ADSP.adsp2181_idle(self.cpu):
+                    ADSP.adsp2181_call(self.cpu, 0x06C8, 0x02A8)
+                    ADSP.adsp2181_run(self.cpu, self.adsp_budget)
             else:
                 ADSP.adsp2181_modem_sample(
                     self.cpu, sport_word, self.silence, self.adsp_budget,
                     0x06C8, 0x02A8)
         finally:
-            if not self.native_bearer_activation:
-                pm[0x00B5] = saved_isr
+            pm[0x00B5] = saved_isr
         wanted = self.dm[0x3132] & 0xFFFF
         if (self.force_info_after_v8 and self.resident == 0x025F
                 and wanted != 0x0260 and self.dm[0x3FB0] not in (6, 7)):
@@ -2025,7 +2060,11 @@ class NativeMipsModem:
             self.forced_info_samples.append(self._media_samples)
             print(f"[native-mips] diagnostic post-V.8 fallback -> INFO "
                   f"at sample {self._media_samples}")
-        if (self.dm[0x3FC1] & 0x0100 and self.dm[0x3131]
+        page_ready = bool(self.dm[0x3FC1] & 0x0100)
+        if (self.native_bearer_activation and self.dm[0x3137]
+                and wanted != self.resident):
+            page_ready = True
+        if (page_ready and self.dm[0x3131]
                 and wanted in self.download_descriptors):
             previous = self.resident
             if wanted != self.resident:
@@ -2161,11 +2200,10 @@ def create_native_mips_modem(kernel: Path, tikrnl: Path, law: str = "pcmu",
     if not native_bearer_activation:
         modem.start_native_task()
     if native_bearer_activation:
-        # SWITCH_ON's transfer leaves parking words in resident PM after it
-        # has consumed the initializer's exported callbacks. Restore the same
-        # kernel+sparse-task composition without rerunning initialization or
-        # disturbing the live DM records it just installed.
-        load_pm_words(core, kernel / "pm.bin")
+        # The subsequent transfer parks resident code again. Restore only the
+        # declared kernel/task PM blocks; a flattened image would erase the
+        # live command ring at PM3327 and lose the task-attachment message.
+        load_sparse_pm_words(core, kernel)
         load_sparse_pm_words(core, tikrnl)
         ADSP.adsp2181_set_idma_boot_hold(core, 0)
         print("[native-mips] using native lower-PRI bearer activation; "
