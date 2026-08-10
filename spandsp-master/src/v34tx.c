@@ -640,12 +640,14 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason);
 static void l1_l2_signal_init(v34_state_t *s);
 static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
+static void pre_info1_a_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
 static void v90_v34_fallback_wait_init(v34_state_t *s);
 static complex_sig_t get_phase4_baud(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
+static int info1a_repeats(v34_state_t *s);
 static void infomarksa_baud_init(v34_state_t *s);
 static int info1c_wait_bauds(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
@@ -3365,7 +3367,27 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                 /* End of line probe sequence */
                 if (s->tx.duplex)
                 {
-                    if (s->tx.calling_party)
+                    if (s->tx.calling_party  &&  s->tx.v90_mode)
+                    {
+                        /* V.90 §9.2.2.1.8: the *analogue* modem is the calling
+                           party, and after L1/L2 it transmits Tone A and
+                           conditions its receiver to receive INFO1d.  INFO1a
+                           comes only after that (§9.2.2.1.9), and Table 11
+                           says why: bit 25 selects the carrier and bits 26:29
+                           the pre-emphasis for the digital-to-analogue
+                           direction, which are answers to what INFO1d offered.
+                           This used to take the V.34 call-modem branch below
+                           and send INFO1a straight off the end of L2.  The
+                           digital modem waits for Tone A before sending INFO1d
+                           (§9.2.1.1.7), so the exchange deadlocked: measured
+                           against an Eicon Diva Server's own firmware, the
+                           card stayed in its INFO parser for the whole call
+                           while we went on to Phase 3 alone. */
+                        span_log(&s->logging, SPAN_LOG_FLOW,
+                                 "Tx - V.90 analogue modem: L2 done, Tone A while awaiting INFO1d (9.2.2.1.8)\n");
+                        pre_info1_a_init(s);
+                    }
+                    else if (s->tx.calling_party)
                         info1_baud_init(s);
                     else if (s->tx.v90_mode)
                     {
@@ -3508,6 +3530,29 @@ static void l1_l2_signal_init(v34_state_t *s)
 
 static int info1c_wait_bauds(v34_state_t *s)
 {
+    if (s->tx.v90_mode  &&  s->tx.calling_party)
+    {
+        /* §9.2.2.2.4's 2000 ms + two round trips is a floor on how long the
+           analogue modem waits for INFO1d before recovering, not a ceiling on
+           how long Tone A may be held -- and the recovery it offers,
+           INFOMARKSa, stops the Tone A that §9.2.1.1.7 has the digital modem
+           waiting to detect.  An Eicon Diva Server reaches the state where it
+           looks for Tone A around 10 s into the call, by which time the
+           default recovery has already replaced it.  ME_V90_ANALOGUE_INFO1D_WAIT_MS
+           holds Tone A for longer so that peer can be measured. */
+        const char *env = getenv("ME_V90_ANALOGUE_INFO1D_WAIT_MS");
+
+        if (env  &&  *env)
+        {
+            long ms = strtol(env, NULL, 10);
+
+            if (ms > 0)
+                return (int) ((600*ms + 500)/1000);
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
     int rtd_bauds;
     int timeout_bauds;
 
@@ -3624,8 +3669,10 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
         if (s->rx.received_event == V34_EVENT_INFO1_OK)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - INFO1c received after %d bauds of Tone A, sending INFO1a (11.2.1.2.9)\n",
-                     s->tx.tone_duration);
+                     "Tx - %s received after %d bauds of Tone A, sending INFO1a (%s)\n",
+                     (s->tx.v90_mode  &&  s->tx.calling_party) ? "INFO1d" : "INFO1c",
+                     s->tx.tone_duration,
+                     (s->tx.v90_mode  &&  s->tx.calling_party) ? "9.2.2.1.9" : "11.2.1.2.9");
             s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 0;
             info1_baud_init(s);
@@ -3664,9 +3711,35 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                    delays.  Of the two permitted responses (retrain per
                    11.5.2.1, or INFOMARKSa) take INFOMARKSa, which keeps the
                    handshake alive and lets the call modem resend INFO1c. */
+                const char *recovery = NULL;
+
+                if (s->tx.v90_mode  &&  s->tx.calling_party)
+                    recovery = getenv("ME_V90_ANALOGUE_INFO1D_TIMEOUT");
+                /*endif*/
+                if (recovery  &&  strcmp(recovery, "info1a") == 0)
+                {
+                    /* Not one of §9.2.2.2.4's two responses, and opt-in for
+                       that reason.  A digital modem that never sends INFO1d
+                       leaves the conformant pair unreachable: INFOMARKSa
+                       replaces the Tone A the peer is waiting for, and a
+                       retrain returns to the same deadlock.  An Eicon Diva
+                       Server is such a peer -- it cycles its INFO receive
+                       states waiting for INFO1a, whose bits 37:39 are what
+                       its firmware reads to choose the V.90 page. */
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - no INFO1d within %d bauds; sending INFO1a anyway "
+                             "(ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a)\n",
+                             s->tx.tone_duration);
+                    s->tx.tone_duration = 0;
+                    info1_baud_init(s);
+                    break;
+                }
+                /*endif*/
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - no INFO1c within %d bauds; sending INFOMARKSa (11.2.2.2.4)\n",
-                         s->tx.tone_duration);
+                         "Tx - no %s within %d bauds; sending INFOMARKSa (%s)\n",
+                         (s->tx.v90_mode  &&  s->tx.calling_party) ? "INFO1d" : "INFO1c",
+                         s->tx.tone_duration,
+                         (s->tx.v90_mode  &&  s->tx.calling_party) ? "9.2.2.2.4" : "11.2.2.2.4");
                 infomarksa_baud_init(s);
             }
             /*endif*/
@@ -3686,6 +3759,21 @@ static void second_a_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.stage = V34_TX_STAGE_POST_L2_A;
+    s->tx.current_getbaud = get_second_a_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void pre_info1_a_init(v34_state_t *s)
+{
+    /* Tone A, held until the peer's INFO1 arrives.  V.34 reaches this as the
+       answer modem (§11.2.1.2.8); the V.90 analogue modem reaches it as the
+       *calling* party (§9.2.2.1.8), which is the same signal for the same
+       reason -- the peer is waiting to see Tone A before it sends its INFO1. */
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - pre_info1_a_init()\n");
+    s->tx.tone_duration = 0;
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.stage = V34_TX_STAGE_PRE_INFO1_A;
     s->tx.current_getbaud = get_second_a_baud;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4322,9 +4410,30 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
     {
         if (s->tx.calling_party && s->tx.v90_mode)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: INFO1a complete, entering Phase 3 S/!S handoff\n");
-            s_not_s_baud_init(s);
+            /* §8.2.3.1 permits multiple INFO sequences as a group, and the
+               digital modem's INFO1d is already repeated four times here for
+               exactly that reason: a receiver that switches detectors on the
+               first boundary needs a subsequent sync word to acquire on.  The
+               analogue modem's INFO1a used to go out once, and a peer that
+               starts its INFO receive late never completed a frame -- an Eicon
+               Diva Server logs INFO_RX event without complete, over and over,
+               against a single INFO1a. */
+            if (s->tx.tone_duration < info1a_repeats(s))
+            {
+                s->tx.tone_duration++;
+                s->tx.txptr = 0;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: repeating INFO1a contiguously (%d/%d)\n",
+                         s->tx.tone_duration, info1a_repeats(s));
+            }
+            else
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90: INFO1a complete, entering Phase 3 S/!S handoff\n");
+                s->tx.tone_duration = 0;
+                s_not_s_baud_init(s);
+            }
+            /*endif*/
         }
         else if (s->tx.calling_party)
         {
@@ -4366,6 +4475,28 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
         s->tx.lastbit.re = -s->tx.lastbit.re;
     /*endif*/
     return s->tx.lastbit;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* How many times the analogue modem's INFO1a is repeated as one §8.2.3.1
+   group.  Four matches what the digital side already sends for INFO1d;
+   ME_V90_ANALOGUE_INFO1A_REPEATS raises it for a peer that needs longer to
+   arrive at its INFO receive state. */
+static int info1a_repeats(v34_state_t *s)
+{
+    const char *env;
+
+    (void) s;
+    if ((env = getenv("ME_V90_ANALOGUE_INFO1A_REPEATS")) != NULL  &&  *env)
+    {
+        long n = strtol(env, NULL, 10);
+
+        if (n >= 1  &&  n <= 200)
+            return (int) n;
+        /*endif*/
+    }
+    /*endif*/
+    return 4;
 }
 /*- End of function --------------------------------------------------------*/
 

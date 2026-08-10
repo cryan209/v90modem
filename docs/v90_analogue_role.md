@@ -89,45 +89,52 @@ That last line is the reason for the whole exercise: on the analogue side the
 constellation decision is ours, derived from a measurement rather than offered
 blind (docs/v90_mi_negotiation.md).
 
-## First live call against a real digital modem
+## Live against a real digital modem: through Phase 2, into the V.90 page
 
 Dialled the Eicon card under emulation (`../modem-dsp-emu`, `./run
-native-tower`) on 2026-08-10, both ends G.711 µ-law over SIP. What ran:
+native-tower`) on 2026-08-10, both ends G.711 µ-law. The card completes Phase 2
+with this side as the analogue modem, reads our INFO1a, and switches its
+firmware to the V.90 page:
 
 ```text
-[ME] V.8 negotiated V.90 with this end as the ANALOGUE modem (U_INFO=78)
-FLOW Rx INFO0d (V.90): PCM law=u-law, ack=0
-FLOW Tx INFO1a (V.90 Table 10):
-FLOW Tx - timing [analogue]: Phase 2 complete in 3181.5 ms, handing off to Phase 3
-[ME] V.90 analogue Phase 3 started: 3200 baud high carrier, U_INFO=78, Ja descriptor N=120 (1260 bits)
-[ME] V.90 analogue TX: silence -> S -> PP -> TRN -> Ja
-[ME] V.90 analogue: §9.3.2 deadline passed in Ja with no answer from the digital modem
+[adsp] TrnProgress 0x0042 -> 0x0044 -> 0x0046 -> 0x004f  INFO_RX complete=0x0001
+[adsp] overlay request page 14 V.90 DPCM -> 0x026a served
+[adsp] bootpage 7 INFO (V.34/V.90 phase 2) -> 14 V.90 DPCM
 ```
 
-Everything on this side did what §9.3.2 says, in order, on a live call. The
-card never answered, and its own trace says why it could not: it stayed on
-firmware page 7 (INFO, V.34/V.90 Phase 2) for the whole call, `TrnProgress`
-climbing to 0x0042 and falling back to 0x0026 twice — an INFO retry loop, not
-a modem that has moved on to Phase 3.
+Getting there took three fixes, each one found by a call:
 
-**The gap is in Phase 2, and it is ours.** Our receiver decoded the card's
-INFO0d and nothing after it: no INFO1d was ever received, yet SpanDSP sent
-INFO1a and declared "Phase 2 complete" anyway. That is out of order. §9.2.1.1
-has the digital modem send INFO1d and the analogue modem answer with INFO1a,
-and Table 11 makes the dependency concrete — INFO1a bit 25 selects the carrier
-and bits 26:29 the pre-emphasis *for the digital-to-analogue direction*, which
-are answers to what INFO1d offered. Sending INFO1a first leaves the card
-waiting for a reply to a message it has not sent, which is exactly the loop
-its trace shows.
+1. **§9.2.2.1.8 — Tone A before INFO1a.** SpanDSP took the V.34 call-modem
+   branch at the end of L1/L2 and sent INFO1a straight away. V.90 swaps the
+   roles: the analogue modem is the *calling* party, and after probing it
+   transmits Tone A and conditions its receiver for INFO1d (§9.2.2.1.8), only
+   answering with INFO1a once that arrives (§9.2.2.1.9). Table 11 shows why the
+   order matters — INFO1a bit 25 selects the carrier and bits 26:29 the
+   pre-emphasis for the digital-to-analogue direction, both answers to what
+   INFO1d offered. The digital modem waits to detect Tone A before sending
+   INFO1d (§9.2.1.1.7), so sending INFO1a first deadlocks both ends.
+2. **This card never sends INFO1d at all.** Decoding its own transmit
+   (`./vpcm_decode --v34` on the capture) finds INFO0d at 4830 ms and no INFO1d
+   anywhere in 26 s. It sits in its INFO receive states — `INFO_RX event=1,
+   complete=0`, over and over — waiting for INFO1a, whose bits 37:39 are what
+   its firmware reads to choose the V.90 page (the decision chain is pinned in
+   the sibling project's Session 194–195). §9.2.2.2.4 offers two responses to a
+   missing INFO1d, retrain or INFOMARKSa, and neither reaches this peer:
+   INFOMARKSa *replaces* the Tone A it is waiting for. `ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a`
+   sends INFO1a instead. Opt-in, because it is not one of the two.
+3. **One INFO1a is not enough.** §8.2.3.1 permits a group of INFO sequences,
+   and the digital side of this same code already repeats INFO1d four times for
+   exactly that reason. INFO1a went out once, and a peer that arrives at its
+   receive state late never completes a frame. It now repeats, four times by
+   default and `ME_V90_ANALOGUE_INFO1A_REPEATS` more.
 
-This is the first time SpanDSP's analogue-side V.90 Phase 2 has run against a
-real digital modem. The digital side of that same code has had many rounds of
-live interop work; this side has had none, and the first call found it.
-
-Repeat with:
+The recipe that reaches page 14:
 
 ```bash
-cd ../modem-dsp-emu && ./run native-tower --run <n>     # answers as 6001
+cd ../modem-dsp-emu && ./run native-tower --run <n>      # answers as 6001
+ME_V90_ANALOGUE_INFO1A_REPEATS=40 \
+ME_V90_ANALOGUE_INFO1D_WAIT_MS=12000 \
+ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a \
 SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
     --sip-server <registrar> --username 6000 --password 6000 \
     --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue
@@ -137,11 +144,34 @@ printf 'ATD6001\r' > /tmp/v90modem-analogue
 `SIP_FORCE_PCMU=1` is not optional: the first attempt negotiated A-law against
 a µ-law endpoint, and a transcoded DS0 cannot carry Phase 3 at all.
 
+### Where it stops now, and why it is not ours
+
+The card enters page 14, runs its Phase 3 states `0x0060` → `0x0074` for about
+four seconds, sends **no Sd at all** (`./vpcm_decode --v90` on the capture finds
+none, and that scan tries every U_INFO), then falls back to `0x0024` and
+retrains. `run54.adsp.csv` says why, at the page boundary:
+
+```text
+boot=0x0007 trn=0x004f  tx_ptr=0x3764  tx_value=0x0000
+boot=0x000e trn=0x0060  tx_ptr=0x0000  tx_value=0x0000   <- and zero for the whole page
+```
+
+The V.90 page comes up with no transmit source wired to it. That is the
+emulator harness's own documented defect — the sibling project's Session 47,
+"page-local transmit state that the real host re-establishes across a boot-page
+change and our supervisor does not" — and it is in `../modem-dsp-emu`, not
+here. Our receiver hunting Sd and finding none is the correct behaviour against
+a peer that is transmitting nothing.
+
+So the analogue role is blocked on the *instrument*, not on the modem. Against
+real hardware the same build would carry on into Phase 3; there is no evidence
+either way yet, because the only digital modem in the lab is this one.
+
 ## What is left
 
-1. **Phase 2 must wait for INFO1d** before sending INFO1a (§9.2.1.1). This is
-   the live blocker above, and it is in the vendored SpanDSP's analogue-side
-   Phase 2 rather than in any of the modules here.
+1. **A digital peer that transmits Sd.** The emulated card does not, for a
+   reason in its own harness (above). Either fix that in `../modem-dsp-emu` —
+   the boot-page 7 → 14 transmit handoff — or find another digital modem.
 2. **Phase 4 (§9.4)** — CPt, then a CP built from the measurement
    `v90_analogue_phase3_measurement()` already returns, then E/B1.
 3. **Data mode** — receive the mapped downstream instead of transmitting it.
