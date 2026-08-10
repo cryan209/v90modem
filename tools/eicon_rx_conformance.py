@@ -13,31 +13,33 @@ still fails.
 own shipped V.90 firmware transmitting to a USR Courier that connected. This
 harness points our analogue-side receive path at them.
 
-Each fixture is checked twice, and the order matters:
+Each fixture is checked in two parts, and the order matters:
 
-  1. POSITIVE CONTROL -- a codeword-exact DIL run and an Sd/S-bar boundary must
-     be recovered. These prove codeword recovery is working and the harness is
-     actually armed. A watch that never fires and a watch that was never armed
-     look identical; this is what tells them apart. If the control fails, the
-     harness is broken and the result below means nothing.
+  1. PHASE 3 CHAIN -- Sd, S-bar_d, TRN1d and Jd must be recovered at the
+     symbol offsets an independent segmentation of the capture puts them at.
+     These are exact expected values, not thresholds: they were derived from
+     the fixtures without using our decoder (mu-law Ucode decomposition plus
+     the 5.3 GPC generator) and then reproduced by it. Any drift is a
+     regression.
 
-  2. THE ASSERTION -- at least 48 TRN1d symbols must be descrambled, which is
-     what the decoder itself states it needs for a full decode.
+  2. THE ASSERTION -- the codeword-exact DIL decoder must recover the DIL that
+     starts where Jd ends.
 
-Step 2 FAILS TODAY. That is the correct initial state, and the point of the
-test: it is the only check in the tree that can catch this class of defect at
-all. See docs/eicon_downstream_comparison.md, Finding 2.
+Step 2 FAILS TODAY, and step 1 is what makes that failure meaningful: the
+Phase 3 chain landing exactly right proves codeword recovery works, so a DIL
+no-decode is a real receive-path gap and not a broken harness.
 
-The cause is *not* a scrambler disagreement -- the card's TRN1d is GPC,
-zero-initialized, and matches the Recommendation bit-for-bit (Finding 1). Our
-decoder mislabels the card's constant-magnitude TRN1d as "Sd" and then searches
-for TRN1d after it, where there is none.
+The cause is structural, in `v90_dil_rx.c`. That decoder recovers DIL by
+finding an exactly-periodic run and fitting a descriptor to one cycle. But
+8.4.1 gives each of the N DIL-segments its own training Ucode, so a real DIL
+is not periodic at the segment scale -- only at the full N-segment cycle. The
+card sends that cycle roughly once (~15.7 kT, 1.97 s, 132T segments) before
+the Courier terminates it, so there is no second cycle to lock onto, and the
+scan degenerates to fitting short accidental fragments where adjacent segments
+happen to share a Ucode. Our own transmitter repeats DIL cycles, which is why
+no loopback test sees this.
 
-Caveat on the control: its Sd arm currently accepts that mislabel, because it
-only asks whether *an* Sd was reported. §8.4.4 makes Sd one-third Ucode 0, so it
-should additionally require Ucode-0 density near 1/3 -- which the card's TRN1d
-would fail, as it should. Until then the Sd arm proves less than it appears to;
-the DIL arm is what genuinely establishes that codeword recovery works.
+See docs/eicon_downstream_comparison.md, Finding 4.
 
 Not wired into `make test` -- it encodes a known-open defect, and a suite that
 is red by default stops being read. Run it deliberately:
@@ -54,13 +56,38 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO / "artifacts" / "eicon-digital-downstream"
 
-# The decoder states this threshold itself: "need >=48 for full decode".
-MIN_TRN1D_SYMBOLS = 48
+SD_RE    = re.compile(r"V\.90 Sd: W_UCODE=(\d+) \(U_INFO=(\d+)\), (\d+) reps")
+SBAR_RE  = re.compile(r"V\.90 S̄d: (\d+) reps")
+TRN1D_RE = re.compile(r"V\.90 TRN1d: (\d+) symbols .* descrambled to ones")
+JD_RE    = re.compile(r"V\.90 Jd\+J'd: (\d+) symbols")
+DIL_RE   = re.compile(r"Codeword-exact DIL run:\s*(\S+)\s*-\s*(\S+)\s*ms")
 
-TRN1D_RE = re.compile(r"V\.90 TRN1d[^:]*:\s*(\d+)\s*symbols")
-DESCRAMBLER_FAILED_RE = re.compile(r"sign-bit descrambler found (\d+) TRN1d symbols")
-DIL_RUN_RE = re.compile(r"Codeword-exact DIL run:\s*(\S+)\s*-\s*(\S+)\s*ms")
-SD_RE = re.compile(r"V\.90 Sd[^:]*:.*?(\d+) reps")
+# Independently derived from the captures; see the module docstring.  8.4.4
+# fixes Sd at 64 reps and S-bar_d at 8, and both calls spend 30005T on TRN1d --
+# 3750.6 ms, 94% of the 9.3.1.5 budget.
+#
+# dil_start_ms / dil_len_ms bound the region between the end of Jd and the
+# start of Ri -- the constant-U_INFO run that follows DIL -- again measured
+# without our decoder.
+EXPECTED = {
+    "call1-connect-32000.ulaw": {
+        "u_info": 48, "w_ucode": 64,
+        "sd_reps": 64, "sbar_reps": 8,
+        "trn1d_symbols": 30005, "jd_symbols": 943,
+        "dil_start_ms": 12289.4, "dil_len_ms": 1971.8,
+    },
+    "call3-connect-42666.ulaw": {
+        "u_info": 48, "w_ucode": 64,
+        "sd_reps": 64, "sbar_reps": 8,
+        "trn1d_symbols": 30005, "jd_symbols": 1015,
+        "dil_start_ms": 12337.9, "dil_len_ms": 1980.0,
+    },
+}
+
+# How close a claimed DIL run has to come to the real one to count.  Generous
+# on purpose: the point is to reject fragments, not to pin down a boundary.
+DIL_START_TOLERANCE_MS = 50.0
+DIL_MIN_COVERAGE = 0.80
 
 
 def decode(binary, path):
@@ -77,35 +104,78 @@ def decode(binary, path):
 
 
 def check(binary, path):
-    """Return (control_ok, assertion_ok, notes)."""
+    """Return (chain_ok, assertion_ok, notes)."""
     out = decode(binary, path)
+    want = EXPECTED.get(path.name)
     notes = []
 
-    dil = DIL_RUN_RE.search(out)
-    sd = SD_RE.search(out)
-    control_ok = bool(dil) and bool(sd)
+    if want is None:
+        return False, False, [f"no expected values recorded for {path.name}"]
 
-    if dil:
-        notes.append(f"control: codeword-exact DIL run {dil.group(1)}-{dil.group(2)} ms")
-    else:
-        notes.append("control: NO codeword-exact DIL run -- codeword recovery is broken")
+    chain_ok = True
+
+    def expect(label, got, exp):
+        nonlocal chain_ok
+        if got == exp:
+            notes.append(f"chain: {label} = {got}")
+        else:
+            chain_ok = False
+            notes.append(f"chain: {label} = {got}, EXPECTED {exp}")
+
+    sd = SD_RE.search(out)
     if sd:
-        notes.append(f"control: Sd recovered, {sd.group(1)} reps")
+        expect("W_UCODE", int(sd.group(1)), want["w_ucode"])
+        expect("U_INFO", int(sd.group(2)), want["u_info"])
+        expect("Sd reps", int(sd.group(3)), want["sd_reps"])
     else:
-        notes.append("control: NO Sd recovered")
+        chain_ok = False
+        notes.append("chain: NO Sd recovered")
+
+    sbar = SBAR_RE.search(out)
+    if sbar:
+        expect("S̄d reps", int(sbar.group(1)), want["sbar_reps"])
+    else:
+        chain_ok = False
+        notes.append("chain: NO S̄d recovered")
 
     trn = TRN1D_RE.search(out)
     if trn:
-        count = int(trn.group(1))
-        assertion_ok = count >= MIN_TRN1D_SYMBOLS
-        notes.append(f"TRN1d: {count} symbols descrambled")
+        expect("TRN1d symbols", int(trn.group(1)), want["trn1d_symbols"])
     else:
-        failed = DESCRAMBLER_FAILED_RE.search(out)
-        count = int(failed.group(1)) if failed else 0
-        assertion_ok = False
-        notes.append(f"TRN1d: {count} symbols descrambled (need >={MIN_TRN1D_SYMBOLS})")
+        chain_ok = False
+        notes.append("chain: NO descrambled TRN1d -- sign recovery is broken")
 
-    return control_ok, assertion_ok, notes
+    jd = JD_RE.search(out)
+    if jd:
+        expect("Jd+J'd symbols", int(jd.group(1)), want["jd_symbols"])
+    else:
+        chain_ok = False
+        notes.append("chain: NO Jd recovered")
+
+    #
+    # A decode only counts if it lands on the DIL region.  Without this the
+    # arm passes on debris: on call3 the scan currently reports a 35 ms,
+    # 280-symbol fragment from the middle of DIL, which is an accidental
+    # period-132 match between two adjacent segments, not a recovered DIL.
+    dil = DIL_RE.search(out)
+    if dil:
+        got_start = float(dil.group(1))
+        got_len = float(dil.group(2)) - got_start
+        coverage = got_len / want["dil_len_ms"]
+        near_start = abs(got_start - want["dil_start_ms"]) <= DIL_START_TOLERANCE_MS
+        assertion_ok = near_start and coverage >= DIL_MIN_COVERAGE
+        notes.append(
+            f"DIL: run {got_start:.1f}-{float(dil.group(2)):.1f} ms "
+            f"({got_len:.1f} ms, {100.0 * coverage:.0f}% of the region; "
+            f"region starts {want['dil_start_ms']:.1f} ms)"
+        )
+        if not assertion_ok:
+            notes.append("DIL: rejected -- a fragment, not the DIL region")
+    else:
+        assertion_ok = False
+        notes.append("DIL: no codeword-exact run recovered")
+
+    return chain_ok, assertion_ok, notes
 
 
 def main():
@@ -113,8 +183,9 @@ def main():
     ap.add_argument("--binary", default=str(REPO / "vpcm_decode"),
                     help="path to vpcm_decode (default: ./vpcm_decode)")
     ap.add_argument("--expect-failure", action="store_true",
-                    help="exit 0 while the known defect stands, but fail loudly "
-                         "if the positive control breaks or the defect is fixed")
+                    help="exit 0 while the known-open DIL defect stands, but "
+                         "fail loudly if the Phase 3 chain breaks or the defect "
+                         "is fixed")
     args = ap.parse_args()
 
     # resolve(): pathlib drops a leading "./", which would leave subprocess with
@@ -127,40 +198,42 @@ def main():
     if not fixtures:
         raise SystemExit(f"no fixtures in {FIXTURE_DIR}")
 
-    control_failures = []
+    chain_failures = []
     assertion_failures = []
 
     for path in fixtures:
-        control_ok, assertion_ok, notes = check(binary, path)
-        status = "PASS" if (control_ok and assertion_ok) else "FAIL"
+        chain_ok, assertion_ok, notes = check(binary, path)
+        status = "PASS" if (chain_ok and assertion_ok) else "FAIL"
         print(f"[{status}] {path.name}")
         for note in notes:
             print(f"         {note}")
-        if not control_ok:
-            control_failures.append(path.name)
+        if not chain_ok:
+            chain_failures.append(path.name)
         if not assertion_ok:
             assertion_failures.append(path.name)
 
     print()
-    if control_failures:
-        print("POSITIVE CONTROL FAILED on: " + ", ".join(control_failures))
-        print("The harness is not armed. The TRN1d result above means nothing --")
-        print("fix codeword recovery before reading it.")
+    if chain_failures:
+        print("PHASE 3 CHAIN FAILED on: " + ", ".join(chain_failures))
+        print("This is a regression: these offsets were reproduced from the")
+        print("captures independently of our decoder.  Fix the chain before")
+        print("reading the DIL result above.")
         return 2
 
     if not assertion_failures:
-        print("All fixtures decoded. If this is the first green run, the")
-        print("convention defect in docs/eicon_downstream_comparison.md is fixed --")
-        print("update that doc and move this into `make test`.")
+        print("All fixtures decoded, DIL included.  If this is the first green")
+        print("run, the defect in docs/eicon_downstream_comparison.md Finding 4")
+        print("is fixed -- update that doc and move this into `make test`.")
         return 1 if args.expect_failure else 0
 
-    print("TRN1d recovery failed on: " + ", ".join(assertion_failures))
-    print("Positive control passed, so codeword recovery works and this is a real")
-    print("receive-path failure.  It is NOT a scrambler disagreement: the card's")
-    print("TRN1d is GPC, zero-initialized, and matches the Recommendation")
-    print("bit-for-bit.  We mislabel that constant-magnitude TRN1d as Sd and then")
-    print("search for TRN1d after it, where there is none.")
-    print("Known-open defect: docs/eicon_downstream_comparison.md, Finding 2.")
+    print("DIL recovery failed on: " + ", ".join(assertion_failures))
+    print("The Phase 3 chain landed on its expected offsets, so codeword")
+    print("recovery works and this is a real receive-path gap: v90_dil_rx.c")
+    print("locks onto an exactly-periodic run, and 8.4.1 gives every")
+    print("DIL-segment its own training Ucode, so a real one-pass DIL is")
+    print("periodic only at the full N-segment cycle -- which the card sends")
+    print("about once before the peer terminates it.")
+    print("Known-open defect: docs/eicon_downstream_comparison.md, Finding 4.")
     return 0 if args.expect_failure else 1
 
 

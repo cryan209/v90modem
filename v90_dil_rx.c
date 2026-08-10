@@ -80,11 +80,57 @@ static void dil_decompose(const uint8_t *codewords, int len, v90_law_t law,
  * floor; Sd already uses Ucode >= 16). */
 #define DIL_MIN_TRAIN_UCODE 8
 
+/*
+ * §8.4.4 Sd is {+W, +0, +W, -W, -0, -W} repeated 64 times, which is exactly
+ * periodic at 6 symbols and carries two magnitudes, so it satisfies every
+ * structural test for a DIL cycle and gets decoded as a 6-symbol,
+ * single-segment DIL.  On artifacts/eicon-digital-downstream/call1 that made
+ * the 384-symbol Sd at 8366.9 ms the reported "codeword-exact DIL run".
+ *
+ * Sd's shape is fixed by the Recommendation, so it can be excluded exactly:
+ * the zero slots sit at positions 1 and 4, the other four slots all carry the
+ * same magnitude W, and the signs run +++--- (or the S-bar-d inverse).  No DIL
+ * cycle has that form -- a DIL-segment's reference symbol is REFc, which is
+ * not constrained to alternate with a single training Ucode this way.
+ */
+static bool dil_is_sd_template(const dil_sym_t *t, int c)
+{
+    int i;
+
+    /* Sd is periodic at 6, so it also fits any multiple of 6 as a "cycle"
+     * (12 symbols is two Sd frames).  Test the 6-frame and then require the
+     * whole template to be that frame repeated, so the exclusion does not
+     * depend on which multiple the periodicity search happened to pick. */
+    if (c < 6 || c % 6 != 0)
+        return false;
+    if (t[0].u == 0 || t[1].u != 0 || t[4].u != 0)
+        return false;
+    if (t[2].u != t[0].u || t[3].u != t[0].u || t[5].u != t[0].u)
+        return false;
+    /* Signs are checked on the W slots only: the polarity of a zero-level
+     * symbol carries nothing, and a real digital modem does not follow
+     * §8.4.4's "-0" there (see v90_sd_slot_match in vpcm_decode.c). */
+    if (t[2].s != t[0].s)
+        return false;
+    if (t[3].s == t[0].s || t[5].s != t[3].s)
+        return false;
+    for (i = 6; i < c; i++) {
+        if (t[i].u != t[i % 6].u)
+            return false;
+        if (t[i].u != 0 && t[i].s != t[i % 6].s)
+            return false;
+    }
+    return true;
+}
+
 static bool dil_template_plausible(const dil_sym_t *t, int c)
 {
     int i;
     bool distinct = false;
     bool trainable = false;
+
+    if (dil_is_sd_template(t, c))
+        return false;
 
     for (i = 0; i < c; i++) {
         if (t[i].u >= DIL_MIN_TRAIN_UCODE)
@@ -676,6 +722,41 @@ static bool dil_decode_run(const dil_sym_t *x, int rs, int re, int c,
     free(runs);
     if (!ok)
         return false;
+
+    /*
+     * Reject a constant-magnitude run.
+     *
+     * DIL probes the channel by transmitting a training Ucode against a
+     * reference (§8.4.7), so every DIL cycle carries at least two distinct
+     * magnitudes -- including a single-segment one, where the training and
+     * reference Ucodes still differ.  A run with one magnitude throughout is
+     * therefore not DIL, whatever descriptor can be fitted to its signs.
+     *
+     * §8.6.4 Ri is exactly such a run: U_INFO at a period-6 sign pattern.  On
+     * artifacts/eicon-digital-downstream/call1 the 4548-symbol Ri run at
+     * 14261 ms was decoded as "N=1 LSP=6 LTP=6, training Ucodes: 1 unique"
+     * and reported as the DIL run, 2 s after the real DIL had started.
+     *
+     * The test is on the signal rather than the descriptor: N==1 is legal DIL
+     * (see the single-segment roundtrip in vpcm_loopback_test), so rejecting
+     * on descriptor shape would throw out real decodes with the false one.
+     *
+     * Failing here lets v90_dil_rx_scan() move on to the next candidate, and
+     * leaves a genuine no-decode visible instead of masked by a false one.
+     */
+    {
+        int i;
+        bool varies = false;
+
+        for (i = rs + 1; i < re; i++) {
+            if (x[i].u != x[rs].u) {
+                varies = true;
+                break;
+            }
+        }
+        if (!varies)
+            return false;
+    }
 
     memset(out, 0, sizeof(*out));
     out->desc = desc;

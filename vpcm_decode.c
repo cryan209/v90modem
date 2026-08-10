@@ -37902,6 +37902,28 @@ static int codeword_to_ucode(v91_law_t law, uint8_t codeword)
     return -1;
 }
 
+/*
+ * Match one slot of the Sd / S-bar-d pattern (§8.4.4).
+ *
+ * §8.4.4 writes the sequence as {+W, +0, +W, -W, -0, -W}, and this scan used to
+ * compare all six slots as exact codewords, negative zero included.  But G.711
+ * Ucode 0 has two codewords for what is the same level at the far D/A, and a
+ * working digital modem does not honour the distinction: the Eicon card
+ * transmits +0 (mu-law 0xFF) in *every* zero slot of both Sd and S-bar-d, on
+ * two independently captured calls the peer Courier answered with CONNECT
+ * (artifacts/eicon-digital-downstream/, docs/eicon_downstream_comparison.md).
+ *
+ * Requiring a polarity on a zero-level symbol therefore rejects real Sd.  The
+ * information in §8.4.4 lives in the W slots -- match the level on the zero
+ * slots and the full codeword everywhere else.
+ */
+static bool v90_sd_slot_match(v91_law_t law, uint8_t got, uint8_t want)
+{
+    if (codeword_to_ucode(law, want) == 0)
+        return codeword_to_ucode(law, got) == 0;
+    return got == want;
+}
+
 static void decode_v90_signals(const uint8_t *codewords, int total,
                                v91_law_t law, int known_u_info,
                                int anspcm_start, int anspcm_end)
@@ -37949,8 +37971,18 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
     uint8_t pos_zero = v91_ucode_to_codeword(law, 0, true);
     uint8_t neg_zero = v91_ucode_to_codeword(law, 0, false);
 
-    /* V.90 §8.3.2: "UINFO shall be greater than 66" */
-    int u_info_lo = (known_u_info >= 0) ? known_u_info : 67;
+    /*
+     * Table 12 (INFO1a bits 25:31) says "UINFO shall be greater than 66", and
+     * this scan used to start at 67 on that authority.  That clause binds the
+     * *analogue* modem populating INFO1a; it is not a fact about the line, and
+     * enforcing it here makes the receiver blind to real traffic.  Both
+     * captures in artifacts/eicon-digital-downstream/ -- calls that the peer
+     * Courier answered with CONNECT 32000 and CONNECT 42666 -- run at
+     * U_INFO = 48, confirmed independently by W = 16 + UINFO = 64 holding
+     * exactly across Sd (§8.4.4).  Accept what is on the wire and let the
+     * structural checks below reject nonsense.
+     */
+    int u_info_lo = (known_u_info >= 0) ? known_u_info : 10;
     int u_info_hi = (known_u_info >= 0) ? known_u_info : 127;
 
     if (known_u_info >= 0)
@@ -37976,7 +38008,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
             bool match = true;
             for (int rep = 0; rep < 4 && match; rep++) {
                 for (int j = 0; j < 6 && match; j++) {
-                    if (codewords[offset + rep * 6 + j] != sd_pat[j])
+                    if (!v90_sd_slot_match(law, codewords[offset + rep * 6 + j],
+                                           sd_pat[j]))
                         match = false;
                 }
             }
@@ -38000,7 +38033,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
             while (offset + (sd_reps + 1) * 6 <= total) {
                 bool ok = true;
                 for (int j = 0; j < 6 && ok; j++) {
-                    if (codewords[offset + sd_reps * 6 + j] != sd_pat[j])
+                    if (!v90_sd_slot_match(law, codewords[offset + sd_reps * 6 + j],
+                                           sd_pat[j]))
                         ok = false;
                 }
                 if (!ok) break;
@@ -38018,7 +38052,8 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
             while (pos + (sbar_reps + 1) * 6 <= total) {
                 bool ok = true;
                 for (int j = 0; j < 6 && ok; j++) {
-                    if (codewords[pos + sbar_reps * 6 + j] != sbar_pat[j])
+                    if (!v90_sd_slot_match(law, codewords[pos + sbar_reps * 6 + j],
+                                           sbar_pat[j]))
                         ok = false;
                 }
                 if (!ok) break;
@@ -38031,21 +38066,53 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
                 pos += sbar_reps * 6;
             }
 
-            /* TRN1d: scrambled ones at U_INFO magnitude.
-             * All codewords should have Ucode == u_info. Count run length. */
+            /*
+             * TRN1d and Jd are both the U_INFO codeword (§8.4.5, §8.4.2), so
+             * the magnitude run that starts here spans both and a
+             * magnitude-only count cannot say where one ends.  It has to be
+             * descrambled: §8.4.5 makes TRN1d binary ones through the §5.3
+             * scrambler seeded to zero, so TRN1d is exactly the prefix of the
+             * run that descrambles to 1, and Jd is what follows.
+             *
+             * Reporting the whole magnitude run as "TRN1d" is not a cosmetic
+             * error -- it is how long a peer trains for, the open question in
+             * docs/eicon_downstream_comparison.md, and the merged figure
+             * overstates it.
+             */
             int trn1d_start = pos;
-            int trn1d_len = 0;
+            int uinfo_run = 0;
             while (pos < total) {
                 int u = codeword_to_ucode(law, codewords[pos]);
                 if (u != u_info) break;
-                trn1d_len++;
+                uinfo_run++;
                 pos++;
             }
+
+            int trn1d_len = 0;
+            {
+                uint32_t descramble_reg = 0;
+                while (trn1d_len < uinfo_run) {
+                    int sign = (codewords[trn1d_start + trn1d_len] & 0x80) ? 1 : 0;
+                    if (offline_v90_descramble_reg_bit(&descramble_reg, sign) != 1)
+                        break;
+                    trn1d_len++;
+                }
+            }
+
             if (trn1d_len > 0) {
-                printf("  [%7.1f ms] V.90 TRN1d: %d symbols (%.1f ms) at U_INFO=%d\n",
+                printf("  [%7.1f ms] V.90 TRN1d: %d symbols (%.1f ms) at U_INFO=%d,"
+                       " descrambled to ones\n",
                        sample_to_ms(trn1d_start, 8000), trn1d_len,
                        sample_to_ms(trn1d_len, 8000), u_info);
+            } else if (uinfo_run > 0) {
+                printf("  [%7.1f ms] V.90 U_INFO run: %d symbols (%.1f ms) at"
+                       " U_INFO=%d, but none descramble to ones — not TRN1d\n",
+                       sample_to_ms(trn1d_start, 8000), uinfo_run,
+                       sample_to_ms(uinfo_run, 8000), u_info);
             }
+
+            /* Rewind to the TRN1d/Jd boundary so the Jd walk below sees it. */
+            pos = trn1d_start + trn1d_len;
 
             /* Jd/J'd: also at U_INFO magnitude with varying signs.
              * Count remaining U_INFO-magnitude codewords. */
@@ -38384,6 +38451,40 @@ static void decode_v90_signals(const uint8_t *codewords, int total,
             if (total_reps < 16) {
                 offset = pos - 6; /* resume scanning after this short run */
                 continue;
+            }
+
+            /*
+             * Reject Ri, which shares Sd's period-6 sign pattern.
+             *
+             * This scan is sign-only by design (see the comment above: on a
+             * mixed line recording the magnitudes are not trustworthy).  But
+             * §8.6.4 Ri is the U_INFO codeword with +++--- signs, so a
+             * sign-only test cannot tell it from §8.4.4 Sd, and Ri is far
+             * longer.  On artifacts/eicon-digital-downstream/call1 that is
+             * exactly what happened: 758 reps of Ri at 14261 ms were reported
+             * as Sd, and the TRN1d descrambler was then started ~5.9 s past
+             * the real TRN1d and found nothing.
+             *
+             * The discriminator is §8.4.4 itself: two of every six Sd symbols
+             * are Ucode 0, where Ri is constant magnitude.  Requiring only
+             * that *some* Ucode 0 is present keeps this tolerant of the
+             * corrupted magnitudes the scan exists to cope with, while
+             * rejecting a constant-magnitude run outright.
+             */
+            {
+                int zero_slots = 0;
+                for (int i = run_start; i < pos; i++) {
+                    if (codeword_to_ucode(law, codewords[i]) == 0)
+                        zero_slots++;
+                }
+                if (zero_slots == 0) {
+                    printf("  [%7.1f ms] V.90 Sd sign-pattern rejected: %d reps at"
+                           " constant magnitude, no Ucode 0 (§8.4.4 makes Sd 1/3"
+                           " Ucode 0) — this is Ri (§8.6.4), not Sd\n",
+                           sample_to_ms(run_start, 8000), total_reps);
+                    offset = pos - 6;
+                    continue;
+                }
             }
 
             /* Suppress false match in the ANSpcm region */

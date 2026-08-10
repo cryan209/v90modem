@@ -100,8 +100,9 @@ periodicity) gives the card's whole Phase 3, and ours beside it:
 | Sd | **384T** | 384T | yes — **match** |
 | S̄d | **48T** | 48T | yes — **match** |
 | TRN1d (const-mag, GPC signs) | **30000T (3750 ms)** | 2496T (312 ms) | yes — **12× short** |
-| sparse, one non-zero per 6, descending level | 1950 ms | 100 ms | **no** |
-| const-magnitude periodic (`+++−−−`) | 500 ms | 1000 ms | **no** |
+| Jd (const-mag, scrambled+diff signs) | 943T (118 ms) | peer-gated | **no** |
+| DIL (132T segments, descending level) | 1972 ms | 100 ms | **no** |
+| Ri (const-magnitude, `+++−−−`) | 571 ms | 1000 ms | **no** |
 | multi-level (data) | 12200 ms | 11400 ms | **no** |
 
 **Only the first four rows mean anything.** §9.3.1.3 has the digital modem send
@@ -132,10 +133,12 @@ W = Ucode(16 + U_INFO), and the card's TRN1d runs at U_INFO = 48 — so
 
 Decoding the card's Jd, J'd, DIL and Phase 4 is *not* confounded — a
 reference decode is a reference decode regardless of what our transmitter did.
-The sparse descending-level stage (Ucode 76 falling to 2, one non-zero per six
-symbols, 1950 ms) is unidentified and is the obvious next target: `--dil-scan`
-reports `default_125x12=no impairment=9` for the card, so whatever it is, it is
-not the default DIL our encoder emits.
+
+That is where the work since has gone. The sparse descending-level stage is
+identified: it is **DIL**, 132T segments stepping the training Ucode down the
+ladder (Finding 4). Getting there required fixing the Sd detection that was
+mis-anchoring everything after it (Finding 3), and DIL is now the first stage
+our receive path cannot read.
 
 ## Jd — decoded on both sides, and it is almost entirely correct
 
@@ -208,9 +211,9 @@ The card sends 943T and 1015T (13–14 frames) on its two calls; we sent 1231T o
 this one and 9744 ms on another. That spread is not a defect: §9.3.1.5 runs Jd
 until the analogue modem's S arrives. The card's peer answers; ours does not.
 
-## Finding 2 — our decoder mislabels the card's TRN1d as "Sd"
+## Finding 2 — our decoder mislabelled Ri as "Sd" — **fixed**
 
-`vpcm_decode --v90` reports, on the card's stream:
+`vpcm_decode --v90` used to report, on the card's stream:
 
 ```text
 [14261.1 ms] V.90 Sd (sign-pattern): 758 reps (4548 symbols, 568.5 ms)
@@ -220,21 +223,116 @@ until the analogue modem's S arrives. The card's peer answers; ours does not.
 its symbols are Ucode 0. Measured over that exact span: 4547 of 4548 symbols are
 Ucode 48 and **one** is Ucode 0. A constant-magnitude signal cannot be Sd.
 
-The `--dil-scan` output labels the same span a "codeword-exact DIL run" with
-"training Ucodes: 1 unique (first: 48)", so two different reports disagree about
-one region and neither is right.
+Nor is it TRN1d, as an earlier revision of this section claimed. TRN1d is the
+GPC-locked run at 8420.9–12171.5 ms (Finding 1). The 14261.1 ms region sits
+*after* DIL and is **Ri** — §8.6.4 makes Ri the U_INFO codeword at a `+++−−−`
+sign pattern, which is a constant magnitude and a period-6 sign pattern, i.e.
+exactly what was measured. Sd and Ri share that sign pattern; only the Ucode-0
+content tells them apart, which is what the detector was not checking.
 
-This is a real receive-path defect — an Sd detector that fires on a
-constant-magnitude signal will mis-anchor everything downstream of it — and it
-is what `make eicon-rx-test` pins.
+The `--dil-scan` output labelled the same span a "codeword-exact DIL run" with
+"training Ucodes: 1 unique (first: 48)", so two different reports disagreed
+about one region and neither was right.
+
+Fixed — see Finding 3 for the three separate causes. The card's Sd now decodes
+at 8366.9 ms, and the whole Phase 3 chain behind it. `make eicon-rx-test` now
+pins the DIL gap instead (Finding 4).
+
+## Finding 3 — three receive-path defects hid the card's Sd — **fixed**
+
+The card's Sd was there all along, at 8366.9 ms on call 1 and 8406.4 ms on
+call 3, spec-exact at 64 reps. Three independent faults kept us from seeing it,
+and all three had to be fixed before any of them showed:
+
+**(a) The exact-codeword matcher demanded `−0`.** §8.4.4 writes Sd as
+`{+W, +0, +W, −W, −0, −W}`, and `sd_pat[]` compared all six slots as exact
+codewords. But G.711 Ucode 0 has two codewords for one level at the far D/A,
+and the card transmits `+0` (µ-law `0xFF`) in **every** zero slot of both Sd and
+S̄d — on both calls:
+
+```text
+T66935   +64 [bf] +0 [ff] +64 [bf] -64 [3f] +0 [ff] -64 [3f]
+```
+
+Our transmitter follows the Recommendation's `−0` literally, which is defensible
+and is left alone; a *receiver* that requires it cannot read a working peer.
+`v90_sd_slot_match()` now matches the level on the zero slots and the full
+codeword on the W slots, which is where §8.4.4 carries information.
+
+**(b) The U_INFO search started at 67.** Table 12 says "U<sub>INFO</sub> shall be
+greater than 66", and the scan enforced it. That clause binds the *analogue*
+modem populating INFO1a; it is not a fact about the line. Both these calls —
+which the Courier answered `CONNECT 32000` and `CONNECT 42666` — run at
+**U_INFO = 48**, confirmed by W = 16 + U_INFO = 64 holding exactly across Sd.
+The floor is now 10; the peer's choice is not ours to police.
+
+**(c) The sign-pattern fallback matched `+++−−−`, which real Sd is not.**
+With both zero slots positive, the card's Sd signs are `+ + + − + −`. So the
+fallback could never fire on genuine Sd — and, having no Ucode-0 requirement, it
+fired on Ri instead (Finding 2). It now rejects a candidate with no Ucode 0 in
+it, citing §8.4.4's one-third.
+
+A fourth, smaller fault surfaced once the chain ran: TRN1d and Jd are both the
+U_INFO codeword, and the matcher counted the magnitude run as all TRN1d,
+reporting 30948 symbols. It now descrambles §8.4.5's scrambled ones and splits
+at the lock, giving **30005T TRN1d + 943T Jd** — reproducing Finding 1 through
+our own receive path for the first time.
+
+Result, both fixtures, matching an independent segmentation of the captures:
+
+```text
+[ 8366.9 ms] V.90 Sd: W_UCODE=64 (U_INFO=48), 64 reps (384 symbols, 48.0 ms)
+[ 8414.9 ms] V.90 S̄d: 8 reps (48 symbols, 6.0 ms)
+[ 8420.9 ms] V.90 TRN1d: 30005 symbols (3750.6 ms) at U_INFO=48, descrambled to ones
+[12171.5 ms] V.90 Jd+J'd: 943 symbols (117.9 ms), ~13 Jd frame repetitions
+```
+
+## Finding 4 — DIL recovery cannot read a real DIL — **open**
+
+With Phase 3 anchored correctly, the next stage is DIL, at 12289.4 ms on call 1
+(12337.9 ms on call 3), running ~1971 ms to where Ri starts. It is textbook
+§8.4.1: 132-symbol segments (H<sub>c</sub> = 21), REF<sub>c</sub> = Ucode 0, and
+a training Ucode that steps down the ladder segment by segment — 84, 83, 82, 81,
+…
+
+`v90_dil_rx.c` does not decode it. The reason is structural, not a threshold:
+the decoder finds an **exactly-periodic run** and fits a descriptor to one
+cycle. But §8.4.1 gives each of the N segments its own training Ucode, so a real
+DIL is not periodic at the segment scale — only at the full N-segment cycle,
+here ~15.7 kT. The card sends that cycle about **once** before the Courier
+terminates it (§8.4.1 lets the analogue modem terminate on any segment
+boundary), so there is no second cycle to lock onto.
+
+What the scan does instead is fit short accidental fragments where two adjacent
+segments happen to share a Ucode. Isolating the DIL region and scanning it alone
+returns a 280-symbol, 35 ms "DIL run" — 2% of the region:
+
+```text
+Codeword-exact DIL run: 890.6 - 925.6 ms (280 symbols, 2 cycles of 132)
+  training Ucodes: 2 unique across 2 segments (first: 1 32)
+```
+
+Fixing this means recovering segment boundaries structurally — REF<sub>c</sub>
+runs and training-symbol positions — instead of by autocorrelation. That is a
+rewrite of the acquisition front of `v90_dil_rx.c`, not a tuning change.
+
+`make eicon-rx-test` pins this: the Phase 3 chain is checked against exact
+expected offsets (so a failure there is a regression, and its passing is what
+makes the DIL result meaningful), and the DIL arm requires a run that starts
+within 50 ms of the region and covers ≥80% of it, so fragments do not count as
+a pass.
+
+**Why no loopback test could have found it:** our own transmitter repeats DIL
+cycles, so `vpcm_loopback_test` always presents ≥2 identical cycles — the one
+input shape the decoder needs and a real peer does not provide.
 
 ## Withdrawn — do not re-derive
 
 - ~~"The card transmits 4548T of Sd where §9.3.1.3 says 384T."~~ **Wrong.** That
-  region is TRN1d (Finding 1), and 4548T was only the part of it our detector
-  happened to bracket. The card's Sd was never measured here. Nothing in this
-  capture shows the card violating §9.3.1.3, and `V90_SD_REPS 64` is not
-  implicated. The SmartLink justification at `v90.c:75` stands unchallenged.
+  region is Ri (Finding 2), and the card's Sd is 384T exactly where §9.3.1.3
+  puts it (Finding 3). Nothing in this capture shows the card violating
+  §9.3.1.3, and `V90_SD_REPS 64` is not implicated. The SmartLink justification
+  at `v90.c:75` stands unchallenged.
 - ~~"A scrambler convention mismatch — seed, tap or polarity — explains why we
   cannot read the card's TRN1d."~~ **Disproved.** GPC, zero-initialized, matches
   100% (Finding 1). There is no convention error. Our "0 TRN1d symbols" is a
@@ -294,6 +392,28 @@ Not in `make test`: it encodes a known-open defect, and a suite that is red by
 default stops being read. `--expect-failure` inverts the exit status, so the
 target is green while the defect stands and goes loud if the control breaks or
 the defect is fixed.
+
+## Reproducing the segmentation
+
+`tools/v90_downstream_segment.py` recovers the whole Phase 3 timeline from the
+bytes, independently of the C receive path — which is the point, since it is
+where `eicon_rx_conformance.py`'s expected offsets come from and it must not be
+able to share a bug with the code under test:
+
+```bash
+python3 tools/v90_downstream_segment.py artifacts/eicon-digital-downstream/*.ulaw
+```
+
+```text
+UINFO = 48  ->  W = Ucode 64 (§8.4.4)
+Sd:     T66935       384T      48.0 ms  (64 reps)
+S̄d:     T67319        48T       6.0 ms  (8 reps)
+TRN1d:  T67367     30005T    3750.6 ms  (GPC-locked)
+Jd:     T97372       943T     117.9 ms
+DIL:    T98315     15774T    1971.8 ms
+Ri:     T114089     4572T     571.5 ms  (§8.6.4)
+data:   T118661    97499T   12187.4 ms
+```
 
 ## Reproducing Finding 1
 

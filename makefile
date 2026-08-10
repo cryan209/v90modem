@@ -174,10 +174,11 @@ v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2
 
 # Receive-path conformance against a downstream we did not generate.  Encodes a
-# known-open defect (docs/eicon_downstream_comparison.md, Finding 3), so it is
-# deliberately NOT part of `test` -- a suite that is red by default stops being
-# read.  --expect-failure inverts the exit status: green while the defect
-# stands, loud when the positive control breaks or the defect is fixed.
+# known-open defect (docs/eicon_downstream_comparison.md, Finding 4: DIL
+# recovery cannot read a real one-pass DIL), so it is deliberately NOT part of
+# `test` -- a suite that is red by default stops being read.  --expect-failure
+# inverts the exit status: green while the defect stands, loud when the Phase 3
+# chain regresses or the defect is fixed.
 eicon-rx-test: vpcm_decode
 	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
 
