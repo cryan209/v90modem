@@ -29,15 +29,17 @@ Step 2 FAILS TODAY, and step 1 is what makes that failure meaningful: the
 Phase 3 chain landing exactly right proves codeword recovery works, so a DIL
 no-decode is a real receive-path gap and not a broken harness.
 
-The cause is structural, in `v90_dil_rx.c`. That decoder recovers DIL by
-finding an exactly-periodic run and fitting a descriptor to one cycle. But
-8.4.1 gives each of the N DIL-segments its own training Ucode, so a real DIL
-is not periodic at the segment scale -- only at the full N-segment cycle. The
-card sends that cycle roughly once (~15.7 kT, 1.97 s, 132T segments) before
-the Courier terminates it, so there is no second cycle to lock onto, and the
-scan degenerates to fitting short accidental fragments where adjacent segments
-happen to share a Ucode. Our own transmitter repeats DIL cycles, which is why
-no loopback test sees this.
+The cause is acquisition, in `v90_dil_rx.c`. That decoder finds DIL by
+autocorrelation -- an exactly-periodic run, then a descriptor fitted to one
+cycle -- and `v90_dil_rx_scan()` keeps a candidate only if the run spans
+`2 * c`. The cycle has to appear twice. 8.4.1 lets the analogue modem
+terminate DIL on any segment boundary, and the Courier does so after roughly
+one pass (~15.7 kT, 1.97 s, 132T segments), so it never does.
+
+Below two cycles the decoder does not fail -- it returns success with a wrong
+cycle, fitting a short local repeat. Measured with our own generator, the
+cliff is exactly at 2.00 cycles. Our own transmitter always repeats cycles,
+which is why no loopback test sees this.
 
 See docs/eicon_downstream_comparison.md, Finding 4.
 
@@ -229,10 +231,9 @@ def main():
     print("DIL recovery failed on: " + ", ".join(assertion_failures))
     print("The Phase 3 chain landed on its expected offsets, so codeword")
     print("recovery works and this is a real receive-path gap: v90_dil_rx.c")
-    print("locks onto an exactly-periodic run, and 8.4.1 gives every")
-    print("DIL-segment its own training Ucode, so a real one-pass DIL is")
-    print("periodic only at the full N-segment cycle -- which the card sends")
-    print("about once before the peer terminates it.")
+    print("acquires by autocorrelation and needs the DIL cycle to appear")
+    print("twice, and 8.4.1 lets the peer terminate DIL on any segment")
+    print("boundary -- the Courier does so after about one pass.")
     print("Known-open defect: docs/eicon_downstream_comparison.md, Finding 4.")
     return 0 if args.expect_failure else 1
 

@@ -295,26 +295,69 @@ With Phase 3 anchored correctly, the next stage is DIL, at 12289.4 ms on call 1
 a training Ucode that steps down the ladder segment by segment — 84, 83, 82, 81,
 …
 
-`v90_dil_rx.c` does not decode it. The reason is structural, not a threshold:
-the decoder finds an **exactly-periodic run** and fits a descriptor to one
-cycle. But §8.4.1 gives each of the N segments its own training Ucode, so a real
-DIL is not periodic at the segment scale — only at the full N-segment cycle,
-here ~15.7 kT. The card sends that cycle about **once** before the Courier
-terminates it (§8.4.1 lets the analogue modem terminate on any segment
-boundary), so there is no second cycle to lock onto.
+`v90_dil_rx.c` does not decode it, and the reason is not the descriptor — it is
+**acquisition**. Generating a DIL needs no acquisition: the generator is handed
+the descriptor. The decoder has to find one, and it does that by autocorrelation
+— locate an exactly-periodic run, then fit a descriptor to a single cycle.
+`dil_best_run_at()` extends a candidate only while `x[i] == x[i+c]`, and
+`v90_dil_rx_scan()` keeps it only if `re - rs >= 2 * c`. **The cycle has to
+appear twice.**
 
-What the scan does instead is fit short accidental fragments where two adjacent
-segments happen to share a Ucode. Isolating the DIL region and scanning it alone
-returns a 280-symbol, 35 ms "DIL run" — 2% of the region:
+§8.4.1 lets the analogue modem terminate DIL on any segment boundary, and the
+Courier does so after roughly one pass, so it never appears twice.
+
+Measured with our *own* generator, so nothing depends on reading the card —
+a card-shaped descriptor (N = 119, H<sub>c</sub> = 21, REF<sub>c</sub> = 0,
+training Ucode stepping down the ladder), varying only how much is transmitted:
+
+```text
+descriptor: N=119, 15708T cycle (1963.5 ms)
+
+  cycles sent   symbols     decode      cycle_len reported
+        0.75     11781     OK         12 (WRONG)
+        1.00     15708     OK         12 (WRONG)
+        1.50     23562     OK         12 (WRONG)
+        1.75     27489     OK         12 (WRONG)
+        2.00     31416     OK         15708
+        3.00     47124     OK         15708
+```
+
+A hard cliff at 2.00 cycles, and note what happens below it: the decoder does
+not fail, it **returns success with a wrong cycle**. It fits a 12-symbol period
+to a local repeat inside a segment (LSP = LTP = 12) and reports that as the DIL.
+On the card's capture the same behaviour yields a 280-symbol, 35 ms "DIL run" —
+2% of the region:
 
 ```text
 Codeword-exact DIL run: 890.6 - 925.6 ms (280 symbols, 2 cycles of 132)
   training Ucodes: 2 unique across 2 segments (first: 1 32)
 ```
 
+So "we cannot decode a real DIL" understates it: we silently mis-decode one.
+
+Note also that 15708T is within 0.5% of the card's measured 15774T region, which
+is a second, independent confirmation that N ≈ 119 and H<sub>c</sub> = 21 are
+the card's actual parameters.
+
 Fixing this means recovering segment boundaries structurally — REF<sub>c</sub>
-runs and training-symbol positions — instead of by autocorrelation. That is a
-rewrite of the acquisition front of `v90_dil_rx.c`, not a tuning change.
+runs and training-symbol positions, which are self-describing within a single
+cycle — instead of by autocorrelation. That is a rewrite of the acquisition
+front of `v90_dil_rx.c`, not a tuning change. The descriptor-fitting behind it
+is fine: `vpcm_loopback_test`'s `merged-twins` case already round-trips a
+4-segment DIL with distinct per-segment training Ucodes.
+
+### Why every test missed it
+
+`vpcm_test_dil_roundtrip_case()` sets `body = cycle * 2 + cycle / 2` — always
+**2.5 cycles**, just past the cliff — under a comment that states the assumption
+outright:
+
+> Short cycles need more repetitions to clear the decoder's minimum run length
+> (**real DILs run for seconds regardless of cycle size**).
+
+Real DILs do run for seconds. The card's runs for 1.97 s. It is still only one
+cycle, because a long cycle and a repeated cycle are not the same thing, and
+only the second one is what the decoder needs.
 
 `make eicon-rx-test` pins this: the Phase 3 chain is checked against exact
 expected offsets (so a failure there is a regression, and its passing is what
