@@ -5636,6 +5636,8 @@ static void prepare_v90_analogue_phase3_locked(void)
  * stage as it is reached, act on the deadlines, and say what the measurement
  * came to when it ends.
  */
+static void me_v90_analogue_phase4_progress_locked(void);
+
 static void me_v90_analogue_progress_locked(void)
 {
     static v90_analogue_tx_stage_t last_tx = (v90_analogue_tx_stage_t) -1;
@@ -5689,7 +5691,15 @@ static void me_v90_analogue_progress_locked(void)
         return;
     }
 
-    if (!v90_analogue_phase3_complete(g_v90a) || g_v90a_complete_logged)
+    /*
+     * Phase 4 reporting cannot hang off v90_analogue_phase3_complete(), which
+     * is "the transmitter is sitting in V90A_TX_PHASE4" and therefore stops
+     * being true the moment CPt starts — i.e. exactly when Phase 4 becomes
+     * worth reporting.  Follow it from here instead, unconditionally.
+     */
+    me_v90_analogue_phase4_progress_locked();
+
+    if (!v90_analogue_phase3_complete(g_v90a)  ||  g_v90a_complete_logged)
         return;
     g_v90a_complete_logged = true;
 
@@ -5728,18 +5738,80 @@ static void me_v90_analogue_progress_locked(void)
         trace_phase("V90a Phase3 complete");
     }
 
-    /*
-     * §9.4 is next and does not exist for this role.  Holding the call open
-     * would only run out the training timeout, so end it with a stated reason
-     * — unless a lab run wants the call kept up to keep capturing.
-     */
-    if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) != 0) {
-        ME_LOG("[ME] V.90 analogue: Phase 4 not implemented; ME_V90_ANALOGUE_HOLD "
-               "set, holding the call open\n");
-        return;
+    if (v90_analogue_phase3_phase4_failed(g_v90a)) {
+        ME_LOG("[ME] V.90 analogue: the measurement yielded no constellation "
+               "§8.5.2 would let us offer; Phase 4 cannot start\n");
     }
-    ME_LOG("[ME] V.90 analogue: Phase 4 (§9.4) is not implemented — hanging up\n");
-    g_state = ME_HANGUP;
+    /*endif*/
+}
+
+/*
+ * Follow §9.4 along, with g_state_mtx held.  Phase 4's transmit stages come
+ * from the same transmitter Phase 3 used, so they are already reported by the
+ * TX line above; what is new is the receive side and, at the end, what the
+ * digital modem said in MP.
+ */
+static void me_v90_analogue_phase4_progress_locked(void)
+{
+    static v90_analogue_phase4_rx_stage_t last = (v90_analogue_phase4_rx_stage_t) -1;
+    static int last_mp_frames = -1;
+    static bool started_logged = false;
+    const v90_analogue_phase4_t *p4;
+    v90_analogue_phase4_rx_stage_t stage;
+
+    if (!g_v90a  ||  (p4 = v90_analogue_phase3_phase4_state(g_v90a)) == NULL)
+        return;
+
+    if (!started_logged) {
+        const vpcm_cp_frame_t *cpt = v90_analogue_phase3_cpt(g_v90a);
+        const vpcm_cp_frame_t *cp = v90_analogue_phase3_cp(g_v90a);
+
+        started_logged = true;
+        if (cpt  &&  cp) {
+            ME_LOG("[ME] V.90 analogue Phase 4 started (§9.4.2.1): "
+                   "CPt drn=%u (%d bits/frame), CP drn=%u (%d bits/frame, "
+                   "%.0f bps), Sr=%u, %s\n",
+                   cpt->drn, cpt->drn + 8,
+                   cp->drn, cp->drn + 20, vpcm_cp_drn_to_bps(cp->drn),
+                   cp->shaping_redundancy,
+                   cp->codec_alaw ? "A-law" : "u-law");
+            trace_phase("V90a Phase4 start: CPt drn=%u CP drn=%u",
+                        cpt->drn, cp->drn);
+        }
+        /*endif*/
+    }
+    /*endif*/
+
+    stage = v90_analogue_phase4_stage(p4);
+    if (stage != last) {
+        last = stage;
+        ME_LOG("[ME] V.90 analogue Phase 4 RX: %s (Ri %dT, TRN2d %dT/%d ones, "
+               "MP %d frames, %d frames off the CPt constellation)\n",
+               v90_analogue_phase4_stage_name(stage),
+               v90_analogue_phase4_r_symbols(p4),
+               v90_analogue_phase4_trn2d_symbols(p4),
+               v90_analogue_phase4_trn2d_ones(p4),
+               v90_analogue_phase4_mp_frames(p4),
+               v90_analogue_phase4_demap_failures(p4));
+        trace_phase("V90a P4 RX %s", v90_analogue_phase4_stage_name(stage));
+    }
+    /*endif*/
+    if (v90_analogue_phase4_mp_frames(p4) != last_mp_frames) {
+        const v90_analogue_mp_t *mp = v90_analogue_phase4_mp(p4);
+
+        last_mp_frames = v90_analogue_phase4_mp_frames(p4);
+        if (mp) {
+            /* §9.4.2.4: the upstream rate is the maximum enabled in both
+             * modems and no more than MP's cap. */
+            ME_LOG("[ME] V.90 analogue MP: Type %d, max upstream drn=%u (%d bps), "
+                   "trellis=%u, rate mask 0x%04X, %s\n",
+                   mp->type1 ? 1 : 0, mp->max_drn, mp->max_drn*2400,
+                   mp->trellis, mp->rate_mask,
+                   mp->acknowledge ? "MP' (acknowledged)" : "MP");
+        }
+        /*endif*/
+    }
+    /*endif*/
 }
 
 /* Called with g_state_mtx held. */

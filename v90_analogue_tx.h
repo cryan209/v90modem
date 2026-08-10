@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "v90.h"
+#include "vpcm_cp.h"
 
 typedef enum {
     /* §9.3.2.1 — 70 ± 5 ms of silence after INFO1a. */
@@ -44,7 +45,20 @@ typedef enum {
     V90A_TX_DIL_RX,             /* §9.3.2.9 — silence or SCR while DIL arrives */
     V90A_TX_S_DIL_ENOUGH,       /* §9.3.2.10 — S for 128T: "enough of the DIL" */
     V90A_TX_S_BAR_DIL_ENOUGH,   /* §9.3.2.10 — S̄ for 16T */
-    V90A_TX_PHASE4,             /* §9.4 — this module is done */
+    /*
+     * §9.4.2.  Phase 4's transmit side is the same modulation as Ja -- §8.5.2
+     * sends CP "according to 10.1.3.9/V.34", which is J's -- so it belongs
+     * here rather than in a second symbol pump beside this one.  What changes
+     * is only which bits are fed to it, and that Phase 4 has four conditional
+     * moments instead of Phase 3's four.
+     */
+    V90A_TX_PHASE4,             /* §9.3.2.10 done, Phase 4 not yet armed */
+    V90A_TX_CPT,                /* §9.4.2.1 — CPt, until the Ri→R̄i transition */
+    V90A_TX_SCR4,               /* §9.4.2.2 — optional SCR, at most 4000 ms */
+    V90A_TX_CP,                 /* §9.4.2.3 — CP, until MP arrives */
+    V90A_TX_CP_PRIME,           /* §9.4.2.3 — CP with the acknowledge bit set */
+    V90A_TX_E,                  /* §9.4.2.4 — §8.5.3's 20 ones */
+    V90A_TX_B1_PENDING,         /* §9.4.2.5 — E sent; B1 is not implemented */
 } v90_analogue_tx_stage_t;
 
 typedef struct v90_analogue_tx_s v90_analogue_tx_t;
@@ -85,6 +99,34 @@ void v90_analogue_tx_sd_bar_seen(v90_analogue_tx_t *s);   /* §9.3.2.4 */
 void v90_analogue_tx_jd_seen(v90_analogue_tx_t *s);       /* §9.3.2.7 */
 void v90_analogue_tx_jd_prime_seen(v90_analogue_tx_t *s); /* §9.3.2.8 */
 void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s);    /* §9.3.2.10 */
+
+/*
+ * Arm Phase 4 (§9.4.2.1) with the two CP sequences the measurement produced:
+ * CPt names the constellation the digital modem trains on, CP the one it uses
+ * in data mode.  CP' is CP with Table 14 bit 33 set, so it is derived here
+ * rather than passed in — §8.5.2 requires every CP in a group to carry
+ * identical parameters, and building it from the same frame is the only way to
+ * be sure of that.
+ *
+ * Takes effect at V90A_TX_PHASE4, which §9.3.2.10 has already reached by the
+ * time a measurement exists.  Returns false if either sequence will not pack.
+ */
+bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
+                                  const vpcm_cp_frame_t *cpt,
+                                  const vpcm_cp_frame_t *cp,
+                                  bool scr_after_r);
+
+/*
+ * Phase 4's conditional moments, from the PCM receive side (§9.4.2).  Like the
+ * Phase 3 events above, each is idempotent.
+ *
+ * "Complete the current sequence" in §9.4.2.2/.3/.4 is taken literally: the
+ * event is latched and the stage changes at the next sequence boundary, so a
+ * peer never sees a CP truncated mid-frame.
+ */
+void v90_analogue_tx_r_transition_seen(v90_analogue_tx_t *s); /* §9.4.2.2 */
+void v90_analogue_tx_mp_seen(v90_analogue_tx_t *s);           /* §9.4.2.3 */
+void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s);     /* §9.4.2.4 */
 
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s);
 const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage);

@@ -18,6 +18,7 @@
 
 #include <spandsp.h>
 
+#include "v90_analogue_phase4.h"
 #include "v90_analogue_rx.h"
 #include "v90_analogue_tx.h"
 
@@ -75,5 +76,19 @@ bool v90_analogue_phase3_retrain_due(const v90_analogue_phase3_t *s);
 
 /* The DIL measurement, once §9.3.2.10 has fired.  NULL before that. */
 const v90_dil_measurement_t *v90_analogue_phase3_measurement(const v90_analogue_phase3_t *s);
+
+/*
+ * §9.4.  The handover happens inside this module, at the one moment both its
+ * conditions hold — the transmitter has finished §9.3.2.10 and a measurement
+ * exists — because that is when a CPt can be built, and nothing after R̄i can
+ * be read without one.  From then on the codeword stream goes to the Phase 4
+ * receiver instead of the Phase 3 one.
+ */
+const v90_analogue_phase4_t *v90_analogue_phase3_phase4_state(const v90_analogue_phase3_t *s);
+/* The measurement produced no constellation §8.5.2 would let us offer. */
+bool v90_analogue_phase3_phase4_failed(const v90_analogue_phase3_t *s);
+/* What is being transmitted, once Phase 4 has started.  NULL before that. */
+const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s);
+const vpcm_cp_frame_t *v90_analogue_phase3_cp(const v90_analogue_phase3_t *s);
 
 #endif

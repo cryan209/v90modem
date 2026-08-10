@@ -97,6 +97,11 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
  * byte 0, and bit 0 is first in time. */
 #define JA_MAX_BYTES            1024
 
+/* §9.4.2.2: SCR after the R̄i transition, for no more than 4000 ms. */
+#define SCR_PHASE4_MAX_MS       4000
+/* §8.5.3 -> §10.1.3.2/V.34: E is 20 bits, and this mapping is 2 bits/symbol. */
+#define E_SYMBOLS               10
+
 struct v90_analogue_tx_s {
     v90_analogue_tx_config_t cfg;
     int      baud_rate;             /* symbols per second */
@@ -120,6 +125,26 @@ struct v90_analogue_tx_s {
     int      ja_bit_pos;
 
     bool     dil_zero_length;
+
+    /*
+     * §9.4.2.  One bit per byte here, unlike Ja's packed descriptor, because
+     * that is what vpcm_cp_encode_bits() produces and repacking it would buy
+     * nothing: CP is sent once per few hundred symbols, not per sample.
+     */
+    uint8_t  cpt_bits[VPCM_CP_MAX_BITS];
+    int      cpt_len;
+    uint8_t  cp_bits[VPCM_CP_MAX_BITS];
+    int      cp_len;
+    uint8_t  cp_prime_bits[VPCM_CP_MAX_BITS];
+    int      cp_prime_len;
+    int      cp_bit_pos;            /* cursor into whichever is being sent */
+    bool     scr_after_r;
+    bool     phase4_armed;
+    /* §9.4.2.2/.3/.4 all say "complete the current sequence" before changing
+     * signal, so an event latches here and is acted on at the next wrap. */
+    bool     pending_r_transition;
+    bool     pending_mp;
+    bool     pending_mp_prime;
 };
 
 static int ms_to_symbols(const v90_analogue_tx_t *s, int ms)
@@ -169,6 +194,73 @@ static void enter_stage(v90_analogue_tx_t *s, v90_analogue_tx_stage_t stage)
 {
     s->stage = stage;
     s->stage_symbols = 0;
+}
+
+/* The bit stream the Phase 4 stage is currently repeating, and its length. */
+static const uint8_t *cp_stream(const v90_analogue_tx_t *s, int *len)
+{
+    switch (s->stage) {
+    case V90A_TX_CPT:       *len = s->cpt_len;      return s->cpt_bits;
+    case V90A_TX_CP:        *len = s->cp_len;       return s->cp_bits;
+    case V90A_TX_CP_PRIME:  *len = s->cp_prime_len; return s->cp_prime_bits;
+    default:                *len = 0;               return NULL;
+    }
+}
+
+/*
+ * One Phase 4 symbol from the CP stream, honouring §9.4.2's "complete the
+ * current sequence".  Returns the stage to move to at this symbol, or the
+ * current stage to stay.
+ */
+static v90_analogue_tx_stage_t cp_symbol(v90_analogue_tx_t *s,
+                                         float *re, float *im)
+{
+    const uint8_t *bits;
+    int len;
+    int b0;
+    int b1;
+
+    bits = cp_stream(s, &len);
+    if (bits == NULL  ||  len <= 0)
+        return s->stage;
+    b0 = bits[s->cp_bit_pos++] & 1;
+    if (s->cp_bit_pos >= len)
+        s->cp_bit_pos = 0;
+    b1 = bits[s->cp_bit_pos++] & 1;
+    if (s->cp_bit_pos >= len)
+        s->cp_bit_pos = 0;
+    diff_encoded_symbol(s, b0, b1, re, im);
+    if (s->cp_bit_pos != 0)
+        return s->stage;
+    /*endif*/
+    /* A sequence boundary: this is where a latched event may be acted on. */
+    switch (s->stage) {
+    case V90A_TX_CPT:
+        /* §9.4.2.2: after the R̄i transition, complete the CPt and then send
+         * SCR for at most 4000 ms, or go straight on -- both are permitted. */
+        if (s->pending_r_transition) {
+            s->pending_r_transition = false;
+            return s->scr_after_r ? V90A_TX_SCR4 : V90A_TX_CP;
+        }
+        break;
+    case V90A_TX_CP:
+        /* §9.4.2.3: MP received, so acknowledge from the next sequence on. */
+        if (s->pending_mp) {
+            s->pending_mp = false;
+            return V90A_TX_CP_PRIME;
+        }
+        break;
+    case V90A_TX_CP_PRIME:
+        /* §9.4.2.4: a CP' has now been sent and MP'/Ed has arrived. */
+        if (s->pending_mp_prime) {
+            s->pending_mp_prime = false;
+            return V90A_TX_E;
+        }
+        break;
+    default:
+        break;
+    }
+    return s->stage;
 }
 
 v90_analogue_tx_t *v90_analogue_tx_init(const v90_analogue_tx_config_t *cfg)
@@ -375,7 +467,59 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
         return;
 
     case V90A_TX_PHASE4:
-        /* §9.4 belongs to the Phase 4 transmitter; stay silent here. */
+        /*
+         * §9.3.2.10 is done.  §9.4.2.1 starts as soon as a CPt exists, which
+         * is a decision the measurement makes, not this module -- so wait
+         * silently for v90_analogue_tx_start_phase4() rather than guess.
+         */
+        if (s->phase4_armed) {
+            /* §8.5.2: the scrambler and differential encoder are initialised
+             * to zero before the first CPt. */
+            s->scramble_reg = 0;
+            s->diff = 0;
+            s->cp_bit_pos = 0;
+            enter_stage(s, V90A_TX_CPT);
+        }
+        /*endif*/
+        return;
+
+    case V90A_TX_CPT:
+    case V90A_TX_CP:
+    case V90A_TX_CP_PRIME: {
+        v90_analogue_tx_stage_t next = cp_symbol(s, re, im);
+
+        if (next != s->stage)
+            enter_stage(s, next);
+        /*endif*/
+        return;
+    }
+
+    case V90A_TX_SCR4:
+        /* §9.4.2.2: SCR for no more than 4000 ms.  §8.3.5 again — ones
+         * through the same mapping, nothing reinitialised. */
+        diff_encoded_symbol(s, 1, 1, re, im);
+        if (s->stage_symbols >= ms_to_symbols(s, SCR_PHASE4_MAX_MS))
+            enter_stage(s, V90A_TX_CP);
+        /*endif*/
+        return;
+
+    case V90A_TX_E:
+        /* §8.5.3 -> §10.1.3.2/V.34: twenty binary ones, through J's mapping.
+         * Two bits per symbol, so ten symbols. */
+        diff_encoded_symbol(s, 1, 1, re, im);
+        if (s->stage_symbols >= E_SYMBOLS)
+            enter_stage(s, V90A_TX_B1_PENDING);
+        /*endif*/
+        return;
+
+    case V90A_TX_B1_PENDING:
+        /*
+         * §9.4.2.5 wants B1 here — one data frame of scrambled ones through
+         * the *data mode* mapper, which the analogue role does not have: the
+         * upstream data path is still SpanDSP's V.22bis placeholder.  Sending
+         * something that is not B1 would be worse than sending nothing, so
+         * hold silence and let the engine report where this stopped.
+         */
         return;
     }
 }
@@ -406,6 +550,59 @@ void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s)
         enter_stage(s, V90A_TX_S_DIL_ENOUGH);
 }
 
+bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
+                                  const vpcm_cp_frame_t *cpt,
+                                  const vpcm_cp_frame_t *cp,
+                                  bool scr_after_r)
+{
+    vpcm_cp_frame_t prime;
+
+    if (s == NULL  ||  cpt == NULL  ||  cp == NULL)
+        return false;
+    if (!vpcm_cp_encode_bits(cpt, s->cpt_bits, &s->cpt_len))
+        return false;
+    if (!vpcm_cp_encode_bits(cp, s->cp_bits, &s->cp_len))
+        return false;
+    /* §8.5.2: CP' is CP with the acknowledge bit set, and every CP in a group
+     * carries identical parameters -- so derive it rather than accept one. */
+    prime = *cp;
+    prime.acknowledge = true;
+    if (!vpcm_cp_encode_bits(&prime, s->cp_prime_bits, &s->cp_prime_len))
+        return false;
+    /* Two bits go out per symbol, so an odd length would put the sequence
+     * boundary mid-symbol and "complete the current sequence" would have no
+     * meaning.  Table 14's fill bits make it even; check rather than assume. */
+    if ((s->cpt_len & 1)  ||  (s->cp_len & 1)  ||  (s->cp_prime_len & 1))
+        return false;
+    s->scr_after_r = scr_after_r;
+    s->phase4_armed = true;
+    return true;
+}
+
+void v90_analogue_tx_r_transition_seen(v90_analogue_tx_t *s)
+{
+    if (s  &&  s->stage == V90A_TX_CPT)
+        s->pending_r_transition = true;
+}
+
+void v90_analogue_tx_mp_seen(v90_analogue_tx_t *s)
+{
+    if (s == NULL)
+        return;
+    /* §9.4.2.3 acknowledges MP from CP; arriving during SCR only means the
+     * digital modem is ahead of us, so cut SCR short rather than lose it. */
+    if (s->stage == V90A_TX_SCR4)
+        enter_stage(s, V90A_TX_CP);
+    if (s->stage == V90A_TX_CP)
+        s->pending_mp = true;
+}
+
+void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s)
+{
+    if (s  &&  s->stage == V90A_TX_CP_PRIME)
+        s->pending_mp_prime = true;
+}
+
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s)
 {
     return s ? s->stage : V90A_TX_PHASE4;
@@ -429,7 +626,13 @@ const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage)
     case V90A_TX_DIL_RX:            return "DIL receive";
     case V90A_TX_S_DIL_ENOUGH:      return "S (DIL enough)";
     case V90A_TX_S_BAR_DIL_ENOUGH:  return "S-bar (DIL enough)";
-    case V90A_TX_PHASE4:            return "Phase 4";
+    case V90A_TX_PHASE4:            return "Phase 4 (unarmed)";
+    case V90A_TX_CPT:               return "CPt";
+    case V90A_TX_SCR4:              return "SCR (post-R-bar)";
+    case V90A_TX_CP:                return "CP";
+    case V90A_TX_CP_PRIME:          return "CP'";
+    case V90A_TX_E:                 return "E";
+    case V90A_TX_B1_PENDING:        return "B1 (not implemented)";
     }
     return "?";
 }

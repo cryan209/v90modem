@@ -1,0 +1,646 @@
+/*
+ * v90_analogue_phase4.c — the analogue modem's Phase 4 receiver (§9.4.2).
+ *
+ * See v90_analogue_phase4.h for the signals.  The shape of this file is set by
+ * one fact: everything after R̄i is mapped through §5.4 with the CPt this side
+ * chose, so from that point the receiver is not looking at signs any more, it
+ * is running the modulus mapper backwards.  v90_demap_shaped_frame() is that
+ * inverse, and it needs three things kept exactly right across the whole of
+ * Phase 4 -- the six-symbol frame grid, the §5.3 descrambler, and the §5.4.5
+ * shaping state.  §8.6.5 zeroes the last two at TRN2d's first frame, and
+ * §8.6.4's R̄i is 24T, a whole number of frames, which fixes the first.
+ *
+ * So the only thing that has to be *found* here is R, and after that the whole
+ * phase is counted rather than searched.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <spandsp.h>
+
+#include "v90_analogue_phase4.h"
+
+/* §8.6.4: R and R̄ are six-symbol sequences; R̄ is exactly four repetitions. */
+#define R_PERIOD            6
+#define R_BAR_SYMBOLS       24
+/* Symbols of history the R hunt matches against — two whole periods.  §9.4.1.1
+ * sends Ri for at least 192T, so there is no shortage of them. */
+#define R_HISTORY           12
+/*
+ * Consecutive symbols at the opposite polarity that call §9.4.2.2's transition.
+ *
+ * Two whole periods, not half of one.  §8.6.4's R̄ reverses *every* sign, so a
+ * genuine reversal disagrees on every symbol; a slipped or repeated octet
+ * shifts the alignment instead, which disagrees on some slots and agrees on
+ * others.  Measured on the card's Ri -- 80 000 runs of exactly three signs with
+ * 24 anomalies in thirty seconds -- a three-symbol test fires on those
+ * anomalies and reports a transition that never happened.
+ */
+#define R_REVERSAL_SLOTS    12
+
+/* §9.4.1.2 sends TRN2d for at least 2040T; MP is not looked for before then
+ * (§9.4.1.3 allows up to 2000 ms). */
+#define TRN2D_MIN_SYMBOLS   2040
+/* Plain bits kept while hunting MP's sync run.  Two Type-1 MP frames' worth. */
+#define MP_BIT_WINDOW       512
+/* §8.6.3 Table 16: Type 0 runs to bit 85 plus fill, Type 1 to bit 187. */
+#define MP_TYPE0_BITS       86
+#define MP_TYPE1_BITS       188
+#define MP_SYNC_BITS        17
+/* §8.6.2: Ed is two data frames of zeroes.  Require most of one frame's worth
+ * of them before calling it, so a run inside MP's fill cannot. */
+#define ED_ZERO_RUN         48
+
+struct v90_analogue_phase4_s {
+    v90_analogue_phase4_config_t cfg;
+    v90_analogue_phase4_rx_stage_t stage;
+
+    int64_t  index;
+
+    /* R acquisition (§8.6.4): two whole periods of history to match against. */
+    uint8_t  hist_sign[R_HISTORY];
+    int      hist_ucode[R_HISTORY];
+    int      hist_len;
+    int      r_ucode;
+    int      r_phase;               /* index%6 holding slot 0 */
+    int      r_polarity;            /* sign seen in slot 0 when R was acquired */
+    int      r_symbols;
+    int      r_reversed_slots;
+    int      r_bar_symbols;
+
+    /* §5.4 demapping, from TRN2d onwards. */
+    int      bits_per_frame;
+    uint8_t  frame[6];
+    int      frame_fill;
+    uint32_t descramble_reg;
+    v90_shaped_rx_state_t shaper;
+    int      trn2d_symbols;
+    int      trn2d_ones;
+    bool     trn2d_broke;
+    int      demap_failures;
+
+    /* Plain bits, as a sliding window for the MP hunt. */
+    uint8_t  bits[MP_BIT_WINDOW];
+    int      bit_len;
+    int      ones_run;          /* §8.6.3's sync run, seen from the far side */
+    int      mp_candidate;      /* frame start implied by a start bit, or -1 */
+    int      zero_run;
+    bool     mp_seen;
+
+    int      mp_frames;
+    v90_analogue_mp_t mp;
+    bool     mp_valid;
+};
+
+static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
+{
+    int sign;
+
+    v90_codeword_decompose(s->cfg.law, c, ucode, &sign);
+    return sign;
+}
+
+v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config_t *cfg)
+{
+    v90_analogue_phase4_t *s;
+
+    if (cfg == NULL)
+        return NULL;
+    /* Table 14: CPt's rate field is (drn + 8) bits per six-symbol frame, where
+     * CP's is (drn + 20).  Using the wrong one puts this demapper on a
+     * different frame length than the digital modem's mapper. */
+    if (cfg->cpt.shaping_redundancy < 1  ||  cfg->cpt.shaping_redundancy > 3)
+        return NULL;
+    if ((s = calloc(1, sizeof(*s))) == NULL)
+        return NULL;
+    s->cfg = *cfg;
+    s->bits_per_frame = cfg->cpt.drn + 8;
+    s->stage = V90A4_RX_HUNT_R;
+    s->r_phase = -1;
+    s->mp_candidate = -1;
+    return s;
+}
+
+void v90_analogue_phase4_free(v90_analogue_phase4_t *s)
+{
+    free(s);
+}
+
+/* §10.1.2.3.2/V.34 over Table 16's three information blocks, which is the same
+ * convention v90.c builds MP with. */
+static bool mp_crc_ok(const uint8_t *bits)
+{
+    uint16_t crc;
+    int i;
+
+    crc = 0xFFFF;
+    for (int start = 17; start < 68; start += 17) {
+        for (int bit = start + 1; bit <= start + 16; bit++)
+            crc = crc_itu16_bits(bits[bit] & 1U, 1, crc);
+    }
+    for (i = 0; i < 16; i++) {
+        if (bits[69 + i] != ((crc >> i) & 1))
+            return false;
+    }
+    return true;
+}
+
+/* Table 16's fixed fields.  A frame that fails these is not an MP however
+ * plausible the CRC looks. */
+static bool mp_structure_ok(const uint8_t *bits, int avail)
+{
+    int i;
+
+    if (avail < MP_TYPE0_BITS)
+        return false;
+    for (i = 0; i < MP_SYNC_BITS; i++) {
+        if (bits[i] != 1)
+            return false;
+    }
+    /* Start bits 17, 34, 51, 68 and the reserved fields the digital modem
+     * sets to zero (19:23, 28, 35, 50). */
+    if (bits[17] || bits[34] || bits[51] || bits[68])
+        return false;
+    for (i = 19; i <= 23; i++) {
+        if (bits[i])
+            return false;
+    }
+    if (bits[28] || bits[35] || bits[50])
+        return false;
+    if (bits[18] == 0) {
+        /* Type 0: 52:67 reserved, bit 85 fill. */
+        for (i = 52; i <= 67; i++) {
+            if (bits[i])
+                return false;
+        }
+        if (bits[85])
+            return false;
+    } else if (avail < MP_TYPE1_BITS) {
+        return false;
+    }
+    return mp_crc_ok(bits);
+}
+
+static uint32_t get_bits(const uint8_t *bits, int first, int count)
+{
+    uint32_t v = 0;
+
+    for (int i = 0; i < count; i++)
+        v |= (uint32_t) (bits[first + i] & 1U) << i;
+    return v;
+}
+
+static void mp_decode(const uint8_t *bits, v90_analogue_mp_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->type1            = bits[18] != 0;
+    out->max_drn          = (uint8_t) get_bits(bits, 24, 4);
+    out->trellis          = (uint8_t) get_bits(bits, 29, 2);
+    out->nonlinear        = bits[31] != 0;
+    out->expanded_shaping = bits[32] != 0;
+    out->acknowledge      = bits[33] != 0;
+    out->rate_mask        = (uint16_t) get_bits(bits, 36, 13);
+}
+
+/* Append one demapped plain bit, and answer whether it completed something. */
+static unsigned push_bit(v90_analogue_phase4_t *s, int bit)
+{
+    unsigned events = 0;
+
+    if (s->bit_len >= MP_BIT_WINDOW) {
+        /* A Type-1 candidate that never completed.  Drop it rather than grow
+         * the window: MP repeats, so the next frame costs nothing. */
+        s->mp_candidate = -1;
+        s->bit_len = 0;
+    }
+    /*endif*/
+    s->bits[s->bit_len++] = (uint8_t) (bit & 1);
+
+    /*
+     * §8.6.2: Ed is two data frames of scrambled zeroes, and it is the only
+     * long zero run in Phase 4 -- TRN2d is ones and MP opens with seventeen of
+     * them.  It is what §9.4.2.4 accepts in place of MP′.
+     */
+    if (bit == 0) {
+        if (++s->zero_run >= ED_ZERO_RUN  &&  s->mp_seen
+            &&
+            s->stage == V90A4_RX_MP) {
+            s->stage = V90A4_RX_DONE;
+            events |= V90A4_RX_EVENT_ED;
+        }
+        /*endif*/
+    } else {
+        s->zero_run = 0;
+    }
+    /*endif*/
+
+    /*
+     * Find MP by Table 16's start bit, not by its sync run.
+     *
+     * The sync run cannot be found directly: §8.6.5's TRN2d is scrambled ones
+     * and §8.6.3's MP opens with seventeen more of them, so there is no edge
+     * between the two -- exactly the same problem §8.4.2's Jd sets against
+     * TRN1d, and with the same answer.  Bit 17 is a zero and everything before
+     * it is a one, so the first zero after seventeen or more ones is bit 17,
+     * and the frame started seventeen bits earlier.
+     */
+    if (s->mp_candidate < 0) {
+        if (bit == 0  &&  s->ones_run >= MP_SYNC_BITS) {
+            s->mp_candidate = s->bit_len - 1 - MP_SYNC_BITS;
+            if (s->mp_candidate < 0)
+                s->mp_candidate = 0;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+    s->ones_run = bit ? (s->ones_run + 1) : 0;
+
+    if (s->mp_candidate >= 0) {
+        const uint8_t *frame = s->bits + s->mp_candidate;
+        int have = s->bit_len - s->mp_candidate;
+        int need = MP_TYPE0_BITS;
+
+        /* Bit 18 says which length to wait for (§8.6.3, Table 16). */
+        if (have > 18  &&  frame[18])
+            need = MP_TYPE1_BITS;
+        /*endif*/
+        if (have >= need) {
+            if (mp_structure_ok(frame, have)) {
+                mp_decode(frame, &s->mp);
+                s->mp_valid = true;
+                s->mp_frames++;
+                s->mp_seen = true;
+                if (s->stage == V90A4_RX_TRN2D)
+                    s->stage = V90A4_RX_MP;
+                /*endif*/
+                events |= V90A4_RX_EVENT_MP;
+                if (s->mp.acknowledge)
+                    events |= V90A4_RX_EVENT_MP_PRIME;
+                /*endif*/
+            }
+            /*endif*/
+            /* Resolved either way: the next frame is found from its own start
+             * bit, so nothing before this point is needed again. */
+            s->mp_candidate = -1;
+            s->bit_len = 0;
+        }
+    } else if (s->bit_len >= MP_BIT_WINDOW - 1) {
+        /* No candidate and the window is full: keep only enough to carry the
+         * ones run that a start bit would terminate. */
+        memmove(s->bits, s->bits + s->bit_len - MP_SYNC_BITS, MP_SYNC_BITS);
+        s->bit_len = MP_SYNC_BITS;
+    }
+    /*endif*/
+    return events;
+}
+
+/* Demap one complete six-codeword frame (§5.4) and feed its bits forward. */
+static unsigned demap_frame(v90_analogue_phase4_t *s)
+{
+    uint8_t out[64];
+    unsigned events = 0;
+    int n;
+
+    n = v90_demap_shaped_frame(s->cfg.law, &s->cfg.cpt, s->bits_per_frame,
+                               &s->descramble_reg, &s->shaper, s->frame, out);
+    if (n <= 0) {
+        /*
+         * A frame that will not demap is a frame whose codewords are not in
+         * the constellation this side asked for.  Count it: a digital modem
+         * that ignored CPt produces nothing but these, and that is a different
+         * problem from one that is simply not transmitting yet.
+         */
+        s->demap_failures++;
+        return 0;
+    }
+    /*endif*/
+    for (int i = 0; i < n; i++) {
+        /* §8.6.5 is scrambled ones from the first frame, so what this counts
+         * is the run before the first zero -- which is MP's start bit, and
+         * therefore also where TRN2d ended. */
+        if (s->stage == V90A4_RX_TRN2D  &&  !s->trn2d_broke) {
+            if (out[i])
+                s->trn2d_ones++;
+            else
+                s->trn2d_broke = true;
+        }
+        /*endif*/
+        events |= push_bit(s, out[i]);
+    }
+    return events;
+}
+
+/*
+ * Is the sign history a run of §8.6.4's + + + − − − at alignment `phase`?
+ * `phase` is the offset within the history at which slot 0 sits.
+ */
+static bool r_pattern_at(const v90_analogue_phase4_t *s, int phase, int *polarity)
+{
+    int first;
+
+    first = s->hist_sign[phase];
+    for (int i = 0; i < R_HISTORY; i++) {
+        int slot = (i - phase + R_HISTORY)%R_PERIOD;
+        int want = (slot < 3) ? first : !first;
+
+        if (s->hist_sign[i] != want)
+            return false;
+    }
+    *polarity = first;
+    return true;
+}
+
+static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
+{
+    unsigned events = 0;
+    int ucode;
+    int sign;
+
+    sign = codeword_sign(s, c, &ucode);
+
+    switch (s->stage) {
+    case V90A4_RX_HUNT_R:
+        /*
+         * Slide a window of R_HISTORY codewords along and ask whether it is
+         * two whole periods of §8.6.4's pattern at one non-zero level.  Two
+         * periods at a fixed magnitude is not something TRN, Ja or silence
+         * produce, and §9.4.1.1 sends at least 192T of it.
+         */
+        memmove(s->hist_sign, s->hist_sign + 1, R_HISTORY - 1);
+        memmove(s->hist_ucode, s->hist_ucode + 1,
+                (R_HISTORY - 1)*sizeof(s->hist_ucode[0]));
+        s->hist_sign[R_HISTORY - 1] = (uint8_t) sign;
+        s->hist_ucode[R_HISTORY - 1] = ucode;
+        if (s->hist_len < R_HISTORY)
+            s->hist_len++;
+        /*endif*/
+        if (s->hist_len == R_HISTORY  &&  s->hist_ucode[0] != 0) {
+            bool level = true;
+
+            for (int i = 1; i < R_HISTORY; i++) {
+                if (s->hist_ucode[i] != s->hist_ucode[0]) {
+                    level = false;
+                    break;
+                }
+            }
+            for (int phase = 0; level  &&  phase < R_PERIOD; phase++) {
+                int polarity;
+
+                if (!r_pattern_at(s, phase, &polarity))
+                    continue;
+                /*endif*/
+                s->r_ucode = s->hist_ucode[0];
+                s->r_polarity = polarity;
+                /* The history's last symbol is at slot (R_HISTORY-1-phase). */
+                s->r_phase = (int) ((s->index - (R_HISTORY - 1 - phase))%R_PERIOD);
+                if (s->r_phase < 0)
+                    s->r_phase += R_PERIOD;
+                s->r_symbols = R_HISTORY;
+                s->stage = V90A4_RX_R;
+                events |= V90A4_RX_EVENT_R;
+                break;
+            }
+        }
+        /*endif*/
+        break;
+
+    case V90A4_RX_R: {
+        int slot = (int) ((s->index - s->r_phase)%R_PERIOD);
+        int want;
+
+        if (slot < 0)
+            slot += R_PERIOD;
+        want = (slot < 3) ? s->r_polarity : !s->r_polarity;
+        s->r_symbols++;
+        if (ucode != s->r_ucode) {
+            /* R is over without a reversal this side could see.  §9.4.2.2 has
+             * nothing to act on, so start again rather than pretend. */
+            s->stage = V90A4_RX_HUNT_R;
+            s->hist_len = 0;
+            break;
+        }
+        /*endif*/
+        if (sign == want) {
+            /*
+             * The pattern broke and then came back: that is a slipped octet
+             * moving the alignment, not a reversal.  Re-acquire rather than
+             * carry a wrong alignment, which would disagree on some slots for
+             * the rest of the call and hide the reversal when it does come.
+             */
+            if (s->r_reversed_slots > 0)
+                s->stage = V90A4_RX_HUNT_R, s->hist_len = 0;
+            /*endif*/
+            s->r_reversed_slots = 0;
+            break;
+        }
+        /*endif*/
+        /* §8.6.4: R̄ is R with every sign reversed, so a sustained run at the
+         * opposite polarity is §9.4.2.2's transition -- the same shape as
+         * §9.3.2.4's Sd-to-S̄d, and detected the same way. */
+        if (++s->r_reversed_slots >= R_REVERSAL_SLOTS) {
+            s->stage = V90A4_RX_R_BAR;
+            s->r_bar_symbols = s->r_reversed_slots;
+            events |= V90A4_RX_EVENT_R_BAR;
+        }
+        /*endif*/
+        break;
+    }
+
+    case V90A4_RX_R_BAR:
+        /*
+         * §8.6.4 fixes R̄ at four repetitions and §9.4.1.2 sends exactly 24T of
+         * it, so TRN2d's first symbol is counted rather than searched for --
+         * and 24 is a whole number of frames, which is what puts the §5.4
+         * frame grid in step with R's alignment.  A level change before then
+         * means the count was wrong somewhere, so take that too.
+         */
+        s->r_bar_symbols++;
+        if (s->r_bar_symbols >= R_BAR_SYMBOLS  ||  ucode != s->r_ucode) {
+            /* §8.6.5: scrambler and shaping state are zero at TRN2d's first
+             * frame, which is what makes everything after it decodable. */
+            s->descramble_reg = 0;
+            memset(&s->shaper, 0, sizeof(s->shaper));
+            s->frame_fill = 0;
+            s->bit_len = 0;
+            s->ones_run = 0;
+            s->mp_candidate = -1;
+            s->zero_run = 0;
+            s->stage = V90A4_RX_TRN2D;
+            events |= V90A4_RX_EVENT_TRN2D;
+            if (ucode != s->r_ucode) {
+                /* This codeword is already TRN2d's first. */
+                s->frame[s->frame_fill++] = c;
+                s->trn2d_symbols++;
+            }
+            /*endif*/
+        }
+        /*endif*/
+        break;
+
+    case V90A4_RX_TRN2D:
+    case V90A4_RX_MP:
+        if (s->stage == V90A4_RX_TRN2D)
+            s->trn2d_symbols++;
+        /*endif*/
+        s->frame[s->frame_fill++] = c;
+        if (s->frame_fill == 6) {
+            s->frame_fill = 0;
+            events |= demap_frame(s);
+        }
+        /*endif*/
+        break;
+
+    case V90A4_RX_DONE:
+        break;
+    }
+    s->index++;
+    return events;
+}
+
+unsigned v90_analogue_phase4_put(v90_analogue_phase4_t *s,
+                                 const uint8_t *codewords,
+                                 int count)
+{
+    unsigned events = 0;
+
+    if (s == NULL  ||  codewords == NULL)
+        return 0;
+    for (int i = 0; i < count; i++)
+        events |= put_one(s, codewords[i]);
+    return events;
+}
+
+v90_analogue_phase4_rx_stage_t v90_analogue_phase4_stage(const v90_analogue_phase4_t *s)
+{
+    return s ? s->stage : V90A4_RX_HUNT_R;
+}
+
+const char *v90_analogue_phase4_stage_name(v90_analogue_phase4_rx_stage_t stage)
+{
+    switch (stage) {
+    case V90A4_RX_HUNT_R: return "hunting Ri";
+    case V90A4_RX_R:      return "Ri";
+    case V90A4_RX_R_BAR:  return "R-bar_i";
+    case V90A4_RX_TRN2D:  return "TRN2d";
+    case V90A4_RX_MP:     return "MP";
+    case V90A4_RX_DONE:   return "done";
+    }
+    return "?";
+}
+
+int v90_analogue_phase4_r_symbols(const v90_analogue_phase4_t *s)
+{
+    return s ? s->r_symbols : 0;
+}
+
+int v90_analogue_phase4_trn2d_symbols(const v90_analogue_phase4_t *s)
+{
+    return s ? s->trn2d_symbols : 0;
+}
+
+int v90_analogue_phase4_mp_frames(const v90_analogue_phase4_t *s)
+{
+    return s ? s->mp_frames : 0;
+}
+
+const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s)
+{
+    return (s  &&  s->mp_valid) ? &s->mp : NULL;
+}
+
+int v90_analogue_phase4_demap_failures(const v90_analogue_phase4_t *s)
+{
+    return s ? s->demap_failures : 0;
+}
+
+int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s)
+{
+    return s ? s->trn2d_ones : 0;
+}
+
+bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
+                                  v90_law_t law,
+                                  vpcm_cp_frame_t *cpt_out,
+                                  vpcm_cp_frame_t *cp_out)
+{
+    v90_dil_rate_plan_t plan;
+    vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t cpt;
+    int d;
+
+    if (m == NULL  ||  cpt_out == NULL  ||  cp_out == NULL)
+        return false;
+    /* The same call the engine already makes to report the rate: measured
+     * noise from the bottom of the ladder, §8.5.2's Table 15 cap from the top
+     * (docs/v90_constellation_selection.md). */
+    if (!v90_dil_measure_plan_rate(m, 0, 3.0, 0.0, law, &plan))
+        return false;
+    if (plan.intervals_unprobed != 0)
+        return false;
+
+    vpcm_cp_init(&cp);
+    cp.v90_compatibility = true;        /* Table 14 bit 19: 1 = CP */
+    cp.drn = plan.drn;
+    cp.codec_alaw = (law == V90_LAW_ALAW);
+    /* Sr = 1 is the minimum §5.4.5 allows and the only value with no spectral
+     * shaping to agree on; ld = 0 follows from it. */
+    cp.shaping_redundancy = 1;
+    cp.shaping_lookahead = 0;
+    /*
+     * Table 14 bits 52:67 -- the RMS of TRN1d at the digital modem's output
+     * over its RMS at the codec's D/A, unsigned Q3.13.  The measurement's
+     * gain_db is the reciprocal of that ratio in dB, which is where a digital
+     * pad in the path shows up, so this is the field that tells the digital
+     * modem about it.
+     */
+    {
+        double ratio = pow(10.0, -m->gain_db/20.0);
+        double q = ratio*8192.0;
+
+        if (!(q >= 0.0))
+            q = 8192.0;
+        if (q > 65535.0)
+            q = 65535.0;
+        cp.trn1d_gain_q3_13 = (uint16_t) (q + 0.5);
+    }
+    /* Bits 36:48 -- what this side's transmitter supports upstream.  INFO1a
+     * offered 3200 baud to 31200 bit/s, so offer the same ladder and no more:
+     * §9.4.2.4 picks from the intersection of this and MP's. */
+    cp.upstream_rate_mask = 0x0FFF;     /* 4800 … 31200 */
+    cp.constellation_count = VPCM_CP_FRAME_INTERVALS;
+    cp.codec_constellations_differ = false;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        cp.dfi[i] = (uint8_t) i;
+        memcpy(cp.masks[i], plan.mask[i], VPCM_CP_MASK_BYTES);
+    }
+
+    /*
+     * CPt.  §8.5.2 caps CP's average power at 3 dB above CPt's, and the
+     * simplest way to satisfy that with a measurement rather than a guess is
+     * to name the same constellations in both: the difference is then zero.
+     * What changes is the rate, and Table 14 encodes the two differently --
+     * (drn + 20) bits per frame in CP against (drn + 8) in CPt -- so the same
+     * D is a different drn in each, and CPt's field cannot always reach it.
+     * Where it cannot, CPt runs at the highest rate its field can express;
+     * fewer bits per frame over the same constellation is always encodable,
+     * and TRN2d and MP do not need the line's full rate.
+     */
+    cpt = cp;
+    cpt.v90_compatibility = false;      /* Table 14 bit 19: 0 = CPt */
+    d = (int) cp.drn + 20;
+    if (d - 8 > 22)
+        cpt.drn = 22;
+    else if (d - 8 < 0)
+        cpt.drn = 0;
+    else
+        cpt.drn = (uint8_t) (d - 8);
+
+    if (!vpcm_cp_validate(&cp, NULL, 0)  ||  !vpcm_cp_validate(&cpt, NULL, 0))
+        return false;
+    *cp_out = cp;
+    *cpt_out = cpt;
+    return true;
+}

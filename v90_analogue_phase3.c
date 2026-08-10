@@ -19,6 +19,20 @@ struct v90_analogue_phase3_s {
     v90_analogue_rx_t *rx;
     v34_state_t       *v34;
     bool               owns_v34;
+
+    /*
+     * §9.4.  Phase 4's receiver cannot exist until Phase 3 has produced a
+     * measurement -- everything after R̄i is mapped with the CPt that
+     * measurement implies -- so it is created at the handover rather than up
+     * front, and the codeword stream is routed to it from that point.
+     */
+    v90_law_t              law;
+    int                    u_info;
+    v90_analogue_phase4_t *p4;
+    vpcm_cp_frame_t        cpt;
+    vpcm_cp_frame_t        cp;
+    bool                   phase4_started;
+    bool                   phase4_failed;
 };
 
 v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config_t *cfg)
@@ -43,6 +57,9 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     rxc.u_info = cfg->u_info;
     rxc.dil = cfg->dil;
     rxc.dil_coverage = cfg->dil_coverage;
+
+    s->law = cfg->law;
+    s->u_info = cfg->u_info;
 
     s->tx = v90_analogue_tx_init(&txc);
     s->rx = v90_analogue_rx_init(&rxc);
@@ -84,6 +101,7 @@ void v90_analogue_phase3_free(v90_analogue_phase3_t *s)
         v34_free(s->v34);
     v90_analogue_tx_free(s->tx);
     v90_analogue_rx_free(s->rx);
+    v90_analogue_phase4_free(s->p4);
     free(s);
 }
 
@@ -108,6 +126,59 @@ static void apply_events(v90_analogue_phase3_t *s, unsigned events)
         v90_analogue_tx_dil_enough(s->tx);         /* §9.3.2.10: S, then S̄ */
 }
 
+/*
+ * §9.4.2's conditional moments.  Same rule as apply_events(): each entry point
+ * is a no-op outside the stage it ends, so the digital modem repeating MP
+ * until it sees CP cannot push the transmitter past CP'.
+ */
+static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
+{
+    if (events & V90A4_RX_EVENT_R_BAR)
+        v90_analogue_tx_r_transition_seen(s->tx);  /* §9.4.2.2: end CPt */
+    if (events & V90A4_RX_EVENT_MP)
+        v90_analogue_tx_mp_seen(s->tx);            /* §9.4.2.3: CP' */
+    /* §9.4.2.4 accepts either MP' or Ed as the cue for E. */
+    if (events & (V90A4_RX_EVENT_MP_PRIME | V90A4_RX_EVENT_ED))
+        v90_analogue_tx_mp_prime_seen(s->tx);
+}
+
+/*
+ * Hand over to §9.4 once §9.3.2.10 is done and a measurement exists.
+ *
+ * Both conditions matter and neither implies the other: the transmitter can
+ * reach V90A_TX_PHASE4 on a zero-length DIL with nothing measured, and a
+ * measurement can exist while §9.3.2.10's closing S̄ is still going out.
+ */
+static void start_phase4(v90_analogue_phase3_t *s)
+{
+    v90_analogue_phase4_config_t p4c;
+    const v90_dil_measurement_t *m;
+
+    if (s->p4 != NULL  ||  s->phase4_failed)
+        return;
+    if (v90_analogue_tx_stage(s->tx) != V90A_TX_PHASE4)
+        return;
+    if ((m = v90_analogue_rx_measurement(s->rx)) == NULL)
+        return;
+    if (!v90_analogue_phase4_build_cp(m, s->law, &s->cpt, &s->cp)) {
+        s->phase4_failed = true;
+        return;
+    }
+    memset(&p4c, 0, sizeof(p4c));
+    p4c.law = s->law;
+    p4c.u_info = s->u_info;
+    p4c.cpt = s->cpt;
+    if ((s->p4 = v90_analogue_phase4_init(&p4c)) == NULL
+        ||
+        !v90_analogue_tx_start_phase4(s->tx, &s->cpt, &s->cp, false)) {
+        v90_analogue_phase4_free(s->p4);
+        s->p4 = NULL;
+        s->phase4_failed = true;
+        return;
+    }
+    s->phase4_started = true;
+}
+
 unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
                                 const uint8_t *codewords,
                                 int count)
@@ -116,8 +187,17 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
 
     if (s == NULL)
         return 0;
+    if (s->p4 != NULL) {
+        /* Phase 3's receiver is finished with this stream; §8.6's signals are
+         * not §8.4's and feeding both would only produce noise in one. */
+        events = v90_analogue_phase4_put(s->p4, codewords, count);
+        apply_phase4_events(s, events);
+        return 0;
+    }
+    /*endif*/
     events = v90_analogue_rx_put(s->rx, codewords, count);
     apply_events(s, events);
+    start_phase4(s);
     return events;
 }
 
@@ -161,4 +241,24 @@ bool v90_analogue_phase3_retrain_due(const v90_analogue_phase3_t *s)
 const v90_dil_measurement_t *v90_analogue_phase3_measurement(const v90_analogue_phase3_t *s)
 {
     return s ? v90_analogue_rx_measurement(s->rx) : NULL;
+}
+
+const v90_analogue_phase4_t *v90_analogue_phase3_phase4_state(const v90_analogue_phase3_t *s)
+{
+    return s ? s->p4 : NULL;
+}
+
+bool v90_analogue_phase3_phase4_failed(const v90_analogue_phase3_t *s)
+{
+    return s  &&  s->phase4_failed;
+}
+
+const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s)
+{
+    return (s  &&  s->phase4_started) ? &s->cpt : NULL;
+}
+
+const vpcm_cp_frame_t *v90_analogue_phase3_cp(const v90_analogue_phase3_t *s)
+{
+    return (s  &&  s->phase4_started) ? &s->cp : NULL;
 }
