@@ -137,6 +137,77 @@ symbols, 1950 ms) is unidentified and is the obvious next target: `--dil-scan`
 reports `default_125x12=no impairment=9` for the card, so whatever it is, it is
 not the default DIL our encoder emits.
 
+## Jd — decoded on both sides, and it is almost entirely correct
+
+`tools/v90_jd_decode.py` recovers the Jd frame from a DS0 capture. Getting there
+needs three things §8.4.2 states but never puts together: TRN1d has to be
+located first (the differential encoder is seeded with "the final symbol of the
+transmitted TRN1d"), the scrambler is *not* reinitialized at the boundary (so
+the descrambler's 23-bit history is TRN1d's own tail, and TRN1d's signs are its
+scrambled bits directly, being undifferentiated), and the CRC is delegated to
+10.1.2.3.2/V.34 without restatement.
+
+The decode validates: **72-bit period at 98–99%**, all three of Table 13's fixed
+fields exact, CRC valid, and the **identical frame on both independent card
+calls**.
+
+| Table 13 field | card (connects) | ours |
+|---|---|---|
+| 0:16 frame sync | `11111111111111111` | same |
+| 17 start bit | `0` | same |
+| 18:33 rate mask | `1111111111111111` | **same** |
+| 35:46 rate mask (contd) | `111111000000` | **same** |
+| 47 training constellation | `0` (4-point) | same |
+| 48 renegotiation constellation | `0` (4-point) | same |
+| **49:50 spectral-shaping lookahead** | `11` → **3** | `10` → **1** |
+| 52:67 CRC | `0x66cf` **valid** | `0x76ee` **valid** |
+| 68:71 fill | `0000` | same |
+
+**Bits 0–49 are identical.** Our framing, scrambling, differential encoding and
+CRC convention all match a working implementation exactly. Of the four differing
+bits — 50, 55, 62, 67 — three are inside the CRC field and are consequences of
+the fourth.
+
+So Jd is not broken, and it is not the Courier blocker: a peer that rejected our
+Jd would be rejecting a frame whose sync, framing and CRC are all correct.
+
+### The one real difference: we advertise the minimum shaping lookahead
+
+`v90_build_jd()` hardcodes it, and says so:
+
+```c
+/* Bits 49:50 — spectral shaping lookahead: 1 (minimum mandatory) */
+```
+
+The card advertises 3. Both are legal — §8.4.2's field is "a number between 1
+and 3".
+
+**Do not simply change this to 3.** It is a capability claim about our own
+encoder, and `vpcm_cp.c`'s guards (`shaping_lookahead != 1` at `v90.c:1115`,
+`> 3` at `v90.c:1220`) suggest the mapper implements lookahead 1 only.
+Advertising 3 while shaping to 1 would be a lie the peer acts on, and the place
+it would surface is Phase 4. The honest sequence is: implement lookahead > 1 in
+the shaper, then raise the advertisement to match. Recorded as a genuine
+capability gap, not a quick fix.
+
+### CRC formulation, confirmed empirically
+
+§8.4.2 delegates the CRC to 10.1.2.3.2/V.34. Reproduced against a working
+implementation, so this can be relied on:
+
+> CRC-16-CCITT, polynomial `0x1021`, init `0xFFFF`, over the two 16-bit
+> information groups (bits 18:33 and 35:50), transmitted **MSB-first** in bits
+> 52:67.
+
+Our `v90_build_jd()` already matches this. Note the field is MSB-first: reading
+it LSB-first makes a valid CRC look broken, which cost a step here.
+
+### Jd duration is peer-gated — do not compare it
+
+The card sends 943T and 1015T (13–14 frames) on its two calls; we sent 1231T on
+this one and 9744 ms on another. That spread is not a defect: §9.3.1.5 runs Jd
+until the analogue modem's S arrives. The card's peer answers; ours does not.
+
 ## Finding 2 — our decoder mislabels the card's TRN1d as "Sd"
 
 `vpcm_decode --v90` reports, on the card's stream:
