@@ -116,10 +116,28 @@ static int v90_trn1d_len(void)
             char *end;
             long parsed = strtol(value, &end, 10);
 
-            /* Below 2040T violates §9.3.1.4; much above ~2 s starts eating the
-             * Jd window §9.3.2.7 entitles the peer to use. */
+            /* Below 2040T violates §9.3.1.4.  The ceiling is §9.3.1.4's own:
+             * Jd must start within 4000 ms of TRN1d starting, so TRN1d cannot
+             * exceed 4000 ms = 32000T at 8 kHz.
+             *
+             * This was 16000 (2000 ms), on the reasoning that "much above ~2 s
+             * starts eating the Jd window §9.3.2.7 entitles the peer to use".
+             * A working V.90 digital modem contradicts that: the Eicon Diva
+             * Server PRI transmits 30000T (3750 ms) of TRN1d -- 94% of the
+             * budget -- on two independent calls that a USR Courier answered
+             * with CONNECT.  Verified bit-for-bit against the §5.3 GPC
+             * sequence; see docs/eicon_downstream_comparison.md.  The old
+             * ceiling was what blocked testing that value.
+             *
+             * v90_jd_s_wait_symbols() subtracts this from the same budget and
+             * stays positive here: at 32000T it still leaves 12800T of Jd wait.
+             *
+             * The *default* is deliberately unchanged.  30000T is unverified
+             * against a live peer, and SmartLink is known to be timing
+             * sensitive in this phase (see V90_SD_REPS above), so it is offered
+             * as an experiment via ME_V90_TRN1D_SYMBOLS, not adopted. */
             if (end != value && *end == '\0'
-                && parsed >= V90_TRN1D_MIN_LEN && parsed <= 16000)
+                && parsed >= V90_TRN1D_MIN_LEN && parsed <= 32000)
                 cached = (int) parsed;
         }
         /* Enforce the multiple-of-6 rule whatever the source of the value. */

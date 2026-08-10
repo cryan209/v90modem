@@ -158,7 +158,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -172,6 +172,14 @@ test: $(TEST_TARGETS)
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2
+
+# Receive-path conformance against a downstream we did not generate.  Encodes a
+# known-open defect (docs/eicon_downstream_comparison.md, Finding 3), so it is
+# deliberately NOT part of `test` -- a suite that is red by default stops being
+# read.  --expect-failure inverts the exit status: green while the defect
+# stands, loud when the positive control breaks or the defect is fixed.
+eicon-rx-test: vpcm_decode
+	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
