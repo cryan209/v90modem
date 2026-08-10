@@ -1570,6 +1570,29 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
 static const bool g_advertise_v90 = true; /* Advertise V.90 — PCM downstream active */
+
+/*
+ * Which side of a V.90 call this endpoint offers to be.
+ *
+ * V.90 is asymmetric: the digital modem injects PCM codewords downstream and
+ * the analogue modem is the one with a D/A -> loop -> A/D hop, so it is the
+ * side that measures the line and tells the digital modem what constellation
+ * to use (§5.4.3).  This software has always been the digital side, and V.8
+ * has always said so.
+ *
+ * The analogue role is opt-in and incomplete: V.8 negotiates it correctly, but
+ * Phase 3 has no analogue transmitter (no Sr/TRN1r/Jr, no Ja carrying a DIL
+ * descriptor), so a call that negotiated it could not proceed.  Rather than
+ * advertise something we cannot honour to a real peer, selecting it requires
+ * ME_V90_ROLE=analogue and the V.8 result handler says plainly what is
+ * missing.  See docs/v90_analogue_role.md.
+ */
+static bool g_v90_analogue_role = false;
+
+static bool me_v90_analogue_role(void)
+{
+    return g_v90_analogue_role;
+}
 static int        g_v34_start_baud = 2400;   /* 3200 has 91 Hz separation (notch unusable); 2400 has 200 Hz */
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
@@ -1958,7 +1981,21 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     if (g_advertise_v90)
         v8_parms.jm_cm.modulations   |= V8_MOD_V90;
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
-    if (g_advertise_v90) {
+    if (g_advertise_v90 && me_v90_analogue_role()) {
+        /*
+         * Analogue role: we are not the DCE on the digital network, so
+         * V8_PSTN_ACCESS_DCE_ON_DIGITAL must not be set -- a peer that saw it
+         * alongside the analogue availability bit would be told two
+         * contradictory things about where we sit.  Table 5's availability
+         * field then offers the analogue side of V.90/V.92.
+         */
+        v8_parms.jm_cm.pstn_access            = 0;
+        v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
+        /* The V.92 QC/QCA octet below encodes the *digital* modem's
+         * capabilities; there is no analogue equivalent wired up here, so V.92
+         * stays out of an analogue-role offer rather than being guessed. */
+        v8_parms.v92 = -1;
+    } else if (g_advertise_v90) {
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
         v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
         /* Advertising V8_PSTN_PCM_MODEM_V91 here makes 2003-era SmartLink
@@ -3599,6 +3636,26 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             return;
         }
     } else if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
+        && me_v90_analogue_role()) {
+        /*
+         * We offered the analogue role and the peer offered V.90.  V.8 has
+         * done its job; Phase 3 has not been written for this direction.
+         *
+         * Falling through to V.34 is the honest outcome: everything after this
+         * point -- start_v34_training() and the Phase 3 state machine -- drives
+         * the *digital* transmitter, so continuing into V.90 here would put a
+         * digital Sd/TRN1d/Jd on the wire from a modem that just told the peer
+         * it was analogue, and the peer would be waiting for Sr/TRN1r/Jr and a
+         * Ja carrying our DIL descriptor.  Better a working V.34 call than a
+         * V.90 one built on a contradiction.
+         */
+        ME_LOG("[ME] V.8 negotiated V.90 with this end as the ANALOGUE modem, "
+               "but Phase 3 has no analogue transmitter (Sr/TRN1r/Jr, Ja+DIL "
+               "descriptor) — falling back to V.34\n");
+        trace_phase("V8 selected V90 analogue role; unimplemented, using V34");
+        g_mod = ME_MOD_V34;
+        start_v34_training();
+    } else if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
         && (result->jm_cm.modulations & V8_MOD_V34)) {
         /*
          * V.90 selected: downstream = PCM codeword injection (up to 56 kbps),
@@ -3700,6 +3757,14 @@ void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
     v90_cp_live_worker_start();
+    {
+        const char *role = getenv("ME_V90_ROLE");
+
+        g_v90_analogue_role = (role && strcmp(role, "analogue") == 0);
+        if (g_v90_analogue_role)
+            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 3 analogue TX is "
+                   "not implemented — V.8 only)\n");
+    }
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
     {

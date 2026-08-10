@@ -45,11 +45,18 @@ typedef enum {
     /*
      * Modelled on what the Eicon card transmitted to a Courier that connected
      * (artifacts/eicon-digital-downstream/): 66T segments, REFc = 0, and a
-     * descending ladder interleaved with low-Ucode probes.  Not a decode of
-     * the Courier's actual descriptor -- that request travelled upstream in
-     * Ja and is not in the capture, and docs/eicon_downstream_comparison.md
-     * Finding 5 is why we cannot recover it from the downstream either.
-     * Shape observed, values reconstructed.
+     * descending ladder interleaved with low-Ucode probes.  Shape observed,
+     * values reconstructed -- this is not a decode of the Courier's actual
+     * descriptor.
+     *
+     * It could be.  The Courier's Ja carries that descriptor, and the upstream
+     * side of the same session is captured in the sibling project as
+     * artifacts/interop/courier-2185n-dil/selector.rx.ulaw.  Recovering it is
+     * a V.34 demodulation job that tools/search_v90_ja.py and
+     * tools/recover_ja_descriptor.py exist to do, and the result would have an
+     * unusually strong check available: the descriptor has to reproduce the
+     * DIL observed downstream at 12289.4 ms.  Until someone runs that through,
+     * this preset is a plausible shape and not evidence.
      */
     V90_DIL_PRESET_COURIER_STYLE,
 

@@ -152,12 +152,24 @@ interval.
 
 `courier-style-60x66` is **modelled on**, not decoded from, the Eicon card's
 downstream: 66T segments, REFc = 0, a descending ladder interleaved with
-low-Ucode probes (84, 83, 82, 81, 80, 79, 78, 1, 77, 1, 76, 1, 75, 1, 2 …).
-The Courier's actual request travelled upstream in Ja and is not in the
-capture, and Finding 5 of [`eicon_downstream_comparison.md`](eicon_downstream_comparison.md)
-is why we cannot recover it from the downstream either. Its narrow ladder is
-why it plans 45 333 rather than 56 000 — worth knowing, since it is the shape a
-peer that connects actually asked for.
+low-Ucode probes (84, 83, 82, 81, 80, 79, 78, 1, 77, 1, 76, 1, 75, 1, 2 …). Its
+narrow ladder is why it plans 45 333 rather than 56 000 — worth knowing, since
+it is roughly the shape a peer that connects actually asked for.
+
+**The real one is recoverable and has not been recovered yet.** An earlier note
+here claimed the Courier's request was gone because it travelled upstream in
+Ja; that was wrong. The upstream side of the same session is captured, as
+`artifacts/interop/courier-2185n-dil/selector.rx.ulaw` in the sibling project,
+and the tree already carries the tooling for the job — `tools/search_v90_ja.py`,
+`tools/recover_ja_descriptor.py`, `tools/check_ja_dil_consistency.py`. It is a
+V.34 demodulation problem, not a missing-data problem.
+
+The payoff is better than a preset: a recovered descriptor can be checked
+against the DIL the card actually transmitted at 12289.4 ms, which is about as
+strong a validation as this kind of archaeology ever gets. It would also settle
+Finding 5 of [`eicon_downstream_comparison.md`](eicon_downstream_comparison.md)
+from the other direction — knowing the descriptor turns "why will this region
+not segment?" into a check rather than a search.
 
 Anything else goes through `v90_dil_desc_from_ucodes()`, including
 [`../tools/v90_dil_from_audio.py`](../tools/v90_dil_from_audio.py), which
