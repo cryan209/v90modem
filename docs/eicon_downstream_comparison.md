@@ -368,37 +368,81 @@ and both are information that is simply not on the wire:
   64-segment cycle are the same symbols.
 - H<sub>c</sub> and REF<sub>c</sub> for a chord the DIL never trains in.
 
-## Finding 5 — the card's DIL is still not decodable — **open**
+## Finding 5 — the card's DIL does not decode, and that matters less than it looks
 
-The acquisition fix does not make the card's DIL decode. What blocks it now is
-a different thing, and worth stating precisely because it was invisible before.
+The acquisition fix does not make the card's DIL decode. Two things are worth
+separating here, because they were conflated for most of this investigation.
 
-The card's training-symbol first-occurrences are **66 symbols** apart
-(H<sub>c</sub> = 10, not the 132 an earlier revision of this note recorded —
-132 is two segments), with REF<sub>c</sub> = Ucode 0, and a training Ucode that
-steps down the ladder: 84, 83, 82, 81, 80, 79, 78, …
+### Descriptor recovery is not a modem function
 
-But at a uniform 66T segmentation — and at the best of all 66 possible
-alignments — only **188 of 239** segments carry the two Ucodes §8.4.1 allows.
-**51 carry three.** The excess is concentrated where the ladder reaches the
-bottom of the range, in segments mixing Ucodes 0, 1 and 2:
+DIL is Digital Impairment Learning, and **the analogue modem is the one that
+asked for it**:
+
+> §8.4.1 — "The parameters necessary for the digital modem to form the DIL are
+> sent to it by the analogue modem using the DIL descriptor defined in 8.3.1."
+>
+> §9.3.2.9 — "The analogue modem shall **receive the DIL sequence it
+> requested** in Ja."
+
+So on the analogue side the descriptor is an *input*. The receiver already
+knows every codeword that was meant to arrive; its job is to measure what did.
+Recovering a descriptor nobody told us is what offline analysis of somebody
+else's capture needs — it is not a step in a V.90 start-up, and building the
+analogue role does not depend on it.
+
+§9.3.2.10 makes the same point from the other end: the analogue modem stops DIL
+as soon as it "has received **enough** of the DIL sequence". A partial pass is
+the designed behaviour, not a degraded one. Every DIL-segment measures one
+training Ucode independently, so half a cycle measures half the ladder.
+
+`v90_dil_measure.c` does that job, and
+`vpcm_loopback_test`'s *V.90 DIL impairment measurement from half a pass*
+demonstrates it on a deliberately halved DIL carrying a 3 dB pad and robbed-bit
+signalling in one DS0 phase of six:
+
+```text
+PASS: V.90 DIL impairment measurement from half a pass
+      (ulaw, coverage=50%, 31 Ucodes measured, gain=-3.0 dB,
+       RBS slot mask=0x04, 26 usable / 5 collapsed)
+```
+
+The pad and the RBS slot both come back exactly, from half a pass, and the
+usable/collapsed split is the output that constellation selection actually
+wants (`docs/v90_mi_negotiation.md`).
+
+**One property worth knowing:** alignment cannot be found by a blind search.
+G.711 is self-similar across chords — Ucodes *u* and *u+16* differ by exactly a
+factor of two — so a DIL stepping one Ucode per segment reproduces its own
+shape 16 segments later, scaled. A scale-invariant score cannot tell them
+apart, and scale-invariance is exactly what is wanted (a pad is a scale
+factor). §9.3.2.8-9 removes the problem: the analogue modem sends S and then
+receives the DIL it just asked for, so it searches a window, not a capture.
+
+### What still blocks the card, and what it is worth
+
+Descriptor recovery on the card's capture remains open. Its training-symbol
+first-occurrences are 66 symbols apart (H<sub>c</sub> = 10 — not the 132 an
+earlier revision recorded, which is two segments) with REF<sub>c</sub> = Ucode
+0, and the training Ucode steps down the ladder: 84, 83, 82, 81, 80, 79, …
+
+At a uniform 66T segmentation — and at the best of all 66 alignments — only
+**188 of 239** segments carry the two Ucodes §8.4.1 allows. **51 carry three**,
+concentrated where the ladder reaches the bottom of the range:
 
 ```text
 T99378   +0   +1   +0   +0   +0   +0
 T99384   -2   +0   +0   +0   +0   +1
-T99390   +0   +0   +0   +0   -2   +0
 ```
 
 The leading explanation is that H<sub>c</sub> is per-chord and the card's ladder
-crosses chords, so a uniform 66T is simply the wrong length down there and is
-merging several short chord-0 segments into one window. That has not been
-confirmed, and until it is, "the card's DIL carries three Ucodes per segment"
-should be read as "at the segmentation we have tried", not as a claim about the
-card.
+crosses chords, so a uniform 66T is the wrong length down there and is merging
+short chord-0 segments. That is unconfirmed; read "three Ucodes per segment" as
+"at the segmentation we have tried", not as a claim about the card.
 
-Resolving it means recovering H<sub>c</sub> per chord from the data rather than
-assuming one length across the region. `make eicon-rx-test` pins the DIL arm
-until then.
+This is now a **tool** limitation rather than a modem one. It blocks reading
+somebody else's DIL out of a capture — useful for exactly this kind of
+archaeology — but it does not block the analogue role, which never needs it.
+`make eicon-rx-test` still pins it, at that reduced priority.
 
 ## Withdrawn — do not re-derive
 

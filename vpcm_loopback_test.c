@@ -21,6 +21,7 @@
 #include "vpcm_v91_loopback.h"
 #include "v90_cp_rx.h"
 #include "v90_dil_rx.h"
+#include "v90_dil_measure.h"
 #include "v92_cp_rx.h"
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
@@ -957,6 +958,153 @@ static bool test_v90_dil_rx_single_pass(v91_law_t law)
 
     vpcm_log("PASS: V.90 DIL decoded from a single pass (%s)", law_name);
     return true;
+}
+
+/*
+ * What the analogue modem does with DIL: measure the channel (§9.3.2.9).
+ *
+ * The descriptor is an input here, not an output — §8.4.1 sends it to the
+ * digital modem in Ja, so this side already knows every codeword that was
+ * meant to arrive.  Nothing needs decoding; what matters is the difference
+ * between that and what did arrive.
+ *
+ * The DIL is deliberately cut at **half a cycle**.  §9.3.2.10 lets the
+ * analogue modem stop as soon as it has "received enough of the DIL
+ * sequence", and each segment measures one Ucode independently, so half a
+ * pass measures half the ladder and is a perfectly good answer.
+ */
+static bool test_v90_dil_impairment_measurement(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v91_law_t v91_law = law;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    const int lead = 700;          /* Jd-ish junk ahead of the DIL */
+    const int rbs_slot = 2;
+    v90_dil_desc_t desc;
+    v90_dil_measurement_t m;
+    uint8_t *stream = NULL;
+    uint8_t *dil = NULL;
+    int cycle;
+    int half;
+    int total;
+    int offset = -1;
+    double score = 0.0;
+    int collapsed = 0;
+    int i;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 DIL impairment measurement from half a pass (%s)", law_name);
+
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 60;
+    desc.lsp = 12;
+    desc.ltp = 12;
+    for (i = 0; i < 12; i++) {
+        desc.sp[i] = (uint8_t) ((0x0A6DU >> i) & 1U);
+        desc.tp[i] = (uint8_t) ((0x0DB7U >> i) & 1U);
+    }
+    for (i = 0; i < 8; i++) {
+        desc.h[i] = 10;            /* 66T segments */
+        desc.ref[i] = 0;
+    }
+    for (i = 0; i < desc.n; i++)
+        desc.train_u[i] = (uint8_t) (100 - i);
+
+    cycle = v90_dil_cycle_len(&desc);
+    half = (cycle / 2 / 6) * 6;
+    total = lead + half;
+    stream = malloc((size_t) total);
+    dil = malloc((size_t) half);
+    if (!stream || !dil)
+        goto out;
+
+    for (i = 0; i < lead; i++)
+        stream[i] = v90_codeword_compose(v90_law, 48, (i / 3) & 1);
+    v90_dil_generate_codewords(v90_law, &desc, dil, half);
+
+    /*
+     * Impair it the way a digital network does: a 3 dB pad on everything, and
+     * robbed-bit signalling clearing the codeword LSB in one DS0 phase of six.
+     */
+    for (i = 0; i < half; i++) {
+        int16_t linear = v91_codeword_to_linear(v91_law, dil[i]);
+        uint8_t cw = v91_linear_to_codeword(v91_law, (int16_t) (linear * 0.708));
+
+        if (((lead + i) % 6) == rbs_slot)
+            cw &= (uint8_t) ~1u;
+        stream[lead + i] = cw;
+    }
+
+    /*
+     * Search a window, not the whole capture.  §9.3.2.8-9 has the analogue
+     * modem transmit S and then receive the DIL it just requested, so it knows
+     * when DIL starts to within the round-trip uncertainty — and it has to
+     * use that, because a blind search is ambiguous by exactly one chord: the
+     * levels of Ucodes u and u+16 differ by a factor of two, so a ladder that
+     * steps one Ucode per segment repeats its own shape 16 segments later and
+     * no scale-invariant score can tell the two apart.
+     */
+    if (!v90_dil_measure_align(stream, total, v90_law, &desc,
+                               lead - 120, 240, &offset, &score)) {
+        fprintf(stderr, "DIL measure %s: alignment failed\n", law_name);
+        goto out;
+    }
+    if (offset != lead) {
+        fprintf(stderr, "DIL measure %s: aligned at %d, DIL starts at %d (score %.3f)\n",
+                law_name, offset, lead, score);
+        goto out;
+    }
+    if (!v90_dil_measure(stream, total, v90_law, &desc, offset, &m)) {
+        fprintf(stderr, "DIL measure %s: measurement failed\n", law_name);
+        goto out;
+    }
+
+    /* Half a pass, and that is the point. */
+    if (m.coverage < 0.45 || m.coverage > 0.55) {
+        fprintf(stderr, "DIL measure %s: coverage %.2f, expected ~0.5\n",
+                law_name, m.coverage);
+        goto out;
+    }
+    if (m.ucodes_measured < desc.n / 3) {
+        fprintf(stderr, "DIL measure %s: only %d Ucodes measured\n",
+                law_name, m.ucodes_measured);
+        goto out;
+    }
+    /* The pad: 0.708 linear is -3.0 dB. */
+    if (m.gain_db > -2.0 || m.gain_db < -4.0) {
+        fprintf(stderr, "DIL measure %s: gain %.2f dB, expected about -3\n",
+                law_name, m.gain_db);
+        goto out;
+    }
+    if (m.rbs_slot_mask != (uint8_t) (1u << rbs_slot)) {
+        fprintf(stderr, "DIL measure %s: RBS slots 0x%02X, expected 0x%02X\n",
+                law_name, m.rbs_slot_mask, 1u << rbs_slot);
+        goto out;
+    }
+    /* A pad compresses the ladder, so some neighbours have to collapse onto
+     * one received code — that is the impairment, stated as constellation
+     * headroom. */
+    for (i = 0; i < V90_DIL_UCODES; i++) {
+        if (m.u[i].tx_count > 0 && !m.usable[i])
+            collapsed++;
+    }
+    if (m.usable_count < 2 || m.usable_count > m.ucodes_measured) {
+        fprintf(stderr, "DIL measure %s: %d usable of %d measured\n",
+                law_name, m.usable_count, m.ucodes_measured);
+        goto out;
+    }
+
+    vpcm_log("PASS: V.90 DIL impairment measurement from half a pass (%s, "
+             "coverage=%.0f%%, %d Ucodes measured, gain=%.1f dB, RBS slot mask=0x%02X, "
+             "%d usable / %d collapsed)",
+             law_name, 100.0 * m.coverage, m.ucodes_measured, m.gain_db,
+             m.rbs_slot_mask, m.usable_count, collapsed);
+    ok = true;
+
+out:
+    free(stream);
+    free(dil);
+    return ok;
 }
 
 static bool test_v90_dil_rx_roundtrip(v91_law_t law)
@@ -9309,6 +9457,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
         && test_v90_dil_rx_single_pass(V91_LAW_ULAW)
         && test_v90_dil_rx_single_pass(V91_LAW_ALAW)
+        && test_v90_dil_impairment_measurement(V91_LAW_ULAW)
+        && test_v90_dil_impairment_measurement(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v92_phase3_transitions()
