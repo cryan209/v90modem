@@ -37,15 +37,21 @@ digital modem exactly as before.
 
 | field | digital role | analogue role |
 |---|---|---|
-| `pstn_access` | `V8_PSTN_ACCESS_DCE_ON_DIGITAL` | `0` |
+| `pstn_access` | `V8_PSTN_ACCESS_DCE_ON_DIGITAL` | *unchanged* |
 | `pcm_modem_availability` | `V8_PSTN_PCM_MODEM_V90_V92_DIGITAL` | `V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE` |
 | V.92 QC/QCA octet | `0x45` / `0x47` | omitted |
 
-`pstn_access` matters as much as the availability bit: it says the DCE sits on
-the digital network. Leaving it set while advertising analogue availability
-tells a peer two contradictory things about where we are. The V.92 octet
-encodes the *digital* modem's capabilities and has no analogue equivalent wired
-up, so an analogue-role offer omits it rather than guessing.
+Only the availability field moves. `pstn_access` answers a different question —
+how this DCE reaches the network — and the answer does not change with the role
+we choose to play: the media is G.711 over SIP, so `DCE_ON_DIGITAL` stays set
+because it is true. The V.92 octet encodes the *digital* modem's capabilities
+and has no analogue equivalent wired up, so an analogue-role offer omits it
+rather than guessing.
+
+A peer could in principle object that a digital access has no analogue loop on
+which to learn impairment. That is an empirical question, and the lab case this
+exists for — dialling the Eicon card with both ends on G.711 — is exactly where
+to answer it.
 
 ## What is already built
 
@@ -64,6 +70,40 @@ out to be separable from the signalling:
 
 So the analogue side already knows what to ask for and what to do with the
 answer. What it cannot do is conduct the conversation.
+
+## The chokepoint is not the modulation
+
+It is worth being precise about this, because "we have no V.34 transmitter" is
+the wrong summary and would send someone down a very long road for no reason.
+
+**SpanDSP's V.34 transmitter is real and already in the live path.**
+`spandsp-master/src/v34tx.c` is 7 285 lines, `modem_engine.c` calls `v34_tx()`
+during training and in `ME_DATA` for plain V.34 calls, and V.34 data transmit
+works today. The vendored tree even carries V.90-aware transmit stages
+(`V34_TX_STAGE_V90_WAIT_INFO1A`, `V90_PHASE2_B`, …) and can build **INFO1a**
+(`prepare_info1a()`, `v34tx.c:942`), which is the analogue modem's Phase 2 INFO.
+
+What is missing sits *on top of* the modulation:
+
+1. **V.90's additions to INFO1a.** `prepare_info1a()` fills the V.34 fields —
+   power reduction, MD, frequency offset, pre-emphasis, max data rate. Table 12's
+   V.90 additions are not there: U<sub>INFO</sub> (bits 25:31), the length of MD,
+   the DIL descriptor length, the symbol rates. Those are the fields that carry
+   our chosen DIL preset to the peer, so nothing downstream of here works
+   without them.
+2. **The Phase 3 analogue signals.** Sr, S̄r, TRN1r, Jr and Ja are V.90 signals
+   modulated per V.34; SpanDSP has no idea they exist. `v90.c` has the digital
+   mirror of each as the model.
+3. **A role switch in SpanDSP's V.90 mode.** `s->tx.v90_mode` is a single
+   `bool`, and which V.90 INFO variant gets sent is implied by `calling_party`
+   (`v34tx.c:755`, `:4391`) rather than by an explicit role. There is no way to
+   say "V.90 mode, analogue side" — that needs either a SpanDSP change or a
+   bypass that drives the modulator with our own bits.
+
+So the work is V.90 signalling over a modulator that already exists, not a
+modulator. Item 3 is the one that decides the shape of the rest: patching the
+vendored SpanDSP versus feeding it bits from outside is a fork in the road
+worth choosing deliberately.
 
 ## What is left
 

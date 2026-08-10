@@ -1983,13 +1983,21 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     if (g_advertise_v90 && me_v90_analogue_role()) {
         /*
-         * Analogue role: we are not the DCE on the digital network, so
-         * V8_PSTN_ACCESS_DCE_ON_DIGITAL must not be set -- a peer that saw it
-         * alongside the analogue availability bit would be told two
-         * contradictory things about where we sit.  Table 5's availability
-         * field then offers the analogue side of V.90/V.92.
+         * The two fields answer different questions, and only the second one
+         * is about the role.
+         *
+         * pstn_access describes how this DCE reaches the network, and the
+         * answer does not change with the role we play: the media here is
+         * G.711 over SIP, so V8_PSTN_ACCESS_DCE_ON_DIGITAL stays set because
+         * it is true.  pcm_modem_availability is the field that offers a
+         * V.90/V.92 role, and that is the one that flips.
+         *
+         * (A peer could in principle object that a digital access has no
+         * analogue loop to learn impairment on.  That is an empirical
+         * question, and the lab case this exists for -- dialling the Eicon
+         * card, both ends on G.711 -- is exactly where to answer it.)
          */
-        v8_parms.jm_cm.pstn_access            = 0;
+        v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
         v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
         /* The V.92 QC/QCA octet below encodes the *digital* modem's
          * capabilities; there is no analogue equivalent wired up here, so V.92
