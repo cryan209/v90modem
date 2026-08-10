@@ -1609,6 +1609,7 @@ static bool me_v90_analogue_role(void)
 static v90_analogue_phase3_t *g_v90a = NULL;
 static bool     g_v90a_started = false;
 static bool     g_v90a_complete_logged = false;
+static bool     g_v90a_retrain_logged = false;
 static uint64_t g_v90a_rx_codewords = 0;
 static int      g_v90a_u_info = 78;
 static v90_dil_desc_t g_v90a_dil;
@@ -2832,6 +2833,7 @@ static void cleanup_v34_v90_training_locked(void)
     }
     g_v90a_started = false;
     g_v90a_complete_logged = false;
+    g_v90a_retrain_logged = false;
     g_v90a_rx_codewords = 0;
     if (g_v90) {
         v90_free(g_v90);
@@ -3780,6 +3782,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             }
             g_v90a_started = false;
             g_v90a_complete_logged = false;
+            g_v90a_retrain_logged = false;
             g_v90a_rx_codewords = 0;
 
             /* Phase 2 CC carriers are the mirror of the digital role's: §8.2.3.1
@@ -5625,11 +5628,21 @@ static void me_v90_analogue_progress_locked(void)
      * not exist for this role yet.  Report it rather than sitting on a dead
      * Phase 3 until the training timeout, so a lab run says what happened. */
     if (v90_analogue_phase3_retrain_due(g_v90a)) {
-        ME_LOG("[ME] V.90 analogue: §9.3.2 deadline passed in %s with no answer "
-               "from the digital modem; §9.5.2.1 retrain is not implemented\n",
-               v90_analogue_tx_stage_name(tx_stage));
-        trace_phase("V90a deadline expired in %s",
-                    v90_analogue_tx_stage_name(tx_stage));
+        if (!g_v90a_retrain_logged) {
+            g_v90a_retrain_logged = true;
+            ME_LOG("[ME] V.90 analogue: §9.3.2 deadline passed in %s with no answer "
+                   "from the digital modem; §9.5.2.1 retrain is not implemented\n",
+                   v90_analogue_tx_stage_name(tx_stage));
+            trace_phase("V90a deadline expired in %s",
+                        v90_analogue_tx_stage_name(tx_stage));
+        }
+        /* ME_V90_ANALOGUE_HOLD is a capture aid, and this is the path a lab
+         * run most needs it on: the question it answers is what the digital
+         * modem does *after* our deadline, which hanging up here destroys.
+         * An Eicon Diva Server under emulation was still advancing its Phase 3
+         * states when this fired. */
+        if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) != 0)
+            return;
         g_state = ME_HANGUP;
         return;
     }

@@ -102,7 +102,12 @@ firmware to the V.90 page:
 [adsp] bootpage 7 INFO (V.34/V.90 phase 2) -> 14 V.90 DPCM
 ```
 
-Getting there took three fixes, each one found by a call:
+Getting there took three fixes, each one found by a call. **Two of them are
+now obsolete** — see "Measured live against the card (run 55)" below: with the
+§9.2.2.1.3–9.2.2.1.6 choreography corrected the card sends INFO1d unprompted,
+so neither `ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a` nor a raised
+`ME_V90_ANALOGUE_INFO1A_REPEATS` is needed, and the latter is now harmful.
+They are kept here because the reasoning is what led to the real fix:
 
 1. **§9.2.2.1.8 — Tone A before INFO1a.** SpanDSP took the V.34 call-modem
    branch at the end of L1/L2 and sent INFO1a straight away. V.90 swaps the
@@ -152,6 +157,10 @@ scan tries every U_INFO), then falls back to `0x0024` and retrains.
 `run54.adsp.csv` shows `tx_ptr` going `0x3764` → `0x0000` at the page boundary
 and staying there, which matches the sibling project's Session 47 note about
 page-local transmit state.
+
+**Superseded — see run 55 below.** This section's conclusion was right: the
+divergence was on this side, in the tone choreography. The card now advances to
+`0x007a` and validates our Phase 3, though it still transmits no Sd.
 
 **Do not read that as an emulator defect.** The same card under the same
 emulation has reached full V.90 data mode against two different analogue
@@ -269,7 +278,78 @@ is `caller_saw_info1`: §9.2.2.1.9 forbids it sending INFO1a until INFO1d has
 arrived, so that is what separates a completed Phase 2 from one that timed out
 and sent INFO1a anyway.
 
-Untested live so far — the SIP pair below is the next check, and then the card:
+### Measured live against the card (run 55, 2026-08-10)
+
+Four calls into `../modem-dsp-emu` `./run native-tower`, both ends G.711 µ-law
+over the lab registrar. The results are larger than the loopback suggested.
+
+**Phase 2 completes with no workarounds at all, in 2823 ms.** Before this fix
+it needed all three of `ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a`,
+`ME_V90_ANALOGUE_INFO1A_REPEATS=40` and `ME_V90_ANALOGUE_INFO1D_WAIT_MS=12000`,
+and took 7203 ms. The run that produced the numbers below set none of them:
+
+```bash
+SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
+    --sip-server <registrar> --username 6000 --password 6000 \
+    --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue
+printf 'ATD6001\r' > /tmp/v90modem-analogue
+```
+
+**The card sends INFO1d.** This is the headline: "this card never sends INFO1d
+at all" was recorded above as a property of the card, and it was ours.
+§9.2.1.1.7 has the digital modem wait to detect Tone A after the L1/L2 it is
+expecting before it sends INFO1d, and the analogue side was never transmitting
+the §9.2.2.1.6 Tone A that section waits for. With the choreography right it
+arrives unprompted — a 109-bit frame, CRC 0, and its contents are exactly what
+a digital modem's line probe should yield:
+
+```text
+Rx - info CRC result 0x0 (target_bits=93)
+Rx - info raw bytes: 00 20 68 80 00 01 40 07 00 80 e0 37
+Rx INFO1c:
+  Baud rate 2400 use high carrier ... max data rate = 24000bps
+  Baud rate 3200 use low carrier  ... max data rate = 31200bps
+Tx - INFO1d received after 275 bauds of Tone A, sending INFO1a (9.2.2.1.9)
+```
+
+(`Rx INFO1c` is the log label; §8.2.3.2 Table 9 makes INFO1d identical to
+INFO1c, so the same decoder prints it.) The offline `--v34` scan of the card's
+transmit misframes this one; our own receiver's CRC over a 109-bit frame is the
+authority, and only the digital modem sends 109 bits.
+
+**Workarounds 2 and 3 above are obsolete, and 3 is now actively harmful.**
+`ME_V90_ANALOGUE_INFO1A_REPEATS=40` spends 4801 ms transmitting INFO1a repeats
+the card no longer needs, which pushes our Phase 3 start from 7.4 s out to
+11.8 s — past the card's page-14 dwell, so we began transmitting S at the exact
+moment it gave up. Leave both unset.
+
+**The card gets further into page 14.** It used to run `0x0060 → 0x0074` and
+send nothing. It now runs
+
+```text
+0x0060 -> 0x0062 -> 0x0068 -> 0x0070 -> 0x0072 -> 0x0074 -> 0x0076 -> 0x007a
+```
+
+in 300 ms, with `DI_control=0x2000[rx0_valid]` at 0x0072 — it is receiving and
+validating our Phase 3. It then holds 0x007a for ~3.8 s, raises
+`flow_blocked`, and falls back to page 7 / `0x0024`.
+
+**Still no Sd.** `./vpcm_decode --v90` finds no Sd sequence anywhere in the
+card's transmit for the whole 123 s capture, and the emulator's own media
+accounting reports `0 payload / 3596 mark fill`. That is unchanged and remains
+item 1 of "What is left" below — a transmit-path problem in the card's page 14
+under emulation, in `../modem-dsp-emu`, not in this choreography. What changed
+is that the card is now demonstrably reading us.
+
+`ME_V90_ANALOGUE_HOLD=1` now also holds the call open on the §9.3.2
+deadline path, not only after a complete Phase 3. That path is the one a
+capture most needs held: the question it answers is what the digital modem does
+*after* our Ja deadline, and hanging up there destroys it. Our deadline fired
+at 9.8 s while the card was still advancing.
+
+### The in-tree pair
+
+Also worth running, and the fastest loop of the three:
 
 ```bash
 SIP_FORCE_PCMU=1 VPCM_ME_VERBOSE=1 ./sip_v90_modem --sip-server <registrar> \
@@ -280,17 +360,15 @@ SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
     --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue  # ATD6001
 ```
 
-Worth re-measuring against the Eicon card too: workaround 2
-(`ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a`) exists because the card never sent
-INFO1d, and §9.2.1.1.7 conditions INFO1d on the digital modem detecting Tone A
-after the L1/L2 it expects. The analogue side was never presenting the
-§9.2.2.1.6 Tone A at all, which is exactly the signal that section waits for.
-
 ## What is left
 
 1. **A digital peer that transmits Sd.** The emulated card does not, for a
-   reason in its own harness (above). Either fix that in `../modem-dsp-emu` —
-   the boot-page 7 → 14 transmit handoff — or find another digital modem.
+   reason in its own harness. As of run 55 it reaches page-14 state `0x007a`
+   and marks our Phase 3 `rx0_valid`, so it is reading us; its transmit is
+   `0 payload / 3596 mark fill` and `./vpcm_decode --v90` finds no Sd anywhere
+   in the capture. Either fix that in `../modem-dsp-emu` — the boot-page
+   7 → 14 transmit handoff — or find another digital modem. This is now the
+   single thing between here and Phase 4.
 2. **Phase 4 (§9.4)** — CPt, then a CP built from the measurement
    `v90_analogue_phase3_measurement()` already returns, then E/B1.
 3. **Data mode** — receive the mapped downstream instead of transmitting it.
