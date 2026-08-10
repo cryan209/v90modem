@@ -1110,7 +1110,7 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
     {
         v90_dil_rate_plan_t plan;
 
-        if (!v90_dil_measure_plan_rate(&m, 0, &plan)) {
+        if (!v90_dil_measure_plan_rate(&m, 0, 0.0, v90_law, &plan)) {
             fprintf(stderr, "DIL measure %s: rate planning failed\n", law_name);
             goto out;
         }
@@ -1138,14 +1138,116 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
                     law_name, plan.bps);
             goto out;
         }
-        vpcm_log("PASS: V.90 DIL impairment measurement from half a pass (%s, "
-                 "coverage=%.0f%%, %d Ucodes measured, gain=%.1f dB, "
-                 "RBS slot mask=0x%02X, %d usable / %d collapsed; "
-                 "Mi=[%d %d %d %d %d %d] -> drn=%u, %.0f bps)",
-                 law_name, 100.0 * m.coverage, m.ucodes_measured, m.gain_db,
-                 m.rbs_slot_mask, m.usable_count, collapsed,
-                 plan.mi[0], plan.mi[1], plan.mi[2], plan.mi[3], plan.mi[4],
-                 plan.mi[5], (unsigned) plan.drn, plan.bps);
+        /*
+         * §8.5.2 is a second, independent ceiling: Table 15 caps the average
+         * power of the constellation set against the digital modem's maximum
+         * transmit power, so a line can be clean enough to carry points the
+         * transmitter is not allowed to send.  -12 dBm0 is the common
+         * setting, and the one that keeps real V.90 links off 56k.
+         */
+        {
+            v90_dil_rate_plan_t capped;
+
+            if (!v90_dil_measure_plan_rate(&m, 0, -12.0, v90_law, &capped)) {
+                fprintf(stderr, "DIL measure %s: power-limited planning failed\n",
+                        law_name);
+                goto out;
+            }
+            if (capped.power_limit <= 0.0) {
+                fprintf(stderr, "DIL measure %s: no Table 15 limit resolved\n",
+                        law_name);
+                goto out;
+            }
+            if (capped.avg_power > capped.power_limit) {
+                fprintf(stderr, "DIL measure %s: power %.0f still over limit %.0f\n",
+                        law_name, capped.avg_power, capped.power_limit);
+                goto out;
+            }
+            if (capped.bps > plan.bps) {
+                fprintf(stderr, "DIL measure %s: power cap raised the rate\n",
+                        law_name);
+                goto out;
+            }
+            vpcm_log("PASS: V.90 DIL impairment measurement from half a pass (%s, "
+                     "coverage=%.0f%%, %d Ucodes measured, gain=%.1f dB, "
+                     "RBS slot mask=0x%02X, %d usable / %d collapsed)",
+                     law_name, 100.0 * m.coverage, m.ucodes_measured, m.gain_db,
+                     m.rbs_slot_mask, m.usable_count, collapsed);
+            vpcm_log("      impairment only: Mi=[%d %d %d %d %d %d] drn=%u %.0f bps",
+                     plan.mi[0], plan.mi[1], plan.mi[2], plan.mi[3], plan.mi[4],
+                     plan.mi[5], (unsigned) plan.drn, plan.bps);
+            vpcm_log("      §8.5.2 at -12 dBm0: Mi=[%d %d %d %d %d %d] drn=%u %.0f bps"
+                     " (%d points dropped, power %.3g of limit %.3g, %s)",
+                     capped.mi[0], capped.mi[1], capped.mi[2], capped.mi[3],
+                     capped.mi[4], capped.mi[5], (unsigned) capped.drn, capped.bps,
+                     capped.points_dropped, capped.avg_power, capped.power_limit,
+                     capped.power_limited ? "rate reduced" : "rate unaffected");
+        }
+
+        /*
+         * The same cap against a DIL that probes the *whole* ladder, on a
+         * clean channel — which is the case that says what §8.5.2 actually
+         * costs.
+         *
+         * It costs constellation, not rate.  Power is dominated by the
+         * largest levels, and G.711 packs plenty of distinguishable levels
+         * down low, so dropping the top still leaves far more points than
+         * §5.4.3 needs for drn 22.  The rate only falls when the line has
+         * already pushed the usable set up to the top of the ladder, where
+         * there is nothing cheap left to keep — noise takes the low points,
+         * §8.5.2 takes the high ones, and the two compound.
+         */
+        {
+            v90_dil_desc_t wide;
+            v90_dil_measurement_t wm;
+            v90_dil_rate_plan_t wplan;
+            uint8_t *clean;
+            int wcycle;
+            int j;
+
+            memset(&wide, 0, sizeof(wide));
+            wide.n = 120;
+            wide.lsp = 12;
+            wide.ltp = 11;
+            for (j = 0; j < 12; j++)
+                wide.sp[j] = (uint8_t) ((0x0A6DU >> j) & 1U);
+            for (j = 0; j < 11; j++)
+                wide.tp[j] = (uint8_t) ((0x6B7U >> j) & 1U);
+            for (j = 0; j < 8; j++) {
+                wide.h[j] = 10;
+                wide.ref[j] = 0;
+            }
+            for (j = 0; j < wide.n; j++)
+                wide.train_u[j] = (uint8_t) (2 + (j * 125) / (wide.n - 1));
+
+            wcycle = v90_dil_cycle_len(&wide);
+            clean = malloc((size_t) wcycle);
+            if (!clean)
+                goto out;
+            v90_dil_generate_codewords(v90_law, &wide, clean, wcycle);
+            if (!v90_dil_measure(clean, wcycle, v90_law, &wide, 0, &wm)
+                || !v90_dil_measure_plan_rate(&wm, 0, -12.0, v90_law, &wplan)) {
+                free(clean);
+                fprintf(stderr, "DIL measure %s: wide-ladder planning failed\n",
+                        law_name);
+                goto out;
+            }
+            free(clean);
+            if (wplan.points_dropped == 0) {
+                fprintf(stderr, "DIL measure %s: -12 dBm0 dropped nothing from a "
+                        "full ladder\n", law_name);
+                goto out;
+            }
+            if (wplan.bps < 56000.0) {
+                fprintf(stderr, "DIL measure %s: full ladder fell to %.0f bps at "
+                        "-12 dBm0\n", law_name, wplan.bps);
+                goto out;
+            }
+            vpcm_log("      §8.5.2 vs a full ladder, clean line: %d points dropped,"
+                     " Mi still %d, drn=%u %.0f bps — costs constellation, not rate",
+                     wplan.points_dropped, wplan.mi[0], (unsigned) wplan.drn,
+                     wplan.bps);
+        }
     }
     ok = true;
 

@@ -136,10 +136,46 @@ typedef struct {
      * fix is a different DIL descriptor, not a lower rate.
      */
     uint8_t intervals_unprobed;
+
+    /*
+     * §8.5.2's average-power check.  `power_limited` says the answer above was
+     * set by Table 15 rather than by what the line could carry -- which is a
+     * different problem with a different fix, so the two are reported apart.
+     */
+    double  avg_power;          /* §8.5.2 formula, squared linear amplitude */
+    double  power_limit;        /* Table 15 limit for the given max tx power */
+    bool    power_limited;      /* points were dropped to satisfy it */
+    int     points_dropped;
 } v90_dil_rate_plan_t;
 
+/*
+ * Table 15 limit for a maximum digital modem transmit power, in dBm0 (the
+ * value INFO0d bits 33:37 carry, negative).  Returns the limit as a squared
+ * linear amplitude, or 0 when the argument is outside the table's -0.5 .. -16
+ * range.
+ */
+double v90_dil_power_limit(double max_tx_dbm0);
+
+/*
+ * §8.5.2 average power of a constellation set, in squared linear amplitude.
+ *
+ * Weighted by how often the §5.4.3 modulus encoder actually uses each level
+ * across all 2^K input words, which is what the Recommendation's formula
+ * does -- levels are not equiprobable, and treating them as if they were
+ * misstates the power of exactly the large-Mi sets that matter.
+ */
+double v90_dil_constellation_power(const uint8_t mask[6][VPCM_CP_MASK_BYTES],
+                                   const int mi[6], int k, v90_law_t law);
+
+/*
+ * `max_tx_dbm0` applies §8.5.2: points are dropped from the top of the ladder
+ * until the set fits Table 15's limit, and the rate is re-derived from what is
+ * left.  Pass 0 to skip the check and get the impairment-only answer.
+ */
 bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                int level_margin,
+                               double max_tx_dbm0,
+                               v90_law_t law,
                                v90_dil_rate_plan_t *out);
 
 #endif

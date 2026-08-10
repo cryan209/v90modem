@@ -361,14 +361,109 @@ int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
     return n;
 }
 
+/*
+ * Table 15/V.90, indexed in 0.5 dBm0 steps from -0.5 down to -16.  The
+ * Recommendation tabulates an amplitude; the limit is its square.
+ */
+static const int dil_power_limit_amplitude[32] = {
+    15124, 14276, 13480, 12724, 12012, 11340, 10708, 10108,
+     9544,  9008,  8504,  8028,  7580,  7156,  6756,  6380,
+     6020,  5684,  5368,  5068,  4784,  4516,  4264,  4024,
+     3800,  3588,  3388,  3196,  3020,  2852,  2692,  2540,
+};
+
+double v90_dil_power_limit(double max_tx_dbm0)
+{
+    int idx;
+    double amp;
+
+    if (max_tx_dbm0 > -0.5 || max_tx_dbm0 < -16.0)
+        return 0.0;
+    idx = (int) ((-max_tx_dbm0) / 0.5 + 0.5) - 1;
+    if (idx < 0 || idx >= 32)
+        return 0.0;
+    amp = dil_power_limit_amplitude[idx];
+    return amp * amp;
+}
+
+double v90_dil_constellation_power(const uint8_t mask[6][VPCM_CP_MASK_BYTES],
+                                   const int mi[6], int k, v90_law_t law)
+{
+    double total = 0.0;
+    double two_k;
+    double a_i = 1.0;
+    double r_i;
+    int i;
+
+    if (!mask || !mi || k <= 0 || k > 60)
+        return 0.0;
+    two_k = ldexp(1.0, k);
+    r_i = two_k - 1.0;      /* §8.5.2: the weights are taken at R0 = 2^K - 1 */
+
+    for (i = 0; i < 6; i++) {
+        double levels[V90_DIL_UCODES];
+        int n = 0;
+        int u;
+        double r_next;
+        double k_i;
+        int j;
+
+        if (mi[i] < 1)
+            return 0.0;
+        for (u = 0; u < V90_DIL_UCODES && n < mi[i]; u++) {
+            if (!vpcm_cp_mask_get(mask[i], u))
+                continue;
+            levels[n++] = (double) dil_abs_level(
+                law, v90_codeword_compose(law, u, 1));
+        }
+        if (n != mi[i])
+            return 0.0;
+
+        /* §5.4.3 modulus encoder, run on R0 = 2^K - 1. */
+        k_i = fmod(r_i, (double) mi[i]);
+        r_next = floor(r_i / (double) mi[i]);
+
+        for (j = 0; j < mi[i]; j++) {
+            double p = levels[j] * levels[j];
+            double n_ij;
+
+            if (j < (int) k_i)
+                n_ij = a_i * (r_next + 1.0);
+            else if (j == (int) k_i)
+                n_ij = two_k - a_i * (r_i - r_next);
+            else
+                n_ij = a_i * r_next;
+            total += p * n_ij;
+        }
+
+        a_i *= (double) mi[i];
+        r_i = r_next;
+    }
+    return total / (6.0 * two_k);
+}
+
+static int dil_drn_for_bits(double bits)
+{
+    int d;
+
+    for (d = 22; d >= 0; d--) {
+        int k = vpcm_cp_drn_to_k((uint8_t) d);
+
+        if (k > 0 && (double) k <= bits)
+            return d;
+    }
+    return -1;
+}
+
 bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                int level_margin,
+                               double max_tx_dbm0,
+                               v90_law_t law,
                                v90_dil_rate_plan_t *out)
 {
     double bits = 0.0;
     int widest = 0;
     int i;
-    int d;
 
     if (!m || !out || level_margin < 0)
         return false;
@@ -416,10 +511,6 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
         bits += log2((double) out->mi[i]);
     }
 
-    for (i = 0; i < 6; i++) {
-        if (out->mi[i] < widest)
-            out->robbed_bit_limited = true;
-    }
     out->bits_available = bits;
 
     /*
@@ -428,15 +519,83 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
      * not exceed sum(log2(Mi)).  §5.4.1 then fixes the rate: D = drn + 20
      * bits per 6-symbol frame at 8000 symbols/s.
      */
-    out->drn = 0;
-    for (d = 22; d >= 0; d--) {
-        int k = vpcm_cp_drn_to_k((uint8_t) d);
+    {
+        int d = dil_drn_for_bits(bits);
 
-        if (k > 0 && (double) k <= bits) {
-            out->drn = (uint8_t) d;
-            break;
+        if (d < 0)
+            return false;
+        out->drn = (uint8_t) d;
+    }
+
+    /*
+     * §8.5.2: the set also has to fit Table 15's average-power limit, and
+     * that is a second, independent ceiling — a line can be clean enough to
+     * carry more points than the transmitter is allowed to send.
+     *
+     * Drop from the top of the ladder when it does not fit.  G.711 levels
+     * grow geometrically, so the largest point dominates the sum and removing
+     * it buys the most power for the least rate; taking it from whichever
+     * interval currently has the most points keeps the six balanced, which is
+     * what maximises prod(Mi) for a given total number of points.
+     */
+    out->power_limit = v90_dil_power_limit(max_tx_dbm0);
+    if (out->power_limit > 0.0) {
+        for (;;) {
+            int k = vpcm_cp_drn_to_k(out->drn);
+            int fattest = 0;
+            int u;
+            int highest = -1;
+
+            out->avg_power = v90_dil_constellation_power(
+                (const uint8_t (*)[VPCM_CP_MASK_BYTES]) out->mask,
+                out->mi, k, law);
+            if (out->avg_power <= out->power_limit)
+                break;
+
+            for (i = 1; i < 6; i++) {
+                if (out->mi[i] > out->mi[fattest])
+                    fattest = i;
+            }
+            if (out->mi[fattest] <= 2)
+                return false;       /* cannot meet the limit at any rate */
+            for (u = V90_DIL_UCODES - 1; u >= 0; u--) {
+                if (vpcm_cp_mask_get(out->mask[fattest], u)) {
+                    highest = u;
+                    break;
+                }
+            }
+            if (highest < 0)
+                return false;
+            vpcm_cp_mask_set(out->mask[fattest], highest, false);
+            out->mi[fattest]--;
+            out->points_dropped++;
+            out->power_limited = true;
+
+            bits = 0.0;
+            for (i = 0; i < 6; i++)
+                bits += log2((double) out->mi[i]);
+            out->bits_available = bits;
+            {
+                int d = dil_drn_for_bits(bits);
+
+                if (d < 0)
+                    return false;
+                out->drn = (uint8_t) d;
+            }
         }
     }
+
+    out->robbed_bit_limited = false;
+    widest = 0;
+    for (i = 0; i < 6; i++) {
+        if (out->mi[i] > widest)
+            widest = out->mi[i];
+    }
+    for (i = 0; i < 6; i++) {
+        if (out->mi[i] < widest)
+            out->robbed_bit_limited = true;
+    }
+
     out->bps = vpcm_cp_drn_to_bps(out->drn);
     return true;
 }

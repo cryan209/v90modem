@@ -203,6 +203,67 @@ search is therefore ambiguous by one chord and no level-based score fixes it.
 §9.3.2.8-9 removes the need: the analogue modem sends S and then receives the
 DIL it just requested, so `v90_dil_measure_align()` takes `from`/`span`.
 
+### §8.5.2 average constellation power — a second, independent ceiling
+
+§8.5.2 gives an explicit formula and Table 15 caps it against the digital
+modem's maximum transmit power (INFO0d bits 33:37):
+
+```text
+                     Σ_{i=0..5} Σ_{j=0..Mi-1} p_i,j · n_i,j
+average power  =  ─────────────────────────────────────────
+                                  6 · 2^K
+```
+
+`p_i,j` is the square of the Table 1 linear value of level *j* in constellation
+*i*. `n_i,j` is how often the §5.4.3 modulus encoder uses that level across all
+2^K input words, taken with R₀ = 2^K − 1 — **levels are not equiprobable**, and
+treating them as if they were misstates the power of exactly the large-Mi sets
+that matter. `v90_dil_constellation_power()` implements it literally;
+`v90_dil_power_limit()` is Table 15.
+
+**Does it limit the rate?** Measured, not assumed — sweeping the cap against a
+clean channel and a DIL that probes the whole ladder (Ucode 2…127):
+
+| max tx power | points dropped | Mi | drn | rate |
+|---|---:|---:|---:|---:|
+| none | 0 | 121 | 22 | 56 000 |
+| −6 dBm0 | 19 | 118 | 22 | 56 000 |
+| −12 dBm0 | 117 | 101 | 22 | 56 000 |
+| −16 dBm0 | 184 | 90 | 22 | 56 000 |
+
+**It costs constellation, not rate.** §5.4.3 needs only Σlog₂(Mi) ≥ K, i.e.
+about 64 points per interval for drn 22, and G.711 packs plenty of
+distinguishable levels down low — so dropping the top of the ladder still
+leaves ample margin. Even at Table 15's tightest entry the rate holds.
+
+It bites when the *usable* set has already been pushed up the ladder, because
+then there are no cheap points left to keep. Same cap, same clean channel, but
+a DIL probing only Ucode 71…127:
+
+| max tx power | Mi | drn | rate |
+|---|---:|---:|---:|
+| none | 58 | 21 | 54 667 |
+| −6 dBm0 | 40 | 17 | 49 333 |
+| −10 dBm0 | 25 | 13 | 44 000 |
+| −12 dBm0 | 18 | 10 | 40 000 |
+| −14 dBm0 | 10 | 5 | 33 333 |
+| −16 dBm0 | — | — | no viable set |
+
+So the two constraints compound rather than acting separately: **noise removes
+the low points, §8.5.2 removes the high ones, and what survives in the middle
+sets the rate.** Either alone is usually survivable; together they are what
+takes a link off 56k.
+
+Both outcomes are pinned in `vpcm_loopback_test`'s DIL measurement case.
+
+**Caveat on the greedy.** `v90_dil_measure_plan_rate()` drops the
+highest-magnitude point first, which buys the most power for the least rate —
+but it also compresses the constellation downward, where the same absolute
+noise costs more. Nothing here models that, so "not power-limited at −16 dBm0"
+is optimistic: it keeps 90 points crammed into low levels that a real line
+might not resolve. A real selection trades power against margin; this one only
+does power.
+
 ### Still not applied
 
 §8.5.2's cap on average constellation power, and any noise estimate beyond the
