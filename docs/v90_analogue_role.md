@@ -128,8 +128,8 @@ coverage against a modem that actually connects.
 
 ## Testing it without a second modem
 
-`tools/eicon_adsp_sip.py` runs the Eicon card's own shipped V.90 firmware as a
-SIP endpoint, answer-only. `sip_modem.c` can originate (ATD via
+`eicon_adsp_sip.py`, in the separate `../eicon-adsp-emu` project, runs the Eicon
+card's own shipped V.90 firmware as a SIP endpoint, answer-only. `sip_modem.c` can originate (ATD via
 `pjsua_call_make_call`), so an analogue-role build can dial the card directly —
 no Asterisk in the path, no hardware. That gives a real digital peer whose
 internal state is readable per-sample (`TrnProgress`, `Rstatus`, eye words) via
