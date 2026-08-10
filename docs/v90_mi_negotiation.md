@@ -146,129 +146,19 @@ result comes back later as a CP mask, not as an annotated DIL descriptor.
 Keep this in mind for [Fix 2](#fix-2-live-v92-cpd-open-question) below — it
 rules out one tempting shortcut.
 
-## Deriving Mi from a measured DIL (`v90_dil_measure.c`)
+## Deriving Mi from a measured DIL
 
-Fix 1 below describes the harness offering a maximal constellation instead of
-one derived from its own DIL analysis. The missing piece was never the
-consumption path — it was that nothing turned *received* DIL into Ci.
+The gap this note describes — constellations offered maximal rather than
+derived from DIL — is closed from the other end by
+[`v90_constellation_selection.md`](v90_constellation_selection.md) and
+[`../v90_dil_measure.c`](../v90_dil_measure.c). The consumption path below was
+never the missing piece; nothing turned a *received* DIL into Ci.
 
-`v90_dil_measure.c` does that, and the chain is short:
-
-1. **Measure.** The descriptor is an input (§8.4.1 sends it in Ja; §9.3.2.9 has
-   the analogue modem "receive the DIL sequence it requested"), so every
-   expected codeword is known. Per transmitted Ucode, record what arrived —
-   **per data-frame interval**, because §9.3.2.10 lets the peer stop early and
-   because robbed-bit signalling hits one DS0 phase in six.
-2. **Build Ci.** Walk the ladder upward in interval *i* and keep a Ucode only
-   when its received level clears the previous kept one by the noise margin.
-   A pad compresses neighbours onto one received code; RBS takes the LSB and
-   merges them. Both drop out here.
-3. **Mi = |Ci|**, per interval.
-4. **Gate on §5.4.3.** The modulus encoder needs ∏Mi ≥ 2^K, so the largest
-   supportable `drn` is the largest whose K does not exceed Σlog₂(Mi).
-5. **Rate is then §5.4.1**: D = drn + 20 bits per 6-symbol frame, ×8000/6.
-
-On a synthetic line with a 3 dB pad and RBS in one slot of six, from **half** a
-DIL pass:
-
-```text
-coverage=50%, 31 Ucodes measured, gain=-3.0 dB, RBS slot mask=0x04,
-Mi=[26 26 16 26 26 26] -> drn=13, 44000 bps
-```
-
-The robbed interval carries 16 points where the clean ones carry 26, which is
-exactly why §5.4.3 makes Mi per-interval rather than one number per frame.
-
-### A DIL descriptor can be self-consistent and still be useless
-
-Segment lengths are multiples of 6 and TP restarts at every segment boundary,
-so each data-frame interval is pinned to a fixed subset of TP bit positions. If
-LTP shares a factor with 6 and none of that interval's TP bits are set, the
-interval receives **only** REFc for the whole DIL and nothing is learned about
-it. The first descriptor tried here did exactly that — LTP 12 left interval 1
-landing only on TP bits 3 and 9, both zero — and the measurement correctly
-reported Mi = 1 for it.
-
-`v90_dil_rate_plan_t.intervals_unprobed` reports this, because the fix is a
-different descriptor (LTP coprime with 6), not a lower rate. Anything that
-authors a DIL descriptor here has to check it.
-
-### Alignment must not be searched blindly
-
-G.711 is self-similar across chords — Ucodes *u* and *u+16* differ by exactly a
-factor of two — so a DIL stepping one Ucode per segment reproduces its own
-shape 16 segments later, scaled. Normalised correlation cannot see a scale
-factor, and that is the property wanted (a pad *is* a scale factor). A blind
-search is therefore ambiguous by one chord and no level-based score fixes it.
-§9.3.2.8-9 removes the need: the analogue modem sends S and then receives the
-DIL it just requested, so `v90_dil_measure_align()` takes `from`/`span`.
-
-### §8.5.2 average constellation power — a second, independent ceiling
-
-§8.5.2 gives an explicit formula and Table 15 caps it against the digital
-modem's maximum transmit power (INFO0d bits 33:37):
-
-```text
-                     Σ_{i=0..5} Σ_{j=0..Mi-1} p_i,j · n_i,j
-average power  =  ─────────────────────────────────────────
-                                  6 · 2^K
-```
-
-`p_i,j` is the square of the Table 1 linear value of level *j* in constellation
-*i*. `n_i,j` is how often the §5.4.3 modulus encoder uses that level across all
-2^K input words, taken with R₀ = 2^K − 1 — **levels are not equiprobable**, and
-treating them as if they were misstates the power of exactly the large-Mi sets
-that matter. `v90_dil_constellation_power()` implements it literally;
-`v90_dil_power_limit()` is Table 15.
-
-**Does it limit the rate?** Measured, not assumed — sweeping the cap against a
-clean channel and a DIL that probes the whole ladder (Ucode 2…127):
-
-| max tx power | points dropped | Mi | drn | rate |
-|---|---:|---:|---:|---:|
-| none | 0 | 121 | 22 | 56 000 |
-| −6 dBm0 | 19 | 118 | 22 | 56 000 |
-| −12 dBm0 | 117 | 101 | 22 | 56 000 |
-| −16 dBm0 | 184 | 90 | 22 | 56 000 |
-
-**It costs constellation, not rate.** §5.4.3 needs only Σlog₂(Mi) ≥ K, i.e.
-about 64 points per interval for drn 22, and G.711 packs plenty of
-distinguishable levels down low — so dropping the top of the ladder still
-leaves ample margin. Even at Table 15's tightest entry the rate holds.
-
-It bites when the *usable* set has already been pushed up the ladder, because
-then there are no cheap points left to keep. Same cap, same clean channel, but
-a DIL probing only Ucode 71…127:
-
-| max tx power | Mi | drn | rate |
-|---|---:|---:|---:|
-| none | 58 | 21 | 54 667 |
-| −6 dBm0 | 40 | 17 | 49 333 |
-| −10 dBm0 | 25 | 13 | 44 000 |
-| −12 dBm0 | 18 | 10 | 40 000 |
-| −14 dBm0 | 10 | 5 | 33 333 |
-| −16 dBm0 | — | — | no viable set |
-
-So the two constraints compound rather than acting separately: **noise removes
-the low points, §8.5.2 removes the high ones, and what survives in the middle
-sets the rate.** Either alone is usually survivable; together they are what
-takes a link off 56k.
-
-Both outcomes are pinned in `vpcm_loopback_test`'s DIL measurement case.
-
-**Caveat on the greedy.** `v90_dil_measure_plan_rate()` drops the
-highest-magnitude point first, which buys the most power for the least rate —
-but it also compresses the constellation downward, where the same absolute
-noise costs more. Nothing here models that, so "not power-limited at −16 dBm0"
-is optimistic: it keeps 90 points crammed into low levels that a real line
-might not resolve. A real selection trades power against margin; this one only
-does power.
-
-### Still not applied
-
-§8.5.2's cap on average constellation power, and any noise estimate beyond the
-caller's `level_margin`. The masks are a starting point for a CP frame, not a
-finished one.
+In short: measure what arrived per Ucode per data-frame interval, keep the
+points that clear a noise margin, drop points from the top until §8.5.2's
+Table 15 limit is met, then take the largest `drn` whose K fits Σlog₂(Mi).
+Noise thins the constellation from the bottom of the ladder and §8.5.2 from the
+top; measured, it is the combination that moves the rate, not either alone.
 
 ## Rate ↔ bits per frame (§5.4.1, Table 2)
 

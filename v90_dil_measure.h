@@ -51,6 +51,15 @@ typedef struct {
      */
     int      rx_ucode_slot[6];  /* dominant received Ucode, -1 if unseen */
     int      rx_level_slot[6];  /* mean received |level| in that interval */
+
+    /*
+     * Spread of the received level for this Ucode, which is what decides
+     * whether the point next to it can be told apart.  Without it a
+     * "distinguishable" test is only asking whether two codes differ, which
+     * is true right down to the noise floor and therefore says nothing.
+     */
+    double   rx_sigma;          /* over the whole DIL */
+    double   rx_sigma_slot[6];  /* per data-frame interval */
 } v90_dil_ucode_obs_t;
 
 typedef struct {
@@ -107,14 +116,16 @@ int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
  * 2^K -- picks the largest drn the line supports.  Rate follows from drn
  * (§5.4.1: D = drn + 20 bits per 6-symbol frame, so bps = D * 8000/6).
  *
- * `level_margin` is the smallest difference in received level, in linear
- * units, at which two Ucodes still count as distinguishable.  Zero means
- * "distinct codes are enough", which is the optimistic bound rather than a
- * noise-aware answer.
+ * `level_margin` is a floor on the separation between adjacent points, in
+ * linear units.  `noise_sigmas` is the interesting one: two points count as
+ * distinguishable only when their received levels differ by at least that
+ * many standard deviations of the measured noise, so the constellation
+ * thins out wherever the line is noisy relative to G.711's spacing.  Pass 0
+ * to ignore noise and get the optimistic bound.
  *
- * Not applied here: §8.5.2's constraint on average constellation power, and
- * any noise estimate beyond `level_margin`.  The masks are a starting point
- * for a CP frame, not a finished one.
+ * With both `noise_sigmas` and `max_tx_dbm0` set, the two constraints squeeze
+ * from opposite ends -- noise from the bottom of the ladder, §8.5.2 from the
+ * top -- and the plan reports how many points each removed.
  */
 typedef struct {
     uint8_t mask[6][VPCM_CP_MASK_BYTES];  /* Ci per data-frame interval */
@@ -145,7 +156,17 @@ typedef struct {
     double  avg_power;          /* §8.5.2 formula, squared linear amplitude */
     double  power_limit;        /* Table 15 limit for the given max tx power */
     bool    power_limited;      /* points were dropped to satisfy it */
-    int     points_dropped;
+    int     points_dropped;     /* dropped from the top, for §8.5.2 */
+
+    /*
+     * The other end of the squeeze.  Noise merges points at the *bottom* of
+     * the ladder, where G.711's levels sit closest together, while §8.5.2
+     * removes them from the top.  Counting the two separately is the only way
+     * to see which one is actually setting the rate.
+     */
+    bool    noise_limited;
+    int     points_below_margin;  /* excluded because a neighbour was too close */
+    double  noise_floor;          /* mean measured sigma, linear */
 } v90_dil_rate_plan_t;
 
 /*
@@ -174,6 +195,7 @@ double v90_dil_constellation_power(const uint8_t mask[6][VPCM_CP_MASK_BYTES],
  */
 bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                int level_margin,
+                               double noise_sigmas,
                                double max_tx_dbm0,
                                v90_law_t law,
                                v90_dil_rate_plan_t *out);

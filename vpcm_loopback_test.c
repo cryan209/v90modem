@@ -1110,7 +1110,7 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
     {
         v90_dil_rate_plan_t plan;
 
-        if (!v90_dil_measure_plan_rate(&m, 0, 0.0, v90_law, &plan)) {
+        if (!v90_dil_measure_plan_rate(&m, 0, 0.0, 0.0, v90_law, &plan)) {
             fprintf(stderr, "DIL measure %s: rate planning failed\n", law_name);
             goto out;
         }
@@ -1148,7 +1148,7 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
         {
             v90_dil_rate_plan_t capped;
 
-            if (!v90_dil_measure_plan_rate(&m, 0, -12.0, v90_law, &capped)) {
+            if (!v90_dil_measure_plan_rate(&m, 0, 0.0, -12.0, v90_law, &capped)) {
                 fprintf(stderr, "DIL measure %s: power-limited planning failed\n",
                         law_name);
                 goto out;
@@ -1226,7 +1226,7 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
                 goto out;
             v90_dil_generate_codewords(v90_law, &wide, clean, wcycle);
             if (!v90_dil_measure(clean, wcycle, v90_law, &wide, 0, &wm)
-                || !v90_dil_measure_plan_rate(&wm, 0, -12.0, v90_law, &wplan)) {
+                || !v90_dil_measure_plan_rate(&wm, 0, 0.0, -12.0, v90_law, &wplan)) {
                 free(clean);
                 fprintf(stderr, "DIL measure %s: wide-ladder planning failed\n",
                         law_name);
@@ -1254,6 +1254,146 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
 out:
     free(stream);
     free(dil);
+    return ok;
+}
+
+/*
+ * Where the constellation actually gets decided: noise from below, §8.5.2
+ * from above.
+ *
+ * G.711's levels are spaced geometrically, so they sit closest together at
+ * the bottom of the ladder — which is exactly where noise merges them. §8.5.2
+ * pushes the other way, removing the largest levels because they dominate the
+ * average-power sum. Neither constraint alone says much; the rate is set by
+ * what survives between them.
+ */
+static bool test_v90_dil_constellation_tradeoff(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v91_law_t v91_law = law;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    const double noise_sigma = 40.0;
+    const double sigmas = 3.0;
+    v90_dil_desc_t desc;
+    v90_dil_measurement_t m;
+    v90_dil_rate_plan_t ideal;
+    v90_dil_rate_plan_t noisy;
+    v90_dil_rate_plan_t both;
+    uint8_t *stream = NULL;
+    uint32_t lcg = 0x13579BDFu;
+    int cycle;
+    int i;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 constellation trade-off, noise vs §8.5.2 power (%s)",
+             law_name);
+
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 120;
+    desc.lsp = 12;
+    desc.ltp = 11;          /* coprime with 6: every interval gets probed */
+    for (i = 0; i < 12; i++)
+        desc.sp[i] = (uint8_t) ((0x0A6DU >> i) & 1U);
+    for (i = 0; i < 11; i++)
+        desc.tp[i] = (uint8_t) ((0x6B7U >> i) & 1U);
+    for (i = 0; i < 8; i++) {
+        desc.h[i] = 10;
+        desc.ref[i] = 0;
+    }
+    for (i = 0; i < desc.n; i++)      /* sweep the whole ladder */
+        desc.train_u[i] = (uint8_t) (2 + (i * 125) / (desc.n - 1));
+
+    cycle = v90_dil_cycle_len(&desc);
+    stream = malloc((size_t) cycle);
+    if (!stream)
+        goto out;
+    v90_dil_generate_codewords(v90_law, &desc, stream, cycle);
+
+    /* Additive noise, summed draws so it is roughly Gaussian, and
+     * deterministic so the thresholds below mean something. */
+    for (i = 0; i < cycle; i++) {
+        double n = 0.0;
+        int k;
+        int32_t v;
+
+        for (k = 0; k < 4; k++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            n += ((double) ((lcg >> 16) & 0xFFFF) / 65535.0) - 0.5;
+        }
+        n *= noise_sigma / 0.577;      /* 4 uniforms: sd = sqrt(4/12) */
+        v = v91_codeword_to_linear(v91_law, stream[i]) + (int32_t) n;
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        stream[i] = v91_linear_to_codeword(v91_law, (int16_t) v);
+    }
+
+    if (!v90_dil_measure(stream, cycle, v90_law, &desc, 0, &m)) {
+        fprintf(stderr, "tradeoff %s: measurement failed\n", law_name);
+        goto out;
+    }
+    if (!v90_dil_measure_plan_rate(&m, 0, 0.0, 0.0, v90_law, &ideal)
+        || !v90_dil_measure_plan_rate(&m, 0, sigmas, 0.0, v90_law, &noisy)
+        || !v90_dil_measure_plan_rate(&m, 0, sigmas, -12.0, v90_law, &both)) {
+        fprintf(stderr, "tradeoff %s: planning failed\n", law_name);
+        goto out;
+    }
+
+    /* The noise has to be visible in the measurement, and roughly the size
+     * that went in -- a floor that is present but wrong would let everything
+     * below through on a threshold that means nothing. */
+    {
+        int with_sigma = 0;
+
+        for (i = 0; i < V90_DIL_UCODES; i++) {
+            if (m.u[i].tx_count > 0 && m.u[i].rx_sigma > 0.0)
+                with_sigma++;
+        }
+        if (with_sigma < m.ucodes_measured / 2) {
+            fprintf(stderr, "tradeoff %s: only %d of %d Ucodes show noise\n",
+                    law_name, with_sigma, m.ucodes_measured);
+            goto out;
+        }
+        if (noisy.noise_floor < noise_sigma * 0.5
+            || noisy.noise_floor > noise_sigma * 1.5) {
+            fprintf(stderr, "tradeoff %s: measured floor %.1f, injected %.0f\n",
+                    law_name, noisy.noise_floor, noise_sigma);
+            goto out;
+        }
+    }
+    /* Ignoring noise has to look better than accounting for it. */
+    if (noisy.mi[0] >= ideal.mi[0] || !noisy.noise_limited) {
+        fprintf(stderr, "tradeoff %s: noise did not thin the constellation "
+                "(%d -> %d, %d below margin)\n", law_name, ideal.mi[0],
+                noisy.mi[0], noisy.points_below_margin);
+        goto out;
+    }
+    /* And the power cap has to take points off the other end. */
+    if (both.points_dropped == 0 || both.mi[0] >= noisy.mi[0]) {
+        fprintf(stderr, "tradeoff %s: power cap removed nothing (%d -> %d)\n",
+                law_name, noisy.mi[0], both.mi[0]);
+        goto out;
+    }
+    if (both.bps > noisy.bps || noisy.bps > ideal.bps) {
+        fprintf(stderr, "tradeoff %s: rates not ordered (%.0f %.0f %.0f)\n",
+                law_name, ideal.bps, noisy.bps, both.bps);
+        goto out;
+    }
+
+    vpcm_log("PASS: V.90 constellation trade-off (%s, injected sigma=%.0f, "
+             "measured floor=%.1f)", law_name, noise_sigma, noisy.noise_floor);
+    vpcm_log("      noise ignored:        Mi=%3d  drn=%2u  %.0f bps",
+             ideal.mi[0], (unsigned) ideal.drn, ideal.bps);
+    vpcm_log("      %.0f-sigma margin:      Mi=%3d  drn=%2u  %.0f bps "
+             "(%d points lost at the bottom)",
+             sigmas, noisy.mi[0], (unsigned) noisy.drn, noisy.bps,
+             noisy.points_below_margin);
+    vpcm_log("      + §8.5.2 -12 dBm0:    Mi=%3d  drn=%2u  %.0f bps "
+             "(%d more lost at the top)",
+             both.mi[0], (unsigned) both.drn, both.bps, both.points_dropped);
+    ok = true;
+
+out:
+    free(stream);
     return ok;
 }
 
@@ -9609,6 +9749,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_rx_single_pass(V91_LAW_ALAW)
         && test_v90_dil_impairment_measurement(V91_LAW_ULAW)
         && test_v90_dil_impairment_measurement(V91_LAW_ALAW)
+        && test_v90_dil_constellation_tradeoff(V91_LAW_ULAW)
+        && test_v90_dil_constellation_tradeoff(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v92_phase3_transitions()

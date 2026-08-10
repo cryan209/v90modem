@@ -161,6 +161,7 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     int *rx_n;
     int (*slot_tally)[6][V90_DIL_UCODES];
     long (*slot_sum)[6];
+    double (*slot_sq)[6];
     int (*slot_cnt)[6];
     int i;
     int u;
@@ -187,9 +188,10 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     rx_n = calloc((size_t) V90_DIL_UCODES, sizeof(*rx_n));
     slot_tally = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_tally));
     slot_sum = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_sum));
+    slot_sq = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_sq));
     slot_cnt = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_cnt));
     if (!gen || !tally || !rx_sum || !rx_n
-        || !slot_tally || !slot_sum || !slot_cnt) {
+        || !slot_tally || !slot_sum || !slot_sq || !slot_cnt) {
         goto fail;
     }
     if (v90_dil_generate_codewords(law, desc, gen, avail) != avail)
@@ -219,8 +221,11 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
         {
             int slot = (i + offset) % 6;
 
+            double lvl = dil_abs_level(law, rx[offset + i]);
+
             slot_tally[tx_u][slot][rx_u]++;
-            slot_sum[tx_u][slot] += dil_abs_level(law, rx[offset + i]);
+            slot_sum[tx_u][slot] += (long) lvl;
+            slot_sq[tx_u][slot] += lvl * lvl;
             slot_cnt[tx_u][slot]++;
         }
     }
@@ -262,6 +267,26 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
             out->u[u].rx_ucode_slot[r] = sbest_u;
             out->u[u].rx_level_slot[r] = slot_cnt[u][r]
                 ? (int) (slot_sum[u][r] / slot_cnt[u][r]) : 0;
+            if (slot_cnt[u][r] > 1) {
+                double n2 = (double) slot_cnt[u][r];
+                double mean = (double) slot_sum[u][r] / n2;
+                double var = slot_sq[u][r] / n2 - mean * mean;
+
+                out->u[u].rx_sigma_slot[r] = var > 0.0 ? sqrt(var) : 0.0;
+            }
+        }
+        {
+            /* Pool the per-interval spreads for a single figure per Ucode. */
+            double acc = 0.0;
+            int seen = 0;
+
+            for (r = 0; r < 6; r++) {
+                if (slot_cnt[u][r] > 1) {
+                    acc += out->u[u].rx_sigma_slot[r];
+                    seen++;
+                }
+            }
+            out->u[u].rx_sigma = seen ? acc / seen : 0.0;
         }
 
         /* A pad shows up as a level ratio; Ucode 0 carries no level to
@@ -332,6 +357,7 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     free(rx_n);
     free(slot_tally);
     free(slot_sum);
+    free(slot_sq);
     free(slot_cnt);
     return true;
 
@@ -342,6 +368,7 @@ fail:
     free(rx_n);
     free(slot_tally);
     free(slot_sum);
+    free(slot_sq);
     free(slot_cnt);
     return false;
 }
@@ -457,11 +484,14 @@ static int dil_drn_for_bits(double bits)
 
 bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                int level_margin,
+                               double noise_sigmas,
                                double max_tx_dbm0,
                                v90_law_t law,
                                v90_dil_rate_plan_t *out)
 {
     double bits = 0.0;
+    double sigma_acc = 0.0;
+    int sigma_n = 0;
     int widest = 0;
     int i;
 
@@ -483,24 +513,49 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
          * the LSB away, drop out here -- which is the impairment restated as
          * constellation points.
          */
+        double prev_sigma = 0.0;
+
         for (u = 0; u < V90_DIL_UCODES; u++) {
             int level;
+            double sigma;
+            double need;
 
             if (m->u[u].tx_count == 0)
                 continue;
             if (m->u[u].rx_ucode_slot[i] < 0)
                 continue;
             level = m->u[u].rx_level_slot[i];
-            /* A margin of 0 still means "must have moved": two Ucodes that
-             * arrive at the same level are one constellation point, not two. */
-            if (prev_level >= 0
-                && level - prev_level < (level_margin > 1 ? level_margin : 1))
+            sigma = m->u[u].rx_sigma_slot[i];
+
+            /*
+             * How far apart two levels have to land before a receiver can
+             * call them different points.  The noise term dominates wherever
+             * the line is poor relative to G.711's spacing -- and G.711's
+             * spacing is finest at the bottom of the ladder, so this is what
+             * thins the constellation from below while §8.5.2 thins it from
+             * above.
+             *
+             * sqrt(s1^2 + s2^2) because it is the *difference* of two noisy
+             * observations that has to clear the threshold, not either one.
+             */
+            need = (level_margin > 1) ? level_margin : 1;
+            if (noise_sigmas > 0.0) {
+                double combined = sqrt(prev_sigma * prev_sigma + sigma * sigma);
+                double want = noise_sigmas * combined;
+
+                if (want > need)
+                    need = want;
+            }
+            if (prev_level >= 0 && (double) (level - prev_level) < need) {
+                out->points_below_margin++;
                 continue;
+            }
             if (u != 0)
                 probed++;
             vpcm_cp_mask_set(out->mask[i], u, true);
             out->mi[i]++;
             prev_level = level;
+            prev_sigma = sigma;
         }
         if (probed == 0)
             out->intervals_unprobed |= (uint8_t) (1u << i);
@@ -512,6 +567,14 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
     }
 
     out->bits_available = bits;
+    out->noise_limited = (noise_sigmas > 0.0 && out->points_below_margin > 0);
+    for (i = 0; i < V90_DIL_UCODES; i++) {
+        if (m->u[i].tx_count > 0 && m->u[i].rx_sigma > 0.0) {
+            sigma_acc += m->u[i].rx_sigma;
+            sigma_n++;
+        }
+    }
+    out->noise_floor = sigma_n ? sigma_acc / sigma_n : 0.0;
 
     /*
      * §5.4.3: the modulus encoder has to fit K bits into the product of the
