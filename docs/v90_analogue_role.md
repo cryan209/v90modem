@@ -144,28 +144,55 @@ printf 'ATD6001\r' > /tmp/v90modem-analogue
 `SIP_FORCE_PCMU=1` is not optional: the first attempt negotiated A-law against
 a µ-law endpoint, and a transcoded DS0 cannot carry Phase 3 at all.
 
-### Where it stops now, and why it is not ours
+### Where it stops, and why the evidence points back at us
 
 The card enters page 14, runs its Phase 3 states `0x0060` → `0x0074` for about
-four seconds, sends **no Sd at all** (`./vpcm_decode --v90` on the capture finds
-none, and that scan tries every U_INFO), then falls back to `0x0024` and
-retrains. `run54.adsp.csv` says why, at the page boundary:
+four seconds, sends **no Sd at all** (`./vpcm_decode --v90` finds none, and that
+scan tries every U_INFO), then falls back to `0x0024` and retrains.
+`run54.adsp.csv` shows `tx_ptr` going `0x3764` → `0x0000` at the page boundary
+and staying there, which matches the sibling project's Session 47 note about
+page-local transmit state.
 
-```text
-boot=0x0007 trn=0x004f  tx_ptr=0x3764  tx_value=0x0000
-boot=0x000e trn=0x0060  tx_ptr=0x0000  tx_value=0x0000   <- and zero for the whole page
+**Do not read that as an emulator defect.** The same card under the same
+emulation has reached full V.90 data mode against two different analogue
+modems and produced a `CONNECT` from a CX93001 (Sessions 87, 190, 237). A peer
+that behaves correctly gets Sd out of it. Three things say the remaining
+divergence is on this side:
+
+1. **The workarounds are the symptom.** A conformant analogue modem does not
+   need `ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a`, and does not need INFO1a
+   repeated forty times. The card sends INFO1d to real modems; that it does not
+   send one to us means our Phase 2 is still not presenting what §9.2.1.1.7
+   requires before it will — Tone A at the right moment, after the L1/L2 it is
+   expecting.
+2. **§9.3.1.1–9.3.1.3 make Sd conditional on Ja.** The digital modem conditions
+   its receiver to detect Ja, waits up to 500 ms, and only then transmits Sd.
+   A card sitting in page 14 with nothing to transmit is consistent with never
+   having detected our Ja, and our Ja has no foreign grader: `v90_analogue_tx_test`
+   demodulates it with our own inverse mapping, which cannot catch a convention
+   that is wrong but self-consistent — the exact trap the Eicon fixture caught
+   twice on the receive side.
+3. **Our analogue side does not complete Phase 2 against our own digital side
+   either.** Two instances over SIP, analogue-role dialling digital-role, stall
+   in the Phase 2 tone exchange — analogue at `FIRST_B_INFO_SEEN`, digital at
+   `V90_PHASE2_B_INFO0_SEEN`, each waiting for a reversal from the other. That
+   is a reproduction with no card in it, and it is the place to work next
+   because the loop is seconds long:
+
+```bash
+SIP_FORCE_PCMU=1 VPCM_ME_VERBOSE=1 ./sip_v90_modem --sip-server <registrar> \
+    --username 6001 --password 6001 --local-port 5064 --rtp-port 4200 \
+    --pty-link /tmp/v90modem-digital        # then ATS0=1
+SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
+    --sip-server <registrar> --username 6000 --password 6000 \
+    --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue  # ATD6001
 ```
 
-The V.90 page comes up with no transmit source wired to it. That is the
-emulator harness's own documented defect — the sibling project's Session 47,
-"page-local transmit state that the real host re-establishes across a boot-page
-change and our supervisor does not" — and it is in `../modem-dsp-emu`, not
-here. Our receiver hunting Sd and finding none is the correct behaviour against
-a peer that is transmitting nothing.
-
-So the analogue role is blocked on the *instrument*, not on the modem. Against
-real hardware the same build would carry on into Phase 3; there is no evidence
-either way yet, because the only digital modem in the lab is this one.
+The tone/reversal choreography of §9.2.2.1.3–9.2.2.1.6 is the prime suspect:
+the analogue role reuses SpanDSP's V.34 *call modem* tone stages, which are
+named for Tone B and sequenced for V.34's roles, while V.90 has the analogue
+modem transmitting Tone A and answering Tone B reversals on a different
+timetable.
 
 ## What is left
 
