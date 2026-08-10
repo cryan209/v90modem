@@ -26,6 +26,7 @@
 #define V90_DIL_MEASURE_H
 
 #include "v90.h"
+#include "vpcm_cp.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -40,6 +41,16 @@ typedef struct {
     int      tx_level;          /* transmitted |level|, linear */
     int      rx_level;          /* mean received |level|, linear */
     uint8_t  slot_disagree;     /* bitmask of DS0 phases (mod 6) that vary */
+
+    /*
+     * Per data-frame interval, because that is the resolution the answer is
+     * needed at.  Robbed-bit signalling alters one DS0 phase in six, so a
+     * Ucode can arrive clean in five intervals and collapse onto its
+     * neighbour in the sixth -- which is exactly why §5.4.3 makes Mi
+     * per-interval rather than one number for the frame.
+     */
+    int      rx_ucode_slot[6];  /* dominant received Ucode, -1 if unseen */
+    int      rx_level_slot[6];  /* mean received |level| in that interval */
 } v90_dil_ucode_obs_t;
 
 typedef struct {
@@ -87,5 +98,48 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
  */
 int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
                                   uint8_t *out, int max_out);
+
+/*
+ * The constellation and rate the measured channel will carry.
+ *
+ * Ci is built per data-frame interval from what actually arrived there, Mi is
+ * its population, and §5.4.3's gate -- the modulus encoder needs prod(Mi) >=
+ * 2^K -- picks the largest drn the line supports.  Rate follows from drn
+ * (§5.4.1: D = drn + 20 bits per 6-symbol frame, so bps = D * 8000/6).
+ *
+ * `level_margin` is the smallest difference in received level, in linear
+ * units, at which two Ucodes still count as distinguishable.  Zero means
+ * "distinct codes are enough", which is the optimistic bound rather than a
+ * noise-aware answer.
+ *
+ * Not applied here: §8.5.2's constraint on average constellation power, and
+ * any noise estimate beyond `level_margin`.  The masks are a starting point
+ * for a CP frame, not a finished one.
+ */
+typedef struct {
+    uint8_t mask[6][VPCM_CP_MASK_BYTES];  /* Ci per data-frame interval */
+    int     mi[6];                        /* |Ci| */
+    double  bits_available;               /* sum of log2(Mi) */
+    uint8_t drn;
+    double  bps;
+    bool    robbed_bit_limited;           /* some interval carries fewer points */
+
+    /*
+     * Data-frame intervals the DIL never probed, as a bitmask.
+     *
+     * A descriptor can be self-consistent and still be useless in an interval:
+     * segment lengths are multiples of 6 and TP restarts every segment, so if
+     * TP happens to hold no training symbol at any position congruent to
+     * interval i, that interval only ever carries REFc and nothing is learned
+     * about it.  §8.4.1 does not forbid it, but §5.4.3 needs an Mi for all
+     * six.  Reported rather than quietly turned into "Mi = 1", because the
+     * fix is a different DIL descriptor, not a lower rate.
+     */
+    uint8_t intervals_unprobed;
+} v90_dil_rate_plan_t;
+
+bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
+                               int level_margin,
+                               v90_dil_rate_plan_t *out);
 
 #endif

@@ -146,6 +146,69 @@ result comes back later as a CP mask, not as an annotated DIL descriptor.
 Keep this in mind for [Fix 2](#fix-2-live-v92-cpd-open-question) below — it
 rules out one tempting shortcut.
 
+## Deriving Mi from a measured DIL (`v90_dil_measure.c`)
+
+Fix 1 below describes the harness offering a maximal constellation instead of
+one derived from its own DIL analysis. The missing piece was never the
+consumption path — it was that nothing turned *received* DIL into Ci.
+
+`v90_dil_measure.c` does that, and the chain is short:
+
+1. **Measure.** The descriptor is an input (§8.4.1 sends it in Ja; §9.3.2.9 has
+   the analogue modem "receive the DIL sequence it requested"), so every
+   expected codeword is known. Per transmitted Ucode, record what arrived —
+   **per data-frame interval**, because §9.3.2.10 lets the peer stop early and
+   because robbed-bit signalling hits one DS0 phase in six.
+2. **Build Ci.** Walk the ladder upward in interval *i* and keep a Ucode only
+   when its received level clears the previous kept one by the noise margin.
+   A pad compresses neighbours onto one received code; RBS takes the LSB and
+   merges them. Both drop out here.
+3. **Mi = |Ci|**, per interval.
+4. **Gate on §5.4.3.** The modulus encoder needs ∏Mi ≥ 2^K, so the largest
+   supportable `drn` is the largest whose K does not exceed Σlog₂(Mi).
+5. **Rate is then §5.4.1**: D = drn + 20 bits per 6-symbol frame, ×8000/6.
+
+On a synthetic line with a 3 dB pad and RBS in one slot of six, from **half** a
+DIL pass:
+
+```text
+coverage=50%, 31 Ucodes measured, gain=-3.0 dB, RBS slot mask=0x04,
+Mi=[26 26 16 26 26 26] -> drn=13, 44000 bps
+```
+
+The robbed interval carries 16 points where the clean ones carry 26, which is
+exactly why §5.4.3 makes Mi per-interval rather than one number per frame.
+
+### A DIL descriptor can be self-consistent and still be useless
+
+Segment lengths are multiples of 6 and TP restarts at every segment boundary,
+so each data-frame interval is pinned to a fixed subset of TP bit positions. If
+LTP shares a factor with 6 and none of that interval's TP bits are set, the
+interval receives **only** REFc for the whole DIL and nothing is learned about
+it. The first descriptor tried here did exactly that — LTP 12 left interval 1
+landing only on TP bits 3 and 9, both zero — and the measurement correctly
+reported Mi = 1 for it.
+
+`v90_dil_rate_plan_t.intervals_unprobed` reports this, because the fix is a
+different descriptor (LTP coprime with 6), not a lower rate. Anything that
+authors a DIL descriptor here has to check it.
+
+### Alignment must not be searched blindly
+
+G.711 is self-similar across chords — Ucodes *u* and *u+16* differ by exactly a
+factor of two — so a DIL stepping one Ucode per segment reproduces its own
+shape 16 segments later, scaled. Normalised correlation cannot see a scale
+factor, and that is the property wanted (a pad *is* a scale factor). A blind
+search is therefore ambiguous by one chord and no level-based score fixes it.
+§9.3.2.8-9 removes the need: the analogue modem sends S and then receives the
+DIL it just requested, so `v90_dil_measure_align()` takes `from`/`span`.
+
+### Still not applied
+
+§8.5.2's cap on average constellation power, and any noise estimate beyond the
+caller's `level_margin`. The masks are a starting point for a CP frame, not a
+finished one.
+
 ## Rate ↔ bits per frame (§5.4.1, Table 2)
 
 Two counts matter per 6-symbol data frame (`v90_state_t`'s `data_mapper_d`/`_k`/`_s`):

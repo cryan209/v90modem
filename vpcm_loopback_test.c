@@ -998,11 +998,19 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
     memset(&desc, 0, sizeof(desc));
     desc.n = 60;
     desc.lsp = 12;
-    desc.ltp = 12;
-    for (i = 0; i < 12; i++) {
+    /*
+     * LTP is 11, not 12, and that matters.  Segment lengths are multiples of
+     * 6 and TP restarts each segment, so an LTP sharing a factor with 6 pins
+     * each data-frame interval to the same TP bits forever — with LTP 12 and
+     * this pattern, interval 1 lands only on TP bits 3 and 9, both zero, and
+     * never receives a training symbol at all.  11 is coprime with 6, so the
+     * training symbols sweep every interval.
+     */
+    desc.ltp = 11;
+    for (i = 0; i < 12; i++)
         desc.sp[i] = (uint8_t) ((0x0A6DU >> i) & 1U);
-        desc.tp[i] = (uint8_t) ((0x0DB7U >> i) & 1U);
-    }
+    for (i = 0; i < 11; i++)
+        desc.tp[i] = (uint8_t) ((0x6B7U >> i) & 1U);
     for (i = 0; i < 8; i++) {
         desc.h[i] = 10;            /* 66T segments */
         desc.ref[i] = 0;
@@ -1094,11 +1102,51 @@ static bool test_v90_dil_impairment_measurement(v91_law_t law)
         goto out;
     }
 
-    vpcm_log("PASS: V.90 DIL impairment measurement from half a pass (%s, "
-             "coverage=%.0f%%, %d Ucodes measured, gain=%.1f dB, RBS slot mask=0x%02X, "
-             "%d usable / %d collapsed)",
-             law_name, 100.0 * m.coverage, m.ucodes_measured, m.gain_db,
-             m.rbs_slot_mask, m.usable_count, collapsed);
+    /*
+     * And the point of measuring: the rate.  §5.4.3 needs prod(Mi) >= 2^K, so
+     * the per-interval constellations the measurement just produced decide
+     * which drn the line will carry, and §5.4.1 turns drn into bit/s.
+     */
+    {
+        v90_dil_rate_plan_t plan;
+
+        if (!v90_dil_measure_plan_rate(&m, 0, &plan)) {
+            fprintf(stderr, "DIL measure %s: rate planning failed\n", law_name);
+            goto out;
+        }
+        if (plan.intervals_unprobed != 0) {
+            fprintf(stderr, "DIL measure %s: intervals 0x%02X never probed\n",
+                    law_name, plan.intervals_unprobed);
+            goto out;
+        }
+        if (!plan.robbed_bit_limited) {
+            fprintf(stderr,
+                    "DIL measure %s: RBS slot not reflected in Mi (%d %d %d %d %d %d)\n",
+                    law_name, plan.mi[0], plan.mi[1], plan.mi[2],
+                    plan.mi[3], plan.mi[4], plan.mi[5]);
+            goto out;
+        }
+        if (plan.mi[rbs_slot] >= plan.mi[(rbs_slot + 1) % 6]) {
+            fprintf(stderr, "DIL measure %s: robbed slot %d carries %d points, "
+                    "clean slot carries %d\n", law_name, rbs_slot,
+                    plan.mi[rbs_slot], plan.mi[(rbs_slot + 1) % 6]);
+            goto out;
+        }
+        /* A padded, robbed line must not come out at the 56k ceiling. */
+        if (plan.bps <= 0.0 || plan.bps >= 56000.0) {
+            fprintf(stderr, "DIL measure %s: planned %.0f bps on an impaired line\n",
+                    law_name, plan.bps);
+            goto out;
+        }
+        vpcm_log("PASS: V.90 DIL impairment measurement from half a pass (%s, "
+                 "coverage=%.0f%%, %d Ucodes measured, gain=%.1f dB, "
+                 "RBS slot mask=0x%02X, %d usable / %d collapsed; "
+                 "Mi=[%d %d %d %d %d %d] -> drn=%u, %.0f bps)",
+                 law_name, 100.0 * m.coverage, m.ucodes_measured, m.gain_db,
+                 m.rbs_slot_mask, m.usable_count, collapsed,
+                 plan.mi[0], plan.mi[1], plan.mi[2], plan.mi[3], plan.mi[4],
+                 plan.mi[5], (unsigned) plan.drn, plan.bps);
+    }
     ok = true;
 
 out:

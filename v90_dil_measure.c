@@ -7,6 +7,7 @@
 #include "v90_dil_measure.h"
 
 #include "v91.h"
+#include "vpcm_cp.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -158,6 +159,9 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     int (*tally)[V90_DIL_UCODES];
     long *rx_sum;
     int *rx_n;
+    int (*slot_tally)[6][V90_DIL_UCODES];
+    long (*slot_sum)[6];
+    int (*slot_cnt)[6];
     int i;
     int u;
     double gain_acc = 0.0;
@@ -181,20 +185,15 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     tally = calloc((size_t) V90_DIL_UCODES, sizeof(*tally));
     rx_sum = calloc((size_t) V90_DIL_UCODES, sizeof(*rx_sum));
     rx_n = calloc((size_t) V90_DIL_UCODES, sizeof(*rx_n));
-    if (!gen || !tally || !rx_sum || !rx_n) {
-        free(gen);
-        free(tally);
-        free(rx_sum);
-        free(rx_n);
-        return false;
+    slot_tally = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_tally));
+    slot_sum = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_sum));
+    slot_cnt = calloc((size_t) V90_DIL_UCODES, sizeof(*slot_cnt));
+    if (!gen || !tally || !rx_sum || !rx_n
+        || !slot_tally || !slot_sum || !slot_cnt) {
+        goto fail;
     }
-    if (v90_dil_generate_codewords(law, desc, gen, avail) != avail) {
-        free(gen);
-        free(tally);
-        free(rx_sum);
-        free(rx_n);
-        return false;
-    }
+    if (v90_dil_generate_codewords(law, desc, gen, avail) != avail)
+        goto fail;
 
     memset(out, 0, sizeof(*out));
     memset(slot_bad, 0, sizeof(slot_bad));
@@ -217,6 +216,13 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
         rx_n[tx_u]++;
         out->u[tx_u].tx_count++;
         out->u[tx_u].tx_level = dil_abs_level(law, gen[i]);
+        {
+            int slot = (i + offset) % 6;
+
+            slot_tally[tx_u][slot][rx_u]++;
+            slot_sum[tx_u][slot] += dil_abs_level(law, rx[offset + i]);
+            slot_cnt[tx_u][slot]++;
+        }
     }
 
     for (u = 0; u < V90_DIL_UCODES; u++) {
@@ -241,6 +247,22 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
         out->u[u].rx_distinct = distinct;
         out->u[u].rx_level = rx_n[u] ? (int) (rx_sum[u] / rx_n[u]) : 0;
         out->ucodes_measured++;
+
+        for (r = 0; r < 6; r++) {
+            int sbest_u = -1;
+            int sbest_n = 0;
+            int q;
+
+            for (q = 0; q < V90_DIL_UCODES; q++) {
+                if (slot_tally[u][r][q] > sbest_n) {
+                    sbest_n = slot_tally[u][r][q];
+                    sbest_u = q;
+                }
+            }
+            out->u[u].rx_ucode_slot[r] = sbest_u;
+            out->u[u].rx_level_slot[r] = slot_cnt[u][r]
+                ? (int) (slot_sum[u][r] / slot_cnt[u][r]) : 0;
+        }
 
         /* A pad shows up as a level ratio; Ucode 0 carries no level to
          * measure a ratio against. */
@@ -308,7 +330,20 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
     free(tally);
     free(rx_sum);
     free(rx_n);
+    free(slot_tally);
+    free(slot_sum);
+    free(slot_cnt);
     return true;
+
+fail:
+    free(gen);
+    free(tally);
+    free(rx_sum);
+    free(rx_n);
+    free(slot_tally);
+    free(slot_sum);
+    free(slot_cnt);
+    return false;
 }
 
 int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
@@ -324,4 +359,84 @@ int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
             out[n++] = (uint8_t) u;
     }
     return n;
+}
+
+bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
+                               int level_margin,
+                               v90_dil_rate_plan_t *out)
+{
+    double bits = 0.0;
+    int widest = 0;
+    int i;
+    int d;
+
+    if (!m || !out || level_margin < 0)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+
+    for (i = 0; i < 6; i++) {
+        int prev_level = -1;
+        int probed = 0;
+        int u;
+
+        /*
+         * Walk the ladder upward and keep a Ucode only when what arrived for
+         * it in *this* interval is far enough from what arrived for the last
+         * one kept.  Neighbours that a pad has compressed onto the same
+         * received code, or that robbed-bit signalling has merged by taking
+         * the LSB away, drop out here -- which is the impairment restated as
+         * constellation points.
+         */
+        for (u = 0; u < V90_DIL_UCODES; u++) {
+            int level;
+
+            if (m->u[u].tx_count == 0)
+                continue;
+            if (m->u[u].rx_ucode_slot[i] < 0)
+                continue;
+            level = m->u[u].rx_level_slot[i];
+            /* A margin of 0 still means "must have moved": two Ucodes that
+             * arrive at the same level are one constellation point, not two. */
+            if (prev_level >= 0
+                && level - prev_level < (level_margin > 1 ? level_margin : 1))
+                continue;
+            if (u != 0)
+                probed++;
+            vpcm_cp_mask_set(out->mask[i], u, true);
+            out->mi[i]++;
+            prev_level = level;
+        }
+        if (probed == 0)
+            out->intervals_unprobed |= (uint8_t) (1u << i);
+        if (out->mi[i] < 1)
+            return false;
+        if (out->mi[i] > widest)
+            widest = out->mi[i];
+        bits += log2((double) out->mi[i]);
+    }
+
+    for (i = 0; i < 6; i++) {
+        if (out->mi[i] < widest)
+            out->robbed_bit_limited = true;
+    }
+    out->bits_available = bits;
+
+    /*
+     * §5.4.3: the modulus encoder has to fit K bits into the product of the
+     * Mi, so the largest drn the line supports is the largest whose K does
+     * not exceed sum(log2(Mi)).  §5.4.1 then fixes the rate: D = drn + 20
+     * bits per 6-symbol frame at 8000 symbols/s.
+     */
+    out->drn = 0;
+    for (d = 22; d >= 0; d--) {
+        int k = vpcm_cp_drn_to_k((uint8_t) d);
+
+        if (k > 0 && (double) k <= bits) {
+            out->drn = (uint8_t) d;
+            break;
+        }
+    }
+    out->bps = vpcm_cp_drn_to_bps(out->drn);
+    return true;
 }
