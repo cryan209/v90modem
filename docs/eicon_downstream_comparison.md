@@ -89,6 +89,54 @@ is what blocks the experiment.
 `ME_V90_TRN1D_SYMBOLS=30000`. This is a live test, not an offline one — it needs
 hardware, and it is the single highest-value call to make.
 
+## The full downstream timeline, and what else is comparable
+
+Segmenting both sides by (Ucode-0 density, distinct magnitudes, sign
+periodicity) gives the card's whole Phase 3, and ours beside it:
+
+| stage | card (connects) | ours (fails) | comparable? |
+|---|---|---|---|
+| pre-Phase 3 silence | 3000 ms | 2900 ms | yes — match |
+| Sd | **384T** | 384T | yes — **match** |
+| S̄d | **48T** | 48T | yes — **match** |
+| TRN1d (const-mag, GPC signs) | **30000T (3750 ms)** | 2496T (312 ms) | yes — **12× short** |
+| sparse, one non-zero per 6, descending level | 1950 ms | 100 ms | **no** |
+| const-magnitude periodic (`+++−−−`) | 500 ms | 1000 ms | **no** |
+| multi-level (data) | 12200 ms | 11400 ms | **no** |
+
+**Only the first four rows mean anything.** §9.3.1.3 has the digital modem send
+Sd, S̄d and TRN1d unconditionally after Ja, so those are transmitted into the
+void and are directly comparable. **Jd then continues until the analogue
+modem's S arrives** — and on our call it never does: our own decode shows
+`Jd zone … 9744.4 ms`, us sitting in Jd waiting. Every stage after TRN1d is
+therefore gated on a peer response we do not get, and its duration is a
+*consequence* of the failure, not a candidate cause.
+
+Reading those last rows as defects would be the trap that cost `modem-dsp-emu`
+three leads in one session (handoff §2: "do not compare two ends without
+checking both are in the same phase"). They are recorded here so nobody
+re-measures them and gets excited.
+
+So: **TRN1d is the only defensible transmit-side fix these captures support.**
+
+### Sd and S̄d are confirmed correct
+
+Measured on the card, both calls: Sd is `{+W, +0, +W, −W, −0, −W}` with
+W = Ucode **64**, running **384T**, followed by **48T** of S̄d. §8.4.4 defines
+W = Ucode(16 + U_INFO), and the card's TRN1d runs at U_INFO = 48 — so
+16 + 48 = 64 checks out, and the card is internally consistent and spec-exact.
+
+`V90_SD_REPS 64` and `V90_SD_BAR_REPS 8` are right. Do not touch them.
+
+### The remaining value in these captures is on the receive side
+
+Decoding the card's Jd, J'd, DIL and Phase 4 is *not* confounded — a
+reference decode is a reference decode regardless of what our transmitter did.
+The sparse descending-level stage (Ucode 76 falling to 2, one non-zero per six
+symbols, 1950 ms) is unidentified and is the obvious next target: `--dil-scan`
+reports `default_125x12=no impairment=9` for the card, so whatever it is, it is
+not the default DIL our encoder emits.
+
 ## Finding 2 — our decoder mislabels the card's TRN1d as "Sd"
 
 `vpcm_decode --v90` reports, on the card's stream:
