@@ -42,12 +42,14 @@ struct v90_analogue_rx_s {
     v90_analogue_rx_stage_t  stage;
 
     int      w_ucode;               /* §8.4.4: Ucode(16 + U_INFO) */
+    int      trn1d_ucode;           /* §8.4.5: Ucode(U_INFO) = w_ucode - 16 */
     uint8_t  sd_pat[6];             /* {+W, +0, +W, −W, −0, −W} */
 
     int64_t  index;                 /* codewords consumed */
 
     /* Sd acquisition: one run length per alignment hypothesis. */
     int      sd_run[6];
+    int      sd_w[6];               /* W learned from the wire, 0 until seen */
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
     int      sd_shift_run;          /* consecutive codewords matching S̄d */
 
@@ -123,6 +125,70 @@ static bool slot_match(const v90_analogue_rx_t *s, uint8_t got, uint8_t want)
     return got_ucode == 0;
 }
 
+static int codeword_ucode(const v90_analogue_rx_t *s, uint8_t c, int *sign_out);
+
+/*
+ * One slot of the Sd hunt, matched *structurally* rather than against a
+ * precomputed pattern, learning W as it goes.
+ *
+ * §8.4.4 puts Sd at W = Ucode(16 + U_INFO), and U_INFO is the analogue
+ * modem's own choice, announced in INFO1a bits 25:31 (§8.2.3.2 Table 10).
+ * The hunt used to build the six codewords from that announced value and
+ * accept nothing else, which is only correct against a digital modem that
+ * honours it.  An Eicon Diva Server does not: told U_INFO = 78 it transmits
+ * Sd at W = 64, and told 48 it transmits at W = 35 (measured live, run 57,
+ * both calls also carrying a textbook 64-rep Sd, 8-rep S̄d and 30005T TRN1d).
+ * Both in-tree fixtures in artifacts/eicon-digital-downstream/ -- calls a
+ * Courier answered with CONNECT -- likewise run at W = 64.  A receiver pinned
+ * to the value it requested is blind to all of them, and loopback cannot show
+ * it: our own transmitter uses the same variable.
+ *
+ * So take W off the wire.  The structure is what identifies Sd: four W slots
+ * at one common non-zero level with signs + + − −, and two zero slots.  The
+ * offline scanner reached the same conclusion from the other direction, by
+ * scanning every U_INFO (vpcm_decode.c).
+ */
+static bool sd_hunt_slot(v90_analogue_rx_t *s, int h, int slot, uint8_t c)
+{
+    int ucode;
+    int sign;
+
+    ucode = codeword_ucode(s, c, &sign);
+    /* Slots 1 and 4 are Ucode 0, which is one level at the far D/A whatever
+     * the sign bit says -- the same rule slot_match() applies. */
+    if (slot == 1  ||  slot == 4)
+        return ucode == 0;
+    if (s->sd_w[h] == 0) {
+        if (ucode == 0)
+            return false;
+        s->sd_w[h] = ucode;
+    }
+    if (ucode != s->sd_w[h])
+        return false;
+    return sign == ((slot == 0  ||  slot == 2)  ?  1  :  0);
+}
+
+/* Rebuild the Sd codeword pattern once acquisition has settled on a W.  Every
+ * stage after acquisition works from sd_pat, so this is the only place the
+ * learned value has to be installed. */
+static void sd_set_w(v90_analogue_rx_t *s, int w)
+{
+    s->w_ucode = w;
+    /* §8.4.5 puts TRN1d at Ucode(U_INFO) while §8.4.4 puts Sd at
+     * Ucode(16 + U_INFO), so the two levels are locked 16 apart whatever
+     * U_INFO the digital modem chose.  Deriving TRN1d's level from the W that
+     * Sd actually arrived at keeps the S̄d->TRN1d boundary working against a
+     * peer that ignored our request: the Eicon card's Sd at W = 64 is followed
+     * by TRN1d at Ucode 48, and its Sd at W = 35 by TRN1d at Ucode 19. */
+    s->trn1d_ucode = (w >= 16)  ?  (w - 16)  :  0;
+    s->sd_pat[0] = v90_codeword_compose(s->cfg.law, w, 1);
+    s->sd_pat[1] = v90_codeword_compose(s->cfg.law, 0, 1);
+    s->sd_pat[2] = s->sd_pat[0];
+    s->sd_pat[3] = v90_codeword_compose(s->cfg.law, w, 0);
+    s->sd_pat[4] = v90_codeword_compose(s->cfg.law, 0, 0);
+    s->sd_pat[5] = s->sd_pat[3];
+}
+
 static int codeword_ucode(const v90_analogue_rx_t *s, uint8_t c, int *sign_out)
 {
     int ucode;
@@ -147,17 +213,13 @@ v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg)
     if (s->cfg.dil_coverage <= 0.0)
         s->cfg.dil_coverage = DIL_DEFAULT_COVERAGE;
 
-    /* §8.4.4: Sd is transmitted at W = Ucode(16 + U_INFO). */
+    /* §8.4.4: Sd is transmitted at W = Ucode(16 + U_INFO).  That is what we
+     * requested, so seed the pattern with it; acquisition replaces it with
+     * whatever the digital modem actually sends (see sd_hunt_slot()). */
     w = cfg->u_info + 16;
     if (w > 127)
         w = 127;
-    s->w_ucode = w;
-    s->sd_pat[0] = v90_codeword_compose(cfg->law, w, 1);
-    s->sd_pat[1] = v90_codeword_compose(cfg->law, 0, 1);
-    s->sd_pat[2] = s->sd_pat[0];
-    s->sd_pat[3] = v90_codeword_compose(cfg->law, w, 0);
-    s->sd_pat[4] = v90_codeword_compose(cfg->law, 0, 0);
-    s->sd_pat[5] = s->sd_pat[3];
+    sd_set_w(s, w);
 
     s->sd_phase = -1;
     s->sd_start = -1;
@@ -329,14 +391,22 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
 
             if (slot < 0)
                 slot += 6;
-            if (slot_match(s, c, s->sd_pat[slot]))
+            if (sd_hunt_slot(s, h, slot, c)) {
                 s->sd_run[h]++;
-            else
+            } else {
                 s->sd_run[h] = 0;
+                s->sd_w[h] = 0;
+            }
+            /*endif*/
             if (s->sd_run[h] >= 24) {
                 s->sd_phase = h;
                 s->sd_start = s->index - s->sd_run[h] + 1;
                 s->sd_reps = s->sd_run[h]/6;
+                /* Install the W four complete repetitions agreed on.  It is
+                 * usually 16 + the U_INFO we announced, but §8.4.4 is only
+                 * binding on a peer that honours the request -- see
+                 * sd_hunt_slot(). */
+                sd_set_w(s, s->sd_w[h]);
                 s->stage = V90A_RX_SD;
                 s->sd_shift_run = 0;
                 events |= V90A_RX_EVENT_SD;
@@ -388,6 +458,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
          * again rather than pretending Phase 3 advanced. */
         s->stage = V90A_RX_HUNT_SD;
         memset(s->sd_run, 0, sizeof(s->sd_run));
+        memset(s->sd_w, 0, sizeof(s->sd_w));
         break;
     }
 
@@ -403,7 +474,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
         /* §8.4.5: TRN1d moves to the U_INFO codeword, so the magnitude change
          * is the boundary — no ambiguity with the S̄d pattern above it. */
         ucode = codeword_ucode(s, c, &sign);
-        if (ucode == s->cfg.u_info) {
+        if (ucode == s->trn1d_ucode) {
             s->trn1d_start = s->index;
             s->stage = V90A_RX_TRN1D;
             s->descramble_reg = 0;
@@ -425,6 +496,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
              * legitimately outrun §9.3.1.5's budget by this much. */
             s->stage = V90A_RX_HUNT_SD;
             memset(s->sd_run, 0, sizeof(s->sd_run));
+            memset(s->sd_w, 0, sizeof(s->sd_w));
             break;
         }
         /*endif*/

@@ -5566,7 +5566,36 @@ static void prepare_v90_analogue_phase3_locked(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     cfg.baud_rate_code = 4;             /* §6.2: 3200 baud upstream */
-    cfg.high_carrier = true;            /* INFO1d directs the upstream high (§8.2.3.2) */
+    /*
+     * The upstream carrier is the digital modem's choice, not ours.  §8.2.3.2
+     * Table 9 makes INFO1d identical to V.34's INFO1c, and V.34 §10.1.2.3.4
+     * has INFO1c's per-symbol-rate block carry the carrier and pre-emphasis
+     * for the *answer* modem's transmitter — which here is us, since
+     * §9.2.2.1.9 puts the analogue modem in the V.34 answer-modem role.
+     *
+     * This was hardcoded true, with a comment claiming INFO1d directs the
+     * upstream high.  It does not: an Eicon Diva Server asks for the low
+     * carrier at 3200 baud, and transmitting the high one puts our whole
+     * Phase 3 91 Hz off what its receiver is tuned to (1920 against
+     * 1829 Hz).  Its Ja detector then has nothing to find, so §9.3.1.3 never
+     * fires and it transmits no Sd at all — measured as 4.5 s of pure 0xFF
+     * on the wire while it sat in page 14 (run 56).
+     */
+    {
+        v34_v90_info1d_t info1d;
+
+        cfg.high_carrier = true;
+        if (v34_get_v90_received_info1d(g_v34, &info1d)) {
+            cfg.high_carrier = info1d.rate_data[cfg.baud_rate_code].use_high_carrier;
+            ME_LOG("[ME] V.90 analogue upstream: INFO1d selects the %s carrier "
+                   "at 3200 baud (max bit rate code %d)\n",
+                   cfg.high_carrier ? "high" : "low",
+                   info1d.rate_data[cfg.baud_rate_code].max_bit_rate);
+        } else {
+            ME_LOG("[ME] V.90 analogue upstream: no INFO1d decoded; defaulting "
+                   "to the high carrier at 3200 baud\n");
+        }
+    }
     cfg.u_info = g_v90a_u_info;
     cfg.md_units = 0;                   /* INFO1a announces no MD */
     cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
@@ -5581,8 +5610,9 @@ static void prepare_v90_analogue_phase3_locked(void)
         return;
     }
     g_v90a_started = true;
-    ME_LOG("[ME] V.90 analogue Phase 3 started: 3200 baud high carrier, U_INFO=%d, "
+    ME_LOG("[ME] V.90 analogue Phase 3 started: 3200 baud %s carrier, U_INFO=%d, "
            "Ja descriptor N=%u (%d bits)\n",
+           cfg.high_carrier ? "high" : "low",
            g_v90a_u_info, (unsigned) cfg.dil.n,
            v90_analogue_tx_ja_bits(v90_analogue_phase3_tx_state(g_v90a)));
     trace_phase("V90 analogue Phase3 start: U_INFO=%d N=%u",

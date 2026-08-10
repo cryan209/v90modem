@@ -4898,9 +4898,51 @@ static void s_not_s_baud_init(v34_state_t *s)
         /*endif*/
         preemp_idx = s->rx.info1a.preemphasis_filter;
     }
+    else if (s->tx.calling_party  &&  s->tx.v90_mode)
+    {
+        /* V.90 analogue role.  §8.2.3.2 Table 9 makes INFO1d identical to
+           INFO1c, and V.34 §10.1.2.3.4 has INFO1c describe the *answer*
+           modem's transmitter -- which in V.90 is this one, because
+           §9.2.2.1.9 gives the analogue modem the V.34 answer-modem role.
+           So INFO1d governs our Phase 3 transmit: power reduction, and the
+           per-symbol-rate block's pre-emphasis index and carrier.
+
+           This used to fall through to the "no INFO1 received" default even
+           though INFO1d had decoded, so every analogue-role Phase 3 went out
+           3 dB down, unemphasised, and -- worse -- on whichever carrier
+           Phase 2 happened to leave set.  An Eicon Diva Server asks for the
+           *low* carrier at 3200 baud; transmitting the high one puts the
+           upstream 91 Hz off (1920 Hz against the 1829 Hz its receiver is
+           tuned to), which no carrier recovery will pull in.  Loopback
+           cannot catch it: our own receiver is configured from the same
+           variable, so it demodulates a wrong carrier perfectly. */
+        info1_source = (s->rx.info1c_received)  ?  "INFO1d"  :  NULL;
+        if (info1_source)
+        {
+            power_reduction = s->rx.info1c.power_reduction;
+            preemp_idx = s->rx.info1c.rate_data[baud_idx].pre_emphasis;
+            if (s->tx.high_carrier != s->rx.info1c.rate_data[baud_idx].use_high_carrier)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 3: INFO1d selects the %s carrier at %d baud "
+                         "(was %s); retuning to %.0f Hz\n",
+                         s->rx.info1c.rate_data[baud_idx].use_high_carrier ? "high" : "low",
+                         baud_rate_parameters[baud_idx].baud_rate,
+                         s->tx.high_carrier ? "high" : "low",
+                         carrier_frequency(s->tx.baud_rate,
+                                           s->rx.info1c.rate_data[baud_idx].use_high_carrier));
+                s->tx.high_carrier = s->rx.info1c.rate_data[baud_idx].use_high_carrier;
+                carrier_idx = s->tx.high_carrier ? 1 : 0;
+                s->tx.v34_carrier_phase_rate =
+                    dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
     else if (s->tx.calling_party)
     {
-        info1_source = (s->rx.info1a_received  &&  !s->tx.v90_mode)  ?  "INFO1a"  :  NULL;
+        info1_source = (s->rx.info1a_received)  ?  "INFO1a"  :  NULL;
         if (info1_source)
         {
             power_reduction = s->rx.info1a.power_reduction;

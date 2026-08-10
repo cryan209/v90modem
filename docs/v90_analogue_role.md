@@ -334,18 +334,71 @@ in 300 ms, with `DI_control=0x2000[rx0_valid]` at 0x0072 — it is receiving and
 validating our Phase 3. It then holds 0x007a for ~3.8 s, raises
 `flow_blocked`, and falls back to page 7 / `0x0024`.
 
-**Still no Sd.** `./vpcm_decode --v90` finds no Sd sequence anywhere in the
-card's transmit for the whole 123 s capture, and the emulator's own media
-accounting reports `0 payload / 3596 mark fill`. That is unchanged and remains
-item 1 of "What is left" below — a transmit-path problem in the card's page 14
-under emulation, in `../modem-dsp-emu`, not in this choreography. What changed
-is that the card is now demonstrably reading us.
+**Still no Sd at this point — and that turned out to be ours too.** See the
+next section: it was the upstream carrier. (The `0 payload / 3596 mark fill`
+line cited here originally is *not* evidence about the line — it is the
+B-channel data source, and says nothing about what the ADSP transmits.)
 
 `ME_V90_ANALOGUE_HOLD=1` now also holds the call open on the §9.3.2
 deadline path, not only after a complete Phase 3. That path is the one a
 capture most needs held: the question it answers is what the digital modem does
 *after* our Ja deadline, and hanging up there destroys it. Our deadline fired
 at 9.8 s while the card was still advancing.
+
+### The upstream carrier, and what it unlocked (run 57/58, 2026-08-11)
+
+"No Sd" above was wrong twice over, and both were ours.
+
+**The upstream carrier was hardcoded.** `prepare_v90_analogue_phase3_locked()`
+set `cfg.high_carrier = true` with a comment claiming INFO1d directs the
+upstream high. It does not. §8.2.3.2 Table 9 makes INFO1d identical to V.34's
+INFO1c, and V.34 §10.1.2.3.4 has INFO1c's per-symbol-rate block carry the
+carrier and pre-emphasis **for the answer modem's transmitter** — which here is
+us, since §9.2.2.1.9 puts the analogue modem in the V.34 answer-modem role. The
+card asks for the *low* carrier at 3200 baud, so our entire Phase 3 went out at
+1920 Hz against the 1829 Hz its receiver was tuned to. 91 Hz is not something
+carrier recovery pulls in. Its §9.3.1.1 Ja detector had nothing to find, so
+§9.3.1.3 never fired and it transmitted **nothing** — measured as 4.5 s of pure
+`0xFF`, RMS 0, for its whole page-14 residency (run 56).
+
+The same bug ran through `s_not_s_baud_init()`, whose `calling_party` branch
+excluded `v90_mode` and so fell to the "no INFO1 received" default: 3 dB down
+and unemphasised, on a call where INFO1d had decoded cleanly and asked for 0 dB.
+Both now read INFO1d.
+
+With the carrier right the card transmits a textbook downstream:
+
+```text
+[ 9278.9 ms] V.90 Sd: W_UCODE=64 (U_INFO=48), 64 reps (384 symbols, 48.0 ms)
+[ 9326.9 ms] V.90 S̄d: 8 reps (48 symbols, 6.0 ms)
+[ 9332.9 ms] V.90 TRN1d: 30005 symbols (3750.6 ms) at U_INFO=48, descrambled to ones
+[13083.5 ms] V.90 Jd+J'd: ~11019 Jd frame repetitions
+```
+
+and its states run on past `0x007a` for the first time — `0x007b → 0x007c →
+0x0080 → 0x00b0` — reporting `SNRatio 31.5 dB` and `upstream quality 0x0067` on
+what we send it. 30005T of TRN1d is the same 94% of the §9.3.1.5 budget the
+`artifacts/eicon-digital-downstream/` fixtures spend, against our own 2496T.
+
+**Then we still could not see it, for a second reason: W.** §8.4.4 puts Sd at
+W = Ucode(16 + U_INFO), and U_INFO is the analogue modem's choice, announced in
+INFO1a bits 25:31. `v90_analogue_rx.c` built the six Sd codewords from the value
+it had announced and accepted nothing else. **The card does not honour it:**
+told U_INFO = 78 it transmits Sd at W = 64, and told 48 it transmits at W = 35.
+Both in-tree fixtures — calls a Courier answered with CONNECT — also run at
+W = 64. A receiver pinned to what it requested is blind to all of them, and
+loopback can never show it, because our own transmitter reads the same variable.
+
+So acquisition now takes W off the wire. The structure is what identifies Sd:
+four W slots at one common non-zero level with signs + + − −, and two zero
+slots. `vpcm_decode`'s offline scanner had already reached the same conclusion
+from the other direction, by scanning every U_INFO. §8.4.5's TRN1d level is
+derived from the acquired W as well (W − 16), since the two are locked 16 apart
+whatever the peer chose — without that the S̄d→TRN1d boundary still missed.
+
+Live result: `Sd 64 reps, S̄d 8 reps, TRN1d 24000T+`. Ja ends on the §9.3.2.4
+Sd→S̄d transition as it should. What remains is the TRN1d→Jd seam — see "What
+is left".
 
 ### The in-tree pair
 
@@ -362,13 +415,15 @@ SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
 
 ## What is left
 
-1. **A digital peer that transmits Sd.** The emulated card does not, for a
-   reason in its own harness. As of run 55 it reaches page-14 state `0x007a`
-   and marks our Phase 3 `rx0_valid`, so it is reading us; its transmit is
-   `0 payload / 3596 mark fill` and `./vpcm_decode --v90` finds no Sd anywhere
-   in the capture. Either fix that in `../modem-dsp-emu` — the boot-page
-   7 → 14 transmit handoff — or find another digital modem. This is now the
-   single thing between here and Phase 4.
+1. **The TRN1d → Jd seam on a live stream.** The card's full Phase 3
+   downstream now decodes as far as TRN1d (run 58: Sd 64 reps, S̄d 8 reps,
+   TRN1d past 24 000T), but the TRN1d→Jd boundary oscillates and no Jd frame
+   validates, so §9.3.2.6's S is never sent and the card sits in `0x00b0`
+   repeating Jd. `v90_analogue_rx_test` decodes 13–14 CRC-valid Jd frames from
+   the *file* fixture, so the decoder is not simply wrong; the difference is
+   that this is live RTP. A single lost, duplicated or substituted sample
+   desynchronises the §5.3 descrambler, and TRN1d→Jd is exactly where that
+   shows. Start by instrumenting RTP continuity across the Phase 3 window.
 2. **Phase 4 (§9.4)** — CPt, then a CP built from the measurement
    `v90_analogue_phase3_measurement()` already returns, then E/B1.
 3. **Data mode** — receive the mapped downstream instead of transmitting it.
