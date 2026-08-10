@@ -27,6 +27,8 @@
 #include "v91.h"
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
+#include "v90_analogue_phase3.h"
+#include "v90_dil_presets.h"
 #include "p3_demod.h"
 #include "v92_cp_rx.h"
 #include "v92_p3_rx.h"
@@ -1593,6 +1595,85 @@ static bool me_v90_analogue_role(void)
 {
     return g_v90_analogue_role;
 }
+
+/*
+ * Analogue-role Phase 3 (§9.3.2).  v90_analogue_phase3.c owns both directions;
+ * the engine's job is to start it at the Phase 2/3 seam, hand it the received
+ * codewords, and take its samples for the upstream.
+ *
+ * g_v90 stays NULL for the whole of an analogue-role call.  Every digital
+ * Phase 3/4 site in this file is guarded on it, so leaving it unbuilt is what
+ * keeps the digital transmitter out of a call that announced itself analogue —
+ * rather than a flag each of those sites would have to remember to check.
+ */
+static v90_analogue_phase3_t *g_v90a = NULL;
+static bool     g_v90a_started = false;
+static bool     g_v90a_complete_logged = false;
+static uint64_t g_v90a_rx_codewords = 0;
+static int      g_v90a_u_info = 78;
+static v90_dil_desc_t g_v90a_dil;
+static bool     g_v90a_dil_valid = false;
+
+/*
+ * U_INFO for our INFO1a (Table 11 bits 25:31): the Ucode the digital modem
+ * will train on.  Table 12's note says it "shall be greater than 66", and 78
+ * sits mid-scale above that.  The Eicon card honours whatever is asked for --
+ * the Courier asked it for 48 -- so this is tunable for interop work.
+ */
+static int me_v90a_u_info(void)
+{
+    int v = parse_env_int("ME_V90_ANALOGUE_UINFO", 78);
+
+    return (v > 0  &&  v < 128) ? v : 78;
+}
+
+/* The DIL descriptor to request in Ja.  §9.3.2.9 will measure what comes back
+ * of exactly this, so the choice decides what can be learned about the line
+ * (docs/v90_constellation_selection.md). */
+static bool me_v90a_load_dil(v90_dil_desc_t *desc)
+{
+    const char *name = getenv("ME_V90_ANALOGUE_DIL");
+    v90_dil_preset_t preset = V90_DIL_PRESET_MEASUREMENT;
+    v90_dil_desc_check_t check;
+
+    if (name  &&  *name) {
+        if (strcmp(name, "none") == 0) {
+            memset(desc, 0, sizeof(*desc));
+            ME_LOG("[ME] V.90 analogue: requesting a zero-length DIL\n");
+            return true;
+        } else if (strcmp(name, "default-ja") == 0) {
+            preset = V90_DIL_PRESET_DEFAULT_JA;
+        } else if (strcmp(name, "courier-style") == 0) {
+            preset = V90_DIL_PRESET_COURIER_STYLE;
+        } else if (strcmp(name, "smartlink-adi") == 0) {
+            preset = V90_DIL_PRESET_SMARTLINK_ADI;
+        } else if (strcmp(name, "smartlink-adi-qc") == 0) {
+            preset = V90_DIL_PRESET_SMARTLINK_ADI_QC;
+        } else if (strcmp(name, "measurement") != 0) {
+            ME_LOG("[ME] V.90 analogue: unknown ME_V90_ANALOGUE_DIL '%s'; using measurement\n",
+                   name);
+        }
+    }
+    if (!v90_dil_preset_load(preset, desc)) {
+        ME_LOG("[ME] V.90 analogue: could not load DIL preset %s\n",
+               v90_dil_preset_name(preset));
+        return false;
+    }
+    /* A descriptor can satisfy every Table 12 constraint and still leave a
+     * data-frame interval unprobed, which is silent at the far end and costs
+     * a sixth of the constellation.  Say so now rather than discovering it in
+     * the measurement. */
+    if (v90_dil_desc_validate(desc, &check)) {
+        ME_LOG("[ME] V.90 analogue DIL: %s — %d segments, %d symbols (%.1f ms), "
+               "Ucodes %d..%d, intervals probed 0x%02X%s\n",
+               v90_dil_preset_name(preset),
+               check.segments, check.cycle_symbols, check.cycle_ms,
+               check.lowest_ucode, check.highest_ucode,
+               check.intervals_probed,
+               check.ok ? "" : " — INCOMPLETE, some interval will not be measured");
+    }
+    return true;
+}
 static int        g_v34_start_baud = 2400;   /* 3200 has 91 Hz separation (notch unusable); 2400 has 200 Hz */
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
@@ -2744,6 +2825,14 @@ static void v92_live_p4u_frame(void *user_data,
 
 static void cleanup_v34_v90_training_locked(void)
 {
+    /* Before g_v34: the analogue Phase 3 borrows it as its modulator. */
+    if (g_v90a) {
+        v90_analogue_phase3_free(g_v90a);
+        g_v90a = NULL;
+    }
+    g_v90a_started = false;
+    g_v90a_complete_logged = false;
+    g_v90a_rx_codewords = 0;
     if (g_v90) {
         v90_free(g_v90);
         g_v90 = NULL;
@@ -3646,23 +3735,59 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     } else if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
         && me_v90_analogue_role()) {
         /*
-         * We offered the analogue role and the peer offered V.90.  V.8 has
-         * done its job; Phase 3 has not been written for this direction.
+         * We offered the analogue role and the peer offered V.90.
          *
-         * Falling through to V.34 is the honest outcome: everything after this
-         * point -- start_v34_training() and the Phase 3 state machine -- drives
-         * the *digital* transmitter, so continuing into V.90 here would put a
-         * digital Sd/TRN1d/Jd on the wire from a modem that just told the peer
-         * it was analogue, and the peer would be waiting for Sr/TRN1r/Jr and a
-         * Ja carrying our DIL descriptor.  Better a working V.34 call than a
-         * V.90 one built on a contradiction.
+         * V.90 puts the analogue modem on the calling side (§9.2 has it send
+         * INFO0a and INFO1a), and SpanDSP's Phase 2 keys the analogue INFO
+         * variants off calling_party.  An answering call cannot take this role
+         * without lying about which INFO it will send, so it falls back.
          */
-        ME_LOG("[ME] V.8 negotiated V.90 with this end as the ANALOGUE modem, "
-               "but Phase 3 has no analogue transmitter (Sr/TRN1r/Jr, Ja+DIL "
-               "descriptor) — falling back to V.34\n");
-        trace_phase("V8 selected V90 analogue role; unimplemented, using V34");
-        g_mod = ME_MOD_V34;
-        start_v34_training();
+        if (!g_calling_party) {
+            ME_LOG("[ME] V.90 analogue role requires the calling side (§9.2); "
+                   "this call is answering — falling back to V.34\n");
+            trace_phase("V8 selected V90 analogue role on answer side; using V34");
+            g_mod = ME_MOD_V34;
+            start_v34_training();
+        } else if (!me_v90a_load_dil(&g_v90a_dil)) {
+            ME_LOG("[ME] V.90 analogue role: no DIL descriptor — falling back to V.34\n");
+            trace_phase("V8 selected V90 analogue role; no DIL, using V34");
+            g_mod = ME_MOD_V34;
+            start_v34_training();
+        } else {
+            int saved_baud = g_v34_start_baud;
+
+            g_v90a_dil_valid = true;
+            g_v90a_u_info = me_v90a_u_info();
+            ME_LOG("[ME] V.8 negotiated V.90 with this end as the ANALOGUE modem "
+                   "(U_INFO=%d)\n", g_v90a_u_info);
+            trace_phase("V8 selected V90 analogue role");
+
+            /* §6.2: the analogue modem's upstream is 3200 baud. */
+            g_v34_start_baud = 3200;
+            start_v34_training();
+            g_v34_start_baud = saved_baud;
+            g_mod = ME_MOD_V90;
+
+            /*
+             * SpanDSP's V.90 mode plus calling_party is already the analogue
+             * side of Phase 2: INFO0a is the plain V.34 INFO0 (Table 8) and
+             * info1_baud_init() picks the Table 10 INFO1a that carries U_INFO.
+             * Nothing else of its V.90 machinery is wanted — Phase 3 is ours.
+             */
+            if (g_v34) {
+                v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+                v34_set_v90_u_info(g_v34, g_v90a_u_info);
+            }
+            g_v90a_started = false;
+            g_v90a_complete_logged = false;
+            g_v90a_rx_codewords = 0;
+
+            /* Phase 2 CC carriers are the mirror of the digital role's: §8.2.3.1
+               puts the analogue modem's INFO at 2400 Hz and the digital modem's
+               at 1200 Hz, so the notch goes on *our* 2400 Hz, not on 1200. */
+            notch_filter_init(&g_notch, 2400.0f, 30.0f, 8000.0f);
+            ME_LOG("[ME] V.90 analogue: notch at 2400 Hz (our CC TX), RX CC at 1200 Hz\n");
+        }
     } else if ((result->jm_cm.modulations & V8_MOD_V90) && g_advertise_v90
         && (result->jm_cm.modulations & V8_MOD_V34)) {
         /*
@@ -3770,8 +3895,8 @@ void me_init(void)
 
         g_v90_analogue_role = (role && strcmp(role, "analogue") == 0);
         if (g_v90_analogue_role)
-            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 3 analogue TX is "
-                   "not implemented — V.8 only)\n");
+            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; V.8, Phase 2 and Phase 3 "
+                   "only — §9.4 Phase 4 is not implemented)\n");
     }
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
@@ -4880,7 +5005,16 @@ void me_rx_audio(const int16_t *amp, int len)
                 }
                 v90_wait_ja_energy_gate_locked(filtered, len);
                 v90_s_echo_record_rx_locked(filtered, len);
-                v34_rx(g_v34, filtered, len);
+                /*
+                 * Once the analogue role's Phase 3 is running, what arrives is
+                 * the digital modem's PCM downstream — Sd, TRN1d, Jd, DIL —
+                 * which is not a V.34 signal.  me_rx_g711() hands those to the
+                 * codeword receiver; putting them through a V.34 demodulator
+                 * as well only produces events about signals that are not
+                 * there, and its Phase 3 detectors act on them.
+                 */
+                if (!g_v90a_started)
+                    v34_rx(g_v34, filtered, len);
                 /* p3_demod J scanner runs AFTER v34_rx so the real-time V.34
                    receiver processes samples first.  The scanner reads from
                    the g_rx_ref_buf ring (filled by v90_s_echo_record above),
@@ -5404,6 +5538,155 @@ static void v92_apply_p3_ja_locked(void)
         ME_LOG("[ME] V.92 Phase 3: strict Ja arrived outside WAIT_JA\n");
 }
 
+/*
+ * The analogue role's Phase 2/3 seam, called with g_state_mtx held.
+ *
+ * SpanDSP's transmit stage reaching FIRST_S is the moment its Phase 2 is over:
+ * it has sent INFO1a and would start V.34's own S/S̄/PP/TRN next.  §9.3.2.1
+ * starts from the same point but with V.90's sequence, so the modulator is
+ * taken over here and SpanDSP's Phase 3 never runs.
+ *
+ * Its *receiver* stops being fed at the same moment (see me_rx_audio): what
+ * arrives from here on is the digital modem's PCM downstream, which is not a
+ * V.34 signal at all, and feeding it to a V.34 demodulator produces events
+ * about signals that are not there.
+ */
+static void prepare_v90_analogue_phase3_locked(void)
+{
+    v90_analogue_phase3_config_t cfg;
+
+    if (!me_v90_analogue_role() || g_mod != ME_MOD_V90 || !g_v34 || g_v90a_started)
+        return;
+    if (v34_get_tx_stage(g_v34) < V34_TX_STAGE_FIRST_S)
+        return;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    cfg.baud_rate_code = 4;             /* §6.2: 3200 baud upstream */
+    cfg.high_carrier = true;            /* INFO1d directs the upstream high (§8.2.3.2) */
+    cfg.u_info = g_v90a_u_info;
+    cfg.md_units = 0;                   /* INFO1a announces no MD */
+    cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
+    cfg.v34 = g_v34;                    /* borrow the modulator Phase 2 configured */
+    if (g_v90a_dil_valid)
+        cfg.dil = g_v90a_dil;
+
+    g_v90a = v90_analogue_phase3_init(&cfg);
+    if (!g_v90a) {
+        ME_LOG("[ME] V.90 analogue: Phase 3 failed to start; the call cannot continue\n");
+        trace_phase("V90 analogue Phase3 init failed");
+        return;
+    }
+    g_v90a_started = true;
+    ME_LOG("[ME] V.90 analogue Phase 3 started: 3200 baud high carrier, U_INFO=%d, "
+           "Ja descriptor N=%u (%d bits)\n",
+           g_v90a_u_info, (unsigned) cfg.dil.n,
+           v90_analogue_tx_ja_bits(v90_analogue_phase3_tx_state(g_v90a)));
+    trace_phase("V90 analogue Phase3 start: U_INFO=%d N=%u",
+                g_v90a_u_info, (unsigned) cfg.dil.n);
+}
+
+/*
+ * Follow the analogue Phase 3 along, with g_state_mtx held: log each §9.3.2
+ * stage as it is reached, act on the deadlines, and say what the measurement
+ * came to when it ends.
+ */
+static void me_v90_analogue_progress_locked(void)
+{
+    static v90_analogue_tx_stage_t last_tx = (v90_analogue_tx_stage_t) -1;
+    static v90_analogue_rx_stage_t last_rx = (v90_analogue_rx_stage_t) -1;
+    const v90_analogue_rx_t *rx;
+    v90_analogue_tx_stage_t tx_stage;
+    v90_analogue_rx_stage_t rx_stage;
+
+    if (!g_v90a)
+        return;
+
+    tx_stage = v90_analogue_phase3_tx_stage(g_v90a);
+    rx_stage = v90_analogue_phase3_rx_stage(g_v90a);
+    rx = v90_analogue_phase3_rx_state(g_v90a);
+
+    if (tx_stage != last_tx) {
+        last_tx = tx_stage;
+        ME_LOG("[ME] V.90 analogue TX: %s\n", v90_analogue_tx_stage_name(tx_stage));
+        trace_phase("V90a TX %s", v90_analogue_tx_stage_name(tx_stage));
+    }
+    if (rx_stage != last_rx) {
+        last_rx = rx_stage;
+        ME_LOG("[ME] V.90 analogue RX: %s (Sd %d reps, S̄d %d reps, TRN1d %dT, "
+               "Jd %d frames)\n",
+               v90_analogue_rx_stage_name(rx_stage),
+               v90_analogue_rx_sd_reps(rx), v90_analogue_rx_sd_bar_reps(rx),
+               v90_analogue_rx_trn1d_symbols(rx), v90_analogue_rx_jd_frames(rx));
+        trace_phase("V90a RX %s", v90_analogue_rx_stage_name(rx_stage));
+    }
+
+    /* §9.3.2.4 and §9.3.2.7 both expire into a retrain (§9.5.2.1), which does
+     * not exist for this role yet.  Report it rather than sitting on a dead
+     * Phase 3 until the training timeout, so a lab run says what happened. */
+    if (v90_analogue_phase3_retrain_due(g_v90a)) {
+        ME_LOG("[ME] V.90 analogue: §9.3.2 deadline passed in %s with no answer "
+               "from the digital modem; §9.5.2.1 retrain is not implemented\n",
+               v90_analogue_tx_stage_name(tx_stage));
+        trace_phase("V90a deadline expired in %s",
+                    v90_analogue_tx_stage_name(tx_stage));
+        g_state = ME_HANGUP;
+        return;
+    }
+
+    if (!v90_analogue_phase3_complete(g_v90a) || g_v90a_complete_logged)
+        return;
+    g_v90a_complete_logged = true;
+
+    {
+        const v90_dil_measurement_t *m = v90_analogue_phase3_measurement(g_v90a);
+        v90_dil_rate_plan_t plan;
+
+        ME_LOG("[ME] V.90 analogue Phase 3 complete: Sd %d reps, S̄d %d reps, "
+               "TRN1d %dT, %d Jd frames (%s-point), DIL %d symbols\n",
+               v90_analogue_rx_sd_reps(rx), v90_analogue_rx_sd_bar_reps(rx),
+               v90_analogue_rx_trn1d_symbols(rx), v90_analogue_rx_jd_frames(rx),
+               v90_analogue_rx_jd_trn16(rx) ? "16" : "4",
+               v90_analogue_rx_dil_symbols(rx));
+        if (m) {
+            ME_LOG("[ME] V.90 analogue DIL measured: %d Ucodes, %d usable, "
+                   "gain %.2f dB, RBS slots 0x%02X, coverage %.0f%%\n",
+                   m->ucodes_measured, m->usable_count, m->gain_db,
+                   m->rbs_slot_mask, 100.0*m->coverage);
+            /* What the line would actually carry.  This is the whole point of
+               taking the analogue role: the constellation decision is ours. */
+            if (v90_dil_measure_plan_rate(m, 0, 3.0, 0.0,
+                                          (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+                                                                 : V90_LAW_ULAW,
+                                          &plan)) {
+                ME_LOG("[ME] V.90 analogue constellation: Mi = %d %d %d %d %d %d, "
+                       "drn=%u, %.0f bps%s%s\n",
+                       plan.mi[0], plan.mi[1], plan.mi[2], plan.mi[3],
+                       plan.mi[4], plan.mi[5],
+                       (unsigned) plan.drn, plan.bps,
+                       plan.robbed_bit_limited ? " (robbed-bit limited)" : "",
+                       plan.noise_limited ? " (noise limited)" : "");
+            }
+        } else {
+            ME_LOG("[ME] V.90 analogue: Phase 3 ended with no DIL measurement\n");
+        }
+        trace_phase("V90a Phase3 complete");
+    }
+
+    /*
+     * §9.4 is next and does not exist for this role.  Holding the call open
+     * would only run out the training timeout, so end it with a stated reason
+     * — unless a lab run wants the call kept up to keep capturing.
+     */
+    if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) != 0) {
+        ME_LOG("[ME] V.90 analogue: Phase 4 not implemented; ME_V90_ANALOGUE_HOLD "
+               "set, holding the call open\n");
+        return;
+    }
+    ME_LOG("[ME] V.90 analogue: Phase 4 (§9.4) is not implemented — hanging up\n");
+    g_state = ME_HANGUP;
+}
+
 /* Called with g_state_mtx held. */
 static void prepare_v90_phase3_locked(void)
 {
@@ -5411,6 +5694,12 @@ static void prepare_v90_phase3_locked(void)
     bool v92_selected = false;
 
     if (g_mod != ME_MOD_V90 || !g_v34 || g_v90_phase3_started)
+        return;
+    /* The digital transmitter has no business in a call that told the peer it
+     * was the analogue modem.  It would not get far — this waits on an INFO1a
+     * that the analogue role sends rather than receives — but the guard states
+     * the intent instead of relying on that. */
+    if (me_v90_analogue_role())
         return;
 
     v92_refresh_info0_confirmation_locked();
@@ -5820,6 +6109,20 @@ void me_tx_audio(int16_t *amp, int len)
                     amp[i] = pcm_to_linear(pcm_out[i]);
             }
             pthread_mutex_unlock(&g_state_mtx);
+        } else if (g_mod == ME_MOD_V90 && me_v90_analogue_role()) {
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_v34) {
+                /* Take the modulator over at the Phase 2/3 seam (§9.3.2.1). */
+                prepare_v90_analogue_phase3_locked();
+                if (g_v90a_started && g_v90a) {
+                    v90_analogue_phase3_tx(g_v90a, amp, len);
+                    me_v90_analogue_progress_locked();
+                } else {
+                    /* Still in Phase 2: SpanDSP is sending INFO0a/INFO1a. */
+                    v34_tx(g_v34, amp, len);
+                }
+            }
+            pthread_mutex_unlock(&g_state_mtx);
         } else if (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) {
             pthread_mutex_lock(&g_state_mtx);
             if ((g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90) && g_v34) {
@@ -5976,6 +6279,17 @@ void me_rx_g711(const uint8_t *codewords, int count)
                && (g_state == ME_TRAINING || g_state == ME_DATA));
     if (raw_v91)
         v91_live_receive_codewords_locked(codewords, count);
+    if (g_v90a_started && g_v90a && g_state == ME_TRAINING) {
+        /*
+         * §9.3.2's whole conditional structure comes off this stream: the
+         * Sd-to-S̄d transition ends Ja, Jd starts S, J'd starts S̄, and enough
+         * DIL ends Phase 3.  v90_analogue_phase3_rx() applies each to the
+         * transmitter as it is found.
+         */
+        (void) v90_analogue_phase3_rx(g_v90a, codewords, count);
+        g_v90a_rx_codewords += (uint64_t) count;
+        me_v90_analogue_progress_locked();
+    }
     if (g_v92_p3_rx_active && g_v92_active && g_state == ME_TRAINING) {
         for (int i = 0; i < count; i++) {
             (void)v92_p3_rx_feed(&g_v92_p3_rx,
