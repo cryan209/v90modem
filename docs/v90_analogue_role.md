@@ -172,12 +172,104 @@ divergence is on this side:
    demodulates it with our own inverse mapping, which cannot catch a convention
    that is wrong but self-consistent — the exact trap the Eicon fixture caught
    twice on the receive side.
-3. **Our analogue side does not complete Phase 2 against our own digital side
-   either.** Two instances over SIP, analogue-role dialling digital-role, stall
-   in the Phase 2 tone exchange — analogue at `FIRST_B_INFO_SEEN`, digital at
+3. **Our analogue side did not complete Phase 2 against our own digital side
+   either** — analogue stalled at `FIRST_B_INFO_SEEN`, digital at
    `V90_PHASE2_B_INFO0_SEEN`, each waiting for a reversal from the other. That
-   is a reproduction with no card in it, and it is the place to work next
-   because the loop is seconds long:
+   was a reproduction with no card in it, and it is **now fixed**; see the
+   section below.
+
+## The §9.2.2.1.3–9.2.2.1.6 tone choreography (fixed 2026-08-10)
+
+The analogue role was running SpanDSP's V.34 **call modem** tone stages —
+`FIRST_B`, `FIRST_B_INFO_SEEN`, `FIRST_NOT_B_WAIT`, `FIRST_B_SILENCE`, … —
+because `initial_ab_not_ab_baud_init()` picked the stage family off
+`calling_party` alone.
+
+The tone *frequency* was right by accident: `v34_restart()` already gives the
+V.90 analogue modem the 2400 Hz CC carrier, which is Tone A. What was wrong was
+the **timetable**. The rule the code was missing:
+
+> Which tone a modem transmits follows its **role**, not the call direction.
+> V.34 gives Tone A to the answer modem (§11.2.1.2) and Tone B to the call
+> modem (§11.2.1.1). V.90 keeps both tones and both timetables and hands them
+> to the other end of the call: the analogue modem is the *calling* party and
+> runs §9.2.2.1, which is §11.2.1.2 word for word with INFO0d/INFO1d in place
+> of INFO0c/INFO1c; the digital modem answers and runs §9.2.1.1, which is
+> §11.2.1.1.
+
+So the Tone A transmitter is the side where `calling_party` and `v90_mode`
+agree — the same predicate `v34rx.c` already used to pick the receive carrier.
+The whole correct analogue choreography was therefore already in the tree, as
+the V.34 answer-modem A family; it just was not reachable from the V.90
+analogue role. Three changes in `v34tx.c`:
+
+1. **`initial_ab_not_ab_baud_init()` routes on the role.** V.34 caller →
+   `FIRST_B`; V.90 digital answerer → `V90_PHASE2_B`; everything else (V.34
+   answerer, V.90 analogue) → `INITIAL_A`.
+2. **End of the analogue's own L1/L2 goes to `second_a_baud_init()`**, not
+   `pre_info1_a_init()`. §9.2.2.1.5's probe is only the *first* of the two
+   rounds. Off the end of L2 the analogue modem owes 50 ms of Tone A, a
+   reversal, 10 ms more and then silence (§9.2.2.1.6), so §9.2.1.1.6 can time
+   its Tone B reversal against it; only after that reversal does it receive the
+   digital modem's L1/L2 (§9.2.2.1.7) and finally hold Tone A for INFO1d
+   (§9.2.2.1.8). Jumping straight to `PRE_INFO1_A` skipped the entire second
+   round — the digital modem sat in `SECOND_B` waiting for a Tone A reversal
+   that never came, and so never sent INFO1d.
+3. **`FIRST_A` waits for the peer's tone, not just its INFO0.** §9.2.2.1.3 and
+   §11.2.1.2.3 are identical here: *"After Tone B is detected **and** Tone A has
+   been transmitted for at least 50 ms"*. The code reversed on `INFO0_OK`
+   alone, which is only the same thing when the peer's tone is already up by the
+   time its INFO0 decodes. **In V.90 it never is:** §9.2.1.1.1–9.2.1.1.2 have
+   the digital modem start Tone B *after* it receives INFO0a, so our INFO0d
+   decode precedes its Tone B by a whole INFO0a length. Reversing there put the
+   reversal in front of the digital modem's tone detector before it had its 20
+   bauds of steady Tone A to measure against — the reversal was swallowed and
+   both sides waited on each other. `TONE_SEEN` before a good INFO0 remains the
+   §9.2.2.2.1 error case; after one it is the §9.2.2.1.3 trigger.
+
+   **This one is V.90-only, deliberately.** §11.2.1.2.3 says the same thing,
+   but the V.34 answer modem cannot test it: `process_rx_info0()` parks its
+   receiver in `V34_RX_STAGE_TONE_B`, whose detector never publishes
+   `TONE_SEEN` — the assignment in `v34rx.c` is commented out — so requiring it
+   there would deadlock plain V.34. The V.90 analogue modem lands in
+   `V34_RX_STAGE_TONE_A` instead (`calling_party` is set), which does publish
+   it. V.34 keeps the `INFO0_OK` shortcut, which is sound for it because the
+   call modem's Tone B is already running by the time INFO0c decodes.
+
+A fourth defect surfaced next to these, on the digital side: the
+`FIRST_B_SILENCE` recovery branch for "analogue L1/L2 arrived after a missed
+second reversal" set `stage = V90_WAIT_TONE_A_REV` without moving
+`current_getbaud`. That stage's case lives in `get_initial_fdx_a_not_a_baud`,
+so the digital modem fell off the end of the B switch every baud and held
+Tone B for the rest of the call. Fixed alongside.
+
+Both halves now mesh, in both laws:
+
+```text
+analogue  INITIAL_A -> FIRST_A -> FIRST_NOT_A -> FIRST_NOT_A_REV_SEEN -> SECOND_A
+          -> L1/L2 -> POST_L2_A -> POST_L2_NOT_A -> A_SILENCE -> PRE_INFO1_A -> INFO1a
+digital   V90_PHASE2_B -> V90_PHASE2_B_INFO0_SEEN -> FIRST_NOT_B_WAIT -> FIRST_NOT_B
+          -> FIRST_B_SILENCE -> FIRST_B_POST_REV_SILENCE -> SECOND_B -> SECOND_B_WAIT
+          -> SECOND_NOT_B -> L1/L2 -> INFO1d
+```
+
+INFO1d and INFO1a both decode CRC-clean and both sides enter Phase 3.
+
+The regression test is the coupled harness in `vpcm_loopback_test.c`
+(`test_spandsp_v90_info_startup_over_analog_g711`), which drives a V.90
+analogue caller against a V.90 digital answerer through a G.711 channel. It is
+the only in-tree check that the two halves of §9.2.1.1/§9.2.2.1 mesh, it costs
+about 0.1 s, and it now runs as part of `make test` rather than staying behind
+`--experimental-v90-info`. Its pass condition changed with the fix: the digital
+side is no longer asked for `INFO1_OK` on INFO1a, because `v34rx.c`
+deliberately clears that event as it runs `v90_enter_phase3_from_info1a()` so a
+stale one cannot block Phase 3 J detection. Its evidence of having read INFO1a
+is U_INFO, an INFO1a field (§8.2.3.2 Table 10). What the *analogue* side owes
+is `caller_saw_info1`: §9.2.2.1.9 forbids it sending INFO1a until INFO1d has
+arrived, so that is what separates a completed Phase 2 from one that timed out
+and sent INFO1a anyway.
+
+Untested live so far — the SIP pair below is the next check, and then the card:
 
 ```bash
 SIP_FORCE_PCMU=1 VPCM_ME_VERBOSE=1 ./sip_v90_modem --sip-server <registrar> \
@@ -188,11 +280,11 @@ SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
     --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue  # ATD6001
 ```
 
-The tone/reversal choreography of §9.2.2.1.3–9.2.2.1.6 is the prime suspect:
-the analogue role reuses SpanDSP's V.34 *call modem* tone stages, which are
-named for Tone B and sequenced for V.34's roles, while V.90 has the analogue
-modem transmitting Tone A and answering Tone B reversals on a different
-timetable.
+Worth re-measuring against the Eicon card too: workaround 2
+(`ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a`) exists because the card never sent
+INFO1d, and §9.2.1.1.7 conditions INFO1d on the digital modem detecting Tone A
+after the L1/L2 it expects. The analogue side was never presenting the
+§9.2.2.1.6 Tone A at all, which is exactly the signal that section waits for.
 
 ## What is left
 

@@ -2528,7 +2528,11 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_A:
-        /* Continue sending pure tone until we see an INFO0c message (V.34/11.2.1.2.3) */
+        /* Continue sending pure tone until the peer's INFO0 has been received
+           *and* its tone has actually been detected (V.34/11.2.1.2.3,
+           V.90/9.2.2.1.3 -- identical wording: "After Tone B is detected and
+           Tone A has been transmitted for at least 50 ms").  INITIAL_A served
+           the 50 ms. */
         if (s->tx.phase2_reranging)
         {
             /* Re-ranging out of the §11.2.2.1.1 INFO0 recovery.  The call
@@ -2546,9 +2550,42 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
         }
-        else if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        else if (s->tx.v90_mode
+                 &&
+                 s->rx.info0_received
+                 &&
+                 s->rx.received_event == V34_EVENT_TONE_SEEN)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A\n");
+            /* Both halves of the §9.2.2.1.3 condition now hold ("After Tone B
+               is detected and Tone A has been transmitted for at least 50 ms";
+               INITIAL_A served the 50 ms).  This used to fire on INFO0_OK
+               alone, which is only the same thing when the peer's tone is
+               already up by the time its INFO0 decodes.  In V.90 it never is:
+               §9.2.1.1.1-9.2.1.1.2 have the digital modem start Tone B *after*
+               it receives INFO0a, so our INFO0d decode precedes its Tone B by a
+               whole INFO0a length.  Reversing there put the reversal in front
+               of the digital modem's tone detector before it had 20 bauds of
+               steady Tone A to measure against, so the reversal was swallowed
+               and both sides waited on each other -- the analogue in
+               FIRST_NOT_A, the digital in V90_PHASE2_B_INFO0_SEEN.
+
+               V.90 only.  §11.2.1.2.3 says the same thing, but the V.34 answer
+               modem cannot test it: process_rx_info0() parks its receiver in
+               V34_RX_STAGE_TONE_B, whose detector never publishes TONE_SEEN
+               (the assignment in v34rx.c is commented out), so requiring it
+               there would deadlock.  V.34 keeps the INFO0_OK shortcut below,
+               which is sound for it because the call modem's Tone B is already
+               running by then. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: INFO0d received and Tone B detected, sending !A (9.2.2.1.3)\n");
+            /* Transmit our first phase reversal */
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+        }
+        else if (!s->tx.v90_mode  &&  s->rx.received_event == V34_EVENT_INFO0_OK)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A (11.2.1.2.3)\n");
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
@@ -2567,8 +2604,13 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD
                  ||
-                 s->rx.received_event == V34_EVENT_TONE_SEEN)
+                 (s->rx.received_event == V34_EVENT_TONE_SEEN
+                  &&  !s->rx.info0_received))
         {
+            /* §11.2.2.2.1 / §9.2.2.2.1: the peer's tone detected *before* its
+               INFO0 was correctly received.  Repeat INFO0a.  Tone detection
+               after a good INFO0 is not this case -- it is the §9.2.2.1.3
+               trigger above. */
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: bad event %d, retrying INFO0a\n",
                      s->rx.received_event);
             /* Go back to sending INFO0a until we get a clean INFO0c */
@@ -2601,10 +2643,13 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* Send phase reversed pure tone for 10ms */
         if (++s->tx.tone_duration == 6)
         {
-            if (s->tx.v90_mode)
+            if (s->tx.v90_mode  &&  !s->tx.calling_party)
             {
                 /* V.90 §9.2.1.1.5: digital modem does NOT send L1/L2 here.
-                   Instead, send Tone B and wait to RECEIVE analog's L1/L2 */
+                   Instead, send Tone B and wait to RECEIVE analog's L1/L2.
+                   The analogue modem takes the L1/L2 branch below: §9.2.2.1.5
+                   has it transmit the probe right off its own 10 ms of Tone A,
+                   exactly as the V.34 answer modem does in §11.2.1.2.5. */
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: sending Tone B, waiting for analog L1/L2\n");
                 s->tx.tone_duration = 0;
@@ -2995,6 +3040,11 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                          "Tx - V.90: analogue L1/L2 transaction completed after a missed second reversal; transmitting Tone B and waiting for the next Tone A reversal\n");
                 s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
                 s->tx.tone_duration = 0;
+                /* V90_WAIT_TONE_A_REV is a case in get_initial_fdx_a_not_a_baud,
+                   not in this function.  Setting the stage without also moving
+                   the getbaud left the digital modem falling off the end of this
+                   switch every baud, holding Tone B for the rest of the call. */
+                s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
                 s->tx.stage = V34_TX_STAGE_V90_WAIT_TONE_A_REV;
                 s->rx.received_event = V34_EVENT_NONE;
                 s->rx.persistence1 = 0;
@@ -3014,21 +3064,13 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /*endif*/
         return zero;
     case V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE:
-        /* Send silence, as we wait for L2 (V.34/11.2.1.1.4) */
-        if (s->tx.v90_mode && s->tx.calling_party)
-        {
-            /* V.90 caller (analog modem): after first reversal exchange silence,
-               immediately send L1/L2 probing signals (V.90 §9.2.1.1.4).
-               Don't wait for answerer's L2 — both sides send L1/L2 concurrently. */
-            if (++s->tx.tone_duration >= 50)
-            {
-                span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90 caller: silence done, sending L1/L2\n");
-                s->tx.tone_duration = 0;
-                l1_l2_signal_init(s);
-            }
-        }
-        else if ((s->tx.v90_mode && v90_phase2_l2_pending(s))
+        /* Send silence, as we wait for L2 (V.34/11.2.1.1.4).  Only the Tone B
+           transmitter reaches here -- the V.34 call modem and the V.90 digital
+           modem.  The V.90 analogue modem used to be routed through this whole
+           B-family chain and needed a special case here to get its §9.2.2.1.5
+           probe out; it now runs the A family, where L1/L2 follows its own
+           second reversal directly. */
+        if ((s->tx.v90_mode && v90_phase2_l2_pending(s))
             ||
             s->rx.received_event == V34_EVENT_L2_SEEN
             ||
@@ -3268,51 +3310,64 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     if (s->tx.duplex)
     {
-        if (s->tx.calling_party)
+        /* Which tone this modem transmits follows the role, not the call
+           direction.  V.34 gives Tone A to the answer modem (§11.2.1.2) and
+           Tone B to the call modem (§11.2.1.1).  V.90 keeps both tones and
+           both timetables but hands them to the other end of the call: the
+           analogue modem is the *calling* party and runs §9.2.2.1, which is
+           §11.2.1.2 word for word with INFO0d/INFO1d in place of
+           INFO0c/INFO1c; the digital modem answers and runs §9.2.1.1, which
+           is §11.2.1.1.  So the Tone A transmitter is the side where
+           calling_party and v90_mode agree. */
+        if (s->tx.calling_party  &&  !s->tx.v90_mode)
         {
+            /* V.34 call modem (§11.2.1.1): Tone B. */
             s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
             s->tx.stage = V34_TX_STAGE_FIRST_B;
         }
+        else if (!s->tx.calling_party  &&  s->tx.v90_mode)
+        {
+            /* V.90 9.2.1.1.1: the digital modem follows INFO0d with Tone B,
+               not the V.34 answerer A/!A sequence. It must also condition
+               its receiver to receive INFO0a and detect Tone A in this
+               window, so use the Tone A RX stage while keeping INFO0
+               target_bits active. */
+            s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+            s->tx.stage = V34_TX_STAGE_V90_PHASE2_B;
+            s->tx.tone_duration = 0;
+            v90_prime_info0a_tone_a_rx(s, "after INFO0d");
+        }
         else
         {
-            if (s->tx.v90_mode)
+            /* Tone A: the V.34 answer modem (§11.2.1.2.1) and the V.90
+               analogue modem (§9.2.2.1.1), which run the same timetable. */
+            s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
+            s->tx.stage = V34_TX_STAGE_INITIAL_A;
+            if (s->rx.stage == V34_RX_STAGE_INFO1C  &&  !s->tx.v90_mode)
             {
-                /* V.90 9.2.1.1.1: the digital modem follows INFO0d with Tone B,
-                   not the V.34 answerer A/!A sequence. It must also condition
-                   its receiver to receive INFO0a and detect Tone A in this
-                   window, so use the Tone A RX stage while keeping INFO0
-                   target_bits active. */
-                s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
-                s->tx.stage = V34_TX_STAGE_V90_PHASE2_B;
-                s->tx.tone_duration = 0;
-                v90_prime_info0a_tone_a_rx(s, "after INFO0d");
+                /* Re-entering the ranging sequence from the §11.2.2.1.1
+                   INFO0 recovery.  The receiver is still conditioned for
+                   INFO1c, so it would never report the Tone B reversal
+                   that FIRST_NOT_A waits on and we would hold Tone A
+                   forever.  §11.2.1.2.2: condition the receiver to detect
+                   Tone B and receive INFO0c.  Restricted to the recovery
+                   case so the ordinary first pass, where the receiver is
+                   already conditioned coming out of INFO0, is untouched.
+                   The V.90 analogue modem parks its receiver in INFO1C for
+                   INFO1d as an ordinary part of §9.2.2.1.8, so this guard
+                   would misfire there; its own re-ranging comes through
+                   §9.2.2.2.x instead. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - re-ranging after INFO0 recovery; conditioning RX for Tone B + INFO0 (11.2.1.2.2)\n");
+                s->rx.stage = V34_RX_STAGE_TONE_B;
+                s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+                s->rx.bit_count = 0;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->tx.phase2_reranging = true;
             }
-            else
-            {
-                s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
-                s->tx.stage = V34_TX_STAGE_INITIAL_A;
-                if (s->rx.stage == V34_RX_STAGE_INFO1C)
-                {
-                    /* Re-entering the ranging sequence from the §11.2.2.1.1
-                       INFO0 recovery.  The receiver is still conditioned for
-                       INFO1c, so it would never report the Tone B reversal
-                       that FIRST_NOT_A waits on and we would hold Tone A
-                       forever.  §11.2.1.2.2: condition the receiver to detect
-                       Tone B and receive INFO0c.  Restricted to the recovery
-                       case so the ordinary first pass, where the receiver is
-                       already conditioned coming out of INFO0, is untouched. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
-                             "Tx - re-ranging after INFO0 recovery; conditioning RX for Tone B + INFO0 (11.2.1.2.2)\n");
-                    s->rx.stage = V34_RX_STAGE_TONE_B;
-                    s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
-                    s->rx.bit_count = 0;
-                    s->rx.persistence1 = 0;
-                    s->rx.persistence2 = 0;
-                    s->rx.received_event = V34_EVENT_NONE;
-                    s->tx.phase2_reranging = true;
-                }
-                /*endif*/
-            }
+            /*endif*/
         }
         /*endif*/
     }
@@ -3369,23 +3424,29 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                 {
                     if (s->tx.calling_party  &&  s->tx.v90_mode)
                     {
-                        /* V.90 §9.2.2.1.8: the *analogue* modem is the calling
-                           party, and after L1/L2 it transmits Tone A and
-                           conditions its receiver to receive INFO1d.  INFO1a
-                           comes only after that (§9.2.2.1.9), and Table 11
-                           says why: bit 25 selects the carrier and bits 26:29
+                        /* V.90 §9.2.2.1.6: the *analogue* modem is the calling
+                           party, and its own probe is only the first of the
+                           two rounds.  Off the end of L2 it owes the digital
+                           modem 50 ms of Tone A, a reversal, 10 ms more and
+                           then silence, so that §9.2.1.1.6 can time its Tone B
+                           reversal against it; only after that reversal does it
+                           receive the digital modem's L1/L2 (§9.2.2.1.7) and
+                           finally hold Tone A for INFO1d (§9.2.2.1.8).  That is
+                           second_a_baud_init()'s POST_L2_A -> A_SILENCE ->
+                           PRE_INFO1_A chain, which the V.34 answer modem
+                           already walks for §11.2.1.2.6-8.  Jumping straight to
+                           PRE_INFO1_A here skipped the whole second round: the
+                           digital modem sat in SECOND_B waiting for a Tone A
+                           reversal that never came, and never sent INFO1d.
+                           Note INFO1a must not go out before INFO1d either
+                           (Table 11: bit 25 selects the carrier and bits 26:29
                            the pre-emphasis for the digital-to-analogue
-                           direction, which are answers to what INFO1d offered.
-                           This used to take the V.34 call-modem branch below
-                           and send INFO1a straight off the end of L2.  The
-                           digital modem waits for Tone A before sending INFO1d
-                           (§9.2.1.1.7), so the exchange deadlocked: measured
-                           against an Eicon Diva Server's own firmware, the
-                           card stayed in its INFO parser for the whole call
-                           while we went on to Phase 3 alone. */
+                           direction, both answers to what INFO1d offered), so
+                           the V.34 call-modem branch below is wrong twice
+                           over. */
                         span_log(&s->logging, SPAN_LOG_FLOW,
-                                 "Tx - V.90 analogue modem: L2 done, Tone A while awaiting INFO1d (9.2.2.1.8)\n");
-                        pre_info1_a_init(s);
+                                 "Tx - V.90 analogue modem: L2 done, Tone A + reversal + silence (9.2.2.1.6)\n");
+                        second_a_baud_init(s);
                     }
                     else if (s->tx.calling_party)
                         info1_baud_init(s);

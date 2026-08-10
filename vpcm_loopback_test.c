@@ -8733,8 +8733,17 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
         last_caller_tx_stage = caller_tx_stage;
         last_answerer_tx_stage = answerer_tx_stage;
 
+        /* The digital side is not asked for INFO1_OK on INFO1a: v34rx.c
+           deliberately clears the event as it runs v90_enter_phase3_from_info1a(),
+           so a stale INFO1_OK cannot block Phase 3 J detection.  Its evidence of
+           having read INFO1a is answerer_saw_uinfo (U_INFO is an INFO1a field,
+           §8.2.3.2 Table 10).  What the analogue side owes is caller_saw_info1 --
+           §9.2.2.1.9 forbids it sending INFO1a until INFO1d has arrived, so this
+           is what distinguishes a completed Phase 2 from one that timed out and
+           sent INFO1a anyway. */
         if (answerer_saw_info0
-            && answerer_saw_info1
+            && caller_saw_info0
+            && caller_saw_info1
             && answerer_saw_uinfo
             && phase3_seen)
         {

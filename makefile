@@ -172,6 +172,11 @@ test: $(TEST_TARGETS)
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
 	./vpcm_loopback_test --all-tests
+	# The coupled analogue<->digital Phase 2 harness.  It is the only in-tree
+	# check that both halves of the §9.2.1.1/§9.2.2.1 tone choreography mesh,
+	# and it costs ~0.1 s, so it runs by default rather than staying behind
+	# --experimental-v90-info.
+	./vpcm_loopback_test --session-only --experimental-v90-info
 
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
