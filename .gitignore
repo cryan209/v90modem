@@ -34,6 +34,8 @@ data_stack_test
 v42_link_test
 v92_proc_eval_test
 v34_phase2_decode_test
+v90_analogue_tx_test
+v90_analogue_rx_test
 v91_loopback_test
 
 # Common maps/logs

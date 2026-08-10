@@ -502,6 +502,46 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int bit_rate,
                                                 int trellis_size);
 
+/*! Set U_INFO for a V.90 analogue-role INFO1a — Table 11 bits 25:31, the Ucode
+    the digital modem uses for Sd and TRN1d (§8.4.4, §8.4.5).  The analogue
+    modem chooses it, so its receiver must be told the same value.  Call before
+    Phase 2.  0 restores the default.
+    \param s The modem context.
+    \param u_info Ucode, 0 to 127. */
+SPAN_DECLARE(void) v34_set_v90_u_info(v34_state_t *s, int u_info);
+
+/*! An external per-baud symbol source for the V.34 modulator.  The symbol is
+    returned in normalised units: 1.0 is one constellation step, so the 4-point
+    training constellation is (±0.7071068, ±0.7071068).  Nominal symbol RMS,
+    pulse shaping, carrier and gain are applied by the modulator. */
+typedef void (*v34_tx_external_symbol_func_t)(void *user_data, float *re, float *im);
+
+/*! Drive the V.34 modulator from an external symbol source, bypassing the
+    Phase 2/3/4 transmit state machine entirely.
+
+    This exists for the V.90 analogue role.  The analogue modem's Phase 3
+    signals (S, S̄, PP, TRN, Ja, SCR) are V.34-modulated, but their sequencing
+    is governed by events in the *PCM* downstream — the Sd-to-S̄d transition,
+    Jd, J'd, DIL (§9.3.2) — which this module never sees, because that
+    direction is not V.34 at all.  So only the modulator is reused here; the
+    state machine stays with the caller, and the receiver is untouched.
+
+    \param s The modem context.
+    \param baud_rate Symbol rate as a code from 0 (2400) to 5 (3429).
+    \param high_carrier True to use the higher of the two carrier options.
+    \param fn Symbol source, called once per baud.
+    \param user_data Opaque pointer passed to fn.
+    \return 0 on success, -1 on a bad baud rate or a NULL source. */
+SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
+                                                int baud_rate,
+                                                int high_carrier,
+                                                v34_tx_external_symbol_func_t fn,
+                                                void *user_data);
+
+/*! Stop an external symbol source and leave the transmitter silent.
+    \param s The modem context. */
+SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s);
+
 /*! Decode one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
                                                int16_t bits[16]);

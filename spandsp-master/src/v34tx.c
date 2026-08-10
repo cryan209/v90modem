@@ -965,11 +965,12 @@ static void prepare_v90_info1a(v34_state_t *s)
     s->tx.info1a.md = 0;
     s->tx.info1a.freq_offset = 0;
 
-    /* In V.90 INFO1a, max_data_rate carries the 7-bit U_INFO Ucode.
-       Default to midpoint Ucode 78 unless externally configured. */
-    if (s->tx.info1a.max_data_rate == 0)
-        s->tx.info1a.max_data_rate = 78;
-    /*endif*/
+    /* In V.90 INFO1a, max_data_rate carries the 7-bit U_INFO Ucode.  The
+       analogue modem chooses it; v34_set_v90_u_info() is how, and its
+       receiver has to be told the same value.  Default: midpoint Ucode 78. */
+    s->tx.info1a.max_data_rate = (s->tx.v90_u_info > 0  &&  s->tx.v90_u_info < 128)
+                               ? s->tx.v90_u_info
+                               : 78;
     s->tx.info1a.use_high_carrier = false;
     s->tx.info1a.preemphasis_filter = 0;
 
@@ -6424,6 +6425,88 @@ static void tx_silence_init(v34_state_t *s, int duration)
     s->tx.tone_duration = milliseconds_to_samples(duration);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
     s->tx.current_getbaud = get_silence_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_v90_u_info(v34_state_t *s, int u_info)
+{
+    if (s == NULL  ||  u_info < 0  ||  u_info > 127)
+        return;
+    /*endif*/
+    s->tx.v90_u_info = u_info;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90 analogue role: U_INFO = %d\n", u_info);
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_external_baud(v34_state_t *s)
+{
+    float re;
+    float im;
+
+    re = 0.0f;
+    im = 0.0f;
+    if (s->tx.external_symbol_func)
+        s->tx.external_symbol_func(s->tx.external_symbol_user_data, &re, &im);
+    /*endif*/
+    /* The caller works in constellation steps; nominal symbol RMS belongs to
+       the modulator, exactly as it does for the built-in training signals. */
+    return complex_sig_set(TRAINING_SCALE(re*TRAINING_AMP), TRAINING_SCALE(im*TRAINING_AMP));
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
+                                                int baud_rate,
+                                                int high_carrier,
+                                                v34_tx_external_symbol_func_t fn,
+                                                void *user_data)
+{
+    if (fn == NULL  ||  baud_rate < V34_BAUD_RATE_2400  ||  baud_rate > V34_BAUD_RATE_3429)
+        return -1;
+    /*endif*/
+    s->tx.baud_rate = baud_rate;
+    s->tx.high_carrier = high_carrier;
+    s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+    /* Only the sample-rate-to-symbol-rate ratio is wanted here.  The bit rate
+       is irrelevant to a symbol source that maps its own points, so ask for
+       the lowest rate this symbol rate supports and take the timing from it. */
+    v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, 2400, true);
+
+#if defined(SPANDSP_USE_FIXED_POINT)
+    vec_zeroi16(s->tx.rrc_filter_re, sizeof(s->tx.rrc_filter_re)/sizeof(s->tx.rrc_filter_re[0]));
+    vec_zeroi16(s->tx.rrc_filter_im, sizeof(s->tx.rrc_filter_im)/sizeof(s->tx.rrc_filter_im[0]));
+#else
+    vec_zerof(s->tx.rrc_filter_re, sizeof(s->tx.rrc_filter_re)/sizeof(s->tx.rrc_filter_re[0]));
+    vec_zerof(s->tx.rrc_filter_im, sizeof(s->tx.rrc_filter_im)/sizeof(s->tx.rrc_filter_im[0]));
+#endif
+    s->tx.rrc_filter_step = 0;
+    s->tx.baud_phase = 0;
+    s->tx.carrier_phase = 0;
+    s->tx.external_symbol_func = fn;
+    s->tx.external_symbol_user_data = user_data;
+    s->tx.current_getbaud = get_external_baud;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.getbaud_null_logged = false;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - external symbol source started (%d baud, %s carrier)\n",
+             baud_rate_parameters[s->tx.baud_rate].baud_rate,
+             high_carrier  ?  "high"  :  "low");
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s)
+{
+    s->tx.external_symbol_func = NULL;
+    s->tx.external_symbol_user_data = NULL;
+    if (s->tx.current_getbaud == get_external_baud)
+    {
+        /* Stay in the V.34 modulator putting out zero symbols rather than
+           calling tx_silence_init(), which would restart the transmission
+           preamble and drag the Phase 2 state machine back in. */
+        s->tx.current_getbaud = get_silence_baud;
+    }
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - external symbol source stopped\n");
 }
 /*- End of function --------------------------------------------------------*/
 

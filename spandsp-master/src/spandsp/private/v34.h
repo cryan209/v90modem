@@ -403,6 +403,19 @@ typedef struct
 
     bool getbaud_null_logged;
 
+    /*! \brief U_INFO for a V.90 analogue-role INFO1a (Table 11 bits 25:31):
+               the Ucode the digital modem trains on.  Zero uses the default. */
+    int v90_u_info;
+
+    /*! \brief External per-baud symbol source.  When set, the V.34 modulator
+               (RRC shaping, carrier, gain) is driven by symbols supplied from
+               outside this state machine — see v34_tx_start_external_symbols().
+               Used by the V.90 analogue role, whose Phase 3 sequencing is
+               governed by PCM-domain events this module never sees. */
+    void (*external_symbol_func)(void *user_data, float *re, float *im);
+    /*! \brief A user specified opaque pointer passed to external_symbol_func. */
+    void *external_symbol_user_data;
+
     /*! \brief Mapping frame parsed input */
     uint32_t r0;
     uint16_t qbits[8];
