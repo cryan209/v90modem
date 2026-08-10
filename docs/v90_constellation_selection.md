@@ -129,6 +129,48 @@ Both outcomes are pinned in `vpcm_loopback_test`
 (*V.90 DIL impairment measurement from half a pass*, *V.90 constellation
 trade-off, noise vs §8.5.2 power*).
 
+## Which DIL to send
+
+The analogue role has to author a descriptor. [`../v90_dil_presets.c`](../v90_dil_presets.c)
+carries the candidates, each run end to end by `vpcm_loopback_test` — validated,
+transmitted, measured back off a 3 dB pad, and planned at 3σ / −12 dBm0:
+
+| preset | N | cycle | Ucodes | chords | plans to |
+|---|---:|---:|---|---:|---:|
+| `default-ja-125x12` | 125 | 1 500T (188 ms) | 2…127, 64 distinct | 8 | 48 000 |
+| `smartlink-adi` | 144 | 16 140T (2.0 s) | 2…116, 115 distinct | 8 | 56 000 |
+| `smartlink-adi-qc` | 144 | 32 280T (4.0 s) | 2…116, 115 distinct | 8 | 56 000 |
+| `measurement-120x66` | 120 | 7 920T (990 ms) | 2…127, 120 distinct | 8 | 56 000 |
+| `courier-style-60x66` | 60 | 3 960T (495 ms) | 1…84, 32 distinct | 4 | 45 333 |
+
+`default-ja-125x12` is the profile this tree has always used and is kept
+bit-identical, LTP of 12 included — it is what a peer has seen from us.
+`measurement-120x66` is built for this job: it sweeps the whole ladder (low
+Ucodes are the cheap points §8.5.2 leaves alone, and without them a power cap
+has nothing to fall back on) with LTP 11 so training symbols reach every
+interval.
+
+`courier-style-60x66` is **modelled on**, not decoded from, the Eicon card's
+downstream: 66T segments, REFc = 0, a descending ladder interleaved with
+low-Ucode probes (84, 83, 82, 81, 80, 79, 78, 1, 77, 1, 76, 1, 75, 1, 2 …).
+The Courier's actual request travelled upstream in Ja and is not in the
+capture, and Finding 5 of [`eicon_downstream_comparison.md`](eicon_downstream_comparison.md)
+is why we cannot recover it from the downstream either. Its narrow ladder is
+why it plans 45 333 rather than 56 000 — worth knowing, since it is the shape a
+peer that connects actually asked for.
+
+Anything else goes through `v90_dil_desc_from_ucodes()`, including
+[`../tools/v90_dil_from_audio.py`](../tools/v90_dil_from_audio.py), which
+builds a ladder from the envelope of a sound clip. Mostly a toy, but a useful
+one: a clip with a narrow dynamic range produces a ladder clustered in a few
+chords, and the validator says so rather than the measurement quietly reporting
+a small constellation much later.
+
+**Validate every descriptor before sending it.** `v90_dil_desc_validate()`
+reports the cycle, the ladder, and the per-interval level coverage, and it is
+what catches the first trap below at authoring time instead of at measurement
+time.
+
 ## Two traps
 
 ### A DIL descriptor can be valid and still measure nothing
@@ -143,7 +185,13 @@ The first descriptor tried here did exactly that — LTP 12 left interval 1
 landing only on TP bits 3 and 9, both zero — and the measurement correctly
 reported Mi = 1. `intervals_unprobed` reports it as its own condition, because
 the fix is **a different descriptor (LTP coprime with 6)**, not a lower rate.
-Anything authoring a DIL descriptor here has to check it.
+
+The test is on **distinct levels reaching the interval, not training symbols**,
+and the difference matters: reference symbols carry levels too. A first version
+of `v90_dil_desc_validate()` counted only TP=1 positions and wrongly failed
+`default-ja-125x12`, whose REFc is `(chord << 4) | 1` — a different reference
+per chord, so its TP=0 positions alone deliver eight distinct levels to every
+interval. The profile is fine; the check was wrong.
 
 ### Alignment cannot be searched blindly
 

@@ -29,6 +29,8 @@ The automated tests only cover offline and loopback paths — passing them says 
 
 Adding a source file means updating `SRCS` **and** the relevant `*_OBJS` lists in `makefile`; the test binaries link overlapping subsets, so a new dependency often needs adding in several places.
 
+**The makefile has no header dependencies** (`%.o: %.c` at `makefile:243`, no `-MMD`). Editing a `.h` does not rebuild the `.c` files that include it, so a struct field added or reordered leaves stale objects linked against the old layout — the symptom is impossible values at runtime, not a link error. `rm` the affected `.o` files (or `make clean`) after touching any header.
+
 ## Platform (macOS Apple Silicon)
 
 - SpanDSP 3.0 builds from source in `spandsp-master/`. Do not substitute a system spandsp.

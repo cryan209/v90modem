@@ -550,14 +550,15 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                 out->points_below_margin++;
                 continue;
             }
-            if (u != 0)
-                probed++;
+            probed++;
             vpcm_cp_mask_set(out->mask[i], u, true);
             out->mi[i]++;
             prev_level = level;
             prev_sigma = sigma;
         }
-        if (probed == 0)
+        /* Fewer than two distinguishable levels is no constellation at all,
+         * and matches v90_dil_desc_validate()'s notion of a probed interval. */
+        if (probed < 2)
             out->intervals_unprobed |= (uint8_t) (1u << i);
         if (out->mi[i] < 1)
             return false;

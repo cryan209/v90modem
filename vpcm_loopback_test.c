@@ -22,6 +22,7 @@
 #include "v90_cp_rx.h"
 #include "v90_dil_rx.h"
 #include "v90_dil_measure.h"
+#include "v90_dil_presets.h"
 #include "v92_cp_rx.h"
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
@@ -1395,6 +1396,143 @@ static bool test_v90_dil_constellation_tradeoff(v91_law_t law)
 out:
     free(stream);
     return ok;
+}
+
+/*
+ * Every DIL we could send, put through the whole chain: validate, transmit,
+ * measure what comes back off an impaired line, and plan a rate.
+ *
+ * The descriptor is the analogue modem's choice (§8.4.1), and it decides what
+ * can be learned — a DIL that never probes a data-frame interval leaves a
+ * sixth of the constellation unknown however good the line is.  Checking that
+ * here means a preset cannot be added without someone noticing.
+ */
+static bool test_v90_dil_presets(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v91_law_t v91_law = law;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    int which;
+
+    vpcm_log("Test: V.90 DIL presets end to end (%s)", law_name);
+
+    for (which = 0; which < V90_DIL_PRESET_COUNT; which++) {
+        v90_dil_desc_t desc;
+        v90_dil_desc_check_t check;
+        v90_dil_measurement_t m;
+        v90_dil_rate_plan_t plan;
+        const char *name = v90_dil_preset_name((v90_dil_preset_t) which);
+        uint8_t *stream;
+        int cycle;
+        int i;
+        bool planned;
+
+        if (!v90_dil_preset_load((v90_dil_preset_t) which, &desc)) {
+            fprintf(stderr, "preset %s: load failed\n", name);
+            return false;
+        }
+        if (!v90_dil_desc_validate(&desc, &check)) {
+            fprintf(stderr, "preset %s: validate failed\n", name);
+            return false;
+        }
+        if (!check.ok) {
+            fprintf(stderr, "preset %s: intervals probed 0x%02X (want 0x3F), "
+                    "%d distinct Ucodes, fewest levels in an interval %d\n",
+                    name, check.intervals_probed, check.distinct_ucodes,
+                    check.min_interval_levels);
+            return false;
+        }
+
+        cycle = v90_dil_cycle_len(&desc);
+        stream = malloc((size_t) cycle);
+        if (!stream)
+            return false;
+        v90_dil_generate_codewords(v90_law, &desc, stream, cycle);
+        /* A 3 dB pad, so the plan is answering about a real channel. */
+        for (i = 0; i < cycle; i++) {
+            int16_t lin = v91_codeword_to_linear(v91_law, stream[i]);
+
+            stream[i] = v91_linear_to_codeword(v91_law, (int16_t) (lin * 0.708));
+        }
+
+        planned = v90_dil_measure(stream, cycle, v90_law, &desc, 0, &m)
+               && v90_dil_measure_plan_rate(&m, 0, 3.0, -12.0, v90_law, &plan);
+        free(stream);
+        if (!planned) {
+            fprintf(stderr, "preset %s: measure/plan failed\n", name);
+            return false;
+        }
+        if ((uint8_t) ~plan.intervals_unprobed != (uint8_t) (check.intervals_probed | 0xC0)) {
+            fprintf(stderr, "preset %s: validator said 0x%02X, measurement said "
+                    "0x%02X unprobed\n", name, check.intervals_probed,
+                    plan.intervals_unprobed);
+            return false;
+        }
+
+        vpcm_log("      %-20s N=%3d cycle=%5dT (%6.1f ms) Ucodes %d..%d (%d distinct,"
+                 " %d chords) -> Mi=%3d drn=%2u %.0f bps%s",
+                 name, check.segments, check.cycle_symbols, check.cycle_ms,
+                 check.lowest_ucode, check.highest_ucode, check.distinct_ucodes,
+                 check.chords_covered, plan.mi[0], (unsigned) plan.drn, plan.bps,
+                 plan.power_limited ? " [power-limited]" : "");
+        vpcm_log("          intervals probed 0x%02X%s", check.intervals_probed,
+                 check.ok ? " (all six)" : "  <-- INCOMPLETE");
+    }
+
+    /* A custom ladder, which is how anything not in the list gets built. */
+    {
+        uint8_t ladder[40];
+        v90_dil_desc_t desc;
+        v90_dil_desc_check_t check;
+        int i;
+
+        for (i = 0; i < 40; i++)
+            ladder[i] = (uint8_t) (8 + i * 3);
+        if (!v90_dil_desc_from_ucodes(ladder, 40, 10, &desc)
+            || !v90_dil_desc_validate(&desc, &check) || !check.ok) {
+            fprintf(stderr, "custom ladder: rejected (mask 0x%02X)\n",
+                    check.intervals_probed);
+            return false;
+        }
+        vpcm_log("      %-20s N=%3d cycle=%5dT (%6.1f ms) Ucodes %d..%d (%d distinct)",
+                 "custom-from-ucodes", check.segments, check.cycle_symbols,
+                 check.cycle_ms, check.lowest_ucode, check.highest_ucode,
+                 check.distinct_ucodes);
+    }
+
+    /* And the trap: LTP sharing a factor with 6 blinds an interval. */
+    {
+        v90_dil_desc_t bad;
+        v90_dil_desc_check_t check;
+        int i;
+
+        memset(&bad, 0, sizeof(bad));
+        bad.n = 40;
+        bad.lsp = 12;
+        bad.ltp = 12;
+        for (i = 0; i < 12; i++) {
+            bad.sp[i] = (uint8_t) ((0x0A6DU >> i) & 1U);
+            bad.tp[i] = (uint8_t) ((0x0DB7U >> i) & 1U);   /* bits 3 and 9 clear */
+        }
+        for (i = 0; i < 8; i++) {
+            bad.h[i] = 10;       /* 66T: 66 % 12 == 6, so intervals stay pinned */
+            bad.ref[i] = 0;
+        }
+        for (i = 0; i < bad.n; i++)
+            bad.train_u[i] = (uint8_t) (100 - i);
+        if (!v90_dil_desc_validate(&bad, &check))
+            return false;
+        if (check.ok || check.intervals_probed == 0x3F) {
+            fprintf(stderr, "validator missed an unprobed interval (mask 0x%02X)\n",
+                    check.intervals_probed);
+            return false;
+        }
+        vpcm_log("      validator rejects LTP=12 with 66T segments: probed 0x%02X",
+                 check.intervals_probed);
+    }
+
+    vpcm_log("PASS: V.90 DIL presets end to end (%s)", law_name);
+    return true;
 }
 
 static bool test_v90_dil_rx_roundtrip(v91_law_t law)
@@ -9751,6 +9889,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_impairment_measurement(V91_LAW_ALAW)
         && test_v90_dil_constellation_tradeoff(V91_LAW_ULAW)
         && test_v90_dil_constellation_tradeoff(V91_LAW_ALAW)
+        && test_v90_dil_presets(V91_LAW_ULAW)
+        && test_v90_dil_presets(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v92_phase3_transitions()
