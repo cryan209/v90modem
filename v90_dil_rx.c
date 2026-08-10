@@ -1,24 +1,35 @@
 /*
  * v90_dil_rx.c — Offline V.90 DIL waveform decoder (§8.4.1).
  *
+ * Acquisition is structural, not periodic, because §8.4.1 lets the
+ * analogue modem terminate DIL on any segment boundary and real peers do
+ * — a DIL that arrives once has no repetition to lock onto.
+ *
  * Pipeline:
  *   1. Decompose G.711 codewords into (Ucode, sign) symbols.
- *   2. Find the longest exactly-periodic run whose period is a multiple
- *      of 6 (every DIL-segment is (Hc+1)*6 symbols, so the full cycle is
- *      always a multiple of 6). The minimal such period is taken as the
- *      cycle; internally repetitive descriptors therefore decode to a
- *      shorter, waveform-equivalent canonical form.
- *   3. Segment one cycle: boundaries are detected where a third distinct
- *      Ucode value appears (each segment carries at most two Ucodes:
- *      its training symbol and its chord's reference symbol), then
- *      snapped to a common mod-6 residue. Reference-symbol runs shared
- *      by adjacent segments give each boundary its snapping slack.
- *   4. Derive the descriptor: training Ucode per segment (the larger of
- *      the two values — REFc in real requests is a low Ucode), Hc from
- *      segment lengths per chord, REFc from the smaller value, and
- *      minimal-period SP/TP patterns solved across all segments.
- *   5. Verify by re-expanding the descriptor with
- *      v90_dil_generate_codewords() and comparing byte-for-byte.
+ *   2. Locate each segment's training symbols. A segment carries two
+ *      Ucodes (its training symbol and its chord's REFc), so a third
+ *      value marks a new segment; the first symbol carrying each new
+ *      training Ucode is recorded. §8.4.1 restarts SP and TP at every
+ *      boundary, so those first-occurrences are exactly one segment
+ *      apart whatever their shared offset into the segment is, and that
+ *      offset is then the only unknown left — bounded by the gap to the
+ *      previous segment's last training symbol, and settled by (5).
+ *   3. Tile the region into segments and split any that merged because
+ *      adjacent segments shared a training Ucode.
+ *   4. Derive the descriptor from the minimal repeat of the (training
+ *      Ucode, length) sequence — so a DIL that did repeat still decodes
+ *      to its minimal cycle — with Hc from segment lengths per chord,
+ *      REFc from the other value, and SP/TP solved across every observed
+ *      segment.
+ *   5. Verify by re-expanding with v90_dil_generate_codewords() across
+ *      the whole region and comparing byte-for-byte.
+ *
+ * The periodic search (dil_best_run_at and below) is kept as a fallback
+ * for shapes the walk cannot segment. It needs the cycle twice, and on
+ * its own it would accept a short accidental repeat as the cycle, since
+ * such a run does reproduce itself; step 5 is what the structural path
+ * has instead, and why it cannot make that mistake.
  *
  * Known limits (verification catches all of them, so a decode never
  * silently returns a wrong descriptor):
@@ -26,6 +37,9 @@
  *     another segment of the same chord pins the true length.
  *   - A segment whose TP is all zeros decodes as all-training with the
  *     reference value as its training symbol (waveform-equivalent).
+ *   - From a single pass, a descriptor whose training-Ucode sequence is
+ *     itself periodic decodes to that shorter period. Nothing on the
+ *     wire separates the two until the cycle runs twice.
  */
 
 #include "v90_dil_rx.h"
@@ -701,6 +715,517 @@ static bool dil_decode_uniform(const dil_sym_t *t, int c, v90_law_t law,
     return found;
 }
 
+/* ------------------------------------------------------------------ */
+/* Structural acquisition — reads a DIL that is transmitted only once   */
+/* ------------------------------------------------------------------ */
+/*
+ * The periodic search above locks a cycle by autocorrelation, so it needs
+ * the cycle to appear on the wire twice (`re - rs >= 2 * c`).  §8.4.1 lets
+ * the analogue modem terminate DIL on any segment boundary, and real peers
+ * do: the Eicon card's DIL runs 1.97 s and stops after about one pass, and
+ * below two cycles the periodic search does not fail but fits a short local
+ * repeat and reports it as the cycle (docs/eicon_downstream_comparison.md,
+ * Finding 4).
+ *
+ * A DIL cycle is self-describing in a single pass, so acquisition does not
+ * need repetition at all.  §8.4.1 gives each DIL-segment exactly two
+ * codewords — its training Ucode and its chord's REFc — so a segment
+ * boundary is where a third Ucode appears, and every segment length is a
+ * multiple of 6.  Walking those boundaries recovers the segmentation
+ * directly; repetition, when it exists, then shows up as a repeat in the
+ * recovered segment sequence and still yields the minimal cycle.
+ */
+
+#define DIL_MIN_SEGMENTS  3     /* fewest segments worth calling a DIL */
+#define DIL_WALK_STEP     64    /* coarse spacing for the region search */
+#define DIL_START_TRIES   24    /* verified candidates per structural decode */
+
+/*
+ * Identify the (at most) two Ucodes carried by the segment starting at `at`
+ * and return the index of the first symbol carrying a third — the latest a
+ * segment boundary can be.  Bounded, so a long two-valued stretch cannot
+ * run the walk away.
+ */
+static int dil_two_values(const dil_sym_t *x, int hi, int at,
+                          int *a_out, int *b_out)
+{
+    int a = -1;
+    int b = -1;
+    int cap = at + 2 * DIL_MAX_SEG_LEN;
+    int i;
+
+    if (cap > hi)
+        cap = hi;
+    for (i = at; i < cap; i++) {
+        int u = x[i].u;
+
+        if (a < 0 || u == a) {
+            a = u;
+            continue;
+        }
+        if (b < 0 || u == b) {
+            b = u;
+            continue;
+        }
+        break;
+    }
+    *a_out = a;
+    *b_out = b;
+    return i;
+}
+
+/*
+ * One segment's training symbols, located without knowing where the segment
+ * boundary is.
+ *
+ * The obvious rule -- cut where a third Ucode appears -- is wrong, and the
+ * card shows why: its segments open with REF symbols, so the first symbol
+ * carrying the new training Ucode is 8 symbols past the boundary, not on it.
+ *
+ * What is stable is the *spacing*.  §8.4.1 restarts SP and TP at every
+ * segment boundary, so the first training symbol sits at the same offset in
+ * every segment.  Consecutive first-occurrences are therefore exactly one
+ * segment apart, whatever that shared offset turns out to be, and the offset
+ * itself is then the single unknown left to settle.
+ */
+typedef struct {
+    int t;          /* first position carrying this segment's training Ucode */
+    int last;       /* last such position, which bounds the offset below */
+    int train;
+} dil_train_t;
+
+static int dil_scan_trains(const dil_sym_t *x, int rs, int hi,
+                           dil_train_t *tr, int max_tr)
+{
+    int p = rs;
+    int n = 0;
+
+    while (p < hi && n < max_tr) {
+        int a;
+        int b;
+        int q;
+        int train;
+        int first = -1;
+        int last = -1;
+        int i;
+
+        q = dil_two_values(x, hi, p, &a, &b);
+        if (b < 0)
+            break;                      /* one Ucode: constant magnitude */
+        train = (a > b) ? a : b;
+        for (i = p; i < q; i++) {
+            if (x[i].u != train)
+                continue;
+            if (first < 0)
+                first = i;
+            last = i;
+        }
+        if (first < 0)
+            break;
+        tr[n].t = first;
+        tr[n].last = last;
+        tr[n].train = train;
+        n++;
+        p = q;
+    }
+    return n;
+}
+
+/* Re-derive train/ref for a segment addressed linearly from the region base. */
+static bool dil_classify_linear(const dil_sym_t *x, dil_seg_t *seg)
+{
+    int a = -1;
+    int b = -1;
+    int i;
+
+    for (i = 0; i < seg->len; i++) {
+        int u = x[seg->start + i].u;
+
+        if (a < 0 || u == a) {
+            a = u;
+            continue;
+        }
+        if (b < 0 || u == b) {
+            b = u;
+            continue;
+        }
+        return false;
+    }
+    if (b >= 0 && b > a) {
+        int swap = a;
+
+        a = b;
+        b = swap;
+    }
+    seg->train = a;
+    seg->ref = b;
+    return true;
+}
+
+/*
+ * Minimal period, in segments, of the (training Ucode, length) sequence.
+ * A DIL sent more than once repeats here, which is what keeps the recovered
+ * descriptor canonical-minimal for streams the periodic path also handles.
+ */
+static int dil_segment_period(const dil_seg_t *segs, int nseg)
+{
+    int period;
+
+    for (period = 1; period < nseg; period++) {
+        bool ok = true;
+        int i;
+
+        for (i = period; i < nseg; i++) {
+            if (segs[i].train != segs[i % period].train
+                || segs[i].len != segs[i % period].len) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok)
+            return period;
+    }
+    return nseg;
+}
+
+typedef struct {
+    const dil_sym_t *x;     /* region base */
+    const dil_seg_t *segs;
+} dil_lin_ctx_t;
+
+static int dil_lin_sign_bit(void *vctx, int seg, int pos)
+{
+    const dil_lin_ctx_t *ctx = vctx;
+
+    return ctx->x[ctx->segs[seg].start + pos].s;
+}
+
+static int dil_lin_train_bit(void *vctx, int seg, int pos)
+{
+    const dil_lin_ctx_t *ctx = vctx;
+    int u = ctx->x[ctx->segs[seg].start + pos].u;
+
+    if (u == ctx->segs[seg].train)
+        return 1;
+    if (ctx->segs[seg].ref >= 0 && u == ctx->segs[seg].ref)
+        return 0;
+    return -1;
+}
+
+/*
+ * Build a descriptor from the first `period` segments and verify it by
+ * re-expanding §8.4.1 across the *whole* tiled region.
+ *
+ * Verifying against the region rather than against one cycle of itself is
+ * what makes this safe where the periodic path was not: a descriptor fitted
+ * to a short accidental repeat reproduces that repeat and nothing else, so
+ * it cannot survive here.  SP/TP are solved across every segment, not just
+ * the cycle, for the same reason.
+ */
+static bool dil_derive_linear(const dil_sym_t *x, int span, v90_law_t law,
+                              dil_seg_t *segs, int nseg, int period,
+                              v90_dil_desc_t *desc_out)
+{
+    v90_dil_desc_t desc;
+    dil_lin_ctx_t ctx;
+    int chord_len[8];
+    int chord_ref[8];
+    uint8_t *gen;
+    int lsp;
+    int ltp;
+    int longest = 0;
+    int k;
+    bool ok = true;
+
+    if (period < 1 || period > V90_DIL_MAX_SEGMENTS || nseg < period)
+        return false;
+
+    memset(&desc, 0, sizeof(desc));
+    for (k = 0; k < 8; k++) {
+        chord_len[k] = -1;
+        chord_ref[k] = -1;
+        desc.h[k] = 1;
+        desc.ref[k] = 0;
+    }
+
+    for (k = 0; k < nseg; k++) {
+        int chord;
+
+        if (segs[k].len < 6 || segs[k].len % 6 != 0
+            || segs[k].len > DIL_MAX_SEG_LEN)
+            return false;
+        if (!dil_classify_linear(x, &segs[k]))
+            return false;
+        chord = (segs[k].train >> 4) & 7;
+        if (chord_len[chord] < 0)
+            chord_len[chord] = segs[k].len;
+        else if (chord_len[chord] != segs[k].len)
+            return false;
+        if (segs[k].ref >= 0) {
+            if (chord_ref[chord] < 0)
+                chord_ref[chord] = segs[k].ref;
+            else if (chord_ref[chord] != segs[k].ref)
+                return false;
+        }
+        if (segs[k].len > longest)
+            longest = segs[k].len;
+        if (k < period)
+            desc.train_u[k] = (uint8_t) segs[k].train;
+    }
+    desc.n = (uint8_t) period;
+    for (k = 0; k < 8; k++) {
+        if (chord_len[k] >= 0)
+            desc.h[k] = (uint8_t) (chord_len[k] / 6 - 1);
+        if (chord_ref[k] >= 0)
+            desc.ref[k] = (uint8_t) chord_ref[k];
+    }
+
+    ctx.x = x;
+    ctx.segs = segs;
+    lsp = dil_solve_pattern(segs, nseg, dil_lin_sign_bit, &ctx, desc.sp);
+    if (lsp == 0)
+        return false;
+    ltp = dil_solve_pattern(segs, nseg, dil_lin_train_bit, &ctx, desc.tp);
+    if (ltp == 0)
+        return false;
+
+    /* Same canonicalisation as the periodic path: a pattern is observable
+     * only out to the longest segment, and expanding to that length lets the
+     * ubiquitous 12-bit defaults come back verbatim. */
+    if (longest <= V90_DIL_MAX_PAT_BITS && lsp <= longest && ltp <= longest) {
+        int i;
+
+        for (i = lsp; i < longest; i++)
+            desc.sp[i] = desc.sp[i % lsp];
+        for (i = ltp; i < longest; i++)
+            desc.tp[i] = desc.tp[i % ltp];
+        lsp = longest;
+        ltp = longest;
+    }
+    desc.lsp = (uint8_t) lsp;
+    desc.ltp = (uint8_t) ltp;
+
+    gen = malloc((size_t) span);
+    if (!gen)
+        return false;
+    if (v90_dil_generate_codewords(law, &desc, gen, span) != span) {
+        free(gen);
+        return false;
+    }
+    for (k = 0; k < span; k++) {
+        if (gen[k] != v90_codeword_compose(law, x[k].u, x[k].s)) {
+            ok = false;
+            break;
+        }
+    }
+    free(gen);
+    if (!ok)
+        return false;
+
+    *desc_out = desc;
+    return true;
+}
+
+/*
+ * Tile [tr[first].t - offset, tr[ntr-1].t - offset) into whole segments and
+ * try to decode it.  `offset` is the shared distance from each segment
+ * boundary to that segment's first training symbol.
+ */
+static bool dil_try_offset(const dil_sym_t *x, int len_total,
+                           const dil_train_t *tr, int ntr,
+                           int first, int offset, bool with_tail,
+                           v90_law_t law,
+                           dil_seg_t *segs, int max_seg,
+                           v90_dil_rx_result_t *out)
+{
+    v90_dil_desc_t desc;
+    int rs = tr[first].t - offset;
+    int nseg = 0;
+    int period;
+    int span;
+    int cycle;
+    int k;
+
+    if (rs < 0)
+        return false;
+    for (k = first; k + 1 < ntr && nseg < max_seg; k++) {
+        int len = tr[k + 1].t - tr[k].t;
+
+        if (len < 6 || len % 6 != 0 || len > DIL_MAX_SEG_LEN)
+            return false;
+        segs[nseg].start = tr[k].t - offset - rs;
+        segs[nseg].len = len;
+        segs[nseg].train = tr[k].train;
+        segs[nseg].ref = -1;
+        nseg++;
+    }
+    if (nseg < DIL_MIN_SEGMENTS)
+        return false;
+
+    /*
+     * The final training value has no successor to space it against, so the
+     * loop above stops one segment short.  When a peer sends DIL once, that
+     * dropped segment is the difference between the descriptor it sent and
+     * one segment less of it, so recover it from the length already known
+     * for its chord.  Re-expansion below rejects the guess if it is wrong.
+     */
+    if (with_tail && nseg < max_seg) {
+        int chord = (tr[ntr - 1].train >> 4) & 7;
+        int len = -1;
+
+        for (k = 0; k < nseg; k++) {
+            if (((segs[k].train >> 4) & 7) == chord) {
+                len = segs[k].len;
+                break;
+            }
+        }
+        if (len < 0)
+            return false;
+        segs[nseg].start = tr[ntr - 1].t - offset - rs;
+        segs[nseg].len = len;
+        segs[nseg].train = tr[ntr - 1].train;
+        segs[nseg].ref = -1;
+        if (rs + segs[nseg].start + len > len_total)
+            return false;
+        nseg++;
+    }
+
+    nseg = dil_split_merged(segs, nseg, max_seg);
+    if (nseg < DIL_MIN_SEGMENTS)
+        return false;
+
+    span = 0;
+    for (k = 0; k < nseg; k++) {
+        if (segs[k].start != span)
+            return false;           /* the split left a hole */
+        span += segs[k].len;
+    }
+    if (span < DIL_MIN_RUN_SYMBOLS)
+        return false;
+
+    period = dil_segment_period(segs, nseg);
+    if (!dil_derive_linear(x + rs, span, law, segs, nseg, period, &desc))
+        return false;
+
+    cycle = v90_dil_cycle_len(&desc);
+    if (cycle <= 0)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->desc = desc;
+    out->run_start = rs;
+    out->run_len = span;
+    out->first_segment_at = rs;
+    out->cycle_len = cycle;
+    out->cycles_seen = span / cycle;
+    out->mismatches = 0;
+    out->exact = true;
+    return true;
+}
+
+/*
+ * Structural decode over a whole stream.
+ *
+ * The coarse pass finds where the training-symbol scan survives longest; a
+ * scan that begins outside DIL stops on its first symbol, so stepping costs
+ * nothing there.  What is left is the offset from each boundary to its first
+ * training symbol, which §8.4.1 makes the same in every segment and which is
+ * bounded by the gap between one segment's last training symbol and the next
+ * segment's first.  That is a handful of candidates, and re-expansion
+ * decides between them.
+ */
+static bool dil_decode_structural(const dil_sym_t *x, int len, v90_law_t law,
+                                  v90_dil_rx_result_t *out)
+{
+    int max_seg = V90_DIL_MAX_SEGMENTS * 2 + 8;
+    int max_tr = max_seg;
+    dil_seg_t *segs;
+    dil_train_t *tr;
+    int anchor = -1;
+    int best = 0;
+    int ntr;
+    int at;
+    int first;
+    int max_offset;
+    int offset;
+    bool ok = false;
+
+    segs = malloc(sizeof(*segs) * (size_t) max_seg);
+    tr = malloc(sizeof(*tr) * (size_t) max_tr);
+    if (!segs || !tr) {
+        free(segs);
+        free(tr);
+        return false;
+    }
+
+    for (at = 0; at + DIL_MIN_RUN_SYMBOLS <= len; at += DIL_WALK_STEP) {
+        int n = dil_scan_trains(x, at, len, tr, max_tr);
+
+        if (n > best) {
+            best = n;
+            anchor = at;
+        }
+    }
+    if (anchor < 0 || best < DIL_MIN_SEGMENTS + 1) {
+        free(segs);
+        free(tr);
+        return false;
+    }
+    ntr = dil_scan_trains(x, anchor, len, tr, max_tr);
+
+    /*
+     * Re-anchor onto the first training symbol before trusting the scan.
+     *
+     * A scan that starts in the signal *before* DIL pairs that signal's
+     * Ucode with the first training Ucode, so the segment's own REFc arrives
+     * as an apparent third value and cuts the first segment short.  That is
+     * not hypothetical: the clean-line Ja profile uses REFc = (chord << 4)|1,
+     * so chord 0's reference is Ucode 1 while the idle ahead of it is Ucode
+     * 0.  Restarting from a training symbol puts the scan inside DIL, where
+     * the pair is the segment's own {train, REFc}.
+     */
+    if (ntr > 0) {
+        int retry = dil_scan_trains(x, tr[0].t, len, tr, max_tr);
+
+        if (retry > 0)
+            ntr = retry;
+    }
+
+    /* The offset cannot reach back past the previous segment's last training
+     * symbol, which pins it tightly. */
+    max_offset = DIL_MAX_SEG_LEN;
+    for (at = 1; at < ntr; at++) {
+        int room = tr[at].t - tr[at - 1].last - 1;
+
+        if (room < max_offset)
+            max_offset = room;
+    }
+    if (max_offset < 0)
+        max_offset = 0;
+
+    /*
+     * An anchor inside the *preceding* signal makes tr[0] describe a segment
+     * that is partly not DIL, so the first one or two entries are dropped in
+     * turn.  Later entries are unaffected: they are found from the third-value
+     * transitions, which do not depend on where the scan began.
+     */
+    /* Prefer the tiling that covers the most DIL: with the trailing segment
+     * recovered, and starting as early as the scan allows. */
+    for (first = 0; first < 3 && first + 1 < ntr && !ok; first++) {
+        for (offset = 0; offset <= max_offset && !ok; offset++) {
+            ok = dil_try_offset(x, len, tr, ntr, first, offset, true, law,
+                                segs, max_seg, out);
+            if (!ok)
+                ok = dil_try_offset(x, len, tr, ntr, first, offset, false, law,
+                                    segs, max_seg, out);
+        }
+    }
+
+    free(segs);
+    free(tr);
+    return ok;
+}
+
 static bool dil_decode_run(const dil_sym_t *x, int rs, int re, int c,
                            v90_law_t law, v90_dil_rx_result_t *out)
 {
@@ -790,9 +1315,17 @@ bool v90_dil_rx_decode(const uint8_t *codewords, int len, v90_law_t law,
     max_period = len / 2;
     if (max_period > V90_DIL_RX_MAX_CYCLE)
         max_period = V90_DIL_RX_MAX_CYCLE;
-    dil_best_run_at(x, len, 0, max_period, &rs, &re, &c);
-    if (c > 0)
-        ok = dil_decode_run(x, rs, re, c, law, out);
+    /* Structural acquisition first: it reads a DIL sent once, and it
+     * verifies against the whole region rather than against a single cycle
+     * of itself, so it cannot accept a short accidental repeat.  The
+     * periodic search stays as a fallback for shapes the walk cannot
+     * segment (see its own comment). */
+    ok = dil_decode_structural(x, len, law, out);
+    if (!ok) {
+        dil_best_run_at(x, len, 0, max_period, &rs, &re, &c);
+        if (c > 0)
+            ok = dil_decode_run(x, rs, re, c, law, out);
+    }
     free(x);
     if (!ok)
         return v90_dil_rx_scan(codewords, len, law, out);
@@ -821,6 +1354,11 @@ bool v90_dil_rx_scan(const uint8_t *codewords, int len, v90_law_t law,
     if (!x)
         return false;
     dil_decompose(codewords, len, law, x);
+
+    if (dil_decode_structural(x, len, law, out)) {
+        free(x);
+        return true;
+    }
 
     max_period = len / 2;
     if (max_period > V90_DIL_RX_MAX_CYCLE)

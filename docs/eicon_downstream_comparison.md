@@ -101,7 +101,7 @@ periodicity) gives the card's whole Phase 3, and ours beside it:
 | S̄d | **48T** | 48T | yes — **match** |
 | TRN1d (const-mag, GPC signs) | **30000T (3750 ms)** | 2496T (312 ms) | yes — **12× short** |
 | Jd (const-mag, scrambled+diff signs) | 943T (118 ms) | peer-gated | **no** |
-| DIL (132T segments, descending level) | 1972 ms | 100 ms | **no** |
+| DIL (66T segments, descending level) | 1972 ms | 100 ms | **no** |
 | Ri (const-magnitude, `+++−−−`) | 571 ms | 1000 ms | **no** |
 | multi-level (data) | 12200 ms | 11400 ms | **no** |
 
@@ -135,10 +135,11 @@ Decoding the card's Jd, J'd, DIL and Phase 4 is *not* confounded — a
 reference decode is a reference decode regardless of what our transmitter did.
 
 That is where the work since has gone. The sparse descending-level stage is
-identified: it is **DIL**, 132T segments stepping the training Ucode down the
-ladder (Finding 4). Getting there required fixing the Sd detection that was
-mis-anchoring everything after it (Finding 3), and DIL is now the first stage
-our receive path cannot read.
+identified: it is **DIL**, 66T segments stepping the training Ucode down the
+ladder. Getting there required fixing the Sd detection that was mis-anchoring
+everything after it (Finding 3) and then rewriting DIL acquisition, which could
+not read a DIL sent once (Finding 4). DIL is still the first stage our receive
+path cannot read, for a narrower reason now (Finding 5).
 
 ## Jd — decoded on both sides, and it is almost entirely correct
 
@@ -287,87 +288,117 @@ Result, both fixtures, matching an independent segmentation of the captures:
 [12171.5 ms] V.90 Jd+J'd: 943 symbols (117.9 ms), ~13 Jd frame repetitions
 ```
 
-## Finding 4 — DIL recovery cannot read a real DIL — **open**
+## Finding 4 — DIL acquisition needed the cycle twice — **fixed**
 
 With Phase 3 anchored correctly, the next stage is DIL, at 12289.4 ms on call 1
-(12337.9 ms on call 3), running ~1971 ms to where Ri starts. It is textbook
-§8.4.1: 132-symbol segments (H<sub>c</sub> = 21), REF<sub>c</sub> = Ucode 0, and
-a training Ucode that steps down the ladder segment by segment — 84, 83, 82, 81,
-…
+(12337.9 ms on call 3), running ~1971 ms to where Ri starts.
 
-`v90_dil_rx.c` does not decode it, and the reason is not the descriptor — it is
-**acquisition**. Generating a DIL needs no acquisition: the generator is handed
-the descriptor. The decoder has to find one, and it does that by autocorrelation
-— locate an exactly-periodic run, then fit a descriptor to a single cycle.
-`dil_best_run_at()` extends a candidate only while `x[i] == x[i+c]`, and
-`v90_dil_rx_scan()` keeps it only if `re - rs >= 2 * c`. **The cycle has to
-appear twice.**
+`v90_dil_rx.c` could not decode it, and the reason was **acquisition**, not the
+descriptor. Generating a DIL needs no acquisition: the generator is handed the
+descriptor. The decoder had to find one, and did it by autocorrelation —
+locate an exactly-periodic run, then fit a descriptor to a single cycle.
+`dil_best_run_at()` extended a candidate only while `x[i] == x[i+c]`, and
+`v90_dil_rx_scan()` kept it only if the run spanned `2 * c`. **The cycle had to
+appear twice.** §8.4.1 lets the analogue modem terminate DIL on any segment
+boundary, and the Courier does so after roughly one pass, so it never did.
 
-§8.4.1 lets the analogue modem terminate DIL on any segment boundary, and the
-Courier does so after roughly one pass, so it never appears twice.
+Measured with our *own* generator, so nothing depended on reading the card —
+a card-shaped descriptor, varying only how much was transmitted:
 
-Measured with our *own* generator, so nothing depends on reading the card —
-a card-shaped descriptor (N = 119, H<sub>c</sub> = 21, REF<sub>c</sub> = 0,
-training Ucode stepping down the ladder), varying only how much is transmitted:
+| cycles sent | before | after |
+|---|---|---|
+| 0.75 | OK, cycle 12 (**wrong**) | partial pass decoded |
+| 1.00 | OK, cycle 12 (**wrong**) | **exact** |
+| 1.75 | OK, cycle 12 (**wrong**) | **exact** |
+| 2.00 | exact | **exact** |
+| 3.00 | exact | **exact** |
 
-```text
-descriptor: N=119, 15708T cycle (1963.5 ms)
+Note what the old path did below the cliff: it did not fail, it **returned
+success with a wrong cycle**, fitting a 12-symbol local repeat (LSP = LTP = 12)
+and calling it the DIL. So we did not merely fail to read a real DIL, we
+silently mis-decoded one; the 280-symbol "DIL run" seen on the card's capture
+is the same behaviour.
 
-  cycles sent   symbols     decode      cycle_len reported
-        0.75     11781     OK         12 (WRONG)
-        1.00     15708     OK         12 (WRONG)
-        1.50     23562     OK         12 (WRONG)
-        1.75     27489     OK         12 (WRONG)
-        2.00     31416     OK         15708
-        3.00     47124     OK         15708
-```
+### What replaced it
 
-A hard cliff at 2.00 cycles, and note what happens below it: the decoder does
-not fail, it **returns success with a wrong cycle**. It fits a 12-symbol period
-to a local repeat inside a segment (LSP = LTP = 12) and reports that as the DIL.
-On the card's capture the same behaviour yields a 280-symbol, 35 ms "DIL run" —
-2% of the region:
+Acquisition is now structural. §8.4.1 restarts SP and TP at every segment
+boundary, so **the first training symbol sits at the same offset in every
+segment** — consecutive first-occurrences are therefore exactly one segment
+apart, whatever that shared offset is. Segment spacing comes out of the data
+without any assumption that the cycle repeats; the shared offset is the single
+remaining unknown, bounded by the gap back to the previous segment's last
+training symbol, and settled by re-expansion.
 
-```text
-Codeword-exact DIL run: 890.6 - 925.6 ms (280 symbols, 2 cycles of 132)
-  training Ucodes: 2 unique across 2 segments (first: 1 32)
-```
+The obvious rule — cut where a third Ucode appears — is wrong, and the card
+shows why: its segments open with REF symbols, so the first symbol carrying a
+new training Ucode is 8 symbols past the boundary, not on it.
 
-So "we cannot decode a real DIL" understates it: we silently mis-decode one.
+Re-expansion now checks the **whole region** rather than one cycle of itself.
+That is what makes the structural path safe where the periodic one was not: a
+descriptor fitted to a short accidental repeat reproduces that repeat and
+nothing else, so it cannot survive. The periodic search is kept as a fallback
+for shapes the walk cannot segment.
 
-Note also that 15708T is within 0.5% of the card's measured 15774T region, which
-is a second, independent confirmation that N ≈ 119 and H<sub>c</sub> = 21 are
-the card's actual parameters.
+`vpcm_loopback_test`'s `V.90 DIL decoded from a single pass` pins this, with no
+lead or tail padding — a single pass is exactly the DIL and nothing else, which
+is also the hardest case for finding where the region starts.
 
-Fixing this means recovering segment boundaries structurally — REF<sub>c</sub>
-runs and training-symbol positions, which are self-describing within a single
-cycle — instead of by autocorrelation. That is a rewrite of the acquisition
-front of `v90_dil_rx.c`, not a tuning change. The descriptor-fitting behind it
-is fine: `vpcm_loopback_test`'s `merged-twins` case already round-trips a
-4-segment DIL with distinct per-segment training Ucodes.
-
-### Why every test missed it
+### Why no test caught it
 
 `vpcm_test_dil_roundtrip_case()` sets `body = cycle * 2 + cycle / 2` — always
-**2.5 cycles**, just past the cliff — under a comment that states the assumption
-outright:
+**2.5 cycles**, just past the cliff — under a comment that states the
+assumption outright:
 
 > Short cycles need more repetitions to clear the decoder's minimum run length
 > (**real DILs run for seconds regardless of cycle size**).
 
-Real DILs do run for seconds. The card's runs for 1.97 s. It is still only one
+Real DILs do run for seconds. The card's runs 1.97 s. It is still only one
 cycle, because a long cycle and a repeated cycle are not the same thing, and
-only the second one is what the decoder needs.
+only the second one is what acquisition needed.
 
-`make eicon-rx-test` pins this: the Phase 3 chain is checked against exact
-expected offsets (so a failure there is a regression, and its passing is what
-makes the DIL result meaningful), and the DIL arm requires a run that starts
-within 50 ms of the region and covers ≥80% of it, so fragments do not count as
-a pass.
+### What is genuinely unrecoverable from one pass
 
-**Why no loopback test could have found it:** our own transmitter repeats DIL
-cycles, so `vpcm_loopback_test` always presents ≥2 identical cycles — the one
-input shape the decoder needs and a real peer does not provide.
+Two canonicalisations stop being distinguishable when the cycle arrives once,
+and both are information that is simply not on the wire:
+
+- A descriptor whose training-Ucode sequence is itself periodic decodes to that
+  shorter period. The clean-line Ja profile is the example: its Ucodes are
+  `(chord << 4) | offset` over 8 chords and 8 offsets, so the sequence repeats
+  every 64 segments while N is 125 — and the first 125 segments of a
+  64-segment cycle are the same symbols.
+- H<sub>c</sub> and REF<sub>c</sub> for a chord the DIL never trains in.
+
+## Finding 5 — the card's DIL is still not decodable — **open**
+
+The acquisition fix does not make the card's DIL decode. What blocks it now is
+a different thing, and worth stating precisely because it was invisible before.
+
+The card's training-symbol first-occurrences are **66 symbols** apart
+(H<sub>c</sub> = 10, not the 132 an earlier revision of this note recorded —
+132 is two segments), with REF<sub>c</sub> = Ucode 0, and a training Ucode that
+steps down the ladder: 84, 83, 82, 81, 80, 79, 78, …
+
+But at a uniform 66T segmentation — and at the best of all 66 possible
+alignments — only **188 of 239** segments carry the two Ucodes §8.4.1 allows.
+**51 carry three.** The excess is concentrated where the ladder reaches the
+bottom of the range, in segments mixing Ucodes 0, 1 and 2:
+
+```text
+T99378   +0   +1   +0   +0   +0   +0
+T99384   -2   +0   +0   +0   +0   +1
+T99390   +0   +0   +0   +0   -2   +0
+```
+
+The leading explanation is that H<sub>c</sub> is per-chord and the card's ladder
+crosses chords, so a uniform 66T is simply the wrong length down there and is
+merging several short chord-0 segments into one window. That has not been
+confirmed, and until it is, "the card's DIL carries three Ucodes per segment"
+should be read as "at the segmentation we have tried", not as a claim about the
+card.
+
+Resolving it means recovering H<sub>c</sub> per chord from the data rather than
+assuming one length across the region. `make eicon-rx-test` pins the DIL arm
+until then.
 
 ## Withdrawn — do not re-derive
 

@@ -29,19 +29,19 @@ Step 2 FAILS TODAY, and step 1 is what makes that failure meaningful: the
 Phase 3 chain landing exactly right proves codeword recovery works, so a DIL
 no-decode is a real receive-path gap and not a broken harness.
 
-The cause is acquisition, in `v90_dil_rx.c`. That decoder finds DIL by
-autocorrelation -- an exactly-periodic run, then a descriptor fitted to one
-cycle -- and `v90_dil_rx_scan()` keeps a candidate only if the run spans
-`2 * c`. The cycle has to appear twice. 8.4.1 lets the analogue modem
-terminate DIL on any segment boundary, and the Courier does so after roughly
-one pass (~15.7 kT, 1.97 s, 132T segments), so it never does.
+Acquisition no longer needs the cycle to repeat: `v90_dil_rx.c` recovers
+segment boundaries from the training-symbol spacing 8.4.1 fixes, and
+`vpcm_loopback_test` proves a single pass decodes exactly (Finding 4).
 
-Below two cycles the decoder does not fail -- it returns success with a wrong
-cycle, fitting a short local repeat. Measured with our own generator, the
-cliff is exactly at 2.00 cycles. Our own transmitter always repeats cycles,
-which is why no loopback test sees this.
+What blocks the card now is narrower. Its training-symbol first-occurrences
+are 66 symbols apart with REFc = Ucode 0, but at a uniform 66T segmentation --
+and at the best of all 66 alignments -- only 188 of 239 segments carry the two
+Ucodes 8.4.1 allows; 51 carry three, concentrated where the training ladder
+reaches Ucodes 0/1/2. The leading explanation is that Hc is per-chord and the
+card's ladder crosses chords, so one length across the region is simply wrong
+down there. Until that is settled, this arm stays red.
 
-See docs/eicon_downstream_comparison.md, Finding 4.
+See docs/eicon_downstream_comparison.md, Finding 5.
 
 Not wired into `make test` -- it encodes a known-open defect, and a suite that
 is red by default stops being read. Run it deliberately:
@@ -230,11 +230,12 @@ def main():
 
     print("DIL recovery failed on: " + ", ".join(assertion_failures))
     print("The Phase 3 chain landed on its expected offsets, so codeword")
-    print("recovery works and this is a real receive-path gap: v90_dil_rx.c")
-    print("acquires by autocorrelation and needs the DIL cycle to appear")
-    print("twice, and 8.4.1 lets the peer terminate DIL on any segment")
-    print("boundary -- the Courier does so after about one pass.")
-    print("Known-open defect: docs/eicon_downstream_comparison.md, Finding 4.")
+    print("recovery works and this is a real receive-path gap.  Acquisition")
+    print("from a single pass is fixed (Finding 4); what remains is that a")
+    print("uniform 66T segmentation leaves 51 of 239 segments carrying three")
+    print("Ucodes, where 8.4.1 allows two -- most likely because Hc is")
+    print("per-chord and the card's training ladder crosses chords.")
+    print("Known-open defect: docs/eicon_downstream_comparison.md, Finding 5.")
     return 0 if args.expect_failure else 1
 
 

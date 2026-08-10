@@ -823,6 +823,142 @@ out:
     return ok;
 }
 
+/*
+ * Decode a DIL the peer sent exactly once.
+ *
+ * §8.4.1 lets the analogue modem terminate DIL on any segment boundary, and
+ * real peers do: the Eicon card's DIL runs 1.97 s and stops after about one
+ * pass.  Acquisition therefore cannot depend on the cycle repeating, and this
+ * is the case that says so — vpcm_test_dil_roundtrip_case() always sends 2.5
+ * cycles, which hid a hard requirement for two (docs/eicon_downstream_
+ * comparison.md, Finding 4).
+ *
+ * No lead or tail padding: a single pass is exactly the DIL and nothing else,
+ * which is also the hardest version for finding where the region starts.
+ */
+static bool vpcm_test_dil_single_pass_case(v90_law_t law,
+                                           const v90_dil_desc_t *desc,
+                                           const char *name,
+                                           bool expect_field_equality)
+{
+    int cycle = v90_dil_cycle_len(desc);
+    uint8_t *stream;
+    uint8_t *regen;
+    v90_dil_rx_result_t rx;
+    bool ok = false;
+
+    if (cycle <= 0)
+        return false;
+    stream = malloc((size_t) cycle);
+    regen = malloc((size_t) cycle);
+    if (!stream || !regen) {
+        free(stream);
+        free(regen);
+        return false;
+    }
+    v90_dil_generate_codewords(law, desc, stream, cycle);
+
+    if (!v90_dil_rx_decode(stream, cycle, law, &rx)) {
+        fprintf(stderr, "DIL single-pass %s: decode failed\n", name);
+        goto out;
+    }
+    /* The whole pass has to be accounted for, however the descriptor is
+     * canonicalised: a decode that covers part of it is the fragment
+     * behaviour this test exists to catch. */
+    if (rx.run_start != 0 || rx.run_len != cycle) {
+        fprintf(stderr, "DIL single-pass %s: covered [%d,%d) of [0,%d)\n",
+                name, rx.run_start, rx.run_start + rx.run_len, cycle);
+        goto out;
+    }
+    v90_dil_generate_codewords(law, &rx.desc, regen, cycle);
+    if (memcmp(regen, stream, (size_t) cycle) != 0) {
+        fprintf(stderr, "DIL single-pass %s: re-expansion differs\n", name);
+        goto out;
+    }
+
+    if (expect_field_equality) {
+        if (rx.cycle_len != cycle) {
+            fprintf(stderr, "DIL single-pass %s: cycle %d, expected %d\n",
+                    name, rx.cycle_len, cycle);
+            goto out;
+        }
+        if (rx.desc.n != desc->n
+            || memcmp(rx.desc.train_u, desc->train_u, desc->n) != 0) {
+            fprintf(stderr, "DIL single-pass %s: segment mismatch (n=%d/%d)\n",
+                    name, rx.desc.n, desc->n);
+            goto out;
+        }
+        /* Hc and REFc are only recoverable for chords the DIL actually
+         * trains in; an unused chord's fields are not on the wire. */
+        for (int i = 0; i < desc->n; i++) {
+            int chord = vpcm_test_dil_uchord_index(desc->train_u[i] & 0x7F);
+
+            if (rx.desc.h[chord] != desc->h[chord]
+                || rx.desc.ref[chord] != desc->ref[chord]) {
+                fprintf(stderr,
+                        "DIL single-pass %s: chord %d mismatch (h=%d/%d ref=%d/%d)\n",
+                        name, chord, rx.desc.h[chord], desc->h[chord],
+                        rx.desc.ref[chord], desc->ref[chord]);
+                goto out;
+            }
+        }
+    }
+    ok = true;
+
+out:
+    free(stream);
+    free(regen);
+    return ok;
+}
+
+static bool test_v90_dil_rx_single_pass(v91_law_t law)
+{
+    v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
+    const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
+    v90_dil_desc_t desc;
+    int i;
+
+    vpcm_log("Test: V.90 DIL decoded from a single pass (%s)", law_name);
+
+    /* Shaped like the card's: 66T segments (Hc = 10), REFc = Ucode 0, and a
+     * distinct training Ucode per segment stepping down the ladder. */
+    memset(&desc, 0, sizeof(desc));
+    desc.n = 73;
+    desc.lsp = 12;
+    desc.ltp = 12;
+    for (i = 0; i < 12; i++) {
+        desc.sp[i] = (uint8_t) ((0x0A6DU >> i) & 1U);
+        desc.tp[i] = (uint8_t) ((0x0DB7U >> i) & 1U);
+    }
+    for (i = 0; i < 8; i++) {
+        desc.h[i] = 10;
+        desc.ref[i] = 0;
+    }
+    for (i = 0; i < desc.n; i++)
+        desc.train_u[i] = (uint8_t) (84 - i);
+    if (!vpcm_test_dil_single_pass_case(v90_law, &desc, "ladder-73x66", true))
+        return false;
+
+    /*
+     * The clean-line Ja profile sent once: short segments, per-chord REFc,
+     * and training Ucodes that revisit each chord.
+     *
+     * Fields are not compared here, because from a single pass they are not
+     * determined.  This profile's training Ucodes are (chord << 4) | offset
+     * over 8 chords and 8 offsets, so the sequence repeats every 64 segments
+     * while N is 125 -- and the first 125 segments of a 64-segment cycle are
+     * the same symbols.  Nothing on the wire separates the two until the
+     * cycle runs a second time.  What must still hold is that the decode
+     * accounts for the whole pass and re-expands to it.
+     */
+    vpcm_test_init_default_ja_profile(&desc);
+    if (!vpcm_test_dil_single_pass_case(v90_law, &desc, "default-125x12", false))
+        return false;
+
+    vpcm_log("PASS: V.90 DIL decoded from a single pass (%s)", law_name);
+    return true;
+}
+
 static bool test_v90_dil_rx_roundtrip(v91_law_t law)
 {
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
@@ -9171,6 +9307,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_smartlink_dil_profile()
         && test_v90_dil_rx_roundtrip(V91_LAW_ULAW)
         && test_v90_dil_rx_roundtrip(V91_LAW_ALAW)
+        && test_v90_dil_rx_single_pass(V91_LAW_ULAW)
+        && test_v90_dil_rx_single_pass(V91_LAW_ALAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ULAW)
         && test_v90_phase3_raw_codeword_parity(V91_LAW_ALAW)
         && test_v92_phase3_transitions()
