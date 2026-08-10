@@ -413,22 +413,107 @@ SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
     --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue  # ATD6001
 ```
 
+### Phase 3 completes against the card (run 7, 2026-08-11)
+
+The whole of §9.3.2 now runs in a live call, ending in a measurement:
+
+```text
+[ME] V.90 analogue RX: TRN1d   (Sd 64 reps, S̄d 8 reps)
+[ME] V.90 analogue RX: Jd      (TRN1d 30006T)
+[ME] V.90 analogue TX: S (awaiting J'd)
+[ME] V.90 analogue TX: S-bar (post-J'd)
+[ME] V.90 analogue RX: DIL     (20 Jd frames)
+[ME] V.90 analogue TX: Phase 4
+[ME] V.90 analogue Phase 3 complete: Sd 64 reps, S̄d 8 reps, TRN1d 30000T,
+     20 Jd frames (4-point), DIL 4200 symbols
+[ME] V.90 analogue DIL measured: 65 Ucodes, 39 usable, gain -11.77 dB,
+     RBS slots 0x00, coverage 53%
+[ME] V.90 analogue constellation: Mi = 39 39 37 39 39 39, drn=17, 49333 bps
+```
+
+and the card walks `0x00b0 → 0x00b1 → 0x00b2 → 0x00b3 → 0x00b4 → 0x00b6 →
+0x00c0` in 940 ms rather than stalling 23 s at `0x00b1`. Three fixes, and the
+first two are the same mistake in two places.
+
+1. **TRN1d's level is not 16 Ucodes below Sd's.** §8.4.4 puts Sd at
+   Ucode(16 + U<sub>INFO</sub>) and §8.4.5 puts TRN1d at Ucode(U<sub>INFO</sub>),
+   so on a peer that honours U<sub>INFO</sub> the two indices are 16 apart, and
+   `sd_set_w()` derived one from the other. What the card actually holds is the
+   *level* ratio those indices imply, not the index gap:
+
+   | stream | Sd Ucode | µ-law level | TRN1d Ucode | level | ratio |
+   |---|---|---|---|---|---|
+   | `call1-connect-32000.ulaw` | 64 | 495 | 48 | 231 | 2.14 |
+   | live, U<sub>INFO</sub> = 48 | 35 | 123 | **22** | 57 | 2.16 |
+   | §8.4.5 applied to the live W | 35 | 123 | 19 | 45 | 2.73 |
+
+   Both are 6.6 dB. The arithmetic and the ratio agree exactly when Sd lands on
+   a segment boundary (mantissa 0) — which is what Ucode 64 is, and what *both*
+   in-tree fixtures use. So the rule read as correct on every offline test this
+   tree has. The S̄d→TRN1d boundary is now matched structurally instead: S̄d
+   carries only two magnitudes, W and zero, so any third one is the boundary,
+   and the level is taken from the wire the same way W already was. It is
+   confirmed rather than assumed — a level that does not descramble to §8.4.5's
+   ones inside 256 symbols is abandoned.
+
+2. **A failed Jd search left the TRN1d descrambler stranded.** On finding no
+   frame in the window the receiver went back to reading TRN1d without
+   re-seeding, so the register sat `SCRAMBLER_HISTORY` bits behind the stream,
+   which guarantees another false break a couple of dozen symbols later, which
+   fails the same way. One corrupted octet put it in that loop for the rest of
+   the call. `trn1d_resume()` re-seeds out of the sign buffer and re-scans from
+   just past the break, which is possible now that TRN1d is decoded through an
+   explicit cursor rather than as a side effect of arrival.
+
+3. **J'd needs a witness that a slipped octet cannot move.** The Jd walk is
+   positional — 72 bits per frame from where the frame was located — so an
+   inserted or lost octet moves every boundary after it. Inside Jd that costs
+   one frame and re-locks on the next §8.4.2 sync run, which is why 27 of the
+   card's 38 frames still decoded; landing on the last frame it eats J'd's
+   twelve zeros instead, and DIL is never entered. Measured: the card sent a
+   textbook DIL for 23 s while this receiver sat in Jd through all of it. §8.4.1
+   gives the second witness for free — DIL sweeps the ladder the descriptor
+   asked for and leaves the Jd codeword on its first symbol, so eight
+   consecutive codewords off that level are J'd having ended, and the first of
+   them is DIL's first symbol.
+
+**Clock recovery must not slip a DS0 stream.** `sip_modem.c` inserted or
+dropped one octet per frame on the DPLL's signal, in both the linear and the
+G.711 paths. On a modulated carrier that is what clock recovery is *for* — the
+timing loop absorbs it. On the digital modem's DS0 output it is data
+corruption: the octets are the constellation, and one extra shifts every §5.4
+data frame after it and desynchronises the §5.3 scrambler. It fired one to two
+times a second on this lab path. `me_rx_g711_slip_permitted()` now returns false
+for the whole of an analogue-role call (the predicate is `g_v90a != NULL`, so
+V.8 and Phase 2 are untouched), and the drift is left to show up somewhere that
+can absorb it.
+
+### Capturing and replaying a call
+
+`ME_G711_CAPTURE=<prefix>` records the received octets to `<prefix>.rx.ulaw`
+byte for byte as the engine consumed them, and
+
+```bash
+./v90_analogue_rx_test --trace <file.ulaw> [u_info]
+```
+
+replays any downstream through the Phase 3 receiver with a stage trace. That
+pair is what turned this from a live-call problem into an offline one: an
+engine log cannot tell a receiver that has not reached Jd yet from one
+oscillating in and out of it, and the trace can.
+
 ## What is left
 
-1. **The TRN1d → Jd seam on a live stream.** The card's full Phase 3
-   downstream now decodes as far as TRN1d (run 58: Sd 64 reps, S̄d 8 reps,
-   TRN1d past 24 000T), but the TRN1d→Jd boundary oscillates and no Jd frame
-   validates, so §9.3.2.6's S is never sent and the card sits in `0x00b0`
-   repeating Jd. `v90_analogue_rx_test` decodes 13–14 CRC-valid Jd frames from
-   the *file* fixture, so the decoder is not simply wrong; the difference is
-   that this is live RTP. A single lost, duplicated or substituted sample
-   desynchronises the §5.3 descrambler, and TRN1d→Jd is exactly where that
-   shows. Start by instrumenting RTP continuity across the Phase 3 window.
-2. **Phase 4 (§9.4)** — CPt, then a CP built from the measurement
+1. **Phase 4 (§9.4)** — CPt, then a CP built from the measurement
    `v90_analogue_phase3_measurement()` already returns, then E/B1.
-3. **Data mode** — receive the mapped downstream instead of transmitting it.
-4. **Retrain (§9.5.2.1)** — §9.3.2.4's and §9.3.2.7's deadlines are detected
+2. **Data mode** — receive the mapped downstream instead of transmitting it.
+3. **Retrain (§9.5.2.1)** — §9.3.2.4's and §9.3.2.7's deadlines are detected
    and reported, but the response to them is a hang-up, not a retrain.
+4. **U<sub>INFO</sub> = 78, the default, does not work against this card.** At
+   78 it blocks at `0x007a` and falls back to page 7; at 48 it completes. The
+   runs above all set `ME_V90_ANALOGUE_UINFO=48`. Why the announced value
+   changes a decision the card makes about a signal it chooses its own level
+   for is not established.
 
 ## When it still falls back to V.34
 

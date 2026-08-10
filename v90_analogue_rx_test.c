@@ -318,9 +318,94 @@ static void test_driven_by_fixture(const fixture_t *fx)
     free(data);
 }
 
-int main(void)
+/*
+ * --trace <file.ulaw> [u_info] — run the receiver over an arbitrary downstream
+ * and print every stage change, rather than checking a fixture's known values.
+ *
+ * This is the offline half of a live call: ME_G711_CAPTURE records what the
+ * analogue role actually consumed, and this replays it.  A stage trace is what
+ * separates "the decoder is wrong" from "the stream is not what was sent" --
+ * a receiver oscillating between TRN1d and Jd looks, in the engine's own log,
+ * exactly like a receiver that has not reached Jd yet.
+ */
+static int trace_stream(const char *path, int u_info)
+{
+    v90_analogue_rx_config_t cfg;
+    v90_analogue_rx_stage_t last;
+    v90_analogue_rx_t *rx;
+    uint8_t *data;
+    long len;
+    int transitions;
+
+    if ((data = read_file(path, &len)) == NULL) {
+        printf("cannot read %s\n", path);
+        return 1;
+    }
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = u_info;
+    /* The descriptor the engine requests by default, so a replayed live
+     * capture reaches §9.3.2.9 the same way the call did. */
+    (void) v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &cfg.dil);
+    if ((rx = v90_analogue_rx_init(&cfg)) == NULL) {
+        free(data);
+        printf("receiver did not initialise\n");
+        return 1;
+    }
+
+    printf("§9.3.2 trace of %s (%ld octets, %.1f s), U_INFO=%d\n",
+           path, len, len/8000.0, u_info);
+    last = v90_analogue_rx_stage(rx);
+    transitions = 0;
+    for (long off = 0; off < len; off += 160) {
+        int n = (int) ((len - off < 160) ? (len - off) : 160);
+        v90_analogue_rx_stage_t now;
+
+        (void) v90_analogue_rx_put(rx, data + off, n);
+        if ((now = v90_analogue_rx_stage(rx)) != last) {
+            last = now;
+            transitions++;
+            /* An oscillating seam produces hundreds of these; print enough to
+             * see the pattern and then just count. */
+            if (transitions <= 40) {
+                printf("  [%8.1f ms] -> %-10s Sd %d, S̄d %d, TRN1d %dT, Jd %d\n",
+                       (off + n)/8.0,
+                       v90_analogue_rx_stage_name(now),
+                       v90_analogue_rx_sd_reps(rx),
+                       v90_analogue_rx_sd_bar_reps(rx),
+                       v90_analogue_rx_trn1d_symbols(rx),
+                       v90_analogue_rx_jd_frames(rx));
+            }
+        }
+    }
+    printf("  end: %s after %d stage changes — Sd %d reps, S̄d %d reps, "
+           "TRN1d %dT, Jd %d frames, DIL %dT\n",
+           v90_analogue_rx_stage_name(v90_analogue_rx_stage(rx)), transitions,
+           v90_analogue_rx_sd_reps(rx), v90_analogue_rx_sd_bar_reps(rx),
+           v90_analogue_rx_trn1d_symbols(rx), v90_analogue_rx_jd_frames(rx),
+           v90_analogue_rx_dil_symbols(rx));
+    {
+        const v90_dil_measurement_t *m = v90_analogue_rx_measurement(rx);
+
+        if (m != NULL) {
+            printf("  DIL: %d Ucodes measured, %d usable, gain %.2f dB, "
+                   "RBS slots 0x%02X, coverage %.0f%%\n",
+                   m->ucodes_measured, m->usable_count, m->gain_db,
+                   m->rbs_slot_mask, 100.0*m->coverage);
+        }
+    }
+
+    v90_analogue_rx_free(rx);
+    free(data);
+    return 0;
+}
+
+int main(int argc, char *argv[])
 {
     size_t i;
+
+    if (argc >= 3  &&  strcmp(argv[1], "--trace") == 0)
+        return trace_stream(argv[2], (argc >= 4) ? atoi(argv[3]) : 48);
 
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_fixture(&fixtures[i]);

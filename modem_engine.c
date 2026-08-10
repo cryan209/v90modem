@@ -4766,6 +4766,18 @@ int me_cr_get_adjustment(void)
     return adj;
 }
 
+bool me_rx_g711_slip_permitted(void)
+{
+    bool ds0;
+
+    pthread_mutex_lock(&g_state_mtx);
+    /* g_v90a exists only on a call that took the analogue role, and from the
+     * moment it does the downstream is codewords rather than a carrier. */
+    ds0 = (g_v90a != NULL);
+    pthread_mutex_unlock(&g_state_mtx);
+    return !ds0;
+}
+
 void me_rx_audio(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
@@ -6306,6 +6318,40 @@ void me_tx_audio(int16_t *amp, int len)
     buffer_tx_samples_for_echo(amp, len);
 }
 
+/*
+ * ME_G711_CAPTURE=<prefix> records the received G.711 octets to
+ * <prefix>.rx.ulaw, byte for byte as the engine consumed them.
+ *
+ * In the analogue role this stream *is* the far end's DS0 output, so a capture
+ * of it can be diffed against what the digital modem is known to have
+ * transmitted.  That difference is the only way to tell a decoder fault from a
+ * transport fault, and the two look identical in the log.
+ */
+static void me_g711_capture_rx(const uint8_t *codewords, int count)
+{
+    static FILE *f;
+    static bool tried;
+
+    if (!tried) {
+        const char *prefix = getenv("ME_G711_CAPTURE");
+        char path[512];
+
+        tried = true;
+        if (prefix == NULL  ||  prefix[0] == '\0')
+            return;
+        snprintf(path, sizeof(path), "%s.rx.ulaw", prefix);
+        if ((f = fopen(path, "wb")) == NULL) {
+            ME_LOG("[ME] G.711 capture: cannot write %s\n", path);
+            return;
+        }
+        ME_LOG("[ME] G.711 capture: recording received octets to %s\n", path);
+    }
+    if (f) {
+        fwrite(codewords, 1, (size_t) count, f);
+        fflush(f);
+    }
+}
+
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
@@ -6314,6 +6360,8 @@ void me_rx_g711(const uint8_t *codewords, int count)
 
     if (!codewords || count <= 0)
         return;
+
+    me_g711_capture_rx(codewords, count);
 
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;

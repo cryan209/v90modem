@@ -28,6 +28,9 @@
 #define DIL_MEASURE_INTERVAL 600
 /* Bits of scrambler output needed to bring a descrambler into step (§5.3). */
 #define SCRAMBLER_HISTORY   32
+/* How much of TRN1d has to read as §8.4.5's ones before the level the
+ * S̄d→TRN1d boundary was matched at is believed. */
+#define TRN1D_CONFIRM_SYMBOLS 256
 /* TRN1d can legitimately run to §9.3.1.5's budget; the Eicon card spends
  * 30005T on it.  Cap the sign buffer well above that and no further. */
 #define SIGN_MAX            (1 << 17)
@@ -36,6 +39,10 @@
  * symbol or two; the window is generous rather than tight. */
 #define JD_SEARCH_BACK      64
 #define JD_SEARCH_FORWARD   8
+/* Consecutive codewords off the Jd/J'd level that say DIL has started.  Jd and
+ * J'd never leave it, so this cannot fire early; §8.4.1's first segment can sit
+ * on it, so a handful of symbols rather than one. */
+#define JD_EXIT_SYMBOLS     8
 
 struct v90_analogue_rx_s {
     v90_analogue_rx_config_t cfg;
@@ -83,6 +90,8 @@ struct v90_analogue_rx_s {
     int      sign_len;
     int      sign_cap;
     int      trn1d_break;           /* first symbol whose plain bit is not 1 */
+    int      trn1d_scan;            /* cursor into signs[] for TRN1d decoding */
+    int      trn1d_ones;            /* how much of it read as §8.4.5's ones */
     int      jd_bit_pos;            /* cursor into signs[] for Jd decoding */
     uint32_t descramble_reg;        /* fed the scrambler output, whatever carries it */
     int      prev_sign;
@@ -92,6 +101,8 @@ struct v90_analogue_rx_s {
     bool     jd_trn16;
     int      jd_prime_zeros;
     bool     in_jd_frame;
+    int      jd_exit_run;           /* consecutive codewords off the Jd level */
+    uint8_t  jd_exit_hold[JD_EXIT_SYMBOLS];
 
     uint8_t *dil_rx;
     int      dil_len;
@@ -174,12 +185,24 @@ static bool sd_hunt_slot(v90_analogue_rx_t *s, int h, int slot, uint8_t c)
 static void sd_set_w(v90_analogue_rx_t *s, int w)
 {
     s->w_ucode = w;
-    /* §8.4.5 puts TRN1d at Ucode(U_INFO) while §8.4.4 puts Sd at
-     * Ucode(16 + U_INFO), so the two levels are locked 16 apart whatever
-     * U_INFO the digital modem chose.  Deriving TRN1d's level from the W that
-     * Sd actually arrived at keeps the S̄d->TRN1d boundary working against a
-     * peer that ignored our request: the Eicon card's Sd at W = 64 is followed
-     * by TRN1d at Ucode 48, and its Sd at W = 35 by TRN1d at Ucode 19. */
+    /*
+     * §8.4.5 puts TRN1d at Ucode(U_INFO) while §8.4.4 puts Sd at
+     * Ucode(16 + U_INFO), so on a peer that honours U_INFO the two indices are
+     * 16 apart.  This is only a starting guess: a peer that ignores U_INFO for
+     * Sd (see sd_hunt_slot) ignores it here too, and what it holds instead is
+     * the *level* ratio those two indices imply, not the index gap.
+     *
+     * Measured on the Eicon card: Sd at Ucode 64 (µ-law magnitude 495) is
+     * followed by TRN1d at Ucode 48 (231), and Sd at Ucode 35 (123) by TRN1d
+     * at Ucode 22 (57).  Both are a factor of 2.15 -- about 6.6 dB -- but only
+     * the first is a gap of 16.  §8.4.5's arithmetic coincides with the level
+     * ratio exactly when Sd lands on a segment boundary (mantissa 0), which is
+     * what Ucode 64 is, and what both in-tree fixtures happen to use.  The gap
+     * of 16 read as a rule for four months on the strength of that coincidence.
+     *
+     * So the real value is taken off the wire in V90A_RX_SD_BAR; this is what
+     * the hunt starts from.
+     */
     s->trn1d_ucode = (w >= 16)  ?  (w - 16)  :  0;
     s->sd_pat[0] = v90_codeword_compose(s->cfg.law, w, 1);
     s->sd_pat[1] = v90_codeword_compose(s->cfg.law, 0, 1);
@@ -284,6 +307,28 @@ static bool push_sign(v90_analogue_rx_t *s, uint8_t codeword)
     /*endif*/
     s->signs[s->sign_len++] = (uint8_t) sign;
     return true;
+}
+
+/*
+ * Put the TRN1d decoder back on signs[from] with a descrambler in step there.
+ *
+ * §5.3's GPC is self-synchronising, so seeding is a matter of running the
+ * preceding SCRAMBLER_HISTORY signs through it and throwing the output away.
+ * Called when a Jd search fails and the scan has to be resumed behind where
+ * the search read to.
+ */
+static void trn1d_resume(v90_analogue_rx_t *s, int from)
+{
+    int i;
+
+    if (from < 0)
+        from = 0;
+    if (from > s->sign_len)
+        from = s->sign_len;
+    s->descramble_reg = 0;
+    for (i = (from > SCRAMBLER_HISTORY) ? (from - SCRAMBLER_HISTORY) : 0; i < from; i++)
+        (void) descramble(&s->descramble_reg, s->signs[i]);
+    s->trn1d_scan = from;
 }
 
 /*
@@ -471,16 +516,30 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             s->sd_bar_reps = (int) ((s->index - s->sd_bar_start + 1)/6);
             break;
         }
-        /* §8.4.5: TRN1d moves to the U_INFO codeword, so the magnitude change
-         * is the boundary — no ambiguity with the S̄d pattern above it. */
+        /*
+         * §8.4.5: TRN1d moves to a lower codeword, so the magnitude change is
+         * the boundary — and S̄d itself only ever carries two magnitudes, W and
+         * zero, so *any* third one is that boundary.  Match it that way rather
+         * than against the level §8.4.5 predicts: the prediction is only good
+         * on a peer that honoured U_INFO, and this one does not (sd_set_w).
+         * Taking the level off the wire is the same rule the W hunt applies
+         * one stage earlier, and for the same reason.
+         *
+         * The reading is confirmed rather than assumed: trn1d_check counts how
+         * much of the first TRN1D_CONFIRM_SYMBOLS descrambles to the ones
+         * §8.4.5 says are there, and a level that does not is abandoned.
+         */
         ucode = codeword_ucode(s, c, &sign);
-        if (ucode == s->trn1d_ucode) {
+        if (ucode != 0  &&  ucode != s->w_ucode) {
+            s->trn1d_ucode = ucode;
             s->trn1d_start = s->index;
             s->stage = V90A_RX_TRN1D;
             s->descramble_reg = 0;
             s->sign_len = 0;
+            s->trn1d_scan = 0;
             s->trn1d_break = -1;
             s->trn1d_symbols = 0;
+            s->trn1d_ones = 0;
             events |= V90A_RX_EVENT_TRN1D;
             events |= put_one(s, c);
             return events;
@@ -489,8 +548,6 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
     }
 
     case V90A_RX_TRN1D: {
-        int plain;
-
         if (!push_sign(s, c)) {
             /* Nothing sane left to do with a stream this long: TRN1d cannot
              * legitimately outrun §9.3.1.5's budget by this much. */
@@ -500,29 +557,104 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             break;
         }
         /*endif*/
-        /* §8.4.5: the scrambler output is the sign, with no differential
-         * encoder, so scrambled ones descramble to ones directly. */
-        plain = descramble(&s->descramble_reg, s->signs[s->sign_len - 1]);
-        s->trn1d_symbols++;
         /*
-         * §9.3.2.5/§9.3.2.6: the first 2040T trains the equaliser and only
-         * then is Jd looked for.  Jd switches the mapping to differential
-         * (§8.4.2), so this decoder stops reading ones within a symbol or two
-         * of the boundary -- close to it, but not exactly on it.  Take the
-         * break as a hint and let the frame decide.
+         * Scan whatever is buffered and not yet scanned.  Normally that is the
+         * one sign just pushed, but after a Jd search that came to nothing it
+         * is the whole window the search had to buffer, replayed from a
+         * re-seeded descrambler — see the failure path in V90A_RX_JD.
          */
-        if (!plain
-            && s->trn1d_symbols > TRN1D_MIN_SYMBOLS
-            && s->trn1d_break < 0) {
-            s->trn1d_break = s->sign_len - 1;
-            s->stage = V90A_RX_JD;
-            s->jd_bit_pos = -1;
+        while (s->trn1d_scan < s->sign_len) {
+            /* §8.4.5: the scrambler output is the sign, with no differential
+             * encoder, so scrambled ones descramble to ones directly. */
+            int plain = descramble(&s->descramble_reg, s->signs[s->trn1d_scan]);
+
+            s->trn1d_scan++;
+            s->trn1d_symbols = s->trn1d_scan;
+            /* The descrambler needs SCRAMBLER_HISTORY bits to come into step,
+             * so only count ones once it is in step. */
+            if (plain  &&  s->trn1d_scan > SCRAMBLER_HISTORY)
+                s->trn1d_ones++;
+            /*endif*/
+            /*
+             * A level that is not TRN1d does not descramble to ones.  Checking
+             * that is what lets the S̄d→TRN1d boundary be matched on "some
+             * third magnitude" rather than on a predicted one.
+             */
+            if (s->trn1d_scan == TRN1D_CONFIRM_SYMBOLS
+                &&
+                s->trn1d_ones*10 < (TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY)*9) {
+                s->stage = V90A_RX_HUNT_SD;
+                memset(s->sd_run, 0, sizeof(s->sd_run));
+                memset(s->sd_w, 0, sizeof(s->sd_w));
+                break;
+            }
+            /*endif*/
+            /*
+             * §9.3.2.5/§9.3.2.6: the first 2040T trains the equaliser and only
+             * then is Jd looked for.  Jd switches the mapping to differential
+             * (§8.4.2), so this decoder stops reading ones within a symbol or
+             * two of the boundary -- close to it, but not exactly on it.  Take
+             * the break as a hint and let the frame decide.
+             */
+            if (!plain  &&  s->trn1d_symbols > TRN1D_MIN_SYMBOLS) {
+                s->trn1d_break = s->trn1d_scan - 1;
+                s->stage = V90A_RX_JD;
+                s->jd_bit_pos = -1;
+                break;
+            }
+            /*endif*/
         }
-        /*endif*/
         break;
     }
 
     case V90A_RX_JD: {
+        /*
+         * §8.4.2's Jd and §8.4.3's J'd are both carried on the sign of the one
+         * TRN1d codeword, so the bit walk below is what separates them -- but
+         * the DIL that follows is not: §8.4.1 sweeps the ladder the descriptor
+         * asked for, and leaves that codeword behind on its first symbol.
+         *
+         * That level change is a second, independent witness of the same
+         * moment §9.3.2.8 turns on, and it survives what the bit walk does
+         * not.  The walk is positional: it counts 72 bits per frame from where
+         * the frame was located, so one inserted or lost octet moves every
+         * boundary after it.  Inside Jd that costs a frame and re-locks on the
+         * next §8.4.2 sync run, which is why 27 of the card's 38 frames still
+         * decoded; but landing on the last frame it eats J'd's twelve zeros
+         * and DIL is never entered at all.  Measured live: the card sent a
+         * textbook DIL for 23 s and this receiver sat in Jd through all of it.
+         */
+        ucode = codeword_ucode(s, c, &sign);
+        if (ucode != s->trn1d_ucode) {
+            if (s->jd_exit_run < (int) sizeof(s->jd_exit_hold))
+                s->jd_exit_hold[s->jd_exit_run] = c;
+            /*endif*/
+            if (++s->jd_exit_run >= JD_EXIT_SYMBOLS) {
+                events |= V90A_RX_EVENT_JD_PRIME;
+                if (s->dil_cycle_len > 0) {
+                    int i;
+
+                    /* The first symbol off the Jd codeword is DIL's first, so
+                     * the run that proved it is DIL and belongs in the buffer. */
+                    s->dil_start = s->index - s->jd_exit_run + 1;
+                    s->dil_len = 0;
+                    for (i = 0; i < s->jd_exit_run  &&  s->dil_len < s->dil_cap; i++)
+                        s->dil_rx[s->dil_len++] = s->jd_exit_hold[i];
+                    s->dil_next_measure = DIL_MEASURE_INTERVAL;
+                    s->stage = V90A_RX_DIL;
+                } else {
+                    s->stage = V90A_RX_DONE;
+                    events |= V90A_RX_EVENT_DIL_ENOUGH;
+                }
+                /*endif*/
+                s->index++;
+                return events;
+            }
+            /*endif*/
+        } else {
+            s->jd_exit_run = 0;
+        }
+        /*endif*/
         if (!push_sign(s, c))
             break;
         /*endif*/
@@ -568,8 +700,21 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
                 break;
             }
             if (s->jd_bit_pos < 0) {
-                /* No frame in the window.  The break was not Jd: keep reading
-                 * TRN1d rather than inventing a boundary. */
+                /*
+                 * No frame in the window.  The break was not Jd but a
+                 * corrupted symbol, so go back to reading TRN1d — from just
+                 * past the break, with the descrambler re-seeded out of the
+                 * buffer.
+                 *
+                 * Re-seeding is the whole of it.  Leaving the register where
+                 * the search left it strands it SCRAMBLER_HISTORY bits behind
+                 * the stream, which guarantees another false break a couple of
+                 * dozen symbols later, which fails the same way — and the
+                 * receiver oscillates between TRN1d and Jd for the rest of the
+                 * call, never seeing the boundary when it does arrive.  One
+                 * slipped octet is enough to start it.
+                 */
+                trn1d_resume(s, s->trn1d_break + 1);
                 s->trn1d_break = -1;
                 s->stage = V90A_RX_TRN1D;
             }

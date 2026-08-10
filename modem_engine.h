@@ -17,6 +17,7 @@
 #ifndef MODEM_ENGINE_H
 #define MODEM_ENGINE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Modem state machine states */
@@ -141,6 +142,19 @@ void me_on_sip_connected(void);
  */
 void me_cr_update(uint32_t rtp_ts, int64_t local_ns);
 int  me_cr_get_adjustment(void);
+
+/*
+ * Is the received G.711 payload a modulated signal, or is it data?
+ *
+ * A slip is a timing correction on a modulated carrier: the receiver's timing
+ * loop absorbs a repeated or missing sample and nothing is lost.  It is not a
+ * timing correction on the digital modem's DS0 output, which is what arrives
+ * in the V.90 analogue role -- there the octets *are* the constellation, and
+ * inserting one shifts every §5.4 data frame after it and desynchronises the
+ * §5.3 scrambler.  Nothing downstream can absorb that, so the slip is skipped
+ * and the drift is left to show up where it does no damage.
+ */
+bool me_rx_g711_slip_permitted(void);
 
 /*
  * Set the G.711 encoding law for V.90 downstream codeword generation.

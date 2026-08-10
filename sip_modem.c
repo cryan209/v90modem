@@ -190,7 +190,8 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 
     st = pjmedia_port_get_frame(port->downstream_port, (pjmedia_frame *) rx_ext);
     if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_EXTENDED) {
-        int adj = me_cr_get_adjustment();
+        /* Never on a DS0 stream — see me_rx_g711_slip_permitted(). */
+        int adj = me_rx_g711_slip_permitted() ? me_cr_get_adjustment() : 0;
         static uint8_t adj_g711_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
 
         for (i = 0; i < rx_ext->subframe_cnt; i++) {
@@ -216,7 +217,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
         }
     } else if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_AUDIO
                && rx_ext->base.buf && rx_ext->base.size > 0) {
-        int adj = me_cr_get_adjustment();
+        int adj = me_rx_g711_slip_permitted() ? me_cr_get_adjustment() : 0;
         static uint8_t adj_g711_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
         unsigned sz = (unsigned) rx_ext->base.size;
 
