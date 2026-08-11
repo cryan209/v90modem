@@ -290,7 +290,17 @@ Phase 4 is not "CP/CP' in disguise".
   decoded bits contain only 411 ones even though its leading decoded interval
   is B1's scrambled-all-ones data frame; its best 128-bit payload candidate is
   still 45 errors.  The corruption therefore exists before the mapping-frame
-  decoder, in the post-CP equalizer/constellation slicer
+  decoder, in the post-CP equalizer/constellation slicer.  Cross-checking the
+  exact coupled upstream capture with `modem-dsp-emu/tools/v90_rx_reference_demod.py`
+  gives **31.4 dB SNR / 2.7% EVM** over its clean four-point stretches (mu-law
+  ceiling 37.0 dB), while this receiver still returns effectively random B1.
+  The transmitted waveform and G.711 quantisation are therefore good; the
+  failure is specifically SpanDSP's online acquisition.  This agrees with the
+  emulator investigation's control: its independent online blind loop could
+  not demodulate even its own clean signal, while deterministic matched-filter
+  sampling plus least-squares equalization reached 36.3 dB.  Set
+  `VPCM_V90_NATIVE_UPSTREAM_DUMP=/tmp/native-up.ulaw` on the strict diagnostic
+  to reproduce the same cross-check
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by

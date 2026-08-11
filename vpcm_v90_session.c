@@ -730,6 +730,7 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     uint8_t analogue_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
     int total_samples = 0;
     int caller_tx_stage;
+    FILE *upstream_dump = NULL;
     bool ja_notified = false;
     bool jd_s_notified = false;
     bool dil_s_notified = false;
@@ -747,6 +748,8 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     (void)v92_mode; /* This path is deliberately native V.90, not V.92 proxying. */
     if (!caller || !answerer || !digital_dil)
         return false;
+    if (getenv("VPCM_V90_NATIVE_UPSTREAM_DUMP"))
+        upstream_dump = fopen(getenv("VPCM_V90_NATIVE_UPSTREAM_DUMP"), "wb");
 
     memset(&analogue_cfg, 0, sizeof(analogue_cfg));
     analogue_cfg.law = vpcm_v90_data_law(law);
@@ -790,6 +793,9 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
         }
         vpcm_v90_encode_linear_chunk_to_g711(law, analogue_tx, analogue_g711,
                                              VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
+        if (upstream_dump)
+            fwrite(analogue_g711, 1, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES,
+                   upstream_dump);
         if (!vpcm_v90_record_duplex(io, digital_tx, analogue_g711,
                                     VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
             fprintf(stderr, "V.90 native coupled training: recording failed\n");
@@ -973,6 +979,8 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     }
 
 done:
+    if (upstream_dump)
+        fclose(upstream_dump);
     v90_free(digital);
     v90_analogue_phase3_free(analogue);
     return ok;
