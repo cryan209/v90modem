@@ -136,3 +136,16 @@ selected 3200-low, drove SmartLink's error energy from zero to about 9, caused
 it to build its 428-bit CPt, and moved this receiver into `V90_CP`.  It then
 retrained before CP validation, so the next foreign-modem blocker is CPt
 acquisition rather than Ja/Sd acquisition.
+
+### 2026-08-11 CPt replay result
+
+The independent strict CP receiver was still hard-coded to 2400 baud even
+though Table 10/INFO1a had selected 3200.  Its fixed RRC/DQPSK path now derives
+samples per symbol and low/high carrier frequencies from that selected baud,
+and its carrier-rise optimization no longer truncates the search eight seconds
+after an earlier Phase-3 rise.  Replaying the exact live RX above now recovers
+a CRC-clean 428-bit CPt at 3200 baud (`drn=15`, `Sr=1`, `ld=1`, PCMU, one
+transmitter constellation with a separate codec mask).  The prior code reports
+`no strict frame` on the same waveform.  Subsequent live retries did not make
+it through the still-variable Ja/Sd seam to exercise CPt again, so advancement
+past `V90_CP` remains to be confirmed on a fresh foreign call.

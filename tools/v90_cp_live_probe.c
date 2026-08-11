@@ -12,17 +12,19 @@ int main(int argc, char **argv)
     int count;
     int hint;
     int compatibility;
+    int baud_code;
     vpcm_cp_diag_t diag;
     v90_cp_live_meta_t meta;
 
-    if (argc != 4) {
+    if (argc != 4 && argc != 5) {
         fprintf(stderr,
-                "usage: %s input.s16le phase4_hint_sample compatibility\n",
+                "usage: %s input.s16le phase4_hint_sample compatibility [baud-code]\n",
                 argv[0]);
         return 2;
     }
     hint = atoi(argv[2]);
     compatibility = atoi(argv[3]);
+    baud_code = argc == 5 ? atoi(argv[4]) : 4;
     fp = fopen(argv[1], "rb");
     if (!fp || fseek(fp, 0, SEEK_END) != 0
         || (bytes = ftell(fp)) < 0 || fseek(fp, 0, SEEK_SET) != 0) {
@@ -44,6 +46,7 @@ int main(int argc, char **argv)
     if (!v90_cp_live_recover(samples,
                              count,
                              hint,
+                             baud_code,
                              compatibility,
                              false,
                              &diag,

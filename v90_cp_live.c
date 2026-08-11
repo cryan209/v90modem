@@ -15,7 +15,6 @@
 #endif
 
 #define V90_CP_LIVE_SAMPLE_RATE 8000
-#define V90_CP_LIVE_BAUD_CODE P3_BAUD_2400
 #define V90_CP_LIVE_TIMINGS 16
 #define V90_CP_LIVE_MIN_BITS 292
 #define V90_CP_DIRECT_RRC_HALF 27
@@ -632,8 +631,8 @@ static bool v90_cp_live_decode_repeated(const uint8_t *bits,
     return found;
 }
 
-/* SmartLink's long-startup CPt is ordinary 2400-baud, 1800-Hz differential
- * QPSK with a 0.1-rolloff pulse shape.  The general Phase-3 front end below
+/* SmartLink's CPt is differential QPSK at the INFO1a-selected baud/carrier
+ * with a 0.1-rolloff pulse shape.  The general Phase-3 front end below
  * is useful when the preceding training can seed its adaptive equalizer, but
  * it can freeze on the pre-CP Phase-4 signal and miss a subsequently perfect
  * CPt stream.  This small fixed matched-filter path has no adaptive state and
@@ -664,6 +663,7 @@ static bool v90_cp_live_direct_recover(const int16_t *samples,
                                        int segment_start,
                                        int segment_end,
                                        float carrier_hz,
+                                       float samples_per_symbol,
                                        int expected_compatibility,
                                        bool expected_alaw,
                                        vpcm_cp_diag_t *out,
@@ -671,7 +671,6 @@ static bool v90_cp_live_direct_recover(const int16_t *samples,
                                        int carrier_sel)
 {
     static const uint8_t quadrant_map[4] = {0, 3, 2, 1};
-    const float samples_per_symbol = 10.0f / 3.0f;
     const int half = V90_CP_DIRECT_RRC_HALF;
     int direct_carrier_step = getenv("ME_V90_CP_DIRECT_CARRIER_STEP")
                             ? atoi(getenv("ME_V90_CP_DIRECT_CARRIER_STEP"))
@@ -694,7 +693,8 @@ static bool v90_cp_live_direct_recover(const int16_t *samples,
     vpcm_cp_diag_t best_candidate;
     v90_cp_live_meta_t best_meta;
 
-    if (!samples || !out || segment_start < 0
+    if (!samples || !out || samples_per_symbol <= 1.0f
+        || segment_start < 0
         || segment_end <= segment_start + 4 * half) {
         return false;
     }
@@ -1123,6 +1123,7 @@ done:
 bool v90_cp_live_recover(const int16_t *samples,
                          int sample_count,
                          int phase4_hint_sample,
+                         int baud_code,
                          int expected_compatibility,
                          bool expected_alaw,
                          vpcm_cp_diag_t *out,
@@ -1137,11 +1138,11 @@ bool v90_cp_live_recover(const int16_t *samples,
     int timing_begin = 0;
     int timing_end = V90_CP_LIVE_TIMINGS;
     int carrier_onset = -1;
-    int baud_code = V90_CP_LIVE_BAUD_CODE;
 
     if (!samples || !out || sample_count <= 0
         || phase4_hint_sample < 0
         || phase4_hint_sample >= sample_count
+        || baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT
         || (expected_compatibility != 0 && expected_compatibility != 1)) {
         return false;
     }
@@ -1180,13 +1181,12 @@ bool v90_cp_live_recover(const int16_t *samples,
             search_start = carrier_onset - 800;
             if (search_start < capture_start)
                 search_start = capture_start;
-            /* Some SmartLink captures need several seconds of repeated CPt
-             * before the equalizer yields an untouched frame.  Keep a
-             * bounded eight-second train; live retries naturally provide a
-             * shorter prefix until that much waveform exists. */
-            search_end = carrier_onset + 8 * V90_CP_LIVE_SAMPLE_RATE;
-            if (search_end > sample_count)
-                search_end = sample_count;
+            /* Do not cap the search relative to this rise.  With 3200-low
+             * negotiation SmartLink emitted its first CRC-clean CPt 8.7 s
+             * after our Ri marker, beyond the old rise+8 s boundary.  Live
+             * retries remain bounded by the captured prefix and retain every
+             * completed frame for strict CRC selection. */
+            search_end = sample_count;
         } else if (sample_count
                        < phase4_hint_sample + V90_CP_LIVE_SAMPLE_RATE / 2) {
             /* V.90 §9.4.1.1: receive CPt while transmitting Ri.  Early live
@@ -1236,9 +1236,10 @@ bool v90_cp_live_recover(const int16_t *samples,
         timing_end = timing_begin + 1;
     }
     if (getenv("ME_V90_CP_BAUD_CODE")) {
-        baud_code = atoi(getenv("ME_V90_CP_BAUD_CODE"));
-        if (baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT)
-            baud_code = V90_CP_LIVE_BAUD_CODE;
+        int override = atoi(getenv("ME_V90_CP_BAUD_CODE"));
+
+        if (override >= P3_BAUD_2400 && override < P3_BAUD_COUNT)
+            baud_code = override;
     }
     if (getenv("ME_V90_CP_DIAG")) {
         fprintf(stderr,
@@ -1248,8 +1249,7 @@ bool v90_cp_live_recover(const int16_t *samples,
                 carrier_begin, carrier_end, timing_begin, timing_end - 1);
     }
 
-    if (!getenv("ME_V90_CP_DISABLE_DIRECT")
-        && baud_code == P3_BAUD_2400) {
+    if (!getenv("ME_V90_CP_DISABLE_DIRECT")) {
         p3_baud_params_t bp;
 
         if (p3_get_baud_params(baud_code, &bp)) {
@@ -1267,6 +1267,8 @@ bool v90_cp_live_recover(const int16_t *samples,
                                                search_start,
                                                search_end,
                                                carrier_hz,
+                                               (float)bp.samples_num
+                                                   / bp.samples_den,
                                                expected_compatibility,
                                                expected_alaw,
                                                out,

@@ -32,12 +32,14 @@ typedef struct {
 /*
  * Recover the newest strict frame of the requested kind from a captured
  * 8 kHz upstream waveform.  phase4_hint_sample is the local downstream
- * DIL->Ri boundary in the same sample coordinate system.  Set
- * expected_compatibility to 0 for CPt and 1 for data-mode CP/CP'.
+ * DIL->Ri boundary in the same sample coordinate system.  baud_code is the
+ * INFO1a-selected V.34 rate (P3_BAUD_3000 or P3_BAUD_3200 for this profile).
+ * Set expected_compatibility to 0 for CPt and 1 for data-mode CP/CP'.
  */
 bool v90_cp_live_recover(const int16_t *samples,
                          int sample_count,
                          int phase4_hint_sample,
+                         int baud_code,
                          int expected_compatibility,
                          bool expected_alaw,
                          vpcm_cp_diag_t *out,

@@ -784,6 +784,7 @@ static int             g_v90_cp_live_sample_count = 0;
 static int             g_v90_cp_live_phase4_hint = -1;
 static int             g_v90_cp_live_next_request = -1;
 static int             g_v90_cp_live_expected_compatibility = 0;
+static int             g_v90_cp_live_baud_code = 4;
 static unsigned        g_v90_cp_live_generation = 0;
 typedef struct {
     uint64_t input_bits;
@@ -2231,6 +2232,7 @@ static void start_v22bis_training(void);
 static void v34_put_aux_bit_cb(void *user_data, int bit);
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                                       const char *source);
+static int v90_selected_upstream_baud_locked(void);
 static void v92_su_rx_reset_locked(void);
 void me_hangup(void);
 
@@ -2296,6 +2298,7 @@ static void v90_cp_live_capture_reset_locked(void)
     g_v90_cp_live_phase4_hint = -1;
     g_v90_cp_live_next_request = -1;
     g_v90_cp_live_expected_compatibility = 0;
+    g_v90_cp_live_baud_code = 4;
     g_v90_cp_live_cpt_accept_sample = -1;
     g_v90_cp_live_post_cpt_attempts = 0;
     memset(&g_v90_cp_live_rx_baseline,
@@ -2340,13 +2343,15 @@ static void v90_cp_live_note_phase4_hint_locked(void)
     pthread_mutex_lock(&g_v90_cp_live_mtx);
     g_v90_cp_live_phase4_hint = g_v90_cp_live_sample_count;
     g_v90_cp_live_expected_compatibility = 0;
+    g_v90_cp_live_baud_code = v90_selected_upstream_baud_locked();
     /* Attempt as soon as one observed 428-bit CPt could be complete.  If the
      * peer starts later, short strict retries below catch its first frame. */
     g_v90_cp_live_next_request =
         g_v90_cp_live_sample_count + V90_CP_LIVE_FIRST_ATTEMPT_SAMPLES;
     pthread_mutex_unlock(&g_v90_cp_live_mtx);
-    ME_LOG("[ME] V.90 strict batch CP receiver armed at upstream sample %d\n",
-           g_v90_cp_live_phase4_hint);
+    ME_LOG("[ME] V.90 strict batch CP receiver armed at upstream sample %d (%d baud)\n",
+           g_v90_cp_live_phase4_hint,
+           g_v90_cp_live_baud_code == 3 ? 3000 : 3200);
 }
 
 /* Called after an actually accepted strict frame with g_state_mtx held. */
@@ -2542,6 +2547,7 @@ static void *v90_cp_live_worker(void *user_data)
         int sample_count;
         int phase4_hint;
         int expected_compatibility;
+        int baud_code;
         int cpt_accept_sample;
         unsigned post_cpt_attempt;
         unsigned generation;
@@ -2562,6 +2568,7 @@ static void *v90_cp_live_worker(void *user_data)
         phase4_hint = g_v90_cp_live_phase4_hint;
         expected_compatibility =
             g_v90_cp_live_expected_compatibility;
+        baud_code = g_v90_cp_live_baud_code;
         cpt_accept_sample = g_v90_cp_live_cpt_accept_sample;
         post_cpt_attempt = 0;
         if (expected_compatibility)
@@ -2584,6 +2591,7 @@ static void *v90_cp_live_worker(void *user_data)
              && v90_cp_live_recover(snapshot,
                                     sample_count,
                                     phase4_hint,
+                                    baud_code,
                                     expected_compatibility,
                                     g_law == ME_LAW_ALAW,
                                     &diag,
@@ -2677,6 +2685,7 @@ static void *v90_cp_live_worker(void *user_data)
             repeated_cpt = v90_cp_live_recover(snapshot,
                                                 sample_count,
                                                 phase4_hint,
+                                                baud_code,
                                                 0,
                                                 g_law == ME_LAW_ALAW,
                                                 &repeated_cpt_diag,
