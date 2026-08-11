@@ -948,8 +948,13 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         caller_phase3_tx_ready |= caller_phase3_tx_now;
         answerer_phase3_tx_ready |= answerer_phase3_tx_now;
 
+        /* The digital side deliberately clears INFO1_OK while consuming
+         * INFO1a and entering Phase 3, so its durable evidence is U_INFO.
+         * The analogue side must have decoded INFO1d before sending INFO1a
+         * (§9.2.2.1.9); require that event instead.  This is the same gate as
+         * the dedicated coupled Phase 2 test. */
         if (answerer_saw_info0
-            && answerer_saw_info1
+            && caller_saw_info1
             && answerer_saw_uinfo
             && phase3_seen
             && caller_phase3_tx_now
@@ -969,7 +974,7 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         && vpcm_v90_map_received_info0a(&received_info0a, &raw_info0a)) {
         received_info0a_valid = true;
     }
-    if (answerer_saw_info1
+    if (answerer_saw_uinfo
         && v34_get_v90_received_info1a(answerer, &raw_info1a) > 0
         && vpcm_v90_map_received_info1a(&received_info1a, &raw_info1a)) {
         received_info1a_valid = true;
@@ -977,7 +982,7 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
 
     if (!ok
         && answerer_saw_info0
-        && answerer_saw_info1
+        && caller_saw_info1
         && answerer_saw_uinfo
         && phase3_seen
         && (final_caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S)
