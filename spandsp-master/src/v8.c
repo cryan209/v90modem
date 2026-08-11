@@ -1073,6 +1073,21 @@ static void conditionally_send_v92(v8_state_t *s)
 
     if (s->parms.v92 >= 0)
     {
+        /* V.92 9.2.4.1: an answering digital modem sends QCA1d only after
+           detecting QC1a.  If the caller sent ordinary CM, the mandated
+           action is normal V.8; an unsolicited QCA makes some V.92 modems
+           abandon that full-startup path and wait for QTS/ANSpcm instead.
+           The same response rule applies to the QC2/QCA2 family in 9.2.4.2.
+           A locally configured QC is an initiating signal and is therefore
+           not gated here. */
+        if ((s->parms.v92 & 0x02)
+            && (s->result.v92 < 0 || (s->result.v92 & 0x02)))
+        {
+            span_log(&s->logging,
+                     SPAN_LOG_FLOW,
+                     "V.92 QCA suppressed: no peer QC received; continuing normal V.8\n");
+            return;
+        }
         /* Send 2 V.92 packets */
         for (i = 0;  i < 2;  i++)
         {

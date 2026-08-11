@@ -804,12 +804,15 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
         /* 29:32    Digital modem nominal transmit power for Phase 2.
                     Represented in -1 dBm0 steps: 0 = -6 dBm0, 15 = -21 dBm0.
-                    We use -10 dBm0 -> code = 10 - 6 = 4 */
-        bitstream_put(&bs, &t, 4, 4);
+                    V.90 Table 7 requires the transmitted value, not the level
+                    requested from the linear modulator.  The byte-exact G.711
+                    output measures -13 dBm0 for L2 and the INFO carrier, so
+                    advertise that wire level rather than the old -10 dBm0. */
+        bitstream_put(&bs, &t, 7, 4);
         /* 33:37    Maximum digital modem transmit power.
                     Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
-                    We use -10 dBm0 -> code = (10 - 0.5) / 0.5 = 19 */
-        bitstream_put(&bs, &t, 19, 5);
+                    -13 dBm0 -> code = (13 - 0.5) / 0.5 = 25. */
+        bitstream_put(&bs, &t, 25, 5);
         /* 38       Power measurement at codec output (1) or modem terminals (0).
                     SIP/RTP = codec output */
         bitstream_put(&bs, &t, 1, 1);
@@ -829,7 +832,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, 0, 8);
         bitstream_flush(&bs, &t);
         span_log(tx_log_state(s), SPAN_LOG_FLOW,
-                 "  PCM law: %s, nominal power: -10 dBm0, max power: -10 dBm0\n",
+                 "  PCM law: %s, nominal power: -13 dBm0, max power: -13 dBm0\n",
                  s->v90_pcm_law ? "A-law" : "u-law");
         return 62;
     }
@@ -883,6 +886,160 @@ static int info0_sequence_tx(v34_tx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Turn the received L2 spectrum into one Table 17/V.92 probing-result block.
+   V.34 leaves the receiver's projection algorithm implementation-specific;
+   the transmitted fields themselves, however, are measurements, not a copy
+   of the locally configured transmitter profile (V.34 10.1.2.3.4, V.92
+   Table 17).  Select the carrier and one of Tables 3/4's pre-emphasis shapes
+   by minimizing the ripple of channel-response × filter-response over the
+   occupied band, then constrain the projected rate by measured in-band SNR. */
+static int v34_l2_probe_result(v34_state_t *s,
+                               int baud_idx,
+                               int *high_carrier,
+                               int *pre_emphasis,
+                               int configured_max_n)
+{
+    static const int tone_present[25] =
+    {
+        1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1,
+        1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    };
+    float baud;
+    float noise;
+    float best_score;
+    float best_min_gain;
+    int best_carrier;
+    int best_filter;
+    int carrier;
+    int filter;
+    int i;
+
+    if (s->rx.l1_l2_gain_count <= 0)
+        return 0;
+    /*endif*/
+    baud = 2400.0f*baud_rate_parameters[baud_idx].a/baud_rate_parameters[baud_idx].c;
+    noise = (s->rx.l1_l2_noise_count > 0)
+          ? s->rx.l1_l2_noise_sum/s->rx.l1_l2_noise_count
+          : 1.0f;
+    if (noise < 1.0f)
+        noise = 1.0f;
+    /*endif*/
+    best_score = 1.0e30f;
+    best_min_gain = 0.0f;
+    best_carrier = 0;
+    best_filter = 0;
+    for (carrier = 0;  carrier < 2;  carrier++)
+    {
+        float centre;
+        bool supported;
+
+        supported = carrier
+                  ? s->rx.far_capabilities.support_baud_rate_high_carrier[baud_idx]
+                  : s->rx.far_capabilities.support_baud_rate_low_carrier[baud_idx];
+        if (!supported)
+            continue;
+        /*endif*/
+        centre = baud*baud_rate_parameters[baud_idx].low_high[carrier].d
+                      /baud_rate_parameters[baud_idx].low_high[carrier].e;
+        for (filter = 0;  filter <= 10;  filter++)
+        {
+            float sum;
+            float sum2;
+            float min_gain;
+            int n;
+
+            sum = 0.0f;
+            sum2 = 0.0f;
+            min_gain = 1.0e30f;
+            n = 0;
+            for (i = 0;  i < 25;  i++)
+            {
+                float f;
+                float channel_gain;
+                float filter_gain;
+                float response_db;
+
+                if (!tone_present[i])
+                    continue;
+                f = 150.0f*(i + 1);
+                if (f < centre - 0.48f*baud  ||  f > centre + 0.48f*baud)
+                    continue;
+                channel_gain = s->rx.l1_l2_gain_sum[i]/s->rx.l1_l2_gain_count;
+                if (channel_gain <= 0.0f)
+                    continue;
+                filter_gain = 1.0f;
+                if (filter > 0)
+                {
+                    float re;
+                    float im;
+                    int tap;
+
+                    re = 0.0f;
+                    im = 0.0f;
+                    for (tap = 0;  tap < 16;  tap++)
+                    {
+                        float angle;
+
+                        angle = 2.0f*3.14159265f*f*tap/8000.0f;
+                        re += v34_tx_pre_emphasis_filters[baud_idx][carrier][filter - 1][tap]*cosf(angle);
+                        im -= v34_tx_pre_emphasis_filters[baud_idx][carrier][filter - 1][tap]*sinf(angle);
+                    }
+                    filter_gain = sqrtf(re*re + im*im);
+                }
+                if (filter_gain < 1.0e-6f)
+                    filter_gain = 1.0e-6f;
+                response_db = 20.0f*log10f(channel_gain*filter_gain);
+                sum += response_db;
+                sum2 += response_db*response_db;
+                if (channel_gain < min_gain)
+                    min_gain = channel_gain;
+                n++;
+            }
+            /*endfor*/
+            if (n >= 4)
+            {
+                float score;
+
+                score = sum2/n - (sum/n)*(sum/n);
+                if (score < best_score)
+                {
+                    best_score = score;
+                    best_min_gain = min_gain;
+                    best_carrier = carrier;
+                    best_filter = filter;
+                }
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    if (best_score >= 1.0e29f  ||  best_min_gain <= 0.0f)
+        return 0;
+    /*endif*/
+    *high_carrier = best_carrier;
+    *pre_emphasis = best_filter;
+    {
+        float snr_db;
+        int snr_max_n;
+
+        snr_db = 20.0f*log10f(best_min_gain/noise);
+        snr_max_n = (int) floorf((snr_db - 4.0f)/2.0f);
+        if (snr_max_n < 1)
+            return 0;
+        if (snr_max_n > 14)
+            snr_max_n = 14;
+        span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                 "Tx INFO1d measured probe: baud=%d carrier=%s pre=%d ripple=%.2f snr=%.1f dB rate=%d\n",
+                 baud_rate_parameters[baud_idx].baud_rate,
+                 best_carrier ? "high" : "low", best_filter,
+                 sqrtf(best_score), snr_db,
+                 (snr_max_n < configured_max_n ? snr_max_n : configured_max_n)*2400);
+        return (snr_max_n < configured_max_n) ? snr_max_n : configured_max_n;
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
 static void prepare_info1c(v34_state_t *s)
 {
     int i;
@@ -916,16 +1073,54 @@ static void prepare_info1c(v34_state_t *s)
         if (s->tx.v90_mode)
         {
             int rate_cap;
+            int configured_max;
+            int measured_carrier;
+            int measured_pre_emphasis;
 
             rate_cap = (baud_rate_parameters[i].max_bit_rate_code >> 1) + 1;
-            s->tx.info1c.rate_data[i].pre_emphasis = 0;
+            configured_max = (s->tx.baud_rate >= i)
+                           ? ((max_n < rate_cap) ? max_n : rate_cap)
+                           : 0;
+            measured_carrier = 1;
+            measured_pre_emphasis = 0;
             s->tx.info1c.rate_data[i].max_bit_rate =
-                (s->tx.baud_rate >= i) ? ((max_n < rate_cap) ? max_n : rate_cap) : 0;
+                configured_max > 0
+                ? v34_l2_probe_result(s, i,
+                                      &measured_carrier,
+                                      &measured_pre_emphasis,
+                                      configured_max)
+                : 0;
+            s->tx.info1c.rate_data[i].use_high_carrier = measured_carrier != 0;
+            s->tx.info1c.rate_data[i].pre_emphasis = measured_pre_emphasis;
         }
         else
         {
             s->tx.info1c.rate_data[i].pre_emphasis = 6;
             s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  max_n  :  0;
+        }
+    }
+    if (s->tx.v90_mode)
+    {
+        if (s->rx.l1_l2_1050_phase_step_count > 0)
+        {
+            float offset_hz;
+            int offset_code;
+
+            offset_hz = (s->rx.l1_l2_1050_phase_step_sum
+                       / s->rx.l1_l2_1050_phase_step_count)
+                      / (2.0f*3.14159265f*0.020f);
+            offset_code = (int) lroundf(offset_hz/0.02f);
+            s->tx.info1c.freq_offset = (offset_code >= -511  &&  offset_code <= 511)
+                                    ? offset_code : -512;
+            span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                     "Tx INFO1d measured probe frequency offset: %.3f Hz (code %d)\n",
+                     offset_hz, s->tx.info1c.freq_offset);
+        }
+        else
+        {
+            /* V.34 10.1.2.3.4: -512 explicitly says the measurement could
+               not be made accurately; zero falsely claims a perfect clock. */
+            s->tx.info1c.freq_offset = -512;
         }
     }
     if (v92_info1d)
@@ -3460,6 +3655,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                            strict analogue modems to lose the INFO1d sync. */
                         if (s->rx.received_event == V34_EVENT_TONE_SEEN
                             || s->rx.received_event == V34_EVENT_REVERSAL_1
+                            || s->rx.received_event == V34_EVENT_REVERSAL_3
                             || s->rx.signal_present)
                         {
                             span_log(&s->logging, SPAN_LOG_FLOW,
@@ -3544,8 +3740,14 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                     {
                         if (s->rx.received_event == V34_EVENT_TONE_SEEN
                             || s->rx.received_event == V34_EVENT_REVERSAL_1
+                            || s->rx.received_event == V34_EVENT_REVERSAL_3
                             || s->rx.signal_present)
                         {
+                            /* The expected third Tone A reversal can complete
+                               during our PCM L2 and switches the RX directly to
+                               INFO1A.  REVERSAL_3 is therefore positive Tone A
+                               evidence, not a stale event; dropping it here
+                               created a 650 ms silence before INFO1d on V.92. */
                             span_log(&s->logging, SPAN_LOG_FLOW,
                                      "Tx - V.90: Tone A already present at end of PCM L2; sending INFO1d without a carrier gap\n");
                             info1_baud_init(s);
@@ -3841,14 +4043,21 @@ static void pre_info1_a_init(v34_state_t *s)
 
 static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 {
-    enum
-    {
-        V90_WAIT_TONE_A_GUARD_BAUDS = 120
-    };
-    /* V.90 §9.2.1.1.7: After L2, digital modem waits for Tone A from analog modem
-       (up to 550ms + RTD), then sends INFO1d. We send silence while waiting.
-       Only trigger on actual Tone A detection — L2_SEEN fires too early
-       (before the analog modem has received our L1/L2 and started Tone A). */
+    int rtd_bauds;
+    int timeout_bauds;
+
+    /* V.90 §9.2.1.1.7: After L2, the digital modem waits for Tone A from the
+       analogue modem, then sends INFO1d.  §9.2.1.2.5 does not declare Tone A
+       missing until 650 ms plus RTD from the end of the local L2 echo.  This
+       getbaud runs at the 600-baud control-channel rate.  The old hardcoded
+       200-baud timeout was only 333 ms and sent INFO1d before a CX93001 raised
+       Tone A; that peer then selected Table 11/V.34 despite mutual V.92.
+       Only trigger early on actual Tone A detection -- L2_SEEN fires before
+       the analogue modem has received our L1/L2 and started Tone A. */
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*600 + SAMPLE_RATE/2)/SAMPLE_RATE
+                : 0;
+    timeout_bauds = (600*650 + 500)/1000 + rtd_bauds;
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
         span_log(&s->logging, SPAN_LOG_FLOW,
@@ -3887,7 +4096,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
         || (s->rx.signal_present && s->tx.tone_duration >= 30)
-        || s->tx.tone_duration >= 200)
+        || s->tx.tone_duration >= timeout_bauds)
     {
         if (s->tx.tone_duration < 30
             && (s->rx.received_event == V34_EVENT_TONE_SEEN
@@ -3906,7 +4115,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
         /* Tone A detected (or timeout) — proceed to INFO1d */
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %s (event=%d signal=%d) after %d bauds, sending INFO1d\n",
-                 (s->tx.tone_duration >= 200) ? "Timeout"
+                 (s->tx.tone_duration >= timeout_bauds) ? "Timeout"
                  : (((s->rx.received_event == V34_EVENT_TONE_SEEN)
                      || (s->rx.received_event == V34_EVENT_REVERSAL_1))
                     ? "RX event"
@@ -6992,6 +7201,10 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
                                         int expanded_shaping,
                                         const int16_t precoder_coeffs[6])
 {
+    /* V.90 §8.5.1: B1 and upstream data use the analogue-modem GPA
+       scrambler (1 + x^-5 + x^-23), i.e. zero-based tap 4.  Do not inherit
+       the answer-modem/downstream GPC tap from an earlier role. */
+    s->tx.scrambler_tap = 4;
     if (v34_seed_tx_data(s, bit_rate_n, trellis_size,
                          use_non_linear_encoder, expanded_shaping,
                          precoder_coeffs) != 0)

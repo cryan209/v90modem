@@ -27,6 +27,8 @@
 #include "v92_ja_decode.h"
 #include "v92_phase4_decode.h"
 #include "v92_trn2u.h"
+#include "v92_upstream_data.h"
+#include "v92_upstream_rx.h"
 
 #include <spandsp.h>
 #include <pjsua-lib/pjsua.h>
@@ -390,6 +392,7 @@ static bool test_v90_smartlink_dummy_cpt_repair(void);
 static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_v34_rx_stage_isolation(void);
 static bool test_v90_v90cp_upstream_data_reconfiguration(void);
+static bool test_v90_upstream_t3_b1_acquisition(void);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
 static bool test_v92_suvd_codec_and_phase4(void);
@@ -3365,6 +3368,349 @@ done:
     return ok;
 }
 
+static bool test_v92_upstream_modulus_frames(void)
+{
+    uint32_t prng = 0x92C0FFEEU;
+
+    vpcm_log("Test: V.92 PCM-upstream GPA/modulus data frames");
+    for (int drn = 1; drn <= 19; drn++) {
+        v92_upstream_profile_t profile;
+        v92_upstream_tx_state_t tx;
+        v92_upstream_rx_state_t rx;
+        uint8_t input[V92_UPSTREAM_MAX_FRAME_BITS];
+        uint8_t output[V92_UPSTREAM_MAX_FRAME_BITS];
+        uint8_t ki[V92_UPSTREAM_INTERVALS];
+        int k = v92_upstream_bits_per_frame((uint8_t)drn);
+        int base = k/V92_UPSTREAM_INTERVALS;
+        int extra = k%V92_UPSTREAM_INTERVALS;
+        int sign_changes = 0;
+
+        memset(&profile, 0, sizeof(profile));
+        profile.drn = (uint8_t)drn;
+        /* A power-of-two profile with product(Mi)=2^K.  Across drn=1..19
+         * this exercises Mi=8..64 without relying on a self-derived rate. */
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+            profile.moduli[i] = (uint8_t)(1U << (base + (i < extra)));
+        if (!v92_upstream_profile_validate(&profile)) {
+            fprintf(stderr, "V.92 upstream rejected valid drn=%d profile\n", drn);
+            return false;
+        }
+        v92_upstream_tx_init(&tx);
+        v92_upstream_rx_init(&rx);
+
+        /* With zero GPA history, an all-zero first frame has R=0 and all
+         * twelve §6.4.1 remainders are zero. */
+        memset(input, 0, sizeof(input));
+        if (!v92_upstream_encode_frame(&tx, &profile, input, k, ki))
+            return false;
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+            if (ki[i] != 0) {
+                fprintf(stderr,
+                        "V.92 upstream zero vector failed at drn=%d interval=%d\n",
+                        drn, i);
+                return false;
+            }
+        }
+        if (!v92_upstream_decode_frame(&rx, &profile, ki, output,
+                                       (int)sizeof(output))
+            || memcmp(input, output, (size_t)k) != 0)
+            return false;
+
+        for (int frame = 0; frame < 128; frame++) {
+            int old_sign = tx.previous_differential_sign;
+
+            for (int i = 0; i < k; i++) {
+                prng = prng*1664525U + 1013904223U;
+                input[i] = (uint8_t)(prng >> 31);
+            }
+            if (!v92_upstream_encode_frame(&tx, &profile, input, k, ki)
+                || !v92_upstream_decode_frame(&rx, &profile, ki, output,
+                                               (int)sizeof(output))
+                || memcmp(input, output, (size_t)k) != 0
+                || tx.previous_differential_sign
+                   != rx.previous_differential_sign) {
+                fprintf(stderr,
+                        "V.92 upstream frame round trip failed (drn=%d frame=%d)\n",
+                        drn, frame);
+                return false;
+            }
+            if (old_sign != tx.previous_differential_sign)
+                sign_changes++;
+        }
+        if (sign_changes == 0) {
+            fprintf(stderr,
+                    "V.92 upstream differential-sign path not exercised (drn=%d)\n",
+                    drn);
+            return false;
+        }
+    }
+
+    {
+        v92_upstream_profile_t bad;
+
+        memset(&bad, 0, sizeof(bad));
+        bad.drn = 19;
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+            bad.moduli[i] = 2;
+        if (v92_upstream_profile_validate(&bad)
+            || v92_upstream_bits_per_frame(0) != 0
+            || v92_upstream_bits_per_frame(20) != 0) {
+            fprintf(stderr, "V.92 upstream accepted an invalid profile/rate\n");
+            return false;
+        }
+    }
+
+    vpcm_log("PASS: V.92 PCM-upstream GPA/modulus data frames (drn=1..19)");
+    return true;
+}
+
+static void v92_test_build_upstream_cpd(v92_cpd_frame_t *cpd, int drn,
+                                         bool filters)
+{
+    int k = v92_upstream_bits_per_frame((uint8_t)drn);
+    int base = k/V92_UPSTREAM_INTERVALS;
+    int extra = k%V92_UPSTREAM_INTERVALS;
+
+    memset(cpd, 0, sizeof(*cpd));
+    cpd->modulus_present = true;
+    cpd->constellations_present = true;
+    cpd->selected_upstream_drn = (uint8_t)drn;
+    cpd->trellis_select = 0;          /* Figure 10/V.34, 16 states */
+    cpd->gain_q0_16 = 0xFFFF;
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+        cpd->moduli[i] = (uint8_t)(1U << (base + (i < extra)));
+    cpd->set_sizes[0] = 64;
+    for (int i = 0; i < 64; i++)
+        cpd->points[0][i] = (uint16_t)(2*i + 1);
+    if (filters) {
+        cpd->coeffs_present = true;
+        cpd->lz1 = 1;
+        cpd->precoder_ff[0] = 4096;   /* z1(1) = 0.125, Q0.15 */
+        cpd->lp1 = 1;
+        cpd->precoder_fb[0] = -1024;  /* p1(1) = -0.0625, Q1.14 */
+        cpd->lz2 = 2;
+        cpd->prefilter_ff[0] = 24576; /* z2(0) = 0.75 */
+        cpd->prefilter_ff[1] = 4096;  /* z2(1) = 0.125 */
+        cpd->lp2 = 1;
+        cpd->prefilter_fb[0] = 1024;  /* p2(1) = 0.0625 */
+    }
+}
+
+static bool test_v92_upstream_waveform_frames(void)
+{
+    uint32_t prng = 0x6404B1U;
+
+    vpcm_log("Test: V.92 §6.4 upstream constellation/precoder/trellis frames");
+    for (int filtered = 0; filtered <= 1; filtered++) {
+        int first_drn = filtered ? 9 : 1;
+        int last_drn = filtered ? 9 : 19;
+
+        for (int drn = first_drn; drn <= last_drn; drn++) {
+            v92_cpd_frame_t cpd;
+            v92_upstream_wave_tx_t tx;
+            v92_upstream_wave_rx_t rx;
+            uint8_t input[V92_UPSTREAM_MAX_FRAME_BITS];
+            uint8_t output[V92_UPSTREAM_MAX_FRAME_BITS];
+            double samples[V92_UPSTREAM_INTERVALS];
+            int k = v92_upstream_bits_per_frame((uint8_t)drn);
+
+            v92_test_build_upstream_cpd(&cpd, drn, filtered != 0);
+            if (!v92_upstream_wave_profile_validate(&cpd)) {
+                fprintf(stderr,
+                        "V.92 upstream waveform rejected profile drn=%d filtered=%d\n",
+                        drn, filtered);
+                return false;
+            }
+            v92_upstream_wave_tx_init(&tx);
+            v92_upstream_wave_rx_init(&rx);
+            for (int frame = 0; frame < 96; frame++) {
+                for (int i = 0; i < k; i++) {
+                    prng = prng*1664525U + 1013904223U;
+                    input[i] = (uint8_t)(prng >> 31);
+                }
+                if (!v92_upstream_wave_encode_frame(&tx, &cpd, input, k,
+                                                    samples)
+                    || !v92_upstream_wave_decode_frame(&rx, &cpd, samples,
+                                                       output,
+                                                       (int)sizeof(output))
+                    || memcmp(input, output, (size_t)k) != 0
+                    || tx.convolutional_state != rx.convolutional_state) {
+                    fprintf(stderr,
+                            "V.92 upstream waveform round trip failed "
+                            "(drn=%d filtered=%d frame=%d)\n",
+                            drn, filtered, frame);
+                    return false;
+                }
+            }
+            if (rx.symbols != 96U*V92_UPSTREAM_INTERVALS
+                || rx.slicing_errors != 0) {
+                fprintf(stderr,
+                        "V.92 upstream waveform receiver counters wrong "
+                        "(drn=%d filtered=%d symbols=%llu errors=%llu)\n",
+                        drn, filtered,
+                        (unsigned long long)rx.symbols,
+                        (unsigned long long)rx.slicing_errors);
+                return false;
+            }
+        }
+    }
+    /* Exercise the 16-state Viterbi path with one deliberately wrong hard
+     * decision per frame.  Moving symbol 3 just across its nearest-point
+     * boundary flips §6.4.2's Y0 parity; the second candidate is the valid
+     * Figure-10 survivor. */
+    {
+        v92_cpd_frame_t cpd;
+        v92_upstream_wave_tx_t tx;
+        v92_upstream_wave_rx_t rx;
+        uint8_t input[V92_UPSTREAM_MAX_FRAME_BITS];
+        uint8_t output[V92_UPSTREAM_MAX_FRAME_BITS];
+        double samples[V92_UPSTREAM_INTERVALS];
+        double gain = 65535.0/(4.0*65536.0);
+        int k = v92_upstream_bits_per_frame(9);
+
+        v92_test_build_upstream_cpd(&cpd, 9, false);
+        v92_upstream_wave_tx_init(&tx);
+        v92_upstream_wave_rx_init(&rx);
+        for (int frame = 0; frame < 64; frame++) {
+            for (int i = 0; i < k; i++) {
+                prng = prng*1664525U + 1013904223U;
+                input[i] = (uint8_t)(prng >> 31);
+            }
+            if (!v92_upstream_wave_encode_frame(&tx, &cpd, input, k,
+                                                samples))
+                return false;
+            samples[3] += samples[3] >= 0.0 ? -1.1*gain : 1.1*gain;
+            if (!v92_upstream_wave_decode_viterbi_frame(
+                    &rx, &cpd, samples, output, (int)sizeof(output))
+                || memcmp(input, output, (size_t)k) != 0
+                || tx.convolutional_state != rx.convolutional_state) {
+                fprintf(stderr,
+                        "V.92 upstream Viterbi correction failed at frame %d\n",
+                        frame);
+                return false;
+            }
+        }
+        if (rx.slicing_errors < 64) {
+            fprintf(stderr,
+                    "V.92 upstream Viterbi did not record corrected decisions\n");
+            return false;
+        }
+    }
+
+    vpcm_log("PASS: V.92 §6.4 upstream waveform frames (16-state, drn=1..19, Viterbi correction)");
+    return true;
+}
+
+typedef struct {
+    uint8_t bytes[2048];
+    int count;
+} v92_upstream_byte_capture_t;
+
+static void v92_upstream_test_put_byte(void *user_data, uint8_t byte)
+{
+    v92_upstream_byte_capture_t *capture = user_data;
+
+    if (capture->count < (int)sizeof(capture->bytes))
+        capture->bytes[capture->count++] = byte;
+}
+
+static bool test_v92_upstream_b1u_receiver(void)
+{
+    v92_cpd_frame_t cpd;
+    v92_upstream_wave_tx_t tx;
+    v92_upstream_rx_t rx;
+    v92_upstream_byte_capture_t capture;
+    uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS];
+    uint8_t expected[2048];
+    int16_t samples[4096];
+    double wave[V92_UPSTREAM_INTERVALS];
+    uint32_t prng = 0xB1B1B1U;
+    int expected_count = 0;
+    int expected_bit = 0;
+    uint8_t expected_byte = 0;
+    int sample_count = 37;
+    int k = v92_upstream_bits_per_frame(9);
+
+    vpcm_log("Test: V.92 B1u acquisition and upstream byte delivery");
+    memset(samples, 0, sizeof(samples));
+    memset(&capture, 0, sizeof(capture));
+    v92_test_build_upstream_cpd(&cpd, 9, false);
+    v92_upstream_wave_tx_init(&tx);
+
+    memset(bits, 1, sizeof(bits));
+    for (int frame = 0; frame < V92_B1U_FRAMES; frame++) {
+        if (!v92_upstream_wave_encode_frame(&tx, &cpd, bits, k, wave))
+            return false;
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+            samples[sample_count++] = (int16_t)(100.0 + 120.0*wave[i]
+                                                + (wave[i] >= 0.0 ? 0.5 : -0.5));
+    }
+    for (int frame = 0; frame < 80; frame++) {
+        for (int i = 0; i < k; i++) {
+            prng = prng*1664525U + 1013904223U;
+            bits[i] = (uint8_t)(prng >> 31);
+            expected_byte |= (uint8_t)(bits[i] << expected_bit);
+            if (++expected_bit == 8) {
+                expected[expected_count++] = expected_byte;
+                expected_byte = 0;
+                expected_bit = 0;
+            }
+        }
+        if (!v92_upstream_wave_encode_frame(&tx, &cpd, bits, k, wave))
+            return false;
+        for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+            samples[sample_count++] = (int16_t)(100.0 + 120.0*wave[i]
+                                                + (wave[i] >= 0.0 ? 0.5 : -0.5));
+    }
+
+    /* A 0.2-symbol fractional phase/channel echo makes the raw B1u
+     * correlation insufficient for a scalar gain fit and exercises the
+     * supervised seven-tap equalizer.  Three tail samples flush its delay. */
+    {
+        int16_t unfiltered[4096];
+
+        memcpy(unfiltered, samples, (size_t)sample_count*sizeof(samples[0]));
+        for (int i = 37; i < sample_count; i++) {
+            double current = unfiltered[i] - 100.0;
+            double previous = i > 37 ? unfiltered[i - 1] - 100.0 : 0.0;
+            double value = 100.0 + 0.8*current + 0.2*previous;
+
+            samples[i] = (int16_t)(value + (value >= 0.0 ? 0.5 : -0.5));
+        }
+        for (int i = 0; i < V92_UPSTREAM_EQ_TAPS/2; i++)
+            samples[sample_count++] = 100;
+    }
+
+    if (!v92_upstream_b1_rx_init(&rx, &cpd, v92_upstream_test_put_byte,
+                                  &capture))
+        return false;
+    for (int pos = 0; pos < sample_count; ) {
+        int chunk = sample_count - pos;
+
+        if (chunk > 37)
+            chunk = 37;
+        (void)v92_upstream_b1_rx_feed(&rx, &samples[pos], chunk);
+        pos += chunk;
+    }
+    if (!rx.locked || !rx.equalizer_trained || rx.equalizer_delay == 0
+        || rx.correlation < 0.995
+        || capture.count != expected_count
+        || memcmp(capture.bytes, expected, (size_t)expected_count) != 0
+        || rx.rejected_frames != 0
+        || rx.equalizer_updates != 80U*V92_UPSTREAM_INTERVALS) {
+        fprintf(stderr,
+                "V.92 B1u/data receiver failed: lock=%d corr=%.6f "
+                "bytes=%d/%d rejected=%llu\n",
+                rx.locked ? 1 : 0, rx.correlation,
+                capture.count, expected_count,
+                (unsigned long long)rx.rejected_frames);
+        return false;
+    }
+    vpcm_log("PASS: V.92 B1u lock and upstream bytes (corr=%.6f bytes=%d)",
+             rx.correlation, capture.count);
+    return true;
+}
+
 static bool test_v92_cpd_full_codec(void)
 {
     static uint8_t bits[4096];
@@ -5221,6 +5567,140 @@ static bool test_v90_v90cp_upstream_data_reconfiguration(void)
     v34_free(answerer);
     vpcm_log("PASS: V.90 V90_CP -> DATA reconfigures RX to 3200 baud");
     return true;
+}
+
+enum { V90_T3_TEST_MAX_BITS = 65536 };
+
+typedef struct {
+    uint32_t state;
+    uint8_t bits[V90_T3_TEST_MAX_BITS/8];
+    int bit_pos;
+} v90_t3_test_bits_t;
+
+static int v90_t3_test_get_bit(void *user_data)
+{
+    v90_t3_test_bits_t *s = user_data;
+    int bit;
+
+    s->state = s->state*1664525U + 1013904223U;
+    bit = (int)(s->state >> 31);
+    if (s->bit_pos < V90_T3_TEST_MAX_BITS) {
+        if (bit)
+            s->bits[s->bit_pos >> 3] |= (uint8_t)(1U << (s->bit_pos & 7));
+        s->bit_pos++;
+    }
+    return bit;
+}
+
+static void v90_t3_test_put_bit(void *user_data, int bit)
+{
+    v90_t3_test_bits_t *s = user_data;
+
+    if (bit < 0 || s->bit_pos >= V90_T3_TEST_MAX_BITS)
+        return;
+    if (bit)
+        s->bits[s->bit_pos >> 3] |= (uint8_t)(1U << (s->bit_pos & 7));
+    s->bit_pos++;
+}
+
+static bool test_v90_upstream_t3_b1_acquisition(void)
+{
+    v90_t3_test_bits_t sent = {.state = 0x90B1D47AU};
+    v90_t3_test_bits_t received = {0};
+    v34_state_t *tx = NULL;
+    v34_state_t *rx = NULL;
+    int16_t linear[160];
+    int16_t wire[160];
+    int64_t input_8k = 0;
+    int64_t output_96k = 0;
+    int alignment = -1;
+    int checked_bits;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 upstream T/3 B1 acquisition and DATA payload");
+    tx = v34_init(NULL, 3200, 21600, true, true,
+                  v90_t3_test_get_bit, &sent,
+                  vpcm_v34_dummy_put_bit, NULL);
+    rx = v34_init(NULL, 3200, 21600, false, true,
+                  vpcm_v34_dummy_get_bit, NULL,
+                  v90_t3_test_put_bit, &received);
+    if (!tx || !rx)
+        goto done;
+    v34_set_v90_mode(tx, V91_LAW_ULAW);
+    v34_set_v90_mode(rx, V91_LAW_ULAW);
+    v34_set_put_phase4_bit(rx, vpcm_v34_dummy_put_bit, NULL);
+    v34_force_v90_phase4_cp_rx(rx);
+    if (v34_v90_prepare_upstream_data(rx, 21600, 0) != 0
+        || v34_begin_rx_data(rx) != 0
+        || v34_v90_begin_tx_data(tx, 9, 0, 0, 0, NULL) != 0) {
+        goto done;
+    }
+    for (int block = 0; block < 100; block++) {
+        int produced = v34_tx(tx, linear, 160);
+
+        if (produced < 0)
+            goto done;
+        for (int i = produced; i < 160; i++)
+            linear[i] = 0;
+        for (int i = 0; i < 160; i++)
+            wire[i] = ulaw_to_linear(linear_to_ulaw(linear[i]));
+        if (v34_rx(rx, wire, 160) != 0)
+            goto done;
+    }
+    v34_v90_upstream_sample_counts(rx, &input_8k, &output_96k);
+    if (!v34_v90_upstream_rx_acquired(rx)
+        || input_8k != 16000 || output_96k <= input_8k
+        || output_96k > (6*input_8k)/5) {
+        fprintf(stderr,
+                "V.90 T/3 B1 acquisition failed (acquired=%d, 8k=%lld, 9.6k=%lld)\n",
+                v34_v90_upstream_rx_acquired(rx),
+                (long long)input_8k, (long long)output_96k);
+        goto done;
+    }
+    for (int shift = 0; shift + 128 <= received.bit_pos && shift < 4096;
+         shift++) {
+        int errors = 0;
+
+        for (int bit = 0; bit < 128; bit++) {
+            int got = (received.bits[(shift + bit) >> 3]
+                       >> ((shift + bit) & 7)) & 1;
+            int want = (sent.bits[bit >> 3] >> (bit & 7)) & 1;
+            errors += got != want;
+        }
+        if (errors == 0) {
+            alignment = shift;
+            break;
+        }
+    }
+    checked_bits = received.bit_pos - alignment;
+    if (alignment < 0 || checked_bits > sent.bit_pos)
+        goto payload_fail;
+    if (checked_bits > 16000)
+        checked_bits = 16000;
+    if (checked_bits < 8000)
+        goto payload_fail;
+    for (int bit = 0; bit < checked_bits; bit++) {
+        int got = (received.bits[(alignment + bit) >> 3]
+                   >> ((alignment + bit) & 7)) & 1;
+        int want = (sent.bits[bit >> 3] >> (bit & 7)) & 1;
+        if (got != want)
+            goto payload_fail;
+    }
+    ok = true;
+    vpcm_log("PASS: V.90 native upstream DATA, %d bits zero-error "
+             "(%lld 8k -> %lld 9.6k samples)",
+             checked_bits, (long long)input_8k, (long long)output_96k);
+    goto done;
+payload_fail:
+    fprintf(stderr,
+            "V.90 T/3 DATA payload failed (sent=%d received=%d alignment=%d checked=%d)\n",
+            sent.bit_pos, received.bit_pos, alignment, checked_bits);
+done:
+    if (tx)
+        v34_free(tx);
+    if (rx)
+        v34_free(rx);
+    return ok;
 }
 
 static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)
@@ -8886,6 +9366,40 @@ static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
     return true;
 }
 
+static bool test_v8_v92_unsolicited_qca_suppressed(v91_law_t law)
+{
+    v8_parms_t caller_parms;
+    v8_parms_t answer_parms;
+    vpcm_v8_result_t caller_result;
+    vpcm_v8_result_t answer_result;
+    uint32_t expected_mods = V8_MOD_V22 | V8_MOD_V34 | V8_MOD_V90;
+    int expected_pcm = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
+
+    vpcm_log("Test: V.92 QCA suppression after ordinary CM (%s)",
+             vpcm_law_to_str(law));
+    init_v8_parms(&caller_parms, true, expected_mods, expected_pcm);
+    init_v8_parms(&answer_parms, false, expected_mods, expected_pcm);
+    caller_parms.v92 = -1;  /* Ordinary V.8 CM: no QC1a/QC2a. */
+    answer_parms.v92 = 0x47;  /* QCA1d, if a QC had actually arrived. */
+
+    if (!run_v8_exchange(law, &caller_parms, &answer_parms,
+                         &caller_result, &answer_result, NULL))
+        return false;
+
+    /* V.92 9.2.4.1: CM selects normal V.8.  In particular, the answerer must
+       not send QCA1d and push the caller into the QTS/ANSpcm short procedure. */
+    if (caller_result.result.v92 >= 0 || answer_result.result.v92 >= 0) {
+        fprintf(stderr,
+                "V.92 unsolicited QCA leaked into ordinary V.8: caller_rx=0x%X answer_rx=0x%X\n",
+                caller_result.result.v92, answer_result.result.v92);
+        return false;
+    }
+
+    vpcm_log("PASS: V.92 QCA suppressed after ordinary CM (%s)",
+             vpcm_law_to_str(law));
+    return true;
+}
+
 static bool test_v92_dil_rate_adaptation(void)
 {
     v90_dil_desc_t clean_dil;
@@ -9889,6 +10403,8 @@ static bool run_vpcm_session_suite(void)
         && test_v8_v91_advertisement_over_analog_g711(V91_LAW_ALAW)
         && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW)
         && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW)
+        && test_v8_v92_unsolicited_qca_suppressed(V91_LAW_ULAW)
+        && test_v8_v92_unsolicited_qca_suppressed(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit(V91_LAW_ALAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
@@ -9902,6 +10418,7 @@ static bool run_vpcm_primitive_suite(void)
     return test_vpcm_cp_robbed_bit_safe_profile()
         && test_v90_v34_rx_stage_isolation()
         && test_v90_v90cp_upstream_data_reconfiguration()
+        && test_v90_upstream_t3_b1_acquisition()
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)
@@ -9938,6 +10455,9 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_spectral_shaping(V91_LAW_ALAW)
         && test_v92_suvd_codec_and_phase4()
         && test_v92_cpd_full_codec()
+        && test_v92_upstream_modulus_frames()
+        && test_v92_upstream_waveform_frames()
+        && test_v92_upstream_b1u_receiver()
         && test_v92_trn2u_loopback()
         && test_v92_native_cpu_phase4(V91_LAW_ULAW)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)

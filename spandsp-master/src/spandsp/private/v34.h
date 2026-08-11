@@ -38,6 +38,16 @@
 #define V34_EQUALIZER_POST_LEN              63
 #define V34_EQUALIZER_MASK                  127
 
+/* V.90 upstream DATA receiver.  The bearer remains 8 kHz; only this private
+   receive branch runs at 9.6 kHz so 3200 baud is exactly three samples/T. */
+#define V34_V90_T3_HILBERT_TAPS             63
+#define V34_V90_T3_RESAMPLE_TAPS            33
+#define V34_V90_T3_RRC_TAPS                 97
+#define V34_V90_T3_FSE_TAPS                 7
+#define V34_V90_T3_RAW_SIZE                 4096
+#define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
+#define V34_V90_T3_B1_MAX_SYMBOLS           256
+
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
 #define V34_XOFF                            3
@@ -785,6 +795,34 @@ typedef struct
     int data_symbol_rotation;
     bool data_symbol_conjugate;
 
+    /*! \brief V.90 upstream-only 8 kHz -> 9.6 kHz, T/3 receive path.
+        It is armed at the E/B1 seam and never touches the G.711 bearer or the
+        downstream PCM path.  B1 supplies the timing phase and supervised FSE
+        solution; raw/FIR/FSE state then continues unchanged into DATA. */
+    bool v90_t3_prepared;
+    int v90_t3_trellis_size;
+    bool v90_t3_active;
+    bool v90_t3_acquisition_attempted;
+    bool v90_t3_acquired;
+    int64_t v90_t3_input_count;
+    int64_t v90_t3_next_output;
+    int64_t v90_t3_output_count;
+    float v90_t3_hilbert[V34_V90_T3_HILBERT_TAPS];
+    int v90_t3_hilbert_pos;
+    complexf_t v90_t3_input[V34_V90_T3_RESAMPLE_TAPS + 8];
+    float v90_t3_rrc_coeff[V34_V90_T3_RRC_TAPS];
+    complexf_t v90_t3_rrc[V34_V90_T3_RRC_TAPS];
+    int v90_t3_rrc_pos;
+    complexf_t v90_t3_raw[V34_V90_T3_RAW_SIZE];
+    complexf_t v90_t3_matched[V34_V90_T3_RAW_SIZE];
+    int64_t v90_t3_raw_count;
+    complexf_t v90_t3_fse[V34_V90_T3_FSE_TAPS];
+    bool v90_t3_fse_conjugate;
+    int64_t v90_t3_next_symbol;
+    int v90_t3_b1_symbols;
+    complexf_t v90_t3_b1[V34_V90_T3_B1_MAX_SYMBOLS];
+    float v90_t3_training_match;
+
     /*! \brief Parameters for the current bit rate and baud rate */
     v34_parameters_t parms;
 
@@ -1179,6 +1217,17 @@ typedef struct
     complexf_t last_sample;
 #endif
     int l1_l2_duration;
+    /*! L2-only accumulation used to derive the V.34/V.90/V.92 INFO1
+        probing fields.  V.92 Table 17 requires probing results, rather than
+        configured transmitter defaults. */
+    float l1_l2_gain_sum[25];
+    int l1_l2_gain_count;
+    float l1_l2_noise_sum;
+    int l1_l2_noise_count;
+    float l1_l2_prev_1050_phase;
+    float l1_l2_1050_phase_step_sum;
+    int l1_l2_1050_phase_step_count;
+    int l1_l2_have_prev_1050_phase;
 
     int current_demodulator;
 

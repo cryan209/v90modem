@@ -427,6 +427,7 @@ static const complex_sig_t zero = {TRAINING_SCALE(0.0f), TRAINING_SCALE(0.0f)};
 
 static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample);
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample);
+static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym);
 static void l1_l2_analysis_init(v34_rx_state_t *s);
 static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
@@ -4954,31 +4955,69 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     };
     int i;
     int j;
+    float phase_1050;
 
     slow_dft(s->dft_buffer, LINE_PROBE_SAMPLES);
+    phase_1050 = atan2f(s->dft_buffer[21].im, s->dft_buffer[21].re);
     /* Now resolve the analysis into gain and phase values for the bins which contain the tones */ 
     /* Base things around what happens at 1050Hz the first time through. */
     if (s->l1_l2_duration == 0)
-        s->base_phase = atan2f(s->dft_buffer[21].im, s->dft_buffer[21].re);
+        s->base_phase = phase_1050;
     /*endif*/
     for (i = 0;  i < 25;  i++)
     {
+        j = 3*(i + 1);
         if (adjust[i] < 7.0f)
         {
             /* This tone should be present in the transmitted signal. */
-            j = 3*(i + 1);
             s->l1_l2_gains[i] = sqrtf(s->dft_buffer[j].re*s->dft_buffer[j].re
                                     + s->dft_buffer[j].im*s->dft_buffer[j].im);
             s->l1_l2_phases[i] = fmodf(atan2f(s->dft_buffer[j].im, s->dft_buffer[j].re) - s->base_phase + adjust[i],
                                        3.14159265f);
+            /* V.34 10.1.2.3.4 and V.92 Table 17: INFO1 reports what the
+               receiver measured from L1/L2.  Accumulate only L2 (the first
+               eight 20-ms blocks are L1, 6 dB higher) so gain-dependent
+               choices are not biased by the level transition. */
+            if (s->l1_l2_duration >= 8)
+                s->l1_l2_gain_sum[i] += s->l1_l2_gains[i];
+            /*endif*/
         }
         else
         {
-            /* This tone should not be present in the transmitted signal. */
+            float noise;
+
+            /* The deliberately unoccupied probe bins provide an in-band
+               noise estimate without requiring a second analysis window. */
+            noise = sqrtf(s->dft_buffer[j].re*s->dft_buffer[j].re
+                        + s->dft_buffer[j].im*s->dft_buffer[j].im);
             s->l1_l2_gains[i] = 0.0f;
             s->l1_l2_phases[i] = 0.0f;
+            if (s->l1_l2_duration >= 8)
+            {
+                s->l1_l2_noise_sum += noise;
+                s->l1_l2_noise_count++;
+            }
+            /*endif*/
         }
         /*endif*/
+    }
+    if (s->l1_l2_duration >= 8)
+    {
+        float step;
+
+        s->l1_l2_gain_count++;
+        if (s->l1_l2_have_prev_1050_phase)
+        {
+            step = phase_1050 - s->l1_l2_prev_1050_phase;
+            while (step > 3.14159265f)
+                step -= 2.0f*3.14159265f;
+            while (step < -3.14159265f)
+                step += 2.0f*3.14159265f;
+            s->l1_l2_1050_phase_step_sum += step;
+            s->l1_l2_1050_phase_step_count++;
+        }
+        s->l1_l2_prev_1050_phase = phase_1050;
+        s->l1_l2_have_prev_1050_phase = 1;
     }
     /*endfor*/
     for (i = 0;  i < 25;  i++)
@@ -5001,6 +5040,14 @@ static void l1_l2_analysis_init(v34_rx_state_t *s)
     s->dft_ptr = 0;
     s->base_phase = 42.0;
     s->l1_l2_duration = 0;
+    memset(s->l1_l2_gain_sum, 0, sizeof(s->l1_l2_gain_sum));
+    s->l1_l2_gain_count = 0;
+    s->l1_l2_noise_sum = 0.0f;
+    s->l1_l2_noise_count = 0;
+    s->l1_l2_prev_1050_phase = 0.0f;
+    s->l1_l2_1050_phase_step_sum = 0.0f;
+    s->l1_l2_1050_phase_step_count = 0;
+    s->l1_l2_have_prev_1050_phase = 0;
     s->current_demodulator = V34_MODULATION_L1_L2;
     s->stage = V34_RX_STAGE_L1_L2;
 }
@@ -5338,7 +5385,7 @@ static int cc_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
+static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
     float energy;
     uint32_t ang1;
@@ -5350,24 +5397,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     int i;
     mp_t mp;
     v34_state_t *t;
-    complexf_t eq_sample;
     complexf_t eq_target;
-    const complexf_t *sym;
 
-    /* This routine processes every half a baud, as we put things into the equalizer at the T/2 rate.
-       This routine adapts the position of the half baud samples, which the caller takes. */
-
-    /* Feed the T/2-rate primary channel samples into the equalizer buffer. */
-    s->eq_buf[s->eq_step] = *sample;
-    s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
-
-    /* On alternate insertions we have a whole baud and must process it. */
-    if ((s->baud_half ^= 1))
-        return;
-    /*endif*/
-    pri_symbol_sync(s);
-    eq_sample = equalizer_get(s);
-    sym = &eq_sample;
     if (s->qam_report)
         s->qam_report(s->qam_user_data, sym, NULL, s->qam_sample_time);
 
@@ -9029,6 +9060,468 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 }
 /*- End of function --------------------------------------------------------*/
 
+static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
+{
+    complexf_t eq_sample;
+
+    /* Ordinary V.34 uses the historical T/2 front end.  The V.90 DATA-only
+       T/3 branch calls process_primary_symbol() directly after its supervised
+       B1 equalizer, so both paths share the mapper and protocol state. */
+    s->eq_buf[s->eq_step] = *sample;
+    s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
+    if ((s->baud_half ^= 1))
+        return;
+    pri_symbol_sync(s);
+    eq_sample = equalizer_get(s);
+    process_primary_symbol(s, &eq_sample);
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Solve the small real normal equation used by supervised B1 acquisition. */
+static bool v90_t3_solve(double *a, double *b, double *x, int n)
+{
+    int i;
+    int j;
+    int k;
+
+    for (i = 0;  i < n;  i++)
+    {
+        int pivot = i;
+        double best = fabs(a[i*n + i]);
+
+        for (j = i + 1;  j < n;  j++)
+        {
+            double v = fabs(a[j*n + i]);
+            if (v > best)
+            {
+                best = v;
+                pivot = j;
+            }
+        }
+        if (!isfinite(best) || best < 1e-12)
+            return false;
+        if (pivot != i)
+        {
+            for (k = i;  k < n;  k++)
+            {
+                double t = a[i*n + k];
+                a[i*n + k] = a[pivot*n + k];
+                a[pivot*n + k] = t;
+            }
+            {
+                double t = b[i];
+                b[i] = b[pivot];
+                b[pivot] = t;
+            }
+        }
+        {
+            double d = a[i*n + i];
+            for (k = i;  k < n;  k++)
+                a[i*n + k] /= d;
+            b[i] /= d;
+        }
+        for (j = 0;  j < n;  j++)
+        {
+            double f;
+            if (j == i)
+                continue;
+            f = a[j*n + i];
+            if (f == 0.0)
+                continue;
+            for (k = i;  k < n;  k++)
+                a[j*n + k] -= f*a[i*n + k];
+            b[j] -= f*b[i];
+        }
+    }
+    for (i = 0;  i < n;  i++)
+        x[i] = b[i];
+    return true;
+}
+
+static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
+{
+    complexf_t z = {0.0f, 0.0f};
+
+    if (index >= 0 && index < s->v90_t3_raw_count
+        && index >= s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE)
+        z = s->v90_t3_raw[index & V34_V90_T3_RAW_MASK];
+    return z;
+}
+
+static complexf_t v90_t3_matched_get(const v34_rx_state_t *s, int64_t index)
+{
+    complexf_t z = {0.0f, 0.0f};
+
+    if (index >= 0 && index < s->v90_t3_raw_count
+        && index >= s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE)
+        z = s->v90_t3_matched[index & V34_V90_T3_RAW_MASK];
+    return z;
+}
+
+static void v90_t3_make_rrc(v34_rx_state_t *s)
+{
+    const double beta = 0.12;       /* V.34 §9: 12% excess bandwidth. */
+    const int centre = V34_V90_T3_RRC_TAPS/2;
+    double power = 0.0;
+    int i;
+
+    for (i = 0;  i < V34_V90_T3_RRC_TAPS;  i++)
+    {
+        double t = (i - centre)/3.0;
+        double h;
+
+        if (fabs(t) < 1e-10)
+            h = 1.0 - beta + 4.0*beta/M_PI;
+        else if (fabs(fabs(4.0*beta*t) - 1.0) < 1e-8)
+            h = beta/sqrt(2.0)*((1.0 + 2.0/M_PI)*sin(M_PI/(4.0*beta))
+                              + (1.0 - 2.0/M_PI)*cos(M_PI/(4.0*beta)));
+        else
+            h = (sin(M_PI*t*(1.0 - beta))
+                 + 4.0*beta*t*cos(M_PI*t*(1.0 + beta)))
+              / (M_PI*t*(1.0 - 16.0*beta*beta*t*t));
+        s->v90_t3_rrc_coeff[i] = (float)h;
+        power += h*h;
+    }
+    power = sqrt(power);
+    for (i = 0;  i < V34_V90_T3_RRC_TAPS;  i++)
+        s->v90_t3_rrc_coeff[i] /= (float)power;
+}
+
+static float v90_t3_coarse_score(v34_rx_state_t *s, int64_t first,
+                                 bool conjugate)
+{
+    double cross_re = 0.0;
+    double cross_im = 0.0;
+    double input_power = 0.0;
+    double target_power = 0.0;
+    int n;
+
+    for (n = 0;  n < s->v90_t3_b1_symbols;  n++)
+    {
+        complexf_t x = v90_t3_matched_get(s, first + 3*n);
+        complexf_t y = s->v90_t3_b1[n];
+        if (conjugate)
+            x.im = -x.im;
+        cross_re += y.re*x.re + y.im*x.im;
+        cross_im += y.im*x.re - y.re*x.im;
+        input_power += x.re*x.re + x.im*x.im;
+        target_power += y.re*y.re + y.im*y.im;
+    }
+    if (input_power < 1e-12 || target_power < 1e-12)
+        return 0.0f;
+    return (float)((cross_re*cross_re + cross_im*cross_im)
+                   /(input_power*target_power));
+}
+
+static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
+                        complexf_t coeff[V34_V90_T3_FSE_TAPS])
+{
+    enum { N = 2*V34_V90_T3_FSE_TAPS };
+    double matrix[N*N];
+    double rhs[N];
+    double solution[N];
+    int train = s->v90_t3_b1_symbols;
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    double trace = 0.0;
+    double error = 0.0;
+    double power = 0.0;
+    int n;
+    int row;
+    int column;
+
+    memset(matrix, 0, sizeof(matrix));
+    memset(rhs, 0, sizeof(rhs));
+    for (n = 0;  n < train;  n++)
+    {
+        double fr[N];
+        double fi[N];
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get(s, first + 3*n - pre + tap);
+            if (conjugate)
+                x.im = -x.im;
+            fr[2*tap] = x.re;
+            fr[2*tap + 1] = -x.im;
+            fi[2*tap] = x.im;
+            fi[2*tap + 1] = x.re;
+        }
+        for (row = 0;  row < N;  row++)
+        {
+            rhs[row] += fr[row]*s->v90_t3_b1[n].re
+                      + fi[row]*s->v90_t3_b1[n].im;
+            for (column = 0;  column < N;  column++)
+                matrix[row*N + column] += fr[row]*fr[column]
+                                        + fi[row]*fi[column];
+        }
+    }
+    for (row = 0;  row < N;  row++)
+        trace += matrix[row*N + row];
+    for (row = 0;  row < N;  row++)
+        matrix[row*N + row] += trace*1e-6;
+    if (!v90_t3_solve(matrix, rhs, solution, N))
+        return 0.0f;
+    for (n = 0;  n < s->v90_t3_b1_symbols;  n++)
+    {
+        double yr = 0.0;
+        double yi = 0.0;
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get(s, first + 3*n - pre + tap);
+            double ar = solution[2*tap];
+            double ai = solution[2*tap + 1];
+            if (conjugate)
+                x.im = -x.im;
+            yr += ar*x.re - ai*x.im;
+            yi += ar*x.im + ai*x.re;
+        }
+        error += (yr - s->v90_t3_b1[n].re)*(yr - s->v90_t3_b1[n].re)
+               + (yi - s->v90_t3_b1[n].im)*(yi - s->v90_t3_b1[n].im);
+        power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
+               + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
+    }
+    if (power <= 0.0 || error >= power)
+        return 0.0f;
+    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+    {
+        coeff[tap].re = (float)solution[2*tap];
+        coeff[tap].im = (float)solution[2*tap + 1];
+    }
+    return (float)(1.0 - error/power);
+}
+
+static void v90_t3_emit_ready(v34_rx_state_t *s)
+{
+    int pre = V34_V90_T3_FSE_TAPS/2;
+
+    while (s->v90_t3_acquired
+           && s->v90_t3_next_symbol - pre + V34_V90_T3_FSE_TAPS
+                <= s->v90_t3_raw_count)
+    {
+        complexf_t y = {0.0f, 0.0f};
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get(
+                s, s->v90_t3_next_symbol - pre + tap);
+            complexf_t z;
+            if (s->v90_t3_fse_conjugate)
+                x.im = -x.im;
+            z = complex_mulf(&s->v90_t3_fse[tap], &x);
+            y = complex_addf(&y, &z);
+        }
+        process_primary_symbol(s, &y);
+        s->v90_t3_next_symbol += 3;
+    }
+}
+
+static void v90_t3_try_acquire(v34_rx_state_t *s)
+{
+    enum { KEEP = 8, SEARCH_END = 240 };
+    float score[KEEP] = {0};
+    int64_t first[KEEP] = {0};
+    bool conjugate[KEEP] = {0};
+    complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
+    float best_match = 0.0f;
+    int64_t best_first = 0;
+    bool best_conjugate = false;
+    int pre = V34_V90_T3_FSE_TAPS/2;
+
+    if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
+        || s->v90_t3_b1_symbols <= 0
+        || s->v90_t3_raw_count < SEARCH_END
+             + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS)
+        return;
+    s->v90_t3_acquisition_attempted = true;
+    /* B1 begins at the E handover.  The range accounts for the causal
+       resampler/RRC group delay and media-block boundary uncertainty. */
+    for (int64_t f = pre + V34_V90_T3_RRC_TAPS/2;
+         f <= SEARCH_END;  f++)
+    {
+        for (int c = 0;  c < 2;  c++)
+        {
+            float q = v90_t3_coarse_score(s, f, c != 0);
+            for (int k = 0;  k < KEEP;  k++)
+            {
+                if (q > score[k])
+                {
+                    for (int j = KEEP - 1;  j > k;  j--)
+                    {
+                        score[j] = score[j - 1];
+                        first[j] = first[j - 1];
+                        conjugate[j] = conjugate[j - 1];
+                    }
+                    score[k] = q;
+                    first[k] = f - V34_V90_T3_RRC_TAPS/2;
+                    conjugate[k] = c != 0;
+                    break;
+                }
+            }
+        }
+    }
+    for (int k = 0;  k < KEEP;  k++)
+    {
+        complexf_t candidate[V34_V90_T3_FSE_TAPS];
+        float match = v90_t3_fit(s, first[k], conjugate[k], candidate);
+        if (match > best_match)
+        {
+            best_match = match;
+            best_first = first[k];
+            best_conjugate = conjugate[k];
+            memcpy(best_coeff, candidate, sizeof(best_coeff));
+        }
+    }
+    /* Dense high-rate B1 can produce a superficially plausible least-squares
+       solution which does not generalise into DATA.  Require a near-exact
+       complete-frame fit; the clean 21.6 kbit/s regression is 99.9%, while
+       the known-bad 28.8 kbit/s solution is only about 93%. */
+    if (best_match < 0.95f)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 T/3 B1 acquisition failed "
+                 "(first=%lld coarse=%.1f%% fit=%.1f%%)\n",
+                 (long long)best_first, 100.0f*score[0],
+                 100.0f*best_match);
+        s->received_event = V34_EVENT_TRAINING_FAILED;
+        return;
+    }
+    memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
+    s->v90_t3_training_match = best_match;
+    s->v90_t3_fse_conjugate = best_conjugate;
+    s->v90_t3_next_symbol = best_first;
+    s->v90_t3_acquired = true;
+    /* The supervised filter already maps onto the exact Q9.7 template grid. */
+    s->data_symbol_scale = 1.0f;
+    s->data_symbol_rotation = 0;
+    s->data_symbol_conjugate = false;
+    s->phase4_da_derot = 0;
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 upstream B1 acquired at 9.6 kHz T/3 "
+             "(sample=%lld, symbols=%d, fit=%.1f%%)\n",
+             (long long)best_first, s->v90_t3_b1_symbols,
+             100.0f*best_match);
+    v90_t3_emit_ready(s);
+}
+
+static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
+{
+    double angle = -2.0*M_PI
+                 * carrier_frequency(V34_BAUD_RATE_3200, s->high_carrier)
+                 * (double)s->v90_t3_output_count/9600.0;
+    complexf_t mixed;
+    complexf_t filtered = {0.0f, 0.0f};
+
+    mixed.re = value.re*(float)cos(angle) - value.im*(float)sin(angle);
+    mixed.im = value.re*(float)sin(angle) + value.im*(float)cos(angle);
+    s->v90_t3_rrc[s->v90_t3_rrc_pos] = mixed;
+    if (++s->v90_t3_rrc_pos >= V34_V90_T3_RRC_TAPS)
+        s->v90_t3_rrc_pos = 0;
+    for (int tap = 0;  tap < V34_V90_T3_RRC_TAPS;  tap++)
+    {
+        int pos = s->v90_t3_rrc_pos - 1 - tap;
+        if (pos < 0)
+            pos += V34_V90_T3_RRC_TAPS;
+        filtered.re += s->v90_t3_rrc_coeff[tap]*s->v90_t3_rrc[pos].re;
+        filtered.im += s->v90_t3_rrc_coeff[tap]*s->v90_t3_rrc[pos].im;
+    }
+    /* The RRC establishes the timing eye; the supervised fractionally spaced
+       solve uses the pre-RRC T/3 samples, as the reference receiver does, so
+       the adaptive filter owns the complete channel rather than inverting a
+       separately truncated matched filter. */
+    s->v90_t3_raw[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = mixed;
+    s->v90_t3_matched[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = filtered;
+    s->v90_t3_raw_count++;
+    s->v90_t3_output_count++;
+    if (!s->v90_t3_acquired)
+        v90_t3_try_acquire(s);
+    else
+        v90_t3_emit_ready(s);
+}
+
+static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
+{
+    const int half = V34_V90_T3_RESAMPLE_TAPS/2;
+
+    for (int i = 0;  i < len;  i++)
+    {
+        complexf_t analytic = {0.0f, 0.0f};
+        int64_t n;
+
+        s->qam_sample_time++;
+        (void) power_meter_update(&s->power, amp[i]);
+        s->v90_t3_hilbert[s->v90_t3_hilbert_pos] = amp[i];
+        if (++s->v90_t3_hilbert_pos >= V34_V90_T3_HILBERT_TAPS)
+            s->v90_t3_hilbert_pos = 0;
+        /* Streaming analytic signal.  Form it before resampling, matching the
+           proven reference receiver and preventing the negative-frequency
+           image from sitting only 256 Hz beyond the RRC transition band. */
+        {
+            int centre = V34_V90_T3_HILBERT_TAPS/2;
+            int real_pos = s->v90_t3_hilbert_pos - 1 - centre;
+            if (real_pos < 0)
+                real_pos += V34_V90_T3_HILBERT_TAPS;
+            analytic.re = s->v90_t3_hilbert[real_pos];
+            for (int tap = 0;  tap < V34_V90_T3_HILBERT_TAPS;  tap++)
+            {
+                int m = tap - centre;
+                int pos;
+                double window;
+                if (m == 0 || (m & 1) == 0)
+                    continue;
+                pos = s->v90_t3_hilbert_pos - 1 - tap;
+                if (pos < 0)
+                    pos += V34_V90_T3_HILBERT_TAPS;
+                window = 0.42 - 0.5*cos(2.0*M_PI*tap
+                                        /(V34_V90_T3_HILBERT_TAPS - 1))
+                         + 0.08*cos(4.0*M_PI*tap
+                                    /(V34_V90_T3_HILBERT_TAPS - 1));
+                analytic.im += (float)(window*2.0/(M_PI*m))
+                             * s->v90_t3_hilbert[pos];
+            }
+        }
+        n = s->v90_t3_input_count++;
+        {
+            int ring = (int)(n % (V34_V90_T3_RESAMPLE_TAPS + 8));
+            s->v90_t3_input[ring] = analytic;
+        }
+        /* Rational 6/5 interpolation.  Publication is delayed by half the
+           window, but input consumption remains exactly the caller's 8 kHz
+           length and the output count tends exactly to 6/5 of it. */
+        while (5*s->v90_t3_next_output <= 6*(n - half))
+        {
+            double t = 5.0*s->v90_t3_next_output/6.0;
+            int centre = (int)floor(t);
+            complexf_t y = {0.0f, 0.0f};
+            double norm = 0.0;
+            for (int k = centre - half;  k <= centre + half;  k++)
+            {
+                double d;
+                double sinc;
+                double window;
+                double h;
+                int pos;
+                if (k < 0 || k > n)
+                    continue;
+                d = t - k;
+                sinc = fabs(d) < 1e-12 ? 1.0 : sin(M_PI*d)/(M_PI*d);
+                window = 0.42 + 0.5*cos(M_PI*d/(half + 1.0))
+                         + 0.08*cos(2.0*M_PI*d/(half + 1.0));
+                h = sinc*window;
+                pos = k % (V34_V90_T3_RESAMPLE_TAPS + 8);
+                y.re += (float)h*s->v90_t3_input[pos].re;
+                y.im += (float)h*s->v90_t3_input[pos].im;
+                norm += h;
+            }
+            if (fabs(norm) > 1e-12)
+            {
+                y.re /= (float)norm;
+                y.im /= (float)norm;
+            }
+            v90_t3_put_sample(s, y);
+            s->v90_t3_next_output++;
+        }
+    }
+    return 0;
+}
+
 static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 {
     int i;
@@ -9056,6 +9549,11 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         192*8000*3/(2400*4),
         192*8000*7/(2400*10)
     };
+
+    /* This branch is internal DSP only. v34_rx() still consumes exactly len
+       8 kHz line samples; no sample is inserted into or removed from RTP. */
+    if (s->v90_t3_active && s->stage == V34_RX_STAGE_DATA)
+        return v90_t3_primary_rx(s, amp, len);
 
     /* Use the negotiated baud rate and carrier assignment.
        baud_rate is set from INFO1a (process_rx_info1a) or v34_rx_restart.
@@ -10005,10 +10503,10 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        skips the ordinary V.34 MP exchange that would otherwise reconfigure
        the receiver for data, so do it here, at the V90_CP seam: restore the
        negotiated data baud and recompute the carrier/shaper/parm state
-       without touching the trained equalizer, carrier-tracking or
-       decision-aided derotator (those carry CPt's solution into DATA per
-       the §9.4.2.2 channel-static assumption).  high_carrier is preserved
-       from the Phase-3/INFO1a assignment. */
+       while leaving the CP receiver intact through the remainder of E.
+       At the following B1 boundary the dedicated 9.6 kHz/T/3 branch acquires
+       its own timing/equalizer from known B1.  high_carrier is preserved from
+       the Phase-3/INFO1a assignment. */
     data_baud = V34_BAUD_RATE_3200;
     baud_env = getenv("ME_V90_UPSTREAM_BAUD");
     if (baud_env && *baud_env)
@@ -10037,6 +10535,10 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        timing/history at the E→B1 sample boundary. */
     cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
                V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->rx.v90_t3_prepared = (data_baud == V34_BAUD_RATE_3200);
+    s->rx.v90_t3_trellis_size = trellis_size;
+    /* V.90 §8.5.1 upstream B1/data uses the analogue-modem GPA tap. */
+    s->rx.scrambler_tap = 4;
     s->rx.use_non_linear_encoder = false;
     for (i = 0;  i < 3;  i++)
     {
@@ -10047,6 +10549,107 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
+{
+    return s && s->rx.v90_t3_acquired;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_upstream_sample_counts(v34_state_t *s,
+                                                  int64_t *input_8k,
+                                                  int64_t *output_96k)
+{
+    if (input_8k)
+        *input_8k = s ? s->rx.v90_t3_input_count : 0;
+    if (output_96k)
+        *output_96k = s ? s->rx.v90_t3_output_count : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v90_t3_b1_get_bit(void *user_data)
+{
+    (void) user_data;
+    return 1;
+}
+
+static void v90_t3_b1_put_bit(void *user_data, int bit)
+{
+    (void) user_data;
+    (void) bit;
+}
+
+static bool v90_t3_build_b1(v34_rx_state_t *rx)
+{
+    v34_state_t *tx;
+    int16_t frame[16];
+    int rate = (rx->bit_rate/2 + 1)*2400;
+
+    tx = v34_init(NULL, 3200, rate, true, true,
+                  v90_t3_b1_get_bit, NULL,
+                  v90_t3_b1_put_bit, NULL);
+    if (!tx)
+        return false;
+    tx->tx.scrambler_tap = 4;       /* V.90 analogue-modem GPA, §8.5.1. */
+    tx->tx.baud_rate = V34_BAUD_RATE_3200;
+    if (v34_seed_tx_data(tx, rate/2400, rx->v90_t3_trellis_size,
+                         0, 0, NULL) != 0)
+    {
+        v34_free(tx);
+        return false;
+    }
+    if (tx->tx.parms.j > 0)
+    {
+        tx->tx.super_frame = tx->tx.parms.j - 1;
+        tx->tx.v0_pattern = (uint16_t)(2*(tx->tx.parms.j - 1));
+    }
+    rx->v90_t3_b1_symbols = 0;
+    for (int mapping = 0;  mapping < tx->tx.parms.p;  mapping++)
+    {
+        if (v34_get_mapping_frame_state(tx, frame) != 16)
+            break;
+        for (int n = 0;  n < 8;  n++)
+        {
+            int dst = rx->v90_t3_b1_symbols++;
+            if (dst >= V34_V90_T3_B1_MAX_SYMBOLS)
+            {
+                v34_free(tx);
+                return false;
+            }
+            rx->v90_t3_b1[dst].re = frame[2*n]/128.0f;
+            rx->v90_t3_b1[dst].im = frame[2*n + 1]/128.0f;
+        }
+    }
+    v34_free(tx);
+    return rx->v90_t3_b1_symbols > 0;
+}
+
+static bool v90_t3_start(v34_rx_state_t *rx)
+{
+    rx->v90_t3_active = false;
+    rx->v90_t3_acquisition_attempted = false;
+    rx->v90_t3_acquired = false;
+    rx->v90_t3_input_count = 0;
+    rx->v90_t3_next_output = 0;
+    rx->v90_t3_output_count = 0;
+    rx->v90_t3_hilbert_pos = 0;
+    rx->v90_t3_rrc_pos = 0;
+    rx->v90_t3_raw_count = 0;
+    rx->v90_t3_next_symbol = 0;
+    rx->v90_t3_training_match = 0.0f;
+    rx->v90_t3_fse_conjugate = false;
+    memset(rx->v90_t3_hilbert, 0, sizeof(rx->v90_t3_hilbert));
+    memset(rx->v90_t3_input, 0, sizeof(rx->v90_t3_input));
+    memset(rx->v90_t3_rrc, 0, sizeof(rx->v90_t3_rrc));
+    memset(rx->v90_t3_raw, 0, sizeof(rx->v90_t3_raw));
+    memset(rx->v90_t3_matched, 0, sizeof(rx->v90_t3_matched));
+    memset(rx->v90_t3_fse, 0, sizeof(rx->v90_t3_fse));
+    v90_t3_make_rrc(rx);
+    if (!v90_t3_build_b1(rx))
+        return false;
+    rx->v90_t3_active = true;
+    return true;
+}
 
 SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
 {
@@ -10091,6 +10694,8 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     /*endfor*/
     s->rx.received_event = V34_EVENT_E;
     s->rx.mp_seen = 2;
+    if (s->rx.v90_t3_prepared && !v90_t3_start(&s->rx))
+        return -1;
     s->rx.stage = V34_RX_STAGE_DATA;
     return 0;
 }
@@ -10113,6 +10718,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.bit_rate = bit_rate;
     s->rx.high_carrier = high_carrier;
     s->rx.training_failed_reported = false;
+    s->rx.v90_t3_prepared = false;
+    s->rx.v90_t3_active = false;
     /* Phase 3/4 peer-retrain detectors: a restart returns to Phase 2, where
        primary_channel_rx() -- and therefore these detectors' out-of-stage
        reset branches -- never runs, so one-shot flags latched during the
