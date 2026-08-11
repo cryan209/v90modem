@@ -479,9 +479,21 @@ double vpcm_cp_drn_to_bps(uint8_t drn)
 
 int vpcm_cp_drn_to_k(uint8_t drn)
 {
-    if (drn == 0 || drn > 28)
+    return vpcm_cp_drn_to_k_sr(drn, 0);
+}
+
+int vpcm_cp_drn_to_k_sr(uint8_t drn, int sr)
+{
+    /*
+     * §5.4.1/§5.4.2: a data frame carries D = K + S bits, where S = 6 - Sr
+     * sign bits carry user data and K enter the modulus encoder.  Table 14's
+     * rate field names D (D = drn + 20 in a CP), so K follows Sr — assuming
+     * S = 6 understates K by exactly Sr, and the modulus encoder then has
+     * more bits to place than §5.4.3's 2^K <= prod(Mi) allows.
+     */
+    if (drn == 0 || drn > 28 || sr < 0 || sr > 3)
         return 0;
-    return (int) drn + 14;
+    return (int) drn + 14 + sr;
 }
 
 double vpcm_cp_robbed_bit_ceiling_bps(void)

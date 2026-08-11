@@ -5611,6 +5611,16 @@ static void prepare_v90_analogue_phase3_locked(void)
     cfg.u_info = g_v90a_u_info;
     cfg.md_units = 0;                   /* INFO1a announces no MD */
     cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
+    /*
+     * §5.4.5's Sr, which this side chooses and Phase 4's CPt/CP carry.  The
+     * default is 0 — spectral shaping disabled — because it is the only value
+     * that needs nothing agreed with the digital modem: no filter parameters
+     * to signal in Table 14 bits 69:101, no ld to keep consistent with Jd, and
+     * S = 6, so every one of the six sign bits carries data.  1 to 3 enable
+     * shaping and cost rate twice over (§5.4.1: S falls and K rises).
+     */
+    cfg.shaping_redundancy = parse_env_int("ME_V90_ANALOGUE_SR", 0);
+    cfg.shaping_lookahead = parse_env_int("ME_V90_ANALOGUE_LD", 0);
     cfg.v34 = g_v34;                    /* borrow the modulator Phase 2 configured */
     if (g_v90a_dil_valid)
         cfg.dil = g_v90a_dil;
@@ -5768,12 +5778,16 @@ static void me_v90_analogue_phase4_progress_locked(void)
 
         started_logged = true;
         if (cpt  &&  cp) {
+            /* K is the number the digital modem's mapper is built from, so it
+             * is the one worth logging beside the rate: Table 17 caps a CPt's
+             * at 24 and §5.4.3 caps both at log2(prod(Mi)). */
             ME_LOG("[ME] V.90 analogue Phase 4 started (§9.4.2.1): "
-                   "CPt drn=%u (%d bits/frame), CP drn=%u (%d bits/frame, "
-                   "%.0f bps), Sr=%u, %s\n",
-                   cpt->drn, cpt->drn + 8,
-                   cp->drn, cp->drn + 20, vpcm_cp_drn_to_bps(cp->drn),
-                   cp->shaping_redundancy,
+                   "CPt drn=%u (%d bits/frame, K=%d), CP drn=%u "
+                   "(%d bits/frame, K=%d, %.0f bps), Sr=%u, ld=%u, %s\n",
+                   cpt->drn, cpt->drn + 8, v90_analogue_phase4_cp_k(cpt),
+                   cp->drn, cp->drn + 20, v90_analogue_phase4_cp_k(cp),
+                   vpcm_cp_drn_to_bps(cp->drn),
+                   cp->shaping_redundancy, cp->shaping_lookahead,
                    cp->codec_alaw ? "A-law" : "u-law");
             trace_phase("V90a Phase4 start: CPt drn=%u CP drn=%u",
                         cpt->drn, cp->drn);

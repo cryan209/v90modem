@@ -75,6 +75,10 @@ struct v90_analogue_phase4_s {
     uint8_t  frame[6];
     int      frame_fill;
     uint32_t descramble_reg;
+    /* §5.4.5: with Sr = 0 the signs are §5.4.5.1's differential chain and
+     * there is no shaper; with Sr = 1 to 3 they come out of the shaper and
+     * `prev_sign` is unused.  One of the two is live, decided by the CPt. */
+    int      prev_sign;
     v90_shaped_rx_state_t shaper;
     int      trn2d_symbols;
     int      trn2d_ones;
@@ -108,10 +112,15 @@ v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config
 
     if (cfg == NULL)
         return NULL;
-    /* Table 14: CPt's rate field is (drn + 8) bits per six-symbol frame, where
+    /*
+     * Table 14: CPt's rate field is (drn + 8) bits per six-symbol frame, where
      * CP's is (drn + 20).  Using the wrong one puts this demapper on a
-     * different frame length than the digital modem's mapper. */
-    if (cfg->cpt.shaping_redundancy < 1  ||  cfg->cpt.shaping_redundancy > 3)
+     * different frame length than the digital modem's mapper.  Sr comes from
+     * the same frame and decides how the six sign bits carry it (§5.4.5).
+     */
+    if (cfg->cpt.shaping_redundancy > 3)
+        return NULL;
+    if (v90_analogue_phase4_cp_k(&cfg->cpt) < 0)
         return NULL;
     if ((s = calloc(1, sizeof(*s))) == NULL)
         return NULL;
@@ -304,8 +313,18 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
     unsigned events = 0;
     int n;
 
-    n = v90_demap_shaped_frame(s->cfg.law, &s->cfg.cpt, s->bits_per_frame,
-                               &s->descramble_reg, &s->shaper, s->frame, out);
+    /* §5.4.5: Sr = 0 disables spectral shaping, and the signs are then
+     * §5.4.5.1's differential chain rather than the shaper's output. */
+    if (s->cfg.cpt.shaping_redundancy == 0) {
+        n = v90_demap_mapped_frame(s->cfg.law, &s->cfg.cpt, s->bits_per_frame,
+                                   &s->descramble_reg, &s->prev_sign,
+                                   s->frame, out);
+    } else {
+        n = v90_demap_shaped_frame(s->cfg.law, &s->cfg.cpt, s->bits_per_frame,
+                                   &s->descramble_reg, &s->shaper, s->frame,
+                                   out);
+    }
+    /*endif*/
     if (n <= 0) {
         /*
          * A frame that will not demap is a frame whose codewords are not in
@@ -459,9 +478,11 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
          */
         s->r_bar_symbols++;
         if (s->r_bar_symbols >= R_BAR_SYMBOLS  ||  ucode != s->r_ucode) {
-            /* §8.6.5: scrambler and shaping state are zero at TRN2d's first
-             * frame, which is what makes everything after it decodable. */
+            /* §8.6.5: scrambler, differential encoder and shaping state are
+             * all zero at TRN2d's first frame, which is what makes everything
+             * after it decodable. */
             s->descramble_reg = 0;
+            s->prev_sign = 0;
             memset(&s->shaper, 0, sizeof(s->shaper));
             s->frame_fill = 0;
             s->bit_len = 0;
@@ -561,22 +582,76 @@ int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s)
     return s ? s->trn2d_ones : 0;
 }
 
+int v90_analogue_phase4_cp_k(const vpcm_cp_frame_t *cp)
+{
+    uint64_t product = 1;
+    int d;
+    int k;
+
+    if (cp == NULL  ||  cp->drn == 0  ||  cp->shaping_redundancy > 3)
+        return -1;
+    /* Table 14 bit 19 picks the rate encoding, and §5.4.1 takes the sign bits
+     * back out of it. */
+    d = cp->drn + (cp->v90_compatibility ? 20 : 8);
+    k = d - (6 - cp->shaping_redundancy);
+    if (k < 1  ||  k > 56)
+        return -1;
+    /*
+     * Table 17: Phase 4's K runs from 6 to 24, where data mode's (Table 2)
+     * runs to 39.  A CPt above 24 is the one number a digital modem cannot
+     * work around -- §8.6.5 maps TRN2d with it, so it has nothing to train on
+     * and §9.4.1.2 never answers.
+     */
+    if (!cp->v90_compatibility  &&  (k < 6  ||  k > 24))
+        return -1;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        int c = cp->dfi[i];
+        int mi;
+
+        if (c < 0  ||  c >= cp->constellation_count)
+            return -1;
+        if ((mi = vpcm_cp_mask_population(cp->masks[c])) <= 0)
+            return -1;
+        product *= (uint64_t) mi;
+    }
+    /* §5.4.3: 2^K <= prod(Mi), or the modulus encoder has more to place than
+     * the constellations hold. */
+    if (k < 64  &&  product < (1ULL << k))
+        return -1;
+    return k;
+}
+
 bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   v90_law_t law,
+                                  int shaping_redundancy,
+                                  int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,
                                   vpcm_cp_frame_t *cp_out)
 {
     v90_dil_rate_plan_t plan;
     vpcm_cp_frame_t cp;
     vpcm_cp_frame_t cpt;
-    int d;
+    int s;
+    int k;
 
     if (m == NULL  ||  cpt_out == NULL  ||  cp_out == NULL)
         return false;
+    if (shaping_redundancy < 0  ||  shaping_redundancy > 3)
+        return false;
+    /* §8.5.2: ld is the look-ahead requested *during spectral shaping*, so
+     * with §5.4.5's shaping disabled there is nothing for it to describe. */
+    if (shaping_lookahead < 0  ||  shaping_lookahead > 3
+        ||
+        (shaping_redundancy == 0  &&  shaping_lookahead != 0)) {
+        return false;
+    }
     /* The same call the engine already makes to report the rate: measured
      * noise from the bottom of the ladder, §8.5.2's Table 15 cap from the top
-     * (docs/v90_constellation_selection.md). */
-    if (!v90_dil_measure_plan_rate(m, 0, 3.0, 0.0, law, &plan))
+     * (docs/v90_constellation_selection.md).  Sr goes in here rather than onto
+     * the frame afterwards because it decides the rate the plan comes back
+     * with. */
+    if (!v90_dil_measure_plan_rate_sr(m, 0, 3.0, 0.0, law,
+                                      shaping_redundancy, &plan))
         return false;
     if (plan.intervals_unprobed != 0)
         return false;
@@ -585,10 +660,8 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
     cp.v90_compatibility = true;        /* Table 14 bit 19: 1 = CP */
     cp.drn = plan.drn;
     cp.codec_alaw = (law == V90_LAW_ALAW);
-    /* Sr = 1 is the minimum §5.4.5 allows and the only value with no spectral
-     * shaping to agree on; ld = 0 follows from it. */
-    cp.shaping_redundancy = 1;
-    cp.shaping_lookahead = 0;
+    cp.shaping_redundancy = (uint8_t) shaping_redundancy;
+    cp.shaping_lookahead = (uint8_t) shaping_lookahead;
     /*
      * Table 14 bits 52:67 -- the RMS of TRN1d at the digital modem's output
      * over its RMS at the codec's D/A, unsigned Q3.13.  The measurement's
@@ -621,24 +694,34 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
      * CPt.  §8.5.2 caps CP's average power at 3 dB above CPt's, and the
      * simplest way to satisfy that with a measurement rather than a guess is
      * to name the same constellations in both: the difference is then zero.
-     * What changes is the rate, and Table 14 encodes the two differently --
-     * (drn + 20) bits per frame in CP against (drn + 8) in CPt -- so the same
-     * D is a different drn in each, and CPt's field cannot always reach it.
-     * Where it cannot, CPt runs at the highest rate its field can express;
-     * fewer bits per frame over the same constellation is always encodable,
-     * and TRN2d and MP do not need the line's full rate.
+     * What changes is the rate, and the quantity to carry across is K, not the
+     * field -- Table 14 encodes D differently in the two ((drn + 20) against
+     * (drn + 8)) while §5.4.3 and §8.6.5 are both about K.
+     *
+     * Table 17 then caps Phase 4's K at 24 where data mode's runs to 39, so a
+     * fast line's CPt trains at a lower rate than it will carry.  That costs
+     * nothing: fewer bits per frame over the same constellation is always
+     * encodable, and TRN2d and MP do not need the line's full rate.
      */
+    s = 6 - shaping_redundancy;
+    k = plan.k;
+    if (k > 24)
+        k = 24;
     cpt = cp;
     cpt.v90_compatibility = false;      /* Table 14 bit 19: 0 = CPt */
-    d = (int) cp.drn + 20;
-    if (d - 8 > 22)
-        cpt.drn = 22;
-    else if (d - 8 < 0)
-        cpt.drn = 0;
-    else
-        cpt.drn = (uint8_t) (d - 8);
+    if (k + s - 8 < 1  ||  k + s - 8 > 22)
+        return false;
+    cpt.drn = (uint8_t) (k + s - 8);
 
     if (!vpcm_cp_validate(&cp, NULL, 0)  ||  !vpcm_cp_validate(&cpt, NULL, 0))
+        return false;
+    /*
+     * The check the digital modem is about to make.  Getting here with a frame
+     * that fails it is how a Phase 4 stalls with the line looking perfect:
+     * §9.4.1.2 sends R̄i only after *receiving* a CPt, and a CPt it cannot
+     * build a mapper from is not one it has received.
+     */
+    if (v90_analogue_phase4_cp_k(&cpt) < 0  ||  v90_analogue_phase4_cp_k(&cp) < 0)
         return false;
     *cp_out = cp;
     *cpt_out = cpt;

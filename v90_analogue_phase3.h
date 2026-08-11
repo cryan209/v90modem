@@ -34,6 +34,16 @@ typedef struct {
     bool      scr_during_dil;   /* §9.3.2.9: SCR rather than silence */
     double    dil_coverage;     /* §9.3.2.10 stopping rule; 0 = default */
     /*
+     * §5.4.5's Sr, carried into Phase 4's CPt and CP: 0 disables spectral
+     * shaping, 1 to 3 spend that many of the six sign bits on it.  This side
+     * chooses it, and it moves the rate both ways (§5.4.1), so it is settled
+     * here rather than in the CP builder.  `shaping_lookahead` is Table 14's
+     * ld and must not exceed the digital modem's Jd bits 49:50; it is ignored
+     * — and required to be zero — when Sr is zero.
+     */
+    int       shaping_redundancy;
+    int       shaping_lookahead;
+    /*
      * A V.34 context to borrow as the modulator.  Phase 2 has already
      * configured one — power, symbol rate, carrier — and its receiver is what
      * read INFO0d/INFO1d, so the live engine passes it here rather than

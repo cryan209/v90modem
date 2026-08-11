@@ -469,12 +469,12 @@ double v90_dil_constellation_power(const uint8_t mask[6][VPCM_CP_MASK_BYTES],
     return total / (6.0 * two_k);
 }
 
-static int dil_drn_for_bits(double bits)
+static int dil_drn_for_bits(double bits, int sr)
 {
     int d;
 
     for (d = 22; d >= 0; d--) {
-        int k = vpcm_cp_drn_to_k((uint8_t) d);
+        int k = vpcm_cp_drn_to_k_sr((uint8_t) d, sr);
 
         if (k > 0 && (double) k <= bits)
             return d;
@@ -489,16 +489,30 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                v90_law_t law,
                                v90_dil_rate_plan_t *out)
 {
+    return v90_dil_measure_plan_rate_sr(m, level_margin, noise_sigmas,
+                                        max_tx_dbm0, law, 0, out);
+}
+
+bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
+                                  int level_margin,
+                                  double noise_sigmas,
+                                  double max_tx_dbm0,
+                                  v90_law_t law,
+                                  int shaping_redundancy,
+                                  v90_dil_rate_plan_t *out)
+{
     double bits = 0.0;
     double sigma_acc = 0.0;
     int sigma_n = 0;
     int widest = 0;
     int i;
 
-    if (!m || !out || level_margin < 0)
+    if (!m || !out || level_margin < 0
+        || shaping_redundancy < 0 || shaping_redundancy > 3)
         return false;
 
     memset(out, 0, sizeof(*out));
+    out->sr = (uint8_t) shaping_redundancy;
 
     for (i = 0; i < 6; i++) {
         int prev_level = -1;
@@ -581,10 +595,11 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
      * §5.4.3: the modulus encoder has to fit K bits into the product of the
      * Mi, so the largest drn the line supports is the largest whose K does
      * not exceed sum(log2(Mi)).  §5.4.1 then fixes the rate: D = drn + 20
-     * bits per 6-symbol frame at 8000 symbols/s.
+     * bits per 6-symbol frame at 8000 symbols/s, of which S = 6 - Sr are
+     * sign bits and the rest are K.
      */
     {
-        int d = dil_drn_for_bits(bits);
+        int d = dil_drn_for_bits(bits, shaping_redundancy);
 
         if (d < 0)
             return false;
@@ -605,7 +620,7 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
     out->power_limit = v90_dil_power_limit(max_tx_dbm0);
     if (out->power_limit > 0.0) {
         for (;;) {
-            int k = vpcm_cp_drn_to_k(out->drn);
+            int k = vpcm_cp_drn_to_k_sr(out->drn, shaping_redundancy);
             int fattest = 0;
             int u;
             int highest = -1;
@@ -640,7 +655,7 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                 bits += log2((double) out->mi[i]);
             out->bits_available = bits;
             {
-                int d = dil_drn_for_bits(bits);
+                int d = dil_drn_for_bits(bits, shaping_redundancy);
 
                 if (d < 0)
                     return false;
@@ -660,6 +675,7 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
             out->robbed_bit_limited = true;
     }
 
+    out->k = vpcm_cp_drn_to_k_sr(out->drn, shaping_redundancy);
     out->bps = vpcm_cp_drn_to_bps(out->drn);
     return true;
 }

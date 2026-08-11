@@ -537,17 +537,71 @@ reach CP's D (22 is its maximum, so 30 bits per frame); where it cannot, CPt
 runs at the highest rate it can express, which is always encodable over the
 same constellation and is more than TRN2d and MP need.
 
-### Where Phase 4 stops: the card never leaves Ri
+### Where Phase 4 stopped: the card never left Ri — because Sr said 1
 
-The card's entire Phase 4 downstream is two codewords, ±Ucode 22, in the
+The card's entire Phase 4 downstream was two codewords, ±Ucode 22, in the
 `+ + + − − −` of §8.6.4 — 79 979 runs of exactly three signs over thirty
-seconds. It is a textbook Ri and it never becomes R̄i, so there is no TRN2d and
-no MP. §9.4.1.1 has the digital modem "send signal Ri … and condition its
-receiver to receive a CPt sequence" and §9.4.1.2 sends R̄i only "after receiving
-a CPt sequence", so **the card is not accepting our CPt**. That is the next
-thing to establish, and the leading suspicion is its content rather than its
-framing: the DIL came back 11.77 dB down, so the levels our masks name may not
-be levels this card will transmit.
+seconds. A textbook Ri that never became R̄i, so no TRN2d and no MP. §9.4.1.1
+has the digital modem "send signal Ri … and condition its receiver to receive a
+CPt sequence" and §9.4.1.2 sends R̄i only "after receiving a CPt sequence", so
+the card was not accepting our CPt.
+
+**It was ours, and the 11.77 dB pad was a red herring: the CPt was arithmetically
+invalid at every attenuation.** `v90_analogue_phase4_build_cp()` set Sr = 1, on
+the premise — written into the comment — that "Sr = 1 is the minimum §5.4.5
+allows and the only value with no spectral shaping to agree on". §5.4.5 says the
+opposite: *"The redundancy, Sr, … can be 0, 1, 2 or 3. When Sr = 0, spectral
+shaping is disabled."* Sr = 1 is shaping **enabled**, with one of the six sign
+bits spent on it, so S = 5 rather than 6. Everything downstream of that assumed
+S = 6:
+
+- **CPt broke Table 17.** §5.4.1 has D = K + S bits per data frame, and Table 14
+  gives D (drn + 8 in a CPt). At drn = 22 that is D = 30, so K = 30 − 5 = 25.
+  Table 17 caps Phase 4 at K = 24 — 40 kbit/s, reachable only at S = 6. §8.6.5
+  maps TRN2d with the CPt's K, so a digital modem cannot build the mapper it is
+  about to train with, and there is nothing for §9.4.1.2 to answer.
+- **CP broke §5.4.3.** `vpcm_cp_drn_to_k()` was `drn + 14`, i.e. K = D − 6, and
+  `v90_dil_measure_plan_rate()` picked the largest drn whose K fit
+  Σlog₂(Mi) under that formula. Declaring Sr = 1 added a bit to the real K, so
+  2^K > ∏Mi essentially always — the modulus encoder cannot exist.
+
+Neither needs the card to demonstrate. Feeding the builder's own output into
+this tree's *digital* half — `v90_set_phase4_cp()`, whose checks are Table 17 at
+[`v90.c`](../v90.c) `v90_configure_phase4_mapper()` and §5.4.3 beside it —
+rejects the CPt on every measurement tried, from 9 usable Ucodes to 65 and 0 dB
+of pad to 11.77. Flip Sr to 0 and all of them are accepted. The live run's
+reported `CPt drn=22 (30 bits/frame) / CP drn=17` is that case exactly.
+
+**The fix is Sr-awareness rather than a different constant**, because all four
+values are legal and the rate arithmetic differs in each:
+
+- `vpcm_cp_drn_to_k_sr(drn, sr)` = D − (6 − Sr); the old
+  `vpcm_cp_drn_to_k()` is now its Sr = 0 case.
+- `v90_dil_measure_plan_rate_sr()` derives the rate under a chosen Sr, and the
+  plan carries the Sr and K it was derived with, because drn alone does not name
+  a rate.
+- `v90_analogue_phase4_build_cp()` takes Sr and ld. CPt's rate is now derived
+  from **K** — `min(K_CP, 24)`, then back to a drn through the CPt encoding —
+  rather than clamped at the field maximum, which is the same answer only when
+  Sr = 0.
+- `v90_analogue_phase4_cp_k()` is the check itself, and the builder runs it on
+  both frames before returning them: −1 for a K outside Table 17 (CPt) or a
+  constellation that cannot hold 2^K (§5.4.3).
+- The analogue Phase 4 receiver demaps through `v90_demap_mapped_frame()` when
+  Sr = 0 (§5.4.5.1's differential sign chain) and `v90_demap_shaped_frame()`
+  otherwise. `v90_generate_phase4_codewords()` and
+  `v90_generate_trn2d_codewords()` gained the same branch, so the regression
+  test can generate the downstream the shipped configuration implies.
+- §8.5.2 wants ld "consistent with the capabilities of the digital modem
+  indicated in Jd", whose bits 49:50 carry its maximum. That is now clamped in
+  `v90_analogue_phase3.c` at the handover, which is the first point where Jd has
+  been decoded.
+
+**The default is Sr = 0** (`ME_V90_ANALOGUE_SR`, with `ME_V90_ANALOGUE_LD` for
+ld). It is the only value that needs nothing agreed with the far end: no filter
+parameters in Table 14 bits 69:101, no ld to keep consistent with Jd, and all
+six sign bits carrying data. Untested against the card — the run that would say
+whether R̄i follows has not been taken.
 
 That capture also cost a receiver fix worth recording. The stream carries 24
 anomalies in those thirty seconds — runs of one and five signs where every
@@ -561,15 +615,23 @@ re-acquires the alignment instead of carrying a wrong one.
 `v90_analogue_rx_test` covers the receiver against a Phase 4 downstream
 generated by `v90.c` — the digital side of this same tree, which is the pairing
 a real call has — through Ri, the R̄i transition, TRN2d demapping to §8.6.5's
-ones, and a Table 16 MP′ with its CRC. What that cannot check is the convention
-questions the Eicon fixtures answer for Phase 3: there is no foreign Phase 4
-downstream in this tree, so §8.6.4's level and §8.6.5's frame alignment are
-still agreed between two halves of one codebase.
+ones, and a Table 16 MP′ with its CRC, at all four values of Sr. The CPt/CP
+builder is now checked the same way: every frame it produces goes into
+`v90_set_phase4_cp()`, so an invalid one fails the suite rather than a live
+call. That pairing is what the old test lacked — it asserted `Sr >= 1` next to
+the code that set `Sr = 1`, and built its own drn = 12 CPt for the receive test,
+so the configuration actually transmitted was never mapped by anything.
+
+What none of it can check is the convention questions the Eicon fixtures answer
+for Phase 3: there is no foreign Phase 4 downstream in this tree, so §8.6.4's
+level and §8.6.5's frame alignment are still agreed between two halves of one
+codebase.
 
 ## What is left
 
-1. **Get the card to accept our CPt**, which is what stands between here and
-   TRN2d/MP. See above.
+1. **A live call at Sr = 0**, to see whether R̄i follows. The CPt is valid now by
+   the check the digital modem makes; whether this card wants anything else is
+   unmeasured.
 2. **B1 (§9.4.2.5)** — E is transmitted; B1 is one data frame of scrambled ones
    through the *data mode* mapper, which the analogue role does not have (the
    upstream data path is still SpanDSP's V.22bis placeholder). The transmitter

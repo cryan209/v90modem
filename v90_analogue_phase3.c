@@ -28,6 +28,8 @@ struct v90_analogue_phase3_s {
      */
     v90_law_t              law;
     int                    u_info;
+    int                    shaping_redundancy;
+    int                    shaping_lookahead;
     v90_analogue_phase4_t *p4;
     vpcm_cp_frame_t        cpt;
     vpcm_cp_frame_t        cp;
@@ -43,6 +45,15 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
 
     if (cfg == NULL  ||  cfg->baud_rate_code < 0  ||  cfg->baud_rate_code > 5)
         return NULL;
+    if (cfg->shaping_redundancy < 0  ||  cfg->shaping_redundancy > 3)
+        return NULL;
+    /* §8.5.2: ld describes look-ahead *during spectral shaping*, so Sr = 0
+     * leaves it nothing to describe. */
+    if (cfg->shaping_lookahead < 0  ||  cfg->shaping_lookahead > 3
+        ||
+        (cfg->shaping_redundancy == 0  &&  cfg->shaping_lookahead != 0)) {
+        return NULL;
+    }
     if ((s = calloc(1, sizeof(*s))) == NULL)
         return NULL;
 
@@ -60,6 +71,8 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
 
     s->law = cfg->law;
     s->u_info = cfg->u_info;
+    s->shaping_redundancy = cfg->shaping_redundancy;
+    s->shaping_lookahead = cfg->shaping_lookahead;
 
     s->tx = v90_analogue_tx_init(&txc);
     s->rx = v90_analogue_rx_init(&rxc);
@@ -153,6 +166,7 @@ static void start_phase4(v90_analogue_phase3_t *s)
 {
     v90_analogue_phase4_config_t p4c;
     const v90_dil_measurement_t *m;
+    int ld;
 
     if (s->p4 != NULL  ||  s->phase4_failed)
         return;
@@ -160,7 +174,28 @@ static void start_phase4(v90_analogue_phase3_t *s)
         return;
     if ((m = v90_analogue_rx_measurement(s->rx)) == NULL)
         return;
-    if (!v90_analogue_phase4_build_cp(m, s->law, &s->cpt, &s->cp)) {
+    /*
+     * §8.5.2: ld "shall be consistent with the capabilities of the digital
+     * modem indicated in Jd", whose bits 49:50 are its maximum.  Jd has been
+     * decoded by now -- §9.3.2.7 is upstream of here -- so this is the first
+     * point where the requirement can actually be met.
+     */
+    ld = s->shaping_lookahead;
+    if (s->shaping_redundancy > 0) {
+        const uint8_t *jd = v90_analogue_rx_jd_bits(s->rx);
+
+        if (jd != NULL) {
+            int max_ld = (jd[49] & 1) | ((jd[50] & 1) << 1);
+
+            if (ld > max_ld)
+                ld = max_ld;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+    if (!v90_analogue_phase4_build_cp(m, s->law, s->shaping_redundancy, ld,
+                                      &s->cpt, &s->cp)) {
         s->phase4_failed = true;
         return;
     }

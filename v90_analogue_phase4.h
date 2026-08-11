@@ -105,6 +105,18 @@ int v90_analogue_phase4_demap_failures(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s);
 
 /*
+ * §5.4.1's K for a CP frame — the bits that enter the modulus encoder, which
+ * is the number both mappers have to agree on and the only one that can be
+ * checked against the frame itself.  Table 14 bit 19 says which rate encoding
+ * the frame uses (D = drn + 8 for a CPt, drn + 20 for a CP) and Sr says how
+ * many of the six sign bits are shaping redundancy, so K = D - (6 - Sr).
+ *
+ * Returns -1 when the frame is not one a digital modem could act on: §5.4.3's
+ * 2^K <= prod(Mi) fails, or a CPt's K is outside Table 17's 6 to 24.
+ */
+int v90_analogue_phase4_cp_k(const vpcm_cp_frame_t *cp);
+
+/*
  * Build the CPt and CP frames a measured DIL implies (§8.5.2).
  *
  * CPt names the constellation the digital modem trains on and CP the one it
@@ -113,9 +125,19 @@ int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s);
  * for CPt — so the same line rate is a different drn in each, and conflating
  * them puts the digital modem's mapper on a different number of bits per frame
  * than its receiver is decoding.
+ *
+ * `shaping_redundancy` is §5.4.5's Sr, which this side chooses: 0 disables
+ * spectral shaping, 1 to 3 enable it and spend that many sign bits on it.  It
+ * has to be decided here rather than stamped on afterwards, because it moves
+ * both halves of the rate — S = 6 - Sr sign bits carry data, and K grows by Sr.
+ * `shaping_lookahead` is Table 14's ld, which §8.5.2 requires to be consistent
+ * with the digital modem's maximum in Jd bits 49:50; it must be 0 when Sr is,
+ * there being no shaping to look ahead for.
  */
 bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   v90_law_t law,
+                                  int shaping_redundancy,
+                                  int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,
                                   vpcm_cp_frame_t *cp_out);
 

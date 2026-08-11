@@ -4613,12 +4613,12 @@ int v90_generate_trn2d_codewords(v90_law_t law,
     int bits_per_frame;
     int sign_bits;
     int modulus_bits;
+    int prev_sign = 0;
     int output_frame = 0;
     int input_frames;
 
     if (!cp || !initial_state || !codewords_out || frames <= 0
         || codewords_max < frames * V90_FRAME_LEN
-        || cp->shaping_redundancy < 1
         || cp->shaping_redundancy > 3
         || cp->shaping_lookahead > 3)
         return 0;
@@ -4638,13 +4638,26 @@ int v90_generate_trn2d_codewords(v90_law_t law,
     v90_scrambler_init(&scrambler);
     /* ld is measured in shaping frames. Buffer enough six-symbol PCM frames
      * to expose ld future shaping frames, then feed the same number of extra
-     * all-ones frames to emit the requested final TRN2d frame. */
+     * all-ones frames to emit the requested final TRN2d frame.  With §5.4.5's
+     * shaping disabled (Sr = 0) there is no look-ahead and no delay. */
     input_frames = frames + v90_shaper_delay_frames(cp);
     for (int input_frame = 0; input_frame < input_frames; input_frame++) {
         uint8_t scrambled[64];
 
         for (int bit = 0; bit < bits_per_frame; bit++)
             scrambled[bit] = (uint8_t)v90_scramble_bit(&scrambler, 1);
+        if (cp->shaping_redundancy == 0) {
+            if (!v90_map_scrambled_frame(
+                    &local,
+                    cp,
+                    modulus_bits,
+                    scrambled,
+                    &prev_sign,
+                    codewords_out + output_frame * V90_FRAME_LEN))
+                return 0;
+            output_frame++;
+            continue;
+        }
         if (!v90_map_shaped_scrambled_frame(
                 &local,
                 cp,
@@ -4679,12 +4692,12 @@ int v90_generate_phase4_codewords(v90_law_t law,
     int bits_per_frame;
     int sign_bits;
     int modulus_bits;
+    int prev_sign = 0;
     int output_frame = 0;
     int input_frames;
 
     if (!cp || !initial_state || !plain_bits || !codewords_out || frames <= 0
         || codewords_max < frames * V90_FRAME_LEN
-        || cp->shaping_redundancy < 1
         || cp->shaping_redundancy > 3
         || cp->shaping_lookahead > 3)
         return 0;
@@ -4712,6 +4725,18 @@ int v90_generate_phase4_codewords(v90_law_t law,
             int plain = plain_bits[source_frame * bits_per_frame + bit] & 1;
 
             scrambled[bit] = (uint8_t)v90_scramble_bit(&scrambler, plain);
+        }
+        if (cp->shaping_redundancy == 0) {
+            if (!v90_map_scrambled_frame(
+                    &local,
+                    cp,
+                    modulus_bits,
+                    scrambled,
+                    &prev_sign,
+                    codewords_out + output_frame * V90_FRAME_LEN))
+                return 0;
+            output_frame++;
+            continue;
         }
         if (!v90_map_shaped_scrambled_frame(
                 &local,

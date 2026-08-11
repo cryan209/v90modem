@@ -132,6 +132,14 @@ typedef struct {
     int     mi[6];                        /* |Ci| */
     double  bits_available;               /* sum of log2(Mi) */
     uint8_t drn;
+    /*
+     * The spectral-shaping redundancy the rate was derived under (§5.4.5).
+     * It belongs with `drn` because the two only mean a rate together: Table
+     * 14's field names D, and K = D - (6 - Sr) is what §5.4.3 measures against
+     * prod(Mi).  A CP built from this plan must carry this Sr.
+     */
+    uint8_t sr;
+    int     k;                            /* §5.4.1 modulus encoder bits */
     double  bps;
     bool    robbed_bit_limited;           /* some interval carries fewer points */
 
@@ -199,5 +207,20 @@ bool v90_dil_measure_plan_rate(const v90_dil_measurement_t *m,
                                double max_tx_dbm0,
                                v90_law_t law,
                                v90_dil_rate_plan_t *out);
+
+/*
+ * The same, for a chosen spectral-shaping redundancy (§5.4.5): Sr = 0 disables
+ * shaping, 1 to 3 spend that many of the six sign bits on it.  Sr costs rate
+ * twice over -- S = 6 - Sr sign bits carry data, and the K the remaining
+ * bits must fit into §5.4.3 with grows by Sr -- so it cannot be chosen after
+ * the fact.  v90_dil_measure_plan_rate() is Sr = 0.
+ */
+bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
+                                  int level_margin,
+                                  double noise_sigmas,
+                                  double max_tx_dbm0,
+                                  v90_law_t law,
+                                  int shaping_redundancy,
+                                  v90_dil_rate_plan_t *out);
 
 #endif

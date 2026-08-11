@@ -367,7 +367,7 @@ static int build_mp_type0(uint8_t *bits, uint8_t max_drn, bool acknowledge)
     return 102;
 }
 
-static void test_phase4_receive(void)
+static void test_phase4_receive(int sr)
 {
     v90_analogue_phase4_config_t cfg;
     v90_analogue_phase4_t *rx;
@@ -388,12 +388,20 @@ static void test_phase4_receive(void)
     const int r_bar_reps = 4;            /* §8.6.4: exactly four */
     const int ucode = 40;
 
-    printf("§9.4.2 receive against a v90.c-generated Phase 4 downstream\n");
+    printf("§9.4.2 receive against a v90.c-generated Phase 4 downstream (Sr=%d)\n",
+           sr);
 
     vpcm_cp_init(&cpt);
     cpt.v90_compatibility = false;       /* Table 14 bit 19: 0 = CPt */
     cpt.drn = 12;
-    cpt.shaping_redundancy = 1;
+    /*
+     * §5.4.5: Sr = 0 disables spectral shaping and the six sign bits are
+     * §5.4.5.1's differential chain; 1 to 3 run the shaper.  Both are legal
+     * for a CPt and the two demap by different routes, so the receiver is run
+     * against a downstream generated each way.
+     */
+    cpt.shaping_redundancy = (uint8_t) sr;
+    cpt.shaping_lookahead = 0;
     cpt.constellation_count = 1;
     vpcm_cp_enable_all_ucodes(cpt.masks[0]);
     for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
@@ -535,23 +543,69 @@ static void test_phase4_cp_from_measurement(void)
     m.usable_count = V90_DIL_UCODES - 1;
     m.coverage = 1.0;
 
-    if (!v90_analogue_phase4_build_cp(&m, V90_LAW_ULAW, &cpt, &cp)) {
-        printf("  SKIP: this measurement yields no offerable constellation\n");
-        return;
+    /*
+     * Every Sr §5.4.5 allows, because the rate arithmetic is different in each
+     * and getting it wrong is invisible from this side: a CPt that no digital
+     * modem can build a mapper from still encodes, still passes its own CRC,
+     * and still demaps against itself.
+     */
+    for (int sr = 0; sr <= 3; sr++) {
+        int ld = (sr == 0) ? 0 : 1;
+        v90_state_t *digital;
+        int cpt_k;
+        int cp_k;
+
+        if (!v90_analogue_phase4_build_cp(&m, V90_LAW_ULAW, sr, ld, &cpt, &cp)) {
+            printf("  FAIL: Sr=%d yielded no offerable constellation\n", sr);
+            failures++;
+            continue;
+        }
+        CHECK(cpt.v90_compatibility == false, "CPt has Table 14 bit 19 set");
+        CHECK(cp.v90_compatibility == true, "CP has Table 14 bit 19 clear");
+        CHECK(cpt.drn <= 22, "CPt drn %u exceeds Table 14's range", cpt.drn);
+        CHECK(cp.drn <= 28, "CP drn %u exceeds what vpcm_cp accepts", cp.drn);
+        CHECK(cpt.shaping_redundancy == sr  &&  cp.shaping_redundancy == sr,
+              "Sr=%d asked for, Sr=%u/%u built", sr,
+              cpt.shaping_redundancy, cp.shaping_redundancy);
+        /* §8.5.2 caps CP's average power 3 dB above CPt's; naming the same
+         * constellations in both makes the difference zero by construction. */
+        CHECK(memcmp(cpt.masks, cp.masks, sizeof(cpt.masks)) == 0,
+              "CPt and CP name different constellations, so §8.5.2 needs checking");
+
+        /* Table 17 and §5.4.3, which is where a wrong Sr shows up. */
+        cpt_k = v90_analogue_phase4_cp_k(&cpt);
+        cp_k = v90_analogue_phase4_cp_k(&cp);
+        CHECK(cpt_k >= 6  &&  cpt_k <= 24,
+              "Sr=%d: CPt K=%d is outside Table 17's 6..24", sr, cpt_k);
+        CHECK(cp_k > 0, "Sr=%d: CP K does not fit §5.4.3", sr);
+        CHECK(cpt_k == cpt.drn + 8 - (6 - sr),
+              "Sr=%d: CPt K=%d does not follow §5.4.1 from D=%d",
+              sr, cpt_k, cpt.drn + 8);
+
+        /*
+         * The check that matters, made by the other half of this tree rather
+         * than by an assertion written next to the code under test.  §9.4.1.2
+         * sends R̄i only after *receiving* a CPt, and a digital modem that
+         * cannot configure a mapper from one has not received it -- which is
+         * exactly how a Phase 4 stalls in Ri with the line looking perfect.
+         */
+        if ((digital = v90_init_data_pump(V90_LAW_ULAW)) != NULL) {
+            CHECK(v90_set_phase4_cp(digital, &cpt),
+                  "Sr=%d: a V.90 digital modem rejects our CPt "
+                  "(drn=%u, D=%d, K=%d)",
+                  sr, cpt.drn, cpt.drn + 8, cpt_k);
+            CHECK(v90_set_phase4_cp(digital, &cp),
+                  "Sr=%d: a V.90 digital modem rejects our CP "
+                  "(drn=%u, D=%d, K=%d)",
+                  sr, cp.drn, cp.drn + 20, cp_k);
+            v90_free(digital);
+        }
+        /*endif*/
+        printf("  Sr=%d: CPt drn=%u (%d bits/frame, K=%d), "
+               "CP drn=%u (%d bits/frame, K=%d, %.0f bps)\n",
+               sr, cpt.drn, cpt.drn + 8, cpt_k,
+               cp.drn, cp.drn + 20, cp_k, vpcm_cp_drn_to_bps(cp.drn));
     }
-    CHECK(cpt.v90_compatibility == false, "CPt has Table 14 bit 19 set");
-    CHECK(cp.v90_compatibility == true, "CP has Table 14 bit 19 clear");
-    CHECK(cpt.drn <= 22, "CPt drn %u exceeds Table 14's range", cpt.drn);
-    CHECK(cp.drn <= 28, "CP drn %u exceeds what vpcm_cp accepts", cp.drn);
-    CHECK(cpt.shaping_redundancy >= 1,
-          "Sr = 0 would make the §5.4.5 demapper reject every frame");
-    /* §8.5.2 caps CP's average power 3 dB above CPt's; naming the same
-     * constellations in both makes the difference zero by construction. */
-    CHECK(memcmp(cpt.masks, cp.masks, sizeof(cpt.masks)) == 0,
-          "CPt and CP name different constellations, so §8.5.2 needs checking");
-    printf("  CPt drn=%u (%d bits/frame), CP drn=%u (%d bits/frame, %.0f bps)\n",
-           cpt.drn, cpt.drn + 8, cp.drn, cp.drn + 20,
-           vpcm_cp_drn_to_bps(cp.drn));
 }
 
 /*
@@ -648,7 +702,8 @@ int main(int argc, char *argv[])
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
     test_dil_stage();
-    test_phase4_receive();
+    for (int sr = 0; sr <= 3; sr++)
+        test_phase4_receive(sr);
     test_phase4_cp_from_measurement();
 
     if (failures) {
